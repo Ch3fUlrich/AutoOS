@@ -1,0 +1,30 @@
+---
+- name: Install Miniconda3 using Chocolatey and set up Python environment on Windows
+  hosts: windows
+  tasks:
+    - name: Ensure Chocolatey is installed
+      win_chocolatey:
+        name: chocolatey
+        state: present
+
+    - name: Install Miniconda3 using Chocolatey
+      win_chocolatey:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - miniconda3
+        - python --version=3.8
+
+    - name: Add Miniconda to PATH
+      win_environment:
+        name: Path
+        value: 'C:\ProgramData\chocolatey\lib\miniconda3\tools\Scripts;C:\ProgramData\chocolatey\lib\miniconda3\tools;C:\ProgramData\chocolatey\lib\miniconda3\Library\bin'
+        state: present
+
+    - name: Create conda environment
+      win_command: 'C:\ProgramData\chocolatey\lib\miniconda3\Scripts\conda.exe create -n suite2p python=3.8 -y'
+      args:
+        creates: C:\ProgramData\chocolatey\lib\miniconda3\envs\suite2p
+
+    - name: Install packages using pip in the conda environment
+      win_command: 'C:\ProgramData\chocolatey\lib\miniconda3\Scripts\conda.exe run -n suite2p pip install requests suite2p'
