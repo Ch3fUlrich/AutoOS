@@ -1,0 +1,24 @@
+---
+- name: Install additional software
+  hosts: windows
+  tasks:
+    - name: Create installer directory
+      win_file:
+        path: "{{ playbook_dir }}\\installs"
+        state: directory
+
+    - name: Download installers
+      win_get_url:
+        url: "{{ item.url }}"
+        dest: "{{ playbook_dir }}\\installs\\{{ item.name }}"
+      loop:
+        - { name: 'realtimesync_installer.exe', url: 'https://freefilesync.org/download/FreeFileSync_13.8_Windows_Setup.exe' }
+
+    - name: Install additional software that may not be available through Chocolatey
+      win_command: "Start-Process -FilePath '{{ playbook_dir }}\\installs\\{{ item }}' -ArgumentList '/silent' -Wait"
+      args:
+        chdir: "{{ playbook_dir }}\\installs"
+      loop:
+        - realtimesync_installer.exe
+        # Add other installers here if needed
+        # - Creative_Cloud_Set-Up.exe  # Uncomment if you have this installer available

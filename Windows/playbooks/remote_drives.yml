@@ -1,0 +1,21 @@
+---
+- name: Connect to Remote Drives
+  hosts: windows
+  tasks:
+    - name: U
+      community.windows.win_mapped_drive:
+        letter: "U:"
+        path: '\\unibasel.ads.unibas.ch\bz\'
+        state: present
+
+    - name: Hippo
+      community.windows.win_mapped_drive:
+        letter: "Z:"
+        path: '\\toucan-all.scicore.unibas.ch\DONAFL00-HIPPO$'
+        state: present
+
+    - name: Toucan
+      community.windows.win_mapped_drive:
+        letter: "X:"
+        path: '\\toucan-all.scicore.unibas.ch\donafl00-calcium$'
+        state: present

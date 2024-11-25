@@ -1,0 +1,16 @@
+---
+- name: Main playbook
+  hosts: windows
+  tasks:
+    - name: run chocolatey_software playbook
+      import_playbook: playbooks/chocolatey_software.yml
+
+    - name: add remote drives to windows
+      import_playbook: playbooks/remote_drives.yml
+
+    - name: create suite2p environment in conda
+      import_playbook: playbooks/python_miniconda_suite2p.yml
+
+    - name: install realtime_sync
+      import_playbook: playbooks/additional_software.yml
+
