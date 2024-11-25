@@ -1,7 +1,7 @@
----
 - name: Install software on Windows 11
   hosts: localhost
   tasks:
+
     - name: Ensure Chocolatey is installed
       win_get_url:
         url: https://chocolatey.org/install.ps1
@@ -9,7 +9,7 @@
       register: choco_install
 
     - name: Run Chocolatey installation script
-      win_shell: powershell -NoProfile -InputFormat None -ExecutionPolicy Bypass -File C:\chocolatey-install.ps1
+      win_shell: powershell -NoProfile -ExecutionPolicy Bypass -File C:\chocolatey-install.ps1
       when: choco_install.changed
 
     - name: Install software via Chocolatey
@@ -17,50 +17,51 @@
         name: "{{ item }}"
         state: present
       loop:
-        ## Usefull Tools
+        # Useful Tools
         - 7zip
         - powertoys
         - treesizefree
 
-        ## music and video
+        # Music and Video
         - spotify
         - vlc
         
-        ## browsers
+        # Browsers
         - firefox
         - googlechrome
 
-        ## file sync and cloud
+        # File Sync and Cloud
         - switchdrive
         - owncloud-client
         
-        ## remote controll
+        # Remote Control
         - teamviewer
         - parsec
 
-        ## vpn
+        # VPN
         - globalprotect
         - wireguard
 
-        ## communication
+        # Communication
         - slack
 
-        ## notes
+        # Notes
         - zotero
         - obsidian
         - notepadplusplus
 
-        ## code
-        # python
+        # Code
         - vscode
-        # matlab
-        - mcr-r2023b
+        # Uncomment the following lines if you want to install Python and MATLAB
+        # - python
+        # - mcr-r2023b
 
     - name: Ensure pip is installed for Python
       win_command: "python -m ensurepip"
-      when: python_installed.changed
+      register: python_installed
+      ignore_errors: yes  # Added to prevent failure if Python is not installed
 
     - name: Clean up Chocolatey installation script
       win_file:
         path: C:\chocolatey-install.ps1
-        state: absent        
+        state: absent

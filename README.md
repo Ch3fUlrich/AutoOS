@@ -66,7 +66,7 @@ sudo apt update -y
 sudo apt upgrade -y
 #sudo apt install software-properties-common
 #sudo apt-add-repository --yes --update ppa:ansible/ansible
-sudo apt install ansible
+sudo apt install git sshpass ansible
 # verify installation
 ansible --version
 ```
