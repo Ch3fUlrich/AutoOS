@@ -1,6 +1,6 @@
 - hosts: windows
   vars_files:
-    - "{{ lookup('env', 'PROJECT_ROOT') }}/windows/netowk_drives.yml"
+    - "../network_drives.yml"
 
   tasks:
     - name: Ensure network drives are mapped
@@ -11,9 +11,9 @@
         password: "{{ item.password }}"
         state: present
       loop: "{{ network_drives }}"
-      become: true
-      become_method: runas
-      become_user: "{{ ansible_user }}"
+      #become: true
+      #become_method: runas
+      #become_user: "{{ ansible_user }}"
 
 
     # Optional: Verify drive mapping

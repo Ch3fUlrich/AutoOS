@@ -1,14 +1,14 @@
 all:
   vars:
-    # Individual credential variables
-    unibas_mail: 'sergej.maul@unibas.ch'
-    unibas_password: 'asdf'
-    toucan_drive_username: mauser00
-
     # Windows credentials
     windows_ip: 131.152.9.67
     windows_user: 'DonatoLab'
     windows_password: 'asdf'
+
+    # Placeholder for drives
+    unibas_mail: 'bla.bla@unibas.ch'
+    unibas_password: 'good_password'
+    toucan_drive_username: blabl0000
 
   hosts:
     windows:

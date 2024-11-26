@@ -1,7 +1,5 @@
 - name: Install software on Windows 11
   hosts: windows
-  vars_files:
-      - "{{ lookup('env', 'PROJECT_ROOT') }}/credentials.yml"....
 
   tasks:
 

@@ -2,7 +2,7 @@
 - name: Install Miniconda3 using Chocolatey and set up Python environment on Windows
   hosts: windows
   tasks:
-  
+
     - name: Ensure Chocolatey is installed
       win_chocolatey:
         name: chocolatey
@@ -10,11 +10,8 @@
 
     - name: Install Miniconda3 using Chocolatey
       win_chocolatey:
-        name: "{{ item }}"
+        name: miniconda3
         state: present
-      loop:
-        - miniconda3
-        - python --version=3.8
 
     - name: Add Miniconda to PATH
       win_environment:

@@ -1,25 +1,24 @@
 - name: Install additional software
   hosts: windows
   vars_files:
-    - "{{ lookup('env', 'PROJECT_ROOT') }}/credentials.yml"
-    - "{{ lookup('env', 'PROJECT_ROOT') }}/windows/software.yml...
+    - "../software_links.yml"
 
   tasks:
     - name: Create installer directory
       win_file:
-        path: "{{ playbook_dir }}\\installs"
+        path: "{{ playbook_dir }}\\..\\installs"
         state: directory
 
     - name: Download installers
       win_get_url:
         url: "{{ item.url }}"
-        dest: "{{ playbook_dir }}\\installs\\{{ item.filename }}"
+        dest: "{{ playbook_dir }}\\..\\installs\\{{ item.filename }}"
       loop: "{{ software_list }}"
       register: download_status
 
     - name: Install software via MSI
       win_package:
-        path: "{{ playbook_dir }}\\installs\\{{ item.filename }}"
+        path: "{{ playbook_dir }}\\..\\installs\\{{ item.filename }}"
         state: present
         arguments: "{{ item.silent_args }}"
       loop: "{{ software_list }}"
@@ -27,9 +26,9 @@
       register: msi_install_status
 
     - name: Install software via EXE
-      win_command: "Start-Process -FilePath '{{ playbook_dir }}\\installs\\{{ item.filename }}' -ArgumentList '{{ item.silent_args }}' -Wait"
+      win_command: "Start-Process -FilePath '{{ playbook_dir }}\\..\\installs\\{{ item.filename }}' -ArgumentList '{{ item.silent_args }}' -Wait"
       args:
-        chdir: "{{ playbook_dir }}\\installs"
+        chdir: "{{ playbook_dir }}\\..\\installs"
       loop: "{{ software_list }}"
       when: item.install_method == 'exe'
       register: exe_install_status
