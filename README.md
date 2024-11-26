@@ -40,7 +40,7 @@ Get-Service -Name sshd
 ```
 
 
-### Configure Ansible
+### Configure Ansible for Windows
 Ansible uses an inventory file (ansible hosts) to specify which Windows machines to connect to and manage with Ansible playbooks.
 
 Let‘s create an inventory file and set up key-based SSH authentication for passwordless connections:
@@ -69,6 +69,36 @@ sudo apt upgrade -y
 sudo apt install git sshpass ansible
 # verify installation
 ansible --version
+```
+2. After the installation, you can clone this repository.
+```bash
+git clone https://github.com/Ch3fUlrich/Ansible-Setup-OS.git
+```
+3. Get your windows ip address by running the following command in powershell.
+```powershell
+# the ip address should look like 192.156.125.132
+ipconfig
+```
+4. Edit your inventory file to include the IP addresses of the machines you want to manage. In this case we will use the localhost.
+```bash
+nano inventory.yml
+```
+Change the IP address to you windows ip address.
+```yaml
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+```
+#TODO: create an automated script for doing the above steps
+
+### Configure Ansible for Linux
+#TODO: Add Linux setup instructions
+
+### Run Playbooks
+To run a playbook, use the following command:
+```bash
+ansible-playbook -i inventory.yml playbooks/<playbook-name>.yml
 ```
 
 ## MacOS
