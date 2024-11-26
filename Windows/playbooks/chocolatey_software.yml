@@ -1,5 +1,8 @@
 - name: Install software on Windows 11
-  hosts: localhost
+  hosts: windows
+  vars_files:
+      - "{{ lookup('env', 'PROJECT_ROOT') }}/credentials.yml"....
+
   tasks:
 
     - name: Ensure Chocolatey is installed
@@ -39,7 +42,6 @@
         - parsec
 
         # VPN
-        - globalprotect
         - wireguard
 
         # Communication
@@ -59,7 +61,7 @@
     - name: Ensure pip is installed for Python
       win_command: "python -m ensurepip"
       register: python_installed
-      ignore_errors: yes  # Added to prevent failure if Python is not installed
+      ignore_errors: true  # Added to prevent failure if Python is not installed
 
     - name: Clean up Chocolatey installation script
       win_file:

@@ -1,0 +1,21 @@
+
+
+# Network drives to map
+network_drives:
+  - name: 'Unibas network drive' 
+    letter: U
+    path: '\\unibasel.ads.unibas.ch\bz'
+    username: '{{ unibas_mail }}'
+    password: '{{ unibas_password }}' 
+  
+  - name : 'Toucan network drive'
+    letter: X
+    path: '\\toucan-all.scicore.unibas.ch\donafl00-calcium$'
+    username: '{{ toucan_drive_username }}'
+    password: '{{ unibas_password }}' 
+
+  - name : 'Hippo network drive'
+    letter: Z
+    path: '\\toucan-all.scicore.unibas.ch\DONAFL00-HIPPO$'
+    username: '{{ toucan_drive_username }}'
+    password: '{{ unibas_password }}' 

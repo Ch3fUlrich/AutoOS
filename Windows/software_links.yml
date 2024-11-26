@@ -1,0 +1,14 @@
+software_list:
+  - name: GlobalProtect
+    filename: 'GlobalProtect64.msi'
+    url: 'https://vpn.unibas.ch/global-protect/getmsi.esp?version=64&platform=windows'
+    install_method: msi
+    silent_args: '/quiet'
+
+  - name: RealTimeSync
+    filename: 'realtimesync_installer.exe'
+    url: 'https://freefilesync.org/download/FreeFileSync_13.8_Windows_Setup.exe'
+    install_method: exe
+    silent_args: '/silent'
+
+  # You can add more software here

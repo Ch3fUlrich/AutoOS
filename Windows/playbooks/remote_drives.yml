@@ -1,21 +1,28 @@
----
-- name: Connect to Remote Drives
-  hosts: windows
+- hosts: windows
+  vars_files:
+    - "{{ lookup('env', 'PROJECT_ROOT') }}/credentials.yml"
+    - "{{ lookup('env', 'PROJECT_ROOT') }}/windows/netowk_drives.yml"
+
   tasks:
-    - name: U
+    - name: Ensure network drives are mapped
       community.windows.win_mapped_drive:
-        letter: "U:"
-        path: '\\unibasel.ads.unibas.ch\bz\'
+        letter: "{{ item.letter }}"
+        path: "{{ item.path }}"
+        username: "{{ item.username }}"
+        password: "{{ item.password }}"
         state: present
+      loop: "{{ network_drives }}"
+      become: true
+      become_method: runas
+      become_user: "{{ ansible_user }}"  # Explicitly specify the user
 
-    - name: Hippo
-      community.windows.win_mapped_drive:
-        letter: "Z:"
-        path: '\\toucan-all.scicore.unibas.ch\DONAFL00-HIPPO$'
-        state: present
 
-    - name: Toucan
-      community.windows.win_mapped_drive:
-        letter: "X:"
-        path: '\\toucan-all.scicore.unibas.ch\donafl00-calcium$'
-        state: present
+    # Optional: Verify drive mapping
+    - name: Verify drive mapping
+      ansible.windows.win_command: "net use"
+      register: drive_mapping_result
+      changed_when: false
+
+    - name: Display drive mapping
+      debug:
+        var: drive_mapping_result.stdout_lines
