@@ -11,4 +11,10 @@ software_list:
     install_method: exe
     silent_args: '/silent'
 
+  - name: CreativeCloud
+    filename: 'Creative_Cloud_Set-Up.exe'
+    url: 'https://not_available.com'
+    install_method: exe
+    silent_args: '/silent'
+
   # You can add more software here

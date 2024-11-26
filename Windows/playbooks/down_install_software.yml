@@ -6,32 +6,52 @@
   tasks:
     - name: Create installer directory
       win_file:
-        path: "{{ playbook_dir }}\\..\\installs"
+        path: "{{ lookup('env', 'USERPROFILE') }}\\Downloads\\installs"
         state: directory
+
+    - name: Get current WSL username
+      command: whoami
+      register: wsl_user
+
+    - name: Set WSL username as a fact
+      set_fact:
+        wsl_username: "{{ wsl_user.stdout }}"
+
+    #FIXME: Copying files from WSL to Windows not possible
+    - name: Copy all install files from WSL to Windows Downloads folder
+      win_copy:
+        src: "\\\\wsl.localhost\\Ubuntu\\home\\{{ wsl_username }}\\code\\Ansible-Setup-OS\\Windows\\installs"
+        dest: "{{ lookup('env', 'USERPROFILE') }}\\Downloads\\installs"
+        remote_src: true
+      ignore_errors: true  # To continue even if some files fail to copy
 
     - name: Download installers
       win_get_url:
         url: "{{ item.url }}"
-        dest: "{{ playbook_dir }}\\..\\installs\\{{ item.filename }}"
+        dest: "{{ lookup('env', 'USERPROFILE') }}\\Downloads\\installs\\{{ item.filename }}"
       loop: "{{ software_list }}"
       register: download_status
+      ignore_errors: true  # To continue even if some files fail to copy
 
+    #FIXME: Installation of downloaded software not possible
     - name: Install software via MSI
       win_package:
-        path: "{{ playbook_dir }}\\..\\installs\\{{ item.filename }}"
+        path: "{{ lookup('env', 'USERPROFILE') }}\\Downloads\\installs\\{{ item.filename }}"
         state: present
         arguments: "{{ item.silent_args }}"
       loop: "{{ software_list }}"
       when: item.install_method == 'msi'
       register: msi_install_status
+      ignore_errors: true  # To continue even if some files fail to copy
 
     - name: Install software via EXE
-      win_command: "Start-Process -FilePath '{{ playbook_dir }}\\..\\installs\\{{ item.filename }}' -ArgumentList '{{ item.silent_args }}' -Wait"
+      win_command: "Start-Process -FilePath '{{ lookup('env', 'USERPROFILE') }}\\Downloads\\installs\\{{ item.filename }}' -ArgumentList '{{ item.silent_args }}' -Wait"
       args:
-        chdir: "{{ playbook_dir }}\\..\\installs"
+        chdir: "{{ lookup('env', 'USERPROFILE') }}\\Downloads\\installs"
       loop: "{{ software_list }}"
       when: item.install_method == 'exe'
       register: exe_install_status
+      ignore_errors: true  # To continue even if some files fail to copy
 
     - name: Display installation results
       debug:

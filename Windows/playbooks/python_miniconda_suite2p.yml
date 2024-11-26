@@ -16,13 +16,14 @@
     - name: Add Miniconda to PATH
       win_environment:
         name: Path
-        value: 'C:\ProgramData\chocolatey\lib\miniconda3\tools\Scripts;C:\ProgramData\chocolatey\lib\miniconda3\tools;C:\ProgramData\chocolatey\lib\miniconda3\Library\bin'
+        value: 'C:\tools\miniconda3;C:\tools\miniconda3\Scripts;C:\tools\miniconda3\tools;C:\tools\miniconda3\Library\bin'
         state: present
+        level: user # or machine
 
     - name: Create conda environment
-      win_command: 'C:\ProgramData\chocolatey\lib\miniconda3\Scripts\conda.exe create -n suite2p python=3.8 -y'
+      win_command: 'C:\tools\miniconda3\Scripts\conda.exe create -n suite2p python=3.8 -y'
       args:
-        creates: C:\ProgramData\chocolatey\lib\miniconda3\envs\suite2p
+        creates: C:\tools\miniconda3\envs\suite2p
 
     - name: Install packages using pip in the conda environment
-      win_command: 'C:\ProgramData\chocolatey\lib\miniconda3\Scripts\conda.exe run -n suite2p pip install requests suite2p'
+      win_command: 'C:\tools\miniconda3\Scripts\conda.exe run -n suite2p pip install suite2p'
