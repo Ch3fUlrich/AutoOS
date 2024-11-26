@@ -1,6 +1,9 @@
----
 - name: Install additional software
   hosts: windows
+  vars_files:
+    - "{{ lookup('env', 'PROJECT_ROOT') }}/credentials.yml"
+    - "{{ lookup('env', 'PROJECT_ROOT') }}/windows/software.yml...
+
   tasks:
     - name: Create installer directory
       win_file:
@@ -10,15 +13,30 @@
     - name: Download installers
       win_get_url:
         url: "{{ item.url }}"
-        dest: "{{ playbook_dir }}\\installs\\{{ item.name }}"
-      loop:
-        - { name: 'realtimesync_installer.exe', url: 'https://freefilesync.org/download/FreeFileSync_13.8_Windows_Setup.exe' }
+        dest: "{{ playbook_dir }}\\installs\\{{ item.filename }}"
+      loop: "{{ software_list }}"
+      register: download_status
 
-    - name: Install additional software that may not be available through Chocolatey
-      win_command: "Start-Process -FilePath '{{ playbook_dir }}\\installs\\{{ item }}' -ArgumentList '/silent' -Wait"
+    - name: Install software via MSI
+      win_package:
+        path: "{{ playbook_dir }}\\installs\\{{ item.filename }}"
+        state: present
+        arguments: "{{ item.silent_args }}"
+      loop: "{{ software_list }}"
+      when: item.install_method == 'msi'
+      register: msi_install_status
+
+    - name: Install software via EXE
+      win_command: "Start-Process -FilePath '{{ playbook_dir }}\\installs\\{{ item.filename }}' -ArgumentList '{{ item.silent_args }}' -Wait"
       args:
         chdir: "{{ playbook_dir }}\\installs"
-      loop:
-        - realtimesync_installer.exe
-        # Add other installers here if needed
-        # - Creative_Cloud_Set-Up.exe  # Uncomment if you have this installer available
+      loop: "{{ software_list }}"
+      when: item.install_method == 'exe'
+      register: exe_install_status
+
+    - name: Display installation results
+      debug:
+        msg: 
+          - "Downloaded: {{ download_status.results | selectattr('changed') | list | length }} items"
+          - "MSI Installed: {{ msi_install_status.results | selectattr('changed') | list | length }} items"
+          - "EXE Installed: {{ exe_install_status.results | selectattr('changed') | list | length }} items"

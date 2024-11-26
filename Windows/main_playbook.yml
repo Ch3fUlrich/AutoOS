@@ -2,6 +2,7 @@
 - name: Main playbook
   hosts: windows
   tasks:
+  
     - name: run chocolatey_software playbook
       import_playbook: playbooks/chocolatey_software.yml
 

@@ -1,8 +1,3 @@
 all:
   hosts:
     windows:
-      ansible_host: 131.152.9.67
-      ansible_user: DonatoLab
-      ansible_password: "password"
-      ansible_connection: ssh
-      ansible_shell_type: cmd
