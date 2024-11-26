@@ -1,6 +1,5 @@
 - hosts: windows
   vars_files:
-    - "{{ lookup('env', 'PROJECT_ROOT') }}/credentials.yml"
     - "{{ lookup('env', 'PROJECT_ROOT') }}/windows/netowk_drives.yml"
 
   tasks:
@@ -14,7 +13,7 @@
       loop: "{{ network_drives }}"
       become: true
       become_method: runas
-      become_user: "{{ ansible_user }}"  # Explicitly specify the user
+      become_user: "{{ ansible_user }}"
 
 
     # Optional: Verify drive mapping

@@ -1,3 +1,20 @@
 all:
+  vars:
+    # Individual credential variables
+    unibas_mail: 'sergej.maul@unibas.ch'
+    unibas_password: 'asdf'
+    toucan_drive_username: mauser00
+
+    # Windows credentials
+    windows_ip: 131.152.9.67
+    windows_user: 'DonatoLab'
+    windows_password: 'asdf'
+
   hosts:
     windows:
+      ansible_host: '{{ windows_ip }}'
+      ansible_user: '{{ windows_user }}'
+      ansible_password: '{{ windows_password }}'
+      ansible_connection: ssh
+      ansible_shell_type: cmd
+
