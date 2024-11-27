@@ -44,6 +44,8 @@
 
         # Communication
         - slack
+        - whatsapp
+        - zoom
 
         # Notes
         - zotero
