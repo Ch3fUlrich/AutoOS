@@ -5,6 +5,17 @@ Automations are done using [Ansible](https://docs.ansible.com/ansible/latest/get
 ## Windows (10)
 Since Ansible is not natively supported on Windows, we will use Windows Subsystem for Linux (WSL) to run Ansible. WSL allows you to run a Linux distribution on Windows without the need for a virtual machine or dual booting.
 
+1. [Set Up Windows Subsystem for Linux](#set-up-windows-subsystem-for-linux)
+2. [Install Orchestrator](#install-ansible).
+3. [Setup SSH server on Windows](#setup-ssh-server-on-windows).
+4. Test the connection to Windows from Ubuntu by running the following command:
+```bash
+ssh <windows-ip>
+```
+5. [Configure Ansible for Windows](#configure-ansible-for-windows).
+6. [Setup Ansible scripts](#setup-ansible-scripts).
+7. [Run the main playbook in the Ubuntu terminal](#run-playbooks).
+
 ### Set Up Windows Subsystem for Linux
 1. Open PowerShell as Administrator and run the following line to install Ubuntu:
 ```powershell
@@ -14,13 +25,6 @@ wsl --install
    1. If the installation failed set the **virtualization** flag in the **BIOS** to **enabled**.
 3. **Start** **Ubuntu** installation by searching for Ubuntu in the start menu.
 4. Complete the installation and setup of the Linux distribution.
-5. **Login to the Linux distribution** and install needed packages as described [below](#install-ansible).
-6. Setup SSH server on Windows as described [below](#setup-ssh-server-on-windows).
-7. Test the connection to Windows from Ubuntu by running the following command:
-```bash
-ssh <windows-ip>
-```
-8. 
 
 ### Setup SSH Server on Windows
 Since Ansible uses SSH to connect to Windows machines, we need to set up an SSH server on Windows. The following commands will install the OpenSSH server, start the service, set it to start automatically, and allow it through the firewall.
@@ -52,7 +56,8 @@ interpreter_python = auto_silent
 host_key_checking = False
 ```
 3. Press Ctrl + X to exit and save the file, then press Y to confirm.
-4. 
+
+### The Ansible setup will 
 
 ## Linux (Ubuntu)
 ### Install [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html)
@@ -70,6 +75,8 @@ sudo apt install git sshpass ansible
 # verify installation
 ansible --version
 ```
+
+### Setup Ansible scripts
 2. After the installation, you can clone this repository.
 ```bash
 git clone https://github.com/Ch3fUlrich/Ansible-Setup-OS.git
@@ -79,11 +86,13 @@ git clone https://github.com/Ch3fUlrich/Ansible-Setup-OS.git
 # the ip address should look like 192.156.125.132
 ipconfig
 ```
-4. Edit your inventory file to include the IP addresses of the machines you want to manage. In this case we will use the localhost.
+4. Change the **IP addresses** in the inventory file the windows IP from Steop 3. In this case we will use the localhost.
 ```bash
 nano inventory.yml
 ```
-Change the IP address to you windows ip address.
+5. Ctrl + X to exit and save the file, then press Y to confirm.
+
+#TODO: is this correct?
 ```yaml
 all:
   hosts:
@@ -96,9 +105,9 @@ all:
 #TODO: Add Linux setup instructions
 
 ### Run Playbooks
-To run a playbook, use the following command:
+To run all playbooks, use the following command:
 ```bash
-ansible-playbook -i inventory.yml playbooks/<playbook-name>.yml
+ansible-playbook -i inventory.yml main_playbook.yml
 ```
 
 ## MacOS
