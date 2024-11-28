@@ -22,6 +22,12 @@
         - 7zip
         - powertoys
         - treesizefree
+        - cygwin
+
+        # fonts
+        - nerd-fonts-meslo
+        - nerd-fonts-fira-code
+        - nerd-fonts-hack
 
         # Music and Video
         - spotify
