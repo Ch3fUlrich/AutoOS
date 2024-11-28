@@ -1,0 +1,13 @@
+#TODO: implement this settings for setting up oh my posh
+  #TODO: add starship design
+  #TODO: add meslo nerd font?
+
+  1. `notepad $PROFILE`
+  #add to profile
+  2. oh-my-posh init pwsh | Invoke-Expression
+  3. relode profile by running `. $PROFILE`
+#TODO: implement this settings for setting up cygwin
+
+
+Install-Module -Name PSReadLine -Scope CurrentUser -Force 
+Set-ExecutionPolicy RemoteSigned
