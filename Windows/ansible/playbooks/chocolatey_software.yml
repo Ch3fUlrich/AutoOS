@@ -22,12 +22,16 @@
         - 7zip
         - powertoys
         - treesizefree
-        - cygwin
 
-        # fonts
+        # coding tools
+        ## fonts
         - nerd-fonts-meslo
         - nerd-fonts-fira-code
         - nerd-fonts-hack
+        ## linux commands
+        - cygwin
+        ## terminal design
+        - oh-my-posh
 
         # Music and Video
         - spotify
