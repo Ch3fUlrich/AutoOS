@@ -1,15 +1,14 @@
 #TODO: implement this settings for setting up oh my posh
   #TODO: add starship design
   #TODO: add meslo nerd font?
-
+  0. winget install JanDeDobbeleer.OhMyPosh -s winget
   1. `notepad $PROFILE`
   #add to profile
-  2. oh-my-posh init pwsh | Invoke-Expression
+  2. set theme to powerlevel10k rainbow `oh-my-posh init pwsh --config "$env:POSH_THEMES_PATH/powerlevel10k_rainbow.omp.json" | Invoke-Expression`
   3. relode profile by running `. $PROFILE`
-  4. set theme to powerlevel10k rainbow `oh-my-posh init pwsh --config "$env:POSH_THEMES_PATH/powerlevel10k_rainbow.omp.json" | Invoke-Expression`
-  # or other theme that can be found here Get-PoshThemes
-#TODO: implement this settings for setting up cygwin
+  # or other theme that can be found here Get-PoshThemes, the theme name neets to be pu instead of powerlevel10k_rainbow
 
+#TODO: implement this settings for setting up cygwin
 
 Install-Module -Name PSReadLine -Scope CurrentUser -Force 
 Set-ExecutionPolicy RemoteSigned
