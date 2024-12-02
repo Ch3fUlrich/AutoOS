@@ -7,7 +7,7 @@
   2. set theme to powerlevel10k rainbow `oh-my-posh init pwsh --config "$env:POSH_THEMES_PATH/powerlevel10k_rainbow.omp.json" | Invoke-Expression`
   3. Add showing virtual environment to theme: 
     1. open notepad $env:POSH_THEMES_PATH/powerlevel10k_rainbow.omp.json  
-    2. Add following lines to blocks: alignment left : segments (as shown in the file `Windows/posh/theme/powerlevel10k_rainbow_env.omp.json`
+    2. Add following lines to blocks: alignment left : segments (as shown in the file `Windows/Terminal/oh-my-posh/theme/powerlevel10k_rainbow_env.omp.json`
   ```json
           {
           "type": "python",
