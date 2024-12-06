@@ -1,33 +1,51 @@
-#TODO: implement this settings for setting up oh my posh
-  #TODO: add starship design
-  #TODO: add meslo nerd font?
-  0. winget install JanDeDobbeleer.OhMyPosh -s winget
-  1. `notepad $PROFILE`
-  #add to profile
-  2. set theme to powerlevel10k rainbow `oh-my-posh init pwsh --config "$env:POSH_THEMES_PATH/powerlevel10k_rainbow.omp.json" | Invoke-Expression`
-  3. Add showing virtual environment to theme: 
-    1. open notepad $env:POSH_THEMES_PATH/powerlevel10k_rainbow.omp.json  
-    2. Add following lines to blocks: alignment left : segments (as shown in the file `Windows/Terminal/oh-my-posh/theme/powerlevel10k_rainbow_env.omp.json`
-  ```json
-          {
-          "type": "python",
-          "trailing_diamond": "\ue0b4",
-          "leading_diamond": "<transparent,background>\ue0b0</>",
-          "style": "diamond",
-          "powerline_symbol": "\uE0B0",
-          "foreground": "#100e23",
-          "background": "#906cff",
-          "template": " \uE235 {{ .Full }} {{ if .Venv }}{{ .Venv }}{{ end }}",
-          "properties": {
-              "fetch_virtual_env": true,
-              "display_mode": "environment",
-              "home_enabled": true
-          }
-  ```
-  4. relode profile by running `. $PROFILE`
-  # or other theme that can be found here Get-PoshThemes, the theme name neets to be pu instead of powerlevel10k_rainbow
+- name: Setup Windows Terminal and Oh My Posh
+  hosts: windows
+  tasks:
+    - name: Install Oh My Posh using Winget
+      win_shell: |
+        winget install --id JanDeDobbeleer.OhMyPosh -e --source winget
 
-#TODO: implement this settings for setting up cygwin
+    - name: Clone the Git repository to the Downloads folder
+      git:
+        repo: https://github.com/Ch3fUlrich/AutoOS.git
+        dest: C:\Users\{{ lookup('env', 'USERPROFILE') }}\Downloads
+        clone: yes
+        update: yes
+        
+    #TODO: save fonts in repository and download from there
+    - name: Install Meslo Nerd Font
+      win_shell: |
+        Invoke-WebRequest -Uri "https://github.com/ryanoasis/nerd-fonts/releases/download/v2.3.3/Meslo.zip" -OutFile "C:\Temp\Meslo.zip"
+        Expand-Archive -Path "C:\Temp\Meslo.zip" -DestinationPath "C:\Windows\Fonts"
+        Remove-Item -Path "C:\Temp\Meslo.zip"
 
-Install-Module -Name PSReadLine -Scope CurrentUser -Force 
-Set-ExecutionPolicy RemoteSigned
+    - name: Ensure PowerShell profile exists
+      win_file:
+        path: "{{ lookup('env', 'USERPROFILE') }}\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1"
+        state: touch
+
+    - name: Add Oh My Posh initialization to $PROFILE
+      win_lineinfile:
+        path: "{{ lookup('env', 'USERPROFILE') }}\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1"
+        line: 'oh-my-posh init pwsh --config "$env:POSH_THEMES_PATH/powerlevel10k_rainbow.omp.json" | Invoke-Expression'
+        create: yes
+
+
+    - name: Copy custom theme to Oh My Posh themes folder
+      copy:
+        src: C:\Users\{{ lookup('env', 'USERPROFILE') }}\Downloads\AutoOS\Windows\Terminal\oh-my-posh\theme\powerlevel10k_rainbow_env.omp.json
+        dest: C:\Users\{{ lookup('env', 'USERPROFILE') }}\Documents\WindowsPowerShell\powerlevel10k_rainbow_env.omp.json
+        force: yes
+        backup: yes
+
+    - name: Install PSReadLine module
+      win_shell: |
+        Install-Module -Name PSReadLine -Scope CurrentUser -Force
+
+    - name: Set execution policy to RemoteSigned
+      win_shell: |
+        Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+
+    - name: Reload PowerShell profile
+      win_shell: |
+        . $PROFILE

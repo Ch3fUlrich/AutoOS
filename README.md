@@ -53,7 +53,7 @@ Ansible uses an inventory file (ansible hosts) to specify which Windows machines
 Let‘s create an inventory file and set up key-based SSH authentication for passwordless connections:
 1. **Start Ubuntu** installation by searching for Ubuntu in the start menu.
 2. **Set defaults** for Ansible on Windows: Create a .ansible.cfg file in your home directory by running `nano ~/.ansible.cfg` and add the following lines:
-```bash
+```yaml
 [defaults]
 interpreter_python = auto_silent
 host_key_checking = False
@@ -80,31 +80,23 @@ ansible --version
 ```
 
 ### Setup Ansible scripts
-2. After the installation, you can clone this repository.
+1. After the (installation)[#install-ansible] you can clone this repository and go into the wanted directory e.g. **Windows**. 
 ```bash
 git clone https://github.com/Ch3fUlrich/AutoOS.git
+cd AutoOS/Windows/anisble
 ```
-3. Get your windows username and ip address by running the following command in powershell.
+2. Get your windows username and ip address by running the following command in powershell.
 ```powershell
 # get the username (this will be the username for the inventory file)
 $Env:UserName
 # the ip address should one of the ip addresses that pop up. Typically the top one. 
 ipconfig | Select-String "IPv4"
 ```
-1. Change the **windows_ip**, **windows_user** and **windows_password** in the inventory file from the step before. The password is the password of the user that is logged in.
+3. Change the **windows_ip**, **windows_user** and **windows_password** in the inventory file from the step before. The password is the password of the user that is logged in.
 ```bash
 nano inventory.yml
 ```
-1. Ctrl + X to exit and save the file, then press Y to confirm.
-
-#TODO: is this correct?
-```yaml
-all:
-  hosts:
-    localhost:
-      ansible_connection: local
-```
-#TODO: create an automated script for doing the above steps
+4. Ctrl + X to exit and save the file, then press Y to confirm.
 
 ### Configure Ansible for Linux
 #TODO: Add Linux setup instructions
