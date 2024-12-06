@@ -71,6 +71,7 @@
 
         # Code
         - vscode
+        - git
         # Uncomment the following lines if you want to install Python and MATLAB
         # - python
         # - mcr-r2023b
