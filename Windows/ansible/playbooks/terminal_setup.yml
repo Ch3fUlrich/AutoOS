@@ -1,43 +1,60 @@
 - name: Setup Windows Terminal and Oh My Posh
   hosts: windows
   tasks:
-    - name: Install Oh My Posh using Winget
-      win_shell: |
-        winget install --id JanDeDobbeleer.OhMyPosh -e --source winget
+    # only needed to run if WinGet is not installed
+    #- name: Install Winget
+    #  win_shell: |
+    #    Write-Host "Installing WinGet PowerShell module from PSGallery..."
+    #    Install-PackageProvider -Name NuGet -Force | Out-Null
+    #    Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery | Out-Null
+    #    Write-Host "Using Repair-WinGetPackageManager cmdlet to bootstrap WinGet..."
+    #    Repair-WinGetPackageManager
+
+    - name: Check if Git is installed
+      win_command: git --version
+      register: git_installed
+      ignore_errors: True
+
+    - name: Install Git if not present
+      win_chocolatey:
+        name: git
+        state: present
+      when: git_installed.rc != 0
+
+    - name: Get current Path environment variable
+      win_environment:
+        name: Path
+        level: user  # or machine
+      register: current_path
+
+    - name: Add Git to Path (if not already present)
+      win_environment:
+        name: Path
+        value: "{{ current_path.value }};C:\\Program Files\\Git\\cmd"
+        state: present
+        level: user  # or machine
+      when: "'C:\\Program Files\\Git\\cmd' not in current_path.value"
 
     - name: Clone the Git repository to the Downloads folder
-      git:
-        repo: https://github.com/Ch3fUlrich/AutoOS.git
-        dest: C:\Users\{{ lookup('env', 'USERPROFILE') }}\Downloads
-        clone: yes
-        update: yes
-        
-    #TODO: save fonts in repository and download from there
-    - name: Install Meslo Nerd Font
       win_shell: |
-        Invoke-WebRequest -Uri "https://github.com/ryanoasis/nerd-fonts/releases/download/v2.3.3/Meslo.zip" -OutFile "C:\Temp\Meslo.zip"
-        Expand-Archive -Path "C:\Temp\Meslo.zip" -DestinationPath "C:\Windows\Fonts"
-        Remove-Item -Path "C:\Temp\Meslo.zip"
+        Remove-Item -Path "C:\Users\{{ ansible_user }}\Downloads\AutoOS" -Recurse -Force -ErrorAction SilentlyContinue
+        git clone https://github.com/Ch3fUlrich/AutoOS.git "C:\Users\{{ ansible_user }}\Downloads\AutoOS"
 
     - name: Ensure PowerShell profile exists
       win_file:
-        path: "{{ lookup('env', 'USERPROFILE') }}\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1"
+        path: "C:\\Users\\{{ ansible_user }}\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1"
         state: touch
 
     - name: Add Oh My Posh initialization to $PROFILE
       win_lineinfile:
-        path: "{{ lookup('env', 'USERPROFILE') }}\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1"
+        path: "C:\\Users\\{{ ansible_user }}\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1"
         line: 'oh-my-posh init pwsh --config "$env:POSH_THEMES_PATH/powerlevel10k_rainbow.omp.json" | Invoke-Expression'
         create: yes
 
-
     - name: Copy custom theme to Oh My Posh themes folder
-      copy:
-        src: C:\Users\{{ lookup('env', 'USERPROFILE') }}\Downloads\AutoOS\Windows\Terminal\oh-my-posh\theme\powerlevel10k_rainbow_env.omp.json
-        dest: C:\Users\{{ lookup('env', 'USERPROFILE') }}\Documents\WindowsPowerShell\powerlevel10k_rainbow_env.omp.json
-        force: yes
-        backup: yes
-
+      win_shell: |
+        Copy-Item -Path "C:\Users\donat\Downloads\AutoOS\Windows\Terminal\oh-my-posh\theme\powerlevel10k_rainbow_env.omp.json" -Destination "C:\Program Files (x86)\oh-my-posh\themes\powerlevel10k_rainbow.omp.json" -Force
+      
     - name: Install PSReadLine module
       win_shell: |
         Install-Module -Name PSReadLine -Scope CurrentUser -Force
@@ -45,7 +62,3 @@
     - name: Set execution policy to RemoteSigned
       win_shell: |
         Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-
-    - name: Reload PowerShell profile
-      win_shell: |
-        . $PROFILE
