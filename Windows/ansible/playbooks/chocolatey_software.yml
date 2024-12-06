@@ -17,6 +17,11 @@
       win_chocolatey:
         name: "{{ item }}"
         state: present
+        
+        # Uncomment the following lines if you want to ignore checksums (less secure)
+        #args:
+        #  choco_install_args: "--ignore-checksums"
+        
       loop:
         # Useful Tools
         - 7zip
@@ -26,8 +31,9 @@
         # coding tools
         ## fonts
         - nerd-fonts-meslo
-        - nerd-fonts-fira-code
+        - nerd-fonts-firacode
         - nerd-fonts-hack
+
         ## linux commands
         - cygwin
         ## terminal design
@@ -44,6 +50,7 @@
         # File Sync and Cloud
         - switchdrive
         - owncloud-client
+        - googledrive
         
         # Remote Control
         - teamviewer
