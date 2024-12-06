@@ -32,7 +32,10 @@ Since Ansible uses SSH to connect to Windows machines, we need to set up an SSH 
 Open PowerShell as **Administrator** and run the following commands:
 
 ```powershell
+# check if OpenSSH is installed
 Get-WindowsCapability -Online | ? Name -like 'OpenSSH*'
+# install the OpenSSH server (client is typically already installed)
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
 # start the ssh server
 Start-Service sshd
 # Set SSH server to start automatically
@@ -79,18 +82,20 @@ ansible --version
 ### Setup Ansible scripts
 2. After the installation, you can clone this repository.
 ```bash
-git clone https://github.com/Ch3fUlrich/Ansible-Setup-OS.git
+git clone https://github.com/Ch3fUlrich/AutoOS.git
 ```
-3. Get your windows ip address by running the following command in powershell.
+3. Get your windows username and ip address by running the following command in powershell.
 ```powershell
-# the ip address should look like 192.156.125.132
-ipconfig
+# get the username (this will be the username for the inventory file)
+$Env:UserName
+# the ip address should one of the ip addresses that pop up. Typically the top one. 
+ipconfig | Select-String "IPv4"
 ```
-4. Change the **IP addresses** in the inventory file the windows IP from Steop 3. In this case we will use the localhost.
+1. Change the **windows_ip**, **windows_user** and **windows_password** in the inventory file from the step before. The password is the password of the user that is logged in.
 ```bash
 nano inventory.yml
 ```
-5. Ctrl + X to exit and save the file, then press Y to confirm.
+1. Ctrl + X to exit and save the file, then press Y to confirm.
 
 #TODO: is this correct?
 ```yaml
