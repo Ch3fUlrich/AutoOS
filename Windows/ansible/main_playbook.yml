@@ -1,9 +1,10 @@
 ---
 - name: Main playbook
   hosts: windows
-  var_files:
+  vars_files:
     - software_links.yml
     - network_drives.yml
+
   tasks:
 
     - name: run chocolatey_software playbook
