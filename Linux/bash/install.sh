@@ -41,7 +41,7 @@ git clone https://github.com/LazyVim/starter ~/.config/nvim
 rm -rf ~/.config/nvim/.git
 
 # download tools
-sudo apt install wget curl 
+sudo apt install -y wget curl 
 
 # install monitoring tools 
 sudo apt install -y htop nmon neofetch
@@ -59,26 +59,6 @@ sudo apt install -y nfs-common
 # file movement
 sudo apt install -y rsync
 
-# install docker
-curl -fsSL https://get.docker.com -o get-docker.sh
-sh get-docker.sh
-groupadd docker
-usermod -aG docker $USER
-# check if docker is running
-#service docker status
-# start if not running
-systemctl start docker
-# enable docker autostarting at reboot
-systemctl enable docker.service
-systemctl enable containerd.service
-
-# install portainer agent
-docker run -d -p 9001:9001 --name portainer_agent --restart=always -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/docker/volumes:/var/lib/docker/volumes portainer/agent:latest   # create directory for apps
-mkdir apps
-
-
-
-
 # install shell tools
 sudo apt install -y zsh
 # install oh-my-zsh
@@ -90,8 +70,8 @@ git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-m
 ## add zsh-syntax-highlighting
 git clone https://github.com/zsh-users/zsh-syntax-highlighting ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
 
-HISTSIZE=50000         # Number of commands to keep in memory
-SAVEHIST=10000         # Number of commands to save in the history file
+HISTSIZE=500000         # Number of commands to keep in memory
+SAVEHIST=100000         # Number of commands to save in the history file
 
 # change theme
 
@@ -146,3 +126,23 @@ exec zsh
 
 ## update changes
 source  ~/.zshrc
+
+
+
+
+# install docker
+curl -fsSL https://get.docker.com -o get-docker.sh
+sh get-docker.sh
+groupadd docker
+usermod -aG docker $USER
+# check if docker is running
+#service docker status
+# start if not running
+systemctl start docker
+# enable docker autostarting at reboot
+systemctl enable docker.service
+systemctl enable containerd.service
+
+# install portainer agent
+docker run -d -p 9001:9001 --name portainer_agent --restart=always -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/docker/volumes:/var/lib/docker/volumes portainer/agent:latest   # create directory for apps
+mkdir apps

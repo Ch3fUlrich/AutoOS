@@ -55,6 +55,8 @@
         # Remote Control
         - teamviewer
         - parsec
+        - moonlight-qt.install
+        #- moonlight-qt
 
         # VPN
         - wireguard
