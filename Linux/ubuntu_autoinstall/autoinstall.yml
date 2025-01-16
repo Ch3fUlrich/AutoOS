@@ -1,0 +1,99 @@
+# autoinstall.yaml
+version: 1
+identity:
+  hostname: ubuntu-server
+  username: ubuntu
+  password: "$6$rounds=4096$somesalt$hashedpassword"
+locale: en_US.UTF-8
+keyboard:
+  layout: us
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true
+storage:
+  layout:
+    name: lvm
+  swap:
+    size: 2GB
+  config:
+    - type: disk
+      id: disk0
+      ptable: gpt
+      wipe: superblock
+      grub_device: true
+      match:
+        size: largest
+    - type: partition
+      id: boot-partition
+      device: disk0
+      size: 1G
+      flag: boot
+    - type: partition
+      id: root-partition
+      device: disk0
+      size: 20G
+    - type: lvm_volgroup
+      id: vg0
+      devices:
+        - root-partition
+    - type: lvm_partition
+      id: lv-root
+      volgroup: vg0
+      size: 18G
+      fstype: ext4
+      mount: /
+    - type: lvm_partition
+      id: lv-swap
+      volgroup: vg0
+      size: 2G
+      fstype: swap
+      mount: swap
+packages:
+  - clang
+  - python3
+  - python3-pip
+  - python3-venv
+  - python3-setuptools
+  - python3-wheel
+  - git
+  - initx
+  - openbox
+  - tmux
+  - wireguard
+  - w3m
+  - firefox-esr
+  - nano
+  - neovim
+  - wget
+  - curl
+  - htop
+  - nmon
+  - neofetch
+  - mc
+  - ansible
+  - cron
+  - nfs-common
+  - rsync
+  - zsh
+user-data:
+  disable_root: false
+  timezone: UTC
+  runcmd:
+    - bash <(curl -sL https://github.com/xpipe-io/xpipe/raw/master/get-xpipe.sh)
+    - mkdir -p /home/ubuntu/apps
+    - RUNONCE=1 CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+    - git clone https://github.com/zsh-users/zsh-autosuggestions /home/ubuntu/.oh-my-zsh/custom/plugins/zsh-autosuggestions
+    - git clone https://github.com/zsh-users/zsh-syntax-highlighting /home/ubuntu/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting
+    - git clone --depth=1 https://github.com/romkatv/powerlevel10k.git /home/ubuntu/.oh-my-zsh/custom/themes/powerlevel10k
+    - mkdir -p /home/ubuntu/.local/share/fonts
+    - wget -P /home/ubuntu/.local/share/fonts https://github.com/romkatv/powerlevel10k-media/raw/master/MesloLGS%20NF%20Regular.ttf
+    - fc-cache -fv
+    - echo 'HISTSIZE=50000' >> /home/ubuntu/.zshrc
+    - echo 'SAVEHIST=10000' >> /home/ubuntu/.zshrc
+    - echo 'ZSH_THEME="powerlevel10k/powerlevel10k"' >> /home/ubuntu/.zshrc
+    - echo 'plugins=(z git zsh-autosuggestions zsh-syntax-highlighting colored-man-pages)' >> /home/ubuntu/.zshrc
+    - chown -R ubuntu:ubuntu /home/ubuntu
+late-commands:
+  - echo "Installation complete!" > /target/home/ubuntu/install-complete.txt
