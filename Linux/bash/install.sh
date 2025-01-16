@@ -31,6 +31,10 @@ sudo apt Install initx openbox
 
 # virtual Terminals
 sudo apt Install tmux
+sudo apt install wireguard
+
+# install xpipe for ssh managing
+bash <(curl -sL https://github.com/xpipe-io/xpipe/raw/master/get-xpipe.sh)
 
 # Browser
 sudo apt Install w3m firefox-esr
