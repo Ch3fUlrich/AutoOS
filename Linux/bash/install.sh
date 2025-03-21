@@ -134,6 +134,62 @@ source  ~/.zshrc
 
 
 
+
+
+# install gnome extensions https://extensions.gnome.org/
+sudo apt install -y gnome-shell-extensions gnome-tweaks
+sudo apt install gnome-shell-extension-manager
+
+# windows like start menu
+sudo apt install gnome-shell-extension-dash-to-panel
+
+# extra functionality and customization for the quick settings menu.
+lock keys
+notification banner reloaded
+caffein
+auto move windows
+impatience
+gnome 4x ui Improvements
+clipboard history
+ddterm - drop down terminal
+Status Area Horizontal Spacing 
+Transparent Notification
+System-Monitor
+Vitals # better than system monitor
+EasyScreen Cast
+space bar
+forge # automated tiling
+wintile-beyond # windows
+Improved Workspace Indicator # for multi virtual monitors
+user themes
+vitals
+openweather refined
+wgtk4 dekstop icons NG
+rounded window corners reborn
+launch new instance
+places status indicator
+window list
+bluetooth quick connect
+appindicator and kstatusnotifieritem support
+    Removable Drive Menu - For those of us used to have 1-click USB ejection.
+    V-Shell - Amazing amounts of customization, but most of all fixes “native” Gnome bugs with display scaling!
+Hot Edge - Add a hot edge that activates the overview to the bottom of the screen. This provides a better mouse-based workflow and can be an alternative to a dock.
+Removable Drive Menu
+QSTWEAk
+ Alphabetical App Grid
+blur my shell
+ Gesture Improvements - extra functionality for laptop touchpads
+ Just Perfection - additional Gnome shell customization
+# battery time
+sudo apt install gnome-shell-extension-system-monitor
+
+sudo apt install gnome-shell-extension-dash-to-dock
+sudo apt install gnome-shell-extension-arc-menu
+sudo apt install gnome-shell-extension-clipboard-indicator
+sudo apt install gnome-shell-extension-gpaste
+
+
+
 # install docker
 curl -fsSL https://get.docker.com -o get-docker.sh
 sh get-docker.sh
