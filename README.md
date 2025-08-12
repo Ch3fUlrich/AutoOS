@@ -2,6 +2,47 @@
 This Repository is for setting up a newly installed OS with all the necessary tools and configurations. For this process we will use [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html) was born in the Linux world, support and capabilities for managing Windows environments have improved significantly.
 Automations are done using [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html).
 
+# AutoOS: Automated Post-OS Installation Setup
+
+AutoOS is a cross-platform automation toolkit for setting up newly installed operating systems (Windows, Linux, MacOS) with all necessary tools, configurations, and customizations. It leverages [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html) for automation, supporting both Linux and Windows environments (via WSL for Windows).
+
+## Repository Structure
+
+- **Linux/**: Bash scripts and modules for configuring Ubuntu and other Linux distributions.
+- **Windows/**: Ansible playbooks, PowerShell scripts, and Oh My Posh setup for Windows environments.
+- **Network/**: Network configuration scripts (e.g., Eduroam setup for Linux).
+- **Fonts/**: Recommended fonts for terminal and shell customization.
+- **ubuntu_autoinstall/**: Ubuntu autoinstall configuration and documentation.
+
+## Completed Steps
+
+- Windows setup instructions (WSL, SSH server, Ansible configuration)
+- Linux setup instructions (Ansible installation, playbook usage)
+- Initial Ansible playbooks and inventory files for Windows automation
+- Oh My Posh configuration for PowerShell
+- Eduroam network setup script for Linux
+
+## Upcoming Steps & Suggestions
+
+- Add detailed setup instructions for each OS (Linux, Windows, MacOS)
+- Automate more installation/configuration tasks (network, fonts, shell customization)
+- Add troubleshooting and FAQ sections
+- Integrate CI for script linting and validation
+- Expand documentation for each module and script
+- Add MacOS support and documentation
+
+## Getting Started
+
+See the subproject README files for OS-specific instructions:
+- [Linux/README.md](Linux/README.md)
+- [Windows/README.md](Windows/README.md)
+- [Network/README.md](Network/README.md)
+- [ubuntu_autoinstall/README.md](ubuntu_autoinstall/README.md)
+- [Fonts/README.md](Fonts/README.md)
+
+---
+Below are the original setup instructions for Windows and Linux. These will be further improved and split into their respective subproject README files.
+
 ## Windows (10)
 Since Ansible is not natively supported on Windows, we will use Windows Subsystem for Linux (WSL) to run Ansible. WSL allows you to run a Linux distribution on Windows without the need for a virtual machine or dual booting.
 
