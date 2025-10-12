@@ -55,6 +55,10 @@ install_packages() {
 
 # Check if package is installed
 is_package_installed() {
+    if [ -z "$1" ]; then
+        echo "⚠️  No package name specified for is_package_installed"
+        return 1
+    fi
     dpkg -l "$1" 2>/dev/null | grep -q "^ii"
 }
 
