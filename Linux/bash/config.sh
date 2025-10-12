@@ -39,15 +39,15 @@ PROGRAMMING_PACKAGES=(
     python3-setuptools    # Python package utilities
     python3-wheel         # Python wheel support
     build-essential       # Essential build tools
-    nodejs                # Node.js runtime (optional)
-    npm                   # Node package manager (optional)
+    nodejs                # Node.js runtime
+    npm                   # Node package manager
 )
 
 PROGRAMMING_DESCRIPTION="Development tools and programming languages:
   - C/C++ development (clang, build-essential)
   - Python 3 with package management (pip, venv)
   - Build tools and compilers
-  - Optional: Node.js and npm"
+  - Includes: Node.js and npm"
 
 # ============================================
 # GNOME DESKTOP ENHANCEMENTS
