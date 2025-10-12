@@ -33,6 +33,15 @@ install_docker_stack() {
         curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
     fi
     
+    # Verify the integrity of the downloaded script
+    SCRIPT_HASH=$(sha256sum /tmp/get-docker.sh | awk '{print $1}')
+    echo "SHA256 checksum of downloaded script: $SCRIPT_HASH"
+    echo "Please verify this checksum against the official Docker documentation (if available)."
+    if ! confirm "Do you want to proceed and execute the downloaded Docker installation script?"; then
+        echo "Aborting Docker installation."
+        return 1
+    fi
+    
     sudo sh /tmp/get-docker.sh
     
     # Post-installation setup
