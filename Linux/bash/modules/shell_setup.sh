@@ -92,7 +92,7 @@ install_powerline_fonts() {
         if [ ! -f "$font_dir/$font_name" ]; then
             echo "  Downloading $font_name..."
             wget -q -P "$font_dir" "$font_base_url/$font" || {
-                warning_message "Failed to download $font_name"
+                warning_message "Failed to download $font_name from $font_base_url/$font. Please check your network connection or try downloading the font manually from the URL above."
             }
         else
             echo "  ✅ $font_name already exists"
