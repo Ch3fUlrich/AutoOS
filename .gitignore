@@ -1,1 +1,22 @@
 installers/
+
+# Temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Installation artifacts
+get-docker.sh
+/tmp/
+
+# Backup files
+*.backup.*
+*.bak
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*

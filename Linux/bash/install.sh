@@ -1,5 +1,37 @@
 #!/bin/bash
 
+# ============================================
+# DEPRECATED: This script is no longer maintained
+# ============================================
+# Please use main.sh instead for a better experience:
+#   ./main.sh
+# 
+# The new main.sh provides:
+#   - Interactive menu-driven installation
+#   - Modular component selection
+#   - Better error handling and logging
+#   - User-friendly prompts and descriptions
+#   - Proper configuration management
+# ============================================
+
+echo ""
+echo "⚠️  DEPRECATION NOTICE ⚠️"
+echo ""
+echo "This script (install.sh) is deprecated and no longer maintained."
+echo "Please use the new interactive installer instead:"
+echo ""
+echo "  ./main.sh"
+echo ""
+echo "The new installer provides a better user experience with:"
+echo "  • Interactive menu system"
+echo "  • Selective component installation"
+echo "  • Better error handling"
+echo "  • Detailed logging"
+echo "  • Configuration management"
+echo ""
+read -rp "Press Enter to exit or Ctrl+C to continue with this deprecated script..."
+echo ""
+
 # install languages
 ## C++
 sudo apt install -y clang
