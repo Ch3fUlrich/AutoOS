@@ -1,15 +1,21 @@
 #!/bin/bash
 # Programming tools installation
 
+# --- Source color helpers (module-local) ---
+MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$MODULE_DIR/utils.sh" ]; then
+    source "$MODULE_DIR/utils.sh"
+elif [ -f "$MODULE_DIR/../modules/utils.sh" ]; then
+    source "$MODULE_DIR/../modules/utils.sh"
+fi
+
 install_programming_tools() {
     section_header "Programming Languages & Tools Installation"
     
     info_box "Programming Tools" "$PROGRAMMING_DESCRIPTION"
     
     echo "The following packages will be installed:"
-    for pkg in "${PROGRAMMING_PACKAGES[@]}"; do
-        echo "  • $pkg"
-    done
+    print_pkg_list "${PROGRAMMING_PACKAGES[@]}"
     echo ""
     
     if ! confirm "Do you want to proceed with programming tools installation?" "Y"; then

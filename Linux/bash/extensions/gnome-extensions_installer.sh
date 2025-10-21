@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
+# GNOME extensions installer (module)
 
-# Safer bash settings
+MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# source helpers
+if [ -f "$MODULE_DIR/gnome-utils.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$MODULE_DIR/gnome-utils.sh"
+elif [ -f "$MODULE_DIR/../modules/utils.sh" ]; then
+    # fallback
+    # shellcheck source=/dev/null
+    source "$MODULE_DIR/../modules/utils.sh"
+else
+    echo "Unable to locate gnome-utils or modules/utils.sh" >&2
+    return 1
+fi
+
 set -Eeuo pipefail
-
-# Source the utility functions
-SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-source "${SCRIPT_DIR}/gnome-utils.sh"
 
 # Set up error handling
 trap 'error_handler $? $LINENO $BASH_LINENO "$BASH_COMMAND" $(printf "::%s" ${FUNCNAME[@]:-})' ERR
@@ -23,37 +33,36 @@ install_core_gnome_packages() {
         gnome-shell-extension-gpaste
         gnome-shell-extension-system-monitor
     )
-    
-    echo "Installing core GNOME packages..."
-    "${PKG_MANAGER}" "${PKG_OPTS[@]}" install --no-install-recommends "${packages[@]}"
+
+    info "Installing core GNOME packages..."
+    # Use safe_run to respect DRY_RUN
+    safe_run sudo apt-get install --no-install-recommends -y "${packages[@]}"
 }
 
 # Main execution
 main() {
-    # Check privileges
+    # Check privileges: prefer sudo but do not exec which breaks orchestration
+    SUDO_CMD=""
     if ! check_privileges; then
         if command -v sudo >/dev/null; then
-            exec sudo -E bash "$0" "$@"
+            SUDO_CMD="sudo"
+            info "Will use sudo for privileged operations"
         else
-            echo "This script must be run as root and 'sudo' is not available." >&2
-            exit 1
+            warning_message "This script ideally needs root privileges for some operations."
         fi
     fi
 
-    # Setup package manager
+    # Setup package manager (gnome-utils provides helpers)
     PKG_MANAGER=$(setup_package_manager)
     if [ "${PKG_MANAGER}" = "unknown" ]; then
-        echo "Unsupported distribution" >&2
-        exit 1
+        warning_message "Unsupported distribution"
+        return 1
     fi
-
-    # Get package manager options
-    PKG_OPTS=$(get_pkg_manager_opts "${PKG_MANAGER}")
 
     # Check GNOME version
     if ! check_gnome_version; then
-        echo "GNOME version check failed" >&2
-        exit 1
+        warning_message "GNOME version check failed"
+        return 1
     fi
 
     # Define required dependencies
@@ -66,17 +75,17 @@ main() {
     )
 
     # Check and install dependencies
-    MISSING_DEPS=$(check_dependencies "${PKG_MANAGER}" "${DEPENDENCIES[@]}")
-    if [ -n "${MISSING_DEPS}" ]; then
-        echo "Installing missing dependencies: ${MISSING_DEPS}"
-        ${PKG_MANAGER} ${PKG_OPTS} install ${MISSING_DEPS}
+    MISSING_DEPS=$(check_dependencies "${PKG_MANAGER}" "${DEPENDENCIES[@]}") || true
+    if [ -n "${MISSING_DEPS:-}" ]; then
+        info "Installing missing dependencies: ${MISSING_DEPS}"
+        safe_run ${SUDO_CMD} ${PKG_MANAGER} ${PKG_OPTS:-} install ${MISSING_DEPS}
     fi
 
     install_core_gnome_packages
 
     # Define extensions with compatibility information
     # In the extensions configuration section
-    declare -A extensions=(
+    declare -A EXTENSIONS=(
         # Core functionality
         [800]="Lock Keys|3.36|44"
         [1506]="Notification Banner Reloaded|40|44"
@@ -114,18 +123,25 @@ main() {
     )
 
     # Install extensions
-    local current_gnome_version=$(gnome-shell --version | awk '{print $3}')
+    local current_gnome_version
+    if command_exists gnome-shell; then
+        current_gnome_version=$(gnome-shell --version | awk '{print $3}')
+    else
+        current_gnome_version="0.0.0"
+    fi
+
     for ext_id in "${!EXTENSIONS[@]}"; do
         IFS="|" read -r name min_ver max_ver <<< "${EXTENSIONS[$ext_id]}"
-        
+
         if version_check "${current_gnome_version}" "${min_ver}" "${max_ver}"; then
             install_gnome_extension "${ext_id}" "${name}"
         else
-            echo "Skipping ${name}: not compatible with GNOME ${current_gnome_version}" >&2
+            info "Skipping ${name}: not compatible with GNOME ${current_gnome_version}"
         fi
     done
 
     print_completion_message
+    return 0
 }
 
 # Execute main function

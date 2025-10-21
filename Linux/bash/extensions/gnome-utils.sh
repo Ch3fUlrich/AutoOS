@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 # gnome-utils.sh - Reusable GNOME shell utility functions
 
+# --- Source central utils (colors, logging, safe_run) ---
+MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$MODULE_DIR/../modules/utils.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$MODULE_DIR/../modules/utils.sh"
+elif [ -f "$MODULE_DIR/modules/utils.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$MODULE_DIR/modules/utils.sh"
+elif [ -f "$MODULE_DIR/../../modules/utils.sh" ]; then
+    # handle nested layouts
+    # shellcheck source=/dev/null
+    source "$MODULE_DIR/../../modules/utils.sh"
+else
+    echo "Unable to locate modules/utils.sh - gnome-utils requires utilities." >&2
+    return 1
+fi
+
 # Prevent direct execution of this library
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "This is a library file and should be sourced, not executed directly." >&2
@@ -130,26 +147,33 @@ install_gnome_extension() {
     local success=false
 
     # Check if extension is already installed
-    if gnome-extensions list | grep -q "@${ext_id}"; then
-        echo "Extension ${ext_name} is already installed."
+    if command_exists gnome-extensions && gnome-extensions list | grep -q "@${ext_id}"; then
+        info "Extension ${ext_name} is already installed."
         return 0
     fi
 
     for ((try=1; try<=max_retries; try++)); do
-        if gnome-shell-extension-installer "${ext_id}" --yes; then
+        # Use safe_run to respect DRY_RUN. The installer returns non-zero on failure.
+        if [ "$DRY_RUN" = true ]; then
+            info "[DRY RUN] gnome-shell-extension-installer ${ext_id} --yes"
             success=true
             break
         else
-            echo "Attempt ${try}/${max_retries} failed. Waiting ${retry_delay}s before retry..."
-            sleep "${retry_delay}"
+            if gnome-shell-extension-installer "${ext_id}" --yes; then
+                success=true
+                break
+            else
+                warning_message "Attempt ${try}/${max_retries} failed. Waiting ${retry_delay}s before retry..."
+                sleep "${retry_delay}"
+            fi
         fi
     done
 
     if [ "${success}" = true ]; then
-        echo "Successfully installed ${ext_name}"
+        info "Successfully installed ${ext_name}"
         return 0
     else
-        echo "Failed to install ${ext_name} after ${max_retries} attempts" >&2
+        warning_message "Failed to install ${ext_name} after ${max_retries} attempts"
         return 1
     fi
 }

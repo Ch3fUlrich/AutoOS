@@ -52,29 +52,14 @@ main_menu() {
     echo "║                     AutoOS Setup Menu                          ║"
     echo "╚════════════════════════════════════════════════════════════════╝"
     echo ""
-    echo "  1) Install Core System Packages"
-    echo "     └─ Essential tools: git, curl, htop, ansible, etc."
-    echo ""
-    echo "  2) Install Programming Languages & Tools"
-    echo "     └─ Python, C/C++, build tools"
-    echo ""
-    echo "  3) Configure Shell Environment"
-    echo "     └─ Zsh, Oh My Zsh, Powerlevel10k theme"
-    echo ""
-    echo "  4) Setup GNOME Desktop"
-    echo "     └─ Extensions, tweaks, and customizations"
-    echo ""
-    echo "  5) Install Docker & Portainer"
-    echo "     └─ Container platform and management"
-    echo ""
-    echo "  6) Install Everything (Full Setup)"
-    echo "     └─ All of the above in sequence"
-    echo ""
-    echo "  7) View Installation Log"
-    echo "     └─ Show detailed log file"
-    echo ""
-    echo "  8) Exit"
-    echo ""
+    print_menu_item 1 "Install Core System Packages" "└─ Essential tools: git, curl, htop, ansible, etc."
+    print_menu_item 2 "Install Programming Languages & Tools" "└─ Python, C/C++, build tools"
+    print_menu_item 3 "Configure Shell Environment" "└─ Zsh, Oh My Zsh, Powerlevel10k theme"
+    print_menu_item 4 "Setup GNOME Desktop" "└─ Extensions, tweaks, and customizations"
+    print_menu_item 5 "Install Docker & Portainer" "└─ Container platform and management"
+    print_menu_item 6 "Install Everything (Full Setup)" "└─ All of the above in sequence"
+    print_menu_item 7 "View Installation Log" "└─ Show detailed log file"
+    print_menu_item 8 "Exit" ""
     echo "════════════════════════════════════════════════════════════════"
     echo -n "Enter your choice (1-8): "
 }
@@ -128,17 +113,25 @@ install_everything() {
     
     # Run all installation modules
     install_core_packages
-    read -rp "Press Enter to continue to next step..."
-    
+    if [ "${AUTO_CONFIRM:-false}" != true ]; then
+        read -rp "Press Enter to continue to next step..."
+    fi
+
     install_programming_tools
-    read -rp "Press Enter to continue to next step..."
-    
+    if [ "${AUTO_CONFIRM:-false}" != true ]; then
+        read -rp "Press Enter to continue to next step..."
+    fi
+
     configure_shell_environment
-    read -rp "Press Enter to continue to next step..."
-    
+    if [ "${AUTO_CONFIRM:-false}" != true ]; then
+        read -rp "Press Enter to continue to next step..."
+    fi
+
     setup_gnome_desktop
-    read -rp "Press Enter to continue to next step..."
-    
+    if [ "${AUTO_CONFIRM:-false}" != true ]; then
+        read -rp "Press Enter to continue to next step..."
+    fi
+
     install_docker_stack
     
     echo ""
@@ -178,37 +171,35 @@ main() {
     
     # Main menu loop
     while true; do
-        main_menu
-        read choice
+    main_menu
+    # Read raw input and sanitize: remove CR and trim whitespace
+    read -r __choice_raw
+    # strip carriage returns (CR) and leading/trailing whitespace
+    choice="$(printf '%s' "${__choice_raw}" | tr -d '\r' | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
         
         case $choice in
-            1) 
+            1)
                 install_core_packages
-                read -rp "Press Enter to continue..."
                 ;;
-            2) 
+            2)
                 install_programming_tools
-                read -rp "Press Enter to continue..."
                 ;;
-            3) 
+            3)
                 configure_shell_environment
-                read -rp "Press Enter to continue..."
                 ;;
-            4) 
+            4)
                 setup_gnome_desktop
-                read -rp "Press Enter to continue..."
                 ;;
-            5) 
+            5)
                 install_docker_stack
-                read -rp "Press Enter to continue..."
                 ;;
-            6) 
+            6)
                 install_everything
                 ;;
             7)
                 view_log
                 ;;
-            8) 
+            8)
                 echo ""
                 echo "Thank you for using AutoOS!"
                 echo "Log file: $LOG_FILE"
@@ -216,7 +207,7 @@ main() {
                 log_info "AutoOS installation exited by user"
                 exit 0
                 ;;
-            *) 
+            *)
                 warning_message "Invalid option. Please choose 1-8."
                 sleep 2
                 ;;

@@ -1,5 +1,21 @@
+MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$MODULE_DIR/modules/utils.sh" ]; then
+  source "$MODULE_DIR/modules/utils.sh"
+elif [ -f "$MODULE_DIR/../modules/utils.sh" ]; then
+  source "$MODULE_DIR/../modules/utils.sh"
+fi
 #!/bin/bash
 # Configuration settings for AutoOS Linux installation
+
+# Ensure utility helpers are available (colors, logging)
+if [ -z "${AUTOOS_UTILS_LOADED:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -f "$SCRIPT_DIR/modules/utils.sh" ]; then
+    source "$SCRIPT_DIR/modules/utils.sh"
+  elif [ -f "$SCRIPT_DIR/../modules/utils.sh" ]; then
+    source "$SCRIPT_DIR/../modules/utils.sh"
+  fi
+fi
 
 # ============================================
 # CORE SYSTEM PACKAGES
@@ -132,10 +148,12 @@ declare -A GNOME_EXTENSIONS=(
 # INSTALLATION BEHAVIOR
 # ============================================
 # Set to 'true' to skip confirmations (dangerous!)
-AUTO_CONFIRM=false
+## Allow environment overrides for these flags (useful for CI/automation)
+# Set to 'true' to skip confirmations (dangerous!)
+AUTO_CONFIRM=${AUTO_CONFIRM:-false}
 
 # Set to 'true' to enable verbose output
-VERBOSE=false
+VERBOSE=${VERBOSE:-false}
 
 # Set to 'true' to perform a dry-run (show what would be done)
-DRY_RUN=false
+DRY_RUN=${DRY_RUN:-false}

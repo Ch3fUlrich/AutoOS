@@ -1,109 +1,159 @@
 #!/bin/bash
-# Docker and Portainer installation
+# Docker & Portainer installation (module)
+
+# --- Source color/helpers (module-local) ---
+MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$MODULE_DIR/utils.sh" ]; then
+    # module placed alongside utils (rare)
+    # shellcheck source=/dev/null
+    source "$MODULE_DIR/utils.sh"
+elif [ -f "$MODULE_DIR/../modules/utils.sh" ]; then
+    # normal layout: modules/docker_setup.sh -> modules/utils.sh
+    # shellcheck source=/dev/null
+    source "$MODULE_DIR/../modules/utils.sh"
+else
+    echo "Unable to locate utils.sh for color/logging helpers. Please ensure modules/utils.sh is present." >&2
+    return 1
+fi
 
 install_docker_stack() {
-    echo "======================================"
-    echo "Docker & Portainer Installation"
-    echo "======================================"
-    echo ""
-    echo "This will install:"
-    echo "  - Docker Engine"
-    echo "  - Docker Compose"
-    echo "  - Portainer Agent (for remote management)"
-    echo ""
-    
+    header "Docker & Portainer Installation"
+
+    info_box "This will install:\n  - Docker Engine\n  - Docker Compose\n  - Portainer Agent (for remote management)"
+
     if ! confirm "Do you want to proceed with Docker installation?"; then
-        echo "Skipping Docker installation"
+        warning_message "Skipping Docker installation"
         return 0
     fi
-    
+
     # Check if Docker is already installed
     if command_exists docker; then
-        echo "Docker is already installed ($(docker --version))"
+        info "Docker is already installed: $(docker --version 2>/dev/null || echo 'unknown')"
         if ! confirm "Do you want to reinstall Docker?"; then
-            echo "Skipping Docker installation"
+            info "Skipping Docker installation"
             docker_post_install
             return 0
         fi
     fi
-    
-    # Install Docker using official script
-    echo "Installing Docker..."
-    if [ ! -f /tmp/get-docker.sh ]; then
-        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+
+    # Download the official convenience script (safe_run will print in DRY_RUN)
+    info "Downloading Docker install script to /tmp/get-docker.sh"
+    safe_run curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+
+    # Try to show checksum if file exists (may not exist during DRY_RUN)
+    if [ -f /tmp/get-docker.sh ]; then
+        if command_exists sha256sum; then
+            SCRIPT_HASH=$(sha256sum /tmp/get-docker.sh | awk '{print $1}' 2>/dev/null || true)
+            if [ -n "$SCRIPT_HASH" ]; then
+                info_box "SHA256 checksum of downloaded script: $SCRIPT_HASH"
+                info "Please verify this checksum against the official Docker documentation (if available)."
+            fi
+        fi
+    else
+        info "Checksum unavailable: /tmp/get-docker.sh not present (DRY_RUN or download skipped)"
     fi
-    
-    # Verify the integrity of the downloaded script
-    SCRIPT_HASH=$(sha256sum /tmp/get-docker.sh | awk '{print $1}')
-    echo "SHA256 checksum of downloaded script: $SCRIPT_HASH"
-    echo "Please verify this checksum against the official Docker documentation (if available)."
+
     if ! confirm "Do you want to proceed and execute the downloaded Docker installation script?"; then
-        echo "Aborting Docker installation."
+        warning_message "Aborting Docker installation."
         return 1
     fi
-    
-    sudo sh /tmp/get-docker.sh
-    
+
+    safe_run sudo sh /tmp/get-docker.sh
+
     # Post-installation setup
     docker_post_install
-    
+
     # Install Portainer Agent
     if confirm "Do you want to install Portainer Agent?"; then
         install_portainer_agent
     fi
-    
+
+    # Offer to install Portainer CLI (managed by other computer)
+    if confirm "Do you want to install the Portainer CLI (portainer-cli) to manage Portainer remotely?"; then
+        install_portainer_cli
+    fi
+
     # Create apps directory
     if [ ! -d "$HOME/apps" ]; then
-        mkdir -p "$HOME/apps"
-        echo "Created apps directory at $HOME/apps"
+        safe_run mkdir -p "$HOME/apps"
+        info "Created apps directory at $HOME/apps"
     fi
-    
-    echo ""
-    echo "Docker installation completed!"
-    echo "Note: You may need to log out and back in for group changes to take effect."
+
+    success_message "Docker installation completed!\nNote: You may need to log out and back in for group changes to take effect."
 }
 
 docker_post_install() {
-    echo "Configuring Docker..."
-    
+    info "Configuring Docker..."
+
     # Add user to docker group
     if ! groups "$USER" | grep -q docker; then
-        sudo groupadd docker 2>/dev/null || true
-        sudo usermod -aG docker "$USER"
-        echo "Added $USER to docker group"
+        safe_run sudo groupadd docker || true
+        safe_run sudo usermod -aG docker "$USER"
+        info "Added $USER to docker group"
     fi
-    
+
     # Start and enable Docker service
-    sudo systemctl start docker 2>/dev/null || true
-    sudo systemctl enable docker.service 2>/dev/null || true
-    sudo systemctl enable containerd.service 2>/dev/null || true
-    
-    echo "Docker service enabled and started"
+    safe_run sudo systemctl start docker || true
+    safe_run sudo systemctl enable docker.service || true
+    safe_run sudo systemctl enable containerd.service || true
+
+    info "Docker service enabled (if installed)"
 }
 
 install_portainer_agent() {
-    echo "Installing Portainer Agent..."
-    
+    section_header "Portainer Agent"
+
+    info "Installing Portainer Agent..."
+
     # Check if container already exists
-    if docker ps -a | grep -q portainer_agent; then
-        echo "Portainer Agent container already exists"
+    if command_exists docker && docker ps -a | grep -q portainer_agent; then
+        info "Portainer Agent container already exists"
         if confirm "Do you want to remove and reinstall it?"; then
-            docker stop portainer_agent 2>/dev/null || true
-            docker rm portainer_agent 2>/dev/null || true
+            safe_run docker stop portainer_agent || true
+            safe_run docker rm portainer_agent || true
         else
-            echo "Skipping Portainer Agent installation"
+            info "Skipping Portainer Agent installation"
             return 0
         fi
     fi
-    
+
     # Run Portainer Agent
-    docker run -d \
+    safe_run docker run -d \
         -p 9001:9001 \
         --name portainer_agent \
         --restart=always \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v /var/lib/docker/volumes:/var/lib/docker/volumes \
         portainer/agent:latest
-    
-    echo "Portainer Agent installed and running on port 9001"
+
+    success_message "Portainer Agent installation attempted (check docker ps to verify)."
+}
+
+# Install Portainer CLI (portainer-cli)
+install_portainer_cli() {
+    section_header "Portainer CLI (Managed by Other Computer)"
+
+    info "This section installs the Portainer CLI (portainer-cli) for managing Portainer from the command line."
+
+    if ! confirm "Do you want to install the Portainer CLI now?" "Y"; then
+        warning_message "Skipping Portainer CLI installation"
+        return 0
+    fi
+
+    # prefer npm global installation if available
+    if command_exists npm; then
+        info "Installing portainer-cli via npm (global)..."
+        safe_run sudo npm install -g @portainer/portainer-cli || true
+    else
+        # Try pipx/pip install from PyPI if present (portainer-cli may not be available there)
+        if command_exists pipx; then
+            info "Installing via pipx..."
+            safe_run pipx install portainer-cli || true
+        else
+            warning_message "npm not found and pipx not available. Please install Node.js/npm or pipx to install portainer-cli."
+            return 0
+        fi
+    fi
+
+    success_message "Portainer CLI installation attempted. Run 'portainer-cli --help' to verify."
 }

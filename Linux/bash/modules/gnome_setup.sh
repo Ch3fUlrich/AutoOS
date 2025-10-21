@@ -1,5 +1,28 @@
 #!/bin/bash
+# GNOME desktop setup
+
+# --- Source color helpers (module-local) ---
+MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$MODULE_DIR/utils.sh" ]; then
+    source "$MODULE_DIR/utils.sh"
+elif [ -f "$MODULE_DIR/../modules/utils.sh" ]; then
+    source "$MODULE_DIR/../modules/utils.sh"
+fi
+#!/bin/bash
 # GNOME Desktop configuration
+
+#!/bin/bash
+# GNOME Desktop configuration
+
+# Ensure utility helpers are available
+if [ -z "${AUTOOS_UTILS_LOADED:-}" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -f "$SCRIPT_DIR/utils.sh" ]; then
+        source "$SCRIPT_DIR/utils.sh"
+    elif [ -f "$SCRIPT_DIR/../modules/utils.sh" ]; then
+        source "$SCRIPT_DIR/../modules/utils.sh"
+    fi
+fi
 
 setup_gnome_desktop() {
     section_header "GNOME Desktop Setup"
