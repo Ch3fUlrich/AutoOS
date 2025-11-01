@@ -133,6 +133,10 @@ install_everything() {
     fi
 
     install_docker_stack
+    # Raspberry Pi specific extras (if applicable)
+    if [ "${IS_RPI:-false}" = true ] && type install_pi_extras >/dev/null 2>&1; then
+        install_pi_extras
+    fi
     
     echo ""
     echo "╔════════════════════════════════════════════════════════════════╗"
@@ -161,6 +165,15 @@ source "$SCRIPT_DIR/modules/programming.sh"
 source "$SCRIPT_DIR/modules/shell_setup.sh"
 source "$SCRIPT_DIR/modules/gnome_setup.sh"
 source "$SCRIPT_DIR/modules/docker_setup.sh"
+
+# If Raspberry Pi specific modules exist, source them so they can override
+# or add functions and variables. This keeps `main.sh` as the single
+# orchestrator while allowing Pi-specific scripts to customize behavior.
+if [ -d "$SCRIPT_DIR/pi_modules" ]; then
+    for f in "$SCRIPT_DIR/pi_modules"/*.sh; do
+        [ -f "$f" ] && source "$f"
+    done
+fi
 
 # ============================================
 # MAIN LOOP

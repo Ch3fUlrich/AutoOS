@@ -157,3 +157,15 @@ VERBOSE=${VERBOSE:-false}
 
 # Set to 'true' to perform a dry-run (show what would be done)
 DRY_RUN=${DRY_RUN:-false}
+
+# ------------------------------------------------------------
+# Raspberry Pi OS overrides
+# If the pi_modules override file exists, source it so Raspberry Pi
+# specific package additions and helper functions are available.
+# This keeps the main package lists reusable while allowing Pi
+# adjustments.
+# ------------------------------------------------------------
+if [ -f "$(dirname "${BASH_SOURCE[0]}")/pi_modules/pi_overrides.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$(dirname "${BASH_SOURCE[0]}")/pi_modules/pi_overrides.sh"
+fi
