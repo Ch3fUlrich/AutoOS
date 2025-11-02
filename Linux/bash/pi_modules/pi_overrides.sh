@@ -8,23 +8,14 @@ if [ -n "${AUTOOS_PI_OVERRIDES_LOADED:-}" ]; then
 fi
 AUTOOS_PI_OVERRIDES_LOADED=1
 
-is_raspberry_pi() {
-    # Check /proc/device-tree/model (present on Raspberry Pi hardware)
-    if [ -f /proc/device-tree/model ]; then
-        if grep -qi "raspberry" /proc/device-tree/model 2>/dev/null; then
-            return 0
-        fi
+## Use canonical detection from modules/utils.sh when available to avoid
+## duplicate logic. Source utils.sh if not already loaded.
+if [ -z "${AUTOOS_UTILS_LOADED:-}" ]; then
+    if [ -f "$(dirname "${BASH_SOURCE[0]}")/../modules/utils.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$(dirname "${BASH_SOURCE[0]}")/../modules/utils.sh"
     fi
-
-    # Fallback to /etc/os-release matching Raspbian / Raspberry
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        case "${ID:-}${ID_LIKE:-}${NAME:-}${PRETTY_NAME:-}" in
-            *raspbian*|*raspberry*) return 0 ;;
-        esac
-    fi
-    return 1
-}
+fi
 
 if is_raspberry_pi; then
     IS_RPI=true

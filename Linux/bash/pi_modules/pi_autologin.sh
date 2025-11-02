@@ -20,8 +20,8 @@ install_pi_extras() {
 
     # 1) Autologin (optional)
     if confirm "Enable autologin on tty1 for the current user ($USER)?" "N"; then
-        sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
-        sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null <<'EOF'
+    safe_run sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
+    safe_run sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null <<'EOF'
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin $USER --noclear %I \$TERM
@@ -33,17 +33,17 @@ EOF
 
     # 2) Install audio and optional Moonlight helper packages
     if confirm "Install PulseAudio and related helpers (recommended for streaming)?" "N"; then
-        sudo apt-get update -qq
-        sudo apt-get install -y pulseaudio curl || {
+        safe_run sudo apt-get update -qq
+        safe_run sudo apt-get install -y pulseaudio curl || {
             warn "Failed to install pulseaudio or curl — continuing"
         }
-        sudo systemctl --global enable pulseaudio || true
+        safe_run sudo systemctl --global enable pulseaudio || true
         ok "PulseAudio (or equivalent) installed/enabled"
     fi
 
     # 3) pi-apps (convenience app store) — installed via upstream script
     if confirm "Install pi-apps (third-party apps manager, optional)?" "N"; then
-        curl -fsSL https://raw.githubusercontent.com/Botspot/pi-apps/master/install | bash || {
+        safe_run bash -c 'curl -fsSL https://raw.githubusercontent.com/Botspot/pi-apps/master/install | bash' || {
             warn "pi-apps install script failed"
         }
         ok "pi-apps installation attempted"

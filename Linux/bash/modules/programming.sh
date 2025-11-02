@@ -10,70 +10,47 @@ elif [ -f "$MODULE_DIR/../modules/utils.sh" ]; then
 fi
 
 install_programming_tools() {
-    section_header "Programming Languages & Tools Installation"
-    
-    info_box "Programming Tools" "$PROGRAMMING_DESCRIPTION"
-    
-    echo "The following packages will be installed:"
-    print_pkg_list "${PROGRAMMING_PACKAGES[@]}"
-    echo ""
-    
-    if ! confirm "Do you want to proceed with programming tools installation?" "Y"; then
-        warning_message "Skipping programming tools installation"
-        return 0
-    fi
-    
-    log_info "Starting programming tools installation"
-    install_packages "${PROGRAMMING_PACKAGES[@]}"
+    # Use the generic install flow for consistent UX
+    standard_install_flow "Programming Languages & Tools" "$PROGRAMMING_DESCRIPTION" PROGRAMMING_PACKAGES
+    log_info "Programming packages installation requested/completed by standard flow"
     
     # Python verification and setup
     echo ""
-    echo "Verifying Python installation..."
+    info "Verifying Python installation..."
     if python3 --version &> /dev/null; then
-        echo "✅ Python $(python3 --version 2>&1 | cut -d' ' -f2) installed"
-        
+        success_message "Python $(python3 --version 2>&1 | cut -d' ' -f2) installed"
+
         if confirm "Do you want to upgrade pip to the latest version?"; then
-            echo ""
-            echo "ℹ️  Pip Installation Method:"
-            echo "   • Installing with --user flag (user-specific installation)"
-            echo "   • Recommended for most users to avoid system-wide conflicts"
-            echo "   • If you're using a virtual environment, pip will install there instead"
-            echo ""
-            
+            info "Pip upgrade: choosing installation method based on environment"
+
             # Check if we're in a virtual environment
             if [ -n "$VIRTUAL_ENV" ]; then
-                echo "✅ Virtual environment detected: $VIRTUAL_ENV"
-                echo "   Installing pip without --user flag (virtual environment-specific)"
-                python3 -m pip install --upgrade pip
+                info "Virtual environment detected: $VIRTUAL_ENV — upgrading pip inside venv"
+                safe_run python3 -m pip install --upgrade pip
             else
-                echo "📦 No virtual environment detected"
-                echo "   Installing pip with --user flag (user-specific, no sudo required)"
-                python3 -m pip install --upgrade pip --user
+                info "No virtual environment detected — upgrading pip for user"
+                safe_run python3 -m pip install --upgrade pip --user
             fi
-            echo "✅ Pip upgraded successfully"
+            ok "Pip upgrade attempted"
         fi
-        
+
         if confirm "Do you want to install common Python development tools (virtualenv, black, pylint)?"; then
-            echo ""
-            echo "Installing Python development tools..."
-            echo "ℹ️  Note: Tools will be installed in the same way as pip"
-            echo "   (user-specific with --user flag if not in a virtual environment)"
-            echo ""
-            
+            info "Installing Python development tools (virtualenv, black, pylint, flake8)"
+
             # Install based on environment
             if [ -n "$VIRTUAL_ENV" ]; then
-                python3 -m pip install virtualenv black pylint flake8
+                safe_run python3 -m pip install virtualenv black pylint flake8
             else
-                python3 -m pip install --user virtualenv black pylint flake8
+                safe_run python3 -m pip install --user virtualenv black pylint flake8
             fi
-            echo "✅ Python development tools installed"
+            ok "Python development tools installation attempted"
         fi
     else
         error_message "Python installation verification failed!"
         log_error "Python installation failed"
         return 1
     fi
-    
+
     success_message "Programming tools installed successfully!"
     log_info "Programming tools installation completed"
 }

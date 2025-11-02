@@ -17,7 +17,7 @@ else
 fi
 
 install_docker_stack() {
-    header "Docker & Portainer Installation"
+    section_header "Docker & Portainer Installation"
 
     info_box "This will install:\n  - Docker Engine\n  - Docker Compose\n  - Portainer Agent (for remote management)"
 
@@ -73,29 +73,20 @@ install_docker_stack() {
         install_portainer_cli
     fi
 
-    # Create apps directory
-    if [ ! -d "$HOME/apps" ]; then
-        safe_run mkdir -p "$HOME/apps"
-        info "Created apps directory at $HOME/apps"
-    fi
+    # Create apps directory (use utils helper for consistent feedback)
+    create_directory_with_feedback "$HOME/apps"
 
     success_message "Docker installation completed!\nNote: You may need to log out and back in for group changes to take effect."
 }
 
 docker_post_install() {
     info "Configuring Docker..."
+    # Add user to docker group (idempotent helper)
+    add_user_to_group "$USER" docker
 
-    # Add user to docker group
-    if ! groups "$USER" | grep -q docker; then
-        safe_run sudo groupadd docker || true
-        safe_run sudo usermod -aG docker "$USER"
-        info "Added $USER to docker group"
-    fi
-
-    # Start and enable Docker service
-    safe_run sudo systemctl start docker || true
-    safe_run sudo systemctl enable docker.service || true
-    safe_run sudo systemctl enable containerd.service || true
+    # Start and enable Docker + containerd services using the helper
+    enable_and_start_service docker
+    enable_and_start_service containerd
 
     info "Docker service enabled (if installed)"
 }

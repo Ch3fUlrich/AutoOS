@@ -59,9 +59,10 @@ main_menu() {
     print_menu_item 5 "Install Docker & Portainer" "└─ Container platform and management"
     print_menu_item 6 "Install Everything (Full Setup)" "└─ All of the above in sequence"
     print_menu_item 7 "View Installation Log" "└─ Show detailed log file"
-    print_menu_item 8 "Exit" ""
+    print_menu_item 8 "Install GNOME Extensions" "└─ Curated groups of extensions (interactive)"
+    print_menu_item 9 "Exit" ""
     echo "════════════════════════════════════════════════════════════════"
-    echo -n "Enter your choice (1-8): "
+    echo -n "Enter your choice (1-9): "
 }
 
 # ============================================
@@ -164,6 +165,7 @@ source "$SCRIPT_DIR/modules/core_packages.sh"
 source "$SCRIPT_DIR/modules/programming.sh"
 source "$SCRIPT_DIR/modules/shell_setup.sh"
 source "$SCRIPT_DIR/modules/gnome_setup.sh"
+source "$SCRIPT_DIR/modules/gnome-extensions_installer.sh"
 source "$SCRIPT_DIR/modules/docker_setup.sh"
 
 # If Raspberry Pi specific modules exist, source them so they can override
@@ -174,6 +176,8 @@ if [ -d "$SCRIPT_DIR/pi_modules" ]; then
         [ -f "$f" ] && source "$f"
     done
 fi
+
+# Source extension helpers (do not execute installer scripts directly)
 
 # ============================================
 # MAIN LOOP
@@ -206,13 +210,21 @@ main() {
             5)
                 install_docker_stack
                 ;;
-            6)
+            8)
+                # Run GNOME extensions installer (interactive). Prefer function if available.
+                if type install_gnome_extensions_grouped >/dev/null 2>&1; then
+                    install_gnome_extensions_grouped
+                else
+                    warning_message "GNOME extensions installer not available. Please run $SCRIPT_DIR/modules/gnome-extensions_installer.sh manually."
+                fi
+                ;;
+            9)
                 install_everything
                 ;;
-            7)
+            6)
                 view_log
                 ;;
-            8)
+            7)
                 echo ""
                 echo "Thank you for using AutoOS!"
                 echo "Log file: $LOG_FILE"
@@ -221,7 +233,7 @@ main() {
                 exit 0
                 ;;
             *)
-                warning_message "Invalid option. Please choose 1-8."
+                warning_message "Invalid option. Please choose 1-9."
                 sleep 2
                 ;;
         esac

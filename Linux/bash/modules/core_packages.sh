@@ -10,34 +10,11 @@ elif [ -f "$MODULE_DIR/../modules/utils.sh" ]; then
 fi
 
 install_core_packages() {
-    section_header "Core System Packages Installation"
-    
-    info_box "Core System Packages" "$CORE_DESCRIPTION"
-    
-    echo "The following packages will be installed:"
-    print_pkg_list "${CORE_PACKAGES[@]}"
-    echo ""
-    
-    if ! confirm "Do you want to proceed with core package installation?" "Y"; then
-        warning_message "Skipping core packages installation"
-        return 0
+    # Use the generic install flow to present and install core packages
+    standard_install_flow "Core System Packages" "$CORE_DESCRIPTION" CORE_PACKAGES
+
+    # Post-install: ensure docker group membership if docker was installed
+    if command_exists docker; then
+        add_user_to_group "$USER" docker
     fi
-    
-    # Install packages
-    log_info "Starting core packages installation"
-    install_packages "${CORE_PACKAGES[@]}"
-    
-    # Additional system setup
-    if ! command_exists docker; then
-        if groups "$USER" | grep -q docker; then
-            log_info "User already in docker group"
-        else
-            safe_run sudo groupadd docker 2>/dev/null || true
-            safe_run sudo usermod -aG docker "$USER"
-            echo "✅ Added $USER to docker group (requires re-login)"
-        fi
-    fi
-    
-    success_message "Core packages installed successfully!"
-    log_info "Core packages installation completed"
 }

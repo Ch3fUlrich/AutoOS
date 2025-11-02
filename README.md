@@ -40,6 +40,40 @@ See the subproject README files for OS-specific instructions:
 - [ubuntu_autoinstall/README.md](ubuntu_autoinstall/README.md)
 - [Fonts/README.md](Fonts/README.md)
 
+## Linux: CLI usage (bash modules)
+
+This repository contains a set of bash modules under `Linux/bash/` used to perform post-install configuration on Ubuntu and related distributions. The GNOME extensions installer has been refactored into a small set of modules and supports non-interactive and dry-run modes.
+
+Quick notes:
+- Modules entrypoint: `Linux/bash/main.sh` and module files live under `Linux/bash/modules/`.
+- GNOME extensions metadata: `Linux/bash/modules/extensions.json` (JSON is the canonical source; `extensions.yaml` is deprecated/removed).
+- Key environment variables / CLI flags used by the bash modules:
+    - `--dry-run` or set `DRY_RUN=true` — run the flow without performing mutating actions; commands are printed/logged but not executed.
+    - `--non-interactive` / `--yes` / `-y` or set `AUTO_CONFIRM=true` — skip interactive prompts and accept defaults.
+    - The GNOME installer exposes a thin loader: `Linux/bash/modules/gnome-extensions_installer.sh` which sources the core and platform helpers.
+
+Module layout (important files):
+- `Linux/bash/modules/utils.sh` — shared helpers: colored output (`cecho`), `safe_run()` (respects `DRY_RUN`), `confirm()`/`select_from_list()` (respect `AUTO_CONFIRM`), system helpers and package helpers.
+- `Linux/bash/modules/gnome-extensions-core.sh` — core installer logic: JSON parsing, grouping, compatibility checks, install engine.
+- `Linux/bash/modules/gnome-extensions-platform.sh` — platform-specific behavior (Raspberry Pi handling, GNOME-on-Pi helpers).
+- `Linux/bash/pi_modules/install_gnome_pi.sh` — legacy shim that delegates to the canonical installer.
+
+Examples:
+
+Run a dry-run of the GNOME extensions installer (no changes):
+```bash
+# from repository root
+DRY_RUN=true AUTO_CONFIRM=true bash Linux/bash/modules/gnome-extensions_installer.sh --dry-run --non-interactive
+```
+
+Run the full installer interactively (will prompt):
+```bash
+bash Linux/bash/main.sh
+```
+
+If you're running on a Raspberry Pi and GNOME is not installed, the platform helper will skip incompatible extensions and offers an optional flow to install GNOME (see `pi_modules/install_gnome_pi.sh`).
+
+
 ---
 Below are the original setup instructions for Windows and Linux. These will be further improved and split into their respective subproject README files.
 

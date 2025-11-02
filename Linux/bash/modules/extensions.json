@@ -1,0 +1,264 @@
+{
+  "extensions": [
+    {
+      "id": 615,
+      "name": "AppIndicator Support",
+      "desc": "Adds AppIndicator, KStatusNotifierItem and legacy Tray icons support to the Shell",
+      "min": "3.36",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 8,
+      "name": "Places Status Indicator",
+      "desc": "Add a menu for quickly navigating places in the system",
+      "min": "3.36",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 974,
+      "name": "Removable Drive Menu",
+      "desc": "A status menu for accessing and unmounting removable devices",
+      "min": "3.36",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 602,
+      "name": "Window List",
+      "desc": "Display a window list at the bottom of the screen",
+      "min": "3.36",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 779,
+      "name": "Clipboard Indicator",
+      "desc": "The most popular clipboard manager for GNOME, with over 2M downloads",
+      "min": "3.38",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 19,
+      "name": "User Themes",
+      "desc": "Load shell themes from user directory",
+      "min": "3.36",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 4269,
+      "name": "Desktop Icons NG",
+      "desc": "Adds icons to the desktop. Fork of the original Desktop Icons extension, with several enhancements",
+      "min": "40",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 4922,
+      "name": "Rounded Window Corners",
+      "desc": "Add rounded corners to all windows",
+      "min": "42",
+      "max": "44",
+      "rpi": "maybe"
+    },
+    {
+      "id": 4144,
+      "name": "Status Area Horizontal Spacing",
+      "desc": "Reduce the horizontal spacing between icons in the top-right status area",
+      "min": "40",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 3041,
+      "name": "Transparent Notifications",
+      "desc": "Make notification banners transparent",
+      "min": "40",
+      "max": "44",
+      "rpi": "maybe"
+    },
+    {
+      "id": 16,
+      "name": "Auto Move Windows",
+      "desc": "Move applications to specific workspaces when they create windows",
+      "min": "3.36",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 3693,
+      "name": "Improved Workspace Indicator",
+      "desc": "Improved workspace indicator with customizable settings",
+      "min": "40",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 600,
+      "name": "Launch New Instance",
+      "desc": "Always launch a new application instance for the clicked icon",
+      "min": "3.38",
+      "max": "44",
+      "rpi": "yes"
+    },
+    {
+      "id": 1262,
+      "name": "EasyScreenCast",
+      "desc": "Record your screen with a simple click",
+      "min": "3.38",
+      "max": "44",
+      "rpi": "maybe"
+    },
+    {
+      "id": 277,
+      "name": "Impatience",
+      "desc": "Speed up the GNOME Shell animation speed",
+      "min": "3.36",
+      "max": "44",
+      "rpi": "maybe"
+    },
+    {
+      "id": 3193,
+      "name": "Blur My Shell",
+      "desc": "Adds blur to different parts of the GNOME Shell, including the top panel, dash, and overview",
+      "min": "40",
+      "max": "44",
+      "rpi": "no"
+    },
+    {
+      "id": 3841,
+      "name": "Just Perfection",
+      "desc": "Tweak tool to customize GNOME Shell and disable UI elements",
+      "min": "40",
+      "max": "44",
+      "rpi": "no"
+    },
+    {
+      "id": 3088,
+      "name": "GNOME 4x UI Improvements",
+      "desc": "Customize GNOME Shell UI (reduce padding, remove icons, etc.)",
+      "min": "40",
+      "max": "44",
+      "rpi": "no"
+    },
+    {
+      "id": 1460,
+      "name": "Vitals",
+      "desc": "A glimpse into your computer's temperature, voltage, fan speed, memory usage, processor load, system resources, network speed and storage stats",
+      "min": "3.34",
+      "max": "44",
+      "rpi": "maybe"
+    },
+    {
+      "id": "apt-gnome-shell-extensions",
+      "name": "GNOME Shell Extensions (meta-package)",
+      "desc": "A collection of extensions packaged for Debian/Ubuntu; provides several useful default extensions",
+      "type": "apt",
+      "pkg": "gnome-shell-extensions",
+      "rpi": "maybe"
+    },
+    {
+      "id": "apt-gnome-tweaks",
+      "name": "GNOME Tweaks",
+      "desc": "Tweaks app for customizing small parts of GNOME (themes, fonts, extensions, etc.)",
+      "type": "apt",
+      "pkg": "gnome-tweaks",
+      "rpi": "yes"
+    },
+    {
+      "id": "apt-gnome-shell-extension-manager",
+      "name": "Extension Manager (App)",
+      "desc": "GUI tool to browse and install GNOME Shell extensions from GNOME extensions website",
+      "type": "apt",
+      "pkg": "gnome-shell-extension-manager",
+      "rpi": "maybe"
+    },
+    {
+      "id": "apt-gnome-shell-extension-dash-to-panel",
+      "name": "Dash to Panel (packaged)",
+      "desc": "Combines dash and top panel into a single unified panel. Packaged variant if available via apt",
+      "type": "apt",
+      "pkg": "gnome-shell-extension-dash-to-panel",
+      "ext_id": 1160,
+      "rpi": "maybe"
+    },
+    {
+      "id": "apt-gnome-shell-extension-dash-to-dock",
+      "name": "Dash to Dock (packaged)",
+      "desc": "Makes the dash behave like a dock; often provided as a package on Debian/Ubuntu",
+      "type": "apt",
+      "pkg": "gnome-shell-extension-dash-to-dock",
+      "ext_id": 307,
+      "rpi": "maybe"
+    },
+    {
+      "id": "apt-gnome-shell-extension-arc-menu",
+      "name": "Arc Menu (packaged)",
+      "desc": "A more traditional applications menu for GNOME Shell; packaged variant",
+      "type": "apt",
+      "pkg": "gnome-shell-extension-arc-menu",
+      "rpi": "maybe"
+    },
+    {
+      "id": "apt-gnome-shell-extension-clipboard-indicator",
+      "name": "Clipboard Indicator (packaged)",
+      "desc": "System clipboard indicator / history as a panel menu; packaged variant if available",
+      "type": "apt",
+      "pkg": "gnome-shell-extension-clipboard-indicator",
+      "ext_id": 779,
+      "rpi": "maybe"
+    },
+    {
+      "id": "apt-gpaste",
+      "name": "GPaste",
+      "desc": "Clipboard management system (daemon + UI) that integrates well with GNOME and extension-based clipboards",
+      "type": "apt",
+      "pkg": "gpaste",
+      "rpi": "yes"
+    },
+    {
+      "id": "apt-gnome-shell-extension-system-monitor",
+      "name": "System Monitor (extension)",
+      "desc": "Shows system metrics in the top bar (CPU, memory, network). Packaged variant if available",
+      "type": "apt",
+      "pkg": "gnome-shell-extension-system-monitor",
+      "ext_id": 120,
+      "rpi": "maybe"
+    }
+  ],
+  "groups": {
+    "Essential Utilities": {
+      "desc": "Core utilities and indicators for everyday desktop use",
+      "items": [615, 8, 974, 602, 779]
+    },
+    "UI & Appearance": {
+      "desc": "Customize the look and feel of your GNOME desktop",
+      "items": [19, 4269, 4922, 4144, 3041]
+    },
+    "Productivity": {
+      "desc": "Workflow and window management enhancements",
+      "items": [16, 3693, 600, 1262]
+    },
+    "Optional & Tweaks": {
+      "desc": "Advanced customization and experimental features",
+      "items": [277, 3193, 3841, 3088, 1460]
+    },
+    "Important Extensions": {
+      "desc": "Core extensions and helper packages recommended for most GNOME desktops. Includes GUI helpers like Tweaks and Extension Manager, plus popular dock/menu/clipboard tools",
+      "items": [
+        "apt-gnome-shell-extensions",
+        "apt-gnome-tweaks",
+        "apt-gnome-shell-extension-manager",
+        "apt-gnome-shell-extension-dash-to-panel",
+        "apt-gnome-shell-extension-dash-to-dock",
+        "apt-gnome-shell-extension-arc-menu",
+        "apt-gnome-shell-extension-clipboard-indicator",
+        "apt-gpaste",
+        "apt-gnome-shell-extension-system-monitor"
+      ]
+    }
+  }
+}

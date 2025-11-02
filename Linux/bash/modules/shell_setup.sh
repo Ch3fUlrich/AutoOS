@@ -82,10 +82,9 @@ configure_shell_environment() {
 
     echo ""
     success_message "Shell environment configured successfully!"
-    echo "To start using Zsh, run: chsh -s \$(which zsh)"
-    echo "Then log out and log back in."
-    echo ""
-    echo "For Powerlevel10k configuration, run: p10k configure"
+    info "To start using Zsh, run: chsh -s \$(which zsh)"
+    info "Then log out and log back in."
+    info "For Powerlevel10k configuration, run: p10k configure"
     echo ""
 
     log_info "Shell configuration completed"
