@@ -26,11 +26,13 @@ set -Eeuo pipefail
 if declare -f install_gnome_on_pi >/dev/null 2>&1; then
     if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         install_gnome_on_pi "$@"
+        exit 0
     fi
     # Export for callers that source this script and expect the function
     export -f install_gnome_on_pi
-    exit 0
 else
     echo "Error: install_gnome_on_pi not available after sourcing module" >&2
-    exit 2
+    if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+        exit 2
+    fi
 fi

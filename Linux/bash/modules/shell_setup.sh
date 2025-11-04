@@ -68,6 +68,11 @@ configure_shell_environment() {
         install_zsh_plugins
     fi
 
+    # Install exa for enhanced ls with icons (modern replacement for ls)
+    info "Installing eza for enhanced ls output with icons..."
+    install_packages eza
+    success_message "eza installed successfully."
+
     # Configure .zshrc
     if [ -f "$HOME/.zshrc" ]; then
         if confirm "Do you want to configure .zshrc with recommended settings?"; then
@@ -144,7 +149,7 @@ configure_terminal_font() {
     fi
 
     # 3) Windows Terminal (WSL users) - try to find settings.json in known locations and update defaultProfile fontFace
-    if grep -qi Microsoft /proc/version 2>/dev/null || [ -n "$WSL_INTEROP" ]; then
+    if grep -qi Microsoft /proc/version 2>/dev/null || [ -n "${WSL_INTEROP:-}" ]; then
         # Attempt to edit Windows Terminal settings.json in LocalState for the default Windows user
         # This is best-effort; we won't try to guess every Windows package path. Provide a helpful note instead.
         info "WSL detected: Automatic configuration of Windows Terminal is not performed to avoid modifying Windows user settings unexpectedly."
@@ -252,10 +257,22 @@ configure_zshrc() {
         echo "" >> "$HOME/.zshrc"
         echo "# AutoOS aliases" >> "$HOME/.zshrc"
         echo "alias update='sudo apt update && sudo apt upgrade'" >> "$HOME/.zshrc"
-        echo "alias ll='ls -lah'" >> "$HOME/.zshrc"
+        if command_exists exa; then
+            echo "alias ls='exa --icons'" >> "$HOME/.zshrc"
+            echo "alias ll='exa -l --icons'" >> "$HOME/.zshrc"
+        else
+            echo "alias ll='ls -lah'" >> "$HOME/.zshrc"
+        fi
         echo "alias grep='grep --color=auto'" >> "$HOME/.zshrc"
         info "Helpful aliases added"
     fi
 
     info ".zshrc configured"
+
+    info "Setting Zsh as default shell..."
+    if chsh -s "$(which zsh)" "$USER" 2>/dev/null; then
+        success_message "Zsh set as default shell. Please log out and back in for changes to take effect."
+    else
+        warning_message "Failed to set Zsh as default shell automatically. Run 'chsh -s $(which zsh)' manually after setup."
+    fi
 }

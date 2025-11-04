@@ -14,7 +14,10 @@ fi
 
 set -Eeuo pipefail
 
-section_header "GNOME Extensions — Grouped Installer"
+if [ -z "${GNOME_INSTALLER_SOURCED:-}" ]; then
+    section_header "GNOME Extensions — Grouped Installer"
+    GNOME_INSTALLER_SOURCED=1
+fi
 
 # Source platform-specific helpers (Raspberry Pi install / optimizations)
 if [ -f "$MODULE_DIR/gnome-extensions-platform.sh" ]; then

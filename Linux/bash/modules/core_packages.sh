@@ -17,4 +17,29 @@ install_core_packages() {
     if command_exists docker; then
         add_user_to_group "$USER" docker
     fi
+
+    # Configure Git user name and email
+    if command_exists git; then
+        if ! git config --global user.name > /dev/null 2>&1; then
+            info "Configuring Git user name..."
+            read -p "Enter your Git user name: " git_name
+            if [ -n "$git_name" ]; then
+                git config --global user.name "$git_name"
+                success_message "Git user name set to $git_name"
+            fi
+        else
+            info "Git user name already configured"
+        fi
+
+        if ! git config --global user.email > /dev/null 2>&1; then
+            info "Configuring Git user email..."
+            read -p "Enter your Git user email: " git_email
+            if [ -n "$git_email" ]; then
+                git config --global user.email "$git_email"
+                success_message "Git user email set to $git_email"
+            fi
+        else
+            info "Git user email already configured"
+        fi
+    fi
 }

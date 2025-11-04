@@ -22,6 +22,15 @@ setup_gnome_desktop() {
 
     info_box "GNOME Desktop" "$GNOME_DESCRIPTION"
 
+    # Add GNOME Shell Extensions PPA for additional packages
+    info "Adding GNOME Shell Extensions PPA for additional extension packages..."
+    if ! sudo add-apt-repository ppa:gnome-shell-extensions/ppa -y 2>/dev/null; then
+        warning_message "Failed to add GNOME Shell Extensions PPA. Some extension packages may not be available."
+    else
+        sudo apt update -qq
+        success_message "GNOME Shell Extensions PPA added successfully."
+    fi
+
     # Use shared print helper and the standard install flow for consistency
     standard_install_flow "GNOME Desktop" "$GNOME_DESCRIPTION" GNOME_PACKAGES || return 0
 

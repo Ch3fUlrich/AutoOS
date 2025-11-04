@@ -32,7 +32,7 @@ preflight_checks() {
     fi
     
     # Display system information
-    echo "System Information:"
+    cecho "${COLOR_BOLD}${COLOR_BLUE}" "System Information:"
     echo "  Distribution: $(get_distro)"
     echo "  Kernel: $(uname -r)"
     echo "  User: $USER"
@@ -55,14 +55,13 @@ main_menu() {
     print_menu_item 1 "Install Core System Packages" "└─ Essential tools: git, curl, htop, ansible, etc."
     print_menu_item 2 "Install Programming Languages & Tools" "└─ Python, C/C++, build tools"
     print_menu_item 3 "Configure Shell Environment" "└─ Zsh, Oh My Zsh, Powerlevel10k theme"
-    print_menu_item 4 "Setup GNOME Desktop" "└─ Extensions, tweaks, and customizations"
+    print_menu_item 4 "Setup GNOME Desktop & Extensions" "└─ Desktop enhancements and curated extensions"
     print_menu_item 5 "Install Docker & Portainer" "└─ Container platform and management"
     print_menu_item 6 "Install Everything (Full Setup)" "└─ All of the above in sequence"
     print_menu_item 7 "View Installation Log" "└─ Show detailed log file"
-    print_menu_item 8 "Install GNOME Extensions" "└─ Curated groups of extensions (interactive)"
-    print_menu_item 9 "Exit" ""
+    print_menu_item 8 "Exit" ""
     echo "════════════════════════════════════════════════════════════════"
-    echo -n "Enter your choice (1-9): "
+    echo -e -n "${COLOR_GREEN}Enter your choice (1-8): ${COLOR_RESET}"
 }
 
 # ============================================
@@ -71,8 +70,7 @@ main_menu() {
 view_log() {
     if [ -f "$LOG_FILE" ]; then
         echo ""
-        echo "════════════════════════════════════════════════════════════════"
-        echo "Installation Log: $LOG_FILE"
+        cecho "${COLOR_CYAN}" "Installation Log: $LOG_FILE"
         echo "════════════════════════════════════════════════════════════════"
         echo ""
         tail -n 50 "$LOG_FILE"
@@ -99,10 +97,10 @@ install_everything() {
     echo "  1. Core System Packages"
     echo "  2. Programming Languages & Tools"
     echo "  3. Shell Environment (Zsh)"
-    echo "  4. GNOME Desktop Enhancements"
+    echo "  4. GNOME Desktop & Extensions"
     echo "  5. Docker & Portainer"
     echo ""
-    echo "⚠️  This may take 15-30 minutes depending on your internet speed."
+    cecho "${COLOR_YELLOW}" "⚠️  This may take 15-30 minutes depending on your internet speed."
     echo ""
     
     if ! confirm "Do you want to proceed with full installation?" "Y"; then
@@ -132,6 +130,10 @@ install_everything() {
     if [ "${AUTO_CONFIRM:-false}" != true ]; then
         read -rp "Press Enter to continue to next step..."
     fi
+    # Also install GNOME extensions as part of full setup
+    if type install_gnome_extensions_grouped >/dev/null 2>&1; then
+        install_gnome_extensions_grouped
+    fi
 
     install_docker_stack
     # Raspberry Pi specific extras (if applicable)
@@ -141,16 +143,15 @@ install_everything() {
     
     echo ""
     echo "╔════════════════════════════════════════════════════════════════╗"
-    echo "║              🎉 Full Installation Complete! 🎉                 ║"
+    cecho "${COLOR_GREEN}" "║              🎉 Full Installation Complete! 🎉                 ║"
     echo "╚════════════════════════════════════════════════════════════════╝"
     echo ""
-    echo "Next steps:"
-    echo "  1. Log out and log back in for all changes to take effect"
-    echo "  2. Run 'chsh -s \$(which zsh)' to set Zsh as default shell"
-    echo "  3. Configure your terminal font to 'MesloLGS NF'"
-    echo "  4. Run 'p10k configure' to setup Powerlevel10k theme"
+    cecho "${COLOR_BOLD}${COLOR_CYAN}" "Next steps:"
+    echo "  1. Log out and log back in for all changes to take effect (Zsh is now default)"
+    echo "  2. Configure your terminal font to 'MesloLGS NF'"
+    echo "  3. Run 'p10k configure' to setup Powerlevel10k theme"
     echo ""
-    echo "Log file: $LOG_FILE"
+    cecho "${COLOR_BLUE}" "Log file: $LOG_FILE"
     echo ""
     
     log_info "Full installation completed successfully"
@@ -206,34 +207,32 @@ main() {
                 ;;
             4)
                 setup_gnome_desktop
+                # Also install GNOME extensions as part of combined setup
+                if type install_gnome_extensions_grouped >/dev/null 2>&1; then
+                    install_gnome_extensions_grouped
+                else
+                    warning_message "GNOME extensions installer not available."
+                fi
                 ;;
             5)
                 install_docker_stack
                 ;;
-            8)
-                # Run GNOME extensions installer (interactive). Prefer function if available.
-                if type install_gnome_extensions_grouped >/dev/null 2>&1; then
-                    install_gnome_extensions_grouped
-                else
-                    warning_message "GNOME extensions installer not available. Please run $SCRIPT_DIR/modules/gnome-extensions_installer.sh manually."
-                fi
-                ;;
-            9)
+            6)
                 install_everything
                 ;;
-            6)
+            7)
                 view_log
                 ;;
-            7)
+            8)
                 echo ""
-                echo "Thank you for using AutoOS!"
-                echo "Log file: $LOG_FILE"
+                cecho "${COLOR_GREEN}" "Thank you for using AutoOS!"
+                cecho "${COLOR_BLUE}" "Log file: $LOG_FILE"
                 echo ""
                 log_info "AutoOS installation exited by user"
                 exit 0
                 ;;
             *)
-                warning_message "Invalid option. Please choose 1-9."
+                warning_message "Invalid option. Please choose 1-8."
                 sleep 2
                 ;;
         esac

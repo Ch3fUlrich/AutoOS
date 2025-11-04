@@ -96,6 +96,11 @@ ZSH_PLUGINS=(
     zsh-syntax-highlighting  # Syntax highlighting for commands
     z                        # Quick directory jumping
     colored-man-pages        # Colorful man pages
+    zsh-completions          # Additional completion definitions
+    extract                  # Extract various archive formats
+    sudo                     # Press ESC twice to add sudo
+    command-not-found        # Suggest package installations for missing commands
+    history                  # History management enhancements
 )
 
 SHELL_DESCRIPTION="Zsh shell with Oh My Zsh framework:
