@@ -209,7 +209,9 @@ main() {
                 setup_gnome_desktop
                 # Also install GNOME extensions as part of combined setup
                 if type install_gnome_extensions_grouped >/dev/null 2>&1; then
-                    install_gnome_extensions_grouped
+                    info "Running GNOME extensions installer..."
+                    # Run in non-interactive mode for automation
+                    bash "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/modules/gnome-extensions_installer.sh" --non-interactive < /dev/null
                 else
                     warning_message "GNOME extensions installer not available."
                 fi

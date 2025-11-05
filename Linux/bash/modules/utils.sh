@@ -119,8 +119,32 @@ install_packages() {
         return 0
     fi
     update_package_list || return 1
-    safe_run sudo apt-get install -y --no-install-recommends "$@" || { err "Failed to install packages: $*"; return 1; }
-    ok "Packages installed successfully"
+
+    # Try to install all packages, but don't fail if some are unavailable
+    local available_packages=()
+    local unavailable_packages=()
+
+    for pkg in "$@"; do
+        if apt-cache show "$pkg" >/dev/null 2>&1; then
+            available_packages+=("$pkg")
+        else
+            unavailable_packages+=("$pkg")
+            warn "Package '$pkg' is not available in repositories"
+        fi
+    done
+
+    if [ ${#available_packages[@]} -gt 0 ]; then
+        safe_run sudo apt-get install -y --no-install-recommends "${available_packages[@]}" || {
+            err "Failed to install available packages: ${available_packages[*]}"
+            return 1
+        }
+        ok "Available packages installed successfully"
+    fi
+
+    if [ ${#unavailable_packages[@]} -gt 0 ]; then
+        warn "The following packages were not available: ${unavailable_packages[*]}"
+        info "These will need to be installed via alternative methods (e.g., extensions website)"
+    fi
 }
 
 package_installed() { dpkg -l "$1" 2>/dev/null | grep -q "^ii"; }

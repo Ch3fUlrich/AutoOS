@@ -257,9 +257,9 @@ configure_zshrc() {
         echo "" >> "$HOME/.zshrc"
         echo "# AutoOS aliases" >> "$HOME/.zshrc"
         echo "alias update='sudo apt update && sudo apt upgrade'" >> "$HOME/.zshrc"
-        if command_exists exa; then
-            echo "alias ls='exa --icons'" >> "$HOME/.zshrc"
-            echo "alias ll='exa -l --icons'" >> "$HOME/.zshrc"
+        if command_exists eza; then
+            echo "alias ls='eza --icons'" >> "$HOME/.zshrc"
+            echo "alias ll='eza -l --icons'" >> "$HOME/.zshrc"
         else
             echo "alias ll='ls -lah'" >> "$HOME/.zshrc"
         fi

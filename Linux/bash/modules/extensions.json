@@ -37,7 +37,15 @@
       "name": "Clipboard Indicator",
       "desc": "The most popular clipboard manager for GNOME, with over 2M downloads",
       "min": "3.38",
-      "max": "44",
+      "max": "46",
+      "rpi": "yes"
+    },
+    {
+      "id": 1160,
+      "name": "Dash to Panel",
+      "desc": "An icon taskbar for the Gnome Shell. This extension moves the dash into the gnome main panel so that the application launchers and system tray are combined into a single panel, similar to that found in KDE Plasma and Windows 7+.",
+      "min": "3.36",
+      "max": "46",
       "rpi": "yes"
     },
     {
@@ -200,6 +208,7 @@
       "desc": "A more traditional applications menu for GNOME Shell; packaged variant",
       "type": "apt",
       "pkg": "gnome-shell-extension-arc-menu",
+      "ext_id": 3628,
       "rpi": "maybe"
     },
     {
@@ -248,17 +257,7 @@
     },
     "Important Extensions": {
       "desc": "Core extensions and helper packages recommended for most GNOME desktops. Includes GUI helpers like Tweaks and Extension Manager, plus popular dock/menu/clipboard tools",
-      "items": [
-        "apt-gnome-shell-extensions",
-        "apt-gnome-tweaks",
-        "apt-gnome-shell-extension-manager",
-        "apt-gnome-shell-extension-dash-to-panel",
-        "apt-gnome-shell-extension-dash-to-dock",
-        "apt-gnome-shell-extension-arc-menu",
-        "apt-gnome-shell-extension-clipboard-indicator",
-        "apt-gpaste",
-        "apt-gnome-shell-extension-system-monitor"
-      ]
+      "items": ["apt-gnome-shell-extensions", "apt-gnome-tweaks", "apt-gnome-shell-extension-manager", "apt-gnome-shell-extension-dash-to-panel", "apt-gnome-shell-extension-dash-to-dock", "apt-gnome-shell-extension-arc-menu", "apt-gnome-shell-extension-clipboard-indicator", "apt-gpaste", "apt-gnome-shell-extension-system-monitor"]
     }
   }
 }

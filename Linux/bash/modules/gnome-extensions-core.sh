@@ -393,6 +393,27 @@ rollback_installed_extensions() {
 install_gnome_extensions_grouped() {
     info_box "GNOME Extensions" "This installer offers curated groups of stable and useful GNOME Shell extensions. Groups are bundled to make decisions easier and reduce bloat."
 
+    # Check GNOME version and warn about compatibility
+    if command_exists gnome-shell; then
+        local gnome_version
+        gnome_version=$(gnome-shell --version | grep -oP '\d+\.\d+')
+        if [[ "$(printf '%s\n' "$gnome_version" "45.0" | sort -V | head -n1)" == "$gnome_version" && "$gnome_version" != "45.0" ]]; then
+            warning_message "GNOME $gnome_version detected. Most extensions are not yet compatible with GNOME 46+."
+            info "The extension database contains extensions designed for GNOME 44 and earlier."
+            info "Many extensions will be skipped due to incompatibility."
+            echo ""
+            info "For GNOME $gnome_version compatible extensions, consider:"
+            cecho "${COLOR_CYAN}" "  • Using GNOME Extension Manager (already installed)"
+            cecho "${COLOR_CYAN}" "  • Visiting https://extensions.gnome.org/"
+            cecho "${COLOR_CYAN}" "  • Searching for extensions that explicitly support GNOME $gnome_version"
+            echo ""
+            if ! confirm "Continue with installation anyway? Most extensions will be skipped." "N"; then
+                info "Extension installation skipped. Use GNOME Extension Manager for GNOME $gnome_version compatible extensions."
+                return 0
+            fi
+        fi
+    fi
+
     # Raspberry Pi: If GNOME Shell isn't available, offer to install it
     if is_raspberry_pi && ! command_exists gnome-shell; then
         warning_message "Raspberry Pi OS detected without GNOME Shell"
