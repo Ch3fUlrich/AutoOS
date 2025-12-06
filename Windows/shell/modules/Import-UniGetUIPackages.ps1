@@ -25,6 +25,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+# Exit codes
+$WINGET_EXIT_CODE_ALREADY_INSTALLED = -1978335189
+
 # Determine package JSON path
 if (-not $PackageJsonPath) {
     $scriptDir = Split-Path -Parent $PSCommandPath
@@ -151,7 +154,7 @@ foreach ($package in $packages) {
             Write-Status "$packageName installed successfully" -Level Success
             $installed++
         }
-        elseif ($process.ExitCode -eq -1978335189) {
+        elseif ($process.ExitCode -eq $WINGET_EXIT_CODE_ALREADY_INSTALLED) {
             # Package already installed (different exit code)
             Write-Status "$packageName was already installed" -Level Success
             $skipped++

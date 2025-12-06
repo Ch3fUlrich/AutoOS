@@ -62,7 +62,7 @@ Write-Section "Oh My Posh Setup"
 # Locate the Oh My Posh setup script
 $scriptDir = Split-Path -Parent $PSCommandPath
 $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptDir)
-$ohMyPoshScript = Join-Path $repoRoot "powershell\oh-my-posh\main.ps1"
+$ohMyPoshScript = Join-Path $repoRoot (Join-Path "powershell" (Join-Path "oh-my-posh" "main.ps1"))
 
 # Verify script exists
 if (-not (Test-Path $ohMyPoshScript)) {

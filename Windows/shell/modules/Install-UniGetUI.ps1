@@ -19,6 +19,9 @@ param()
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+# Package identifier
+$UNIGETUI_PACKAGE_ID = 'MartiCliment.UniGetUI'
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -73,7 +76,7 @@ function Test-UniGetUIInstalled {
     
     # Also check via winget
     try {
-        $result = winget list --id MartiCliment.UniGetUI 2>$null
+        $result = winget list --id $UNIGETUI_PACKAGE_ID 2>$null
         if ($LASTEXITCODE -eq 0 -and $result -match 'UniGetUI') {
             return $true
         }
@@ -98,7 +101,7 @@ if (Test-UniGetUIInstalled) {
     # Check for updates
     Write-Status "Checking for updates..." -Level Info
     try {
-        winget upgrade --id MartiCliment.UniGetUI --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+        winget upgrade --id $UNIGETUI_PACKAGE_ID --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Write-Status "UniGetUI is up to date" -Level Success
         }
@@ -125,7 +128,7 @@ try {
     # Install UniGetUI
     $installArgs = @(
         'install',
-        '--id', 'MartiCliment.UniGetUI',
+        '--id', $UNIGETUI_PACKAGE_ID,
         '--source', 'winget',
         '--silent',
         '--accept-source-agreements',

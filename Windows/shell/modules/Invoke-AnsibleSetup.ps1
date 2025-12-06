@@ -174,7 +174,13 @@ Write-Host ""
 
 try {
     # Convert Windows path to WSL path
-    $wslAnsiblePath = $ansibleDir -replace '\\', '/' -replace 'C:', '/mnt/c'
+    $wslAnsiblePath = $ansibleDir -replace '\\', '/'
+    
+    # Handle drive letter conversion (C: -> /mnt/c, D: -> /mnt/d, etc.)
+    if ($wslAnsiblePath -match '^([A-Z]):') {
+        $driveLetter = $matches[1].ToLower()
+        $wslAnsiblePath = $wslAnsiblePath -replace '^[A-Z]:', "/mnt/$driveLetter"
+    }
     
     # Run Ansible playbook
     $ansibleCmd = "cd '$wslAnsiblePath' && ansible-playbook -i inventory.yml main_playbook.yml"
