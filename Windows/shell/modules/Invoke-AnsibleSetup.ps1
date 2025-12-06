@@ -174,12 +174,14 @@ Write-Host ""
 
 try {
     # Convert Windows path to WSL path
+    # WSL uses /mnt prefix for Windows drives (C: -> /mnt/c, D: -> /mnt/d, etc.)
     $wslAnsiblePath = $ansibleDir -replace '\\', '/'
     
-    # Handle drive letter conversion (C: -> /mnt/c, D: -> /mnt/d, etc.)
+    # Handle drive letter conversion
     if ($wslAnsiblePath -match '^([A-Z]):') {
         $driveLetter = $matches[1].ToLower()
-        $wslAnsiblePath = $wslAnsiblePath -replace '^[A-Z]:', "/mnt/$driveLetter"
+        $wslMountPrefix = '/mnt'
+        $wslAnsiblePath = $wslAnsiblePath -replace '^[A-Z]:', "$wslMountPrefix/$driveLetter"
     }
     
     # Run Ansible playbook

@@ -26,6 +26,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 # Exit codes
+# WinGet returns this exit code when a package is already installed (0x8A15000D in hex)
 $WINGET_EXIT_CODE_ALREADY_INSTALLED = -1978335189
 
 # Determine package JSON path
