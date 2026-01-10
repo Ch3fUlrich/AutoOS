@@ -28,6 +28,7 @@ CORE_PACKAGES=(
     wireguard        # VPN solution
     htop             # Interactive process viewer
     nmon             # Performance monitoring tool
+    ncdu             # NCurses disk usage analyzer
     neofetch         # System information tool
     mc               # Midnight Commander file manager
     ansible          # IT automation tool
