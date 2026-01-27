@@ -153,12 +153,26 @@ if ($psrl) {
     $ver = $psrl.Version
     Write-Host "PSReadLine v$ver detected" -ForegroundColor Cyan
 
-    # Prediction
-    if ($ver.Major -ge 3 -or ($ver.Major -eq 2 -and $ver.Minor -ge 2)) {
-        Set-PSReadLineOption -PredictionSource HistoryAndPlugin -ErrorAction SilentlyContinue
-        Set-PSReadLineOption -PredictionViewStyle ListView -ErrorAction SilentlyContinue
-    } elseif ($ver.Major -eq 2 -and $ver.Minor -eq 1) {
-        Set-PSReadLineOption -HistoryBasedPrediction $true -ErrorAction SilentlyContinue
+    # Prediction (requires PS 7.2+ for HistoryAndPlugin)
+    $psVersion = $PSVersionTable.PSVersion
+    if ($psVersion.Major -ge 7 -and $psVersion.Minor -ge 2) {
+        # PowerShell 7.2+: Use HistoryAndPlugin
+        if ($ver.Major -ge 3 -or ($ver.Major -eq 2 -and $ver.Minor -ge 2)) {
+            Set-PSReadLineOption -PredictionSource HistoryAndPlugin -ErrorAction SilentlyContinue
+            Set-PSReadLineOption -PredictionViewStyle ListView -ErrorAction SilentlyContinue
+        } elseif ($ver.Major -eq 2 -and $ver.Minor -eq 1) {
+            Set-PSReadLineOption -PredictionSource History -ErrorAction SilentlyContinue
+        }
+    } elseif ($psVersion.Major -ge 7) {
+        # PowerShell 7.0-7.1: Use History only
+        if ($ver.Major -ge 2 -and $ver.Minor -ge 1) {
+            Set-PSReadLineOption -PredictionSource History -ErrorAction SilentlyContinue
+        }
+    } else {
+        # Windows PowerShell 5.x: Use legacy options
+        if ($ver.Major -eq 2 -and $ver.Minor -ge 1) {
+            Set-PSReadLineOption -PredictionSource History -ErrorAction SilentlyContinue
+        }
     }
 
     Set-PSReadLineOption -EditMode Windows -ErrorAction SilentlyContinue
@@ -189,12 +203,22 @@ if (Get-Command fzf -ErrorAction SilentlyContinue) {
 }
 '@
 
+# ------------------------------------------------------------------------
+# Locate fzf and ripgrep binaries in WinGet Packages
+# ------------------------------------------------------------------------
+$fzfPath = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Directory | Where-Object { $_.Name -like "junegunn.fzf*" } | Select-Object -First 1 -ExpandProperty FullName
+$rgPath = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Directory | Where-Object { $_.Name -like "BurntSushi.ripgrep*" } | ForEach-Object { Get-ChildItem $_.FullName -Recurse -Filter "rg.exe" | Select-Object -First 1 | Select-Object -ExpandProperty DirectoryName } | Select-Object -First 1
+
+$pathAdditions = ";`$env:LOCALAPPDATA\Microsoft\WinGet\Links"
+if ($fzfPath) { $pathAdditions += ";$fzfPath" }
+if ($rgPath) { $pathAdditions += ";$rgPath" }
+
 $profileContent = @"
 # === Oh My Posh ===
 oh-my-posh init pwsh --config '$themeFile' | Invoke-Expression
 
 # === PATH for WinGet tools ===
-`$env:PATH += ";`$env:LOCALAPPDATA\Microsoft\WinGet\Links"
+`$env:PATH += "$pathAdditions"
 
 # === Modules ===
 Import-Module Terminal-Icons
@@ -227,7 +251,7 @@ try {
 # ------------------------------------------------------------------------
 Write-Host "`nSetup complete!" -ForegroundColor Green
 Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "   1. In Windows Terminal → Settings → Profiles → Defaults → Font face → 'MesloLGS NF'"
+Write-Host "   1. In Windows Terminal -> Settings -> Profiles -> Defaults -> Font face -> 'MesloLGS NF'"
 Write-Host "   2. Restart PowerShell or run: . `$PROFILE"
 Write-Host "   3. Use Ctrl+F (files), Ctrl+R (history), Ctrl+G (git)"
 Write-Host "`nEnjoy your new shell!"
