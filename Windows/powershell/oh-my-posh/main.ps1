@@ -12,17 +12,18 @@ param(
 Write-Host "Oh My Posh Setup - Main Orchestrator" -ForegroundColor Green
 
 $components = @(
-    @{Id=1; Name='OhMyPosh'; Script='modules/install_ohmyposh.ps1'; Desc='Install or update Oh My Posh binary (winget)'; Help='Installs oh-my-posh using winget and verifies availability.'},
-    @{Id=2; Name='Fonts'; Script='modules/install_fonts.ps1'; Desc='Install MesloLGS Nerd Font'; Help='Downloads MesloLGS NF (regular or all) and copies fonts to user fonts.'},
-    @{Id=3; Name='Tools'; Script='modules/install_tools.ps1'; Desc='Install CLI tools (fzf, ripgrep)'; Help='Installs fzf and ripgrep using winget and ensures PATH has WinGet links.'},
-    @{Id=4; Name='Modules'; Script='modules/install_modules.ps1'; Desc='PowerShell modules (PSReadLine, posh-git...)'; Help='Installs modules from PSGallery: PSReadLine, PSFzf, Terminal-Icons, z, posh-git.'},
-    @{Id=5; Name='Theme'; Script='modules/install_theme.ps1'; Desc='Select and configure Oh My Posh theme'; Help='Export default theme, enable Python virtual env segment, and save a theme file.'},
-    @{Id=6; Name='Profile'; Script='modules/configure_profile.ps1'; Desc='Configure PowerShell profile'; Help='Writes a version-aware profile that initializes oh-my-posh and modules.'}
+    @{Id=1; Name='PowerShell'; Script='modules/install_powershell.ps1'; Desc='Install or update PowerShell 7 (pwsh)'; Help='Installs/updates PowerShell 7 via winget. Required for HistoryAndPlugin predictions and ListView completion in PS 7.2+.'},
+    @{Id=2; Name='OhMyPosh'; Script='modules/install_ohmyposh.ps1'; Desc='Install or update Oh My Posh binary (winget)'; Help='Installs oh-my-posh using winget and verifies availability.'},
+    @{Id=3; Name='Fonts'; Script='modules/install_fonts.ps1'; Desc='Install MesloLGS Nerd Font'; Help='Downloads MesloLGS NF (regular or all) and copies fonts to user fonts.'},
+    @{Id=4; Name='Tools'; Script='modules/install_tools.ps1'; Desc='Install CLI tools (fzf, ripgrep)'; Help='Installs fzf and ripgrep using winget and ensures PATH has WinGet links.'},
+    @{Id=5; Name='Modules'; Script='modules/install_modules.ps1'; Desc='PowerShell modules (PSReadLine, posh-git...)'; Help='Installs modules from PSGallery: PSReadLine, PSFzf, Terminal-Icons, z, posh-git.'},
+    @{Id=6; Name='Theme'; Script='modules/install_theme.ps1'; Desc='Select and configure Oh My Posh theme'; Help='Export default theme, enable Python virtual env segment, and save a theme file.'},
+    @{Id=7; Name='Profile'; Script='modules/configure_profile.ps1'; Desc='Configure PowerShell profile'; Help='Writes a version-aware profile that initializes oh-my-posh and modules. Also mirrors to PS7 profile when run from PS5.'}
 )
 
 Write-Host "`nAvailable components:" -ForegroundColor Cyan
 foreach ($c in $components) { Write-Host "  $($c.Id). $($c.Name) - $($c.Desc)" }
-Write-Host "`nCommands: enter numbers separated by comma (e.g. 1,4), '0' or 'all' to run everything. Enter 'info N' to learn more about component N." -ForegroundColor Yellow
+Write-Host "`nCommands: enter numbers (e.g. 1,5,7), '0' or 'all' to run everything. Enter 'info N' for details on component N." -ForegroundColor Yellow
 
 # Allow non-interactive invocation via arguments, e.g. --all or 1,2
 if ($Args -and $Args.Count -gt 0) {
