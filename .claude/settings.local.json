@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell.exe -ExecutionPolicy Bypass -NoProfile -File \"C:\\\\Users\\\\mauls\\\\Documents\\\\Code\\\\AutoOS\\\\Windows\\\\powershell\\\\oh-my-posh\\\\modules\\\\configure_profile.ps1\")",
+      "Bash(powershell.exe -NoProfile -Command \"\nImport-Module PSReadLine\nGet-PSReadLineKeyHandler -Unbound | Where-Object { \\\\$_.Function -match 'menu|complete|tab' -or \\\\$_.Description -match 'menu|complete|tab' } | Select-Object Function,Description | Format-Table -AutoSize -Wrap\n\")",
+      "Bash(powershell.exe -NoProfile -Command \":*)",
+      "Bash(powershell.exe -NoProfile -Command \"Get-Content \\\\$PROFILE\")",
+      "Bash(powershell.exe -NoProfile -Command \"Get-Content 'C:\\\\Users\\\\mauls\\\\Documents\\\\WindowsPowerShell\\\\Microsoft.PowerShell_profile.ps1' | Where-Object { \\\\$_ -match 'Prediction|EditMode|PSReadLine|PSVersion' }\")"
+    ]
+  }
+}
