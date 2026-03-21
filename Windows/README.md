@@ -1,12 +1,42 @@
 # Windows Setup (AutoOS)
 
-This folder contains Ansible playbooks, PowerShell scripts, and configuration files for automating Windows post-installation setup. Windows automation is performed via WSL (Windows Subsystem for Linux) and SSH.
+This folder contains automated setup tools for Windows post-installation. Choose between the modern PowerShell-based approach or the traditional Ansible method.
 
 ## Structure
-- **ansible/**: Inventory and playbooks for Windows automation
+- **shell/**: **[NEW]** Modern PowerShell automation scripts with UniGetUI (recommended)
+- **ansible/**: Ansible playbooks for Windows automation via WSL
 - **powershell/**: PowerShell scripts and Oh My Posh configuration
 
-## Getting Started
+## Quick Start (Recommended)
+
+### Modern Approach - PowerShell Shell Scripts
+
+The new `shell/` directory provides a streamlined, Windows-native automation experience:
+
+1. **Clone the repository**:
+   ```powershell
+   git clone https://github.com/Ch3fUlrich/AutoOS.git
+   cd AutoOS/Windows/shell
+   ```
+
+2. **Run the automated setup**:
+   ```powershell
+   .\Setup-Windows.ps1
+   ```
+
+This will:
+- Install UniGetUI (modern package manager)
+- Install all software packages via WinGet
+- Set up Oh My Posh terminal customization
+- Optionally run Ansible playbooks
+
+**See [shell/README.md](shell/README.md) for detailed documentation.**
+
+## Alternative Approach - Ansible + WSL
+
+For advanced users who prefer Ansible automation:
+
+### Getting Started
 1. Install WSL and Ubuntu:
    ```powershell
    wsl --install
@@ -30,12 +60,25 @@ This folder contains Ansible playbooks, PowerShell scripts, and configuration fi
    ```
 
 ## PowerShell & Oh My Posh
-- See `powershell/oh-my-posh/README.md` for shell customization instructions
+- Integrated into the shell scripts (recommended)
+- Or use standalone: `powershell/oh-my-posh/main.ps1`
 
-## Upcoming Improvements
-- Add troubleshooting and FAQ section
-- Expand documentation for each playbook and script
-- Integrate CI for playbook validation
+## Features Comparison
+
+| Feature | Shell Scripts (New) | Ansible (Traditional) |
+|---------|-------------------|----------------------|
+| Package Manager | UniGetUI/WinGet | Chocolatey |
+| Requires WSL | Optional | Yes |
+| Setup Complexity | Simple | Moderate |
+| User Experience | Modern GUI + CLI | Terminal-based |
+| Windows Integration | Native | Via SSH |
+| Recommended For | All users | Advanced automation |
+
+## Documentation
+
+- **Shell Scripts**: [shell/README.md](shell/README.md) - Comprehensive guide for the new setup
+- **Ansible**: Current documentation below
+- **Oh My Posh**: [powershell/oh-my-posh/](powershell/oh-my-posh/)
 
 ---
 See the main [README.md](../README.md) for repository overview.

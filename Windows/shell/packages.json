@@ -1,0 +1,91 @@
+{
+  "$schema": "https://raw.githubusercontent.com/marticliment/UniGetUI/main/src/UniGetUI.PackageEngine.Managers.Winget/Packages/winget-pkgs_v2_schema.json",
+  "WinGet": {
+    "Packages": [
+      {
+        "Id": "7zip.7zip",
+        "Name": "7-Zip"
+      },
+      {
+        "Id": "Microsoft.PowerToys",
+        "Name": "PowerToys"
+      },
+      {
+        "Id": "JAMSoftware.TreeSize.Free",
+        "Name": "TreeSize Free"
+      },
+      {
+        "Id": "Mozilla.Firefox",
+        "Name": "Firefox"
+      },
+      {
+        "Id": "Google.Chrome",
+        "Name": "Google Chrome"
+      },
+      {
+        "Id": "VideoLAN.VLC",
+        "Name": "VLC Media Player"
+      },
+      {
+        "Id": "Spotify.Spotify",
+        "Name": "Spotify"
+      },
+      {
+        "Id": "TeamViewer.TeamViewer",
+        "Name": "TeamViewer"
+      },
+      {
+        "Id": "Parsec.Parsec",
+        "Name": "Parsec"
+      },
+      {
+        "Id": "MoonlightGameStreamingProject.Moonlight",
+        "Name": "Moonlight"
+      },
+      {
+        "Id": "WireGuard.WireGuard",
+        "Name": "WireGuard"
+      },
+      {
+        "Id": "SlackTechnologies.Slack",
+        "Name": "Slack"
+      },
+      {
+        "Id": "9NKSQGP7F2NH",
+        "Name": "WhatsApp"
+      },
+      {
+        "Id": "Zoom.Zoom",
+        "Name": "Zoom"
+      },
+      {
+        "Id": "DigitalScholar.Zotero",
+        "Name": "Zotero"
+      },
+      {
+        "Id": "Obsidian.Obsidian",
+        "Name": "Obsidian"
+      },
+      {
+        "Id": "Notepad++.Notepad++",
+        "Name": "Notepad++"
+      },
+      {
+        "Id": "Microsoft.VisualStudioCode",
+        "Name": "Visual Studio Code"
+      },
+      {
+        "Id": "Git.Git",
+        "Name": "Git"
+      },
+      {
+        "Id": "Cygwin.Cygwin",
+        "Name": "Cygwin"
+      },
+      {
+        "Id": "JanDeDobbeleer.OhMyPosh",
+        "Name": "Oh My Posh"
+      }
+    ]
+  }
+}

@@ -9,23 +9,44 @@ AutoOS is a cross-platform automation toolkit for setting up newly installed ope
 ## Repository Structure
 
 - **Linux/**: Bash scripts and modules for configuring Ubuntu and other Linux distributions.
-- **Windows/**: Ansible playbooks, PowerShell scripts, and Oh My Posh setup for Windows environments.
+- **Windows/**: 
+  - **shell/** - **[NEW]** Modern PowerShell automation scripts with UniGetUI
+  - **ansible/** - Ansible playbooks for Windows automation
+  - **powershell/** - Oh My Posh terminal customization
 - **Network/**: Network configuration scripts (e.g., Eduroam setup for Linux).
 - **Fonts/**: Recommended fonts for terminal and shell customization.
 - **ubuntu_autoinstall/**: Ubuntu autoinstall configuration and documentation.
 
-## Completed Steps
+## Recent Updates
 
-- Windows setup instructions (WSL, SSH server, Ansible configuration)
-- Linux setup instructions (Ansible installation, playbook usage)
-- Initial Ansible playbooks and inventory files for Windows automation
-- Oh My Posh configuration for PowerShell
-- Eduroam network setup script for Linux
+- ✅ **New Windows Shell Scripts** - Modern PowerShell-based automation with UniGetUI (Dec 2025)
+- ✅ Windows setup instructions (WSL, SSH server, Ansible configuration)
+- ✅ Linux setup instructions (Ansible installation, playbook usage)
+- ✅ Ansible playbooks and inventory files for Windows automation
+- ✅ Oh My Posh configuration for PowerShell
+- ✅ Eduroam network setup script for Linux
+
+## Quick Start
+
+### Windows
+**Modern approach (recommended)**:
+```powershell
+git clone https://github.com/Ch3fUlrich/AutoOS.git
+cd AutoOS/Windows/shell
+.\Setup-Windows.ps1
+```
+See [Windows/shell/README.md](Windows/shell/README.md) for details.
+
+### Linux
+```bash
+git clone https://github.com/Ch3fUlrich/AutoOS.git
+cd AutoOS/Linux/bash
+bash main.sh
+```
 
 ## Upcoming Steps & Suggestions
 
-- Add detailed setup instructions for each OS (Linux, Windows, MacOS)
-- Automate more installation/configuration tasks (network, fonts, shell customization)
+- Add more package options and configurations
 - Add troubleshooting and FAQ sections
 - Integrate CI for script linting and validation
 - Expand documentation for each module and script
