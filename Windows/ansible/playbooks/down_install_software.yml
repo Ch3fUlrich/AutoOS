@@ -9,20 +9,11 @@
         path: "{{ lookup('env', 'USERPROFILE') }}\\Downloads\\installs"
         state: directory
 
-    - name: Get current WSL username
-      command: whoami
-      register: wsl_user
-
-    - name: Set WSL username as a fact
-      set_fact:
-        wsl_username: "{{ wsl_user.stdout }}"
-
     #FIXME: Copying files from WSL to Windows not possible
     - name: Copy all install files from WSL to Windows Downloads folder
       win_copy:
-        src: "\\\\wsl.localhost\\Ubuntu\\home\\{{ wsl_username }}\\code\\Ansible-Setup-OS\\Windows\\installs"
+        src: "../../installs/"
         dest: "{{ lookup('env', 'USERPROFILE') }}\\Downloads\\installs"
-        remote_src: true
       ignore_errors: true  # To continue even if some files fail to copy
 
     - name: Download installers
