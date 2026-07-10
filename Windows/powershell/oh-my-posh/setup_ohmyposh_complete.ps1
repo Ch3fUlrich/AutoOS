@@ -66,18 +66,60 @@ $tools = @(
     @{Name="junegunn.fzf"; Cmd="fzf"},
     @{Name="BurntSushi.ripgrep.MSVC"; Cmd="rg"}
 )
+
+$missingTools = @()
 foreach ($t in $tools) {
     if (-not (Test-Command $t.Cmd)) {
-        Write-Host "Installing $($t.Name)..." -ForegroundColor Green
-        winget install $t.Name --source winget --scope user --force --accept-package-agreements --accept-source-agreements
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Failed to install $($t.Name)" -ForegroundColor Red
-        } elseif (-not (Test-Command $t.Cmd)) {
-            Write-Host "$($t.Cmd) not found in PATH after install. Adding WinGet Links to PATH." -ForegroundColor Yellow
-            $env:PATH += ";$env:LOCALAPPDATA\Microsoft\WinGet\Links"
-        }
+        $missingTools += $t
     } else {
         Write-Host "$($t.Cmd) already installed." -ForegroundColor Green
+    }
+}
+
+if ($missingTools.Count -gt 0) {
+    Write-Host "Installing missing tools in batch via winget import..." -ForegroundColor Green
+    $packagesJson = @()
+    foreach ($t in $missingTools) {
+        $packagesJson += @{ PackageIdentifier = $t.Name }
+    }
+
+    $importConfig = @{
+        '$schema' = "https://aka.ms/winget-packages.schema.2.0.json"
+        CreationDate = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.000-00:00")
+        WinGetVersion = "1.4.0"
+        Sources = @(
+            @{
+                Packages = $packagesJson
+                SourceDetails = @{
+                    Argument = "https://cdn.winget.microsoft.com/cache"
+                    Identifier = "Microsoft.Winget.Source_8wekyb3d8bbwe"
+                    Name = "winget"
+                    Type = "Microsoft.PreIndexed.Package"
+                }
+            }
+        )
+    }
+
+    $tempFile = "$env:TEMP\winget_import_$([guid]::NewGuid()).json"
+    $importConfig | ConvertTo-Json -Depth 5 | Set-Content $tempFile -Encoding UTF8
+
+    winget import --import-file $tempFile --accept-package-agreements --accept-source-agreements
+
+    $importExitCode = $LASTEXITCODE
+    Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+
+    if ($importExitCode -ne 0) {
+        Write-Host "Batch installation failed." -ForegroundColor Red
+    }
+
+    # Check if we need to add WinGet Links to PATH for the current session
+    $pathAdded = $false
+    foreach ($t in $missingTools) {
+        if (-not (Test-Command $t.Cmd) -and -not $pathAdded) {
+            Write-Host "One or more tools not found in PATH after install. Adding WinGet Links to PATH." -ForegroundColor Yellow
+            $env:PATH += ";$env:LOCALAPPDATA\Microsoft\WinGet\Links"
+            $pathAdded = $true
+        }
     }
 }
 
