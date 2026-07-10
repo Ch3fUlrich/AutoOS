@@ -38,7 +38,17 @@ sudo apt install curl pulseaudio
 sudo systemctl --global enable pulseaudio
 
 # Add Moonlight repository (official script)
-curl -1sLf 'https://dl.cloudsmith.io/public/moonlight-game-streaming/moonlight-qt/setup.deb.sh' | distro=raspbian codename=$(lsb_release -cs) sudo -E bash
+# 1. Download the setup script
+curl -1sLf 'https://dl.cloudsmith.io/public/moonlight-game-streaming/moonlight-qt/setup.deb.sh' -o setup.deb.sh
+
+# 2. Verify the script contents (optional but recommended)
+# less setup.deb.sh
+
+# 3. Execute the script
+distro=raspbian codename=$(lsb_release -cs) sudo -E bash setup.deb.sh
+
+# 4. Clean up
+rm setup.deb.sh
 
 # Install Moonlight
 sudo apt install moonlight-qt
