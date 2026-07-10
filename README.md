@@ -174,7 +174,24 @@ nano inventory.yml
 4. Ctrl + X to exit and save the file, then press Y to confirm.
 
 ### Configure Ansible for Linux
-#TODO: Add Linux setup instructions
+Ansible uses an inventory file to specify which Linux machines to connect to and manage.
+
+Let's set up key-based SSH authentication for passwordless connections and configure defaults:
+1. **Generate an SSH key** if you don't already have one:
+```bash
+ssh-keygen -t rsa -b 4096
+```
+2. **Copy the SSH key** to the target Linux machine:
+```bash
+ssh-copy-id user@target_ip
+```
+3. **Set defaults** for Ansible: Create a `.ansible.cfg` file in your home directory by running `nano ~/.ansible.cfg` and add the following lines:
+```yaml
+[defaults]
+interpreter_python = auto_silent
+host_key_checking = False
+```
+4. Press Ctrl + X to exit and save the file, then press Y to confirm.
 
 ### Run Playbooks
 To run all playbooks, use the following command:
