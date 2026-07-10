@@ -521,14 +521,12 @@ class InstallerData:
                 password1_entry = tk.Entry(root, show="*")
                 password1_entry.grid(row=3, column=1)
                 
-                def submit(installer):
-                    def inner():
-                        nonlocal password, password1
-                        (installer.username, password, password1) = (username_entry.get(), password_entry.get(), password1_entry.get())
-                        root.destroy()
-                    return inner
+                def on_submit():
+                    nonlocal password, password1
+                    (self.username, password, password1) = (username_entry.get(), password_entry.get(), password1_entry.get())
+                    root.destroy()
                 
-                login_button = tk.Button(root, text=Messages.ok, command=submit(self))
+                login_button = tk.Button(root, text=Messages.ok, command=on_submit)
                 login_button.grid(row=4, column=0, columnspan=2)
                 
                 root.mainloop()
