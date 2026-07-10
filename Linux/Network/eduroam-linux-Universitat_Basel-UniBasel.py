@@ -639,67 +639,73 @@ class InstallerData:
                     return
         self.graphics = 'tty'
 
+    def __process_p12_crypto(self, pfx_file: str) -> bool:
+        debug("using crypto")
+        try:
+            p12 = crypto.load_pkcs12(open(pfx_file, 'rb').read(),
+                                     self.password)
+        except crypto.Error as error:
+            debug("Incorrect password ({}).".format(error))
+            return False
+        else:
+            if Config.use_other_tls_id:
+                return True
+            try:
+                self.username = p12.get_certificate(). \
+                    get_subject().commonName
+            except crypto.Error:
+                self.username = p12.get_certificate().\
+                    get_subject().emailAddress
+            return True
+
+    def __process_p12_openssl(self, pfx_file: str) -> bool:
+        debug("using openssl")
+        command = ['openssl', 'pkcs12', '-in', pfx_file, '-passin',
+                   'pass:' + self.password, '-nokeys', '-clcerts']
+        shell_command = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE)
+        out, _ = shell_command.communicate()
+        if shell_command.returncode != 0:
+            debug("first password run failed")
+            command1 = ['openssl', 'pkcs12', '-legacy', '-in', pfx_file, '-passin',
+                        'pass:' + self.password, '-nokeys', '-clcerts']
+            shell_command1 = subprocess.Popen(command1, stdout=subprocess.PIPE,
+                                              stderr=subprocess.PIPE)
+            out, err = shell_command1.communicate()
+            if shell_command1.returncode != 0:
+                return False
+        if Config.use_other_tls_id:
+            return True
+        out_str = out.decode('utf-8').strip()
+        # split only on commas that are not inside double quotes
+        subject = re.split(r'\s*[/,]\s*(?=([^"]*"[^"]*")*[^"]*$)',
+                           re.findall(r'subject=/?(.*)$',
+                                      out_str, re.MULTILINE)[0])
+        cert_prop = {}
+        for field in subject:
+            if field:
+                cert_field = re.split(r'\s*=\s*', field)
+                cert_prop[cert_field[0].lower()] = cert_field[1]
+        if cert_prop['cn'] and re.search(r'@', cert_prop['cn']):
+            debug('Using cn: ' + cert_prop['cn'])
+            self.username = cert_prop['cn']
+        elif cert_prop['emailaddress'] and \
+                re.search(r'@', cert_prop['emailaddress']):
+            debug('Using email: ' + cert_prop['emailaddress'])
+            self.username = cert_prop['emailaddress']
+        else:
+            self.username = ''
+            self.alert("Unable to extract username "
+                       "from the certificate")
+        return True
+
     def __process_p12(self) -> bool:
         debug('process_p12')
         pfx_file = get_config_path() + '/cat_installer/user.p12'
         if CRYPTO_AVAILABLE:
-            debug("using crypto")
-            try:
-                p12 = crypto.load_pkcs12(open(pfx_file, 'rb').read(),
-                                         self.password)
-            except crypto.Error as error:
-                debug("Incorrect password ({}).".format(error))
-                return False
-            else:
-                if Config.use_other_tls_id:
-                    return True
-                try:
-                    self.username = p12.get_certificate(). \
-                        get_subject().commonName
-                except crypto.Error:
-                    self.username = p12.get_certificate().\
-                        get_subject().emailAddress
-                return True
+            return self.__process_p12_crypto(pfx_file)
         else:
-            debug("using openssl")
-            command = ['openssl', 'pkcs12', '-in', pfx_file, '-passin',
-                       'pass:' + self.password, '-nokeys', '-clcerts']
-            shell_command = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                             stderr=subprocess.PIPE)
-            out, _ = shell_command.communicate()
-            if shell_command.returncode != 0:
-                debug("first password run failed")
-                command1 = ['openssl', 'pkcs12', '-legacy', '-in', pfx_file, '-passin',
-                            'pass:' + self.password, '-nokeys', '-clcerts']
-                shell_command1 = subprocess.Popen(command1, stdout=subprocess.PIPE,
-                                                  stderr=subprocess.PIPE)
-                out, err = shell_command1.communicate()
-                if shell_command1.returncode != 0:
-                    return False
-            if Config.use_other_tls_id:
-                return True
-            out_str = out.decode('utf-8').strip()
-            # split only on commas that are not inside double quotes
-            subject = re.split(r'\s*[/,]\s*(?=([^"]*"[^"]*")*[^"]*$)',
-                               re.findall(r'subject=/?(.*)$',
-                                          out_str, re.MULTILINE)[0])
-            cert_prop = {}
-            for field in subject:
-                if field:
-                    cert_field = re.split(r'\s*=\s*', field)
-                    cert_prop[cert_field[0].lower()] = cert_field[1]
-            if cert_prop['cn'] and re.search(r'@', cert_prop['cn']):
-                debug('Using cn: ' + cert_prop['cn'])
-                self.username = cert_prop['cn']
-            elif cert_prop['emailaddress'] and \
-                    re.search(r'@', cert_prop['emailaddress']):
-                debug('Using email: ' + cert_prop['emailaddress'])
-                self.username = cert_prop['emailaddress']
-            else:
-                self.username = ''
-                self.alert("Unable to extract username "
-                           "from the certificate")
-            return True
+            return self.__process_p12_openssl(pfx_file)
 
     def __select_p12_file(self) -> str:
         """
