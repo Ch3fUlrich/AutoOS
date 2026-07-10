@@ -51,49 +51,18 @@ storage:
       fstype: swap
       mount: swap
 packages:
-  - clang
-  - python3
-  - python3-pip
-  - python3-venv
-  - python3-setuptools
-  - python3-wheel
   - git
-  - initx
-  - openbox
-  - tmux
-  - wireguard
-  - w3m
-  - firefox-esr
-  - nano
-  - neovim
-  - wget
   - curl
-  - htop
-  - nmon
-  - neofetch
-  - mc
-  - ansible
-  - cron
-  - nfs-common
-  - rsync
-  - zsh
+  - wget
+  - sudo
 user-data:
   disable_root: false
   timezone: UTC
   runcmd:
     - bash <(curl -sL https://github.com/xpipe-io/xpipe/raw/master/get-xpipe.sh)
     - mkdir -p /home/ubuntu/apps
-    - RUNONCE=1 CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-    - git clone https://github.com/zsh-users/zsh-autosuggestions /home/ubuntu/.oh-my-zsh/custom/plugins/zsh-autosuggestions
-    - git clone https://github.com/zsh-users/zsh-syntax-highlighting /home/ubuntu/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting
-    - git clone --depth=1 https://github.com/romkatv/powerlevel10k.git /home/ubuntu/.oh-my-zsh/custom/themes/powerlevel10k
-    - mkdir -p /home/ubuntu/.local/share/fonts
-    - wget -P /home/ubuntu/.local/share/fonts https://github.com/romkatv/powerlevel10k-media/raw/master/MesloLGS%20NF%20Regular.ttf
-    - fc-cache -fv
-    - echo 'HISTSIZE=50000' >> /home/ubuntu/.zshrc
-    - echo 'SAVEHIST=10000' >> /home/ubuntu/.zshrc
-    - echo 'ZSH_THEME="powerlevel10k/powerlevel10k"' >> /home/ubuntu/.zshrc
-    - echo 'plugins=(z git zsh-autosuggestions zsh-syntax-highlighting colored-man-pages)' >> /home/ubuntu/.zshrc
     - chown -R ubuntu:ubuntu /home/ubuntu
 late-commands:
+  - curtin in-target --target=/target -- sudo -u ubuntu git clone https://github.com/Ch3fUlrich/AutoOS.git /home/ubuntu/AutoOS
+  - curtin in-target --target=/target -- sudo -u ubuntu bash -c 'cd /home/ubuntu/AutoOS/Linux/bash && AUTO_CONFIRM=true bash -c "source config.sh && source modules/utils.sh && source modules/core_packages.sh && install_core_packages && source modules/programming.sh && install_programming_tools && source modules/shell_setup.sh && configure_shell_environment"'
   - echo "Installation complete!" > /target/home/ubuntu/install-complete.txt
