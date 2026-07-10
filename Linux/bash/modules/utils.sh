@@ -308,9 +308,17 @@ select_from_list() {
 
 # System helpers
 get_distro() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        echo "$NAME $VERSION_ID"
+    local os_release_file="${OS_RELEASE_FILE:-/etc/os-release}"
+    if [ -f "$os_release_file" ]; then
+        # Default variables to empty strings to avoid unbound variable errors
+        local NAME=""
+        local VERSION_ID=""
+
+        . "$os_release_file"
+
+        # Trim trailing space if VERSION_ID is empty
+        local distro_info="$NAME ${VERSION_ID:-}"
+        echo "${distro_info%"${distro_info##*[![:space:]]}"}"
     else
         echo "Unknown"
     fi
