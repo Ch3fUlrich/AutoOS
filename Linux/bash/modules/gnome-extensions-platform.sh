@@ -14,17 +14,7 @@ fi
 
 set -Eeuo pipefail
 
-# Install GNOME Desktop on Raspberry Pi
-install_gnome_on_pi() {
-    section_header "GNOME Desktop Installation for Raspberry Pi"
-    # If caller passed CLI-style flags to this function (e.g. from a shim),
-    # apply them by reusing the module's CLI parser if present so flags like
-    # --dry-run and --non-interactive are respected when the function is
-    # invoked directly.
-    if declare -f parse_cli_args >/dev/null 2>&1; then
-        parse_cli_args "$@"
-    fi
-    
+_check_gnome_already_installed() {
     # Check if GNOME is already installed
     if command_exists gnome-shell; then
         info "GNOME Shell is already installed!"
@@ -34,10 +24,13 @@ install_gnome_on_pi() {
         echo ""
         if ! confirm "Do you want to reinstall/update GNOME packages?"; then
             info "Skipping GNOME installation"
-            return 0
+            return 1
         fi
     fi
-    
+    return 0
+}
+
+_warn_resource_usage() {
     # Display resource usage warning
     info_box "⚠️  Resource Usage Warning" "GNOME is a modern, feature-rich desktop environment that requires significant system resources:
 
@@ -83,7 +76,10 @@ NOT Recommended For:
         info "Tip: Raspberry Pi OS's default PIXEL desktop is optimized for Pi hardware"
         return 1
     fi
-    
+    return 0
+}
+
+_check_ram_requirements() {
     # Check RAM and warn if low
     local ram_mb
     ram_mb=$(get_ram_mb)
@@ -99,13 +95,10 @@ NOT Recommended For:
             return 1
         fi
     fi
-    
-    log_info "Starting GNOME installation on Raspberry Pi"
-    
-    # Update package list
-    section_header "Updating Package List"
-    update_package_list
-    
+    return 0
+}
+
+_install_gnome_core_packages() {
     # Install GNOME Shell and core components
     section_header "Installing GNOME Shell & Core Components"
     
@@ -127,7 +120,10 @@ NOT Recommended For:
         error_message "Failed to install GNOME core packages"
         return 1
     }
-    
+    return 0
+}
+
+_install_gnome_recommended_packages() {
     # Install recommended GNOME components
     section_header "Installing Recommended GNOME Components"
     
@@ -150,7 +146,10 @@ NOT Recommended For:
             warning_message "Some recommended packages failed to install"
         }
     fi
-    
+    return 0
+}
+
+_configure_display_manager() {
     # Configure GDM3 as default display manager
     section_header "Configuring Display Manager"
     
@@ -162,10 +161,10 @@ NOT Recommended For:
         fi
         ok "GDM3 configured"
     fi
-    
-    # Optimize GNOME for Raspberry Pi
-    apply_gnome_pi_optimizations
-    
+    return 0
+}
+
+_show_installation_complete() {
     # Final success message
     section_header "Installation Complete"
     
@@ -192,6 +191,38 @@ NOT Recommended For:
     echo ""
     
     log_info "GNOME installation completed on Raspberry Pi"
+    return 0
+}
+
+# Install GNOME Desktop on Raspberry Pi
+install_gnome_on_pi() {
+    section_header "GNOME Desktop Installation for Raspberry Pi"
+    # If caller passed CLI-style flags to this function (e.g. from a shim),
+    # apply them by reusing the module's CLI parser if present so flags like
+    # --dry-run and --non-interactive are respected when the function is
+    # invoked directly.
+    if declare -f parse_cli_args >/dev/null 2>&1; then
+        parse_cli_args "$@"
+    fi
+
+    _check_gnome_already_installed || return 0
+    _warn_resource_usage || return 1
+    _check_ram_requirements || return 1
+
+    log_info "Starting GNOME installation on Raspberry Pi"
+
+    # Update package list
+    section_header "Updating Package List"
+    update_package_list
+
+    _install_gnome_core_packages || return 1
+    _install_gnome_recommended_packages
+    _configure_display_manager
+
+    # Optimize GNOME for Raspberry Pi
+    apply_gnome_pi_optimizations
+
+    _show_installation_complete
     
     return 0
 }
