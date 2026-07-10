@@ -19,4 +19,4 @@ get-docker.sh
 # IDE files
 .vscode/
 .idea/
-*.sublime-*
+*.sublime-*__pycache__/
