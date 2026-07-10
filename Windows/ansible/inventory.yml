@@ -1,13 +1,14 @@
+---
 all:
   vars:
     # Windows credentials
     windows_ip: 131.152.9.67
     windows_user: 'DonatoLab'
-    windows_password: 'asdf'
+    windows_password: ''
 
     # Placeholder for drives
     unibas_mail: 'bla.bla@unibas.ch'
-    unibas_password: 'good_password'
+    unibas_password: ''
     toucan_drive_username: blabl0000
 
   hosts:
@@ -17,4 +18,3 @@ all:
       ansible_password: '{{ windows_password }}'
       ansible_connection: ssh
       ansible_shell_type: cmd
-
