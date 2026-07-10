@@ -200,6 +200,30 @@ gather_extensions_to_install() {
     TO_INSTALL=( $(printf "%s\n" "${TO_INSTALL[@]}" | awk '!seen[$0]++') )
 }
 
+install_extension_fallback() {
+    local ext_id=$1
+    local pkgname=$2
+    local mode=$3
+
+    local fallback="${EXT_FALLBACK_EXTID[$ext_id]:-}"
+    if [ -n "$fallback" ]; then
+        info "Attempting fallback installation from extensions.gnome.org (id=${fallback})"
+        if command -v gnome-shell-extension-installer >/dev/null 2>&1; then
+            if gnome-shell-extension-installer "$fallback" --yes; then
+                ok "Fallback installed extension id=${fallback} for ${pkgname}"
+                record_installed_extension "${fallback}" "${pkgname} (${mode})"
+            else
+                warn "Fallback install via extension installer failed for id=${fallback}"
+            fi
+        else
+            warn "No extension installer available to perform fallback for id=${fallback}"
+        fi
+        return 0
+    else
+        return 1
+    fi
+}
+
 check_extension_compat() {
     local ext_id=$1
     local meta=${EXT_META[$ext_id]:-}
@@ -297,20 +321,7 @@ install_selected_extensions() {
             # If the user requested 'extensions' only, skip apt
             if [ "${INSTALL_METHOD}" = "extensions" ]; then
                 info "Skipping apt package ${pkgname} because INSTALL_METHOD=extensions"
-                local fallback="${EXT_FALLBACK_EXTID[$ext_id]:-}"
-                if [ -n "$fallback" ]; then
-                    info "Attempting install via extensions.gnome.org (id=${fallback})"
-                    if command -v gnome-shell-extension-installer >/dev/null 2>&1; then
-                        if gnome-shell-extension-installer "$fallback" --yes; then
-                            ok "Installed extension id=${fallback} for ${pkgname}"
-                            record_installed_extension "${fallback}" "${pkgname} (extensions-mode)"
-                        else
-                            warn "Extension-site install failed for id=${fallback}"
-                        fi
-                    else
-                        warn "No extension installer available to handle fallback id=${fallback}"
-                    fi
-                else
+                if ! install_extension_fallback "${ext_id}" "${pkgname}" "extensions-mode"; then
                     warn "No fallback ext_id configured for ${pkgname}; cannot install in extensions-only mode"
                 fi
                 continue
@@ -322,20 +333,7 @@ install_selected_extensions() {
             else
                 warning_message "Failed to install package ${pkgname} via apt"
                 # fallback: if we have an ext_id mapping for this entry, try installing from extensions.gnome.org
-                local fallback="${EXT_FALLBACK_EXTID[$ext_id]:-}"
-                if [ -n "$fallback" ]; then
-                    info "Attempting fallback installation from extensions.gnome.org (id=${fallback})"
-                    if command -v gnome-shell-extension-installer >/dev/null 2>&1; then
-                        if gnome-shell-extension-installer "$fallback" --yes; then
-                            ok "Fallback installed extension id=${fallback} for ${pkgname}"
-                            record_installed_extension "${fallback}" "${pkgname} (fallback)"
-                        else
-                            warn "Fallback install via extension installer failed for id=${fallback}"
-                        fi
-                    else
-                        warn "No gnome-shell-extension-installer available to perform fallback for id=${fallback}"
-                    fi
-                fi
+                install_extension_fallback "${ext_id}" "${pkgname}" "fallback"
             fi
             continue
         fi
