@@ -13,7 +13,24 @@ sudo apt update && sudo apt install -y zsh git curl wget
 # 2. Install Oh My Zsh (unattended)
 if [ ! -d "$HOME/.oh-my-zsh" ]; then
   echo "Installing Oh My Zsh..."
-  sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+  installer_url="https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/d2379b2701df66a36b217a7707e77f8029a99814/tools/install.sh"
+  installer_hash="95118b50d062198597e2b73d3a57b609fd95ca68cdc86faf4460d955f0172b61"
+  tmp_installer=$(mktemp)
+
+  if curl -fsSL "$installer_url" -o "$tmp_installer"; then
+    if echo "$installer_hash  $tmp_installer" | sha256sum -c - >/dev/null 2>&1; then
+      sh "$tmp_installer" --unattended
+    else
+      echo "Error: Oh My Zsh installer hash mismatch! Download may be corrupted or compromised." >&2
+      rm -f "$tmp_installer"
+      exit 1
+    fi
+    rm -f "$tmp_installer"
+  else
+    echo "Error: Failed to download Oh My Zsh installer." >&2
+    rm -f "$tmp_installer"
+    exit 1
+  fi
 else
   echo "Oh My Zsh is already installed."
 fi

@@ -38,9 +38,30 @@ configure_shell_environment() {
     if [ ! -d "$HOME/.oh-my-zsh" ]; then
         info "Installing Oh My Zsh..."
         if confirm "Install Oh My Zsh?"; then
-            # Use safe_run to respect DRY_RUN; run installer via shell -c piping curl to bash
-            safe_run sh -c "curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh | bash -s -- --unattended"
-            info "Oh My Zsh installation attempted"
+            local installer_url="https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/d2379b2701df66a36b217a7707e77f8029a99814/tools/install.sh"
+            local installer_hash="95118b50d062198597e2b73d3a57b609fd95ca68cdc86faf4460d955f0172b61"
+
+            if [ "${DRY_RUN:-false}" = true ]; then
+                local tmp_installer="/tmp/ohmyzsh-install.sh"
+                safe_run curl -fsSL "$installer_url" -o "$tmp_installer"
+                safe_run bash -c "echo \"$installer_hash  $tmp_installer\" | sha256sum -c - && bash $tmp_installer --unattended"
+                info "Oh My Zsh installation attempted"
+            else
+                local tmp_installer
+                tmp_installer=$(mktemp)
+
+                if curl -fsSL "$installer_url" -o "$tmp_installer"; then
+                    if echo "$installer_hash  $tmp_installer" | sha256sum -c - >/dev/null 2>&1; then
+                        bash "$tmp_installer" --unattended
+                        info "Oh My Zsh installation attempted"
+                    else
+                        error_message "Oh My Zsh installer hash mismatch! Download may be corrupted or compromised."
+                    fi
+                else
+                    error_message "Failed to download Oh My Zsh installer."
+                fi
+                rm -f "$tmp_installer"
+            fi
         fi
     else
         info "Oh My Zsh is already installed"
