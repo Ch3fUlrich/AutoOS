@@ -167,11 +167,16 @@ $Env:UserName
 # the ip address should one of the ip addresses that pop up. Typically the top one. 
 ipconfig | Select-String "IPv4"
 ```
-3. Change the **windows_ip**, **windows_user** and **windows_password** in the inventory file from the step before. The password is the password of the user that is logged in.
+3. Change the **windows_ip** and **windows_user** in the inventory file.
 ```bash
 nano inventory.yml
 ```
 4. Ctrl + X to exit and save the file, then press Y to confirm.
+5. Set the required passwords as environment variables before running ansible. The **WINDOWS_PASSWORD** is the password of the user that is logged in:
+```bash
+export WINDOWS_PASSWORD="your_windows_password"
+export UNIBAS_PASSWORD="your_unibas_password"
+```
 
 ### Configure Ansible for Linux
 #TODO: Add Linux setup instructions
