@@ -255,22 +255,11 @@ install_selected_extensions() {
         # Compatibility check (skip check for explicit apt-package tokens)
         if [[ ! "${ext_id}" =~ ^apt- ]]; then
             # check_extension_compat can return non-zero codes to signal
-            # incompatibility; avoid the ERR trap or 'set -e' causing an exit
-            # by temporarily disabling the ERR trap and errexit, then
-            # restoring them after the call.
-            local _old_err_trap
-            _old_err_trap=$(trap -p ERR || true)
-            trap '' ERR
-            set +e
-            check_extension_compat "$ext_id"
-            local status=$?
-            set -e
-            # restore previous ERR trap if it existed
-            if [ -n "$_old_err_trap" ]; then
-                eval "$_old_err_trap"
-            else
-                trap 'error_handler $? $LINENO' ERR
-            fi
+            # incompatibility. Using || captures the exit status without
+            # triggering set -e or the ERR trap.
+            local status=0
+            check_extension_compat "$ext_id" || status=$?
+
             if [ $status -eq 2 ]; then
                 warning_message "Skipping ${name} due to GNOME version incompatibility"
                 continue
