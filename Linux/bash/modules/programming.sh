@@ -24,8 +24,8 @@ install_programming_tools() {
             info "Pip upgrade: choosing installation method based on environment"
 
             # Check if we're in a virtual environment
-            if [ -n "$VIRTUAL_ENV" ]; then
-                info "Virtual environment detected: $VIRTUAL_ENV — upgrading pip inside venv"
+            if [ -n "${VIRTUAL_ENV:-}" ]; then
+                info "Virtual environment detected: ${VIRTUAL_ENV:-} — upgrading pip inside venv"
                 safe_run python3 -m pip install --upgrade pip
             else
                 info "No virtual environment detected — upgrading pip for user"
@@ -38,7 +38,7 @@ install_programming_tools() {
             info "Installing Python development tools (virtualenv, black, pylint, flake8)"
 
             # Install based on environment
-            if [ -n "$VIRTUAL_ENV" ]; then
+            if [ -n "${VIRTUAL_ENV:-}" ]; then
                 safe_run python3 -m pip install virtualenv black pylint flake8
             else
                 safe_run python3 -m pip install --user virtualenv black pylint flake8

@@ -43,7 +43,26 @@ EOF
 
     # 3) pi-apps (convenience app store) — installed via upstream script
     if confirm "Install pi-apps (third-party apps manager, optional)?" "N"; then
-        safe_run bash -c 'curl -fsSL https://raw.githubusercontent.com/Botspot/pi-apps/master/install | bash' || {
+        safe_run bash -c '
+            EXPECTED_HASH="8a52d966bc16ea254c6816411aad8d082171c5868faba8dc2f393f2d95d293aa"
+            TMP_SCRIPT=$(mktemp)
+            trap "rm -f \"$TMP_SCRIPT\"" EXIT
+
+            if curl -fsSL https://raw.githubusercontent.com/Botspot/pi-apps/master/install -o "$TMP_SCRIPT"; then
+                ACTUAL_HASH=$(sha256sum "$TMP_SCRIPT" | cut -d" " -f1)
+                if [ "$ACTUAL_HASH" = "$EXPECTED_HASH" ]; then
+                    bash "$TMP_SCRIPT"
+                else
+                    echo "Checksum mismatch for pi-apps install script." >&2
+                    echo "Expected: $EXPECTED_HASH" >&2
+                    echo "Got: $ACTUAL_HASH" >&2
+                    exit 1
+                fi
+            else
+                echo "Failed to download pi-apps install script." >&2
+                exit 1
+            fi
+        ' || {
             warn "pi-apps install script failed"
         }
         ok "pi-apps installation attempted"

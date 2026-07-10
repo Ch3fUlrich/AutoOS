@@ -249,8 +249,8 @@ confirm() {
 }
 
 info_box() {
-    local title="$1"
-    local message="$2"
+    local title="${1:-}"
+    local message="${2:-}"
     echo ""
     echo "╔════════════════════════════════════════════════════════════════╗"
     printf "║ %-62s ║\n" "$title"
