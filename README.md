@@ -135,7 +135,7 @@ host_key_checking = False
 ```
 3. Press Ctrl + X to exit and save the file, then press Y to confirm.
 
-### The Ansible setup will 
+### The Ansible setup will
 
 ## Linux (Ubuntu)
 ### Install [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html)
@@ -155,7 +155,7 @@ ansible --version
 ```
 
 ### Setup Ansible scripts
-1. After the (installation)[#install-ansible] you can clone this repository and go into the wanted directory e.g. **Windows**. 
+1. After the (installation)[#install-ansible] you can clone this repository and go into the wanted directory e.g. **Windows**.
 ```bash
 git clone https://github.com/Ch3fUlrich/AutoOS.git
 cd AutoOS/Windows/anisble
@@ -164,7 +164,7 @@ cd AutoOS/Windows/anisble
 ```powershell
 # get the username (this will be the username for the inventory file)
 $Env:UserName
-# the ip address should one of the ip addresses that pop up. Typically the top one. 
+# the ip address should one of the ip addresses that pop up. Typically the top one.
 ipconfig | Select-String "IPv4"
 ```
 3. Change the **windows_ip**, **windows_user** and **windows_password** in the inventory file from the step before. The password is the password of the user that is logged in.
@@ -183,7 +183,17 @@ ansible-playbook -i inventory.yml main_playbook.yml
 ```
 
 ## MacOS
-#TODO: Add MacOS setup instructions
+### Install [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html)
+1. Install Homebrew (if not already installed):
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+2. Install Ansible and required packages:
+```bash
+brew install git sshpass ansible
+# verify installation
+ansible --version
+```
 
 
 # Why Ansible?
