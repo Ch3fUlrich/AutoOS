@@ -13,7 +13,19 @@ sudo apt update && sudo apt install -y zsh git curl wget
 # 2. Install Oh My Zsh (unattended)
 if [ ! -d "$HOME/.oh-my-zsh" ]; then
   echo "Installing Oh My Zsh..."
-  sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+  EXPECTED_HASH="95118b50d062198597e2b73d3a57b609fd95ca68cdc86faf4460d955f0172b61"
+  TMP_FILE=$(mktemp)
+  curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o "$TMP_FILE"
+  ACTUAL_HASH=$(sha256sum "$TMP_FILE" | awk '{print $1}')
+
+  if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+    echo "Error: Checksum mismatch for Oh My Zsh installer."
+    rm "$TMP_FILE"
+    exit 1
+  fi
+
+  sh "$TMP_FILE" --unattended
+  rm "$TMP_FILE"
 else
   echo "Oh My Zsh is already installed."
 fi
