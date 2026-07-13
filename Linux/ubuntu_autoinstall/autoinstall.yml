@@ -81,9 +81,13 @@ user-data:
   disable_root: false
   timezone: UTC
   runcmd:
-    - bash <(curl -sL https://github.com/xpipe-io/xpipe/raw/master/get-xpipe.sh)
+    - curl -fsSL -o /tmp/get-xpipe.sh https://raw.githubusercontent.com/xpipe-io/xpipe/2d7d1bf21c92f62db6138935da79a032689907fa/get-xpipe.sh
+    - echo "40bf206cdf87999699ba431068545e492965e347a539107993a929b5b25def9e  /tmp/get-xpipe.sh" | sha256sum -c - && bash /tmp/get-xpipe.sh
+    - rm -f /tmp/get-xpipe.sh
     - mkdir -p /home/ubuntu/apps
-    - RUNONCE=1 CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+    - curl -fsSL -o /tmp/install-ohmyzsh.sh https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/677a4592b18c08ddea737f8aca70bac0e9fc9313/tools/install.sh
+    - echo "95118b50d062198597e2b73d3a57b609fd95ca68cdc86faf4460d955f0172b61  /tmp/install-ohmyzsh.sh" | sha256sum -c - && RUNONCE=1 CHSH=no sh /tmp/install-ohmyzsh.sh
+    - rm -f /tmp/install-ohmyzsh.sh
     - git clone https://github.com/zsh-users/zsh-autosuggestions /home/ubuntu/.oh-my-zsh/custom/plugins/zsh-autosuggestions
     - git clone https://github.com/zsh-users/zsh-syntax-highlighting /home/ubuntu/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting
     - git clone --depth=1 https://github.com/romkatv/powerlevel10k.git /home/ubuntu/.oh-my-zsh/custom/themes/powerlevel10k
