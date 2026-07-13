@@ -183,7 +183,32 @@ ansible-playbook -i inventory.yml main_playbook.yml
 ```
 
 ## MacOS
-#TODO: Add MacOS setup instructions
+### Install Homebrew
+If you don't have Homebrew installed, you can install it using the following command:
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+### Install Ansible
+Use Homebrew to install Ansible:
+```bash
+brew install ansible
+```
+
+### Setup Ansible scripts
+1. Clone this repository and navigate to the directory:
+```bash
+git clone https://github.com/Ch3fUlrich/AutoOS.git
+cd AutoOS
+```
+
+### Run Playbooks
+*Note: MacOS playbooks and support are currently under development.*
+
+Once playbooks are available, you can run them using:
+```bash
+ansible-playbook -i inventory.yml macos_playbook.yml
+```
 
 
 # Why Ansible?
