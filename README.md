@@ -167,7 +167,7 @@ $Env:UserName
 # the ip address should one of the ip addresses that pop up. Typically the top one. 
 ipconfig | Select-String "IPv4"
 ```
-3. Change the **windows_ip**, **windows_user** and **windows_password** in the inventory file from the step before. The password is the password of the user that is logged in.
+3. Change the **windows_ip** and **windows_user** in the inventory file from the step before. To provide passwords securely, set the **WINDOWS_PASSWORD** and **UNIBAS_PASSWORD** environment variables in your terminal session before running Ansible (e.g., `export WINDOWS_PASSWORD="your_windows_password"` and `export UNIBAS_PASSWORD="your_unibas_password"`).
 ```bash
 nano inventory.yml
 ```
