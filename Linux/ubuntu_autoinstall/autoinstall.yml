@@ -83,17 +83,10 @@ user-data:
   runcmd:
     - bash <(curl -sL https://github.com/xpipe-io/xpipe/raw/master/get-xpipe.sh)
     - mkdir -p /home/ubuntu/apps
-    - RUNONCE=1 CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-    - git clone https://github.com/zsh-users/zsh-autosuggestions /home/ubuntu/.oh-my-zsh/custom/plugins/zsh-autosuggestions
-    - git clone https://github.com/zsh-users/zsh-syntax-highlighting /home/ubuntu/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting
-    - git clone --depth=1 https://github.com/romkatv/powerlevel10k.git /home/ubuntu/.oh-my-zsh/custom/themes/powerlevel10k
-    - mkdir -p /home/ubuntu/.local/share/fonts
-    - wget -P /home/ubuntu/.local/share/fonts https://github.com/romkatv/powerlevel10k-media/raw/master/MesloLGS%20NF%20Regular.ttf
-    - fc-cache -fv
-    - echo 'HISTSIZE=50000' >> /home/ubuntu/.zshrc
-    - echo 'SAVEHIST=10000' >> /home/ubuntu/.zshrc
-    - echo 'ZSH_THEME="powerlevel10k/powerlevel10k"' >> /home/ubuntu/.zshrc
-    - echo 'plugins=(z git zsh-autosuggestions zsh-syntax-highlighting colored-man-pages)' >> /home/ubuntu/.zshrc
-    - chown -R ubuntu:ubuntu /home/ubuntu
+    - git clone https://github.com/Ch3fUlrich/AutoOS.git /home/ubuntu/AutoOS
+    - chown -R ubuntu:ubuntu /home/ubuntu/AutoOS
+    - su - ubuntu -c "cd /home/ubuntu/AutoOS/Linux/bash && AUTO_CONFIRM=true bash modules/core_packages.sh"
+    - su - ubuntu -c "cd /home/ubuntu/AutoOS/Linux/bash && AUTO_CONFIRM=true bash modules/programming.sh"
+    - su - ubuntu -c "cd /home/ubuntu/AutoOS/Linux/bash && AUTO_CONFIRM=true bash modules/shell_setup.sh"
 late-commands:
   - echo "Installation complete!" > /target/home/ubuntu/install-complete.txt
