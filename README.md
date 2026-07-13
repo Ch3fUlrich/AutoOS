@@ -135,7 +135,7 @@ host_key_checking = False
 ```
 3. Press Ctrl + X to exit and save the file, then press Y to confirm.
 
-### The Ansible setup will 
+### The Ansible setup will
 
 ## Linux (Ubuntu)
 ### Install [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html)
@@ -155,7 +155,7 @@ ansible --version
 ```
 
 ### Setup Ansible scripts
-1. After the (installation)[#install-ansible] you can clone this repository and go into the wanted directory e.g. **Windows**. 
+1. After the (installation)[#install-ansible] you can clone this repository and go into the wanted directory e.g. **Windows**.
 ```bash
 git clone https://github.com/Ch3fUlrich/AutoOS.git
 cd AutoOS/Windows/anisble
@@ -164,7 +164,7 @@ cd AutoOS/Windows/anisble
 ```powershell
 # get the username (this will be the username for the inventory file)
 $Env:UserName
-# the ip address should one of the ip addresses that pop up. Typically the top one. 
+# the ip address should one of the ip addresses that pop up. Typically the top one.
 ipconfig | Select-String "IPv4"
 ```
 3. Change the **windows_ip**, **windows_user** and **windows_password** in the inventory file from the step before. The password is the password of the user that is logged in.
@@ -174,7 +174,22 @@ nano inventory.yml
 4. Ctrl + X to exit and save the file, then press Y to confirm.
 
 ### Configure Ansible for Linux
-#TODO: Add Linux setup instructions
+To manage Linux machines with Ansible, you need to configure an inventory file and ensure SSH access is set up:
+1. **Generate an SSH key** (if you don't have one) by running `ssh-keygen -t rsa -b 4096`. Press Enter to accept the default file location and optionally set a passphrase.
+2. **Copy the SSH key** to your target Linux machine:
+```bash
+ssh-copy-id user@target_linux_ip
+```
+3. **Create an inventory file** (e.g., `inventory.yml`) for your Linux targets:
+```bash
+nano inventory.yml
+```
+4. Add your Linux machines to the file:
+```yaml
+[linux]
+target_linux_ip ansible_user=user
+```
+5. Ctrl + X to exit and save the file, then press Y to confirm.
 
 ### Run Playbooks
 To run all playbooks, use the following command:
