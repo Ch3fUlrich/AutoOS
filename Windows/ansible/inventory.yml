@@ -3,11 +3,11 @@ all:
     # Windows credentials
     windows_ip: 131.152.9.67
     windows_user: 'DonatoLab'
-    windows_password: 'asdf'
+    windows_password: "{{ lookup('env', 'WINDOWS_PASSWORD') }}"
 
     # Placeholder for drives
     unibas_mail: 'bla.bla@unibas.ch'
-    unibas_password: 'good_password'
+    unibas_password: "{{ lookup('env', 'UNIBAS_PASSWORD') }}"
     toucan_drive_username: blabl0000
 
   hosts:
