@@ -1,7 +1,7 @@
-﻿param()
+param()
 
 Write-Host "[oh-my-posh] Installing or verifying Oh My Posh..." -ForegroundColor Green
-function Test-Command($cmd) { [bool](Get-Command -Name $cmd -ErrorAction SilentlyContinue) }
+. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Definition) "utils.ps1")
 
 if (-not (Test-Command "oh-my-posh")) {
     Write-Host "oh-my-posh not found - installing via winget..." -ForegroundColor Green

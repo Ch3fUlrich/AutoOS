@@ -1,16 +1,14 @@
-Write-Host "[ARCHIVE] Original install_tools.ps1 moved to deprecated folder." -ForegroundColor Yellow
-
 param()
+Write-Host "[ARCHIVE] Original install_tools.ps1 moved to deprecated folder." -ForegroundColor Yellow
 
 Write-Host "[DEPRECATED] Root-level duplicate. Running canonical script under modules/ if available..." -ForegroundColor Yellow
 $module = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Definition) 'modules\install_tools.ps1'
 if (Test-Path $module) { & $module } else { Write-Host "Module script not found: $module" -ForegroundColor Red }
 
 Write-Host "Tools installation step finished." -ForegroundColor Cyan
-param()
 
 Write-Host "[tools] Installing command-line tools (fzf, ripgrep)..." -ForegroundColor Green
-function Test-Command($cmd) { [bool](Get-Command -Name $cmd -ErrorAction SilentlyContinue) }
+. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Definition) "..\modules\utils.ps1")
 
 $tools = @(
     @{Name='junegunn.fzf'; Cmd='fzf'; Description='FZF - command-line fuzzy finder'},

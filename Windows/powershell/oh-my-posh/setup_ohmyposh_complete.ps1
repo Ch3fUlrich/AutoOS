@@ -18,7 +18,7 @@ if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::
     exit 1
 }
 
-function Test-Command($cmd) { [bool](Get-Command -Name $cmd -ErrorAction SilentlyContinue) }
+. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Definition) "modules\utils.ps1")
 
 # ------------------------------------------------------------------------
 # 1. Install Oh My Posh

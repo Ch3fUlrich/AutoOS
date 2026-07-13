@@ -1,7 +1,7 @@
 param()
 
 Write-Host "[tools] Installing command-line tools (fzf, ripgrep)..." -ForegroundColor Green
-function Test-Command($cmd) { [bool](Get-Command -Name $cmd -ErrorAction SilentlyContinue) }
+. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Definition) "utils.ps1")
 
 $tools = @(
     @{Name='junegunn.fzf'; Cmd='fzf'; Description='FZF - command-line fuzzy finder'},
