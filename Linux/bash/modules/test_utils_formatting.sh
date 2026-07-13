@@ -1,93 +1,132 @@
 #!/usr/bin/env bash
-# Test script to demonstrate beautiful formatting functions from utils.sh
 
 set -euo pipefail
 
-# Source utils
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/utils.sh"
 
-echo "╔════════════════════════════════════════════════════════════════╗"
-echo "║        AutoOS Utils.sh - Formatting Functions Demo            ║"
-echo "╚════════════════════════════════════════════════════════════════╝"
-echo ""
+assert_equals() {
+    local expected="$1"
+    local actual="$2"
+    local msg="$3"
+    if [[ "$expected" != "$actual" ]]; then
+        echo "❌ FAIL: $msg"
+        echo "  Expected: '$expected'"
+        echo "  Actual:   '$actual'"
+        return 1
+    else
+        echo "✅ PASS: $msg"
+    fi
+}
 
-# Test section_header
-section_header "Section Header Example"
+strip_colors() {
+    echo "$1" | sed -r 's/\x1b\[[0-9;]*m//g'
+}
 
-# Test basic colored output
-info "This is an info message with emoji"
-ok "This is a success message"
-warn "This is a warning message"
-err "This is an error message (non-fatal for demo)"
+test_info_formatting() {
+    local output clean_output
+    output=$(info "test message")
+    clean_output=$(strip_colors "$output")
+    assert_equals "💡 [INFO]  test message" "$clean_output" "info() formats correctly"
+}
 
-echo ""
+test_ok_formatting() {
+    local output clean_output
+    output=$(ok "success")
+    clean_output=$(strip_colors "$output")
+    assert_equals "✅ success" "$clean_output" "ok() formats correctly"
+}
 
-# Test formatted messages
-success_message "Installation completed successfully!"
-warning_message "This is a warning that something needs attention"
-error_message "This is an error message with proper formatting"
+test_warn_formatting() {
+    local output clean_output
+    output=$(warn "warning message")
+    clean_output=$(strip_colors "$output")
+    assert_equals "⚠️  warning message" "$clean_output" "warn() formats correctly"
+}
 
-# Test info_box
-info_box "Welcome to AutoOS" "This is a beautiful info box with box-drawing characters. It automatically wraps long text to fit within the box boundaries and looks professional."
+test_err_formatting() {
+    local output clean_output
+    output=$(err "error message")
+    clean_output=$(strip_colors "$output")
+    assert_equals "❌ error message" "$clean_output" "err() formats correctly"
+}
 
-# Test system helpers
-section_header "System Information"
-echo "Distribution: $(get_distro)"
-echo "Running as root: $(is_root && echo 'Yes' || echo 'No')"
-echo "Command 'bash' exists: $(command_exists bash && echo 'Yes' || echo 'No')"
+test_section_header() {
+    local output clean_output
+    # Command substitution strips trailing newlines, so we only expect the leading newline
+    output=$(section_header "Test Title")
+    clean_output=$(strip_colors "$output")
+    local expected="
+==============================
+  Test Title
+=============================="
+    assert_equals "$expected" "$clean_output" "section_header() formats correctly"
+}
 
-# Test menu
-section_header "Interactive Menu Demo"
-echo "Example of select_from_list (skipping for non-interactive demo):"
-echo "  1) Option One"
-echo "  2) Option Two"
-echo "  3) Option Three"
-echo ""
+test_success_message() {
+    local output clean_output
+    output=$(success_message "Installation completed")
+    clean_output=$(strip_colors "$output")
+    local expected="
+✅ SUCCESS: Installation completed"
+    assert_equals "$expected" "$clean_output" "success_message() formats correctly"
+}
 
-# Test spinner (background process demo)
-section_header "Spinner Demo"
-echo "Starting a background process with spinner..."
-sleep 3 &
-SLEEP_PID=$!
-spinner $SLEEP_PID "Processing your request"
+test_warning_message() {
+    local output clean_output
+    output=$(warning_message "Needs attention")
+    clean_output=$(strip_colors "$output")
+    local expected="
+⚠️  WARNING: Needs attention"
+    assert_equals "$expected" "$clean_output" "warning_message() formats correctly"
+}
 
-# Test file operations info
-section_header "File Operations Demo"
-echo "Directory check:"
-if [ -d "/tmp" ]; then
-    echo "  ✓ /tmp directory exists"
-fi
+test_error_message() {
+    local output clean_output
+    output=$(error_message "Something went wrong")
+    clean_output=$(strip_colors "$output")
+    local expected="
+❌ ERROR: Something went wrong"
+    assert_equals "$expected" "$clean_output" "error_message() formats correctly"
+}
 
-echo ""
-echo "Backup file example:"
-echo "  backup_file /path/to/file.txt"
-echo "  → Would create: /path/to/file.txt.backup.YYYYMMDD_HHMMSS"
 
-# Test logging with verbose
-section_header "Logging Demo"
-echo "Logs are written to: $LOG_FILE"
-log_info "This is an info log entry"
-log_warning "This is a warning log entry"
-log_error "This is an error log entry"
-echo ""
-echo "To see verbose output, run with: VERBOSE=true"
+test_multiple_args() {
+    local output clean_output
+    output=$(info "msg part 1" "and part 2")
+    clean_output=$(strip_colors "$output")
+    assert_equals "💡 [INFO]  msg part 1 and part 2" "$clean_output" "formatting handles multiple arguments"
+}
 
-# Test package list formatting
-section_header "Package List Formatting"
-echo "Example package list:"
-print_pkg_list "git" "curl" "wget" "tmux" "vim"
+test_color_output() {
+    # Test cecho by forcing color variables and ensuring the ansi codes appear
+    # We create a subshell so we can redefine colors without polluting the current test environment
+    (
+        export COLOR_RESET='\033[0m'
+        export COLOR_CYAN='\033[0;36m'
+        export COLOR_BOLD='\033[1m'
 
-# Test menu items
-section_header "Menu Item Formatting"
-print_menu_item "1" "Install Core Packages" "Installs essential system utilities and tools"
-print_menu_item "2" "Setup Shell Environment" "Configures Zsh with Oh My Zsh and themes"
-print_menu_item "3" "Exit" "Quit the installer"
+        # Call cecho
+        local output
+        output=$(cecho "${COLOR_CYAN}${COLOR_BOLD}" "💡 [INFO]  colored")
 
-# Final message
-echo ""
-info_box "Demo Complete" "All formatting functions have been demonstrated. These functions are available throughout the AutoOS installation scripts for beautiful and consistent output."
+        # Expected string containing ESC bytes
+        local expected
+        expected="$(printf '%b' "\033[0;36m\033[1m💡 [INFO]  colored\033[0m")"
 
-echo ""
-ok "Demo completed successfully!"
-echo ""
+        assert_equals "$expected" "$output" "cecho() applies colors correctly"
+    )
+}
+
+echo "Running utils.sh formatting tests..."
+test_info_formatting
+test_ok_formatting
+test_warn_formatting
+test_err_formatting
+test_section_header
+test_success_message
+test_warning_message
+test_error_message
+test_multiple_args
+test_color_output
+echo "All tests passed!"
