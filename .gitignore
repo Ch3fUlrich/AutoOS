@@ -20,3 +20,4 @@ get-docker.sh
 .vscode/
 .idea/
 *.sublime-*
+__pycache__/
