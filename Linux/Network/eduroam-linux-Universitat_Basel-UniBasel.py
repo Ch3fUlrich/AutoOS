@@ -496,13 +496,13 @@ class InstallerData:
             password1 = "b"
             if self.graphics == 'tkinter':
                 import tkinter as tk
-                
+
                 root = tk.Tk()
                 root.title(Config.title)
 
 #               desc_label = tk.Label(root, text=Messages.credentials_prompt)
 #               desc_label.grid(row=0, column=0, columnspan=2, sticky=tk.W)
-    
+
                 username_label = tk.Label(root, text=Messages.username_prompt)
                 username_label.grid(row=1, column=0, sticky=tk.W)
 
@@ -520,17 +520,17 @@ class InstallerData:
 
                 password1_entry = tk.Entry(root, show="*")
                 password1_entry.grid(row=3, column=1)
-                
+
                 def submit(installer):
                     def inner():
                         nonlocal password, password1
                         (installer.username, password, password1) = (username_entry.get(), password_entry.get(), password1_entry.get())
                         root.destroy()
                     return inner
-                
+
                 login_button = tk.Button(root, text=Messages.ok, command=submit(self))
                 login_button.grid(row=4, column=0, columnspan=2)
-                
+
                 root.mainloop()
             else:
                 if self.graphics == 'zenity':
@@ -990,7 +990,7 @@ class CatNMConfigTool:
             # settings proxy
             sysproxy = self.bus.get_object(
                 self.settings_service_name,
-                "/org/freedesktop/NetworkManager/Settings")
+                "/org/freedesktop/NetworkManager/Settings", introspect=False)
             # settings interface
             self.settings = dbus.Interface(sysproxy, "org.freedesktop."
                                                      "NetworkManager.Settings")
@@ -1001,7 +1001,7 @@ class CatNMConfigTool:
             # settings proxy
             sysproxy = self.bus.get_object(
                 self.settings_service_name,
-                "/org/freedesktop/NetworkManagerSettings")
+                "/org/freedesktop/NetworkManagerSettings", introspect=False)
             # settings interface
             self.settings = dbus.Interface(
                 sysproxy, "org.freedesktop.NetworkManagerSettings")
@@ -1027,7 +1027,7 @@ class CatNMConfigTool:
         """
         try:
             proxy = self.bus.get_object(
-                self.system_service_name, "/org/freedesktop/NetworkManager")
+                self.system_service_name, "/org/freedesktop/NetworkManager", introspect=False)
             props = dbus.Interface(proxy, "org.freedesktop.DBus.Properties")
             version = props.Get("org.freedesktop.NetworkManager", "Version")
         except dbus.exceptions.DBusException:
@@ -1053,7 +1053,7 @@ class CatNMConfigTool:
             print(Messages.dbus_error)
             exit(3)
         for each in conns:
-            con_proxy = self.bus.get_object(self.system_service_name, each)
+            con_proxy = self.bus.get_object(self.system_service_name, each, introspect=False)
             connection = dbus.Interface(
                 con_proxy,
                 "org.freedesktop.NetworkManager.Settings.Connection")
