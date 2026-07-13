@@ -15,68 +15,66 @@
 
     - name: Install software via Chocolatey
       win_chocolatey:
-        name: "{{ item }}"
+        name:
+          # Useful Tools
+          - 7zip
+          - powertoys
+          - treesizefree
+
+          # coding tools
+          ## fonts
+          - nerd-fonts-meslo
+          - nerd-fonts-firacode
+          - nerd-fonts-hack
+
+          ## linux commands
+          - cygwin
+          ## terminal design
+          - oh-my-posh
+
+          # Music and Video
+          - spotify
+          - vlc
+
+          # Browsers
+          - firefox
+          - googlechrome
+
+          # File Sync and Cloud
+          - switchdrive
+          - owncloud-client
+          - googledrive
+
+          # Remote Control
+          - teamviewer
+          - parsec
+          - moonlight-qt.install
+          #- moonlight-qt
+
+          # VPN
+          - wireguard
+
+          # Communication
+          - slack
+          - whatsapp
+          - zoom
+
+          # Notes
+          - zotero
+          - obsidian
+          - notepadplusplus
+
+          # Code
+          - vscode
+          - git
+          # Uncomment the following lines if you want to install Python and MATLAB
+          # - python
+          # - mcr-r2023b
         state: present
-        
+
         # Uncomment the following lines if you want to ignore checksums (less secure)
         #args:
         #  choco_install_args: "--ignore-checksums"
-        
-      loop:
-        # Useful Tools
-        - 7zip
-        - powertoys
-        - treesizefree
-
-        # coding tools
-        ## fonts
-        - nerd-fonts-meslo
-        - nerd-fonts-firacode
-        - nerd-fonts-hack
-
-        ## linux commands
-        - cygwin
-        ## terminal design
-        - oh-my-posh
-
-        # Music and Video
-        - spotify
-        - vlc
-        
-        # Browsers
-        - firefox
-        - googlechrome
-
-        # File Sync and Cloud
-        - switchdrive
-        - owncloud-client
-        - googledrive
-        
-        # Remote Control
-        - teamviewer
-        - parsec
-        - moonlight-qt.install
-        #- moonlight-qt
-
-        # VPN
-        - wireguard
-
-        # Communication
-        - slack
-        - whatsapp
-        - zoom
-
-        # Notes
-        - zotero
-        - obsidian
-        - notepadplusplus
-
-        # Code
-        - vscode
-        - git
-        # Uncomment the following lines if you want to install Python and MATLAB
-        # - python
-        # - mcr-r2023b
 
     - name: Ensure pip is installed for Python
       win_command: "python -m ensurepip"
