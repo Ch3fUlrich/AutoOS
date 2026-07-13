@@ -3,7 +3,7 @@ version: 1
 identity:
   hostname: ubuntu-server
   username: ubuntu
-  password: "$6$rounds=4096$somesalt$hashedpassword"
+  password: "${UBUNTU_PASSWORD_HASH}"
 locale: en_US.UTF-8
 keyboard:
   layout: us
