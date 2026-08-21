@@ -22,9 +22,13 @@ LIB="$AUTOOS_ROOT/lib/linux"
 # shellcheck source=lib/linux/install.sh
 . "$LIB/install.sh"
 
+# Resolved properly after detect_system; this is only the fallback for the
+# catalog-only modes that run before detection.
 CATALOG="$AUTOOS_ROOT/catalog/linux.json"
 PROFILE=""; ONLY=""; ASSUME_YES=0; DO_SERVE=0; PORT=8777; BIND="127.0.0.1"
-LIST_ONLY=0; CHECK_ONLY=0
+LIST_ONLY=0; CHECK_ONLY=0; DO_UNDO=0; FROM_STATE=""
+STATE_PATH="$AUTOOS_ROOT/.autoos-state.json"
+STATE_PROFILE=""; STATE_SELECTED=""
 
 usage() {
     cat <<'EOF'
@@ -42,10 +46,16 @@ AutoOS — post-install provisioning for Linux
   --bind ADDR        Bind address for --serve (default 127.0.0.1)
   --list             Print the catalog and exit
   --check-catalog    Validate the catalog and exit non-zero on any problem
+
+  --from-state FILE  Replay a previous run's selection and answers
+  --save-state FILE  Where to write this run's state (default .autoos-state.json)
+  --no-verify        Skip the post-install "does it actually work" check
+  --undo             Restore files AutoOS backed up (does NOT uninstall packages)
   --help, -h         This text
 
 Examples:
   ./setup.sh                                  interactive
+  ./setup.sh --from-state .autoos-state.json  repeat a previous machine's setup
   ./setup.sh --profile light --dry-run        what a Raspberry Pi would get
   ./setup.sh --only claude-code,tailscale -y  just those two, plus dependencies
   ./setup.sh --serve                          drive it from a browser
@@ -64,6 +74,10 @@ while [[ $# -gt 0 ]]; do
         --bind)    BIND="${2:-127.0.0.1}"; shift 2 ;;
         --list)    LIST_ONLY=1; shift ;;
         --check-catalog) CHECK_ONLY=1; shift ;;
+        --from-state) FROM_STATE="${2:-}"; shift 2 ;;
+        --save-state) STATE_PATH="${2:-}"; shift 2 ;;
+        --no-verify)  AUTOOS_VERIFY=0; shift ;;
+        --undo)       DO_UNDO=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) printf 'Unknown option: %s\n\n' "$1"; usage; exit 2 ;;
     esac
@@ -73,12 +87,20 @@ ui_init
 
 # ─── Catalog-only modes ─────────────────────────────────────────────────────
 if (( CHECK_ONLY )); then
-    if catalog_validate "$CATALOG"; then ui_ok "Catalog is valid."; exit 0
-    else exit 1; fi
+    # Validate every catalog, not just this machine's: a typo in macos.json must
+    # fail CI on a Linux runner too.
+    rc=0
+    for cat in "$AUTOOS_ROOT"/catalog/*.json; do
+        [[ -f "$cat" ]] || continue
+        if catalog_validate "$cat"; then ui_ok "$(basename "$cat") is valid."
+        else ui_err "$(basename "$cat") has problems."; rc=1; fi
+    done
+    exit $rc
 fi
 
 if (( LIST_ONLY )); then
     detect_system
+    if [[ "${SYS_OS:-linux}" == "macos" ]]; then CATALOG="$AUTOOS_ROOT/catalog/macos.json"; fi
     catalog_load "$CATALOG" "$SYS_ARCH" "$SYS_IS_HEADLESS"
     last=""
     for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
@@ -92,9 +114,14 @@ fi
 # ─── 1. Detect ──────────────────────────────────────────────────────────────
 AUTOOS_LOG="$AUTOOS_ROOT/logs/autoos-$(date +%Y%m%d-%H%M%S).log"
 ui_init
-ui_banner "Linux"
+if [[ "$(uname -s)" == "Darwin" ]]; then ui_banner "macOS"; else ui_banner "Linux"; fi
 
 detect_system
+
+# One entry point, two catalogs: macOS is Homebrew, everything else is apt.
+if [[ "${SYS_OS:-linux}" == "macos" ]]; then
+    CATALOG="$AUTOOS_ROOT/catalog/macos.json"
+fi
 
 ui_section "Detected system"
 ui_kv "Distribution"    "$SYS_DISTRO_NAME"
@@ -137,6 +164,12 @@ if (( ${#BLOCKER_MESSAGE[@]} )); then
     fi
 fi
 
+# ─── Undo ───────────────────────────────────────────────────────────────────
+if (( DO_UNDO )); then
+    autoos_undo "$ASSUME_YES"
+    exit 0
+fi
+
 # ─── Browser mode ───────────────────────────────────────────────────────────
 if (( DO_SERVE )); then
     # shellcheck source=lib/linux/serve.sh
@@ -149,7 +182,10 @@ catalog_load "$CATALOG" "$SYS_ARCH" "$SYS_IS_HEADLESS"
 
 # ─── 2. Profile ─────────────────────────────────────────────────────────────
 SUGGESTED="$(suggested_profile)"
-if [[ -n "$ONLY" ]]; then
+if [[ -n "$FROM_STATE" ]]; then
+    autoos_state_load "$FROM_STATE" || exit 1
+    PROFILE="${STATE_PROFILE:-custom}"
+elif [[ -n "$ONLY" ]]; then
     PROFILE="custom"
 elif [[ -z "$PROFILE" ]]; then
     ui_section "Profile"
@@ -169,7 +205,18 @@ esac
 ui_ok "Using profile: $PROFILE"
 
 # ─── 3. Select ──────────────────────────────────────────────────────────────
-if [[ -n "$ONLY" ]]; then
+if [[ -n "$FROM_STATE" ]]; then
+    SELECTED="$STATE_SELECTED"
+    for id in $SELECTED; do
+        catalog_index_of "$id" >/dev/null || { ui_warn "state names unknown component '$id' - skipping"; }
+    done
+    # keep only ids this machine actually offers
+    kept=""
+    for id in $SELECTED; do
+        catalog_index_of "$id" >/dev/null 2>&1 && kept+="$id "
+    done
+    SELECTED="${kept% }"
+elif [[ -n "$ONLY" ]]; then
     SELECTED="${ONLY//,/ }"
     for id in $SELECTED; do
         catalog_index_of "$id" >/dev/null || { ui_err "Unknown component id: $id"; exit 1; }
@@ -254,16 +301,29 @@ fi
 # ─── 7. Execute ─────────────────────────────────────────────────────────────
 ui_section "Installing"
 installed=0; skipped=0; failed=0; failed_names=""
+installed_names=""; skipped_names=""; unverified=0
 step=0
 for id in $PLAN_IDS; do
     step=$((step + 1))
     i="$(catalog_index_of "$id")"
     ui_step "[$step/$n] ${CAT_NAME[i]}"
-    install_component "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" || INSTALL_STATE="failed"
+    install_component "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}" || INSTALL_STATE="failed"
     case "$INSTALL_STATE" in
-        installed) run_post_install "${CAT_POST[i]}"; installed=$((installed + 1)); ui_ok "${CAT_NAME[i]} done" ;;
-        skipped)   run_post_install "${CAT_POST[i]}"; skipped=$((skipped + 1)) ;;
-        failed)    failed=$((failed + 1)); failed_names+="${CAT_NAME[i]} "; ui_err "${CAT_NAME[i]} failed" ;;
+        installed)
+            run_post_install "${CAT_POST[i]}"
+            installed=$((installed + 1)); installed_names+="${CAT_ID[i]} "
+            verify_component "${CAT_VERIFY[i]}" "${CAT_NAME[i]}"
+            if [[ "$VERIFY_STATE" == "unverified" ]]; then unverified=$((unverified + 1)); fi
+            ui_ok "${CAT_NAME[i]} done"
+            ;;
+        skipped)
+            run_post_install "${CAT_POST[i]}"
+            skipped=$((skipped + 1)); skipped_names+="${CAT_ID[i]} "
+            ;;
+        failed)
+            failed=$((failed + 1)); failed_names+="${CAT_NAME[i]} "
+            ui_err "${CAT_NAME[i]} failed"
+            ;;
     esac
 done
 
@@ -271,6 +331,7 @@ done
 ui_section "Summary"
 ui_kv "Installed"       "$installed" ok
 ui_kv "Already present" "$skipped"   muted
+if (( unverified )); then ui_kv "Installed but unverified" "$unverified" warn; fi
 if (( failed )); then ui_kv "Failed" "$failed" err; else ui_kv "Failed" "0" muted; fi
 if (( failed )); then
     printf '\n'
@@ -278,6 +339,13 @@ if (( failed )); then
     ui_muted "Re-run to retry only the failures; everything else reports as already present."
 fi
 printf '\n'
+# Saved last, so a replay reflects what actually happened rather than what was planned.
+if [[ -n "$STATE_PATH" ]]; then
+    autoos_state_save "$STATE_PATH" "$PROFILE" "$SELECTED" \
+        "$installed_names" "$skipped_names" "$failed_names"
+fi
+
 ui_info "Some changes (PATH, shell, docker group) need a new login to take effect."
+ui_muted "Repeat this setup elsewhere with:  ./setup.sh --from-state $STATE_PATH"
 if (( failed )); then exit 1; fi
 exit 0

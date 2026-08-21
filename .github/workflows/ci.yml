@@ -30,6 +30,9 @@ jobs:
           yamllint -d '{extends: relaxed, rules: {line-length: {max: 140}}}' \
             catalog/ Windows/ansible/ Linux/ubuntu_autoinstall/ .github/
 
+      - name: Documentation links
+        run: python3 tests/check-links.py .
+
   windows:
     name: Windows suite
     runs-on: windows-latest

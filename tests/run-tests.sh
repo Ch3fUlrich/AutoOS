@@ -329,6 +329,111 @@ if it "--check-catalog succeeds"; then
     assert_ok $?
 fi
 
+# ─── Run state, verification, undo ──────────────────────────────────────────
+describe "state, verify and undo"
+
+if it "macos catalog validates"; then
+    out="$(catalog_validate catalog/macos.json 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "$out"; fi
+fi
+
+if it "the cask column does not shift the other fields"; then
+    # Each new TSV column is a chance to reintroduce the delimiter bug.
+    catalog_load catalog/macos.json arm64 0
+    i="$(catalog_index_of docker)"
+    assert_eq "${CAT_CASK[i]}" "1"
+fi
+
+if it "a non-cask formula is flagged 0"; then
+    catalog_load catalog/macos.json arm64 0
+    i="$(catalog_index_of git)"
+    assert_eq "${CAT_CASK[i]}" "0"
+fi
+
+if it "verify commands survive catalog loading"; then
+    catalog_load catalog/linux.json x64 0
+    i="$(catalog_index_of git)"
+    assert_eq "${CAT_VERIFY[i]}" "git --version"
+fi
+
+if it "verification passes for something that is installed"; then
+    AUTOOS_DRY_RUN=0 AUTOOS_VERIFY=1
+    verify_component "bash --version" "bash" >/dev/null 2>&1
+    assert_eq "$VERIFY_STATE" "verified"
+fi
+
+if it "verification reports unverified for a missing binary"; then
+    AUTOOS_DRY_RUN=0 AUTOOS_VERIFY=1
+    verify_component "definitely-not-a-real-binary --version" "ghost" >/dev/null 2>&1
+    assert_eq "$VERIFY_STATE" "unverified"
+fi
+
+if it "--no-verify skips the check entirely"; then
+    AUTOOS_VERIFY=0
+    verify_component "definitely-not-a-real-binary" "ghost" >/dev/null 2>&1
+    AUTOOS_VERIFY=1
+    assert_eq "$VERIFY_STATE" "unchecked"
+fi
+
+if it "state survives a save/load round trip"; then
+    tmp="$(mktemp)"; rm -f "$tmp"
+    AUTOOS_DRY_RUN=0
+    AUTOOS_ANSWERS=([omnigraph_url]="https://example.invalid")
+    autoos_state_save "$tmp" "light" "git tmux" "git" "tmux" "" >/dev/null 2>&1
+    AUTOOS_ANSWERS=()
+    STATE_PROFILE=""; STATE_SELECTED=""
+    autoos_state_load "$tmp" >/dev/null 2>&1
+    rm -f "$tmp"
+    assert_eq "$STATE_PROFILE|$STATE_SELECTED|${AUTOOS_ANSWERS[omnigraph_url]:-}"               "light|git tmux|https://example.invalid"
+fi
+
+if it "a dry run saves no state"; then
+    tmp="$(mktemp)"; rm -f "$tmp"
+    AUTOOS_DRY_RUN=1
+    autoos_state_save "$tmp" "light" "git" "" "" "" >/dev/null 2>&1
+    AUTOOS_DRY_RUN=0
+    if [[ -f "$tmp" ]]; then rm -f "$tmp"; fail "dry run wrote a state file"; else pass; fi
+fi
+
+if it "undo restores a backed-up file"; then
+    scratch="$(mktemp -d)"
+    target="$scratch/.zshrc"
+    printf 'ORIGINAL
+' >"$target"
+    AUTOOS_DRY_RUN=0
+    append_line_once "$target" "AutoOS:test" "export X=1  # AutoOS:test" >/dev/null 2>&1
+    grep -q 'AutoOS:test' "$target" || fail "setup for this test did not modify the file"
+    ( SYS_HOME="$scratch"; autoos_undo 1 >/dev/null 2>&1 )
+    body="$(cat "$target")"
+    rm -rf "$scratch"
+    assert_eq "$body" "ORIGINAL"
+fi
+
+if it "undo never uninstalls anything"; then
+    # The safety property, asserted on the source rather than by removing software.
+    if grep -qE '(apt-get remove|brew uninstall|npm uninstall)' lib/linux/install.sh; then
+        fail "undo path contains an uninstall command"
+    else pass; fi
+fi
+
+# ─── Documentation ──────────────────────────────────────────────────────────
+describe "documentation"
+
+if it "every relative link in the docs resolves"; then
+    out="$(python3 tests/check-links.py . 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "$out"; fi
+fi
+
+if it "every docs page is linked from the index"; then
+    missing=""
+    for f in docs/*.md; do
+        base="$(basename "$f")"
+        [[ "$base" == "README.md" ]] && continue
+        grep -q "$base" docs/README.md || missing+="$base "
+    done
+    assert_eq "$missing" ""
+fi
+
 # ─── shellcheck (optional) ──────────────────────────────────────────────────
 describe "static analysis"
 

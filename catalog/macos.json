@@ -1,0 +1,205 @@
+{
+  "$schema": "./schema.json",
+  "platform": "macos",
+  "profiles": {
+    "workstation": "Full desktop workstation - the same coding and AI stack as the other platforms.",
+    "ai-coding": "Coding and AI tooling plus the shell, no GUI extras.",
+    "light": "Minimal remote-access box - Claude Code, Tailscale and Herdr only.",
+    "custom": "Start with nothing ticked and choose by hand."
+  },
+  "categories": [
+    {
+      "id": "core",
+      "name": "Core CLI",
+      "components": [
+        {
+          "id": "git",
+          "name": "Git",
+          "description": "Version control",
+          "provider": "brew",
+          "package": "git",
+          "verify": "git --version",
+          "profiles": ["workstation", "ai-coding", "light"]
+        },
+        {
+          "id": "download-tools",
+          "name": "curl & wget",
+          "description": "Download tools",
+          "provider": "brew",
+          "package": "curl wget",
+          "verify": "curl --version",
+          "profiles": ["workstation", "ai-coding", "light"]
+        },
+        {
+          "id": "monitoring",
+          "name": "Monitoring tools",
+          "description": "htop and fastfetch",
+          "provider": "brew",
+          "package": "htop fastfetch",
+          "verify": "htop --version",
+          "profiles": ["workstation", "ai-coding"]
+        },
+        {
+          "id": "tmux",
+          "name": "tmux",
+          "description": "Terminal multiplexer",
+          "provider": "brew",
+          "package": "tmux",
+          "verify": "tmux -V",
+          "profiles": ["workstation", "ai-coding", "light"]
+        }
+      ]
+    },
+    {
+      "id": "shell",
+      "name": "Shell & Terminal",
+      "components": [
+        {
+          "id": "oh-my-zsh",
+          "name": "Oh My Zsh",
+          "description": "Zsh framework and plugin manager",
+          "provider": "script",
+          "package": "oh-my-zsh",
+          "requires": ["git", "download-tools"],
+          "profiles": ["workstation", "ai-coding"]
+        },
+        {
+          "id": "zsh-plugins",
+          "name": "Zsh plugins",
+          "description": "autosuggestions and syntax highlighting",
+          "provider": "script",
+          "package": "zsh-plugins",
+          "requires": ["oh-my-zsh"],
+          "profiles": ["workstation", "ai-coding"]
+        },
+        {
+          "id": "powerlevel10k",
+          "name": "Powerlevel10k",
+          "description": "Prompt theme",
+          "provider": "script",
+          "package": "powerlevel10k",
+          "requires": ["oh-my-zsh"],
+          "profiles": ["workstation", "ai-coding"]
+        },
+        {
+          "id": "nerd-font",
+          "name": "MesloLGS Nerd Font",
+          "description": "Font with the prompt glyphs",
+          "provider": "brew",
+          "package": "font-meslo-lg-nerd-font",
+          "cask": true,
+          "profiles": ["workstation"]
+        }
+      ]
+    },
+    {
+      "id": "ai-coding",
+      "name": "Coding & AI",
+      "components": [
+        {
+          "id": "nodejs",
+          "name": "Node.js LTS",
+          "description": "Runtime required by Claude Code",
+          "provider": "brew",
+          "package": "node",
+          "verify": "node --version",
+          "profiles": ["workstation", "ai-coding", "light"]
+        },
+        {
+          "id": "claude-code",
+          "name": "Claude Code CLI",
+          "description": "Anthropic's terminal coding agent",
+          "provider": "npm",
+          "package": "@anthropic-ai/claude-code",
+          "verify": "claude --version",
+          "requires": ["nodejs"],
+          "profiles": ["workstation", "ai-coding", "light"]
+        },
+        {
+          "id": "claude-desktop",
+          "name": "Claude Desktop",
+          "description": "Claude desktop application",
+          "provider": "brew",
+          "package": "claude",
+          "cask": true,
+          "profiles": ["workstation", "ai-coding"]
+        },
+        {
+          "id": "herdr",
+          "name": "Herdr",
+          "description": "Persistent, resumable AI sessions",
+          "provider": "script",
+          "package": "herdr",
+          "requires": ["nodejs"],
+          "profiles": ["workstation", "ai-coding", "light"],
+          "prompt": "herdr_source"
+        },
+        {
+          "id": "docker",
+          "name": "Docker Desktop",
+          "description": "Containers - backs the local MCP memory stack",
+          "provider": "brew",
+          "package": "docker",
+          "cask": true,
+          "verify": "docker --version",
+          "profiles": ["workstation", "ai-coding"]
+        },
+        {
+          "id": "vscode",
+          "name": "Visual Studio Code",
+          "description": "Editor",
+          "provider": "brew",
+          "package": "visual-studio-code",
+          "cask": true,
+          "profiles": ["workstation", "ai-coding"]
+        },
+        {
+          "id": "agent-skills",
+          "name": "agent-skills + MCP servers",
+          "description": "Clone Ch3fUlrich/agent-skills and wire up the MCP stack",
+          "provider": "custom",
+          "package": "agent-skills",
+          "requires": ["git", "nodejs"],
+          "postInstall": "install_agent_skills",
+          "profiles": ["workstation", "ai-coding"],
+          "prompt": "omnigraph_url"
+        }
+      ]
+    },
+    {
+      "id": "network",
+      "name": "Remote Access & Networking",
+      "components": [
+        {
+          "id": "tailscale",
+          "name": "Tailscale",
+          "description": "Mesh VPN - reach this box from anywhere",
+          "provider": "brew",
+          "package": "tailscale",
+          "verify": "tailscale version",
+          "profiles": ["workstation", "ai-coding", "light"]
+        },
+        {
+          "id": "wireguard",
+          "name": "WireGuard",
+          "description": "VPN",
+          "provider": "brew",
+          "package": "wireguard-tools",
+          "profiles": ["workstation"]
+        }
+      ]
+    }
+  ],
+  "prompts": {
+    "omnigraph_url": {
+      "question": "Omnigraph remote server URL (blank = local Docker stack on :8080)",
+      "default": "",
+      "help": "If you run a shared Omnigraph server, give its base URL here and the MCP config will point at it instead of localhost."
+    },
+    "herdr_source": {
+      "question": "Herdr install source",
+      "default": "npm:herdr",
+      "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in Homebrew, so AutoOS needs to be told where it lives."
+    }
+  }
+}

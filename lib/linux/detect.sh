@@ -9,7 +9,66 @@
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# macOS keeps none of the /proc and /etc/os-release furniture the Linux path
+# reads, so it gets its own probe rather than a pile of conditionals.
+detect_macos() {
+    SYS_OS="macos"
+    SYS_DISTRO_ID="macos"
+    SYS_DISTRO_VERSION="$(sw_vers -productVersion 2>/dev/null || echo unknown)"
+    SYS_DISTRO_NAME="macOS ${SYS_DISTRO_VERSION}"
+    SYS_DISTRO_CODENAME=""; SYS_DISTRO_LIKE="darwin"
+    SYS_IS_DEBIAN_LIKE=0
+
+    case "$(uname -m)" in
+        x86_64) SYS_ARCH="x64" ;;
+        arm64)  SYS_ARCH="arm64" ;;
+        *)      SYS_ARCH="$(uname -m)" ;;
+    esac
+
+    SYS_MODEL="$(sysctl -n hw.model 2>/dev/null || echo unknown)"
+    SYS_IS_PI=0; SYS_IS_WSL=0; SYS_IS_CONTAINER=0
+    SYS_CPU_CORES="$(sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+    SYS_CPU_NAME="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
+    local mem_bytes
+    mem_bytes="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+    SYS_RAM_GB="$(awk -v b="$mem_bytes" 'BEGIN{printf "%.1f", b/1073741824}')"
+    SYS_FREE_DISK_GB="$(df -g / 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
+    if [[ -z "$SYS_FREE_DISK_GB" ]]; then SYS_FREE_DISK_GB=0; fi
+
+    SYS_USER="${SUDO_USER:-${USER:-$(id -un)}}"
+    SYS_HOME="$(eval echo "~$SYS_USER" 2>/dev/null || echo "$HOME")"
+    if [[ ! -d "$SYS_HOME" ]]; then SYS_HOME="$HOME"; fi
+    SYS_IS_ROOT=0; if [[ "$(id -u)" -eq 0 ]]; then SYS_IS_ROOT=1; fi
+    if (( SYS_IS_ROOT )); then AUTOOS_SUDO=""; SYS_CAN_SUDO=1
+    elif has_cmd sudo; then AUTOOS_SUDO="sudo"
+        if sudo -n true 2>/dev/null; then SYS_CAN_SUDO=1; else SYS_CAN_SUDO=2; fi
+    else AUTOOS_SUDO=""; SYS_CAN_SUDO=0; fi
+    export AUTOOS_SUDO
+
+    # A Mac reached over SSH has no Aqua session; launchctl is the reliable probe.
+    SYS_IS_HEADLESS=1
+    if launchctl print gui/"$(id -u)" >/dev/null 2>&1; then SYS_IS_HEADLESS=0; fi
+    if [[ -n "${SSH_CLIENT:-}${SSH_TTY:-}" ]]; then SYS_IS_HEADLESS=1; fi
+
+    SYS_HAS_APT=0; SYS_HAS_SNAP=0
+    SYS_HAS_BREW=0;   if has_cmd brew;   then SYS_HAS_BREW=1;   fi
+    SYS_HAS_GIT=0;    if has_cmd git;    then SYS_HAS_GIT=1;    fi
+    SYS_HAS_NODE=0;   if has_cmd node;   then SYS_HAS_NODE=1;   fi
+    SYS_HAS_NPM=0;    if has_cmd npm;    then SYS_HAS_NPM=1;    fi
+    SYS_HAS_DOCKER=0; if has_cmd docker; then SYS_HAS_DOCKER=1; fi
+    SYS_HAS_ZSH=0;    if has_cmd zsh;    then SYS_HAS_ZSH=1;    fi
+    SYS_NODE_VERSION=""
+    if (( SYS_HAS_NODE )); then SYS_NODE_VERSION="$(node --version 2>/dev/null || true)"; fi
+}
+
 detect_system() {
+    SYS_OS="linux"
+    SYS_HAS_BREW=0
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        detect_macos
+        return 0
+    fi
+
     # ─── Distribution ───────────────────────────────────────────────────────
     SYS_DISTRO_ID="unknown"; SYS_DISTRO_NAME="unknown"
     SYS_DISTRO_VERSION=""; SYS_DISTRO_CODENAME=""; SYS_DISTRO_LIKE=""
@@ -101,6 +160,13 @@ detect_system() {
 suggested_profile() {
     # Only ever a default; the user confirms it. Deliberately conservative so a
     # small board is never handed a desktop install it cannot use.
+    #
+    # macOS has no `server` profile, so a headless Mac gets ai-coding instead of
+    # a profile name its catalog does not define.
+    if [[ "${SYS_OS:-linux}" == "macos" ]]; then
+        if awk -v r="$SYS_RAM_GB" -v c="$SYS_CPU_CORES" 'BEGIN{exit !(r >= 15 && c >= 8)}'            && (( ! SYS_IS_HEADLESS )); then echo "workstation"; else echo "ai-coding"; fi
+        return
+    fi
     if (( SYS_IS_PI )); then echo "light"; return; fi
     if (( SYS_IS_CONTAINER )); then echo "server"; return; fi
     # 4 GB or less is small-board territory; 8 GB reports ~7.7 so the cut sits below it.

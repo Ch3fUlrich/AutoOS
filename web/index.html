@@ -151,6 +151,35 @@ async function boot() {
   el('selAll').onclick = () => { document.querySelectorAll('.pick').forEach(c => c.checked = true); onChange(); };
   el('selNone').onclick = () => { document.querySelectorAll('.pick').forEach(c => c.checked = false); onChange(); };
   el('run').onclick = runInstall;
+
+  // The server owns the run, not this tab. If one is already going (you closed
+  // the laptop, or opened the URL from a second device), pick the log back up
+  // instead of showing an idle page over a live install.
+  resumeIfRunning();
+}
+
+async function resumeIfRunning() {
+  try {
+    const r = await fetch(api('/api/log?offset=0'));
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d.lines || !d.lines.length) return;
+    el('log').textContent = '';
+    appendLog(d.lines);
+    logOffset = d.offset;
+    if (d.total) el('prog').style.width = Math.round(100 * d.done / d.total) + '%';
+    if (d.running) {
+      running = true;
+      el('run').disabled = true;
+      el('status').textContent = 'a run is already in progress...';
+      poll();
+    } else {
+      el('status').textContent = d.summary || 'previous run finished';
+      el('prog').style.width = '100%';
+    }
+  } catch (e) {
+    /* nothing in progress, or the server just started - the idle page is correct */
+  }
 }
 
 function renderCatalog() {

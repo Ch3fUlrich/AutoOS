@@ -2,22 +2,38 @@
 
 Set up a freshly installed machine without clicking through twenty installers.
 
-One command per platform. It works out what kind of machine it is running on,
-suggests a sensible profile, lets you tick exactly what you want, shows you the
-plan, and only then installs anything.
-
 ```powershell
 .\setup.ps1          # Windows 10/11
 ```
 
 ```bash
-./setup.sh           # Debian / Ubuntu / Raspberry Pi OS
+./setup.sh           # Debian · Ubuntu · Raspberry Pi OS · macOS
 ```
 
-No prerequisites. Not WSL, not Ansible, not Python packages, not a TUI library —
-which matters, because on a machine you just installed, nothing is there yet.
+One command per platform. It works out what kind of machine it is running on,
+suggests a sensible profile, lets you tick exactly what you want, shows you the
+plan, and only then installs anything.
 
 ---
+
+## Why it works this way
+
+Post-install automation usually fails in the same three ways. Each design
+decision here is aimed at one of them.
+
+| The usual failure | What AutoOS does instead |
+|---|---|
+| **The tool needs tools.** A setup script that needs WSL, Ansible, Python packages and a TUI library cannot run on the machine it is meant to set up. | **No dependencies.** PowerShell 5.1 and bash are already there. On Linux, `python3` is used only to read JSON. No test framework, no menu library. |
+| **All or nothing.** Rigid blocks — "install the dev bundle" — mean taking software you do not want, or editing the script. | **A checkbox per component.** Profiles are just a starting set of ticks. Dependencies resolve themselves. |
+| **It runs once, then rots.** Re-running reinstalls, half-fails, or overwrites your config. | **Safe to run twice.** A second run reports `skipped`. Every file it edits is backed up first, and `--undo` puts them back. |
+
+Two more rules the code is built around, both learned the hard way:
+
+- **Nothing is installed before you confirm.** Detection and selection have no
+  side effects at all, which is what makes `--dry-run` worth trusting.
+- **Never overwrite a PATH, profile or config wholesale** — read, append, write
+  back. Replacing `Path` outright once wiped a user's entire environment; there
+  is now exactly one code path for PATH edits, and a test that guards it.
 
 ## What it looks like
 
@@ -25,7 +41,6 @@ which matters, because on a machine you just installed, nothing is there yet.
 ── Detected system ─────────────────────────────────────────────
   Operating system       Microsoft Windows 11 Home (build 26200)
   Architecture           x64
-  Machine                HP ENVY x360 Convertible
   CPU                    AMD Ryzen 5 4500U - 6 threads
   Memory                 7.4 GB
   Package managers       winget, choco
@@ -45,46 +60,85 @@ which matters, because on a machine you just installed, nothing is there yet.
   ↑↓ move   SPACE toggle   A all   N none   ENTER confirm   ESC cancel
 ```
 
-Arrow keys to move, space to toggle, enter to confirm. Dependencies are worked
-out for you — tick Claude Code and Node.js comes along automatically.
+## What's inside
 
-## Profiles
+| Directory | Contains |
+|---|---|
+| `setup.ps1` / `setup.sh` | The two entry points. Everything else is called by these. |
+| [`catalog/`](docs/catalog.md) | **What** can be installed — `windows.json`, `linux.json`, `macos.json`. Data only. |
+| `lib/windows/` · `lib/linux/` | **How** it happens: detect, catalog, install, ui, state, serve. |
+| [`web/`](docs/web-ui.md) | The browser UI served by `--serve`. |
+| [`tests/`](docs/testing.md) | Both suites — 43 Linux, 49 Windows, no framework needed. |
+| [`Windows/ansible/`](docs/remote-provisioning.md) | Provisioning *other* machines over the network. Not used by `setup.ps1`. |
+| [`Linux/ubuntu_autoinstall/`](docs/remote-provisioning.md#unattended-ubuntu-install) | Unattended Ubuntu install profile. |
+| `third_party/` | Vendored code under its own licence. Never edited. |
+| [`docs/`](docs/README.md) | Everything below, in detail. |
 
-A profile is just a starting set of ticks; you can change anything afterwards.
-The suggested one is picked from the hardware.
+### Software on offer
 
-| Profile | For | Roughly |
-|---|---|---|
-| `workstation` | A machine you sit in front of | Everything that fits |
-| `ai-coding` | Development box | Editors, agents, containers, shell |
-| `light` | Raspberry Pi 5 and similar | Claude Code, Tailscale, Herdr |
-| `server` *(Linux)* | Headless | Shell, networking, containers, no GUI |
-| `custom` | You decide | Nothing pre-ticked |
+Run `--list` for the current set. The headline items:
 
-## Common runs
+| Area | Includes |
+|---|---|
+| Terminal | Windows Terminal, PowerShell 7, Oh My Posh, zsh + Powerlevel10k, Nerd Fonts |
+| Coding & AI | Claude Code CLI, Claude Desktop, Antigravity, VS Code, Docker, Herdr, Node.js |
+| MCP stack | Clones [agent-skills](https://github.com/Ch3fUlrich/agent-skills) and wires up Serena / Graphify / Omnigraph / Superpowers — asking for your Omnigraph URL rather than hardcoding one |
+| Desktop (Windows) | Windhawk with the Explorer file-size and taskbar-clock mods, PowerToys |
+| Remote | Tailscale, WireGuard, Parsec, OpenSSH |
+| Science | Miniconda plus an isolated `suite2p` environment |
+
+Adding software means adding a catalog entry. No code changes — see
+[the catalog](docs/catalog.md).
+
+## How to run it
+
+### Profiles
+
+A profile is a starting set of ticks; the suggestion comes from your hardware.
+
+| Profile | For |
+|---|---|
+| `workstation` | A machine you sit in front of |
+| `ai-coding` | Development box: editors, agents, containers, shell |
+| `light` | Raspberry Pi 5 and similar — Claude Code, Tailscale, Herdr |
+| `server` *(Linux)* | Headless: shell, networking, containers, no GUI |
+| `custom` | Nothing pre-ticked |
+
+Details: [Profiles & detection](docs/profiles.md).
+
+### Common runs
 
 ```bash
-./setup.sh --profile light --dry-run     # what a Pi would get, changes nothing
-./setup.sh --only claude-code,tailscale  # just these two, plus dependencies
-./setup.sh --list                        # every component id
-./setup.sh --check-catalog               # validate the catalog (CI-friendly)
+./setup.sh --profile light --dry-run        # what a Pi would get; changes nothing
+./setup.sh --only claude-code,tailscale -y  # just those two, plus dependencies
+./setup.sh --from-state .autoos-state.json  # repeat a previous machine's setup
+./setup.sh --undo                           # restore the files it backed up
+./setup.sh --list                           # every component id
 ```
 
 ```powershell
 .\setup.ps1 -Profile ai-coding -DryRun
 .\setup.ps1 -Only claude-code,tailscale -Yes
-.\setup.ps1 -ListComponents
+.\setup.ps1 -FromState .autoos-state.json
+.\setup.ps1 -Undo
 ```
 
-`--dry-run` / `-DryRun` prints every command that *would* run and touches
-nothing. It is the right way to see what a profile means before committing.
+`--dry-run` prints every command that *would* run and touches nothing. It is
+the right way to see what a profile means before committing to it.
 
-## Headless machines: the browser UI
+Full flag table: [Getting started](docs/getting-started.md#flags).
 
-For a box you reach over SSH or Tailscale, drive the install from a browser:
+> **Windows:** `setup.ps1` is not code-signed, so run it as
+> `powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1` rather than
+> loosening the machine-wide policy. [Why](docs/security.md#code-signing).
+
+## Using it from a browser
+
+For a machine with no keyboard attached — a Pi in a cupboard, a server you reach
+over Tailscale — `--serve` gives you the same thing as a web page.
 
 ```bash
-./setup.sh --serve                    # prints a URL with a one-time token
+./setup.sh --serve                    # only this machine can reach it
 ./setup.sh --serve --bind 0.0.0.0     # reachable from your LAN / tailnet
 ```
 
@@ -92,86 +146,83 @@ For a box you reach over SSH or Tailscale, drive the install from a browser:
 .\setup.ps1 -Serve
 ```
 
-Same checkboxes, same plan, live log streamed back. The page is served locally
-and drives the real `setup.sh` / `setup.ps1`, so it cannot drift from the CLI.
+It prints a URL containing a one-time token. Open it, and you get the detected
+system, the profile picker, every checkbox, the questions your selection needs,
+and a live log with a progress bar.
 
-**It binds `127.0.0.1` by default and always requires the token printed in the
-terminal.** That endpoint installs software; a wider bind is opt-in and warned
-about. The token is regenerated every run.
+**You can do the whole setup in the browser and install from there** — nothing
+has to happen in the terminal except starting the server. Leave *Dry run*
+ticked for the first pass, read the log, then untick it and confirm.
 
-## What is on offer
+The page does not install anything itself: it calls a small local server that
+runs the very same `setup.sh` / `setup.ps1` you would have typed, so the two
+paths cannot drift apart.
 
-Run `--list` for the current set. The headline items:
+Security, because this endpoint installs software:
 
-- **Terminal** — Windows Terminal, PowerShell 7, Oh My Posh / zsh + Powerlevel10k, Nerd Fonts
-- **Coding & AI** — Claude Code CLI, Claude Desktop, Antigravity, VS Code, Docker, Herdr, Node.js
-- **agent-skills + MCP** — clones [agent-skills](https://github.com/Ch3fUlrich/agent-skills) and wires up Serena / Graphify / Omnigraph / Superpowers, asking for your Omnigraph server URL rather than hardcoding one
-- **Desktop (Windows)** — Windhawk with the Explorer file-size and taskbar-clock mods, PowerToys
-- **Remote** — Tailscale, WireGuard, Parsec, OpenSSH
-- **Science** — Miniconda plus an isolated `suite2p` environment
+- binds `127.0.0.1` unless you pass `--bind`, which prints a warning
+- every API call needs the token, regenerated on each start
+- `--serve --dry-run` locks the session to preview-only, server-side
+- one run at a time
 
-Adding software means adding an entry to `catalog/windows.json` or
-`catalog/linux.json`. No code changes.
+Full walkthrough and limits: [Browser UI](docs/web-ui.md).
 
-## Provisioning *other* machines
-
-`Windows/ansible/` provisions machines over the network. It is separate from the
-local entry points and needs the usual Ansible setup:
+## Repeat, verify, undo
 
 ```bash
-ansible-galaxy collection install -r Windows/ansible/requirements.yml
-cp Windows/ansible/inventory.example.yml Windows/ansible/inventory.yml   # then edit
-ansible-vault create Windows/ansible/group_vars/windows/vault.yml
-ansible-playbook -i Windows/ansible/inventory.yml Windows/ansible/main_playbook.yml --ask-vault-pass
+./setup.sh --from-state .autoos-state.json
 ```
 
-`inventory.yml` and `vault.yml` are git-ignored. **Never put a real password,
-hostname or share path in a tracked file** — this repository is public and has
-leaked credentials once already.
+Every real run records what you chose and what happened. Replaying onto
+different hardware drops what does not apply and says so. Components can declare
+a `verify` command that must succeed after install, so "the package manager
+said OK" is not mistaken for "it works". And `--undo` restores every file
+AutoOS backed up — deliberately **without** uninstalling packages, which is left
+to the tool that owns that record.
+
+Details: [Replay, verification & undo](docs/state-and-undo.md).
 
 ## Tests
 
 ```bash
-bash tests/run-tests.sh          # Linux
-bash tests/run-tests.sh --wsl    # same suite, forced through WSL2 from Windows
+bash tests/run-tests.sh          # Linux / macOS
+bash tests/run-tests.sh --wsl    # same suite through WSL2, from Windows
 ```
 
 ```powershell
 powershell -File tests\run-tests.ps1
 ```
 
-No test framework to install and **no test installs anything** — providers are
-asserted on the planned command, never on system state. The suites cover catalog
-validation, dependency ordering, architecture and headless filtering, the
-detection heuristics, PATH-append safety, and double-run idempotency.
+No framework to install, and **no test installs anything** — providers are
+asserted on the planned command, never on system state. CI additionally runs
+`shellcheck`, `PSScriptAnalyzer`, `ansible-lint`, and a secret scan that
+rejects credential-shaped values and committed binaries.
 
-## Repository layout
+Details: [Testing](docs/testing.md).
 
-```
-setup.ps1  setup.sh     the two entry points
-catalog/*.json          WHAT can be installed — data, no code
-lib/windows/*.psm1      HOW it happens on Windows
-lib/linux/*.sh          HOW it happens on Linux
-web/index.html          browser UI, served by --serve
-tests/                  both suites
-Windows/ansible/        remote fleet provisioning (not used by setup.ps1)
-Linux/ubuntu_autoinstall/  unattended Ubuntu install profile
-third_party/            vendored code under its own licence — do not edit
-```
+## Documentation
 
-Working on this repo with an AI agent? Read [AGENTS.md](AGENTS.md) first.
+| Page | Answers |
+|---|---|
+| [Getting started](docs/getting-started.md) | How do I run it, and what do the flags do? |
+| [Profiles & detection](docs/profiles.md) | What does it work out about my machine? |
+| [The catalog](docs/catalog.md) | How do I add software? |
+| [Browser UI](docs/web-ui.md) | How do I drive a headless machine from a browser? |
+| [Replay, verification & undo](docs/state-and-undo.md) | How do I repeat a setup and get back? |
+| [Architecture](docs/architecture.md) | How is it built, and why that way? |
+| [Testing](docs/testing.md) | How do I check a change before shipping it? |
+| [Remote provisioning](docs/remote-provisioning.md) | How do I set up a machine that isn't this one? |
+| [Security](docs/security.md) | What must never be committed? |
+| [Troubleshooting](docs/troubleshooting.md) | It broke. Now what? |
 
-## Design rules
+Working on this repo with an AI agent? [AGENTS.md](AGENTS.md) is the contract.
 
-These are enforced by tests, not just intentions:
+## Status
 
-1. **Safe to run twice.** A second run reports `skipped`, never `installed`.
-2. **Never overwrite a PATH, profile or config wholesale** — read, append, write
-   back, and keep a timestamped backup. Replacing `Path` outright once wiped a
-   user's entire environment.
-3. **Nothing is installed before you confirm.** Detection and selection have no
-   side effects, which is what makes `--dry-run` meaningful.
-4. **A component that cannot work here is hidden**, not offered and then failed.
+Windows and Linux are used and tested — including the Linux suite under WSL2.
+**macOS is implemented but has not been run on real Apple hardware**; its
+catalog and schema are covered by both suites, but treat a first run there as
+untested and use `--dry-run`.
 
 ## Licence
 

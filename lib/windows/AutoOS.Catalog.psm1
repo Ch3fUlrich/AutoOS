@@ -13,7 +13,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:ValidProviders = @('winget', 'choco', 'npm', 'apt', 'snap', 'script', 'custom')
+$script:ValidProviders = @('winget', 'choco', 'npm', 'apt', 'snap', 'brew', 'script', 'custom')
 
 function Get-AutoOSCatalog {
     param([Parameter(Mandatory)][string]$Path)
@@ -68,6 +68,9 @@ function Test-AutoOSCatalogSchema {
                     if ($r -eq $c.id)      { [void]$problems.Add("$where : requires itself") }
                 }
             }
+            if ($c.PSObject.Properties.Name -contains 'verify' -and [string]::IsNullOrWhiteSpace($c.verify)) {
+                [void]$problems.Add("$where : 'verify' is present but empty")
+            }
             if ($c.PSObject.Properties.Name -contains 'prompt') {
                 if (-not $Catalog.prompts -or -not $Catalog.prompts.PSObject.Properties.Name.Contains($c.prompt)) {
                     [void]$problems.Add("$where : references undefined prompt '$($c.prompt)'")
@@ -113,10 +116,12 @@ function Get-AutoOSAvailableComponents {
                 Provider    = $c.provider
                 Package     = $c.package
                 Source      = Get-AutoOSComponentProperty $c 'source' $null
+                Cask        = [bool](Get-AutoOSComponentProperty $c 'cask' $false)
                 Requires    = @(Get-AutoOSComponentProperty $c 'requires' @())
                 Profiles    = @(Get-AutoOSComponentProperty $c 'profiles' @())
                 PostInstall = Get-AutoOSComponentProperty $c 'postInstall' $null
                 Prompt      = Get-AutoOSComponentProperty $c 'prompt' $null
+                Verify      = Get-AutoOSComponentProperty $c 'verify' $null
                 Notes       = Get-AutoOSComponentProperty $c 'notes' $null
                 Category    = $cat.name
                 CategoryId  = $cat.id

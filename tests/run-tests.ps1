@@ -30,6 +30,7 @@ Import-Module (Join-Path $Lib 'AutoOS.Detect.psm1')  -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Catalog.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Install.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Serve.psm1')   -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.State.psm1')   -Force -DisableNameChecking
 
 $script:Pass = 0
 $script:Fail = 0
@@ -337,6 +338,94 @@ Test-Case 'two consecutive dry runs produce the same plan' {
 Test-Case 'an unknown component id is rejected' {
     $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -Only 'definitely-not-a-thing' -Yes -NoColor 2>&1) -join "`n"
     Assert-True ($LASTEXITCODE -ne 0 -and $out -match 'Unknown component') "exit=$LASTEXITCODE out=$out"
+}
+
+# ─── Run state, verification, undo ──────────────────────────────────────────
+Describe-Group 'state, verify and undo'
+
+Test-Case 'macos catalog validates' {
+    $c = Get-AutoOSCatalog (Join-Path $Root 'catalog\macos.json')
+    $p = @(Test-AutoOSCatalogSchema -Catalog $c)
+    if ($p.Count -eq 0) { Pass } else { throw ($p -join '; ') }
+}
+
+Test-Case 'brew is an accepted provider' {
+    $c = Get-AutoOSCatalog (Join-Path $Root 'catalog\macos.json')
+    $p = @(Test-AutoOSCatalogSchema -Catalog $c)
+    Assert-True (($p -join ';') -notmatch "unknown provider 'brew'") "brew was rejected: $($p -join '; ')"
+}
+
+Test-Case 'cask is projected onto the component' {
+    $c = Get-AutoOSCatalog (Join-Path $Root 'catalog\macos.json')
+    $a = @(Get-AutoOSAvailableComponents -Catalog $c -SystemInfo (New-FakeSystem -Arch 'arm64'))
+    $docker = $a | Where-Object { $_.Id -eq 'docker' }
+    Assert-True $docker.Cask 'docker should be a cask'
+}
+
+Test-Case 'verify commands survive catalog projection' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $git = $a | Where-Object { $_.Id -eq 'git' }
+    Assert-Equal $git.Verify 'git --version'
+}
+
+Test-Case 'a component with no verify command is unchecked' {
+    Assert-Equal (Test-AutoOSComponentWorks -VerifyCommand '' -Name 'x') 'unchecked'
+}
+
+Test-Case 'verification passes for something that is installed' {
+    Assert-Equal (Test-AutoOSComponentWorks -VerifyCommand 'cmd /c ver' -Name 'cmd') 'verified'
+}
+
+Test-Case 'verification reports unverified for a missing binary' {
+    Assert-Equal (Test-AutoOSComponentWorks -VerifyCommand 'definitely-not-a-real-binary --version' -Name 'ghost') 'unverified'
+}
+
+Test-Case '-NoVerify skips the check entirely' {
+    Set-AutoOSVerify $false
+    $r = Test-AutoOSComponentWorks -VerifyCommand 'definitely-not-a-real-binary' -Name 'ghost'
+    Set-AutoOSVerify $true
+    Assert-Equal $r 'unchecked'
+}
+
+Test-Case 'a dry run verifies nothing' {
+    Assert-Equal (Test-AutoOSComponentWorks -VerifyCommand 'cmd /c ver' -Name 'cmd' -DryRun $true) 'unchecked'
+}
+
+Test-Case 'state survives a save/load round trip' {
+    $tmp = Join-Path $env:TEMP "autoos-state-test-$([Guid]::NewGuid().ToString('N')).json"
+    Save-AutoOSState -Path $tmp -ProfileName 'light' -Selected @('git', 'nodejs') `
+        -Answers @{ omnigraph_url = 'https://example.invalid' } `
+        -Results @{ installed = @('git'); skipped = @('nodejs'); failed = @() } | Out-Null
+    $back = Import-AutoOSState -Path $tmp
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Assert-Equal "$($back.Profile)|$($back.Selected -join ',')|$($back.Answers['omnigraph_url'])" `
+                 'light|git,nodejs|https://example.invalid'
+}
+
+Test-Case 'a dry run saves no state' {
+    $tmp = Join-Path $env:TEMP "autoos-state-test-$([Guid]::NewGuid().ToString('N')).json"
+    Save-AutoOSState -Path $tmp -ProfileName 'light' -Selected @('git') -DryRun $true | Out-Null
+    $existed = Test-Path $tmp
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Assert-True (-not $existed) 'dry run wrote a state file'
+}
+
+Test-Case 'backups are grouped newest-per-original' {
+    $scratch = Join-Path $env:TEMP "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    'original' | Out-File (Join-Path $scratch 'profile.ps1') -Encoding utf8
+    'v1' | Out-File (Join-Path $scratch 'profile.ps1.autoos-backup-20260101-000000') -Encoding utf8
+    'v2' | Out-File (Join-Path $scratch 'profile.ps1.autoos-backup-20260202-000000') -Encoding utf8
+    $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+    Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    Assert-True ($b.Count -eq 1 -and $b[0].Backup -match '20260202') "got: $($b | ConvertTo-Json -Compress)"
+}
+
+Test-Case 'undo never uninstalls anything' {
+    # The safety property, asserted on the source rather than by removing software.
+    $src = Get-Content (Join-Path $Lib 'AutoOS.State.psm1') -Raw
+    Assert-True ($src -notmatch 'winget\s+uninstall|choco\s+uninstall|npm\s+uninstall') `
+        'the undo path contains an uninstall command'
 }
 
 # ─── Static analysis ────────────────────────────────────────────────────────

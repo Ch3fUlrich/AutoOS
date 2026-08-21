@@ -24,7 +24,8 @@
             "workstation",
             "ai-coding",
             "server"
-          ]
+          ],
+          "verify": "gcc --version"
         },
         {
           "id": "git",
@@ -37,7 +38,8 @@
             "ai-coding",
             "light",
             "server"
-          ]
+          ],
+          "verify": "git --version"
         },
         {
           "id": "download-tools",
@@ -50,7 +52,8 @@
             "ai-coding",
             "light",
             "server"
-          ]
+          ],
+          "verify": "curl --version"
         },
         {
           "id": "python3",
@@ -62,7 +65,8 @@
             "workstation",
             "ai-coding",
             "server"
-          ]
+          ],
+          "verify": "python3 --version"
         },
         {
           "id": "monitoring",
@@ -105,7 +109,8 @@
             "workstation",
             "ai-coding",
             "server"
-          ]
+          ],
+          "verify": "zsh --version"
         },
         {
           "id": "oh-my-zsh",
@@ -179,7 +184,8 @@
             "ai-coding",
             "light",
             "server"
-          ]
+          ],
+          "verify": "tmux -V"
         }
       ]
     },
@@ -202,7 +208,8 @@
             "ai-coding",
             "light",
             "server"
-          ]
+          ],
+          "verify": "node --version"
         },
         {
           "id": "claude-code",
@@ -218,7 +225,8 @@
             "ai-coding",
             "light",
             "server"
-          ]
+          ],
+          "verify": "claude --version"
         },
         {
           "id": "herdr",
@@ -235,7 +243,8 @@
             "light",
             "server"
           ],
-          "prompt": "herdr_source"
+          "prompt": "herdr_source",
+          "verify": "herdr --version"
         },
         {
           "id": "docker",
@@ -251,7 +260,8 @@
             "ai-coding",
             "server"
           ],
-          "postInstall": "add_user_to_docker_group"
+          "postInstall": "add_user_to_docker_group",
+          "verify": "docker --version"
         },
         {
           "id": "antigravity",
@@ -269,7 +279,8 @@
             "workstation"
           ],
           "notes": "Desktop IDE — hidden on headless and arm64 machines.",
-          "prompt": "antigravity_url"
+          "prompt": "antigravity_url",
+          "verify": "antigravity --version"
         },
         {
           "id": "agent-skills",
@@ -302,7 +313,8 @@
             "workstation",
             "ai-coding",
             "server"
-          ]
+          ],
+          "verify": "nvim --version"
         }
       ]
     },
@@ -324,7 +336,8 @@
             "ai-coding",
             "light",
             "server"
-          ]
+          ],
+          "verify": "tailscale version"
         },
         {
           "id": "openssh-server",
@@ -335,7 +348,8 @@
           "profiles": [
             "light",
             "server"
-          ]
+          ],
+          "verify": "sshd -V"
         },
         {
           "id": "wireguard",
@@ -362,7 +376,8 @@
           ],
           "profiles": [
             "workstation"
-          ]
+          ],
+          "verify": "xpipe version"
         }
       ]
     },
@@ -415,7 +430,8 @@
           "profiles": [
             "workstation",
             "server"
-          ]
+          ],
+          "verify": "ansible --version"
         },
         {
           "id": "cron",

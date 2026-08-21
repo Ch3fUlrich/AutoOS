@@ -61,6 +61,11 @@ is_installed() {
             done
             return 0 ;;
         snap)   snap list "$package" >/dev/null 2>&1 ;;
+        brew)
+            for pkg in $package; do
+                brew list --versions "$pkg" >/dev/null 2>&1 || return 1
+            done
+            return 0 ;;
         npm)    npm ls -g --depth=0 2>/dev/null | grep -q -- "$package" ;;
         script) script_is_installed "$package" ;;
         *)      return 1 ;;
@@ -90,7 +95,7 @@ script_is_installed() {
 # output into the status string and match none of the cases.
 INSTALL_STATE=""
 install_component() {
-    local provider="$1" package="$2"
+    local provider="$1" package="$2" CASK_FLAG="${3:-0}"
     INSTALL_STATE="failed"
 
     if is_installed "$provider" "$package"; then
@@ -106,6 +111,16 @@ install_component() {
             run $AUTOOS_SUDO apt-get install -y $package || rc=$?
             ;;
         snap)   run $AUTOOS_SUDO snap install "$package" || rc=$? ;;
+        brew)
+            # Homebrew must never run under sudo - it refuses, and on the rare
+            # setup where it does not, it leaves a root-owned prefix behind.
+            # shellcheck disable=SC2086  # package may be several formulae
+            if [[ "$CASK_FLAG" == "1" ]]; then
+                run brew install --cask $package || rc=$?
+            else
+                run brew install $package || rc=$?
+            fi
+            ;;
         npm)    run npm install -g "$package" || rc=$? ;;
         script) install_script "$package" || rc=$? ;;
         custom) rc=0 ;;   # handled entirely by postInstall
@@ -301,4 +316,132 @@ run_post_install() {
     fi
     ui_step "post-install: ${fn}"
     "$fn"
+}
+
+# ─── Post-install verification ──────────────────────────────────────────────
+# A package manager reporting success is not proof the thing actually works: a
+# binary can land outside PATH, or a shim can be created without its runtime.
+# `verify` in the catalog is the command that proves it.
+AUTOOS_VERIFY=1
+# Result lands in VERIFY_STATE, not on stdout: this function also prints progress,
+# so a $(...) capture would swallow the UI output into the status string.
+VERIFY_STATE="unchecked"
+
+verify_component() {
+    local cmd="$1" name="$2"
+    VERIFY_STATE="unchecked"
+    [[ -z "$cmd" ]] && return 0
+    (( AUTOOS_VERIFY )) || return 0
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would verify: $cmd"
+        return 0
+    fi
+    # A fresh install often lands in a directory this shell has not picked up.
+    local probe_path="$PATH:/usr/local/bin:/usr/bin:/snap/bin:$SYS_HOME/.local/bin"
+    if PATH="$probe_path" bash -lc "$cmd" >/dev/null 2>&1; then
+        ui_ok "verified: $name"
+        VERIFY_STATE="verified"
+    else
+        ui_warn "$name installed but '$cmd' did not succeed - it may need a new login."
+        VERIFY_STATE="unverified"
+    fi
+    return 0
+}
+
+# ─── Run state: save and replay ─────────────────────────────────────────────
+# Re-imaging a machine should not mean re-choosing 30 checkboxes.
+autoos_state_save() {
+    local path="$1" profile="$2" selected="$3" installed="$4" skipped="$5" failed="$6"
+    (( AUTOOS_DRY_RUN )) && { ui_muted "would save run state to $path"; return 0; }
+    catalog_require_python || return 0
+    local answers_json="{}"
+    if (( ${#AUTOOS_ANSWERS[@]} )); then
+        answers_json="$(
+            for k in "${!AUTOOS_ANSWERS[@]}"; do printf '%s\x1f%s\n' "$k" "${AUTOOS_ANSWERS[$k]}"; done |
+            python3 -c "
+import json,sys
+print(json.dumps({l.split(chr(31),1)[0]: l.split(chr(31),1)[1]
+                  for l in sys.stdin.read().splitlines() if chr(31) in l}))"
+        )"
+    fi
+    python3 - "$path" "$profile" "$selected" "$installed" "$skipped" "$failed" "$answers_json" <<'PY'
+import json, sys, datetime
+path, profile, selected, installed, skipped, failed, answers = sys.argv[1:8]
+json.dump({
+    "version": 1,
+    "savedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    "platform": "linux",
+    "profile": profile,
+    "selected": selected.split(),
+    "answers": json.loads(answers or "{}"),
+    "results": {"installed": installed.split(), "skipped": skipped.split(), "failed": failed.split()},
+}, open(path, "w", encoding="utf-8"), indent=2)
+PY
+    ui_ok "run state saved to $path"
+}
+
+# Sets STATE_PROFILE / STATE_SELECTED and fills AUTOOS_ANSWERS.
+autoos_state_load() {
+    local path="$1"
+    [[ -f "$path" ]] || { ui_err "No state file at $path"; return 1; }
+    catalog_require_python || return 1
+    local line
+    while IFS=$'\x1f' read -r key value; do
+        case "$key" in
+            __profile)  STATE_PROFILE="$value" ;;
+            __selected) STATE_SELECTED="$value" ;;
+            *)          [[ -n "$key" ]] && AUTOOS_ANSWERS["$key"]="$value" ;;
+        esac
+    done < <(python3 - "$path" <<'PY'
+import json, sys
+US = chr(31)
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+print("__profile"  + US + (d.get("profile") or "custom"))
+print("__selected" + US + " ".join(d.get("selected") or []))
+for k, v in (d.get("answers") or {}).items():
+    print(k + US + str(v))
+PY
+    )
+    ui_ok "loaded state from $path (profile: ${STATE_PROFILE:-custom})"
+}
+
+# ─── Undo ───────────────────────────────────────────────────────────────────
+# Restores files AutoOS backed up. It deliberately does NOT uninstall packages:
+# guessing which of a package manager's changes were "ours" is how an undo
+# turns into a second incident.
+autoos_undo() {
+    local assume_yes="${1:-0}"
+    local -a originals=()
+    local b orig
+    while IFS= read -r b; do
+        orig="${b%.autoos-backup-*}"
+        [[ " ${originals[*]} " == *" $orig "* ]] || originals+=("$orig")
+    done < <(find "$SYS_HOME" -maxdepth 4 -name '*.autoos-backup-*' -type f 2>/dev/null | sort)
+
+    if (( ${#originals[@]} == 0 )); then
+        ui_info "Nothing to undo - AutoOS has not backed up any file on this machine."
+        return 0
+    fi
+
+    ui_section "Files AutoOS can restore"
+    local -a newest=()
+    for orig in "${originals[@]}"; do
+        b="$(find "$(dirname "$orig")" -maxdepth 1 -name "$(basename "$orig").autoos-backup-*" -type f 2>/dev/null | sort | tail -1)"
+        newest+=("$b")
+        printf '  %-52s <- %s\n' "$orig" "$(basename "$b")"
+    done
+    ui_muted "Installed packages are NOT removed - only these files are restored."
+
+    if (( AUTOOS_DRY_RUN )); then ui_warn "DRY RUN - nothing restored."; return 0; fi
+    if (( ! assume_yes )); then
+        if ! ui_confirm "Restore ${#originals[@]} file(s) from backup?" n; then
+            ui_warn "Cancelled - nothing was changed."
+            return 0
+        fi
+    fi
+    local i
+    for i in "${!originals[@]}"; do
+        cp "${newest[i]}" "${originals[i]}"
+        ui_ok "restored ${originals[i]}"
+    done
 }

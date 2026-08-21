@@ -10,7 +10,7 @@
 
 CATALOG_PATH=""
 declare -a CAT_ID CAT_NAME CAT_DESC CAT_PROVIDER CAT_PACKAGE CAT_REQUIRES
-declare -a CAT_PROFILES CAT_POST CAT_PROMPT CAT_NOTES CAT_GROUP
+declare -a CAT_PROFILES CAT_POST CAT_PROMPT CAT_NOTES CAT_GROUP CAT_VERIFY CAT_CASK
 
 catalog_require_python() {
     if ! has_cmd python3; then
@@ -32,7 +32,7 @@ try:
 except Exception as exc:
     print(f"catalog: not valid JSON ({exc})"); sys.exit(1)
 
-VALID = {"winget","choco","npm","apt","snap","script","custom"}
+VALID = {"winget","choco","npm","apt","snap","brew","script","custom"}
 problems, seen = [], set()
 cats = cat.get("categories")
 if not cats:
@@ -62,6 +62,9 @@ for grp in cats:
         for r in c.get("requires", []):
             if r not in all_ids:     problems.append(f"{where}: requires unknown component '{r}'")
             if r == cid:             problems.append(f"{where}: requires itself")
+        v = c.get("verify")
+        if "verify" in c and not (v or "").strip():
+            problems.append(f"{where}: 'verify' is present but empty")
         p = c.get("prompt")
         if p and p not in (cat.get("prompts") or {}):
             problems.append(f"{where}: references undefined prompt '{p}'")
@@ -80,15 +83,17 @@ catalog_load() {
 
     CAT_ID=(); CAT_NAME=(); CAT_DESC=(); CAT_PROVIDER=(); CAT_PACKAGE=()
     CAT_REQUIRES=(); CAT_PROFILES=(); CAT_POST=(); CAT_PROMPT=(); CAT_NOTES=(); CAT_GROUP=()
+    CAT_VERIFY=(); CAT_CASK=()
 
     # Delimiter is US (0x1f), NOT tab: tab is an IFS *whitespace* character, so
     # bash collapses runs of them and every empty field shifts the columns left.
-    while IFS=$'\x1f' read -r id name desc provider package requires profiles post prompt notes group; do
+    while IFS=$'\x1f' read -r id name desc provider package requires profiles post prompt notes group verify cask; do
         [[ -z "$id" ]] && continue
         CAT_ID+=("$id");           CAT_NAME+=("$name");     CAT_DESC+=("$desc")
         CAT_PROVIDER+=("$provider");CAT_PACKAGE+=("$package");CAT_REQUIRES+=("$requires")
         CAT_PROFILES+=("$profiles");CAT_POST+=("$post");     CAT_PROMPT+=("$prompt")
-        CAT_NOTES+=("$notes");      CAT_GROUP+=("$group")
+        CAT_NOTES+=("$notes");      CAT_GROUP+=("$group");   CAT_VERIFY+=("$verify")
+        CAT_CASK+=("$cask")
     done < <(python3 - "$path" "$arch" "$headless" <<'PY'
 import json, sys
 path, arch, headless = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
@@ -106,6 +111,8 @@ for grp in cat.get("categories", []):
             ",".join(c.get("requires", [])), ",".join(c.get("profiles", [])),
             c.get("postInstall",""), c.get("prompt",""),
             (c.get("notes","") or "").replace("\x1f"," "), grp.get("name",""),
+            c.get("verify","") or "",
+            "1" if c.get("cask") else "0",
         ]))
 PY
     )

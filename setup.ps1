@@ -40,6 +40,18 @@
 .PARAMETER CheckCatalog
     Validate the catalog schema and exit non-zero on any problem.
 
+.PARAMETER FromState
+    Replay a previous run's selection and answers from a saved state file.
+
+.PARAMETER SaveState
+    Where to write this run's state. Defaults to .autoos-state.json in the repo.
+
+.PARAMETER NoVerify
+    Skip the post-install check that each component actually runs.
+
+.PARAMETER Undo
+    Restore files AutoOS backed up. Does NOT uninstall packages.
+
 .EXAMPLE
     .\setup.ps1
     Interactive: detect, choose a profile, tick components, install.
@@ -71,7 +83,11 @@ param(
     [int]$Port = 8777,
     [string]$Bind = '127.0.0.1',
     [switch]$ListComponents,
-    [switch]$CheckCatalog
+    [switch]$CheckCatalog,
+    [string]$FromState,
+    [string]$SaveState,
+    [switch]$NoVerify,
+    [switch]$Undo
 )
 
 Set-StrictMode -Version Latest
@@ -84,8 +100,11 @@ Import-Module (Join-Path $LibDir 'AutoOS.Ui.psm1')      -Force -DisableNameCheck
 Import-Module (Join-Path $LibDir 'AutoOS.Detect.psm1')  -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.Catalog.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.Install.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $LibDir 'AutoOS.State.psm1')   -Force -DisableNameChecking
 
 if ($NoColor) { Set-AutoOSColor $false }
+if ($NoVerify) { Set-AutoOSVerify $false }
+if (-not $SaveState) { $SaveState = Join-Path $RepoRoot '.autoos-state.json' }
 
 $CatalogPath = Join-Path $RepoRoot 'catalog\windows.json'
 $catalog = Get-AutoOSCatalog -Path $CatalogPath
@@ -153,6 +172,12 @@ if ($blockers.Count) {
     }
 }
 
+# ─── Undo ───────────────────────────────────────────────────────────────────
+if ($Undo) {
+    Invoke-AutoOSUndo -DryRun:$DryRun.IsPresent -AssumeYes:$Yes.IsPresent
+    exit 0
+}
+
 # ─── Browser mode ───────────────────────────────────────────────────────────
 if ($Serve) {
     Import-Module (Join-Path $LibDir 'AutoOS.Serve.psm1') -Force -DisableNameChecking
@@ -164,7 +189,11 @@ if ($Serve) {
 $available = @(Get-AutoOSAvailableComponents -Catalog $catalog -SystemInfo $sys)
 $suggested = Get-AutoOSSuggestedProfile -SystemInfo $sys
 
-if ($Only) {
+$statePayload = $null
+if ($FromState) {
+    $statePayload = Import-AutoOSState -Path $FromState
+    $InstallProfile = $statePayload.Profile
+} elseif ($Only) {
     $InstallProfile = 'custom'
 } elseif (-not $InstallProfile) {
     Write-AutoOSSection 'Profile'
@@ -189,7 +218,16 @@ if ($Only) {
 Write-AutoOSLine "Using profile: $InstallProfile" -Level ok
 
 # ─── 3. Select ──────────────────────────────────────────────────────────────
-if ($Only) {
+if ($statePayload) {
+    # Keep only what this machine actually offers; a Pi replaying a workstation
+    # state should quietly drop what does not apply rather than fail.
+    $stateIds = @($statePayload.Selected)
+    $dropped  = @($stateIds | Where-Object { $_ -notin $available.Id })
+    if ($dropped.Count) {
+        Write-AutoOSLine "not available on this machine, skipping: $($dropped -join ', ')" -Level warn
+    }
+    $selectedIds = @($stateIds | Where-Object { $_ -in $available.Id })
+} elseif ($Only) {
     $unknown = @($Only | Where-Object { $_ -notin $available.Id })
     if ($unknown.Count) {
         Write-AutoOSLine "Unknown component id(s): $($unknown -join ', ')" -Level error
@@ -231,6 +269,7 @@ Write-AutoOSLine "$($plan.Count) component(s); $(@($plan | Where-Object { $_.Aut
 
 # ─── 5. Questions (all of them, before anything is touched) ─────────────────
 $answers = @{}
+if ($statePayload) { $answers = $statePayload.Answers }
 $needed = @($plan | Where-Object { $_.Prompt } | ForEach-Object { $_.Prompt } | Select-Object -Unique)
 
 # An AUTOOS_ANSWER_<KEY> environment variable pre-answers a prompt; this is how
@@ -241,7 +280,7 @@ foreach ($key in $needed) {
     $val = [Environment]::GetEnvironmentVariable($envName)
     if ($null -ne $val -and $val -ne '') { $fromEnv[$key] = $val; $answers[$key] = $val }
 }
-$needed = @($needed | Where-Object { -not $fromEnv.ContainsKey($_) })
+$needed = @($needed | Where-Object { -not $fromEnv.ContainsKey($_) -and -not $answers.ContainsKey($_) })
 
 if ($needed.Count -and -not $Yes) {
     Write-AutoOSSection 'A few questions'
@@ -274,6 +313,7 @@ Initialize-AutoOSInstaller -DryRun:$DryRun.IsPresent -Answers $answers -RepoRoot
 
 Write-AutoOSSection 'Installing'
 $results = [ordered]@{ installed = @(); skipped = @(); failed = @() }
+$unverified = 0
 $n = 0
 foreach ($c in $plan) {
     $n++
@@ -281,8 +321,12 @@ foreach ($c in $plan) {
     try {
         $state = Install-AutoOSComponent -Component $c
         if ($state -ne 'failed') { Invoke-AutoOSPostInstall -Component $c }
-        $results[$state] += $c.Name
-        if ($state -eq 'installed') { Write-AutoOSLine "$($c.Name) done" -Level ok }
+        $results[$state] += $c.Id
+        if ($state -eq 'installed') {
+            $v = Test-AutoOSComponentWorks -VerifyCommand $c.Verify -Name $c.Name -DryRun:$DryRun.IsPresent
+            if ($v -eq 'unverified') { $unverified++ }
+            Write-AutoOSLine "$($c.Name) done" -Level ok
+        }
     } catch {
         Write-AutoOSLine "$($c.Name): $($_.Exception.Message)" -Level error
         $results.failed += $c.Name
@@ -293,12 +337,18 @@ foreach ($c in $plan) {
 Write-AutoOSSection 'Summary'
 Write-AutoOSKeyValue 'Installed' "$($results.installed.Count)" 'ok'
 Write-AutoOSKeyValue 'Already present' "$($results.skipped.Count)" 'muted'
+if ($unverified -gt 0) { Write-AutoOSKeyValue 'Installed but unverified' "$unverified" 'warn' }
 Write-AutoOSKeyValue 'Failed' "$($results.failed.Count)" $(if ($results.failed.Count) { 'err' } else { 'muted' })
 if ($results.failed.Count) {
     Write-AutoOSLine ''
     foreach ($f in $results.failed) { Write-AutoOSLine $f -Level error }
     Write-AutoOSLine 'Re-run to retry only the failures; everything else reports as already present.' -Level muted
 }
+# Saved last, so a replay reflects what actually happened rather than what was planned.
+Save-AutoOSState -Path $SaveState -ProfileName $InstallProfile -Selected $selectedIds `
+                 -Answers $answers -Results $results -DryRun:$DryRun.IsPresent
+
 Write-AutoOSLine ''
 Write-AutoOSLine 'Some changes (PATH, fonts, Docker) need a new terminal or a reboot.' -Level info
+Write-AutoOSLine "Repeat this setup elsewhere with:  .\setup.ps1 -FromState $SaveState" -Level muted
 exit $(if ($results.failed.Count) { 1 } else { 0 })
