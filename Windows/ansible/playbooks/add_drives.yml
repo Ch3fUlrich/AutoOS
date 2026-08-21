@@ -1,6 +1,7 @@
-- hosts: windows
-  vars_files:
-    - "../network_drives.yml"
+---
+- name: Map network drives
+  hosts: windows
+  gather_facts: false
 
   tasks:
     - name: Ensure network drives are mapped
@@ -11,17 +12,15 @@
         password: "{{ item.password }}"
         state: present
       loop: "{{ network_drives }}"
-      #become: true
-      #become_method: runas
-      #become_user: "{{ ansible_user }}"
+      loop_control:
+        label: "{{ item.name }}"     # keep the password out of the task log
+      no_log: true
 
-
-    # Optional: Verify drive mapping
-    - name: Verify drive mapping
-      ansible.windows.win_command: "net use"
-      register: drive_mapping_result
+    - name: Read back the mapped drives
+      ansible.windows.win_command: net use
+      register: drive_mapping
       changed_when: false
 
-    - name: Display drive mapping
-      debug:
-        var: drive_mapping_result.stdout_lines
+    - name: Show the mapped drives
+      ansible.builtin.debug:
+        var: drive_mapping.stdout_lines

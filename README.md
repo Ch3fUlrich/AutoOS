@@ -1,121 +1,179 @@
-# Post OS installation Setup
-This Repository is for setting up a newly installed OS with all the necessary tools and configurations. For this process we will use [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html) was born in the Linux world, support and capabilities for managing Windows environments have improved significantly.
-Automations are done using [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html).
+# AutoOS
 
-## Windows (10)
-Since Ansible is not natively supported on Windows, we will use Windows Subsystem for Linux (WSL) to run Ansible. WSL allows you to run a Linux distribution on Windows without the need for a virtual machine or dual booting.
+Set up a freshly installed machine without clicking through twenty installers.
 
-1. [Set Up Windows Subsystem for Linux](#set-up-windows-subsystem-for-linux)
-2. [Install Orchestrator](#install-ansible).
-3. [Setup SSH server on Windows](#setup-ssh-server-on-windows).
-4. Test the connection to Windows from Ubuntu by running the following command:
-```bash
-ssh <windows-ip>
-```
-5. [Configure Ansible for Windows](#configure-ansible-for-windows).
-6. [Setup Ansible scripts](#setup-ansible-scripts).
-7. [Run the main playbook in the Ubuntu terminal](#run-playbooks).
-
-### Set Up Windows Subsystem for Linux
-1. Open PowerShell as Administrator and run the following line to install Ubuntu:
-```powershell
-wsl --install
-```
-2. **Restart** your computer when prompted.
-   1. If the installation failed set the **virtualization** flag in the **BIOS** to **enabled**.
-3. **Start** **Ubuntu** installation by searching for Ubuntu in the start menu.
-4. Complete the installation and setup of the Linux distribution.
-
-### Setup SSH Server on Windows
-Since Ansible uses SSH to connect to Windows machines, we need to set up an SSH server on Windows. The following commands will install the OpenSSH server, start the service, set it to start automatically, and allow it through the firewall.
-
-Open PowerShell as **Administrator** and run the following commands:
+One command per platform. It works out what kind of machine it is running on,
+suggests a sensible profile, lets you tick exactly what you want, shows you the
+plan, and only then installs anything.
 
 ```powershell
-# check if OpenSSH is installed
-Get-WindowsCapability -Online | ? Name -like 'OpenSSH*'
-# install the OpenSSH server (client is typically already installed)
-Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-# start the ssh server
-Start-Service sshd
-# Set SSH server to start automatically
-Set-Service -Name sshd -StartupType 'Automatic'
-# Allow SSH server through the firewall
-New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Protocol TCP -Action Allow -LocalPort 22
-# verify ssh server is running
-Get-Service -Name sshd
+.\setup.ps1          # Windows 10/11
 ```
 
-
-### Configure Ansible for Windows
-Ansible uses an inventory file (ansible hosts) to specify which Windows machines to connect to and manage with Ansible playbooks.
-
-Let‘s create an inventory file and set up key-based SSH authentication for passwordless connections:
-1. **Start Ubuntu** installation by searching for Ubuntu in the start menu.
-2. **Set defaults** for Ansible on Windows: Create a .ansible.cfg file in your home directory by running `nano ~/.ansible.cfg` and add the following lines:
-```yaml
-[defaults]
-interpreter_python = auto_silent
-host_key_checking = False
-```
-3. Press Ctrl + X to exit and save the file, then press Y to confirm.
-
-### The Ansible setup will 
-
-## Linux (Ubuntu)
-### Install [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html)
-1. Update the package list and install [Ansible](https://docs.ansible.com/ansible/latest/getting_started/index.html): The packages that will be installed are:
-    - python – Ansible is written in Python
-    - python-pip – Used to install Ansible dependencies
-    - software-properties-common – Allows apt-add-repository command
-    - ansible – The latest Ansible release
 ```bash
-sudo apt update -y
-sudo apt upgrade -y
-#sudo apt install software-properties-common
-#sudo apt-add-repository --yes --update ppa:ansible/ansible
-sudo apt install git sshpass ansible
-# verify installation
-ansible --version
+./setup.sh           # Debian / Ubuntu / Raspberry Pi OS
 ```
 
-### Setup Ansible scripts
-1. After the (installation)[#install-ansible] you can clone this repository and go into the wanted directory e.g. **Windows**. 
-```bash
-git clone https://github.com/Ch3fUlrich/AutoOS.git
-cd AutoOS/Windows/anisble
+No prerequisites. Not WSL, not Ansible, not Python packages, not a TUI library —
+which matters, because on a machine you just installed, nothing is there yet.
+
+---
+
+## What it looks like
+
 ```
-2. Get your windows username and ip address by running the following command in powershell.
+── Detected system ─────────────────────────────────────────────
+  Operating system       Microsoft Windows 11 Home (build 26200)
+  Architecture           x64
+  Machine                HP ENVY x360 Convertible
+  CPU                    AMD Ryzen 5 4500U - 6 threads
+  Memory                 7.4 GB
+  Package managers       winget, choco
+  Already present        git, node, docker, wsl
+
+  Choose what to install                    14 of 36 selected
+
+   TERMINAL & SHELL
+   > [x] Windows Terminal          Tabbed terminal with true-colour support
+     [x] PowerShell 7              Modern cross-platform PowerShell
+     [ ] Oh My Posh                Prompt theme engine for PowerShell
+
+   CODING & AI
+     [x] Claude Code CLI           Anthropic's terminal coding agent
+     [x] Docker Desktop            Containers - backs the local MCP stack
+
+  ↑↓ move   SPACE toggle   A all   N none   ENTER confirm   ESC cancel
+```
+
+Arrow keys to move, space to toggle, enter to confirm. Dependencies are worked
+out for you — tick Claude Code and Node.js comes along automatically.
+
+## Profiles
+
+A profile is just a starting set of ticks; you can change anything afterwards.
+The suggested one is picked from the hardware.
+
+| Profile | For | Roughly |
+|---|---|---|
+| `workstation` | A machine you sit in front of | Everything that fits |
+| `ai-coding` | Development box | Editors, agents, containers, shell |
+| `light` | Raspberry Pi 5 and similar | Claude Code, Tailscale, Herdr |
+| `server` *(Linux)* | Headless | Shell, networking, containers, no GUI |
+| `custom` | You decide | Nothing pre-ticked |
+
+## Common runs
+
+```bash
+./setup.sh --profile light --dry-run     # what a Pi would get, changes nothing
+./setup.sh --only claude-code,tailscale  # just these two, plus dependencies
+./setup.sh --list                        # every component id
+./setup.sh --check-catalog               # validate the catalog (CI-friendly)
+```
+
 ```powershell
-# get the username (this will be the username for the inventory file)
-$Env:UserName
-# the ip address should one of the ip addresses that pop up. Typically the top one. 
-ipconfig | Select-String "IPv4"
+.\setup.ps1 -Profile ai-coding -DryRun
+.\setup.ps1 -Only claude-code,tailscale -Yes
+.\setup.ps1 -ListComponents
 ```
-3. Change the **windows_ip**, **windows_user** and **windows_password** in the inventory file from the step before. The password is the password of the user that is logged in.
+
+`--dry-run` / `-DryRun` prints every command that *would* run and touches
+nothing. It is the right way to see what a profile means before committing.
+
+## Headless machines: the browser UI
+
+For a box you reach over SSH or Tailscale, drive the install from a browser:
+
 ```bash
-nano inventory.yml
+./setup.sh --serve                    # prints a URL with a one-time token
+./setup.sh --serve --bind 0.0.0.0     # reachable from your LAN / tailnet
 ```
-4. Ctrl + X to exit and save the file, then press Y to confirm.
 
-### Configure Ansible for Linux
-#TODO: Add Linux setup instructions
+```powershell
+.\setup.ps1 -Serve
+```
 
-### Run Playbooks
-To run all playbooks, use the following command:
+Same checkboxes, same plan, live log streamed back. The page is served locally
+and drives the real `setup.sh` / `setup.ps1`, so it cannot drift from the CLI.
+
+**It binds `127.0.0.1` by default and always requires the token printed in the
+terminal.** That endpoint installs software; a wider bind is opt-in and warned
+about. The token is regenerated every run.
+
+## What is on offer
+
+Run `--list` for the current set. The headline items:
+
+- **Terminal** — Windows Terminal, PowerShell 7, Oh My Posh / zsh + Powerlevel10k, Nerd Fonts
+- **Coding & AI** — Claude Code CLI, Claude Desktop, Antigravity, VS Code, Docker, Herdr, Node.js
+- **agent-skills + MCP** — clones [agent-skills](https://github.com/Ch3fUlrich/agent-skills) and wires up Serena / Graphify / Omnigraph / Superpowers, asking for your Omnigraph server URL rather than hardcoding one
+- **Desktop (Windows)** — Windhawk with the Explorer file-size and taskbar-clock mods, PowerToys
+- **Remote** — Tailscale, WireGuard, Parsec, OpenSSH
+- **Science** — Miniconda plus an isolated `suite2p` environment
+
+Adding software means adding an entry to `catalog/windows.json` or
+`catalog/linux.json`. No code changes.
+
+## Provisioning *other* machines
+
+`Windows/ansible/` provisions machines over the network. It is separate from the
+local entry points and needs the usual Ansible setup:
+
 ```bash
-ansible-playbook -i inventory.yml main_playbook.yml
+ansible-galaxy collection install -r Windows/ansible/requirements.yml
+cp Windows/ansible/inventory.example.yml Windows/ansible/inventory.yml   # then edit
+ansible-vault create Windows/ansible/group_vars/windows/vault.yml
+ansible-playbook -i Windows/ansible/inventory.yml Windows/ansible/main_playbook.yml --ask-vault-pass
 ```
 
-## MacOS
-#TODO: Add MacOS setup instructions
+`inventory.yml` and `vault.yml` are git-ignored. **Never put a real password,
+hostname or share path in a tracked file** — this repository is public and has
+leaked credentials once already.
 
+## Tests
 
-# Why Ansible?
-- **Agentless**: Ansible doesn’t require any agent to be installed on the client machine. It uses SSH for connecting to the client machines.
-- **Simple**: Ansible uses simple YAML syntax for writing playbooks.
-- **Powerful**: Ansible can automate complex multi-tier IT application environments.
-- **Flexible**: Ansible can be used to automate the configuration of a wide range of systems and devices such as servers, switches, storage, and cloud providers.
-- **Efficient**: Ansible uses a push-based mechanism for executing tasks on client machines. It can manage thousands of client machines from a single control node.
-- **Extensible**: Ansible can be extended by writing custom modules in any programming language.
-- **Secure**: Ansible uses SSH for connecting to the client machines. It can also be integrated with enterprise authentication systems such as LDAP, Active Directory, and Kerberos.
+```bash
+bash tests/run-tests.sh          # Linux
+bash tests/run-tests.sh --wsl    # same suite, forced through WSL2 from Windows
+```
+
+```powershell
+powershell -File tests\run-tests.ps1
+```
+
+No test framework to install and **no test installs anything** — providers are
+asserted on the planned command, never on system state. The suites cover catalog
+validation, dependency ordering, architecture and headless filtering, the
+detection heuristics, PATH-append safety, and double-run idempotency.
+
+## Repository layout
+
+```
+setup.ps1  setup.sh     the two entry points
+catalog/*.json          WHAT can be installed — data, no code
+lib/windows/*.psm1      HOW it happens on Windows
+lib/linux/*.sh          HOW it happens on Linux
+web/index.html          browser UI, served by --serve
+tests/                  both suites
+Windows/ansible/        remote fleet provisioning (not used by setup.ps1)
+Linux/ubuntu_autoinstall/  unattended Ubuntu install profile
+third_party/            vendored code under its own licence — do not edit
+```
+
+Working on this repo with an AI agent? Read [AGENTS.md](AGENTS.md) first.
+
+## Design rules
+
+These are enforced by tests, not just intentions:
+
+1. **Safe to run twice.** A second run reports `skipped`, never `installed`.
+2. **Never overwrite a PATH, profile or config wholesale** — read, append, write
+   back, and keep a timestamped backup. Replacing `Path` outright once wiped a
+   user's entire environment.
+3. **Nothing is installed before you confirm.** Detection and selection have no
+   side effects, which is what makes `--dry-run` meaningful.
+4. **A component that cannot work here is hidden**, not offered and then failed.
+
+## Licence
+
+[MIT](LICENSE). Vendored third-party code under `third_party/` keeps its own
+licence.

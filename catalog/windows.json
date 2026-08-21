@@ -1,0 +1,486 @@
+{
+  "$schema": "./schema.json",
+  "platform": "windows",
+  "profiles": {
+    "workstation": "Full development workstation — everything below that fits the hardware.",
+    "ai-coding": "Coding and AI tooling only, plus the terminal it runs in.",
+    "light": "Minimal remote-access box — Claude Code, Tailscale and Herdr only.",
+    "custom": "Start with nothing ticked and choose by hand."
+  },
+  "categories": [
+    {
+      "id": "terminal",
+      "name": "Terminal & Shell",
+      "description": "The shell you will spend the rest of the setup looking at.",
+      "components": [
+        {
+          "id": "windows-terminal",
+          "name": "Windows Terminal",
+          "description": "Tabbed terminal with true-colour support",
+          "provider": "winget",
+          "package": "Microsoft.WindowsTerminal",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ]
+        },
+        {
+          "id": "powershell7",
+          "name": "PowerShell 7",
+          "description": "Modern cross-platform PowerShell",
+          "provider": "winget",
+          "package": "Microsoft.PowerShell",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ]
+        },
+        {
+          "id": "oh-my-posh",
+          "name": "Oh My Posh",
+          "description": "Prompt theme engine for PowerShell",
+          "provider": "winget",
+          "package": "JanDeDobbeleer.OhMyPosh",
+          "requires": [
+            "powershell7",
+            "nerd-fonts"
+          ],
+          "postInstall": "Install-AutoOSPoshTheme",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ]
+        },
+        {
+          "id": "nerd-fonts",
+          "name": "Meslo Nerd Font",
+          "description": "Patched font with prompt glyphs and icons",
+          "provider": "script",
+          "package": "meslo-nerd-font",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "postInstall": "Install-AutoOSNerdFont",
+          "notes": "No winget package exists for Meslo; downloaded from the ryanoasis/nerd-fonts release and installed per-user."
+        }
+      ]
+    },
+    {
+      "id": "ui-design",
+      "name": "UI & Desktop Design",
+      "description": "Explorer, taskbar and window-manager customisation.",
+      "components": [
+        {
+          "id": "windhawk",
+          "name": "Windhawk",
+          "description": "Mod platform for Explorer and the taskbar",
+          "provider": "winget",
+          "package": "RamenSoftware.Windhawk",
+          "postInstall": "Install-AutoOSWindhawkMods",
+          "profiles": [
+            "workstation"
+          ],
+          "notes": "Seeds settings for the Better file sizes and Taskbar Clock mods; the mods themselves are enabled once from the Windhawk UI."
+        },
+        {
+          "id": "powertoys",
+          "name": "PowerToys",
+          "description": "FancyZones, PowerRename, Run and friends",
+          "provider": "winget",
+          "package": "Microsoft.PowerToys",
+          "profiles": [
+            "workstation"
+          ]
+        },
+        {
+          "id": "treesize",
+          "name": "TreeSize Free",
+          "description": "Find what is eating the disk",
+          "provider": "winget",
+          "package": "JAMSoftware.TreeSize.Free",
+          "profiles": [
+            "workstation"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ai-coding",
+      "name": "Coding & AI",
+      "description": "Editors, agents and the runtimes they need.",
+      "components": [
+        {
+          "id": "git",
+          "name": "Git",
+          "description": "Version control",
+          "provider": "winget",
+          "package": "Git.Git",
+          "postInstall": "Add-AutoOSGitToPath",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ]
+        },
+        {
+          "id": "nodejs",
+          "name": "Node.js LTS",
+          "description": "JavaScript runtime — required by Claude Code",
+          "provider": "winget",
+          "package": "OpenJS.NodeJS.LTS",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ]
+        },
+        {
+          "id": "claude-code",
+          "name": "Claude Code CLI",
+          "description": "Anthropic's terminal coding agent",
+          "provider": "npm",
+          "package": "@anthropic-ai/claude-code",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ]
+        },
+        {
+          "id": "claude-desktop",
+          "name": "Claude Desktop",
+          "description": "Claude desktop application",
+          "provider": "winget",
+          "package": "Anthropic.Claude",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ]
+        },
+        {
+          "id": "antigravity",
+          "name": "Antigravity",
+          "description": "Google's agent-first IDE",
+          "provider": "winget",
+          "package": "Google.Antigravity",
+          "postInstall": "Set-AutoOSAntigravityMcp",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ]
+        },
+        {
+          "id": "vscode",
+          "name": "Visual Studio Code",
+          "description": "Editor",
+          "provider": "winget",
+          "package": "Microsoft.VisualStudioCode",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ]
+        },
+        {
+          "id": "docker-desktop",
+          "name": "Docker Desktop",
+          "description": "Containers — backs the local MCP memory stack",
+          "provider": "winget",
+          "package": "Docker.DockerDesktop",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Requires virtualisation enabled in BIOS and a reboot after install."
+        },
+        {
+          "id": "herdr",
+          "name": "Herdr",
+          "description": "Persistent, resumable AI sessions",
+          "provider": "script",
+          "package": "herdr",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "prompt": "herdr_source"
+        },
+        {
+          "id": "agent-skills",
+          "name": "agent-skills + MCP servers",
+          "description": "Clone Ch3fUlrich/agent-skills and wire up the MCP stack",
+          "provider": "custom",
+          "package": "agent-skills",
+          "requires": [
+            "git",
+            "nodejs"
+          ],
+          "postInstall": "Install-AutoOSAgentSkills",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "prompt": "omnigraph_url"
+        }
+      ]
+    },
+    {
+      "id": "remote",
+      "name": "Remote Access & Networking",
+      "components": [
+        {
+          "id": "tailscale",
+          "name": "Tailscale",
+          "description": "Mesh VPN — reach this box from anywhere",
+          "provider": "winget",
+          "package": "Tailscale.Tailscale",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ]
+        },
+        {
+          "id": "wireguard",
+          "name": "WireGuard",
+          "description": "VPN client",
+          "provider": "winget",
+          "package": "WireGuard.WireGuard",
+          "profiles": [
+            "workstation"
+          ]
+        },
+        {
+          "id": "parsec",
+          "name": "Parsec",
+          "description": "Low-latency remote desktop",
+          "provider": "winget",
+          "package": "Parsec.Parsec",
+          "profiles": [
+            "workstation"
+          ]
+        },
+        {
+          "id": "moonlight",
+          "name": "Moonlight",
+          "description": "Game-streaming client",
+          "provider": "winget",
+          "package": "MoonlightGameStreamingProject.Moonlight",
+          "profiles": []
+        },
+        {
+          "id": "teamviewer",
+          "name": "TeamViewer",
+          "description": "Remote support",
+          "provider": "winget",
+          "package": "TeamViewer.TeamViewer",
+          "profiles": []
+        }
+      ]
+    },
+    {
+      "id": "tools",
+      "name": "General Tools",
+      "components": [
+        {
+          "id": "7zip",
+          "name": "7-Zip",
+          "description": "Archives",
+          "provider": "winget",
+          "package": "7zip.7zip",
+          "profiles": [
+            "workstation"
+          ]
+        },
+        {
+          "id": "notepadplusplus",
+          "name": "Notepad++",
+          "description": "Quick text editor",
+          "provider": "winget",
+          "package": "Notepad++.Notepad++",
+          "profiles": [
+            "workstation"
+          ]
+        },
+        {
+          "id": "firefox",
+          "name": "Firefox",
+          "description": "Browser",
+          "provider": "winget",
+          "package": "Mozilla.Firefox",
+          "profiles": [
+            "workstation"
+          ]
+        },
+        {
+          "id": "chrome",
+          "name": "Google Chrome",
+          "description": "Browser",
+          "provider": "winget",
+          "package": "Google.Chrome",
+          "profiles": [
+            "workstation"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "media",
+      "name": "Media & Communication",
+      "components": [
+        {
+          "id": "vlc",
+          "name": "VLC",
+          "description": "Media player",
+          "provider": "winget",
+          "package": "VideoLAN.VLC",
+          "profiles": [
+            "workstation"
+          ]
+        },
+        {
+          "id": "spotify",
+          "name": "Spotify",
+          "description": "Music",
+          "provider": "winget",
+          "package": "Spotify.Spotify",
+          "profiles": []
+        },
+        {
+          "id": "slack",
+          "name": "Slack",
+          "description": "Team chat",
+          "provider": "winget",
+          "package": "SlackTechnologies.Slack",
+          "profiles": []
+        },
+        {
+          "id": "zoom",
+          "name": "Zoom",
+          "description": "Video calls",
+          "provider": "winget",
+          "package": "Zoom.Zoom",
+          "profiles": []
+        },
+        {
+          "id": "whatsapp",
+          "name": "WhatsApp",
+          "description": "Messaging",
+          "provider": "winget",
+          "package": "9NKSQGP7F2NH",
+          "profiles": [],
+          "source": "msstore"
+        }
+      ]
+    },
+    {
+      "id": "research",
+      "name": "Notes & Research",
+      "components": [
+        {
+          "id": "obsidian",
+          "name": "Obsidian",
+          "description": "Markdown knowledge base",
+          "provider": "winget",
+          "package": "Obsidian.Obsidian",
+          "profiles": [
+            "workstation"
+          ]
+        },
+        {
+          "id": "zotero",
+          "name": "Zotero",
+          "description": "Reference manager",
+          "provider": "winget",
+          "package": "DigitalScholar.Zotero",
+          "profiles": []
+        }
+      ]
+    },
+    {
+      "id": "science",
+      "name": "Scientific Python",
+      "description": "Conda plus an isolated analysis environment.",
+      "components": [
+        {
+          "id": "miniconda",
+          "name": "Miniconda3",
+          "description": "Conda package manager",
+          "provider": "winget",
+          "package": "Anaconda.Miniconda3",
+          "postInstall": "Add-AutoOSCondaToPath",
+          "profiles": []
+        },
+        {
+          "id": "suite2p",
+          "name": "suite2p environment",
+          "description": "Conda env for calcium-imaging analysis",
+          "provider": "custom",
+          "package": "suite2p",
+          "requires": [
+            "miniconda"
+          ],
+          "postInstall": "New-AutoOSCondaEnv",
+          "profiles": []
+        }
+      ]
+    },
+    {
+      "id": "sync",
+      "name": "File Sync",
+      "components": [
+        {
+          "id": "owncloud",
+          "name": "ownCloud Desktop",
+          "description": "Self-hosted file sync",
+          "provider": "winget",
+          "package": "ownCloud.ownCloudDesktop",
+          "profiles": []
+        },
+        {
+          "id": "googledrive",
+          "name": "Google Drive",
+          "description": "Drive for desktop",
+          "provider": "winget",
+          "package": "Google.GoogleDrive",
+          "profiles": []
+        }
+      ]
+    }
+  ],
+  "prompts": {
+    "omnigraph_url": {
+      "question": "Omnigraph remote server URL (blank = local Docker stack on :8080)",
+      "default": "",
+      "validate": "url_or_empty",
+      "help": "If you run a shared Omnigraph server, give its base URL here and the MCP config will point at it instead of localhost."
+    },
+    "herdr_source": {
+      "question": "Herdr install source",
+      "default": "npm:herdr",
+      "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in winget, so AutoOS needs to be told where it lives."
+    }
+  },
+  "windhawk_mods": [
+    {
+      "id": "explorer-details-better-file-sizes",
+      "name": "Better file sizes in Explorer details",
+      "settings": {}
+    },
+    {
+      "id": "taskbar-clock-customization",
+      "name": "Taskbar Clock Customization",
+      "settings": {
+        "TopLine": "%date%  %time%",
+        "BottomLine": "💻%cpu%    |    %gpu% 🎞️  %newline%🧠%ram%    | %total_speed%"
+      }
+    }
+  ]
+}

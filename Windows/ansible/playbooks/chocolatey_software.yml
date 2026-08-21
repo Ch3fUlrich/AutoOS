@@ -1,89 +1,33 @@
-- name: Install software on Windows 11
+---
+- name: Install baseline software with Chocolatey
   hosts: windows
+  gather_facts: true
 
   tasks:
-
+    # The old version downloaded install.ps1 to the root of C:\ and ran it with
+    # -ExecutionPolicy Bypass, gated on `when: choco_install.changed` - which is
+    # false on every re-run, so a half-finished install never repaired itself.
     - name: Ensure Chocolatey is installed
-      win_get_url:
-        url: https://chocolatey.org/install.ps1
-        dest: C:\chocolatey-install.ps1
-      register: choco_install
-
-    - name: Run Chocolatey installation script
-      win_shell: powershell -NoProfile -ExecutionPolicy Bypass -File C:\chocolatey-install.ps1
-      when: choco_install.changed
+      chocolatey.chocolatey.win_chocolatey:
+        name: chocolatey
+        state: present
 
     - name: Install software via Chocolatey
-      win_chocolatey:
-        name: "{{ item }}"
+      chocolatey.chocolatey.win_chocolatey:
+        name: "{{ choco_packages }}"
         state: present
-        
-        # Uncomment the following lines if you want to ignore checksums (less secure)
-        #args:
-        #  choco_install_args: "--ignore-checksums"
-        
-      loop:
-        # Useful Tools
-        - 7zip
-        - powertoys
-        - treesizefree
-
-        # coding tools
-        ## fonts
-        - nerd-fonts-meslo
-        - nerd-fonts-firacode
-        - nerd-fonts-hack
-
-        ## linux commands
-        - cygwin
-        ## terminal design
-        - oh-my-posh
-
-        # Music and Video
-        - spotify
-        - vlc
-        
-        # Browsers
-        - firefox
-        - googlechrome
-
-        # File Sync and Cloud
-        - switchdrive
-        - owncloud-client
-        - googledrive
-        
-        # Remote Control
-        - teamviewer
-        - parsec
-        - moonlight-qt.install
-        #- moonlight-qt
-
-        # VPN
-        - wireguard
-
-        # Communication
-        - slack
-        - whatsapp
-        - zoom
-
-        # Notes
-        - zotero
-        - obsidian
-        - notepadplusplus
-
-        # Code
-        - vscode
-        - git
-        # Uncomment the following lines if you want to install Python and MATLAB
-        # - python
-        # - mcr-r2023b
-
-    - name: Ensure pip is installed for Python
-      win_command: "python -m ensurepip"
-      register: python_installed
-      ignore_errors: true  # Added to prevent failure if Python is not installed
-
-    - name: Clean up Chocolatey installation script
-      win_file:
-        path: C:\chocolatey-install.ps1
-        state: absent
+      vars:
+        choco_packages:
+          - 7zip
+          - powertoys
+          - treesizefree
+          - nerd-fonts-meslo
+          - oh-my-posh
+          - firefox
+          - googlechrome
+          - vlc
+          - notepadplusplus
+          - vscode
+          - git
+          - wireguard
+          - obsidian

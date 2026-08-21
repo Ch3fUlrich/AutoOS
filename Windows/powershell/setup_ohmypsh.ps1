@@ -1,33 +1,26 @@
-# Ensure script runs with administrative privileges
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Write-Host "This script must be run as Administrator!" -ForegroundColor Red
-    exit 1
-}
+﻿<#
+.SYNOPSIS
+    Compatibility shim. The real implementation is ..\..\setup.ps1.
 
-# Define relative paths
-$scriptPath = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
-$themeSource = Join-Path -Path $scriptPath -ChildPath "..\Terminal\oh-my-posh\theme\powerlevel10k_rainbow_env.omp.json"
-$themeDestination = "C:\Program Files (x86)\oh-my-posh\themes\powerlevel10k_rainbow.omp.json"
-$profilePath = "$HOME\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1"
+.DESCRIPTION
+    This script used to be a second copy of the oh-my-posh setup. It wrote the
+    Windows PowerShell 5.1 profile while initialising `pwsh` (so neither shell
+    was themed), overwrote oh-my-posh's shipped theme in Program Files, and
+    guarded itself with a Select-String regex built from a string full of regex
+    metacharacters. All of that is fixed in the main entry point, so this now
+    forwards rather than diverging again.
+#>
+[CmdletBinding()]
+param([switch]$DryRun)
 
-# 1. Ensure PowerShell profile exists
-if (-not (Test-Path $profilePath)) {
-    New-Item -Path $profilePath -ItemType File -Force
-}
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-# 2. Add Oh My Posh initialization to $PROFILE
-$ohMyPoshLine = 'oh-my-posh init pwsh --config "$env:POSH_THEMES_PATH/powerlevel10k_rainbow.omp.json" | Invoke-Expression'
-if (-not (Get-Content $profilePath | Select-String -Pattern $ohMyPoshLine)) {
-    Add-Content -Path $profilePath -Value $ohMyPoshLine
-}
+$root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+Write-Host 'Windows\powershell\setup_ohmypsh.ps1 is deprecated; running setup.ps1 instead.'
+Write-Host ''
 
-# 3. Copy custom theme to Oh My Posh themes folder
-Copy-Item -Path $themeSource -Destination $themeDestination -Force
-
-# 4. Install PSReadLine module
-Install-Module -Name PSReadLine -Scope CurrentUser -Force
-
-# 5. Set execution policy to RemoteSigned
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
-
-Write-Host "Oh My Posh setup complete!" -ForegroundColor Green
+$argsList = @('-Only', 'oh-my-posh', '-Yes')
+if ($DryRun) { $argsList += '-DryRun' }
+& (Join-Path $root 'setup.ps1') @argsList
+exit $LASTEXITCODE

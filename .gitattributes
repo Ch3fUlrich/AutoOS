@@ -1,0 +1,28 @@
+# Line endings are part of correctness here, not cosmetics.
+#
+# A shell script checked out with CRLF fails on Linux with a bad-interpreter
+# error, and a .ps1 without a UTF-8 BOM is decoded as ANSI by Windows
+# PowerShell 5.1 - which turns every box-drawing character into a parse error.
+# Both have already happened in this repository.
+
+* text=auto eol=lf
+
+# Must be LF wherever they are checked out
+*.sh    text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.html  text eol=lf
+
+# PowerShell: CRLF, and the BOM is content that must survive round-tripping
+*.ps1   text eol=crlf
+*.psm1  text eol=crlf
+*.psd1  text eol=crlf
+
+# Never touched
+*.ttf   binary
+*.png   binary
+*.jpg   binary
+*.exe   binary

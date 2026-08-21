@@ -1,64 +1,61 @@
-# autoinstall.yaml
+# Ubuntu 24.04 LTS unattended install (Subiquity autoinstall).
+#
+#   REQUIRED before use: replace identity.password with a real hash --
+#     mkpasswd -m sha-512
+#   and replace the ssh authorized key. The file will not produce a usable
+#   machine until you do; a placeholder hash locks the account out.
+#
+# Serve this as user-data alongside an empty meta-data file, e.g.
+#   python3 -m http.server 3003        # in the directory holding both
+#   ... then boot with: autoinstall ds=nocloud-net;s=http://<ip>:3003/
 version: 1
+
 identity:
-  hostname: ubuntu-server
+  hostname: autoos
   username: ubuntu
-  password: "$6$rounds=4096$somesalt$hashedpassword"
+  # NOT a valid hash -- generate your own with: mkpasswd -m sha-512
+  password: "$6$REPLACE$THIS$WITH$A$REAL$SHA512$CRYPT$HASH"
+
 locale: en_US.UTF-8
 keyboard:
   layout: us
+
+# The repo's whole premise is remote management, but the old profile installed
+# no SSH server at all.
+ssh:
+  install-server: true
+  allow-pw: false
+  authorized-keys:
+    - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI_REPLACE_WITH_YOUR_PUBLIC_KEY you@example.org"
+
 network:
   version: 2
   ethernets:
-    eth0:
+    # Ubuntu 24.04 uses predictable interface names (enp0s3, eno1, ...), so a
+    # literal `eth0` matches nothing and the installed system boots offline.
+    any-ethernet:
+      match:
+        name: "en*"
       dhcp4: true
+
+# `layout` and `config` are mutually exclusive in Subiquity: declaring both made
+# the installer stop at the storage stage. `layout` also sizes the volume group
+# sensibly, which the hand-written 20G split did not.
 storage:
   layout:
     name: lvm
-  swap:
-    size: 2GB
-  config:
-    - type: disk
-      id: disk0
-      ptable: gpt
-      wipe: superblock
-      grub_device: true
-      match:
-        size: largest
-    - type: partition
-      id: boot-partition
-      device: disk0
-      size: 1G
-      flag: boot
-    - type: partition
-      id: root-partition
-      device: disk0
-      size: 20G
-    - type: lvm_volgroup
-      id: vg0
-      devices:
-        - root-partition
-    - type: lvm_partition
-      id: lv-root
-      volgroup: vg0
-      size: 18G
-      fstype: ext4
-      mount: /
-    - type: lvm_partition
-      id: lv-swap
-      volgroup: vg0
-      size: 2G
-      fstype: swap
-      mount: swap
+
 packages:
+  - build-essential
   - clang
   - python3
   - python3-pip
   - python3-venv
-  - python3-setuptools
-  - python3-wheel
   - git
-  - initx
+  - curl
+  - wget
+  - ca-certificates
+  - xinit          # was `initx`, which is not a package and aborted the stage
   - openbox
   - tmux
   - wireguard
@@ -66,34 +63,37 @@ packages:
   - firefox-esr
   - nano
   - neovim
-  - wget
-  - curl
   - htop
   - nmon
-  - neofetch
+  - fastfetch      # neofetch was archived upstream in 2024
   - mc
   - ansible
   - cron
   - nfs-common
   - rsync
   - zsh
+
 user-data:
-  disable_root: false
+  disable_root: true
   timezone: UTC
   runcmd:
-    - bash <(curl -sL https://github.com/xpipe-io/xpipe/raw/master/get-xpipe.sh)
-    - mkdir -p /home/ubuntu/apps
-    - RUNONCE=1 CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-    - git clone https://github.com/zsh-users/zsh-autosuggestions /home/ubuntu/.oh-my-zsh/custom/plugins/zsh-autosuggestions
-    - git clone https://github.com/zsh-users/zsh-syntax-highlighting /home/ubuntu/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting
-    - git clone --depth=1 https://github.com/romkatv/powerlevel10k.git /home/ubuntu/.oh-my-zsh/custom/themes/powerlevel10k
-    - mkdir -p /home/ubuntu/.local/share/fonts
-    - wget -P /home/ubuntu/.local/share/fonts https://github.com/romkatv/powerlevel10k-media/raw/master/MesloLGS%20NF%20Regular.ttf
-    - fc-cache -fv
-    - echo 'HISTSIZE=50000' >> /home/ubuntu/.zshrc
-    - echo 'SAVEHIST=10000' >> /home/ubuntu/.zshrc
-    - echo 'ZSH_THEME="powerlevel10k/powerlevel10k"' >> /home/ubuntu/.zshrc
-    - echo 'plugins=(z git zsh-autosuggestions zsh-syntax-highlighting colored-man-pages)' >> /home/ubuntu/.zshrc
-    - chown -R ubuntu:ubuntu /home/ubuntu
+    # Every entry is the LIST form. A bare string is executed with `sh`, where
+    # bash process substitution -- `bash <(curl ...)` -- is a syntax error, so
+    # the old xpipe line silently never ran.
+    #
+    # Each command also runs as the TARGET USER, not root. The old profile ran
+    # the oh-my-zsh installer as root (landing in /root/.oh-my-zsh) and then
+    # cloned plugins into /home/ubuntu/.oh-my-zsh/custom/, a tree that never
+    # existed -- so the theme and plugins were never actually loaded.
+    - ["cloud-init-per", "once", "autoos-clone",
+       "runuser", "-u", "ubuntu", "--",
+       "git", "clone", "--depth", "1",
+       "https://github.com/Ch3fUlrich/AutoOS.git", "/home/ubuntu/AutoOS"]
+    # One entry point, one implementation: hand off to setup.sh rather than
+    # duplicating the package list and the shell setup here.
+    - ["cloud-init-per", "once", "autoos-setup",
+       "runuser", "-u", "ubuntu", "--",
+       "bash", "/home/ubuntu/AutoOS/setup.sh", "--profile", "server", "--yes", "--no-color"]
+
 late-commands:
-  - echo "Installation complete!" > /target/home/ubuntu/install-complete.txt
+  - echo "AutoOS autoinstall finished $(date -Is)" > /target/home/ubuntu/install-complete.txt

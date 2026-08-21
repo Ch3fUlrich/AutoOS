@@ -1,13 +1,16 @@
 ---
-- name: Main playbook
-  hosts: windows
-  vars_files:
-    - software_links.yml
-    - network_drives.yml
-
-
+# Remote fleet provisioning. To set up the machine you are sitting at, use
+# ../../setup.ps1 instead - it needs neither WSL nor Ansible.
+#
+#   ansible-galaxy collection install -r requirements.yml
+#   ansible-playbook -i inventory.yml main_playbook.yml --ask-vault-pass
+#
+# The previous version opened with a play that declared vars_files but had no
+# tasks. vars_files do not carry across import_playbook, so it was a no-op that
+# only looked like shared configuration. Shared variables now live in
+# group_vars/windows/, which every play picks up automatically.
 - import_playbook: playbooks/chocolatey_software.yml
-- import_playbook: playbooks/add_drives.yml
 - import_playbook: playbooks/python_miniconda_suite2p.yml
 - import_playbook: playbooks/down_install_software.yml
 - import_playbook: playbooks/terminal_setup.yml
+- import_playbook: playbooks/add_drives.yml

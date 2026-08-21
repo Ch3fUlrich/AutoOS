@@ -1,8 +1,11 @@
-# Bash Script for installation and configuration of Linux
-This Folder is for bash scripts that lead the setup of a Linux system after a fresh installation. 
-- tested on Ubuntu 24.04 LTS and should work on other Debian-based distributions as well.
+# Deprecated
 
-run the main script with:
+`install.sh` here is a thin shim that forwards to the repository's single Linux
+entry point:
+
 ```bash
-./install.sh
+./setup.sh
 ```
+
+Run that instead. It detects the machine, lets you tick exactly what you want,
+shows the plan before touching anything, and is safe to run twice.

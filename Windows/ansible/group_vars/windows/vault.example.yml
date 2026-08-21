@@ -1,0 +1,8 @@
+# Copy to vault.yml and encrypt it - NEVER commit the decrypted file:
+#   ansible-vault encrypt group_vars/windows/vault.yml
+#
+# vault.yml is git-ignored. Only this .example file is tracked.
+vault_windows_password: "replace-me"
+vault_unibas_mail: "first.last@example.org"
+vault_unibas_password: "replace-me"
+vault_toucan_username: "replace-me"

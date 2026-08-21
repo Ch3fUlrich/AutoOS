@@ -1,1 +1,45 @@
+# ─── Secrets — never commit. Only *.example.* templates are tracked. ─────────
+inventory.yml
+*.vault.yml
+vault.yml
+.vault_pass
+.env
+.env.*
+!.env.example
+!*.example.yml
+!*.example.json
+
+# ─── Downloaded installers and vendor binaries ──────────────────────────────
+installs/
 installers/
+downloads/
+*.exe
+*.msi
+*.deb
+*.rpm
+*.dmg
+*.appx
+*.msix
+
+# ─── Ansible ────────────────────────────────────────────────────────────────
+*.retry
+.ansible/
+collections/
+
+# ─── AutoOS runtime output ──────────────────────────────────────────────────
+logs/
+*.autoos-backup-*
+.autoos-state.json
+
+# ─── Agent tooling ──────────────────────────────────────────────────────────
+.serena/
+graphify-out/
+.claude/settings.local.json
+
+# ─── OS / editor noise ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/

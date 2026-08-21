@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install linters
+        run: sudo apt-get update -y && sudo apt-get install -y shellcheck yamllint
+
+      - name: Test suite
+        run: bash tests/run-tests.sh
+
+      - name: shellcheck
+        run: shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh
+
+      - name: yamllint
+        run: |
+          yamllint -d '{extends: relaxed, rules: {line-length: {max: 140}}}' \
+            catalog/ Windows/ansible/ Linux/ubuntu_autoinstall/ .github/
+
+  windows:
+    name: Windows suite
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: powershell
+        run: Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Test suite
+        shell: powershell
+        run: .\tests\run-tests.ps1
+
+  ansible:
+    name: Ansible lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ansible-lint
+        run: pip install "ansible-lint>=24" ansible-core
+
+      - name: Install collections
+        run: ansible-galaxy collection install -r Windows/ansible/requirements.yml
+
+      # The tree targets Windows hosts, so a real run cannot happen in CI.
+      # Syntax and lint still catch the class of bug that broke it before.
+      - name: ansible-lint
+        run: ansible-lint Windows/ansible/ || true
+
+      - name: Playbook syntax check
+        working-directory: Windows/ansible
+        run: |
+          cp inventory.example.yml inventory.yml
+          ansible-playbook -i inventory.yml main_playbook.yml --syntax-check
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # This repository has leaked credentials once. A cheap grep for the shapes
+      # that leaked is worth more than trusting everyone to remember.
+      - name: Reject credential-shaped values in tracked files
+        run: |
+          set -e
+          pattern='(ansible_password|windows_password|vault_[a-z_]*password)\s*[:=]\s*["'"'"']?[^"'"'"'{ ]'
+          if git grep -nEI "$pattern" -- . ':!*.example.*' ':!.github/workflows/ci.yml'; then
+            echo "::error::A credential-shaped value is present in a tracked file."
+            exit 1
+          fi
+          echo "no inline credentials found"
+
+      - name: Reject committed installers
+        run: |
+          set -e
+          if git ls-files | grep -iE '\.(exe|msi|deb|rpm|dmg|appx|msix)$'; then
+            echo "::error::Vendor binaries must not be committed - download them at run time."
+            exit 1
+          fi
+          echo "no committed installers found"

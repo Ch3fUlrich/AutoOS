@@ -1,0 +1,452 @@
+{
+  "$schema": "./schema.json",
+  "platform": "linux",
+  "profiles": {
+    "workstation": "Full desktop workstation — same coding and AI stack as the Windows profile.",
+    "ai-coding": "Coding and AI tooling plus the shell, no desktop packages.",
+    "light": "Small board (Raspberry Pi 5 and similar) — Claude Code, Tailscale and Herdr only.",
+    "server": "Headless server — shell, networking and containers, no GUI.",
+    "custom": "Start with nothing ticked and choose by hand."
+  },
+  "categories": [
+    {
+      "id": "core",
+      "name": "Core CLI",
+      "description": "The tools everything else assumes are present.",
+      "components": [
+        {
+          "id": "build-essentials",
+          "name": "Build essentials",
+          "description": "clang, make and headers",
+          "provider": "apt",
+          "package": "clang build-essential",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ]
+        },
+        {
+          "id": "git",
+          "name": "Git",
+          "description": "Version control",
+          "provider": "apt",
+          "package": "git",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ]
+        },
+        {
+          "id": "download-tools",
+          "name": "curl & wget",
+          "description": "Download tools",
+          "provider": "apt",
+          "package": "curl wget ca-certificates",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ]
+        },
+        {
+          "id": "python3",
+          "name": "Python 3",
+          "description": "Interpreter, pip and venv",
+          "provider": "apt",
+          "package": "python3 python3-pip python3-venv python3-setuptools python3-wheel",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ]
+        },
+        {
+          "id": "monitoring",
+          "name": "Monitoring tools",
+          "description": "htop, nmon and fastfetch",
+          "provider": "apt",
+          "package": "htop nmon",
+          "postInstall": "install_fastfetch",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ]
+        },
+        {
+          "id": "file-tools",
+          "name": "File tools",
+          "description": "Midnight Commander, rsync and NFS client",
+          "provider": "apt",
+          "package": "mc rsync nfs-common",
+          "profiles": [
+            "workstation",
+            "server"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "shell",
+      "name": "Shell & Terminal",
+      "description": "zsh, prompt theme and the font that renders it.",
+      "components": [
+        {
+          "id": "zsh",
+          "name": "Zsh",
+          "description": "The shell",
+          "provider": "apt",
+          "package": "zsh",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ]
+        },
+        {
+          "id": "oh-my-zsh",
+          "name": "Oh My Zsh",
+          "description": "Zsh framework and plugin manager",
+          "provider": "script",
+          "package": "oh-my-zsh",
+          "requires": [
+            "zsh",
+            "git",
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ]
+        },
+        {
+          "id": "zsh-plugins",
+          "name": "Zsh plugins",
+          "description": "autosuggestions and syntax highlighting",
+          "provider": "script",
+          "package": "zsh-plugins",
+          "requires": [
+            "oh-my-zsh"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ]
+        },
+        {
+          "id": "powerlevel10k",
+          "name": "Powerlevel10k",
+          "description": "Prompt theme",
+          "provider": "script",
+          "package": "powerlevel10k",
+          "requires": [
+            "oh-my-zsh"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ]
+        },
+        {
+          "id": "nerd-font",
+          "name": "MesloLGS Nerd Font",
+          "description": "Font with the prompt glyphs",
+          "provider": "script",
+          "package": "meslo-nerd-font",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation"
+          ],
+          "notes": "Only useful where a local display renders the terminal; skipped on headless profiles."
+        },
+        {
+          "id": "tmux",
+          "name": "tmux",
+          "description": "Terminal multiplexer",
+          "provider": "apt",
+          "package": "tmux",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ai-coding",
+      "name": "Coding & AI",
+      "description": "The same agent stack as the Windows workstation profile.",
+      "components": [
+        {
+          "id": "nodejs",
+          "name": "Node.js LTS",
+          "description": "Runtime required by Claude Code",
+          "provider": "script",
+          "package": "nodesource-lts",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ]
+        },
+        {
+          "id": "claude-code",
+          "name": "Claude Code CLI",
+          "description": "Anthropic's terminal coding agent",
+          "provider": "npm",
+          "package": "@anthropic-ai/claude-code",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ]
+        },
+        {
+          "id": "herdr",
+          "name": "Herdr",
+          "description": "Persistent, resumable AI sessions",
+          "provider": "script",
+          "package": "herdr",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "prompt": "herdr_source"
+        },
+        {
+          "id": "docker",
+          "name": "Docker Engine",
+          "description": "Containers — backs the local MCP memory stack",
+          "provider": "script",
+          "package": "docker",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "postInstall": "add_user_to_docker_group"
+        },
+        {
+          "id": "antigravity",
+          "name": "Antigravity",
+          "description": "Google's agent-first IDE",
+          "provider": "script",
+          "package": "antigravity",
+          "arch": [
+            "x64"
+          ],
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation"
+          ],
+          "notes": "Desktop IDE — hidden on headless and arm64 machines.",
+          "prompt": "antigravity_url"
+        },
+        {
+          "id": "agent-skills",
+          "name": "agent-skills + MCP servers",
+          "description": "Clone Ch3fUlrich/agent-skills and wire up the MCP stack",
+          "provider": "custom",
+          "package": "agent-skills",
+          "requires": [
+            "git",
+            "nodejs"
+          ],
+          "postInstall": "install_agent_skills",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "prompt": "omnigraph_url"
+        },
+        {
+          "id": "neovim",
+          "name": "Neovim + LazyVim",
+          "description": "Editor with the LazyVim starter config",
+          "provider": "apt",
+          "package": "neovim",
+          "requires": [
+            "git"
+          ],
+          "postInstall": "install_lazyvim",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "network",
+      "name": "Remote Access & Networking",
+      "components": [
+        {
+          "id": "tailscale",
+          "name": "Tailscale",
+          "description": "Mesh VPN — reach this box from anywhere",
+          "provider": "script",
+          "package": "tailscale",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ]
+        },
+        {
+          "id": "openssh-server",
+          "name": "OpenSSH server",
+          "description": "Accept inbound SSH",
+          "provider": "apt",
+          "package": "openssh-server",
+          "profiles": [
+            "light",
+            "server"
+          ]
+        },
+        {
+          "id": "wireguard",
+          "name": "WireGuard",
+          "description": "VPN",
+          "provider": "apt",
+          "package": "wireguard",
+          "profiles": [
+            "workstation",
+            "server"
+          ]
+        },
+        {
+          "id": "xpipe",
+          "name": "XPipe",
+          "description": "SSH connection manager",
+          "provider": "script",
+          "package": "xpipe",
+          "arch": [
+            "x64"
+          ],
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "desktop",
+      "name": "Desktop",
+      "description": "Only offered when a display is present.",
+      "requiresDisplay": true,
+      "components": [
+        {
+          "id": "xorg-openbox",
+          "name": "Xorg + Openbox",
+          "description": "Minimal window manager",
+          "provider": "apt",
+          "package": "xinit openbox",
+          "profiles": [
+            "workstation"
+          ]
+        },
+        {
+          "id": "firefox",
+          "name": "Firefox ESR",
+          "description": "Browser",
+          "provider": "apt",
+          "package": "firefox-esr",
+          "profiles": [
+            "workstation"
+          ]
+        },
+        {
+          "id": "w3m",
+          "name": "w3m",
+          "description": "Terminal browser",
+          "provider": "apt",
+          "package": "w3m",
+          "profiles": []
+        }
+      ]
+    },
+    {
+      "id": "automation",
+      "name": "Automation",
+      "components": [
+        {
+          "id": "ansible",
+          "name": "Ansible",
+          "description": "Provision other machines from this one",
+          "provider": "apt",
+          "package": "ansible sshpass",
+          "profiles": [
+            "workstation",
+            "server"
+          ]
+        },
+        {
+          "id": "cron",
+          "name": "cron",
+          "description": "Scheduled jobs",
+          "provider": "apt",
+          "package": "cron",
+          "profiles": [
+            "workstation",
+            "server"
+          ]
+        }
+      ]
+    }
+  ],
+  "prompts": {
+    "omnigraph_url": {
+      "question": "Omnigraph remote server URL (blank = local Docker stack on :8080)",
+      "default": "",
+      "validate": "url_or_empty",
+      "help": "If you run a shared Omnigraph server, give its base URL here and the MCP config will point at it instead of localhost."
+    },
+    "herdr_source": {
+      "question": "Herdr install source",
+      "default": "npm:herdr",
+      "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in apt, so AutoOS needs to be told where it lives."
+    },
+    "antigravity_url": {
+      "question": "Antigravity .deb download URL (blank to skip)",
+      "default": "",
+      "help": "Antigravity has no apt repository, so AutoOS needs the URL of the .deb from the official download page."
+    }
+  }
+}

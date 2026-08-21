@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoOS</title>
+<style>
+:root{
+  --ground:#F6F7F9; --surface:#FFFFFF; --surface-2:#EDEFF3;
+  --ink:#151922; --ink-muted:#5C6675; --ink-faint:#8A93A2;
+  --rule:#DDE1E8; --accent:#2F5D8C; --accent-soft:#E4EBF4;
+  --ok:#2E6B52; --warn:#B26A16; --err:#A3342A;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --ground:#12151B; --surface:#191D25; --surface-2:#222834;
+    --ink:#E7EAF0; --ink-muted:#9BA5B4; --ink-faint:#6F7A8A;
+    --rule:#2C333F; --accent:#7FA8D8; --accent-soft:#1E2A38;
+    --ok:#6FBF97; --warn:#DDA35C; --err:#E08579;
+  }
+}
+*{box-sizing:border-box}
+body{
+  margin:0;background:var(--ground);color:var(--ink);
+  font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+.wrap{max-width:960px;margin:0 auto;padding:28px 20px 80px}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+h1{font-size:1.6rem;margin:0;letter-spacing:-.02em}
+.sub{color:var(--ink-muted);font-size:.9rem}
+h2{font-size:1rem;margin:28px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--rule)}
+.card{background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:14px 16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px}
+.kv{display:flex;justify-content:space-between;gap:10px;font-size:.87rem;padding:3px 0}
+.kv b{color:var(--ink-muted);font-weight:500}
+.kv span{font-family:var(--mono);font-size:.8rem;text-align:right;word-break:break-word}
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 4px}
+select,button{
+  font:inherit;padding:7px 12px;border-radius:6px;border:1px solid var(--rule);
+  background:var(--surface);color:var(--ink);cursor:pointer;
+}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+button.primary:disabled{opacity:.5;cursor:not-allowed}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.cat{margin-bottom:14px}
+.cat h3{
+  font-size:.7rem;text-transform:uppercase;letter-spacing:.11em;color:var(--accent);
+  margin:0 0 6px;font-weight:700;
+}
+label.item{
+  display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-radius:6px;cursor:pointer;
+}
+label.item:hover{background:var(--surface-2)}
+label.item input{margin-top:3px;accent-color:var(--accent);width:16px;height:16px;flex:none}
+.item .name{font-weight:600;font-size:.9rem}
+.item .desc{color:var(--ink-muted);font-size:.82rem}
+.item .pkg{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint)}
+.q{margin:8px 0}
+.q label{display:block;font-size:.85rem;margin-bottom:4px}
+.q input{
+  width:100%;padding:7px 10px;border:1px solid var(--rule);border-radius:6px;
+  background:var(--surface);color:var(--ink);font-family:var(--mono);font-size:.83rem;
+}
+.q .help{color:var(--ink-faint);font-size:.78rem;margin-top:3px}
+#log{
+  background:#0D1117;color:#C9D1D9;font-family:var(--mono);font-size:.78rem;line-height:1.5;
+  padding:12px;border-radius:8px;height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+}
+#log .ok{color:#7EE787}.warn{color:#E3B341}.err{color:#FF7B72}.muted{color:#8B949E}.step{color:#79C0FF}
+.bar{height:5px;background:var(--surface-2);border-radius:3px;overflow:hidden;margin:8px 0}
+.bar>div{height:100%;width:0;background:var(--accent);transition:width .25s}
+.count{color:var(--ink-muted);font-size:.85rem}
+.banner{
+  background:var(--accent-soft);border:1px solid var(--rule);border-radius:8px;
+  padding:10px 14px;font-size:.85rem;margin-bottom:14px;
+}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>AutoOS</h1>
+    <span class="sub">post-install provisioning</span>
+  </header>
+  <div class="banner" id="banner">Connecting…</div>
+
+  <h2>Detected system</h2>
+  <div class="card"><div class="grid" id="sysinfo"></div></div>
+
+  <h2>What to install</h2>
+  <div class="controls">
+    <label class="sub" for="profile">Profile</label>
+    <select id="profile"></select>
+    <button id="selAll" type="button">Select all</button>
+    <button id="selNone" type="button">Select none</button>
+    <label class="sub"><input type="checkbox" id="dryRun" checked> Dry run</label>
+    <span class="count" id="count"></span>
+  </div>
+  <div class="card" id="catalog"></div>
+
+  <div id="questions" class="hidden">
+    <h2>Questions</h2>
+    <div class="card" id="qlist"></div>
+  </div>
+
+  <h2>Run</h2>
+  <div class="controls">
+    <button class="primary" id="run" type="button">Install selected</button>
+    <span class="count" id="status"></span>
+  </div>
+  <div class="bar"><div id="prog"></div></div>
+  <div id="log">Ready.</div>
+</div>
+
+<script>
+const token = new URLSearchParams(location.search).get('token') || '';
+const api = (p) => p + (p.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
+let STATE = null, running = false, logOffset = 0;
+
+const el = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function boot() {
+  try {
+    const r = await fetch(api('/api/state'));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    STATE = await r.json();
+  } catch (e) {
+    el('banner').textContent = 'Cannot reach the AutoOS server: ' + e.message +
+      '. Make sure you opened the URL printed in the terminal, including its token.';
+    return;
+  }
+  const s = STATE.system;
+  el('banner').innerHTML = 'Connected to <b>' + esc(s.host || 'this machine') + '</b> — ' +
+    esc(STATE.platform) + '. Nothing is installed until you press <b>Install selected</b>.';
+
+  el('sysinfo').innerHTML = Object.entries(STATE.system).filter(([k]) => k !== 'host')
+    .map(([k, v]) => '<div class="kv"><b>' + esc(k) + '</b><span>' + esc(v) + '</span></div>').join('');
+
+  const sel = el('profile');
+  sel.innerHTML = Object.entries(STATE.profiles)
+    .map(([n, d]) => '<option value="' + esc(n) + '" title="' + esc(d) + '">' + esc(n) + '</option>').join('');
+  sel.value = STATE.suggested;
+  sel.onchange = () => applyProfile(sel.value);
+
+  renderCatalog();
+  applyProfile(STATE.suggested);
+
+  el('selAll').onclick = () => { document.querySelectorAll('.pick').forEach(c => c.checked = true); onChange(); };
+  el('selNone').onclick = () => { document.querySelectorAll('.pick').forEach(c => c.checked = false); onChange(); };
+  el('run').onclick = runInstall;
+}
+
+function renderCatalog() {
+  const groups = {};
+  for (const c of STATE.components) (groups[c.category] ||= []).push(c);
+  el('catalog').innerHTML = Object.entries(groups).map(([g, items]) =>
+    '<div class="cat"><h3>' + esc(g) + '</h3>' + items.map(c =>
+      '<label class="item"><input type="checkbox" class="pick" data-id="' + esc(c.id) + '">' +
+      '<span><span class="name">' + esc(c.name) + '</span> ' +
+      '<span class="pkg">' + esc(c.provider) + ':' + esc(c.package) + '</span><br>' +
+      '<span class="desc">' + esc(c.description) + '</span></span></label>').join('') + '</div>').join('');
+  document.querySelectorAll('.pick').forEach(c => c.onchange = onChange);
+}
+
+function applyProfile(p) {
+  document.querySelectorAll('.pick').forEach(cb => {
+    const c = STATE.components.find(x => x.id === cb.dataset.id);
+    cb.checked = p !== 'custom' && (c.profiles || []).includes(p);
+  });
+  onChange();
+}
+
+function selectedIds() {
+  return [...document.querySelectorAll('.pick:checked')].map(c => c.dataset.id);
+}
+
+function onChange() {
+  const ids = selectedIds();
+  el('count').textContent = ids.length + ' selected';
+  // Show only the questions the current selection actually needs.
+  const keys = [...new Set(STATE.components.filter(c => ids.includes(c.id) && c.prompt).map(c => c.prompt))];
+  const box = el('questions');
+  if (!keys.length) { box.classList.add('hidden'); el('qlist').innerHTML = ''; return; }
+  box.classList.remove('hidden');
+  el('qlist').innerHTML = keys.map(k => {
+    const q = STATE.prompts[k] || {};
+    const prev = (document.querySelector('[data-q="' + k + '"]') || {}).value;
+    return '<div class="q"><label for="q_' + esc(k) + '">' + esc(q.question || k) + '</label>' +
+      '<input id="q_' + esc(k) + '" data-q="' + esc(k) + '" value="' + esc(prev ?? q.default ?? '') + '">' +
+      (q.help ? '<div class="help">' + esc(q.help) + '</div>' : '') + '</div>';
+  }).join('');
+}
+
+function answers() {
+  const out = {};
+  document.querySelectorAll('[data-q]').forEach(i => out[i.dataset.q] = i.value);
+  return out;
+}
+
+function appendLog(lines) {
+  const box = el('log');
+  for (const l of lines) {
+    const d = document.createElement('div');
+    d.className = l.level || '';
+    d.textContent = l.text;
+    box.appendChild(d);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+async function runInstall() {
+  if (running) return;
+  const ids = selectedIds();
+  if (!ids.length) { alert('Nothing selected.'); return; }
+  const dry = el('dryRun').checked;
+  if (!dry && !confirm('This will install ' + ids.length + ' component(s) on this machine. Continue?')) return;
+
+  running = true;
+  el('run').disabled = true;
+  el('log').textContent = '';
+  logOffset = 0;
+  el('status').textContent = dry ? 'dry run…' : 'installing…';
+
+  const r = await fetch(api('/api/install'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, answers: answers(), dryRun: dry })
+  });
+  if (!r.ok) {
+    appendLog([{ level: 'err', text: 'Server refused the request: HTTP ' + r.status }]);
+    running = false; el('run').disabled = false; return;
+  }
+  poll();
+}
+
+async function poll() {
+  try {
+    const r = await fetch(api('/api/log?offset=' + logOffset));
+    const d = await r.json();
+    if (d.lines && d.lines.length) { appendLog(d.lines); logOffset = d.offset; }
+    if (d.total) el('prog').style.width = Math.round(100 * d.done / d.total) + '%';
+    if (d.running) { setTimeout(poll, 600); return; }
+    running = false;
+    el('run').disabled = false;
+    el('status').textContent = d.summary || 'done';
+    el('prog').style.width = '100%';
+  } catch (e) {
+    appendLog([{ level: 'err', text: 'Lost contact with the server: ' + e.message }]);
+    running = false; el('run').disabled = false;
+  }
+}
+
+boot();
+</script>
+</body>
+</html>

@@ -1,21 +1,22 @@
-
-
-# Network drives to map
+---
+# Credentials come from group_vars/windows/vault.yml (ansible-vault encrypted).
+# Never inline a real username, password or share path here - this file is
+# tracked and the repository is public.
 network_drives:
-  - name: 'Unibas network drive' 
+  - name: Unibas network drive
     letter: U
-    path: '\\unibasel.ads.unibas.ch\bz'
-    username: '{{ unibas_mail }}'
-    password: '{{ unibas_password }}' 
-  
-  - name : 'Toucan network drive'
-    letter: X
-    path: '\\toucan-all.scicore.unibas.ch\donafl00-calcium$'
-    username: '{{ toucan_drive_username }}'
-    password: '{{ unibas_password }}' 
+    path: \unibasel.ads.unibas.ch\bz
+    username: "{{ vault_unibas_mail }}"
+    password: "{{ vault_unibas_password }}"
 
-  - name : 'Hippo network drive'
+  - name: Toucan network drive
+    letter: X
+    path: \toucan-all.scicore.unibas.ch\donafl00-calcium$
+    username: "{{ vault_toucan_username }}"
+    password: "{{ vault_toucan_password | default(vault_unibas_password) }}"
+
+  - name: Hippo network drive
     letter: Z
-    path: '\\toucan-all.scicore.unibas.ch\DONAFL00-HIPPO$'
-    username: '{{ toucan_drive_username }}'
-    password: '{{ unibas_password }}' 
+    path: \toucan-all.scicore.unibas.ch\DONAFL00-HIPPO$
+    username: "{{ vault_toucan_username }}"
+    password: "{{ vault_toucan_password | default(vault_unibas_password) }}"
