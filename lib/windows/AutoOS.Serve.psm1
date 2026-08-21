@@ -23,6 +23,12 @@ Import-Module (Join-Path $PSScriptRoot 'AutoOS.Catalog.psm1') -DisableNameChecki
 $script:Log     = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 $script:RunInfo = [hashtable]::Synchronized(@{ Running = $false; Done = 0; Total = 0; Summary = '' })
 
+# The installer process and one pending async read per stream. The server loop
+# drains them; see Update-AutoOSInstallLog for why it is not a reader thread.
+$script:Proc    = $null
+$script:OutTask = $null
+$script:ErrTask = $null
+
 function Get-AutoOSLineLevel {
     param([string]$Line)
     $t = $Line.TrimStart()
@@ -131,28 +137,71 @@ function Start-AutoOSInstallJob {
     $psi.UseShellExecute        = $false
     $psi.CreateNoWindow         = $true
 
-    $proc = [System.Diagnostics.Process]::Start($psi)
+    $script:Proc = [System.Diagnostics.Process]::Start($psi)
 
-    # Reader thread so the HTTP listener stays responsive while the install runs.
-    $reader = [System.Threading.Thread]::new({
-        while (-not $proc.StandardOutput.EndOfStream) {
-            $line = $proc.StandardOutput.ReadLine()
-            if ($null -eq $line) { break }
-            [void]$script:Log.Add(@{ level = (Get-AutoOSLineLevel $line); text = $line })
+    # One pending read per stream. Both streams must be read as they fill: an
+    # installer that writes enough to stderr while nobody drains it blocks on a
+    # full pipe buffer and the run hangs with no output and no error.
+    $script:OutTask = $script:Proc.StandardOutput.ReadLineAsync()
+    $script:ErrTask = $script:Proc.StandardError.ReadLineAsync()
+}
+
+function Update-AutoOSInstallLog {
+    <#
+    .SYNOPSIS
+        Move whatever the installer has printed so far into the served log.
+
+    .DESCRIPTION
+        Called on every tick of the server loop, idle ones included, and never
+        blocks - so output reaches the browser while it happens and the listener
+        stays answerable throughout a run.
+
+        This is deliberately not a reader thread. A PowerShell scriptblock has no
+        runspace on a raw .NET thread: it does not fail the read, it terminates
+        the whole process with "There is no Runspace available to run scripts in
+        this thread". Draining async reads from the one thread that does have a
+        runspace is the version that works.
+    #>
+    if ($null -eq $script:Proc) { return }
+
+    foreach ($stream in @('Out', 'Err')) {
+        while ($true) {
+            $task = if ($stream -eq 'Out') { $script:OutTask } else { $script:ErrTask }
+            if (($null -eq $task) -or (-not $task.IsCompleted)) { break }
+
+            # A faulted read means the stream died under us; treat it as its end
+            # rather than letting one broken pipe take the server down.
+            $line = $null
+            try { $line = $task.Result } catch { $line = $null }
+
+            if ($null -eq $line) {
+                if ($stream -eq 'Out') { $script:OutTask = $null } else { $script:ErrTask = $null }
+                break
+            }
+
+            $level = if ($stream -eq 'Err') { 'err' } else { Get-AutoOSLineLevel $line }
+            [void]$script:Log.Add(@{ level = $level; text = $line })
             if ($line.TrimStart().StartsWith('> [')) { $script:RunInfo.Done++ }
+
+            if ($stream -eq 'Out') { $script:OutTask = $script:Proc.StandardOutput.ReadLineAsync() }
+            else                   { $script:ErrTask = $script:Proc.StandardError.ReadLineAsync() }
         }
-        $err = $proc.StandardError.ReadToEnd()
-        if ($err) { [void]$script:Log.Add(@{ level = 'err'; text = $err.Trim() }) }
-        $proc.WaitForExit()
-        $script:RunInfo.Running = $false
-        $script:RunInfo.Summary = "finished (exit $($proc.ExitCode))"
-        [void]$script:Log.Add(@{
-            level = $(if ($proc.ExitCode -eq 0) { 'ok' } else { 'err' })
-            text  = "--- exit code $($proc.ExitCode) ---"
-        })
+    }
+
+    # Only call it finished once both streams have ended AND the process has
+    # gone - an exit code read too early is not the one the user ran for.
+    if (($null -ne $script:OutTask) -or ($null -ne $script:ErrTask)) { return }
+    if (-not $script:Proc.HasExited) { return }
+
+    $exit = $script:Proc.ExitCode
+    $script:RunInfo.Running = $false
+    $script:RunInfo.Summary = "finished (exit $exit)"
+    [void]$script:Log.Add(@{
+        level = $(if ($exit -eq 0) { 'ok' } else { 'err' })
+        text  = "--- exit code $exit ---"
     })
-    $reader.IsBackground = $true
-    $reader.Start()
+    $script:Proc.Dispose()
+    $script:Proc = $null
 }
 
 function Start-AutoOSServer {
@@ -177,18 +226,43 @@ function Start-AutoOSServer {
 
     $token = [Convert]::ToBase64String([Guid]::NewGuid().ToByteArray()).TrimEnd('=').Replace('/', '_').Replace('+', '-')
     $prefixHost = if ($Bind -eq '127.0.0.1') { 'localhost' } else { '+' }
-    $listener = New-Object System.Net.HttpListener
-    $listener.Prefixes.Add("http://${prefixHost}:$Port/")
 
-    try {
-        $listener.Start()
-    } catch {
-        Write-AutoOSLine "Could not listen on port $Port : $($_.Exception.Message)" -Level error
+    # A busy port is not a reason to make someone re-run the whole detect pass
+    # with -Port. Walk forward until one is free and say which one won - the URL
+    # printed below is the only one that matters, so a moved port is a note, not
+    # an error. Access-denied is different: no port on the machine will help, so
+    # stop on the first one rather than rattling twenty doors that are all shut.
+    $requestedPort = $Port
+    $listener      = $null
+    $lastError     = ''
+    foreach ($candidatePort in $requestedPort..($requestedPort + 19)) {
+        $candidate = New-Object System.Net.HttpListener
+        $candidate.Prefixes.Add("http://${prefixHost}:$candidatePort/")
+        try {
+            $candidate.Start()
+            $listener = $candidate
+            $Port     = $candidatePort
+            break
+        } catch {
+            $lastError = $_.Exception.Message
+            $candidate.Close()
+            # 5 is ERROR_ACCESS_DENIED - a missing URL reservation, not a clash.
+            if (($_.Exception -is [System.Net.HttpListenerException]) -and
+                ($_.Exception.ErrorCode -eq 5)) { break }
+        }
+    }
+
+    if ($null -eq $listener) {
+        Write-AutoOSLine "Could not listen on port $requestedPort or the 19 ports after it: $lastError" -Level error
         if ($prefixHost -eq '+') {
             Write-AutoOSLine 'Binding beyond localhost needs an elevated shell, or a URL reservation:' -Level muted
-            Write-AutoOSLine "    netsh http add urlacl url=http://+:$Port/ user=$env:USERNAME" -Level muted
+            Write-AutoOSLine "    netsh http add urlacl url=http://+:$requestedPort/ user=$env:USERNAME" -Level muted
         }
         return
+    }
+
+    if ($Port -ne $requestedPort) {
+        Write-AutoOSLine "Port $requestedPort was already in use - serving on $Port instead." -Level warn
     }
 
     $url = "http://$(if ($Bind -eq '127.0.0.1') { 'localhost' } else { $Bind }):$Port/?token=$token"
@@ -221,6 +295,8 @@ function Start-AutoOSServer {
     $pending = $null
     try {
     while ($listener.IsListening) {
+        # Before the wait, so a run keeps streaming even with nobody asking.
+        Update-AutoOSInstallLog
         if ($null -eq $pending) { $pending = $listener.GetContextAsync() }
         if (-not $pending.Wait(200)) { continue }   # timeout: loop, stay interruptible
         $ctx = $pending.Result
@@ -256,6 +332,12 @@ function Start-AutoOSServer {
             }
             elseif ($path -eq '/api/state') {
                 & $json 200 (Get-AutoOSServeState -SystemInfo $SystemInfo -Catalog $Catalog)
+            }
+            elseif ($path -eq '/api/ping') {
+                # Deliberately the cheapest thing this server does: the page
+                # polls it every couple of seconds to notice the moment this
+                # process goes away.
+                & $json 200 @{ ok = $true; running = $script:RunInfo.Running }
             }
             elseif ($path -eq '/api/log') {
                 $offset = 0
@@ -315,4 +397,4 @@ function Start-AutoOSServer {
     }
 }
 
-Export-ModuleMember -Function Start-AutoOSServer, Get-AutoOSServeState, Get-AutoOSLineLevel, Start-AutoOSInstallJob
+Export-ModuleMember -Function Start-AutoOSServer, Get-AutoOSServeState, Get-AutoOSLineLevel, Start-AutoOSInstallJob, Update-AutoOSInstallLog

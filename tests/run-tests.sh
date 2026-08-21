@@ -439,6 +439,66 @@ PY
     assert_eq "$missing" ""
 fi
 
+if it "a busy port moves the server on instead of failing"; then
+    # The socket is opened in a walk, not a single bind, so an already-taken
+    # 8777 costs a line of output rather than the whole run.
+    if grep -q "for candidate in range(PORT, PORT + 20)" lib/linux/serve.py &&
+       grep -q "already in use - serving on" lib/linux/serve.py; then pass
+    else fail "serve.py does not walk past a busy port"; fi
+fi
+
+if it "the server answers a heartbeat the page can poll"; then
+    if grep -q '"/api/ping"' lib/linux/serve.py &&
+       grep -q "/api/ping" web/index.html; then pass
+    else fail "no heartbeat endpoint, or nothing polling it"; fi
+fi
+
+if it "a page whose server has gone tears itself down"; then
+    if grep -q "function serverGone" web/index.html &&
+       grep -q "window.close" web/index.html; then pass
+    else fail "the page would sit there looking live after its server went"; fi
+fi
+
+if it "the output can be copied without selecting it by hand"; then
+    ok=1
+    # innerText returns nothing while the Output card is collapsed, so the text
+    # has to be read off the child elements instead.
+    for marker in 'id="copyLog"' "function copyLog" "function logText" "execCommand"; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "the log cannot be copied in one click"; fi
+fi
+
+if it "a verify command resolves to the file that will run"; then
+    . lib/linux/detect.sh
+    if launch_hint "Git" "git" "git --version" && [[ "$LAUNCH_HOW" == "run  git" && -x "$LAUNCH_PATH" ]]; then
+        pass
+    else fail "git resolved to how=$LAUNCH_HOW path=$LAUNCH_PATH"; fi
+fi
+
+if it "a component that is not here reports nothing rather than guessing"; then
+    # A blank is honest. A plausible-looking path that does not exist is worse
+    # than saying nothing, because it reads like a fact.
+    . lib/linux/detect.sh
+    if launch_hint "AutoOS Nonesuch XYZ" "autoos-nonesuch-xyz" "autoos-nonesuch-xyz"; then
+        fail "invented how=$LAUNCH_HOW path=$LAUNCH_PATH"
+    elif [[ -z "$LAUNCH_HOW" && -z "$LAUNCH_PATH" ]]; then pass
+    else fail "left stale values behind: $LAUNCH_HOW / $LAUNCH_PATH"; fi
+fi
+
+if it "the report says where things landed"; then
+    if grep -q "Where to find them" setup.sh && grep -q "launch_hint" setup.sh; then pass
+    else fail "the report never says where anything went"; fi
+fi
+
+if it "a page whose scripts are blocked says so"; then
+    # Everything on the page is driven by one inline script. Without it the
+    # header would sit at "connecting..." for ever and explain nothing.
+    if grep -q "<noscript>" web/index.html &&
+       grep -q "JavaScript is blocked" web/index.html; then pass
+    else fail "no usable noscript fallback"; fi
+fi
+
 if it "a non-URL homepage is rejected"; then
     tmp="$(mktemp)"
     cat >"$tmp" <<'JSON'
@@ -605,6 +665,69 @@ if it "Handy is offered on every platform"; then
 fi
 
 # ─── WSL detection ──────────────────────────────────────────────────────────
+describe "MCP wiring"
+
+if it "graphify is registered once, at user scope"; then
+    # The command is cwd-relative, so one definition serves every repository its
+    # own graph. A per-repo entry would pin one repo's graph for all of them.
+    if grep -q "register_mcp_server graphify user" lib/linux/install.sh &&
+       grep -q "graphify-out/graph.json" lib/linux/install.sh; then pass
+    else fail "graphify is not a single cwd-relative user-scope entry"; fi
+fi
+
+if it "omnigraph is never registered at user scope"; then
+    # A user-scope omnigraph silently wins over the per-repo one and answers
+    # from the wrong graph, which looks identical to it working.
+    if grep -q "register_mcp_server omnigraph" lib/linux/install.sh; then
+        fail "omnigraph is being registered as a user server"
+    elif grep -q "claude mcp remove omnigraph" lib/linux/install.sh; then pass
+    else fail "the shadowing case is never called out"; fi
+fi
+
+if it "a project MCP server is approved, not just declared"; then
+    # A tracked .mcp.json cannot approve itself; Claude Code skips an unapproved
+    # project server silently.
+    if grep -q "enabledMcpjsonServers" lib/linux/install.sh; then pass
+    else fail "nothing writes the approval list"; fi
+fi
+
+if it "approving a server keeps the rest of the settings file"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.claude"
+    printf '%s' '{"permissions":{"allow":["Bash(ls:*)"]},"enabledMcpjsonServers":["already"]}' \
+        >"$tmp/.claude/settings.local.json"
+    AUTOOS_DRY_RUN=0 enable_project_mcp_server "$tmp" omnigraph >/dev/null 2>&1
+    got="$(python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1],encoding='utf-8'))
+print('perm' if d.get('permissions') else 'LOST', ','.join(d.get('enabledMcpjsonServers',[])))
+" "$tmp/.claude/settings.local.json")"
+    rm -rf "$tmp"
+    if [[ "$got" == "perm already,omnigraph" ]]; then pass
+    else fail "expected the permissions block kept and omnigraph appended, got: $got"; fi
+fi
+
+if it "approving twice adds nothing the second time"; then
+    tmp="$(mktemp -d)"
+    AUTOOS_DRY_RUN=0 enable_project_mcp_server "$tmp" omnigraph >/dev/null 2>&1
+    AUTOOS_DRY_RUN=0 enable_project_mcp_server "$tmp" omnigraph >/dev/null 2>&1
+    n="$(python3 -c "
+import json,sys
+print(len(json.load(open(sys.argv[1],encoding='utf-8')).get('enabledMcpjsonServers',[])))
+" "$tmp/.claude/settings.local.json")"
+    rm -rf "$tmp"
+    if [[ "$n" == "1" ]]; then pass; else fail "expected 1 entry, got $n"; fi
+fi
+
+if it "no bearer token is ever invented"; then
+    # This repository is public. A real-looking secret in it is a leak whether or
+    # not it happens to work, and a guessed one fails as an unexplainable 401.
+    if grep -qE "OMNIGRAPH_TOKEN=[\"']?[A-Za-z0-9]" lib/linux/install.sh; then
+        fail "a token literal is present"
+    elif grep -q "OMNIGRAPH_TOKEN is not set" lib/linux/install.sh; then pass
+    else fail "a missing token is never reported"; fi
+fi
+
 describe "wsl detection"
 
 if it "WSL is detected when running under it"; then

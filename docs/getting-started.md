@@ -110,6 +110,12 @@ plan before letting it install anything.
 
 ## What happens afterwards
 
+- The report ends with **Where to find them**: for everything in the run, the
+  path it occupies and how to start it — a command name for CLI tools, the Start
+  menu entry (Windows), the Applications entry (Linux) or `open -a` (macOS).
+  It is resolved from the machine, not read out of the catalog, so a blank line
+  means genuinely not found rather than a guess. The usual cause of a blank is a
+  PATH change that this shell has not picked up yet.
 - PATH, font and shell changes need a **new terminal**; Docker and WSL need a **reboot**.
 - A run state file is written (default `.autoos-state.json`) so the same
   selection can be replayed elsewhere.

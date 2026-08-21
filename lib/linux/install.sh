@@ -351,6 +351,123 @@ install_lazyvim() {
     ui_ok "LazyVim starter installed"
 }
 
+# ─── MCP wiring ─────────────────────────────────────────────────────────────
+# Claude Code owns ~/.claude.json, so `claude mcp add` edits it, not us. That
+# file is tens of kilobytes of the user's own session state, and rewriting all
+# of it to change one key is exactly the "overwrite a config wholesale" failure
+# this repository has shipped before.
+
+mcp_server_names() {
+    has_cmd claude || return 0
+    # Lines read "name: command - status". Plugin-provided servers are prefixed
+    # "plugin:<plugin>:<name>", so the last colon-separated field is the name
+    # that matters — a serena from a plugin is still a serena.
+    claude mcp list 2>/dev/null | sed -n 's/^[[:space:]]*\([^: ]*\):[[:space:]].*/\1/p' |
+        awk -F: '{print $NF}'
+}
+
+mcp_has_server() {
+    local want="$1" name
+    while IFS= read -r name; do
+        [[ "$name" == "$want" ]] && return 0
+    done < <(mcp_server_names)
+    return 1
+}
+
+register_mcp_server() {
+    local name="$1" scope="$2" workdir="$3"; shift 3
+    if ! has_cmd claude; then
+        ui_warn "claude is not on PATH — cannot register '${name}'. Install claude-code first."
+        return 0
+    fi
+    if mcp_has_server "$name"; then
+        ui_muted "MCP server '${name}' is already registered — left alone."
+        return 0
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would run: claude mcp add --scope ${scope} ${name} -- $*"
+        return 0
+    fi
+    ui_muted "run: claude mcp add --scope ${scope} ${name} -- $*"
+    if ( cd "$workdir" 2>/dev/null || cd "$SYS_HOME"; claude mcp add --scope "$scope" "$name" -- "$@" ); then
+        ui_ok "registered MCP server '${name}' (${scope} scope)"
+    else
+        ui_warn "could not register '${name}'"
+    fi
+    return 0
+}
+
+# A tracked .mcp.json cannot approve itself: Claude Code skips a project server
+# until it is named in that repo's own untracked .claude/settings.local.json. It
+# skips it *silently*, which is the real problem — an unapproved server looks
+# exactly like a broken one.
+enable_project_mcp_server() {
+    local repo="$1" name="$2"
+    local path="$repo/.claude/settings.local.json"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would approve project MCP server '${name}' in ${path}"
+        return 0
+    fi
+    mkdir -p "$repo/.claude"
+    [[ -f "$path" ]] && cp "$path" "${path}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    if ! python3 - "$path" "$name" <<'PY'; then
+import json, pathlib, sys
+path, name = pathlib.Path(sys.argv[1]), sys.argv[2]
+try:
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() and path.read_text(encoding="utf-8").strip() else {}
+except (json.JSONDecodeError, OSError):
+    print("not-json")
+    raise SystemExit(2)
+enabled = list(data.get("enabledMcpjsonServers") or [])
+if name in enabled:
+    print("already")
+    raise SystemExit(0)
+enabled.append(name)
+data["enabledMcpjsonServers"] = enabled
+path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+print("added")
+PY
+        ui_warn "${path} is not valid JSON — leaving it alone."
+        return 0
+    fi
+    ui_ok "approved project MCP server '${name}' in ${path}"
+    return 0
+}
+
+# The omnigraph MCP server is a container talking to a graph server over a Docker
+# network. Miss the image, the network or the token and MCP start-up fails with
+# "pull access denied", "fetch failed" or "missing bearer token" respectively —
+# none of which say which of the three it was. AutoOS does not build or start
+# that stack; it reports what is not ready yet.
+omnigraph_readiness() {
+    local dir="$1" ready=1
+    if ! has_cmd docker; then
+        ui_warn "docker is not installed — omnigraph runs as a container."
+        return 1
+    fi
+    if ! docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -q '^omnigraph-mcp:latest$'; then
+        ui_warn "omnigraph-mcp:latest is not built. Build it with:"
+        ui_muted "    docker build -t omnigraph-mcp:latest ${dir}/infra/mcp-servers/servers/omnigraph-mcp"
+        ready=0
+    fi
+    if ! docker network ls --format '{{.Name}}' 2>/dev/null | grep -q 'mcp-server'; then
+        ui_warn "no mcp-server Docker network — the graph server stack is not up."
+        ui_muted "    docker compose -f ${dir}/infra/mcp-servers/docker-compose.client.yml up -d"
+        ready=0
+    fi
+    if [[ -z "${OMNIGRAPH_TOKEN:-}" ]]; then
+        # Never invent one. An empty bearer fails as "missing bearer token",
+        # which at least names itself; a made-up value fails as a 401 nobody can
+        # explain — and this repository is public, so a real-looking secret in it
+        # is a leak whether or not it happens to work.
+        ui_warn "OMNIGRAPH_TOKEN is not set — the server will reject every call."
+        ui_muted "    it is issued by the graph server, not by AutoOS. Copy"
+        ui_muted "    ${dir}/infra/mcp-servers/.env.client.example to .env.client and fill it in."
+        ready=0
+    fi
+    (( ready ))
+}
+
 install_agent_skills() {
     local code_root="$SYS_HOME/Documents/Code"
     local dest="$code_root/agent-skills"
@@ -364,17 +481,40 @@ install_agent_skills() {
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would write ${SYS_HOME}/.autoos-omnigraph.env"
+    else
+        printf 'OMNIGRAPH_BASE_URL=%s\n' "$base" >"$SYS_HOME/.autoos-omnigraph.env"
+        ui_ok "Omnigraph URL saved to ${SYS_HOME}/.autoos-omnigraph.env"
+    fi
+
+    # graphify is ONE user-scope entry. Its command is cwd-relative, so a single
+    # definition serves every repository its own graph; a per-repo entry would
+    # pin one repo's graph for all of them.
+    register_mcp_server graphify user "$SYS_HOME" \
+        uv --quiet run --with 'graphifyy[mcp]' python -m graphify.serve graphify-out/graph.json
+
+    # omnigraph is the opposite: project scope only, pinned per repo by
+    # OMNIGRAPH_GRAPH_ID. A user-scope entry silently WINS over the project one
+    # and answers from the wrong graph, so this never creates one.
+    if mcp_has_server omnigraph; then
+        ui_warn "A user-scope omnigraph server exists. It silently overrides the"
+        ui_warn "per-repo one and answers from the wrong graph. Remove it with:"
+        ui_muted "    claude mcp remove omnigraph --scope user"
+    fi
+    if [[ -f "$dest/.mcp.json" ]]; then
+        ui_muted "omnigraph is declared per-repo in ${dest}/.mcp.json"
+        enable_project_mcp_server "$dest" omnigraph
+    else
+        ui_warn "no .mcp.json in ${dest} — nothing to pin omnigraph to."
+    fi
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would check the omnigraph image, network and token"
         return 0
     fi
-    printf 'OMNIGRAPH_BASE_URL=%s\n' "$base" >"$SYS_HOME/.autoos-omnigraph.env"
-    ui_ok "Omnigraph URL saved to ${SYS_HOME}/.autoos-omnigraph.env"
-
-    # Must not be the bare `[[ ]] && ...` form: as the last statement of a
-    # function that returns 1, `set -e` would abort the whole run.
-    local setup="$dest/infra/mcp-servers/scripts/linux/init-serena-projects.sh"
-    if [[ -f "$setup" ]]; then
-        ui_muted "    MCP helper scripts: ${dest}/infra/mcp-servers/scripts/linux/"
+    if omnigraph_readiness "$dest"; then
+        ui_ok "omnigraph prerequisites are all present."
     fi
+    ui_info "Restart Claude Code — MCP servers are only read at session start."
     return 0
 }
 

@@ -338,6 +338,27 @@ if (( failed )); then
     ui_muted "Re-run to retry only the failures; everything else reports as already present."
 fi
 printf '\n'
+# ─── Where it landed ────────────────────────────────────────────────────────
+# The counts above say how many, not where or how to start them. Resolved from
+# the live machine, so a blank means genuinely not found rather than a guess.
+landed="${installed_names}${skipped_names}"
+if [[ -n "${landed// /}" ]]; then
+    ui_section "Where to find them"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "Dry run installed nothing — these are the locations as they stand now."
+    fi
+    for id in $landed; do
+        i="$(catalog_index_of "$id")"
+        if launch_hint "${CAT_NAME[i]}" "${CAT_ID[i]}" "${CAT_VERIFY[i]}"; then
+            ui_kv "${CAT_NAME[i]}" "$LAUNCH_HOW"
+            [[ -n "$LAUNCH_PATH" ]] && ui_muted "                         $LAUNCH_PATH"
+        else
+            ui_kv "${CAT_NAME[i]}" "no launcher found yet" warn
+            ui_muted "                         log out and back in, or open a new shell, then re-run"
+        fi
+    done
+fi
+
 # Saved last, so a replay reflects what actually happened rather than what was planned.
 if [[ -n "$STATE_PATH" ]]; then
     autoos_state_save "$STATE_PATH" "$PROFILE" "$SELECTED" \

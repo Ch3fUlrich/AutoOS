@@ -379,6 +379,20 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
 #log div{padding:1px 0}
 #log .ok{color:#7EE787}#log .warn{color:#E3B341}#log .err{color:#FF7B72}
 #log .muted{color:#8B949E}#log .step{color:#79C0FF;font-weight:600}
+/* Sits over the top-right corner of the log rather than above it, so it costs
+   no vertical space in a card whose whole point is showing as much output as
+   possible. */
+.log-wrap{position:relative}
+#copyLog{
+  position:absolute;top:8px;right:8px;z-index:1;
+  font-family:inherit;font-size:.72rem;font-weight:600;line-height:1;letter-spacing:.02em;
+  padding:6px 10px;border-radius:6px;cursor:pointer;
+  color:#C9D1D9;background:rgba(22,27,34,.92);border:1px solid #30363D;
+  opacity:.55;transition:opacity .15s,background .15s;
+}
+.log-wrap:hover #copyLog, #copyLog:focus-visible{opacity:1}
+#copyLog:hover{background:#21262D}
+#copyLog[data-copied="1"]{opacity:1;color:#7EE787;border-color:#238636}
 .bar{height:6px;background:var(--surface-3);border-radius:3px;overflow:hidden;margin:10px 0}
 .bar>div{height:100%;width:0;background:var(--accent);transition:width .3s}
 
@@ -405,6 +419,16 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
   .profile[aria-pressed="true"]{flex:1 1 100%}
 }
 </style>
+<!-- Every control on this page is driven by the inline script at the bottom.
+     If a script blocker, an extension or a policy kills it, none of this markup
+     means anything: the header pill would sit at "connecting…" for ever and the
+     banner would claim it is still contacting a server it never called. Hide the
+     inert half of the page and say what is actually wrong. -->
+<noscript><style>
+  #banner, .tabs, [role="tabpanel"], .actionbar { display: none !important }
+  #hostName { display: none }
+  .host-pill::after { content: "scripts blocked" }
+</style></noscript>
 </head>
 <body data-layout="list" data-cols="auto">
 <div class="wrap">
@@ -423,6 +447,16 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
   </header>
 
   <div class="banner" id="banner">Contacting the AutoOS server…</div>
+
+  <noscript>
+    <div class="banner bad">
+      <b>JavaScript is blocked for this page, so AutoOS cannot start.</b>
+      Hardware detection, the component list and the installer are all driven by
+      the script served with this page — without it nothing on screen is live.
+      Allow scripts for <b>localhost:8777</b> in your browser or script blocker
+      and reload. Nothing has been installed.
+    </div>
+  </noscript>
 
   <div class="tabs" role="tablist" aria-label="Sections">
     <button class="tab" role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true">
@@ -515,7 +549,10 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
       </summary>
       <div class="card-body">
         <div class="bar"><div id="prog"></div></div>
-        <div id="log">Ready. Pick your components, then press Install.</div>
+        <div class="log-wrap">
+          <button type="button" id="copyLog" title="Copy the whole output to the clipboard">Copy</button>
+          <div id="log">Ready. Pick your components, then press Install.</div>
+        </div>
       </div>
     </details>
   </section>
@@ -703,6 +740,56 @@ async function boot() {
   el("run").onclick         = runInstall;
 
   resumeIfRunning();
+  heartbeat();
+}
+
+/* ── the page outlives its server, so it has to notice ─────────────────── */
+/* Ctrl-C in the terminal, a closed window, a crash: the server goes and this
+   tab keeps sitting there looking live, with buttons that look pressable and a
+   component list that is now fiction. Poll a cheap endpoint, and once the
+   server is definitely gone tear the page down instead of letting it lie. */
+const HEARTBEAT_MS = 2000, HEARTBEAT_MISSES = 3;
+let heartbeatTimer = null, misses = 0, dead = false;
+
+async function heartbeat() {
+  if (dead) return;
+  try {
+    // Any answer at all means someone is still listening, so the status is
+    // deliberately ignored: a 404 is an older server that predates this
+    // endpoint, a 403 is a stale token. Neither is a reason to kill the page -
+    // only fetch rejecting, which is the connection itself failing.
+    await fetch(api("/api/ping"), { cache: "no-store" });
+    misses = 0;
+  } catch (e) {
+    // One miss is a hiccup - a request that lost a race with a restarting
+    // listener, a machine that just woke up. Several in a row is a dead server.
+    if (++misses >= HEARTBEAT_MISSES) return serverGone();
+  }
+  heartbeatTimer = setTimeout(heartbeat, HEARTBEAT_MS);
+}
+
+function serverGone() {
+  if (dead) return;
+  dead = true;
+  clearTimeout(heartbeatTimer);
+  running = false;
+
+  // A tab the server opened with Start-Process was not opened by script, so
+  // window.close() is ignored in every browser. Ask anyway - it works for the
+  // window.open case - then replace the page so nothing stale is left to click.
+  try { window.close(); } catch { /* not ours to close */ }
+
+  document.title = "AutoOS — server stopped";
+  document.body.innerHTML =
+    '<div class="wrap"><header><h1>AutoOS</h1>' +
+    '<span class="tagline">post-install provisioning</span></header>' +
+    '<div class="banner bad"><b>The AutoOS server has stopped.</b> ' +
+    'This page is no longer connected to anything, so it has been cleared ' +
+    'rather than left showing a machine it can no longer see. Nothing was ' +
+    'changed by the server shutting down — any install that had already ' +
+    'started keeps running in its own process. ' +
+    'Run <b>setup.ps1 -Serve</b> (or <b>setup.sh --serve</b>) again for a new ' +
+    'URL; the token changes every run, so this one is now dead too.</div></div>';
 }
 
 /* ── profiles, with the selected one expanded into a summary ───────────── */
@@ -1000,6 +1087,67 @@ function answers() {
 }
 
 /* ── running ──────────────────────────────────────────────────────────── */
+/* ── copying the output ───────────────────────────────────────────────── */
+/* The log is what people paste into a bug report, and hand-selecting 400 lines
+   out of a scroll box is miserable. Read the text off the child elements rather
+   than with innerText: innerText returns nothing at all while the Output card is
+   collapsed, and textContent would run every line together without newlines. */
+function logText() {
+  const box = el("log");
+  return box.children.length
+    ? [...box.children].map(d => d.textContent).join("\n")
+    : box.textContent.trim();
+}
+
+function copyFallback(text) {
+  // navigator.clipboard needs a secure context. localhost counts; a --bind LAN
+  // address over plain http does not, and that is exactly the headless case
+  // this UI exists for.
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
+
+let copyResetTimer = null;
+async function copyLog() {
+  const btn = el("copyLog"), text = logText();
+  let ok = false;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("no clipboard API");
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch (e) {
+    ok = copyFallback(text);
+  }
+  if (!ok) {
+    // Both routes refused - select the log so Ctrl-C still gets them there.
+    const sel = window.getSelection(), range = document.createRange();
+    range.selectNodeContents(el("log"));
+    sel.removeAllRanges(); sel.addRange(range);
+  }
+  btn.textContent = ok ? "Copied" : "Selected — press Ctrl-C";
+  btn.dataset.copied = "1";
+  clearTimeout(copyResetTimer);
+  copyResetTimer = setTimeout(() => {
+    btn.textContent = "Copy";
+    delete btn.dataset.copied;
+  }, ok ? 1600 : 4000);
+}
+
+el("copyLog").addEventListener("click", e => {
+  // The button lives inside a <details>; without this the click would also
+  // collapse the card it is trying to copy from.
+  e.preventDefault(); e.stopPropagation();
+  copyLog();
+});
+
 function appendLog(lines) {
   const box = el("log");
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
@@ -1042,6 +1190,7 @@ async function runInstall() {
 }
 
 async function poll() {
+  if (dead) return;
   try {
     const r = await fetch(api("/api/log?offset=" + logOffset));
     const d = await r.json();
@@ -1053,6 +1202,9 @@ async function poll() {
     el("prog").style.width = "100%";
     sync();
   } catch (e) {
+    // The heartbeat may have torn the page down while this request was in
+    // flight; there is no log element left to write the failure into.
+    if (dead) return;
     appendLog([{ level: "err", text: "Lost contact with the server: " + e.message }]);
     running = false; sync();
   }

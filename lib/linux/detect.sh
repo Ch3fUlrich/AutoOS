@@ -246,3 +246,84 @@ detect_blockers() {
             "systemd services and desktop packages may not behave as they would on bare metal."
     fi
 }
+
+# ─── Where a component landed ───────────────────────────────────────────────
+# "Installed 1" answers nothing on its own: most desktop packages put no command
+# on PATH, and the reasonable next question is where it went and how to open it.
+# Resolved from the live machine - an empty answer is honest, a guessed path is
+# not. Sets LAUNCH_PATH and LAUNCH_HOW, both empty when nothing is found.
+LAUNCH_PATH=""
+LAUNCH_HOW=""
+
+_launch_normalise() { printf '%s' "$1" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]'; }
+
+_launch_from_desktop() {
+    local wanted="$1" dir file name exec_line
+    wanted="$(_launch_normalise "$wanted")"
+    [[ -z "$wanted" ]] && return 1
+    for dir in "$HOME/.local/share/applications" /usr/local/share/applications                /usr/share/applications /var/lib/snapd/desktop/applications                /var/lib/flatpak/exports/share/applications                "$HOME/.local/share/flatpak/exports/share/applications"; do
+        [[ -d "$dir" ]] || continue
+        while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            name="$(grep -m1 '^Name=' "$file" 2>/dev/null | cut -d= -f2-)"
+            [[ -n "$name" ]] || name="$(basename "$file" .desktop)"
+            if [[ "$(_launch_normalise "$name")" == "$wanted" ]]; then
+                # Exec carries %U/%F placeholders the launcher fills in; the
+                # first field is the actual program.
+                exec_line="$(grep -m1 '^Exec=' "$file" 2>/dev/null | cut -d= -f2- | awk '{print $1}')"
+                # Exec is often a bare command name; report where it actually is.
+                if [[ -n "$exec_line" && "$exec_line" != /* ]]; then
+                    exec_line="$(command -v "$exec_line" 2>/dev/null || printf '%s' "$exec_line")"
+                fi
+                LAUNCH_PATH="${exec_line:-$file}"
+                LAUNCH_HOW="Applications:  ${name}"
+                return 0
+            fi
+        done < <(find "$dir" -maxdepth 2 -name '*.desktop' 2>/dev/null)
+    done
+    return 1
+}
+
+_launch_from_app_bundle() {
+    local wanted="$1" dir app
+    for dir in /Applications "$HOME/Applications"; do
+        [[ -d "$dir" ]] || continue
+        while IFS= read -r app; do
+            [[ -n "$app" ]] || continue
+            if [[ "$(_launch_normalise "$(basename "$app" .app)")" == "$(_launch_normalise "$wanted")" ]]; then
+                LAUNCH_PATH="$app"
+                LAUNCH_HOW="run  open -a '$(basename "$app" .app)'"
+                return 0
+            fi
+        done < <(find "$dir" -maxdepth 2 -name '*.app' 2>/dev/null)
+    done
+    return 1
+}
+
+launch_hint() {
+    local name="$1" id="$2" verify="${3:-}" exe resolved
+    LAUNCH_PATH=""; LAUNCH_HOW=""
+
+    # A verify command names the executable, which is the most precise handle
+    # there is: command -v resolves it to the exact file that will run.
+    if [[ -n "$verify" ]]; then
+        exe="${verify%% *}"
+        if resolved="$(command -v "$exe" 2>/dev/null)"; then
+            LAUNCH_PATH="$resolved"; LAUNCH_HOW="run  $exe"
+            return 0
+        fi
+    fi
+
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        _launch_from_app_bundle "$name" && return 0
+    else
+        _launch_from_desktop "$name" && return 0
+    fi
+
+    # Last resort: something whose id happens to be its command.
+    if resolved="$(command -v "$id" 2>/dev/null)"; then
+        LAUNCH_PATH="$resolved"; LAUNCH_HOW="run  $id"
+        return 0
+    fi
+    return 1
+}

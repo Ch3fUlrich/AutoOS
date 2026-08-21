@@ -127,3 +127,48 @@ winget ids are easy to get subtly wrong (`tailscale.tailscale` vs
 ```powershell
 winget show --id <the.id> --exact --disable-interactivity
 ```
+
+## The MCP stack
+
+The `agent-skills` component wires two MCP servers into Claude Code, and they are
+wired in opposite ways. Getting it the wrong way round fails *silently*, which is
+why it is spelled out here rather than left to the code.
+
+| | Scope | Why |
+|---|---|---|
+| **graphify** | one **user** entry | Its command is cwd-relative, so a single definition serves every repository its own graph. A per-repo entry pins one repo's graph for all of them. |
+| **omnigraph** | **project** only | The graph is chosen per repo by `OMNIGRAPH_GRAPH_ID`. A user-scope `omnigraph` silently overrides the per-repo one and answers from the wrong graph. |
+
+Two consequences AutoOS acts on:
+
+- It never creates a user-scope `omnigraph`, and warns if it finds one, naming
+  the `claude mcp remove` that undoes it.
+- A tracked `.mcp.json` cannot approve itself, so AutoOS writes the server into
+  that repo's untracked `.claude/settings.local.json` (`enabledMcpjsonServers`).
+  Without that, Claude Code skips the server without saying anything, which looks
+  exactly like the server being broken.
+
+Registration goes through `claude mcp add`, never through editing `~/.claude.json`
+directly: that file is tens of kilobytes of the user's own session state, and
+rewriting it to change one key is the "overwrite a config wholesale" failure rule
+4 exists to prevent.
+
+### What AutoOS does not do
+
+Omnigraph is a container talking to a graph server over a Docker network. AutoOS
+does not build the image, start the stack or issue credentials — it checks and
+names whichever of these is missing:
+
+| Missing | How it fails at MCP start-up |
+|---|---|
+| `omnigraph-mcp:latest` image | `pull access denied` |
+| the `mcp-server` Docker network | `fetch failed` |
+| `OMNIGRAPH_TOKEN` | `missing bearer token` |
+
+The token is **not** issued by AutoOS or looked up from anywhere. It is a shared
+secret you choose: the server compose file takes it as
+`OMNIGRAPH_SERVER_BEARER_TOKEN=${OMNIGRAPH_TOKEN}`, so the same value goes in
+`infra/mcp-servers/.env.shared` and in the client environment. AutoOS never
+invents one — this repository is public, and a plausible-looking secret in it is
+a leak whether or not it happens to work.
+

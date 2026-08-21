@@ -12,6 +12,12 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Get-StartApps takes a couple of seconds; a run asks about dozens of
+# components, so it is read once and reused.
+$script:StartAppsCache = $null
+$script:AppxCache      = $null
+$script:ShortcutCache  = $null
+
 function Test-AutoOSCommand {
     param([Parameter(Mandatory)][string]$Name)
     $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
@@ -200,6 +206,138 @@ function Get-AutoOSBlockers {
     $blockers
 }
 
+function Get-AutoOSStartMenuShortcut {
+    <#
+      .SYNOPSIS Find the Start menu entry for a display name, if there is one.
+
+      .DESCRIPTION
+        Most of this catalog is desktop software with no command on PATH, so the
+        honest answer to "how do I open it" is the shortcut the installer made.
+        Both the machine-wide and per-user Start menus are searched, because an
+        elevated run and a user-scope run put things in different places.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    # Enumerated once: a run asks about dozens of components and recursing both
+    # Start menu trees each time is the slowest thing in the report.
+    if ($null -eq $script:ShortcutCache) {
+        $roots = @(
+            (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'),
+            (Join-Path $env:APPDATA     'Microsoft\Windows\Start Menu\Programs')
+        ) | Where-Object { $_ -and (Test-Path $_) }
+        $script:ShortcutCache = @(foreach ($root in $roots) {
+            Get-ChildItem -Path $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue
+        })
+    }
+    if (-not $script:ShortcutCache) { return $null }
+
+    # Compare on letters and digits only: "Notepad++" and "7-Zip" never match
+    # their shortcut names otherwise.
+    $wanted = ($Name -replace '[^\p{L}\p{N}]', '').ToLowerInvariant()
+    if (-not $wanted) { return $null }
+
+    # An exact name wins outright; a prefix is kept only if nothing better turns up.
+    $fallback = $null
+    foreach ($lnk in $script:ShortcutCache) {
+        $bare = ($lnk.BaseName -replace '[^\p{L}\p{N}]', '').ToLowerInvariant()
+        if ($bare -eq $wanted) { return $lnk }
+        if ((-not $fallback) -and $bare.StartsWith($wanted)) { $fallback = $lnk }
+    }
+    $fallback
+}
+
+function Get-AutoOSStartApp {
+    <#
+      .SYNOPSIS Find a Start menu entry that has no shortcut file behind it.
+
+      .DESCRIPTION
+        Matches on the AppID as well as the display name, because the two often
+        disagree: Windows Terminal is listed as "Terminal", and only its AppID
+        still says WindowsTerminal.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    if ($null -eq $script:StartAppsCache) {
+        $script:StartAppsCache = @(try { Get-StartApps -ErrorAction SilentlyContinue } catch { @() })
+    }
+    $wanted = ($Name -replace '[^\p{L}\p{N}]', '').ToLowerInvariant()
+    if (-not $wanted) { return $null }
+
+    foreach ($a in $script:StartAppsCache) {
+        $bare = ($a.Name -replace '[^\p{L}\p{N}]', '').ToLowerInvariant()
+        if ($bare -eq $wanted) { return $a }
+    }
+    foreach ($a in $script:StartAppsCache) {
+        $id = ($a.AppID -replace '[^\p{L}\p{N}]', '').ToLowerInvariant()
+        if ($id -like "*$wanted*") { return $a }
+    }
+    $null
+}
+
+function Get-AutoOSLaunchHint {
+    <#
+      .SYNOPSIS Where a component actually landed, and how to start it.
+
+      .DESCRIPTION
+        Resolved from the live machine rather than declared in the catalog, so it
+        reports what is true here rather than what was true on the author's box.
+        Returns empty strings when nothing can be found - a blank is honest, a
+        guessed path is not.
+    #>
+    param([Parameter(Mandatory)][psobject]$Component)
+
+    $result = [pscustomobject]@{ Path = ''; How = '' }
+
+    # A verify command names the executable, which is the most precise handle
+    # there is: Get-Command resolves it to the exact file that will run.
+    $verify = if ($Component.PSObject.Properties.Name -contains 'Verify') { $Component.Verify } else { $null }
+    if ($verify) {
+        $exe = ($verify -split '\s+')[0]
+        $cmd = Get-Command -Name $exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cmd -and $cmd.Source) {
+            $result.Path = $cmd.Source
+            $result.How  = "run  $exe"
+            return $result
+        }
+    }
+
+    $lnk = Get-AutoOSStartMenuShortcut -Name $Component.Name
+    if ($lnk) {
+        $target = ''
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            $target = $shell.CreateShortcut($lnk.FullName).TargetPath
+            [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+        } catch { $target = '' }
+        $result.Path = if ($target) { $target } else { $lnk.FullName }
+        $result.How  = "Start menu:  $($lnk.BaseName)"
+        return $result
+    }
+
+    # Store and MSIX apps (Windows Terminal, WhatsApp) have no shortcut file -
+    # their Start entry is an AppID, and their payload lives under WindowsApps.
+    $app = Get-AutoOSStartApp -Name $Component.Name
+    if ($app) {
+        $result.How = "Start menu:  $($app.Name)"
+        $family = ($app.AppID -split '!')[0]
+        if ($null -eq $script:AppxCache) {
+            $script:AppxCache = @(try { Get-AppxPackage -ErrorAction SilentlyContinue } catch { @() })
+        }
+        $pkg = $script:AppxCache | Where-Object { $_.PackageFamilyName -eq $family } | Select-Object -First 1
+        if ($pkg) { $result.Path = $pkg.InstallLocation }
+        return $result
+    }
+
+    # Last resort: something whose id happens to be its command, like 7z.
+    $cmd = Get-Command -Name $Component.Id -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd -and $cmd.Source) {
+        $result.Path = $cmd.Source
+        $result.How  = "run  $($Component.Id)"
+    }
+    $result
+}
+
 Export-ModuleMember -Function `
     Test-AutoOSCommand, Test-AutoOSAdmin, Get-AutoOSSystemInfo,
-    Get-AutoOSSuggestedProfile, Get-AutoOSBlockers
+    Get-AutoOSSuggestedProfile, Get-AutoOSBlockers,
+    Get-AutoOSLaunchHint, Get-AutoOSStartMenuShortcut, Get-AutoOSStartApp

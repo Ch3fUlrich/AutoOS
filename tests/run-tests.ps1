@@ -549,6 +549,176 @@ Test-Case 'the payload reports the microphone' {
     Assert-Equal $state.system.microphone 'Test Mic'
 }
 
+$serveSource = Get-Content -Path (Join-Path $Root 'lib\windows\AutoOS.Serve.psm1') -Raw -Encoding UTF8
+$pageSource  = Get-Content -Path (Join-Path $Root 'web\index.html')             -Raw -Encoding UTF8
+
+Test-Case 'a busy port moves the server on instead of failing' {
+    # The listener is opened in a walk, not a single Start(), so an already-taken
+    # 8777 costs a line of output rather than the whole run.
+    if ($serveSource -notmatch 'foreach \(\$candidatePort in') { throw 'no port walk in Start-AutoOSServer' }
+    if ($serveSource -notmatch 'already in use - serving on')    { throw 'a moved port is never announced' }
+    Pass
+}
+
+Test-Case 'a missing URL reservation stops the walk immediately' {
+    # ERROR_ACCESS_DENIED will not be cured by the next port along; retrying
+    # nineteen more times just delays the message that actually helps.
+    Assert-True ($serveSource -match 'ErrorCode -eq 5') 'access-denied is not singled out'
+}
+
+Test-Case 'the installer output is drained without a reader thread' {
+    # A PowerShell scriptblock has no runspace on a raw .NET thread: it does not
+    # fail the read, it kills the process. This test is the tripwire for anyone
+    # reaching for [System.Threading.Thread] here again.
+    if ($serveSource -match '\[System\.Threading\.Thread\]') { throw 'a raw thread is back in the serve module' }
+    if ($serveSource -notmatch 'ReadLineAsync')                 { throw 'nothing is draining the installer output' }
+    Pass
+}
+
+Test-Case 'the server answers a heartbeat the page can poll' {
+    if ($serveSource -notmatch "'/api/ping'") { throw 'no /api/ping route' }
+    if ($pageSource  -notmatch '/api/ping')    { throw 'the page never polls a heartbeat' }
+    Pass
+}
+
+Test-Case 'a page whose server has gone tears itself down' {
+    if ($pageSource -notmatch 'function serverGone') { throw 'the page has no teardown path' }
+    if ($pageSource -notmatch 'window\.close')       { throw 'the page never tries to close itself' }
+    Pass
+}
+
+Test-Case 'the output can be copied without selecting it by hand' {
+    if ($pageSource -notmatch 'id="copyLog"')    { throw 'no copy button on the output card' }
+    if ($pageSource -notmatch 'function copyLog'){ throw 'the copy button does nothing' }
+    # innerText returns nothing while the Output card is collapsed, so the text
+    # has to be read off the child elements instead.
+    if ($pageSource -notmatch 'function logText'){ throw 'the log text is not gathered safely' }
+    if ($pageSource -notmatch 'execCommand')     { throw 'no fallback for a non-secure context' }
+    Pass
+}
+
+Test-Case 'a verify command resolves to the file that will run' {
+    $hint = Get-AutoOSLaunchHint -Component ([pscustomobject]@{
+        Id = 'powershell7'; Name = 'PowerShell 7'; Verify = 'powershell -Command' })
+    if ($hint.How -ne 'run  powershell') { throw "how was: $($hint.How)" }
+    Assert-True ($hint.Path -match '\.exe$') "path was: $($hint.Path)"
+}
+
+Test-Case 'a component that is not here reports nothing rather than guessing' {
+    # A blank is honest. A plausible-looking path that does not exist is worse
+    # than saying nothing, because it reads like a fact.
+    $hint = Get-AutoOSLaunchHint -Component ([pscustomobject]@{
+        Id = 'autoos-nonesuch-xyz'; Name = 'AutoOS Nonesuch XYZ'; Verify = 'autoos-nonesuch-xyz' })
+    if ($hint.How -ne '' -or $hint.Path -ne '') { throw "invented: $($hint.How) / $($hint.Path)" }
+    Pass
+}
+
+Test-Case 'the report says where things landed' {
+    $setupSource = Get-Content -Path (Join-Path $Root 'setup.ps1') -Raw -Encoding UTF8
+    if ($setupSource -notmatch 'Where to find them')   { throw 'no launch section in the report' }
+    if ($setupSource -notmatch 'Get-AutoOSLaunchHint') { throw 'the report never resolves a location' }
+    Pass
+}
+
+Test-Case '-Only accepts a comma-separated list through -File' {
+    # powershell -File passes every argument literally, so "a,b" arrives as one
+    # string. The browser UI shells out exactly that way, so a multi-component
+    # install used to fail as "unknown component id(s): a,b".
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $setup `
+             -Only 'git,nodejs' -Yes -NoColor -DryRun 2>&1
+    Assert-True ($LASTEXITCODE -eq 0 -and ($out -join "`n") -notmatch 'Unknown component') `
+                "exit $LASTEXITCODE : $($out | Select-Object -Last 3)"
+}
+
+Test-Case 'a page whose scripts are blocked says so' {
+    # Everything on the page is driven by one inline script. Without it the
+    # header would sit at "connecting..." for ever and explain nothing.
+    if ($pageSource -notmatch '<noscript>')            { throw 'no noscript fallback' }
+    if ($pageSource -notmatch 'JavaScript is blocked')  { throw 'the noscript fallback says nothing useful' }
+    Pass
+}
+
+# ─── MCP wiring ────────────────────────────────────────────────────
+Describe-Group 'MCP wiring'
+
+$installSource = Get-Content -Path (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+
+Test-Case 'graphify is registered once, at user scope' {
+    # The command is cwd-relative, so one definition serves every repository its
+    # own graph. A per-repo entry would pin one repo's graph for all of them.
+    if ($installSource -notmatch "Name 'graphify' -Command 'uv' -Scope 'user'") {
+        throw 'graphify is not registered at user scope'
+    }
+    if ($installSource -notmatch 'graphify-out/graph.json') { throw 'graphify is not cwd-relative' }
+    Pass
+}
+
+Test-Case 'omnigraph is never registered at user scope' {
+    # A user-scope omnigraph silently wins over the per-repo one and answers
+    # from the wrong graph, which looks identical to it working.
+    if ($installSource -match "Register-AutoOSMcpServer[^\r\n]*'omnigraph'") {
+        throw 'omnigraph is being registered as a user server'
+    }
+    if ($installSource -notmatch 'claude mcp remove omnigraph') { throw 'the shadowing case is never called out' }
+    Pass
+}
+
+Test-Case 'a project MCP server is approved, not just declared' {
+    # A tracked .mcp.json cannot approve itself; Claude Code skips an unapproved
+    # project server silently.
+    if ($installSource -notmatch 'enabledMcpjsonServers') { throw 'nothing writes the approval list' }
+    Pass
+}
+
+Test-Case 'approving a server keeps the rest of the settings file' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-mcp-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path (Join-Path $tmp '.claude') -Force | Out-Null
+    $file = Join-Path $tmp '.claude\settings.local.json'
+    '{"permissions":{"allow":["Bash(ls:*)"]},"enabledMcpjsonServers":["already"]}' |
+        Out-File -FilePath $file -Encoding utf8
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Enable-AutoOSProjectMcpServer -RepoPath $tmp -Name 'omnigraph' 6>$null | Out-Null
+        $after = Get-Content -Path $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $after.permissions) { throw 'the unrelated permissions block was dropped' }
+        Assert-Contains $after.enabledMcpjsonServers 'omnigraph'
+    } finally {
+        Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'approving twice adds nothing the second time' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-mcp-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Enable-AutoOSProjectMcpServer -RepoPath $tmp -Name 'omnigraph' 6>$null | Out-Null
+        Enable-AutoOSProjectMcpServer -RepoPath $tmp -Name 'omnigraph' 6>$null | Out-Null
+        $after = Get-Content -Path (Join-Path $tmp '.claude\settings.local.json') -Raw -Encoding UTF8 |
+                 ConvertFrom-Json
+        Assert-Equal @($after.enabledMcpjsonServers).Count 1
+    } finally {
+        Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'the Antigravity config is merged, not replaced' {
+    # It used to be written from scratch, which silently deleted every other MCP
+    # server the user had configured there.
+    if ($installSource -notmatch 'cfg\.Contains\(''mcpServers''\)') {
+        throw 'Set-AutoOSAntigravityMcp does not read the existing servers back'
+    }
+    Pass
+}
+
+Test-Case 'no bearer token is ever invented' {
+    # This repository is public. A real-looking secret in it is a leak whether
+    # or not it happens to work, and a guessed one fails as an unexplainable 401.
+    if ($installSource -match "OMNIGRAPH_TOKEN\s*=\s*'[^']") { throw 'a token literal is present' }
+    if ($installSource -notmatch 'OMNIGRAPH_TOKEN is not set') { throw 'a missing token is never reported' }
+    Pass
+}
+
 # ─── Static analysis ────────────────────────────────────────────────────────
 Describe-Group 'static analysis'
 

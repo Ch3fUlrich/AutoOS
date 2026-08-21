@@ -9,6 +9,7 @@ wider bind is opt-in and warned about, because this endpoint installs software.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import secrets
@@ -210,6 +211,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # surface the real reason to the page
                 return self._json(500, {"error": str(exc)})
 
+        if u.path == "/api/ping":
+            # Deliberately the cheapest thing this server does: the page polls it
+            # every couple of seconds to notice the moment this process goes away.
+            return self._json(200, {"ok": True, "running": RUN["running"]})
+
         if u.path == "/api/log":
             offset = int((qs.get("offset") or ["0"])[0])
             with LOCK:
@@ -249,6 +255,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    # daemon_threads: a worker still streaming a log must not keep the process
+    # alive after Ctrl-C. allow_reuse_address: restarting on the same port should
+    # not fail with "address already in use" during TIME_WAIT. Both are class
+    # attributes read at construction, so they are set before the bind loop below.
+    ThreadingHTTPServer.daemon_threads = True
+    ThreadingHTTPServer.allow_reuse_address = True
+
     # Line-buffer stdout: when this is redirected to a file or a pipe (which is
     # exactly how a wrapper reads back the URL) Python block-buffers by default
     # and the connection details never appear until the process exits.
@@ -257,8 +270,27 @@ def main() -> int:
     except AttributeError:  # pragma: no cover - Python < 3.7
         pass
 
-    url = f"http://{'localhost' if BIND == '127.0.0.1' else BIND}:{PORT}/?token={TOKEN}"
+    # A busy port is not a reason to make someone re-run the whole detect pass
+    # with a --port flag. Walk forward until one is free, then print the URL that
+    # actually works - a moved port is a note, not an error. Bind first: printing
+    # a URL for a port we never got is how people end up debugging the wrong thing.
+    srv, port = None, PORT
+    for candidate in range(PORT, PORT + 20):
+        try:
+            srv = ThreadingHTTPServer((BIND, candidate), Handler)
+            port = candidate
+            break
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+    if srv is None:
+        print(f"  x Could not listen on port {PORT} or the 19 ports after it.")
+        return 1
+
+    url = f"http://{'localhost' if BIND == '127.0.0.1' else BIND}:{port}/?token={TOKEN}"
     print()
+    if port != PORT:
+        print(f"  ! Port {PORT} was already in use - serving on {port} instead.")
     print("  AutoOS browser UI")
     print("  " + "-" * 58)
     print(f"  {url}")
@@ -270,9 +302,6 @@ def main() -> int:
         print("  Session is LOCKED to dry run - the browser cannot install anything.")
     print("  The token changes every run. Ctrl-C to stop.")
     print()
-    # daemon_threads: a worker still streaming a log must not keep the process
-    # alive after Ctrl-C. allow_reuse_address: restarting on the same port
-    # should not fail with "address already in use" during TIME_WAIT.
     # Re-arm SIGINT explicitly. A process started in the background by a
     # non-interactive shell inherits SIGINT as SIG_IGN, and CPython then leaves
     # it ignored - so Ctrl-C (or `kill -INT`) would do nothing at all. Handling
@@ -285,10 +314,6 @@ def main() -> int:
         signal.signal(signal.SIGTERM, _request_stop)
     except (AttributeError, ValueError):  # pragma: no cover - not on every platform
         pass
-
-    ThreadingHTTPServer.daemon_threads = True
-    ThreadingHTTPServer.allow_reuse_address = True
-    srv = ThreadingHTTPServer((BIND, PORT), Handler)
 
     # serve_forever() polls on a 0.5 s tick, so SIGINT lands promptly; shutting
     # down explicitly releases the socket instead of leaving it to interpreter exit.

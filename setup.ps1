@@ -93,6 +93,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# `powershell -File setup.ps1 -Only a,b` hands "a,b" over as one string - -File
+# passes every argument literally and never splits on commas the way the normal
+# parser does. The browser UI shells out exactly that way, so without this a
+# multi-component install fails as "unknown component id(s): a,b".
+$Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } |
+          Where-Object { $_ })
+
 $RepoRoot = $PSScriptRoot
 $LibDir   = Join-Path $RepoRoot 'lib\windows'
 
@@ -345,6 +352,29 @@ if ($results.failed.Count) {
     foreach ($f in $results.failed) { Write-AutoOSLine $f -Level error }
     Write-AutoOSLine 'Re-run to retry only the failures; everything else reports as already present.' -Level muted
 }
+# ─── Where it landed ────────────────────────────────────────────────────────
+# "Installed 1" answers nothing on its own: most of this catalog is desktop
+# software with no command on PATH, and the reasonable next question is where it
+# went and how to open it. Resolved from the live machine, so a blank line means
+# genuinely not found rather than a guess that reads like a fact.
+$landed = @($plan | Where-Object { $results.installed -contains $_.Id -or $results.skipped -contains $_.Id })
+if ($landed.Count) {
+    Write-AutoOSSection 'Where to find them'
+    if ($DryRun) {
+        Write-AutoOSLine 'Dry run installed nothing - these are the locations as they stand now.' -Level muted
+    }
+    foreach ($c in $landed) {
+        $hint = Get-AutoOSLaunchHint -Component $c
+        if ($hint.How) {
+            Write-AutoOSKeyValue $c.Name $hint.How
+            if ($hint.Path) { Write-AutoOSLine ("  " + (" " * 22) + " " + $hint.Path) -Level muted }
+        } else {
+            Write-AutoOSKeyValue $c.Name 'no launcher found yet' 'warn'
+            Write-AutoOSLine ("  " + (" " * 22) + ' open a new terminal, or sign out and back in, then re-run') -Level muted
+        }
+    }
+}
+
 # Saved last, so a replay reflects what actually happened rather than what was planned.
 Save-AutoOSState -Path $SaveState -ProfileName $InstallProfile -Selected $selectedIds `
                  -Answers $answers -Results $results -DryRun:$DryRun.IsPresent

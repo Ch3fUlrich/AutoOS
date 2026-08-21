@@ -36,6 +36,15 @@ It prints a URL containing a one-time token:
 
 Open that URL. On a desktop it opens by itself; on a headless box, copy it.
 
+If the port is taken the server moves to the next free one — up to 20 along — and
+says so above the URL. Read the port off the URL it prints rather than assuming
+8777; the token is per-run either way.
+
+The page and the server are tied together: it polls the server every couple of
+seconds, and once the server goes it closes itself where the browser allows that
+and otherwise clears itself and says so. A tab left open after `Ctrl-C` cannot go
+on offering buttons that do nothing.
+
 ## Using it
 
 Two tabs, with a persistent action bar pinned to the bottom so the running total
@@ -125,6 +134,18 @@ Steps come from the longest requirement chain, so step 1 always "needs nothing".
 
 The confirmation dialog names how many components are about to be installed and
 how many are automatic dependencies. Dry run changes nothing at all.
+
+### Copying the output
+
+The log has a **Copy** button in its top-right corner that puts the whole run —
+not just the visible part — on the clipboard, which is what you want when pasting
+into an issue. It works while the card is collapsed, and it does not collapse the
+card when clicked.
+
+`localhost` is a secure context, so the clipboard API is available there. Over a
+`--bind` LAN address on plain http it is not, and the button falls back to a
+hidden textarea; if the browser refuses that too it selects the log and says so,
+leaving `Ctrl-C` to finish the job.
 
 ### Stopping the server
 

@@ -20,8 +20,10 @@ verify command yourself. It is a warning, not a failure.
 Check `Elevated: no` in the detected-system panel. Machine-wide packages need
 an elevated terminal.
 
-**`Could not listen on port 8777`**
-Non-loopback binding needs elevation or a one-time reservation:
+**`Could not listen on port 8777 or the 19 ports after it`**
+A busy port is not this message — the server walks forward to the next free one
+and prints which it took. Seeing this means every port in the range was refused,
+which for a non-loopback bind means elevation or a one-time reservation:
 ```powershell
 netsh http add urlacl url=http://+:8777/ user=$env:USERNAME
 ```
@@ -77,9 +79,31 @@ predating this fix is still running, close its terminal — an older build block
 in a native accept call that could not be interrupted.
 
 **The port is still in use after stopping**
-Both servers release the socket in a `finally` block now. A leftover process from
-an older build can be found with `ss -ltnp | grep 8777` (Linux) or
-`Get-NetTCPConnection -LocalPort 8777` (Windows).
+Both servers release the socket in a `finally` block, and a second instance moves
+to the next free port rather than refusing to start — so this is cosmetic unless
+you need 8777 specifically. A leftover process from an older build can be found
+with `ss -ltnp | grep 8777` (Linux) or `Get-NetTCPConnection -LocalPort 8777`
+(Windows).
+
+**The page never gets past `connecting…`**
+Its scripts are being blocked — by an extension (NoScript, uBlock, a privacy
+suite) or by browser policy. Every control on the page is driven by one inline
+script; without it nothing on screen is live. The page now says so instead of
+sitting there, but if you are on an older build, that silent `connecting…` is
+the symptom. Allow scripts for `localhost:8777` and reload.
+
+**The page says the server has stopped**
+It did. The page polls `/api/ping` and clears itself once the server is gone, so
+a stale tab cannot go on showing a machine it can no longer see. Nothing is
+undone by this — an install already under way runs to completion in its own
+process. Start the server again for a fresh URL; tokens do not survive a restart.
+
+**It says installed - where did it go, and how do I open it?**
+The report's **Where to find them** section names both, resolved from the machine
+after the run. If a component is listed there with `no launcher found yet`, the
+usual cause is a PATH entry this shell predates: open a new terminal (Windows) or
+log out and back in (Linux/macOS) and re-run — a second run is a no-op that
+reports everything as already present.
 
 **Where are the logs?**
 `logs/autoos-<timestamp>.log`, plain text with the colour stripped.
