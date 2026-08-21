@@ -89,6 +89,8 @@ script_is_installed() {
         antigravity)     has_cmd antigravity ;;
         xpipe)           has_cmd xpipe ;;
         herdr)           has_cmd herdr ;;
+        handy)           has_cmd handy || [[ -x /usr/bin/handy ]] ;;
+        vscode)          has_cmd code ;;
         *)               return 1 ;;
     esac
 }
@@ -148,6 +150,8 @@ install_script() {
         antigravity)     install_antigravity ;;
         xpipe)           install_xpipe ;;
         herdr)           install_herdr ;;
+        handy)           install_handy ;;
+        vscode)          install_vscode ;;
         *) ui_err "no script installer for '$1'"; return 1 ;;
     esac
 }
@@ -242,6 +246,68 @@ install_xpipe() {
     local tmp; tmp="$(mktemp)"
     curl -fsSL -o "$tmp" https://github.com/xpipe-io/xpipe/raw/master/get-xpipe.sh
     bash "$tmp"
+    rm -f "$tmp"
+}
+
+install_vscode() {
+    # Microsoft's own documented route: their signed apt repository, so `apt
+    # upgrade` keeps it current instead of it going stale as a one-off .deb.
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would add Microsoft's signed apt repo and install code"
+        return 0
+    fi
+    local key=/etc/apt/keyrings/packages.microsoft.gpg
+    if [[ ! -f "$key" ]]; then
+        local tmp; tmp="$(mktemp)"
+        curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor >"$tmp"
+        $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
+        rm -f "$tmp"
+    fi
+    if [[ ! -f /etc/apt/sources.list.d/vscode.list ]]; then
+        printf 'deb [arch=amd64,arm64,armhf signed-by=%s] https://packages.microsoft.com/repos/code stable main\n' \
+            "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/vscode.list >/dev/null
+        APT_UPDATED=0   # the new repo has to be fetched before install
+    fi
+    apt_update_once
+    run $AUTOOS_SUDO apt-get install -y code
+}
+
+install_handy() {
+    # No apt repository exists, so take the .deb the project publishes. The asset
+    # name is resolved from the release API rather than pinned, so this does not
+    # go stale, and python3 parses it because a grep over JSON is a trap.
+    local suffix
+    case "$SYS_ARCH" in
+        x64)   suffix="amd64" ;;
+        arm64) suffix="arm64" ;;
+        *) ui_warn "Handy publishes no .deb for ${SYS_ARCH} - skipping."; return 0 ;;
+    esac
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install the latest Handy ${suffix}.deb from github.com/cjpais/Handy"
+        return 0
+    fi
+    catalog_require_python || return 1
+    local url
+    url="$(curl -fsSL https://api.github.com/repos/cjpais/Handy/releases/latest 2>/dev/null |
+           python3 -c "
+import json, sys
+suffix = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for asset in data.get('assets', []):
+    if asset['name'].endswith('_' + suffix + '.deb'):
+        print(asset['browser_download_url'])
+        break
+" "$suffix")"
+    if [[ -z "$url" ]]; then
+        ui_warn "Could not find a Handy .deb for ${suffix} in the latest release."
+        return 1
+    fi
+    local tmp; tmp="$(mktemp --suffix=.deb)"
+    curl -fsSL -o "$tmp" "$url"
+    run $AUTOOS_SUDO apt-get install -y "$tmp"
     rm -f "$tmp"
 }
 

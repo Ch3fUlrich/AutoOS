@@ -39,6 +39,25 @@ def sh(*args: str) -> str:
     ).stdout
 
 
+def component_platforms() -> dict:
+    """id -> the platforms whose catalog contains it.
+
+    Read from every catalog, not just this machine's, so the page can say
+    "Windows only" instead of leaving the reader to guess whether something is
+    missing here because it does not exist or because nobody added it yet.
+    """
+    out: dict[str, list[str]] = {}
+    for name in ("windows", "linux", "macos"):
+        path = ROOT / "catalog" / f"{name}.json"
+        if not path.exists():
+            continue
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for grp in data.get("categories", []):
+            for c in grp.get("components", []):
+                out.setdefault(c["id"], []).append(name)
+    return out
+
+
 def build_state() -> dict:
     """System info + catalog, produced by the same shell code the CLI uses."""
     probe = r"""
@@ -74,6 +93,7 @@ PY
     info = json.loads(out.stdout.strip().splitlines()[-1])
 
     catalog = json.loads((ROOT / "catalog" / "linux.json").read_text(encoding="utf-8"))
+    platforms = component_platforms()
     arch = info["system"]["architecture"]
     headless = info["system"]["display"] == "headless"
     components = []
@@ -90,6 +110,7 @@ PY
                 "category": grp["name"],
                 "requires": c.get("requires", []), "homepage": c.get("homepage"),
                 "verify": c.get("verify"), "notes": c.get("notes"),
+                "platforms": platforms.get(c["id"], ["linux"]),
             })
     return {
         "platform": "Linux",

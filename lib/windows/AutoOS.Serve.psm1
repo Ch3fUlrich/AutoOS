@@ -38,6 +38,22 @@ function Get-AutoOSServeState {
     param([psobject]$SystemInfo, [psobject]$Catalog)
 
     $available = @(Get-AutoOSAvailableComponents -Catalog $Catalog -SystemInfo $SystemInfo)
+
+    # Read every catalog, not just this machine's, so the page can say "Linux
+    # only" rather than leaving the reader to guess whether something is absent
+    # here because it cannot exist or because nobody has added it yet.
+    $platforms = @{}
+    foreach ($plat in @('windows', 'linux', 'macos')) {
+        $path = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "catalog\$plat.json"
+        if (-not (Test-Path $path)) { continue }
+        $cat = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($grp in $cat.categories) {
+            foreach ($c in $grp.components) {
+                if (-not $platforms.ContainsKey($c.id)) { $platforms[$c.id] = @() }
+                $platforms[$c.id] += $plat
+            }
+        }
+    }
     $components = foreach ($c in $available) {
         [ordered]@{
             id = $c.Id; name = $c.Name; description = $c.Description
@@ -45,6 +61,7 @@ function Get-AutoOSServeState {
             profiles = @($c.Profiles); prompt = $c.Prompt; category = $c.Category
             requires = @($c.Requires); homepage = $c.Homepage
             verify = $c.Verify; notes = $c.Notes
+            platforms = @($platforms[$c.Id])
         }
     }
     [ordered]@{
@@ -58,6 +75,7 @@ function Get-AutoOSServeState {
             cores          = "$($SystemInfo.CpuCores)"
             memory         = "$($SystemInfo.RamGB) GB"
             'free disk'    = "$($SystemInfo.FreeDiskGB) GB"
+            microphone     = $SystemInfo.Microphone
             user           = $SystemInfo.UserName
             elevated       = $(if ($SystemInfo.IsAdmin) { 'yes' } else { 'no' })
             environment    = $(if ($SystemInfo.IsVirtual) { 'virtual machine' } else { 'bare metal' })

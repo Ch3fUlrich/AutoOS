@@ -72,6 +72,13 @@ Each of these cost a real debugging session and is now covered by a test.
 | `cmd && VAR=1` under `set -e` | Returns non-zero when `cmd` is absent; as a function's last statement it aborts the script |
 | `$Profile`, `$args` as parameter names | Shadow PowerShell automatic variables |
 | A function that both prints and echoes its result | `$(...)` captures the UI output into the status string |
+| `.map(fn)` in JavaScript | Passes `(value, index, array)`; a second parameter with a default silently receives the index |
+| `srv.shutdown()` from inside `serve_forever()` | Blocks waiting for the loop it is running on to finish - deadlock |
+| A process backgrounded by a non-interactive shell | Inherits `SIGINT` as ignored, and CPython leaves it that way - Ctrl-C does nothing |
+| `HttpListener.GetContext()` | Blocks in native code; PowerShell can only act on Ctrl-C between statements |
+| A shellcheck `disable` after the first command | Applies to one command, not the file. It must precede every command |
+| A comment whose first word is `shellcheck` | Parsed as a directive, not prose |
+| `<button>` as a card | Vertically centres its content by default; needs an explicit `flex-direction:column` |
 
 ## Why no framework
 

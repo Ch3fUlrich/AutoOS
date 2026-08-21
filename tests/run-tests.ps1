@@ -139,7 +139,7 @@ function New-FakeSystem {
         UserName = 'testuser'; PsVersion = '5.1.0'; PsEdition = 'Desktop'
         IsInteractive = $false; HasScoop = $false; HasGit = $true
         HasNode = $true; HasNpm = $true; HasDocker = $false; HasWsl = $false
-        NodeVersion = 'v22.0.0'
+        NodeVersion = 'v22.0.0'; HasMicrophone = $true; Microphone = 'Test Mic'
     }
 }
 
@@ -191,7 +191,7 @@ Test-Case 'does not flag what was explicitly requested' {
 Test-Case 'resolves a multi-level chain' {
     $plan = @(Resolve-AutoOSPlan -Available $available -SelectedIds @('oh-my-posh'))
     $ids = @($plan | ForEach-Object { $_.Id })
-    foreach ($want in @('powershell7', 'nerd-fonts', 'oh-my-posh')) {
+    foreach ($want in @('powershell7', 'nerd-font', 'oh-my-posh')) {
         if ($ids -notcontains $want) { throw "missing $want in $($ids -join ', ')" }
     }
     Pass
@@ -506,6 +506,47 @@ Test-Case 'the Windows payload reports whether WSL is available' {
 Test-Case 'the Windows payload carries an environment field' {
     $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
     Assert-True ($state.system.Contains('environment')) 'system.environment missing'
+}
+
+Test-Case 'the serve payload labels platform availability' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    $handy = $state.components | Where-Object { $_.id -eq 'handy' }
+    foreach ($p in @('windows', 'linux', 'macos')) {
+        if (@($handy.platforms) -notcontains $p) {
+            throw "handy platforms were: $(@($handy.platforms) -join ',')"
+        }
+    }
+    Pass
+}
+
+Test-Case 'a Windows-only component is labelled as such' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    $wh = $state.components | Where-Object { $_.id -eq 'windhawk' }
+    Assert-Equal (@($wh.platforms) -join ',') 'windows'
+}
+
+Test-Case 'Handy is offered for dictation in the coding profiles' {
+    $handy = $null
+    foreach ($cat in $winCatalog.categories) {
+        foreach ($c in $cat.components) { if ($c.id -eq 'handy') { $handy = $c } }
+    }
+    if (-not $handy) { throw 'handy is not in the catalog' }
+    Assert-Equal "$($handy.package)|$(($handy.profiles | Sort-Object) -join ',')" `
+                 'cjpais.Handy|ai-coding,workstation'
+}
+
+Test-Case 'Handy says it needs a microphone rather than being hidden' {
+    # It installs fine without one, so it is noted, not filtered out.
+    $handy = $null
+    foreach ($cat in $winCatalog.categories) {
+        foreach ($c in $cat.components) { if ($c.id -eq 'handy') { $handy = $c } }
+    }
+    Assert-True ($handy.notes -match 'microphone') "notes were: $($handy.notes)"
+}
+
+Test-Case 'the payload reports the microphone' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    Assert-Equal $state.system.microphone 'Test Mic'
 }
 
 # ─── Static analysis ────────────────────────────────────────────────────────

@@ -145,6 +145,7 @@ Write-AutoOSKeyValue 'CPU'              "$($sys.CpuName) - $($sys.CpuCores) thre
 Write-AutoOSKeyValue 'Memory'           "$($sys.RamGB) GB"
 Write-AutoOSKeyValue 'GPU'              $sys.Gpu
 Write-AutoOSKeyValue 'Free disk'        "$($sys.FreeDiskGB) GB"
+Write-AutoOSKeyValue 'Microphone'       $sys.Microphone
 Write-AutoOSKeyValue 'Elevated'         $(if ($sys.IsAdmin) { 'yes' } else { 'no' }) $(if ($sys.IsAdmin) { 'ok' } else { 'warn' })
 
 $managers = @()

@@ -36,13 +36,14 @@ These are not style preferences. Violating one is a defect regardless of what el
 Two entry points, one shared catalog, no cross-platform abstraction layer.
 
 ```
-setup.ps1              Windows entry point   — pwsh 5.1+ / 7+, no dependencies
-setup.sh               Linux entry point     — bash 4+, no dependencies
-catalog/*.json         WHAT can be installed (declarative, platform-specific)
-lib/windows/*.psm1     HOW it happens on Windows
-lib/linux/*.sh         HOW it happens on Linux
+setup.ps1              Windows entry point   — PowerShell 5.1+, no dependencies
+setup.sh               Linux AND macOS entry — bash 4+, python3 for JSON only
+catalog/*.json         WHAT can be installed — windows / linux / macos
+lib/windows/*.psm1     HOW it happens on Windows (ui, detect, catalog, install,
+                       state, serve)
+lib/linux/*.sh         HOW it happens on Linux and macOS (+ serve.py)
 web/index.html         Browser UI, served by `--serve` for headless machines
-tests/                 Pester (Windows) + bats (Linux)
+tests/                 Both suites — written in-house, no framework
 Windows/ansible/       Remote fleet provisioning ONLY — not used by setup.ps1
 third_party/           Vendored code with its own licence. Never edit.
 ```
@@ -66,15 +67,21 @@ what makes `--dry-run` meaningful and what lets a headless run be fully non-inte
 
 ```jsonc
 {
-  "id": "windhawk",                    // stable, kebab-case, never reused
-  "name": "Windhawk",                  // shown in the menu
-  "description": "One short line.",    // shown in the menu, <= 70 chars
-  "provider": "winget",                // winget | choco | apt | snap | script | custom
-  "package": "RamenSoftware.Windhawk", // provider-specific identifier
-  "profiles": ["workstation"],         // which profiles pre-tick this
-  "requires": [],                      // other component ids, resolved topologically
-  "arch": ["x64", "arm64"],            // omit to mean "any"
-  "postInstall": "Configure-Windhawk"  // optional function name in lib/
+  "id": "claude-code",                     // stable, kebab-case, never reused
+  "name": "Claude Code CLI",               // shown in the menu
+  "description": "One short line.",        // shown in the menu, <= 70 chars
+  "provider": "npm",                       // winget|choco|npm|apt|snap|brew|script|custom
+  "package": "@anthropic-ai/claude-code",  // provider-specific identifier
+  "verify": "claude --version",            // must exit 0 after install
+  "homepage": "https://...",               // http(s); shown as a link in the browser UI
+  "requires": ["nodejs"],                  // other component ids, resolved topologically
+  "profiles": ["workstation"],             // which profiles pre-tick this
+  "arch": ["x64", "arm64"],                // omit to mean "any"
+  "cask": true,                            // macOS only: brew install --cask
+  "source": "msstore",                     // winget only: alternate source
+  "prompt": "omnigraph_url",               // key into the catalog's `prompts`
+  "postInstall": "Install-AutoOSAgentSkills", // optional function name in lib/
+  "notes": "One line shown under the plan entry."
 }
 ```
 
@@ -141,8 +148,10 @@ Rules:
   the filesystem untouched.
 - The Linux suite must pass under WSL2, since that is where it will usually be run from.
 
-`shellcheck` and `PSScriptAnalyzer` are used when present and **skipped with a visible
-note** when not. A skip is not a pass — install them before claiming a change is clean.
+`shellcheck` and `PSScriptAnalyzer` are used when present. **A skip is not a pass** —
+a shellcheck failure once reached CI precisely because the local run was skipped for a
+missing binary. The Linux suite now falls back to the official shellcheck container and
+only skips when neither that nor the binary is available. Install them where you can.
 
 ## 6. Platform gotchas that have already bitten this repo
 
@@ -158,6 +167,19 @@ note** when not. A skip is not a pass — install them before claiming a change 
   `oh-my-posh init pwsh` in the 5.1 profile themes nothing.
 - Raspberry Pi is `arm64`; a great many packages simply do not exist there. Set `arch` on the
   catalog entry rather than letting it fail at install time.
+- `.map(fn)` in JavaScript passes `(value, index, array)`. A function whose second parameter
+  has a default (`function f(x, seen = new Set())`) silently receives the **index** instead.
+- `srv.shutdown()` called from inside `serve_forever()`'s own thread deadlocks: it waits for
+  the loop that is calling it. After `serve_forever()` returns, `server_close()` is enough.
+- A process backgrounded by a non-interactive shell inherits `SIGINT` as **ignored**, and
+  CPython then leaves it ignored. Arm the handler explicitly if Ctrl-C must work.
+- `HttpListener.GetContext()` blocks in native code, so a PowerShell loop around it cannot be
+  interrupted at all. Use `GetContextAsync()` with a short `Wait()`.
+- A shellcheck `# shellcheck disable=...` only applies file-wide if it comes **before the first
+  command**; anywhere later it covers one command. And a comment starting with the word
+  `shellcheck` is parsed as a directive even when you meant prose.
+- A `<button>` styled as a card vertically centres its content unless you set
+  `display:flex; flex-direction:column`.
 
 ## 7. Definition of done
 

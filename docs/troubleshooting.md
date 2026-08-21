@@ -71,5 +71,15 @@ commands at all; please reproduce and report.
 ```
 Files only — [it does not uninstall packages](state-and-undo.md#what-it-deliberately-does-not-do).
 
+**The browser-UI server will not stop**
+`Ctrl-C` works, and so does `kill` (SIGTERM) on Linux and macOS. If a server
+predating this fix is still running, close its terminal — an older build blocked
+in a native accept call that could not be interrupted.
+
+**The port is still in use after stopping**
+Both servers release the socket in a `finally` block now. A leftover process from
+an older build can be found with `ss -ltnp | grep 8777` (Linux) or
+`Get-NetTCPConnection -LocalPort 8777` (Windows).
+
 **Where are the logs?**
 `logs/autoos-<timestamp>.log`, plain text with the colour stripped.

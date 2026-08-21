@@ -292,6 +292,10 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
 .chip-auto{background:var(--dep);color:#fff}
 .chip-locked{background:var(--warn-soft);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
 .chip-note{background:var(--warn-soft);color:var(--warn)}
+.chip-plat{
+  background:var(--surface-3);color:var(--ink-muted);
+  border-color:var(--rule-strong);font-weight:700;
+}
 .chip-ok{background:var(--ok-soft);color:var(--ok)}
 .prov{font-family:var(--mono);font-size:.67rem;font-weight:700;text-transform:lowercase}
 .prov-winget{background:#DCE9F8;color:#1B4D80}
@@ -819,6 +823,23 @@ function renderCatalog() {
   });
 }
 
+const PLATFORM_NAME = { windows: "Windows", linux: "Linux", macos: "macOS" };
+const ALL_PLATFORMS = ["windows", "linux", "macos"];
+
+/* Only labels the exceptions. Something available everywhere needs no chip;
+   silence means "works on all three". */
+function platformChip(c) {
+  const on = (c.platforms || []).filter(p => ALL_PLATFORMS.includes(p));
+  if (!on.length || on.length === ALL_PLATFORMS.length) return "";
+  if (on.length === 1) {
+    return '<span class="chip chip-plat" title="Only packaged for ' +
+      esc(PLATFORM_NAME[on[0]]) + '">' + esc(PLATFORM_NAME[on[0]]) + " only</span>";
+  }
+  const missing = ALL_PLATFORMS.filter(p => !on.includes(p)).map(p => PLATFORM_NAME[p]);
+  return '<span class="chip chip-plat" title="Not packaged for ' + esc(missing.join(", ")) +
+    '">not on ' + esc(missing.join(", ")) + "</span>";
+}
+
 function itemHtml(c) {
   const name = c.homepage
     ? '<a class="item-name" href="' + esc(c.homepage) + '" target="_blank" rel="noopener noreferrer">' +
@@ -832,6 +853,7 @@ function itemHtml(c) {
         '<span class="chip prov prov-' + esc(c.provider) + '">' + esc(c.provider) + "</span>" +
         '<span class="chip chip-pkg" title="' + esc(c.provider + ": " + c.package) + '">' +
           esc(c.package) + "</span>" +
+        platformChip(c) +
         '<span class="state-chips"></span>' +
       "</span>" +
       '<span class="item-desc">' + esc(c.description) + "</span>" +

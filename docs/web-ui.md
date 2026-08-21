@@ -85,6 +85,10 @@ Each component shows its **provider** (colour-coded: `winget`, `apt`, `brew`,
 `npm`, `script`, `custom`), its exact package id, and its name as a link to the
 project's own homepage.
 
+Components that are not packaged for every platform carry a label —
+`Linux only`, `not on Windows`, and so on. Silence means it is available on all
+three. See [the catalog](catalog.md#platform-availability).
+
 ### Dependencies are shown, not hidden
 
 Some things cannot be installed on their own. Claude Code CLI needs Node.js;

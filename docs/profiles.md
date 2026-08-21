@@ -13,9 +13,11 @@ machines instead of the one they happen to be on.
 | Model / board | Recognising a Raspberry Pi |
 | CPU cores, RAM | Choosing the suggested profile |
 | Free disk | Warning before large installs |
+| Microphone | Reported so speech-to-text tools can say whether they are usable here |
 | Elevation / sudo | Warning that machine-wide packages will be skipped |
 | Display present | Hiding the desktop category on headless boxes |
-| WSL2 / container | Warning that systemd and desktop packages behave differently |
+| WSL (version + distro) | Reported as e.g. `WSL2 on Windows (Ubuntu)`; warns that systemd and desktop packages differ |
+| container | Suggests the `server` profile and warns for the same reason |
 | Package managers, git, node, docker | Skipping what is already there |
 | Virtualisation firmware flag | Warning that Docker and WSL2 will not start without it |
 
@@ -62,6 +64,24 @@ offering it.
 - `arch` on a component hides it on other architectures — for example
   Antigravity is x64-only, so it never appears on a Pi.
 - `requiresDisplay` on a category hides the whole group on a headless box.
+
+## Detecting WSL
+
+Whether you are inside Windows Subsystem for Linux changes what actually works,
+so it is detected from three independent signals rather than one:
+
+- `WSL_DISTRO_NAME` — absent in a service or a bare `wsl -u root` shell;
+- `/proc/version` — rewritten by some kernels;
+- `/proc/sys/kernel/osrelease` — differs between WSL1 and WSL2.
+
+WSL2 ships a real Linux kernel tagged `microsoft-standard-WSL2` and has `/run/WSL`;
+WSL1 is a syscall translation layer on an NT-era version string. The version is
+reported rather than assumed, along with the distro name, and it appears in the
+terminal summary, in the browser UI header, and in the `environment` field of the
+browser payload.
+
+Windows reports itself as the WSL **host**, never the guest: `wsl.isWsl` is always
+false there, with `wsl.available` saying whether the feature is installed.
 
 Check what your machine is actually offered:
 

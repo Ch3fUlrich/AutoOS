@@ -182,6 +182,20 @@
           "homepage": "https://claude.ai/download"
         },
         {
+          "id": "handy",
+          "name": "Handy",
+          "description": "Offline speech-to-text — dictate instead of typing",
+          "provider": "brew",
+          "package": "handy",
+          "cask": true,
+          "homepage": "https://handy.computer/",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Needs a microphone; runs fully offline, nothing is sent to a server."
+        },
+        {
           "id": "herdr",
           "name": "Herdr",
           "description": "Persistent, resumable AI sessions",

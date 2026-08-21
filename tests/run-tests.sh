@@ -566,6 +566,44 @@ if it "only two tabs remain"; then
     assert_eq "$n" "2"
 fi
 
+if it "the core stack is available on all three platforms"; then
+    # These carry the same id in every catalog on purpose: a product that exists
+    # everywhere but is filed under two different ids reports itself as
+    # single-platform, which is exactly what docker-desktop/nerd-fonts did.
+    missing="$(python3 - <<'PY'
+import json, glob, collections
+have = collections.defaultdict(set)
+for p in glob.glob("catalog/*.json"):
+    plat = p.replace("catalog", "").strip("/\\").replace(".json", "")
+    for g in json.load(open(p, encoding="utf-8"))["categories"]:
+        for c in g["components"]:
+            have[c["id"]].add(plat)
+core = ["claude-code", "git", "nodejs", "docker", "tailscale",
+        "handy", "vscode", "herdr", "agent-skills", "nerd-font"]
+bad = [c for c in core if have[c] != {"windows", "linux", "macos"}]
+print(" ".join(bad))
+PY
+)"
+    assert_eq "$missing" ""
+fi
+
+if it "the page labels components that are not on every platform"; then
+    ok=1
+    for marker in "platformChip" "chip-plat" "PLATFORM_NAME"; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "platform label markers missing"; fi
+fi
+
+if it "the payload carries the platform list"; then
+    grep -q "component_platforms" lib/linux/serve.py && pass || fail "serve.py does not compute platforms"
+fi
+
+if it "Handy is offered on every platform"; then
+    n="$(grep -l '"id": "handy"' catalog/*.json | wc -l)"
+    assert_eq "$n" "3"
+fi
+
 # ─── WSL detection ──────────────────────────────────────────────────────────
 describe "wsl detection"
 

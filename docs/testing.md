@@ -11,7 +11,7 @@ powershell -File tests\run-tests.ps1
 powershell -File tests\run-tests.ps1 -Filter catalog
 ```
 
-Current: **65 Linux**, **57 Windows**.
+Current: **69 Linux**, **62 Windows**.
 
 ## No framework
 
@@ -54,9 +54,19 @@ Do not replace them with a framework.
 
 ## Linters
 
-`shellcheck` and `PSScriptAnalyzer` run when present and are **skipped with a
-visible note** when not. A skip is not a pass — install them before calling a
-change clean:
+`shellcheck` and `PSScriptAnalyzer` run when present. **A skip is not a pass.**
+
+This is not a hypothetical: shellcheck was skipped locally for lack of the binary,
+so a shellcheck failure reached CI unnoticed. The Linux suite therefore falls back
+to the official container when the binary is missing, and only skips when neither
+is available:
+
+```bash
+shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh   # if installed
+docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable ...  # fallback
+```
+
+Install them anyway where you can:
 
 ```bash
 sudo apt-get install -y shellcheck

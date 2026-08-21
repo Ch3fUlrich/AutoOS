@@ -68,7 +68,7 @@ Two more rules the code is built around, both learned the hard way:
 | [`catalog/`](docs/catalog.md) | **What** can be installed — `windows.json`, `linux.json`, `macos.json`. Data only. |
 | `lib/windows/` · `lib/linux/` | **How** it happens: detect, catalog, install, ui, state, serve. |
 | [`web/`](docs/web-ui.md) | The browser UI served by `--serve`. |
-| [`tests/`](docs/testing.md) | Both suites — 65 Linux, 57 Windows, no framework needed. |
+| [`tests/`](docs/testing.md) | Both suites — 69 Linux, 62 Windows, no framework needed. |
 | [`Windows/ansible/`](docs/remote-provisioning.md) | Provisioning *other* machines over the network. Not used by `setup.ps1`. |
 | [`Linux/ubuntu_autoinstall/`](docs/remote-provisioning.md#unattended-ubuntu-install) | Unattended Ubuntu install profile. |
 | `third_party/` | Vendored code under its own licence. Never edited. |
@@ -82,6 +82,7 @@ Run `--list` for the current set. The headline items:
 |---|---|
 | Terminal | Windows Terminal, PowerShell 7, Oh My Posh, zsh + Powerlevel10k, Nerd Fonts |
 | Coding & AI | Claude Code CLI, Claude Desktop, Antigravity, VS Code, Docker, Herdr, Node.js |
+| Input | Handy — offline speech-to-text, so you can dictate prompts instead of typing them |
 | MCP stack | Clones [agent-skills](https://github.com/Ch3fUlrich/agent-skills) and wires up Serena / Graphify / Omnigraph / Superpowers — asking for your Omnigraph URL rather than hardcoding one |
 | Desktop (Windows) | Windhawk with the Explorer file-size and taskbar-clock mods, PowerToys |
 | Remote | Tailscale, WireGuard, Parsec, OpenSSH |

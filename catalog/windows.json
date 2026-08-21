@@ -46,7 +46,7 @@
           "package": "JanDeDobbeleer.OhMyPosh",
           "requires": [
             "powershell7",
-            "nerd-fonts"
+            "nerd-font"
           ],
           "postInstall": "Install-AutoOSPoshTheme",
           "profiles": [
@@ -57,7 +57,7 @@
           "homepage": "https://ohmyposh.dev/"
         },
         {
-          "id": "nerd-fonts",
+          "id": "nerd-font",
           "name": "Meslo Nerd Font",
           "description": "Patched font with prompt glyphs and icons",
           "provider": "script",
@@ -178,6 +178,19 @@
           "homepage": "https://claude.ai/download"
         },
         {
+          "id": "handy",
+          "name": "Handy",
+          "description": "Offline speech-to-text — dictate instead of typing",
+          "provider": "winget",
+          "package": "cjpais.Handy",
+          "homepage": "https://github.com/cjpais/Handy",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Needs a microphone; runs fully offline, nothing is sent to a server."
+        },
+        {
           "id": "antigravity",
           "name": "Antigravity",
           "description": "Google's agent-first IDE",
@@ -204,7 +217,7 @@
           "homepage": "https://code.visualstudio.com/"
         },
         {
-          "id": "docker-desktop",
+          "id": "docker",
           "name": "Docker Desktop",
           "description": "Containers — backs the local MCP memory stack",
           "provider": "winget",

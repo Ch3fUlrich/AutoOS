@@ -243,6 +243,43 @@
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
         },
         {
+          "id": "handy",
+          "name": "Handy",
+          "description": "Offline speech-to-text — dictate instead of typing",
+          "provider": "script",
+          "package": "handy",
+          "arch": [
+            "x64",
+            "arm64"
+          ],
+          "requires": [
+            "download-tools"
+          ],
+          "homepage": "https://handy.computer/",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Needs a microphone; installs the .deb from the latest GitHub release."
+        },
+        {
+          "id": "vscode",
+          "name": "Visual Studio Code",
+          "description": "Editor",
+          "provider": "script",
+          "package": "vscode",
+          "requires": [
+            "download-tools"
+          ],
+          "verify": "code --version",
+          "homepage": "https://code.visualstudio.com/",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Adds Microsoft's signed apt repository, as their own docs instruct."
+        },
+        {
           "id": "herdr",
           "name": "Herdr",
           "description": "Persistent, resumable AI sessions",

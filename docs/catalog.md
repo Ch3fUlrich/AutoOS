@@ -60,6 +60,30 @@ something — extend the schema instead.
 | `script` | all | A named function in `lib/*/install.*` |
 | `custom` | all | Nothing; the work happens entirely in `postInstall` |
 
+## Platform availability
+
+There is one catalog per platform, so whether a component exists anywhere else is
+implied rather than stated. The browser UI computes it by reading **all three**
+catalogs and labels only the exceptions:
+
+| Available on | Label shown |
+|---|---|
+| all three | *(nothing — silence means everywhere)* |
+| two | `not on Windows` / `not on macOS` / `not on Linux` |
+| one | `Windows only` / `Linux only` / `macOS only` |
+
+**The same product must carry the same `id` in every catalog it appears in.**
+Filing Docker under `docker-desktop` on Windows and `docker` elsewhere made both
+entries report themselves as single-platform. A test asserts that the core stack
+— Claude Code, Git, Node.js, Docker, Tailscale, Handy, VS Code, Herdr,
+agent-skills and the Nerd Font — resolves to all three platforms.
+
+Names may still differ where the product genuinely differs (`Docker Engine` on
+Linux, `Docker Desktop` elsewhere); only the id has to match.
+
+When adding something, prefer covering all three. Where a platform genuinely has
+no package, leave it out of that catalog and the label explains itself.
+
 ## Prompts
 
 Questions are collected **once, before anything is installed**, so an install

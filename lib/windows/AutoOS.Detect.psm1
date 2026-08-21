@@ -85,6 +85,17 @@ function Get-AutoOSSystemInfo {
         $info.IsLaptop = $bat.Count -gt 0
     } catch { $info.IsLaptop = $false }
 
+    # Reported so a dictation tool like Handy can say up front whether this
+    # machine can actually use it. Never used to hide the component: Handy
+    # installs fine without a microphone, it is just not much use.
+    try {
+        $mics = @(Get-CimInstance Win32_PnPEntity -ErrorAction Stop |
+                  Where-Object { $_.PNPClass -eq 'AudioEndpoint' -and
+                                 $_.Name -match 'Microphone|Mikrofon|Input' })
+        $info.HasMicrophone = $mics.Count -gt 0
+        $info.Microphone = if ($mics.Count) { ($mics[0].Name -replace '\s+', ' ').Trim() } else { 'none' }
+    } catch { $info.HasMicrophone = $false; $info.Microphone = 'unknown' }
+
     try {
         $sys = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction Stop
         $info.FreeDiskGB = [Math]::Round($sys.FreeSpace / 1GB, 1)
