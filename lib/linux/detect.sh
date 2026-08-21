@@ -6,6 +6,11 @@
 # rather than the live machine.
 #
 # shellcheck shell=bash
+# shellcheck disable=SC2034
+#   The SYS_*/CAT_*/MENU_*/*_STATE globals below are this module's public
+#   interface - they are read by setup.sh, serve.py's probe and the tests,
+#   none of which shellcheck can see from here.
+
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
@@ -27,6 +32,7 @@ detect_macos() {
 
     SYS_MODEL="$(sysctl -n hw.model 2>/dev/null || echo unknown)"
     SYS_IS_PI=0; SYS_IS_WSL=0; SYS_IS_CONTAINER=0
+    SYS_WSL_VERSION=""; SYS_WSL_DISTRO=""; SYS_ENVIRONMENT="macOS"
     SYS_CPU_CORES="$(sysctl -n hw.ncpu 2>/dev/null || echo 1)"
     SYS_CPU_NAME="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
     local mem_bytes
@@ -105,9 +111,44 @@ detect_system() {
         SYS_MODEL="$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || echo unknown)"
     fi
     if [[ "$SYS_MODEL" == *"Raspberry Pi"* ]]; then SYS_IS_PI=1; fi
-    if grep -qi microsoft /proc/version 2>/dev/null; then SYS_IS_WSL=1; fi
+    # WSL: three independent signals, because none is reliable alone. The env
+    # var is absent in a service or a bare `wsl -u root` shell, /proc/version is
+    # rewritten by some kernels, and osrelease differs between WSL1 and WSL2.
+    SYS_WSL_VERSION=""; SYS_WSL_DISTRO=""
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+        SYS_IS_WSL=1; SYS_WSL_DISTRO="$WSL_DISTRO_NAME"
+    elif grep -qi microsoft /proc/version 2>/dev/null; then
+        SYS_IS_WSL=1
+    elif grep -qiE 'microsoft|wsl' /proc/sys/kernel/osrelease 2>/dev/null; then
+        SYS_IS_WSL=1
+    fi
+    if (( SYS_IS_WSL )); then
+        # WSL2 ships a real Linux kernel tagged microsoft-standard-WSL2 and has
+        # /run/WSL; WSL1 is a syscall translation layer on an NT-era version string.
+        if grep -qiE 'wsl2|microsoft-standard' /proc/sys/kernel/osrelease 2>/dev/null \
+           || grep -qi 'WSL2' /proc/version 2>/dev/null \
+           || [[ -d /run/WSL ]]; then
+            SYS_WSL_VERSION=2
+        else
+            SYS_WSL_VERSION=1
+        fi
+        if [[ -z "$SYS_WSL_DISTRO" && -r /etc/wsl.conf ]]; then
+            SYS_WSL_DISTRO="$(awk -F= '/^[[:space:]]*hostname/{gsub(/ /,"",$2); print $2}' /etc/wsl.conf 2>/dev/null)"
+        fi
+    fi
     if [[ -f /.dockerenv ]] || grep -qE '(docker|lxc|containerd)' /proc/1/cgroup 2>/dev/null; then
         SYS_IS_CONTAINER=1
+    fi
+
+    # One human-readable summary the UI and the terminal can both print.
+    if (( SYS_IS_WSL )); then
+        SYS_ENVIRONMENT="WSL${SYS_WSL_VERSION} on Windows"
+        if [[ -n "$SYS_WSL_DISTRO" ]]; then
+            SYS_ENVIRONMENT="$SYS_ENVIRONMENT (${SYS_WSL_DISTRO})"
+        fi
+    elif (( SYS_IS_CONTAINER )); then SYS_ENVIRONMENT="container"
+    elif (( SYS_IS_PI )); then        SYS_ENVIRONMENT="Raspberry Pi"
+    else                              SYS_ENVIRONMENT="bare metal or VM"
     fi
 
     # ─── Hardware ───────────────────────────────────────────────────────────
@@ -201,7 +242,7 @@ detect_blockers() {
     fi
     if (( SYS_IS_WSL )); then
         _blocker warn \
-            "Running under WSL2." \
+            "Running under ${SYS_ENVIRONMENT}." \
             "systemd services and desktop packages may not behave as they would on bare metal."
     fi
 }

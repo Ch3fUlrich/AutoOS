@@ -6,6 +6,11 @@
 # system.
 #
 # shellcheck shell=bash
+# shellcheck disable=SC2034
+#   The SYS_*/CAT_*/MENU_*/*_STATE globals below are this module's public
+#   interface - they are read by setup.sh, serve.py's probe and the tests,
+#   none of which shellcheck can see from here.
+
 
 # ─── Capability detection ───────────────────────────────────────────────────
 AUTOOS_LOG="${AUTOOS_LOG:-}"

@@ -60,6 +60,15 @@ function Get-AutoOSServeState {
             'free disk'    = "$($SystemInfo.FreeDiskGB) GB"
             user           = $SystemInfo.UserName
             elevated       = $(if ($SystemInfo.IsAdmin) { 'yes' } else { 'no' })
+            environment    = $(if ($SystemInfo.IsVirtual) { 'virtual machine' } else { 'bare metal' })
+        }
+        wsl = [ordered]@{
+            # Windows is the WSL *host*, never the guest - say so plainly rather
+            # than leaving the field ambiguous.
+            isWsl     = $false
+            available = [bool]$SystemInfo.HasWsl
+            version   = ''
+            distro    = ''
         }
         suggested = Get-AutoOSSuggestedProfile -SystemInfo $SystemInfo
         profiles  = $Catalog.profiles
@@ -187,8 +196,17 @@ function Start-AutoOSServer {
         Write-AutoOSLine 'Could not open a browser here - use the URL above.' -Level muted
     }
 
+    # HttpListener.GetContext() blocks inside native code, and PowerShell can only
+    # act on Ctrl-C between statements - so the old blocking loop could not be
+    # interrupted at all. GetContextAsync + a short Wait() hands control back
+    # every 200 ms, which is what gives Ctrl-C somewhere to land.
+    $pending = $null
+    try {
     while ($listener.IsListening) {
-        $ctx = $listener.GetContext()
+        if ($null -eq $pending) { $pending = $listener.GetContextAsync() }
+        if (-not $pending.Wait(200)) { continue }   # timeout: loop, stay interruptible
+        $ctx = $pending.Result
+        $pending = $null
         $req = $ctx.Request
         $res = $ctx.Response
         $res.Headers.Add('Cache-Control', 'no-store')
@@ -267,6 +285,15 @@ function Start-AutoOSServer {
                 Write-AutoOSLine 'client disconnected before the error could be sent' -Level muted
             }
         }
+    }
+    } finally {
+        # Runs on Ctrl-C too, so the port is released instead of being held by a
+        # half-dead listener until the shell exits.
+        Write-AutoOSLine ''
+        Write-AutoOSLine 'stopping the AutoOS browser UI...' -Level muted
+        if ($listener.IsListening) { $listener.Stop() }
+        $listener.Close()
+        Write-AutoOSLine 'server stopped.' -Level ok
     }
 }
 

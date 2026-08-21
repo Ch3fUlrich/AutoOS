@@ -38,19 +38,41 @@ Open that URL. On a desktop it opens by itself; on a headless box, copy it.
 
 ## Using it
 
-The page is organised into four tabs, with a persistent action bar pinned to the
-bottom so the primary action and the running total are always visible.
+Two tabs, with a persistent action bar pinned to the bottom so the running total
+and the primary action stay visible wherever you are.
 
-| Tab | What you do |
+| Tab | Contains |
 |---|---|
-| **Overview** | Read the detected system, pick a profile. The one matching your hardware is tagged `suggested`. |
-| **Components** | Tick or untick anything, grouped by category with a per-group count. Filter, expand/collapse, select all/none. |
-| **Install order** | See the resolved plan as numbered steps — what gets installed first and what waits on it. |
-| **Run & log** | Answer any questions your selection needs, then watch the live, colour-coded log. |
+| **Overview** | Everything you choose: detected system, profile, components, install order — each in its own collapsible card. |
+| **Run & log** | Any questions your selection needs, then the live colour-coded log. |
+
+Every big card (`Detected system`, `Profile`, `Components`, `Install order`) is a
+collapsible section — click the header to fold it away once you are done with it.
+
+### Theme
+
+A three-way switch in the header: **Auto** (follows your OS), **Light**, **Dark**.
+The choice is remembered per browser.
+
+### Profile cards expand
+
+Selecting a profile grows its card and shrinks the others, and the expanded card
+shows **what that profile actually installs** — total components, how many are
+dependencies, and a per-category breakdown with the component names — before you
+scroll down to the detail.
+
+### Components: list or grid
+
+The components card has a **List / Grid** switch and, in grid mode, a **Columns**
+selector (auto-fit, 2, 3 or 4). Both are remembered per browser. Grid is useful
+on a wide screen; list gives each component more room for its dependency chips.
+
+There is also a filter box, per-group counts, and expand/collapse for the
+category groups.
 
 Each component shows its **provider** (colour-coded: `winget`, `apt`, `brew`,
 `npm`, `script`, `custom`), its exact package id, and its name as a link to the
-project's own homepage — so you can check what something is before installing it.
+project's own homepage.
 
 ### Dependencies are shown, not hidden
 
@@ -66,7 +88,7 @@ explicit rather than silently expanding your selection:
   that needs it instead.
 - The action bar always reads e.g. `3 to install · 2 pulled in as dependencies`.
 
-The **Install order** tab turns the same information into the actual plan:
+The **Install order** card turns the same information into the actual plan:
 
 ```
 ①  Step 1 · 4 components     Needs nothing else — installed first.
@@ -77,20 +99,22 @@ The **Install order** tab turns the same information into the actual plan:
       Claude Code CLI  (after Node.js LTS) · Herdr  (after Node.js LTS)
 ```
 
-Steps are computed from the longest requirement chain, so step 1 is always
-"needs nothing". Items pulled in automatically keep the dashed purple styling.
+Steps come from the longest requirement chain, so step 1 always "needs nothing".
 
 ### Recommended flow
 
-1. **Overview** — confirm the machine, choose a profile.
-2. **Components** — adjust the ticks. Watch the dependency chips.
-3. **Install order** — sanity-check what will happen and in what sequence.
-4. **Run & log** — leave *Dry run* ticked, press **Install selected**, read the log.
-5. Untick *Dry run*, press it again, confirm the dialog.
+1. **Overview** — confirm the machine, pick a profile, read its summary.
+2. Adjust the ticks below. Watch the dependency chips and the install order.
+3. **Run & log** — leave *Dry run* ticked, press **Install selected**, read the log.
+4. Untick *Dry run*, press it again, confirm the dialog.
 
 The confirmation dialog names how many components are about to be installed and
-how many of those are automatic dependencies. Dry run changes nothing at all —
-not one file.
+how many are automatic dependencies. Dry run changes nothing at all.
+
+### Stopping the server
+
+`Ctrl-C` in the terminal stops it and releases the port. On Linux and macOS
+`SIGTERM` (a plain `kill`) works too.
 
 ## What happens under the hood
 

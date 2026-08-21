@@ -10,6 +10,11 @@
 #
 # No test installs anything. Providers are asserted on the PLANNED command,
 # never on system state.
+#
+# shellcheck disable=SC2034
+#   Several assignments below exist only to configure the sourced libraries
+#   (AUTOOS_NO_COLOR, AUTOOS_DRY_RUN, AUTOOS_VERIFY) or to stand in for
+#   detection results inside subshells; the linter sees no reader for them.
 
 set -uo pipefail
 
@@ -70,7 +75,7 @@ assert_ok() {
 }
 
 # ─── Load the libraries under test ──────────────────────────────────────────
-cd "$ROOT"
+cd "$ROOT" || { echo "cannot enter $ROOT" >&2; exit 1; }
 # shellcheck source=../lib/linux/ui.sh
 . lib/linux/ui.sh
 # shellcheck source=../lib/linux/detect.sh
@@ -378,7 +383,7 @@ fi
 if it "state survives a save/load round trip"; then
     tmp="$(mktemp)"; rm -f "$tmp"
     AUTOOS_DRY_RUN=0
-    AUTOOS_ANSWERS=([omnigraph_url]="https://example.invalid")
+    AUTOOS_ANSWERS=(["omnigraph_url"]="https://example.invalid")
     autoos_state_save "$tmp" "light" "git tmux" "git" "tmux" "" >/dev/null 2>&1
     AUTOOS_ANSWERS=()
     STATE_PROFILE=""; STATE_SELECTED=""
@@ -481,6 +486,104 @@ if it "external links open safely"; then
     else fail "external links must carry rel=noopener noreferrer"; fi
 fi
 
+if it "the page offers an explicit light/dark/auto theme"; then
+    ok=1
+    for marker in 'data-theme-choice="auto"' 'data-theme-choice="light"' 'data-theme-choice="dark"'; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "theme switcher markers missing"; fi
+fi
+
+if it "every colour token is defined on bare :root, not only behind a theme"; then
+    # A token defined only inside a media query or [data-theme] block is undefined
+    # in the un-stamped "auto" state, which is what renders one theme on another.
+    missing="$(python3 - <<'PY'
+import re, io
+css = io.open("web/index.html", encoding="utf-8").read()
+base = css.split(":root{", 1)[1].split("}", 1)[0]
+declared = set(re.findall(r"(--[a-z0-9-]+)\s*:", base))
+used = set(re.findall(r"var\((--[a-z0-9-]+)", css))
+print(" ".join(sorted(used - declared)))
+PY
+)"
+    assert_eq "$missing" ""
+fi
+
+if it "the components view can switch between list and grid"; then
+    ok=1
+    for marker in 'data-layout-choice="list"' 'data-layout-choice="grid"' 'data-layout="grid"' 'id="cols"'; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "layout switcher markers missing"; fi
+fi
+
+if it "the big cards are collapsible"; then
+    n="$(grep -c 'details class="card"' web/index.html || true)"
+    if [[ "$n" -ge 4 ]]; then pass; else fail "expected >=4 collapsible cards, found $n"; fi
+fi
+
+if it "the profile card carries an inline component summary"; then
+    ok=1
+    for marker in "psummary" "renderProfileSummary" "psum-cats"; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "profile summary markers missing"; fi
+fi
+
+if it "system, profile, components and install order share one tab"; then
+    # They were three separate tabs; collapsing them into Overview is the point.
+    if grep -q 'id="tab-deps"' web/index.html || grep -q 'id="tab-components"' web/index.html; then
+        fail "a separate components or install-order tab is still present"
+    else
+        missing=""
+        for card in cardSystem cardProfile cardCatalog cardOrder; do
+            grep -q "id=\"$card\"" web/index.html || missing+="$card "
+        done
+        assert_eq "$missing" ""
+    fi
+fi
+
+if it "only two tabs remain"; then
+    n="$(grep -c 'class="tab" role="tab"' web/index.html || true)"
+    assert_eq "$n" "2"
+fi
+
+# ─── WSL detection ──────────────────────────────────────────────────────────
+describe "wsl detection"
+
+if it "WSL is detected when running under it"; then
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]] || grep -qi microsoft /proc/version 2>/dev/null; then
+        assert_eq "$SYS_IS_WSL" "1"
+    else
+        skip "not running under WSL"
+    fi
+fi
+
+if it "the WSL version is identified, not assumed"; then
+    if (( SYS_IS_WSL )); then
+        case "$SYS_WSL_VERSION" in 1|2) pass ;; *) fail "got version [$SYS_WSL_VERSION]" ;; esac
+    else
+        skip "not running under WSL"
+    fi
+fi
+
+if it "the environment summary is always populated"; then
+    [[ -n "${SYS_ENVIRONMENT:-}" ]] && pass || fail "SYS_ENVIRONMENT is empty"
+fi
+
+if it "a non-WSL machine reports no WSL version"; then
+    ( SYS_IS_WSL=0; SYS_IS_CONTAINER=0; SYS_IS_PI=0
+      [[ -z "${SYS_WSL_VERSION:-}" || "$SYS_IS_WSL" == "0" ]] ) && pass || fail "stale WSL version"
+fi
+
+if it "the payload the UI reads exposes the environment"; then
+    ok=1
+    for marker in "SYS_ENVIRONMENT" "isWsl" "environment"; do
+        grep -q "$marker" lib/linux/serve.py || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "serve.py does not expose the environment"; fi
+fi
+
 # ─── Documentation ──────────────────────────────────────────────────────────
 describe "documentation"
 
@@ -503,11 +606,18 @@ fi
 describe "static analysis"
 
 if it "shellcheck is clean"; then
+    # Fall back to the official image when shellcheck is not installed. This
+    # check being skipped locally is precisely how a shellcheck failure reached
+    # CI unnoticed, so "no binary" should not silently mean "no check".
+    files=(setup.sh lib/linux/*.sh tests/run-tests.sh)
     if has_cmd shellcheck; then
-        out="$(shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh 2>&1)"; rc=$?
+        out="$(shellcheck -S warning "${files[@]}" 2>&1)"; rc=$?
         if [[ $rc -eq 0 ]]; then pass; else fail "$(printf '%s' "$out" | head -20)"; fi
+    elif has_cmd docker && docker info >/dev/null 2>&1; then
+        out="$(docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable                -S warning "${files[@]}" 2>&1)"; rc=$?
+        if [[ $rc -eq 0 ]]; then pass; else fail "(via docker) $(printf '%s' "$out" | head -20)"; fi
     else
-        skip "shellcheck not installed"
+        skip "no shellcheck binary and no usable docker"
     fi
 fi
 

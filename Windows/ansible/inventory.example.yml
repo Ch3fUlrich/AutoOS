@@ -9,16 +9,18 @@
 # This tree provisions OTHER machines over the network. To set up the machine
 # you are sitting at, use ../../setup.ps1 instead - no Ansible required.
 all:
-  hosts:
-    windows_target:
-      ansible_host: 192.0.2.10          # RFC 5737 documentation address
-      ansible_user: CHANGEME
-      ansible_connection: ssh
-      # The win_* modules are PowerShell-based, so the target's OpenSSH default
-      # shell must BE PowerShell. On the target, once:
-      #   New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell `
-      #     -Value 'C:\Program Files\PowerShell\7\pwsh.exe' -PropertyType String -Force
-      ansible_shell_type: powershell
-      # Prefer key-based auth. If you must use a password, put it in the vault
-      # as vault_windows_password and reference it here.
-      # ansible_password: "{{ vault_windows_password }}"
+  children:
+    windows:
+      hosts:
+        windows_target:
+          ansible_host: 192.0.2.10          # RFC 5737 documentation address
+          ansible_user: CHANGEME
+          ansible_connection: ssh
+          # The win_* modules are PowerShell-based, so the target's OpenSSH default
+          # shell must BE PowerShell. On the target, once:
+          #   New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell `
+          #     -Value 'C:\Program Files\PowerShell\7\pwsh.exe' -PropertyType String -Force
+          ansible_shell_type: powershell
+          # Prefer key-based auth. If you must use a password, put it in the vault
+          # as vault_windows_password and reference it here.
+          # ansible_password: "{{ vault_windows_password }}"

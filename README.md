@@ -68,7 +68,7 @@ Two more rules the code is built around, both learned the hard way:
 | [`catalog/`](docs/catalog.md) | **What** can be installed — `windows.json`, `linux.json`, `macos.json`. Data only. |
 | `lib/windows/` · `lib/linux/` | **How** it happens: detect, catalog, install, ui, state, serve. |
 | [`web/`](docs/web-ui.md) | The browser UI served by `--serve`. |
-| [`tests/`](docs/testing.md) | Both suites — 50 Linux, 54 Windows, no framework needed. |
+| [`tests/`](docs/testing.md) | Both suites — 62 Linux, 57 Windows, no framework needed. |
 | [`Windows/ansible/`](docs/remote-provisioning.md) | Provisioning *other* machines over the network. Not used by `setup.ps1`. |
 | [`Linux/ubuntu_autoinstall/`](docs/remote-provisioning.md#unattended-ubuntu-install) | Unattended Ubuntu install profile. |
 | `third_party/` | Vendored code under its own licence. Never edited. |
@@ -146,11 +146,12 @@ over Tailscale — `--serve` gives you the same thing as a web page.
 .\setup.ps1 -Serve
 ```
 
-It prints a URL containing a one-time token. Open it and you get four tabs —
-**Overview** (detected system, profile), **Components** (filterable checkboxes
-grouped by category, each linking to the project's own homepage),
-**Install order**, and **Run & log** — with a persistent action bar showing the
-running total.
+It prints a URL containing a one-time token. Open it and you get two tabs:
+**Overview** — detected system, profile, components and install order, each in a
+collapsible card — and **Run & log**. There is a light/dark/auto theme switch, a
+list-or-grid layout for the components with a column selector, and a persistent
+action bar showing the running total. Selecting a profile expands its card to
+show exactly what it installs before you scroll into the detail.
 
 **You can do the whole setup in the browser and install from there** — nothing
 has to happen in the terminal except starting the server. Leave *Dry run*

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import signal
 import subprocess
 import sys
 import threading
@@ -49,7 +50,8 @@ detect_system
 catalog_load catalog/linux.json "$SYS_ARCH" "$SYS_IS_HEADLESS"
 python3 - "$SYS_DISTRO_NAME" "$SYS_ARCH" "$SYS_MODEL" "$SYS_CPU_NAME" "$SYS_CPU_CORES" \
           "$SYS_RAM_GB" "$SYS_FREE_DISK_GB" "$SYS_USER" "$SYS_IS_HEADLESS" \
-          "$(suggested_profile)" "$(hostname)" <<'PY'
+          "$(suggested_profile)" "$(hostname)" "${SYS_ENVIRONMENT:-unknown}" \
+          "${SYS_IS_WSL:-0}" "${SYS_WSL_VERSION:-}" "${SYS_WSL_DISTRO:-}" <<'PY'
 import json, sys
 k = sys.argv[1:]
 print(json.dumps({
@@ -57,8 +59,10 @@ print(json.dumps({
     "host": k[10], "distribution": k[0], "architecture": k[1], "model": k[2],
     "cpu": k[3], "cores": k[4], "memory": k[5] + " GB", "free disk": k[6] + " GB",
     "user": k[7], "display": "headless" if k[8] == "1" else "graphical",
+    "environment": k[11],
   },
   "suggested": k[9],
+  "wsl": {"isWsl": k[12] == "1", "version": k[13], "distro": k[14]},
 }))
 PY
 """
@@ -91,6 +95,7 @@ PY
         "platform": "Linux",
         "system": info["system"],
         "suggested": info["suggested"],
+        "wsl": info.get("wsl", {"isWsl": False, "version": "", "distro": ""}),
         "profiles": catalog.get("profiles", {}),
         "prompts": catalog.get("prompts", {}),
         "components": components,
@@ -244,11 +249,39 @@ def main() -> int:
         print("  Session is LOCKED to dry run - the browser cannot install anything.")
     print("  The token changes every run. Ctrl-C to stop.")
     print()
-    srv = ThreadingHTTPServer((BIND, PORT), Handler)
+    # daemon_threads: a worker still streaming a log must not keep the process
+    # alive after Ctrl-C. allow_reuse_address: restarting on the same port
+    # should not fail with "address already in use" during TIME_WAIT.
+    # Re-arm SIGINT explicitly. A process started in the background by a
+    # non-interactive shell inherits SIGINT as SIG_IGN, and CPython then leaves
+    # it ignored - so Ctrl-C (or `kill -INT`) would do nothing at all. Handling
+    # SIGTERM too means `kill` and service managers stop it cleanly as well.
+    def _request_stop(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _request_stop)
     try:
-        srv.serve_forever()
+        signal.signal(signal.SIGTERM, _request_stop)
+    except (AttributeError, ValueError):  # pragma: no cover - not on every platform
+        pass
+
+    ThreadingHTTPServer.daemon_threads = True
+    ThreadingHTTPServer.allow_reuse_address = True
+    srv = ThreadingHTTPServer((BIND, PORT), Handler)
+
+    # serve_forever() polls on a 0.5 s tick, so SIGINT lands promptly; shutting
+    # down explicitly releases the socket instead of leaving it to interpreter exit.
+    try:
+        srv.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
-        print("\n  stopped.")
+        print("\n  stopping the AutoOS browser UI...", flush=True)
+    finally:
+        # NOT srv.shutdown(): it blocks until serve_forever() signals that it
+        # has stopped, and we are on the very thread that ran it - so calling it
+        # here deadlocks and Ctrl-C appears to do nothing. serve_forever() has
+        # already returned by this point; closing the socket is all that is left.
+        srv.server_close()
+        print("  server stopped.", flush=True)
     return 0
 
 

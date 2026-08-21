@@ -11,7 +11,7 @@ powershell -File tests\run-tests.ps1
 powershell -File tests\run-tests.ps1 -Filter catalog
 ```
 
-Current: **50 Linux**, **54 Windows**.
+Current: **62 Linux**, **57 Windows**.
 
 ## No framework
 

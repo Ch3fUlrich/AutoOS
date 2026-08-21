@@ -136,11 +136,7 @@ elif (( SYS_CAN_SUDO )); then ui_kv "Privileges" "sudo available" ok
 else ui_kv "Privileges" "unprivileged" warn; fi
 ui_kv "Display"         "$( ((SYS_IS_HEADLESS)) && echo "headless" || echo "graphical session" )"
 
-extras=""
-if (( SYS_IS_PI ));        then extras+="raspberry-pi "; fi
-if (( SYS_IS_WSL ));       then extras+="wsl2 ";         fi
-if (( SYS_IS_CONTAINER )); then extras+="container ";    fi
-if [[ -n "$extras" ]]; then ui_kv "Environment" "${extras% }"; fi
+ui_kv "Environment"     "${SYS_ENVIRONMENT:-unknown}"
 
 present=""
 if (( SYS_HAS_GIT ));    then present+="git ";    fi
@@ -282,6 +278,9 @@ for id in $PLAN_IDS; do
         AUTOOS_ANSWERS["$key"]="$d"
     else
         if [[ "$asked" == " $key " ]]; then ui_section "A few questions"; fi
+        # Declared here because ui_ask assigns it via printf -v (which the
+        # linter cannot follow) and an unset name would trip set -u.
+        reply=""
         ui_ask reply "$q" "$d" "$h"
         AUTOOS_ANSWERS["$key"]="$reply"
     fi

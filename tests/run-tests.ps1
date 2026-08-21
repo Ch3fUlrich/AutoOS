@@ -489,6 +489,25 @@ Test-Case 'the serve payload survives JSON round-tripping' {
     Assert-Contains @($cc.requires) 'nodejs'
 }
 
+Test-Case 'the Windows payload reports WSL as host, not guest' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    # Windows is never the WSL guest; the field must say so rather than be absent.
+    Assert-True ($state.wsl.Contains('isWsl') -and -not $state.wsl.isWsl) `
+        "wsl block: $($state.wsl | ConvertTo-Json -Compress)"
+}
+
+Test-Case 'the Windows payload reports whether WSL is available' {
+    $sys = New-FakeSystem
+    $sys.HasWsl = $true
+    $state = Get-AutoOSServeState -SystemInfo $sys -Catalog $winCatalog
+    Assert-True $state.wsl.available 'HasWsl should surface as wsl.available'
+}
+
+Test-Case 'the Windows payload carries an environment field' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    Assert-True ($state.system.Contains('environment')) 'system.environment missing'
+}
+
 # ─── Static analysis ────────────────────────────────────────────────────────
 Describe-Group 'static analysis'
 

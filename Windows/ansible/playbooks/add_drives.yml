@@ -5,7 +5,7 @@
 
   tasks:
     - name: Ensure network drives are mapped
-      community.windows.win_mapped_drive:
+      ansible.windows.win_mapped_drive:
         letter: "{{ item.letter }}"
         path: "{{ item.path }}"
         username: "{{ item.username }}"

@@ -7,6 +7,11 @@
 # all decisions stay in shell.
 #
 # shellcheck shell=bash
+# shellcheck disable=SC2034
+#   The SYS_*/CAT_*/MENU_*/*_STATE globals below are this module's public
+#   interface - they are read by setup.sh, serve.py's probe and the tests,
+#   none of which shellcheck can see from here.
+
 
 CATALOG_PATH=""
 declare -a CAT_ID CAT_NAME CAT_DESC CAT_PROVIDER CAT_PACKAGE CAT_REQUIRES
@@ -80,7 +85,7 @@ PY
 # catalog_load <path> <arch> <is_headless>
 # Fills the CAT_* arrays with components that can run on this machine.
 catalog_load() {
-    local path="$1" arch="$2" headless="$3" line
+    local path="$1" arch="$2" headless="$3"
     CATALOG_PATH="$path"
     catalog_require_python || return 1
 

@@ -81,8 +81,11 @@
         path: "{{ profile_path }}"
         state: touch
       vars:
+        profile_dir: >-
+          {{ 'PowerShell' if has_pwsh.stdout is search('yes')
+             else 'WindowsPowerShell' }}
         profile_path: >-
-          {{ ansible_env.USERPROFILE }}\Documents\{{ 'PowerShell' if has_pwsh.stdout is search('yes') else 'WindowsPowerShell' }}\Microsoft.PowerShell_profile.ps1
+          {{ ansible_env.USERPROFILE }}\Documents\{{ profile_dir }}\Microsoft.PowerShell_profile.ps1
 
     - name: Initialise oh-my-posh from the profile
       community.windows.win_lineinfile:
@@ -94,8 +97,11 @@
         state: present
         create: true
       vars:
+        profile_dir: >-
+          {{ 'PowerShell' if has_pwsh.stdout is search('yes')
+             else 'WindowsPowerShell' }}
         profile_path: >-
-          {{ ansible_env.USERPROFILE }}\Documents\{{ 'PowerShell' if has_pwsh.stdout is search('yes') else 'WindowsPowerShell' }}\Microsoft.PowerShell_profile.ps1
+          {{ ansible_env.USERPROFILE }}\Documents\{{ profile_dir }}\Microsoft.PowerShell_profile.ps1
 
     - name: Install PSReadLine for the connecting user
       ansible.windows.win_shell: |
