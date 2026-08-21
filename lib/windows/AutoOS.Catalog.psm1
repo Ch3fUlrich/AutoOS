@@ -71,6 +71,11 @@ function Test-AutoOSCatalogSchema {
             if ($c.PSObject.Properties.Name -contains 'verify' -and [string]::IsNullOrWhiteSpace($c.verify)) {
                 [void]$problems.Add("$where : 'verify' is present but empty")
             }
+            if ($c.PSObject.Properties.Name -contains 'homepage') {
+                if ($c.homepage -notmatch '^https?://') {
+                    [void]$problems.Add("$where : 'homepage' must be an http(s) URL")
+                }
+            }
             if ($c.PSObject.Properties.Name -contains 'prompt') {
                 if (-not $Catalog.prompts -or -not $Catalog.prompts.PSObject.Properties.Name.Contains($c.prompt)) {
                     [void]$problems.Add("$where : references undefined prompt '$($c.prompt)'")
@@ -122,6 +127,7 @@ function Get-AutoOSAvailableComponents {
                 PostInstall = Get-AutoOSComponentProperty $c 'postInstall' $null
                 Prompt      = Get-AutoOSComponentProperty $c 'prompt' $null
                 Verify      = Get-AutoOSComponentProperty $c 'verify' $null
+                Homepage    = Get-AutoOSComponentProperty $c 'homepage' $null
                 Notes       = Get-AutoOSComponentProperty $c 'notes' $null
                 Category    = $cat.name
                 CategoryId  = $cat.id

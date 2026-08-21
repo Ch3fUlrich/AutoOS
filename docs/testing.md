@@ -11,7 +11,7 @@ powershell -File tests\run-tests.ps1
 powershell -File tests\run-tests.ps1 -Filter catalog
 ```
 
-Current: **43 Linux**, **49 Windows**.
+Current: **50 Linux**, **54 Windows**.
 
 ## No framework
 
@@ -48,6 +48,9 @@ Do not replace them with a framework.
 | Verification | Passes for an installed binary, unverified for a missing one |
 | Undo | Restores a backed-up file; never contains an uninstall command |
 | Encoding | Every PowerShell file has a UTF-8 BOM |
+| Browser UI | Every component has a homepage; a non-URL one is rejected; the serve payload carries `requires`/`homepage`/`verify` and survives JSON round-tripping |
+| Dependency graph | No `requires` names a component the UI is never sent |
+| Documentation | Every relative link resolves; every docs page is linked from the index |
 
 ## Linters
 

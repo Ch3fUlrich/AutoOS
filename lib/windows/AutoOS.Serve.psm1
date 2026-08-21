@@ -43,6 +43,8 @@ function Get-AutoOSServeState {
             id = $c.Id; name = $c.Name; description = $c.Description
             provider = $c.Provider; package = $c.Package
             profiles = @($c.Profiles); prompt = $c.Prompt; category = $c.Category
+            requires = @($c.Requires); homepage = $c.Homepage
+            verify = $c.Verify; notes = $c.Notes
         }
     }
     [ordered]@{

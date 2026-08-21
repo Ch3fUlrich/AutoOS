@@ -84,6 +84,8 @@ PY
                 "provider": c["provider"], "package": c["package"],
                 "profiles": c.get("profiles", []), "prompt": c.get("prompt"),
                 "category": grp["name"],
+                "requires": c.get("requires", []), "homepage": c.get("homepage"),
+                "verify": c.get("verify"), "notes": c.get("notes"),
             })
     return {
         "platform": "Linux",

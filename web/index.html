@@ -5,281 +5,804 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AutoOS</title>
 <style>
+/* ─────────────────────────────────────────────────────────────────────────
+   Design tokens. Steel blue is the structural accent, matching the terminal
+   UI; the warm ramp is reserved for state so a warning never reads as
+   decoration. Both themes are defined token-level so nothing is left
+   undefined in either.
+   ───────────────────────────────────────────────────────────────────────── */
 :root{
-  --ground:#F6F7F9; --surface:#FFFFFF; --surface-2:#EDEFF3;
-  --ink:#151922; --ink-muted:#5C6675; --ink-faint:#8A93A2;
-  --rule:#DDE1E8; --accent:#2F5D8C; --accent-soft:#E4EBF4;
-  --ok:#2E6B52; --warn:#B26A16; --err:#A3342A;
-  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Consolas,monospace;
+  --ground:#F5F7FA; --surface:#FFFFFF; --surface-2:#EDF0F5; --surface-3:#E3E8F0;
+  --ink:#141821; --ink-muted:#5A6474; --ink-faint:#8B94A3;
+  --rule:#DCE1E9; --rule-strong:#C3CAD6;
+  --accent:#2F5D8C; --accent-soft:#E3EBF5; --accent-ink:#FFFFFF;
+  --ok:#2E6B52; --ok-soft:#E0EFE8;
+  --warn:#A8620F; --warn-soft:#FBEEDC;
+  --err:#A3342A; --err-soft:#F8E5E2;
+  --dep:#6B4FA8; --dep-soft:#EDE7F8;
+  --shadow:0 1px 2px rgba(20,24,33,.06), 0 4px 12px rgba(20,24,33,.05);
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+  --radius:10px;
 }
 @media (prefers-color-scheme:dark){
   :root{
-    --ground:#12151B; --surface:#191D25; --surface-2:#222834;
-    --ink:#E7EAF0; --ink-muted:#9BA5B4; --ink-faint:#6F7A8A;
-    --rule:#2C333F; --accent:#7FA8D8; --accent-soft:#1E2A38;
-    --ok:#6FBF97; --warn:#DDA35C; --err:#E08579;
+    --ground:#0F1219; --surface:#171B23; --surface-2:#1F242E; --surface-3:#282F3B;
+    --ink:#E8EBF1; --ink-muted:#9AA4B4; --ink-faint:#6E7889;
+    --rule:#2A313D; --rule-strong:#3A4351;
+    --accent:#7FA8D8; --accent-soft:#1C2836; --accent-ink:#0F1219;
+    --ok:#6FBF97; --ok-soft:#16281F;
+    --warn:#DDA35C; --warn-soft:#2C2317;
+    --err:#E08579; --err-soft:#2E1D1B;
+    --dep:#B49BE8; --dep-soft:#241D33;
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.25);
   }
 }
+
 *{box-sizing:border-box}
+html{scroll-behavior:smooth}
 body{
   margin:0;background:var(--ground);color:var(--ink);
   font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  padding-bottom:76px; /* room for the sticky action bar */
 }
-.wrap{max-width:960px;margin:0 auto;padding:28px 20px 80px}
-header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px}
-h1{font-size:1.6rem;margin:0;letter-spacing:-.02em}
-.sub{color:var(--ink-muted);font-size:.9rem}
-h2{font-size:1rem;margin:28px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--rule)}
-.card{background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:14px 16px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px}
-.kv{display:flex;justify-content:space-between;gap:10px;font-size:.87rem;padding:3px 0}
-.kv b{color:var(--ink-muted);font-weight:500}
-.kv span{font-family:var(--mono);font-size:.8rem;text-align:right;word-break:break-word}
-.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 4px}
-select,button{
-  font:inherit;padding:7px 12px;border-radius:6px;border:1px solid var(--rule);
-  background:var(--surface);color:var(--ink);cursor:pointer;
+.wrap{max-width:1080px;margin:0 auto;padding:24px 20px 40px}
+
+/* ─── header ─────────────────────────────────────────────────────────── */
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+h1{font-size:1.45rem;margin:0;letter-spacing:-.02em;font-weight:700}
+.tagline{color:var(--ink-muted);font-size:.88rem}
+.host-pill{
+  margin-left:auto;display:inline-flex;align-items:center;gap:7px;
+  background:var(--surface);border:1px solid var(--rule);border-radius:999px;
+  padding:5px 12px;font-size:.8rem;color:var(--ink-muted);
 }
-button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-button.primary:disabled{opacity:.5;cursor:not-allowed}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.dot.bad{background:var(--err)}
+
+.banner{
+  background:var(--accent-soft);border:1px solid var(--rule);border-left:3px solid var(--accent);
+  border-radius:var(--radius);padding:11px 14px;font-size:.86rem;margin-bottom:18px;
+}
+.banner.bad{background:var(--err-soft);border-left-color:var(--err)}
+
+/* ─── tabs ───────────────────────────────────────────────────────────── */
+.tabs{display:flex;gap:2px;border-bottom:2px solid var(--rule);margin-bottom:20px;overflow-x:auto}
+.tab{
+  appearance:none;background:none;border:0;border-bottom:2px solid transparent;
+  margin-bottom:-2px;padding:10px 16px;font:inherit;font-size:.9rem;font-weight:600;
+  color:var(--ink-muted);cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:8px;
+}
+.tab:hover{color:var(--ink);background:var(--surface-2);border-radius:6px 6px 0 0}
+.tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:6px}
+.tab .badge{
+  background:var(--surface-3);color:var(--ink-muted);border-radius:999px;
+  padding:1px 8px;font-size:.72rem;font-weight:700;font-variant-numeric:tabular-nums;
+}
+.tab[aria-selected="true"] .badge{background:var(--accent);color:var(--accent-ink)}
+[role="tabpanel"][hidden]{display:none}
+
+/* ─── cards ──────────────────────────────────────────────────────────── */
+.card{
+  background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius);
+  box-shadow:var(--shadow);
+}
+.card-head{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:12px 16px;border-bottom:1px solid var(--rule);
+}
+.card-head h2{font-size:.95rem;margin:0;font-weight:700;letter-spacing:-.01em}
+.card-head .sub{color:var(--ink-muted);font-size:.82rem;margin-left:auto}
+.card-body{padding:14px 16px}
+.stack{display:flex;flex-direction:column;gap:16px}
+
+/* ─── system info grid ───────────────────────────────────────────────── */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:10px}
+.kv{
+  background:var(--surface-2);border:1px solid var(--rule);border-radius:8px;padding:9px 12px;
+}
+.kv dt{color:var(--ink-faint);font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;font-weight:700;margin:0}
+.kv dd{margin:3px 0 0;font-family:var(--mono);font-size:.82rem;word-break:break-word}
+
+/* ─── profile chooser ────────────────────────────────────────────────── */
+.profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.profile{
+  text-align:left;background:var(--surface);border:1.5px solid var(--rule);border-radius:8px;
+  padding:12px 14px;cursor:pointer;font:inherit;color:var(--ink);
+}
+.profile:hover{border-color:var(--rule-strong);background:var(--surface-2)}
+.profile[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft)}
+.profile:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.profile .pname{font-weight:700;font-size:.9rem;display:flex;align-items:center;gap:8px}
+.profile .pdesc{color:var(--ink-muted);font-size:.8rem;margin-top:4px}
+.tag-suggested{
+  background:var(--ok-soft);color:var(--ok);border-radius:999px;padding:1px 8px;
+  font-size:.66rem;font-weight:800;text-transform:uppercase;letter-spacing:.06em;
+}
+
+/* ─── toolbar ────────────────────────────────────────────────────────── */
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+button,select,input[type=search]{
+  font:inherit;font-size:.86rem;padding:7px 12px;border-radius:7px;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink);cursor:pointer;
+}
+button:hover{background:var(--surface-2);border-color:var(--rule-strong)}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}
+button.primary:hover{filter:brightness(1.08)}
+button.primary:disabled{opacity:.45;cursor:not-allowed;filter:none}
 button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.cat{margin-bottom:14px}
-.cat h3{
-  font-size:.7rem;text-transform:uppercase;letter-spacing:.11em;color:var(--accent);
-  margin:0 0 6px;font-weight:700;
+input[type=search]{cursor:text;min-width:190px;flex:1;max-width:280px}
+.switch{display:inline-flex;align-items:center;gap:7px;font-size:.86rem;cursor:pointer;user-select:none}
+.switch input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+
+/* ─── component groups ───────────────────────────────────────────────── */
+.group{margin-bottom:14px}
+.group summary{
+  display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;
+  padding:9px 14px;background:var(--surface-2);border:1px solid var(--rule);
+  border-radius:8px;font-weight:700;font-size:.78rem;text-transform:uppercase;
+  letter-spacing:.09em;color:var(--accent);
 }
-label.item{
-  display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-radius:6px;cursor:pointer;
+.group summary::-webkit-details-marker{display:none}
+.group summary::before{content:"▸";font-size:.85rem;transition:transform .15s}
+.group[open] summary::before{transform:rotate(90deg)}
+.group summary .count{margin-left:auto;color:var(--ink-faint);font-weight:700;font-size:.75rem;letter-spacing:0}
+.group-body{padding:8px 0 0 2px;display:flex;flex-direction:column;gap:6px}
+
+.item{
+  display:grid;grid-template-columns:auto 1fr;gap:11px;align-items:start;
+  padding:10px 12px;border:1px solid var(--rule);border-left:3px solid transparent;
+  border-radius:8px;background:var(--surface);
 }
-label.item:hover{background:var(--surface-2)}
-label.item input{margin-top:3px;accent-color:var(--accent);width:16px;height:16px;flex:none}
-.item .name{font-weight:600;font-size:.9rem}
-.item .desc{color:var(--ink-muted);font-size:.82rem}
-.item .pkg{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint)}
-.q{margin:8px 0}
-.q label{display:block;font-size:.85rem;margin-bottom:4px}
-.q input{
-  width:100%;padding:7px 10px;border:1px solid var(--rule);border-radius:6px;
+.item:hover{background:var(--surface-2);border-color:var(--rule-strong)}
+.item.checked{border-left-color:var(--accent);background:var(--accent-soft)}
+.item.auto{border-left-color:var(--dep);background:var(--dep-soft);border-style:dashed}
+.item.blocked{opacity:.92}
+.item input[type=checkbox]{margin-top:3px;width:17px;height:17px;accent-color:var(--accent);cursor:pointer}
+.item input[type=checkbox]:disabled{cursor:not-allowed}
+.item-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.item-name{font-weight:650;font-size:.91rem}
+a.item-name{color:var(--ink);text-decoration:none;border-bottom:1px dotted var(--ink-faint)}
+a.item-name:hover{color:var(--accent);border-bottom-color:var(--accent)}
+a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink-faint);vertical-align:super}
+.item-desc{color:var(--ink-muted);font-size:.82rem;margin-top:2px}
+.item-meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+
+/* ─── chips & badges ─────────────────────────────────────────────────── */
+.chip{
+  display:inline-flex;align-items:center;gap:4px;border-radius:999px;
+  padding:2px 9px;font-size:.71rem;font-weight:600;white-space:nowrap;
+  border:1px solid transparent;
+}
+.chip-pkg{font-family:var(--mono);background:var(--surface-3);color:var(--ink-muted);font-size:.68rem;font-weight:500}
+.chip-req{background:var(--dep-soft);color:var(--dep);border-color:color-mix(in srgb,var(--dep) 30%,transparent)}
+.chip-by{background:var(--surface-3);color:var(--ink-muted)}
+.chip-auto{background:var(--dep);color:#fff}
+.chip-locked{background:var(--warn-soft);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
+.chip-note{background:var(--warn-soft);color:var(--warn)}
+.chip-ok{background:var(--ok-soft);color:var(--ok)}
+
+/* provider colours: a glance tells you where a package comes from */
+.prov{font-family:var(--mono);font-size:.68rem;font-weight:700;text-transform:lowercase}
+.prov-winget{background:#DCE9F8;color:#1B4D80}
+.prov-choco{background:#DCE4F8;color:#2A3F80}
+.prov-npm{background:#F8DEDE;color:#8B2020}
+.prov-apt{background:#F6E2D8;color:#8A3E17}
+.prov-brew{background:#F8EBD3;color:#7A5310}
+.prov-snap{background:#F6DFD2;color:#8A3B12}
+.prov-script{background:#E6E1F6;color:#4A3A80}
+.prov-custom{background:#E0EDE6;color:#245741}
+@media (prefers-color-scheme:dark){
+  .prov-winget{background:#152A3F;color:#8DBDEC}
+  .prov-choco{background:#171F3B;color:#9AAAE8}
+  .prov-npm{background:#361A1A;color:#EE9C9C}
+  .prov-apt{background:#33231A;color:#E0A47E}
+  .prov-brew{background:#33290F;color:#E3BE6B}
+  .prov-snap{background:#331F14;color:#E09E76}
+  .prov-script{background:#241F3B;color:#B0A2EA}
+  .prov-custom{background:#12291F;color:#7FC7A4}
+}
+
+/* ─── dependency view ────────────────────────────────────────────────── */
+.tiers{display:flex;flex-direction:column;gap:0}
+.tier{position:relative;padding-left:44px;padding-bottom:22px}
+.tier:last-child{padding-bottom:0}
+.tier::before{ /* the connecting spine */
+  content:"";position:absolute;left:15px;top:30px;bottom:0;width:2px;background:var(--rule-strong);
+}
+.tier:last-child::before{display:none}
+.tier-num{
+  position:absolute;left:0;top:0;width:32px;height:32px;border-radius:50%;
+  background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;
+  font-weight:800;font-size:.82rem;font-variant-numeric:tabular-nums;
+}
+.tier-head{font-weight:700;font-size:.86rem;margin:5px 0 3px}
+.tier-hint{color:var(--ink-muted);font-size:.8rem;margin-bottom:9px}
+.tier-items{display:flex;flex-wrap:wrap;gap:7px}
+.dep-node{
+  display:inline-flex;flex-direction:column;gap:3px;
+  border:1px solid var(--rule);border-left:3px solid var(--accent);
+  background:var(--surface);border-radius:8px;padding:7px 11px;min-width:150px;
+}
+.dep-node.auto{border-left-color:var(--dep);border-style:dashed;background:var(--dep-soft)}
+.dep-node .dn-name{font-weight:650;font-size:.85rem}
+.dep-node .dn-req{color:var(--ink-muted);font-size:.73rem}
+.dep-node .dn-req b{color:var(--dep);font-weight:600}
+
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.78rem;color:var(--ink-muted);margin-top:4px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.swatch{width:12px;height:12px;border-radius:3px;border:1px solid var(--rule)}
+.swatch.direct{background:var(--accent)}
+.swatch.autodep{background:var(--dep);border-style:dashed}
+
+/* ─── questions ──────────────────────────────────────────────────────── */
+.q{margin-bottom:14px}
+.q label{display:block;font-size:.86rem;font-weight:600;margin-bottom:5px}
+.q input[type=text]{
+  width:100%;padding:8px 11px;border:1px solid var(--rule);border-radius:7px;
   background:var(--surface);color:var(--ink);font-family:var(--mono);font-size:.83rem;
 }
-.q .help{color:var(--ink-faint);font-size:.78rem;margin-top:3px}
+.q .help{color:var(--ink-faint);font-size:.79rem;margin-top:5px}
+.q .why{color:var(--dep);font-size:.75rem;margin-top:4px;font-weight:600}
+
+/* ─── log ────────────────────────────────────────────────────────────── */
 #log{
-  background:#0D1117;color:#C9D1D9;font-family:var(--mono);font-size:.78rem;line-height:1.5;
-  padding:12px;border-radius:8px;height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  background:#0C1016;color:#C9D1D9;font-family:var(--mono);font-size:.78rem;line-height:1.55;
+  padding:13px;border-radius:8px;height:360px;overflow:auto;white-space:pre-wrap;
+  word-break:break-word;border:1px solid var(--rule);
 }
-#log .ok{color:#7EE787}.warn{color:#E3B341}.err{color:#FF7B72}.muted{color:#8B949E}.step{color:#79C0FF}
-.bar{height:5px;background:var(--surface-2);border-radius:3px;overflow:hidden;margin:8px 0}
-.bar>div{height:100%;width:0;background:var(--accent);transition:width .25s}
-.count{color:var(--ink-muted);font-size:.85rem}
-.banner{
-  background:var(--accent-soft);border:1px solid var(--rule);border-radius:8px;
-  padding:10px 14px;font-size:.85rem;margin-bottom:14px;
+#log div{padding:1px 0}
+#log .ok{color:#7EE787}#log .warn{color:#E3B341}#log .err{color:#FF7B72}
+#log .muted{color:#8B949E}#log .step{color:#79C0FF;font-weight:600}
+.bar{height:6px;background:var(--surface-3);border-radius:3px;overflow:hidden;margin:10px 0}
+.bar>div{height:100%;width:0;background:var(--accent);transition:width .3s}
+
+/* ─── sticky action bar ──────────────────────────────────────────────── */
+.actionbar{
+  position:fixed;left:0;right:0;bottom:0;z-index:20;
+  background:var(--surface);border-top:1px solid var(--rule-strong);
+  box-shadow:0 -2px 12px rgba(0,0,0,.08);
 }
-.hidden{display:none}
+.actionbar .inner{
+  max-width:1080px;margin:0 auto;padding:11px 20px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+}
+.tally{font-size:.85rem;color:var(--ink-muted)}
+.tally b{color:var(--ink);font-variant-numeric:tabular-nums}
+.tally .autoc{color:var(--dep);font-weight:700}
+.actionbar .spacer{margin-left:auto}
+.hint{font-size:.78rem;color:var(--ink-faint)}
+
+.empty{color:var(--ink-muted);font-size:.86rem;padding:14px;text-align:center}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+@media (max-width:640px){
+  .wrap{padding:16px 13px 30px}
+  .actionbar .inner{padding:9px 13px}
+  .tier{padding-left:36px}
+}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>AutoOS</h1>
-    <span class="sub">post-install provisioning</span>
+    <span class="tagline">post-install provisioning</span>
+    <span class="host-pill" id="hostPill"><span class="dot bad"></span><span id="hostName">connecting…</span></span>
   </header>
-  <div class="banner" id="banner">Connecting…</div>
 
-  <h2>Detected system</h2>
-  <div class="card"><div class="grid" id="sysinfo"></div></div>
+  <div class="banner" id="banner">Contacting the AutoOS server…</div>
 
-  <h2>What to install</h2>
-  <div class="controls">
-    <label class="sub" for="profile">Profile</label>
-    <select id="profile"></select>
-    <button id="selAll" type="button">Select all</button>
-    <button id="selNone" type="button">Select none</button>
-    <label class="sub"><input type="checkbox" id="dryRun" checked> Dry run</label>
-    <span class="count" id="count"></span>
-  </div>
-  <div class="card" id="catalog"></div>
-
-  <div id="questions" class="hidden">
-    <h2>Questions</h2>
-    <div class="card" id="qlist"></div>
+  <div class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab" role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true">Overview</button>
+    <button class="tab" role="tab" id="tab-components" aria-controls="panel-components" aria-selected="false">
+      Components <span class="badge" id="badgeSel">0</span>
+    </button>
+    <button class="tab" role="tab" id="tab-deps" aria-controls="panel-deps" aria-selected="false">
+      Install order <span class="badge" id="badgeTiers">0</span>
+    </button>
+    <button class="tab" role="tab" id="tab-run" aria-controls="panel-run" aria-selected="false">Run &amp; log</button>
   </div>
 
-  <h2>Run</h2>
-  <div class="controls">
+  <!-- ── Overview ─────────────────────────────────────────────────────── -->
+  <section role="tabpanel" id="panel-overview" aria-labelledby="tab-overview" tabindex="0">
+    <div class="stack">
+      <div class="card">
+        <div class="card-head"><h2>Detected system</h2><span class="sub">read-only</span></div>
+        <div class="card-body"><dl class="grid" id="sysinfo"></dl></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>Profile</h2>
+          <span class="sub">a starting set of ticks — change anything afterwards</span>
+        </div>
+        <div class="card-body"><div class="profiles" id="profiles"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Components ───────────────────────────────────────────────────── -->
+  <section role="tabpanel" id="panel-components" aria-labelledby="tab-components" tabindex="0" hidden>
+    <div class="toolbar">
+      <input type="search" id="filter" placeholder="Filter components…" aria-label="Filter components">
+      <button id="selAll" type="button">Select all</button>
+      <button id="selNone" type="button">Select none</button>
+      <button id="expandAll" type="button">Expand all</button>
+      <button id="collapseAll" type="button">Collapse all</button>
+    </div>
+    <div class="legend" style="margin-bottom:12px">
+      <span><i class="swatch direct"></i> chosen by you</span>
+      <span><i class="swatch autodep"></i> added automatically as a dependency</span>
+      <span><span class="chip chip-locked">locked</span> needed by something you ticked</span>
+    </div>
+    <div id="catalog"></div>
+  </section>
+
+  <!-- ── Install order ────────────────────────────────────────────────── -->
+  <section role="tabpanel" id="panel-deps" aria-labelledby="tab-deps" tabindex="0" hidden>
+    <div class="card">
+      <div class="card-head">
+        <h2>Install order</h2>
+        <span class="sub">dependencies first — each step needs the ones above it</span>
+      </div>
+      <div class="card-body">
+        <div class="legend" style="margin-bottom:16px">
+          <span><i class="swatch direct"></i> chosen by you</span>
+          <span><i class="swatch autodep"></i> pulled in automatically</span>
+        </div>
+        <div class="tiers" id="tiers"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Run ──────────────────────────────────────────────────────────── -->
+  <section role="tabpanel" id="panel-run" aria-labelledby="tab-run" tabindex="0" hidden>
+    <div class="stack">
+      <div class="card" id="questionsCard" hidden>
+        <div class="card-head">
+          <h2>Questions</h2>
+          <span class="sub">asked once, before anything is installed</span>
+        </div>
+        <div class="card-body" id="qlist"></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>Output</h2>
+          <span class="sub" id="runStatus">idle</span>
+        </div>
+        <div class="card-body">
+          <div class="bar"><div id="prog"></div></div>
+          <div id="log">Ready. Pick your components, then press Install.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="actionbar">
+  <div class="inner">
+    <span class="tally" id="tally">nothing selected</span>
+    <label class="switch"><input type="checkbox" id="dryRun" checked> Dry run</label>
+    <span class="spacer"></span>
+    <span class="hint" id="elevHint"></span>
     <button class="primary" id="run" type="button">Install selected</button>
-    <span class="count" id="status"></span>
   </div>
-  <div class="bar"><div id="prog"></div></div>
-  <div id="log">Ready.</div>
 </div>
 
 <script>
-const token = new URLSearchParams(location.search).get('token') || '';
-const api = (p) => p + (p.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
-let STATE = null, running = false, logOffset = 0;
+"use strict";
+const token = new URLSearchParams(location.search).get("token") || "";
+const api = p => p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
+const el = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
 
-const el = (id) => document.getElementById(id);
-const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let STATE = null;          // /api/state payload
+let BY_ID = new Map();     // id -> component
+let REQUIRED_BY = new Map(); // id -> [ids that require it]
+let picked = new Set();    // explicitly chosen by the user
+let running = false, logOffset = 0;
 
+/* ── dependency maths ───────────────────────────────────────────────────
+   effective() = what actually gets installed: the user's picks plus the
+   transitive closure of their requirements. auto = effective minus picked.  */
+function closure(ids) {
+  const out = new Set(), queue = [...ids];
+  while (queue.length) {
+    const id = queue.pop();
+    if (out.has(id) || !BY_ID.has(id)) continue;
+    out.add(id);
+    for (const r of BY_ID.get(id).requires || []) queue.push(r);
+  }
+  return out;
+}
+const effective = () => closure(picked);
+const autoAdded = () => { const e = effective(); picked.forEach(p => e.delete(p)); return e; };
+
+/* Depth = longest requirement chain, so tier 1 is "needs nothing". */
+const depthCache = new Map();
+function depth(id, seen = new Set()) {
+  if (depthCache.has(id)) return depthCache.get(id);
+  if (seen.has(id)) return 0;                 // cycles are caught server-side
+  seen.add(id);
+  const reqs = (BY_ID.get(id)?.requires || []).filter(r => BY_ID.has(r));
+  const d = reqs.length ? 1 + Math.max(...reqs.map(r => depth(r, seen))) : 0;
+  depthCache.set(id, d);
+  return d;
+}
+
+/* A component is locked when something else in the effective set needs it. */
+function lockedBy(id) {
+  const eff = effective();
+  return (REQUIRED_BY.get(id) || []).filter(d => eff.has(d) && d !== id);
+}
+
+/* ── tabs ─────────────────────────────────────────────────────────────── */
+const TABS = ["overview", "components", "deps", "run"];
+function showTab(name) {
+  TABS.forEach(t => {
+    const tab = el("tab-" + t), panel = el("panel-" + t);
+    const on = t === name;
+    tab.setAttribute("aria-selected", String(on));
+    panel.hidden = !on;
+  });
+  if (name === "deps") renderTiers();
+  if (name === "run") renderQuestions();
+}
+TABS.forEach((t, i) => {
+  el("tab-" + t).addEventListener("click", () => showTab(t));
+  el("tab-" + t).addEventListener("keydown", e => {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    e.preventDefault();
+    const next = TABS[(i + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length];
+    el("tab-" + next).focus(); showTab(next);
+  });
+});
+
+/* ── boot ─────────────────────────────────────────────────────────────── */
 async function boot() {
   try {
-    const r = await fetch(api('/api/state'));
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const r = await fetch(api("/api/state"));
+    if (!r.ok) throw new Error("HTTP " + r.status);
     STATE = await r.json();
   } catch (e) {
-    el('banner').textContent = 'Cannot reach the AutoOS server: ' + e.message +
-      '. Make sure you opened the URL printed in the terminal, including its token.';
+    el("banner").classList.add("bad");
+    el("banner").textContent =
+      "Cannot reach the AutoOS server: " + e.message +
+      ". Open the URL printed in the terminal, including its token.";
+    el("hostName").textContent = "disconnected";
     return;
   }
+
+  BY_ID = new Map(STATE.components.map(c => [c.id, c]));
+  REQUIRED_BY = new Map();
+  for (const c of STATE.components) {
+    for (const r of c.requires || []) {
+      if (!REQUIRED_BY.has(r)) REQUIRED_BY.set(r, []);
+      REQUIRED_BY.get(r).push(c.id);
+    }
+  }
+
   const s = STATE.system;
-  el('banner').innerHTML = 'Connected to <b>' + esc(s.host || 'this machine') + '</b> — ' +
-    esc(STATE.platform) + '. Nothing is installed until you press <b>Install selected</b>.';
+  el("hostName").textContent = s.host || "this machine";
+  el("hostPill").querySelector(".dot").classList.remove("bad");
+  el("banner").innerHTML =
+    "Connected to <b>" + esc(s.host || "this machine") + "</b> (" + esc(STATE.platform) +
+    "). Nothing is installed until you press <b>Install selected</b> — and <b>Dry run</b> " +
+    "is on by default, which only prints what would happen.";
 
-  el('sysinfo').innerHTML = Object.entries(STATE.system).filter(([k]) => k !== 'host')
-    .map(([k, v]) => '<div class="kv"><b>' + esc(k) + '</b><span>' + esc(v) + '</span></div>').join('');
+  el("sysinfo").innerHTML = Object.entries(s).filter(([k]) => k !== "host")
+    .map(([k, v]) => '<div class="kv"><dt>' + esc(k) + "</dt><dd>" + esc(v) + "</dd></div>").join("");
 
-  const sel = el('profile');
-  sel.innerHTML = Object.entries(STATE.profiles)
-    .map(([n, d]) => '<option value="' + esc(n) + '" title="' + esc(d) + '">' + esc(n) + '</option>').join('');
-  sel.value = STATE.suggested;
-  sel.onchange = () => applyProfile(sel.value);
+  const elev = String(s.elevated ?? "").toLowerCase();
+  el("elevHint").textContent =
+    elev === "no" ? "not elevated — machine-wide packages will be skipped" : "";
 
+  renderProfiles();
   renderCatalog();
   applyProfile(STATE.suggested);
 
-  el('selAll').onclick = () => { document.querySelectorAll('.pick').forEach(c => c.checked = true); onChange(); };
-  el('selNone').onclick = () => { document.querySelectorAll('.pick').forEach(c => c.checked = false); onChange(); };
-  el('run').onclick = runInstall;
+  el("selAll").onclick   = () => { STATE.components.forEach(c => picked.add(c.id)); sync(); };
+  el("selNone").onclick  = () => { picked.clear(); sync(); };
+  el("expandAll").onclick   = () => document.querySelectorAll(".group").forEach(g => g.open = true);
+  el("collapseAll").onclick = () => document.querySelectorAll(".group").forEach(g => g.open = false);
+  el("filter").oninput   = applyFilter;
+  el("run").onclick      = runInstall;
 
-  // The server owns the run, not this tab. If one is already going (you closed
-  // the laptop, or opened the URL from a second device), pick the log back up
-  // instead of showing an idle page over a live install.
   resumeIfRunning();
 }
 
-async function resumeIfRunning() {
-  try {
-    const r = await fetch(api('/api/log?offset=0'));
-    if (!r.ok) return;
-    const d = await r.json();
-    if (!d.lines || !d.lines.length) return;
-    el('log').textContent = '';
-    appendLog(d.lines);
-    logOffset = d.offset;
-    if (d.total) el('prog').style.width = Math.round(100 * d.done / d.total) + '%';
-    if (d.running) {
-      running = true;
-      el('run').disabled = true;
-      el('status').textContent = 'a run is already in progress...';
-      poll();
-    } else {
-      el('status').textContent = d.summary || 'previous run finished';
-      el('prog').style.width = '100%';
-    }
-  } catch (e) {
-    /* nothing in progress, or the server just started - the idle page is correct */
-  }
+function renderProfiles() {
+  el("profiles").innerHTML = Object.entries(STATE.profiles).map(([n, d]) =>
+    '<button class="profile" type="button" data-profile="' + esc(n) + '" aria-pressed="false">' +
+      '<span class="pname">' + esc(n) +
+        (n === STATE.suggested ? ' <span class="tag-suggested">suggested</span>' : "") +
+      "</span>" +
+      '<span class="pdesc">' + esc(d) + "</span>" +
+    "</button>").join("");
+  el("profiles").querySelectorAll(".profile").forEach(b =>
+    b.onclick = () => applyProfile(b.dataset.profile));
 }
 
+function applyProfile(name) {
+  picked = new Set(name === "custom" ? []
+    : STATE.components.filter(c => (c.profiles || []).includes(name)).map(c => c.id));
+  el("profiles").querySelectorAll(".profile").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.profile === name)));
+  sync();
+}
+
+/* ── component list ───────────────────────────────────────────────────── */
 function renderCatalog() {
-  const groups = {};
-  for (const c of STATE.components) (groups[c.category] ||= []).push(c);
-  el('catalog').innerHTML = Object.entries(groups).map(([g, items]) =>
-    '<div class="cat"><h3>' + esc(g) + '</h3>' + items.map(c =>
-      '<label class="item"><input type="checkbox" class="pick" data-id="' + esc(c.id) + '">' +
-      '<span><span class="name">' + esc(c.name) + '</span> ' +
-      '<span class="pkg">' + esc(c.provider) + ':' + esc(c.package) + '</span><br>' +
-      '<span class="desc">' + esc(c.description) + '</span></span></label>').join('') + '</div>').join('');
-  document.querySelectorAll('.pick').forEach(c => c.onchange = onChange);
-}
+  const groups = new Map();
+  for (const c of STATE.components) {
+    if (!groups.has(c.category)) groups.set(c.category, []);
+    groups.get(c.category).push(c);
+  }
+  el("catalog").innerHTML = [...groups].map(([g, items]) =>
+    '<details class="group" open data-group="' + esc(g) + '">' +
+      "<summary>" + esc(g) +
+        '<span class="count" data-count="' + esc(g) + '"></span></summary>' +
+      '<div class="group-body">' + items.map(itemHtml).join("") + "</div>" +
+    "</details>").join("");
 
-function applyProfile(p) {
-  document.querySelectorAll('.pick').forEach(cb => {
-    const c = STATE.components.find(x => x.id === cb.dataset.id);
-    cb.checked = p !== 'custom' && (c.profiles || []).includes(p);
+  el("catalog").querySelectorAll(".pick").forEach(cb => {
+    cb.onchange = () => {
+      const id = cb.dataset.id;
+      if (cb.checked) picked.add(id);
+      else picked.delete(id);
+      sync();
+    };
   });
-  onChange();
 }
 
-function selectedIds() {
-  return [...document.querySelectorAll('.pick:checked')].map(c => c.dataset.id);
+function itemHtml(c) {
+  const name = c.homepage
+    ? '<a class="item-name" href="' + esc(c.homepage) + '" target="_blank" rel="noopener noreferrer">' +
+      esc(c.name) + "</a>"
+    : '<span class="item-name">' + esc(c.name) + "</span>";
+  return '<label class="item" data-id="' + esc(c.id) + '" data-search="' +
+      esc((c.id + " " + c.name + " " + c.description + " " + c.package).toLowerCase()) + '">' +
+    '<input type="checkbox" class="pick" data-id="' + esc(c.id) + '">' +
+    "<span>" +
+      '<span class="item-title">' + name +
+        '<span class="chip prov prov-' + esc(c.provider) + '">' + esc(c.provider) + "</span>" +
+        '<span class="chip chip-pkg">' + esc(c.package) + "</span>" +
+        '<span class="state-chips" data-id="' + esc(c.id) + '"></span>' +
+      "</span>" +
+      '<span class="item-desc">' + esc(c.description) + "</span>" +
+      '<span class="item-meta" data-meta="' + esc(c.id) + '"></span>' +
+    "</span></label>";
 }
 
-function onChange() {
-  const ids = selectedIds();
-  el('count').textContent = ids.length + ' selected';
-  // Show only the questions the current selection actually needs.
-  const keys = [...new Set(STATE.components.filter(c => ids.includes(c.id) && c.prompt).map(c => c.prompt))];
-  const box = el('questions');
-  if (!keys.length) { box.classList.add('hidden'); el('qlist').innerHTML = ''; return; }
-  box.classList.remove('hidden');
-  el('qlist').innerHTML = keys.map(k => {
+/* ── the one place that repaints everything derived from `picked` ─────── */
+function sync() {
+  const eff = effective(), auto = autoAdded();
+
+  document.querySelectorAll(".item").forEach(node => {
+    const id = node.dataset.id, c = BY_ID.get(id);
+    const cb = node.querySelector(".pick");
+    const isEff = eff.has(id), isAuto = auto.has(id);
+    const locks = lockedBy(id);
+
+    cb.checked = isEff;
+    // A dependency something else needs cannot be unticked here - untick the
+    // thing that needs it instead. Disabling with an explanation beats letting
+    // the click silently bounce back.
+    cb.disabled = isAuto && locks.length > 0;
+    cb.title = cb.disabled
+      ? "Required by " + locks.map(d => BY_ID.get(d)?.name || d).join(", ")
+      : "";
+
+    node.classList.toggle("checked", isEff && !isAuto);
+    node.classList.toggle("auto", isAuto);
+    node.classList.toggle("blocked", cb.disabled);
+
+    // state chips next to the name
+    const chips = [];
+    if (isAuto) chips.push('<span class="chip chip-auto">auto</span>');
+    if (cb.disabled) chips.push('<span class="chip chip-locked">locked</span>');
+    node.querySelector(".state-chips").innerHTML = chips.join("");
+
+    // requires / required-by / notes underneath
+    const meta = [];
+    const reqs = (c.requires || []).filter(r => BY_ID.has(r));
+    if (reqs.length) {
+      meta.push('<span class="chip chip-req">needs ' +
+        reqs.map(r => esc(BY_ID.get(r).name)).join(" + ") + "</span>");
+    }
+    const dependents = REQUIRED_BY.get(id) || [];
+    if (dependents.length) {
+      meta.push('<span class="chip chip-by">needed by ' + dependents.length + " ("
+        + dependents.map(d => esc(BY_ID.get(d)?.name || d)).join(", ") + ")</span>");
+    }
+    if (c.verify) meta.push('<span class="chip chip-ok">verified with <code>' + esc(c.verify) + "</code></span>");
+    if (c.notes)  meta.push('<span class="chip chip-note">' + esc(c.notes) + "</span>");
+    node.querySelector('[data-meta="' + CSS.escape(id) + '"]').innerHTML = meta.join("");
+  });
+
+  // per-group counts
+  document.querySelectorAll("[data-count]").forEach(span => {
+    const g = span.dataset.count;
+    const items = STATE.components.filter(c => c.category === g);
+    span.textContent = items.filter(c => eff.has(c.id)).length + " / " + items.length;
+  });
+
+  el("badgeSel").textContent = eff.size;
+  // NOT .map(depth): map passes (value, index, array), so the index would
+  // arrive as the `seen` set and blow up on seen.has().
+  el("badgeTiers").textContent = eff.size ? (Math.max(0, ...[...eff].map(id => depth(id))) + 1) : 0;
+  el("tally").innerHTML = eff.size
+    ? "<b>" + eff.size + "</b> to install" +
+      (auto.size ? ' · <span class="autoc">' + auto.size + " pulled in as dependencies</span>" : "")
+    : "nothing selected";
+  el("run").disabled = running || eff.size === 0;
+
+  if (!el("panel-deps").hidden) renderTiers();
+  if (!el("panel-run").hidden) renderQuestions();
+  applyFilter();
+}
+
+function applyFilter() {
+  const q = (el("filter").value || "").trim().toLowerCase();
+  document.querySelectorAll(".item").forEach(n => {
+    n.style.display = !q || n.dataset.search.includes(q) ? "" : "none";
+  });
+  document.querySelectorAll(".group").forEach(g => {
+    const any = [...g.querySelectorAll(".item")].some(n => n.style.display !== "none");
+    g.style.display = any ? "" : "none";
+    if (q && any) g.open = true;
+  });
+}
+
+/* ── install-order view ───────────────────────────────────────────────── */
+function renderTiers() {
+  const eff = [...effective()], auto = autoAdded();
+  if (!eff.length) {
+    el("tiers").innerHTML = '<div class="empty">Nothing selected yet — pick components first.</div>';
+    return;
+  }
+  const byTier = new Map();
+  for (const id of eff) {
+    const d = depth(id);
+    if (!byTier.has(d)) byTier.set(d, []);
+    byTier.get(d).push(id);
+  }
+  el("tiers").innerHTML = [...byTier.keys()].sort((a, b) => a - b).map((d, i) => {
+    const ids = byTier.get(d).sort((a, b) =>
+      (BY_ID.get(a).name).localeCompare(BY_ID.get(b).name));
+    const hint = d === 0
+      ? "Needs nothing else — installed first."
+      : "Cannot start until step " + d + " has finished.";
+    return '<div class="tier">' +
+      '<div class="tier-num">' + (i + 1) + "</div>" +
+      '<div class="tier-head">Step ' + (i + 1) + " · " + ids.length +
+        " component" + (ids.length === 1 ? "" : "s") + "</div>" +
+      '<div class="tier-hint">' + hint + "</div>" +
+      '<div class="tier-items">' + ids.map(id => {
+        const c = BY_ID.get(id);
+        const reqs = (c.requires || []).filter(r => BY_ID.has(r))
+          .map(r => esc(BY_ID.get(r).name));
+        return '<div class="dep-node' + (auto.has(id) ? " auto" : "") + '">' +
+          '<span class="dn-name">' + esc(c.name) + "</span>" +
+          '<span class="dn-req">' + (reqs.length
+            ? "after <b>" + reqs.join("</b>, <b>") + "</b>"
+            : "no prerequisites") + "</span>" +
+        "</div>";
+      }).join("") + "</div></div>";
+  }).join("");
+}
+
+/* ── questions ────────────────────────────────────────────────────────── */
+function renderQuestions() {
+  const eff = effective();
+  const keys = [...new Set(STATE.components.filter(c => eff.has(c.id) && c.prompt).map(c => c.prompt))];
+  const card = el("questionsCard");
+  if (!keys.length) { card.hidden = true; el("qlist").innerHTML = ""; return; }
+  card.hidden = false;
+  el("qlist").innerHTML = keys.map(k => {
     const q = STATE.prompts[k] || {};
-    const prev = (document.querySelector('[data-q="' + k + '"]') || {}).value;
-    return '<div class="q"><label for="q_' + esc(k) + '">' + esc(q.question || k) + '</label>' +
-      '<input id="q_' + esc(k) + '" data-q="' + esc(k) + '" value="' + esc(prev ?? q.default ?? '') + '">' +
-      (q.help ? '<div class="help">' + esc(q.help) + '</div>' : '') + '</div>';
-  }).join('');
+    const prev = document.querySelector('[data-q="' + CSS.escape(k) + '"]')?.value;
+    const asked = STATE.components.filter(c => eff.has(c.id) && c.prompt === k).map(c => c.name);
+    return '<div class="q"><label for="q_' + esc(k) + '">' + esc(q.question || k) + "</label>" +
+      '<input type="text" id="q_' + esc(k) + '" data-q="' + esc(k) + '" value="' +
+        esc(prev ?? q.default ?? "") + '">' +
+      (q.help ? '<div class="help">' + esc(q.help) + "</div>" : "") +
+      '<div class="why">asked because you selected: ' + asked.map(esc).join(", ") + "</div></div>";
+  }).join("");
 }
 
 function answers() {
   const out = {};
-  document.querySelectorAll('[data-q]').forEach(i => out[i.dataset.q] = i.value);
+  document.querySelectorAll("[data-q]").forEach(i => out[i.dataset.q] = i.value);
   return out;
 }
 
+/* ── running ──────────────────────────────────────────────────────────── */
 function appendLog(lines) {
-  const box = el('log');
+  const box = el("log");
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   for (const l of lines) {
-    const d = document.createElement('div');
-    d.className = l.level || '';
+    const d = document.createElement("div");
+    if (l.level) d.className = l.level;
     d.textContent = l.text;
     box.appendChild(d);
   }
-  box.scrollTop = box.scrollHeight;
+  if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
 async function runInstall() {
   if (running) return;
-  const ids = selectedIds();
-  if (!ids.length) { alert('Nothing selected.'); return; }
-  const dry = el('dryRun').checked;
-  if (!dry && !confirm('This will install ' + ids.length + ' component(s) on this machine. Continue?')) return;
+  const ids = [...effective()];
+  if (!ids.length) return;
+  const dry = el("dryRun").checked;
+  const auto = autoAdded();
+  if (!dry) {
+    const msg = "Install " + ids.length + " component(s) on " +
+      (STATE.system.host || "this machine") + "?" +
+      (auto.size ? "\n\n" + auto.size + " of them are dependencies added automatically." : "");
+    if (!confirm(msg)) return;
+  }
 
   running = true;
-  el('run').disabled = true;
-  el('log').textContent = '';
+  el("run").disabled = true;
+  el("log").textContent = "";
   logOffset = 0;
-  el('status').textContent = dry ? 'dry run…' : 'installing…';
+  el("runStatus").textContent = dry ? "dry run in progress…" : "installing…";
+  showTab("run");
 
-  const r = await fetch(api('/api/install'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  const r = await fetch(api("/api/install"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ids, answers: answers(), dryRun: dry })
   });
   if (!r.ok) {
-    appendLog([{ level: 'err', text: 'Server refused the request: HTTP ' + r.status }]);
-    running = false; el('run').disabled = false; return;
+    appendLog([{ level: "err", text: "Server refused the request: HTTP " + r.status }]);
+    running = false; sync(); return;
   }
   poll();
 }
 
 async function poll() {
   try {
-    const r = await fetch(api('/api/log?offset=' + logOffset));
+    const r = await fetch(api("/api/log?offset=" + logOffset));
     const d = await r.json();
-    if (d.lines && d.lines.length) { appendLog(d.lines); logOffset = d.offset; }
-    if (d.total) el('prog').style.width = Math.round(100 * d.done / d.total) + '%';
+    if (d.lines?.length) { appendLog(d.lines); logOffset = d.offset; }
+    if (d.total) el("prog").style.width = Math.round(100 * d.done / d.total) + "%";
     if (d.running) { setTimeout(poll, 600); return; }
     running = false;
-    el('run').disabled = false;
-    el('status').textContent = d.summary || 'done';
-    el('prog').style.width = '100%';
+    el("runStatus").textContent = d.summary || "done";
+    el("prog").style.width = "100%";
+    sync();
   } catch (e) {
-    appendLog([{ level: 'err', text: 'Lost contact with the server: ' + e.message }]);
-    running = false; el('run').disabled = false;
+    appendLog([{ level: "err", text: "Lost contact with the server: " + e.message }]);
+    running = false; sync();
   }
+}
+
+/* The server owns the run, not this tab: reconnecting mid-install picks the
+   log back up instead of showing an idle page over a live run. */
+async function resumeIfRunning() {
+  try {
+    const r = await fetch(api("/api/log?offset=0"));
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d.lines?.length) return;
+    el("log").textContent = "";
+    appendLog(d.lines);
+    logOffset = d.offset;
+    if (d.total) el("prog").style.width = Math.round(100 * d.done / d.total) + "%";
+    if (d.running) {
+      running = true; sync();
+      el("runStatus").textContent = "a run is already in progress…";
+      showTab("run");
+      poll();
+    } else {
+      el("runStatus").textContent = d.summary || "previous run finished";
+      el("prog").style.width = "100%";
+    }
+  } catch (e) { /* nothing in progress - the idle page is correct */ }
 }
 
 boot();

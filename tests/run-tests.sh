@@ -416,6 +416,71 @@ if it "undo never uninstalls anything"; then
     else pass; fi
 fi
 
+# ─── Browser UI payload ─────────────────────────────────────────────────────
+describe "browser UI"
+
+if it "every component has a homepage link"; then
+    missing="$(python3 - <<'PY'
+import json, glob
+bad = []
+for p in sorted(glob.glob("catalog/*.json")):
+    for grp in json.load(open(p, encoding="utf-8")).get("categories", []):
+        for c in grp.get("components", []):
+            if not c.get("homepage"):
+                bad.append(p + ":" + c["id"])
+print(" ".join(bad))
+PY
+)"
+    assert_eq "$missing" ""
+fi
+
+if it "a non-URL homepage is rejected"; then
+    tmp="$(mktemp)"
+    cat >"$tmp" <<'JSON'
+{"categories":[{"id":"x","name":"X","components":[
+  {"id":"thing","name":"Thing","description":"d","provider":"apt","package":"p",
+   "homepage":"not-a-url"}]}]}
+JSON
+    out="$(catalog_validate "$tmp" 2>&1)"; rc=$?
+    rm -f "$tmp"
+    if [[ $rc -ne 0 && "$out" == *"homepage"* ]]; then pass
+    else fail "expected a homepage complaint, got rc=$rc: $out"; fi
+fi
+
+if it "the dependency graph the UI draws has no orphan requirements"; then
+    # The browser resolves dependencies client-side, so every `requires` must
+    # name a component that is actually shipped to it.
+    bad="$(python3 - <<'PY'
+import json, glob
+bad = []
+for p in sorted(glob.glob("catalog/*.json")):
+    d = json.load(open(p, encoding="utf-8"))
+    ids = {c["id"] for g in d.get("categories", []) for c in g.get("components", [])}
+    for g in d.get("categories", []):
+        for c in g.get("components", []):
+            for r in c.get("requires", []):
+                if r not in ids:
+                    bad.append(p + ":" + c["id"] + "->" + r)
+print(" ".join(bad))
+PY
+)"
+    assert_eq "$bad" ""
+fi
+
+if it "the web page ships the dependency visualisation"; then
+    ok=1
+    for marker in "Install order" "chip-req" "chip-auto" "chip-locked" "renderTiers" "lockedBy"; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "web/index.html is missing dependency-UI markers"; fi
+fi
+
+if it "external links open safely"; then
+    # target=_blank without rel=noopener hands the opener to the target page.
+    if grep -q 'target="_blank" rel="noopener noreferrer"' web/index.html; then pass
+    else fail "external links must carry rel=noopener noreferrer"; fi
+fi
+
 # ─── Documentation ──────────────────────────────────────────────────────────
 describe "documentation"
 

@@ -38,28 +38,59 @@ Open that URL. On a desktop it opens by itself; on a headless box, copy it.
 
 ## Using it
 
-The page is one scroll, top to bottom:
+The page is organised into four tabs, with a persistent action bar pinned to the
+bottom so the primary action and the running total are always visible.
 
-| Section | What you do |
+| Tab | What you do |
 |---|---|
-| **Detected system** | Read-only. Confirms you are on the machine you think you are. |
-| **What to install** | Pick a profile, then tick or untick anything. `Select all` / `Select none` are there for the impatient. |
-| **Questions** | Appears only when your selection needs it — e.g. the Omnigraph URL, the Herdr source. |
-| **Run** | `Dry run` is **on by default**. Press `Install selected`. |
-| **Log** | Live output, colour-coded, scrolling as it goes. A progress bar tracks components. |
+| **Overview** | Read the detected system, pick a profile. The one matching your hardware is tagged `suggested`. |
+| **Components** | Tick or untick anything, grouped by category with a per-group count. Filter, expand/collapse, select all/none. |
+| **Install order** | See the resolved plan as numbered steps — what gets installed first and what waits on it. |
+| **Run & log** | Answer any questions your selection needs, then watch the live, colour-coded log. |
 
-The questions section is reactive: tick `agent-skills` and the Omnigraph URL
-field appears; untick it and the field goes away. You answer everything
-*before* the install starts, so it never stops halfway to ask.
+Each component shows its **provider** (colour-coded: `winget`, `apt`, `brew`,
+`npm`, `script`, `custom`), its exact package id, and its name as a link to the
+project's own homepage — so you can check what something is before installing it.
+
+### Dependencies are shown, not hidden
+
+Some things cannot be installed on their own. Claude Code CLI needs Node.js;
+Powerlevel10k needs Oh My Zsh, which needs Zsh and Git. The page makes that
+explicit rather than silently expanding your selection:
+
+- Every component lists **`needs …`** and **`needed by N (…)`** chips.
+- Ticking something **auto-adds its dependencies**, drawn with a dashed purple
+  border and an **`auto`** chip so you can tell them from your own choices.
+- A dependency that something else needs is marked **`locked`** and cannot be
+  unticked — hover it and the tooltip names what requires it. Untick the thing
+  that needs it instead.
+- The action bar always reads e.g. `3 to install · 2 pulled in as dependencies`.
+
+The **Install order** tab turns the same information into the actual plan:
+
+```
+①  Step 1 · 4 components     Needs nothing else — installed first.
+      curl & wget · Git · OpenSSH server · tmux
+②  Step 2 · 2 components     Cannot start until step 1 has finished.
+      Node.js LTS  (after curl & wget) · Tailscale  (after curl & wget)
+③  Step 3 · 2 components     Cannot start until step 2 has finished.
+      Claude Code CLI  (after Node.js LTS) · Herdr  (after Node.js LTS)
+```
+
+Steps are computed from the longest requirement chain, so step 1 is always
+"needs nothing". Items pulled in automatically keep the dashed purple styling.
 
 ### Recommended flow
 
-1. Leave **Dry run** ticked and press **Install selected**.
-2. Read the log. It shows every command that *would* run.
-3. Untick **Dry run**, press it again, confirm the dialog.
+1. **Overview** — confirm the machine, choose a profile.
+2. **Components** — adjust the ticks. Watch the dependency chips.
+3. **Install order** — sanity-check what will happen and in what sequence.
+4. **Run & log** — leave *Dry run* ticked, press **Install selected**, read the log.
+5. Untick *Dry run*, press it again, confirm the dialog.
 
-The confirmation dialog names how many components are about to be installed.
-Dry run changes nothing at all — not one file.
+The confirmation dialog names how many components are about to be installed and
+how many of those are automatic dependencies. Dry run changes nothing at all —
+not one file.
 
 ## What happens under the hood
 
@@ -124,4 +155,3 @@ ssh -L 8777:localhost:8777 you@the-box
 - **Closing the tab does not stop the install.** The server owns the run; reopen
   the URL and `/api/log` picks the output back up from the start.
 - **`Ctrl-C` in the terminal stops the server**, and with it any run in progress.
-EOF

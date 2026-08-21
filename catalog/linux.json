@@ -25,7 +25,8 @@
             "ai-coding",
             "server"
           ],
-          "verify": "gcc --version"
+          "verify": "gcc --version",
+          "homepage": "https://packages.ubuntu.com/build-essential"
         },
         {
           "id": "git",
@@ -39,7 +40,8 @@
             "light",
             "server"
           ],
-          "verify": "git --version"
+          "verify": "git --version",
+          "homepage": "https://git-scm.com/"
         },
         {
           "id": "download-tools",
@@ -53,7 +55,8 @@
             "light",
             "server"
           ],
-          "verify": "curl --version"
+          "verify": "curl --version",
+          "homepage": "https://curl.se/"
         },
         {
           "id": "python3",
@@ -66,7 +69,8 @@
             "ai-coding",
             "server"
           ],
-          "verify": "python3 --version"
+          "verify": "python3 --version",
+          "homepage": "https://www.python.org/"
         },
         {
           "id": "monitoring",
@@ -79,7 +83,8 @@
             "workstation",
             "ai-coding",
             "server"
-          ]
+          ],
+          "homepage": "https://github.com/fastfetch-cli/fastfetch"
         },
         {
           "id": "file-tools",
@@ -90,7 +95,8 @@
           "profiles": [
             "workstation",
             "server"
-          ]
+          ],
+          "homepage": "https://midnight-commander.org/"
         }
       ]
     },
@@ -110,7 +116,8 @@
             "ai-coding",
             "server"
           ],
-          "verify": "zsh --version"
+          "verify": "zsh --version",
+          "homepage": "https://www.zsh.org/"
         },
         {
           "id": "oh-my-zsh",
@@ -127,7 +134,8 @@
             "workstation",
             "ai-coding",
             "server"
-          ]
+          ],
+          "homepage": "https://ohmyz.sh/"
         },
         {
           "id": "zsh-plugins",
@@ -142,7 +150,8 @@
             "workstation",
             "ai-coding",
             "server"
-          ]
+          ],
+          "homepage": "https://github.com/zsh-users/zsh-autosuggestions"
         },
         {
           "id": "powerlevel10k",
@@ -157,7 +166,8 @@
             "workstation",
             "ai-coding",
             "server"
-          ]
+          ],
+          "homepage": "https://github.com/romkatv/powerlevel10k"
         },
         {
           "id": "nerd-font",
@@ -171,7 +181,8 @@
           "profiles": [
             "workstation"
           ],
-          "notes": "Only useful where a local display renders the terminal; skipped on headless profiles."
+          "notes": "Only useful where a local display renders the terminal; skipped on headless profiles.",
+          "homepage": "https://www.nerdfonts.com/"
         },
         {
           "id": "tmux",
@@ -185,7 +196,8 @@
             "light",
             "server"
           ],
-          "verify": "tmux -V"
+          "verify": "tmux -V",
+          "homepage": "https://github.com/tmux/tmux/wiki"
         }
       ]
     },
@@ -209,7 +221,8 @@
             "light",
             "server"
           ],
-          "verify": "node --version"
+          "verify": "node --version",
+          "homepage": "https://nodejs.org/"
         },
         {
           "id": "claude-code",
@@ -226,7 +239,8 @@
             "light",
             "server"
           ],
-          "verify": "claude --version"
+          "verify": "claude --version",
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code"
         },
         {
           "id": "herdr",
@@ -244,7 +258,8 @@
             "server"
           ],
           "prompt": "herdr_source",
-          "verify": "herdr --version"
+          "verify": "herdr --version",
+          "homepage": "https://www.npmjs.com/package/herdr"
         },
         {
           "id": "docker",
@@ -261,7 +276,8 @@
             "server"
           ],
           "postInstall": "add_user_to_docker_group",
-          "verify": "docker --version"
+          "verify": "docker --version",
+          "homepage": "https://docs.docker.com/engine/"
         },
         {
           "id": "antigravity",
@@ -280,7 +296,8 @@
           ],
           "notes": "Desktop IDE — hidden on headless and arm64 machines.",
           "prompt": "antigravity_url",
-          "verify": "antigravity --version"
+          "verify": "antigravity --version",
+          "homepage": "https://antigravity.google/"
         },
         {
           "id": "agent-skills",
@@ -297,7 +314,8 @@
             "workstation",
             "ai-coding"
           ],
-          "prompt": "omnigraph_url"
+          "prompt": "omnigraph_url",
+          "homepage": "https://github.com/Ch3fUlrich/agent-skills"
         },
         {
           "id": "neovim",
@@ -314,7 +332,8 @@
             "ai-coding",
             "server"
           ],
-          "verify": "nvim --version"
+          "verify": "nvim --version",
+          "homepage": "https://www.lazyvim.org/"
         }
       ]
     },
@@ -337,7 +356,8 @@
             "light",
             "server"
           ],
-          "verify": "tailscale version"
+          "verify": "tailscale version",
+          "homepage": "https://tailscale.com/"
         },
         {
           "id": "openssh-server",
@@ -349,7 +369,8 @@
             "light",
             "server"
           ],
-          "verify": "sshd -V"
+          "verify": "sshd -V",
+          "homepage": "https://www.openssh.com/"
         },
         {
           "id": "wireguard",
@@ -360,7 +381,8 @@
           "profiles": [
             "workstation",
             "server"
-          ]
+          ],
+          "homepage": "https://www.wireguard.com/"
         },
         {
           "id": "xpipe",
@@ -377,7 +399,8 @@
           "profiles": [
             "workstation"
           ],
-          "verify": "xpipe version"
+          "verify": "xpipe version",
+          "homepage": "https://xpipe.io/"
         }
       ]
     },
@@ -395,7 +418,8 @@
           "package": "xinit openbox",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "http://openbox.org/"
         },
         {
           "id": "firefox",
@@ -405,7 +429,8 @@
           "package": "firefox-esr",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "https://www.mozilla.org/firefox/"
         },
         {
           "id": "w3m",
@@ -413,7 +438,8 @@
           "description": "Terminal browser",
           "provider": "apt",
           "package": "w3m",
-          "profiles": []
+          "profiles": [],
+          "homepage": "https://w3m.sourceforge.net/"
         }
       ]
     },
@@ -431,7 +457,8 @@
             "workstation",
             "server"
           ],
-          "verify": "ansible --version"
+          "verify": "ansible --version",
+          "homepage": "https://docs.ansible.com/"
         },
         {
           "id": "cron",
@@ -442,7 +469,8 @@
           "profiles": [
             "workstation",
             "server"
-          ]
+          ],
+          "homepage": "https://manpages.ubuntu.com/manpages/noble/man8/cron.8.html"
         }
       ]
     }

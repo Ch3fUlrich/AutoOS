@@ -19,7 +19,12 @@
           "provider": "brew",
           "package": "git",
           "verify": "git --version",
-          "profiles": ["workstation", "ai-coding", "light"]
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://git-scm.com/"
         },
         {
           "id": "download-tools",
@@ -28,7 +33,12 @@
           "provider": "brew",
           "package": "curl wget",
           "verify": "curl --version",
-          "profiles": ["workstation", "ai-coding", "light"]
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://curl.se/"
         },
         {
           "id": "monitoring",
@@ -37,7 +47,11 @@
           "provider": "brew",
           "package": "htop fastfetch",
           "verify": "htop --version",
-          "profiles": ["workstation", "ai-coding"]
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/fastfetch-cli/fastfetch"
         },
         {
           "id": "tmux",
@@ -46,7 +60,12 @@
           "provider": "brew",
           "package": "tmux",
           "verify": "tmux -V",
-          "profiles": ["workstation", "ai-coding", "light"]
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://github.com/tmux/tmux/wiki"
         }
       ]
     },
@@ -60,8 +79,15 @@
           "description": "Zsh framework and plugin manager",
           "provider": "script",
           "package": "oh-my-zsh",
-          "requires": ["git", "download-tools"],
-          "profiles": ["workstation", "ai-coding"]
+          "requires": [
+            "git",
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://ohmyz.sh/"
         },
         {
           "id": "zsh-plugins",
@@ -69,8 +95,14 @@
           "description": "autosuggestions and syntax highlighting",
           "provider": "script",
           "package": "zsh-plugins",
-          "requires": ["oh-my-zsh"],
-          "profiles": ["workstation", "ai-coding"]
+          "requires": [
+            "oh-my-zsh"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/zsh-users/zsh-autosuggestions"
         },
         {
           "id": "powerlevel10k",
@@ -78,8 +110,14 @@
           "description": "Prompt theme",
           "provider": "script",
           "package": "powerlevel10k",
-          "requires": ["oh-my-zsh"],
-          "profiles": ["workstation", "ai-coding"]
+          "requires": [
+            "oh-my-zsh"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/romkatv/powerlevel10k"
         },
         {
           "id": "nerd-font",
@@ -88,7 +126,10 @@
           "provider": "brew",
           "package": "font-meslo-lg-nerd-font",
           "cask": true,
-          "profiles": ["workstation"]
+          "profiles": [
+            "workstation"
+          ],
+          "homepage": "https://www.nerdfonts.com/"
         }
       ]
     },
@@ -103,7 +144,12 @@
           "provider": "brew",
           "package": "node",
           "verify": "node --version",
-          "profiles": ["workstation", "ai-coding", "light"]
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://nodejs.org/"
         },
         {
           "id": "claude-code",
@@ -112,8 +158,15 @@
           "provider": "npm",
           "package": "@anthropic-ai/claude-code",
           "verify": "claude --version",
-          "requires": ["nodejs"],
-          "profiles": ["workstation", "ai-coding", "light"]
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code"
         },
         {
           "id": "claude-desktop",
@@ -122,7 +175,11 @@
           "provider": "brew",
           "package": "claude",
           "cask": true,
-          "profiles": ["workstation", "ai-coding"]
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://claude.ai/download"
         },
         {
           "id": "herdr",
@@ -130,9 +187,16 @@
           "description": "Persistent, resumable AI sessions",
           "provider": "script",
           "package": "herdr",
-          "requires": ["nodejs"],
-          "profiles": ["workstation", "ai-coding", "light"],
-          "prompt": "herdr_source"
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "prompt": "herdr_source",
+          "homepage": "https://www.npmjs.com/package/herdr"
         },
         {
           "id": "docker",
@@ -142,7 +206,11 @@
           "package": "docker",
           "cask": true,
           "verify": "docker --version",
-          "profiles": ["workstation", "ai-coding"]
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://docs.docker.com/engine/"
         },
         {
           "id": "vscode",
@@ -151,7 +219,11 @@
           "provider": "brew",
           "package": "visual-studio-code",
           "cask": true,
-          "profiles": ["workstation", "ai-coding"]
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://code.visualstudio.com/"
         },
         {
           "id": "agent-skills",
@@ -159,10 +231,17 @@
           "description": "Clone Ch3fUlrich/agent-skills and wire up the MCP stack",
           "provider": "custom",
           "package": "agent-skills",
-          "requires": ["git", "nodejs"],
+          "requires": [
+            "git",
+            "nodejs"
+          ],
           "postInstall": "install_agent_skills",
-          "profiles": ["workstation", "ai-coding"],
-          "prompt": "omnigraph_url"
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "prompt": "omnigraph_url",
+          "homepage": "https://github.com/Ch3fUlrich/agent-skills"
         }
       ]
     },
@@ -177,7 +256,12 @@
           "provider": "brew",
           "package": "tailscale",
           "verify": "tailscale version",
-          "profiles": ["workstation", "ai-coding", "light"]
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://tailscale.com/"
         },
         {
           "id": "wireguard",
@@ -185,7 +269,10 @@
           "description": "VPN",
           "provider": "brew",
           "package": "wireguard-tools",
-          "profiles": ["workstation"]
+          "profiles": [
+            "workstation"
+          ],
+          "homepage": "https://www.wireguard.com/"
         }
       ]
     }

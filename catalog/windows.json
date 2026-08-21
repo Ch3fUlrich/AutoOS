@@ -22,7 +22,8 @@
           "profiles": [
             "workstation",
             "ai-coding"
-          ]
+          ],
+          "homepage": "https://learn.microsoft.com/windows/terminal/"
         },
         {
           "id": "powershell7",
@@ -34,7 +35,8 @@
             "workstation",
             "ai-coding"
           ],
-          "verify": "pwsh --version"
+          "verify": "pwsh --version",
+          "homepage": "https://learn.microsoft.com/powershell/"
         },
         {
           "id": "oh-my-posh",
@@ -51,7 +53,8 @@
             "workstation",
             "ai-coding"
           ],
-          "verify": "oh-my-posh --version"
+          "verify": "oh-my-posh --version",
+          "homepage": "https://ohmyposh.dev/"
         },
         {
           "id": "nerd-fonts",
@@ -64,7 +67,8 @@
             "ai-coding"
           ],
           "postInstall": "Install-AutoOSNerdFont",
-          "notes": "No winget package exists for Meslo; downloaded from the ryanoasis/nerd-fonts release and installed per-user."
+          "notes": "No winget package exists for Meslo; downloaded from the ryanoasis/nerd-fonts release and installed per-user.",
+          "homepage": "https://www.nerdfonts.com/"
         }
       ]
     },
@@ -83,7 +87,8 @@
           "profiles": [
             "workstation"
           ],
-          "notes": "Seeds settings for the Better file sizes and Taskbar Clock mods; the mods themselves are enabled once from the Windhawk UI."
+          "notes": "Seeds settings for the Better file sizes and Taskbar Clock mods; the mods themselves are enabled once from the Windhawk UI.",
+          "homepage": "https://windhawk.net/"
         },
         {
           "id": "powertoys",
@@ -93,7 +98,8 @@
           "package": "Microsoft.PowerToys",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "https://learn.microsoft.com/windows/powertoys/"
         },
         {
           "id": "treesize",
@@ -103,7 +109,8 @@
           "package": "JAMSoftware.TreeSize.Free",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "https://www.jam-software.com/treesize_free"
         }
       ]
     },
@@ -124,7 +131,8 @@
             "ai-coding",
             "light"
           ],
-          "verify": "git --version"
+          "verify": "git --version",
+          "homepage": "https://git-scm.com/"
         },
         {
           "id": "nodejs",
@@ -137,7 +145,8 @@
             "ai-coding",
             "light"
           ],
-          "verify": "node --version"
+          "verify": "node --version",
+          "homepage": "https://nodejs.org/"
         },
         {
           "id": "claude-code",
@@ -153,7 +162,8 @@
             "ai-coding",
             "light"
           ],
-          "verify": "claude --version"
+          "verify": "claude --version",
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code"
         },
         {
           "id": "claude-desktop",
@@ -164,7 +174,8 @@
           "profiles": [
             "workstation",
             "ai-coding"
-          ]
+          ],
+          "homepage": "https://claude.ai/download"
         },
         {
           "id": "antigravity",
@@ -176,7 +187,8 @@
           "profiles": [
             "workstation",
             "ai-coding"
-          ]
+          ],
+          "homepage": "https://antigravity.google/"
         },
         {
           "id": "vscode",
@@ -188,7 +200,8 @@
             "workstation",
             "ai-coding"
           ],
-          "verify": "code --version"
+          "verify": "code --version",
+          "homepage": "https://code.visualstudio.com/"
         },
         {
           "id": "docker-desktop",
@@ -201,7 +214,8 @@
             "ai-coding"
           ],
           "notes": "Requires virtualisation enabled in BIOS and a reboot after install.",
-          "verify": "docker --version"
+          "verify": "docker --version",
+          "homepage": "https://www.docker.com/products/docker-desktop/"
         },
         {
           "id": "herdr",
@@ -218,7 +232,8 @@
             "light"
           ],
           "prompt": "herdr_source",
-          "verify": "herdr --version"
+          "verify": "herdr --version",
+          "homepage": "https://www.npmjs.com/package/herdr"
         },
         {
           "id": "agent-skills",
@@ -235,7 +250,8 @@
             "workstation",
             "ai-coding"
           ],
-          "prompt": "omnigraph_url"
+          "prompt": "omnigraph_url",
+          "homepage": "https://github.com/Ch3fUlrich/agent-skills"
         }
       ]
     },
@@ -254,7 +270,8 @@
             "ai-coding",
             "light"
           ],
-          "verify": "tailscale version"
+          "verify": "tailscale version",
+          "homepage": "https://tailscale.com/"
         },
         {
           "id": "wireguard",
@@ -264,7 +281,8 @@
           "package": "WireGuard.WireGuard",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "https://www.wireguard.com/"
         },
         {
           "id": "parsec",
@@ -274,7 +292,8 @@
           "package": "Parsec.Parsec",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "https://parsec.app/"
         },
         {
           "id": "moonlight",
@@ -282,7 +301,8 @@
           "description": "Game-streaming client",
           "provider": "winget",
           "package": "MoonlightGameStreamingProject.Moonlight",
-          "profiles": []
+          "profiles": [],
+          "homepage": "https://moonlight-stream.org/"
         },
         {
           "id": "teamviewer",
@@ -290,7 +310,8 @@
           "description": "Remote support",
           "provider": "winget",
           "package": "TeamViewer.TeamViewer",
-          "profiles": []
+          "profiles": [],
+          "homepage": "https://www.teamviewer.com/"
         }
       ]
     },
@@ -307,7 +328,8 @@
           "profiles": [
             "workstation"
           ],
-          "verify": "7z"
+          "verify": "7z",
+          "homepage": "https://www.7-zip.org/"
         },
         {
           "id": "notepadplusplus",
@@ -317,7 +339,8 @@
           "package": "Notepad++.Notepad++",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "https://notepad-plus-plus.org/"
         },
         {
           "id": "firefox",
@@ -327,7 +350,8 @@
           "package": "Mozilla.Firefox",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "https://www.mozilla.org/firefox/"
         },
         {
           "id": "chrome",
@@ -337,7 +361,8 @@
           "package": "Google.Chrome",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "https://www.google.com/chrome/"
         }
       ]
     },
@@ -353,7 +378,8 @@
           "package": "VideoLAN.VLC",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "https://www.videolan.org/vlc/"
         },
         {
           "id": "spotify",
@@ -361,7 +387,8 @@
           "description": "Music",
           "provider": "winget",
           "package": "Spotify.Spotify",
-          "profiles": []
+          "profiles": [],
+          "homepage": "https://www.spotify.com/"
         },
         {
           "id": "slack",
@@ -369,7 +396,8 @@
           "description": "Team chat",
           "provider": "winget",
           "package": "SlackTechnologies.Slack",
-          "profiles": []
+          "profiles": [],
+          "homepage": "https://slack.com/"
         },
         {
           "id": "zoom",
@@ -377,7 +405,8 @@
           "description": "Video calls",
           "provider": "winget",
           "package": "Zoom.Zoom",
-          "profiles": []
+          "profiles": [],
+          "homepage": "https://zoom.us/"
         },
         {
           "id": "whatsapp",
@@ -386,7 +415,8 @@
           "provider": "winget",
           "package": "9NKSQGP7F2NH",
           "profiles": [],
-          "source": "msstore"
+          "source": "msstore",
+          "homepage": "https://www.whatsapp.com/"
         }
       ]
     },
@@ -402,7 +432,8 @@
           "package": "Obsidian.Obsidian",
           "profiles": [
             "workstation"
-          ]
+          ],
+          "homepage": "https://obsidian.md/"
         },
         {
           "id": "zotero",
@@ -410,7 +441,8 @@
           "description": "Reference manager",
           "provider": "winget",
           "package": "DigitalScholar.Zotero",
-          "profiles": []
+          "profiles": [],
+          "homepage": "https://www.zotero.org/"
         }
       ]
     },
@@ -427,7 +459,8 @@
           "package": "Anaconda.Miniconda3",
           "postInstall": "Add-AutoOSCondaToPath",
           "profiles": [],
-          "verify": "conda --version"
+          "verify": "conda --version",
+          "homepage": "https://docs.conda.io/projects/miniconda/"
         },
         {
           "id": "suite2p",
@@ -439,7 +472,8 @@
             "miniconda"
           ],
           "postInstall": "New-AutoOSCondaEnv",
-          "profiles": []
+          "profiles": [],
+          "homepage": "https://suite2p.readthedocs.io/"
         }
       ]
     },
@@ -453,7 +487,8 @@
           "description": "Self-hosted file sync",
           "provider": "winget",
           "package": "ownCloud.ownCloudDesktop",
-          "profiles": []
+          "profiles": [],
+          "homepage": "https://owncloud.com/desktop-app/"
         },
         {
           "id": "googledrive",
@@ -461,7 +496,8 @@
           "description": "Drive for desktop",
           "provider": "winget",
           "package": "Google.GoogleDrive",
-          "profiles": []
+          "profiles": [],
+          "homepage": "https://www.google.com/drive/download/"
         }
       ]
     }

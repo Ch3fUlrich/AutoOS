@@ -68,7 +68,7 @@ Two more rules the code is built around, both learned the hard way:
 | [`catalog/`](docs/catalog.md) | **What** can be installed — `windows.json`, `linux.json`, `macos.json`. Data only. |
 | `lib/windows/` · `lib/linux/` | **How** it happens: detect, catalog, install, ui, state, serve. |
 | [`web/`](docs/web-ui.md) | The browser UI served by `--serve`. |
-| [`tests/`](docs/testing.md) | Both suites — 43 Linux, 49 Windows, no framework needed. |
+| [`tests/`](docs/testing.md) | Both suites — 50 Linux, 54 Windows, no framework needed. |
 | [`Windows/ansible/`](docs/remote-provisioning.md) | Provisioning *other* machines over the network. Not used by `setup.ps1`. |
 | [`Linux/ubuntu_autoinstall/`](docs/remote-provisioning.md#unattended-ubuntu-install) | Unattended Ubuntu install profile. |
 | `third_party/` | Vendored code under its own licence. Never edited. |
@@ -146,13 +146,22 @@ over Tailscale — `--serve` gives you the same thing as a web page.
 .\setup.ps1 -Serve
 ```
 
-It prints a URL containing a one-time token. Open it, and you get the detected
-system, the profile picker, every checkbox, the questions your selection needs,
-and a live log with a progress bar.
+It prints a URL containing a one-time token. Open it and you get four tabs —
+**Overview** (detected system, profile), **Components** (filterable checkboxes
+grouped by category, each linking to the project's own homepage),
+**Install order**, and **Run & log** — with a persistent action bar showing the
+running total.
 
 **You can do the whole setup in the browser and install from there** — nothing
 has to happen in the terminal except starting the server. Leave *Dry run*
 ticked for the first pass, read the log, then untick it and confirm.
+
+Dependencies are made visible rather than silently resolved. Every component
+shows what it `needs` and what `needs` it; ticking Claude Code auto-adds Node.js
+with a dashed purple `auto` badge, and a dependency something else requires is
+marked `locked` with a tooltip naming what requires it. The **Install order**
+tab turns the same information into numbered steps — step 1 needs nothing, and
+each later step states what it is waiting on.
 
 The page does not install anything itself: it calls a small local server that
 runs the very same `setup.sh` / `setup.ps1` you would have typed, so the two

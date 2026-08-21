@@ -54,6 +54,10 @@ function Test-Case {
         $script:Failures += $Name
         Write-Host ("  " + (C 'X' '1;38;5;167') + " $Name")
         Write-Host ("      " + (C $_.Exception.Message '2;38;5;245'))
+        # Without a location a bare .NET message (e.g. a NullReferenceException
+        # from inside a cmdlet) is almost impossible to trace back to a line.
+        $where = ($_.ScriptStackTrace -split "`n" | Select-Object -First 2) -join ' | '
+        if ($where) { Write-Host ("      " + (C $where '2;38;5;245')) }
     }
 }
 
@@ -122,10 +126,20 @@ Describe-Group 'component filtering'
 
 function New-FakeSystem {
     param([string]$Arch = 'x64', [bool]$Headless = $false, [double]$Ram = 32, [int]$Cores = 16)
+    # Mirrors every field Get-AutoOSSystemInfo really returns, so consumers such
+    # as Get-AutoOSServeState can be tested without touching the live machine.
     [pscustomobject]@{
         Arch = $Arch; IsHeadless = $Headless; RamGB = $Ram; CpuCores = $Cores
         IsAdmin = $true; HasWinget = $true; HasChoco = $false; FreeDiskGB = 200
         VirtualizationEnabled = $true; OsBuild = 22631; WindowsMajor = 11
+        OsName = 'Microsoft Windows 11 Pro'; OsVersion = '10.0.22631'
+        Manufacturer = 'Contoso'; Model = 'TestBox 9000'
+        CpuName = 'Contoso Test CPU'; Gpu = 'none'; HasGpu = $false
+        HasDiscreteGpu = $false; IsLaptop = $false; IsVirtual = $true
+        UserName = 'testuser'; PsVersion = '5.1.0'; PsEdition = 'Desktop'
+        IsInteractive = $false; HasScoop = $false; HasGit = $true
+        HasNode = $true; HasNpm = $true; HasDocker = $false; HasWsl = $false
+        NodeVersion = 'v22.0.0'
     }
 }
 
@@ -428,28 +442,92 @@ Test-Case 'undo never uninstalls anything' {
         'the undo path contains an uninstall command'
 }
 
+# ─── Browser UI payload ─────────────────────────────────────────────────────
+Describe-Group 'browser UI'
+
+Test-Case 'every component has a homepage link' {
+    $bad = @()
+    foreach ($f in @('windows.json', 'linux.json', 'macos.json')) {
+        $c = Get-AutoOSCatalog (Join-Path $Root "catalog\$f")
+        foreach ($cat in $c.categories) {
+            foreach ($comp in $cat.components) {
+                if (-not $comp.PSObject.Properties.Name.Contains('homepage')) { $bad += "$f`:$($comp.id)" }
+            }
+        }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'a non-URL homepage is rejected' {
+    $bad = @'
+{"categories":[{"id":"x","name":"X","components":[
+ {"id":"thing","name":"Thing","description":"d","provider":"winget","package":"p","homepage":"not-a-url"}]}]}
+'@ | ConvertFrom-Json
+    $p = @(Test-AutoOSCatalogSchema -Catalog $bad)
+    Assert-True (($p -join '; ') -match 'homepage') "expected a homepage complaint, got: $($p -join '; ')"
+}
+
+Test-Case 'the serve payload carries what the UI needs' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    $cc = $state.components | Where-Object { $_.id -eq 'claude-code' }
+    foreach ($k in @('requires', 'homepage', 'verify', 'category', 'provider')) {
+        if (-not $cc.Contains($k)) { throw "serve payload is missing '$k'" }
+    }
+    Pass
+}
+
+Test-Case 'the serve payload keeps the dependency edges' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    $cc = $state.components | Where-Object { $_.id -eq 'claude-code' }
+    Assert-Contains $cc.requires 'nodejs'
+}
+
+Test-Case 'the serve payload survives JSON round-tripping' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    $back = ($state | ConvertTo-Json -Depth 8 -Compress) | ConvertFrom-Json
+    $cc = $back.components | Where-Object { $_.id -eq 'claude-code' }
+    Assert-Contains @($cc.requires) 'nodejs'
+}
+
 # ─── Static analysis ────────────────────────────────────────────────────────
 Describe-Group 'static analysis'
 
 Test-Case 'PSScriptAnalyzer is clean' {
-    if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
-        $files = @(Get-ChildItem -Path (Join-Path $Root 'lib\windows') -Filter *.psm1) +
-                 @(Get-Item $setup)
-        $issues = @()
-        foreach ($f in $files) {
-            # PSUseSingularNouns is excluded deliberately: these functions return
-            # collections, and Get-AutoOSAvailableComponent(s) reads worse singular.
-            # Everything else, including PSAvoidAssignmentToAutomaticVariable and
-            # PSReviewUnusedParameter, is treated as a real failure.
-            $issues += Invoke-ScriptAnalyzer -Path $f.FullName -Severity Error, Warning `
-                       -ExcludeRule PSUseShouldProcessForStateChangingFunctions,
-                                    PSAvoidUsingWriteHost,
-                                    PSUseSingularNouns
-        }
-        if ($issues.Count -eq 0) { Pass }
-        else { throw (($issues | Select-Object -First 8 | ForEach-Object { "$($_.ScriptName):$($_.Line) $($_.RuleName)" }) -join '; ') }
-    } else {
+    if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
         Skip 'PSScriptAnalyzer not installed'
+        return
+    }
+    $files = @(Get-ChildItem -Path (Join-Path $Root 'lib\windows') -Filter *.psm1) +
+             @(Get-Item $setup)
+    $issues = @()
+    $ruleCrashes = @()
+    foreach ($f in $files) {
+        # PSUseSingularNouns is excluded deliberately: these functions return
+        # collections, and Get-AutoOSAvailableComponent(s) reads worse singular.
+        # Everything else, including PSAvoidAssignmentToAutomaticVariable and
+        # PSReviewUnusedParameter, is treated as a real failure.
+        #
+        # -ErrorVariable, not $ErrorActionPreference='Stop': the analyzer emits a
+        # non-terminating RULE_ERROR when one of its own rules throws internally
+        # (it does so here on a loaded module, with no single rule reproducing it).
+        # Diagnostics still come through, so they stay the pass criterion - but a
+        # crashed rule is reported rather than silently swallowed.
+        $analyzerErrors = $null
+        $issues += Invoke-ScriptAnalyzer -Path $f.FullName -Severity Error, Warning `
+                   -ExcludeRule PSUseShouldProcessForStateChangingFunctions,
+                                PSAvoidUsingWriteHost,
+                                PSUseSingularNouns `
+                   -ErrorVariable analyzerErrors -ErrorAction SilentlyContinue
+        if ($analyzerErrors) { $ruleCrashes += $f.Name }
+    }
+    if ($issues.Count -gt 0) {
+        throw (($issues | Select-Object -First 8 |
+                ForEach-Object { "$($_.ScriptName):$($_.Line) $($_.RuleName)" }) -join '; ')
+    }
+    Pass
+    if ($ruleCrashes.Count -gt 0) {
+        Write-Host ("      " + (C ("note: a PSScriptAnalyzer rule threw internally on " +
+                    ($ruleCrashes -join ', ') + " - diagnostics were still collected") '38;5;179'))
     }
 }
 

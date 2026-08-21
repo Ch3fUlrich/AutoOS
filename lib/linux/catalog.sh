@@ -62,6 +62,9 @@ for grp in cats:
         for r in c.get("requires", []):
             if r not in all_ids:     problems.append(f"{where}: requires unknown component '{r}'")
             if r == cid:             problems.append(f"{where}: requires itself")
+        hp = c.get("homepage")
+        if hp and not str(hp).startswith(("http://", "https://")):
+            problems.append(f"{where}: 'homepage' must be an http(s) URL")
         v = c.get("verify")
         if "verify" in c and not (v or "").strip():
             problems.append(f"{where}: 'verify' is present but empty")
