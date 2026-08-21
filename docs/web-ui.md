@@ -54,12 +54,23 @@ collapsible section — click the header to fold it away once you are done with 
 A three-way switch in the header: **Auto** (follows your OS), **Light**, **Dark**.
 The choice is remembered per browser.
 
-### Profile cards expand
+### Profile cards expand into a plan
 
-Selecting a profile grows its card and shrinks the others, and the expanded card
-shows **what that profile actually installs** — total components, how many are
-dependencies, and a per-category breakdown with the component names — before you
-scroll down to the detail.
+Selecting a profile grows its card and shrinks the others. The expanded card
+shows **what that profile actually installs, and in what order**:
+
+- a header line — total components, categories, and how many install steps;
+- a process strip — `① 13 components → ② 8 components → ③ 5 components`;
+- a **grid of category cards**, each listing its components with a numbered
+  badge giving that component's install step.
+
+Cards are ordered by when their work starts, and components within a card are
+sorted by step, so reading top-left to bottom-right follows the install
+sequence. Dependencies pulled in automatically are tinted purple.
+
+The same numbers appear as a `step N` chip on every component in the list below
+and as the numbered tiers in the Install order card — all three come from one
+shared function, so they cannot drift apart.
 
 ### Components: list or grid
 

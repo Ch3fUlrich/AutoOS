@@ -174,15 +174,40 @@ details.card>summary:focus-visible{outline:2px solid var(--accent);outline-offse
   display:flex;gap:14px;flex-wrap:wrap;font-size:.8rem;color:var(--ink-muted);margin-bottom:9px;
 }
 .psum-head b{color:var(--ink);font-variant-numeric:tabular-nums;font-size:.95rem}
-.psum-cats{display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:5px}
-.psum-cat{
-  display:flex;align-items:center;gap:7px;font-size:.77rem;background:var(--surface);
-  border:1px solid var(--rule);border-radius:6px;padding:4px 9px;
+
+/* the process at a glance: step 1 -> step 2 -> step 3, with counts */
+.psum-steps{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:10px}
+.psum-step{
+  display:inline-flex;align-items:center;gap:6px;font-size:.74rem;background:var(--surface);
+  border:1px solid var(--rule);border-radius:999px;padding:3px 10px 3px 4px;color:var(--ink-muted);
 }
-.psum-cat .n{
-  margin-left:auto;font-variant-numeric:tabular-nums;font-weight:700;color:var(--accent);
+.psum-arrow{color:var(--ink-faint);font-size:.8rem}
+
+/* one card per category; every component carries its install-order number */
+.psum-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(205px,1fr));gap:8px}
+.psum-card{
+  background:var(--surface);border:1px solid var(--rule);border-radius:8px;
+  padding:8px 10px;min-width:0;
 }
-.psum-cat .names{color:var(--ink-faint);font-size:.72rem}
+.psum-card-head{
+  display:flex;align-items:center;gap:6px;font-size:.7rem;font-weight:700;
+  text-transform:uppercase;letter-spacing:.07em;color:var(--accent);
+  padding-bottom:5px;margin-bottom:5px;border-bottom:1px solid var(--rule);
+}
+.psum-card-head .n{
+  margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink-faint);letter-spacing:0;
+}
+.psum-comp{display:flex;align-items:center;gap:6px;font-size:.77rem;padding:2px 0;min-width:0}
+.psum-comp .cname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.psum-comp.is-dep .cname{color:var(--dep)}
+.step-badge{
+  flex:none;width:17px;height:17px;border-radius:50%;display:grid;place-items:center;
+  font-size:.62rem;font-weight:800;font-variant-numeric:tabular-nums;
+  background:var(--accent);color:var(--accent-ink);
+}
+.step-badge.dep{background:var(--dep);color:#fff}
+/* the same badge, reused inline in the main component list */
+.chip-step{background:var(--accent);color:var(--accent-ink);font-variant-numeric:tabular-nums}
 
 /* ─── toolbar ────────────────────────────────────────────────────────── */
 .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:13px}
@@ -575,6 +600,14 @@ function lockedBy(id) {
   const eff = effective();
   return (REQUIRED_BY.get(id) || []).filter(d => eff.has(d) && d !== id);
 }
+/* id -> step number for a given set. Empty tiers are skipped, so the numbering
+   matches the Install order card exactly rather than being a raw depth. */
+function stepMap(ids) {
+  const depths = [...new Set([...ids].map(id => depth(id)))].sort((a, b) => a - b);
+  const rank = new Map(depths.map((d, i) => [d, i + 1]));
+  return new Map([...ids].map(id => [id, rank.get(depth(id))]));
+}
+
 /* What a profile would install, dependencies included. */
 function profileClosure(name) {
   if (name === "custom") return new Set();
@@ -695,37 +728,71 @@ function profileClosureDirect(name) {
     : STATE.components.filter(c => (c.profiles || []).includes(name)).map(c => c.id);
 }
 
-/* The expanded card shows what that profile actually installs. */
+/* The expanded card shows what that profile actually installs, as a grid of
+   category cards. Every component carries its install-order number so the whole
+   process is readable without opening the Install order card. */
 function renderProfileSummary() {
   el("profiles").querySelectorAll("[data-summary]").forEach(box => {
     const name = box.dataset.summary;
     if (name !== activeProfile) { box.innerHTML = ""; return; }
+
     const ids = name === "custom" ? effective() : profileClosure(name);
     if (!ids.size) {
-      box.innerHTML = '<div class="psum-head">Nothing pre-selected — tick components below.</div>';
+      box.innerHTML = '<div class="psum-head">Nothing pre-selected - tick components below.</div>';
       return;
     }
-    const direct = new Set(profileClosureDirect(name));
-    const deps = [...ids].filter(i => !direct.has(i)).length;
+
+    const direct = new Set(name === "custom" ? picked : profileClosureDirect(name));
+    const deps = [...ids].filter(i => !direct.has(i));
+    const steps = stepMap(ids);
+    const stepCount = Math.max(...steps.values());
+
+    // step 1 (6) -> step 2 (3) -> step 3 (2)
+    const perStep = new Map();
+    for (const n of steps.values()) perStep.set(n, (perStep.get(n) || 0) + 1);
+    const strip = [...perStep.keys()].sort((a, b) => a - b).map(n =>
+      '<span class="psum-step"><span class="step-badge">' + n + "</span>" +
+      perStep.get(n) + " component" + (perStep.get(n) === 1 ? "" : "s") + "</span>"
+    ).join('<span class="psum-arrow">&rarr;</span>');
+
     const cats = new Map();
     for (const id of ids) {
       const c = BY_ID.get(id); if (!c) continue;
       if (!cats.has(c.category)) cats.set(c.category, []);
-      cats.get(c.category).push(c.name);
+      cats.get(c.category).push(id);
     }
-    const rows = [...cats].sort((a, b) => b[1].length - a[1].length).map(([cat, names]) =>
-      '<span class="psum-cat">' + esc(cat) +
-        '<span class="n">' + names.length + "</span></span>" +
-      '<span class="psum-cat names" style="grid-column:1/-1;border:0;background:none;padding:0 0 4px 2px">' +
-        esc(names.slice(0, 6).join(", ")) + (names.length > 6 ? " +" + (names.length - 6) + " more" : "") +
-      "</span>").join("");
+    // Order cards by when their work starts, so reading left-to-right follows
+    // the install sequence rather than an arbitrary category order.
+    const cards = [...cats].sort((a, b) => {
+      const sa = Math.min(...a[1].map(i => steps.get(i)));
+      const sb = Math.min(...b[1].map(i => steps.get(i)));
+      return sa - sb || b[1].length - a[1].length;
+    }).map(([cat, list]) => {
+      const rows = list
+        .sort((x, y) => steps.get(x) - steps.get(y) ||
+                        BY_ID.get(x).name.localeCompare(BY_ID.get(y).name))
+        .map(id => {
+          const isDep = !direct.has(id);
+          return '<span class="psum-comp' + (isDep ? " is-dep" : "") + '" title="' +
+            esc(BY_ID.get(id).name) + " - step " + steps.get(id) +
+            (isDep ? " (dependency)" : "") + '">' +
+            '<span class="step-badge' + (isDep ? " dep" : "") + '">' + steps.get(id) + "</span>" +
+            '<span class="cname">' + esc(BY_ID.get(id).name) + "</span></span>";
+        }).join("");
+      return '<div class="psum-card"><div class="psum-card-head">' + esc(cat) +
+        '<span class="n">' + list.length + "</span></div>" + rows + "</div>";
+    }).join("");
+
     box.innerHTML =
       '<div class="psum-head">' +
         "<span><b>" + ids.size + "</b> components</span>" +
         "<span><b>" + cats.size + "</b> categories</span>" +
-        (deps ? '<span style="color:var(--dep)"><b style="color:var(--dep)">' + deps +
-                "</b> dependencies</span>" : "") +
-      "</div><div class=\"psum-cats\">" + rows + "</div>";
+        "<span><b>" + stepCount + "</b> install step" + (stepCount === 1 ? "" : "s") + "</span>" +
+        (deps.length ? '<span style="color:var(--dep)"><b style="color:var(--dep)">' +
+                       deps.length + "</b> dependencies</span>" : "") +
+      "</div>" +
+      '<div class="psum-steps">' + strip + "</div>" +
+      '<div class="psum-grid">' + cards + "</div>";
   });
 }
 
@@ -773,8 +840,10 @@ function itemHtml(c) {
 }
 
 /* ── the one repaint ──────────────────────────────────────────────────── */
+let STEPS = new Map();
 function sync() {
   const eff = effective(), auto = autoAdded();
+  STEPS = stepMap(eff);
 
   document.querySelectorAll(".item").forEach(node => {
     const id = node.dataset.id, c = BY_ID.get(id);
@@ -791,6 +860,11 @@ function sync() {
     node.classList.toggle("auto", isAuto);
 
     const chips = [];
+    if (isEff) {
+      const st = STEPS.get(id);
+      if (st) chips.push('<span class="chip chip-step" title="installed in step ' + st +
+                         '">step ' + st + "</span>");
+    }
     if (isAuto) chips.push('<span class="chip chip-auto">auto</span>');
     if (cb.disabled) chips.push('<span class="chip chip-locked">locked</span>');
     node.querySelector(".state-chips").innerHTML = chips.join("");
@@ -859,6 +933,7 @@ function renderTiers() {
     if (!byTier.has(d)) byTier.set(d, []);
     byTier.get(d).push(id);
   }
+  // Same numbering the profile summary shows, from the one shared stepMap().
   el("tiers").innerHTML = [...byTier.keys()].sort((a, b) => a - b).map((d, i) => {
     const ids = byTier.get(d).sort((a, b) => BY_ID.get(a).name.localeCompare(BY_ID.get(b).name));
     const hint = d === 0 ? "Needs nothing else — installed first."

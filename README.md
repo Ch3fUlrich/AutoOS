@@ -68,7 +68,7 @@ Two more rules the code is built around, both learned the hard way:
 | [`catalog/`](docs/catalog.md) | **What** can be installed — `windows.json`, `linux.json`, `macos.json`. Data only. |
 | `lib/windows/` · `lib/linux/` | **How** it happens: detect, catalog, install, ui, state, serve. |
 | [`web/`](docs/web-ui.md) | The browser UI served by `--serve`. |
-| [`tests/`](docs/testing.md) | Both suites — 62 Linux, 57 Windows, no framework needed. |
+| [`tests/`](docs/testing.md) | Both suites — 65 Linux, 57 Windows, no framework needed. |
 | [`Windows/ansible/`](docs/remote-provisioning.md) | Provisioning *other* machines over the network. Not used by `setup.ps1`. |
 | [`Linux/ubuntu_autoinstall/`](docs/remote-provisioning.md#unattended-ubuntu-install) | Unattended Ubuntu install profile. |
 | `third_party/` | Vendored code under its own licence. Never edited. |

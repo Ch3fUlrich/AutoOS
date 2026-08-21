@@ -524,10 +524,28 @@ fi
 
 if it "the profile card carries an inline component summary"; then
     ok=1
-    for marker in "psummary" "renderProfileSummary" "psum-cats"; do
+    for marker in "psummary" "renderProfileSummary" "psum-grid" "psum-card"; do
         grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
     done
     if (( ok )); then pass; else fail "profile summary markers missing"; fi
+fi
+
+if it "the profile summary numbers each component with its install step"; then
+    ok=1
+    for marker in "step-badge" "psum-steps" "stepMap"; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "install-order numbering missing from the summary"; fi
+fi
+
+if it "the summary and the install order share one numbering function"; then
+    # Two independent numbering schemes would drift; there must be exactly one.
+    n="$(grep -c "function stepMap" web/index.html || true)"
+    assert_eq "$n" "1"
+fi
+
+if it "the component list shows the same step number"; then
+    grep -q "chip-step" web/index.html && pass || fail "no step chip in the component list"
 fi
 
 if it "system, profile, components and install order share one tab"; then
