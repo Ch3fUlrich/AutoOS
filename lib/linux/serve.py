@@ -59,9 +59,17 @@ def component_platforms() -> dict:
     return out
 
 
+_INFO_CACHE: dict | None = None
+
+
 def build_state() -> dict:
     """System info + catalog, produced by the same shell code the CLI uses."""
-    probe = r"""
+    global _INFO_CACHE
+
+    import copy
+
+    if _INFO_CACHE is None:
+        probe = r"""
 set -euo pipefail
 cd "$AUTOOS_ROOT"
 . lib/linux/ui.sh; . lib/linux/detect.sh; . lib/linux/catalog.sh
@@ -86,13 +94,14 @@ print(json.dumps({
 }))
 PY
 """
-    env = dict(os.environ, AUTOOS_ROOT=str(ROOT))
-    out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True,
-                         env=env, cwd=ROOT, check=False)
-    if out.returncode != 0:
-        raise RuntimeError(out.stderr[-2000:] or "detection failed")
-    info = json.loads(out.stdout.strip().splitlines()[-1])
+        env = dict(os.environ, AUTOOS_ROOT=str(ROOT))
+        out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True,
+                             env=env, cwd=ROOT, check=False)
+        if out.returncode != 0:
+            raise RuntimeError(out.stderr[-2000:] or "detection failed")
+        _INFO_CACHE = json.loads(out.stdout.strip().splitlines()[-1])
 
+    info = copy.deepcopy(_INFO_CACHE)
     catalog = json.loads((ROOT / "catalog" / "linux.json").read_text(encoding="utf-8"))
     platforms = component_platforms()
     arch = info["system"]["architecture"]
