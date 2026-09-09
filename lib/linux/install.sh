@@ -172,7 +172,7 @@ clone_or_update() {
 install_oh_my_zsh() {
     if (( AUTOOS_DRY_RUN )); then ui_muted "would install oh-my-zsh into $SYS_HOME/.oh-my-zsh"; return 0; fi
     # RUNZSH=no keeps the installer from exec'ing a shell and swallowing the
-    # rest of this script - the bug that stopped the old install.sh halfway.
+    # rest of this script.
     RUNZSH=no CHSH=no KEEP_ZSHRC=yes \
         sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
 }
