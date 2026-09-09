@@ -212,6 +212,22 @@ if ($Serve) {
 }
 
 # ─── 2. Profile ─────────────────────────────────────────────────────────────
+$cfgAnswers = @{}
+if (Test-Path $Config) {
+    try {
+        $raw = Get-Content $Config -Raw -Encoding UTF8
+        $cfgObj = $raw | ConvertFrom-Json
+        if (-not $InstallProfile -and $cfgObj.PSObject.Properties.Name -contains 'profile' -and $cfgObj.profile) {
+            $InstallProfile = $cfgObj.profile
+        }
+        if ($cfgObj.PSObject.Properties.Name -contains 'answers' -and $cfgObj.answers) {
+            foreach ($p in $cfgObj.answers.PSObject.Properties) {
+                $cfgAnswers[$p.Name] = [string]$p.Value
+            }
+        }
+    } catch {}
+}
+
 $available = @(Get-AutoOSAvailableComponents -Catalog $catalog -SystemInfo $sys)
 $suggested = Get-AutoOSSuggestedProfile -SystemInfo $sys
 
@@ -302,7 +318,12 @@ Write-AutoOSLine "$($plan.Count) component(s); $(@($plan | Where-Object { $_.Aut
 # ─── 5. Questions (all of them, before anything is touched) ─────────────────
 $answers = @{}
 if ($statePayload) { $answers = $statePayload.Answers }
-$needed = @($plan | Where-Object { $_.Prompt } | ForEach-Object { $_.Prompt } | Select-Object -Unique)
+foreach ($k in $cfgAnswers.Keys) {
+    if (-not $answers.ContainsKey($k)) { $answers[$k] = $cfgAnswers[$k] }
+}
+$needed = @($plan | Where-Object { $_.Prompt } | ForEach-Object {
+    $_.Prompt -split '[, ]+' | Where-Object { $_ }
+} | Select-Object -Unique)
 
 # An AUTOOS_ANSWER_<KEY> environment variable pre-answers a prompt; this is how
 # -Serve passes the browser's answers through to the same code path.
@@ -314,6 +335,7 @@ foreach ($key in $needed) {
 }
 $needed = @($needed | Where-Object { -not $fromEnv.ContainsKey($_) -and -not $answers.ContainsKey($_) })
 
+$configUpdated = $false
 if ($needed.Count -and -not $Yes) {
     Write-AutoOSSection 'A few questions'
     foreach ($key in $needed) {
@@ -321,12 +343,22 @@ if ($needed.Count -and -not $Yes) {
         $help = if ($spec.PSObject.Properties.Name -contains 'help') { $spec.help } else { '' }
         $def  = if ($spec.PSObject.Properties.Name -contains 'default') { $spec.default } else { '' }
         $answers[$key] = Read-AutoOSValue -Question $spec.question -Default $def -Help $help
+        $configUpdated = $true
     }
 } elseif ($needed.Count) {
     foreach ($key in $needed) {
         $spec = $catalog.prompts.$key
         $answers[$key] = if ($spec.PSObject.Properties.Name -contains 'default') { $spec.default } else { '' }
     }
+}
+
+if ($configUpdated -and -not $DryRun.IsPresent -and (Test-Path $Config)) {
+    try {
+        $cfgOut = [ordered]@{ version = 1; profile = $InstallProfile; answers = $answers }
+        $jsonStr = $cfgOut | ConvertTo-Json -Depth 5
+        [System.IO.File]::WriteAllText($Config, $jsonStr, [System.Text.Encoding]::UTF8)
+        Write-AutoOSLine "Saved answers to $Config" -Level ok
+    } catch {}
 }
 
 # ─── 6. Confirm ─────────────────────────────────────────────────────────────
