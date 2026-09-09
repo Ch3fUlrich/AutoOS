@@ -424,6 +424,43 @@ fi
 # ─── Browser UI payload ─────────────────────────────────────────────────────
 describe "browser UI"
 
+if it "classify handles edge cases correctly"; then
+    failures="$(python3 - <<'PY'
+import sys
+sys.path.insert(0, './lib/linux')
+from serve import classify
+
+tests = [
+    # Happy paths
+    ("+ ok line", "ok"),
+    ("! warn line", "warn"),
+    ("x err line", "err"),
+    ("> step line", "step"),
+    ("run: cmd", "muted"),
+    ("would run: cmd", "muted"),
+    ("would do thing", "muted"),
+
+    # Edge cases
+    ("   + padded", "ok"), # spaces
+    ("\t! tabbed", "warn"), # tabs
+    ("", ""), # empty string
+    ("    ", ""), # whitespace only
+    ("unknown format", ""), # unrecognised
+    ("x", ""), # short
+]
+
+bad = []
+for line, expected in tests:
+    res = classify(line)
+    if res != expected:
+        bad.append(f"classify({repr(line)}) == {repr(res)} != {repr(expected)}")
+if bad:
+    print("\n".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
 if it "every component has a homepage link"; then
     missing="$(python3 - <<'PY'
 import json, glob
