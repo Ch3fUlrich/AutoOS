@@ -34,12 +34,6 @@ LOG: list[dict] = []
 RUN = {"running": False, "done": 0, "total": 0, "summary": ""}
 
 
-def sh(*args: str) -> str:
-    return subprocess.run(
-        args, cwd=ROOT, capture_output=True, text=True, check=False
-    ).stdout
-
-
 def component_platforms() -> dict:
     """id -> the platforms whose catalog contains it.
 
