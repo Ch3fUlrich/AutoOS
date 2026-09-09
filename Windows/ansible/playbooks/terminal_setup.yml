@@ -32,7 +32,7 @@
     - name: Add Git to the user Path
       ansible.windows.win_environment:
         name: Path
-        value: "{{ (existing + [git_cmd]) | join(';') }}"
+        value: "{{ (existing | list + [git_cmd]) | join(';') }}"
         level: user
         state: present
       vars:
