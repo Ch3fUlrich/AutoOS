@@ -53,7 +53,9 @@ Both entry points accept the same ideas; only the spelling differs.
 | `-Yes` | `--yes` / `-y` | Non-interactive: take defaults, skip confirmation |
 | `-NoColor` | `--no-color` | Disable ANSI colour |
 | `-ListComponents` | `--list` | Print the catalog and exit |
+| `-Installed` | `--installed` | List applications already installed on this system |
 | `-CheckCatalog` | `--check-catalog` | Validate every catalog; non-zero on any problem |
+| `-Config <file>` | `--config <file>` | Load configuration file (default: `autoos.config.json`) |
 | `-Serve` | `--serve` | [Browser UI](web-ui.md) instead of the terminal menu |
 | `-Port N` / `-Bind addr` | `--port N` / `--bind addr` | Where the browser UI listens |
 | `-FromState <file>` | `--from-state <file>` | [Replay a previous run](state-and-undo.md) |
