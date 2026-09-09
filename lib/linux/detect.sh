@@ -257,30 +257,73 @@ LAUNCH_HOW=""
 
 _launch_normalise() { printf '%s' "$1" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]'; }
 
+declare -A _LAUNCH_DESKTOP_CACHE=()
+_LAUNCH_DESKTOP_INITIALIZED=0
+
+_init_desktop_cache() {
+    (( _LAUNCH_DESKTOP_INITIALIZED )) && return 0
+    _LAUNCH_DESKTOP_INITIALIZED=1
+    has_cmd python3 || return 0
+    local norm name path
+    while IFS=$'\x1f' read -r norm name path; do
+        [[ -n "$norm" ]] && _LAUNCH_DESKTOP_CACHE["$norm"]="${name}"$'\x1f'"${path}"
+    done < <(python3 - "$HOME" <<'PY'
+import os, sys, shutil
+
+home = sys.argv[1]
+dirs = [
+    os.path.join(home, ".local/share/applications"),
+    "/usr/local/share/applications",
+    "/usr/share/applications",
+    "/var/lib/snapd/desktop/applications",
+    "/var/lib/flatpak/exports/share/applications",
+    os.path.join(home, ".local/share/flatpak/exports/share/applications")
+]
+
+seen = set()
+for d in dirs:
+    if not os.path.isdir(d):
+        continue
+    for root, _, files in os.walk(d):
+        for f in files:
+            if not f.endswith(".desktop"):
+                continue
+            path = os.path.join(root, f)
+            name, exec_cmd = "", ""
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        if not name and line.startswith("Name="):
+                            name = line[5:].strip()
+                        elif not exec_cmd and line.startswith("Exec="):
+                            exec_cmd = line[5:].strip()
+                        if name and exec_cmd:
+                            break
+            except Exception:
+                continue
+            if not name:
+                name = f[:-8]
+            norm = "".join(c.lower() for c in name if c.isalnum())
+            if norm and norm not in seen:
+                seen.add(norm)
+                prog = exec_cmd.split()[0] if exec_cmd else ""
+                resolved = shutil.which(prog) if (prog and not os.path.isabs(prog)) else prog
+                print(f"{norm}\x1f{name}\x1f{resolved or path}")
+PY
+    )
+}
+
 _launch_from_desktop() {
-    local wanted="$1" dir file name exec_line
+    local wanted="$1" entry
     wanted="$(_launch_normalise "$wanted")"
     [[ -z "$wanted" ]] && return 1
-    for dir in "$HOME/.local/share/applications" /usr/local/share/applications                /usr/share/applications /var/lib/snapd/desktop/applications                /var/lib/flatpak/exports/share/applications                "$HOME/.local/share/flatpak/exports/share/applications"; do
-        [[ -d "$dir" ]] || continue
-        while IFS= read -r file; do
-            [[ -n "$file" ]] || continue
-            name="$(grep -m1 '^Name=' "$file" 2>/dev/null | cut -d= -f2-)"
-            [[ -n "$name" ]] || name="$(basename "$file" .desktop)"
-            if [[ "$(_launch_normalise "$name")" == "$wanted" ]]; then
-                # Exec carries %U/%F placeholders the launcher fills in; the
-                # first field is the actual program.
-                exec_line="$(grep -m1 '^Exec=' "$file" 2>/dev/null | cut -d= -f2- | awk '{print $1}')"
-                # Exec is often a bare command name; report where it actually is.
-                if [[ -n "$exec_line" && "$exec_line" != /* ]]; then
-                    exec_line="$(command -v "$exec_line" 2>/dev/null || printf '%s' "$exec_line")"
-                fi
-                LAUNCH_PATH="${exec_line:-$file}"
-                LAUNCH_HOW="Applications:  ${name}"
-                return 0
-            fi
-        done < <(find "$dir" -maxdepth 2 -name '*.desktop' 2>/dev/null)
-    done
+    _init_desktop_cache
+    if [[ -v _LAUNCH_DESKTOP_CACHE["$wanted"] ]]; then
+        entry="${_LAUNCH_DESKTOP_CACHE["$wanted"]}"
+        LAUNCH_HOW="Applications:  ${entry%%$'\x1f'*}"
+        LAUNCH_PATH="${entry#*$'\x1f'}"
+        return 0
+    fi
     return 1
 }
 
@@ -303,6 +346,11 @@ _launch_from_app_bundle() {
 launch_hint() {
     local name="$1" id="$2" verify="${3:-}" exe resolved
     LAUNCH_PATH=""; LAUNCH_HOW=""
+
+    if [[ "$id" == "bitwarden-chrome" ]]; then
+        LAUNCH_PATH="chrome://extensions"; LAUNCH_HOW="Chrome:  Bitwarden extension"
+        return 0
+    fi
 
     # A verify command names the executable, which is the most precise handle
     # there is: command -v resolves it to the exact file that will run.

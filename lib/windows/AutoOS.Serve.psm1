@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     AutoOS browser UI for headless or remote Windows machines.
@@ -19,6 +19,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1')      -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Detect.psm1')  -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Catalog.psm1') -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'AutoOS.Install.psm1') -DisableNameChecking
 
 $script:Log     = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 $script:RunInfo = [hashtable]::Synchronized(@{ Running = $false; Done = 0; Total = 0; Summary = '' })
@@ -60,7 +61,12 @@ function Get-AutoOSServeState {
             }
         }
     }
+    $installedList = @(Get-AutoOSInstalledComponents -Components $available)
+    $installedMap = @{}
+    foreach ($inst in $installedList) { $installedMap[$inst.Id] = $true }
+    $installedNames = @($installedList | ForEach-Object { $_.Name })
     $components = foreach ($c in $available) {
+        $isInst = [bool]$installedMap.ContainsKey($c.Id)
         [ordered]@{
             id = $c.Id; name = $c.Name; description = $c.Description
             provider = $c.Provider; package = $c.Package
@@ -68,6 +74,7 @@ function Get-AutoOSServeState {
             requires = @($c.Requires); homepage = $c.Homepage
             verify = $c.Verify; notes = $c.Notes
             platforms = @($platforms[$c.Id])
+            installed = $isInst
         }
     }
     [ordered]@{
@@ -85,6 +92,11 @@ function Get-AutoOSServeState {
             user           = $SystemInfo.UserName
             elevated       = $(if ($SystemInfo.IsAdmin) { 'yes' } else { 'no' })
             environment    = $(if ($SystemInfo.IsVirtual) { 'virtual machine' } else { 'bare metal' })
+            'installed applications' = if ($installedNames.Count -gt 0) {
+                "✓ " + ($installedNames -join ', ') + " ($($installedNames.Count) detected)"
+            } else {
+                'none detected'
+            }
         }
         wsl = [ordered]@{
             # Windows is the WSL *host*, never the guest - say so plainly rather
@@ -349,6 +361,31 @@ function Start-AutoOSServer {
                     running = $script:RunInfo.Running; done = $script:RunInfo.Done
                     total = $script:RunInfo.Total; summary = $script:RunInfo.Summary
                 }
+            }
+            elseif ($path -eq '/api/config' -and $req.HttpMethod -eq 'GET') {
+                $cfgPath = Join-Path $RepoRoot 'autoos.config.json'
+                if (Test-Path $cfgPath) {
+                    $raw = Get-Content $cfgPath -Raw -Encoding UTF8
+                    $data = $raw | ConvertFrom-Json
+                    & $json 200 $data
+                } else {
+                    $exPath = Join-Path $RepoRoot 'autoos.config.example.json'
+                    if (Test-Path $exPath) {
+                        $raw = Get-Content $exPath -Raw -Encoding UTF8
+                        $data = $raw | ConvertFrom-Json
+                        & $json 200 $data
+                    } else {
+                        & $json 200 @{ version = 1; profile = 'workstation'; answers = @{} }
+                    }
+                }
+            }
+            elseif ($path -eq '/api/config' -and $req.HttpMethod -eq 'POST') {
+                $body = (New-Object IO.StreamReader($req.InputStream, $req.ContentEncoding)).ReadToEnd()
+                $cfgPath = Join-Path $RepoRoot 'autoos.config.json'
+                $tmpPath = "$cfgPath.tmp"
+                [System.IO.File]::WriteAllText($tmpPath, $body, [System.Text.Encoding]::UTF8)
+                Move-Item -Path $tmpPath -Destination $cfgPath -Force
+                & $json 200 @{ ok = $true; saved = $cfgPath }
             }
             elseif ($path -eq '/api/install' -and $req.HttpMethod -eq 'POST') {
                 if ($script:RunInfo.Running) {

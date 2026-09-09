@@ -73,7 +73,17 @@ is_installed() {
             return 0 ;;
         npm)    npm ls -g --depth=0 2>/dev/null | grep -q -- "$package" ;;
         script) script_is_installed "$package" ;;
+        custom) custom_is_installed "$package" ;;
         *)      return 1 ;;
+    esac
+}
+
+custom_is_installed() {
+    case "$1" in
+        git-config)
+            has_cmd git && [[ -n "$(git config --global user.name 2>/dev/null || true)" ]]
+            ;;
+        *) return 1 ;;
     esac
 }
 
@@ -91,8 +101,50 @@ script_is_installed() {
         herdr)           has_cmd herdr ;;
         handy)           has_cmd handy || [[ -x /usr/bin/handy ]] ;;
         vscode)          has_cmd code ;;
+        agy)             has_cmd agy || [[ -x "$SYS_HOME/.local/bin/agy" ]] ;;
+        gh)              has_cmd gh ;;
+        uv)              has_cmd uv || [[ -x "$SYS_HOME/.local/bin/uv" || -x "$SYS_HOME/.cargo/bin/uv" ]] ;;
+        ollama)          has_cmd ollama ;;
+        google-chrome)   has_cmd google-chrome || has_cmd google-chrome-stable ;;
+        bitwarden-chrome) [[ -f /opt/google/chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
+                         [[ -f /usr/share/google-chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
+                         [[ -f /etc/opt/chrome/policies/managed/bitwarden.json ]] ;;
         *)               return 1 ;;
     esac
+}
+
+# ─── Catalog installation probe ─────────────────────────────────────────────
+declare -a CAT_INSTALLED=()
+
+catalog_probe_installed() {
+    CAT_INSTALLED=()
+    local i
+    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        if is_installed "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" 2>/dev/null; then
+            CAT_INSTALLED+=(1)
+        else
+            CAT_INSTALLED+=(0)
+        fi
+    done
+}
+
+catalog_installed_names() {
+    local i
+    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        if (( ${CAT_INSTALLED[i]:-0} )); then
+            printf '%s\n' "${CAT_NAME[i]}"
+        fi
+    done
+}
+
+catalog_installed_ids() {
+    local i ids=""
+    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        if (( ${CAT_INSTALLED[i]:-0} )); then
+            ids+="${CAT_ID[i]} "
+        fi
+    done
+    printf '%s' "${ids% }"
 }
 
 # ─── Provider dispatch ──────────────────────────────────────────────────────
@@ -152,6 +204,12 @@ install_script() {
         herdr)           install_herdr ;;
         handy)           install_handy ;;
         vscode)          install_vscode ;;
+        agy)             install_agy ;;
+        gh)              install_gh ;;
+        uv)              install_uv ;;
+        ollama)          install_ollama ;;
+        google-chrome)   install_google_chrome ;;
+        bitwarden-chrome) install_bitwarden_chrome ;;
         *) ui_err "no script installer for '$1'"; return 1 ;;
     esac
 }
@@ -320,6 +378,259 @@ install_herdr() {
                 else local t; t="$(mktemp)"; curl -fsSL -o "$t" "$source"; bash "$t"; rm -f "$t"; fi ;;
         *)      ui_warn "Unrecognised Herdr source '$source' - skipping."; return 0 ;;
     esac
+}
+
+install_agy() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install Antigravity CLI via antigravity.google/cli/install.sh"
+        return 0
+    fi
+    curl -fsSL https://antigravity.google/cli/install.sh | bash
+}
+
+install_google_chrome() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would add Google's signed apt repo and install google-chrome-stable"
+        return 0
+    fi
+    local key=/etc/apt/keyrings/google-chrome.gpg
+    if [[ ! -f "$key" ]]; then
+        local tmp; tmp="$(mktemp)"
+        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor >"$tmp"
+        $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
+        rm -f "$tmp"
+    fi
+    if [[ ! -f /etc/apt/sources.list.d/google-chrome.list ]]; then
+        printf 'deb [arch=amd64 signed-by=%s] http://dl.google.com/linux/chrome/deb/ stable main\n' \
+            "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
+        APT_UPDATED=0
+    fi
+    apt_update_once
+    run $AUTOOS_SUDO apt-get install -y google-chrome-stable
+}
+
+install_bitwarden_chrome() {
+    local ext_id="nngceckbapebfimnlniiiahkandclblb"
+    local update_url="https://clients2.google.com/service/update2/crx"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would configure Bitwarden extension (${ext_id}) for Chrome"
+        return 0
+    fi
+    local dirs=(
+        "/opt/google/chrome/extensions"
+        "/usr/share/google-chrome/extensions"
+    )
+    if has_cmd chromium || has_cmd chromium-browser || [[ -d /snap/chromium ]]; then
+        dirs+=("/usr/share/chromium/extensions")
+    fi
+    for d in "${dirs[@]}"; do
+        $AUTOOS_SUDO mkdir -p "$d"
+        printf '{\n  "external_update_url": "%s"\n}\n' "$update_url" | \
+            $AUTOOS_SUDO tee "$d/${ext_id}.json" >/dev/null
+        $AUTOOS_SUDO chmod 644 "$d/${ext_id}.json"
+    done
+
+    local policy_dir="/etc/opt/chrome/policies/managed"
+    $AUTOOS_SUDO mkdir -p "$policy_dir"
+    printf '{\n  "ExtensionInstallForcelist": [\n    "%s;%s"\n  ]\n}\n' "$ext_id" "$update_url" | \
+        $AUTOOS_SUDO tee "$policy_dir/bitwarden.json" >/dev/null
+    $AUTOOS_SUDO chmod 644 "$policy_dir/bitwarden.json"
+
+    if [[ -d /var/snap/chromium/current ]]; then
+        local snap_policy="/var/snap/chromium/current/policies/managed"
+        $AUTOOS_SUDO mkdir -p "$snap_policy"
+        printf '{\n  "ExtensionInstallForcelist": [\n    "%s;%s"\n  ]\n}\n' "$ext_id" "$update_url" | \
+            $AUTOOS_SUDO tee "$snap_policy/bitwarden.json" >/dev/null
+        $AUTOOS_SUDO chmod 644 "$snap_policy/bitwarden.json"
+    fi
+    ui_ok "configured Bitwarden Chrome extension"
+}
+
+install_gh() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would add GitHub CLI apt repo and install gh"
+        return 0
+    fi
+    if has_cmd apt-get; then
+        local key=/etc/apt/keyrings/githubcli-archive-keyring.gpg
+        $AUTOOS_SUDO mkdir -p -m 755 /etc/apt/keyrings
+        if [[ ! -f "$key" ]]; then
+            local tmp; tmp="$(mktemp)"
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg >"$tmp"
+            $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
+            rm -f "$tmp"
+        fi
+        local arch; arch="$(dpkg --print-architecture)"
+        if [[ ! -f /etc/apt/sources.list.d/github-cli.list ]]; then
+            printf 'deb [arch=%s signed-by=%s] https://cli.github.com/packages stable main\n' \
+                "$arch" "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            APT_UPDATED=0
+        fi
+        apt_update_once
+        run $AUTOOS_SUDO apt-get install -y gh
+    elif has_cmd brew; then
+        run brew install gh
+    else
+        ui_err "no supported package manager for gh"
+        return 1
+    fi
+}
+
+install_uv() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install uv via astral.sh/uv/install.sh"
+        return 0
+    fi
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+}
+
+install_ollama() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install Ollama via ollama.com/install.sh"
+        return 0
+    fi
+    curl -fsSL https://ollama.com/install.sh | sh
+}
+
+setup_ollama_models() {
+    local models
+    models="$(answer ollama_models 'nomic-embed-text')"
+    [[ -z "$models" || "$models" == "none" ]] && return 0
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would pull ollama model(s): ${models}"
+        return 0
+    fi
+    if ! has_cmd ollama; then
+        ui_warn "ollama command not found; skipping model download"
+        return 0
+    fi
+    local m
+    for m in $models; do
+        ui_step "pulling Ollama model: $m"
+        ollama pull "$m" || ui_warn "failed to pull ollama model: $m"
+    done
+}
+
+setup_git_config() {
+    local name email
+    name="$(answer git_user_name '')"
+    email="$(answer git_user_email '')"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would configure git: user.name='${name}' user.email='${email}'"
+        return 0
+    fi
+    if ! has_cmd git; then
+        ui_warn "git not found; skipping git config"
+        return 0
+    fi
+    if [[ -n "$name" ]]; then
+        git config --global user.name "$name"
+        ui_ok "configured git user.name: $name"
+    fi
+    if [[ -n "$email" ]]; then
+        git config --global user.email "$email"
+        ui_ok "configured git user.email: $email"
+    fi
+    git config --global init.defaultBranch main 2>/dev/null || true
+}
+
+link_fdfind() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would symlink ~/.local/bin/fd -> /usr/bin/fdfind"
+        return 0
+    fi
+    if has_cmd fdfind && ! has_cmd fd; then
+        mkdir -p "$SYS_HOME/.local/bin"
+        ln -sf "$(command -v fdfind)" "$SYS_HOME/.local/bin/fd"
+        ui_ok "symlinked ~/.local/bin/fd -> $(command -v fdfind)"
+    fi
+}
+
+CONFIG_PROFILE=""
+autoos_config_load() {
+    local cfg_path="$1"
+    [[ -f "$cfg_path" ]] || return 0
+    catalog_require_python || return 1
+    local py_script='
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    prof = data.get("profile", "")
+    print(f"PROFILE={prof}")
+    answers = data.get("answers", {})
+    for k, v in answers.items():
+        if isinstance(v, (str, int, float, bool)):
+            print(f"ANS_{k}={v}")
+except Exception:
+    pass
+'
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^PROFILE=(.*)$ ]]; then
+            CONFIG_PROFILE="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^ANS_([^=]+)=(.*)$ ]]; then
+            local k="${BASH_REMATCH[1]}"
+            local v="${BASH_REMATCH[2]}"
+            AUTOOS_ANSWERS["$k"]="$v"
+        fi
+    done < <(python3 -c "$py_script" "$cfg_path")
+}
+
+autoos_config_save() {
+    local cfg_path="$1" prof="${2:-${PROFILE:-}}"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would save configuration to ${cfg_path}"
+        return 0
+    fi
+    catalog_require_python || return 1
+    local env_args=()
+    local k safe_k
+    for k in "${!AUTOOS_ANSWERS[@]}"; do
+        safe_k="$(printf '%s' "$k" | tr '[:lower:]-' '[:upper:]_')"
+        env_args+=("AUTOOS_SAVE_ANSWER_${safe_k}=${AUTOOS_ANSWERS[$k]}")
+    done
+    env "${env_args[@]}" python3 - "$cfg_path" "$prof" <<'PY'
+import json, os, sys, tempfile
+
+cfg_path = sys.argv[1]
+prof = sys.argv[2] if len(sys.argv) > 2 else ""
+
+data = {"version": 1, "profile": prof or "workstation", "answers": {}}
+if os.path.isfile(cfg_path):
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+            if isinstance(existing, dict):
+                data["version"] = existing.get("version", 1)
+                if not prof and "profile" in existing:
+                    data["profile"] = existing["profile"]
+                if "answers" in existing and isinstance(existing["answers"], dict):
+                    data["answers"].update(existing["answers"])
+    except Exception:
+        pass
+
+if prof:
+    data["profile"] = prof
+
+for k, v in os.environ.items():
+    if k.startswith("AUTOOS_SAVE_ANSWER_"):
+        raw_k = k[len("AUTOOS_SAVE_ANSWER_"):].lower()
+        data["answers"][raw_k] = v
+
+dir_name = os.path.dirname(os.path.abspath(cfg_path))
+os.makedirs(dir_name, exist_ok=True)
+with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, encoding="utf-8") as tf:
+    json.dump(data, tf, indent=2)
+    tf.write("\n")
+    temp_name = tf.name
+
+os.replace(temp_name, cfg_path)
+try:
+    os.chmod(cfg_path, 0o644)
+except OSError:
+    pass
+PY
 }
 
 # ─── Post-install steps ─────────────────────────────────────────────────────

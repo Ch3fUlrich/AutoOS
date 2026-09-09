@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Provider dispatch and post-install steps for AutoOS on Windows.
@@ -131,8 +131,22 @@ function Test-AutoOSInstalled {
             $out = & npm ls -g --depth=0 2>&1 | Out-String
             return ($out -match [regex]::Escape($Component.Package))
         }
+        'script' {
+            if ($Component.Package -eq 'agy') {
+                return (Test-AutoOSCommand 'agy') -or (Test-Path (Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'))
+            }
+            return $false
+        }
         default { return $false }
     }
+}
+
+function Get-AutoOSInstalledComponents {
+    <#
+      .SYNOPSIS Filter components to only those installed on this machine.
+    #>
+    param([Parameter(Mandatory)][psobject[]]$Components)
+    @($Components | Where-Object { Test-AutoOSInstalled -Component $_ })
 }
 
 # ─── Providers ──────────────────────────────────────────────────────────────
@@ -182,11 +196,29 @@ function Invoke-AutoOSScriptProvider {
     switch ($Component.Package) {
         'meslo-nerd-font' { return Install-AutoOSNerdFont }
         'herdr'           { return Install-AutoOSHerdr }
+        'agy'             { return Install-AutoOSAgy }
         default           { return @{ ExitCode = 1; Output = "no script for '$($Component.Package)'" } }
     }
 }
 
+function Install-AutoOSAgy {
+    if ($script:DryRun) {
+        Write-AutoOSLine "would install Antigravity CLI via antigravity.google/cli/install.ps1" -Level muted
+        return @{ ExitCode = 0; Success = $true }
+    }
+    try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://antigravity.google/cli/install.ps1 | iex"
+        return @{ ExitCode = $LASTEXITCODE; Success = ($LASTEXITCODE -eq 0) }
+    } catch {
+        return @{ ExitCode = 1; Output = $_.Exception.Message; Success = $false }
+    }
+}
+
 # ─── Post-install steps ─────────────────────────────────────────────────────
+function Add-AutoOSAgyToPath {
+    Add-AutoOSPathEntry -Directory @(Join-Path $env:LOCALAPPDATA 'agy\bin') | Out-Null
+}
+
 function Add-AutoOSGitToPath {
     Add-AutoOSPathEntry -Directory @("$env:ProgramFiles\Git\cmd") | Out-Null
 }
@@ -678,8 +710,8 @@ Export-ModuleMember -Function `
     Initialize-AutoOSInstaller, Get-AutoOSAnswer, Invoke-AutoOSProcess, Add-AutoOSPathEntry,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
     Write-AutoOSOmnigraphReadiness,
-    Test-AutoOSInstalled, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
-    Add-AutoOSGitToPath, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
-    Install-AutoOSHerdr, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
+    Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
+    Add-AutoOSGitToPath, Add-AutoOSAgyToPath, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
+    Install-AutoOSHerdr, Install-AutoOSAgy, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Invoke-AutoOSScriptProvider

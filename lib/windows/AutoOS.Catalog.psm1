@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Load the component catalog, filter it against the detected machine, and
@@ -77,8 +77,11 @@ function Test-AutoOSCatalogSchema {
                 }
             }
             if ($c.PSObject.Properties.Name -contains 'prompt') {
-                if (-not $Catalog.prompts -or -not $Catalog.prompts.PSObject.Properties.Name.Contains($c.prompt)) {
-                    [void]$problems.Add("$where : references undefined prompt '$($c.prompt)'")
+                $keys = $c.prompt -split '[, ]+' | Where-Object { $_ }
+                foreach ($k in $keys) {
+                    if (-not $Catalog.prompts -or -not $Catalog.prompts.PSObject.Properties.Name.Contains($k)) {
+                        [void]$problems.Add("$where : references undefined prompt '$k'")
+                    }
                 }
             }
         }
@@ -144,7 +147,8 @@ function New-AutoOSMenuItem {
     param(
         [Parameter(Mandatory)][psobject]$Component,
         # Not $Profile: that is a PowerShell automatic variable ($PROFILE).
-        [Alias('Profile')][string]$ProfileName = 'custom'
+        [Alias('Profile')][string]$ProfileName = 'custom',
+        [bool]$Installed = $false
     )
     [pscustomobject]@{
         Id          = $Component.Id
@@ -154,6 +158,7 @@ function New-AutoOSMenuItem {
         Selected    = ($ProfileName -ne 'custom' -and $ProfileName -in $Component.Profiles)
         Locked      = $false
         Reason      = ''
+        Installed   = $Installed
     }
 }
 

@@ -334,6 +334,20 @@ if it "--check-catalog succeeds"; then
     assert_ok $?
 fi
 
+if it "catalog_probe_installed identifies installed components"; then
+    catalog_load catalog/linux.json x64 0
+    catalog_probe_installed
+    assert_ok $?
+    git_idx="$(catalog_index_of git)"
+    assert_eq "${CAT_INSTALLED[git_idx]}" "1"
+fi
+
+if it "--list shows installed components with a checkmark"; then
+    out="$(bash setup.sh --list 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out" == *"✓"* ]]; then pass
+    else fail "rc=$rc out=$(printf '%s' "$out" | head -10)"; fi
+fi
+
 # ─── Run state, verification, undo ──────────────────────────────────────────
 describe "state, verify and undo"
 
@@ -419,6 +433,38 @@ if it "undo never uninstalls anything"; then
     if grep -qE '(apt-get remove|brew uninstall|npm uninstall)' lib/linux/install.sh; then
         fail "undo path contains an uninstall command"
     else pass; fi
+fi
+
+if it "configuration survives a save/load round trip"; then
+    tmp="$(mktemp)"; rm -f "$tmp"
+    AUTOOS_ANSWERS=()
+    AUTOOS_ANSWERS[git_user_name]="Alice Test"
+    AUTOOS_ANSWERS[git_user_email]="alice@example.com"
+    AUTOOS_ANSWERS[ollama_models]="nomic-embed-text"
+    AUTOOS_DRY_RUN=0
+    autoos_config_save "$tmp" "ai-coding" >/dev/null 2>&1
+    AUTOOS_ANSWERS=()
+    CONFIG_PROFILE=""
+    autoos_config_load "$tmp"
+    rm -f "$tmp"
+    assert_eq "$CONFIG_PROFILE|${AUTOOS_ANSWERS[git_user_name]:-}|${AUTOOS_ANSWERS[git_user_email]:-}|${AUTOOS_ANSWERS[ollama_models]:-}" \
+              "ai-coding|Alice Test|alice@example.com|nomic-embed-text"
+fi
+
+if it "setup.sh reads --config file and applies profile and answers"; then
+    tmp="$(mktemp)"
+    printf '{\n  "version": 1,\n  "profile": "light",\n  "answers": {\n    "git_user_name": "Test User"\n  }\n}\n' >"$tmp"
+    out="$(bash setup.sh --config "$tmp" --dry-run --yes --no-color 2>&1)"
+    rm -f "$tmp"
+    if [[ "$out" == *"Using profile: light"* ]]; then pass
+    else fail "did not use profile from config: $(printf '%s' "$out" | grep -i 'profile' || true)"; fi
+fi
+
+if it "serve.py and web UI provide configuration API and card"; then
+    grep -q "/api/config" lib/linux/serve.py || fail "serve.py missing /api/config"
+    grep -q "cardConfig" web/index.html || fail "web/index.html missing cardConfig"
+    grep -q "saveConfiguration" web/index.html || fail "web/index.html missing saveConfiguration"
+    pass
 fi
 
 # ─── Browser UI payload ─────────────────────────────────────────────────────
@@ -662,6 +708,22 @@ fi
 if it "Handy is offered on every platform"; then
     n="$(grep -l '"id": "handy"' catalog/*.json | wc -l)"
     assert_eq "$n" "3"
+fi
+
+if it "the UI shows installed applications and allows filtering"; then
+    ok=1
+    for marker in "installedPill" "filterInstalled" "installedCount" "filterInstalledOnly" 'data-installed' "✓ installed"; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "web/index.html is missing installed-app markers"; fi
+fi
+
+if it "the payload carries installed component flags"; then
+    ok=1
+    for marker in '"installed":' '"installed applications"' "installed_ids"; do
+        grep -q "$marker" lib/linux/serve.py || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "serve.py does not report installed components"; fi
 fi
 
 # ─── WSL detection ──────────────────────────────────────────────────────────

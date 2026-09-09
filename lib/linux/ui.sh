@@ -124,7 +124,7 @@ ui_ask() {
 # ─── The checkbox selector ──────────────────────────────────────────────────
 # Caller fills these parallel arrays, then calls ui_menu.
 # Result lands in MENU_RESULT (space-separated ids); returns 1 if cancelled.
-declare -a MENU_ID MENU_NAME MENU_DESC MENU_GROUP MENU_SEL
+declare -a MENU_ID MENU_NAME MENU_DESC MENU_GROUP MENU_SEL MENU_INSTALLED
 MENU_RESULT=""
 
 ui_menu() {
@@ -186,12 +186,15 @@ ui_menu() {
             if [[ "${row_kind[r]}" == "header" ]]; then
                 buf+=$'\033[2K'"   $(_c accent)${row_text[r]^^}$(_c reset)"$'\n'
             else
-                local idx=${row_idx[r]} mark box name
+                local idx=${row_idx[r]} mark box name inst_badge=""
                 (( r == cursor )) && mark="$(_c sel)>$(_c reset)" || mark=" "
                 if (( MENU_SEL[idx] )); then box="$(_c ok)[x]$(_c reset)"; else box="$(_c dim)[ ]$(_c reset)"; fi
                 name=$(printf '%-26s' "${MENU_NAME[idx]}")
                 (( r == cursor )) && name="$(_c sel)${name}$(_c reset)"
-                buf+=$'\033[2K'"  ${mark} ${box} ${name} $(_c muted)${MENU_DESC[idx]}$(_c reset)"$'\n'
+                if (( ${#MENU_INSTALLED[@]} > idx && MENU_INSTALLED[idx] )); then
+                    inst_badge="$(_c ok)✓$(_c reset) "
+                fi
+                buf+=$'\033[2K'"  ${mark} ${box} ${name} ${inst_badge}$(_c muted)${MENU_DESC[idx]}$(_c reset)"$'\n'
             fi
             ((lines++))
         done

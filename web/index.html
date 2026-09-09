@@ -78,6 +78,11 @@ h1{font-size:1.4rem;margin:0;letter-spacing:-.02em;font-weight:700}
   border:1px solid var(--rule);border-radius:999px;padding:5px 11px;
   font-size:.75rem;font-weight:700;color:var(--accent);
 }
+.installed-pill{
+  display:inline-flex;align-items:center;gap:6px;background:var(--ok-soft);
+  border:1px solid var(--rule);border-radius:999px;padding:5px 11px;
+  font-size:.75rem;font-weight:700;color:var(--ok);
+}
 
 /* segmented control, used for theme + layout */
 .seg{display:inline-flex;border:1px solid var(--rule);border-radius:8px;overflow:hidden;background:var(--surface)}
@@ -362,7 +367,22 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
 .swatch.direct{background:var(--accent)}
 .swatch.autodep{background:var(--dep);border-style:dashed}
 
-/* ─── questions & log ────────────────────────────────────────────────── */
+/* ─── configuration & questions & log ────────────────────────────────── */
+.config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:10px}
+.config-card{background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:12px}
+.config-card label{display:block;font-size:.82rem;font-weight:600;margin-bottom:5px}
+.config-card input, .config-card select{
+  width:100%;padding:7px 10px;border:1px solid var(--rule);border-radius:6px;
+  background:var(--surface-2);color:var(--ink);font-family:var(--mono);font-size:.8rem;
+}
+.config-card .help{color:var(--ink-faint);font-size:.74rem;margin-top:4px}
+.config-actions{margin-top:14px;display:flex;gap:12px;align-items:center}
+.cfg-save-btn{
+  background:var(--accent);color:var(--accent-ink);border:none;border-radius:6px;
+  padding:8px 16px;font-weight:700;font-size:.8rem;cursor:pointer;
+}
+.cfg-save-btn:hover{opacity:.9}
+.cfg-status{font-size:.8rem;font-weight:600;color:var(--ok)}
 .q{margin-bottom:13px}
 .q label{display:block;font-size:.85rem;font-weight:600;margin-bottom:5px}
 .q input[type=text]{
@@ -437,6 +457,7 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
     <span class="tagline">post-install provisioning</span>
     <div class="header-right">
       <span class="env-pill" id="envPill" hidden></span>
+      <span class="installed-pill" id="installedPill" hidden></span>
       <span class="host-pill"><span class="dot bad" id="hostDot"></span><span id="hostName">connecting…</span></span>
       <div class="seg" role="group" aria-label="Colour theme">
         <button type="button" data-theme-choice="auto"  aria-pressed="true">Auto</button>
@@ -491,6 +512,7 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
       <div class="card-body">
         <div class="toolbar">
           <input type="search" id="filter" placeholder="Filter components…" aria-label="Filter components">
+          <button id="filterInstalled" type="button" aria-pressed="false">✓ Installed (<span id="installedCount">0</span>)</button>
           <button id="selAll" type="button">Select all</button>
           <button id="selNone" type="button">Select none</button>
           <button id="expandAll" type="button">Expand all</button>
@@ -510,6 +532,7 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
           </select>
         </div>
         <div class="legend">
+          <span><span class="chip chip-ok">✓ installed</span> already on machine</span>
           <span><i class="swatch direct"></i> chosen by you</span>
           <span><i class="swatch autodep"></i> added automatically as a dependency</span>
           <span><span class="chip chip-locked">locked</span> needed by something you ticked</span>
@@ -529,6 +552,20 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
           <span><i class="swatch autodep"></i> pulled in automatically</span>
         </div>
         <div class="tiers" id="tiers"></div>
+      </div>
+    </details>
+    <details class="card" id="cardConfig" open>
+      <summary>
+        <span class="card-title">Configuration</span>
+        <span class="card-sub" id="configSub">autoos.config.json</span>
+      </summary>
+      <div class="card-body">
+        <p style="color:var(--ink-muted);font-size:.84rem;margin:0 0 12px 0;">Configure deployment profile and prompt answers. Saved to <code>autoos.config.json</code>.</p>
+        <div class="config-grid" id="configGrid"></div>
+        <div class="config-actions">
+          <button type="button" id="saveConfigBtn" class="cfg-save-btn">Save Configuration</button>
+          <span id="configSaveStatus" class="cfg-status"></span>
+        </div>
       </div>
     </details>
   </section>
@@ -579,6 +616,8 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
 let STATE = null, BY_ID = new Map(), REQUIRED_BY = new Map();
 let picked = new Set(), activeProfile = null;
 let running = false, logOffset = 0;
+let filterInstalledOnly = false;
+let CONFIG_DATA = null;
 
 /* ── preferences (theme + layout) survive a reload ─────────────────────── */
 const PREF = {
@@ -719,8 +758,16 @@ async function boot() {
     "). Nothing is installed until you press <b>Install selected</b> — and <b>Dry run</b> " +
     "is on by default, which only prints what would happen.";
 
+  const installedCount = (STATE.components || []).filter(c => c.installed).length;
+  if (installedCount > 0) {
+    el("installedPill").hidden = false;
+    el("installedPill").textContent = "✓ " + installedCount + " installed";
+    el("installedPill").title = s["installed applications"] || (installedCount + " applications already installed");
+  }
+  el("installedCount").textContent = String(installedCount);
+
   el("sysinfo").innerHTML = Object.entries(s).filter(([k]) => k !== "host")
-    .map(([k, v]) => '<div class="kv' + (k === "environment" ? " highlight" : "") + '"><dt>' +
+    .map(([k, v]) => '<div class="kv' + (k === "environment" || k === "installed applications" ? " highlight" : "") + '"><dt>' +
       esc(k) + "</dt><dd>" + esc(v) + "</dd></div>").join("");
   el("systemSub").textContent = (s.distribution || s["operating system"] || "") + " · " + (s.architecture || "");
 
@@ -737,7 +784,19 @@ async function boot() {
   el("expandAll").onclick   = () => document.querySelectorAll(".group").forEach(g => g.open = true);
   el("collapseAll").onclick = () => document.querySelectorAll(".group").forEach(g => g.open = false);
   el("filter").oninput      = applyFilter;
+  el("filterInstalled").onclick = () => {
+    filterInstalledOnly = !filterInstalledOnly;
+    el("filterInstalled").setAttribute("aria-pressed", String(filterInstalledOnly));
+    applyFilter();
+  };
   el("run").onclick         = runInstall;
+
+  try {
+    const cfRes = await fetch(api("/api/config"));
+    if (cfRes.ok) CONFIG_DATA = await cfRes.json();
+  } catch (e) {}
+  if (!CONFIG_DATA) CONFIG_DATA = { version: 1, profile: STATE.suggested || "workstation", answers: {} };
+  renderConfigCard();
 
   resumeIfRunning();
   heartbeat();
@@ -874,11 +933,14 @@ function renderProfileSummary() {
         '<span class="n">' + list.length + "</span></div>" + rows + "</div>";
     }).join("");
 
+    const psumInst = [...ids].filter(id => BY_ID.get(id)?.installed).length;
     box.innerHTML =
       '<div class="psum-head">' +
         "<span><b>" + ids.size + "</b> components</span>" +
         "<span><b>" + cats.size + "</b> categories</span>" +
         "<span><b>" + stepCount + "</b> install step" + (stepCount === 1 ? "" : "s") + "</span>" +
+        (psumInst ? '<span style="color:var(--ok)"><b style="color:var(--ok)">✓ ' +
+                       psumInst + "</b> already installed</span>" : "") +
         (deps.length ? '<span style="color:var(--dep)"><b style="color:var(--dep)">' +
                        deps.length + "</b> dependencies</span>" : "") +
       "</div>" +
@@ -932,11 +994,17 @@ function itemHtml(c) {
     ? '<a class="item-name" href="' + esc(c.homepage) + '" target="_blank" rel="noopener noreferrer">' +
       esc(c.name) + "</a>"
     : '<span class="item-name">' + esc(c.name) + "</span>";
-  return '<label class="item" data-id="' + esc(c.id) + '" data-search="' +
-      esc((c.id + " " + c.name + " " + c.description + " " + c.package).toLowerCase()) + '">' +
+  const instChip = c.installed
+    ? '<span class="chip chip-ok" title="Already installed on this machine">✓ installed</span>'
+    : "";
+  const searchStr = (c.id + " " + c.name + " " + c.description + " " + c.package +
+    (c.installed ? " installed already-installed" : "")).toLowerCase();
+  return '<label class="item" data-id="' + esc(c.id) + '" data-installed="' + (c.installed ? "1" : "0") + '" data-search="' +
+      esc(searchStr) + '">' +
     '<input type="checkbox" class="pick" data-id="' + esc(c.id) + '">' +
     "<span>" +
       '<span class="item-title">' + name +
+        instChip +
         '<span class="chip prov prov-' + esc(c.provider) + '">' + esc(c.provider) + "</span>" +
         '<span class="chip chip-pkg" title="' + esc(c.provider + ": " + c.package) + '">' +
           esc(c.package) + "</span>" +
@@ -1020,12 +1088,14 @@ function sync() {
 function applyFilter() {
   const q = (el("filter").value || "").trim().toLowerCase();
   document.querySelectorAll(".item").forEach(n => {
-    n.style.display = !q || n.dataset.search.includes(q) ? "" : "none";
+    const matchSearch = !q || n.dataset.search.includes(q);
+    const matchInst = !filterInstalledOnly || n.dataset.installed === "1";
+    n.style.display = matchSearch && matchInst ? "" : "none";
   });
   document.querySelectorAll(".group").forEach(g => {
     const any = [...g.querySelectorAll(".item")].some(n => n.style.display !== "none");
     g.style.display = any ? "" : "none";
-    if (q && any) g.open = true;
+    if ((q || filterInstalledOnly) && any) g.open = true;
   });
 }
 
@@ -1062,20 +1132,87 @@ function renderTiers() {
   }).join("");
 }
 
+/* ── configuration editor ─────────────────────────────────────────────── */
+function renderConfigCard() {
+  const cbox = el("configGrid");
+  if (!cbox) return;
+  const curProf = CONFIG_DATA?.profile || activeProfile || STATE.suggested || "workstation";
+  const answers = CONFIG_DATA?.answers || {};
+  const profOpts = ["workstation", "ai-coding", "light", "server", "custom"].map(p =>
+    '<option value="' + esc(p) + '"' + (p === curProf ? " selected" : "") + ">" + esc(p) + "</option>"
+  ).join("");
+
+  let html = '<div class="config-card">' +
+    '<label for="cfg_profile">Deployment Profile</label>' +
+    '<select id="cfg_profile">' + profOpts + "</select>" +
+    '<div class="help">Default starting set of components</div>' +
+    "</div>";
+
+  const knownPrompts = [
+    { key: "git_user_name", label: "Git User Name", help: "user.name for global git commits" },
+    { key: "git_user_email", label: "Git User Email", help: "user.email for global git commits" },
+    { key: "omnigraph_url", label: "Omnigraph URL", help: "Base URL for Omnigraph server" },
+    { key: "ollama_models", label: "Ollama Models", help: "Models to pull (default: nomic-embed-text)" },
+    { key: "herdr_source", label: "Herdr Source", help: "Source package or URL for Herdr" },
+    { key: "antigravity_url", label: "Antigravity .deb URL", help: "Download URL for Antigravity" }
+  ];
+
+  for (const p of knownPrompts) {
+    const val = answers[p.key] ?? STATE?.prompts?.[p.key]?.default ?? "";
+    html += '<div class="config-card">' +
+      '<label for="cfg_' + esc(p.key) + '">' + esc(p.label) + "</label>" +
+      '<input type="text" id="cfg_' + esc(p.key) + '" data-cfg-key="' + esc(p.key) + '" value="' + esc(val) + '">' +
+      '<div class="help">' + esc(p.help) + "</div>" +
+      "</div>";
+  }
+
+  cbox.innerHTML = html;
+  el("saveConfigBtn").onclick = saveConfiguration;
+}
+
+async function saveConfiguration() {
+  const prof = el("cfg_profile")?.value || "workstation";
+  const ans = {};
+  document.querySelectorAll("[data-cfg-key]").forEach(inp => {
+    ans[inp.dataset.cfgKey] = inp.value;
+  });
+  CONFIG_DATA = { version: 1, profile: prof, answers: ans };
+  try {
+    const res = await fetch(api("/api/config"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(CONFIG_DATA)
+    });
+    if (res.ok) {
+      el("configSaveStatus").textContent = "✓ Saved to autoos.config.json";
+      setTimeout(() => { el("configSaveStatus").textContent = ""; }, 4000);
+    } else {
+      el("configSaveStatus").textContent = "Save failed (" + res.status + ")";
+    }
+  } catch (err) {
+    el("configSaveStatus").textContent = "Save failed: " + err.message;
+  }
+}
+
 /* ── questions ────────────────────────────────────────────────────────── */
 function renderQuestions() {
   const eff = effective();
-  const keys = [...new Set(STATE.components.filter(c => eff.has(c.id) && c.prompt).map(c => c.prompt))];
+  const keys = [...new Set(
+    STATE.components
+      .filter(c => eff.has(c.id) && c.prompt)
+      .flatMap(c => String(c.prompt).split(/[,\s]+/))
+  )].filter(Boolean);
   const card = el("questionsCard");
   if (!keys.length) { card.hidden = true; el("qlist").innerHTML = ""; return; }
   card.hidden = false;
   el("qlist").innerHTML = keys.map(k => {
     const q = STATE.prompts[k] || {};
     const prev = document.querySelector('[data-q="' + CSS.escape(k) + '"]')?.value;
-    const asked = STATE.components.filter(c => eff.has(c.id) && c.prompt === k).map(c => c.name);
+    const cfgVal = CONFIG_DATA?.answers?.[k];
+    const asked = STATE.components.filter(c => eff.has(c.id) && String(c.prompt || "").includes(k)).map(c => c.name);
     return '<div class="q"><label for="q_' + esc(k) + '">' + esc(q.question || k) + "</label>" +
       '<input type="text" id="q_' + esc(k) + '" data-q="' + esc(k) + '" value="' +
-        esc(prev ?? q.default ?? "") + '">' +
+        esc(prev ?? cfgVal ?? q.default ?? "") + '">' +
       (q.help ? '<div class="help">' + esc(q.help) + "</div>" : "") +
       '<div class="why">asked because you selected: ' + asked.map(esc).join(", ") + "</div></div>";
   }).join("");

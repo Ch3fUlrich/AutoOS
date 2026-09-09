@@ -166,6 +166,21 @@
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
         },
         {
+          "id": "agy",
+          "name": "Antigravity CLI",
+          "description": "Google's terminal coding agent",
+          "provider": "script",
+          "package": "agy",
+          "postInstall": "Add-AutoOSAgyToPath",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "verify": "agy --version",
+          "homepage": "https://antigravity.google/"
+        },
+        {
           "id": "claude-desktop",
           "name": "Claude Desktop",
           "description": "Claude desktop application",

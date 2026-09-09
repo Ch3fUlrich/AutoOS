@@ -74,8 +74,10 @@ for grp in cats:
         if "verify" in c and not (v or "").strip():
             problems.append(f"{where}: 'verify' is present but empty")
         p = c.get("prompt")
-        if p and p not in (cat.get("prompts") or {}):
-            problems.append(f"{where}: references undefined prompt '{p}'")
+        if p:
+            for k in [x.strip() for x in str(p).replace(",", " ").split() if x.strip()]:
+                if k not in (cat.get("prompts") or {}):
+                    problems.append(f"{where}: references undefined prompt '{k}'")
 
 for p in problems: print(p)
 sys.exit(1 if problems else 0)

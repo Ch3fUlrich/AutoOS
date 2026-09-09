@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Zero-dependency terminal UI for AutoOS: colour, layout and an interactive
@@ -244,8 +244,9 @@ function Show-AutoOSMenu {
                                else { (Format-AutoOSColor '[ ]' 'dim') }
                     $name = "{0,-26}" -f $it.Name
                     $nameText = if ($i -eq $cursor) { Format-AutoOSColor $name 'sel' } else { $name }
+                    $instBadge = if ($it.Installed) { (Format-AutoOSColor '[installed]' 'ok') + ' ' } else { '' }
                     $desc = Format-AutoOSColor $it.Description 'muted'
-                    [void]$out.AppendLine("$($script:Esc)[2K  $mark $boxText $nameText $desc")
+                    [void]$out.AppendLine("$($script:Esc)[2K  $mark $boxText $nameText $instBadge$desc")
                 }
                 $lines++
             }

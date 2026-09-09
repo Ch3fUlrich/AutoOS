@@ -47,6 +47,7 @@ AutoOS — post-install provisioning for Linux
   --list             Print the catalog and exit
   --check-catalog    Validate the catalog and exit non-zero on any problem
 
+  --config FILE      Load configuration (default autoos.config.json if present)
   --from-state FILE  Replay a previous run's selection and answers
   --save-state FILE  Where to write this run's state (default .autoos-state.json)
   --no-verify        Skip the post-install "does it actually work" check
@@ -62,8 +63,11 @@ Examples:
 EOF
 }
 
+CONFIG_FILE="${AUTOOS_ROOT}/autoos.config.json"
+INSTALLED_ONLY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --config)  CONFIG_FILE="${2:-}"; shift 2 ;;
         --profile) PROFILE="${2:-}"; shift 2 ;;
         --only)    ONLY="${2:-}"; shift 2 ;;
         --dry-run) AUTOOS_DRY_RUN=1; shift ;;
@@ -73,6 +77,7 @@ while [[ $# -gt 0 ]]; do
         --port)    PORT="${2:-8777}"; shift 2 ;;
         --bind)    BIND="${2:-127.0.0.1}"; shift 2 ;;
         --list)    LIST_ONLY=1; shift ;;
+        --installed|--list-installed) INSTALLED_ONLY=1; shift ;;
         --check-catalog) CHECK_ONLY=1; shift ;;
         --from-state) FROM_STATE="${2:-}"; shift 2 ;;
         --save-state) STATE_PATH="${2:-}"; shift 2 ;;
@@ -102,12 +107,39 @@ if (( LIST_ONLY )); then
     detect_system
     if [[ "${SYS_OS:-linux}" == "macos" ]]; then CATALOG="$AUTOOS_ROOT/catalog/macos.json"; fi
     catalog_load "$CATALOG" "$SYS_ARCH" "$SYS_IS_HEADLESS"
+    catalog_probe_installed
     last=""
     for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
         if [[ "${CAT_GROUP[i]}" != "$last" ]]; then ui_section "${CAT_GROUP[i]}"; last="${CAT_GROUP[i]}"; fi
-        printf '  %-18s %-8s %s\n' "${CAT_ID[i]}" "${CAT_PROVIDER[i]}" "${CAT_DESC[i]}"
-        [[ -n "${CAT_PROFILES[i]}" ]] && printf '  %-18s profiles: %s\n' "" "${CAT_PROFILES[i]}"
+        inst_mark="  "
+        if (( CAT_INSTALLED[i] )); then
+            inst_mark="$(_c ok)✓$(_c reset) "
+        fi
+        printf '  %s%-18s %-8s %s\n' "$inst_mark" "${CAT_ID[i]}" "${CAT_PROVIDER[i]}" "${CAT_DESC[i]}"
+        [[ -n "${CAT_PROFILES[i]}" ]] && printf '    %-18s profiles: %s\n' "" "${CAT_PROFILES[i]}"
     done
+    exit 0
+fi
+
+if (( INSTALLED_ONLY )); then
+    detect_system
+    if [[ "${SYS_OS:-linux}" == "macos" ]]; then CATALOG="$AUTOOS_ROOT/catalog/macos.json"; fi
+    catalog_load "$CATALOG" "$SYS_ARCH" "$SYS_IS_HEADLESS"
+    catalog_probe_installed
+    ui_section "Installed applications"
+    found=0
+    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        if (( CAT_INSTALLED[i] )); then
+            printf '  %-26s %-8s %s\n' "${CAT_NAME[i]}" "${CAT_PROVIDER[i]}" "${CAT_DESC[i]}"
+            found=$((found + 1))
+        fi
+    done
+    printf '\n'
+    if (( found > 0 )); then
+        ui_ok "$found installed application(s) detected on this system."
+    else
+        ui_info "No catalog applications currently installed."
+    fi
     exit 0
 fi
 
@@ -145,6 +177,21 @@ if (( SYS_HAS_DOCKER )); then present+="docker "; fi
 if (( SYS_HAS_ZSH ));    then present+="zsh ";    fi
 ui_kv "Already present" "${present:-nothing relevant}"
 
+# Load catalog to identify all installed applications
+catalog_load "$CATALOG" "$SYS_ARCH" "$SYS_IS_HEADLESS"
+catalog_probe_installed
+mapfile -t installed_apps < <(catalog_installed_names)
+if (( ${#installed_apps[@]} > 0 )); then
+    inst_str=""
+    for app in "${installed_apps[@]}"; do
+        [[ -n "$inst_str" ]] && inst_str+=", "
+        inst_str+="$app"
+    done
+    ui_kv "Installed apps" "$(_c ok)✓$(_c reset) ${inst_str} (${#installed_apps[@]} detected)"
+else
+    ui_kv "Installed apps" "none detected"
+fi
+
 detect_blockers
 if (( ${#BLOCKER_MESSAGE[@]} )); then
     ui_section "Warnings"
@@ -174,9 +221,14 @@ if (( DO_SERVE )); then
     exit 0
 fi
 
-catalog_load "$CATALOG" "$SYS_ARCH" "$SYS_IS_HEADLESS"
-
 # ─── 2. Profile ─────────────────────────────────────────────────────────────
+if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+    autoos_config_load "$CONFIG_FILE"
+    if [[ -z "$PROFILE" && -n "$CONFIG_PROFILE" ]]; then
+        PROFILE="$CONFIG_PROFILE"
+    fi
+fi
+
 SUGGESTED="$(suggested_profile)"
 if [[ -n "$FROM_STATE" ]]; then
     autoos_state_load "$FROM_STATE" || exit 1
@@ -221,11 +273,12 @@ elif (( ASSUME_YES )); then
     SELECTED="$(catalog_profile_defaults "$PROFILE")"
 else
     defaults=" $(catalog_profile_defaults "$PROFILE") "
-    MENU_ID=(); MENU_NAME=(); MENU_DESC=(); MENU_GROUP=(); MENU_SEL=()
+    MENU_ID=(); MENU_NAME=(); MENU_DESC=(); MENU_GROUP=(); MENU_SEL=(); MENU_INSTALLED=()
     for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
         MENU_ID+=("${CAT_ID[i]}");   MENU_NAME+=("${CAT_NAME[i]}")
         MENU_DESC+=("${CAT_DESC[i]}"); MENU_GROUP+=("${CAT_GROUP[i]}")
         if [[ "$defaults" == *" ${CAT_ID[i]} "* ]]; then MENU_SEL+=(1); else MENU_SEL+=(0); fi
+        MENU_INSTALLED+=("${CAT_INSTALLED[i]:-0}")
     done
     if ! ui_menu "Choose what to install" "Dependencies are added automatically."; then
         ui_warn "Cancelled — nothing was changed."
@@ -260,31 +313,44 @@ ui_info "$n component(s); $auto_count pulled in as dependencies."
 
 # ─── 5. Questions (all of them, before anything is touched) ─────────────────
 asked=" "
+config_updated=0
 for id in $PLAN_IDS; do
     i="$(catalog_index_of "$id")"
-    key="${CAT_PROMPT[i]}"
-    [[ -z "$key" ]] && continue
-    [[ "$asked" == *" $key "* ]] && continue
-    asked+="$key "
-    q="$(catalog_prompt_field "$CATALOG" "$key" question)"
-    d="$(catalog_prompt_field "$CATALOG" "$key" default)"
-    h="$(catalog_prompt_field "$CATALOG" "$key" help)"
-    # An AUTOOS_ANSWER_<KEY> environment variable pre-answers the prompt; this is
-    # how --serve passes the browser's answers through to the same code path.
-    env_key="AUTOOS_ANSWER_$(printf '%s' "$key" | tr '[:lower:]-' '[:upper:]_')"
-    if [[ -n "${!env_key:-}" ]]; then
-        AUTOOS_ANSWERS["$key"]="${!env_key}"
-    elif (( ASSUME_YES )); then
-        AUTOOS_ANSWERS["$key"]="$d"
-    else
-        if [[ "$asked" == " $key " ]]; then ui_section "A few questions"; fi
-        # Declared here because ui_ask assigns it via printf -v (which the
-        # linter cannot follow) and an unset name would trip set -u.
-        reply=""
-        ui_ask reply "$q" "$d" "$h"
-        AUTOOS_ANSWERS["$key"]="$reply"
-    fi
+    raw_prompts="${CAT_PROMPT[i]}"
+    [[ -z "$raw_prompts" ]] && continue
+    for key in ${raw_prompts//,/ }; do
+        [[ -z "$key" ]] && continue
+        [[ "$asked" == *" $key "* ]] && continue
+        asked+="$key "
+        q="$(catalog_prompt_field "$CATALOG" "$key" question)"
+        d="$(catalog_prompt_field "$CATALOG" "$key" default)"
+        h="$(catalog_prompt_field "$CATALOG" "$key" help)"
+        # An AUTOOS_ANSWER_<KEY> environment variable pre-answers the prompt; this is
+        # how --serve passes the browser's answers through to the same code path.
+        env_key="AUTOOS_ANSWER_$(printf '%s' "$key" | tr '[:lower:]-' '[:upper:]_')"
+        if [[ -n "${!env_key:-}" ]]; then
+            AUTOOS_ANSWERS["$key"]="${!env_key}"
+        elif [[ -n "${AUTOOS_ANSWERS[$key]:-}" ]]; then
+            # Pre-filled from configuration file
+            :
+        elif (( ASSUME_YES )); then
+            AUTOOS_ANSWERS["$key"]="$d"
+        else
+            if [[ "$asked" == " $key " ]]; then ui_section "A few questions"; fi
+            # Declared here because ui_ask assigns it via printf -v (which the
+            # linter cannot follow) and an unset name would trip set -u.
+            reply=""
+            ui_ask reply "$q" "$d" "$h"
+            AUTOOS_ANSWERS["$key"]="$reply"
+            config_updated=1
+        fi
+    done
 done
+
+if (( config_updated )) && [[ -n "$CONFIG_FILE" ]] && (( ! AUTOOS_DRY_RUN )); then
+    autoos_config_save "$CONFIG_FILE" "$PROFILE"
+    ui_ok "Saved answers to ${CONFIG_FILE}"
+fi
 
 # ─── 6. Confirm ─────────────────────────────────────────────────────────────
 if (( AUTOOS_DRY_RUN )); then

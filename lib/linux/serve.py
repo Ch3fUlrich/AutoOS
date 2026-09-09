@@ -64,16 +64,21 @@ def build_state() -> dict:
     probe = r"""
 set -euo pipefail
 cd "$AUTOOS_ROOT"
-. lib/linux/ui.sh; . lib/linux/detect.sh; . lib/linux/catalog.sh
+. lib/linux/ui.sh; . lib/linux/detect.sh; . lib/linux/catalog.sh; . lib/linux/install.sh
 AUTOOS_NO_COLOR=1 ui_init
 detect_system
-catalog_load catalog/linux.json "$SYS_ARCH" "$SYS_IS_HEADLESS"
+cat_file="catalog/linux.json"
+if [[ "${SYS_OS:-linux}" == "macos" ]]; then cat_file="catalog/macos.json"; fi
+catalog_load "$cat_file" "$SYS_ARCH" "$SYS_IS_HEADLESS"
+catalog_probe_installed
+installed_ids="$(catalog_installed_ids)"
 python3 - "$SYS_DISTRO_NAME" "$SYS_ARCH" "$SYS_MODEL" "$SYS_CPU_NAME" "$SYS_CPU_CORES" \
           "$SYS_RAM_GB" "$SYS_FREE_DISK_GB" "$SYS_USER" "$SYS_IS_HEADLESS" \
           "$(suggested_profile)" "$(hostname)" "${SYS_ENVIRONMENT:-unknown}" \
-          "${SYS_IS_WSL:-0}" "${SYS_WSL_VERSION:-}" "${SYS_WSL_DISTRO:-}" <<'PY'
+          "${SYS_IS_WSL:-0}" "${SYS_WSL_VERSION:-}" "${SYS_WSL_DISTRO:-}" "${installed_ids}" <<'PY'
 import json, sys
 k = sys.argv[1:]
+inst_ids = k[15].split() if len(k) > 15 and k[15] else []
 print(json.dumps({
   "system": {
     "host": k[10], "distribution": k[0], "architecture": k[1], "model": k[2],
@@ -83,20 +88,23 @@ print(json.dumps({
   },
   "suggested": k[9],
   "wsl": {"isWsl": k[12] == "1", "version": k[13], "distro": k[14]},
+  "installed_ids": inst_ids,
 }))
 PY
 """
-    env = dict(os.environ, AUTOOS_ROOT=str(ROOT))
     out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True,
-                         env=env, cwd=ROOT, check=False)
+                         cwd=str(ROOT), env={**os.environ, "AUTOOS_ROOT": str(ROOT)})
     if out.returncode != 0:
         raise RuntimeError(out.stderr[-2000:] or "detection failed")
     info = json.loads(out.stdout.strip().splitlines()[-1])
 
-    catalog = json.loads((ROOT / "catalog" / "linux.json").read_text(encoding="utf-8"))
+    catalog_name = "macos.json" if sys.platform == "darwin" else "linux.json"
+    catalog = json.loads((ROOT / "catalog" / catalog_name).read_text(encoding="utf-8"))
     platforms = component_platforms()
     arch = info["system"]["architecture"]
     headless = info["system"]["display"] == "headless"
+    installed_ids = set(info.get("installed_ids", []))
+    installed_names = []
     components = []
     for grp in catalog.get("categories", []):
         if grp.get("requiresDisplay") and headless:
@@ -104,6 +112,9 @@ PY
         for c in grp.get("components", []):
             if c.get("arch") and arch not in c["arch"]:
                 continue
+            is_inst = c["id"] in installed_ids
+            if is_inst:
+                installed_names.append(c["name"])
             components.append({
                 "id": c["id"], "name": c["name"], "description": c["description"],
                 "provider": c["provider"], "package": c["package"],
@@ -112,9 +123,14 @@ PY
                 "requires": c.get("requires", []), "homepage": c.get("homepage"),
                 "verify": c.get("verify"), "notes": c.get("notes"),
                 "platforms": platforms.get(c["id"], ["linux"]),
+                "installed": is_inst,
             })
+    info["system"]["installed applications"] = (
+        "✓ " + ", ".join(installed_names) + f" ({len(installed_names)} detected)"
+        if installed_names else "none detected"
+    )
     return {
-        "platform": "Linux",
+        "platform": "macOS" if sys.platform == "darwin" else "Linux",
         "system": info["system"],
         "suggested": info["suggested"],
         "wsl": info.get("wsl", {"isWsl": False, "version": "", "distro": ""}),
@@ -226,12 +242,42 @@ class Handler(BaseHTTPRequestHandler):
                     "total": RUN["total"], "summary": RUN["summary"],
                 })
 
+        if u.path == "/api/config":
+            cfg_file = ROOT / "autoos.config.json"
+            if cfg_file.is_file():
+                try:
+                    data = json.loads(cfg_file.read_text(encoding="utf-8"))
+                    return self._json(200, data)
+                except Exception as exc:
+                    return self._json(500, {"error": f"failed to read config: {exc}"})
+            ex_file = ROOT / "autoos.config.example.json"
+            if ex_file.is_file():
+                try:
+                    data = json.loads(ex_file.read_text(encoding="utf-8"))
+                    return self._json(200, data)
+                except Exception:
+                    pass
+            return self._json(200, {"version": 1, "profile": "workstation", "answers": {}})
+
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
         u = urlparse(self.path)
         if not self._authed(parse_qs(u.query)):
             return self._json(403, {"error": "bad or missing token"})
+        if u.path == "/api/config":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(body, dict):
+                    return self._json(400, {"error": "payload must be a JSON object"})
+                cfg_file = ROOT / "autoos.config.json"
+                tmp_file = ROOT / "autoos.config.json.tmp"
+                tmp_file.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+                tmp_file.replace(cfg_file)
+                return self._json(200, {"ok": True, "saved": str(cfg_file)})
+            except Exception as exc:
+                return self._json(500, {"error": f"failed to save config: {exc}"})
         if u.path != "/api/install":
             return self._json(404, {"error": "not found"})
         if RUN["running"]:

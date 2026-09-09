@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     AutoOS - post-install provisioning for Windows.
@@ -86,6 +86,7 @@ param(
     [switch]$CheckCatalog,
     [string]$FromState,
     [string]$SaveState,
+    [string]$Config,
     [switch]$NoVerify,
     [switch]$Undo
 )
@@ -102,6 +103,8 @@ $Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() 
 
 $RepoRoot = $PSScriptRoot
 $LibDir   = Join-Path $RepoRoot 'lib\windows'
+
+if (-not $Config) { $Config = Join-Path $RepoRoot 'autoos.config.json' }
 
 Import-Module (Join-Path $LibDir 'AutoOS.Ui.psm1')      -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.Detect.psm1')  -Force -DisableNameChecking
@@ -128,12 +131,18 @@ if ($CheckCatalog) {
 }
 
 if ($ListComponents) {
+    $allComponents = @($catalog.categories | ForEach-Object { $_.components })
+    $installedMap = @{}
+    foreach ($inst in (Get-AutoOSInstalledComponents -Components $allComponents)) {
+        $installedMap[$inst.Id] = $true
+    }
     foreach ($cat in $catalog.categories) {
         Write-AutoOSSection $cat.name
         foreach ($c in $cat.components) {
             $profs = if ($c.PSObject.Properties.Name -contains 'profiles') { $c.profiles -join ',' } else { '' }
-            Write-AutoOSLine ("  {0,-18} {1,-10} {2}" -f $c.id, $c.provider, $c.description)
-            if ($profs) { Write-AutoOSLine ("  {0,-18} profiles: {1}" -f '', $profs) -Level muted }
+            $instMark = if ($installedMap.ContainsKey($c.id)) { (Format-AutoOSColor '✓' 'ok') + ' ' } else { '  ' }
+            Write-AutoOSLine ("  {0}{1,-18} {2,-10} {3}" -f $instMark, $c.id, $c.provider, $c.description)
+            if ($profs) { Write-AutoOSLine ("    {0,-18} profiles: {1}" -f '', $profs) -Level muted }
         }
     }
     exit 0
@@ -166,6 +175,15 @@ foreach ($t in @('Git', 'Node', 'Docker', 'Wsl')) {
     if ($sys."Has$t") { $present += $t.ToLower() }
 }
 Write-AutoOSKeyValue 'Already present' $(if ($present) { $present -join ', ' } else { 'nothing relevant' })
+
+$availableForDetect = @(Get-AutoOSAvailableComponents -Catalog $catalog -SystemInfo $sys)
+$installedApps = @(Get-AutoOSInstalledComponents -Components $availableForDetect | ForEach-Object { $_.Name })
+if ($installedApps.Count -gt 0) {
+    $check = Format-AutoOSColor '✓' 'ok'
+    Write-AutoOSKeyValue 'Installed apps' ("$check $($installedApps -join ', ') ($($installedApps.Count) detected)")
+} else {
+    Write-AutoOSKeyValue 'Installed apps' 'none detected'
+}
 
 $blockers = @(Get-AutoOSBlockers -SystemInfo $sys)
 if ($blockers.Count) {
@@ -246,7 +264,13 @@ if ($statePayload) {
 } elseif ($Yes) {
     $selectedIds = @($available | Where-Object { $InstallProfile -ne 'custom' -and $InstallProfile -in $_.Profiles } | ForEach-Object { $_.Id })
 } else {
-    $items = @($available | ForEach-Object { New-AutoOSMenuItem -Component $_ -Profile $InstallProfile })
+    $installedMap = @{}
+    foreach ($inst in (Get-AutoOSInstalledComponents -Components $available)) {
+        $installedMap[$inst.Id] = $true
+    }
+    $items = @($available | ForEach-Object {
+        New-AutoOSMenuItem -Component $_ -Profile $InstallProfile -Installed ([bool]$installedMap.ContainsKey($_.Id))
+    })
     $menuResult = Show-AutoOSMenu -Items $items -Title 'Choose what to install' `
                    -Footer 'Dependencies are added automatically.'
     if ($null -eq $menuResult) {

@@ -30,6 +30,8 @@ collections/
 logs/
 *.autoos-backup-*
 .autoos-state.json
+autoos.config.json
+!autoos.config.example.json
 
 # ─── Agent tooling ──────────────────────────────────────────────────────────
 .serena/
@@ -43,3 +45,6 @@ desktop.ini
 *.swp
 .idea/
 .vscode/
+__pycache__/
+*.pyc
+

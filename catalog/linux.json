@@ -97,6 +97,72 @@
             "server"
           ],
           "homepage": "https://midnight-commander.org/"
+        },
+        {
+          "id": "git-config",
+          "name": "Git Configuration",
+          "description": "Configure global user.name, user.email, and default branch",
+          "provider": "custom",
+          "package": "git-config",
+          "requires": [
+            "git"
+          ],
+          "postInstall": "setup_git_config",
+          "prompt": "git_user_name, git_user_email",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "homepage": "https://git-scm.com/"
+        },
+        {
+          "id": "gh",
+          "name": "GitHub CLI",
+          "description": "GitHub command-line tool for git, PRs and issues",
+          "provider": "script",
+          "package": "gh",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "gh --version",
+          "homepage": "https://cli.github.com/"
+        },
+        {
+          "id": "ripgrep",
+          "name": "ripgrep",
+          "description": "Fast line-oriented regex search tool (rg)",
+          "provider": "apt",
+          "package": "ripgrep",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "rg --version",
+          "homepage": "https://github.com/BurntSushi/ripgrep"
+        },
+        {
+          "id": "fd",
+          "name": "fd-find",
+          "description": "Fast and user-friendly alternative to find",
+          "provider": "apt",
+          "package": "fd-find",
+          "postInstall": "link_fdfind",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "homepage": "https://github.com/sharkdp/fd"
         }
       ]
     },
@@ -198,6 +264,21 @@
           ],
           "verify": "tmux -V",
           "homepage": "https://github.com/tmux/tmux/wiki"
+        },
+        {
+          "id": "fzf",
+          "name": "fzf",
+          "description": "Command-line fuzzy finder",
+          "provider": "apt",
+          "package": "fzf",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "fzf --version",
+          "homepage": "https://github.com/junegunn/fzf"
         }
       ]
     },
@@ -241,6 +322,24 @@
           ],
           "verify": "claude --version",
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
+        },
+        {
+          "id": "agy",
+          "name": "Antigravity CLI",
+          "description": "Google's terminal coding agent",
+          "provider": "script",
+          "package": "agy",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "agy --version",
+          "homepage": "https://antigravity.google/"
         },
         {
           "id": "handy",
@@ -371,6 +470,61 @@
           ],
           "verify": "nvim --version",
           "homepage": "https://www.lazyvim.org/"
+        },
+        {
+          "id": "uv",
+          "name": "uv",
+          "description": "Fast Python package and tool manager from Astral",
+          "provider": "script",
+          "package": "uv",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "uv --version",
+          "notes": "Used by agent-skills to run graphify and Python MCP servers.",
+          "homepage": "https://docs.astral.sh/uv/"
+        },
+        {
+          "id": "bw",
+          "name": "Bitwarden CLI",
+          "description": "Command-line password manager for secrets and vault access",
+          "provider": "npm",
+          "package": "@bitwarden/cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "bw --version",
+          "homepage": "https://bitwarden.com/help/cli/"
+        },
+        {
+          "id": "ollama",
+          "name": "Ollama",
+          "description": "Local AI runtime and embeddings for Omnigraph",
+          "provider": "script",
+          "package": "ollama",
+          "requires": [
+            "download-tools"
+          ],
+          "prompt": "ollama_models",
+          "postInstall": "setup_ollama_models",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "ollama --version",
+          "notes": "Powers local LLMs and nomic-embed-text for Omnigraph semantic recall.",
+          "homepage": "https://ollama.com/"
         }
       ]
     },
@@ -477,6 +631,42 @@
           "package": "w3m",
           "profiles": [],
           "homepage": "https://w3m.sourceforge.net/"
+        },
+        {
+          "id": "chrome",
+          "name": "Google Chrome",
+          "description": "Browser",
+          "provider": "script",
+          "package": "google-chrome",
+          "arch": [
+            "x64"
+          ],
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation"
+          ],
+          "verify": "google-chrome --version",
+          "homepage": "https://www.google.com/chrome/"
+        },
+        {
+          "id": "bitwarden-chrome",
+          "name": "Bitwarden for Chrome",
+          "description": "Bitwarden password manager extension for Chrome",
+          "provider": "script",
+          "package": "bitwarden-chrome",
+          "arch": [
+            "x64"
+          ],
+          "requires": [
+            "chrome"
+          ],
+          "profiles": [
+            "workstation"
+          ],
+          "notes": "Configures Bitwarden extension automatically in Chrome.",
+          "homepage": "https://chromewebstore.google.com/detail/bitwarden-password-manage/nngceckbapebfimnlniiiahkandclblb"
         }
       ]
     },
@@ -528,6 +718,21 @@
       "question": "Antigravity .deb download URL (blank to skip)",
       "default": "",
       "help": "Antigravity has no apt repository, so AutoOS needs the URL of the .deb from the official download page."
+    },
+    "git_user_name": {
+      "question": "Git commit author name (e.g. Jane Doe)",
+      "default": "",
+      "help": "Sets git config --global user.name so commits on this machine have your author name."
+    },
+    "git_user_email": {
+      "question": "Git commit author email (e.g. jane@example.com)",
+      "default": "",
+      "help": "Sets git config --global user.email so commits on this machine have your email."
+    },
+    "ollama_models": {
+      "question": "Ollama model(s) to pull (blank for nomic-embed-text, or 'none' to skip)",
+      "default": "nomic-embed-text",
+      "help": "nomic-embed-text provides the 768-dim embeddings Omnigraph needs for semantic memory recall."
     }
   }
 }

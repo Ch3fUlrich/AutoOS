@@ -98,6 +98,21 @@ Components that are not packaged for every platform carry a label —
 `Linux only`, `not on Windows`, and so on. Silence means it is available on all
 three. See [the catalog](catalog.md#platform-availability).
 
+### Installed applications
+
+AutoOS probes whether components from the catalog are already installed on the
+host system:
+
+- **Header pill**: A green `✓ N installed` pill in the header indicates how many catalog
+  applications were detected on the machine, with a tooltip listing them.
+- **Detected system**: Lists the detected installed application names prefixed by a green checkmark.
+- **Component badges**: Applications already present display a green **`✓ installed`**
+  badge next to their name.
+- **Installed filter**: A **`✓ Installed (N)`** button in the toolbar filters the
+  catalog list to display only the components already installed on the machine.
+- **Profile summary**: Shows how many of the profile's components are already
+  present on this computer (`✓ N already installed`).
+
 ### Dependencies are shown, not hidden
 
 Some things cannot be installed on their own. Claude Code CLI needs Node.js;
