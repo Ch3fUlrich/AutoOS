@@ -40,6 +40,8 @@ def sh(*args: str) -> str:
     ).stdout
 
 
+_PLATFORMS_CACHE: dict[str, list[str]] | None = None
+
 def component_platforms() -> dict:
     """id -> the platforms whose catalog contains it.
 
@@ -47,6 +49,10 @@ def component_platforms() -> dict:
     "Windows only" instead of leaving the reader to guess whether something is
     missing here because it does not exist or because nobody added it yet.
     """
+    global _PLATFORMS_CACHE
+    if _PLATFORMS_CACHE is not None:
+        return _PLATFORMS_CACHE
+
     out: dict[str, list[str]] = {}
     for name in ("windows", "linux", "macos"):
         path = ROOT / "catalog" / f"{name}.json"
@@ -56,6 +62,8 @@ def component_platforms() -> dict:
         for grp in data.get("categories", []):
             for c in grp.get("components", []):
                 out.setdefault(c["id"], []).append(name)
+
+    _PLATFORMS_CACHE = out
     return out
 
 
