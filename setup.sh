@@ -7,6 +7,32 @@
 #   detect -> profile -> select -> plan -> confirm -> execute -> report
 #
 # Nothing is installed before the confirmation step.
+#
+#   ./setup.sh [options]
+#
+#   --profile <name>   workstation | ai-coding | light | server | custom
+#   --only <ids>       Comma-separated component ids; installs only these
+#   --dry-run          Print every command without changing anything
+#   --yes, -y          Non-interactive: take profile defaults, skip confirmation
+#   --no-color         Disable ANSI colour
+#   --serve            Browser UI instead of the terminal menu (headless boxes)
+#   --port N           Port for --serve (default 8777)
+#   --bind ADDR        Bind address for --serve (default 127.0.0.1)
+#   --list             Print the catalog and exit
+#   --check-catalog    Validate the catalog and exit non-zero on any problem
+#
+#   --from-state FILE  Replay a previous run's selection and answers
+#   --save-state FILE  Where to write this run's state (default .autoos-state.json)
+#   --no-verify        Skip the post-install "does it actually work" check
+#   --undo             Restore files AutoOS backed up (does NOT uninstall packages)
+#   --help, -h         This text
+#
+# Examples:
+#   ./setup.sh                                  interactive
+#   ./setup.sh --from-state .autoos-state.json  repeat a previous machine's setup
+#   ./setup.sh --profile light --dry-run        what a Raspberry Pi would get
+#   ./setup.sh --only claude-code,tailscale -y  just those two, plus dependencies
+#   ./setup.sh --serve                          drive it from a browser
 
 set -euo pipefail
 
@@ -31,35 +57,7 @@ STATE_PATH="$AUTOOS_ROOT/.autoos-state.json"
 STATE_PROFILE=""; STATE_SELECTED=""
 
 usage() {
-    cat <<'EOF'
-AutoOS — post-install provisioning for Linux
-
-  ./setup.sh [options]
-
-  --profile <name>   workstation | ai-coding | light | server | custom
-  --only <ids>       Comma-separated component ids; installs only these
-  --dry-run          Print every command without changing anything
-  --yes, -y          Non-interactive: take profile defaults, skip confirmation
-  --no-color         Disable ANSI colour
-  --serve            Browser UI instead of the terminal menu (headless boxes)
-  --port N           Port for --serve (default 8777)
-  --bind ADDR        Bind address for --serve (default 127.0.0.1)
-  --list             Print the catalog and exit
-  --check-catalog    Validate the catalog and exit non-zero on any problem
-
-  --from-state FILE  Replay a previous run's selection and answers
-  --save-state FILE  Where to write this run's state (default .autoos-state.json)
-  --no-verify        Skip the post-install "does it actually work" check
-  --undo             Restore files AutoOS backed up (does NOT uninstall packages)
-  --help, -h         This text
-
-Examples:
-  ./setup.sh                                  interactive
-  ./setup.sh --from-state .autoos-state.json  repeat a previous machine's setup
-  ./setup.sh --profile light --dry-run        what a Raspberry Pi would get
-  ./setup.sh --only claude-code,tailscale -y  just those two, plus dependencies
-  ./setup.sh --serve                          drive it from a browser
-EOF
+    sed -n '2,/^$/s/^# \?//p' "${BASH_SOURCE[0]}"
 }
 
 while [[ $# -gt 0 ]]; do
