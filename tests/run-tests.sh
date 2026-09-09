@@ -447,6 +447,53 @@ if it "a busy port moves the server on instead of failing"; then
     else fail "serve.py does not walk past a busy port"; fi
 fi
 
+if it "build_state processes shell output correctly"; then
+    out="$(python3 - <<'PY' 2>&1
+import subprocess
+import json
+import sys
+sys.path.append('.')
+from lib.linux.serve import build_state
+
+original_run = subprocess.run
+
+def mock_run(*args, **kwargs):
+    class MockProcess:
+        returncode = 0
+        stdout = json.dumps({
+            "system": {
+                "architecture": "x64",
+                "display": "headless",
+                "distribution": "Ubuntu",
+                "model": "PC",
+                "cpu": "Intel",
+                "cores": "4",
+                "memory": "16 GB",
+                "free disk": "100 GB",
+                "user": "test",
+                "host": "localhost",
+                "environment": "test",
+            },
+            "suggested": "workstation",
+            "wsl": {"isWsl": False, "version": "", "distro": ""}
+        }) + "\n"
+    return MockProcess()
+
+subprocess.run = mock_run
+try:
+    state = build_state()
+    assert state["platform"] == "Linux"
+    assert state["system"]["architecture"] == "x64"
+    assert state["suggested"] == "workstation"
+    assert "profiles" in state
+    assert "components" in state
+finally:
+    subprocess.run = original_run
+PY
+)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "$out"; fi
+fi
+
 if it "the server answers a heartbeat the page can poll"; then
     if grep -q '"/api/ping"' lib/linux/serve.py &&
        grep -q "/api/ping" web/index.html; then pass
