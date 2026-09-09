@@ -208,7 +208,10 @@ install_meslo_font() {
 
 install_nodejs() {
     if (( AUTOOS_DRY_RUN )); then ui_muted "would add the NodeSource LTS repo and install nodejs"; return 0; fi
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | $AUTOOS_SUDO -E bash -
+    local tmp; tmp="$(mktemp)"
+    curl -fsSL https://deb.nodesource.com/setup_lts.x -o "$tmp"
+    $AUTOOS_SUDO -E bash "$tmp"
+    rm -f "$tmp"
     $AUTOOS_SUDO apt-get install -y nodejs
 }
 
@@ -222,7 +225,10 @@ install_docker() {
 
 install_tailscale() {
     if (( AUTOOS_DRY_RUN )); then ui_muted "would install Tailscale via tailscale.com/install.sh"; return 0; fi
-    curl -fsSL https://tailscale.com/install.sh | $AUTOOS_SUDO sh
+    local tmp; tmp="$(mktemp)"
+    curl -fsSL https://tailscale.com/install.sh -o "$tmp"
+    $AUTOOS_SUDO sh "$tmp"
+    rm -f "$tmp"
     ui_info "Run '${AUTOOS_SUDO} tailscale up' to authenticate this machine."
 }
 
