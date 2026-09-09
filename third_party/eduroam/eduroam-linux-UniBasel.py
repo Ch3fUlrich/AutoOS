@@ -1043,9 +1043,9 @@ class CatNMConfigTool:
             return
         self.nm_version = Messages.unknown_version
 
-    def __delete_existing_connection(self, ssid: str) -> None:
+    def __delete_existing_connections(self, ssids: List[str]) -> None:
         """
-        checks and deletes earlier connection
+        checks and deletes earlier connections
         """
         try:
             conns = self.settings.ListConnections()
@@ -1053,7 +1053,7 @@ class CatNMConfigTool:
             print(Messages.dbus_error)
             exit(3)
         for each in conns:
-            con_proxy = self.bus.get_object(self.system_service_name, each)
+            con_proxy = self.bus.get_object(self.system_service_name, each, introspect=False)
             connection = dbus.Interface(
                 con_proxy,
                 "org.freedesktop.NetworkManager.Settings.Connection")
@@ -1063,7 +1063,7 @@ class CatNMConfigTool:
                                                                 'wireless':
                     conn_ssid = byte_to_string(
                         connection_settings['802-11-wireless']['ssid'])
-                    if conn_ssid == ssid:
+                    if conn_ssid in ssids:
                         debug("deleting connection: " + conn_ssid)
                         connection.Delete()
             except dbus.exceptions.DBusException:
@@ -1131,11 +1131,12 @@ class CatNMConfigTool:
         """Delete and then add connections to the system"""
         self.__check_opts()
         self.user_data = user_data
+
+        all_ssids_to_delete = Config.ssids + Config.del_ssids
+        self.__delete_existing_connections(all_ssids_to_delete)
+
         for ssid in Config.ssids:
-            self.__delete_existing_connection(ssid)
             self.__add_connection(ssid)
-        for ssid in Config.del_ssids:
-            self.__delete_existing_connection(ssid)
 
 
 Messages.quit = "Wirklich beenden?"
