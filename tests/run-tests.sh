@@ -790,6 +790,45 @@ if it "no bearer token is ever invented"; then
     else fail "a missing token is never reported"; fi
 fi
 
+if it "Antigravity MCP config is merged, not replaced"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.gemini/config"
+    printf '%s' '{"mcpServers":{"existing":{"command":"node","args":["index.js"]}}}' \
+        >"$tmp/.gemini/config/mcp_config.json"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        register_antigravity_mcp_server "playwright" '{"command":"npx","args":["-y","@playwright/mcp"]}' >/dev/null 2>&1
+    )
+    got="$(python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+servers = d.get('mcpServers', {})
+print(','.join(sorted(servers.keys())))
+" "$tmp/.gemini/config/mcp_config.json")"
+    rm -rf "$tmp"
+    if [[ "$got" == "existing,playwright" ]]; then pass
+    else fail "expected existing and playwright, got: $got"; fi
+fi
+
+if it "register_antigravity_mcp_server is idempotent and creates backup"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.gemini/config"
+    printf '%s' '{"mcpServers":{"existing":{"command":"node"}}}' >"$tmp/.gemini/config/mcp_config.json"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        register_antigravity_mcp_server "serena" '{"command":"uvx"}' >/dev/null 2>&1
+        register_antigravity_mcp_server "serena" '{"command":"uvx"}' >/dev/null 2>&1
+    )
+    backups=( "$tmp"/.gemini/config/mcp_config.json.autoos-backup-* )
+    has_backup=0
+    [[ -f "${backups[0]}" ]] && has_backup=1
+    rm -rf "$tmp"
+    if (( has_backup )); then pass
+    else fail "backup was not created before edit"; fi
+fi
+
 describe "wsl detection"
 
 if it "WSL is detected when running under it"; then

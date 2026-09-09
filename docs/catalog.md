@@ -130,28 +130,43 @@ winget show --id <the.id> --exact --disable-interactivity
 
 ## The MCP stack
 
-The `agent-skills` component wires two MCP servers into Claude Code, and they are
-wired in opposite ways. Getting it the wrong way round fails *silently*, which is
-why it is spelled out here rather than left to the code.
+AutoOS provides first-class support for installing and configuring Model Context
+Protocol (MCP) servers across both **Claude Code** (`~/.claude.json` via CLI) and
+**Antigravity** (`~/.gemini/config/mcp_config.json` on Linux/macOS and
+`%APPDATA%\Antigravity\mcp_config.json` on Windows).
 
-| | Scope | Why |
+Available standalone MCP components in the catalog:
+- `mcp-serena`: Semantic code navigation & symbol search (LSP) via `serena-agent`.
+- `mcp-graphify`: Codebase knowledge graph queries via `graphify.serve`.
+- `mcp-playwright`: Headless browser automation via `@playwright/mcp`.
+- `mcp-context7`: Real-time documentation lookups via `@upstash/context7-mcp`.
+
+The `agent-skills` component wires the complete MCP stack above, along with
+`omnigraph` project-scoped memory.
+
+| Server | Scope | Configuration & Precedence |
 |---|---|---|
-| **graphify** | one **user** entry | Its command is cwd-relative, so a single definition serves every repository its own graph. A per-repo entry pins one repo's graph for all of them. |
+| **graphify** | one **user** entry | Cwd-relative (`graphify-out/graph.json`), serving each repo its own graph. Configured in both Claude Code and Antigravity. |
+| **serena** | one **user** entry | Repo-agnostic symbol lookups via LSP. Path chosen at runtime. Configured in both Claude Code and Antigravity. |
+| **playwright** | one **user** entry | Headless browser execution for coding agents. Configured in both Claude Code and Antigravity. |
+| **context7** | one **user** entry | Real-time framework and library docs. Configured in both Claude Code and Antigravity. |
 | **omnigraph** | **project** only | The graph is chosen per repo by `OMNIGRAPH_GRAPH_ID`. A user-scope `omnigraph` silently overrides the per-repo one and answers from the wrong graph. |
 
-Two consequences AutoOS acts on:
+Key wiring invariants AutoOS enforces:
 
-- It never creates a user-scope `omnigraph`, and warns if it finds one, naming
-  the `claude mcp remove` that undoes it.
-- A tracked `.mcp.json` cannot approve itself, so AutoOS writes the server into
-  that repo's untracked `.claude/settings.local.json` (`enabledMcpjsonServers`).
-  Without that, Claude Code skips the server without saying anything, which looks
-  exactly like the server being broken.
+- It never creates a user-scope `omnigraph` in Claude Code, and warns if it finds
+  one, naming the `claude mcp remove` that undoes it.
+- A tracked `.mcp.json` cannot approve itself, so AutoOS writes the project server
+  into that repo's untracked `.claude/settings.local.json` (`enabledMcpjsonServers`).
+  Without that, Claude Code skips the server silently.
+- Antigravity configurations are always merged idempotently, backing up existing
+  `mcp_config.json` files before editing without dropping other user-configured
+  servers.
 
-Registration goes through `claude mcp add`, never through editing `~/.claude.json`
-directly: that file is tens of kilobytes of the user's own session state, and
-rewriting it to change one key is the "overwrite a config wholesale" failure rule
-4 exists to prevent.
+Claude Code registration goes through `claude mcp add`, never through editing
+`~/.claude.json` directly: that file is tens of kilobytes of the user's own
+session state, and rewriting it to change one key violates Rule 4 (never
+overwrite a config wholesale).
 
 ### What AutoOS does not do
 

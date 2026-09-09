@@ -280,6 +280,88 @@
           ],
           "prompt": "omnigraph_url",
           "homepage": "https://github.com/Ch3fUlrich/agent-skills"
+        },
+        {
+          "id": "uv",
+          "name": "uv",
+          "description": "Extremely fast Python package and project manager",
+          "provider": "winget",
+          "package": "astral-sh.uv",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "uv --version",
+          "homepage": "https://docs.astral.sh/uv/"
+        },
+        {
+          "id": "mcp-serena",
+          "name": "Serena MCP Server",
+          "description": "Semantic code navigation and symbol search MCP server",
+          "provider": "custom",
+          "package": "mcp-serena",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "Install-AutoOSMcpSerena",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Semantic code navigation and LSP symbols for Claude Code and Antigravity.",
+          "homepage": "https://github.com/serena-agent/serena"
+        },
+        {
+          "id": "mcp-graphify",
+          "name": "Graphify MCP Server",
+          "description": "Codebase knowledge graph MCP server for coding agents",
+          "provider": "custom",
+          "package": "mcp-graphify",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "Install-AutoOSMcpGraphify",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Codebase dependency knowledge graph queries for coding agents.",
+          "homepage": "https://github.com/Ch3fUlrich/agent-skills"
+        },
+        {
+          "id": "mcp-playwright",
+          "name": "Playwright MCP Server",
+          "description": "Headless browser automation MCP server for coding agents",
+          "provider": "custom",
+          "package": "mcp-playwright",
+          "requires": [
+            "nodejs"
+          ],
+          "postInstall": "Install-AutoOSMcpPlaywright",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Browser automation and web testing for Claude Code and Antigravity.",
+          "homepage": "https://github.com/modelcontextprotocol/servers"
+        },
+        {
+          "id": "mcp-context7",
+          "name": "Context7 MCP Server",
+          "description": "Real-time library documentation and code context MCP server",
+          "provider": "custom",
+          "package": "mcp-context7",
+          "requires": [
+            "nodejs"
+          ],
+          "prompt": "context7_api_key",
+          "postInstall": "Install-AutoOSMcpContext7",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Up-to-date documentation lookups for frameworks and libraries.",
+          "homepage": "https://github.com/upstash/context7-mcp"
         }
       ]
     },
@@ -541,6 +623,11 @@
       "question": "Herdr install source",
       "default": "npm:herdr",
       "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in winget, so AutoOS needs to be told where it lives."
+    },
+    "context7_api_key": {
+      "question": "Upstash Context7 API key (blank to use default rate limit)",
+      "default": "",
+      "help": "Optional API key for Upstash Context7 live documentation lookups."
     }
   },
   "windhawk_mods": [

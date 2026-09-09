@@ -525,6 +525,75 @@
           "verify": "ollama --version",
           "notes": "Powers local LLMs and nomic-embed-text for Omnigraph semantic recall.",
           "homepage": "https://ollama.com/"
+        },
+        {
+          "id": "mcp-serena",
+          "name": "Serena MCP Server",
+          "description": "Semantic code navigation and symbol search MCP server",
+          "provider": "custom",
+          "package": "mcp-serena",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "install_mcp_serena",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Semantic code navigation and LSP symbols for Claude Code and Antigravity.",
+          "homepage": "https://github.com/serena-agent/serena"
+        },
+        {
+          "id": "mcp-graphify",
+          "name": "Graphify MCP Server",
+          "description": "Codebase knowledge graph MCP server for coding agents",
+          "provider": "custom",
+          "package": "mcp-graphify",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "install_mcp_graphify",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Codebase dependency knowledge graph queries for coding agents.",
+          "homepage": "https://github.com/Ch3fUlrich/agent-skills"
+        },
+        {
+          "id": "mcp-playwright",
+          "name": "Playwright MCP Server",
+          "description": "Headless browser automation MCP server for coding agents",
+          "provider": "custom",
+          "package": "mcp-playwright",
+          "requires": [
+            "nodejs"
+          ],
+          "postInstall": "install_mcp_playwright",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Browser automation and web testing for Claude Code and Antigravity.",
+          "homepage": "https://github.com/modelcontextprotocol/servers"
+        },
+        {
+          "id": "mcp-context7",
+          "name": "Context7 MCP Server",
+          "description": "Real-time library documentation and code context MCP server",
+          "provider": "custom",
+          "package": "mcp-context7",
+          "requires": [
+            "nodejs"
+          ],
+          "prompt": "context7_api_key",
+          "postInstall": "install_mcp_context7",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Up-to-date documentation lookups for frameworks and libraries.",
+          "homepage": "https://github.com/upstash/context7-mcp"
         }
       ]
     },
@@ -733,6 +802,11 @@
       "question": "Ollama model(s) to pull (blank for nomic-embed-text, or 'none' to skip)",
       "default": "nomic-embed-text",
       "help": "nomic-embed-text provides the 768-dim embeddings Omnigraph needs for semantic memory recall."
+    },
+    "context7_api_key": {
+      "question": "Upstash Context7 API key (blank to use default rate limit)",
+      "default": "",
+      "help": "Optional API key for Upstash Context7 live documentation lookups."
     }
   }
 }

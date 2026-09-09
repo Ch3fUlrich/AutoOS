@@ -137,6 +137,16 @@ function Test-AutoOSInstalled {
             }
             return $false
         }
+        'custom' {
+            switch ($Component.Package) {
+                'agent-skills' { return Test-Path (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Code\agent-skills') }
+                'mcp-serena' { return ('serena' -in (Get-AutoOSMcpServerNames)) }
+                'mcp-graphify' { return ('graphify' -in (Get-AutoOSMcpServerNames)) }
+                'mcp-playwright' { return ('playwright' -in (Get-AutoOSMcpServerNames)) }
+                'mcp-context7' { return ('context7' -in (Get-AutoOSMcpServerNames)) }
+                default { return $false }
+            }
+        }
         default { return $false }
     }
 }
@@ -596,10 +606,11 @@ function Install-AutoOSAgentSkills {
         Write-AutoOSLine "Omnigraph URL saved to $envFile" -Level ok
     }
 
-    # ── graphify: one user-scope entry, cwd-relative ──────────────────────────
-    [void](Register-AutoOSMcpServer -Name 'graphify' -Command 'uv' -Scope 'user' -Arguments @(
-        '--quiet', 'run', '--with', 'graphifyy[mcp]', 'python', '-m',
-        'graphify.serve', 'graphify-out/graph.json'))
+    # ── MCP stack: wire user-scope servers across Claude Code and Antigravity ──
+    Install-AutoOSMcpGraphify
+    Install-AutoOSMcpSerena
+    Install-AutoOSMcpPlaywright
+    Install-AutoOSMcpContext7
 
     # ── omnigraph: project scope, and only project scope ──────────────────────
     if ('omnigraph' -in (Get-AutoOSMcpServerNames)) {
@@ -615,6 +626,8 @@ function Install-AutoOSAgentSkills {
         Write-AutoOSLine "no .mcp.json in $dest - nothing to pin omnigraph to." -Level warn
     }
 
+    Set-AutoOSAntigravityMcp
+
     if ($script:DryRun) {
         Write-AutoOSLine 'would check the omnigraph image, network and token' -Level muted
         return
@@ -622,7 +635,7 @@ function Install-AutoOSAgentSkills {
     if (Write-AutoOSOmnigraphReadiness -AgentSkillsDir $dest) {
         Write-AutoOSLine 'omnigraph prerequisites are all present.' -Level ok
     }
-    Write-AutoOSLine 'Restart Claude Code - MCP servers are only read at session start.' -Level info
+    Write-AutoOSLine 'Restart Claude Code and Antigravity - MCP servers are only read at session start.' -Level info
 }
 
 function Set-AutoOSAntigravityMcp {
@@ -694,6 +707,104 @@ function Set-AutoOSAntigravityMcp {
     }
 }
 
+function Register-AutoOSAntigravityMcpServer {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][hashtable]$Spec
+    )
+    $cfgDir  = Join-Path $env:APPDATA 'Antigravity'
+    $cfgPath = Join-Path $cfgDir 'mcp_config.json'
+
+    if ($script:DryRun) {
+        Write-AutoOSLine "would merge $Name into $cfgPath" -Level muted
+        return
+    }
+    if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+
+    $cfg = [ordered]@{}
+    if (Test-Path $cfgPath) {
+        try {
+            $raw = Get-Content -Path $cfgPath -Raw -Encoding UTF8
+            if ($raw.Trim()) {
+                $parsed = $raw | ConvertFrom-Json
+                foreach ($p in $parsed.PSObject.Properties) { $cfg[$p.Name] = $p.Value }
+            }
+        } catch {
+            Write-AutoOSLine "$cfgPath is not valid JSON - leaving it alone." -Level warn
+            return
+        }
+        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
+
+    $servers = [ordered]@{}
+    if ($cfg.Contains('mcpServers') -and $cfg['mcpServers']) {
+        foreach ($p in $cfg['mcpServers'].PSObject.Properties) { $servers[$p.Name] = $p.Value }
+    }
+    $servers[$Name] = $Spec
+    $cfg['mcpServers'] = $servers
+
+    $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
+    Write-AutoOSLine "Antigravity MCP server '$Name' configured in $cfgPath" -Level ok
+}
+
+function Install-AutoOSMcpSerena {
+    Write-AutoOSLine 'Configuring Serena MCP server (Claude Code + Antigravity)' -Level step
+    [void](Register-AutoOSMcpServer -Name 'serena' -Command 'uvx' -Scope 'user' -Arguments @(
+        '--from', 'serena-agent', 'serena', 'start-mcp-server',
+        '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'))
+
+    $serenaHome = Join-Path $HOME '.serena'
+    Register-AutoOSAntigravityMcpServer -Name 'serena' -Spec ([ordered]@{
+        command      = 'uvx'
+        args         = @('--from', 'serena-agent', 'serena', 'start-mcp-server', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false')
+        env          = @{ SERENA_HOME = $serenaHome }
+        excludeTools = @('onboarding', 'open_dashboard', 'initial_instructions', 'write_memory', 'read_memory', 'list_memories', 'delete_memory', 'rename_memory', 'edit_memory')
+    })
+}
+
+function Install-AutoOSMcpGraphify {
+    Write-AutoOSLine 'Configuring Graphify MCP server (Claude Code + Antigravity)' -Level step
+    [void](Register-AutoOSMcpServer -Name 'graphify' -Command 'uv' -Scope 'user' -Arguments @(
+        '--quiet', 'run', '--with', 'graphifyy[mcp]', 'python', '-m',
+        'graphify.serve', 'graphify-out/graph.json'))
+
+    Register-AutoOSAntigravityMcpServer -Name 'graphify' -Spec ([ordered]@{
+        command = 'uv'
+        args    = @('--quiet', 'run', '--with', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', '${workspaceFolder}/graphify-out/graph.json')
+    })
+}
+
+function Install-AutoOSMcpPlaywright {
+    Write-AutoOSLine 'Configuring Playwright MCP server (Claude Code + Antigravity)' -Level step
+    [void](Register-AutoOSMcpServer -Name 'playwright' -Command 'npx' -Scope 'user' -Arguments @(
+        '-y', '@playwright/mcp@latest'))
+
+    Register-AutoOSAntigravityMcpServer -Name 'playwright' -Spec ([ordered]@{
+        command = 'npx'
+        args    = @('-y', '@playwright/mcp@latest')
+    })
+}
+
+function Install-AutoOSMcpContext7 {
+    Write-AutoOSLine 'Configuring Context7 MCP server (Claude Code + Antigravity)' -Level step
+    $key = Get-AutoOSAnswer 'context7_api_key' $env:CONTEXT7_API_KEY
+    if ($key) {
+        [void](Register-AutoOSMcpServer -Name 'context7' -Command 'npx' -Scope 'user' -Arguments @(
+            '-y', '@upstash/context7-mcp', '--api-key', $key))
+        Register-AutoOSAntigravityMcpServer -Name 'context7' -Spec ([ordered]@{
+            command = 'npx'
+            args    = @('-y', '@upstash/context7-mcp', '--api-key', $key)
+        })
+    } else {
+        [void](Register-AutoOSMcpServer -Name 'context7' -Command 'npx' -Scope 'user' -Arguments @(
+            '-y', '@upstash/context7-mcp'))
+        Register-AutoOSAntigravityMcpServer -Name 'context7' -Spec ([ordered]@{
+            command = 'npx'
+            args    = @('-y', '@upstash/context7-mcp')
+        })
+    }
+}
+
 function Invoke-AutoOSPostInstall {
     param([Parameter(Mandatory)][psobject]$Component)
     if (-not $Component.PostInstall) { return }
@@ -714,4 +825,6 @@ Export-ModuleMember -Function `
     Add-AutoOSGitToPath, Add-AutoOSAgyToPath, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
     Install-AutoOSHerdr, Install-AutoOSAgy, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
+    Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Install-AutoOSMcpGraphify,
+    Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Invoke-AutoOSScriptProvider

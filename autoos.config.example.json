@@ -7,6 +7,7 @@
     "omnigraph_url": "http://localhost:8080",
     "herdr_source": "npm:herdr",
     "antigravity_url": "",
-    "ollama_models": "nomic-embed-text"
+    "ollama_models": "nomic-embed-text",
+    "context7_api_key": ""
   }
 }

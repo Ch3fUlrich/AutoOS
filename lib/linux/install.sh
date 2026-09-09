@@ -83,6 +83,21 @@ custom_is_installed() {
         git-config)
             has_cmd git && [[ -n "$(git config --global user.name 2>/dev/null || true)" ]]
             ;;
+        agent-skills)
+            [[ -d "$SYS_HOME/Documents/Code/agent-skills" ]]
+            ;;
+        mcp-serena)
+            mcp_has_server serena || antigravity_has_server serena
+            ;;
+        mcp-graphify)
+            mcp_has_server graphify || antigravity_has_server graphify
+            ;;
+        mcp-playwright)
+            mcp_has_server playwright || antigravity_has_server playwright
+            ;;
+        mcp-context7)
+            mcp_has_server context7 || antigravity_has_server context7
+            ;;
         *) return 1 ;;
     esac
 }
@@ -708,6 +723,142 @@ register_mcp_server() {
     return 0
 }
 
+antigravity_mcp_config_path() {
+    printf '%s/.gemini/config/mcp_config.json' "$SYS_HOME"
+}
+
+antigravity_has_server() {
+    local want="$1"
+    local cfg_path
+    cfg_path="$(antigravity_mcp_config_path)"
+    [[ -f "$cfg_path" && -s "$cfg_path" ]] || return 1
+    python3 - "$cfg_path" "$want" <<'PY' >/dev/null 2>&1
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    sys.exit(0 if sys.argv[2] in data.get("mcpServers", {}) else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+register_antigravity_mcp_server() {
+    local name="$1" spec_json="$2"
+    local cfg_path
+    cfg_path="$(antigravity_mcp_config_path)"
+    local cfg_dir
+    cfg_dir="$(dirname "$cfg_path")"
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would merge '${name}' into Antigravity MCP config (${cfg_path})"
+        return 0
+    fi
+
+    mkdir -p "$cfg_dir"
+    if [[ -f "$cfg_path" && -s "$cfg_path" ]]; then
+        cp "$cfg_path" "${cfg_path}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    fi
+
+    local out
+    out="$(python3 - "$cfg_path" "$name" "$spec_json" <<'PY'
+import json, pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+name = sys.argv[2]
+try:
+    spec = json.loads(sys.argv[3])
+except Exception as exc:
+    print(f"invalid-spec: {exc}")
+    sys.exit(2)
+
+data = {}
+if path.exists() and path.stat().st_size > 0:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        print("not-json")
+        sys.exit(1)
+
+servers = data.setdefault("mcpServers", {})
+if servers.get(name) == spec:
+    print("already")
+    sys.exit(0)
+
+servers[name] = spec
+path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+print("added")
+PY
+)"
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+        if [[ "$out" == "already" ]]; then
+            ui_muted "MCP server '${name}' already configured in Antigravity"
+        else
+            ui_ok "configured MCP server '${name}' in Antigravity (${cfg_path})"
+        fi
+    elif [[ "$out" == "not-json" ]]; then
+        ui_warn "${cfg_path} is not valid JSON — leaving it alone."
+    else
+        ui_warn "could not update Antigravity MCP config at ${cfg_path}"
+    fi
+    return 0
+}
+
+install_mcp_serena() {
+    ui_info "Setting up Serena MCP server (Claude Code + Antigravity)"
+    register_mcp_server serena user "$SYS_HOME" \
+        uvx --from serena-agent serena start-mcp-server --open-web-dashboard false --enable-gui-log-window false
+
+    local serena_home="$SYS_HOME/.serena"
+    local spec
+    spec="$(python3 -c "
+import json
+print(json.dumps({
+    'command': 'uvx',
+    'args': ['--from', 'serena-agent', 'serena', 'start-mcp-server', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
+    'env': {'SERENA_HOME': '$serena_home'},
+    'excludeTools': ['onboarding', 'open_dashboard', 'initial_instructions', 'write_memory', 'read_memory', 'list_memories', 'delete_memory', 'rename_memory', 'edit_memory']
+}))
+")"
+    register_antigravity_mcp_server serena "$spec"
+}
+
+install_mcp_graphify() {
+    ui_info "Setting up Graphify MCP server (Claude Code + Antigravity)"
+    register_mcp_server graphify user "$SYS_HOME" \
+        uv --quiet run --with 'graphifyy[mcp]' python -m graphify.serve graphify-out/graph.json
+
+    register_antigravity_mcp_server graphify '{"command":"uv","args":["--quiet","run","--with","graphifyy[mcp]","python","-m","graphify.serve","${workspaceFolder}/graphify-out/graph.json"]}'
+}
+
+install_mcp_playwright() {
+    ui_info "Setting up Playwright MCP server (Claude Code + Antigravity)"
+    register_mcp_server playwright user "$SYS_HOME" \
+        npx -y @playwright/mcp@latest
+
+    register_antigravity_mcp_server playwright '{"command":"npx","args":["-y","@playwright/mcp@latest"]}'
+}
+
+install_mcp_context7() {
+    ui_info "Setting up Context7 MCP server (Claude Code + Antigravity)"
+    local key
+    key="$(answer context7_api_key "${CONTEXT7_API_KEY:-}")"
+    if [[ -n "$key" ]]; then
+        register_mcp_server context7 user "$SYS_HOME" \
+            npx -y @upstash/context7-mcp --api-key "$key"
+        local spec
+        spec="$(python3 -c "
+import json
+print(json.dumps({'command': 'npx', 'args': ['-y', '@upstash/context7-mcp', '--api-key', '$key']}))
+")"
+        register_antigravity_mcp_server context7 "$spec"
+    else
+        register_mcp_server context7 user "$SYS_HOME" \
+            npx -y @upstash/context7-mcp
+        register_antigravity_mcp_server context7 '{"command":"npx","args":["-y","@upstash/context7-mcp"]}'
+    fi
+}
+
 # A tracked .mcp.json cannot approve itself: Claude Code skips a project server
 # until it is named in that repo's own untracked .claude/settings.local.json. It
 # skips it *silently*, which is the real problem — an unapproved server looks
@@ -797,11 +948,11 @@ install_agent_skills() {
         ui_ok "Omnigraph URL saved to ${SYS_HOME}/.autoos-omnigraph.env"
     fi
 
-    # graphify is ONE user-scope entry. Its command is cwd-relative, so a single
-    # definition serves every repository its own graph; a per-repo entry would
-    # pin one repo's graph for all of them.
-    register_mcp_server graphify user "$SYS_HOME" \
-        uv --quiet run --with 'graphifyy[mcp]' python -m graphify.serve graphify-out/graph.json
+    # Wire user-scope MCP servers across Claude Code and Antigravity
+    install_mcp_graphify
+    install_mcp_serena
+    install_mcp_playwright
+    install_mcp_context7
 
     # omnigraph is the opposite: project scope only, pinned per repo by
     # OMNIGRAPH_GRAPH_ID. A user-scope entry silently WINS over the project one
@@ -818,6 +969,22 @@ install_agent_skills() {
         ui_warn "no .mcp.json in ${dest} — nothing to pin omnigraph to."
     fi
 
+    local omni_spec
+    omni_spec="$(python3 -c "
+import json, os
+env_vars = {'OMNIGRAPH_BASE_URL': '$base'}
+if os.environ.get('OMNIGRAPH_GRAPH_ID'):
+    env_vars['OMNIGRAPH_GRAPH_ID'] = os.environ['OMNIGRAPH_GRAPH_ID']
+if os.environ.get('OMNIGRAPH_TOKEN'):
+    env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
+print(json.dumps({
+    'command': 'npx',
+    'args': ['-y', '@modernrelay/omnigraph-mcp'],
+    'env': env_vars
+}))
+")"
+    register_antigravity_mcp_server omnigraph "$omni_spec"
+
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would check the omnigraph image, network and token"
         return 0
@@ -825,7 +992,7 @@ install_agent_skills() {
     if omnigraph_readiness "$dest"; then
         ui_ok "omnigraph prerequisites are all present."
     fi
-    ui_info "Restart Claude Code — MCP servers are only read at session start."
+    ui_info "Restart Claude Code and Antigravity — MCP servers are only read at session start."
     return 0
 }
 
