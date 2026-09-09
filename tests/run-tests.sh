@@ -763,6 +763,14 @@ if it "the payload the UI reads exposes the environment"; then
     if (( ok )); then pass; else fail "serve.py does not expose the environment"; fi
 fi
 
+# ─── Python Unit Tests ──────────────────────────────────────────────────────
+describe "python tests"
+
+if it "serve.py unit tests pass"; then
+    out="$(python3 -m unittest discover tests 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "$out"; fi
+fi
+
 # ─── Documentation ──────────────────────────────────────────────────────────
 describe "documentation"
 
