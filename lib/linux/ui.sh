@@ -127,22 +127,7 @@ ui_ask() {
 declare -a MENU_ID MENU_NAME MENU_DESC MENU_GROUP MENU_SEL
 MENU_RESULT=""
 
-ui_menu() {
-    local title="${1:-Select components}" footer="${2:-}"
-    local total=${#MENU_ID[@]}
-    (( total == 0 )) && { MENU_RESULT=""; return 0; }
-
-    if ! ui_is_interactive; then
-        local out=""
-        for ((i = 0; i < total; i++)); do
-            if (( MENU_SEL[i] )); then out+="${MENU_ID[i]} "; fi
-        done
-        MENU_RESULT="${out% }"
-        return 0
-    fi
-
-    # Build the render order: a group header row before each group's items.
-    local -a row_kind row_text row_idx
+_ui_menu_build_rows() {
     local last_group="" i
     for ((i = 0; i < total; i++)); do
         if [[ "${MENU_GROUP[i]}" != "$last_group" ]]; then
@@ -152,97 +137,139 @@ ui_menu() {
         row_kind+=("item"); row_text+=("${MENU_NAME[i]}"); row_idx+=("$i")
     done
 
-    local nrows=${#row_kind[@]} cursor=0 top=0 rendered=0 viewport=16
-    local term_h; term_h=$(tput lines 2>/dev/null || echo 30)
-    viewport=$(( term_h - 12 )); (( viewport < 6 )) && viewport=6; (( viewport > 22 )) && viewport=22
+    nrows=${#row_kind[@]}
+    cursor=0
+    top=0
+    rendered=0
+
+    local term_h
+    term_h=$(tput lines 2>/dev/null || echo 30)
+    viewport=$(( term_h - 12 ))
+    (( viewport < 6 )) && viewport=6
+    (( viewport > 22 )) && viewport=22
 
     while [[ "${row_kind[cursor]}" != "item" ]] && (( cursor < nrows - 1 )); do ((cursor++)); done
+}
 
-    _menu_next() {  # $1 = delta ; echoes new cursor
-        local d="$1" i="$cursor"
-        while true; do
-            i=$(( i + d ))
-            (( i < 0 || i >= nrows )) && { echo "$cursor"; return; }
-            [[ "${row_kind[i]}" == "item" ]] && { echo "$i"; return; }
+_ui_menu_next() {
+    local d="$1" i="$cursor"
+    while true; do
+        i=$(( i + d ))
+        (( i < 0 || i >= nrows )) && { echo "$cursor"; return; }
+        [[ "${row_kind[i]}" == "item" ]] && { echo "$i"; return; }
+    done
+}
+
+_ui_menu_render() {
+    (( cursor < top )) && top=$cursor
+    (( cursor >= top + viewport )) && top=$(( cursor - viewport + 1 ))
+
+    local buf="" selcount=0 r i
+    for ((i = 0; i < total; i++)); do (( MENU_SEL[i] )) && ((selcount++)); done
+    (( rendered > 0 )) && buf+=$'\033'"[${rendered}A"
+
+    buf+=$'\033[2K'"  $(_c heading)${title}$(_c reset)$(_c muted)   ${selcount} of ${total} selected$(_c reset)"$'\n'
+    buf+=$'\033[2K'$'\n'
+    local lines=2
+
+    for ((r = top; r < nrows && r < top + viewport; r++)); do
+        if [[ "${row_kind[r]}" == "header" ]]; then
+            buf+=$'\033[2K'"   $(_c accent)${row_text[r]^^}$(_c reset)"$'\n'
+        else
+            local idx=${row_idx[r]} mark box name
+            (( r == cursor )) && mark="$(_c sel)>$(_c reset)" || mark=" "
+            if (( MENU_SEL[idx] )); then box="$(_c ok)[x]$(_c reset)"; else box="$(_c dim)[ ]$(_c reset)"; fi
+            name=$(printf '%-26s' "${MENU_NAME[idx]}")
+            (( r == cursor )) && name="$(_c sel)${name}$(_c reset)"
+            buf+=$'\033[2K'"  ${mark} ${box} ${name} $(_c muted)${MENU_DESC[idx]}$(_c reset)"$'\n'
+        fi
+        ((lines++))
+    done
+
+    local more=$(( nrows - top - viewport ))
+    if (( more > 0 )); then
+        buf+=$'\033[2K'"      $(_c dim)... ${more} more below$(_c reset)"$'\n'
+    else
+        buf+=$'\033[2K'$'\n'
+    fi
+    ((lines++))
+    buf+=$'\033[2K'$'\n'
+    buf+=$'\033[2K'"  $(_c dim)UP/DOWN move   SPACE toggle   A all   N none   ENTER confirm   ESC cancel$(_c reset)"$'\n'
+    lines=$(( lines + 2 ))
+    if [[ -n "$footer" ]]; then
+        buf+=$'\033[2K'"  $(_c muted)${footer}$(_c reset)"$'\n'; ((lines++))
+    fi
+
+    printf '%s' "$buf"
+    rendered=$lines
+}
+
+_ui_menu_handle_input() {
+    local key rest i
+    IFS= read -rsn1 key || key=""
+    case "$key" in
+        $'\033')
+            # Could be a bare ESC or the start of an arrow sequence.
+            if IFS= read -rsn2 -t 0.05 rest; then
+                case "$rest" in
+                    '[A') cursor=$(_ui_menu_next -1) ;;
+                    '[B') cursor=$(_ui_menu_next 1) ;;
+                    '[5') read -rsn1 -t 0.05 _; for _ in 1 2 3 4 5; do cursor=$(_ui_menu_next -1); done ;;
+                    '[6') read -rsn1 -t 0.05 _; for _ in 1 2 3 4 5; do cursor=$(_ui_menu_next 1); done ;;
+                esac
+            else
+                printf '\033[?25h\n'; MENU_RESULT=""; return 1
+            fi
+            ;;
+        ' ')
+            local idx=${row_idx[cursor]}
+            if (( MENU_SEL[idx] )); then MENU_SEL[idx]=0; else MENU_SEL[idx]=1; fi
+            ;;
+        'a'|'A') for ((i = 0; i < total; i++)); do MENU_SEL[i]=1; done ;;
+        'n'|'N') for ((i = 0; i < total; i++)); do MENU_SEL[i]=0; done ;;
+        'q'|'Q') printf '\033[?25h\n'; MENU_RESULT=""; return 1 ;;
+        ''|$'\n')
+            printf '\033[?25h\n'
+            local out=""
+            for ((i = 0; i < total; i++)); do (( MENU_SEL[i] )) && out+="${MENU_ID[i]} "; done
+            MENU_RESULT="${out% }"
+            return 2
+            ;;
+    esac
+    return 0
+}
+
+ui_menu() {
+    local title="${1:-Select components}" footer="${2:-}"
+    local total=${#MENU_ID[@]}
+    (( total == 0 )) && { MENU_RESULT=""; return 0; }
+
+    if ! ui_is_interactive; then
+        local out="" i
+        for ((i = 0; i < total; i++)); do
+            if (( MENU_SEL[i] )); then out+="${MENU_ID[i]} "; fi
         done
-    }
+        MENU_RESULT="${out% }"
+        return 0
+    fi
+
+    # Variables shared with helper functions
+    local -a row_kind row_text row_idx
+    local nrows cursor top rendered viewport
+
+    _ui_menu_build_rows
 
     printf '\033[?25l'   # hide cursor
     trap 'printf "\033[?25h"' RETURN
 
     while true; do
-        (( cursor < top )) && top=$cursor
-        (( cursor >= top + viewport )) && top=$(( cursor - viewport + 1 ))
-
-        local buf="" selcount=0 r
-        for ((i = 0; i < total; i++)); do (( MENU_SEL[i] )) && ((selcount++)); done
-        (( rendered > 0 )) && buf+=$'\033'"[${rendered}A"
-
-        buf+=$'\033[2K'"  $(_c heading)${title}$(_c reset)$(_c muted)   ${selcount} of ${total} selected$(_c reset)"$'\n'
-        buf+=$'\033[2K'$'\n'
-        local lines=2
-
-        for ((r = top; r < nrows && r < top + viewport; r++)); do
-            if [[ "${row_kind[r]}" == "header" ]]; then
-                buf+=$'\033[2K'"   $(_c accent)${row_text[r]^^}$(_c reset)"$'\n'
-            else
-                local idx=${row_idx[r]} mark box name
-                (( r == cursor )) && mark="$(_c sel)>$(_c reset)" || mark=" "
-                if (( MENU_SEL[idx] )); then box="$(_c ok)[x]$(_c reset)"; else box="$(_c dim)[ ]$(_c reset)"; fi
-                name=$(printf '%-26s' "${MENU_NAME[idx]}")
-                (( r == cursor )) && name="$(_c sel)${name}$(_c reset)"
-                buf+=$'\033[2K'"  ${mark} ${box} ${name} $(_c muted)${MENU_DESC[idx]}$(_c reset)"$'\n'
-            fi
-            ((lines++))
-        done
-
-        local more=$(( nrows - top - viewport ))
-        if (( more > 0 )); then
-            buf+=$'\033[2K'"      $(_c dim)... ${more} more below$(_c reset)"$'\n'
-        else
-            buf+=$'\033[2K'$'\n'
+        _ui_menu_render
+        _ui_menu_handle_input
+        local ret=$?
+        if (( ret == 1 )); then
+            return 1
+        elif (( ret == 2 )); then
+            return 0
         fi
-        ((lines++))
-        buf+=$'\033[2K'$'\n'
-        buf+=$'\033[2K'"  $(_c dim)UP/DOWN move   SPACE toggle   A all   N none   ENTER confirm   ESC cancel$(_c reset)"$'\n'
-        lines=$(( lines + 2 ))
-        if [[ -n "$footer" ]]; then
-            buf+=$'\033[2K'"  $(_c muted)${footer}$(_c reset)"$'\n'; ((lines++))
-        fi
-
-        printf '%s' "$buf"
-        rendered=$lines
-
-        local key rest
-        IFS= read -rsn1 key || key=""
-        case "$key" in
-            $'\033')
-                # Could be a bare ESC or the start of an arrow sequence.
-                if IFS= read -rsn2 -t 0.05 rest; then
-                    case "$rest" in
-                        '[A') cursor=$(_menu_next -1) ;;
-                        '[B') cursor=$(_menu_next 1) ;;
-                        '[5') read -rsn1 -t 0.05 _; for _ in 1 2 3 4 5; do cursor=$(_menu_next -1); done ;;
-                        '[6') read -rsn1 -t 0.05 _; for _ in 1 2 3 4 5; do cursor=$(_menu_next 1); done ;;
-                    esac
-                else
-                    printf '\033[?25h\n'; MENU_RESULT=""; return 1
-                fi
-                ;;
-            ' ')
-                local idx=${row_idx[cursor]}
-                if (( MENU_SEL[idx] )); then MENU_SEL[idx]=0; else MENU_SEL[idx]=1; fi
-                ;;
-            'a'|'A') for ((i = 0; i < total; i++)); do MENU_SEL[i]=1; done ;;
-            'n'|'N') for ((i = 0; i < total; i++)); do MENU_SEL[i]=0; done ;;
-            'q'|'Q') printf '\033[?25h\n'; MENU_RESULT=""; return 1 ;;
-            ''|$'\n')
-                printf '\033[?25h\n'
-                local out=""
-                for ((i = 0; i < total; i++)); do (( MENU_SEL[i] )) && out+="${MENU_ID[i]} "; done
-                MENU_RESULT="${out% }"
-                return 0
-                ;;
-        esac
     done
 }
