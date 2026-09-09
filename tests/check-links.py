@@ -29,9 +29,9 @@ def markdown_files(root: str) -> list[str]:
     return sorted(found)
 
 
-def broken_links(root: str) -> list[str]:
+def broken_links(root: str, files: list[str]) -> list[str]:
     problems: list[str] = []
-    for rel in markdown_files(root):
+    for rel in files:
         base = os.path.dirname(os.path.join(root, rel))
         with open(os.path.join(root, rel), encoding="utf-8") as fh:
             text = fh.read()
@@ -49,8 +49,9 @@ def broken_links(root: str) -> list[str]:
 
 def main() -> int:
     root = sys.argv[1] if len(sys.argv) > 1 else "."
-    problems = broken_links(root)
-    total = len(markdown_files(root))
+    files = markdown_files(root)
+    problems = broken_links(root, files)
+    total = len(files)
     if problems:
         print(f"{len(problems)} broken link(s) across {total} file(s):")
         for p in problems:
