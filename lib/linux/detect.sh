@@ -42,8 +42,8 @@ detect_macos() {
     if [[ -z "$SYS_FREE_DISK_GB" ]]; then SYS_FREE_DISK_GB=0; fi
 
     SYS_USER="${SUDO_USER:-${USER:-$(id -un)}}"
-    SYS_HOME="$(eval echo "~$SYS_USER" 2>/dev/null || echo "$HOME")"
-    if [[ ! -d "$SYS_HOME" ]]; then SYS_HOME="$HOME"; fi
+    SYS_HOME="$(dscl . -read "/Users/$SYS_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+    if [[ -z "$SYS_HOME" || ! -d "$SYS_HOME" ]]; then SYS_HOME="$HOME"; fi
     SYS_IS_ROOT=0; if [[ "$(id -u)" -eq 0 ]]; then SYS_IS_ROOT=1; fi
     if (( SYS_IS_ROOT )); then AUTOOS_SUDO=""; SYS_CAN_SUDO=1
     elif has_cmd sudo; then AUTOOS_SUDO="sudo"
