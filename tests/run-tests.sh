@@ -324,7 +324,7 @@ if it "two consecutive dry runs produce the same plan"; then
 fi
 
 if it "an unknown component id is rejected"; then
-    out="$(bash setup.sh --only definitely-not-a-thing --yes --no-color 2>&1)"; rc=$?
+    out="$(bash setup.sh --only definitely-not-a-thing --dry-run --yes --no-color 2>&1)"; rc=$?
     if [[ $rc -ne 0 && "$out" == *"Unknown component"* ]]; then pass
     else fail "rc=$rc out=$(printf '%s' "$out" | tail -3)"; fi
 fi
@@ -437,7 +437,7 @@ fi
 
 if it "configuration survives a save/load round trip"; then
     tmp="$(mktemp)"; rm -f "$tmp"
-    AUTOOS_ANSWERS=()
+    declare -A AUTOOS_ANSWERS=()
     AUTOOS_ANSWERS[git_user_name]="Alice Test"
     AUTOOS_ANSWERS[git_user_email]="alice@example.com"
     AUTOOS_ANSWERS[ollama_models]="nomic-embed-text"

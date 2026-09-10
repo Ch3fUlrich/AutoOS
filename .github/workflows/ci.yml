@@ -22,6 +22,11 @@ jobs:
       - name: Test suite
         run: bash tests/run-tests.sh
 
+      - name: Progress regression tests
+        run: |
+          python3 tests/test-process.py
+          node tests/test-web-progress.js
+
       - name: shellcheck
         run: shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh
 
@@ -46,6 +51,17 @@ jobs:
       - name: Test suite
         shell: powershell
         run: .\tests\run-tests.ps1
+
+      - name: Installer and shell regressions (Windows PowerShell)
+        shell: powershell
+        run: .\tests\test-improvements.ps1
+
+      - name: Installer and shell regressions (PowerShell 7)
+        shell: pwsh
+        run: .\tests\test-improvements.ps1
+
+      - name: Web progress regressions
+        run: node tests/test-web-progress.js
 
   ansible:
     name: Ansible lint

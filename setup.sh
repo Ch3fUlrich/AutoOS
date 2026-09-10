@@ -15,6 +15,8 @@ LIB="$AUTOOS_ROOT/lib/linux"
 
 # shellcheck source=lib/linux/ui.sh
 . "$LIB/ui.sh"
+# shellcheck source=lib/linux/progress.sh
+. "$LIB/progress.sh"
 # shellcheck source=lib/linux/detect.sh
 . "$LIB/detect.sh"
 # shellcheck source=lib/linux/catalog.sh
@@ -249,10 +251,7 @@ elif [[ -z "$PROFILE" ]]; then
         ui_select_radio PROFILE "Choose installation profile" "$SUGGESTED" "${p_opts[@]}"
     fi
 fi
-case "$PROFILE" in
-    workstation|ai-coding|light|server|custom) ;;
-    *) ui_err "Unknown profile '$PROFILE'"; exit 2 ;;
-esac
+if ! catalog_has_profile "$PROFILE"; then ui_err "Unknown profile '$PROFILE'"; exit 2; fi
 ui_ok "Using profile: $PROFILE"
 
 # ─── 3. Select ──────────────────────────────────────────────────────────────
@@ -276,12 +275,13 @@ elif (( ASSUME_YES )); then
     SELECTED="$(catalog_profile_defaults "$PROFILE")"
 else
     defaults=" $(catalog_profile_defaults "$PROFILE") "
-    MENU_ID=(); MENU_NAME=(); MENU_DESC=(); MENU_GROUP=(); MENU_SEL=(); MENU_INSTALLED=()
+    MENU_ID=(); MENU_NAME=(); MENU_DESC=(); MENU_GROUP=(); MENU_SEL=(); MENU_INSTALLED=(); MENU_DISABLED=()
     for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
         MENU_ID+=("${CAT_ID[i]}");   MENU_NAME+=("${CAT_NAME[i]}")
         MENU_DESC+=("${CAT_DESC[i]}"); MENU_GROUP+=("${CAT_GROUP[i]}")
         if [[ "$defaults" == *" ${CAT_ID[i]} "* ]]; then MENU_SEL+=(1); else MENU_SEL+=(0); fi
         MENU_INSTALLED+=("${CAT_INSTALLED[i]:-0}")
+        if [[ "${CAT_PROVIDER[i]}" == manual ]]; then MENU_DISABLED+=(1); MENU_DESC[i]+=" (vendor setup required)"; else MENU_DISABLED+=(0); fi
     done
     if ! ui_menu "Choose what to install" "Dependencies are added automatically."; then
         ui_warn "Cancelled — nothing was changed."
@@ -307,6 +307,8 @@ for id in $PLAN_IDS; do
     tag=""
     if [[ " $PLAN_AUTO " == *" $id "* ]]; then tag="$(_c muted)(dependency)$(_c reset)"; fi
     printf '  %2d. %-22s %-8s %s %s\n' "$n" "${CAT_NAME[i]}" "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "$tag"
+    if (( CAT_INSTALLED[i] )); then ui_ok "✓ Already installed - package will be skipped"; fi
+    if [[ "${CAT_PROVIDER[i]}" == manual ]]; then ui_warn "Action required: ${CAT_HOMEPAGE[i]}"; fi
     if [[ -n "${CAT_NOTES[i]}" ]]; then ui_muted "      ${CAT_NOTES[i]}"; fi
 done
 auto_count=0
@@ -370,13 +372,16 @@ fi
 ui_section "Installing"
 installed=0; skipped=0; failed=0; failed_names=""
 installed_names=""; skipped_names=""; unverified=0
-step=0
+step=0; manual=0; manual_names=""
 for id in $PLAN_IDS; do
     step=$((step + 1))
     i="$(catalog_index_of "$id")"
     ui_step "[$step/$n] ${CAT_NAME[i]}"
-    install_component "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}" || INSTALL_STATE="failed"
+    progress_start "$id" "${CAT_NAME[i]}" "$((step-1))" "$n"
+    install_rc=0
+    install_component "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}" || { install_rc=$?; INSTALL_STATE="failed"; }
     case "$INSTALL_STATE" in
+        manual) manual=$((manual+1)); manual_names+="$id "; ui_warn "Action required: ${CAT_HOMEPAGE[i]}" ;;
         installed)
             run_post_install "${CAT_POST[i]}"
             installed=$((installed + 1)); installed_names+="${CAT_ID[i]} "
@@ -393,11 +398,14 @@ for id in $PLAN_IDS; do
             ui_err "${CAT_NAME[i]} failed"
             ;;
     esac
+    progress_update "$INSTALL_STATE" 1
+    if [[ "$install_rc" == 124 ]]; then ui_err "Run stopped after timeout; remaining applications were not started."; break; fi
 done
 
 # ─── 8. Report ──────────────────────────────────────────────────────────────
 ui_section "Summary"
 ui_kv "Installed"       "$installed" ok
+ui_kv "Action required" "$manual" warn
 ui_kv "Already present" "$skipped"   muted
 if (( unverified )); then ui_kv "Installed but unverified" "$unverified" warn; fi
 if (( failed )); then ui_kv "Failed" "$failed" err; else ui_kv "Failed" "0" muted; fi
@@ -431,7 +439,7 @@ fi
 # Saved last, so a replay reflects what actually happened rather than what was planned.
 if [[ -n "$STATE_PATH" ]]; then
     autoos_state_save "$STATE_PATH" "$PROFILE" "$SELECTED" \
-        "$installed_names" "$skipped_names" "$failed_names"
+        "$installed_names" "$skipped_names" "$failed_names" "$manual_names"
 fi
 
 ui_info "Some changes (PATH, shell, docker group) need a new login to take effect."

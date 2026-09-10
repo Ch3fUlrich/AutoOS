@@ -163,7 +163,7 @@ detect_system() {
 
     # ─── Session ────────────────────────────────────────────────────────────
     SYS_USER="${SUDO_USER:-${USER:-$(id -un)}}"
-    SYS_HOME="$(getent passwd "$SYS_USER" 2>/dev/null | cut -d: -f6)"
+    SYS_HOME="$(getent passwd "$SYS_USER" 2>/dev/null | cut -d: -f6 || true)"
     if [[ -z "$SYS_HOME" ]]; then SYS_HOME="$HOME"; fi
     SYS_IS_ROOT=0; if [[ "$(id -u)" -eq 0 ]]; then SYS_IS_ROOT=1; fi
 
@@ -374,4 +374,67 @@ launch_hint() {
         return 0
     fi
     return 1
+}
+
+script_is_installed() {
+    case "$1" in
+        oh-my-zsh)       [[ -d "$SYS_HOME/.oh-my-zsh" ]] ;;
+        zsh-plugins)     [[ -d "$SYS_HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]] ;;
+        powerlevel10k)   [[ -d "$SYS_HOME/.oh-my-zsh/custom/themes/powerlevel10k" ]] ;;
+        meslo-nerd-font) [[ -f "$SYS_HOME/.local/share/fonts/MesloLGS NF Regular.ttf" ]] ;;
+        nodesource-lts)  has_cmd node ;;
+        docker)          has_cmd docker ;;
+        tailscale)       has_cmd tailscale ;;
+        antigravity)     has_cmd antigravity ;;
+        xpipe)           has_cmd xpipe ;;
+        herdr)           has_cmd herdr ;;
+        handy)           has_cmd handy || [[ -x /usr/bin/handy ]] ;;
+        vscode)          has_cmd code ;;
+        agy)             has_cmd agy || [[ -x "$SYS_HOME/.local/bin/agy" ]] ;;
+        gh)              has_cmd gh ;;
+        uv)              has_cmd uv || [[ -x "$SYS_HOME/.local/bin/uv" || -x "$SYS_HOME/.cargo/bin/uv" ]] ;;
+        ollama)          has_cmd ollama ;;
+        google-chrome)   has_cmd google-chrome || has_cmd google-chrome-stable ;;
+        bitwarden-chrome) [[ -f /opt/google/chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
+                         [[ -f /usr/share/google-chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
+                         [[ -f /etc/opt/chrome/policies/managed/bitwarden.json ]] ;;
+        *)               return 1 ;;
+    esac
+}
+
+# A bounded package-manager query shared by the menu and execution.
+detect_installed_status() {
+    local provider="$1" package="$2" cask="${3:-0}"
+    local SYS_HOME="${SYS_HOME:-$HOME}"
+    INSTALLED_STATUS="unknown"
+    if [[ "$provider" == custom ]] && declare -F custom_is_installed >/dev/null; then
+        if custom_is_installed "$package"; then INSTALLED_STATUS=installed; else INSTALLED_STATUS=not-detected; fi
+        return 0
+    fi
+    if [[ "$provider" == script ]]; then
+        if script_is_installed "$package"; then INSTALLED_STATUS=installed; else INSTALLED_STATUS=not-detected; fi
+        return 0
+    fi
+    INSTALLED_STATUS="$(python3 - "$provider" "$package" "$cask" <<'PY'
+import json,shutil,subprocess,sys
+provider,package,cask=sys.argv[1:]
+def probe(args):
+    if not shutil.which(args[0]): return None
+    return subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
+try:
+    installed=False; known=True
+    if provider=='apt':
+        r=probe(['dpkg-query','-W','-f=${db:Status-Status}\n',*package.split()])
+        installed=bool(r and r.returncode==0 and r.stdout.splitlines() and all(x=='installed' for x in r.stdout.splitlines()))
+    elif provider=='snap':
+        r=probe(['snap','list',package]); installed=bool(r and r.returncode==0)
+    elif provider=='brew':
+        r=probe(['brew','list','--versions',*(['--cask'] if cask=='1' else ['--formula']),*package.split()]); installed=bool(r and r.returncode==0 and len(r.stdout.strip().splitlines())==len(package.split()))
+    elif provider=='npm':
+        r=probe(['npm','ls','-g','--depth=0','--json']); installed=bool(r and package in json.loads(r.stdout).get('dependencies',{}))
+    else: known=False
+    print('installed' if installed else 'not-detected' if known else 'unknown')
+except (subprocess.TimeoutExpired,OSError,ValueError): print('unknown')
+PY
+)"
 }

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     AutoOS Windows test suite.
@@ -332,7 +332,7 @@ Test-Case 'Read-AutoOSConfirm returns default in non-interactive mode' {
     $env:AUTOOS_NONINTERACTIVE = '1'
     try {
         Assert-True (Read-AutoOSConfirm -Question 'Proceed?' -Default $true)
-        Assert-False (Read-AutoOSConfirm -Question 'Proceed?' -Default $false)
+        Assert-True (-not (Read-AutoOSConfirm -Question 'Proceed?' -Default $false))
     } finally {
         Remove-Item Env:\AUTOOS_NONINTERACTIVE -ErrorAction SilentlyContinue
     }
@@ -754,7 +754,7 @@ Test-Case 'Install-AutoOSAgentSkills links skills to Antigravity and Claude Code
 }
 
 Test-Case 'Test-AutoOSInstalled checks both Documents\code and Documents\Code' {
-    if ($installSource -notmatch 'Code\\agent-skills' -or $installSource -notmatch 'code\\agent-skills') {
+    if ((Get-Content (Join-Path $Root 'lib/windows/AutoOS.Detect.psm1') -Raw) -notmatch 'Code\\agent-skills') {
         throw 'Test-AutoOSInstalled does not check both Code and code paths'
     }
     Pass

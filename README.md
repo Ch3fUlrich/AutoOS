@@ -104,6 +104,7 @@ A profile is a starting set of ticks; the suggestion comes from your hardware.
 | `light` | Raspberry Pi 5 and similar — Claude Code, Tailscale, Herdr |
 | `server` *(Linux)* | Headless: shell, networking, containers, no GUI |
 | `custom` | Nothing pre-ticked |
+| `everyday` | Browsers, media, gaming, remote control and resin-printing tools |
 
 Details: [Profiles & detection](docs/profiles.md).
 
@@ -126,6 +127,10 @@ Details: [Profiles & detection](docs/profiles.md).
 
 `--dry-run` prints every command that *would* run and touches nothing. It is
 the right way to see what a profile means before committing to it.
+
+Installed applications have a green check in both interfaces. Package installation is skipped; selected configuration steps can still repair the setup. Overall progress counts finished components, while a second bar shows native download/installer progress (or an explicit indeterminate state).
+
+The `everyday` profile includes Unified Remote Server. FiiO K3 and CHITUBOX use explicit vendor setup steps where no verified package-manager installer is available; these report **Action required**, not installed. See [desktop setup](docs/desktop-setup.md) for the full list, shell configuration and suggested additional profiles.
 
 Full flag table: [Getting started](docs/getting-started.md#flags).
 

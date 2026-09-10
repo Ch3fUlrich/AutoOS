@@ -31,7 +31,10 @@ TOKEN = secrets.token_urlsafe(24)
 
 LOCK = threading.Lock()
 LOG: list[dict] = []
-RUN = {"running": False, "done": 0, "total": 0, "summary": ""}
+RUN = {"running": False, "done": 0, "total": 0, "summary": "", "current": None}
+STATE_LOCK = threading.Lock()
+STATE_CACHE: dict | None = None
+PROGRESS_PREFIX = "@@AUTOOS_PROGRESS "
 
 
 def sh(*args: str) -> str:
@@ -67,18 +70,19 @@ cd "$AUTOOS_ROOT"
 . lib/linux/ui.sh; . lib/linux/detect.sh; . lib/linux/catalog.sh; . lib/linux/install.sh
 AUTOOS_NO_COLOR=1 ui_init
 detect_system
-cat_file="catalog/linux.json"
-if [[ "${SYS_OS:-linux}" == "macos" ]]; then cat_file="catalog/macos.json"; fi
-catalog_load "$cat_file" "$SYS_ARCH" "$SYS_IS_HEADLESS"
-catalog_probe_installed
-installed_ids="$(catalog_installed_ids)"
+catalog_load "catalog/${SYS_OS:-linux}.json" "$SYS_ARCH" "$SYS_IS_HEADLESS"
+catalog_detect_installed
+installed=()
+for ((i=0; i<${#CAT_ID[@]}; i++)); do
+    installed+=("${CAT_ID[i]}" "$(if (( CAT_INSTALLED[i] )); then printf installed; else printf not-detected; fi)")
+done
 python3 - "$SYS_DISTRO_NAME" "$SYS_ARCH" "$SYS_MODEL" "$SYS_CPU_NAME" "$SYS_CPU_CORES" \
           "$SYS_RAM_GB" "$SYS_FREE_DISK_GB" "$SYS_USER" "$SYS_IS_HEADLESS" \
           "$(suggested_profile)" "$(hostname)" "${SYS_ENVIRONMENT:-unknown}" \
-          "${SYS_IS_WSL:-0}" "${SYS_WSL_VERSION:-}" "${SYS_WSL_DISTRO:-}" "${installed_ids}" <<'PY'
+          "${SYS_IS_WSL:-0}" "${SYS_WSL_VERSION:-}" "${SYS_WSL_DISTRO:-}" \
+          "${SYS_OS:-linux}" "${installed[@]}" <<'PY'
 import json, sys
 k = sys.argv[1:]
-inst_ids = k[15].split() if len(k) > 15 and k[15] else []
 print(json.dumps({
   "system": {
     "host": k[10], "distribution": k[0], "architecture": k[1], "model": k[2],
@@ -88,7 +92,8 @@ print(json.dumps({
   },
   "suggested": k[9],
   "wsl": {"isWsl": k[12] == "1", "version": k[13], "distro": k[14]},
-  "installed_ids": inst_ids,
+  "platform": k[15],
+  "installed": dict(zip(k[16::2], k[17::2])),
 }))
 PY
 """
@@ -98,12 +103,12 @@ PY
         raise RuntimeError(out.stderr[-2000:] or "detection failed")
     info = json.loads(out.stdout.strip().splitlines()[-1])
 
-    catalog_name = "macos.json" if sys.platform == "darwin" else "linux.json"
-    catalog = json.loads((ROOT / "catalog" / catalog_name).read_text(encoding="utf-8"))
+    platform = info["platform"]
+    catalog = json.loads((ROOT / "catalog" / f"{platform}.json").read_text(encoding="utf-8"))
     platforms = component_platforms()
     arch = info["system"]["architecture"]
     headless = info["system"]["display"] == "headless"
-    installed_ids = set(info.get("installed_ids", []))
+    installed_ids = {key for key, value in info["installed"].items() if value == "installed"}
     installed_names = []
     components = []
     for grp in catalog.get("categories", []):
@@ -122,15 +127,16 @@ PY
                 "category": grp["name"],
                 "requires": c.get("requires", []), "homepage": c.get("homepage"),
                 "verify": c.get("verify"), "notes": c.get("notes"),
-                "platforms": platforms.get(c["id"], ["linux"]),
-                "installed": is_inst,
+                "platforms": platforms.get(c["id"], [platform]),
+                "installed": info["installed"].get(c["id"]) == "installed",
+                "installedStatus": info["installed"].get(c["id"], "unknown"),
             })
     info["system"]["installed applications"] = (
         "✓ " + ", ".join(installed_names) + f" ({len(installed_names)} detected)"
         if installed_names else "none detected"
     )
     return {
-        "platform": "macOS" if sys.platform == "darwin" else "Linux",
+        "platform": "macOS" if platform == "macos" else "Linux",
         "system": info["system"],
         "suggested": info["suggested"],
         "wsl": info.get("wsl", {"isWsl": False, "version": "", "distro": ""}),
@@ -138,6 +144,29 @@ PY
         "prompts": catalog.get("prompts", {}),
         "components": components,
     }
+
+
+def cached_state() -> dict:
+    global STATE_CACHE
+    with STATE_LOCK:
+        if STATE_CACHE is None:
+            STATE_CACHE = build_state()
+        return STATE_CACHE
+
+
+def record_line(line: str) -> None:
+    """Structured snapshots count completions; ordinary text remains just a log."""
+    with LOCK:
+        if line.startswith(PROGRESS_PREFIX):
+            try:
+                event = json.loads(line[len(PROGRESS_PREFIX):])
+                done, total = int(event["done"]), int(event["total"])
+                if 0 <= done <= total:
+                    RUN.update(done=done, total=total, current=event)
+            except (ValueError, TypeError, KeyError):
+                pass  # A damaged progress line cannot interrupt pipe draining.
+            return
+        LOG.append({"level": classify(line), "text": line})
 
 
 def classify(line: str) -> str:
@@ -156,7 +185,8 @@ def classify(line: str) -> str:
 
 
 def run_install(ids: list[str], answers: dict, dry: bool) -> None:
-    env = dict(os.environ, AUTOOS_NO_COLOR="1")
+    global STATE_CACHE
+    env = dict(os.environ, AUTOOS_NO_COLOR="1", AUTOOS_PROGRESS_EVENTS="1")
     for key, val in (answers or {}).items():
         if val:
             env["AUTOOS_ANSWER_" + key.upper().replace("-", "_")] = str(val)
@@ -166,27 +196,32 @@ def run_install(ids: list[str], answers: dict, dry: bool) -> None:
         cmd.append("--dry-run")
 
     with LOCK:
-        RUN.update(running=True, done=0, total=len(ids), summary="")
         LOG.append({"level": "step", "text": "$ " + " ".join(cmd)})
 
-    proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1)
-    assert proc.stdout is not None
-    for raw in proc.stdout:
-        line = raw.rstrip("\n")
+    try:
+        # Merging stderr into stdout drains both streams even during a noisy
+        # installer. Decode imperfect vendor output without losing the worker.
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            record_line(raw.rstrip("\r\n"))
+        proc.wait()
         with LOCK:
-            LOG.append({"level": classify(line), "text": line})
-            if line.strip().startswith("> ["):
-                RUN["done"] += 1
-    proc.wait()
-
-    with LOCK:
-        RUN["running"] = False
-        RUN["summary"] = "finished (exit %d)" % proc.returncode
-        LOG.append({
-            "level": "ok" if proc.returncode == 0 else "err",
-            "text": "--- exit code %d ---" % proc.returncode,
-        })
+            RUN["summary"] = "finished (exit %d)" % proc.returncode
+            LOG.append({
+                "level": "ok" if proc.returncode == 0 else "err",
+                "text": "--- exit code %d ---" % proc.returncode,
+            })
+    except Exception as exc:
+        with LOCK:
+            RUN["summary"] = "installer failed: " + str(exc)
+            LOG.append({"level": "err", "text": RUN["summary"]})
+    finally:
+        with STATE_LOCK:
+            STATE_CACHE = None
+        with LOCK:
+            RUN["running"] = False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -223,7 +258,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path == "/api/state":
             try:
-                return self._json(200, build_state())
+                return self._json(200, cached_state())
             except Exception as exc:  # surface the real reason to the page
                 return self._json(500, {"error": str(exc)})
 
@@ -233,14 +268,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "running": RUN["running"]})
 
         if u.path == "/api/log":
-            offset = int((qs.get("offset") or ["0"])[0])
+            try:
+                offset = max(0, int((qs.get("offset") or ["0"])[0]))
+            except ValueError:
+                return self._json(400, {"error": "offset must be an integer"})
             with LOCK:
+                offset = min(offset, len(LOG))
                 lines = LOG[offset:]
-                return self._json(200, {
+                payload = {
                     "lines": lines, "offset": offset + len(lines),
                     "running": RUN["running"], "done": RUN["done"],
                     "total": RUN["total"], "summary": RUN["summary"],
-                })
+                    "current": RUN["current"],
+                }
+            return self._json(200, payload)
 
         if u.path == "/api/config":
             cfg_file = ROOT / "autoos.config.json"
@@ -273,16 +314,24 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": "payload must be a JSON object"})
                 cfg_file = ROOT / "autoos.config.json"
                 tmp_file = ROOT / "autoos.config.json.tmp"
-                tmp_file.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+                original = cfg_file.read_text(encoding="utf-8-sig") if cfg_file.exists() else None
+                merged = json.loads(original) if original is not None else {}
+                if not isinstance(merged, dict):
+                    raise ValueError("Existing configuration must be an object")
+                for key, value in body.items():
+                    if key == "answers" and isinstance(value, dict) and isinstance(merged.get(key), dict):
+                        merged[key].update(value)
+                    else:
+                        merged[key] = value
+                if original is not None:
+                    cfg_file.with_name(cfg_file.name + f".autoos-backup-{time.time_ns()}").write_text(original, encoding="utf-8")
+                tmp_file.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
                 tmp_file.replace(cfg_file)
                 return self._json(200, {"ok": True, "saved": str(cfg_file)})
             except Exception as exc:
                 return self._json(500, {"error": f"failed to save config: {exc}"})
         if u.path != "/api/install":
             return self._json(404, {"error": "not found"})
-        if RUN["running"]:
-            return self._json(409, {"error": "a run is already in progress"})
-
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
         ids = [str(i) for i in body.get("ids", []) if i]
@@ -290,7 +339,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "no components selected"})
 
         with LOCK:
+            if RUN["running"]:
+                return self._json(409, {"error": "a run is already in progress"})
             LOG.clear()
+            # Reserve before starting the worker: two simultaneous POSTs must
+            # never launch two package managers against the same machine.
+            RUN.update(running=True, done=0, total=len(ids), summary="", current=None)
         dry = bool(body.get("dryRun", True)) or FORCE_DRY
         threading.Thread(
             target=run_install,

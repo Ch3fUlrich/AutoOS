@@ -187,3 +187,17 @@ secret you choose: the server compose file takes it as
 invents one — this repository is public, and a plausible-looking secret in it is
 a leak whether or not it happens to work.
 
+
+## Installed status and vendor setup
+
+Optional Windows `installedNames` entries match exact registered display names plus
+version/architecture suffixes; `installedAppx` contains exact MSIX package names.
+The same detector serves terminal badges, browser badges and installer skipping.
+A command in a private tool runtime is not proof of a normally installed application.
+Unknown probes remain unknown, without a green check.
+
+`manual` entries require `homepage` and `notes`. They produce an action-required
+result and never run an unverified installer or report a successful installation.
+Windows `psmodule` entries install a named PowerShell Gallery module at user scope;
+`minimumVersion` is optional. Oh My Posh declares PSReadLine and Terminal-Icons as
+ordinary dependencies, rather than hiding their installation in a startup profile.

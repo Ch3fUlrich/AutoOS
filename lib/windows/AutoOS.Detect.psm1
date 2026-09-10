@@ -17,6 +17,148 @@ $ErrorActionPreference = 'Stop'
 $script:StartAppsCache = $null
 $script:AppxCache      = $null
 $script:ShortcutCache  = $null
+$script:InstalledCache = @{}
+$script:InstalledInventory = $null
+
+function Clear-AutoOSInstalledStatus {
+    $script:InstalledCache = @{}
+    $script:InstalledInventory = $null
+}
+
+function Get-AutoOSInstalledInventory {
+    # Inspect local registration only. A winget list for each row can contact
+    # sources, prompt, or hang before an installer even starts.
+    if ($null -ne $script:InstalledInventory) { return $script:InstalledInventory }
+    $entries = @(foreach ($root in @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKCU:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+    )) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        foreach ($entry in @(Get-ItemProperty -Path "$root\*" -ErrorAction SilentlyContinue)) {
+            $display = if ($entry.PSObject.Properties.Name -contains 'DisplayName') { [string]$entry.DisplayName } else { '' }
+            $identifier = if ($entry.PSObject.Properties.Name -contains 'WinGetPackageIdentifier') { [string]$entry.WinGetPackageIdentifier } else { '' }
+            if ($display -or $identifier) {
+                [pscustomobject]@{ Name = $display; Package = $identifier; Key = $entry.PSChildName }
+            }
+        }
+    })
+    # Use persistent PATH, not the hosting process's injected dependency PATH.
+    # In particular, Codex's private pwsh runtime is not an installed PS7 app.
+    $paths = @((([Environment]::GetEnvironmentVariable('Path', 'Machine')) + ';' +
+                 ([Environment]::GetEnvironmentVariable('Path', 'User'))) -split ';' |
+        Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_.Trim('"')) } |
+        Where-Object { $_ -notmatch '(?i)[\\/](?:\.codex|codex-runtimes|codex-primary-runtime)[\\/]' } |
+        Select-Object -Unique)
+    $appx = @()
+    try {
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $psi.Arguments = '-NoProfile -Command "Get-AppxPackage | Select-Object -ExpandProperty Name"'
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $probe = [Diagnostics.Process]::Start($psi)
+        try {
+            $out = $probe.StandardOutput.ReadToEndAsync(); $err = $probe.StandardError.ReadToEndAsync()
+            if ($probe.WaitForExit(8000) -and $out.Wait(1000)) { $appx = @($out.Result -split '[\r\n]+' | Where-Object { $_ }) }
+            else { $probe.Kill() }
+            $null = $err
+        } finally { $probe.Dispose() }
+    } catch { $appx = @() }
+    $script:InstalledInventory = [pscustomobject]@{ Entries = $entries; Paths = $paths; Appx = $appx }
+    $script:InstalledInventory
+}
+
+function Test-AutoOSRegisteredName {
+    param([string]$Actual, [string]$Expected)
+    if (-not $Expected) { return $false }
+    # Permit version/architecture suffixes, but never arbitrary substring
+    # matches: "Steam Tools" is not Steam and "Firefox Helper" is not Firefox.
+    $pattern = '^' + [regex]::Escape($Expected) + '(?:\s+(?:v?\d[^\r\n]*|\((?:x64|x86|arm64|64-bit|32-bit)(?: [a-z]{2}(?:-[A-Z]{2})?)?\)|\((?:User|Machine)\)))?$'
+    $Actual -match $pattern
+}
+
+function Get-AutoOSInstalledStatus {
+    <# .SYNOPSIS Read-only detection shared by selection and installer skipping.
+       .DESCRIPTION Unknown is retained when a component has no reliable probe.
+       Verify commands are never executed: some of them launch a desktop app. #>
+    param([Parameter(Mandatory)][psobject]$Component, [switch]$Refresh)
+    if ($Refresh) { $script:InstalledCache = @{}; $script:InstalledInventory = $null }
+    $verify = if ($Component.PSObject.Properties.Name -contains 'Verify') { [string]$Component.Verify } else { '' }
+    $name = if ($Component.PSObject.Properties.Name -contains 'Name') { [string]$Component.Name } else { '' }
+    $key = "$($Component.Provider)|$($Component.Package)|$name|$verify"
+    if ($script:InstalledCache.ContainsKey($key)) { return $script:InstalledCache[$key] }
+    $status = 'unknown'
+    if ($Component.Provider -eq 'custom') {
+        if ($Component.Package -eq 'agent-skills') {
+            $docs = [Environment]::GetFolderPath('MyDocuments')
+            return $(if (Test-Path -LiteralPath (Join-Path $docs 'Code\agent-skills') -PathType Container) { 'installed' } else { 'not-detected' })
+        }
+        if ($Component.Package -like 'mcp-*') {
+            $server = $Component.Package.Substring(4)
+            foreach ($config in @((Join-Path $env:USERPROFILE '.claude.json'), (Join-Path $env:USERPROFILE '.gemini\antigravity\mcp_config.json'))) {
+                if (-not (Test-Path -LiteralPath $config)) { continue }
+                try {
+                    $data = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
+                    if ($data.PSObject.Properties.Name -contains 'mcpServers' -and $data.mcpServers.PSObject.Properties.Name -contains $server) { return 'installed' }
+                } catch { continue }
+            }
+        }
+        return $status
+    }
+    if ($Component.Provider -eq 'psmodule') {
+        $minimum = if ($Component.PSObject.Properties.Name -contains 'MinimumVersion' -and $Component.MinimumVersion) { [version]$Component.MinimumVersion } else { [version]'0.0' }
+        $found = @(Get-Module -ListAvailable -Name $Component.Package | Where-Object { $_.Version -ge $minimum -and $_.ModuleBase -notmatch '[\\/](?:codex-runtimes|codex-primary-runtime)[\\/]' })
+        return $(if ($found.Count) { 'installed' } else { 'not-detected' })
+    }
+    $inventory = Get-AutoOSInstalledInventory
+    if ($Component.PSObject.Properties.Name -contains 'InstalledAppx' -and $inventory.PSObject.Properties.Name -contains 'Appx') {
+        foreach ($app in $Component.InstalledAppx) { if ($app -in $inventory.Appx) { $script:InstalledCache[$key] = 'installed'; return 'installed' } }
+    }
+    $names = @($name)
+    if ($Component.PSObject.Properties.Name -contains 'InstalledNames') { $names += @($Component.InstalledNames) }
+    foreach ($entry in $inventory.Entries) {
+        if (($entry.Package -and $entry.Package -eq $Component.Package) -or
+            ($entry.Key -eq "$($Component.Package)_winget")) { $status = 'installed'; break }
+        foreach ($candidate in $names) {
+            if (Test-AutoOSRegisteredName $entry.Name $candidate) { $status = 'installed'; break }
+        }
+        if ($status -eq 'installed') { break }
+    }
+    if ($status -ne 'installed' -and $verify -match '^([a-zA-Z0-9][a-zA-Z0-9_.-]*)(?:\s|$)') {
+        $exe = $Matches[1]
+        foreach ($directory in $inventory.Paths) {
+            # WindowsApps contains execution aliases (including uninstalled
+            # Python Store stubs), so existence there cannot prove installation.
+            if ($directory -match '(?i)[\\/]Microsoft[\\/]WindowsApps(?:[\\/]|$)') { continue }
+            foreach ($extension in @('', '.exe', '.cmd', '.bat')) {
+                if (Test-Path -LiteralPath (Join-Path $directory ($exe + $extension)) -PathType Leaf) {
+                    $status = 'installed'; break
+                }
+            }
+            if ($status -eq 'installed') { break }
+        }
+        if ($status -ne 'installed') { $status = 'not-detected' }
+    }
+    if ($status -eq 'unknown' -and $Component.Provider -in @('winget', 'choco', 'manual')) { $status = 'not-detected' }
+    if ($Component.Provider -eq 'script' -and $Component.Package -eq 'meslo-nerd-font') {
+        $fontPath = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts\MesloLGS NF Regular.ttf'
+        $status = if (Test-Path -LiteralPath $fontPath) { 'installed' } else { 'not-detected' }
+    }
+    $script:InstalledCache[$key] = $status
+    $status
+}
+
+function Set-AutoOSInstalledStatus {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Components, [switch]$Refresh)
+    if ($Refresh) { $script:InstalledCache = @{}; $script:InstalledInventory = $null }
+    foreach ($component in $Components) {
+        $status = Get-AutoOSInstalledStatus -Component $component
+        Add-Member -InputObject $component -NotePropertyName InstalledStatus -NotePropertyValue $status -Force
+        Add-Member -InputObject $component -NotePropertyName Installed -NotePropertyValue ($status -eq 'installed') -Force
+    }
+}
 
 function Test-AutoOSCommand {
     param([Parameter(Mandatory)][string]$Name)
@@ -179,7 +321,7 @@ function Get-AutoOSBlockers {
         $blockers += @{
             Severity = 'warn'
             Message  = 'Not running as Administrator.'
-            Fix      = 'Machine-wide packages will be skipped. Re-run from an elevated terminal for a full install.'
+            Fix      = 'Some installers may request administrator approval. Use an elevated terminal if a machine-wide install fails.'
         }
     }
     if ($SystemInfo.FreeDiskGB -gt 0 -and $SystemInfo.FreeDiskGB -lt 10) {
@@ -239,6 +381,7 @@ function Get-AutoOSStartMenuShortcut {
     # An exact name wins outright; a prefix is kept only if nothing better turns up.
     $fallback = $null
     foreach ($lnk in $script:ShortcutCache) {
+        if ($lnk.BaseName -match '(?i)(manual|uninstall|readme|help|website|reset preferences|cache files)') { continue }
         $bare = ($lnk.BaseName -replace '[^\p{L}\p{N}]', '').ToLowerInvariant()
         if ($bare -eq $wanted) { return $lnk }
         if ((-not $fallback) -and $bare.StartsWith($wanted)) { $fallback = $lnk }
@@ -340,4 +483,5 @@ function Get-AutoOSLaunchHint {
 Export-ModuleMember -Function `
     Test-AutoOSCommand, Test-AutoOSAdmin, Get-AutoOSSystemInfo,
     Get-AutoOSSuggestedProfile, Get-AutoOSBlockers,
-    Get-AutoOSLaunchHint, Get-AutoOSStartMenuShortcut, Get-AutoOSStartApp
+    Get-AutoOSLaunchHint, Get-AutoOSStartMenuShortcut, Get-AutoOSStartApp,
+    Get-AutoOSInstalledStatus, Set-AutoOSInstalledStatus, Clear-AutoOSInstalledStatus

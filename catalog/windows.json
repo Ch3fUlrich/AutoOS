@@ -5,7 +5,8 @@
     "workstation": "Full development workstation — everything below that fits the hardware.",
     "ai-coding": "Coding and AI tooling only, plus the terminal it runs in.",
     "light": "Minimal remote-access box — Claude Code, Tailscale and Herdr only.",
-    "custom": "Start with nothing ticked and choose by hand."
+    "custom": "Start with nothing ticked and choose by hand.",
+    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
   },
   "categories": [
     {
@@ -23,7 +24,10 @@
             "workstation",
             "ai-coding"
           ],
-          "homepage": "https://learn.microsoft.com/windows/terminal/"
+          "homepage": "https://learn.microsoft.com/windows/terminal/",
+          "installedAppx": [
+            "Microsoft.WindowsTerminal"
+          ]
         },
         {
           "id": "powershell7",
@@ -36,7 +40,15 @@
             "ai-coding"
           ],
           "verify": "pwsh --version",
-          "homepage": "https://learn.microsoft.com/powershell/"
+          "homepage": "https://learn.microsoft.com/powershell/",
+          "installedNames": [
+            "PowerShell 7-x64",
+            "PowerShell 7 (x64)",
+            "PowerShell 7"
+          ],
+          "installedAppx": [
+            "Microsoft.PowerShell"
+          ]
         },
         {
           "id": "oh-my-posh",
@@ -46,7 +58,9 @@
           "package": "JanDeDobbeleer.OhMyPosh",
           "requires": [
             "powershell7",
-            "nerd-font"
+            "nerd-font",
+            "psreadline",
+            "terminal-icons"
           ],
           "postInstall": "Install-AutoOSPoshTheme",
           "profiles": [
@@ -54,7 +68,11 @@
             "ai-coding"
           ],
           "verify": "oh-my-posh --version",
-          "homepage": "https://ohmyposh.dev/"
+          "homepage": "https://ohmyposh.dev/",
+          "notes": "Installs a calm everyday prompt, completion/history helpers and file icons. The coding theme remains available.",
+          "installedAppx": [
+            "ohmyposh.cli"
+          ]
         },
         {
           "id": "nerd-font",
@@ -69,6 +87,28 @@
           "postInstall": "Install-AutoOSNerdFont",
           "notes": "No winget package exists for Meslo; downloaded from the ryanoasis/nerd-fonts release and installed per-user.",
           "homepage": "https://www.nerdfonts.com/"
+        },
+        {
+          "id": "psreadline",
+          "name": "PSReadLine",
+          "description": "History suggestions, search and tab completion",
+          "provider": "psmodule",
+          "package": "PSReadLine",
+          "minimumVersion": "2.2.0",
+          "profiles": [],
+          "homepage": "https://github.com/PowerShell/PSReadLine"
+        },
+        {
+          "id": "terminal-icons",
+          "name": "Terminal-Icons",
+          "description": "File and folder icons in PowerShell",
+          "provider": "psmodule",
+          "package": "Terminal-Icons",
+          "profiles": [],
+          "requires": [
+            "nerd-font"
+          ],
+          "homepage": "https://github.com/devblackops/Terminal-Icons"
         }
       ]
     },
@@ -132,7 +172,10 @@
             "light"
           ],
           "verify": "git --version",
-          "homepage": "https://git-scm.com/"
+          "homepage": "https://git-scm.com/",
+          "installedNames": [
+            "Git"
+          ]
         },
         {
           "id": "nodejs",
@@ -401,7 +444,8 @@
           "provider": "winget",
           "package": "Parsec.Parsec",
           "profiles": [
-            "workstation"
+            "workstation",
+            "everyday"
           ],
           "homepage": "https://parsec.app/"
         },
@@ -411,8 +455,13 @@
           "description": "Game-streaming client",
           "provider": "winget",
           "package": "MoonlightGameStreamingProject.Moonlight",
-          "profiles": [],
-          "homepage": "https://moonlight-stream.org/"
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://moonlight-stream.org/",
+          "installedNames": [
+            "Moonlight Game Streaming Client"
+          ]
         },
         {
           "id": "teamviewer",
@@ -436,10 +485,14 @@
           "provider": "winget",
           "package": "7zip.7zip",
           "profiles": [
-            "workstation"
+            "workstation",
+            "everyday"
           ],
           "verify": "7z",
-          "homepage": "https://www.7-zip.org/"
+          "homepage": "https://www.7-zip.org/",
+          "installedNames": [
+            "7-Zip"
+          ]
         },
         {
           "id": "notepadplusplus",
@@ -459,9 +512,13 @@
           "provider": "winget",
           "package": "Mozilla.Firefox",
           "profiles": [
-            "workstation"
+            "workstation",
+            "everyday"
           ],
-          "homepage": "https://www.mozilla.org/firefox/"
+          "homepage": "https://www.mozilla.org/firefox/",
+          "installedNames": [
+            "Mozilla Firefox"
+          ]
         },
         {
           "id": "chrome",
@@ -470,9 +527,13 @@
           "provider": "winget",
           "package": "Google.Chrome",
           "profiles": [
-            "workstation"
+            "workstation",
+            "everyday"
           ],
-          "homepage": "https://www.google.com/chrome/"
+          "homepage": "https://www.google.com/chrome/",
+          "installedNames": [
+            "Google Chrome"
+          ]
         }
       ]
     },
@@ -487,9 +548,13 @@
           "provider": "winget",
           "package": "VideoLAN.VLC",
           "profiles": [
-            "workstation"
+            "workstation",
+            "everyday"
           ],
-          "homepage": "https://www.videolan.org/vlc/"
+          "homepage": "https://www.videolan.org/vlc/",
+          "installedNames": [
+            "VLC media player"
+          ]
         },
         {
           "id": "spotify",
@@ -497,8 +562,13 @@
           "description": "Music",
           "provider": "winget",
           "package": "Spotify.Spotify",
-          "profiles": [],
-          "homepage": "https://www.spotify.com/"
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.spotify.com/",
+          "installedAppx": [
+            "SpotifyAB.SpotifyMusic"
+          ]
         },
         {
           "id": "slack",
@@ -526,7 +596,10 @@
           "package": "9NKSQGP7F2NH",
           "profiles": [],
           "source": "msstore",
-          "homepage": "https://www.whatsapp.com/"
+          "homepage": "https://www.whatsapp.com/",
+          "installedAppx": [
+            "5319275A.WhatsAppDesktop"
+          ]
         }
       ]
     },
@@ -608,6 +681,112 @@
           "package": "Google.GoogleDrive",
           "profiles": [],
           "homepage": "https://www.google.com/drive/download/"
+        }
+      ]
+    },
+    {
+      "id": "everyday",
+      "name": "Everyday & Entertainment",
+      "description": "Personal desktop, media, games and maker tools.",
+      "requiresDisplay": true,
+      "components": [
+        {
+          "id": "hwinfo",
+          "name": "HWiNFO",
+          "description": "Hardware information and sensor monitoring",
+          "provider": "winget",
+          "package": "REALiX.HWiNFO",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.hwinfo.com/",
+          "installedNames": [
+            "HWiNFO64",
+            "HWiNFO® 64"
+          ]
+        },
+        {
+          "id": "steam",
+          "name": "Steam",
+          "description": "Game library and store",
+          "provider": "winget",
+          "package": "Valve.Steam",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://store.steampowered.com/about/"
+        },
+        {
+          "id": "discord",
+          "name": "Discord",
+          "description": "Voice, video and community chat",
+          "provider": "winget",
+          "package": "Discord.Discord",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://discord.com/download"
+        },
+        {
+          "id": "fiio-k3",
+          "name": "FiiO K3 USB DAC driver",
+          "description": "USB audio driver for the FiiO K3 DAC",
+          "provider": "manual",
+          "package": "fiio-k3",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.fiio.com/Driver_Download",
+          "notes": "Action required: download the official FiiO USB DAC driver for K3 and follow its wizard. macOS/Linux use class-compliant USB audio without this Windows driver.",
+          "installedNames": [
+            "FiiO USB DAC Driver"
+          ]
+        },
+        {
+          "id": "jellyfin-client",
+          "name": "Jellyfin Media Player",
+          "description": "Desktop client for your Jellyfin media server",
+          "provider": "winget",
+          "package": "Jellyfin.JellyfinMediaPlayer",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://jellyfin.org/downloads/clients/all/",
+          "installedNames": [
+            "Jellyfin Media Player"
+          ]
+        },
+        {
+          "id": "chitubox",
+          "name": "CHITUBOX Basic",
+          "description": "Prepare models for resin 3D printing",
+          "provider": "manual",
+          "package": "chitubox",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.chitubox.com/en/download/chitubox-free",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer.",
+          "installedNames": [
+            "CHITUBOX Basic",
+            "CHITUBOX"
+          ]
+        },
+        {
+          "id": "unified-remote",
+          "name": "Unified Remote Server",
+          "description": "Control this computer from your phone",
+          "provider": "winget",
+          "package": "UnifiedIntents.UnifiedRemote",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.unifiedremote.com/download",
+          "notes": "Install the Unified Remote app on your phone and pair with this server. Review remote access settings before use.",
+          "installedNames": [
+            "Unified Remote Server",
+            "Unified Remote"
+          ]
         }
       ]
     }

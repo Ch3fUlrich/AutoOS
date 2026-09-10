@@ -5,7 +5,8 @@
     "workstation": "Full desktop workstation - the same coding and AI stack as the other platforms.",
     "ai-coding": "Coding and AI tooling plus the shell, no GUI extras.",
     "light": "Minimal remote-access box - Claude Code, Tailscale and Herdr only.",
-    "custom": "Start with nothing ticked and choose by hand."
+    "custom": "Start with nothing ticked and choose by hand.",
+    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
   },
   "categories": [
     {
@@ -386,6 +387,159 @@
             "workstation"
           ],
           "homepage": "https://www.wireguard.com/"
+        }
+      ]
+    },
+    {
+      "id": "everyday",
+      "name": "Everyday & Entertainment",
+      "description": "Personal desktop, media, games and maker tools.",
+      "requiresDisplay": true,
+      "components": [
+        {
+          "id": "firefox",
+          "name": "Firefox",
+          "description": "Web browser with privacy controls",
+          "provider": "brew",
+          "package": "firefox",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.mozilla.org/firefox/",
+          "cask": true
+        },
+        {
+          "id": "chrome",
+          "name": "Google Chrome",
+          "description": "Web browser with account sync",
+          "provider": "brew",
+          "package": "google-chrome",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.google.com/chrome/",
+          "cask": true
+        },
+        {
+          "id": "spotify",
+          "name": "Spotify",
+          "description": "Music and podcasts",
+          "provider": "brew",
+          "package": "spotify",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.spotify.com/download/",
+          "cask": true
+        },
+        {
+          "id": "vlc",
+          "name": "VLC media player",
+          "description": "Play local videos, music and network streams",
+          "provider": "brew",
+          "package": "vlc",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.videolan.org/vlc/",
+          "cask": true
+        },
+        {
+          "id": "7zip",
+          "name": "7-Zip",
+          "description": "Create and extract compressed archives",
+          "provider": "brew",
+          "package": "sevenzip",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.7-zip.org/",
+          "cask": false
+        },
+        {
+          "id": "steam",
+          "name": "Steam",
+          "description": "Game library and store",
+          "provider": "brew",
+          "package": "steam",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://store.steampowered.com/about/",
+          "cask": true
+        },
+        {
+          "id": "discord",
+          "name": "Discord",
+          "description": "Voice, video and community chat",
+          "provider": "brew",
+          "package": "discord",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://discord.com/download",
+          "cask": true
+        },
+        {
+          "id": "parsec",
+          "name": "Parsec",
+          "description": "Remote desktop and low-latency streaming",
+          "provider": "brew",
+          "package": "parsec",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://parsec.app/downloads",
+          "cask": true
+        },
+        {
+          "id": "moonlight",
+          "name": "Moonlight",
+          "description": "Stream games from a compatible host",
+          "provider": "brew",
+          "package": "moonlight",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://moonlight-stream.org/",
+          "cask": true
+        },
+        {
+          "id": "jellyfin-client",
+          "name": "Jellyfin Media Player",
+          "description": "Desktop client for your Jellyfin media server",
+          "provider": "brew",
+          "package": "jellyfin-media-player",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://jellyfin.org/downloads/clients/all/",
+          "cask": true
+        },
+        {
+          "id": "chitubox",
+          "name": "CHITUBOX Basic",
+          "description": "Prepare models for resin 3D printing",
+          "provider": "brew",
+          "package": "chitubox",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.chitubox.com/en/download/chitubox-free",
+          "cask": true
+        },
+        {
+          "id": "unified-remote",
+          "name": "Unified Remote Server",
+          "description": "Control this computer from your phone",
+          "provider": "brew",
+          "package": "unified-remote",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.unifiedremote.com/download",
+          "cask": true,
+          "notes": "Install the Unified Remote app on your phone and pair with this server. Review remote access settings before use."
         }
       ]
     }

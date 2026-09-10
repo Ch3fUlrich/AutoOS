@@ -37,7 +37,7 @@ try:
 except Exception as exc:
     print(f"catalog: not valid JSON ({exc})"); sys.exit(1)
 
-VALID = {"winget","choco","npm","apt","snap","brew","script","custom"}
+VALID = {"winget","choco","npm","apt","snap","brew","script","custom","manual","psmodule"}
 problems, seen = [], set()
 cats = cat.get("categories")
 if not cats:
@@ -64,6 +64,10 @@ for grp in cats:
         if not prov:                 problems.append(f"{where}: missing 'provider'")
         elif prov not in VALID:      problems.append(f"{where}: unknown provider '{prov}'")
         if not c.get("package"):     problems.append(f"{where}: missing 'package'")
+        for profile in c.get("profiles", []):
+            if profile not in cat.get("profiles", {}): problems.append(f"{where}: unknown profile '{profile}'")
+        if prov=='manual' and (not c.get('homepage') or not c.get('notes')):
+            problems.append(f"{where}: manual provider requires homepage and notes")
         for r in c.get("requires", []):
             if r not in all_ids:     problems.append(f"{where}: requires unknown component '{r}'")
             if r == cid:             problems.append(f"{where}: requires itself")
@@ -93,17 +97,17 @@ catalog_load() {
 
     CAT_ID=(); CAT_NAME=(); CAT_DESC=(); CAT_PROVIDER=(); CAT_PACKAGE=()
     CAT_REQUIRES=(); CAT_PROFILES=(); CAT_POST=(); CAT_PROMPT=(); CAT_NOTES=(); CAT_GROUP=()
-    CAT_VERIFY=(); CAT_CASK=()
+    CAT_VERIFY=(); CAT_CASK=(); CAT_HOMEPAGE=(); CAT_INSTALLED=()
 
     # Delimiter is US (0x1f), NOT tab: tab is an IFS *whitespace* character, so
     # bash collapses runs of them and every empty field shifts the columns left.
-    while IFS=$'\x1f' read -r id name desc provider package requires profiles post prompt notes group verify cask; do
+    while IFS=$'\x1f' read -r id name desc provider package requires profiles post prompt notes group verify cask homepage; do
         [[ -z "$id" ]] && continue
         CAT_ID+=("$id");           CAT_NAME+=("$name");     CAT_DESC+=("$desc")
         CAT_PROVIDER+=("$provider");CAT_PACKAGE+=("$package");CAT_REQUIRES+=("$requires")
         CAT_PROFILES+=("$profiles");CAT_POST+=("$post");     CAT_PROMPT+=("$prompt")
         CAT_NOTES+=("$notes");      CAT_GROUP+=("$group");   CAT_VERIFY+=("$verify")
-        CAT_CASK+=("$cask")
+        CAT_CASK+=("$cask"); CAT_HOMEPAGE+=("$homepage"); CAT_INSTALLED+=(0)
     done < <(python3 - "$path" "$arch" "$headless" <<'PY'
 import json, sys
 path, arch, headless = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
@@ -122,7 +126,7 @@ for grp in cat.get("categories", []):
             c.get("postInstall",""), c.get("prompt",""),
             (c.get("notes","") or "").replace("\x1f"," "), grp.get("name",""),
             c.get("verify","") or "",
-            "1" if c.get("cask") else "0",
+            "1" if c.get("cask") else "0", c.get("homepage", ""),
         ]))
 PY
     )
@@ -141,6 +145,7 @@ catalog_profile_defaults() {
     local profile="$1" i out=""
     [[ "$profile" == "custom" ]] && { echo ""; return; }
     for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        [[ "${CAT_PROVIDER[i]}" == manual ]] && continue
         [[ ",${CAT_PROFILES[i]}," == *",${profile},"* ]] && out+="${CAT_ID[i]} "
     done
     echo "${out% }"
@@ -159,6 +164,7 @@ catalog_resolve() {
         id="${queue[0]}"; queue=("${queue[@]:1}")
         [[ " ${wanted[*]} " == *" $id "* ]] && continue
         i="$(catalog_index_of "$id")" || continue
+        if [[ "${CAT_PROVIDER[i]}" == manual ]]; then ui_err "AutoOS cannot install $id; use its vendor link for manual setup."; return 1; fi
         wanted+=("$id")
         if [[ -n "${CAT_REQUIRES[i]}" ]]; then
             IFS=',' read -ra deps <<<"${CAT_REQUIRES[i]}"
@@ -219,5 +225,20 @@ import json, sys
 cat = json.load(open(sys.argv[1], encoding="utf-8"))
 for name, desc in (cat.get("profiles") or {}).items():
     print(f"{name}\t{desc}")
+PY
+}
+
+catalog_detect_installed() {
+    local i
+    for ((i=0; i<${#CAT_ID[@]}; i++)); do
+        detect_installed_status "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}"
+        if [[ "$INSTALLED_STATUS" == installed ]]; then CAT_INSTALLED[i]=1; else CAT_INSTALLED[i]=0; fi
+    done
+}
+
+catalog_has_profile() {
+    python3 - "$CATALOG_PATH" "$1" <<'PY'
+import json,sys
+sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1],encoding='utf8'))['profiles'] else 1)
 PY
 }

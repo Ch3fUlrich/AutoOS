@@ -27,7 +27,7 @@ run() {
         return 0
     fi
     ui_muted "run: $*"
-    "$@"
+    python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/process.py" "$@"
 }
 
 # ─── Idempotent file editing ────────────────────────────────────────────────
@@ -58,24 +58,8 @@ apt_update_once() {
 
 # ─── Idempotency checks ─────────────────────────────────────────────────────
 is_installed() {
-    local provider="$1" package="$2" pkg
-    case "$provider" in
-        apt)
-            for pkg in $package; do
-                dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "^install ok installed" || return 1
-            done
-            return 0 ;;
-        snap)   snap list "$package" >/dev/null 2>&1 ;;
-        brew)
-            for pkg in $package; do
-                brew list --versions "$pkg" >/dev/null 2>&1 || return 1
-            done
-            return 0 ;;
-        npm)    npm ls -g --depth=0 2>/dev/null | grep -q -- "$package" ;;
-        script) script_is_installed "$package" ;;
-        custom) custom_is_installed "$package" ;;
-        *)      return 1 ;;
-    esac
+    detect_installed_status "$1" "$2" "${3:-0}"
+    [[ "$INSTALLED_STATUS" == installed ]]
 }
 
 custom_is_installed() {
@@ -102,32 +86,6 @@ custom_is_installed() {
     esac
 }
 
-script_is_installed() {
-    case "$1" in
-        oh-my-zsh)       [[ -d "$SYS_HOME/.oh-my-zsh" ]] ;;
-        zsh-plugins)     [[ -d "$SYS_HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]] ;;
-        powerlevel10k)   [[ -d "$SYS_HOME/.oh-my-zsh/custom/themes/powerlevel10k" ]] ;;
-        meslo-nerd-font) [[ -f "$SYS_HOME/.local/share/fonts/MesloLGS NF Regular.ttf" ]] ;;
-        nodesource-lts)  has_cmd node ;;
-        docker)          has_cmd docker ;;
-        tailscale)       has_cmd tailscale ;;
-        antigravity)     has_cmd antigravity ;;
-        xpipe)           has_cmd xpipe ;;
-        herdr)           has_cmd herdr ;;
-        handy)           has_cmd handy || [[ -x /usr/bin/handy ]] ;;
-        vscode)          has_cmd code ;;
-        agy)             has_cmd agy || [[ -x "$SYS_HOME/.local/bin/agy" ]] ;;
-        gh)              has_cmd gh ;;
-        uv)              has_cmd uv || [[ -x "$SYS_HOME/.local/bin/uv" || -x "$SYS_HOME/.cargo/bin/uv" ]] ;;
-        ollama)          has_cmd ollama ;;
-        google-chrome)   has_cmd google-chrome || has_cmd google-chrome-stable ;;
-        bitwarden-chrome) [[ -f /opt/google/chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
-                         [[ -f /usr/share/google-chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
-                         [[ -f /etc/opt/chrome/policies/managed/bitwarden.json ]] ;;
-        *)               return 1 ;;
-    esac
-}
-
 # ─── Catalog installation probe ─────────────────────────────────────────────
 declare -a CAT_INSTALLED=()
 
@@ -135,7 +93,7 @@ catalog_probe_installed() {
     CAT_INSTALLED=()
     local i
     for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
-        if is_installed "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" 2>/dev/null; then
+        if is_installed "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}"; then
             CAT_INSTALLED+=(1)
         else
             CAT_INSTALLED+=(0)
@@ -172,13 +130,14 @@ install_component() {
     local provider="$1" package="$2" CASK_FLAG="${3:-0}"
     INSTALL_STATE="failed"
 
-    if is_installed "$provider" "$package"; then
-        ui_muted "${package} is already installed"
+    if is_installed "$provider" "$package" "$CASK_FLAG"; then
+        ui_ok "✓ ${package} is already installed - skipping package"
         INSTALL_STATE="skipped"; return 0
     fi
 
     local rc=0
     case "$provider" in
+        manual) ui_warn "Action required: use the vendor download link in the plan."; INSTALL_STATE=manual; return 0 ;;
         apt)
             apt_update_once
             # shellcheck disable=SC2086  # package may legitimately be several names
@@ -202,6 +161,7 @@ install_component() {
     esac
 
     if (( rc != 0 )); then INSTALL_STATE="failed"; else INSTALL_STATE="installed"; fi
+    if (( rc == 124 )); then return 124; fi
     return 0
 }
 
@@ -1066,7 +1026,7 @@ verify_component() {
 # ─── Run state: save and replay ─────────────────────────────────────────────
 # Re-imaging a machine should not mean re-choosing 30 checkboxes.
 autoos_state_save() {
-    local path="$1" profile="$2" selected="$3" installed="$4" skipped="$5" failed="$6"
+    local path="$1" profile="$2" selected="$3" installed="$4" skipped="$5" failed="$6" manual="${7:-}"
     (( AUTOOS_DRY_RUN )) && { ui_muted "would save run state to $path"; return 0; }
     catalog_require_python || return 0
     local answers_json="{}"
@@ -1079,7 +1039,7 @@ print(json.dumps({l.split(chr(31),1)[0]: l.split(chr(31),1)[1]
                   for l in sys.stdin.read().splitlines() if chr(31) in l}))"
         )"
     fi
-    python3 - "$path" "$profile" "$selected" "$installed" "$skipped" "$failed" "$answers_json" <<'PY'
+    python3 - "$path" "$profile" "$selected" "$installed" "$skipped" "$failed" "$answers_json" "$manual" <<'PY'
 import json, sys, datetime
 path, profile, selected, installed, skipped, failed, answers = sys.argv[1:8]
 json.dump({
@@ -1089,7 +1049,7 @@ json.dump({
     "profile": profile,
     "selected": selected.split(),
     "answers": json.loads(answers or "{}"),
-    "results": {"installed": installed.split(), "skipped": skipped.split(), "failed": failed.split()},
+    "results": {"installed": installed.split(), "skipped": skipped.split(), "failed": failed.split(), "manual": sys.argv[8].split()},
 }, open(path, "w", encoding="utf-8"), indent=2)
 PY
     ui_ok "run state saved to $path"

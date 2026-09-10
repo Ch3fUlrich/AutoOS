@@ -32,6 +32,7 @@ menu afterwards.
 | `ai-coding` | ✅ | ✅ | ✅ | Development box: editors, agents, containers, shell |
 | `light` | ✅ | ✅ | ✅ | Raspberry Pi 5 and similar — Claude Code, Tailscale, Herdr |
 | `server` | — | ✅ | — | Headless: shell, networking, containers, no GUI |
+| `everyday` | ✅ | ✅ | ✅ | Personal desktop; available apps and vendor setup steps vary by platform |
 | `custom` | ✅ | ✅ | ✅ | Nothing pre-ticked |
 
 `server` does not exist on Windows or macOS, so a headless machine there is
@@ -88,3 +89,5 @@ Check what your machine is actually offered:
 ```bash
 ./setup.sh --list
 ```
+
+Profile names are validated against the platform catalog, so adding a profile requires no entry-point code changes. For the everyday app list and proposed additional profiles, see [desktop setup](desktop-setup.md).

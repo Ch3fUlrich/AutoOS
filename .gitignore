@@ -31,6 +31,7 @@ logs/
 *.autoos-backup-*
 .autoos-state.json
 autoos.config.json
+autoos.config.json.tmp
 !autoos.config.example.json
 
 # ─── Agent tooling ──────────────────────────────────────────────────────────
@@ -47,4 +48,3 @@ desktop.ini
 .vscode/
 __pycache__/
 *.pyc
-
