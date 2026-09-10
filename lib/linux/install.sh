@@ -204,10 +204,33 @@ clone_or_update() {
 
 install_oh_my_zsh() {
     if (( AUTOOS_DRY_RUN )); then ui_muted "would install oh-my-zsh into $SYS_HOME/.oh-my-zsh"; return 0; fi
+    local tmp; tmp="$(mktemp)"
+    local url="https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/76ac9fcddc4e93c15dc778b4c6234755ad714e5a/tools/install.sh"
+    local expected_hash="5574b96e94dbcb769f0d1592fa83aeb6ca2caf41c6ae5d76fcc7f04c524b4f55"
+
+    if ! curl -fsSL "$url" -o "$tmp"; then
+        ui_err "failed to download oh-my-zsh installer"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    local actual_hash=""
+    if has_cmd sha256sum; then
+        actual_hash="$(sha256sum "$tmp" | awk '{print $1}')"
+    elif has_cmd shasum; then
+        actual_hash="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+    fi
+
+    if [[ -n "$actual_hash" && "$actual_hash" != "$expected_hash" ]]; then
+        ui_err "oh-my-zsh installer checksum mismatch"
+        rm -f "$tmp"
+        return 1
+    fi
+
     # RUNZSH=no keeps the installer from exec'ing a shell and swallowing the
-    # rest of this script - the bug that stopped the old install.sh halfway.
-    RUNZSH=no CHSH=no KEEP_ZSHRC=yes \
-        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+    # rest of this script.
+    RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh "$tmp" --unattended
+    rm -f "$tmp"
 }
 
 install_zsh_plugins() {
@@ -241,7 +264,10 @@ install_meslo_font() {
 
 install_nodejs() {
     if (( AUTOOS_DRY_RUN )); then ui_muted "would add the NodeSource LTS repo and install nodejs"; return 0; fi
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | $AUTOOS_SUDO -E bash -
+    local tmp; tmp="$(mktemp)"
+    curl -fsSL https://deb.nodesource.com/setup_lts.x -o "$tmp"
+    $AUTOOS_SUDO -E bash "$tmp"
+    rm -f "$tmp"
     $AUTOOS_SUDO apt-get install -y nodejs
 }
 
@@ -255,7 +281,10 @@ install_docker() {
 
 install_tailscale() {
     if (( AUTOOS_DRY_RUN )); then ui_muted "would install Tailscale via tailscale.com/install.sh"; return 0; fi
-    curl -fsSL https://tailscale.com/install.sh | $AUTOOS_SUDO sh
+    local tmp; tmp="$(mktemp)"
+    curl -fsSL https://tailscale.com/install.sh -o "$tmp"
+    $AUTOOS_SUDO sh "$tmp"
+    rm -f "$tmp"
     ui_info "Run '${AUTOOS_SUDO} tailscale up' to authenticate this machine."
 }
 

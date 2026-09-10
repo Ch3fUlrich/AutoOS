@@ -9,8 +9,13 @@
 # tasks. vars_files do not carry across import_playbook, so it was a no-op that
 # only looked like shared configuration. Shared variables now live in
 # group_vars/windows/, which every play picks up automatically.
-- import_playbook: playbooks/chocolatey_software.yml
-- import_playbook: playbooks/python_miniconda_suite2p.yml
-- import_playbook: playbooks/down_install_software.yml
-- import_playbook: playbooks/terminal_setup.yml
-- import_playbook: playbooks/add_drives.yml
+- name: Install Chocolatey and core software
+  import_playbook: playbooks/chocolatey_software.yml
+- name: Install Python, Miniconda and Suite2p
+  import_playbook: playbooks/python_miniconda_suite2p.yml
+- name: Download and install standalone software
+  import_playbook: playbooks/down_install_software.yml
+- name: Set up Windows Terminal and environment
+  import_playbook: playbooks/terminal_setup.yml
+- name: Mount network drives
+  import_playbook: playbooks/add_drives.yml

@@ -1108,13 +1108,15 @@ function sync() {
 
 function applyFilter() {
   const q = (el("filter").value || "").trim().toLowerCase();
-  document.querySelectorAll(".item").forEach(n => {
-    const matchSearch = !q || n.dataset.search.includes(q);
-    const matchInst = !filterInstalledOnly || n.dataset.installed === "1";
-    n.style.display = matchSearch && matchInst ? "" : "none";
-  });
   document.querySelectorAll(".group").forEach(g => {
-    const any = [...g.querySelectorAll(".item")].some(n => n.style.display !== "none");
+    let any = false;
+    g.querySelectorAll(".item").forEach(n => {
+      const matchSearch = !q || n.dataset.search.includes(q);
+      const matchInst = !filterInstalledOnly || n.dataset.installed === "1";
+      const show = matchSearch && matchInst;
+      n.style.display = show ? "" : "none";
+      if (show) any = true;
+    });
     g.style.display = any ? "" : "none";
     if ((q || filterInstalledOnly) && any) g.open = true;
   });

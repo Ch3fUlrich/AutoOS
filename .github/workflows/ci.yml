@@ -82,7 +82,7 @@ jobs:
       # The tree targets Windows hosts, so a real run cannot happen in CI.
       # Syntax and lint still catch the class of bug that broke it before.
       - name: ansible-lint
-        run: ansible-lint Windows/ansible/ || true
+        run: ansible-lint Windows/ansible/
 
       - name: Playbook syntax check
         working-directory: Windows/ansible
