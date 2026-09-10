@@ -421,6 +421,13 @@ if it "undo never uninstalls anything"; then
     else pass; fi
 fi
 
+describe "python unit tests"
+
+if it "runs tests/test_serve.py successfully"; then
+    out="$(python3 -m unittest tests.test_serve 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "$out"; fi
+fi
+
 # ─── Browser UI payload ─────────────────────────────────────────────────────
 describe "browser UI"
 
