@@ -122,3 +122,21 @@ plan before letting it install anything.
 - A run state file is written (default `.autoos-state.json`) so the same
   selection can be replayed elsewhere.
 - A timestamped log lands in `logs/`.
+
+## Everyday desktop
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -Profile everyday -DryRun -Yes
+```
+
+Remove `-DryRun -Yes` for the interactive selection and confirmation flow.
+Linux/macOS: `./setup.sh --profile everyday --dry-run --yes`.
+Vendor-only setup steps print the official link and remain **Action required**.
+
+Install commands have a 30-minute bound. To change it for the current shell:
+`$env:AUTOOS_INSTALL_TIMEOUT_SECONDS = '900'` (PowerShell), or
+`export AUTOOS_INSTALL_TIMEOUT_SECONDS=900` (bash). Accepted range: 1–86400 seconds.
+A timeout stops the owned installer process and the remaining installation plan;
+inspect the logs and any elevation prompt before retrying. External system installer
+services can outlive their client, so AutoOS does not immediately retry timed-out work.
+See [download troubleshooting](downloads.md).

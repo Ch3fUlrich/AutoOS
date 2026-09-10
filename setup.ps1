@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     AutoOS - post-install provisioning for Windows.
@@ -73,7 +73,6 @@ param(
     # Named InstallProfile because $Profile is a PowerShell automatic variable
     # ($PROFILE); the alias keeps -Profile working on the command line.
     [Alias('Profile')]
-    [ValidateSet('workstation', 'ai-coding', 'light', 'custom')]
     [string]$InstallProfile,
     [string[]]$Only,
     [switch]$DryRun,
@@ -93,6 +92,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 
 # `powershell -File setup.ps1 -Only a,b` hands "a,b" over as one string - -File
 # passes every argument literally and never splits on commas the way the normal
@@ -118,6 +118,8 @@ if (-not $SaveState) { $SaveState = Join-Path $RepoRoot '.autoos-state.json' }
 
 $CatalogPath = Join-Path $RepoRoot 'catalog\windows.json'
 $catalog = Get-AutoOSCatalog -Path $CatalogPath
+$profileNames = @($catalog.profiles.PSObject.Properties.Name)
+if ($InstallProfile -and $InstallProfile -notin $profileNames) { throw "Unknown profile '$InstallProfile'. Choose: $($profileNames -join ', ')" }
 
 # ─── Catalog-only modes ─────────────────────────────────────────────────────
 if ($CheckCatalog) {
@@ -225,10 +227,11 @@ if (Test-Path $Config) {
                 $cfgAnswers[$p.Name] = [string]$p.Value
             }
         }
-    } catch {}
+    } catch { throw "Unable to read configuration: $($_.Exception.Message)" }
 }
 
 $available = @(Get-AutoOSAvailableComponents -Catalog $catalog -SystemInfo $sys)
+Set-AutoOSInstalledStatus -Components $available
 $suggested = Get-AutoOSSuggestedProfile -SystemInfo $sys
 
 $statePayload = $null
@@ -255,6 +258,7 @@ if ($FromState) {
         $InstallProfile = Show-AutoOSRadioMenu -Items $profileItems -Title 'Choose installation profile' -DefaultId $suggested
     }
 }
+if ($InstallProfile -notin $profileNames) { throw "Unknown profile: $InstallProfile" }
 Write-AutoOSLine "Using profile: $InstallProfile" -Level ok
 
 # ─── 3. Select ──────────────────────────────────────────────────────────────
@@ -276,7 +280,7 @@ if ($statePayload) {
     }
     $selectedIds = @($Only)
 } elseif ($Yes) {
-    $selectedIds = @($available | Where-Object { $InstallProfile -ne 'custom' -and $InstallProfile -in $_.Profiles } | ForEach-Object { $_.Id })
+    $selectedIds = @($available | Where-Object { $_.Provider -ne 'manual' -and $InstallProfile -ne 'custom' -and $InstallProfile -in $_.Profiles } | ForEach-Object { $_.Id })
 } else {
     $installedMap = @{}
     foreach ($inst in (Get-AutoOSInstalledComponents -Components $available)) {
@@ -308,6 +312,7 @@ foreach ($c in $plan) {
     $i++
     $tag = if ($c.AutoAdded) { Format-AutoOSColor '(dependency)' 'muted' } else { '' }
     Write-AutoOSLine ("  {0,2}. {1,-20} {2,-8} {3} {4}" -f $i, $c.Name, $c.Provider, $c.Package, $tag)
+    if ($c.Installed) { Write-AutoOSLine (([char]0x2713) + ' Already installed - package will be skipped') -Level ok }
     if ($c.Notes) { Write-AutoOSLine "      $($c.Notes)" -Level muted }
 }
 Write-AutoOSLine ''
@@ -350,15 +355,6 @@ if ($needed.Count -and -not $Yes) {
     }
 }
 
-if ($configUpdated -and -not $DryRun.IsPresent -and (Test-Path $Config)) {
-    try {
-        $cfgOut = [ordered]@{ version = 1; profile = $InstallProfile; answers = $answers }
-        $jsonStr = $cfgOut | ConvertTo-Json -Depth 5
-        [System.IO.File]::WriteAllText($Config, $jsonStr, [System.Text.Encoding]::UTF8)
-        Write-AutoOSLine "Saved answers to $Config" -Level ok
-    } catch {}
-}
-
 # ─── 6. Confirm ─────────────────────────────────────────────────────────────
 if ($DryRun) {
     Write-AutoOSLine 'DRY RUN - no changes will be made.' -Level warn
@@ -370,34 +366,55 @@ if ($DryRun) {
     }
 }
 
+if ($configUpdated -and -not $DryRun.IsPresent -and (Test-Path -LiteralPath $Config)) {
+    # Preserve unrelated settings and back up the original only after consent.
+    $cfgObj | Add-Member -NotePropertyName profile -NotePropertyValue $InstallProfile -Force
+    $cfgObj | Add-Member -NotePropertyName answers -NotePropertyValue $answers -Force
+    Copy-Item -LiteralPath $Config -Destination "$Config.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss-fffffff')"
+    [IO.File]::WriteAllText($Config, ($cfgObj | ConvertTo-Json -Depth 100), [Text.Encoding]::UTF8)
+    Write-AutoOSLine "Saved answers to $Config" -Level ok
+}
+
 # ─── 7. Execute ─────────────────────────────────────────────────────────────
 Initialize-AutoOSInstaller -DryRun:$DryRun.IsPresent -Answers $answers -RepoRoot $RepoRoot
 
 Write-AutoOSSection 'Installing'
-$results = [ordered]@{ installed = @(); skipped = @(); failed = @() }
+$results = [ordered]@{ installed = @(); skipped = @(); failed = @(); manual = @() }
+Import-Module (Join-Path $LibDir 'AutoOS.Progress.psm1') -DisableNameChecking
 $unverified = 0
 $n = 0
 foreach ($c in $plan) {
     $n++
     Write-AutoOSLine "[$n/$($plan.Count)] $($c.Name)" -Level step
+    Start-AutoOSComponentProgress -Id $c.Id -Name $c.Name -Done ($n - 1) -Total $plan.Count
+    $state = 'failed'
+    $abortRun = $false
     try {
+        $blocked = @($c.Requires | Where-Object { $_ -in $results.failed -or $_ -in $results.manual })
+        if ($blocked.Count) { throw "Required components did not complete: $($blocked -join ', ')" }
         $state = Install-AutoOSComponent -Component $c
-        if ($state -ne 'failed') { Invoke-AutoOSPostInstall -Component $c }
-        $results[$state] += $c.Id
+        if ($state -in @('installed', 'skipped')) { Write-AutoOSInstallProgress -Phase 'configuring'; Invoke-AutoOSPostInstall -Component $c | Out-Null }
         if ($state -eq 'installed') {
+            Write-AutoOSInstallProgress -Phase 'verifying'
             $v = Test-AutoOSComponentWorks -VerifyCommand $c.Verify -Name $c.Name -DryRun:$DryRun.IsPresent
             if ($v -eq 'unverified') { $unverified++ }
             Write-AutoOSLine "$($c.Name) done" -Level ok
         }
+        $results[$state] += $c.Id
     } catch {
         Write-AutoOSLine "$($c.Name): $($_.Exception.Message)" -Level error
-        $results.failed += $c.Name
+        $state = 'failed'
+        $results.failed += $c.Id
+        $abortRun = $_.Exception -is [TimeoutException]
     }
+    Write-AutoOSInstallProgress -Phase $state -Complete
+    if ($abortRun) { break }
 }
 
 # ─── 8. Report ──────────────────────────────────────────────────────────────
 Write-AutoOSSection 'Summary'
-Write-AutoOSKeyValue 'Installed' "$($results.installed.Count)" 'ok'
+Write-AutoOSKeyValue $(if ($DryRun) { 'Planned' } else { 'Installed' }) "$($results.installed.Count)" 'ok'
+Write-AutoOSKeyValue 'Action required' "$($results.manual.Count)" 'warn'
 Write-AutoOSKeyValue 'Already present' "$($results.skipped.Count)" 'muted'
 if ($unverified -gt 0) { Write-AutoOSKeyValue 'Installed but unverified' "$unverified" 'warn' }
 Write-AutoOSKeyValue 'Failed' "$($results.failed.Count)" $(if ($results.failed.Count) { 'err' } else { 'muted' })

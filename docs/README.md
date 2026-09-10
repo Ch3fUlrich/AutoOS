@@ -4,6 +4,8 @@ Start here. Each page is short and answers one question.
 
 | Page | Answers |
 |---|---|
+| [Desktop setup](desktop-setup.md) | Everyday apps, shell design, and useful additional profiles |
+| [Download troubleshooting](downloads.md) | Why WinGet can download slowly and how to select another downloader |
 | [Getting started](getting-started.md) | How do I run it, and what do the flags do? |
 | [Profiles & detection](profiles.md) | What does it work out about my machine, and what does each profile mean? |
 | [The catalog](catalog.md) | How do I add software, and what does each field do? |

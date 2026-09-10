@@ -310,7 +310,7 @@ ui_select_radio() {
 # ─── The checkbox selector ──────────────────────────────────────────────────
 # Caller fills these parallel arrays, then calls ui_menu.
 # Result lands in MENU_RESULT (space-separated ids); returns 1 if cancelled.
-declare -a MENU_ID MENU_NAME MENU_DESC MENU_GROUP MENU_SEL MENU_INSTALLED
+declare -a MENU_ID MENU_NAME MENU_DESC MENU_GROUP MENU_SEL MENU_INSTALLED MENU_DISABLED=()
 MENU_RESULT=""
 
 ui_menu() {
@@ -396,6 +396,7 @@ ui_menu() {
                 if (( MENU_SEL[idx] )); then box="$(_c ok)[✓]$(_c reset)"; else box="$(_c dim)[ ]$(_c reset)"; fi
                 name=$(printf '%-26s' "${MENU_NAME[idx]}")
                 (( r == cursor )) && name="$(_c sel)${name}$(_c reset)"
+                if (( ${MENU_DISABLED[idx]:-0} )); then name="$(_c muted)${name}$(_c reset)"; box="$(_c muted)[-]$(_c reset)"; fi
                 if (( ${#MENU_INSTALLED[@]} > idx && MENU_INSTALLED[idx] )); then
                     inst_badge="$(_c ok)✓ installed$(_c reset) "
                 fi
@@ -441,6 +442,7 @@ ui_menu() {
             'j'|'J') cursor=$(_menu_next 1) ;;
             ' ')
                 local idx=${row_idx[cursor]}
+                if (( ${MENU_DISABLED[idx]:-0} )); then continue; fi
                 if (( MENU_SEL[idx] )); then MENU_SEL[idx]=0; else MENU_SEL[idx]=1; fi
                 ;;
             'g'|'G')
@@ -459,17 +461,17 @@ ui_menu() {
                     local new_val=$(( 1 - all_selected ))
                     for ((j = 0; j < total; j++)); do
                         if [[ "${MENU_GROUP[j]}" == "$target_group" ]]; then
-                            MENU_SEL[j]=$new_val
+                            if (( ! ${MENU_DISABLED[j]:-0} )); then MENU_SEL[j]=$new_val; fi
                         fi
                     done
                 fi
                 ;;
             'i'|'I')
                 for ((i = 0; i < total; i++)); do
-                    MENU_SEL[i]=$(( 1 - MENU_SEL[i] ))
+                    if (( ! ${MENU_DISABLED[i]:-0} )); then MENU_SEL[i]=$(( 1 - MENU_SEL[i] )); fi
                 done
                 ;;
-            'a'|'A') for ((i = 0; i < total; i++)); do MENU_SEL[i]=1; done ;;
+            'a'|'A') for ((i = 0; i < total; i++)); do if (( ! ${MENU_DISABLED[i]:-0} )); then MENU_SEL[i]=1; fi; done ;;
             'n'|'N') for ((i = 0; i < total; i++)); do MENU_SEL[i]=0; done ;;
             'q'|'Q') printf '\033[?25h\n'; MENU_RESULT=""; return 1 ;;
             ''|$'\n')

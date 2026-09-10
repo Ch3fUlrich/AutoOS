@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Load the component catalog, filter it against the detected machine, and
@@ -13,7 +13,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:ValidProviders = @('winget', 'choco', 'npm', 'apt', 'snap', 'brew', 'script', 'custom')
+$script:ValidProviders = @('winget', 'choco', 'npm', 'apt', 'snap', 'brew', 'script', 'custom', 'manual', 'psmodule')
 
 function Get-AutoOSCatalog {
     param([Parameter(Mandatory)][string]$Path)
@@ -62,6 +62,12 @@ function Test-AutoOSCatalogSchema {
             }
             if (-not $c.package)     { [void]$problems.Add("$where : missing ""package""") }
 
+            if ($c.PSObject.Properties.Name -contains 'profiles') {
+                foreach ($profileName in $c.profiles) {
+                    if ($profileName -notin $Catalog.profiles.PSObject.Properties.Name) { [void]$problems.Add("$where : unknown profile '$profileName'") }
+                }
+            }
+            if ($c.provider -eq 'manual' -and (-not (Get-AutoOSComponentProperty $c 'homepage') -or -not (Get-AutoOSComponentProperty $c 'notes'))) { [void]$problems.Add("$where : manual provider requires homepage and notes") }
             if ($c.PSObject.Properties.Name -contains 'requires') {
                 foreach ($r in $c.requires) {
                     if ($r -notin $allIds) { [void]$problems.Add("$where : requires unknown component '$r'") }
@@ -131,6 +137,9 @@ function Get-AutoOSAvailableComponents {
                 Prompt      = Get-AutoOSComponentProperty $c 'prompt' $null
                 Verify      = Get-AutoOSComponentProperty $c 'verify' $null
                 Homepage    = Get-AutoOSComponentProperty $c 'homepage' $null
+                InstalledNames = @(Get-AutoOSComponentProperty $c 'installedNames' @())
+                InstalledAppx = @(Get-AutoOSComponentProperty $c 'installedAppx' @())
+                MinimumVersion = Get-AutoOSComponentProperty $c 'minimumVersion' $null
                 Notes       = Get-AutoOSComponentProperty $c 'notes' $null
                 Category    = $cat.name
                 CategoryId  = $cat.id
@@ -155,9 +164,9 @@ function New-AutoOSMenuItem {
         Name        = $Component.Name
         Description = $Component.Description
         Group       = $Component.Category
-        Selected    = ($ProfileName -ne 'custom' -and $ProfileName -in $Component.Profiles)
-        Locked      = $false
-        Reason      = ''
+        Selected    = ($Component.Provider -ne 'manual' -and $ProfileName -ne 'custom' -and $ProfileName -in $Component.Profiles)
+        Locked      = ($Component.Provider -eq 'manual')
+        Reason      = $(if ($Component.Provider -eq 'manual') { 'Vendor setup required; AutoOS cannot install this application.' } else { '' })
         Installed   = $Installed
     }
 }
@@ -187,6 +196,7 @@ function Resolve-AutoOSPlan {
     foreach ($id in $SelectedIds) { if ($byId.ContainsKey($id)) { [void]$queue.Enqueue($id) } }
     while ($queue.Count -gt 0) {
         $id = $queue.Dequeue()
+        if ($byId[$id].Provider -eq 'manual') { throw "AutoOS cannot install '$id'; use its vendor link for manual setup." }
         if (-not $wanted.Add($id)) { continue }
         foreach ($dep in $byId[$id].Requires) {
             if ($byId.ContainsKey($dep)) { [void]$queue.Enqueue($dep) }

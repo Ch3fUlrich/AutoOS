@@ -230,3 +230,16 @@ ssh -L 8777:localhost:8777 you@the-box
 - **Closing the tab does not stop the install.** The server owns the run; reopen
   the URL and `/api/log` picks the output back up from the start.
 - **`Ctrl-C` in the terminal stops the server**, and with it any run in progress.
+
+## Installed apps and progress
+
+Green checks identify detected applications in the component list, profile cards
+and install order. The detector refreshes after a run. Checks do not mean an
+application was installed by a preview, and unchecked/unknown detection is not
+proof that an application is absent.
+
+The overall bar counts **completed** components, including dependencies and skips.
+The current-app bar uses a percentage supplied by the installer (including byte
+counts during WinGet downloads). When no percentage is available it is
+indeterminate and shows the phase and elapsed time. A stopped run keeps its
+actual completed count; it never jumps to 100 percent simply because it exited.

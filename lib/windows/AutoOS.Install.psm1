@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Provider dispatch and post-install steps for AutoOS on Windows.
@@ -15,6 +15,7 @@ $ErrorActionPreference = 'Stop'
 # global copy, which silently strips these functions from the session.
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1')     -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Detect.psm1') -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'AutoOS.Progress.psm1') -DisableNameChecking
 
 $script:DryRun  = $false
 $script:Answers = @{}
@@ -24,12 +25,31 @@ function Initialize-AutoOSInstaller {
     param([bool]$DryRun = $false, [hashtable]$Answers = @{}, [string]$RepoRoot = $null)
     $script:DryRun  = $DryRun
     $script:Answers = $Answers
+    Clear-AutoOSInstalledStatus
     if ($RepoRoot) { $script:RepoRoot = $RepoRoot }
 }
 
 function Get-AutoOSAnswer {
     param([string]$Key, $Default = '')
     if ($script:Answers.ContainsKey($Key)) { $script:Answers[$Key] } else { $Default }
+}
+
+function ConvertTo-AutoOSProcessArgument {
+    param([AllowEmptyString()][string]$Value)
+    # Windows CommandLineToArgvW quoting, including trailing backslashes.
+    '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Get-AutoOSNativePercent {
+    param([string]$Line)
+    if ($Line -match '(?<!\d)(100|\d{1,2})(?:\.\d+)?\s*%') { return [int]$Matches[1] }
+    if ($Line -match '([0-9]+(?:[.,][0-9]+)?)\s*(KB|MB|GB|KiB|MiB|GiB)\s*/\s*([0-9]+(?:[.,][0-9]+)?)\s*(KB|MB|GB|KiB|MiB|GiB)') {
+        $units = @{ KB=1000; MB=1000000; GB=1000000000; KiB=1024; MiB=1048576; GiB=1073741824 }
+        $downloaded = [double]::Parse($Matches[1].Replace(',', '.'), [Globalization.CultureInfo]::InvariantCulture) * $units[$Matches[2]]
+        $total = [double]::Parse($Matches[3].Replace(',', '.'), [Globalization.CultureInfo]::InvariantCulture) * $units[$Matches[4]]
+        if ($total -gt 0) { return [int][Math]::Min(100, [Math]::Floor(100 * $downloaded / $total)) }
+    }
+    -1
 }
 
 function Invoke-AutoOSProcess {
@@ -42,7 +62,8 @@ function Invoke-AutoOSProcess {
         [int[]]$SuccessCodes = @(0),
         # Project-scoped tools write into the current directory, so where a
         # command runs is part of what it does.
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+        [ValidateRange(1, 86400)][int]$TimeoutSeconds = 1800
     )
     $display = "$FilePath $($Arguments -join ' ')"
     if ($script:DryRun) {
@@ -50,21 +71,101 @@ function Invoke-AutoOSProcess {
         return @{ ExitCode = 0; Output = ''; DryRun = $true; Success = $true }
     }
     Write-AutoOSLine "run: $display" -Level muted
-    $pushed = $false
-    try {
-        if ($WorkingDirectory -and (Test-Path $WorkingDirectory)) {
-            Push-Location $WorkingDirectory; $pushed = $true
+    if ($env:AUTOOS_INSTALL_TIMEOUT_SECONDS) {
+        $configured = 0
+        if (-not [int]::TryParse($env:AUTOOS_INSTALL_TIMEOUT_SECONDS, [ref]$configured) -or $configured -lt 1 -or $configured -gt 86400) {
+            throw 'AUTOOS_INSTALL_TIMEOUT_SECONDS must be between 1 and 86400.'
         }
-        $out = & $FilePath @Arguments 2>&1 | Out-String
-        $code = $LASTEXITCODE
-        if ($null -eq $code) { $code = 0 }
-        # SuccessCodes is why this exists: winget returns 0x8A15002B when the
-        # package is already present, which is a success for our purposes.
-        @{ ExitCode = $code; Output = $out; DryRun = $false; Success = ($code -in $SuccessCodes) }
+        $TimeoutSeconds = $configured
+    }
+    $process = $null
+    $output = New-Object Text.StringBuilder
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $lastHeartbeat = -5.0
+    $exitedAt = $null
+    $timedOut = $false
+    try {
+        $command = Get-Command $FilePath -ErrorAction Stop
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $command.Source
+        $psi.Arguments = ($Arguments | ForEach-Object { ConvertTo-AutoOSProcessArgument $_ }) -join ' '
+        if ($psi.FileName -match '\.(cmd|bat|ps1)$') {
+            # Avoid cmd string interpolation: encode a PowerShell invocation with
+            # literal arguments. Use the system shell so installing pwsh cannot
+            # lock the very executable hosting this child.
+            $literalArgs = ($Arguments | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ','
+            $invoke = "& '" + $command.Source.Replace("'", "''") + "' @($literalArgs); " + 'exit $LASTEXITCODE'
+            $psi.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($invoke))
+        }
+        $psi.WorkingDirectory = if ($WorkingDirectory) { $WorkingDirectory } else { (Get-Location).Path }
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+        $psi.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
+        $process = [Diagnostics.Process]::Start($psi)
+        $streams = @($process.StandardOutput, $process.StandardError)
+        $buffers = @((New-Object char[] 4096), (New-Object char[] 4096))
+        $pending = @($streams[0].ReadAsync($buffers[0], 0, 4096), $streams[1].ReadAsync($buffers[1], 0, 4096))
+        $partial = @('', '')
+        $percent = -1
+        $phase = 'starting'
+        while ($true) {
+            for ($s = 0; $s -lt 2; $s++) {
+                if ($null -eq $pending[$s] -or -not $pending[$s].IsCompleted) { continue }
+                $count = $pending[$s].GetAwaiter().GetResult()
+                if ($count -eq 0) {
+                    if ($partial[$s]) { Write-AutoOSLine $partial[$s] -Level muted }
+                    $pending[$s] = $null
+                    continue
+                }
+                $chunk = -join $buffers[$s][0..($count - 1)]
+                [void]$output.Append($chunk)
+                if ($output.Length -gt 65536) { [void]$output.Remove(0, $output.Length - 65536) }
+                $parts = [regex]::Split(($partial[$s] + $chunk), '[\r\n]')
+                $partial[$s] = $parts[-1]
+                for ($l = 0; $l -lt $parts.Length - 1; $l++) {
+                    $line = $parts[$l] -replace '\x1b\[[0-?]*[ -/]*[@-~]', ''
+                    if (-not $line.Trim()) { continue }
+                    # Native child text must not masquerade as a progress event.
+                    Write-AutoOSLine ('  ' + $line) -Level muted
+                    if ($line -match '(?i)(download|herunterlad)') { $phase = 'downloading' }
+                    if ($line -match '(?i)(starting.*install|installation.*(start|wird)|installing package)') { $phase = 'installing'; $percent = -1 }
+                    $native = Get-AutoOSNativePercent -Line $line
+                    if ($native -ge 0) { $percent = $native }
+                }
+                if ($partial[$s].Length -gt 8192) { $partial[$s] = $partial[$s].Substring($partial[$s].Length - 8192) }
+                $pending[$s] = $streams[$s].ReadAsync($buffers[$s], 0, 4096)
+            }
+            if ($timer.Elapsed.TotalSeconds - $lastHeartbeat -ge 5) {
+                Write-AutoOSInstallProgress -Phase $phase -Percent $percent
+                $lastHeartbeat = $timer.Elapsed.TotalSeconds
+            }
+            if ($process.HasExited) {
+                if ($null -eq $exitedAt) { $exitedAt = $timer.Elapsed.TotalSeconds }
+                if (($null -eq $pending[0] -and $null -eq $pending[1]) -or $timer.Elapsed.TotalSeconds - $exitedAt -gt 2) { break }
+            } elseif ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                $timedOut = $true
+                # Only this owned child tree; never kill unrelated MSI services.
+                $stop = New-Object Diagnostics.ProcessStartInfo
+                $stop.FileName = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+                $stop.Arguments = "/PID $($process.Id) /T /F"
+                $stop.UseShellExecute = $false; $stop.CreateNoWindow = $true
+                $killer = [Diagnostics.Process]::Start($stop)
+                try { [void]$killer.WaitForExit(5000) } finally { $killer.Dispose() }
+                Write-AutoOSLine "Installer exceeded ${TimeoutSeconds}s. Stopping this run; inspect the installer log and any Windows elevation prompt before retrying." -Level error
+                break
+            }
+            Start-Sleep -Milliseconds 50
+        }
+        $code = if ($timedOut) { 124 } else { $process.ExitCode }
+        @{ ExitCode = $code; Output = $output.ToString(); DryRun = $false; Success = (-not $timedOut -and $code -in $SuccessCodes); TimedOut = $timedOut }
     } catch {
         @{ ExitCode = 1; Output = $_.Exception.Message; DryRun = $false; Success = $false }
     } finally {
-        if ($pushed) { Pop-Location }
+        if ($null -ne $process) { $process.Dispose() }
     }
 }
 
@@ -115,43 +216,7 @@ function Add-AutoOSPathEntry {
 # ─── Idempotency checks ─────────────────────────────────────────────────────
 function Test-AutoOSInstalled {
     param([Parameter(Mandatory)][psobject]$Component)
-    switch ($Component.Provider) {
-        'winget' {
-            if (-not (Test-AutoOSCommand 'winget')) { return $false }
-            $out = & winget list --id $Component.Package --exact --disable-interactivity 2>&1 | Out-String
-            return ($out -match [regex]::Escape($Component.Package))
-        }
-        'choco' {
-            if (-not (Test-AutoOSCommand 'choco')) { return $false }
-            $out = & choco list --local-only --exact $Component.Package 2>&1 | Out-String
-            return ($out -match '1 packages installed')
-        }
-        'npm' {
-            if (-not (Test-AutoOSCommand 'npm')) { return $false }
-            $out = & npm ls -g --depth=0 2>&1 | Out-String
-            return ($out -match [regex]::Escape($Component.Package))
-        }
-        'script' {
-            if ($Component.Package -eq 'agy') {
-                return (Test-AutoOSCommand 'agy') -or (Test-Path (Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'))
-            }
-            return $false
-        }
-        'custom' {
-            switch ($Component.Package) {
-                'agent-skills' {
-                    $myDocs = [Environment]::GetFolderPath('MyDocuments')
-                    return (Test-Path (Join-Path $myDocs 'Code\agent-skills')) -or (Test-Path (Join-Path $myDocs 'code\agent-skills'))
-                }
-                'mcp-serena' { return ('serena' -in (Get-AutoOSMcpServerNames)) }
-                'mcp-graphify' { return ('graphify' -in (Get-AutoOSMcpServerNames)) }
-                'mcp-playwright' { return ('playwright' -in (Get-AutoOSMcpServerNames)) }
-                'mcp-context7' { return ('context7' -in (Get-AutoOSMcpServerNames)) }
-                default { return $false }
-            }
-        }
-        default { return $false }
-    }
+    (Get-AutoOSInstalledStatus -Component $Component) -eq 'installed'
 }
 
 function Get-AutoOSInstalledComponents {
@@ -170,7 +235,7 @@ function Install-AutoOSComponent {
     param([Parameter(Mandatory)][psobject]$Component)
 
     if (Test-AutoOSInstalled -Component $Component) {
-        Write-AutoOSLine "$($Component.Name) is already installed" -Level muted
+        Write-AutoOSLine (([char]0x2713) + " $($Component.Name) is already installed - package skipped") -Level ok
         return 'skipped'
     }
 
@@ -179,7 +244,8 @@ function Install-AutoOSComponent {
             $wingetArgs = @('install', '--id', $Component.Package, '--exact',
                             '--accept-package-agreements', '--accept-source-agreements',
                             '--disable-interactivity', '--silent')
-            if ($Component.Source) { $wingetArgs += @('--source', $Component.Source) }
+            $source = if ($Component.Source) { $Component.Source } else { 'winget' }
+            $wingetArgs += @('--source', $source, '--verbose-logs')
             # 0x8A15002B = "no applicable upgrade / already installed"
             Invoke-AutoOSProcess -FilePath 'winget' -Arguments $wingetArgs -SuccessCodes @(0, -1978335189)
         }
@@ -189,11 +255,22 @@ function Install-AutoOSComponent {
         'npm' {
             Invoke-AutoOSProcess -FilePath 'npm' -Arguments @('install', '-g', $Component.Package)
         }
+        'psmodule' {
+            if ($Component.Package -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') { throw 'Invalid PowerShell module name.' }
+            $minimum = if ($Component.MinimumVersion) { " -MinimumVersion '$([version]$Component.MinimumVersion)'" } else { '' }
+            $install = "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; " +
+                "Install-PackageProvider NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force -ErrorAction Stop | Out-Null; " +
+                "Install-Module -Name '$($Component.Package)'$minimum -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop"
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("`$ErrorActionPreference='Stop'; " + $install))
+            Invoke-AutoOSProcess -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
+        }
         'script'  { Invoke-AutoOSScriptProvider -Component $Component }
         'custom'  { @{ ExitCode = 0; Output = 'handled by postInstall'; Success = $true } }
+        'manual' { Write-AutoOSLine "Action required: $($Component.Name) - $($Component.Homepage)" -Level warn; return 'manual' }
         default   { @{ ExitCode = 1; Output = "unknown provider '$($Component.Provider)'"; Success = $false } }
     }
 
+    if ($result.ContainsKey('TimedOut') -and $result.TimedOut) { throw [TimeoutException]::new("Installer timed out: $($Component.Name). Remaining applications were not started.") }
     # Script providers may return a bare hashtable; treat exit 0 as success.
     $ok = if ($result.ContainsKey('Success')) { [bool]$result.Success } else { $result.ExitCode -eq 0 }
     if (-not $ok) {
@@ -201,6 +278,8 @@ function Install-AutoOSComponent {
         if ($result.Output) { Write-AutoOSLine ($result.Output.Trim() -split "`n" | Select-Object -First 3 | Out-String).Trim() -Level muted }
         return 'failed'
     }
+    if (-not $script:DryRun) { Clear-AutoOSInstalledStatus }
+    if ($result.ExitCode -eq -1978335189) { return 'skipped' }
     'installed'
 }
 
@@ -316,36 +395,8 @@ function Install-AutoOSHerdr {
 }
 
 function Install-AutoOSPoshTheme {
-    <#
-      .SYNOPSIS
-        Install the AutoOS oh-my-posh theme and wire it into the right profile.
-      .DESCRIPTION
-        Two bugs from the Ansible original are fixed here: the theme is installed
-        under its OWN name instead of overwriting the shipped
-        powerlevel10k_rainbow.omp.json, and the init line goes into the profile
-        of the shell it actually initialises.
-    #>
-    $themeSrc = Join-Path $script:RepoRoot 'Windows\Terminal\oh-my-posh\theme\powerlevel10k_rainbow_env.omp.json'
-    if (-not (Test-Path $themeSrc)) {
-        Write-AutoOSLine "theme file not found at $themeSrc" -Level warn
-        return
-    }
-    $themeDir = Join-Path $env:LOCALAPPDATA 'AutoOS\themes'
-    $themeDst = Join-Path $themeDir 'powerlevel10k_rainbow_env.omp.json'
-    if (-not $script:DryRun) {
-        if (-not (Test-Path $themeDir)) { New-Item -ItemType Directory -Path $themeDir -Force | Out-Null }
-        Copy-Item -Path $themeSrc -Destination $themeDst -Force
-    }
-    Write-AutoOSLine "theme installed to $themeDst" -Level ok
-
-    $line = "oh-my-posh init pwsh --config `"$themeDst`" | Invoke-Expression"
-    # PowerShell 7 profile; falls back to 5.1 when pwsh is absent.
-    $pwshProfile = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'PowerShell\Microsoft.PowerShell_profile.ps1'
-    $ps5Profile  = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1'
-    $target = if (Test-AutoOSCommand 'pwsh') { $pwshProfile } else { $ps5Profile }
-    if ($target -eq $ps5Profile) { $line = $line -replace 'init pwsh', 'init powershell' }
-
-    Add-AutoOSProfileLine -ProfilePath $target -Line $line -Marker 'oh-my-posh init'
+    Import-Module (Join-Path $PSScriptRoot 'AutoOS.Shell.psm1') -DisableNameChecking
+    Install-AutoOSShellConfiguration -RepoRoot $script:RepoRoot -DryRun:$script:DryRun
 }
 
 function Add-AutoOSProfileLine {

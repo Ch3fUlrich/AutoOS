@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     AutoOS browser UI for headless or remote Windows machines.
@@ -22,7 +22,7 @@ Import-Module (Join-Path $PSScriptRoot 'AutoOS.Catalog.psm1') -DisableNameChecki
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Install.psm1') -DisableNameChecking
 
 $script:Log     = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
-$script:RunInfo = [hashtable]::Synchronized(@{ Running = $false; Done = 0; Total = 0; Summary = '' })
+$script:RunInfo = [hashtable]::Synchronized(@{ Running = $false; Done = 0; Total = 0; Summary = ''; Current = $null })
 
 # The installer process and one pending async read per stream. The server loop
 # drains them; see Update-AutoOSInstallLog for why it is not a reader thread.
@@ -42,7 +42,7 @@ function Get-AutoOSLineLevel {
 }
 
 function Get-AutoOSServeState {
-    param([psobject]$SystemInfo, [psobject]$Catalog)
+    param([psobject]$SystemInfo, [psobject]$Catalog, [hashtable]$InstalledStatus = @{})
 
     $available = @(Get-AutoOSAvailableComponents -Catalog $Catalog -SystemInfo $SystemInfo)
 
@@ -61,20 +61,18 @@ function Get-AutoOSServeState {
             }
         }
     }
-    $installedList = @(Get-AutoOSInstalledComponents -Components $available)
-    $installedMap = @{}
-    foreach ($inst in $installedList) { $installedMap[$inst.Id] = $true }
+    $installedList = @($available | Where-Object { $InstalledStatus[$_.Id] -eq 'installed' })
     $installedNames = @($installedList | ForEach-Object { $_.Name })
     $components = foreach ($c in $available) {
-        $isInst = [bool]$installedMap.ContainsKey($c.Id)
         [ordered]@{
             id = $c.Id; name = $c.Name; description = $c.Description
             provider = $c.Provider; package = $c.Package
             profiles = @($c.Profiles); prompt = $c.Prompt; category = $c.Category
             requires = @($c.Requires); homepage = $c.Homepage
             verify = $c.Verify; notes = $c.Notes
+            installed = $InstalledStatus[$c.Id] -eq 'installed'
+            installedStatus = $(if ($InstalledStatus.ContainsKey($c.Id)) { $InstalledStatus[$c.Id] } else { 'unknown' })
             platforms = @($platforms[$c.Id])
-            installed = $isInst
         }
     }
     [ordered]@{
@@ -125,6 +123,7 @@ function Start-AutoOSInstallJob {
     $script:RunInfo.Done    = 0
     $script:RunInfo.Total   = $Ids.Count
     $script:RunInfo.Summary = ''
+    $script:RunInfo.Current = $null
 
     $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                 (Join-Path $RepoRoot 'setup.ps1'),
@@ -133,29 +132,64 @@ function Start-AutoOSInstallJob {
 
     [void]$script:Log.Add(@{ level = 'step'; text = '$ powershell ' + ($psArgs -join ' ') })
 
-    $env:AUTOOS_NO_COLOR = '1'
-    foreach ($k in $Answers.Keys) {
-        if ($Answers[$k]) {
-            Set-Item -Path ("Env:AUTOOS_ANSWER_" + ($k.ToUpper() -replace '-', '_')) -Value $Answers[$k]
-        }
-    }
-
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName  = (Get-Command powershell).Source
     $psi.Arguments = ($psArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
     $psi.WorkingDirectory      = $RepoRoot
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
+    $psi.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+    $psi.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
     $psi.UseShellExecute        = $false
     $psi.CreateNoWindow         = $true
+    # Answers belong to this child only: retaining them on the server would
+    # silently reuse an earlier run's inputs when the next form leaves them blank.
+    $psi.EnvironmentVariables['AUTOOS_NO_COLOR'] = '1'
+    $psi.EnvironmentVariables['AUTOOS_PROGRESS_EVENTS'] = '1'
+    foreach ($k in $Answers.Keys) {
+        if ($Answers[$k]) {
+            $psi.EnvironmentVariables['AUTOOS_ANSWER_' + ($k.ToUpper() -replace '-', '_')] = [string]$Answers[$k]
+        }
+    }
 
-    $script:Proc = [System.Diagnostics.Process]::Start($psi)
+    try { $script:Proc = [System.Diagnostics.Process]::Start($psi) }
+    catch {
+        $script:RunInfo.Running = $false
+        $script:RunInfo.Summary = 'could not start installer'
+        throw
+    }
 
     # One pending read per stream. Both streams must be read as they fill: an
     # installer that writes enough to stderr while nobody drains it blocks on a
     # full pipe buffer and the run hangs with no output and no error.
     $script:OutTask = $script:Proc.StandardOutput.ReadLineAsync()
     $script:ErrTask = $script:Proc.StandardError.ReadLineAsync()
+}
+
+function Get-AutoOSServeInstalledStatus {
+    param([psobject]$SystemInfo, [psobject]$Catalog)
+    $components = @(Get-AutoOSAvailableComponents -Catalog $Catalog -SystemInfo $SystemInfo)
+    Set-AutoOSInstalledStatus -Components $components -Refresh
+    $status = @{}
+    foreach ($component in $components) { $status[$component.Id] = $component.InstalledStatus }
+    return $status
+}
+
+function Set-AutoOSServeProgress {
+    param([string]$Line)
+    $prefix = '@@AUTOOS_PROGRESS '
+    if (-not $Line.StartsWith($prefix)) { return $false }
+    try {
+        $progressRecord = $Line.Substring($prefix.Length) | ConvertFrom-Json
+        if ($progressRecord.total -lt 0 -or $progressRecord.done -lt 0 -or $progressRecord.done -gt $progressRecord.total) { return $true }
+        $script:RunInfo.Done = [int]$progressRecord.done
+        $script:RunInfo.Total = [int]$progressRecord.total
+        $script:RunInfo.Current = $progressRecord
+    } catch {
+        # A malformed progress record must never stop draining either pipe.
+        return $true
+    }
+    return $true
 }
 
 function Update-AutoOSInstallLog {
@@ -191,9 +225,10 @@ function Update-AutoOSInstallLog {
                 break
             }
 
-            $level = if ($stream -eq 'Err') { 'err' } else { Get-AutoOSLineLevel $line }
-            [void]$script:Log.Add(@{ level = $level; text = $line })
-            if ($line.TrimStart().StartsWith('> [')) { $script:RunInfo.Done++ }
+            if (-not (Set-AutoOSServeProgress -Line $line)) {
+                $level = if ($stream -eq 'Err') { 'err' } else { Get-AutoOSLineLevel $line }
+                [void]$script:Log.Add(@{ level = $level; text = $line })
+            }
 
             if ($stream -eq 'Out') { $script:OutTask = $script:Proc.StandardOutput.ReadLineAsync() }
             else                   { $script:ErrTask = $script:Proc.StandardError.ReadLineAsync() }
@@ -305,10 +340,15 @@ function Start-AutoOSServer {
     # interrupted at all. GetContextAsync + a short Wait() hands control back
     # every 200 ms, which is what gives Ctrl-C somewhere to land.
     $pending = $null
+    $installedStatus = Get-AutoOSServeInstalledStatus -SystemInfo $SystemInfo -Catalog $Catalog
     try {
     while ($listener.IsListening) {
         # Before the wait, so a run keeps streaming even with nobody asking.
+        $wasRunning = $script:RunInfo.Running
         Update-AutoOSInstallLog
+        if ($wasRunning -and -not $script:RunInfo.Running) {
+            $installedStatus = Get-AutoOSServeInstalledStatus -SystemInfo $SystemInfo -Catalog $Catalog
+        }
         if ($null -eq $pending) { $pending = $listener.GetContextAsync() }
         if (-not $pending.Wait(200)) { continue }   # timeout: loop, stay interruptible
         $ctx = $pending.Result
@@ -343,7 +383,7 @@ function Start-AutoOSServer {
                 & $json 403 @{ error = 'bad or missing token' }
             }
             elseif ($path -eq '/api/state') {
-                & $json 200 (Get-AutoOSServeState -SystemInfo $SystemInfo -Catalog $Catalog)
+                & $json 200 (Get-AutoOSServeState -SystemInfo $SystemInfo -Catalog $Catalog -InstalledStatus $installedStatus)
             }
             elseif ($path -eq '/api/ping') {
                 # Deliberately the cheapest thing this server does: the page
@@ -355,11 +395,13 @@ function Start-AutoOSServer {
                 $offset = 0
                 [void][int]::TryParse($req.QueryString['offset'], [ref]$offset)
                 $all = @($script:Log)
+                $offset = [Math]::Max(0, [Math]::Min($offset, $all.Count))
                 $lines = if ($offset -lt $all.Count) { $all[$offset..($all.Count - 1)] } else { @() }
                 & $json 200 @{
                     lines = @($lines); offset = $offset + @($lines).Count
                     running = $script:RunInfo.Running; done = $script:RunInfo.Done
                     total = $script:RunInfo.Total; summary = $script:RunInfo.Summary
+                    current = $script:RunInfo.Current
                 }
             }
             elseif ($path -eq '/api/config' -and $req.HttpMethod -eq 'GET') {
@@ -383,7 +425,16 @@ function Start-AutoOSServer {
                 $body = (New-Object IO.StreamReader($req.InputStream, $req.ContentEncoding)).ReadToEnd()
                 $cfgPath = Join-Path $RepoRoot 'autoos.config.json'
                 $tmpPath = "$cfgPath.tmp"
-                [System.IO.File]::WriteAllText($tmpPath, $body, [System.Text.Encoding]::UTF8)
+                $updates = $body | ConvertFrom-Json
+                if ($updates -isnot [pscustomobject]) { throw 'Configuration must be a JSON object.' }
+                $merged = if (Test-Path -LiteralPath $cfgPath) { Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+                foreach ($property in $updates.PSObject.Properties) {
+                    if ($property.Name -eq 'answers' -and $merged.PSObject.Properties.Name -contains 'answers') {
+                        foreach ($answer in $property.Value.PSObject.Properties) { $merged.answers | Add-Member -NotePropertyName $answer.Name -NotePropertyValue $answer.Value -Force }
+                    } else { $merged | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force }
+                }
+                if (Test-Path -LiteralPath $cfgPath) { Copy-Item -LiteralPath $cfgPath -Destination "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss-fffffff')" }
+                [System.IO.File]::WriteAllText($tmpPath, ($merged | ConvertTo-Json -Depth 100), [System.Text.Encoding]::UTF8)
                 Move-Item -Path $tmpPath -Destination $cfgPath -Force
                 & $json 200 @{ ok = $true; saved = $cfgPath }
             }

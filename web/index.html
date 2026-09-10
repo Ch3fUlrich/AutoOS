@@ -438,6 +438,15 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
   .tier{padding-left:35px}
   .profile[aria-pressed="true"]{flex:1 1 100%}
 }
+.chip-installed{color:#267840;background:rgba(57,165,90,.12);border:1px solid rgba(57,165,90,.32)}
+.chip-manual{color:var(--ink-muted);border:1px solid currentColor}
+.item.unavailable{background:rgba(128,128,128,.08);color:var(--ink-muted);cursor:not-allowed}
+.item.unavailable .item-name,.item.unavailable .prov,.item.unavailable .item-desc{color:var(--ink-muted)}
+.item.unavailable input{cursor:not-allowed}
+.progress-label{display:flex;justify-content:space-between;font-size:.82rem;margin:8px 0;color:var(--ink-muted)}
+.bar.indeterminate>div{width:32%!important;animation:install-motion 1.7s ease-in-out infinite}
+@keyframes install-motion{from{transform:translateX(-100%)}to{transform:translateX(330%)}}
+@media(prefers-reduced-motion:reduce){.bar.indeterminate>div{animation:none}}
 </style>
 <!-- Every control on this page is driven by the inline script at the bottom.
      If a script blocker, an extension or a policy kills it, none of this markup
@@ -585,7 +594,10 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
         <span class="card-sub" id="runStatus">idle</span>
       </summary>
       <div class="card-body">
-        <div class="bar"><div id="prog"></div></div>
+        <div class="progress-label"><span>Overall progress</span><span id="overallLabel">0 / 0 completed</span></div>
+        <div class="bar" role="progressbar" aria-label="Overall installation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="overallBar"><div id="prog"></div></div>
+        <div class="progress-label"><span id="currentLabel">Current application</span><span id="currentDetail">Waiting to start</span></div>
+        <div class="bar" role="progressbar" aria-label="Current application progress" aria-valuemin="0" aria-valuemax="100" id="currentBar"><div id="currentProg"></div></div>
         <div class="log-wrap">
           <button type="button" id="copyLog" title="Copy the whole output to the clipboard">Copy</button>
           <div id="log">Ready. Pick your components, then press Install.</div>
@@ -653,8 +665,14 @@ applyLayout(PREF.get("layout", "list"));
 applyCols(PREF.get("cols", "auto"));
 
 /* ── dependency maths ─────────────────────────────────────────────────── */
+function canInstall(c, seen = new Set()) {
+  if (!c || c.provider === 'manual' || c.installable === false) return false;
+  if (seen.has(c.id)) return true;
+  seen.add(c.id);
+  return (c.requires || []).every(id => canInstall(BY_ID.get(id), seen));
+}
 function closure(ids) {
-  const out = new Set(), queue = [...ids];
+  const out = new Set(), queue = [...ids].filter(id => canInstall(BY_ID.get(id)));
   while (queue.length) {
     const id = queue.pop();
     if (out.has(id) || !BY_ID.has(id)) continue;
@@ -691,7 +709,7 @@ function stepMap(ids) {
 /* What a profile would install, dependencies included. */
 function profileClosure(name) {
   if (name === "custom") return new Set();
-  return closure(STATE.components.filter(c => (c.profiles || []).includes(name)).map(c => c.id));
+  return closure(STATE.components.filter(c => canInstall(c) && (c.profiles || []).includes(name)).map(c => c.id));
 }
 
 /* ── tabs ─────────────────────────────────────────────────────────────── */
@@ -773,13 +791,13 @@ async function boot() {
 
   const elev = String(s.elevated ?? "").toLowerCase();
   el("elevHint").textContent = elev === "no"
-    ? "not elevated — machine-wide packages will be skipped" : "";
+    ? "not elevated — some installers may request administrator approval" : "";
 
   renderProfiles();
   renderCatalog();
   applyProfile(STATE.suggested);
 
-  el("selAll").onclick      = () => { STATE.components.forEach(c => picked.add(c.id)); activeProfile = null; sync(); };
+  el("selAll").onclick      = () => { STATE.components.filter(c => canInstall(c)).forEach(c => picked.add(c.id)); activeProfile = null; sync(); };
   el("selNone").onclick     = () => { picked.clear(); activeProfile = null; sync(); };
   el("expandAll").onclick   = () => document.querySelectorAll(".group").forEach(g => g.open = true);
   el("collapseAll").onclick = () => document.querySelectorAll(".group").forEach(g => g.open = false);
@@ -875,7 +893,7 @@ function applyProfile(name) {
 /* Direct members only - dependencies get added by closure() during sync. */
 function profileClosureDirect(name) {
   return name === "custom" ? []
-    : STATE.components.filter(c => (c.profiles || []).includes(name)).map(c => c.id);
+    : STATE.components.filter(c => canInstall(c) && (c.profiles || []).includes(name)).map(c => c.id);
 }
 
 /* The expanded card shows what that profile actually installs, as a grid of
@@ -927,7 +945,7 @@ function renderProfileSummary() {
             esc(BY_ID.get(id).name) + " - step " + steps.get(id) +
             (isDep ? " (dependency)" : "") + '">' +
             '<span class="step-badge' + (isDep ? " dep" : "") + '">' + steps.get(id) + "</span>" +
-            '<span class="cname">' + esc(BY_ID.get(id).name) + "</span></span>";
+            '<span class="cname">' + esc(BY_ID.get(id).name) + installedChip(BY_ID.get(id)) + "</span></span>";
         }).join("");
       return '<div class="psum-card"><div class="psum-card-head">' + esc(cat) +
         '<span class="n">' + list.length + "</span></div>" + rows + "</div>";
@@ -963,7 +981,7 @@ function renderCatalog() {
     "</details>").join("");
   el("catalog").querySelectorAll(".pick").forEach(cb => {
     cb.onchange = () => {
-      if (cb.checked) picked.add(cb.dataset.id); else picked.delete(cb.dataset.id);
+      if (cb.checked && canInstall(BY_ID.get(cb.dataset.id))) picked.add(cb.dataset.id); else picked.delete(cb.dataset.id);
       activeProfile = "custom";
       el("profiles").querySelectorAll(".profile").forEach(b =>
         b.setAttribute("aria-pressed", String(b.dataset.profile === "custom")));
@@ -989,26 +1007,28 @@ function platformChip(c) {
     '">not on ' + esc(missing.join(", ")) + "</span>";
 }
 
+function installedChip(c) {
+  if (c.installed) return '<span class="chip chip-installed" title="Detected locally; package installation will be skipped">✓ Installed</span>';
+  if (c.provider === 'manual') return '<span class="chip chip-manual">Vendor setup required</span>';
+  return c.installedStatus === 'unknown' ? '<span class="chip" title="No reliable installed-app probe is available">Not checked</span>' : '';
+}
+
 function itemHtml(c) {
   const name = c.homepage
     ? '<a class="item-name" href="' + esc(c.homepage) + '" target="_blank" rel="noopener noreferrer">' +
       esc(c.name) + "</a>"
     : '<span class="item-name">' + esc(c.name) + "</span>";
-  const instChip = c.installed
-    ? '<span class="chip chip-ok" title="Already installed on this machine">✓ installed</span>'
-    : "";
   const searchStr = (c.id + " " + c.name + " " + c.description + " " + c.package +
     (c.installed ? " installed already-installed" : "")).toLowerCase();
-  return '<label class="item" data-id="' + esc(c.id) + '" data-installed="' + (c.installed ? "1" : "0") + '" data-search="' +
+  return '<label class="item' + (canInstall(c) ? '' : ' unavailable') + '" data-id="' + esc(c.id) + '" data-installed="' + (c.installed ? "1" : "0") + '" data-search="' +
       esc(searchStr) + '">' +
-    '<input type="checkbox" class="pick" data-id="' + esc(c.id) + '">' +
+    '<input type="checkbox" class="pick" data-id="' + esc(c.id) + '"' + (canInstall(c) ? '' : ' disabled aria-disabled="true"') + '>' +
     "<span>" +
       '<span class="item-title">' + name +
-        instChip +
         '<span class="chip prov prov-' + esc(c.provider) + '">' + esc(c.provider) + "</span>" +
         '<span class="chip chip-pkg" title="' + esc(c.provider + ": " + c.package) + '">' +
           esc(c.package) + "</span>" +
-        platformChip(c) +
+        platformChip(c) + installedChip(c) +
         '<span class="state-chips"></span>' +
       "</span>" +
       '<span class="item-desc">' + esc(c.description) + "</span>" +
@@ -1019,6 +1039,7 @@ function itemHtml(c) {
 /* ── the one repaint ──────────────────────────────────────────────────── */
 let STEPS = new Map();
 function sync() {
+  picked = new Set([...picked].filter(id => canInstall(BY_ID.get(id))));
   const eff = effective(), auto = autoAdded();
   STEPS = stepMap(eff);
 
@@ -1029,8 +1050,8 @@ function sync() {
     const locks = lockedBy(id);
 
     cb.checked = isEff;
-    cb.disabled = isAuto && locks.length > 0;
-    cb.title = cb.disabled
+    cb.disabled = !canInstall(c) || (isAuto && locks.length > 0);
+    cb.title = !canInstall(c) ? "AutoOS cannot install this application. Use the vendor link for manual setup." : cb.disabled
       ? "Required by " + locks.map(d => BY_ID.get(d)?.name || d).join(", ") : "";
 
     node.classList.toggle("checked", isEff && !isAuto);
@@ -1074,7 +1095,7 @@ function sync() {
   el("catalogSub").textContent = eff.size + " of " + STATE.components.length + " selected";
   el("orderSub").textContent = steps ? steps + " step" + (steps === 1 ? "" : "s") : "nothing selected";
   el("tally").innerHTML = eff.size
-    ? "<b>" + eff.size + "</b> to install" +
+    ? "<b>" + eff.size + "</b> selected · " + [...eff].filter(id => BY_ID.get(id).installed).length + " already installed · " + [...eff].filter(id => BY_ID.get(id).provider === "manual" && !BY_ID.get(id).installed).length + " vendor setup" +
       (auto.size ? ' · <span class="autoc">' + auto.size + " pulled in as dependencies</span>" : "")
     : "nothing selected";
   el("run").disabled = running || eff.size === 0;
@@ -1125,7 +1146,7 @@ function renderTiers() {
         const c = BY_ID.get(id);
         const reqs = (c.requires || []).filter(r => BY_ID.has(r)).map(r => esc(BY_ID.get(r).name));
         return '<div class="dep-node' + (auto.has(id) ? " auto" : "") + '">' +
-          '<span class="dn-name">' + esc(c.name) + "</span>" +
+          '<span class="dn-name">' + esc(c.name) + installedChip(c) + "</span>" +
           '<span class="dn-req">' + (reqs.length ? "after <b>" + reqs.join("</b>, <b>") + "</b>"
                                                  : "no prerequisites") + "</span></div>";
       }).join("") + "</div></div>";
@@ -1138,7 +1159,7 @@ function renderConfigCard() {
   if (!cbox) return;
   const curProf = CONFIG_DATA?.profile || activeProfile || STATE.suggested || "workstation";
   const answers = CONFIG_DATA?.answers || {};
-  const profOpts = ["workstation", "ai-coding", "light", "server", "custom"].map(p =>
+  const profOpts = Object.keys(STATE.profiles).map(p =>
     '<option value="' + esc(p) + '"' + (p === curProf ? " selected" : "") + ">" + esc(p) + "</option>"
   ).join("");
 
@@ -1312,6 +1333,7 @@ async function runInstall() {
   el("run").disabled = true;
   el("log").textContent = "";
   logOffset = 0;
+  renderProgress({running:true,total:ids.length,done:0,current:null});
   el("runStatus").textContent = dry ? "dry run in progress…" : "installing…";
   showTab("run");
 
@@ -1326,18 +1348,46 @@ async function runInstall() {
   poll();
 }
 
+function renderProgress(d) {
+  const total = Math.max(0, Number(d.total) || 0), done = Math.min(total, Math.max(0, Number(d.done) || 0));
+  const pct = total ? Math.floor(100 * done / total) : 0;
+  el("prog").style.width = pct + "%";
+  el("overallBar").setAttribute("aria-valuenow", String(pct));
+  el("overallLabel").textContent = done + " / " + total + " completed (" + pct + "%)";
+  const c = d.current;
+  el("currentLabel").textContent = c?.name || "Current application";
+  const active = Boolean(d.running && c?.status === "running");
+  const known = c && typeof c.percent === "number" && Number.isFinite(c.percent);
+  el("currentBar").classList.toggle("indeterminate", active && !known);
+  el("currentProg").style.width = known ? Math.max(0, Math.min(100, c.percent)) + "%" : "0%";
+  if (known) el("currentBar").setAttribute("aria-valuenow", String(Math.max(0, Math.min(100, c.percent))));
+  else el("currentBar").removeAttribute("aria-valuenow");
+  el("currentDetail").textContent = c ? (c.phase + " · " + (known ? c.percent + "% · " : active ? "percentage unavailable · " : "") + (c.elapsedSeconds || 0) + "s") : d.running ? "Detecting and planning…" : "Waiting to start";
+}
+
+async function refreshInstalled() {
+  const r = await fetch(api("/api/state"));
+  if (!r.ok) return;
+  const fresh = await r.json();
+  for (const app of fresh.components || []) {
+    const current = BY_ID.get(app.id);
+    if (current) { current.installed = app.installed; current.installedStatus = app.installedStatus; }
+  }
+  renderCatalog(); sync();
+}
+
 async function poll() {
   if (dead) return;
   try {
     const r = await fetch(api("/api/log?offset=" + logOffset));
     const d = await r.json();
     if (d.lines?.length) { appendLog(d.lines); logOffset = d.offset; }
-    if (d.total) el("prog").style.width = Math.round(100 * d.done / d.total) + "%";
+    renderProgress(d);
     if (d.running) { setTimeout(poll, 600); return; }
     running = false;
     el("runStatus").textContent = d.summary || "done";
-    el("prog").style.width = "100%";
     sync();
+    await refreshInstalled();
   } catch (e) {
     // The heartbeat may have torn the page down while this request was in
     // flight; there is no log element left to write the failure into.
@@ -1356,14 +1406,14 @@ async function resumeIfRunning() {
     el("log").textContent = "";
     appendLog(d.lines);
     logOffset = d.offset;
-    if (d.total) el("prog").style.width = Math.round(100 * d.done / d.total) + "%";
+    renderProgress(d);
     if (d.running) {
       running = true; sync();
       el("runStatus").textContent = "a run is already in progress…";
       showTab("run"); poll();
     } else {
       el("runStatus").textContent = d.summary || "previous run finished";
-      el("prog").style.width = "100%";
+      renderProgress(d);
     }
   } catch (e) { /* nothing in progress */ }
 }

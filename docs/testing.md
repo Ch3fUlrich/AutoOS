@@ -11,7 +11,24 @@ powershell -File tests\run-tests.ps1
 powershell -File tests\run-tests.ps1 -Filter catalog
 ```
 
-Current: **69 Linux**, **62 Windows**.
+Use the totals reported by the harness; coverage grows with the catalog and UI.
+
+Additional regressions run harmless child-process fixtures and temporary config
+files, never real installers:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test-improvements.ps1
+pwsh -NoProfile -File tests/test-improvements.ps1
+node tests/test-web-progress.js
+```
+
+```bash
+python3 tests/test-process.py
+```
+
+The process-group checks require a POSIX host. Git Bash can exercise the Bash
+suite on Windows, but does not substitute for native Linux or WSL validation.
+CI runs the Linux suite and process-group tests on Ubuntu.
 
 ## No framework
 

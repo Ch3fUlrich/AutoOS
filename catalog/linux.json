@@ -6,7 +6,8 @@
     "ai-coding": "Coding and AI tooling plus the shell, no desktop packages.",
     "light": "Small board (Raspberry Pi 5 and similar) — Claude Code, Tailscale and Herdr only.",
     "server": "Headless server — shell, networking and containers, no GUI.",
-    "custom": "Start with nothing ticked and choose by hand."
+    "custom": "Start with nothing ticked and choose by hand.",
+    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
   },
   "categories": [
     {
@@ -688,7 +689,8 @@
           "provider": "apt",
           "package": "firefox-esr",
           "profiles": [
-            "workstation"
+            "workstation",
+            "everyday"
           ],
           "homepage": "https://www.mozilla.org/firefox/"
         },
@@ -714,7 +716,8 @@
             "download-tools"
           ],
           "profiles": [
-            "workstation"
+            "workstation",
+            "everyday"
           ],
           "verify": "google-chrome --version",
           "homepage": "https://www.google.com/chrome/"
@@ -767,6 +770,132 @@
             "server"
           ],
           "homepage": "https://manpages.ubuntu.com/manpages/noble/man8/cron.8.html"
+        }
+      ]
+    },
+    {
+      "id": "everyday",
+      "name": "Everyday & Entertainment",
+      "description": "Personal desktop, media, games and maker tools.",
+      "requiresDisplay": true,
+      "components": [
+        {
+          "id": "spotify",
+          "name": "Spotify",
+          "description": "Music and podcasts",
+          "provider": "manual",
+          "package": "spotify",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.spotify.com/download/",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "vlc",
+          "name": "VLC media player",
+          "description": "Play local videos, music and network streams",
+          "provider": "apt",
+          "package": "vlc",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.videolan.org/vlc/"
+        },
+        {
+          "id": "7zip",
+          "name": "7-Zip",
+          "description": "Create and extract compressed archives",
+          "provider": "apt",
+          "package": "p7zip-full",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.7-zip.org/"
+        },
+        {
+          "id": "steam",
+          "name": "Steam",
+          "description": "Game library and store",
+          "provider": "manual",
+          "package": "steam",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://store.steampowered.com/about/",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "discord",
+          "name": "Discord",
+          "description": "Voice, video and community chat",
+          "provider": "manual",
+          "package": "discord",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://discord.com/download",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "parsec",
+          "name": "Parsec",
+          "description": "Remote desktop and low-latency streaming",
+          "provider": "manual",
+          "package": "parsec",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://parsec.app/downloads",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "moonlight",
+          "name": "Moonlight",
+          "description": "Stream games from a compatible host",
+          "provider": "manual",
+          "package": "moonlight",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://moonlight-stream.org/",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "jellyfin-client",
+          "name": "Jellyfin Media Player",
+          "description": "Desktop client for your Jellyfin media server",
+          "provider": "manual",
+          "package": "jellyfin-client",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://jellyfin.org/downloads/clients/all/",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "chitubox",
+          "name": "CHITUBOX Basic",
+          "description": "Prepare models for resin 3D printing",
+          "provider": "manual",
+          "package": "chitubox",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.chitubox.com/en/download/chitubox-free",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "unified-remote",
+          "name": "Unified Remote Server",
+          "description": "Control this computer from your phone",
+          "provider": "manual",
+          "package": "unified-remote",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.unifiedremote.com/download",
+          "notes": "Install the Unified Remote app on your phone and pair with this server. Review remote access settings before use."
         }
       ]
     }

@@ -98,6 +98,7 @@ function Save-AutoOSState {
         results  = [ordered]@{
             installed = @($Results['installed']); skipped = @($Results['skipped'])
             failed    = @($Results['failed'])
+            manual    = @($Results['manual'])
         }
     }
     $dir = Split-Path -Parent $Path

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Zero-dependency terminal UI for AutoOS: colour, layout and an interactive
@@ -252,7 +252,7 @@ function Show-AutoOSRadioMenu {
                 $mark = if ($i -eq $cursor) { (Format-AutoOSColor '❯' 'sel') } else { ' ' }
                 $radio = if ($i -eq $cursor) { (Format-AutoOSColor '(•)' 'sel') } else { (Format-AutoOSColor '( )' 'dim') }
                 $name = "{0,-14}" -f $it.Name
-                $nameText = if ($i -eq $cursor) { Format-AutoOSColor $name 'sel' } else { $name }
+                $nameText = if ($it.Locked) { Format-AutoOSColor $name 'muted' } elseif ($i -eq $cursor) { Format-AutoOSColor $name 'sel' } else { $name }
                 $badgeText = if ($it.Badge) { " " + (Format-AutoOSColor "[$($it.Badge)]" 'accent') } else { "" }
                 $descText = if ($it.Description) { "  " + (Format-AutoOSColor $it.Description 'muted') } else { "" }
 
@@ -418,7 +418,7 @@ function Show-AutoOSMenu {
                                elseif ($it.Selected) { (Format-AutoOSColor '[✓]' 'ok') }
                                else { (Format-AutoOSColor '[ ]' 'dim') }
                     $name = "{0,-26}" -f $it.Name
-                    $nameText = if ($i -eq $cursor) { Format-AutoOSColor $name 'sel' } else { $name }
+                    $nameText = if ($it.Locked) { Format-AutoOSColor $name 'muted' } elseif ($i -eq $cursor) { Format-AutoOSColor $name 'sel' } else { $name }
                     $instBadge = if ($it.Installed) { (Format-AutoOSColor '✓ installed' 'ok') + ' ' } else { '' }
                     $desc = Format-AutoOSColor $it.Description 'muted'
                     [void]$out.AppendLine("$($script:Esc)[2K  $mark $boxText $nameText $instBadge$desc")
