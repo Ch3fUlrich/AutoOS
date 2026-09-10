@@ -743,6 +743,23 @@ Test-Case 'no bearer token is ever invented' {
     Pass
 }
 
+Test-Case 'Install-AutoOSAgentSkills links skills to Antigravity and Claude Code' {
+    if ($installSource -notmatch 'agySkills = Join-Path \$env:USERPROFILE ''\.gemini\\config\\skills''') {
+        throw 'Install-AutoOSAgentSkills does not configure Antigravity skills'
+    }
+    if ($installSource -notmatch 'claudeSkills = Join-Path \$env:USERPROFILE ''\.claude\\skills''') {
+        throw 'Install-AutoOSAgentSkills does not configure Claude Code skills'
+    }
+    Pass
+}
+
+Test-Case 'Test-AutoOSInstalled checks both Documents\code and Documents\Code' {
+    if ($installSource -notmatch 'Code\\agent-skills' -or $installSource -notmatch 'code\\agent-skills') {
+        throw 'Test-AutoOSInstalled does not check both Code and code paths'
+    }
+    Pass
+}
+
 # ─── Static analysis ────────────────────────────────────────────────────────
 Describe-Group 'static analysis'
 

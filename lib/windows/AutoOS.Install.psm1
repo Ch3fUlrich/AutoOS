@@ -139,7 +139,10 @@ function Test-AutoOSInstalled {
         }
         'custom' {
             switch ($Component.Package) {
-                'agent-skills' { return Test-Path (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Code\agent-skills') }
+                'agent-skills' {
+                    $myDocs = [Environment]::GetFolderPath('MyDocuments')
+                    return (Test-Path (Join-Path $myDocs 'Code\agent-skills')) -or (Test-Path (Join-Path $myDocs 'code\agent-skills'))
+                }
                 'mcp-serena' { return ('serena' -in (Get-AutoOSMcpServerNames)) }
                 'mcp-graphify' { return ('graphify' -in (Get-AutoOSMcpServerNames)) }
                 'mcp-playwright' { return ('playwright' -in (Get-AutoOSMcpServerNames)) }
@@ -585,7 +588,11 @@ function Install-AutoOSAgentSkills {
                       and answers from the wrong graph, so this never creates one
                       and says so when it finds one.
     #>
-    $codeRoot = Join-Path $env:USERPROFILE 'Documents\Code'
+    $myDocs = [Environment]::GetFolderPath('MyDocuments')
+    $codeRoot = Join-Path $myDocs 'Code'
+    if (Test-Path (Join-Path $myDocs 'code')) {
+        $codeRoot = Join-Path $myDocs 'code'
+    }
     $dest = Join-Path $codeRoot 'agent-skills'
     if (-not $script:DryRun -and -not (Test-Path $codeRoot)) {
         New-Item -ItemType Directory -Path $codeRoot -Force | Out-Null
@@ -627,6 +634,39 @@ function Install-AutoOSAgentSkills {
     }
 
     Set-AutoOSAntigravityMcp
+
+    # ── Wire skills into Antigravity and Claude Code global skills directories ──
+    $agySkills = Join-Path $env:USERPROFILE '.gemini\config\skills'
+    $claudeSkills = Join-Path $env:USERPROFILE '.claude\skills'
+    $skillsSrc = Join-Path $dest 'skills'
+    if (Test-Path $skillsSrc) {
+        if ($script:DryRun) {
+            Write-AutoOSLine "would link skills from $skillsSrc to $agySkills and $claudeSkills" -Level muted
+        } else {
+            foreach ($dir in @($agySkills, $claudeSkills)) {
+                if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            }
+            foreach ($s in Get-ChildItem -Path $skillsSrc -Directory) {
+                $agyTarget = Join-Path $agySkills $s.Name
+                $claudeTarget = Join-Path $claudeSkills $s.Name
+                if (-not (Test-Path $agyTarget)) {
+                    try {
+                        New-Item -ItemType Junction -Path $agyTarget -Target $s.FullName | Out-Null
+                    } catch {
+                        Copy-Item -Path $s.FullName -Destination $agyTarget -Recurse -Force
+                    }
+                }
+                if (-not (Test-Path $claudeTarget)) {
+                    try {
+                        New-Item -ItemType Junction -Path $claudeTarget -Target $s.FullName | Out-Null
+                    } catch {
+                        Copy-Item -Path $s.FullName -Destination $claudeTarget -Recurse -Force
+                    }
+                }
+            }
+            Write-AutoOSLine 'Agent skills registered with Antigravity and Claude Code' -Level ok
+        }
+    }
 
     if ($script:DryRun) {
         Write-AutoOSLine 'would check the omnigraph image, network and token' -Level muted

@@ -880,6 +880,52 @@ if it "register_antigravity_mcp_server is idempotent and creates backup"; then
     else fail "backup was not created before edit"; fi
 fi
 
+if it "agent-skills links skills to Antigravity and Claude Code"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Documents/code/agent-skills/skills/test-skill"
+    printf -- '---\nname: test-skill\ndescription: test\n---\n' >"$tmp/Documents/code/agent-skills/skills/test-skill/SKILL.md"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }
+        install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }
+        install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        enable_project_mcp_server() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        install_agent_skills >/dev/null 2>&1
+    )
+    ok=1
+    [[ -e "$tmp/.gemini/config/skills/test-skill/SKILL.md" ]] || ok=0
+    [[ -e "$tmp/.claude/skills/test-skill/SKILL.md" ]] || ok=0
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "skills were not linked to Antigravity or Claude Code"; fi
+fi
+
+if it "custom_is_installed detects agent-skills under Documents/code or Documents/Code"; then
+    tmp="$(mktemp -d)"
+    (
+        SYS_HOME="$tmp"
+        mkdir -p "$tmp/Documents/code/agent-skills"
+        custom_is_installed agent-skills
+    )
+    rc_code=$?
+    (
+        SYS_HOME="$tmp"
+        rm -rf "$tmp/Documents/code"
+        mkdir -p "$tmp/Documents/Code/agent-skills"
+        custom_is_installed agent-skills
+    )
+    rc_Code=$?
+    rm -rf "$tmp"
+    if [[ $rc_code -eq 0 && $rc_Code -eq 0 ]]; then pass
+    else fail "rc_code=$rc_code rc_Code=$rc_Code"; fi
+fi
+
 describe "wsl detection"
 
 if it "WSL is detected when running under it"; then

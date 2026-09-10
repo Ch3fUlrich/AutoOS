@@ -84,7 +84,7 @@ custom_is_installed() {
             has_cmd git && [[ -n "$(git config --global user.name 2>/dev/null || true)" ]]
             ;;
         agent-skills)
-            [[ -d "$SYS_HOME/Documents/Code/agent-skills" ]]
+            [[ -d "$SYS_HOME/Documents/Code/agent-skills" || -d "$SYS_HOME/Documents/code/agent-skills" ]]
             ;;
         mcp-serena)
             mcp_has_server serena || antigravity_has_server serena
@@ -932,6 +932,9 @@ omnigraph_readiness() {
 
 install_agent_skills() {
     local code_root="$SYS_HOME/Documents/Code"
+    if [[ -d "$SYS_HOME/Documents/code" ]]; then
+        code_root="$SYS_HOME/Documents/code"
+    fi
     local dest="$code_root/agent-skills"
     (( AUTOOS_DRY_RUN )) || mkdir -p "$code_root"
     clone_or_update https://github.com/Ch3fUlrich/agent-skills.git "$dest"
@@ -984,6 +987,29 @@ print(json.dumps({
 }))
 ")"
     register_antigravity_mcp_server omnigraph "$omni_spec"
+
+    # Wire skills into Antigravity and Claude Code global skills directories
+    local agy_skills="$SYS_HOME/.gemini/config/skills"
+    local claude_skills="$SYS_HOME/.claude/skills"
+    if [[ -d "$dest/skills" ]]; then
+        if (( AUTOOS_DRY_RUN )); then
+            ui_muted "would link skills from $dest/skills to $agy_skills and $claude_skills"
+        else
+            mkdir -p "$agy_skills" "$claude_skills"
+            local s_dir s_name
+            for s_dir in "$dest/skills"/*; do
+                [[ -d "$s_dir" ]] || continue
+                s_name="$(basename "$s_dir")"
+                if [[ ! -e "$agy_skills/$s_name" ]]; then
+                    ln -snf "$s_dir" "$agy_skills/$s_name" 2>/dev/null || cp -r "$s_dir" "$agy_skills/$s_name"
+                fi
+                if [[ ! -e "$claude_skills/$s_name" ]]; then
+                    ln -snf "$s_dir" "$claude_skills/$s_name" 2>/dev/null || cp -r "$s_dir" "$claude_skills/$s_name"
+                fi
+            done
+            ui_ok "Agent skills linked to Antigravity and Claude Code"
+        fi
+    fi
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would check the omnigraph image, network and token"

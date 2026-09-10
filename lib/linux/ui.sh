@@ -167,7 +167,11 @@ ui_ask() {
     [[ -n "$help" ]] && printf '    %s%s%s\n' "$(_c muted)" "$help" "$(_c reset)"
     if [[ -n "$default" ]]; then shown=" [$default]"; fi
     printf '  %s?%s %s%s%s%s: ' "$(_c accent)" "$(_c reset)" "$question" "$(_c muted)" "$shown" "$(_c reset)"
-    read -r value || value=""
+    if [[ -t 0 ]] && [[ -n "$default" ]]; then
+        read -e -i "$default" -r value 2>/dev/null || read -r value || value=""
+    else
+        read -r value || value=""
+    fi
     if [[ -z "$value" ]]; then value="$default"; fi
     printf -v "$__var" '%s' "$value"
 }
