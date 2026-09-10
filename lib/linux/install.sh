@@ -171,10 +171,40 @@ clone_or_update() {
 
 install_oh_my_zsh() {
     if (( AUTOOS_DRY_RUN )); then ui_muted "would install oh-my-zsh into $SYS_HOME/.oh-my-zsh"; return 0; fi
+
+    local tmp
+    tmp="$(mktemp)"
+    # Pin to a known commit to prevent supply chain attacks
+    local url="https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/76ac9fcddc4e93c15dc778b4c6234755ad714e5a/tools/install.sh"
+    local expected_hash="5574b96e94dbcb769f0d1592fa83aeb6ca2caf41c6ae5d76fcc7f04c524b4f55"
+
+    if ! curl -fsSL "$url" -o "$tmp"; then
+        ui_err "failed to download oh-my-zsh installer"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    local actual_hash=""
+    if has_cmd sha256sum; then
+        actual_hash="$(sha256sum "$tmp" | awk '{print $1}')"
+    elif has_cmd shasum; then
+        actual_hash="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+    else
+        ui_err "No sha256sum or shasum found to verify oh-my-zsh installer"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    if [[ "$actual_hash" != "$expected_hash" ]]; then
+        ui_err "oh-my-zsh installer checksum mismatch"
+        rm -f "$tmp"
+        return 1
+    fi
+
     # RUNZSH=no keeps the installer from exec'ing a shell and swallowing the
     # rest of this script - the bug that stopped the old install.sh halfway.
-    RUNZSH=no CHSH=no KEEP_ZSHRC=yes \
-        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+    RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh "$tmp" --unattended
+    rm -f "$tmp"
 }
 
 install_zsh_plugins() {
