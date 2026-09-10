@@ -28,7 +28,10 @@ ui_init() {
     fi
 }
 
-ui_is_interactive() { [[ -t 0 && -t 1 ]]; }
+ui_is_interactive() {
+    [[ -n "${AUTOOS_NONINTERACTIVE:-}" ]] && return 1
+    [[ -t 0 && -t 1 ]]
+}
 
 # Steel blue accent; the warm ramp is reserved for severity so a warning never
 # reads as decoration.
@@ -45,6 +48,9 @@ _c() {
         warn)    printf '\033[38;5;179m' ;;
         err)     printf '\033[1;38;5;167m' ;;
         sel)     printf '\033[1;38;5;80m' ;;
+        bold)    printf '\033[1m' ;;
+        inv)     printf '\033[7m' ;;
+        badge)   printf '\033[38;5;111m' ;;
     esac
 }
 
@@ -93,20 +99,65 @@ ui_kv() {
 
 # ─── Prompts ────────────────────────────────────────────────────────────────
 ui_confirm() {
-    local question="$1" default="${2:-y}" hint answer
-    ui_is_interactive || { [[ "$default" == "y" ]]; return; }
-    if [[ "$default" == "y" ]]; then hint="[Y/n]"; else hint="[y/N]"; fi
+    local question="$1" default="${2:-y}"
+    if ! ui_is_interactive; then
+        [[ "$default" == "y" ]] && return 0 || return 1
+    fi
+
+    # Interactive two-button toggle: [ Yes ]  [ No ]
+    local choice=0
+    [[ "$default" != "y" ]] && choice=1
+
+    printf '\033[?25l'   # hide cursor
+    # shellcheck disable=SC2064
+    trap 'printf "\033[?25h"' RETURN
+
+    local first_render=1
     while true; do
-        printf '  %s?%s %s %s%s%s ' "$(_c accent)" "$(_c reset)" "$question" "$(_c muted)" "$hint" "$(_c reset)"
-        read -r answer || answer=""
-        answer="${answer,,}"
-        if [[ -z "$answer" ]]; then answer="$default"; fi
-        case "$answer" in
-            y|yes|j|ja) return 0 ;;
-            n|no|nein)  return 1 ;;
-            *) ui_warn "Please answer y or n." ;;
+        local btn_yes btn_no
+        if (( choice == 0 )); then
+            btn_yes="$(_c sel)$(_c inv) [ Yes ] $(_c reset)"
+            btn_no="$(_c dim)  No   $(_c reset)"
+        else
+            btn_yes="$(_c dim)  Yes   $(_c reset)"
+            btn_no="$(_c sel)$(_c inv) [ No ] $(_c reset)"
+        fi
+
+        if (( first_render )); then
+            printf '  %s?%s %s  %s %s' "$(_c accent)" "$(_c reset)" "$question" "$btn_yes" "$btn_no"
+            first_render=0
+        else
+            printf '\r\033[2K  %s?%s %s  %s %s' "$(_c accent)" "$(_c reset)" "$question" "$btn_yes" "$btn_no"
+        fi
+
+        local key rest
+        IFS= read -rsn1 key || key=""
+        case "$key" in
+            $'\033')
+                if IFS= read -rsn2 -t 0.05 rest; then
+                    case "$rest" in
+                        '[C'|'[D'|'[A'|'[B') choice=$(( 1 - choice )) ;;
+                    esac
+                else
+                    printf '\033[?25h\r\033[2K  %s?%s %s  %s\n' "$(_c accent)" "$(_c reset)" "$question" "$(_c warn)Cancelled$(_c reset)"
+                    return 1
+                fi
+                ;;
+            $'\t'|' '|'h'|'l'|'j'|'k'|'H'|'L'|'J'|'K') choice=$(( 1 - choice )) ;;
+            'y'|'Y') choice=0; break ;;
+            'n'|'N') choice=1; break ;;
+            ''|$'\n') break ;;
         esac
     done
+
+    printf '\033[?25h'
+    if (( choice == 0 )); then
+        printf '\r\033[2K  %s?%s %s  %s\n' "$(_c accent)" "$(_c reset)" "$question" "$(_c ok)Yes$(_c reset)"
+        return 0
+    else
+        printf '\r\033[2K  %s?%s %s  %s\n' "$(_c accent)" "$(_c reset)" "$question" "$(_c warn)No$(_c reset)"
+        return 1
+    fi
 }
 
 # ui_ask <var-name> <question> [default] [help]
@@ -119,6 +170,137 @@ ui_ask() {
     read -r value || value=""
     if [[ -z "$value" ]]; then value="$default"; fi
     printf -v "$__var" '%s' "$value"
+}
+
+# ─── Interactive single-choice radio selector ───────────────────────────────
+# ui_select_radio <out-var> <title> <default-key> [item1] [item2] ...
+# Each item format: "key|label|desc|badge"
+ui_select_radio() {
+    local __out="$1" title="$2" default_key="${3:-}"
+    shift 3
+    local -a items=("$@")
+    local total=${#items[@]}
+
+    if (( total == 0 )); then
+        printf -v "$__out" '%s' "$default_key"
+        return 0
+    fi
+
+    local -a keys=() labels=() descs=() badges=()
+    local default_idx=0 i
+    for ((i = 0; i < total; i++)); do
+        local item="${items[i]}"
+        local k="" l="" d="" b=""
+        IFS='|' read -r k l d b <<<"$item"
+        keys+=("$k")
+        labels+=("${l:-$k}")
+        descs+=("${d:-}")
+        badges+=("${b:-}")
+        if [[ "$k" == "$default_key" ]]; then
+            default_idx=$i
+        fi
+    done
+
+    if ! ui_is_interactive; then
+        printf -v "$__out" '%s' "${keys[default_idx]}"
+        return 0
+    fi
+
+    local cursor=$default_idx
+    local rendered=0
+
+    printf '\033[?25l'   # hide cursor
+    # shellcheck disable=SC2064
+    trap 'printf "\033[?25h"' RETURN
+
+    while true; do
+        local buf=""
+        (( rendered > 0 )) && buf+=$'\033'"[${rendered}A"
+
+        buf+=$'\033[2K'"  $(_c heading)${title}:$(_c reset)"$'\n'
+        local lines=1
+
+        for ((i = 0; i < total; i++)); do
+            local mark radio badge_str desc_str label_str
+            if (( i == cursor )); then
+                mark="$(_c sel)❯$(_c reset)"
+                radio="$(_c sel)(•)$(_c reset)"
+                label_str="$(_c sel)$(_c bold)$(printf '%-14s' "${labels[i]}")$(_c reset)"
+            else
+                mark=" "
+                radio="$(_c dim)( )$(_c reset)"
+                label_str="$(printf '%-14s' "${labels[i]}")"
+            fi
+
+            if [[ -n "${badges[i]}" ]]; then
+                badge_str=" $(_c badge)[${badges[i]}]$(_c reset)"
+            else
+                badge_str=""
+            fi
+
+            if [[ -n "${descs[i]}" ]]; then
+                desc_str="  $(_c muted)${descs[i]}$(_c reset)"
+            else
+                desc_str=""
+            fi
+
+            buf+=$'\033[2K'"  ${mark} ${radio} ${label_str}${badge_str}${desc_str}"$'\n'
+            lines=$(( lines + 1 ))
+        done
+
+        buf+=$'\033[2K'$'\n'
+        buf+=$'\033[2K'"  $(_c dim)↑↓/jk move   1-$total select   ENTER confirm   ESC default$(_c reset)"$'\n'
+        lines=$(( lines + 2 ))
+
+        printf '%s' "$buf"
+        rendered=$lines
+
+        local key rest
+        IFS= read -rsn1 key || key=""
+        case "$key" in
+            $'\033')
+                if IFS= read -rsn2 -t 0.05 rest; then
+                    case "$rest" in
+                        '[A') if (( cursor > 0 )); then cursor=$(( cursor - 1 )); else cursor=$(( total - 1 )); fi ;;
+                        '[B') if (( cursor < total - 1 )); then cursor=$(( cursor + 1 )); else cursor=0; fi ;;
+                    esac
+                else
+                    cursor=$default_idx
+                    break
+                fi
+                ;;
+            'k'|'K') if (( cursor > 0 )); then cursor=$(( cursor - 1 )); else cursor=$(( total - 1 )); fi ;;
+            'j'|'J') if (( cursor < total - 1 )); then cursor=$(( cursor + 1 )); else cursor=0; fi ;;
+            [1-9])
+                local num=$(( key - 1 ))
+                if (( num >= 0 && num < total )); then
+                    cursor=$num
+                fi
+                ;;
+            'q'|'Q')
+                cursor=$default_idx
+                break
+                ;;
+            ' '|$'\n'|'')
+                break
+                ;;
+        esac
+    done
+
+    # Clean up the radio menu lines
+    if (( rendered > 0 )); then
+        local clean_buf=""
+        clean_buf+=$'\033'"[${rendered}A"
+        for ((i = 0; i < rendered; i++)); do
+            clean_buf+=$'\033[2K'$'\n'
+        done
+        clean_buf+=$'\033'"[${rendered}A"
+        printf '%s' "$clean_buf"
+    fi
+    printf '\033[?25h'
+
+    printf -v "$__out" '%s' "${keys[cursor]}"
+    return 0
 }
 
 # ─── The checkbox selector ──────────────────────────────────────────────────
@@ -156,7 +338,7 @@ ui_menu() {
     local term_h; term_h=$(tput lines 2>/dev/null || echo 30)
     viewport=$(( term_h - 12 )); (( viewport < 6 )) && viewport=6; (( viewport > 22 )) && viewport=22
 
-    while [[ "${row_kind[cursor]}" != "item" ]] && (( cursor < nrows - 1 )); do ((cursor++)); done
+    while [[ "${row_kind[cursor]}" != "item" ]] && (( cursor < nrows - 1 )); do cursor=$(( cursor + 1 )); done
 
     _menu_next() {  # $1 = delta ; echoes new cursor
         local d="$1" i="$cursor"
@@ -175,28 +357,47 @@ ui_menu() {
         (( cursor >= top + viewport )) && top=$(( cursor - viewport + 1 ))
 
         local buf="" selcount=0 r
-        for ((i = 0; i < total; i++)); do (( MENU_SEL[i] )) && ((selcount++)); done
+        for ((i = 0; i < total; i++)); do (( MENU_SEL[i] )) && selcount=$(( selcount + 1 )); done
         (( rendered > 0 )) && buf+=$'\033'"[${rendered}A"
 
-        buf+=$'\033[2K'"  $(_c heading)${title}$(_c reset)$(_c muted)   ${selcount} of ${total} selected$(_c reset)"$'\n'
+        local pct=0 bar=""
+        if (( total > 0 )); then
+            pct=$(( selcount * 100 / total ))
+            local filled=$(( selcount * 10 / total ))
+            local empty=$(( 10 - filled ))
+            local fill_str="" empty_str=""
+            (( filled > 0 )) && fill_str="$(printf '█%.0s' $(seq 1 $filled))"
+            (( empty > 0 )) && empty_str="$(printf '░%.0s' $(seq 1 $empty))"
+            bar="  $(_c sel)[${fill_str}$(_c dim)${empty_str}$(_c sel)] ${pct}%$(_c reset)"
+        fi
+
+        buf+=$'\033[2K'"  $(_c heading)${title}$(_c reset)$(_c muted)   ${selcount} of ${total} selected$(_c reset)${bar}"$'\n'
         buf+=$'\033[2K'$'\n'
         local lines=2
 
         for ((r = top; r < nrows && r < top + viewport; r++)); do
             if [[ "${row_kind[r]}" == "header" ]]; then
-                buf+=$'\033[2K'"   $(_c accent)${row_text[r]^^}$(_c reset)"$'\n'
+                local gname="${row_text[r]}"
+                local gsel=0 gtot=0 j
+                for ((j = 0; j < total; j++)); do
+                    if [[ "${MENU_GROUP[j]}" == "$gname" ]]; then
+                        gtot=$(( gtot + 1 ))
+                        (( MENU_SEL[j] )) && gsel=$(( gsel + 1 ))
+                    fi
+                done
+                buf+=$'\033[2K'"   $(_c accent)${gname^^}$(_c reset)  $(_c dim)(${gsel}/${gtot} selected)$(_c reset)"$'\n'
             else
                 local idx=${row_idx[r]} mark box name inst_badge=""
-                (( r == cursor )) && mark="$(_c sel)>$(_c reset)" || mark=" "
-                if (( MENU_SEL[idx] )); then box="$(_c ok)[x]$(_c reset)"; else box="$(_c dim)[ ]$(_c reset)"; fi
+                (( r == cursor )) && mark="$(_c sel)❯$(_c reset)" || mark=" "
+                if (( MENU_SEL[idx] )); then box="$(_c ok)[✓]$(_c reset)"; else box="$(_c dim)[ ]$(_c reset)"; fi
                 name=$(printf '%-26s' "${MENU_NAME[idx]}")
                 (( r == cursor )) && name="$(_c sel)${name}$(_c reset)"
                 if (( ${#MENU_INSTALLED[@]} > idx && MENU_INSTALLED[idx] )); then
-                    inst_badge="$(_c ok)✓$(_c reset) "
+                    inst_badge="$(_c ok)✓ installed$(_c reset) "
                 fi
                 buf+=$'\033[2K'"  ${mark} ${box} ${name} ${inst_badge}$(_c muted)${MENU_DESC[idx]}$(_c reset)"$'\n'
             fi
-            ((lines++))
+            lines=$(( lines + 1 ))
         done
 
         local more=$(( nrows - top - viewport ))
@@ -205,12 +406,12 @@ ui_menu() {
         else
             buf+=$'\033[2K'$'\n'
         fi
-        ((lines++))
+        lines=$(( lines + 1 ))
         buf+=$'\033[2K'$'\n'
-        buf+=$'\033[2K'"  $(_c dim)UP/DOWN move   SPACE toggle   A all   N none   ENTER confirm   ESC cancel$(_c reset)"$'\n'
+        buf+=$'\033[2K'"  $(_c dim)↑↓/jk move   SPACE toggle   g group   a all   n none   i invert   ENTER confirm   ESC cancel$(_c reset)"$'\n'
         lines=$(( lines + 2 ))
         if [[ -n "$footer" ]]; then
-            buf+=$'\033[2K'"  $(_c muted)${footer}$(_c reset)"$'\n'; ((lines++))
+            buf+=$'\033[2K'"  $(_c muted)${footer}$(_c reset)"$'\n'; lines=$(( lines + 1 ))
         fi
 
         printf '%s' "$buf"
@@ -232,9 +433,37 @@ ui_menu() {
                     printf '\033[?25h\n'; MENU_RESULT=""; return 1
                 fi
                 ;;
+            'k'|'K') cursor=$(_menu_next -1) ;;
+            'j'|'J') cursor=$(_menu_next 1) ;;
             ' ')
                 local idx=${row_idx[cursor]}
                 if (( MENU_SEL[idx] )); then MENU_SEL[idx]=0; else MENU_SEL[idx]=1; fi
+                ;;
+            'g'|'G')
+                local cur_idx=${row_idx[cursor]}
+                if (( cur_idx >= 0 )); then
+                    local target_group="${MENU_GROUP[cur_idx]}"
+                    local all_selected=1 j
+                    for ((j = 0; j < total; j++)); do
+                        if [[ "${MENU_GROUP[j]}" == "$target_group" ]]; then
+                            if (( ! MENU_SEL[j] )); then
+                                all_selected=0
+                                break
+                            fi
+                        fi
+                    done
+                    local new_val=$(( 1 - all_selected ))
+                    for ((j = 0; j < total; j++)); do
+                        if [[ "${MENU_GROUP[j]}" == "$target_group" ]]; then
+                            MENU_SEL[j]=$new_val
+                        fi
+                    done
+                fi
+                ;;
+            'i'|'I')
+                for ((i = 0; i < total; i++)); do
+                    MENU_SEL[i]=$(( 1 - MENU_SEL[i] ))
+                done
                 ;;
             'a'|'A') for ((i = 0; i < total; i++)); do MENU_SEL[i]=1; done ;;
             'n'|'N') for ((i = 0; i < total; i++)); do MENU_SEL[i]=0; done ;;

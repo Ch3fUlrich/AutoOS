@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     AutoOS Windows test suite.
@@ -312,6 +312,30 @@ Test-Case 'menu cursor stays put at the end of the list' {
     $rows = New-Object System.Collections.ArrayList
     [void]$rows.Add([pscustomobject]@{ Kind = 'item' })
     Assert-Equal (Get-AutoOSNextItemIndex $rows 0 1) 0
+}
+
+Test-Case 'Show-AutoOSRadioMenu returns DefaultId in non-interactive mode' {
+    $env:AUTOOS_NONINTERACTIVE = '1'
+    try {
+        $items = @(
+            [pscustomobject]@{ Id = 'workstation'; Name = 'workstation'; Description = 'Full dev' },
+            [pscustomobject]@{ Id = 'light'; Name = 'light'; Description = 'Minimal' }
+        )
+        $res = Show-AutoOSRadioMenu -Items $items -Title 'Profile' -DefaultId 'light'
+        Assert-Equal $res 'light'
+    } finally {
+        Remove-Item Env:\AUTOOS_NONINTERACTIVE -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Read-AutoOSConfirm returns default in non-interactive mode' {
+    $env:AUTOOS_NONINTERACTIVE = '1'
+    try {
+        Assert-True (Read-AutoOSConfirm -Question 'Proceed?' -Default $true)
+        Assert-False (Read-AutoOSConfirm -Question 'Proceed?' -Default $false)
+    } finally {
+        Remove-Item Env:\AUTOOS_NONINTERACTIVE -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Case 'log lines are classified for the browser UI' {

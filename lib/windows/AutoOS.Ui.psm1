@@ -31,6 +31,7 @@ $script:UseColor = Test-AutoOSColorSupport
 
 function Set-AutoOSColor { param([bool]$Enabled) $script:UseColor = $Enabled }
 function Test-AutoOSInteractive {
+    if ($env:AUTOOS_NONINTERACTIVE) { return $false }
     -not ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected)
 }
 
@@ -128,16 +129,64 @@ function Write-AutoOSKeyValue {
 function Read-AutoOSConfirm {
     param([string]$Question, [bool]$Default = $true)
     if (-not (Test-AutoOSInteractive)) { return $Default }
-    $hint = if ($Default) { '[Y/n]' } else { '[y/N]' }
-    while ($true) {
-        Write-AutoOSLine ("  " + (Format-AutoOSColor '?' 'accent') + " $Question " + (Format-AutoOSColor $hint 'muted') + ' ') -NoNewline
-        $answer = [Console]::ReadLine()
-        if ($null -eq $answer -or $answer.Trim() -eq '') { return $Default }
-        switch -Regex ($answer.Trim()) {
-            '^(y|yes|j|ja)$' { return $true }
-            '^(n|no|nein)$'  { return $false }
-            default { Write-AutoOSLine 'Please answer y or n.' -Level warn }
+
+    $choice = if ($Default) { 0 } else { 1 } # 0 = Yes, 1 = No
+    $first = $true
+    try {
+        [Console]::CursorVisible = $false
+        while ($true) {
+            $btnYes = if ($choice -eq 0) { (Format-AutoOSColor '[ Yes ]' 'sel') } else { (Format-AutoOSColor '  Yes  ' 'dim') }
+            $btnNo  = if ($choice -eq 1) { (Format-AutoOSColor '[ No ]' 'sel') } else { (Format-AutoOSColor '  No  ' 'dim') }
+
+            $line = "  " + (Format-AutoOSColor '?' 'accent') + " $Question  $btnYes  $btnNo"
+            if ($first) {
+                [Console]::Write($line)
+                $first = $false
+            } else {
+                [Console]::Write("`r$($script:Esc)[2K$line")
+            }
+
+            $key = [Console]::ReadKey($true)
+            switch ($key.Key) {
+                'LeftArrow'  { $choice = 1 - $choice }
+                'RightArrow' { $choice = 1 - $choice }
+                'UpArrow'    { $choice = 1 - $choice }
+                'DownArrow'  { $choice = 1 - $choice }
+                'Tab'        { $choice = 1 - $choice }
+                'Spacebar'   { $choice = 1 - $choice }
+                'Enter'      {
+                    [Console]::CursorVisible = $true
+                    $ansText = if ($choice -eq 0) { Format-AutoOSColor 'Yes' 'ok' } else { Format-AutoOSColor 'No' 'warn' }
+                    [Console]::WriteLine("`r$($script:Esc)[2K  " + (Format-AutoOSColor '?' 'accent') + " $Question  $ansText")
+                    return ($choice -eq 0)
+                }
+                'Escape'     {
+                    [Console]::CursorVisible = $true
+                    [Console]::WriteLine("`r$($script:Esc)[2K  " + (Format-AutoOSColor '?' 'accent') + " $Question  " + (Format-AutoOSColor 'Cancelled' 'warn'))
+                    return $false
+                }
+                default {
+                    switch ($key.KeyChar) {
+                        'y' {
+                            [Console]::CursorVisible = $true
+                            [Console]::WriteLine("`r$($script:Esc)[2K  " + (Format-AutoOSColor '?' 'accent') + " $Question  " + (Format-AutoOSColor 'Yes' 'ok'))
+                            return $true
+                        }
+                        'n' {
+                            [Console]::CursorVisible = $true
+                            [Console]::WriteLine("`r$($script:Esc)[2K  " + (Format-AutoOSColor '?' 'accent') + " $Question  " + (Format-AutoOSColor 'No' 'warn'))
+                            return $false
+                        }
+                        'h' { $choice = 1 - $choice }
+                        'l' { $choice = 1 - $choice }
+                        'j' { $choice = 1 - $choice }
+                        'k' { $choice = 1 - $choice }
+                    }
+                }
+            }
         }
+    } finally {
+        [Console]::CursorVisible = $true
     }
 }
 
@@ -154,6 +203,123 @@ function Read-AutoOSValue {
         $result = & $Validator $value
         if ($result -eq $true) { return $value }
         Write-AutoOSLine $result -Level warn
+    }
+}
+
+# ─── Interactive single-choice radio selector ───────────────────────────────
+function Show-AutoOSRadioMenu {
+    <#
+    .SYNOPSIS
+        Interactive single-choice radio selector for profiles or options.
+    .PARAMETER Items
+        Objects with: Id, Name, Description, Badge
+    .PARAMETER Title
+        Header text.
+    .PARAMETER DefaultId
+        Default selected Id.
+    #>
+    param(
+        [Parameter(Mandatory)][object[]]$Items,
+        [string]$Title = 'Choose profile',
+        [string]$DefaultId = ''
+    )
+
+    if (-not (Test-AutoOSInteractive)) {
+        return $DefaultId
+    }
+
+    if ($Items.Count -eq 0) {
+        return $DefaultId
+    }
+
+    $cursor = 0
+    for ($i = 0; $i -lt $Items.Count; $i++) {
+        if ($Items[$i].Id -eq $DefaultId) { $cursor = $i; break }
+    }
+
+    $rendered = 0
+    try {
+        [Console]::CursorVisible = $false
+        while ($true) {
+            $out = New-Object System.Text.StringBuilder
+            if ($rendered -gt 0) { [void]$out.Append("$($script:Esc)[${rendered}A") }
+
+            [void]$out.AppendLine("$($script:Esc)[2K  " + (Format-AutoOSColor "$Title`:" 'heading'))
+            $lines = 1
+
+            for ($i = 0; $i -lt $Items.Count; $i++) {
+                $it = $Items[$i]
+                $mark = if ($i -eq $cursor) { (Format-AutoOSColor '❯' 'sel') } else { ' ' }
+                $radio = if ($i -eq $cursor) { (Format-AutoOSColor '(•)' 'sel') } else { (Format-AutoOSColor '( )' 'dim') }
+                $name = "{0,-14}" -f $it.Name
+                $nameText = if ($i -eq $cursor) { Format-AutoOSColor $name 'sel' } else { $name }
+                $badgeText = if ($it.Badge) { " " + (Format-AutoOSColor "[$($it.Badge)]" 'accent') } else { "" }
+                $descText = if ($it.Description) { "  " + (Format-AutoOSColor $it.Description 'muted') } else { "" }
+
+                [void]$out.AppendLine("$($script:Esc)[2K  $mark $radio $nameText$badgeText$descText")
+                $lines++
+            }
+
+            [void]$out.AppendLine("$($script:Esc)[2K")
+            $keys = "↑↓/jk move   1-$($Items.Count) select   ENTER confirm   ESC default"
+            [void]$out.AppendLine("$($script:Esc)[2K  " + (Format-AutoOSColor $keys 'dim'))
+            $lines += 2
+
+            [Console]::Write($out.ToString())
+            $rendered = $lines
+
+            $key = [Console]::ReadKey($true)
+            switch ($key.Key) {
+                'UpArrow'   { if ($cursor -gt 0) { $cursor-- } else { $cursor = $Items.Count - 1 } }
+                'DownArrow' { if ($cursor -lt $Items.Count - 1) { $cursor++ } else { $cursor = 0 } }
+                'Enter'     {
+                    if ($rendered -gt 0) {
+                        $clr = New-Object System.Text.StringBuilder
+                        [void]$clr.Append("$($script:Esc)[${rendered}A")
+                        for ($k = 0; $k -lt $rendered; $k++) { [void]$clr.AppendLine("$($script:Esc)[2K") }
+                        [void]$clr.Append("$($script:Esc)[${rendered}A")
+                        [Console]::Write($clr.ToString())
+                    }
+                    [Console]::CursorVisible = $true
+                    return $Items[$cursor].Id
+                }
+                'Escape'    {
+                    if ($rendered -gt 0) {
+                        $clr = New-Object System.Text.StringBuilder
+                        [void]$clr.Append("$($script:Esc)[${rendered}A")
+                        for ($k = 0; $k -lt $rendered; $k++) { [void]$clr.AppendLine("$($script:Esc)[2K") }
+                        [void]$clr.Append("$($script:Esc)[${rendered}A")
+                        [Console]::Write($clr.ToString())
+                    }
+                    [Console]::CursorVisible = $true
+                    return $DefaultId
+                }
+                default {
+                    switch ($key.KeyChar) {
+                        'k' { if ($cursor -gt 0) { $cursor-- } else { $cursor = $Items.Count - 1 } }
+                        'j' { if ($cursor -lt $Items.Count - 1) { $cursor++ } else { $cursor = 0 } }
+                        'q' { [Console]::CursorVisible = $true; return $DefaultId }
+                        ' ' {
+                            if ($rendered -gt 0) {
+                                $clr = New-Object System.Text.StringBuilder
+                                [void]$clr.Append("$($script:Esc)[${rendered}A")
+                                for ($k = 0; $k -lt $rendered; $k++) { [void]$clr.AppendLine("$($script:Esc)[2K") }
+                                [void]$clr.Append("$($script:Esc)[${rendered}A")
+                                [Console]::Write($clr.ToString())
+                            }
+                            [Console]::CursorVisible = $true
+                            return $Items[$cursor].Id
+                        }
+                        { $_ -ge '1' -and $_ -le '9' } {
+                            $idx = [int][string]$_ - 1
+                            if ($idx -ge 0 -and $idx -lt $Items.Count) { $cursor = $idx }
+                        }
+                    }
+                }
+            }
+        }
+    } finally {
+        [Console]::CursorVisible = $true
     }
 }
 
@@ -227,24 +393,33 @@ function Show-AutoOSMenu {
             if ($rendered -gt 0) { [void]$out.Append("$($script:Esc)[${rendered}A") }
 
             $selCount = @($Items | Where-Object { $_.Selected }).Count
+            $pct = if ($Items.Count -gt 0) { [Math]::Floor(($selCount * 100) / $Items.Count) } else { 0 }
+            $filled = if ($Items.Count -gt 0) { [Math]::Floor(($selCount * 10) / $Items.Count) } else { 0 }
+            $empty = 10 - $filled
+            $fillStr = '█' * $filled
+            $emptyStr = '░' * $empty
+            $bar = "  " + (Format-AutoOSColor "[$fillStr" 'sel') + (Format-AutoOSColor "$emptyStr] $pct%" 'dim')
             [void]$out.AppendLine("$($script:Esc)[2K  " + (Format-AutoOSColor $Title 'heading') +
-                (Format-AutoOSColor "   $selCount of $($Items.Count) selected" 'muted'))
+                (Format-AutoOSColor "   $selCount of $($Items.Count) selected" 'muted') + $bar)
             [void]$out.AppendLine("$($script:Esc)[2K")
             $lines = 2
 
             for ($i = $top; $i -lt [Math]::Min($rows.Count, $top + $viewport); $i++) {
                 $row = $rows[$i]
                 if ($row.Kind -eq 'header') {
-                    [void]$out.AppendLine("$($script:Esc)[2K   " + (Format-AutoOSColor $row.Text.ToUpper() 'accent'))
+                    $grpItems = @($Items | Where-Object { $_.Group -eq $row.Text })
+                    $grpSel = @($grpItems | Where-Object { $_.Selected }).Count
+                    $grpStat = (Format-AutoOSColor " ($grpSel/$($grpItems.Count) selected)" 'dim')
+                    [void]$out.AppendLine("$($script:Esc)[2K   " + (Format-AutoOSColor $row.Text.ToUpper() 'accent') + $grpStat)
                 } else {
                     $it = $row.Item
-                    $mark = if ($i -eq $cursor) { (Format-AutoOSColor '>' 'sel') } else { ' ' }
+                    $mark = if ($i -eq $cursor) { (Format-AutoOSColor '❯' 'sel') } else { ' ' }
                     $boxText = if ($it.Locked) { (Format-AutoOSColor '[=]' 'muted') }
-                               elseif ($it.Selected) { (Format-AutoOSColor '[x]' 'ok') }
+                               elseif ($it.Selected) { (Format-AutoOSColor '[✓]' 'ok') }
                                else { (Format-AutoOSColor '[ ]' 'dim') }
                     $name = "{0,-26}" -f $it.Name
                     $nameText = if ($i -eq $cursor) { Format-AutoOSColor $name 'sel' } else { $name }
-                    $instBadge = if ($it.Installed) { (Format-AutoOSColor '[installed]' 'ok') + ' ' } else { '' }
+                    $instBadge = if ($it.Installed) { (Format-AutoOSColor '✓ installed' 'ok') + ' ' } else { '' }
                     $desc = Format-AutoOSColor $it.Description 'muted'
                     [void]$out.AppendLine("$($script:Esc)[2K  $mark $boxText $nameText $instBadge$desc")
                 }
@@ -260,7 +435,7 @@ function Show-AutoOSMenu {
             $lines++
 
             [void]$out.AppendLine("$($script:Esc)[2K")
-            $keys = '↑↓ move   SPACE toggle   A all   N none   ENTER confirm   ESC cancel'
+            $keys = '↑↓/jk move   SPACE toggle   g group   a all   n none   i invert   ENTER confirm   ESC cancel'
             [void]$out.AppendLine("$($script:Esc)[2K  " + (Format-AutoOSColor $keys 'dim'))
             $lines += 2
             if ($Footer) { [void]$out.AppendLine("$($script:Esc)[2K  " + (Format-AutoOSColor $Footer 'muted')); $lines++ }
@@ -292,6 +467,20 @@ function Show-AutoOSMenu {
                 }
                 default {
                     switch ($key.KeyChar) {
+                        'k' { $cursor = Get-AutoOSNextItemIndex $rows $cursor -1 }
+                        'j' { $cursor = Get-AutoOSNextItemIndex $rows $cursor  1 }
+                        'g' {
+                            $curGroup = $rows[$cursor].Item.Group
+                            $grpItems = @($Items | Where-Object { $_.Group -eq $curGroup -and -not $_.Locked })
+                            $allSel = ($grpItems.Count -gt 0) -and -not ($grpItems | Where-Object { -not $_.Selected })
+                            $newVal = -not $allSel
+                            foreach ($git in $grpItems) { $git.Selected = $newVal }
+                        }
+                        'i' {
+                            foreach ($it in $Items) {
+                                if (-not $it.Locked) { $it.Selected = -not $it.Selected }
+                            }
+                        }
                         'a' { foreach ($it in $Items) { if (-not $it.Locked) { $it.Selected = $true } } }
                         'n' { foreach ($it in $Items) { if (-not $it.Locked) { $it.Selected = $false } } }
                         'q' { [Console]::CursorVisible = $true; [Console]::WriteLine(); return $null }
@@ -308,4 +497,4 @@ Export-ModuleMember -Function `
     Test-AutoOSColorSupport, Set-AutoOSColor, Test-AutoOSInteractive, Format-AutoOSColor,
     Initialize-AutoOSLog, Write-AutoOSLine, Write-AutoOSBanner, Write-AutoOSSection,
     Write-AutoOSKeyValue, Read-AutoOSConfirm, Read-AutoOSValue, Show-AutoOSMenu,
-    Get-AutoOSNextItemIndex
+    Show-AutoOSRadioMenu, Get-AutoOSNextItemIndex

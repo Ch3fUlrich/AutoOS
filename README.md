@@ -46,18 +46,18 @@ Two more rules the code is built around, both learned the hard way:
   Package managers       winget, choco
   Already present        git, node, docker, wsl
 
-  Choose what to install                    14 of 36 selected
+  Choose what to install   14 of 36 selected  [████░░░░░░] 38%
 
-   TERMINAL & SHELL
-   > [x] Windows Terminal          Tabbed terminal with true-colour support
-     [x] PowerShell 7              Modern cross-platform PowerShell
-     [ ] Oh My Posh                Prompt theme engine for PowerShell
+   TERMINAL & SHELL  (2/3 selected)
+  ❯ [✓] Windows Terminal          Tabbed terminal with true-colour support
+    [✓] PowerShell 7              Modern cross-platform PowerShell
+    [ ] Oh My Posh                Prompt theme engine for PowerShell
 
-   CODING & AI
-     [x] Claude Code CLI           Anthropic's terminal coding agent
-     [x] Docker Desktop            Containers - backs the local MCP stack
+   CODING & AI  (2/2 selected)
+    [✓] Claude Code CLI           Anthropic's terminal coding agent
+    [✓] Docker Desktop            Containers - backs the local MCP stack
 
-  ↑↓ move   SPACE toggle   A all   N none   ENTER confirm   ESC cancel
+  ↑↓/jk move   SPACE toggle   g group   a all   n none   i invert   ENTER confirm   ESC cancel
 ```
 
 ## What's inside

@@ -237,14 +237,17 @@ elif [[ -n "$ONLY" ]]; then
     PROFILE="custom"
 elif [[ -z "$PROFILE" ]]; then
     ui_section "Profile"
-    printf '  Suggested for this machine: %s%s%s\n\n' "$(_c accent)" "$SUGGESTED" "$(_c reset)"
-    while IFS=$'\t' read -r pname pdesc; do
-        mark=" "; [[ "$pname" == "$SUGGESTED" ]] && mark="*"
-        printf '  %s %-13s %s\n' "$mark" "$pname" "$pdesc"
-    done < <(catalog_profile_list "$CATALOG")
-    printf '\n'
-    if (( ASSUME_YES )); then PROFILE="$SUGGESTED"
-    else ui_ask PROFILE "Profile" "$SUGGESTED"; fi
+    if (( ASSUME_YES )); then
+        PROFILE="$SUGGESTED"
+    else
+        p_opts=()
+        while IFS=$'\t' read -r pname pdesc; do
+            p_badge=""
+            [[ "$pname" == "$SUGGESTED" ]] && p_badge="suggested"
+            p_opts+=("${pname}|${pname}|${pdesc}|${p_badge}")
+        done < <(catalog_profile_list "$CATALOG")
+        ui_select_radio PROFILE "Choose installation profile" "$SUGGESTED" "${p_opts[@]}"
+    fi
 fi
 case "$PROFILE" in
     workstation|ai-coding|light|server|custom) ;;

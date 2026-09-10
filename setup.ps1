@@ -239,22 +239,20 @@ if ($FromState) {
     $InstallProfile = 'custom'
 } elseif (-not $InstallProfile) {
     Write-AutoOSSection 'Profile'
-    Write-AutoOSLine "Suggested for this machine: " -NoNewline
-    Write-AutoOSLine (Format-AutoOSColor $suggested 'accent')
-    Write-AutoOSLine ''
-    foreach ($p in $catalog.profiles.PSObject.Properties) {
-        $mark = if ($p.Name -eq $suggested) { '*' } else { ' ' }
-        Write-AutoOSLine ("  $mark {0,-13} {1}" -f $p.Name, $p.Value)
-    }
-    Write-AutoOSLine ''
     if ($Yes) {
         $InstallProfile = $suggested
     } else {
-        $InstallProfile = Read-AutoOSValue -Question 'Profile' -Default $suggested -Validator {
-            param($v)
-            if ($v -in @('workstation', 'ai-coding', 'light', 'custom')) { $true }
-            else { "Choose one of: workstation, ai-coding, light, custom" }
+        $profileItems = @()
+        foreach ($p in $catalog.profiles.PSObject.Properties) {
+            $badge = if ($p.Name -eq $suggested) { 'suggested' } else { '' }
+            $profileItems += [pscustomobject]@{
+                Id          = $p.Name
+                Name        = $p.Name
+                Description = [string]$p.Value
+                Badge       = $badge
+            }
         }
+        $InstallProfile = Show-AutoOSRadioMenu -Items $profileItems -Title 'Choose installation profile' -DefaultId $suggested
     }
 }
 Write-AutoOSLine "Using profile: $InstallProfile" -Level ok
