@@ -492,8 +492,8 @@ class InstallerData:
         """
         output_fields_separator = "\n\n\n\n\n"
         while True:
-            password = "a"
-            password1 = "b"
+            password = None
+            password1 = ""
             if self.graphics == 'tkinter':
                 import tkinter as tk
                 
@@ -593,8 +593,8 @@ class InstallerData:
         elif self.graphics in ('tkinter', 'zenity', 'yad'):
             self.__get_username_password_atomic()
         else:
-            password = "a"
-            password1 = "b"
+            password = None
+            password1 = ""
             if self.username:
                 user_prompt = self.username
             elif Config.hint_user_input:
