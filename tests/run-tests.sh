@@ -1484,6 +1484,123 @@ if it "the payload the UI reads exposes the environment"; then
     if (( ok )); then pass; else fail "serve.py does not expose the environment"; fi
 fi
 
+# ─── Answer-file templates & rescue bootstrap (installer USB, task 9) ──────
+describe "answer file templates"
+
+if it "no template contains a credential"; then
+    if grep -rnE '(\$6\$|password[[:space:]]+[^ ]|passwd/user-password)' templates/ \
+       | grep -v 'CHANGE-ME'; then
+        fail "a template carries something that looks like a real credential"
+    else pass; fi
+fi
+
+if it "no template wipes a disk without being asked"; then
+    if grep -rqE 'layout:|partman-auto/method' templates/ && \
+       ! grep -rq 'AUTOOS_WIPE_TARGET_DISK' templates/; then
+        fail "automatic partitioning is not gated behind the wipe flag"
+    else pass; fi
+fi
+
+if it "rescue-bootstrap.sh installs exactly the catalog's rescue-profile apt packages (template)"; then
+    # The catalog (catalog/linux.json) is the single source of truth for what
+    # "rescue tooling" means. This is finding A12 in the installer-USB plan:
+    # the old scripts kept a second, hand-written package list that quietly
+    # drifted from the catalog. Cross-checking the two here means it can't
+    # drift again without a test noticing.
+    catalog_pkgs="$(python3 -c "
+import json
+data = json.load(open('catalog/linux.json'))
+pkgs = set()
+for cat in data['categories']:
+    for c in cat['components']:
+        if c.get('provider') == 'apt' and 'rescue' in c.get('profiles', []):
+            pkgs.add(c['package'])
+print('\n'.join(sorted(pkgs)))
+" | tr -d '\r')"
+    missing=""
+    while IFS= read -r pkg; do
+        [[ -z "$pkg" ]] && continue
+        grep -q -w -- "$pkg" templates/rescue-bootstrap.sh || missing+="$pkg "
+    done <<<"$catalog_pkgs"
+    assert_eq "$missing" ""
+fi
+
+if it "the rescue bootstrap template is shellcheck clean"; then
+    files=(templates/rescue-bootstrap.sh templates/ai-dispatcher.sh)
+    if has_cmd shellcheck; then
+        out="$(shellcheck -S warning "${files[@]}" 2>&1)"; rc=$?
+        if [[ $rc -eq 0 ]]; then pass; else fail "$(printf '%s' "$out" | head -20)"; fi
+    elif has_cmd docker && docker info >/dev/null 2>&1; then
+        # MSYS_NO_PATHCONV: on Windows Git Bash, MSYS mangles the bare "/mnt"
+        # argument into a host path before docker ever sees it. A no-op
+        # elsewhere (native Linux/macOS docker never looks at this var).
+        out="$(MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable \
+               -S warning "${files[@]}" 2>&1)"; rc=$?
+        if [[ $rc -eq 0 ]]; then pass; else fail "(via docker) $(printf '%s' "$out" | head -20)"; fi
+    else
+        skip "no shellcheck binary and no usable docker"
+    fi
+fi
+
+if it "ai dispatcher --list names both backends (template)"; then
+    out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" bash templates/ai-dispatcher.sh --list 2>&1)"
+    rc=$?
+    if [[ $rc -eq 0 && "$out" == *"claude"* && "$out" == *"gemini"* ]]; then
+        pass
+    else
+        fail "expected both backends listed (rc=$rc): ${out:0:200}"
+    fi
+fi
+
+if it "ai dispatcher falls back cleanly when the default binary is absent (template)"; then
+    # Hermetic: a fake PATH provides only "gemini", never touches the real
+    # machine, and never installs anything. Restricted to /usr/bin:/bin so a
+    # real claude/gemini binary elsewhere on this machine's PATH (e.g. this
+    # very agent's own `claude`) cannot leak into the test.
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/gemini" <<'EOS'
+#!/usr/bin/env bash
+printf 'gemini-fake:%s\n' "$*"
+EOS
+    chmod +x "$fakebin/gemini"
+    out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" \
+           PATH="$fakebin:/usr/bin:/bin" \
+           bash templates/ai-dispatcher.sh "hello" 2>&1)"
+    rc=$?
+    rm -rf "$fakebin"
+    if [[ $rc -eq 0 && "$out" == *"gemini-fake:hello"* && "$out" == *"not installed"* ]]; then
+        pass
+    else
+        fail "expected a clean fallback to gemini (rc=$rc): ${out:0:200}"
+    fi
+fi
+
+if it "ai dispatcher honours an explicit backend even when it differs from the default (template)"; then
+    # Same hermetic fake-PATH approach, but now both backends "exist" and the
+    # caller names one explicitly — the dispatcher must not substitute a
+    # different backend once the caller has been specific.
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/claude" <<'EOS'
+#!/usr/bin/env bash
+printf 'claude-fake:%s\n' "$*"
+EOS
+    cat >"$fakebin/gemini" <<'EOS'
+#!/usr/bin/env bash
+printf 'gemini-fake:%s\n' "$*"
+EOS
+    chmod +x "$fakebin/claude" "$fakebin/gemini"
+    out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" \
+           PATH="$fakebin:/usr/bin:/bin" \
+           bash templates/ai-dispatcher.sh gemini "hi" 2>&1)"
+    rc=$?
+    rm -rf "$fakebin"
+    if [[ $rc -eq 0 && "$out" == "gemini-fake:hi" ]]; then
+        pass
+    else
+        fail "expected the explicitly-named backend to run (rc=$rc): ${out:0:200}"
+    fi
+fi
+
 # ─── Documentation ──────────────────────────────────────────────────────────
 describe "documentation"
 
