@@ -39,13 +39,42 @@
 #   A3   Automatic whole-disk wipe with no prompt. Not this script's concern
 #        (it does not touch storage at all) — see the answer-file templates.
 #
+# DELIBERATE DIVERGENCE FROM THE CATALOG — Node.js only.
+#
+#   catalog/linux.json installs `nodejs` with provider "script" (NodeSource),
+#   and both AI CLIs `require` it, so `setup.sh --profile rescue` gets Node
+#   from NodeSource. install_nodejs() below instead takes Ubuntu's own
+#   `nodejs`/`npm` apt packages. That is intentional, not drift: it is the
+#   fix for A14 (NodeSource means `curl | bash` of an unverified remote
+#   script) and A13 (its apt repo file was re-added on every run). apt is
+#   idempotent on its own and needs no network trust decision, which is what
+#   a rescue stick handed to a stranger needs.
+#
+#   Everything ELSE here is cross-checked against the catalog by
+#   tests/run-tests.sh, in both directions, precisely so a second hand-written
+#   package list can never drift again (A12). Node is the one exception, and
+#   it is documented here and in docs/profiles.md rather than left implicit.
+#
 # Safe to run twice (AGENTS.md §4): every already-installed package or file
-# is reported "skipped", never re-installed or re-created from scratch.
+# is reported "skipped", never re-installed or re-created from scratch. The
+# two files an operator can edit — /etc/autoos/ai-clients.conf and
+# /etc/profile.d/autoos-ai.sh — are merged or left alone, never overwritten
+# (hard rule 4), and backed up before any change (hard rule 5).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MARKER="/var/lib/autoos/rescue-bootstrap.done"
+
+# AUTOOS_ROOT_PREFIX: test-only override, empty in every real install. The test
+# suite points it at a temp directory so main() and every installer below can be
+# driven end to end without touching a real /etc, /usr/local or /var — the same
+# test-only-override pattern as AUTOOS_OFFLINE_APT_LIST in
+# register_offline_cache() below. Nothing a real operator runs ever sets it.
+PREFIX="${AUTOOS_ROOT_PREFIX:-}"
+MARKER="$PREFIX/var/lib/autoos/rescue-bootstrap.done"
+AI_REGISTRY_DEST="$PREFIX/etc/autoos/ai-clients.conf"
+AI_BIN_DEST="$PREFIX/usr/local/bin/ai"
+AI_PROFILE_DEST="$PREFIX/etc/profile.d/autoos-ai.sh"
 
 # ─── tiny, self-contained UI (no dependency on lib/linux/ui.sh: this script
 # must work even when only templates/ was copied onto the stick) ───────────
@@ -75,6 +104,20 @@ require_root() {
     fi
     printf 'rescue-bootstrap.sh must run as root (or with sudo available)\n' >&2
     exit 1
+}
+
+# ─── backups (AGENTS.md hard rule 5: never modify a file the user owns without
+# copying it to <file>.autoos-backup-<timestamp> first) ─────────────────────
+backup_file() {
+    local path="$1" backup
+    backup="$path.autoos-backup-$(date -u +%Y%m%d%H%M%S)"
+    # shellcheck disable=SC2086
+    if $AUTOOS_SUDO cp -p "$path" "$backup"; then
+        ui_info "backed up $path -> $backup"
+        return 0
+    fi
+    ui_warn "could not back up $path"
+    return 1
 }
 
 # ─── offline guard: every network-touching step calls this first ──────────
@@ -302,20 +345,78 @@ install_ai_dispatcher() {
         return 0
     fi
     # shellcheck disable=SC2086
-    $AUTOOS_SUDO mkdir -p /etc/autoos
+    $AUTOOS_SUDO mkdir -p "$(dirname "$AI_REGISTRY_DEST")" "$(dirname "$AI_BIN_DEST")"
+
+    install_ai_registry "$src_conf"
+
+    # The dispatcher itself is *our* code, not the operator's, so replacing it
+    # wholesale is correct — but only when it actually differs. A second run
+    # over an identical file must report "skipped" (AGENTS.md §4), which is
+    # what `cmp -s` buys and what an unconditional `install` never could.
+    if [[ -f "$AI_BIN_DEST" ]] && cmp -s "$src_bin" "$AI_BIN_DEST"; then
+        ui_line "skipped" "ai dispatcher ($AI_BIN_DEST, unchanged)"
+    else
+        # shellcheck disable=SC2086
+        $AUTOOS_SUDO install -m 755 "$src_bin" "$AI_BIN_DEST"
+        ui_line "installed" "ai dispatcher ($AI_BIN_DEST)"
+    fi
+}
+
+# templates/ai-clients.conf documents itself as THE extension point: "adding a
+# third AI CLI later is a one-line addition to THIS file". Installing it with a
+# plain `install` then erased that line on the next run — a documented
+# extension point that silently deletes the extension is worse than no
+# extension point at all, and it is AGENTS.md hard rule 4 (never overwrite a
+# config wholesale; read, merge idempotently, write back).
+#
+# So: merge by id. Everything already in the file is kept verbatim — comments,
+# ordering, and any backend the operator registered — and only shipped records
+# whose id is absent get appended. The file is backed up first (hard rule 5)
+# and left completely untouched when the merge would change nothing.
+install_ai_registry() {
+    local src="$1" tmp
+    if [[ ! -f "$AI_REGISTRY_DEST" ]]; then
+        # shellcheck disable=SC2086
+        $AUTOOS_SUDO install -m 644 "$src" "$AI_REGISTRY_DEST"
+        ui_line "installed" "ai registry ($AI_REGISTRY_DEST)"
+        return 0
+    fi
+
+    tmp="$(mktemp)"
+    # Pass 1 (the installed file) is copied out line for line; pass 2 (the
+    # shipped file) contributes only records whose id pass 1 did not define.
+    awk -F: '
+        NR == FNR {
+            if ($0 !~ /^[[:space:]]*#/ && NF >= 2) have[$1] = 1
+            print
+            next
+        }
+        /^[[:space:]]*#/ { next }
+        NF < 2           { next }
+        !($1 in have)    { print }
+    ' "$AI_REGISTRY_DEST" "$src" >"$tmp"
+
+    if cmp -s "$tmp" "$AI_REGISTRY_DEST"; then
+        rm -f "$tmp"
+        ui_line "skipped" "ai registry ($AI_REGISTRY_DEST, every shipped backend already registered)"
+        return 0
+    fi
+
+    backup_file "$AI_REGISTRY_DEST" || true
     # shellcheck disable=SC2086
-    $AUTOOS_SUDO install -m 644 "$src_conf" /etc/autoos/ai-clients.conf
-    # shellcheck disable=SC2086
-    $AUTOOS_SUDO install -m 755 "$src_bin" /usr/local/bin/ai
-    ui_line "installed" "ai dispatcher (/usr/local/bin/ai, registry /etc/autoos/ai-clients.conf)"
+    $AUTOOS_SUDO install -m 644 "$tmp" "$AI_REGISTRY_DEST"
+    rm -f "$tmp"
+    ui_line "installed" "ai registry ($AI_REGISTRY_DEST, appended the shipped backends it was missing)"
 }
 
 # No API key is EVER written here — only commented key lines (see AGENTS.md
 # hard rule 1). `alias ai=` is gone: /usr/local/bin/ai now covers that job
 # for every registered backend, not just one hard-coded tool.
 write_ai_profile() {
-    local dest="/etc/profile.d/autoos-ai.sh"
+    local dest="$AI_PROFILE_DEST"
     local tmp
+    # shellcheck disable=SC2086
+    $AUTOOS_SUDO mkdir -p "$(dirname "$dest")"
     tmp="$(mktemp)"
     cat >"$tmp" <<'EOF'
 # AutoOS rescue stick — AI CLIs.
@@ -330,6 +431,21 @@ write_ai_profile() {
 # export ANTHROPIC_API_KEY=
 # export GEMINI_API_KEY=
 EOF
+    # This file invites the operator to paste their own key into it
+    # ("Uncomment and paste your own below"), so the moment it exists it is
+    # THEIRS. It carries no logic this script ever needs to update — only
+    # comments — so once present it is never rewritten: overwriting it deleted
+    # the operator's key on every second run, which is AGENTS.md hard rule 4.
+    if [[ -f "$dest" ]]; then
+        if cmp -s "$tmp" "$dest"; then
+            ui_line "skipped" "$dest (unchanged)"
+        else
+            backup_file "$dest" || true          # hard rule 5, before deciding
+            ui_line "skipped" "$dest (kept your edits — backup taken)"
+        fi
+        rm -f "$tmp"
+        return 0
+    fi
     # shellcheck disable=SC2086
     $AUTOOS_SUDO install -m 644 "$tmp" "$dest"
     rm -f "$tmp"
