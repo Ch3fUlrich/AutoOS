@@ -29,6 +29,7 @@ Import-Module (Join-Path $Lib 'AutoOS.Ui.psm1')      -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Detect.psm1')  -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Catalog.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Install.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.Download.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Serve.psm1')   -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.State.psm1')   -Force -DisableNameChecking
 
@@ -1239,6 +1240,71 @@ Test-Case 'a round-trip timestamp is read back as the date it was written' {
 Test-Case 'dry run is off by default' {
     $html = Get-Content (Join-Path $Root 'web\index.html') -Raw
     Assert-True ($html -match '<input type="checkbox" id="dryRun">')
+}
+
+# ─── Verified download (Task 3) ─────────────────────────────────────────────
+Describe-Group 'verified download'
+
+function ConvertTo-AutoOSTestFileUri {
+    param([string]$Path)
+    ([Uri]$Path).AbsoluteUri
+}
+
+Test-Case 'a checksum mismatch fails and leaves nothing behind' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_dl_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'
+    Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $uri = ConvertTo-AutoOSTestFileUri $src
+    $threw = $false
+    try {
+        Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 ('0' * 68) | Out-Null
+    } catch {
+        $threw = $true
+    }
+    Assert-True ($threw -and -not (Test-Path -LiteralPath $out)) `
+        "threw=$threw, out exists=$(Test-Path -LiteralPath $out)"
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+
+Test-Case 'a matching checksum succeeds' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_dl_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'
+    Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $uri = ConvertTo-AutoOSTestFileUri $src
+    $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+    Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 $sum | Out-Null
+    Assert-True ((Test-Path -LiteralPath $out) -and (Get-Item -LiteralPath $out).Length -gt 0) `
+        "verified download did not produce the file"
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+
+Test-Case 'a cached, already-verified file is skipped, not refetched' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_dl_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'
+    Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $uri = ConvertTo-AutoOSTestFileUri $src
+    $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+    Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 $sum | Out-Null
+
+    # Get-AutoOSVerifiedFile reports through Write-AutoOSLine, which writes
+    # straight to [Console]::Out rather than the pipeline, so the skip
+    # message is captured by redirecting the real Console stream - the
+    # PowerShell equivalent of the bash suite capturing fetch_verified's own
+    # combined stdout+stderr.
+    $sw = [IO.StringWriter]::new()
+    $origOut = [Console]::Out
+    [Console]::SetOut($sw)
+    try {
+        Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 $sum | Out-Null
+    } finally {
+        [Console]::SetOut($origOut)
+    }
+    $text = $sw.ToString()
+    Assert-True ($text -like '*skipped*') "expected to contain [skipped] in [$text]"
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
 # ─── Static analysis ────────────────────────────────────────────────────────
