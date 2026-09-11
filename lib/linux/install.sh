@@ -628,19 +628,69 @@ install_gh() {
 }
 
 install_uv() {
+    # Found alongside the install_ollama fix while adding the A14 regression
+    # guard below: this had the identical unverified pipe-to-shell pattern
+    # (curl ... | sh) that this branch exists to remove — a pipe can't be
+    # inspected before it runs and can be swapped mid-stream; a downloaded
+    # file can be both. Astral publishes no checksum for this installer,
+    # unlike oh-my-zsh's pinned sha256 in install_oh_my_zsh() above, so a
+    # hash can't be verified here either. Same minimum bar as install_agy()
+    # and install_ollama(): download to a file, log the exact URL, verify it
+    # is non-empty and actually looks like a script, and only then execute
+    # the FILE - never the pipe.
+    local url="https://astral.sh/uv/install.sh"
     if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would install uv via astral.sh/uv/install.sh"
+        ui_muted "would download and run the uv installer from $url"
         return 0
     fi
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ui_muted "downloading uv installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -LsSf -o "$tmp" "$url"; then
+        ui_err "failed to download uv installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_err "uv installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    sh "$tmp" || rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
 install_ollama() {
+    # This used to be `curl -fsSL $url | sh` - an unverified remote script
+    # piped straight into a shell (A14, the exact finding this branch exists
+    # to remove: a pipe can't be inspected and can be swapped mid-stream).
+    # Ollama publishes no checksum for this installer, unlike oh-my-zsh's
+    # pinned sha256 in install_oh_my_zsh() above, so a hash can't be verified
+    # here either. The minimum acceptable bar instead: download to a file,
+    # log the exact URL, verify it is non-empty and actually looks like a
+    # script, and only then execute the FILE - never the pipe.
+    local url="https://ollama.com/install.sh"
     if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would install Ollama via ollama.com/install.sh"
+        ui_muted "would download and run the Ollama installer from $url"
         return 0
     fi
-    curl -fsSL https://ollama.com/install.sh | sh
+    ui_muted "downloading Ollama installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_err "failed to download Ollama installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_err "Ollama installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    sh "$tmp" || rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
 setup_ollama_models() {

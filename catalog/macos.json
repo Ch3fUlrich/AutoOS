@@ -213,7 +213,7 @@
           "requires": [
             "ollama"
           ],
-          "verify": "ollama list | grep -q qwen3:4b",
+          "verify": "ollama show qwen3:4b",
           "homepage": "https://ollama.com/library/qwen3",
           "notes": "Pre-ticked default: small enough to load fast off USB, and its 256K context fits a full dmesg/SMART dump.",
           "profiles": [
@@ -230,7 +230,7 @@
           "requires": [
             "ollama"
           ],
-          "verify": "ollama list | grep -q qwen3:1.7b",
+          "verify": "ollama show qwen3:1.7b",
           "homepage": "https://ollama.com/library/qwen3",
           "profiles": []
         },
@@ -244,7 +244,7 @@
           "requires": [
             "ollama"
           ],
-          "verify": "ollama list | grep -q qwen2.5-coder:7b",
+          "verify": "ollama show qwen2.5-coder:7b",
           "homepage": "https://ollama.com/library/qwen2.5-coder",
           "profiles": []
         },
