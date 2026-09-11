@@ -33,7 +33,7 @@ def _disk(name, model, size, rm, tran, mountpoint=None, children=None):
     return d
 
 
-def _part(name, size, rm, tran, mountpoint=None):
+def _part(name, size, rm, tran, mountpoint=None, fstype=None, ro=False):
     return {
         "name": name,
         "model": None,
@@ -42,6 +42,8 @@ def _part(name, size, rm, tran, mountpoint=None):
         "tran": tran,
         "mountpoint": mountpoint,
         "type": "part",
+        "fstype": fstype,
+        "ro": ro,
     }
 
 
@@ -101,6 +103,38 @@ FIXTURES = {
     "usb_ssd_fixed": lambda: {"blockdevices": [
         _boot_disk(),
         _disk("sdb", "Samsung T7 (USB enclosure)", 2000398934016, False, "usb"),
+    ]},
+
+    # Task 6 (B16): the uefi-copy engine writes onto an EXISTING mounted
+    # FAT32 partition rather than the raw device, so usb_guard's
+    # "mounted-fat32-writable" mode wants the opposite of every fixture
+    # above — mounted, not unmounted. This is the human partner's real
+    # stick shape (see module docstring): FAT32, writable, already mounted.
+    "usb_fat32_mounted": lambda: {"blockdevices": [
+        _boot_disk(),
+        _disk("sdb", "Intenso Office Line", 31437766656, True, "usb", children=[
+            _part("sdb1", 31400000000, True, "usb", "/media/user/AUTOOS",
+                  fstype="vfat", ro=False),
+        ]),
+    ]},
+
+    # Same target, but its one mounted partition is NTFS, not FAT32 — the
+    # guard must name the actual filesystem so the refusal is actionable.
+    "usb_wrong_fs_mounted": lambda: {"blockdevices": [
+        _boot_disk(),
+        _disk("sdb", "Intenso Office Line", 31437766656, True, "usb", children=[
+            _part("sdb1", 31400000000, True, "usb", "/media/user/AUTOOS",
+                  fstype="ntfs", ro=False),
+        ]),
+    ]},
+
+    # FAT32, mounted, but read-only (RO=1) — uefi-copy needs to write to it.
+    "usb_fat32_readonly": lambda: {"blockdevices": [
+        _boot_disk(),
+        _disk("sdb", "Intenso Office Line", 31437766656, True, "usb", children=[
+            _part("sdb1", 31400000000, True, "usb", "/media/user/AUTOOS",
+                  fstype="vfat", ro=True),
+        ]),
     ]},
 }
 

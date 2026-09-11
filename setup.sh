@@ -23,6 +23,10 @@ LIB="$AUTOOS_ROOT/lib/linux"
 . "$LIB/catalog.sh"
 # shellcheck source=lib/linux/install.sh
 . "$LIB/install.sh"
+# shellcheck source=lib/linux/download.sh
+. "$LIB/download.sh"
+# shellcheck source=lib/linux/usb.sh
+. "$LIB/usb.sh"
 
 # Resolved properly after detect_system; this is only the fallback for the
 # catalog-only modes that run before detection.
@@ -32,6 +36,9 @@ CLAUDE_SESSIONS=""
 LIST_ONLY=0; CHECK_ONLY=0; DO_UNDO=0; FROM_STATE=""
 STATE_PATH="$AUTOOS_ROOT/.autoos-state.json"
 STATE_PROFILE=""; STATE_SELECTED=""
+# Task 6 (installer-USB planner): --create-usb and its companions.
+DO_CREATE_USB=0; USB_IMAGE=""; USB_KIND="installer"; USB_ENGINE=""; USB_DEVICE=""
+USB_WIPE=0; LIST_USB=0; LIST_ENGINES=0
 
 usage() {
     cat <<'EOF'
@@ -57,6 +64,16 @@ AutoOS — post-install provisioning for Linux
   --save-state FILE  Where to write this run's state (default .autoos-state.json)
   --no-verify        Skip the post-install "does it actually work" check
   --undo             Restore files AutoOS backed up (does NOT uninstall packages)
+                     (does not cover a USB write — that cannot be undone)
+
+  --create-usb           Plan an installer/rescue USB write (--dry-run to preview only)
+  --image <id>            catalog/images.json entry to write
+  --kind <kind>            installer | live-persistent | full-os (default: installer)
+  --engine <id>            catalog/engines.json entry to write with
+  --usb-device <path>      Target device, e.g. /dev/sdb
+  --wipe-target-disk       Acknowledge the target disk's current contents are lost
+  --list-usb              List candidate USB devices and exit
+  --list-engines          List write engines available on this machine and exit
   --help, -h         This text
 
 Examples:
@@ -93,6 +110,14 @@ while [[ $# -gt 0 ]]; do
         --save-state) STATE_PATH="${2:-}"; shift 2 ;;
         --no-verify)  AUTOOS_VERIFY=0; shift ;;
         --undo)       DO_UNDO=1; shift ;;
+        --create-usb)       DO_CREATE_USB=1; shift ;;
+        --image)            USB_IMAGE="${2:-}"; shift 2 ;;
+        --kind)              USB_KIND="${2:-installer}"; shift 2 ;;
+        --engine)            USB_ENGINE="${2:-}"; shift 2 ;;
+        --usb-device)        USB_DEVICE="${2:-}"; shift 2 ;;
+        --wipe-target-disk)  USB_WIPE=1; shift ;;
+        --list-usb)          LIST_USB=1; shift ;;
+        --list-engines)      LIST_ENGINES=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) printf 'Unknown option: %s\n\n' "$1"; usage; exit 2 ;;
     esac
@@ -149,6 +174,110 @@ if (( INSTALLED_ONLY )); then
         ui_ok "$found installed application(s) detected on this system."
     else
         ui_info "No catalog applications currently installed."
+    fi
+    exit 0
+fi
+
+# ─── USB creation (Task 6) ──────────────────────────────────────────────────
+# A pure planner-and-guard flow, standalone like the catalog-only modes
+# above: usb_plan "emits commands and runs nothing" (its own docstring in
+# lib/linux/usb.sh), so nothing below this point writes to a disk, only to
+# stdout. --list-engines and --create-usb --dry-run both have to work
+# without ever reaching the main install pipeline's "Detect" banner.
+if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
+    # detect_system is silent (sets SYS_* globals; prints nothing) and is
+    # skipped whenever EITHER SYS_OS or SYS_ARCH is already set. That is
+    # what lets B11/B13's tests simulate macOS and arm64 independently,
+    # without a second machine (AGENTS.md §5): they export SYS_OS or
+    # SYS_ARCH before invoking this script, and a fresh detect_system()
+    # call would otherwise silently overwrite BOTH with this machine's real
+    # `uname` — checking only one of the two globals here would still let
+    # the other one get clobbered.
+    if [[ -z "${SYS_OS:-}" && -z "${SYS_ARCH:-}" ]]; then detect_system; fi
+
+    # setup.sh is the shared Linux AND macOS entry point (AGENTS.md), but
+    # nothing past this line was written for `diskutil`-shaped output —
+    # refuse cleanly here rather than fail unpredictably inside usb_list.
+    if [[ "$(_usb_current_os)" == "macos" ]]; then
+        ui_err "USB creation is not supported on macOS"
+        exit 1
+    fi
+
+    if (( LIST_ENGINES )); then
+        ui_section "USB write engines available on this machine"
+        while IFS= read -r eid; do
+            [[ -z "$eid" ]] && continue
+            # mapfile, not `read < <(...)`: a process substitution that
+            # produces no output makes `read` fail, which under this
+            # script's `set -e` would abort the whole run rather than just
+            # this one engine's row.
+            eng_fields=()
+            mapfile -t eng_fields < <(_engine_field "$eid" name interactive)
+            ename="${eng_fields[0]:-$eid}"; einteractive="${eng_fields[1]:-0}"
+            tag=""; [[ "$einteractive" == "1" ]] && tag=" (interactive)"
+            printf '  %-12s %s%s\n' "$eid" "$ename" "$tag"
+        done < <(_engine_list_for_platform "$(_usb_current_os)" "$(_usb_current_arch)")
+        exit 0
+    fi
+
+    if (( LIST_USB )); then
+        ui_section "Candidate USB devices"
+        found_usb=0
+        while IFS=$'\t' read -r dpath dmodel dsize _drm _dtran; do
+            [[ -z "$dpath" ]] && continue
+            printf '  %-14s %-24s %s bytes\n' "$dpath" "$dmodel" "$dsize"
+            found_usb=$((found_usb + 1))
+        done < <(usb_list)
+        (( found_usb == 0 )) && ui_info "No USB devices found."
+        exit 0
+    fi
+
+    # DO_CREATE_USB
+    if [[ -z "$USB_IMAGE" || -z "$USB_ENGINE" || -z "$USB_DEVICE" ]]; then
+        ui_err "--create-usb requires --image, --engine and --usb-device (--list-engines / --list-usb to discover values)"
+        exit 2
+    fi
+    # AGENTS.md hard rule 3: every destructive action is opt-in and
+    # announced. usb_plan below refuses nothing based on --wipe-target-disk
+    # (Task 7 owns the actual write and its own confirmation), but a plan
+    # for a raw-write engine already means the target's current contents
+    # are lost, so the flag is acknowledged here rather than silently
+    # accepted-and-ignored if a user thought passing it would gate something.
+    if (( USB_WIPE )); then
+        ui_muted "Acknowledged: the target device's current contents will be overwritten."
+    fi
+    # if/else, not `cmd; rc=$?`: under `set -e` (active for this whole
+    # script) a bare failing command substitution assignment would exit the
+    # script right here, before usb_plan_rc — or the plan/refusal text
+    # captured with it — was ever used. A command that is an if-condition
+    # is the one form set -e never treats as fatal.
+    if usb_plan_out="$(usb_plan "$USB_IMAGE" "$USB_KIND" "$USB_ENGINE" "$USB_DEVICE" 2>&1)"; then
+        usb_plan_rc=0
+    else
+        usb_plan_rc=$?
+    fi
+    printf '%s\n' "$usb_plan_out"
+    if (( usb_plan_rc != 0 )); then
+        exit 1
+    fi
+
+    # Elevation (B10): checked here, once the plan is known to be coherent,
+    # not deferred to write time — the failure this prevents is a dry run
+    # that looks perfect followed by "Access is denied" on the one run that
+    # matters. uefi-copy writes onto an already-mounted filesystem and needs
+    # no elevation; every other engine does (same split usb_require_elevation
+    # documents). A dry run still shows the plan above even when unelevated
+    # — that gap belongs in the preview, not hidden behind a hard failure
+    # that would stop the plan from ever being shown.
+    if [[ "$USB_ENGINE" != "uefi-copy" ]]; then
+        if ! usb_elev_out="$(usb_require_elevation 2>&1)"; then
+            if (( AUTOOS_DRY_RUN )); then
+                ui_warn "$usb_elev_out"
+            else
+                ui_err "$usb_elev_out"
+                exit 1
+            fi
+        fi
     fi
     exit 0
 fi
@@ -220,6 +349,11 @@ fi
 # ─── Undo ───────────────────────────────────────────────────────────────────
 if (( DO_UNDO )); then
     autoos_undo "$ASSUME_YES"
+    # B13: a USB write does not participate in --save-state/--from-state/
+    # --undo at all — say so plainly rather than silently leaving a user's
+    # last USB write out of what "undo" covers, which they would reasonably
+    # expect it to.
+    ui_muted "A USB write is not tracked by AutoOS and cannot be undone."
     exit 0
 fi
 

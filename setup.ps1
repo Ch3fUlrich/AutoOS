@@ -98,7 +98,16 @@ param(
     [string]$SaveState,
     [string]$Config,
     [switch]$NoVerify,
-    [switch]$Undo
+    [switch]$Undo,
+    # Task 6 (installer-USB planner): -CreateUsb and its companions.
+    [switch]$CreateUsb,
+    [string]$Image,
+    [string]$Kind = 'installer',
+    [string]$Engine,
+    [string]$UsbDevice,
+    [switch]$WipeTargetDisk,
+    [switch]$ListUsb,
+    [switch]$ListEngines
 )
 
 Set-StrictMode -Version Latest
@@ -122,6 +131,7 @@ Import-Module (Join-Path $LibDir 'AutoOS.Detect.psm1')  -Force -DisableNameCheck
 Import-Module (Join-Path $LibDir 'AutoOS.Catalog.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.Install.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.State.psm1')   -Force -DisableNameChecking
+Import-Module (Join-Path $LibDir 'AutoOS.Usb.psm1')     -Force -DisableNameChecking
 
 if ($NoColor) { Set-AutoOSColor $false }
 if ($NoVerify) { Set-AutoOSVerify $false }
@@ -141,6 +151,80 @@ if ($CheckCatalog) {
     }
     foreach ($p in $problems) { Write-AutoOSLine $p -Level error }
     exit 1
+}
+
+# ─── USB creation (Task 6) ──────────────────────────────────────────────────
+# A pure planner-and-guard flow, standalone like the catalog-only modes
+# above: New-AutoOSUsbPlan runs nothing itself (its own docstring in
+# AutoOS.Usb.psm1), so nothing below this point writes to a disk, only to
+# the console. -ListEngines and -CreateUsb -DryRun both have to work
+# without ever reaching the main install pipeline's "Detect" banner.
+if ($CreateUsb -or $ListUsb -or $ListEngines) {
+    if ($ListEngines) {
+        Write-AutoOSSection 'USB write engines available on this machine'
+        $engines = @(Get-AutoOSUsbEngineList -Platform (Get-AutoOSUsbCurrentOs) -Arch (Get-AutoOSUsbCurrentArch))
+        foreach ($e in $engines) {
+            $tag = if ($e.interactive) { ' (interactive)' } else { '' }
+            Write-AutoOSLine ("  {0,-12} {1}{2}" -f $e.id, $e.name, $tag)
+        }
+        exit 0
+    }
+
+    if ($ListUsb) {
+        Write-AutoOSSection 'Candidate USB devices'
+        $devices = @(Get-AutoOSUsbDevice)
+        if ($devices.Count -eq 0) {
+            Write-AutoOSLine 'No USB devices found.' -Level info
+        }
+        foreach ($d in $devices) {
+            Write-AutoOSLine ("  {0,-18} {1,-24} {2} bytes" -f $d.DeviceId, $d.Model, $d.SizeBytes)
+        }
+        exit 0
+    }
+
+    # $CreateUsb
+    if (-not $Image -or -not $Engine -or -not $UsbDevice) {
+        Write-AutoOSLine '-CreateUsb requires -Image, -Engine and -UsbDevice (-ListEngines / -ListUsb to discover values)' -Level error
+        exit 2
+    }
+    # AGENTS.md hard rule 3: every destructive action is opt-in and
+    # announced. New-AutoOSUsbPlan below refuses nothing based on
+    # -WipeTargetDisk (Task 7 owns the actual write and its own
+    # confirmation), but a plan for a raw-write engine already means the
+    # target's current contents are lost, so the flag is acknowledged here
+    # rather than silently accepted-and-ignored if a user thought passing
+    # it would gate something.
+    if ($WipeTargetDisk) {
+        Write-AutoOSLine "Acknowledged: the target device's current contents will be overwritten." -Level muted
+    }
+    try {
+        $plan = @(New-AutoOSUsbPlan -ImageId $Image -Kind $Kind -Engine $Engine -DeviceId $UsbDevice -DryRun:$DryRun.IsPresent)
+    } catch {
+        Write-AutoOSLine $_.Exception.Message -Level error
+        exit 1
+    }
+    foreach ($line in $plan) { Write-AutoOSLine $line }
+
+    # Elevation (B10): checked here, once the plan is known to be coherent,
+    # not deferred to write time — the failure this prevents is a dry run
+    # that looks perfect followed by "Access is denied" on the one run
+    # that matters. uefi-copy writes onto an already-mounted volume and
+    # needs no elevation; every other engine does. A dry run still shows
+    # the plan above even when unelevated — that gap belongs in the
+    # preview, not hidden behind a hard failure that would stop the plan
+    # from ever being shown.
+    if ($Engine -ne 'uefi-copy') {
+        $elev = Test-AutoOSElevated
+        if (-not $elev.IsElevated) {
+            if ($DryRun) {
+                Write-AutoOSLine $elev.Reason -Level warn
+            } else {
+                Write-AutoOSLine $elev.Reason -Level error
+                exit 1
+            }
+        }
+    }
+    exit 0
 }
 
 # ─── What is already here ───────────────────────────────────────────────────
@@ -238,6 +322,11 @@ if ($blockers.Count) {
 # ─── Undo ───────────────────────────────────────────────────────────────────
 if ($Undo) {
     Invoke-AutoOSUndo -DryRun:$DryRun.IsPresent -AssumeYes:$Yes.IsPresent
+    # B13: a USB write does not participate in -SaveState/-FromState/-Undo
+    # at all — say so plainly rather than silently leaving a user's last
+    # USB write out of what "undo" covers, which they would reasonably
+    # expect it to.
+    Write-AutoOSLine 'A USB write is not tracked by AutoOS and cannot be undone.' -Level muted
     exit 0
 }
 

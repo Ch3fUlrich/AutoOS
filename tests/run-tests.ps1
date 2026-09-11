@@ -1322,7 +1322,13 @@ function New-FakeUsbDisk {
     param(
         [int]$Number, [string]$Model, [long]$Size, [string]$BusType,
         [bool]$IsBoot = $false, [bool]$IsSystem = $false, [bool]$IsRemovable = $false,
-        [string]$DriveLetter = $null
+        [string]$DriveLetter = $null,
+        # FileSystem/IsReadOnly (Task 6): what Assert-AutoOSUsbSafe's
+        # 'MountedFat32Writable' mode (the uefi-copy engine's guard mode)
+        # checks — the exact mirror of tests/helpers/fake_usb.py's
+        # fstype/ro fields.
+        [string]$FileSystem = '',
+        [bool]$IsReadOnly = $false
     )
     # Every field _Get-AutoOSUsbRawDisks/_ConvertTo-AutoOSUsbRecord reads is
     # present explicitly - Set-StrictMode turns a missing one into a hard
@@ -1336,7 +1342,11 @@ function New-FakeUsbDisk {
         IsBoot      = $IsBoot
         IsSystem    = $IsSystem
         IsRemovable = $IsRemovable
-        Partitions  = @([pscustomobject]@{ DriveLetter = $DriveLetter })
+        Partitions  = @([pscustomobject]@{
+            DriveLetter = $DriveLetter
+            FileSystem  = $FileSystem
+            IsReadOnly  = $IsReadOnly
+        })
     }
 }
 
@@ -1396,6 +1406,33 @@ function Get-FakeUsbDisksJson {
         'usb_ssd_fixed' {
             @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Samsung T7 (USB enclosure)' `
                 -Size 2000398934016 -BusType 'SCSI' -IsRemovable $false))
+        }
+
+        # Task 6 (B16): the uefi-copy engine writes onto an EXISTING
+        # mounted FAT32 volume rather than the raw disk, so
+        # Assert-AutoOSUsbSafe's 'MountedFat32Writable' mode wants the
+        # opposite of every fixture above — mounted, not unmounted. This is
+        # the human partner's real stick shape: Disk 5, FAT32, writable,
+        # already mounted at J:.
+        'usb_fat32_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter 'J' `
+                -FileSystem 'FAT32' -IsReadOnly $false))
+        }
+
+        # Same target, but its mounted volume is NTFS, not FAT32 — the
+        # guard must name the actual filesystem so the refusal is actionable.
+        'usb_wrong_fs_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter 'J' `
+                -FileSystem 'NTFS' -IsReadOnly $false))
+        }
+
+        # FAT32, mounted, but read-only — uefi-copy needs to write to it.
+        'usb_fat32_readonly' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter 'J' `
+                -FileSystem 'FAT32' -IsReadOnly $true))
         }
 
         default { throw "unknown fake-usb fixture: $Fixture" }
@@ -1493,6 +1530,132 @@ Test-Case 'Assert-AutoOSElevated is satisfied for a usb write when already admin
     } finally {
         Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
     }
+}
+
+# ─── Engine-aware guard modes (Task 6, B16) ─────────────────────────────────
+# The real-hardware bug that started Task 6: Assert-AutoOSUsbSafe correctly
+# refused every internal disk, then refused the legitimate USB stick too,
+# because the only mode it knew was "must be unmounted" — wrong for
+# uefi-copy, which writes onto a volume that is ALREADY mounted. The -Mode
+# parameter is what fixes this; every branch gets its own fixture and test.
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) accepts an already-mounted writable FAT32 target' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_fat32_mounted' -Body {
+        $result = Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable
+        Assert-True ($null -ne $result) 'rejected a valid uefi-copy target'
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a target with nothing mounted' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no mounted volume*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a mounted volume that is not FAT32' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_wrong_fs_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*not FAT32*' -and $msg -like '*NTFS*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a read-only FAT32 volume' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_fat32_readonly' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*read-only*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe still defaults to Unmounted mode when none is given' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*mounted*') "threw=$threw msg=[$msg]"
+    }
+}
+
+# ─── The write planner (Task 6) ─────────────────────────────────────────────
+# New-AutoOSUsbPlan turns (image, kind, engine, device) into the exact
+# write commands, checks every compatibility/platform/lock/safety question
+# first, and runs nothing — the exact mirror of lib/linux/usb.sh's
+# usb_plan(). Every test name below carries "usb" so `-Filter usb` reaches it.
+Test-Case 'usb: New-AutoOSUsbPlan names the device and Ventoy for a dry run' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $plan = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' `
+            -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        $joined = $plan -join "`n"
+        Assert-True ($joined -like '*PHYSICALDRIVE5*') "device missing from plan: $joined"
+        Assert-True ($joined -like '*Ventoy2Disk*') "Ventoy2Disk missing from plan: $joined"
+        Assert-True ($joined -notlike '*installed*') "unexpected 'installed' in plan: $joined"
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan never plans a raw image onto ventoy''s copy path' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $threw = $false; $msg = ''
+        try { New-AutoOSUsbPlan -ImageId 'proxmox-ve' -Kind 'installer' -Engine 'ventoy' `
+            -DeviceId '\\.\PHYSICALDRIVE5' -DryRun | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*raw*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan refuses a full-os kind on an engine that cannot build one' {
+    $threw = $false; $msg = ''
+    try { New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'full-os' -Engine 'ventoy' `
+        -DeviceId '\\.\PHYSICALDRIVE5' -DryRun | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*cannot build*') "threw=$threw msg=[$msg]"
+}
+
+Test-Case 'usb: the ventoy engine is hidden on arm64, not offered and broken' {
+    $env:AUTOOS_FAKE_ARCH = 'arm64'
+    try {
+        $ids = @(Get-AutoOSUsbEngineList -Platform 'windows' -Arch (Get-AutoOSUsbCurrentArch) | ForEach-Object { $_.id })
+        Assert-NotContains $ids 'ventoy'
+        Assert-Contains $ids 'native'
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan refuses a second write while one is already in progress' {
+    $env:AUTOOS_FAKE_RUN_ACTIVE = '1'
+    try {
+        $threw = $false; $msg = ''
+        try { New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' `
+            -DeviceId '\\.\PHYSICALDRIVE5' -DryRun | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*already in progress*') "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_RUN_ACTIVE -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: setup.ps1 -CreateUsb dry run names the device and Ventoy' {
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture 'good_stick'
+    $env:AUTOOS_IMAGE_BYTES = '4000000000'
+    try {
+        $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb `
+            -Image 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' `
+            -UsbDevice '\\.\PHYSICALDRIVE5' -DryRun -NoColor 2>&1) -join "`n"
+        Assert-True ($out -like '*PHYSICALDRIVE5*' -and $out -like '*Ventoy2Disk*') "out=$out"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: setup.ps1 -Undo states plainly that a USB write cannot be undone' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -Undo -DryRun -NoColor 2>&1) -join "`n"
+    Assert-True ($out -like '*USB*') "out=$out"
 }
 
 # ─── Static analysis ────────────────────────────────────────────────────────

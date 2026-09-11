@@ -206,6 +206,70 @@ print(' '.join(bad))")"
     [[ -z "$out" ]] && pass || fail "raw images claiming persistence: $out"
 fi
 
+# ─── Engine catalog (Task 6, plan ruling P3) ────────────────────────────────
+# catalog/engines.json is the data-shaped home for B3's engine/kind
+# compatibility matrix — usb_plan() (lib/linux/usb.sh) looks entries up by
+# id at plan time rather than branching on engine names in code, so a
+# malformed entry here is a silent, unhandled-in-either-place gap unless
+# this schema is checked directly.
+if it "the engine catalog validates against its own schema"; then
+    out="$(python3 -c "
+import json
+REQUIRED = {'id', 'name', 'platforms', 'arch', 'kinds', 'writeModes', 'requires', 'interactive'}
+KINDS = {'installer', 'live-persistent', 'full-os'}
+WRITE_MODES = {'hybrid', 'raw'}
+problems = []
+data = json.load(open('catalog/engines.json'))
+seen = set()
+for e in data.get('engines', []):
+    eid = e.get('id')
+    where = f\"engine '{eid}'\" if eid else 'engine with no id'
+    missing = REQUIRED - set(e.keys())
+    if missing:
+        problems.append(f'{where}: missing {sorted(missing)}')
+        continue
+    if eid in seen:
+        problems.append(f'{where}: duplicate id')
+    seen.add(eid)
+    if not isinstance(e['interactive'], bool):
+        problems.append(f'{where}: interactive must be a bool')
+    if not e['kinds'] or not set(e['kinds']) <= KINDS:
+        problems.append(f'{where}: kinds must be a non-empty subset of {sorted(KINDS)}')
+    if not e['writeModes'] or not set(e['writeModes']) <= WRITE_MODES:
+        problems.append(f'{where}: writeModes must be a non-empty subset of {sorted(WRITE_MODES)}')
+    if not e['platforms']:
+        problems.append(f'{where}: platforms must not be empty')
+print('\n'.join(problems))
+import sys; sys.exit(1 if problems else 0)
+" 2>&1)"; rc=$?
+    [[ $rc -eq 0 ]] && pass || fail "$out"
+fi
+
+if it "the engine catalog names exactly the five engines this feature ships"; then
+    out="$(python3 -c "
+import json
+ids = sorted(e['id'] for e in json.load(open('catalog/engines.json'))['engines'])
+want = sorted(['ventoy', 'uefi-copy', 'wsl', 'native', 'rufus'])
+print(' '.join(ids) if ids != want else '')")"
+    [[ -z "$out" ]] && pass || fail "got: $out"
+fi
+
+if it "ventoy is the only engine an arch list can hide, and rufus is the only interactive one"; then
+    out="$(python3 -c "
+import json
+engines = {e['id']: e for e in json.load(open('catalog/engines.json'))['engines']}
+bad = []
+if 'arm64' in engines['ventoy'].get('arch', []):
+    bad.append('ventoy claims arm64')
+if not engines['rufus']['interactive']:
+    bad.append('rufus is not marked interactive')
+for eid in ('ventoy', 'uefi-copy', 'wsl', 'native'):
+    if engines[eid]['interactive']:
+        bad.append(f'{eid} is wrongly marked interactive')
+print(' / '.join(bad))")"
+    [[ -z "$out" ]] && pass || fail "$out"
+fi
+
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
 describe "catalog loading"
 detect_system
@@ -607,6 +671,22 @@ if it "two consecutive dry runs produce the same plan"; then
     a="$(bash setup.sh --profile light --dry-run --yes --no-color 2>&1 | grep -E '^\s+[0-9]+\.')"
     b="$(bash setup.sh --profile light --dry-run --yes --no-color 2>&1 | grep -E '^\s+[0-9]+\.')"
     assert_eq "$a" "$b"
+fi
+
+if it "a dry run for --create-usb (usb write plan) leaves the filesystem untouched"; then
+    # Task 6 Step 6: the same property every other dry-run test in this
+    # block proves, for the USB feature specifically — a scratch cache dir
+    # (never the real one) must come out exactly as it went in, proving
+    # usb_plan/setup.sh's --create-usb handling never called fetch_verified
+    # or touched the device.
+    usb_scratch_cache="$(mktemp -d)"
+    before_listing="$(find "$usb_scratch_cache" 2>/dev/null | sort)"
+    AUTOOS_CACHE_DIR="$usb_scratch_cache" AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_DRY_RUN=1 \
+        bash setup.sh --create-usb --image ubuntu-desktop-lts --kind installer \
+        --engine ventoy --usb-device /dev/sdb >/dev/null 2>&1
+    after_listing="$(find "$usb_scratch_cache" 2>/dev/null | sort)"
+    assert_eq "$after_listing" "$before_listing"
+    rm -rf "$usb_scratch_cache"
 fi
 
 if it "an unknown component id is rejected"; then
@@ -2141,6 +2221,110 @@ fi
 
 if it "usb_require_elevation is satisfied when already root (B10)"; then
     AUTOOS_SUDO="" AUTOOS_FAKE_UID=0 usb_require_elevation && pass || fail "refused root"
+fi
+
+# ─── Engine-aware guard modes (Task 6, B16) ─────────────────────────────────
+# The real-hardware bug that started Task 6: Assert-AutoOSUsbSafe/usb_guard
+# correctly refused every internal disk, then refused the legitimate USB
+# stick too, because the only mode it knew was "must be unmounted" — wrong
+# for uefi-copy, which writes onto a partition that is ALREADY mounted.
+# usb_guard's <mode> parameter is what fixes this; every branch gets its
+# own fixture (tests/helpers/fake_usb.py) and its own test here.
+if it "usb_guard (mounted-fat32-writable mode) accepts an already-mounted writable FAT32 target"; then
+    AUTOOS_FAKE_LSBLK="$(fake_usb usb_fat32_mounted)" \
+        usb_guard /dev/sdb mounted-fat32-writable && pass || fail "rejected a valid uefi-copy target"
+fi
+
+if it "usb_guard (mounted-fat32-writable mode) refuses a target with nothing mounted"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
+           usb_guard /dev/sdb mounted-fat32-writable 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"no mounted partition"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_guard (mounted-fat32-writable mode) refuses a mounted partition that is not FAT32"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_wrong_fs_mounted)" \
+           usb_guard /dev/sdb mounted-fat32-writable 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"not FAT32"* && "$out" == *"ntfs"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_guard (mounted-fat32-writable mode) refuses a read-only FAT32 partition"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_fat32_readonly)" \
+           usb_guard /dev/sdb mounted-fat32-writable 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"read-only"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_guard still defaults to unmounted mode when none is given (B16 backward compat)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_mounted)" usb_guard /dev/sdb 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"mounted"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+# ─── The write planner (Task 6) ─────────────────────────────────────────────
+# usb_plan() turns (image, kind, engine, device) into the exact write
+# commands, checks every compatibility/platform/lock/safety question first,
+# and runs nothing — this is what makes --dry-run provable for this
+# feature. Every test name below carries "usb" so `--filter usb` reaches
+# it; most also carry "plan" or "engine" (`--filter plan` / `--filter
+# engine`), matching the three filters this task's own testing scope asks
+# for — the brief warns a filter matching zero tests here has reported a
+# clean run twice already on this branch.
+describe "usb planning"
+
+if it "usb_plan: a dry run names the device and writes nothing"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_DRY_RUN=1 \
+           bash setup.sh --create-usb --image ubuntu-desktop-lts \
+                         --kind installer --engine ventoy --usb-device /dev/sdb 2>&1)"
+    assert_contains "$out" "/dev/sdb"
+    assert_contains "$out" "Ventoy2Disk.sh"
+    assert_not_contains "$out" "installed"
+fi
+
+if it "usb_plan: a raw image is never planned onto ventoy's copy path"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_DRY_RUN=1 \
+           bash setup.sh --create-usb --image proxmox-ve \
+                         --kind installer --engine ventoy --usb-device /dev/sdb 2>&1)" || true
+    assert_contains "$out" "raw"
+fi
+
+if it "usb_plan: a full-os kind is refused on an engine that cannot build one"; then
+    out="$(AUTOOS_DRY_RUN=1 bash setup.sh --create-usb --image ubuntu-desktop-lts \
+           --kind full-os --engine ventoy --usb-device /dev/sdb 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"cannot build"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_plan: macOS is refused cleanly, not left to fail inside usb_list"; then
+    out="$( SYS_OS=macos bash setup.sh --create-usb --image ubuntu-desktop-lts \
+            --kind installer --engine native --usb-device /dev/disk2 2>&1 )"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"not supported on macOS"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_plan: the ventoy engine is hidden on arm64, not offered and broken"; then
+    out="$( SYS_ARCH=arm64 bash setup.sh --create-usb --list-engines 2>&1 )"
+    assert_not_contains "$out" "ventoy"
+    assert_contains     "$out" "native"
+fi
+
+if it "usb_plan: a second write is refused while one is already in progress"; then
+    out="$( AUTOOS_FAKE_RUN_ACTIVE=1 usb_plan ubuntu-desktop-lts installer ventoy /dev/sdb 2>&1 )"
+    rc=$?
+    [[ $rc -ne 0 && "$out" == *"already in progress"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_plan: uefi-copy needs no elevation but every other engine does (B10)"; then
+    # A successful uefi-copy plan (its own fixture: already mounted, FAT32,
+    # writable — the opposite of what ventoy/native/wsl need) must never
+    # even mention elevation: setup.sh's --create-usb handling skips the
+    # check entirely for this one engine, so nothing about it can leak into
+    # the output whether or not this session actually has sudo/admin.
+    out_uefi="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_fat32_mounted)" AUTOOS_DRY_RUN=1 \
+                bash setup.sh --create-usb --image ubuntu-desktop-lts --kind installer \
+                --engine uefi-copy --usb-device /dev/sdb 2>&1)"; rc_uefi=$?
+    if [[ $rc_uefi -eq 0 && "$out_uefi" != *"levat"* ]]; then pass
+    else fail "rc=$rc_uefi: $out_uefi"; fi
+fi
+
+if it "usb --undo states plainly that a USB write cannot be undone"; then
+    out="$( bash setup.sh --undo --dry-run 2>&1 )"
+    assert_contains "$out" "USB"
 fi
 
 # ─── Answer-file templates ──────────────────────────────────────────────────
