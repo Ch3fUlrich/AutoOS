@@ -145,7 +145,7 @@ in the machine, and cannot work on Linux. So AutoOS offers the user a real choic
 | `ventoy` *(default)* | Windows + Linux | `Ventoy2Disk.exe VTOYCLI /I /Drive:E: /GPT` / `Ventoy2Disk.sh -i -g /dev/sdX` | Scriptable, multi-boot: install once, then **add an OS by copying an ISO**. A second distribution costs a file copy, not a reflash. |
 | `wsl` | Windows only | `usbipd attach` → real `/dev/sdX` inside WSL2 → `dd` / `mmdebstrap` / `parted` | The entire Linux toolchain on Windows. Required for `full-os` sticks. No Rufus. |
 | `native` | Linux only | `dd` / `parted` / `mmdebstrap` directly | No extra dependency at all. |
-| `uefi-copy` | Windows + Linux, **no admin** | Copy the ISO's contents onto an existing FAT32 partition | The only engine that needs no elevation at all. See B16 — it is what makes this feature usable on a locked-down machine, and it is how the first real stick was built. |
+| `uefi-copy` | Windows + Linux, **no admin** | Copy the ISO's contents onto an existing FAT32 partition | **The documented fallback**, kept deliberately (human partner, 2026-09-11: "keep the not-elevated solution as a backup"). Needs no elevation at all. See B16; it is how the first real stick was built. |
 | `rufus` | Windows only | Launch the GUI, hand the user the settings, wait | Escape hatch for an image the others cannot handle. **Explicitly marked interactive**; unavailable under `--dry-run` and in the browser UI. |
 
 Requirement 4.1.1 — "rufus should also be installed if not present on windows" — is met as a
@@ -388,6 +388,85 @@ within the no-elevation budget.
 **Treat this as probe-then-commit, not as a promise.** Casper's file-based persistence has changed
 across releases; the planner must verify it took effect on first boot (write a marker, reboot, look
 for it) and the UI must not claim persistence that was never confirmed. Owner: Task 7.
+
+### B18. Elevation is available — so `ventoy` stays the default and gains legacy BIOS
+
+Settled 2026-09-11: *"elevated shell is fine since a lot of applications need elevated shell, but
+keep the not-elevated solution as a backup."*
+
+That resolves the tension B16 opened. The engine order is:
+
+1. **`ventoy`** — the default. Needs elevation, and in exchange writes a partition table and an MBR
+   boot sector, so a stick boots on **legacy BIOS/CSM as well as UEFI**. For a rescue stick aimed at
+   old or broken hardware this is the difference between working and not.
+2. **`uefi-copy`** — the fallback, selected automatically when the process is not elevated and
+   elevation cannot be obtained. Prints exactly one line saying the stick will be UEFI-only and
+   why, so the limitation is never a surprise at the boot menu.
+
+The planner picks the fallback on its own rather than failing, and says which it picked and why.
+
+### B19. An offline package cache, because a rescue stick meets machines with no network
+
+Settled 2026-09-11: *"yes do it."*
+
+`rescue-bootstrap.sh` needs `apt` to reach the internet, and the machines this stick exists for are
+exactly the ones with no working network. So the stick carries its own `.deb` cache.
+
+**The version trap that makes this non-trivial:** packages must match the *live ISO's* release, not
+the build machine's. This machine's WSL is Ubuntu **24.04** while the ISO is **26.04**, so a naive
+`apt-get download` produces packages that fail dependency resolution on the target — worse than no
+cache, because it fails *after* you have booted a broken machine.
+
+The build therefore creates a throwaway chroot of the **image's own release** and downloads into it:
+
+```bash
+mmdebstrap --variant=apt --include=ca-certificates resolute /tmp/rescue-chroot \
+           http://archive.ubuntu.com/ubuntu
+chroot /tmp/rescue-chroot apt-get -y --download-only install <the rescue package set>
+cp /tmp/rescue-chroot/var/cache/apt/archives/*.deb <stick>/rescue/debs/
+```
+
+The release codename comes from the image catalog entry, never a hardcoded string, so this cannot
+silently drift from the ISO it ships beside. `rescue-bootstrap.sh` then prefers the local cache
+(`apt-get install --no-download -o Dir::Cache::archives=<stick>/rescue/debs`) and falls back to the
+network when a package is missing. Budget ~2 GB on the stick.
+
+### B20. `ai` is a dispatcher over a registry, not an alias to one tool
+
+Settled 2026-09-11: *"claude and [the other] should both be ai, but claude should be the default.
+Make it possible to ship multiple ais, since there will be other ai clients added in the future."*
+
+So `ai` is a small command over a data file, not an alias — the same catalog-is-data rule AGENTS.md
+§2 applies to software:
+
+- `/etc/autoos/ai-clients.conf` — one `id:binary:description` record per line.
+- `ai "question"` runs the default (`claude`); `ai gemini "question"` dispatches by id;
+  `ai --list` shows every registered client with an installed/not-installed column.
+- `AUTOOS_AI_DEFAULT` overrides the default without editing a file.
+- If the default is absent but another client is present, it says so and names the working one,
+  rather than failing with `claude: command not found`.
+
+Adding a third AI CLI is then one line in a config file and one catalog entry. Owner: Task 9.
+
+### B21. A separate `local-ai` profile, because the models are enormous
+
+Settled 2026-09-11: *"the user should be capable of requesting ollama and models to run local ai
+stuff… add those local ai capabilities as an additional profile and warn because of the big size."*
+
+Local inference is exactly right for a rescue stick — it is the only way the AI tooling works on a
+machine with no network, and it needs no API key, which is the other standing constraint.
+
+It is **its own profile**, never folded into `rescue`, because the size difference is two orders of
+magnitude: the entire rescue toolkit is ~400 MB of packages; one useful local model is 4–20 GB.
+A user who asked for a rescue stick has not asked for that.
+
+- Profile id `local-ai`: `ollama`, plus model pulls as separate catalog components.
+- **Every model component states its download size in its `description`**, and the plan summary
+  shows the total before the confirmation — an unannounced 20 GB download on a metered connection
+  is the kind of surprise AGENTS.md hard rule 3 exists to prevent.
+- Models are `custom`-provider components whose `postInstall` runs `ollama pull`, so the existing
+  idempotency applies: a model already pulled reports `skipped`.
+- Default suggestion is one small general model (~4 GB), not the largest available.
 
 ### B9. WSL becomes an install *target*, not just a component (Phase 4)
 
@@ -637,6 +716,70 @@ git add .gitignore && git commit -m "chore: never track an ISO or the download c
 ```
 
 ---
+
+#### Task 1B: the `local-ai` profile
+
+**Files:** Modify `catalog/linux.json`, `catalog/windows.json`, `catalog/macos.json`;
+`tests/run-tests.sh`, `tests/run-tests.ps1`, `docs/profiles.md`
+
+**Interfaces:**
+- Produces: profile id `local-ai`; component ids `ollama`, `ollama-model-<name>`.
+
+- [ ] **Step 1: Write the failing tests.** The size warning is the point of this task, so it is
+  what the tests guard:
+
+```bash
+if it "local-ai profile ships ollama"; then
+    assert_contains "$(catalog_profile_defaults local-ai)" "ollama"
+fi
+
+if it "local-ai is NOT pulled in by the rescue profile"; then
+    # Two orders of magnitude apart: ~400 MB of tools vs 4-20 GB of weights.
+    assert_not_contains "$(catalog_profile_defaults rescue)" "ollama"
+fi
+
+if it "every model component states its download size"; then
+    out="$(python3 -c "
+import json,re
+cat=json.load(open('catalog/linux.json'))
+bad=[c['id'] for g in cat['categories'] for c in g['components']
+     if c['id'].startswith('ollama-model-')
+     and not re.search(r'[0-9]+(\.[0-9]+)?\s?GB', c.get('description',''))]
+print(' '.join(bad))")"
+    [[ -z "$out" ]] && pass || fail "model entries with no size in the description: $out"
+fi
+```
+
+- [ ] **Step 2: Run them and watch them fail** — `bash tests/run-tests.sh --filter local-ai`.
+  Confirm the printed test count is non-zero before believing a pass.
+
+- [ ] **Step 3: Add the profile key** to all three catalogs:
+
+```jsonc
+"local-ai": "Local AI inference with Ollama — no API key and no network, but models are 4-20 GB."
+```
+
+- [ ] **Step 4: Add the components.** `ollama` (provider `script`, the vendor's own installer, with
+  its checksum verified per Task 3's helper), then one entry per model, each naming its size:
+
+```jsonc
+{
+  "id": "ollama-model-llama3.2",
+  "name": "Llama 3.2 3B",
+  "description": "General-purpose local model, 2.0 GB download",
+  "provider": "custom",
+  "postInstall": "pull_ollama_model",
+  "requires": ["ollama"],
+  "verify": "ollama list | grep -q llama3.2",
+  "homepage": "https://ollama.com/library/llama3.2",
+  "profiles": ["local-ai"]
+}
+```
+
+- [ ] **Step 5: Make the plan summary total the download size** before the confirmation, so a user
+  sees "this will download 14 GB" while they can still say no.
+
+- [ ] **Step 6: Run the filtered tests, update `docs/profiles.md`, commit.**
 
 ### Phase 2 — verified download and USB writing
 
