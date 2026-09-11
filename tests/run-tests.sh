@@ -1614,6 +1614,7 @@ EOS
     log2="$(cat "$fake_apt_log" 2>/dev/null)"
     deb_count=$(find "$tmp_stick/rescue/debs" -maxdepth 1 -name '*.deb' 2>/dev/null | wc -l | tr -d ' ')
     has_index=0; [[ -f "$tmp_stick/rescue/debs/Packages.gz" ]] && has_index=1
+    has_release=0; [[ -s "$tmp_stick/rescue/debs/Release" ]] && has_release=1
 
     rm -rf "$tmp_stick" "$fakebin"
 
@@ -1622,10 +1623,11 @@ EOS
         && -z "$log2" \
         && "$out2" == *"already cached"* \
         && "$out2" == *"verified"* \
+        && "$has_release" -eq 1 \
         && "$deb_count" -eq 2 && "$has_index" -eq 1 ]]; then
         pass
     else
-        fail "run1 rc=$rc1 log='${log1:0:150}' | run2 rc=$rc2 log='${log2:0:150}' out2='${out2: -200}' debs=$deb_count index=$has_index"
+        fail "run1 rc=$rc1 log='${log1:0:150}' | run2 rc=$rc2 log='${log2:0:150}' out2='${out2: -200}' debs=$deb_count index=$has_index release=$has_release"
     fi
 fi
 
@@ -1715,6 +1717,72 @@ EOS
         pass
     else
         fail "rc1=$rc1 out1='${out1: -200}' | rc2=$rc2 log2='$log2' index_count=$pkg_count_in_index"
+    fi
+fi
+
+if it "imagecache_index writes a Release file that always matches the current Packages, never a stale one (cache)"; then
+    # Reproduces the finding from exercising this against the physical stick:
+    # a repo with Packages/Packages.gz but no Release makes apt probe for
+    # InRelease/Release, fail, and log a scary "Err: … Method gave a blank
+    # filename" before falling back and succeeding anyway — fine for apt,
+    # indistinguishable from real breakage for a human on a rescue stick.
+    # This test needs no apt-get at all: imagecache_index only reads whatever
+    # .deb files are already on disk. Directly proves the risk the coordinator
+    # called out — a Release whose checksums don't match Packages is worse
+    # than no Release, because apt rejects the whole index — by corrupting
+    # Packages after a first index and confirming a second pass fixes both
+    # Packages (dpkg-scanpackages always rebuilds it from the .deb files) and
+    # Release's checksums to match, rather than leaving either stale.
+    tmp_stick="$(mktemp -d)"
+    out="$tmp_stick/rescue/debs"
+    mkdir -p "$out"
+    : > "$out/foo_1.0_amd64.deb"
+    : > "$out/bar_1.0_amd64.deb"
+
+    fakebin="$(mktemp -d)"
+    cat > "$fakebin/dpkg-scanpackages" <<'EOS'
+#!/usr/bin/env bash
+dir="${1:-.}"
+for f in "$dir"/*.deb; do
+    [[ -e "$f" ]] || continue
+    printf 'Package: %s\nFilename: %s\n\n' "$(basename "$f")" "$f"
+done
+exit 0
+EOS
+    chmod +x "$fakebin/dpkg-scanpackages"
+    # No fake apt-ftparchive: exercises the hand-written fallback, which is
+    # the path with real checksum/size correctness risk.
+
+    out1="$(PATH="$fakebin:/usr/bin:/bin" imagecache_index "$out" 2>&1)"; rc1=$?
+    has_release1=0; [[ -s "$out/Release" ]] && has_release1=1
+    sha_release1="$(awk '/^ .*Packages$/{print $1; exit}' "$out/Release" 2>/dev/null)"
+    sha_actual1="$(sha256sum "$out/Packages" | cut -d' ' -f1)"
+
+    # Corrupt Packages directly (stands in for any way the index could go
+    # stale between runs) and index again. dpkg-scanpackages always rebuilds
+    # Packages from the .deb files on disk, so — since those .deb files never
+    # changed — the *fixed* content, and hence its hash, is expected to come
+    # back identical to run 1's; what actually proves "not stale" is that
+    # Release's checksum tracks that corrected content and NOT the corrupted
+    # one it was briefly overwritten with.
+    printf 'STALE-GARBAGE\n' >> "$out/Packages"
+    sha_corrupted="$(sha256sum "$out/Packages" | cut -d' ' -f1)"
+    out2="$(PATH="$fakebin:/usr/bin:/bin" imagecache_index "$out" 2>&1)"; rc2=$?
+    packages_after="$(cat "$out/Packages")"
+    sha_release2="$(awk '/^ .*Packages$/{print $1; exit}' "$out/Release" 2>/dev/null)"
+    sha_actual2="$(sha256sum "$out/Packages" | cut -d' ' -f1)"
+
+    rm -rf "$tmp_stick" "$fakebin"
+
+    if [[ $rc1 -eq 0 && $rc2 -eq 0 \
+        && "$has_release1" -eq 1 \
+        && -n "$sha_release1" && "$sha_release1" == "$sha_actual1" \
+        && "$packages_after" != *"STALE-GARBAGE"* \
+        && -n "$sha_release2" && "$sha_release2" == "$sha_actual2" \
+        && "$sha_release2" != "$sha_corrupted" ]]; then
+        pass
+    else
+        fail "rc1=$rc1 rc2=$rc2 has_release1=$has_release1 sha_release1=$sha_release1 sha_actual1=$sha_actual1 sha_release2=$sha_release2 sha_actual2=$sha_actual2 sha_corrupted=$sha_corrupted out1='${out1:0:150}' out2='${out2:0:150}'"
     fi
 fi
 

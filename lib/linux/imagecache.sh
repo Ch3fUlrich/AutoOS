@@ -106,7 +106,8 @@ PY
 # imagecache_build <stick_root> <catalog_path>
 # Populates <stick_root>/rescue/debs with the .deb files for every rescue-
 # profile apt package matched to the release actually on the stick, and
-# publishes them as a local apt repository (dpkg-scanpackages + Packages.gz).
+# publishes them as a local apt repository (dpkg-scanpackages, Packages.gz
+# and a Release file — see imagecache_index below for why Release matters).
 #
 # Safe to run twice (AGENTS.md §4): a package whose .deb is already sitting
 # in the cache is never re-downloaded — dpkg filenames are always
@@ -237,8 +238,7 @@ EOF
     # lands on disk but never makes it into Packages.gz is invisible to apt
     # on the target — it just sits there, and the failure looks exactly like
     # "package not available" with no clue why.
-    if ! ( cd "$out" && dpkg-scanpackages . /dev/null 2>/dev/null >Packages && gzip -9kf Packages ); then
-        ui_err "imagecache: failed to index $out as an apt repository"
+    if ! imagecache_index "$out"; then
         return 1
     fi
 
@@ -249,6 +249,86 @@ EOF
     # below for why) — always finish with the real audit, and let its exit
     # status be this function's exit status.
     imagecache_verify "$stick_root" "$catalog_path"
+}
+
+# imagecache_index <out>
+# (Re)builds <out>/Packages, Packages.gz and Release from whatever .deb files
+# are actually on disk right now. Called unconditionally at the end of
+# imagecache_build — full build, top-up, or a no-op run that fetched nothing
+# new — so the index is always freshly derived from reality, never left
+# stale: a Packages file mutated or corrupted between runs is simply
+# overwritten by the next dpkg-scanpackages pass, and Release is generated
+# from THAT output, never a cached one.
+#
+# Release matters even though apt works without it: a repo shipping only
+# Packages/Packages.gz makes apt probe for InRelease/Release, fail, and log
+#   Err:3 file:<repo> ./ Packages
+#     Method gave a blank filename
+# before falling back and succeeding anyway — proven live against the actual
+# stick. It still works, but a red Err: line is indistinguishable from real
+# breakage to someone reading it on a broken machine at 2am, which is exactly
+# what a rescue stick exists for. Release is always written LAST, after
+# Packages/Packages.gz, since it checksums them — get that order backwards
+# and apt is handed a Release whose checksums don't match, which it rejects
+# outright (worse than no Release at all).
+imagecache_index() {
+    local out="$1"
+
+    if ! ( cd "$out" && dpkg-scanpackages . /dev/null 2>/dev/null >Packages && gzip -9kf Packages ); then
+        ui_err "imagecache: failed to index $out as an apt repository"
+        return 1
+    fi
+
+    imagecache_write_release "$out"
+}
+
+# imagecache_write_release <out>
+# Prefers `apt-ftparchive release .` (present via apt-utils on the machines
+# that build this cache); falls back to a hand-written minimum when it isn't
+# available. Both paths write through a temp file and `mv` into place so an
+# interrupted run can never leave a truncated Release for apt to reject.
+imagecache_write_release() {
+    local out="$1"
+    local tmp
+
+    if has_cmd apt-ftparchive; then
+        tmp="$(mktemp "$out/Release.XXXXXX")"
+        if ( cd "$out" && apt-ftparchive release . ) >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+            mv "$tmp" "$out/Release"
+            return 0
+        fi
+        rm -f "$tmp"
+        ui_warn "imagecache: apt-ftparchive failed to generate Release — writing one by hand"
+    fi
+
+    if ! has_cmd sha256sum; then
+        ui_err "imagecache: sha256sum not found — cannot write a Release file"
+        return 1
+    fi
+
+    # The minimum apt accepts for a flat file:// repo. The SHA256 entries MUST
+    # match Packages/Packages.gz exactly (size in bytes, not disk blocks) or
+    # apt rejects the whole index outright — always read from the files that
+    # are actually on disk right now, never a cached/assumed value.
+    local tmp2 f sha size
+    tmp2="$(mktemp "$out/Release.XXXXXX")"
+    {
+        printf 'Origin: AutoOS\n'
+        printf 'Label: AutoOS rescue offline cache\n'
+        printf 'Suite: stable\n'
+        printf 'Codename: ./\n'
+        printf 'Architectures: amd64\n'
+        printf 'Components: \n'
+        printf 'Date: %s\n' "$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S UTC')"
+        printf 'SHA256:\n'
+        for f in Packages Packages.gz; do
+            [[ -f "$out/$f" ]] || continue
+            sha="$(sha256sum "$out/$f" | cut -d' ' -f1)"
+            size="$(wc -c <"$out/$f" | tr -d ' ')"
+            printf ' %s %s %s\n' "$sha" "$size" "$f"
+        done
+    } >"$tmp2"
+    mv "$tmp2" "$out/Release"
 }
 
 # imagecache_verify <stick_root> <catalog_path>
