@@ -39,6 +39,30 @@ menu afterwards.
 `server` does not exist on Windows or macOS, so a headless machine there is
 offered `ai-coding` instead of a profile its catalog does not define.
 
+### `rescue`: one deliberate divergence from the catalog
+
+The rescue USB has two entry points, and for **Node.js only** they install it
+differently. This is intentional, and it is written down here because an
+undocumented second package list is exactly the drift that caused finding A12.
+
+| | Node.js comes from |
+|---|---|
+| `./setup.sh --profile rescue` | NodeSource, via the catalog's `nodejs` entry (`provider: "script"`) |
+| `templates/rescue-bootstrap.sh` on a booted stick | Ubuntu's own `nodejs` / `npm` apt packages |
+
+Both AI CLIs (`claude-code`, `gemini-cli`) `require: ["nodejs"]` and carry the
+`rescue` profile, so either route gets you a working `claude` and `gemini`.
+
+The bootstrap deviates because a stick handed to a stranger cannot pipe an
+unverified remote script into a shell (`curl … | bash`, finding A14), and
+because the NodeSource apt source file was re-added on every run, which broke
+idempotency (A13). apt is idempotent on its own and needs no trust decision at
+2am on a broken machine.
+
+**Everything else** in `rescue-bootstrap.sh` is cross-checked against
+`catalog/linux.json` in both directions by `tests/run-tests.sh`, so no other
+package can drift. Node is the one exception.
+
 ## How the suggestion is picked
 
 Deliberately conservative — a small board is never handed a desktop install it
