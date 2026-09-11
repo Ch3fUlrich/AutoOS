@@ -158,6 +158,7 @@ install_rescue_tools() {
     install_apt_group "stress-test"    memtester stress-ng f3
     install_apt_group "partitioning"   gdisk parted testdisk gddrescue gparted
     install_apt_group "filesystems"    e2fsprogs btrfs-progs xfsprogs ntfs-3g dosfstools exfatprogs
+    install_apt_group "volume-management" lvm2 mdadm cryptsetup
     install_apt_group "windows-repair" dislocker chntpw efibootmgr arch-install-scripts
     install_apt_group "cloning"        clonezilla
     install_apt_group "networking"     nmap tcpdump iperf3 ethtool wireguard

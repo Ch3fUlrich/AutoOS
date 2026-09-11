@@ -201,6 +201,15 @@ if it "rescue profile stays off the desktop"; then
     assert_not_contains "$(catalog_profile_defaults rescue)" "antigravity"
 fi
 
+if it "rescue can open LVM, RAID and LUKS volumes"; then
+    got="$(catalog_profile_defaults rescue)"
+    ok=1
+    for id in lvm2 mdadm cryptsetup; do
+        [[ " $got " == *" $id "* ]] || { ok=0; echo "missing: $id" >&2; }
+    done
+    (( ok )) && pass || fail "rescue cannot reach encrypted or logical volumes"
+fi
+
 if it "rescue ships both AI CLIs"; then
     got="$(catalog_profile_defaults rescue)"
     assert_contains "$got" "claude-code"
