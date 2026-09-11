@@ -139,6 +139,47 @@ JSON
     fi
 fi
 
+# ─── Image catalog (plan Task 4) ────────────────────────────────────────────
+describe "image catalog"
+
+if it "the image catalog validates"; then
+    out="$(python3 tests/helpers/images_validate.py catalog/images.json 2>&1)"; rc=$?
+    [[ $rc -eq 0 ]] && pass || fail "$out"
+fi
+
+if it "no image pins a version number in its URL"; then
+    # A9: a pinned version is stale the day it is written.
+    if grep -qE '"index"[^,]*[0-9]+\.[0-9]+' catalog/images.json; then
+        fail "an index URL contains a hardcoded version"
+    else pass; fi
+fi
+
+if it "every image carries a checksum source"; then
+    # custom-url/custom-local are excluded here for the same reason
+    # images_validate.py's PSEUDO set excludes them from require_sums(): they
+    # are UI text fields, not downloadable images, and by construction have
+    # no 'sums' to carry. Checking every entry without this carve-out is the
+    # same Step-3-vs-Step-4 contradiction the validator itself had to name
+    # explicitly — it just resurfaces here because this test reads the
+    # catalog directly instead of going through the validator.
+    out="$(python3 -c "
+import json,sys
+PSEUDO={'custom-url','custom-local'}
+bad=[i['id'] for i in json.load(open('catalog/images.json'))['images']
+     if i['id'] not in PSEUDO and not i.get('sums')]
+print(' '.join(bad)); sys.exit(1 if bad else 0)")"; rc=$?
+    [[ $rc -eq 0 ]] && pass || fail "no checksum source: $out"
+fi
+
+if it "a raw-write image is never offered to ventoy's copy path"; then
+    out="$(python3 -c "
+import json
+bad=[i['id'] for i in json.load(open('catalog/images.json'))['images']
+     if i.get('writeMode')=='raw' and 'live-persistent' in i.get('kinds',[])]
+print(' '.join(bad))")"
+    [[ -z "$out" ]] && pass || fail "raw images claiming persistence: $out"
+fi
+
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
 describe "catalog loading"
 detect_system

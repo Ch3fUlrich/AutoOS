@@ -1,0 +1,169 @@
+{
+  "images": [
+    {
+      "id": "ubuntu-desktop-lts",
+      "name": "Ubuntu Desktop (LTS)",
+      "homepage": "https://ubuntu.com/download/desktop",
+      "index": "https://releases.ubuntu.com/",
+      "file": "ubuntu-[0-9]+\\.[0-9]+(\\.[0-9]+)?-desktop-amd64\\.iso$",
+      "sums": "SHA256SUMS",
+      "sig": "SHA256SUMS.gpg",
+      "key": "-",
+      "kinds": [
+        "installer",
+        "live-persistent"
+      ],
+      "writeMode": "hybrid",
+      "sizeGb": 6,
+      "notes": "SHA256SUMS covers the payload tree only — EFI/, .disk/ and boot/grub/ (the boot chain) are absent from it, so a manifest match alone does not confirm the stick can boot."
+    },
+    {
+      "id": "ubuntu-server-lts",
+      "name": "Ubuntu Server (LTS)",
+      "homepage": "https://ubuntu.com/download/server",
+      "index": "https://releases.ubuntu.com/",
+      "file": "ubuntu-[0-9]+\\.[0-9]+(\\.[0-9]+)?-live-server-amd64\\.iso$",
+      "sums": "SHA256SUMS",
+      "sig": "SHA256SUMS.gpg",
+      "key": "-",
+      "kinds": [
+        "installer"
+      ],
+      "writeMode": "hybrid",
+      "sizeGb": 3,
+      "notes": "SHA256SUMS covers the payload tree only — EFI/, .disk/ and boot/grub/ (the boot chain) are absent from it, so a manifest match alone does not confirm the stick can boot."
+    },
+    {
+      "id": "debian-netinst-stable",
+      "name": "Debian Netinst (stable)",
+      "homepage": "https://www.debian.org/CD/netinst/",
+      "index": "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/",
+      "file": "debian-[0-9]+\\.[0-9]+\\.[0-9]+-amd64-netinst\\.iso$",
+      "sums": "SHA256SUMS",
+      "sig": "SHA256SUMS.sign",
+      "key": "-",
+      "kinds": [
+        "installer"
+      ],
+      "writeMode": "hybrid",
+      "sizeGb": 1
+    },
+    {
+      "id": "fedora-workstation",
+      "name": "Fedora Workstation",
+      "homepage": "https://fedoraproject.org/workstation/download",
+      "index": "https://download.fedoraproject.org/pub/fedora/linux/releases/",
+      "file": "Fedora-Workstation-Live-x86_64-[0-9]+-[0-9.]+\\.iso$",
+      "sums": "CHECKSUM",
+      "sig": "-",
+      "key": "-",
+      "kinds": [
+        "installer",
+        "live-persistent"
+      ],
+      "writeMode": "hybrid",
+      "sizeGb": 3,
+      "notes": "Fedora's CHECKSUM file is GPG-clearsigned inline, not a detached signature — fetch_verified's separate sig_url model does not apply directly. sha256 comparison only for now."
+    },
+    {
+      "id": "systemrescue",
+      "name": "SystemRescue",
+      "homepage": "https://www.system-rescue.org/",
+      "index": "https://fastly-cdn.system-rescue.org/releases/",
+      "file": "systemrescue-[0-9]+\\.[0-9]+(\\.[0-9]+)?-amd64\\.iso$",
+      "sums": "systemrescue-[0-9]+\\.[0-9]+(\\.[0-9]+)?-amd64\\.iso\\.sha256$",
+      "sig": "-",
+      "key": "-",
+      "kinds": [
+        "live-persistent"
+      ],
+      "writeMode": "hybrid",
+      "sizeGb": 1,
+      "notes": "index deliberately points at the vendor CDN, not SourceForge: system-rescue's own SourceForge /download link is an HTML mirror-chooser interstitial, not the ISO (finding A7)."
+    },
+    {
+      "id": "proxmox-ve",
+      "name": "Proxmox VE",
+      "homepage": "https://www.proxmox.com/en/downloads",
+      "index": "https://enterprise.proxmox.com/iso/",
+      "file": "proxmox-ve_[0-9]+\\.[0-9]+-[0-9]+\\.iso$",
+      "sums": "SHA256SUMS",
+      "sig": "-",
+      "key": "-",
+      "kinds": [
+        "installer"
+      ],
+      "writeMode": "raw",
+      "sizeGb": 1.5,
+      "notes": "writeMode is raw: this is a disk image, not a hybrid ISO. It must be written block-for-block (dd / Rufus DD mode) and must never be offered to a Ventoy copy path (finding A11)."
+    },
+    {
+      "id": "gparted-live",
+      "name": "GParted Live",
+      "homepage": "https://gparted.org/livecd.php",
+      "index": "https://sourceforge.net/projects/gparted/files/gparted-live-stable/",
+      "file": "gparted-live-[0-9]+\\.[0-9]+(\\.[0-9]+)?-[0-9]+-amd64\\.iso$",
+      "sums": "gparted-live-[0-9]+\\.[0-9]+(\\.[0-9]+)?-[0-9]+-amd64\\.iso\\.sha256$",
+      "sig": "-",
+      "key": "-",
+      "kinds": [
+        "live-persistent"
+      ],
+      "writeMode": "hybrid",
+      "sizeGb": 0.5,
+      "notes": "SourceForge-hosted like system-rescue was (finding A7) — the /download shortcut can return an HTML mirror page instead of the file. Not yet confirmed against a direct CDN; verify before wiring the downloader to this entry."
+    },
+    {
+      "id": "clonezilla-live",
+      "name": "Clonezilla Live",
+      "homepage": "https://clonezilla.org/downloads.php",
+      "index": "https://sourceforge.net/projects/clonezilla/files/clonezilla_live_stable/",
+      "file": "clonezilla-live-[0-9]+\\.[0-9]+(\\.[0-9]+)?-[0-9]+-amd64\\.iso$",
+      "sums": "clonezilla-live-[0-9]+\\.[0-9]+(\\.[0-9]+)?-[0-9]+-amd64\\.iso\\.sha256$",
+      "sig": "-",
+      "key": "-",
+      "kinds": [
+        "live-persistent"
+      ],
+      "writeMode": "hybrid",
+      "sizeGb": 0.6,
+      "notes": "SourceForge-hosted like system-rescue was (finding A7); same caveat as gparted-live — verify the direct file path before wiring the downloader to this entry."
+    },
+    {
+      "id": "memtest86plus",
+      "name": "Memtest86+",
+      "homepage": "https://www.memtest.org/",
+      "index": "https://github.com/memtest86plus/memtest86plus/releases/latest",
+      "file": "mt86plus_[0-9]+\\.[0-9]+(\\.[0-9]+)?\\.iso\\.zip$",
+      "sums": "sha256sum.txt",
+      "sig": "-",
+      "key": "-",
+      "kinds": [
+        "live-persistent"
+      ],
+      "writeMode": "hybrid",
+      "sizeGb": 0.1,
+      "notes": "GitHub Releases asset naming and the sha256sum.txt asset name are best-effort from the project's recent releases, not pinned — confirm both against the current release before wiring the downloader to this entry."
+    },
+    {
+      "id": "custom-url",
+      "name": "Custom URL",
+      "kinds": [
+        "installer",
+        "live-persistent",
+        "full-os"
+      ],
+      "notes": "UI affordance, not a downloadable image: becomes a free-text URL field. The user supplies the URL, kind and writeMode; nothing here is resolved from this catalog."
+    },
+    {
+      "id": "custom-local",
+      "name": "Custom local file",
+      "kinds": [
+        "installer",
+        "live-persistent",
+        "full-os"
+      ],
+      "notes": "UI affordance, not a downloadable image: becomes a free-text local file-path field for an image the user already has on disk. Nothing here is resolved from this catalog."
+    }
+  ]
+}
