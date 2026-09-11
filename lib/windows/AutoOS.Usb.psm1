@@ -36,6 +36,11 @@ $ErrorActionPreference = 'Stop'
 # Get-AutoOSDownloadCacheDir rather than re-deriving the P6 cache path.
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Detect.psm1') -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Download.psm1') -DisableNameChecking
+# Task 7: the write executor below reports status the way every other
+# AutoOS module does (Write-AutoOSLine, never Write-Host - AGENTS.md SS3),
+# which this module did not previously need since Assert-AutoOSUsbSafe/
+# New-AutoOSUsbPlan only ever throw or return data.
+Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1') -DisableNameChecking
 
 # Get-AutoOSUsbRawDisk
 # Prints the raw disk records this module reasons over: parsed from
@@ -534,7 +539,11 @@ function New-AutoOSUsbPlan {
             $lines.Add("Invoke-AutoOSUsbCopyImage $DeviceId $localPath")
         }
         'native' {
-            $lines.Add("Write-AutoOSUsbRaw $DeviceId $localPath")
+            # Task 7/B14: Write-AutoOSUsbRaw computes its own progress from
+            # bytes written rather than parsing a subprocess (there is no dd
+            # on Windows to parse in the first place) - it needs the image
+            # size up front, already computed above for the guard.
+            $lines.Add("Write-AutoOSUsbRaw $DeviceId $localPath $imageBytes")
         }
         'wsl' {
             if ($Kind -eq 'full-os') {
@@ -558,7 +567,373 @@ function New-AutoOSUsbPlan {
     return $lines.ToArray()
 }
 
+# ─── The write executor (Task 7) ────────────────────────────────────────────
+# Invoke-AutoOSUsbPlan is the exact mirror of lib/linux/usb.sh's
+# usb_execute(): the only thing in this module that ever runs a line
+# New-AutoOSUsbPlan printed. Everything above this point only reads
+# catalog\*.json and the live disk table; everything below actually writes.
+
+# Invoke-AutoOSUsbPlanStep -DeviceId -Line
+# One executed plan step - the mirror of usb.sh's _usb_run_step/
+# _usb_dispatch_step combined. $env:AUTOOS_TRACE/AUTOOS_FORCE_FAIL/
+# AUTOOS_DRY_RUN are read here, in one place, exactly like their bash
+# counterparts, so Invoke-AutoOSUsbPlan's own loop stays "run each line,
+# stop at the first failure". "Ventoy2Disk.exe ..." is dispatched to
+# Install-AutoOSUsbVentoy for the same reason usb_execute special-cases the
+# Linux binary's name: New-AutoOSUsbPlan deliberately keeps that line
+# literal in its own output (a human previewing a plan should see the real
+# tool that runs), even though the binary it names is not on PATH until
+# Install-AutoOSUsbVentoy has fetched it.
+function Invoke-AutoOSUsbPlanStep {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DeviceId,
+        [Parameter(Mandatory)][string]$Line
+    )
+
+    if ($env:AUTOOS_TRACE -eq '1') {
+        Write-Output "TRACE $Line"
+    }
+    if ($env:AUTOOS_FORCE_FAIL -eq '1') {
+        throw "forced failure (AUTOOS_FORCE_FAIL) before: $Line"
+    }
+    if ($env:AUTOOS_DRY_RUN -eq '1') {
+        return
+    }
+
+    if ($Line -match '^Ventoy2Disk\.exe\s') {
+        Install-AutoOSUsbVentoy -DeviceId $DeviceId
+        return
+    }
+    # Every other line is either a real function this module (or its
+    # siblings) already defines - Invoke-AutoOSUsbCopyImage,
+    # Write-AutoOSUsbRaw - or an external tool (wsl.exe, rufus.exe).
+    # Invoke-Expression is PowerShell's eval, the same role bash's
+    # `eval "$line"` plays in the Linux mirror.
+    Invoke-Expression $Line
+}
+
+function Invoke-AutoOSUsbPlan {
+    <#
+      .SYNOPSIS
+        Runs a plan (New-AutoOSUsbPlan's output) against -DeviceId. Returns
+        once every step has succeeded AND the device still enumerates
+        (B15) - throws with a human-actionable reason otherwise. There is
+        no rollback: a failure means the stick must be rewritten from
+        wipefs onward, and this function never retries automatically (a
+        re-plugged stick can enumerate under a different device id).
+      .PARAMETER Plan
+        The exact output of New-AutoOSUsbPlan, one command per array
+        element (the PowerShell equivalent of usb_execute's one-command-
+        per-line stdin contract).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DeviceId,
+        [Parameter(Mandatory)][string[]]$Plan
+    )
+
+    $steps = @($Plan | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($steps.Count -eq 0) {
+        throw "Invoke-AutoOSUsbPlan: empty plan - nothing to run"
+    }
+
+    foreach ($line in $steps) {
+        try {
+            Invoke-AutoOSUsbPlanStep -DeviceId $DeviceId -Line $line
+        } catch {
+            $stillThere = @(Get-AutoOSUsbDevice | Where-Object { $_.DeviceId -eq $DeviceId })
+            if ($stillThere.Count -gt 0) {
+                Write-AutoOSLine "usb_execute: write to $DeviceId failed ($($_.Exception.Message)). There is no rollback (B15) - the stick must be rewritten from wipefs onward; do not retry automatically." -Level error
+            } else {
+                Write-AutoOSLine "usb_execute: $DeviceId is no longer present - the stick was removed during the write. Re-seat it and start over; do not retry blindly, a re-plugged stick can enumerate under a different device id." -Level error
+            }
+            throw
+        }
+    }
+
+    $stillThere = @(Get-AutoOSUsbDevice | Where-Object { $_.DeviceId -eq $DeviceId })
+    if ($stillThere.Count -eq 0) {
+        Write-AutoOSLine "usb_execute: $DeviceId did not read back after the write - treat this stick as unbootable and rewrite it; a retry is safe, it always starts from wipefs (B15)." -Level error
+        throw "$DeviceId did not read back after the write"
+    }
+
+    Write-AutoOSLine "Ready to boot: $DeviceId" -Level ok
+}
+
+# Write-AutoOSUsbRaw -DeviceId -ImagePath -ImageBytes
+# B14's Windows side: there is no dd here to parse a progress line out of in
+# the first place, so this writes the image itself in 4 MB chunks and
+# reports bytes-written/-ImageBytes as its own "NN%" lines - the mirror of
+# lib/linux/usb.sh's usb_write_raw(), which reaches the same percentage by
+# reading dd's stderr instead.
+function Write-AutoOSUsbRaw {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DeviceId,
+        [Parameter(Mandatory)][string]$ImagePath,
+        [int64]$ImageBytes = 0
+    )
+
+    if ($env:AUTOOS_DRY_RUN -eq '1') {
+        Write-AutoOSLine "would write $ImagePath onto $DeviceId (raw)" -Level muted
+        return
+    }
+    if (-not (Test-Path -LiteralPath $ImagePath)) {
+        throw "Write-AutoOSUsbRaw: image not found: $ImagePath"
+    }
+    if ($ImageBytes -le 0) {
+        $ImageBytes = (Get-Item -LiteralPath $ImagePath).Length
+    }
+
+    $bufferSize = 4MB
+    $buffer = New-Object byte[] $bufferSize
+    $written = [int64]0
+    $lastPct = -1
+
+    $src = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+    try {
+        $dst = [System.IO.File]::Open($DeviceId, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write)
+        try {
+            while ($true) {
+                $read = $src.Read($buffer, 0, $bufferSize)
+                if ($read -le 0) { break }
+                $dst.Write($buffer, 0, $read)
+                $written += $read
+                if ($ImageBytes -gt 0) {
+                    # [math]::Floor, not a bare [int] cast: PowerShell divides
+                    # two integers as a [double] and [int] ROUNDS that
+                    # (confirmed live in Add-AutoOSUsbVentoyPersistence's own
+                    # half-stick cap, which this mirrors) - a rounded-up
+                    # percentage could print "100%" before the write is
+                    # actually done, exactly the overclaim B15 exists to rule
+                    # out.
+                    $pct = [int][math]::Floor(($written * 100) / $ImageBytes)
+                    if ($pct -gt 100) { $pct = 100 }
+                    if ($pct -ne $lastPct) {
+                        Write-Output "$pct%"
+                        $lastPct = $pct
+                    }
+                }
+            }
+            $dst.Flush($true)
+        } finally {
+            $dst.Close()
+        }
+    } finally {
+        $src.Close()
+    }
+}
+
+# Invoke-AutoOSUsbCopyImage -DeviceId -ImagePath [-ExtraFiles]
+# Mirrors lib/linux/usb.sh's usb_copy_image(): copies a hybrid ISO's
+# contents, plus any extra files (Task 9's rescue templates), onto the
+# FAT32/exFAT volume already mounted on -DeviceId. Never the raw device -
+# that is Install-AutoOSUsbVentoy's job, or Write-AutoOSUsbRaw's for a
+# writeMode:raw image.
+#
+# Finding A11: refuses outright when the mounted volume is CDFS/UDF (a
+# raw-written hybrid image mounts as one of those, and both are read-only
+# in Windows) - checked before anything else, so a raw-written stick fails
+# fast with a named reason instead of a confusing copy error partway
+# through. Finding B16: refuses before copying anything if any file inside
+# the image exceeds FAT32's 4 GiB per-file ceiling, naming the offending
+# file - failing 20 minutes into a multi-gigabyte copy is exactly what this
+# guards against.
+function Invoke-AutoOSUsbCopyImage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DeviceId,
+        [Parameter(Mandatory)][string]$ImagePath,
+        [string[]]$ExtraFiles = @()
+    )
+
+    if ($env:AUTOOS_DRY_RUN -eq '1') {
+        Write-AutoOSLine "would copy $ImagePath (+$($ExtraFiles.Count) extra file(s)) onto $DeviceId" -Level muted
+        return
+    }
+
+    $target = Get-AutoOSUsbDevice | Where-Object { $_.DeviceId -eq $DeviceId } | Select-Object -First 1
+    if (-not $target) { throw "Invoke-AutoOSUsbCopyImage: $DeviceId was not found among enumerated disks" }
+    if ($target.MountedFileSystem -in @('CDFS', 'UDF')) {
+        throw "Invoke-AutoOSUsbCopyImage: $DeviceId's volume is $($target.MountedFileSystem) - this stick was written with a raw block copy (finding A11) and is read-only. It must be rewritten before this engine can use it."
+    }
+    if (-not $target.MountedLetter) {
+        throw "Invoke-AutoOSUsbCopyImage: $DeviceId has no mounted volume to copy onto"
+    }
+    $destRoot = "$($target.MountedLetter):\"
+
+    $mounted = Mount-DiskImage -ImagePath $ImagePath -PassThru -ErrorAction Stop
+    try {
+        $srcLetter = ($mounted | Get-Volume).DriveLetter
+        $srcRoot = "${srcLetter}:\"
+
+        $biggest = Get-ChildItem -LiteralPath $srcRoot -Recurse -File -ErrorAction SilentlyContinue |
+            Sort-Object Length -Descending | Select-Object -First 1
+        if ($biggest -and $biggest.Length -gt 4294967295) {
+            throw "Invoke-AutoOSUsbCopyImage: $($biggest.FullName.Substring($srcRoot.Length)) is $($biggest.Length) bytes - over FAT32's 4 GiB single-file ceiling (finding B16). Refusing before copying anything."
+        }
+
+        robocopy $srcRoot $destRoot /E /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS | Out-Null
+        if ($LASTEXITCODE -ge 8) {
+            throw "Invoke-AutoOSUsbCopyImage: robocopy reported a failure copying $ImagePath onto $destRoot (exit $LASTEXITCODE)"
+        }
+    } finally {
+        Dismount-DiskImage -ImagePath $ImagePath -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    $rescueDir = Join-Path $destRoot 'rescue'
+    New-Item -ItemType Directory -Path $rescueDir -Force | Out-Null
+    foreach ($f in $ExtraFiles) {
+        if (-not (Test-Path -LiteralPath $f)) {
+            Write-AutoOSLine "Invoke-AutoOSUsbCopyImage: extra file not found, skipping: $f" -Level warn
+            continue
+        }
+        Copy-Item -LiteralPath $f -Destination $rescueDir -Force
+    }
+}
+
+# Get-AutoOSUsbVentoyCacheDir
+# Where the Ventoy TOOL itself (not an image) is cached - a sibling of the
+# image cache, mirroring lib/linux/usb.sh's _usb_ventoy_cache_dir.
+function Get-AutoOSUsbVentoyCacheDir {
+    Join-Path (Split-Path -Parent (Get-AutoOSDownloadCacheDir)) 'tools\ventoy'
+}
+
+# Install-AutoOSUsbVentoy -DeviceId
+# Ensures the Ventoy tool is present and verified, then runs
+# Ventoy2Disk.exe -I -G -DeviceId. Mirrors lib/linux/usb.sh's
+# usb_write_ventoy(): downloads from Ventoy's own GitHub release index,
+# verifies the published sha256.txt entry for the exact asset downloaded
+# (never a pinned version or checksum in this repository - AGENTS.md hard
+# rule 2), and caches the extracted tool so a second call is a no-op
+# download. $env:AUTOOS_FAKE_VENTOY_RELEASE substitutes the "ask GitHub"
+# step with test-supplied JSON, the same knob the Linux mirror reads.
+function Install-AutoOSUsbVentoy {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DeviceId)
+
+    if ($env:AUTOOS_DRY_RUN -eq '1') {
+        Write-AutoOSLine "would run: Ventoy2Disk.exe -I -G $DeviceId" -Level muted
+        return
+    }
+
+    $cacheDir = Get-AutoOSUsbVentoyCacheDir
+    New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+
+    $bin = Get-ChildItem -Path $cacheDir -Filter 'Ventoy2Disk.exe' -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+    if (-not $bin) {
+        if ($env:AUTOOS_FAKE_VENTOY_RELEASE) {
+            $release = $env:AUTOOS_FAKE_VENTOY_RELEASE | ConvertFrom-Json
+        } else {
+            $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/ventoy/Ventoy/releases/latest'
+        }
+        $asset = $release.assets | Where-Object { $_.name -like '*-windows.zip' } | Select-Object -First 1
+        $shaAsset = $release.assets | Where-Object { $_.name -eq 'sha256.txt' } | Select-Object -First 1
+        if (-not $asset) { throw "Install-AutoOSUsbVentoy: no windows.zip asset in the latest Ventoy release" }
+
+        $zipPath = Join-Path $cacheDir $asset.name
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing
+
+        if (-not $shaAsset) {
+            Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+            throw "Install-AutoOSUsbVentoy: no published sha256 found for $($asset.name) - refusing to install an unverified Ventoy"
+        }
+        $shaText = (Invoke-WebRequest -Uri $shaAsset.browser_download_url -UseBasicParsing).Content
+        $wantLine = ($shaText -split "`r?`n") | Where-Object { $_ -match [regex]::Escape($asset.name) } | Select-Object -First 1
+        $want = if ($wantLine) { ($wantLine.Trim() -split '\s+')[0] } else { $null }
+        $have = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
+        if (-not $want -or $have.ToLowerInvariant() -ne $want.ToLowerInvariant()) {
+            Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+            throw "Install-AutoOSUsbVentoy: checksum mismatch for $($asset.name) - refusing to install an unverified Ventoy"
+        }
+
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $cacheDir -Force
+        $bin = Get-ChildItem -Path $cacheDir -Filter 'Ventoy2Disk.exe' -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $bin) { throw "Install-AutoOSUsbVentoy: Ventoy2Disk.exe not found even after fetching Ventoy" }
+
+    Write-AutoOSLine "run: $bin -I -G $DeviceId" -Level muted
+    & $bin -I -G $DeviceId
+    if ($LASTEXITCODE -ne 0) {
+        throw "Install-AutoOSUsbVentoy: Ventoy2Disk.exe exited $LASTEXITCODE"
+    }
+}
+
+# Add-AutoOSUsbVentoyPersistence -DeviceId [-SizeGb]
+# Mirrors lib/linux/usb.sh's usb_ventoy_add_persistence() (Task 7 Step 4,
+# B17/B18): a .dat file on the Ventoy data volume, registered in
+# ventoy\ventoy.json, gives a live-persistent stick a writable overlay
+# without repartitioning. Defaults to 16 GB, capped at half the stick's
+# total size. Not wired into New-AutoOSUsbPlan's own output, for the same
+# reason its Linux mirror is not - see usb_ventoy_add_persistence's own
+# comment in lib/linux/usb.sh.
+function Add-AutoOSUsbVentoyPersistence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DeviceId,
+        [int]$SizeGb = 16
+    )
+
+    $target = Get-AutoOSUsbDevice | Where-Object { $_.DeviceId -eq $DeviceId } | Select-Object -First 1
+    if (-not $target) { throw "Add-AutoOSUsbVentoyPersistence: $DeviceId was not found among enumerated disks" }
+
+    if ($target.SizeBytes -gt 0) {
+        # [int] on a [double] ROUNDS (MidpointRounding.ToEven) rather than
+        # truncating - 31437766656 bytes/2/1e9 = 15.7188... would cast to
+        # 16, not 15, silently defeating the whole cap on a stick sized just
+        # so (confirmed live: good_stick's own 31437766656 B does exactly
+        # this). [math]::Floor matches lib/linux/usb.sh's bash integer
+        # division (which truncates toward zero) exactly.
+        $halfGb = [int][math]::Floor($target.SizeBytes / 2 / 1000000000)
+        if ($halfGb -gt 0 -and $SizeGb -gt $halfGb) {
+            Write-AutoOSLine "Add-AutoOSUsbVentoyPersistence: ${SizeGb}GB would be more than half of $DeviceId - capping at ${halfGb}GB" -Level warn
+            $SizeGb = $halfGb
+        }
+    }
+    if ($SizeGb -lt 1) {
+        throw "Add-AutoOSUsbVentoyPersistence: $DeviceId is too small to fit a persistence file"
+    }
+
+    if ($env:AUTOOS_DRY_RUN -eq '1') {
+        Write-AutoOSLine "would create a ${SizeGb}GB Ventoy persistence file on $DeviceId" -Level muted
+        return
+    }
+    if (-not $target.MountedLetter) {
+        throw "Add-AutoOSUsbVentoyPersistence: $DeviceId has no mounted volume to write the persistence file onto"
+    }
+
+    $ventoyDir = "$($target.MountedLetter):\ventoy"
+    New-Item -ItemType Directory -Path $ventoyDir -Force | Out-Null
+    $datPath = Join-Path $ventoyDir 'persistence.dat'
+
+    $sizeBytes = [int64]$SizeGb * 1000 * 1MB
+    $stream = [System.IO.File]::Open($datPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+    try { $stream.SetLength($sizeBytes) } finally { $stream.Close() }
+
+    $jsonPath = Join-Path $ventoyDir 'ventoy.json'
+    $data = if (Test-Path -LiteralPath $jsonPath) {
+        try { Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json } catch { [pscustomobject]@{} }
+    } else { [pscustomobject]@{} }
+    $persistence = @()
+    if ($data.PSObject.Properties.Name -contains 'persistence') { $persistence = @($data.persistence) }
+    $entry = [pscustomobject]@{ backend = '/ventoy/persistence.dat'; mount = @('/') }
+    if (-not ($persistence | Where-Object { $_.backend -eq $entry.backend })) {
+        $persistence += $entry
+    }
+    if ($data.PSObject.Properties.Name -contains 'persistence') {
+        $data.persistence = $persistence
+    } else {
+        $data | Add-Member -NotePropertyName persistence -NotePropertyValue $persistence -Force
+    }
+    $data | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $jsonPath -Encoding utf8
+}
+
 Export-ModuleMember -Function `
     Get-AutoOSUsbDevice, Assert-AutoOSUsbSafe, Test-AutoOSElevated, Assert-AutoOSElevated, `
     New-AutoOSUsbPlan, Get-AutoOSUsbEngine, Get-AutoOSUsbImage, Get-AutoOSUsbEngineList, `
-    Get-AutoOSUsbCurrentOs, Get-AutoOSUsbCurrentArch, Test-AutoOSUsbRunActive
+    Get-AutoOSUsbCurrentOs, Get-AutoOSUsbCurrentArch, Test-AutoOSUsbRunActive, `
+    Invoke-AutoOSUsbPlan, Write-AutoOSUsbRaw, Invoke-AutoOSUsbCopyImage, `
+    Install-AutoOSUsbVentoy, Add-AutoOSUsbVentoyPersistence, Get-AutoOSUsbVentoyCacheDir

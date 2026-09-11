@@ -101,6 +101,40 @@ fake_usb() {
     python3 "$ROOT/tests/helpers/fake_usb.py" "$1"
 }
 
+# _start_test_http_server <directory>
+# Starts a throwaway python3 http.server bound to 127.0.0.1 on an
+# OS-assigned port, serving <directory>, and prints "<pid> <port>" once it
+# is actually listening (polls a port file the server writes itself before
+# calling serve_forever(), so there is no read-before-bound race). Task 7's
+# usb_write_ventoy tests use this instead of file:// URLs: curl on a
+# Windows/Git-Bash test host cannot open a file:// URL built from an MSYS
+# /tmp path (confirmed: "curl: (37) Could not open file /tmp/tmp.XXXXXX/...")
+# - the same class of host-specific path trap MSYS_NO_PATHCONV already
+# documents elsewhere in this suite. A real loopback HTTP server sidesteps
+# it entirely and behaves identically under WSL2/Linux, where this suite
+# usually runs (AGENTS.md §5). The caller must `kill` the printed pid when
+# done - this function never cleans up after itself.
+_start_test_http_server() {
+    local dir="$1" portfile pid port i
+    portfile="$(mktemp -u)"
+    python3 -c '
+import http.server, socketserver, sys, os
+os.chdir(sys.argv[1])
+httpd = socketserver.TCPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+with open(sys.argv[2], "w") as f:
+    f.write(str(httpd.server_address[1]))
+httpd.serve_forever()
+' "$dir" "$portfile" >/dev/null 2>&1 &
+    pid=$!
+    port=""
+    for i in $(seq 1 50); do
+        if [[ -s "$portfile" ]]; then port="$(cat "$portfile")"; break; fi
+        sleep 0.1
+    done
+    rm -f "$portfile"
+    printf '%s %s\n' "$pid" "$port"
+}
+
 # ─── Load the libraries under test ──────────────────────────────────────────
 cd "$ROOT" || { echo "cannot enter $ROOT" >&2; exit 1; }
 # shellcheck source=../lib/linux/ui.sh
@@ -2325,6 +2359,180 @@ fi
 if it "usb --undo states plainly that a USB write cannot be undone"; then
     out="$( bash setup.sh --undo --dry-run 2>&1 )"
     assert_contains "$out" "USB"
+fi
+
+# ─── The write executor (Task 7) ────────────────────────────────────────────
+# usb_execute() is the only thing in usb.sh that ever runs a line usb_plan
+# prints - every test here exercises it through the trace/fake runner it
+# already has built in (AUTOOS_TRACE/AUTOOS_FORCE_FAIL/AUTOOS_DRY_RUN), or
+# through the AUTOOS_FAKE_* escape hatches usb_write_ventoy/usb_copy_image
+# grow for the same reason, never against a real device (AGENTS.md SS5).
+# Every test name below carries "usb_execute" so both `--filter execute` and
+# `--filter usb` reach it - the brief for this task warns a filter matching
+# zero tests here has reported a clean run twice already on this branch.
+describe "usb execution"
+
+if it "usb_execute: executing a plan runs exactly the planned commands, in order"; then
+    plan="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
+            usb_plan ubuntu-desktop-lts installer ventoy /dev/sdb)"
+    ran="$(AUTOOS_DRY_RUN=1 AUTOOS_TRACE=1 usb_execute /dev/sdb <<<"$plan" 2>&1)"
+    assert_eq "$(echo "$ran" | grep -c '^TRACE ')" "$(echo "$plan" | wc -l)"
+fi
+
+if it "usb_execute: a failed write never leaves the stick claimed as successful"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FORCE_FAIL=1 \
+           usb_execute /dev/sdb <<<"echo x" 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" != *"Ready to boot"* ]] && pass || fail "reported success on failure"
+fi
+
+if it "usb_execute: reports Ready to boot only once every step succeeds and the device still reads back (B15)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_execute /dev/sdb <<<"echo hello" 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$out" == *"Ready to boot: /dev/sdb"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
+if it "usb_execute: a step failure names the stick as removed when it truly vanished, not a generic error"; then
+    # root_is_sda's fixture carries no sdb at all - the same "the device is
+    # simply gone" state the unplug-mid-write finding describes.
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb root_is_sda)" AUTOOS_FORCE_FAIL=1 \
+           usb_execute /dev/sdb <<<"echo x" 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"removed during the write"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
+if it "usb_execute: dispatches a Ventoy2Disk.sh plan line through usb_write_ventoy, not a bare command lookup"; then
+    # usb_plan deliberately keeps "Ventoy2Disk.sh -i -g <dev>" literal in its
+    # own output (the "usb planning" tests above assert that exact string),
+    # even though the real binary is not on PATH until usb_write_ventoy has
+    # fetched it. This proves usb_execute bridges that gap instead of just
+    # eval-ing the literal plan line (which would fail: command not found).
+    # AUTOOS_FAKE_VENTOY_RELEASE points at a fake tarball+sha256.txt served
+    # over a throwaway loopback HTTP server (_start_test_http_server above) -
+    # no real network, and AUTOOS_CACHE_DIR is "$scratch/images" (not
+    # "$scratch" itself) so usb_write_ventoy's tools/ventoy cache, which
+    # lives next to dirname(AUTOOS_CACHE_DIR), stays isolated per test
+    # instead of colliding on a shared /tmp/tools/ventoy.
+    rel="$(mktemp -d)"
+    printf '#!/bin/sh\necho "fake ventoy $*"\n' >"$rel/Ventoy2Disk.sh"
+    chmod +x "$rel/Ventoy2Disk.sh"
+    tar -C "$rel" -czf "$rel/ventoy-9.9.9-linux.tar.gz" Ventoy2Disk.sh
+    sum="$(sha256sum "$rel/ventoy-9.9.9-linux.tar.gz" | awk '{print $1}')"
+    printf '%s  ventoy-9.9.9-linux.tar.gz\n' "$sum" >"$rel/sha256.txt"
+    read -r http_pid http_port < <(_start_test_http_server "$rel")
+    base="http://127.0.0.1:$http_port"
+    release_json="{\"assets\":[{\"name\":\"ventoy-9.9.9-linux.tar.gz\",\"browser_download_url\":\"$base/ventoy-9.9.9-linux.tar.gz\"},{\"name\":\"sha256.txt\",\"browser_download_url\":\"$base/sha256.txt\"}]}"
+    scratch="$(mktemp -d)"
+    if [[ -n "$http_port" ]]; then
+        out="$(AUTOOS_SUDO="" AUTOOS_CACHE_DIR="$scratch/images" AUTOOS_FAKE_VENTOY_RELEASE="$release_json" \
+               AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
+               usb_execute /dev/sdb <<<"Ventoy2Disk.sh -i -g /dev/sdb" 2>&1)"; rc=$?
+        if [[ $rc -eq 0 && "$out" == *"fake ventoy -i -g /dev/sdb"* ]]; then pass
+        else fail "rc=$rc out=$(printf '%s' "$out" | tail -5)"; fi
+    else
+        fail "test HTTP server never started listening"
+    fi
+    # wait, not just kill: on this host a killed python http.server can hold
+    # its serving directory open for a moment afterward, and the rm -rf right
+    # below would otherwise race it ("Device or resource busy").
+    kill "$http_pid" 2>/dev/null
+    wait "$http_pid" 2>/dev/null
+    rm -rf "$rel" "$scratch"
+fi
+
+if it "usb_execute: usb_write_ventoy caches the extracted tool and skips re-fetching on a second call"; then
+    rel="$(mktemp -d)"
+    printf '#!/bin/sh\necho "fake ventoy $*"\n' >"$rel/Ventoy2Disk.sh"
+    chmod +x "$rel/Ventoy2Disk.sh"
+    tar -C "$rel" -czf "$rel/ventoy-9.9.9-linux.tar.gz" Ventoy2Disk.sh
+    sum="$(sha256sum "$rel/ventoy-9.9.9-linux.tar.gz" | awk '{print $1}')"
+    printf '%s  ventoy-9.9.9-linux.tar.gz\n' "$sum" >"$rel/sha256.txt"
+    read -r http_pid http_port < <(_start_test_http_server "$rel")
+    base="http://127.0.0.1:$http_port"
+    release_json="{\"assets\":[{\"name\":\"ventoy-9.9.9-linux.tar.gz\",\"browser_download_url\":\"$base/ventoy-9.9.9-linux.tar.gz\"},{\"name\":\"sha256.txt\",\"browser_download_url\":\"$base/sha256.txt\"}]}"
+    scratch="$(mktemp -d)"
+    if [[ -n "$http_port" ]]; then
+        AUTOOS_SUDO="" AUTOOS_CACHE_DIR="$scratch/images" AUTOOS_FAKE_VENTOY_RELEASE="$release_json" \
+            usb_write_ventoy /dev/sdb >/dev/null 2>&1
+        first_rc=$?
+        # Second call is handed a release with NO usable assets at all - if
+        # it still succeeds, the cache hit (not a re-fetch) is what made
+        # that work.
+        out="$(AUTOOS_SUDO="" AUTOOS_CACHE_DIR="$scratch/images" AUTOOS_FAKE_VENTOY_RELEASE='{"assets":[]}' \
+               usb_write_ventoy /dev/sdb 2>&1)"; second_rc=$?
+        if [[ $first_rc -eq 0 && $second_rc -eq 0 && "$out" == *"fake ventoy -i -g /dev/sdb"* ]]; then pass
+        else fail "first_rc=$first_rc second_rc=$second_rc out=$out"; fi
+    else
+        fail "test HTTP server never started listening"
+    fi
+    # wait, not just kill: on this host a killed python http.server can hold
+    # its serving directory open for a moment afterward, and the rm -rf right
+    # below would otherwise race it ("Device or resource busy").
+    kill "$http_pid" 2>/dev/null
+    wait "$http_pid" 2>/dev/null
+    rm -rf "$rel" "$scratch"
+fi
+
+if it "usb_execute: usb_write_raw's dry run names the dd command and writes nothing"; then
+    out="$(AUTOOS_DRY_RUN=1 usb_write_raw /dev/sdb /path/to/image.iso 123456 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$out" == *"dd if=/path/to/image.iso of=/dev/sdb"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
+if it "usb_execute: usb_write_raw computes its own NN% progress from dd's byte counter (B14)"; then
+    # dd status=progress prints bytes-and-rate but never a percentage
+    # (lib/linux/process.py's %-regex would otherwise see nothing) - a fake
+    # dd on PATH stands in for the real one so this proves the percentage
+    # math without writing to anything.
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/dd" <<'DDEOF'
+#!/usr/bin/env bash
+echo "52428800 bytes (52 MB, 50 MiB) copied, 1 s, 52 MB/s" >&2
+echo "104857600 bytes (105 MB, 100 MiB) copied, 2 s, 52 MB/s" >&2
+exit 0
+DDEOF
+    chmod +x "$fakebin/dd"
+    img="$(mktemp)"; printf 'x' >"$img"
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" usb_write_raw /dev/fake "$img" 104857600 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out" == *"50%"* && "$out" == *"100%"* ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+    rm -rf "$fakebin"; rm -f "$img"
+fi
+
+if it "usb_execute: usb_write_raw returns non-zero when dd itself fails"; then
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/dd" <<'DDEOF'
+#!/usr/bin/env bash
+echo "dd: fake write error" >&2
+exit 1
+DDEOF
+    chmod +x "$fakebin/dd"
+    img="$(mktemp)"; printf 'x' >"$img"
+    PATH="$fakebin:$PATH" AUTOOS_SUDO="" usb_write_raw /dev/fake "$img" 104857600 >/dev/null 2>&1
+    assert_eq "$?" "1"
+    rm -rf "$fakebin"; rm -f "$img"
+fi
+
+if it "usb_execute: usb_copy_image's dry run writes nothing"; then
+    out="$(AUTOOS_DRY_RUN=1 usb_copy_image /dev/sdb /tmp/x.iso /tmp/extra.sh 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$out" == *"would copy"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
+if it "usb_execute: usb_copy_image refuses a mounted ISO9660 stick (finding A11)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_iso9660_mounted)" usb_copy_image /dev/sdb /tmp/x.iso 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"A11"* && "$out" == *"raw block copy"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
+if it "usb_execute: usb_copy_image refuses an unmounted ISO9660 partition before mounting anything (A11, ventoy path)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_iso9660_unmounted)" usb_copy_image /dev/sdb /tmp/x.iso 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"A11"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
+if it "usb_execute: usb_copy_image refuses a >4GiB inner file before copying anything (B16)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_fat32_mounted)" AUTOOS_FAKE_ISO_MAX_FILE_BYTES=5000000000 \
+           AUTOOS_FAKE_ISO_MAX_FILE_NAME="casper/big.squashfs" usb_copy_image /dev/sdb /tmp/x.iso 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"casper/big.squashfs"* && "$out" == *"4 GiB"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
+if it "usb_execute: usb_ventoy_add_persistence caps the default 16GB at half the stick's size (B17)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_DRY_RUN=1 usb_ventoy_add_persistence /dev/sdb 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$out" == *"capping"* && "$out" == *"15GB"* ]] && pass || fail "rc=$rc out=$out"
 fi
 
 # ─── Answer-file templates ──────────────────────────────────────────────────

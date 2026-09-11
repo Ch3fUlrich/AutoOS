@@ -178,6 +178,17 @@ elif cmd == "has_mounted_partition":
             break
     print("1" if found else "0")
 
+elif cmd == "partitions_of":
+    # Task 7: every partition under a top-level disk, largest first once the
+    # bash caller sorts this - what usb_copy_image needs to find "the
+    # partition Ventoy2Disk.sh just created" when nothing is mounted yet
+    # (the ventoy path; the uefi-copy path already has one mounted and uses
+    # mounted_info below instead).
+    want = sys.argv[2] if len(sys.argv) > 2 else ""
+    for name, model, size, rm, tran, mp, typ, fstype, ro, top in rows:
+        if top == want and typ != "disk":
+            print(f"{name}\t{size}\t{fstype}\t{ro}\t{mp}")
+
 elif cmd == "mounted_info":
     # The first mounted partition under the named top-level disk: its
     # mountpoint, filesystem type and read-only flag — what usb_guard's
@@ -702,7 +713,16 @@ usb_plan() {
             printf 'usb_copy_image %s %s\n' "$dev" "$local_path"
             ;;
         native)
-            printf 'dd if=%s of=%s bs=4M status=progress conv=fsync\n' "$local_path" "$dev"
+            # Task 7/B14: dd's own status=progress emits bytes-and-rate, never
+            # a percentage, so lib/linux/process.py's `NN%` regex would
+            # silently degrade to "percentage unavailable" for every raw
+            # write. usb_write_raw (this file, below) is dd wrapped with its
+            # own computed percentage - the same function name the Windows
+            # sibling (New-AutoOSUsbPlan) already emits here, so both
+            # platforms' native plans name the real thing that runs. Passing
+            # $image_bytes (already computed above for the guard) lets
+            # usb_write_raw compute NN% without re-deriving the image size.
+            printf 'usb_write_raw %s %s %s\n' "$dev" "$local_path" "$image_bytes"
             ;;
         wsl)
             if [[ "$kind" == "full-os" ]]; then
@@ -719,4 +739,652 @@ usb_plan() {
             return 1
             ;;
     esac
+}
+
+# ─── The write executor (Task 7) ────────────────────────────────────────────
+# usb_execute (below) is the only thing in this file that ever runs a line
+# usb_plan prints. Everything above this point only ever reads catalog/*.json
+# and the live block-device table; everything below actually writes.
+#
+# FAT32's per-file ceiling (finding B16): one byte short of 4 GiB. Ubuntu
+# 26.04.1's largest inner file (casper/minimal.squashfs, 3,432,136,704 B) is
+# safely under it - that headroom is what makes uefi-copy work at all, and
+# it must be re-checked per image, never assumed.
+_USB_FAT32_MAX_FILE_BYTES=4294967295
+
+# _usb_file_size <path>
+# Prints a file's size in bytes. GNU stat (-c) and BSD/macOS stat (-f) take
+# different flags for the same thing; wc -c is the last-resort fallback.
+_usb_file_size() {
+    local f="$1"
+    [[ -f "$f" ]] || { printf '0\n'; return 1; }
+    stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || wc -c <"$f"
+}
+
+# _usb_device_present <device>
+# True if <device> still enumerates as a usb_list() candidate. Shared by
+# _usb_verify_readback (B15: "reads back" means "still there") and
+# _usb_report_write_failure (the "unplug mid-write" finding: this is exactly
+# how that check tells "the stick vanished" apart from "the write itself
+# failed").
+_usb_device_present() {
+    local dev="$1"
+    usb_list | awk -F'\t' -v d="$dev" '$1==d{found=1} END{exit !found}'
+}
+
+# _usb_verify_readback <device>
+# B15: "Ready to boot" is earned by the filesystem reading back, not by an
+# exit code alone (that already proved insufficient once in this plan -
+# finding A7, an HTML mirror page saved under an ISO's name with exit 0).
+# What this can honestly check from userspace, without mounting anything a
+# human is about to unplug and boot from, is that the device still
+# enumerates and lsblk can still read a partition table off it - the same
+# enumeration usb_guard() and usb_list() already trust elsewhere in this
+# file. A deeper check (mount every partition, diff file contents against
+# the source) is exactly the class of thing Step 5 defers to the human
+# hardware run, not something this function fakes confidence about.
+_usb_verify_readback() {
+    _usb_device_present "$1"
+}
+
+# _usb_report_write_failure <device>
+# The "unplug mid-write" finding: dd and Ventoy both surface a vanished USB
+# stick as a plain I/O error, indistinguishable from a genuine write fault
+# until something re-checks enumeration. usb_execute calls this once, after
+# a step has already failed, so the message a human sees names the actual
+# cause instead of whatever low-level errno the failed step happened to
+# print. Never retries automatically: a re-plugged stick can enumerate under
+# a different device name, and blindly retrying THIS name would then write
+# to whatever now holds it.
+_usb_report_write_failure() {
+    local dev="$1"
+    if _usb_device_present "$dev"; then
+        ui_err "usb_execute: write to $dev failed. There is no rollback (B15) - the stick must be rewritten from wipefs onward; do not retry automatically."
+    else
+        ui_err "usb_execute: $dev is no longer present - the stick was removed during the write. Re-seat it and start over from wipefs; do not retry blindly, a re-plugged stick can enumerate under a different device name."
+    fi
+}
+
+# _usb_dispatch_step <device> <line>
+# Turns one plan line into the real action. Most lines ARE the literal
+# thing that runs (usb_copy_image, usb_write_raw are already real function
+# names usb_plan prints); one is not: usb_plan deliberately keeps
+# "Ventoy2Disk.sh -i -g <dev>" literal in its output (the existing "usb
+# planning" tests assert that exact string appears under --dry-run, and a
+# human previewing a plan should see the real tool that will run, not an
+# internal function name) even though the binary it names is not actually
+# on PATH until usb_write_ventoy has fetched, verified and extracted it.
+# This is the one place that gap is bridged.
+_usb_dispatch_step() {
+    local dev="$1" line="$2"
+    case "$line" in
+        "Ventoy2Disk.sh "*) usb_write_ventoy "$dev" ;;
+        *) eval "$line" ;;
+    esac
+}
+
+# _usb_run_step <device> <line>
+# One executed plan step. Every AUTOOS_* testing knob usb_execute's own
+# tests depend on lives HERE, in one place, so usb_execute's loop stays a
+# plain "run each line, stop at the first failure":
+#   AUTOOS_TRACE=1      print "TRACE <line>" before anything else happens -
+#                        the plan-order proof Task 7's own tests assert on.
+#                        Fires even under a forced failure or a dry run: a
+#                        traced dry run must still trace every line.
+#   AUTOOS_FORCE_FAIL=1 fail this step without running it - lets a test
+#                        exercise the "never claim success on failure" path
+#                        (B15) without a real failing command.
+#   AUTOOS_DRY_RUN=1    succeed without running it - the same "would run"
+#                        contract every other AutoOS installer honours
+#                        (install.sh's run()), reimplemented locally because
+#                        a plan line here is sometimes a real function call
+#                        (usb_copy_image), not always an external command.
+_usb_run_step() {
+    local dev="$1" line="$2"
+
+    if [[ "${AUTOOS_TRACE:-0}" == "1" ]]; then
+        printf 'TRACE %s\n' "$line"
+    fi
+    if [[ "${AUTOOS_FORCE_FAIL:-0}" == "1" ]]; then
+        ui_err "usb_execute: forced failure (AUTOOS_FORCE_FAIL) before: $line"
+        return 1
+    fi
+    if (( ${AUTOOS_DRY_RUN:-0} )); then
+        return 0
+    fi
+    _usb_dispatch_step "$dev" "$line"
+}
+
+# usb_execute <device>
+# Reads the plan (usb_plan's output, Task 6) on stdin, one command per line,
+# and runs each in order. Returns 0 only when every step exited 0 AND the
+# resulting filesystem reads back (B15) - never on exit code alone.
+usb_execute() {
+    local dev="$1"
+    if [[ -z "$dev" ]]; then
+        ui_err "usb_execute: no device given"
+        return 1
+    fi
+
+    local -a steps=()
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+        steps+=("$line")
+    done
+
+    if [[ ${#steps[@]} -eq 0 ]]; then
+        ui_err "usb_execute: empty plan on stdin - nothing to run"
+        return 1
+    fi
+
+    local step
+    for step in "${steps[@]}"; do
+        if ! _usb_run_step "$dev" "$step"; then
+            _usb_report_write_failure "$dev"
+            return 1
+        fi
+    done
+
+    if ! _usb_verify_readback "$dev"; then
+        ui_err "usb_execute: $dev did not read back after the write - treat this stick as unbootable and rewrite it; a retry is safe, it always starts from wipefs (B15)."
+        return 1
+    fi
+
+    ui_ok "Ready to boot: $dev"
+    return 0
+}
+
+# ─── usb_write_ventoy ────────────────────────────────────────────────────────
+
+# _usb_ventoy_cache_dir
+# Where the Ventoy tool itself (not an image) is cached - a sibling of the
+# image cache (download_cache_dir), never the same directory, since this
+# holds an extracted tool tree rather than a single verified file.
+_usb_ventoy_cache_dir() {
+    printf '%s/tools/ventoy\n' "$(dirname -- "$(download_cache_dir)")"
+}
+
+# _usb_ventoy_binary <cache_dir>
+# Prints the path to an already-extracted Ventoy2Disk.sh under <cache_dir>,
+# or nothing if none is there yet. Step 6's idempotency: a cache hit here
+# skips _usb_ventoy_fetch (and its network calls) entirely on a second run.
+_usb_ventoy_binary() {
+    local cache_dir="$1"
+    find "$cache_dir" -maxdepth 2 -name 'Ventoy2Disk.sh' -type f 2>/dev/null | head -1
+}
+
+# _usb_ventoy_release_fields <release_json>
+# Prints "<tarball_name>\t<tarball_url>\t<sha256_txt_url>" from a GitHub
+# releases/latest JSON document. python3, like every other structured-data
+# read in this file (_usb_py, _usb_catalog_py above) - piped on stdin, not
+# passed as an argv string, so a large JSON body never risks an argv-length
+# or quoting problem.
+#
+# `tr -d '\r'`: the same trap _usb_catalog_py above already documents - a
+# python3 invoked from a native Windows install (this repo is tested from
+# Git Bash as well as WSL2/Linux, per AGENTS.md SS5) writes CRLF line endings
+# to a text-mode stdout even inside a Unix-style shell. Invisible on the
+# tarball name/url (never the LAST field), but it silently appended \r to
+# sha_url - curl then requested "...sha256.txt\r" and got nothing back, so
+# every checksum lookup failed with "no published sha256 found" even though
+# the release JSON and the sha256.txt content were both correct. A no-op
+# everywhere else.
+_usb_ventoy_release_fields() {
+    python3 -c '
+import json, sys
+
+data = json.load(sys.stdin)
+assets = data.get("assets") or []
+tarball = next((a for a in assets if a.get("name", "").endswith("-linux.tar.gz")), None)
+sha = next((a for a in assets if a.get("name") == "sha256.txt"), None)
+
+name = tarball.get("name", "") if tarball else ""
+url = tarball.get("browser_download_url", "") if tarball else ""
+sha_url = sha.get("browser_download_url", "") if sha else ""
+print(f"{name}\t{url}\t{sha_url}")
+' <<<"$1" | tr -d '\r'
+}
+
+# _usb_ventoy_fetch <cache_dir>
+# Resolves Ventoy's latest GitHub release, downloads the Linux tarball
+# through fetch_verified (Task 3) against the sha256 published in that same
+# release's sha256.txt asset (never a hardcoded checksum, never a pinned
+# version - AGENTS.md hard rule 2: no vendor binary is ever committed to
+# this repository, it is always fetched and verified at run time), then
+# extracts it. AUTOOS_FAKE_VENTOY_RELEASE substitutes the "ask GitHub" step
+# with test-supplied JSON (AGENTS.md SS5: this file must never depend on
+# live network access to be exercised); its asset URLs can point at local
+# file:// paths, the same trick the "verified download" tests already use
+# for fetch_verified itself.
+_usb_ventoy_fetch() {
+    local cache_dir="$1"
+    mkdir -p "$cache_dir" || { ui_err "usb_write_ventoy: cannot create $cache_dir"; return 1; }
+
+    local release_json
+    if [[ -n "${AUTOOS_FAKE_VENTOY_RELEASE:-}" ]]; then
+        release_json="$AUTOOS_FAKE_VENTOY_RELEASE"
+    elif has_cmd curl; then
+        release_json="$(curl -fsSL https://api.github.com/repos/ventoy/Ventoy/releases/latest)" || {
+            ui_err "usb_write_ventoy: could not reach GitHub for Ventoy's latest release"
+            return 1
+        }
+    else
+        ui_err "usb_write_ventoy: curl not found - cannot fetch Ventoy"
+        return 1
+    fi
+
+    local tarball_name tarball_url sha_url
+    IFS=$'\t' read -r tarball_name tarball_url sha_url < <(_usb_ventoy_release_fields "$release_json")
+    if [[ -z "$tarball_name" || -z "$tarball_url" ]]; then
+        ui_err "usb_write_ventoy: no linux tarball asset in the latest Ventoy release"
+        return 1
+    fi
+
+    local want=""
+    if [[ -n "$sha_url" ]]; then
+        want="$(curl -fsSL "$sha_url" 2>/dev/null | awk -v f="$tarball_name" '$2==f{print $1; exit}')"
+    fi
+    if [[ -z "$want" ]]; then
+        ui_err "usb_write_ventoy: no published sha256 found for $tarball_name - refusing to install an unverified Ventoy"
+        return 1
+    fi
+
+    local dest="$cache_dir/$tarball_name"
+    fetch_verified "$tarball_url" "$dest" "$want" - - || {
+        ui_err "usb_write_ventoy: download/verification of $tarball_name failed"
+        return 1
+    }
+
+    tar -xzf "$dest" -C "$cache_dir" || {
+        ui_err "usb_write_ventoy: could not extract $tarball_name"
+        return 1
+    }
+}
+
+# usb_write_ventoy <device>
+# Ensures the Ventoy tool is present and verified, then runs
+# Ventoy2Disk.sh -i -g <device> - the partitioning step usb_plan's ventoy
+# branch names directly in its own output. usb_execute's dispatcher
+# (_usb_dispatch_step above) is what routes that plan line here, because the
+# binary it names is not on PATH until this function has fetched it.
+usb_write_ventoy() {
+    local dev="$1"
+    if [[ -z "$dev" ]]; then
+        ui_err "usb_write_ventoy: no device given"
+        return 1
+    fi
+
+    if (( ${AUTOOS_DRY_RUN:-0} )); then
+        ui_muted "would run: Ventoy2Disk.sh -i -g $dev"
+        return 0
+    fi
+
+    local cache_dir bin
+    cache_dir="$(_usb_ventoy_cache_dir)"
+    bin="$(_usb_ventoy_binary "$cache_dir")"
+    if [[ -z "$bin" ]]; then
+        _usb_ventoy_fetch "$cache_dir" || return 1
+        bin="$(_usb_ventoy_binary "$cache_dir")"
+    fi
+    if [[ -z "$bin" ]]; then
+        ui_err "usb_write_ventoy: Ventoy2Disk.sh not found even after fetching Ventoy"
+        return 1
+    fi
+    chmod +x "$bin" 2>/dev/null
+
+    ui_muted "run: $bin -i -g $dev"
+    $AUTOOS_SUDO "$bin" -i -g "$dev"
+}
+
+# ─── usb_write_raw ───────────────────────────────────────────────────────────
+
+# _usb_raw_progress_reader <total_bytes>
+# Reads dd's stderr (status=progress lines, one roughly per second, shaped
+# like "1234567890 bytes (1.2 GB, 1.1 GiB) copied, 5 s, 246 MB/s") on stdin
+# and prints "NN%" once per distinct percentage reached. Split out of
+# usb_write_raw so it can be the read side of a progress fifo running
+# concurrently with dd.
+_usb_raw_progress_reader() {
+    local total="$1" line bytes pct last=-1
+    while IFS= read -r line; do
+        bytes="${line%% *}"
+        [[ "$bytes" =~ ^[0-9]+$ ]] || continue
+        [[ "$total" -gt 0 ]] || continue
+        pct=$(( bytes * 100 / total ))
+        (( pct > 100 )) && pct=100
+        if (( pct != last )); then
+            printf '%d%%\n' "$pct"
+            last=$pct
+        fi
+    done
+}
+
+# usb_write_raw <device> <image_path> <image_bytes>
+# B14: `dd status=progress` prints bytes-and-rate but never a percentage, so
+# lib/linux/process.py's existing `(100|\d{1,2})\s*%` regex silently
+# degrades to "percentage unavailable" for every raw write. This function
+# does not hand dd straight to that runner - it reads dd's own stderr and
+# computes NN% from the byte counter against the known <image_bytes>,
+# printing exactly the lines process.py already knows how to parse. dd's
+# real output is not discarded, it drives this function's percentage
+# instead of being handed to a regex that cannot find one in it.
+usb_write_raw() {
+    local dev="$1" image="$2" total="${3:-0}"
+
+    if [[ -z "$dev" || -z "$image" ]]; then
+        ui_err "usb_write_raw: usage: usb_write_raw <device> <image_path> <image_bytes>"
+        return 1
+    fi
+
+    if (( ${AUTOOS_DRY_RUN:-0} )); then
+        ui_muted "would run: dd if=$image of=$dev bs=4M status=progress conv=fsync"
+        return 0
+    fi
+    if [[ ! -f "$image" ]]; then
+        ui_err "usb_write_raw: image not found: $image"
+        return 1
+    fi
+    if [[ -z "$total" || "$total" -le 0 ]]; then
+        total="$(_usb_file_size "$image")"
+    fi
+
+    ui_muted "run: dd if=$image of=$dev bs=4M status=progress conv=fsync"
+
+    local fifo
+    fifo="$(mktemp -u)"
+    if ! mkfifo "$fifo" 2>/dev/null; then
+        ui_err "usb_write_raw: cannot create a progress pipe"
+        return 1
+    fi
+
+    ( _usb_raw_progress_reader "$total" <"$fifo" ) &
+    local reader_pid=$!
+
+    $AUTOOS_SUDO dd if="$image" of="$dev" bs=4M status=progress conv=fsync 2>"$fifo"
+    local rc=$?
+
+    wait "$reader_pid" 2>/dev/null
+    rm -f "$fifo"
+    return "$rc"
+}
+
+# ─── usb_copy_image ──────────────────────────────────────────────────────────
+
+# _usb_copy_target_mount <device>
+# Prints the mountpoint of <device>'s already-mounted partition (the
+# uefi-copy case - usb_guard already ran in mounted-fat32-writable mode, so
+# this is always populated by the time usb_copy_image needs it) and returns
+# 0, or prints nothing and returns 0 when nothing is mounted yet (the ventoy
+# case - the caller mounts the data partition itself, below), or returns 1
+# with a named reason when what IS mounted cannot be written to.
+#
+# Finding A11: an ISO9660 filesystem here means this stick was written with
+# a raw block copy and is read-only in every OS - refuses immediately,
+# defense-in-depth alongside usb_guard's own fstype check for the uefi-copy
+# path, and the only check standing between a bare usb_copy_image call (the
+# ventoy path never goes through usb_guard's mounted-fat32-writable mode)
+# and a confusing mid-copy failure.
+#
+# ui_err's own printf writes to stdout (like every ui_* helper in this
+# codebase - see lib/linux/ui.sh), which is exactly what THIS function's own
+# stdout also carries as its return value. Every ui_err call below is
+# explicitly redirected to stderr (`>&2`) so a caller doing
+# `mnt="$(_usb_copy_target_mount "$dev")"` gets only the mountpoint on
+# failure-free paths and never has a refusal MESSAGE silently swallowed
+# into that variable instead of reaching whoever is watching stderr.
+_usb_copy_target_mount() {
+    local dev="$1" info mp fstype ro
+    info="$(_mounted_partition_info "$dev")"
+    if [[ -z "$info" ]]; then
+        return 0
+    fi
+    IFS=$'\t' read -r mp fstype ro <<<"$info"
+    if [[ "$fstype" == "iso9660" ]]; then
+        ui_err "usb_copy_image: $dev's mounted partition is ISO9660 - this stick was written with a raw block copy (finding A11) and is read-only. It must be rewritten (wipefs) before this engine can use it." >&2
+        return 1
+    fi
+    if [[ "$ro" == "1" ]]; then
+        ui_err "usb_copy_image: $dev's mounted partition ($mp) is read-only" >&2
+        return 1
+    fi
+    printf '%s\n' "$mp"
+}
+
+# _usb_copy_mount_data_partition <device>
+# The ventoy path: Ventoy2Disk.sh has just partitioned <device> but mounted
+# nothing. Mounts the larger of its partitions (Ventoy's data partition;
+# the small VTOYEFI partition is always the smaller one) at a fresh
+# temporary directory and prints that path. Needs root - the ventoy engine
+# already requires elevation for the partitioning step above this one, so
+# nothing about uefi-copy's "no elevation at all" promise is affected.
+#
+# Same stdout-carries-the-return-value constraint as _usb_copy_target_mount
+# above: every ui_err call below is redirected to stderr (`>&2`) so it never
+# gets captured into a caller's `mnt="$(...)"` instead of being seen.
+_usb_copy_mount_data_partition() {
+    local dev="$1" name line part fstype mnt
+    name="$(basename -- "$dev")"
+    line="$(_lsblk_json | _usb_py partitions_of "$name" | sort -t $'\t' -k2,2rn | head -1)"
+    if [[ -z "$line" ]]; then
+        ui_err "usb_copy_image: $dev has no partitions to write onto - did Ventoy2Disk.sh run first?" >&2
+        return 1
+    fi
+    IFS=$'\t' read -r part _ fstype _ _ <<<"$line"
+    if [[ "$fstype" == "iso9660" ]]; then
+        ui_err "usb_copy_image: $dev's largest partition is ISO9660 - this stick was written with a raw block copy (finding A11) and is read-only. It must be rewritten (wipefs) before ventoy can use it." >&2
+        return 1
+    fi
+
+    mnt="$(mktemp -d)" || { ui_err "usb_copy_image: cannot create a mount point" >&2; return 1; }
+    if ! $AUTOOS_SUDO mount "/dev/$part" "$mnt" 2>/dev/null; then
+        ui_err "usb_copy_image: could not mount /dev/$part at $mnt" >&2
+        rmdir "$mnt" 2>/dev/null
+        return 1
+    fi
+    printf '%s\n' "$mnt"
+}
+
+# _usb_copy_onto <image_path> <mountpoint> [extra_file...]
+# Mounts <image_path> read-only (a loop mount - the source is a plain ISO
+# file, never the physical device), refuses before copying anything if any
+# file inside it exceeds FAT32's 4 GiB ceiling (B16 - "check before copying,
+# refuse naming the offending file, rather than failing 20 minutes in"),
+# then copies its contents onto <mountpoint> followed by every extra file
+# (Task 9's rescue templates) into <mountpoint>/rescue/.
+#
+# AUTOOS_FAKE_ISO_MAX_FILE_BYTES/_NAME let a test exercise the B16 refusal
+# without mounting a real multi-gigabyte ISO (AGENTS.md SS5) - production
+# never sets them, so the real mount-and-measure path is what actually runs
+# outside a test.
+_usb_copy_onto() {
+    local image="$1" mnt="$2"; shift 2
+    local -a extra_files=("$@")
+
+    if [[ -n "${AUTOOS_FAKE_ISO_MAX_FILE_BYTES:-}" ]]; then
+        if (( AUTOOS_FAKE_ISO_MAX_FILE_BYTES > _USB_FAT32_MAX_FILE_BYTES )); then
+            ui_err "usb_copy_image: ${AUTOOS_FAKE_ISO_MAX_FILE_NAME:-<unknown file>} is $AUTOOS_FAKE_ISO_MAX_FILE_BYTES bytes - over FAT32's 4 GiB single-file ceiling (finding B16). Refusing before copying anything."
+            return 1
+        fi
+    else
+        local src_mnt
+        src_mnt="$(mktemp -d)" || { ui_err "usb_copy_image: cannot create a mount point for $image"; return 1; }
+        if ! $AUTOOS_SUDO mount -o loop,ro "$image" "$src_mnt" 2>/dev/null; then
+            ui_err "usb_copy_image: could not mount $image to inspect and copy it"
+            rmdir "$src_mnt" 2>/dev/null
+            return 1
+        fi
+
+        local biggest big_bytes big_path
+        biggest="$(find "$src_mnt" -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -1)"
+        IFS=$'\t' read -r big_bytes big_path <<<"$biggest"
+        if [[ -n "$big_bytes" ]] && (( big_bytes > _USB_FAT32_MAX_FILE_BYTES )); then
+            ui_err "usb_copy_image: ${big_path#"$src_mnt"/} is $big_bytes bytes - over FAT32's 4 GiB single-file ceiling (finding B16). Refusing before copying anything."
+            $AUTOOS_SUDO umount "$src_mnt" 2>/dev/null; rmdir "$src_mnt" 2>/dev/null
+            return 1
+        fi
+
+        if ! cp -a "$src_mnt/." "$mnt/"; then
+            ui_err "usb_copy_image: copying $image onto $mnt failed"
+            $AUTOOS_SUDO umount "$src_mnt" 2>/dev/null; rmdir "$src_mnt" 2>/dev/null
+            return 1
+        fi
+        $AUTOOS_SUDO umount "$src_mnt" 2>/dev/null
+        rmdir "$src_mnt" 2>/dev/null
+    fi
+
+    local f
+    mkdir -p "$mnt/rescue"
+    for f in "${extra_files[@]}"; do
+        if [[ ! -f "$f" ]]; then
+            ui_warn "usb_copy_image: extra file not found, skipping: $f"
+            continue
+        fi
+        cp -a "$f" "$mnt/rescue/" || { ui_err "usb_copy_image: could not copy $f onto $mnt/rescue/"; return 1; }
+    done
+}
+
+# usb_copy_image <device> <image_path> [extra_file...]
+# Copies a hybrid ISO's contents, plus any extra files (Task 9's rescue
+# templates - rescue-bootstrap.sh, ai-clients.conf, ai-dispatcher.sh), onto
+# the FAT32/exFAT partition already on <device>. Never the raw device
+# itself - that is Ventoy2Disk.sh's job, or usb_write_raw's for a
+# writeMode:raw image.
+#
+# Two callers, two starting states (usb_plan, Task 6):
+#   uefi-copy - usb_guard already ran in mounted-fat32-writable mode, so the
+#               target partition is already mounted, writable, FAT32. This
+#               function never mounts or unmounts anything for that case,
+#               matching the engine's documented "no elevation at all"
+#               (B16): a mount() syscall for an already-mounted filesystem
+#               is not needed.
+#   ventoy    - Ventoy2Disk.sh has just partitioned <device> but mounted
+#               nothing; this function mounts the data partition itself
+#               (needs root - ventoy already requires elevation for the
+#               partitioning step above it) and unmounts it again when done.
+usb_copy_image() {
+    local dev="$1" image="$2"
+    local -a extra_files=()
+    if [[ $# -gt 2 ]]; then
+        shift 2
+        extra_files=("$@")
+    fi
+
+    if [[ -z "$dev" || -z "$image" ]]; then
+        ui_err "usb_copy_image: usage: usb_copy_image <device> <image_path> [extra_file...]"
+        return 1
+    fi
+
+    if (( ${AUTOOS_DRY_RUN:-0} )); then
+        ui_muted "would copy $image (+${#extra_files[@]} extra file(s)) onto $dev"
+        return 0
+    fi
+
+    local mnt owned_mount=0
+    mnt="$(_usb_copy_target_mount "$dev")" || return 1
+    if [[ -z "$mnt" ]]; then
+        mnt="$(_usb_copy_mount_data_partition "$dev")" || return 1
+        owned_mount=1
+    fi
+
+    local rc=0
+    _usb_copy_onto "$image" "$mnt" "${extra_files[@]}" || rc=1
+
+    if (( owned_mount )); then
+        sync 2>/dev/null
+        $AUTOOS_SUDO umount "$mnt" 2>/dev/null
+        rmdir "$mnt" 2>/dev/null
+    fi
+
+    return "$rc"
+}
+
+# ─── Ventoy persistence (Task 7 Step 4, B17/B18) ────────────────────────────
+
+# usb_ventoy_add_persistence <device> [size_gb]
+# Ventoy's persistence plugin: a .dat file on the data partition, registered
+# in ventoy/ventoy.json, gives a live-persistent stick a writable overlay
+# without repartitioning. Defaults to 16 GB, capped at half the stick's
+# total size so persistence can never claim more room than the image itself
+# plus headroom needs.
+#
+# Not wired into usb_plan's own output: Task 6's ventoy branch prints the
+# same two lines regardless of <kind>, and adding a kind-conditional third
+# line there is a decision about the already-verified planner's contract
+# that this task's given tests never exercise. This function is a
+# standalone, independently callable and independently tested capability;
+# wiring a kind=live-persistent plan line to call it is left to whichever
+# task owns that decision. B17 also flags this as "probe-then-commit, not a
+# promise" - confirming persistence actually survives a reboot needs a
+# second boot of the real stick, which is exactly the class of check Step 5
+# defers to the human hardware run.
+usb_ventoy_add_persistence() {
+    local dev="$1" size_gb="${2:-16}"
+
+    if [[ -z "$dev" ]]; then
+        ui_err "usb_ventoy_add_persistence: no device given"
+        return 1
+    fi
+
+    local disk_size half_gb
+    disk_size="$(_size_bytes "$dev")"
+    if [[ "$disk_size" -gt 0 ]]; then
+        half_gb=$(( disk_size / 2 / 1000000000 ))
+        if (( half_gb > 0 && size_gb > half_gb )); then
+            ui_warn "usb_ventoy_add_persistence: ${size_gb}GB would be more than half of $dev - capping at ${half_gb}GB"
+            size_gb=$half_gb
+        fi
+    fi
+    if (( size_gb < 1 )); then
+        ui_err "usb_ventoy_add_persistence: $dev is too small to fit a persistence file"
+        return 1
+    fi
+
+    if (( ${AUTOOS_DRY_RUN:-0} )); then
+        ui_muted "would create a ${size_gb}GB Ventoy persistence file on $dev"
+        return 0
+    fi
+
+    local mnt owned_mount=0
+    mnt="$(_usb_copy_target_mount "$dev")" || return 1
+    if [[ -z "$mnt" ]]; then
+        mnt="$(_usb_copy_mount_data_partition "$dev")" || return 1
+        owned_mount=1
+    fi
+
+    local rc=0
+    local dat="$mnt/ventoy/persistence.dat"
+    mkdir -p "$mnt/ventoy"
+    if ! dd if=/dev/zero of="$dat" bs=1M count="$(( size_gb * 1000 ))" status=none 2>/dev/null; then
+        ui_err "usb_ventoy_add_persistence: could not create $dat"
+        rc=1
+    fi
+
+    if (( rc == 0 )) && ! python3 -c '
+import json, sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    data = {}
+data.setdefault("persistence", [])
+entry = {"backend": "/ventoy/persistence.dat", "mount": ["/"]}
+if entry not in data["persistence"]:
+    data["persistence"].append(entry)
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+' "$mnt/ventoy/ventoy.json"; then
+        ui_err "usb_ventoy_add_persistence: could not register $dat in ventoy.json"
+        rc=1
+    fi
+
+    if (( owned_mount )); then
+        sync 2>/dev/null
+        $AUTOOS_SUDO umount "$mnt" 2>/dev/null
+        rmdir "$mnt" 2>/dev/null
+    fi
+
+    return "$rc"
 }

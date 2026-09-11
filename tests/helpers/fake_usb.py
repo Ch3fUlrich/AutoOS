@@ -136,6 +136,30 @@ FIXTURES = {
                   fstype="vfat", ro=True),
         ]),
     ]},
+
+    # Task 7 (finding A11): a stick previously written with a raw block copy
+    # of a hybrid ISO — its one partition is ISO9660, mounted read-only, the
+    # exact signature usb_copy_image's own defense-in-depth check (beyond
+    # usb_guard's own fstype refusal) must recognise and refuse rather than
+    # attempt a confusing mid-copy failure.
+    "usb_iso9660_mounted": lambda: {"blockdevices": [
+        _boot_disk(),
+        _disk("sdb", "Intenso Office Line", 31437766656, True, "usb", children=[
+            _part("sdb1", 31400000000, True, "usb", "/media/user/CDROM",
+                  fstype="iso9660", ro=True),
+        ]),
+    ]},
+
+    # Same raw-block-copy signature, but unmounted — the shape
+    # _usb_copy_mount_data_partition sees on the ventoy path, where nothing
+    # is mounted yet and it must pick and inspect the largest partition
+    # itself before ever attempting to mount it.
+    "usb_iso9660_unmounted": lambda: {"blockdevices": [
+        _boot_disk(),
+        _disk("sdb", "Intenso Office Line", 31437766656, True, "usb", children=[
+            _part("sdb1", 31400000000, True, "usb", None, fstype="iso9660", ro=True),
+        ]),
+    ]},
 }
 
 
