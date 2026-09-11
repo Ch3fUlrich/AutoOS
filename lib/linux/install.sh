@@ -183,6 +183,7 @@ install_script() {
         gh)              install_gh ;;
         uv)              install_uv ;;
         ollama)          install_ollama ;;
+        claude-autostart) install_claude_autostart ;;
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
         *) ui_err "no script installer for '$1'"; return 1 ;;
@@ -390,6 +391,118 @@ install_agy() {
         return 0
     fi
     curl -fsSL https://antigravity.google/cli/install.sh | bash
+}
+
+install_claude_autostart() {
+    local appdir="${AUTOOS_ROOT}/lib/linux"
+    local udest="${SYS_HOME}/.config/systemd/user"
+    local units=(claude-sessions-snapshot.service claude-sessions-snapshot.timer claude-sessions-restore.service)
+    local interval; interval="$(claude_autostart_interval "$appdir")"
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install ${#units[@]} systemd user units into $udest"
+        ui_muted "would snapshot live sessions every ${interval} minutes and restore them at boot"
+        ui_muted "would enable lingering for ${USER:-$(whoami)} so the timer runs before you log in"
+        claude_autostart_report_host
+        return 0
+    fi
+
+    if ! has_cmd systemctl; then
+        # macOS reaches lib/linux for everything else, but there is no systemd here
+        # and writing unit files nothing will ever read is how the first version
+        # reported success on a machine where the feature could not work.
+        ui_err "systemd is required for claude-autostart and systemctl was not found"
+        return 1
+    fi
+
+    mkdir -p "$udest"
+    local u src changed=0
+    for u in "${units[@]}"; do
+        src="${appdir}/systemd/user/${u}"
+        if [[ ! -f "$src" ]]; then
+            ui_err "missing unit template: $src"
+            return 1
+        fi
+        # Render to a temp file first so an unchanged unit is genuinely untouched:
+        # rewriting it would restart the timer on every run of an idempotent script.
+        local tmp; tmp="$(mktemp)"
+        sed -e "s#@APPDIR@#${appdir}#g" \
+            -e "s#@APPROOT@#${AUTOOS_ROOT}#g" \
+            -e "s#@INTERVAL@#${interval}#g" "$src" > "$tmp"
+        if [[ -f "${udest}/${u}" ]] && cmp -s "$tmp" "${udest}/${u}"; then
+            ui_info "$u is already current"
+            rm -f "$tmp"
+        else
+            mv -f "$tmp" "${udest}/${u}"
+            ui_ok "installed $u"
+            changed=1
+        fi
+    done
+
+    if (( changed )); then
+        systemctl --user daemon-reload && ui_ok "reloaded the user unit files" \
+            || ui_warn "systemctl --user daemon-reload failed — is there a user manager on this session?"
+    fi
+
+    if systemctl --user enable claude-sessions-restore.service >/dev/null 2>&1; then
+        ui_ok "enabled claude-sessions-restore.service (runs at boot)"
+    else
+        ui_warn "could not enable claude-sessions-restore.service"
+    fi
+    if systemctl --user enable --now claude-sessions-snapshot.timer >/dev/null 2>&1; then
+        ui_ok "enabled claude-sessions-snapshot.timer (every ${interval} minutes)"
+    else
+        ui_warn "could not enable claude-sessions-snapshot.timer"
+    fi
+
+    claude_autostart_enable_linger
+    claude_autostart_report_host
+}
+
+# Without lingering, the user manager only exists while somebody is logged in, so
+# the timer never runs at boot and there is nothing to restore from. Enabling it
+# is a system-level change, so it is named before it happens and the exact command
+# is printed when we cannot make it ourselves.
+claude_autostart_enable_linger() {
+    has_cmd loginctl || { ui_warn "loginctl not found — cannot enable lingering"; return 0; }
+    local user_name="${USER:-$(whoami)}"
+
+    if [[ "$(loginctl show-user "$user_name" -p Linger --value 2>/dev/null || true)" == "yes" ]]; then
+        ui_info "lingering is already enabled for $user_name"
+        return 0
+    fi
+    if [[ -z "$AUTOOS_SUDO" ]] && [[ "$(id -u)" != "0" ]]; then
+        ui_warn "lingering is off: the snapshot timer will not run until you log in"
+        ui_info "enable it with: sudo loginctl enable-linger $user_name"
+        return 0
+    fi
+
+    ui_step "enabling lingering for $user_name (lets the timer run without a login)"
+    if $AUTOOS_SUDO loginctl enable-linger "$user_name"; then
+        ui_ok "lingering enabled for $user_name"
+    else
+        ui_warn "could not enable lingering — run: sudo loginctl enable-linger $user_name"
+    fi
+}
+
+# A restore with nowhere to draw does nothing (ADR 0002). Say so at install time
+# rather than letting the user discover it after a reboot.
+claude_autostart_report_host() {
+    if has_cmd herdr || has_cmd tmux; then
+        ui_info "terminal host for restored sessions: $(has_cmd herdr && echo herdr || echo tmux)"
+    else
+        ui_warn "neither herdr nor tmux is installed — restore will refuse to start a session it cannot show you"
+        ui_info "install one of them, or set claude_autostart.terminal_host in autoos.config.json"
+    fi
+}
+
+claude_autostart_interval() {
+    local appdir="$1" value
+    value="$(AUTOOS_CONFIG_FILE="${AUTOOS_CONFIG_FILE:-$AUTOOS_ROOT/autoos.config.json}" \
+             python3 "$appdir/claude_sessions.py" config 2>/dev/null |
+             sed -n "s/^AUTOOS_CLAUDE_SNAPSHOT_INTERVAL_MINS='\(.*\)'$/\1/p")"
+    [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 59 )) || value=5
+    printf '%s' "$value"
 }
 
 install_google_chrome() {

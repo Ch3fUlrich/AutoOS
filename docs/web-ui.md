@@ -47,21 +47,119 @@ on offering buttons that do nothing.
 
 ## Using it
 
-Two tabs, with a persistent action bar pinned to the bottom so the running total
-and the primary action stay visible wherever you are.
+Navigation is a dropdown in the header — one labelled button rather than a strip
+that grew a tab every time the page gained a job. It is a real menu: arrow keys
+walk it, Escape closes it, clicking elsewhere closes it. A persistent action bar
+stays pinned to the bottom so the running total and the primary action are
+visible wherever you are.
 
-| Tab | Contains |
+| Section | Contains |
 |---|---|
-| **Overview** | Everything you choose: detected system, profile, components, install order — each in its own collapsible card. |
-| **Run & log** | Any questions your selection needs, then the live colour-coded log. |
+| **Overview** | What to install: profile, components, install order. |
+| **Configure** | Settings for the things AutoOS installs, and any questions your selection needs. Saved to `autoos.config.json`. |
+| **Run & log** | The live colour-coded log. |
+| **System** | What this machine is, and what is already on it. Read-only. |
 
-Every big card (`Detected system`, `Profile`, `Components`, `Install order`) is a
-collapsible section — click the header to fold it away once you are done with it.
+Overview is only ever *choose what to install*. The rest of the header carries
+the machine name and one button that toggles light and dark.
+
+### Card chooser
+
+At the top of Overview sits the **Choose cards** toolbar: toggle any card off, or
+pick a view — **All**, **Suggested** (profile and components) or **Catalog**
+(components and install order). The active view is shown as a pressed button, and
+your choice is remembered in `localStorage`. Choosing a card also expands it: a
+preset that reveals a card you then have to unfold has not really revealed it.
+
+Components with settings carry a **⚙ Configure** chip that switches to the
+Configure tab, opens the right card and focuses the field.
+
+### System
+
+The detected machine, then everything already present on it — grouped by the
+catalog's own categories and filterable by name, package or description. AutoOS
+skips the latter on a run.
+
+That list used to be a single comma-separated line inside the *Detected system*
+card, where thirty-odd entries pushed every other detected fact off the screen.
+
+### Components
+
+The list is compact by default: the application's icon, its name and one line of
+description. **Details** adds the provider, the exact package, the platform and
+the dependency chips — the things you want when auditing a plan and never when
+picking one. Within each category, what is already installed sorts last.
+
+Each component that is not installed carries a **⚡ Install** button that installs
+just that one without touching your selection. Presses while a run is in flight
+are queued (the server runs one at a time), and progress appears in the header so
+it is visible from whichever section you started it on.
+
+Icons are the applications' own favicons, fetched by the homepage domain in the
+catalog through DuckDuckGo's icon service. Two things follow: that service learns
+which domains are in the catalog, and on an offline machine — which a freshly
+provisioned box often is — nothing is fetched. Each icon is drawn on top of a
+monogram, so a blocked, failed or offline request leaves a letter rather than a
+broken image.
+
+### Claude autostart
+
+One card on the Configure tab, covering the `claude-autostart` component. It
+leads with the three facts that decide whether your sessions actually come back:
+
+| Shown | Means |
+|---|---|
+| **Service** | Whether the supervisor (systemd user units, or Scheduled Tasks) is installed |
+| **Last snapshot** | How long ago the session list was recorded — anything older than a few minutes means the timer is not running |
+| **Tracked sessions** | How many sessions would be reopened right now |
+
+Below that, the sessions themselves (name, directory, branch, last active), a
+**Capture snapshot now** button, and the settings:
+
+| Setting | Effect |
+|---|---|
+| **Autostart** | On, or paused. Pausing keeps the service and the snapshots and restores nothing. |
+| **Resume mode** | Resume in full, or from a summary. Only enforced where the terminal host supports typing into it (herdr, tmux) — see [ADR 0002](decisions/0002-restored-sessions-need-a-visible-terminal.md). |
+| **When there is no snapshot** | Start one `claude --continue` session, or do nothing. |
+| **Remote control** | Whether restored sessions get `--rc`. |
+| **Snapshot every** | Interval for the timer. Baked into the unit file and the Scheduled Task, so changing it needs the installer re-run — the card says so after you save. |
+| **Count as live for** | How far back "was running before the shutdown" reaches. |
+| **Restore at most** | Cap, most recently active first. |
+
+Saving merges into `autoos.config.json`; settings the card does not show
+(`fallback_cwd`, `fallback_name`, `terminal_host`) are left alone.
+
+The same state is available in the terminal, which is the better place to look
+when the browser UI is not running:
+
+```bash
+bash lib/linux/claude-sessions.sh status
+```
+
+```powershell
+pwsh lib\windows\claude-sessions.ps1 -Action status
+```
+
+### Prefilled answers
+
+On a machine with no `autoos.config.json` yet, the configuration form is seeded
+from the machine — your real `git config --global user.name` and `user.email`,
+not the example file's `Your Name` / `you@example.com`. Catalog defaults appear
+as greyed placeholders rather than as values, so a field you have not answered
+looks unanswered, and an empty field is saved as *unanswered* rather than as an
+empty string that would shadow the default.
+
+### Dry run
+
+**Dry run** is off by default and the confirmation lists every package before
+anything happens. Tick it to print the plan without touching the machine.
 
 ### Theme
 
-A three-way switch in the header: **Auto** (follows your OS), **Light**, **Dark**.
-The choice is remembered per browser.
+One button in the header. It starts on your OS preference and shows the theme it
+would switch *to* — a sun while you are in dark, a moon while you are in light —
+because that is the only thing a single toggle can say unambiguously. The choice
+is remembered per browser.
 
 ### Profile cards expand into a plan
 
@@ -187,6 +285,9 @@ all the ones you already tested from the CLI. Your answers reach it as
 | `/api/state` | GET | Detected system + the catalog for this machine |
 | `/api/install` | POST | Start a run — `{ids, answers, dryRun}` |
 | `/api/log` | GET | Poll for new log lines and progress |
+| `/api/config` | GET, POST | Read / save configuration, answers, and autostart settings |
+| `/api/claude/sessions` | GET | The recorded session list, when it was captured, and whether the supervisor is installed. Read-only. |
+| `/api/claude/snapshot` | POST | Record the live sessions now |
 
 ## Security
 

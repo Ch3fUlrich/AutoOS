@@ -251,6 +251,46 @@ function Update-AutoOSInstallLog {
     $script:Proc = $null
 }
 
+function Get-AutoOSExampleBlock {
+    <#
+      .SYNOPSIS
+        One top-level block of autoos.config.example.json, or an empty object.
+      .DESCRIPTION
+        The example is the single home for the shipped defaults, so the server
+        reads them from there rather than restating them.
+    #>
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$RepoRoot)
+
+    $path = Join-Path $RepoRoot 'autoos.config.example.json'
+    if (-not (Test-Path -LiteralPath $path)) { return @{} }
+    try {
+        $block = (Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json).$Name
+        if ($block) { return $block }
+    } catch { }
+    @{}
+}
+
+function Get-AutoOSDetectedAnswers {
+    <#
+      .SYNOPSIS
+        Answers that can be read off the machine instead of being asked for.
+      .DESCRIPTION
+        A prefilled field is only an improvement when the value is real; a
+        plausible-looking placeholder is worse than an empty box, because it
+        reads as answered and gets saved as though it had been.
+    #>
+    $answers = @{}
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $answers }
+    foreach ($pair in @(@{ Key = 'git_user_name'; Setting = 'user.name' },
+                        @{ Key = 'git_user_email'; Setting = 'user.email' })) {
+        try {
+            $value = (& git config --global $pair.Setting 2>$null | Select-Object -First 1)
+            if ($value) { $answers[$pair.Key] = [string]$value }
+        } catch { }
+    }
+    $answers
+}
+
 function Start-AutoOSServer {
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
@@ -411,13 +451,15 @@ function Start-AutoOSServer {
                     $data = $raw | ConvertFrom-Json
                     & $json 200 $data
                 } else {
-                    $exPath = Join-Path $RepoRoot 'autoos.config.example.json'
-                    if (Test-Path $exPath) {
-                        $raw = Get-Content $exPath -Raw -Encoding UTF8
-                        $data = $raw | ConvertFrom-Json
-                        & $json 200 $data
-                    } else {
-                        & $json 200 @{ version = 1; profile = 'workstation'; answers = @{} }
+                    # No config yet. Seed it from the machine, never from the
+                    # example file: its answers are illustrative ("Your Name",
+                    # "you@example.com") and serving them puts fake identity in
+                    # the form, where it looks answered and gets saved as real.
+                    & $json 200 @{
+                        version          = 1
+                        profile          = 'workstation'
+                        answers          = (Get-AutoOSDetectedAnswers)
+                        claude_autostart = (Get-AutoOSExampleBlock -Name 'claude_autostart' -RepoRoot $RepoRoot)
                     }
                 }
             }
@@ -437,6 +479,27 @@ function Start-AutoOSServer {
                 [System.IO.File]::WriteAllText($tmpPath, ($merged | ConvertTo-Json -Depth 100), [System.Text.Encoding]::UTF8)
                 Move-Item -Path $tmpPath -Destination $cfgPath -Force
                 & $json 200 @{ ok = $true; saved = $cfgPath }
+            }
+            elseif ($path -eq '/api/claude/sessions' -and $req.HttpMethod -eq 'GET') {
+                # Reads the recorded state; a GET must not have side effects.
+                Import-Module (Join-Path $PSScriptRoot 'AutoOS.ClaudeAutostart.psm1') -DisableNameChecking
+                $state = Get-AutoOSClaudeState
+                & $json 200 @{
+                    sessions        = @($state.sessions)
+                    captured_at_iso = $state.captured_at_iso
+                    installed       = (Test-AutoOSClaudeAutostartInstalled)
+                }
+            }
+            elseif ($path -eq '/api/claude/snapshot' -and $req.HttpMethod -eq 'POST') {
+                Import-Module (Join-Path $PSScriptRoot 'AutoOS.ClaudeAutostart.psm1') -DisableNameChecking
+                [void](Save-AutoOSClaudeSnapshot)
+                $state = Get-AutoOSClaudeState
+                & $json 200 @{
+                    ok              = $true
+                    sessions        = @($state.sessions)
+                    captured_at_iso = $state.captured_at_iso
+                    installed       = (Test-AutoOSClaudeAutostartInstalled)
+                }
             }
             elseif ($path -eq '/api/install' -and $req.HttpMethod -eq 'POST') {
                 if ($script:RunInfo.Running) {

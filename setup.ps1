@@ -25,6 +25,10 @@
 .PARAMETER NoColor
     Disable ANSI colour.
 
+.PARAMETER ClaudeSessions
+    Report or drive the Claude session autostart: status, snapshot, restore or
+    configure. See docs/web-ui.md.
+
 .PARAMETER Serve
     Start the browser UI instead of the terminal menu. For headless machines.
 
@@ -33,6 +37,10 @@
 
 .PARAMETER Bind
     Bind address for -Serve. Default 127.0.0.1. Anything wider needs elevation.
+
+.PARAMETER Installed
+    List the applications already detected on this system and exit. The Linux
+    equivalent is --installed.
 
 .PARAMETER ListComponents
     Print the catalog and exit.
@@ -79,9 +87,12 @@ param(
     [switch]$Yes,
     [switch]$NoColor,
     [switch]$Serve,
+    [ValidateSet('status', 'snapshot', 'restore', 'configure')]
+    [string]$ClaudeSessions,
     [int]$Port = 8777,
     [string]$Bind = '127.0.0.1',
     [switch]$ListComponents,
+    [switch]$Installed,
     [switch]$CheckCatalog,
     [string]$FromState,
     [string]$SaveState,
@@ -132,6 +143,21 @@ if ($CheckCatalog) {
     exit 1
 }
 
+# ─── What is already here ───────────────────────────────────────────────────
+# docs/getting-started.md has documented -Installed alongside the Linux
+# --installed since before this existed; the flag was the missing half.
+if ($Installed) {
+    $allComponents = @($catalog.categories | ForEach-Object { $_.components })
+    $found = @(Get-AutoOSInstalledComponents -Components $allComponents)
+    Write-AutoOSSection 'Installed applications'
+    foreach ($c in $found) {
+        Write-AutoOSLine ("  {0,-26} {1,-8} {2}" -f $c.Name, $c.Provider, $c.Description)
+    }
+    Write-AutoOSLine ''
+    Write-AutoOSLine "$($found.Count) of $($allComponents.Count) catalog components are already installed." -Level muted
+    exit 0
+}
+
 if ($ListComponents) {
     $allComponents = @($catalog.categories | ForEach-Object { $_.components })
     $installedMap = @{}
@@ -147,6 +173,15 @@ if ($ListComponents) {
             if ($profs) { Write-AutoOSLine ("    {0,-18} profiles: {1}" -f '', $profs) -Level muted }
         }
     }
+    exit 0
+}
+
+# ─── Claude session autostart ───────────────────────────────────────────────
+# A first-class entry point rather than "go and run this file under lib/": the
+# status of a background service is exactly the thing people need after a reboot,
+# and the run log and -NoColor come free from going through setup.ps1.
+if ($ClaudeSessions) {
+    & (Join-Path $LibDir 'claude-sessions.ps1') -Action $ClaudeSessions -DryRun:$DryRun
     exit 0
 }
 

@@ -325,6 +325,23 @@
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
         },
         {
+          "id": "claude-autostart",
+          "name": "Claude autostart",
+          "description": "Reopens the Claude Code sessions you had before a reboot",
+          "provider": "script",
+          "package": "claude-autostart",
+          "requires": [
+            "claude-code"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code",
+          "launcher": "none"
+        },
+        {
           "id": "agy",
           "name": "Antigravity CLI",
           "description": "Google's terminal coding agent",

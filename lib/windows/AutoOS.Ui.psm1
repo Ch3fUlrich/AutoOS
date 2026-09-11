@@ -118,6 +118,35 @@ function Write-AutoOSSection {
     Write-AutoOSLine (Format-AutoOSColor ('─' * [Math]::Max(0, 60 - $Title.Length)) 'dim')
 }
 
+function Format-AutoOSTimestamp {
+    <#
+      .SYNOPSIS
+        An ISO timestamp plus how long ago it was.
+      .DESCRIPTION
+        The age is the actionable half - a snapshot from four hours ago means the
+        timer is not running - and ISO keeps this line in the same shape as the
+        session rows below it, which a culture-formatted date did not.
+    #>
+    param([string]$Iso)
+
+    if (-not $Iso) { return 'never' }
+    $when = [datetime]::MinValue
+    # InvariantCulture + RoundtripKind, not the bare TryParse: the value is an
+    # ISO-8601 round-trip string, and parsing it under a d/M/y culture silently
+    # swapped the day and the month (2026-09-11 read back as 2026-11-09).
+    if (-not [datetime]::TryParse($Iso, [Globalization.CultureInfo]::InvariantCulture,
+                                  [Globalization.DateTimeStyles]::RoundtripKind, [ref]$when)) {
+        return $Iso
+    }
+
+    $minutes = [int]((Get-Date) - $when).TotalMinutes
+    $ago = if ($minutes -lt 1) { 'just now' }
+           elseif ($minutes -lt 60) { "$minutes min ago" }
+           elseif ($minutes -lt 2880) { "$([int]($minutes / 60)) h ago" }
+           else { "$([int]($minutes / 1440)) days ago" }
+    "{0} ({1})" -f $when.ToString('yyyy-MM-dd HH:mm'), $ago
+}
+
 function Write-AutoOSKeyValue {
     param([string]$Key, [string]$Value, [string]$Style = 'plain')
     $k = (Format-AutoOSColor ("{0,-22}" -f $Key) 'muted')
@@ -497,4 +526,4 @@ Export-ModuleMember -Function `
     Test-AutoOSColorSupport, Set-AutoOSColor, Test-AutoOSInteractive, Format-AutoOSColor,
     Initialize-AutoOSLog, Write-AutoOSLine, Write-AutoOSBanner, Write-AutoOSSection,
     Write-AutoOSKeyValue, Read-AutoOSConfirm, Read-AutoOSValue, Show-AutoOSMenu,
-    Show-AutoOSRadioMenu, Get-AutoOSNextItemIndex
+    Show-AutoOSRadioMenu, Get-AutoOSNextItemIndex, Format-AutoOSTimestamp

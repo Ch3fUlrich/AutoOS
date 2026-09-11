@@ -137,6 +137,10 @@ function Get-AutoOSAvailableComponents {
                 Prompt      = Get-AutoOSComponentProperty $c 'prompt' $null
                 Verify      = Get-AutoOSComponentProperty $c 'verify' $null
                 Homepage    = Get-AutoOSComponentProperty $c 'homepage' $null
+                # 'none' means the component installs a background service with
+                # no command to run, so the report says that rather than hunting
+                # for a launcher and reporting it as missing.
+                Launcher    = Get-AutoOSComponentProperty $c 'launcher' $null
                 InstalledNames = @(Get-AutoOSComponentProperty $c 'installedNames' @())
                 InstalledAppx = @(Get-AutoOSComponentProperty $c 'installedAppx' @())
                 MinimumVersion = Get-AutoOSComponentProperty $c 'minimumVersion' $null

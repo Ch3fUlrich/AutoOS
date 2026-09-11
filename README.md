@@ -81,7 +81,7 @@ Run `--list` for the current set. The headline items:
 | Area | Includes |
 |---|---|
 | Terminal | Windows Terminal, PowerShell 7, Oh My Posh, zsh + Powerlevel10k, Nerd Fonts |
-| Coding & AI | Claude Code CLI, Claude Desktop, Antigravity, VS Code, Docker, Herdr, Node.js |
+| Coding & AI | Claude Code CLI, Claude autostart (reopens your sessions after a reboot), Claude Desktop, Antigravity, VS Code, Docker, Herdr, Node.js |
 | Input | Handy — offline speech-to-text, so you can dictate prompts instead of typing them |
 | MCP stack | Clones [agent-skills](https://github.com/Ch3fUlrich/agent-skills), registers Graphify with Claude Code and approves Omnigraph per-repo — asking for your Omnigraph URL rather than hardcoding one, and naming what is still missing rather than pretending it is wired |
 | Desktop (Windows) | Windhawk with the Explorer file-size and taskbar-clock mods, PowerToys |

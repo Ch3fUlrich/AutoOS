@@ -25,10 +25,133 @@ function Clear-AutoOSInstalledStatus {
     $script:InstalledInventory = $null
 }
 
+function Get-AutoOSShimDirectory {
+    <#
+      .SYNOPSIS
+        Directories that hold commands but are routinely absent from PATH.
+
+      .DESCRIPTION
+        Returns candidates, not survivors: the caller filters to what exists, so
+        this stays a pure function that the suite can assert against without a
+        Scoop or Chocolatey install on the box running it.
+
+        The persistent PATH is read from the registry, which is correct but
+        stale - a package manager that installed something five minutes ago has
+        not necessarily written itself there, and a per-user shim directory is
+        only on PATH for the user who ran the installer.
+    #>
+    $home_ = $env:USERPROFILE
+    @(
+        # Scoop: user-scope by default, global when SCOOP_GLOBAL is set.
+        (Join-Path $home_ 'scoop\shims'),
+        $(if ($env:SCOOP) { Join-Path $env:SCOOP 'shims' }),
+        $(if ($env:SCOOP_GLOBAL) { Join-Path $env:SCOOP_GLOBAL 'shims' }),
+        (Join-Path $env:ProgramData 'scoop\shims'),
+        # Chocolatey.
+        (Join-Path $env:ProgramData 'chocolatey\bin'),
+        # winget's own shim directory for portable packages.
+        (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'),
+        (Join-Path $env:ProgramFiles 'WinGet\Links'),
+        # npm -g, pipx/uv and cargo all install here and all rely on PATH.
+        (Join-Path $env:APPDATA 'npm'),
+        (Join-Path $home_ '.local\bin'),
+        (Join-Path $home_ '.cargo\bin'),
+        (Join-Path $home_ 'bin')
+    ) | Where-Object { $_ }
+}
+
+function Get-AutoOSProgramDirectoryName {
+    <#
+      .SYNOPSIS
+        Normalised names of per-user installs under %LOCALAPPDATA%\Programs.
+
+      .DESCRIPTION
+        A user-scope installer that writes no Uninstall key and puts nothing on
+        PATH is invisible to every other probe, and this is where it lands.
+
+        A directory only counts when an executable is actually inside it.
+        %APPDATA% is deliberately NOT read: it holds configuration, which
+        outlives the uninstall that removed the program - this machine still has
+        %APPDATA%\JAM Software years after TreeSize went away. Reporting that as
+        an install is exactly the false positive that is worse than a blank.
+    #>
+    param([Parameter(Mandatory)][string]$Root)
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return @() }
+    @(foreach ($dir in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
+        $exe = Get-ChildItem -LiteralPath $dir.FullName -Filter '*.exe' -File -Recurse -Depth 2 `
+                             -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $exe) { continue }
+        $bare = ($dir.Name -replace '[^\p{L}\p{N}]', '').ToLowerInvariant()
+        if ($bare) { $bare }
+    }) | Select-Object -Unique
+}
+
+function Get-AutoOSWingetPackageProcess {
+    <#
+      .SYNOPSIS
+        Start `winget list` out of process, or return $null.
+
+      .DESCRIPTION
+        winget's own record is the only probe that knows a package by its id
+        rather than by whatever display name the installer chose. The standing
+        warning in this file is about running it PER ROW: that can contact
+        sources, prompt, or hang dozens of times before an installer even
+        starts. One bounded call per run is a different thing, and it is started
+        before the slow Appx probe so the wait overlaps rather than adds.
+
+        Offline-safe by construction: no output means no change of answer.
+        Set AUTOOS_SKIP_WINGET_LIST=1 to opt out entirely.
+    #>
+    if ($env:AUTOOS_SKIP_WINGET_LIST -eq '1') { return $null }
+    try {
+        $winget = Get-Command 'winget.exe' -ErrorAction SilentlyContinue
+        if (-not $winget) { return $null }
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $winget.Source
+        # --disable-interactivity is what stops this blocking on a prompt nobody
+        # is there to answer. Deliberately NOT --accept-source-agreements:
+        # accepting an agreement is a side effect, and detection runs before the
+        # user has confirmed anything - including during a dry run, which must
+        # leave the machine untouched. On a winget that has never been used the
+        # call simply fails, and a failed probe changes no answer.
+        $psi.Arguments = 'list --disable-interactivity'
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.RedirectStandardInput = $true
+        $psi.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+        $process = [Diagnostics.Process]::Start($psi)
+        # Close stdin so a prompt that slipped past --disable-interactivity reads
+        # EOF and gives up, instead of sitting there until the timeout.
+        try { $process.StandardInput.Close() } catch { }
+        $process
+    } catch { $null }
+}
+
+function Get-AutoOSWingetPackageResult {
+    <# .SYNOPSIS Harvest a started winget list, killing it if it overruns. #>
+    param($Process, [int]$TimeoutMilliseconds = 12000)
+    if (-not $Process) { return @() }
+    $packages = @()
+    try {
+        $out = $Process.StandardOutput.ReadToEndAsync()
+        $null = $Process.StandardError.ReadToEndAsync()
+        if ($Process.WaitForExit($TimeoutMilliseconds) -and $out.Wait(2000)) {
+            # The table is fixed-width and localised, so the columns are not
+            # parsed at all: an id is matched as a whole whitespace-delimited
+            # token, which is exactly how it appears in the Id column.
+            $packages = @($out.Result -split '\s+' | Where-Object { $_ } | Select-Object -Unique)
+        } else {
+            $Process.Kill()
+        }
+    } catch { $packages = @() }
+    finally { try { $Process.Dispose() } catch { } }
+    $packages
+}
+
 function Get-AutoOSInstalledInventory {
-    # Inspect local registration only. A winget list for each row can contact
-    # sources, prompt, or hang before an installer even starts.
     if ($null -ne $script:InstalledInventory) { return $script:InstalledInventory }
+    # Started first so its wait overlaps the Appx probe below instead of adding to it.
+    $wingetProcess = Get-AutoOSWingetPackageProcess
     $entries = @(foreach ($root in @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
@@ -51,6 +174,11 @@ function Get-AutoOSInstalledInventory {
         Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_.Trim('"')) } |
         Where-Object { $_ -notmatch '(?i)[\\/](?:\.codex|codex-runtimes|codex-primary-runtime)[\\/]' } |
         Select-Object -Unique)
+    # A shim directory proves nothing on its own; it is only ever searched for a
+    # file a verify command already named, so an empty one costs a Test-Path.
+    $paths = @($paths + @(Get-AutoOSShimDirectory | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) |
+        Select-Object -Unique)
+    $programs = @(Get-AutoOSProgramDirectoryName -Root (Join-Path $env:LOCALAPPDATA 'Programs'))
     $appx = @()
     try {
         $psi = New-Object Diagnostics.ProcessStartInfo
@@ -66,16 +194,30 @@ function Get-AutoOSInstalledInventory {
             $null = $err
         } finally { $probe.Dispose() }
     } catch { $appx = @() }
-    $script:InstalledInventory = [pscustomobject]@{ Entries = $entries; Paths = $paths; Appx = $appx }
+    $script:InstalledInventory = [pscustomobject]@{
+        Entries = $entries; Paths = $paths; Appx = $appx; Programs = $programs
+        WingetPackages = @(Get-AutoOSWingetPackageResult -Process $wingetProcess)
+    }
     $script:InstalledInventory
 }
 
 function Test-AutoOSRegisteredName {
     param([string]$Actual, [string]$Expected)
     if (-not $Expected) { return $false }
-    # Permit version/architecture suffixes, but never arbitrary substring
-    # matches: "Steam Tools" is not Steam and "Firefox Helper" is not Firefox.
-    $pattern = '^' + [regex]::Escape($Expected) + '(?:\s+(?:v?\d[^\r\n]*|\((?:x64|x86|arm64|64-bit|32-bit)(?: [a-z]{2}(?:-[A-Z]{2})?)?\)|\((?:User|Machine)\)))?$'
+    # Permit version, bitness and release-channel decorations, but never
+    # arbitrary substring matches: "Steam Tools" is not Steam, "Firefox Helper"
+    # is not Firefox and "Git Extensions" is not Git.
+    #
+    # Every one of these decorations is a real registered name that went
+    # undetected: "Notepad++ (64-bit x64)", "PowerToys (Preview) x64",
+    # "PowerShell 7-x64", "Docker Desktop (User)". The trailing locale in
+    # "Mozilla Firefox (x64 en-US)" is not optional dressing either - drop it
+    # and Firefox stops being detected on an English install.
+    $arch = '(?:x64|x86|arm64|(?:64|32)-bit(?:\s+(?:x64|x86))?)'
+    $decoration = '(?:\((?:Preview|Beta|Insider|User|Machine|' + $arch + '(?:\s+[a-z]{2}(?:-[A-Z]{2})?)?)\)' +
+                  '|' + $arch +
+                  '|v?\d[^\r\n]*)'
+    $pattern = '^' + [regex]::Escape($Expected) + '(?:[\s-]+' + $decoration + ')*$'
     $Actual -match $pattern
 }
 
@@ -83,13 +225,22 @@ function Get-AutoOSInstalledStatus {
     <# .SYNOPSIS Read-only detection shared by selection and installer skipping.
        .DESCRIPTION Unknown is retained when a component has no reliable probe.
        Verify commands are never executed: some of them launch a desktop app. #>
-    param([Parameter(Mandatory)][psobject]$Component, [switch]$Refresh)
+    param([Parameter(Mandatory)][psobject]$Component, [switch]$Refresh, [psobject]$Inventory)
     if ($Refresh) { $script:InstalledCache = @{}; $script:InstalledInventory = $null }
     $verify = if ($Component.PSObject.Properties.Name -contains 'Verify') { [string]$Component.Verify } else { '' }
     $name = if ($Component.PSObject.Properties.Name -contains 'Name') { [string]$Component.Name } else { '' }
     $key = "$($Component.Provider)|$($Component.Package)|$name|$verify"
-    if ($script:InstalledCache.ContainsKey($key)) { return $script:InstalledCache[$key] }
+    # A caller-supplied inventory is a synthetic machine, so it must neither read
+    # nor poison the cache that describes this one.
+    if (-not $Inventory -and $script:InstalledCache.ContainsKey($key)) { return $script:InstalledCache[$key] }
     $status = 'unknown'
+    if ($Component.Provider -eq 'script' -and $Component.Package -eq 'claude-autostart') {
+        # Get-ScheduledTask is a CIM call; cache it like every other probe so that
+        # rendering the catalog does not pay for one per row.
+        $status = if (Get-ScheduledTask -TaskName 'AutoOS-Claude-Restore' -ErrorAction SilentlyContinue) { 'installed' } else { 'not-detected' }
+        if (-not $Inventory) { $script:InstalledCache[$key] = $status }
+        return $status
+    }
     if ($Component.Provider -eq 'custom') {
         if ($Component.Package -eq 'agent-skills') {
             $docs = [Environment]::GetFolderPath('MyDocuments')
@@ -112,9 +263,14 @@ function Get-AutoOSInstalledStatus {
         $found = @(Get-Module -ListAvailable -Name $Component.Package | Where-Object { $_.Version -ge $minimum -and $_.ModuleBase -notmatch '[\\/](?:codex-runtimes|codex-primary-runtime)[\\/]' })
         return $(if ($found.Count) { 'installed' } else { 'not-detected' })
     }
-    $inventory = Get-AutoOSInstalledInventory
+    $inventory = if ($Inventory) { $Inventory } else { Get-AutoOSInstalledInventory }
     if ($Component.PSObject.Properties.Name -contains 'InstalledAppx' -and $inventory.PSObject.Properties.Name -contains 'Appx') {
-        foreach ($app in $Component.InstalledAppx) { if ($app -in $inventory.Appx) { $script:InstalledCache[$key] = 'installed'; return 'installed' } }
+        foreach ($app in $Component.InstalledAppx) {
+            if ($app -in $inventory.Appx) {
+                if (-not $Inventory) { $script:InstalledCache[$key] = 'installed' }
+                return 'installed'
+            }
+        }
     }
     $names = @($name)
     if ($Component.PSObject.Properties.Name -contains 'InstalledNames') { $names += @($Component.InstalledNames) }
@@ -141,12 +297,33 @@ function Get-AutoOSInstalledStatus {
         }
         if ($status -ne 'installed') { $status = 'not-detected' }
     }
+
+    # ─── Fallbacks, in ascending order of cost ──────────────────────────────
+    # Reached only when the registry knew nothing and either there is no verify
+    # command or its executable is nowhere on disk. Each one still has to find
+    # real evidence; none of them ever upgrades a miss into a guess.
+    if ($status -ne 'installed' -and $inventory.PSObject.Properties.Name -contains 'Programs' -and $name) {
+        # A user-scope installer that registered nothing: match the install
+        # directory on the full name, never a prefix, so "Obsidian Helper" is
+        # not Obsidian.
+        $bare = ($name -replace '[^\p{L}\p{N}]', '').ToLowerInvariant()
+        if ($bare -and $bare -in $inventory.Programs) { $status = 'installed' }
+    }
+    if ($status -ne 'installed' -and $Component.Provider -eq 'winget' -and
+        $inventory.PSObject.Properties.Name -contains 'WingetPackages') {
+        # winget knows the package id, which is the one handle that does not
+        # change when a vendor renames the product. Restricted to winget rows:
+        # a bare package name from another provider could collide with a word
+        # that appears in that table for an unrelated reason.
+        if ($Component.Package -and $Component.Package -in $inventory.WingetPackages) { $status = 'installed' }
+    }
+
     if ($status -eq 'unknown' -and $Component.Provider -in @('winget', 'choco', 'manual')) { $status = 'not-detected' }
     if ($Component.Provider -eq 'script' -and $Component.Package -eq 'meslo-nerd-font') {
         $fontPath = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts\MesloLGS NF Regular.ttf'
         $status = if (Test-Path -LiteralPath $fontPath) { 'installed' } else { 'not-detected' }
     }
-    $script:InstalledCache[$key] = $status
+    if (-not $Inventory) { $script:InstalledCache[$key] = $status }
     $status
 }
 
@@ -431,6 +608,15 @@ function Get-AutoOSLaunchHint {
 
     $result = [pscustomobject]@{ Path = ''; How = '' }
 
+    # Some components install a background service and no command at all. Hunting
+    # for a launcher there and reporting "no launcher found yet - open a new
+    # terminal" is not a blank, it is a wrong answer that sends the user looking.
+    $launcher = if ($Component.PSObject.Properties.Name -contains 'Launcher') { $Component.Launcher } else { $null }
+    if ($launcher -eq 'none') {
+        $result.How = 'runs in the background - no command to open'
+        return $result
+    }
+
     # A verify command names the executable, which is the most precise handle
     # there is: Get-Command resolves it to the exact file that will run.
     $verify = if ($Component.PSObject.Properties.Name -contains 'Verify') { $Component.Verify } else { $null }
@@ -484,4 +670,5 @@ Export-ModuleMember -Function `
     Test-AutoOSCommand, Test-AutoOSAdmin, Get-AutoOSSystemInfo,
     Get-AutoOSSuggestedProfile, Get-AutoOSBlockers,
     Get-AutoOSLaunchHint, Get-AutoOSStartMenuShortcut, Get-AutoOSStartApp,
-    Get-AutoOSInstalledStatus, Set-AutoOSInstalledStatus, Clear-AutoOSInstalledStatus
+    Get-AutoOSInstalledStatus, Set-AutoOSInstalledStatus, Clear-AutoOSInstalledStatus,
+    Test-AutoOSRegisteredName, Get-AutoOSShimDirectory, Get-AutoOSProgramDirectoryName

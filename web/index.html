@@ -78,11 +78,15 @@ h1{font-size:1.4rem;margin:0;letter-spacing:-.02em;font-weight:700}
   border:1px solid var(--rule);border-radius:999px;padding:5px 11px;
   font-size:.75rem;font-weight:700;color:var(--accent);
 }
+/* A real <button>: it navigates to the Installed tab, so it has to be reachable
+   from the keyboard and announced as a control rather than as decoration. */
 .installed-pill{
   display:inline-flex;align-items:center;gap:6px;background:var(--ok-soft);
   border:1px solid var(--rule);border-radius:999px;padding:5px 11px;
-  font-size:.75rem;font-weight:700;color:var(--ok);
+  font:inherit;font-size:.75rem;font-weight:700;color:var(--ok);cursor:pointer;
 }
+.installed-pill:hover{border-color:var(--ok)}
+.installed-pill:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 /* segmented control, used for theme + layout */
 .seg{display:inline-flex;border:1px solid var(--rule);border-radius:8px;overflow:hidden;background:var(--surface)}
@@ -115,8 +119,10 @@ h1{font-size:1.4rem;margin:0;letter-spacing:-.02em;font-weight:700}
   background:var(--surface-3);color:var(--ink-muted);border-radius:999px;padding:1px 8px;
   font-size:.71rem;font-weight:700;font-variant-numeric:tabular-nums;
 }
-.tab[aria-selected="true"] .badge{background:var(--accent);color:var(--accent-ink)}
-[role="tabpanel"][hidden]{display:none}
+.tabmenu > button[aria-checked="true"] .badge{background:var(--accent);color:var(--accent-ink)}
+/* Panels are regions now that the tab strip is a menu; a hidden one must stay
+   hidden even though .card and friends set display explicitly. */
+[role="region"][hidden]{display:none}
 
 /* ─── collapsible cards ──────────────────────────────────────────────── */
 details.card{
@@ -147,34 +153,41 @@ details.card>summary:focus-visible{outline:2px solid var(--accent);outline-offse
 .kv.highlight{background:var(--accent-soft);border-color:var(--accent)}
 
 /* ─── profile cards: the chosen one grows, the rest shrink ───────────── */
-.profiles{display:flex;gap:10px;flex-wrap:wrap;align-items:stretch}
-.profile{
-  text-align:left;background:var(--surface);border:1.5px solid var(--rule);border-radius:9px;
-  padding:12px 14px;cursor:pointer;font:inherit;color:var(--ink);
-  flex:1 1 190px;min-width:170px;
-  /* Buttons vertically centre their content by default, which left the shrunken
-     cards with their title floating in the middle next to the expanded one. */
-  display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;
-  transition:flex-grow .22s ease, background .15s, border-color .15s, box-shadow .22s;
+/* A row of square chips, one per profile, then the selected one in full below. */
+.profiles{display:flex;flex-direction:column;gap:14px}
+.profile-strip{display:flex;gap:8px;flex-wrap:wrap}
+.profile-chip{
+  flex:0 0 auto;width:96px;min-width:0;padding:10px 8px;cursor:pointer;font:inherit;
+  display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center;
+  background:var(--surface);border:1.5px solid var(--rule);border-radius:10px;color:var(--ink);
+  transition:background .15s, border-color .15s;
 }
-.profile:hover{border-color:var(--rule-strong);background:var(--surface-2)}
-.profile:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.profile[aria-pressed="true"]{
-  border-color:var(--accent);background:var(--accent-soft);box-shadow:var(--shadow-lg);
-  flex:4 1 460px;
+.profile-chip:hover{border-color:var(--rule-strong);background:var(--surface-2)}
+.profile-chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.profile-chip[aria-pressed="true"]{
+  border-color:var(--accent);background:var(--accent-soft);box-shadow:var(--shadow);
 }
-.profile .pname{font-weight:700;font-size:.92rem;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.profile .pdesc{color:var(--ink-muted);font-size:.8rem;margin-top:5px}
-.profile[aria-pressed="false"] .pdesc{
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+.picon{font-size:1.25rem;line-height:1.1}
+.profile-chip .pname{font-weight:700;font-size:.76rem;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.profile-chip .pcount{font-size:.66rem;color:var(--ink-faint);font-weight:600;font-variant-numeric:tabular-nums}
+.profile-chip .tag-suggested{font-size:.52rem;padding:1px 5px}
+
+.profile-detail{
+  border:1.5px solid var(--accent);border-radius:10px;background:var(--accent-soft);
+  padding:14px 16px;
 }
+.profile-detail .pdhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+.profile-detail .pdname{font-weight:700;font-size:1rem}
+.profile-detail .pdesc{color:var(--ink-muted);font-size:.84rem;margin-bottom:11px}
+.tag-suggested{font-size:.55rem;padding:1px 6px}
+.profile[aria-pressed="false"] .pcount{
+  display:block;font-size:.66rem;color:var(--ink-faint);font-weight:600;margin-top:4px;
+}
+.profile[aria-pressed="true"] .pcount{display:none}
 .tag-suggested{
   background:var(--ok-soft);color:var(--ok);border-radius:999px;padding:1px 8px;
   font-size:.64rem;font-weight:800;text-transform:uppercase;letter-spacing:.06em;
 }
-/* the inline summary only exists on the expanded card */
-.psummary{display:none;margin-top:11px;padding-top:11px;border-top:1px solid var(--rule)}
-.profile[aria-pressed="true"] .psummary{display:block}
 .psum-head{
   display:flex;gap:14px;flex-wrap:wrap;font-size:.8rem;color:var(--ink-muted);margin-bottom:9px;
 }
@@ -189,16 +202,29 @@ details.card>summary:focus-visible{outline:2px solid var(--accent);outline-offse
 .psum-arrow{color:var(--ink-faint);font-size:.8rem}
 
 /* one card per category; every component carries its install-order number */
-.psum-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(205px,1fr));gap:8px}
+.psum-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:6px}
 .psum-card{
   background:var(--surface);border:1px solid var(--rule);border-radius:8px;
-  padding:8px 10px;min-width:0;
+  padding:0;min-width:0;
 }
+/* Folded by default: the category and its count are the answer most of the time,
+   and twelve open lists of components are not a summary. */
+.psum-card > summary{
+  list-style:none;cursor:pointer;padding:6px 9px;border-radius:8px;
+}
+.psum-card > summary::-webkit-details-marker{display:none}
+.psum-card > summary:hover{background:var(--surface-2)}
+.psum-card > summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.psum-card[open] > summary{border-bottom:1px solid var(--rule);border-radius:8px 8px 0 0}
+.psum-card-body{padding:5px 9px 7px 9px}
 .psum-card-head{
-  display:flex;align-items:center;gap:6px;font-size:.7rem;font-weight:700;
+  display:flex;align-items:center;gap:6px;font-size:.68rem;font-weight:700;
   text-transform:uppercase;letter-spacing:.07em;color:var(--accent);
-  padding-bottom:5px;margin-bottom:5px;border-bottom:1px solid var(--rule);
 }
+.psum-card-head::before{
+  content:"\25B8";font-size:.72rem;color:var(--ink-faint);transition:transform .15s ease;
+}
+.psum-card[open] .psum-card-head::before{transform:rotate(90deg)}
 .psum-card-head .n{
   margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink-faint);letter-spacing:0;
 }
@@ -248,7 +274,9 @@ select:disabled{opacity:.45;cursor:not-allowed}
 .group-body{display:flex;flex-direction:column;gap:6px}
 body[data-layout="grid"] .group-body{
   display:grid;gap:8px;
-  grid-template-columns:repeat(auto-fill,minmax(290px,1fr));
+  /* 290px fitted about three per row on a laptop. The compact row needs far less
+     than that, and seeing more of the catalog at once is the point. */
+  grid-template-columns:repeat(auto-fill,minmax(215px,1fr));
 }
 body[data-layout="grid"][data-cols="2"] .group-body{grid-template-columns:repeat(2,minmax(0,1fr))}
 body[data-layout="grid"][data-cols="3"] .group-body{grid-template-columns:repeat(3,minmax(0,1fr))}
@@ -261,10 +289,66 @@ body[data-layout="grid"][data-cols="4"] .group-body{grid-template-columns:repeat
 }
 
 .item{
-  display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start;
-  padding:10px 12px;border:1px solid var(--rule);border-left:3px solid transparent;
+  display:grid;grid-template-columns:auto auto 1fr;gap:9px;align-items:start;
+  padding:8px 10px;border:1px solid var(--rule);border-left:3px solid transparent;
   border-radius:8px;background:var(--surface);
 }
+
+/* A monogram, not a fetched favicon: the server is local and often offline, and
+   a per-row request to a remote icon service would leak the catalog. `icon` in
+   the catalog wins when a component declares one. */
+.item-icon{
+  position:relative;flex:none;width:26px;height:26px;border-radius:7px;
+  display:grid;place-items:center;overflow:hidden;
+  font-size:.8rem;font-weight:800;line-height:1;margin-top:1px;
+  background:var(--accent-soft);color:var(--accent);text-transform:uppercase;
+  user-select:none;
+}
+/* Sits on top of the monogram, so a blocked or offline request leaves a letter
+   rather than an empty box or a broken-image glyph. */
+.item-icon .icon-img{
+  position:absolute;inset:0;width:100%;height:100%;object-fit:contain;
+  border-radius:inherit;padding:2px;
+  /* A white tile in BOTH themes. Many of these favicons are a black glyph on
+     transparency (every GitHub-hosted project ships one), which disappears
+     entirely against a dark surface. */
+  background:#fff;box-shadow:inset 0 0 0 1px rgba(0,0,0,.08);
+}
+.item.is-installed .item-icon{background:var(--ok-soft);color:var(--ok)}
+
+/* Detail is opt-in. These chips answer "which package exactly" and "what pulls
+   this in", which matters when auditing a plan and never when picking one. The
+   compact row is icon + name + description, plus the two chips that describe the
+   CONTROL rather than the component: `auto` (ticked for you) and `locked`
+   (cannot be unticked). Losing those would make a checkbox behave inexplicably. */
+body:not([data-detail="on"]) .item .item-detail,
+body:not([data-detail="on"]) .item .item-meta,
+body:not([data-detail="on"]) .item .chip-step{display:none}
+body:not([data-detail="on"]) .item .item-meta{margin-top:0}
+.item-detail{display:contents}
+.detail-toggle[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+
+/* Quick install: one component, now, without touching the selection. */
+.quick-install{
+  flex:none;font:inherit;font-size:.68rem;font-weight:700;letter-spacing:.03em;
+  padding:2px 8px;border-radius:999px;cursor:pointer;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink-muted);
+}
+.quick-install:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.quick-install:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.quick-install[disabled]{opacity:.5;cursor:default}
+
+/* Header progress, so a quick install started from the catalog is visible from
+   every tab instead of only on Run & log. */
+.header-progress{
+  display:flex;align-items:center;gap:10px;margin:0 0 14px 0;
+  font-size:.74rem;color:var(--ink-muted);
+}
+/* Same trap as the section menu: an author `display:flex` beats the browser's
+   own [hidden]{display:none}, so without this it renders empty on every load. */
+.header-progress[hidden]{display:none}
+.header-progress .bar{flex:1;height:5px;margin:0}
+.header-progress-label{white-space:nowrap;font-weight:600}
 .item:hover{background:var(--surface-2);border-color:var(--rule-strong)}
 .item.checked{border-left-color:var(--accent);background:var(--accent-soft)}
 .item.auto{border-left-color:var(--dep);background:var(--dep-soft);border-style:dashed}
@@ -447,14 +531,164 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
 .bar.indeterminate>div{width:32%!important;animation:install-motion 1.7s ease-in-out infinite}
 @keyframes install-motion{from{transform:translateX(-100%)}to{transform:translateX(330%)}}
 @media(prefers-reduced-motion:reduce){.bar.indeterminate>div{animation:none}}
+/* ─── card chooser & visibility ──────────────────────────────────────── */
+.card-chooser-bar{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius);
+  padding:10px 14px;margin-bottom:16px;box-shadow:var(--shadow);
+}
+.card-chooser-title{font-size:.82rem;font-weight:700;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.06em}
+.card-pills{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.card-pill{
+  appearance:none;border:1px solid var(--rule);background:var(--surface-2);color:var(--ink-muted);
+  font:inherit;font-size:.78rem;font-weight:600;padding:4px 11px;border-radius:999px;
+  cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s ease;
+}
+.card-pill:hover{border-color:var(--rule-strong);color:var(--ink)}
+.card-pill:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.card-pill[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.card-presets{margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.card-preset-label{font-size:.76rem;color:var(--ink-faint);font-weight:600}
+.card-preset-btn{
+  font:inherit;font-size:.74rem;padding:3px 8px;border-radius:6px;border:1px solid var(--rule);
+  background:var(--surface);color:var(--ink-muted);cursor:pointer;
+}
+.card-preset-btn:hover{background:var(--surface-2);color:var(--ink)}
+.card-preset-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* Which view you are in has to be visible, or the presets are four buttons that
+   appear to do nothing when the result happens to match what you already had. */
+.card-preset-btn[aria-pressed="true"]{
+  background:var(--accent-soft);border-color:var(--accent);color:var(--ink);font-weight:700;
+}
+
+/* ─── claude autostart card ──────────────────────────────────────────── */
+.claude-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.claude-controls-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-bottom:16px}
+.claude-sessions-section{margin-top:16px;border-top:1px solid var(--rule);padding-top:14px}
+.claude-sessions-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.claude-section-title{font-size:.84rem;font-weight:700;letter-spacing:.02em}
+.claude-table-wrap{overflow-x:auto}
+.claude-sessions-table{width:100%;border-collapse:collapse;font-size:.8rem}
+.claude-sessions-table th,.claude-sessions-table td{padding:7px 10px;border-bottom:1px solid var(--rule);text-align:left}
+.claude-sessions-table th{font-size:.72rem;text-transform:uppercase;color:var(--ink-faint);letter-spacing:.06em}
+.btn-sm{font:inherit;font-size:.75rem;padding:4px 9px;border-radius:6px;border:1px solid var(--rule);background:var(--surface);cursor:pointer}
+.btn-sm:hover{background:var(--surface-2);border-color:var(--rule-strong)}
+.jump-link{
+  font:inherit;font-size:.72rem;font-weight:600;color:var(--accent);text-decoration:none;
+  cursor:pointer;border:1px solid var(--rule);padding:2px 8px;border-radius:5px;background:var(--surface);
+  display:inline-flex;align-items:center;gap:4px;
+}
+.jump-link:hover{background:var(--accent-soft);border-color:var(--accent)}
+.jump-link:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ─── claude status strip ────────────────────────────────────────────── */
+/* The card leads with the three facts that answer "will my sessions come back?"
+   — the service, the age of the snapshot, the count — because four settings
+   selects answer a question nobody asked first. */
+.claude-status{
+  display:flex;gap:18px;flex-wrap:wrap;align-items:baseline;
+  background:var(--surface-2);border:1px solid var(--rule);border-radius:8px;
+  padding:10px 14px;margin-bottom:14px;
+}
+.claude-status-item{display:flex;flex-direction:column;gap:2px;min-width:120px}
+.claude-status-label{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-faint);font-weight:700}
+.claude-status-value{font-size:.86rem;font-weight:600}
+.claude-status-value.is-warn{color:var(--warn,var(--ink))}
+.claude-hint{
+  font-size:.76rem;color:var(--ink-muted);margin:10px 0 0 0;padding:8px 11px;
+  border-left:2px solid var(--accent);background:var(--surface-2);border-radius:0 6px 6px 0;
+}
+
+/* ─── banner facts ───────────────────────────────────────────────────── */
+.banner-facts{
+  display:flex;gap:6px 18px;flex-wrap:wrap;align-items:baseline;
+  margin:-6px 0 16px 0;padding:0 2px;font-size:.78rem;
+}
+/* An author display rule beats the browser's [hidden]; see AGENTS.md. */
+.banner-facts[hidden]{display:none}
+.bfact{display:inline-flex;gap:6px;align-items:baseline}
+.bfact-k{color:var(--ink-faint);text-transform:uppercase;letter-spacing:.06em;font-size:.68rem;font-weight:700}
+.bfact-v{color:var(--ink-muted);font-weight:600}
+.banner-facts .jump-link{margin-left:auto}
+
+/* ─── header navigation ──────────────────────────────────────────────── */
+/* One labelled button instead of a strip that grew a tab every time the page
+   gained a job. The menu is a real menu: focusable, walkable, escapable. */
+.tabnav{position:relative;margin-left:18px}
+.tabnav-btn{
+  font:inherit;font-size:.86rem;font-weight:700;cursor:pointer;
+  display:inline-flex;align-items:center;gap:8px;
+  padding:6px 12px;border-radius:8px;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink);
+}
+.tabnav-btn:hover{background:var(--surface-2);border-color:var(--rule-strong)}
+.tabnav-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tabnav-caret{color:var(--ink-faint);font-size:.7rem}
+.tabnav-btn[aria-expanded="true"] .tabnav-caret{transform:rotate(180deg)}
+
+.tabmenu{
+  position:absolute;top:calc(100% + 6px);left:0;z-index:40;min-width:190px;
+  background:var(--surface);border:1px solid var(--rule-strong);border-radius:10px;
+  box-shadow:var(--shadow-lg);padding:5px;display:flex;flex-direction:column;gap:2px;
+}
+/* An author `display:flex` beats the browser's own [hidden]{display:none}, so
+   without this the menu renders open on every load. */
+.tabmenu[hidden]{display:none}
+.tabmenu > button{
+  font:inherit;font-size:.85rem;text-align:left;cursor:pointer;
+  display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:7px;
+  border:0;background:transparent;color:var(--ink);width:100%;
+}
+.tabmenu > button:hover{background:var(--surface-2)}
+.tabmenu > button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.tabmenu > button[aria-checked="true"]{background:var(--accent-soft);color:var(--ink);font-weight:700}
+.tabmenu > button[aria-checked="true"]::before{content:"¹3";color:var(--accent);font-weight:800}
+.tabmenu > button[aria-checked="false"]::before{content:"";width:0}
+.tabmenu .badge{margin-left:auto}
+
+/* ─── theme toggle ───────────────────────────────────────────────────── */
+.theme-toggle{
+  font:inherit;cursor:pointer;width:34px;height:34px;border-radius:8px;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink);
+  display:grid;place-items:center;font-size:1rem;line-height:1;
+}
+.theme-toggle:hover{background:var(--surface-2);border-color:var(--rule-strong)}
+.theme-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ─── installed tab ──────────────────────────────────────────────────── */
+.panel-lede{color:var(--ink-muted);font-size:.86rem;margin:0 0 16px 0;max-width:70ch}
+.installed-toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.installed-toolbar input[type=search]{
+  font:inherit;font-size:.86rem;padding:7px 11px;border-radius:8px;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink);min-width:240px;flex:1 1 240px;max-width:420px;
+}
+.installed-toolbar input[type=search]:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.installed-summary{font-size:.8rem;color:var(--ink-muted)}
+.installed-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.installed-row{
+  border:1px solid var(--rule);border-radius:8px;padding:10px 12px;background:var(--surface);
+  display:flex;flex-direction:column;gap:5px;
+}
+.installed-row-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.installed-row-meta{margin-top:2px}
+
+/* ─── modular SRP config sections ────────────────────────────────────── */
+.config-section{margin-bottom:18px}
+.config-section:last-child{margin-bottom:0}
+.config-section-title{
+  font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--accent);
+  padding-bottom:5px;margin-bottom:8px;border-bottom:1px solid var(--rule);display:flex;align-items:center;gap:6px;
+}
+.target-highlight{outline:2px solid var(--accent);outline-offset:3px;transition:outline .3s ease}
 </style>
 <!-- Every control on this page is driven by the inline script at the bottom.
      If a script blocker, an extension or a policy kills it, none of this markup
      means anything: the header pill would sit at "connecting…" for ever and the
      banner would claim it is still contacting a server it never called. Hide the
      inert half of the page and say what is actually wrong. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6f9f'/%3E%3Cpath d='M9 22 L16 9 L23 22 M12 18 H20' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <noscript><style>
-  #banner, .tabs, [role="tabpanel"], .actionbar { display: none !important }
+  #banner, .tabnav, [role="region"], .actionbar { display: none !important }
   #hostName { display: none }
   .host-pill::after { content: "scripts blocked" }
 </style></noscript>
@@ -463,20 +697,47 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
 <div class="wrap">
   <header>
     <h1>AutoOS</h1>
-    <span class="tagline">post-install provisioning</span>
-    <div class="header-right">
-      <span class="env-pill" id="envPill" hidden></span>
-      <span class="installed-pill" id="installedPill" hidden></span>
-      <span class="host-pill"><span class="dot bad" id="hostDot"></span><span id="hostName">connecting…</span></span>
-      <div class="seg" role="group" aria-label="Colour theme">
-        <button type="button" data-theme-choice="auto"  aria-pressed="true">Auto</button>
-        <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
-        <button type="button" data-theme-choice="dark"  aria-pressed="false">Dark</button>
+    <!-- Navigation lives in the header now: one labelled button instead of a strip
+         that grew a tab every time the page gained a job. -->
+    <nav class="tabnav" id="tabNav">
+      <button type="button" class="tabnav-btn" id="tabMenuBtn"
+              aria-haspopup="menu" aria-expanded="false" aria-controls="tabMenu">
+        <span id="tabMenuCurrent">Overview</span>
+        <span class="tabnav-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="tabmenu" id="tabMenu" role="menu" aria-label="Sections" hidden>
+        <button type="button" role="menuitemradio" aria-checked="true" id="tab-overview">
+          Overview <span class="badge" id="badgeSel">0</span>
+        </button>
+        <button type="button" role="menuitemradio" aria-checked="false" id="tab-configure">Configure</button>
+        <button type="button" role="menuitemradio" aria-checked="false" id="tab-run">Run &amp; log</button>
+        <button type="button" role="menuitemradio" aria-checked="false" id="tab-system">
+          System <span class="badge" id="badgeInstalled">0</span>
+        </button>
       </div>
+    </nav>
+    <div class="header-right">
+      <!-- Which machine this is stays; what is on it moved to the System tab. -->
+      <span class="host-pill"><span class="dot bad" id="hostDot"></span><span id="hostName">connecting…</span></span>
+      <button type="button" class="theme-toggle" id="themeToggle"
+              title="Switch between light and dark" aria-label="Switch colour theme">
+        <span class="theme-icon" id="themeIcon" aria-hidden="true">◐</span>
+      </button>
     </div>
   </header>
 
   <div class="banner" id="banner">Contacting the AutoOS server…</div>
+  <!-- A one-line summary under the banner. The header keeps only which machine
+       this is; the full inventory is a click away on the System tab. -->
+  <div class="banner-facts" id="bannerFacts" hidden></div>
+  <!-- A quick install started from the catalog has to be visible from the tab you
+       started it on, not only from Run & log. -->
+  <div class="header-progress" id="headerProgress" hidden>
+    <span class="header-progress-label" id="headerProgressLabel"></span>
+    <div class="bar" role="progressbar" aria-label="Installation progress"
+         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="headerBar"><div id="headerProg"></div></div>
+    <button type="button" class="jump-link" id="headerProgressLink">Open log &rarr;</button>
+  </div>
 
   <noscript>
     <div class="banner bad">
@@ -488,23 +749,25 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
     </div>
   </noscript>
 
-  <div class="tabs" role="tablist" aria-label="Sections">
-    <button class="tab" role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true">
-      Overview <span class="badge" id="badgeSel">0</span>
-    </button>
-    <button class="tab" role="tab" id="tab-run" aria-controls="panel-run" aria-selected="false">Run &amp; log</button>
-  </div>
 
   <!-- ── Overview ─────────────────────────────────────────────────────── -->
-  <section role="tabpanel" id="panel-overview" aria-labelledby="tab-overview" tabindex="0">
-    <details class="card" id="cardSystem" open>
-      <summary>
-        <span class="card-title">Detected system</span>
-        <span class="card-sub" id="systemSub">read-only</span>
-      </summary>
-      <div class="card-body"><dl class="grid" id="sysinfo"></dl></div>
-    </details>
-  
+  <section role="region" id="panel-overview" aria-label="Overview" tabindex="0">
+    <div class="card-chooser-bar" id="cardChooserBar">
+      <span class="card-chooser-title">Choose Cards:</span>
+      <div class="card-pills" id="cardPills">
+        <button type="button" class="card-pill" data-target-card="cardProfile" aria-pressed="true">Profile</button>
+        <button type="button" class="card-pill" data-target-card="cardCatalog" aria-pressed="true">Components</button>
+        <button type="button" class="card-pill" data-target-card="cardOrder" aria-pressed="true">Install order</button>
+      </div>
+      <div class="card-presets">
+        <span class="card-preset-label">Views:</span>
+        <button type="button" class="card-preset-btn" data-preset="all">All</button>
+        <button type="button" class="card-preset-btn" data-preset="suggested">Suggested</button>
+        <button type="button" class="card-preset-btn" data-preset="catalog">Catalog</button>
+        <button type="button" class="card-preset-btn" data-preset="config">Config</button>
+      </div>
+    </div>
+
     <details class="card" id="cardProfile" open>
       <summary>
         <span class="card-title">Profile</span>
@@ -526,6 +789,8 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
           <button id="selNone" type="button">Select none</button>
           <button id="expandAll" type="button">Expand all</button>
           <button id="collapseAll" type="button">Collapse all</button>
+          <button id="detailToggle" type="button" aria-pressed="false"
+                  title="Show the provider, the exact package and the platform for every component">Details</button>
           <span class="spacer" style="margin-left:auto"></span>
           <span class="tool-label">Layout</span>
           <div class="seg" role="group" aria-label="Component layout">
@@ -563,6 +828,41 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
         <div class="tiers" id="tiers"></div>
       </div>
     </details>
+  </section>
+
+  <!-- ── Detected system ────────────────────────────────── -->
+  <section role="region" id="panel-system" aria-label="System" tabindex="0" hidden>
+    <p class="panel-lede">What AutoOS found on this machine, and what is already
+      on it. Read-only — nothing here changes anything; it is what the profile
+      suggestion is based on, and what a run will skip.</p>
+    <details class="card" id="cardSystem" open>
+      <summary>
+        <span class="card-title">Detected system</span>
+        <span class="card-sub" id="systemSub">read-only</span>
+      </summary>
+      <div class="card-body"><dl class="grid" id="sysinfo"></dl></div>
+    </details>
+  
+
+    <div class="installed-toolbar">
+      <input type="search" id="installedSearch" placeholder="Filter installed…"
+             aria-label="Filter installed applications" autocomplete="off">
+      <span class="installed-summary" id="installedSummary"></span>
+    </div>
+    <div id="installedList"></div>
+    </section>
+
+  <!-- ── Configure ──────────────────────────────────────── -->
+  <section role="region" id="panel-configure" aria-label="Configure" tabindex="0" hidden>
+    <p class="panel-lede">Settings for the things AutoOS installs. Saved to
+      <code>autoos.config.json</code>; the installers read them from there.</p>
+    <details class="card" id="questionsCard" open hidden>
+      <summary>
+        <span class="card-title">Questions</span>
+        <span class="card-sub">asked once, before anything is installed</span>
+      </summary>
+      <div class="card-body" id="qlist"></div>
+    </details>
     <details class="card" id="cardConfig" open>
       <summary>
         <span class="card-title">Configuration</span>
@@ -577,17 +877,109 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
         </div>
       </div>
     </details>
+    <details class="card" id="cardClaudeAutostart">
+      <summary>
+        <span class="card-title">Claude autostart</span>
+        <span class="card-sub" id="claudeSub">reopen your sessions after a reboot</span>
+      </summary>
+      <div class="card-body">
+        <!-- State before settings: the three facts below are what "will my
+             sessions come back?" actually depends on. -->
+        <div class="claude-status" id="claudeStatus" aria-live="polite">
+          <div class="claude-status-item">
+            <span class="claude-status-label">Service</span>
+            <span class="claude-status-value" id="claudeStatusService">checking…</span>
+          </div>
+          <div class="claude-status-item">
+            <span class="claude-status-label">Last snapshot</span>
+            <span class="claude-status-value" id="claudeStatusSnapshot">—</span>
+          </div>
+          <div class="claude-status-item">
+            <span class="claude-status-label">Tracked sessions</span>
+            <span class="claude-status-value" id="claudeStatusCount">—</span>
+          </div>
+        </div>
+
+        <div class="claude-sessions-section">
+          <div class="claude-sessions-head">
+            <span class="claude-section-title">Sessions that would come back</span>
+            <div class="claude-sessions-actions" style="display:flex;gap:8px;">
+              <button type="button" id="claudeRefreshBtn" class="btn-sm">Refresh</button>
+              <button type="button" id="claudeSnapshotBtn" class="btn-sm">Capture snapshot now</button>
+            </div>
+          </div>
+          <div id="claudeSessionsContainer">
+            <div class="empty">Loading…</div>
+          </div>
+        </div>
+
+        <div class="claude-sessions-section">
+          <div class="claude-section-title" style="margin-bottom:10px;">Settings</div>
+          <div class="claude-controls-grid">
+            <div class="config-card">
+              <label for="cfg_claude_enabled">Autostart</label>
+              <select id="cfg_claude_enabled" data-claude-cfg="enabled">
+                <option value="true">On — reopen sessions at boot</option>
+                <option value="false">Paused — keep snapshotting, restore nothing</option>
+              </select>
+              <div class="help">Pausing leaves the service and the snapshots in place</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_resume_mode">Resume mode</label>
+              <select id="cfg_claude_resume_mode" data-claude-cfg="resume_mode">
+                <option value="full">In full — nothing compacted away</option>
+                <option value="summary">From a summary — faster, loses context</option>
+              </select>
+              <div class="help">Only enforced where the terminal can be typed into (herdr, tmux)</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_fallback">When there is no snapshot</label>
+              <select id="cfg_claude_fallback" data-claude-cfg="fallback">
+                <option value="continue">Start one session (claude --continue)</option>
+                <option value="none">Do nothing</option>
+              </select>
+              <div class="help">Applies on a fresh machine, or after a long shutdown</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_remote_control">Remote control</label>
+              <select id="cfg_claude_remote_control" data-claude-cfg="remote_control">
+                <option value="snapshot">Keep what was recorded</option>
+                <option value="always">Always enable</option>
+                <option value="never">Never enable</option>
+              </select>
+              <div class="help">Passes --rc to restored sessions</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_snapshot_interval_mins">Snapshot every (minutes)</label>
+              <input type="number" id="cfg_claude_snapshot_interval_mins" data-claude-cfg="snapshot_interval_mins" min="1" max="59" step="1" value="5">
+              <div class="help">How much session <em>membership</em> a crash can cost you</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_liveness_window_mins">Count as live for (minutes)</label>
+              <input type="number" id="cfg_claude_liveness_window_mins" data-claude-cfg="liveness_window_mins" min="5" max="10080" step="5" value="240">
+              <div class="help">How far back “was running before the shutdown” reaches</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_max_sessions">Restore at most</label>
+              <input type="number" id="cfg_claude_max_sessions" data-claude-cfg="max_sessions" min="1" max="32" step="1" value="8">
+              <div class="help">Most recently active first</div>
+            </div>
+          </div>
+          <div class="config-actions" style="margin-top:14px;">
+            <button type="button" id="saveClaudeConfigBtn" class="cfg-save-btn">Save settings</button>
+            <span id="claudeConfigSaveStatus" class="cfg-status" role="status"></span>
+          </div>
+          <p class="claude-hint" id="claudeIntervalHint" hidden>
+            The snapshot interval is baked into the systemd timer and the Scheduled Task.
+            Re-run the installer for <code>claude-autostart</code> to apply a new value.
+          </p>
+        </div>
+      </div>
+    </details>
+
   </section>
 
-  <!-- Run -->
-  <section role="tabpanel" id="panel-run" aria-labelledby="tab-run" tabindex="0" hidden>
-    <details class="card" id="questionsCard" open hidden>
-      <summary>
-        <span class="card-title">Questions</span>
-        <span class="card-sub">asked once, before anything is installed</span>
-      </summary>
-      <div class="card-body" id="qlist"></div>
-    </details>
+  <section role="region" id="panel-run" aria-label="Run and log" tabindex="0" hidden>
     <details class="card" open>
       <summary>
         <span class="card-title">Output</span>
@@ -610,7 +1002,10 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
 <div class="actionbar">
   <div class="inner">
     <span class="tally" id="tally">nothing selected</span>
-    <label class="switch"><input type="checkbox" id="dryRun" checked> Dry run</label>
+    <!-- Unchecked by default: a run that installs nothing, when the button says
+         "Install selected", is a surprise in the wrong direction. The copy under
+         the button says what dry run is for, and the confirmation names it. -->
+    <label class="switch"><input type="checkbox" id="dryRun"> Dry run</label>
     <span class="spacer"></span>
     <span class="hint" id="elevHint"></span>
     <button class="primary" id="run" type="button">Install selected</button>
@@ -637,14 +1032,28 @@ const PREF = {
   set(k, v) { try { localStorage.setItem("autoos." + k, v); } catch { /* private mode */ } }
 };
 
+/* One button, two states. "auto" is still the stored default until the user
+   expresses a preference; from then on the button flips light <-> dark and the
+   icon shows the theme you would switch TO, which is the one thing a single
+   toggle can say unambiguously. */
+function currentThemeIsDark() {
+  const stamped = document.documentElement.getAttribute("data-theme");
+  if (stamped) return stamped === "dark";
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
 function applyTheme(choice) {
   // "auto" removes the stamp entirely so prefers-color-scheme takes over.
   if (choice === "auto") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.setAttribute("data-theme", choice);
-  document.querySelectorAll("[data-theme-choice]").forEach(b =>
-    b.setAttribute("aria-pressed", String(b.dataset.themeChoice === choice)));
   PREF.set("theme", choice);
+
+  const dark = currentThemeIsDark();
+  el("themeIcon").textContent = dark ? "☀" : "☾";
+  el("themeToggle").title = dark ? "Switch to light" : "Switch to dark";
+  el("themeToggle").setAttribute("aria-label", dark ? "Switch to light theme" : "Switch to dark theme");
 }
+
 function applyLayout(choice) {
   document.body.dataset.layout = choice;
   document.querySelectorAll("[data-layout-choice]").forEach(b =>
@@ -654,8 +1063,7 @@ function applyLayout(choice) {
 }
 function applyCols(v) { document.body.dataset.cols = v; el("cols").value = v; PREF.set("cols", v); }
 
-document.querySelectorAll("[data-theme-choice]").forEach(b =>
-  b.onclick = () => applyTheme(b.dataset.themeChoice));
+el("themeToggle").onclick = () => applyTheme(currentThemeIsDark() ? "light" : "dark");
 document.querySelectorAll("[data-layout-choice]").forEach(b =>
   b.onclick = () => applyLayout(b.dataset.layoutChoice));
 el("cols").onchange = () => applyCols(el("cols").value);
@@ -713,22 +1121,61 @@ function profileClosure(name) {
 }
 
 /* ── tabs ─────────────────────────────────────────────────────────────── */
-const TABS = ["overview", "run"];
+const TABS = ["overview", "configure", "run", "system"];
+const TAB_LABEL = { overview: "Overview", configure: "Configure", run: "Run & log", system: "System" };
+
 function showTab(name) {
   TABS.forEach(t => {
-    el("tab-" + t).setAttribute("aria-selected", String(t === name));
+    el("tab-" + t).setAttribute("aria-checked", String(t === name));
     el("panel-" + t).hidden = t !== name;
   });
-  if (name === "run") renderQuestions();
+  el("tabMenuCurrent").textContent = TAB_LABEL[name] || name;
+  closeTabMenu();
+  // The questions a selection needs live on Configure now, so they have to be
+  // rendered when that tab opens rather than when the run starts.
+  if (name === "run" || name === "configure") renderQuestions();
+  if (name === "system") renderInstalledTab();
 }
+
+/* The section menu. A dropdown has to be openable, closable and walkable from
+   the keyboard or it is only a button that looks like navigation. */
+function openTabMenu() {
+  el("tabMenu").hidden = false;
+  el("tabMenuBtn").setAttribute("aria-expanded", "true");
+  const current = TABS.find(t => el("tab-" + t).getAttribute("aria-checked") === "true");
+  el("tab-" + (current || TABS[0])).focus();
+}
+function closeTabMenu() {
+  el("tabMenu").hidden = true;
+  el("tabMenuBtn").setAttribute("aria-expanded", "false");
+}
+function toggleTabMenu() {
+  if (el("tabMenu").hidden) openTabMenu(); else closeTabMenu();
+}
+
+el("tabMenuBtn").addEventListener("click", toggleTabMenu);
+el("tabMenuBtn").addEventListener("keydown", e => {
+  if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") { e.preventDefault(); openTabMenu(); }
+});
+
 TABS.forEach((t, i) => {
   el("tab-" + t).addEventListener("click", () => showTab(t));
   el("tab-" + t).addEventListener("keydown", e => {
-    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    if (e.key === "Escape") { closeTabMenu(); el("tabMenuBtn").focus(); return; }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
-    const next = TABS[(i + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length];
-    el("tab-" + next).focus(); showTab(next);
+    const next = TABS[(i + (e.key === "ArrowDown" ? 1 : TABS.length - 1)) % TABS.length];
+    el("tab-" + next).focus();
   });
+});
+
+// Clicking anywhere else closes it, which is what every other menu on the
+// machine does and therefore what the user will try.
+document.addEventListener("click", e => {
+  if (!el("tabMenu").hidden && !el("tabNav").contains(e.target)) closeTabMenu();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && !el("tabMenu").hidden) { closeTabMenu(); el("tabMenuBtn").focus(); }
 });
 
 /* ── boot ─────────────────────────────────────────────────────────────── */
@@ -758,34 +1205,41 @@ async function boot() {
   el("hostName").textContent = s.host || "this machine";
   el("hostDot").classList.remove("bad");
 
-  // WSL is worth calling out in the header: it changes what actually works.
+  // WSL changes what actually works, so it is named in the banner sentence below
+  // rather than in a header pill; the detail sits on the System tab.
   const wsl = STATE.wsl || {};
-  if (wsl.isWsl) {
-    el("envPill").hidden = false;
-    el("envPill").textContent = "WSL" + (wsl.version || "") +
-      (wsl.distro ? " · " + wsl.distro : "");
-    el("envPill").title = "Running inside Windows Subsystem for Linux — systemd " +
-      "services and desktop packages may not behave as they would on bare metal.";
-  } else if (s.environment) {
-    el("envPill").hidden = false;
-    el("envPill").textContent = s.environment;
-  }
 
   el("banner").innerHTML = "Connected to <b>" + esc(s.host || "this machine") + "</b> (" +
     esc(STATE.platform) + (wsl.isWsl ? ", under WSL" + esc(wsl.version || "") : "") +
-    "). Nothing is installed until you press <b>Install selected</b> — and <b>Dry run</b> " +
-    "is on by default, which only prints what would happen.";
+    "). Nothing is installed until you press <b>Install selected</b>, and the " +
+    "confirmation lists every package first. Tick <b>Dry run</b> to print the plan " +
+    "without touching the machine.";
 
   const installedCount = (STATE.components || []).filter(c => c.installed).length;
-  if (installedCount > 0) {
-    el("installedPill").hidden = false;
-    el("installedPill").textContent = "✓ " + installedCount + " installed";
-    el("installedPill").title = s["installed applications"] || (installedCount + " applications already installed");
-  }
   el("installedCount").textContent = String(installedCount);
 
-  el("sysinfo").innerHTML = Object.entries(s).filter(([k]) => k !== "host")
-    .map(([k, v]) => '<div class="kv' + (k === "environment" || k === "installed applications" ? " highlight" : "") + '"><dt>' +
+  // Five facts, one line. Enough to re-check what you are provisioning without
+  // leaving the flow; the rest is on the System tab.
+  const facts = [
+    ["OS", s.distribution || s["operating system"]],
+    ["Arch", s.architecture],
+    ["CPU", s.cores ? s.cores + " cores" : null],
+    ["RAM", s.memory],
+    ["Free disk", s["free disk"]]
+  ].filter(([, v]) => v);
+  el("bannerFacts").hidden = !facts.length;
+  el("bannerFacts").innerHTML = facts.map(([k, v]) =>
+    '<span class="bfact"><span class="bfact-k">' + esc(k) + "</span>" +
+    '<span class="bfact-v">' + esc(String(v)) + "</span></span>").join("") +
+    '<button type="button" class="jump-link" id="bannerSystemLink">Full system &rarr;</button>';
+  el("bannerSystemLink").addEventListener("click", () => showTab("system"));
+
+  // "installed applications" is a 31-item comma-separated blob. As one <dd> in a
+  // key/value grid it pushed every other detected fact off the screen, so it gets
+  // the Installed tab instead and this card keeps the facts that fit a grid.
+  const HIDE_FROM_GRID = ["host", "installed applications"];
+  el("sysinfo").innerHTML = Object.entries(s).filter(([k]) => !HIDE_FROM_GRID.includes(k))
+    .map(([k, v]) => '<div class="kv' + (k === "environment" ? " highlight" : "") + '"><dt>' +
       esc(k) + "</dt><dd>" + esc(v) + "</dd></div>").join("");
   el("systemSub").textContent = (s.distribution || s["operating system"] || "") + " · " + (s.architecture || "");
 
@@ -796,6 +1250,21 @@ async function boot() {
   renderProfiles();
   renderCatalog();
   applyProfile(STATE.suggested);
+
+  el("badgeInstalled").textContent = String(installedCount);
+  el("installedSearch").addEventListener("input", renderInstalledTab);
+
+  // Detail is off by default and remembered: the chips answer "which package
+  // exactly", which matters when auditing a plan and never when picking one.
+  const applyDetail = on => {
+    document.body.dataset.detail = on ? "on" : "off";
+    el("detailToggle").setAttribute("aria-pressed", String(on));
+    PREF.set("detail", on ? "on" : "off");
+  };
+  applyDetail(PREF.get("detail", "off") === "on");
+  el("detailToggle").onclick = () => applyDetail(document.body.dataset.detail !== "on");
+
+  el("headerProgressLink").addEventListener("click", () => showTab("run"));
 
   el("selAll").onclick      = () => { STATE.components.filter(c => canInstall(c)).forEach(c => picked.add(c.id)); activeProfile = null; sync(); };
   el("selNone").onclick     = () => { picked.clear(); activeProfile = null; sync(); };
@@ -815,9 +1284,476 @@ async function boot() {
   } catch (e) {}
   if (!CONFIG_DATA) CONFIG_DATA = { version: 1, profile: STATE.suggested || "workstation", answers: {} };
   renderConfigCard();
+  initCardChooser();
+  initConfigureLinks();
+  renderClaudeAutostartCard();
 
   resumeIfRunning();
   heartbeat();
+}
+
+/* ── card chooser & card visibility ───────────────────────────────────── */
+/* The chooser governs the Overview panel only. The settings cards live on the
+   Configure tab, where hiding them would just be a second way to lose them. */
+const ALL_CARDS = ["cardProfile", "cardCatalog", "cardOrder"];
+const PRESETS = {
+  all: ALL_CARDS,
+  suggested: ["cardProfile", "cardCatalog"],
+  catalog: ["cardCatalog", "cardOrder"]
+};
+
+/* Where each card lives, so a "⚙ Configure" link can switch tabs before it
+   scrolls — otherwise it silently scrolls a panel nobody is looking at. */
+const CARD_TAB = {
+  cardProfile: "overview", cardCatalog: "overview", cardOrder: "overview",
+  cardSystem: "system",
+  cardConfig: "configure", cardClaudeAutostart: "configure", questionsCard: "configure"
+};
+
+/* Motion is opt-out at the OS level, so anything that scrolls or animates has to
+   ask first — the same reason the indeterminate progress bar has a guard. */
+const REDUCED_MOTION = window.matchMedia
+  ? window.matchMedia("(prefers-reduced-motion: reduce)")
+  : { matches: false };
+
+function getVisibleCards() {
+  const saved = PREF.get("cards", null);
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved);
+      // Drop ids from an older layout rather than resurrecting a card that no
+      // longer exists, which would leave a pill toggling nothing.
+      const known = parsed.filter(id => ALL_CARDS.includes(id));
+      if (known.length) return new Set(known);
+    } catch (e) {}
+  }
+  return new Set(ALL_CARDS);
+}
+
+function applyCardVisibility(visibleSet) {
+  ALL_CARDS.forEach(cardId => {
+    const card = el(cardId);
+    const isVis = visibleSet.has(cardId);
+    if (card) card.hidden = !isVis;
+    const pill = document.querySelector('.card-pill[data-target-card="' + cardId + '"]');
+    if (pill) pill.setAttribute("aria-pressed", String(isVis));
+  });
+
+  // Light up the preset whose set this is, so the active view is visible.
+  const current = [...visibleSet].sort().join(",");
+  document.querySelectorAll(".card-preset-btn").forEach(btn => {
+    const preset = PRESETS[btn.dataset.preset] || [];
+    btn.setAttribute("aria-pressed", String([...preset].sort().join(",") === current));
+  });
+
+  PREF.set("cards", JSON.stringify([...visibleSet]));
+}
+
+/* Choosing a card is a deliberate act, so it opens what it names. Without this a
+   preset can surface a card that is still folded and look like it did nothing —
+   and a folded card hides the very controls the preset was chosen for. */
+function openCards(cardIds) {
+  cardIds.forEach(cardId => {
+    const card = el(cardId);
+    if (card) card.open = true;
+  });
+}
+
+function initCardChooser() {
+  applyCardVisibility(getVisibleCards());
+
+  el("cardChooserBar").addEventListener("click", ev => {
+    const pill = ev.target.closest(".card-pill");
+    if (pill) {
+      const target = pill.dataset.targetCard;
+      const cur = getVisibleCards();
+      if (cur.has(target)) {
+        // Never leave an empty Overview: the last card stays.
+        if (cur.size > 1) cur.delete(target);
+        applyCardVisibility(cur);
+      } else {
+        cur.add(target);
+        applyCardVisibility(cur);
+        openCards([target]);
+      }
+      return;
+    }
+
+    const preset = ev.target.closest(".card-preset-btn");
+    if (preset && PRESETS[preset.dataset.preset]) {
+      const next = PRESETS[preset.dataset.preset];
+      applyCardVisibility(new Set(next));
+      // "All" is the default landing view, not a focused one: leave the cards
+      // folded as the user left them rather than expanding six at once.
+      if (preset.dataset.preset !== "all") openCards(next);
+    }
+  });
+}
+
+/* Reveal a card (unhiding it if the chooser had it off) and put the cursor where
+   the user was heading. Bound through delegation from the click handlers below
+   rather than an inline onclick: an inline handler would need a value
+   HTML-escaped into a JS string, which is the wrong escaper for that context. */
+function focusCard(cardId, elementId) {
+  // Only Overview cards can be hidden by the chooser; unhide before scrolling.
+  if (ALL_CARDS.includes(cardId)) {
+    const visible = getVisibleCards();
+    if (!visible.has(cardId)) {
+      visible.add(cardId);
+      applyCardVisibility(visible);
+    }
+  }
+  const card = el(cardId);
+  if (!card) return;
+  card.open = true;
+  showTab(CARD_TAB[cardId] || "overview");
+
+  const target = (elementId && el(elementId)) || card;
+  target.scrollIntoView({ behavior: REDUCED_MOTION.matches ? "auto" : "smooth", block: "center" });
+  if (elementId && el(elementId)) {
+    const field = el(elementId);
+    field.classList.add("target-highlight");
+    setTimeout(() => field.classList.remove("target-highlight"), 1600);
+    try { field.focus(); } catch (e) {}
+  }
+}
+
+/* One delegated listener for every "⚙ Configure" affordance on the page. */
+function initConfigureLinks() {
+  document.addEventListener("click", ev => {
+    const link = ev.target.closest("[data-configure-card]");
+    if (!link) return;
+    // These sit inside <label class="item">, whose activation would otherwise
+    // toggle the component's checkbox on the way past.
+    ev.preventDefault();
+    ev.stopPropagation();
+    focusCard(link.dataset.configureCard, link.dataset.configureField || null);
+  });
+}
+
+/* ── quick install ────────────────────────────────────────────────────── */
+/* Installing one component from the catalog without disturbing the selection.
+   A run is single-threaded on the server, so presses while one is in flight are
+   queued rather than dropped or run concurrently. */
+let quickQueue = [];
+
+function queueQuickInstall(id) {
+  const c = BY_ID.get(id);
+  if (!c || !canInstall(c) || c.installed) return;
+
+  if (!quickQueue.includes(id)) quickQueue.push(id);
+  markQuickPending();
+
+  if (running) {
+    setHeaderProgressNote(quickQueue.length + " queued");
+    return;
+  }
+  drainQuickQueue();
+}
+
+function markQuickPending() {
+  document.querySelectorAll("[data-quick]").forEach(btn => {
+    const queued = quickQueue.includes(btn.dataset.quick);
+    btn.disabled = queued;
+    btn.textContent = queued ? "queued…" : "⚡ Install";
+  });
+}
+
+async function drainQuickQueue() {
+  if (running || !quickQueue.length) return;
+  const id = quickQueue[0];
+  const c = BY_ID.get(id);
+  const dry = el("dryRun").checked;
+
+  // Dependencies still apply: installing a thing without what it needs fails.
+  const ids = [...closure(new Set([id]))].filter(x => !BY_ID.get(x)?.installed);
+  if (!ids.length) { quickQueue.shift(); markQuickPending(); return; }
+
+  running = true;
+  el("run").disabled = true;
+  logOffset = 0;
+  el("log").textContent = "";
+  renderProgress({ running: true, total: ids.length, done: 0, current: null });
+  showHeaderProgress(c ? c.name : id);
+
+  const r = await fetch(api("/api/install"), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids, answers: answers(), dryRun: dry })
+  });
+  if (!r.ok) {
+    appendLog([{ level: "err", text: "Server refused the quick install: HTTP " + r.status }]);
+    quickQueue.shift();
+    running = false; markQuickPending(); hideHeaderProgress(); sync();
+    return;
+  }
+  quickQueue.shift();
+  poll();
+}
+
+function showHeaderProgress(name) {
+  el("headerProgress").hidden = false;
+  el("headerProgressLabel").textContent = "Installing " + name;
+}
+function setHeaderProgressNote(note) {
+  if (!el("headerProgress").hidden) {
+    el("headerProgressLabel").textContent =
+      el("headerProgressLabel").textContent.split(" · ")[0] + " · " + note;
+  }
+}
+function hideHeaderProgress() {
+  el("headerProgress").hidden = true;
+}
+function renderHeaderProgress(d) {
+  if (el("headerProgress").hidden) return;
+  const total = Math.max(0, Number(d.total) || 0);
+  const done = Math.min(total, Math.max(0, Number(d.done) || 0));
+  const pct = total ? Math.floor(100 * done / total) : 0;
+  el("headerProg").style.width = pct + "%";
+  el("headerBar").setAttribute("aria-valuenow", String(pct));
+}
+
+/* ── installed tab ────────────────────────────────────────────────────── */
+/* The detected-system card used to carry every installed app as one long comma
+   separated <dd>, which buried the twelve facts around it. Same data, given
+   room: grouped by the catalog's own categories, filterable, and each row links
+   to its settings where it has any. */
+function renderInstalledTab() {
+  const all = (STATE.components || []).filter(c => c.installed);
+  el("badgeInstalled").textContent = String(all.length);
+
+  const needle = (el("installedSearch").value || "").trim().toLowerCase();
+  const shown = needle
+    ? all.filter(c => (c.id + " " + c.name + " " + (c.description || "") + " " + c.package)
+        .toLowerCase().includes(needle))
+    : all;
+
+  el("installedSummary").textContent = needle
+    ? shown.length + " of " + all.length + " shown"
+    : all.length + " already on this machine";
+
+  if (!shown.length) {
+    el("installedList").innerHTML = '<div class="empty">' +
+      (all.length ? "Nothing matches that filter." : "Nothing detected as installed yet.") + "</div>";
+    return;
+  }
+
+  const byCategory = new Map();
+  for (const c of shown) {
+    const category = c.category || "Other";
+    if (!byCategory.has(category)) byCategory.set(category, []);
+    byCategory.get(category).push(c);
+  }
+
+  let html = "";
+  for (const [category, items] of byCategory) {
+    html += '<details class="card" open><summary><span class="card-title">' + esc(category) +
+      '</span><span class="card-sub">' + items.length + " installed</span></summary>" +
+      '<div class="card-body"><div class="installed-grid">';
+    for (const c of items) {
+      const link = c.homepage
+        ? '<a class="item-name" href="' + esc(c.homepage) + '" target="_blank" rel="noopener">' + esc(c.name) + "</a>"
+        : '<span class="item-name">' + esc(c.name) + "</span>";
+      const configure = CONFIGURABLE_COMPONENTS[c.id]
+        ? '<button type="button" class="jump-link" data-configure-card="' +
+          esc(CONFIGURABLE_COMPONENTS[c.id].card) + '"' +
+          (CONFIGURABLE_COMPONENTS[c.id].field
+            ? ' data-configure-field="' + esc(CONFIGURABLE_COMPONENTS[c.id].field) + '"' : "") +
+          ">⚙ Configure</button>"
+        : "";
+      html += '<div class="installed-row">' +
+        '<div class="installed-row-head">' + link + configure + "</div>" +
+        '<div class="item-desc">' + esc(c.description || "") + "</div>" +
+        '<div class="installed-row-meta"><span class="chip chip-pkg" title="' +
+          esc(c.provider + ": " + c.package) + '">' + esc(c.package) + "</span></div>" +
+        "</div>";
+    }
+    html += "</div></div></details>";
+  }
+  el("installedList").innerHTML = html;
+}
+
+/* Which components have settings, and where those settings are. Derived from the
+   catalog's `prompt` field at render time for everything else; this map only
+   covers the components whose settings are a card of their own. */
+const CONFIGURABLE_COMPONENTS = {
+  "claude-autostart": { card: "cardClaudeAutostart" },
+  "claude-code": { card: "cardClaudeAutostart" },
+  git: { card: "cardConfig", field: "cfg_git_user_name" },
+  herdr: { card: "cardConfig", field: "cfg_herdr_source" },
+  ollama: { card: "cardConfig", field: "cfg_ollama_models" },
+  agy: { card: "cardConfig", field: "cfg_antigravity_url" }
+};
+
+/* ── claude autostart & session tracking ──────────────────────────────── */
+
+/* The settings this card owns, and the id suffix each one is rendered under.
+   Held in one object because the first version wrote `resume_prompt_mode` and
+   `interval_minutes` while the scripts read `resume_mode` and
+   `snapshot_interval_mins` — the save succeeded and changed nothing. The test
+   `every claude_autostart key the web UI writes is a key the scripts read`
+   compares these names against autoos.config.example.json. */
+const CLAUDE_CFG_KEYS = {
+  enabled: "bool",
+  resume_mode: "string",
+  fallback: "string",
+  remote_control: "string",
+  snapshot_interval_mins: "int",
+  liveness_window_mins: "int",
+  max_sessions: "int"
+};
+
+function claudeAgo(iso) {
+  if (!iso) return "never";
+  const then = new Date(iso);
+  if (isNaN(then)) return "never";
+  const mins = Math.round((Date.now() - then.getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + " min ago";
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return hours + " h ago";
+  return Math.round(hours / 24) + " days ago";
+}
+
+function renderClaudeStatus(data) {
+  const installed = !!data.installed;
+  const sessions = data.sessions || [];
+
+  const service = el("claudeStatusService");
+  service.textContent = installed ? "installed" : "not installed";
+  service.classList.toggle("is-warn", !installed);
+
+  const snap = el("claudeStatusSnapshot");
+  snap.textContent = claudeAgo(data.captured_at_iso);
+  snap.classList.toggle("is-warn", !data.captured_at_iso);
+
+  el("claudeStatusCount").textContent = String(sessions.length);
+
+  // The card is only worth opening on its own when the feature is actually on.
+  const card = el("cardClaudeAutostart");
+  if (card && !card.dataset.opened) {
+    card.open = installed;
+    card.dataset.opened = "1";
+  }
+  el("claudeSub").textContent = installed
+    ? sessions.length + " session(s) would be restored"
+    : "not installed — select claude-autostart in Components";
+}
+
+async function loadClaudeSessions() {
+  const container = el("claudeSessionsContainer");
+  try {
+    const res = await fetch(api("/api/claude/sessions"));
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    renderClaudeStatus(data);
+
+    const sessions = data.sessions || [];
+    if (!sessions.length) {
+      // An empty state that says what to do next, not just that it is empty.
+      container.innerHTML = data.installed
+        ? '<div class="empty">Nothing recorded yet. Open a Claude Code session, then ' +
+          '<button type="button" class="jump-link" id="claudeEmptySnapshot">capture a snapshot</button>.</div>'
+        : '<div class="empty">Nothing recorded — the snapshot service is not installed. ' +
+          '<button type="button" class="jump-link" data-configure-card="cardCatalog">Pick claude-autostart in Components →</button></div>';
+      const quick = el("claudeEmptySnapshot");
+      if (quick) quick.addEventListener("click", captureClaudeSnapshot);
+      return;
+    }
+
+    let html = '<div class="claude-table-wrap"><table class="claude-sessions-table"><thead><tr>' +
+      "<th>Session</th><th>Working directory</th><th>Branch</th><th>Last active</th><th>Flags</th>" +
+      "</tr></thead><tbody>";
+    for (const s of sessions) {
+      const rc = s.remote_control
+        ? '<span class="chip prov prov-npm">--rc</span>'
+        : '<span style="color:var(--ink-faint)">standard</span>';
+      html += "<tr>" +
+        "<td><b>" + esc(s.name || "unnamed") + "</b><br>" +
+          '<code style="font-size:.7rem;color:var(--ink-faint)" title="' + esc(s.session_uuid || "") + '">' +
+          esc((s.session_uuid || "").slice(0, 8)) + "…</code></td>" +
+        '<td style="font-family:var(--mono);font-size:.76rem;" title="' + esc(s.cwd || "") + '">' +
+          esc(s.cwd || "~") + "</td>" +
+        "<td>" + esc(s.git_branch || "—") + "</td>" +
+        "<td>" + esc(claudeAgo(s.last_active ? new Date(s.last_active * 1000).toISOString() : null)) + "</td>" +
+        "<td>" + rc + "</td>" +
+        "</tr>";
+    }
+    container.innerHTML = html + "</tbody></table></div>";
+  } catch (err) {
+    container.innerHTML = '<div class="empty" style="color:var(--err)">Could not read the session state: ' +
+      esc(err.message) + "</div>";
+  }
+}
+
+async function captureClaudeSnapshot() {
+  const btn = el("claudeSnapshotBtn");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Capturing…";
+  try {
+    const res = await fetch(api("/api/claude/snapshot"), { method: "POST" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    await loadClaudeSessions();
+  } catch (err) {
+    el("claudeSessionsContainer").innerHTML =
+      '<div class="empty" style="color:var(--err)">Snapshot failed: ' + esc(err.message) + "</div>";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+function renderClaudeAutostartCard() {
+  const cfg = (CONFIG_DATA && CONFIG_DATA.claude_autostart) || {};
+  for (const key of Object.keys(CLAUDE_CFG_KEYS)) {
+    const field = el("cfg_claude_" + key);
+    if (!field || cfg[key] === undefined || cfg[key] === null) continue;
+    field.value = CLAUDE_CFG_KEYS[key] === "bool" ? String(!!cfg[key]) : cfg[key];
+  }
+  // Remember what the interval was, so the "re-run the installer" hint appears
+  // only for the one setting that is genuinely baked into the supervisor.
+  el("cfg_claude_snapshot_interval_mins").dataset.saved =
+    el("cfg_claude_snapshot_interval_mins").value;
+
+  el("claudeRefreshBtn").addEventListener("click", loadClaudeSessions);
+  el("claudeSnapshotBtn").addEventListener("click", captureClaudeSnapshot);
+  el("saveClaudeConfigBtn").addEventListener("click", saveClaudeConfiguration);
+  loadClaudeSessions();
+}
+
+async function saveClaudeConfiguration() {
+  const status = el("claudeConfigSaveStatus");
+  const intervalField = el("cfg_claude_snapshot_interval_mins");
+  const intervalChanged = intervalField.value !== intervalField.dataset.saved;
+
+  if (!CONFIG_DATA) CONFIG_DATA = { version: 1, profile: activeProfile || "workstation", answers: {} };
+  // Merge, never replace: the block also holds fallback_cwd, fallback_name and
+  // terminal_host, which this card does not show and must not discard.
+  const block = Object.assign({}, CONFIG_DATA.claude_autostart || {});
+  for (const [key, kind] of Object.entries(CLAUDE_CFG_KEYS)) {
+    const field = el("cfg_claude_" + key);
+    if (!field) continue;
+    if (kind === "int") block[key] = parseInt(field.value, 10) || 0;
+    else if (kind === "bool") block[key] = field.value === "true";
+    else block[key] = field.value;
+  }
+  CONFIG_DATA.claude_autostart = block;
+
+  try {
+    const res = await fetch(api("/api/config"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(CONFIG_DATA)
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    status.textContent = "Saved";
+    intervalField.dataset.saved = intervalField.value;
+    // Not a toast: this one needs acting on, so it stays until the value changes.
+    el("claudeIntervalHint").hidden = !intervalChanged;
+    setTimeout(() => { status.textContent = ""; }, 4000);
+  } catch (err) {
+    status.textContent = "Save failed: " + err.message;
+  }
 }
 
 /* ── the page outlives its server, so it has to notice ─────────────────── */
@@ -870,23 +1806,34 @@ function serverGone() {
 }
 
 /* ── profiles, with the selected one expanded into a summary ───────────── */
+/* An icon per profile. Emoji rather than an icon font or sprite sheet: the page
+   is a single self-contained file served by a local one-file server. */
+const PROFILE_ICON = {
+  workstation: "\u{1F5A5}\uFE0F", "ai-coding": "\u{1F916}", light: "\u{1FAB6}",
+  server: "\u{1F5C4}\uFE0F", everyday: "\u{1F3E0}", custom: "\u2699\uFE0F"
+};
+
 function renderProfiles() {
-  el("profiles").innerHTML = Object.entries(STATE.profiles).map(([n, d]) =>
-    '<button class="profile" type="button" data-profile="' + esc(n) + '" aria-pressed="false">' +
-      '<span class="pname">' + esc(n) +
-        (n === STATE.suggested ? ' <span class="tag-suggested">suggested</span>' : "") +
-      "</span>" +
-      '<span class="pdesc">' + esc(d) + "</span>" +
-      '<span class="psummary" data-summary="' + esc(n) + '"></span>' +
+  const chips = Object.entries(STATE.profiles).map(([n]) =>
+    '<button class="profile-chip" type="button" data-profile="' + esc(n) + '" aria-pressed="false">' +
+      '<span class="picon" aria-hidden="true">' + (PROFILE_ICON[n] || "\u25A6") + "</span>" +
+      '<span class="pname">' + esc(n) + "</span>" +
+      '<span class="pcount">' + profileClosure(n).size + "</span>" +
+      (n === STATE.suggested ? '<span class="tag-suggested">suggested</span>' : "") +
     "</button>").join("");
-  el("profiles").querySelectorAll(".profile").forEach(b =>
+
+  el("profiles").innerHTML =
+    '<div class="profile-strip" role="group" aria-label="Deployment profile">' + chips + "</div>" +
+    '<div class="profile-detail" id="profileDetail"></div>';
+
+  el("profiles").querySelectorAll(".profile-chip").forEach(b =>
     b.onclick = () => applyProfile(b.dataset.profile));
 }
 
 function applyProfile(name) {
   activeProfile = name;
   picked = new Set(profileClosureDirect(name));
-  el("profiles").querySelectorAll(".profile").forEach(b =>
+  el("profiles").querySelectorAll(".profile-chip").forEach(b =>
     b.setAttribute("aria-pressed", String(b.dataset.profile === name)));
   sync();
 }
@@ -900,13 +1847,24 @@ function profileClosureDirect(name) {
    category cards. Every component carries its install-order number so the whole
    process is readable without opening the Install order card. */
 function renderProfileSummary() {
-  el("profiles").querySelectorAll("[data-summary]").forEach(box => {
-    const name = box.dataset.summary;
-    if (name !== activeProfile) { box.innerHTML = ""; return; }
+  // One detail panel, not one per card: it gets the full width of the card now
+  // rather than whatever was left over after four collapsed siblings.
+  const box = el("profileDetail");
+  if (!box) return;
+  const name = activeProfile;
+  const heading = name
+    ? '<div class="pdhead"><span class="picon" aria-hidden="true">' +
+        (PROFILE_ICON[name] || "▦") + '</span><span class="pdname">' + esc(name) + "</span>" +
+        (name === STATE.suggested ? '<span class="tag-suggested">suggested</span>' : "") +
+      "</div>" +
+      '<div class="pdesc">' + esc(STATE.profiles[name] || "") + "</div>"
+    : "";
 
+  {
     const ids = name === "custom" ? effective() : profileClosure(name);
     if (!ids.size) {
-      box.innerHTML = '<div class="psum-head">Nothing pre-selected - tick components below.</div>';
+      box.innerHTML = heading +
+        '<div class="psum-head">Nothing pre-selected — tick components below.</div>';
       return;
     }
 
@@ -947,12 +1905,23 @@ function renderProfileSummary() {
             '<span class="step-badge' + (isDep ? " dep" : "") + '">' + steps.get(id) + "</span>" +
             '<span class="cname">' + esc(BY_ID.get(id).name) + installedChip(BY_ID.get(id)) + "</span></span>";
         }).join("");
-      return '<div class="psum-card"><div class="psum-card-head">' + esc(cat) +
-        '<span class="n">' + list.length + "</span></div>" + rows + "</div>";
+      return '<details class="psum-card"><summary><span class="psum-card-head">' + esc(cat) +
+        '<span class="n">' + list.length + "</span></span></summary>" +
+        '<div class="psum-card-body">' + rows + "</div></details>";
     }).join("");
 
     const psumInst = [...ids].filter(id => BY_ID.get(id)?.installed).length;
-    box.innerHTML =
+    const hasClaude = ids.has("claude-autostart") || ids.has("claude-code");
+    const integratedHtml =
+      '<div class="psum-integrated" style="margin-top:10px;background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:9px 12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">' +
+        '<span style="font-size:.8rem;font-weight:700;">🚀 Claude Autostart:</span>' +
+        '<span style="font-size:.76rem;color:var(--ink-muted);">' + (hasClaude ? 'Selected in this profile' : 'Not ticked by default') + '</span>' +
+        '<button type="button" class="jump-link" data-configure-card="cardClaudeAutostart">Configure Autostart &rarr;</button>' +
+        '<span style="margin-left:auto;font-size:.76rem;color:var(--ink-muted);">⚙ Stack:</span>' +
+        '<button type="button" class="jump-link" data-configure-card="cardConfig">Environment Config &rarr;</button>' +
+      '</div>';
+
+    box.innerHTML = heading +
       '<div class="psum-head">' +
         "<span><b>" + ids.size + "</b> components</span>" +
         "<span><b>" + cats.size + "</b> categories</span>" +
@@ -963,8 +1932,9 @@ function renderProfileSummary() {
                        deps.length + "</b> dependencies</span>" : "") +
       "</div>" +
       '<div class="psum-steps">' + strip + "</div>" +
-      '<div class="psum-grid">' + cards + "</div>";
-  });
+      '<div class="psum-grid">' + cards + "</div>" +
+      integratedHtml;
+  }
 }
 
 /* ── component list ───────────────────────────────────────────────────── */
@@ -974,16 +1944,35 @@ function renderCatalog() {
     if (!groups.has(c.category)) groups.set(c.category, []);
     groups.get(c.category).push(c);
   }
+  // Already installed sorts last in every group: it is the part of the list you
+  // have no decision left to make about.
+  for (const items of groups.values()) {
+    items.sort((a, b) => (a.installed ? 1 : 0) - (b.installed ? 1 : 0) ||
+                         a.name.localeCompare(b.name));
+  }
   el("catalog").innerHTML = [...groups].map(([g, items]) =>
     '<details class="group" open data-group="' + esc(g) + '">' +
       "<summary>" + esc(g) + '<span class="count" data-count="' + esc(g) + '"></span></summary>' +
       '<div class="group-body">' + items.map(itemHtml).join("") + "</div>" +
     "</details>").join("");
+  el("catalog").addEventListener("error", ev => {
+    if (ev.target instanceof HTMLImageElement && ev.target.classList.contains("icon-img")) {
+      ev.target.remove();
+    }
+  }, true);
+  el("catalog").querySelectorAll("[data-quick]").forEach(btn => {
+    btn.addEventListener("click", ev => {
+      // Inside a <label>: without this the click also toggles the checkbox.
+      ev.preventDefault();
+      ev.stopPropagation();
+      queueQuickInstall(btn.dataset.quick);
+    });
+  });
   el("catalog").querySelectorAll(".pick").forEach(cb => {
     cb.onchange = () => {
       if (cb.checked && canInstall(BY_ID.get(cb.dataset.id))) picked.add(cb.dataset.id); else picked.delete(cb.dataset.id);
       activeProfile = "custom";
-      el("profiles").querySelectorAll(".profile").forEach(b =>
+      el("profiles").querySelectorAll(".profile-chip").forEach(b =>
         b.setAttribute("aria-pressed", String(b.dataset.profile === "custom")));
       sync();
     };
@@ -1013,6 +2002,34 @@ function installedChip(c) {
   return c.installedStatus === 'unknown' ? '<span class="chip" title="No reliable installed-app probe is available">Not checked</span>' : '';
 }
 
+/* The real application icon, with a monogram underneath it.
+
+   The icon is the site's own favicon, fetched through DuckDuckGo's icon service
+   by the homepage domain the catalog already carries. Two consequences worth
+   knowing: the page tells that service which domains are in the catalog, and on
+   an offline machine — which a freshly provisioned box often is — none of them
+   load. So the monogram is not a fallback that gets swapped in; it is rendered
+   first and the image sits on top of it, which means a failed or blocked request
+   degrades to a letter with no flash of nothing. */
+function iconDomain(c) {
+  if (!c.homepage) return null;
+  try {
+    return new URL(c.homepage).hostname.replace(/^www\./, "");
+  } catch (e) {
+    return null;
+  }
+}
+
+function componentIcon(c) {
+  const letter = (c.name || c.id || "?").replace(/[^A-Za-z0-9]/g, "").charAt(0) || "?";
+  const domain = iconDomain(c);
+  const img = domain
+    ? '<img class="icon-img" alt="" loading="lazy" referrerpolicy="no-referrer" src="' +
+      esc("https://icons.duckduckgo.com/ip3/" + domain + ".ico") + '">'
+    : "";
+  return '<span class="item-icon" aria-hidden="true">' + esc(letter) + img + "</span>";
+}
+
 function itemHtml(c) {
   const name = c.homepage
     ? '<a class="item-name" href="' + esc(c.homepage) + '" target="_blank" rel="noopener noreferrer">' +
@@ -1020,15 +2037,33 @@ function itemHtml(c) {
     : '<span class="item-name">' + esc(c.name) + "</span>";
   const searchStr = (c.id + " " + c.name + " " + c.description + " " + c.package +
     (c.installed ? " installed already-installed" : "")).toLowerCase();
-  return '<label class="item' + (canInstall(c) ? '' : ' unavailable') + '" data-id="' + esc(c.id) + '" data-installed="' + (c.installed ? "1" : "0") + '" data-search="' +
-      esc(searchStr) + '">' +
+  const configBtn = c.id === "claude-autostart"
+    ? '<button type="button" class="jump-link" data-configure-card="cardClaudeAutostart">⚙ Configure</button>'
+    : (c.prompt
+      ? '<button type="button" class="jump-link" data-configure-card="cardConfig" data-configure-field="cfg_' + esc(String(c.prompt).split(/[\s,]+/)[0]) + '">⚙ Configure</button>'
+      : "");
+
+  // Installed components cannot be quick-installed; there is nothing to do.
+  const quick = (canInstall(c) && !c.installed)
+    ? '<button type="button" class="quick-install" data-quick="' + esc(c.id) +
+      '" title="Install just this one now">⚡ Install</button>'
+    : "";
+
+  return '<label class="item' + (canInstall(c) ? '' : ' unavailable') +
+      (c.installed ? ' is-installed' : '') + '" data-id="' + esc(c.id) +
+      '" data-installed="' + (c.installed ? "1" : "0") + '" data-search="' + esc(searchStr) + '">' +
     '<input type="checkbox" class="pick" data-id="' + esc(c.id) + '"' + (canInstall(c) ? '' : ' disabled aria-disabled="true"') + '>' +
+    componentIcon(c) +
     "<span>" +
-      '<span class="item-title">' + name +
-        '<span class="chip prov prov-' + esc(c.provider) + '">' + esc(c.provider) + "</span>" +
-        '<span class="chip chip-pkg" title="' + esc(c.provider + ": " + c.package) + '">' +
-          esc(c.package) + "</span>" +
-        platformChip(c) + installedChip(c) +
+      '<span class="item-title">' + name + installedChip(c) + quick +
+        // Everything below is detail: which package exactly, which platforms,
+        // where to configure it. Hidden unless the Details toggle is on.
+        '<span class="item-detail">' +
+          '<span class="chip prov prov-' + esc(c.provider) + '">' + esc(c.provider) + "</span>" +
+          '<span class="chip chip-pkg" title="' + esc(c.provider + ": " + c.package) + '">' +
+            esc(c.package) + "</span>" +
+          platformChip(c) + configBtn +
+        "</span>" +
         '<span class="state-chips"></span>' +
       "</span>" +
       '<span class="item-desc">' + esc(c.description) + "</span>" +
@@ -1131,9 +2166,16 @@ function renderTiers() {
   }
   const byTier = new Map();
   for (const id of eff) {
+    // Already installed means the run will skip it, so it is not a step in the
+    // order — listing it made the plan look longer than the work.
+    if (BY_ID.get(id)?.installed) continue;
     const d = depth(id);
     if (!byTier.has(d)) byTier.set(d, []);
     byTier.get(d).push(id);
+  }
+  if (!byTier.size) {
+    el("tiers").innerHTML = '<div class="empty">Everything selected is already installed — nothing to do.</div>';
+    return;
   }
   // Same numbering the profile summary shows, from the one shared stepMap().
   el("tiers").innerHTML = [...byTier.keys()].sort((a, b) => a - b).map((d, i) => {
@@ -1156,37 +2198,90 @@ function renderTiers() {
 }
 
 /* ── configuration editor ─────────────────────────────────────────────── */
+/* Which section each prompt belongs in, and a short label for it. The catalog
+   owns the questions themselves — this only groups them and gives them a name
+   that fits above a field, falling back to the catalog's own wording.
+
+   The list of FIELDS is not here on purpose. It used to be, and it was wrong:
+   the form hardcoded six, of which ollama_models and antigravity_url are asked
+   only by the Linux catalog, so on Windows it showed boxes whose answers no
+   installer ever read. Rendering from STATE.prompts also means the reverse works:
+   git_user_name/git_user_email became Windows prompts later, and the Developer
+   identity section appeared there with no change to this file. */
+const CONFIG_SECTIONS = [
+  { title: "Developer identity", keys: ["git_user_name", "git_user_email"] },
+  { title: "Knowledge & MCP stack", keys: ["omnigraph_url", "herdr_source", "antigravity_url", "context7_api_key"] },
+  { title: "Local AI & inference", keys: ["ollama_models"] }
+];
+
+const CONFIG_LABELS = {
+  git_user_name: "Git user name",
+  git_user_email: "Git user email",
+  omnigraph_url: "Omnigraph URL",
+  herdr_source: "Herdr source",
+  antigravity_url: "Antigravity download URL",
+  ollama_models: "Ollama models",
+  context7_api_key: "Context7 API key"
+};
+
 function renderConfigCard() {
   const cbox = el("configGrid");
   if (!cbox) return;
   const curProf = CONFIG_DATA?.profile || activeProfile || STATE.suggested || "workstation";
   const answers = CONFIG_DATA?.answers || {};
+  const prompts = STATE.prompts || {};
   const profOpts = Object.keys(STATE.profiles).map(p =>
     '<option value="' + esc(p) + '"' + (p === curProf ? " selected" : "") + ">" + esc(p) + "</option>"
   ).join("");
 
-  let html = '<div class="config-card">' +
-    '<label for="cfg_profile">Deployment Profile</label>' +
-    '<select id="cfg_profile">' + profOpts + "</select>" +
-    '<div class="help">Default starting set of components</div>' +
-    "</div>";
-
-  const knownPrompts = [
-    { key: "git_user_name", label: "Git User Name", help: "user.name for global git commits" },
-    { key: "git_user_email", label: "Git User Email", help: "user.email for global git commits" },
-    { key: "omnigraph_url", label: "Omnigraph URL", help: "Base URL for Omnigraph server" },
-    { key: "ollama_models", label: "Ollama Models", help: "Models to pull (default: nomic-embed-text)" },
-    { key: "herdr_source", label: "Herdr Source", help: "Source package or URL for Herdr" },
-    { key: "antigravity_url", label: "Antigravity .deb URL", help: "Download URL for Antigravity" }
-  ];
-
-  for (const p of knownPrompts) {
-    const val = answers[p.key] ?? STATE?.prompts?.[p.key]?.default ?? "";
-    html += '<div class="config-card">' +
-      '<label for="cfg_' + esc(p.key) + '">' + esc(p.label) + "</label>" +
-      '<input type="text" id="cfg_' + esc(p.key) + '" data-cfg-key="' + esc(p.key) + '" value="' + esc(val) + '">' +
-      '<div class="help">' + esc(p.help) + "</div>" +
+  const field = key => {
+    const spec = prompts[key];
+    if (!spec) return "";   // not a prompt on this platform: do not offer it
+    // An answer fills the box; a catalog default only suggests one. Putting the
+    // default in `value` made every field look answered — and a Save then wrote
+    // the suggestion back as though the user had chosen it.
+    const answered = answers[key];
+    const suggestion = spec.default ?? "";
+    const label = CONFIG_LABELS[key] || spec.question || key;
+    return '<div class="config-card">' +
+      '<label for="cfg_' + esc(key) + '">' + esc(label) + "</label>" +
+      '<input type="text" id="cfg_' + esc(key) + '" data-cfg-key="' + esc(key) + '"' +
+        ' value="' + esc(answered ?? "") + '"' +
+        (suggestion ? ' placeholder="' + esc(suggestion) + '"' : "") + ">" +
+      '<div class="help">' + esc(spec.help || spec.question || "") + "</div>" +
       "</div>";
+  };
+
+  let html = '<div class="config-section" style="grid-column:1 / -1;">' +
+    '<div class="config-section-title">System &amp; deployment</div>' +
+    '<div class="config-grid" style="margin-top:8px;">' +
+    '<div class="config-card">' +
+      '<label for="cfg_profile">Deployment profile</label>' +
+      '<select id="cfg_profile">' + profOpts + "</select>" +
+      '<div class="help">Default starting set of components</div>' +
+    "</div></div></div>";
+
+  const placed = new Set();
+  for (const sec of CONFIG_SECTIONS) {
+    const fields = sec.keys.filter(k => prompts[k]);
+    if (!fields.length) continue;          // nothing this platform asks: no empty heading
+    fields.forEach(k => placed.add(k));
+    html += '<div class="config-section" style="grid-column:1 / -1;">' +
+      '<div class="config-section-title">' + esc(sec.title) + "</div>" +
+      '<div class="config-grid" style="margin-top:8px;">' +
+      fields.map(field).join("") +
+      "</div></div>";
+  }
+
+  // A prompt added to a catalog but not to CONFIG_SECTIONS still gets a field,
+  // rather than silently never being asked in the browser.
+  const rest = Object.keys(prompts).filter(k => !placed.has(k));
+  if (rest.length) {
+    html += '<div class="config-section" style="grid-column:1 / -1;">' +
+      '<div class="config-section-title">Other settings</div>' +
+      '<div class="config-grid" style="margin-top:8px;">' +
+      rest.map(field).join("") +
+      "</div></div>";
   }
 
   cbox.innerHTML = html;
@@ -1197,9 +2292,15 @@ async function saveConfiguration() {
   const prof = el("cfg_profile")?.value || "workstation";
   const ans = {};
   document.querySelectorAll("[data-cfg-key]").forEach(inp => {
-    ans[inp.dataset.cfgKey] = inp.value;
+    // An empty box means "not answered", not "answered with nothing". Writing ""
+    // would shadow the catalog default: `herdr_source: ""` reaches the installer
+    // as a real answer and fails the source check instead of using npm:herdr.
+    const value = inp.value.trim();
+    if (value) ans[inp.dataset.cfgKey] = value;
   });
-  CONFIG_DATA = { version: 1, profile: prof, answers: ans };
+  if (!CONFIG_DATA) CONFIG_DATA = { version: 1 };
+  CONFIG_DATA.profile = prof;
+  CONFIG_DATA.answers = ans;
   try {
     const res = await fetch(api("/api/config"), {
       method: "POST",
@@ -1385,11 +2486,16 @@ async function poll() {
     const d = await r.json();
     if (d.lines?.length) { appendLog(d.lines); logOffset = d.offset; }
     renderProgress(d);
+    renderHeaderProgress(d);
     if (d.running) { setTimeout(poll, 600); return; }
     running = false;
     el("runStatus").textContent = d.summary || "done";
     sync();
     await refreshInstalled();
+    // A queued quick install starts only once the previous run has finished:
+    // the server runs one at a time and rejects a second with HTTP 409.
+    if (quickQueue.length) { markQuickPending(); drainQuickQueue(); }
+    else { hideHeaderProgress(); markQuickPending(); }
   } catch (e) {
     // The heartbeat may have torn the page down while this request was in
     // flight; there is no log element left to write the failure into.

@@ -250,6 +250,168 @@ Test-Case 'disabled virtualisation is a warning, not a blocker' {
     Assert-Equal $v[0].Severity 'warn'
 }
 
+# ─── "Is it already installed?" ─────────────────────────────────────────────
+# Every probe below runs against a synthetic inventory rather than this machine,
+# so the suite asserts the same thing on a box where nothing is installed.
+# The bar is asymmetric on purpose: a missed install costs a re-run, a false
+# positive silently skips something the user asked for.
+
+function New-FakeInventory {
+    # Mirrors every field Get-AutoOSInstalledInventory really returns.
+    param(
+        [object[]]$Entries = @(),
+        [string[]]$Paths = @(),
+        [string[]]$Appx = @(),
+        [string[]]$Programs = @(),
+        [string[]]$WingetPackages = @()
+    )
+    [pscustomobject]@{
+        Entries = $Entries; Paths = $Paths; Appx = $Appx
+        Programs = $Programs; WingetPackages = $WingetPackages
+    }
+}
+
+function New-FakeComponent {
+    param([string]$Id = 'widget', [string]$Name = 'Widget',
+          [string]$Provider = 'winget', [string]$Package = 'Contoso.Widget',
+          [string]$Verify = '')
+    [pscustomobject]@{ Id = $Id; Name = $Name; Provider = $Provider; Package = $Package; Verify = $Verify }
+}
+
+Test-Case 'a bitness suffix on the registered name still matches' {
+    # Notepad++ registers as "Notepad++ (64-bit x64)" and went undetected.
+    Assert-True (Test-AutoOSRegisteredName 'Notepad++ (64-bit x64)' 'Notepad++') 'bitness suffix rejected'
+}
+
+Test-Case 'a release-channel suffix on the registered name still matches' {
+    # PowerToys registers as "PowerToys (Preview) x64".
+    Assert-True (Test-AutoOSRegisteredName 'PowerToys (Preview) x64' 'PowerToys') 'preview suffix rejected'
+}
+
+Test-Case 'an architecture-plus-locale suffix still matches' {
+    # "Mozilla Firefox (x64 en-US)". Widening the pattern for PowerToys dropped
+    # this case once and silently un-detected Firefox on every English install.
+    Assert-True (Test-AutoOSRegisteredName 'Mozilla Firefox (x64 en-US)' 'Mozilla Firefox') 'locale suffix rejected'
+}
+
+Test-Case 'a different product sharing a prefix is never matched' {
+    foreach ($pair in @(@('Steam Tools', 'Steam'), @('Firefox Helper', 'Firefox'),
+                        @('PowerToys Run Plugin', 'PowerToys'), @('Git Extensions', 'Git'))) {
+        if (Test-AutoOSRegisteredName $pair[0] $pair[1]) { throw "'$($pair[0])' must not match '$($pair[1])'" }
+    }
+    Pass
+}
+
+Test-Case 'the shim directories package managers use are probed even when PATH is stale' {
+    $dirs = @(Get-AutoOSShimDirectory)
+    foreach ($want in @('scoop\shims', 'chocolatey\bin', 'Microsoft\WinGet\Links')) {
+        if (-not @($dirs | Where-Object { $_ -like "*$want*" })) {
+            throw "no probe directory for $want in: $($dirs -join '; ')"
+        }
+    }
+    Pass
+}
+
+Test-Case 'a shim directory off the persistent PATH still resolves a verify command' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    try {
+        Set-Content -LiteralPath (Join-Path $tmp 'widget.cmd') -Value '@echo off'
+        $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent -Verify 'widget --version') `
+                                            -Inventory (New-FakeInventory -Paths @($tmp))
+        Assert-Equal $status 'installed'
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'a winget package id present in the cached list counts as installed' {
+    # winget's own record, read once per run - never one probe per catalog row.
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent) `
+                                        -Inventory (New-FakeInventory -WingetPackages @('Contoso.Widget'))
+    Assert-Equal $status 'installed'
+}
+
+Test-Case 'a winget package id missing from the cached list is not-detected' {
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent -Package 'Contoso.Other') `
+                                        -Inventory (New-FakeInventory -WingetPackages @('Contoso.Widget'))
+    Assert-Equal $status 'not-detected'
+}
+
+Test-Case 'the winget list is only trusted for winget rows' {
+    # 'python' appears in that output as a moniker for something else entirely.
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent -Provider 'choco' -Package 'widget') `
+                                        -Inventory (New-FakeInventory -WingetPackages @('widget'))
+    Assert-Equal $status 'not-detected'
+}
+
+Test-Case 'a per-user install under LOCALAPPDATA\Programs counts as installed' {
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent -Name 'Obsidian' -Package 'Obsidian.Obsidian') `
+                                        -Inventory (New-FakeInventory -Programs @('obsidian'))
+    Assert-Equal $status 'installed'
+}
+
+Test-Case 'a per-user directory belonging to something else proves nothing' {
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent -Name 'Obsidian' -Package 'Obsidian.Obsidian') `
+                                        -Inventory (New-FakeInventory -Programs @('obsidianhelper'))
+    Assert-Equal $status 'not-detected'
+}
+
+Test-Case 'a per-user program directory is only believed when it holds an executable' {
+    # %APPDATA%\JAM Software outlives TreeSize by years: configuration left
+    # behind is not an installation, which is why only Programs\ is read and
+    # only when an .exe is actually in it.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path (Join-Path $tmp 'Leftovers') -Force)
+    [void](New-Item -ItemType Directory -Path (Join-Path $tmp 'RealApp') -Force)
+    try {
+        Set-Content -LiteralPath (Join-Path $tmp 'RealApp\app.exe') -Value 'x'
+        $found = @(Get-AutoOSProgramDirectoryName -Root $tmp)
+        Assert-True (($found -contains 'realapp') -and ($found -notcontains 'leftovers')) `
+            "expected only realapp, got: $($found -join ', ')"
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'an appx package still wins over everything else' {
+    $c = New-FakeComponent -Name 'Slack' -Package 'SlackTechnologies.Slack'
+    Add-Member -InputObject $c -NotePropertyName InstalledAppx -NotePropertyValue @('91750D7E.Slack')
+    $status = Get-AutoOSInstalledStatus -Component $c -Inventory (New-FakeInventory -Appx @('91750D7E.Slack'))
+    Assert-Equal $status 'installed'
+}
+
+Test-Case 'nothing is guessed when every probe comes up empty' {
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent) -Inventory (New-FakeInventory)
+    Assert-Equal $status 'not-detected'
+}
+
+Test-Case 'the disk analyser is WizTree, and treesize is gone' {
+    $ids = @($available | ForEach-Object { $_.Id })
+    Assert-True (($ids -contains 'wiztree') -and ($ids -notcontains 'treesize')) `
+        "catalog ids were: $($ids -join ', ')"
+}
+
+Test-Case 'git and the GitHub CLI are both in the workstation profile' {
+    $ws = @($available | Where-Object { 'workstation' -in $_.Profiles } | ForEach-Object { $_.Id })
+    foreach ($want in @('git', 'gh')) {
+        if ($ws -notcontains $want) { throw "workstation is missing $want" }
+    }
+    Pass
+}
+
+Test-Case 'the windows catalog asks for a git identity and wires it to git' {
+    foreach ($key in @('git_user_name', 'git_user_email')) {
+        if ($winCatalog.prompts.PSObject.Properties.Name -notcontains $key) { throw "windows catalog never asks $key" }
+    }
+    $git = $available | Where-Object { $_.Id -eq 'git' }
+    Assert-True (($git.Prompt -split '[, ]+') -contains 'git_user_name' -and
+                 ($git.Prompt -split '[, ]+') -contains 'git_user_email') `
+        "git prompt was: [$($git.Prompt)]"
+}
+
+Test-Case 'the git post-install step exists and is callable' {
+    $git = $available | Where-Object { $_.Id -eq 'git' }
+    Assert-True ($git.PostInstall -and (Get-Command $git.PostInstall -ErrorAction SilentlyContinue)) `
+        "post-install '$($git.PostInstall)' is not a loaded function"
+}
+
 # ─── PATH handling (the critical regression) ────────────────────────────────
 Describe-Group 'PATH handling'
 
@@ -758,6 +920,304 @@ Test-Case 'Test-AutoOSInstalled checks both Documents\code and Documents\Code' {
         throw 'Test-AutoOSInstalled does not check both Code and code paths'
     }
     Pass
+}
+
+# ─── Claude autostart & session tracking ───────────────────────────────────
+Describe-Group 'claude autostart'
+
+Import-Module (Join-Path $Root 'lib\windows\AutoOS.ClaudeAutostart.psm1') -DisableNameChecking -Force
+
+# A fixture transcript tree shaped exactly like %USERPROFILE%\.claude\projects:
+# one directory per working directory, one *.jsonl per session, with cwd and
+# sessionId carried in the records themselves (ADR 0001). The first line has no
+# cwd, like a real transcript, so discovery has to read forward to find one.
+function New-ClaudeFixture {
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][object[]]$Sessions)
+    foreach ($s in $Sessions) {
+        $slug = ($s.Cwd -replace '[^A-Za-z0-9]', '-')
+        $dir = Join-Path $Root "projects\$slug"
+        [void](New-Item -ItemType Directory -Path $dir -Force)
+        $file = Join-Path $dir "$($s.Uuid).jsonl"
+        $lines = @(
+            (@{ type = 'queue-operation'; sessionId = $s.Uuid } | ConvertTo-Json -Compress)
+            (@{ sessionId = $s.Uuid; cwd = $s.Cwd; gitBranch = 'main'; type = 'user' } | ConvertTo-Json -Compress)
+        )
+        [System.IO.File]::WriteAllLines($file, $lines)
+        (Get-Item $file).LastWriteTime = (Get-Date).AddMinutes(-1 * $s.AgeMinutes)
+    }
+}
+
+function Use-ClaudeFixture {
+    param([Parameter(Mandatory)][object[]]$Sessions, [int]$LiveCount = 1, [Parameter(Mandatory)][scriptblock]$Body)
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    try {
+        New-ClaudeFixture -Root $tmp -Sessions $Sessions
+        $env:AUTOOS_CLAUDE_HOME = $tmp
+        $env:AUTOOS_CLAUDE_LIVE_COUNT = "$LiveCount"
+        $env:AUTOOS_CLAUDE_STATE_FILE = Join-Path $tmp 'state.json'
+        & $Body $tmp
+    }
+    finally {
+        Remove-Item Env:\AUTOOS_CLAUDE_HOME, Env:\AUTOOS_CLAUDE_LIVE_COUNT, Env:\AUTOOS_CLAUDE_STATE_FILE -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'claude-autostart component exists in the Windows catalog' {
+    $cat = Get-Content (Join-Path $Root 'catalog\windows.json') -Raw | ConvertFrom-Json
+    $comp = $cat.categories.components | Where-Object { $_.id -eq 'claude-autostart' }
+    Assert-Equal $comp.provider 'script'
+}
+
+Test-Case 'claude-autostart is absent from the macOS catalog' {
+    # It routes through lib/linux/install.sh, which writes systemd units; on a Mac
+    # that reported `installed` while doing nothing.
+    $cat = Get-Content (Join-Path $Root 'catalog\macos.json') -Raw | ConvertFrom-Json
+    $comp = @($cat.categories.components | Where-Object { $_.id -eq 'claude-autostart' })
+    Assert-Equal $comp.Count 0
+}
+
+Test-Case 'discovery reads the cwd out of each transcript' {
+    # The previous implementation parsed process command lines. Win32_Process has
+    # no working directory, so it found nothing at all - 0 of 6 live sessions on a
+    # real machine. This is that regression, pinned.
+    Use-ClaudeFixture -LiveCount 2 -Sessions @(
+        @{ Cwd = 'C:\work\alpha'; Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 2 }
+        @{ Cwd = 'C:\work\beta';  Uuid = '22222222-2222-2222-2222-222222222222'; AgeMinutes = 3 }
+    ) -Body {
+        $found = @(Find-AutoOSClaudeSessions | Sort-Object cwd)
+        Assert-Equal $found.Count 2
+        Assert-Equal $found[0].cwd 'C:\work\alpha'
+        Assert-Equal $found[0].session_uuid '11111111-1111-1111-1111-111111111111'
+        Assert-Equal $found[0].name 'alpha'
+    }
+}
+
+Test-Case 'a transcript older than the liveness window is not restored' {
+    Use-ClaudeFixture -Sessions @(
+        @{ Cwd = 'C:\work\fresh'; Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 5 }
+        @{ Cwd = 'C:\work\stale'; Uuid = '22222222-2222-2222-2222-222222222222'; AgeMinutes = 900 }
+    ) -Body {
+        $found = @(Find-AutoOSClaudeSessions)
+        Assert-Equal $found.Count 1
+        Assert-Equal $found[0].cwd 'C:\work\fresh'
+    }
+}
+
+Test-Case 'nothing is discovered while no Claude process is running' {
+    Use-ClaudeFixture -LiveCount 0 -Sessions @(
+        @{ Cwd = 'C:\work\alpha'; Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 2 }
+    ) -Body {
+        Assert-Equal @(Find-AutoOSClaudeSessions).Count 0
+    }
+}
+
+Test-Case 'one session is recorded once even when it left transcripts in two places' {
+    # Observed on a real machine: the same session id under two project slugs.
+    # Restoring it twice opens two terminals fighting over one conversation.
+    Use-ClaudeFixture -Sessions @(
+        @{ Cwd = 'C:\work\proj';         Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 4 }
+        @{ Cwd = 'C:\work\proj\scratch'; Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 2 }
+    ) -Body {
+        $found = @(Find-AutoOSClaudeSessions)
+        Assert-Equal $found.Count 1
+        Assert-Equal $found[0].cwd 'C:\work\proj\scratch'
+    }
+}
+
+Test-Case 'max_sessions keeps the most recently active, not an arbitrary slice' {
+    Use-ClaudeFixture -LiveCount 3 -Sessions @(
+        @{ Cwd = 'C:\work\a'; Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 30 }
+        @{ Cwd = 'C:\work\b'; Uuid = '22222222-2222-2222-2222-222222222222'; AgeMinutes = 2 }
+        @{ Cwd = 'C:\work\c'; Uuid = '33333333-3333-3333-3333-333333333333'; AgeMinutes = 10 }
+    ) -Body {
+        $config = Get-AutoOSClaudeConfig
+        $config['max_sessions'] = 2
+        $found = @(Find-AutoOSClaudeSessions -Config $config)
+        Assert-Equal $found.Count 2
+        Assert-Equal (($found | ForEach-Object { $_.name }) -join ',') 'b,c'
+    }
+}
+
+Test-Case 'Save-AutoOSClaudeSnapshot records the sessions it is given' {
+    # It used to ignore its argument and re-derive from the process table, which
+    # is what made the hook path a silent no-op that wrote "sessions": [].
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $file = Join-Path $tmp 'state.json'
+    try {
+        $mine = @([pscustomobject]@{
+            session_uuid = '44444444-4444-4444-4444-444444444444'
+            name = 'given'; cwd = 'C:\work\given'; remote_control = $false; last_active = 1
+        })
+        [void](Save-AutoOSClaudeSnapshot -Sessions $mine -Path $file)
+        $doc = Get-Content $file -Raw | ConvertFrom-Json
+        Assert-Equal @($doc.sessions).Count 1
+        Assert-Equal $doc.sessions[0].name 'given'
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'a snapshot with nothing live never clobbers a good one' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $file = Join-Path $tmp 'state.json'
+    try {
+        $mine = @([pscustomobject]@{
+            session_uuid = '44444444-4444-4444-4444-444444444444'
+            name = 'kept'; cwd = 'C:\work\kept'; remote_control = $false; last_active = 1
+        })
+        [void](Save-AutoOSClaudeSnapshot -Sessions $mine -Path $file)
+        # The timer fires again mid-boot, before anything is up.
+        [void](Save-AutoOSClaudeSnapshot -Sessions @() -Path $file)
+        $doc = Get-Content $file -Raw | ConvertFrom-Json
+        Assert-Equal @($doc.sessions).Count 1
+        Assert-Equal $doc.sessions[0].name 'kept'
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'remote_control=never strips --rc from a session recorded with it' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $file = Join-Path $tmp 'state.json'
+    try {
+        $session = @([pscustomobject]@{
+            session_uuid = '55555555-5555-5555-5555-555555555555'
+            name = 'alpha'; cwd = 'C:\work\alpha'; remote_control = $true; last_active = 1
+        })
+        [void](Save-AutoOSClaudeSnapshot -Sessions $session -Path $file)
+        $config = Get-AutoOSClaudeConfig
+        $config['remote_control'] = 'never'
+        $plan = @(Get-AutoOSClaudeRestorePlan -Config $config -Path $file)
+        Assert-Equal $plan.Count 1
+        Assert-Equal $plan[0].Action 'START'
+        Assert-Equal $plan[0].RemoteControl $false
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'a session with no recorded id is skipped with a reason, not started' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $file = Join-Path $tmp 'state.json'
+    try {
+        $doc = [pscustomobject]@{
+            version = 2; captured_at = 1; captured_at_iso = 'x'
+            sessions = @([pscustomobject]@{ session_uuid = ''; name = 'broken'; cwd = 'C:\work\broken'; remote_control = $false })
+        }
+        [IO.File]::WriteAllText($file, ($doc | ConvertTo-Json -Depth 10))
+        $plan = @(Get-AutoOSClaudeRestorePlan -Path $file)
+        Assert-Equal $plan[0].Action 'SKIP'
+        Assert-True ($plan[0].Reason -like '*no session id*')
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'the defaults come from the shipped example config, not a second copy' {
+    # Three homes for these values (here, claude_sessions.py, the example file) is
+    # how the web UI ended up writing keys nothing read.
+    $example = Get-Content (Join-Path $Root 'autoos.config.example.json') -Raw | ConvertFrom-Json
+    $defaults = Get-AutoOSClaudeDefaults
+    foreach ($p in $example.claude_autostart.PSObject.Properties) {
+        Assert-Equal $defaults[$p.Name] $p.Value
+    }
+}
+
+Test-Case 'Set-AutoOSClaudeConfig merges and never drops the keys it does not set' {
+    # The web card's first version replaced the whole object, silently discarding
+    # fallback_cwd, fallback_name and terminal_host on every save.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $file = Join-Path $tmp 'autoos.config.json'
+    try {
+        $seed = [pscustomobject]@{
+            version = 1; profile = 'workstation'
+            answers = [pscustomobject]@{ git_user_name = 'Keep Me' }
+            claude_autostart = [pscustomobject]@{ fallback_cwd = 'C:\keep'; resume_mode = 'full' }
+        }
+        [IO.File]::WriteAllText($file, ($seed | ConvertTo-Json -Depth 10))
+        [void](Set-AutoOSClaudeConfig -Settings @{ resume_mode = 'summary'; max_sessions = 3 } -ConfigPath $file)
+
+        $after = Get-Content $file -Raw | ConvertFrom-Json
+        Assert-Equal $after.claude_autostart.resume_mode 'summary'
+        Assert-Equal $after.claude_autostart.max_sessions 3
+        Assert-Equal $after.claude_autostart.fallback_cwd 'C:\keep'
+        Assert-Equal $after.answers.git_user_name 'Keep Me'
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSClaudeConfig refuses a setting that nothing reads' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    try {
+        $threw = $false
+        try { [void](Set-AutoOSClaudeConfig -Settings @{ resume_prompt_mode = 'full' } -ConfigPath (Join-Path $tmp 'c.json')) }
+        catch { $threw = $true }
+        Assert-True $threw 'an unknown key should be rejected, not written where no reader looks'
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'the scheduled-task arguments are stable, so a second run can skip' {
+    $a = Get-AutoOSClaudeTaskArguments -Action 'restore'
+    $b = Get-AutoOSClaudeTaskArguments -Action 'restore'
+    Assert-Equal $a $b
+    Assert-True ($a -like '*-Action restore*')
+    # Hidden launcher, visible terminal: the window the user needs is the one
+    # wt.exe opens, not this one (ADR 0002).
+    Assert-True ($a -like '*-WindowStyle Hidden*')
+}
+
+Test-Case 'an unregistered task never counts as current' {
+    Assert-Equal (Test-AutoOSClaudeTaskCurrent -TaskName 'AutoOS-Claude-DoesNotExist' -Arguments 'x') $false
+}
+
+Test-Case 'restore starts nothing when there is no terminal host' {
+    # Windows Terminal is what a restored TUI appears in; with none, restore has
+    # to refuse rather than orphan a process nobody can see (ADR 0002).
+    $config = Get-AutoOSClaudeConfig
+    $config['terminal_host'] = 'herdr'   # not a Windows host, so none resolves
+    Assert-True ($null -eq (Get-AutoOSClaudeTerminalHost -Config $config))
+}
+
+Test-Case 'the live-process probe answers on this machine without throwing' {
+    # Principle 9: the AUTOOS_CLAUDE_LIVE_COUNT seam every test above uses must
+    # not be the only path that is ever exercised.
+    Assert-True ((Get-AutoOSClaudeLiveCount) -ge 0)
+}
+
+Test-Case 'the claude card, chooser and configure affordance are present in the page' {
+    $html = Get-Content (Join-Path $Root 'web\index.html') -Raw
+    Assert-True ($html -match 'id="cardClaudeAutostart"')
+    Assert-True ($html -match 'id="cardChooserBar"')
+    Assert-True ($html -match 'data-configure-card')
+}
+
+Test-Case 'the web UI introduces no inline onclick handlers' {
+    $html = Get-Content (Join-Path $Root 'web\index.html') -Raw
+    Assert-True (-not ($html -match 'onclick="'))
+}
+
+Test-Case 'the reduced-motion guard for the progress bar survives' {
+    $html = Get-Content (Join-Path $Root 'web\index.html') -Raw
+    Assert-True ($html -match 'prefers-reduced-motion:reduce\)\{\.bar\.indeterminate>div\{animation:none')
+}
+
+Test-Case 'a round-trip timestamp is read back as the date it was written' {
+    # A bare [datetime]::TryParse uses the current culture, which read the ISO
+    # string 2026-09-11T12:04 back as 2026-11-09 - the status screen showed a
+    # snapshot two months in the future next to rows dated correctly.
+    $written = (Get-Date '2026-09-11T12:04:33.0000000+02:00').ToString('o')
+    $shown = Format-AutoOSTimestamp $written
+    Assert-True ($shown -like '2026-09-11 *') "expected 2026-09-11, got [$shown]"
+}
+
+Test-Case 'dry run is off by default' {
+    $html = Get-Content (Join-Path $Root 'web\index.html') -Raw
+    Assert-True ($html -match '<input type="checkbox" id="dryRun">')
 }
 
 # ─── Static analysis ────────────────────────────────────────────────────────

@@ -24,7 +24,8 @@ something — extend the schema instead.
   "source": "msstore",                   // winget only: alternate source
   "postInstall": "Install-AutoOSPoshTheme", // function in lib/
   "prompt": "omnigraph_url",             // a question to ask before installing
-  "notes": "One line shown under the plan entry."
+  "notes": "One line shown under the plan entry.",
+  "launcher": "none"                     // a service, not a command
 }
 ```
 
@@ -46,6 +47,7 @@ something — extend the schema instead.
 | `postInstall` | | Function name in `lib/` run after a successful install |
 | `prompt` | | Key into the catalog's `prompts` object |
 | `notes` | | Shown under the plan entry |
+| `launcher` | | `none` when the component installs a background service and no command. Without it the post-run report hunts for an executable and tells the user "no launcher found yet", which for a service is a wrong answer rather than a blank one. |
 
 ## Providers
 
@@ -191,7 +193,21 @@ a leak whether or not it happens to work.
 ## Installed status and vendor setup
 
 Optional Windows `installedNames` entries match exact registered display names plus
-version/architecture suffixes; `installedAppx` contains exact MSIX package names.
+version, bitness, release-channel and locale suffixes — `Notepad++ (64-bit x64)`,
+`PowerToys (Preview) x64` and `Mozilla Firefox (x64 en-US)` all match their bare
+name, while `Git Extensions` never matches `Git`. `installedAppx` contains exact
+MSIX package names.
+
+When neither the Uninstall registry nor the `verify` command's executable settles
+it, detection falls back to per-user installs under `%LOCALAPPDATA%\Programs` and
+then to winget's own record of installed package ids, read once per run with a
+timeout. `%APPDATA%` is never consulted: configuration outlives the uninstall that
+removed the program. Set `AUTOOS_SKIP_WINGET_LIST=1` to skip the winget fallback.
+
+Linux detection searches `~/.local/bin`, `~/bin`, `~/.cargo/bin`, `/usr/local/bin`,
+`/snap/bin` and both flatpak export directories in addition to `PATH`, because a
+non-login or `sudo` shell reaches none of them.
+
 The same detector serves terminal badges, browser badges and installer skipping.
 A command in a private tool runtime is not proof of a normally installed application.
 Unknown probes remain unknown, without a green check.

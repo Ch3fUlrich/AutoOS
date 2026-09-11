@@ -1,0 +1,35 @@
+# Bring back the Claude Code sessions that were live before the last shutdown,
+# into a terminal a human can actually attach to (ADR 0002).
+#
+# ORDERING: no `After=default.target`. This unit is pulled in *by* default.target,
+# so ordering after it is a cycle systemd has to break on its own — and the
+# original template did exactly that. `herdr-server.service` is a Wants=, not a
+# Requires=, because most machines do not have one: where it exists the panes must
+# be owned before anything can be started in them, and where it does not the
+# script falls back to tmux or refuses outright.
+#
+# TIMEOUT: several sessions, each waiting on its own resume prompt, on a machine
+# that has just booted. The default 90s kills that half-done, leaving some
+# sessions restored and some not, which is worse than either extreme.
+#
+# @APPDIR@ / @APPROOT@ are substituted by install.sh; no unit file hard-codes an
+# install path.
+[Unit]
+Description=Restore Claude Code sessions after boot
+Documentation=file://@APPROOT@/docs/decisions/0002-restored-sessions-need-a-visible-terminal.md
+Wants=herdr-server.service network-online.target
+After=herdr-server.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=AUTOOS_ROOT=@APPROOT@
+Environment=AUTOOS_NONINTERACTIVE=1
+Environment=NO_COLOR=1
+ExecStart=@APPDIR@/claude-sessions.sh restore
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

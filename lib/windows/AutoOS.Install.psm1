@@ -17,6 +17,11 @@ Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1')     -DisableNameCheckin
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Detect.psm1') -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Progress.psm1') -DisableNameChecking
 
+# winget's APPINSTALLER_CLI_ERROR_PACKAGE_ALREADY_INSTALLED. Script providers
+# return it to mean "there was nothing left to do", which is how a second run
+# reports `skipped` instead of `installed`.
+$script:ExitCodeAlreadyInstalled = -1978335189
+
 $script:DryRun  = $false
 $script:Answers = @{}
 $script:RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -279,7 +284,7 @@ function Install-AutoOSComponent {
         return 'failed'
     }
     if (-not $script:DryRun) { Clear-AutoOSInstalledStatus }
-    if ($result.ExitCode -eq -1978335189) { return 'skipped' }
+    if ($result.ExitCode -eq $script:ExitCodeAlreadyInstalled) { return 'skipped' }
     'installed'
 }
 
@@ -288,6 +293,7 @@ function Invoke-AutoOSScriptProvider {
     switch ($Component.Package) {
         'meslo-nerd-font' { return Install-AutoOSNerdFont }
         'herdr'           { return Install-AutoOSHerdr }
+        'claude-autostart'{ return Install-AutoOSClaudeAutostart }
         'agy'             { return Install-AutoOSAgy }
         default           { return @{ ExitCode = 1; Output = "no script for '$($Component.Package)'" } }
     }
@@ -313,6 +319,64 @@ function Add-AutoOSAgyToPath {
 
 function Add-AutoOSGitToPath {
     Add-AutoOSPathEntry -Directory @("$env:ProgramFiles\Git\cmd") | Out-Null
+}
+
+function Set-AutoOSGitConfig {
+    <#
+      .SYNOPSIS
+        Put git on PATH and apply the commit identity the user was asked for.
+      .DESCRIPTION
+        The Linux side has asked for git_user_name / git_user_email since the
+        beginning and applies them in setup_git_config; Windows asked for
+        nothing, so a fresh machine was left committing as whatever git guessed
+        from the hostname.
+
+        Read-modify-write, never clobber: an empty answer leaves whatever the
+        user already configured alone, and a value that is already set is
+        reported as such rather than rewritten. `git config --global` edits one
+        key in ~/.gitconfig, so the rest of the file survives.
+    #>
+    Add-AutoOSGitToPath
+
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    $pairs = @(
+        @{ Key = 'git_user_name';  Setting = 'user.name' },
+        @{ Key = 'git_user_email'; Setting = 'user.email' }
+    )
+    if ($script:DryRun) {
+        foreach ($pair in $pairs) {
+            $answer = [string](Get-AutoOSAnswer $pair.Key '')
+            if ($answer) { Write-AutoOSLine "would set git $($pair.Setting) = $answer" -Level muted }
+        }
+        return
+    }
+    if (-not $git) {
+        # A brand-new install is not on this process's PATH yet. Fall back to the
+        # file git.exe was just written to rather than silently doing nothing.
+        $fallback = Join-Path $env:ProgramFiles 'Git\cmd\git.exe'
+        if (Test-Path -LiteralPath $fallback -PathType Leaf) { $git = Get-Command $fallback }
+    }
+    if (-not $git) {
+        Write-AutoOSLine 'git not found - skipping git identity' -Level warn
+        return
+    }
+
+    foreach ($pair in $pairs) {
+        $answer = [string](Get-AutoOSAnswer $pair.Key '')
+        if (-not $answer) { continue }
+        $current = ''
+        try { $current = [string](& $git.Source 'config' '--global' $pair.Setting 2>$null | Select-Object -First 1) } catch { $current = '' }
+        if ($current -eq $answer) {
+            Write-AutoOSLine "git $($pair.Setting) already set to $answer" -Level muted
+            continue
+        }
+        try {
+            & $git.Source 'config' '--global' $pair.Setting $answer 2>&1 | Out-Null
+            Write-AutoOSLine "git $($pair.Setting) = $answer" -Level ok
+        } catch {
+            Write-AutoOSLine "could not set git $($pair.Setting): $($_.Exception.Message)" -Level warn
+        }
+    }
 }
 
 function Add-AutoOSCondaToPath {
@@ -392,6 +456,65 @@ function Install-AutoOSHerdr {
     }
     Write-AutoOSLine "Unrecognised Herdr source '$source' - skipping." -Level warn
     @{ ExitCode = 0; Output = 'skipped' }
+}
+
+function Install-AutoOSClaudeAutostart {
+    <#
+      .SYNOPSIS
+        Register the Scheduled Tasks that snapshot and restore Claude Code sessions.
+      .DESCRIPTION
+        Writes nothing into the user's ~/.claude: the lifecycle-hook approach was
+        removed because SessionEnd deletes the very record restore depends on, and
+        a hook command hard-codes this checkout's path into a global config file
+        (ADR 0003). The only state this owns is two Scheduled Tasks.
+
+        Returns the winget "already installed" exit code when both tasks are
+        already current, so a second run reports `skipped` rather than `installed`.
+    #>
+    Import-Module (Join-Path $PSScriptRoot 'AutoOS.ClaudeAutostart.psm1') -DisableNameChecking -Force
+    $config = Get-AutoOSClaudeConfig
+
+    if ($script:DryRun) {
+        [void](Register-AutoOSClaudeAutostartTask -Config $config -DryRun)
+        Write-AutoOSLine "would snapshot live sessions every $($config['snapshot_interval_mins']) minutes and reopen them at logon" -Level muted
+        Write-AutoOSClaudeHostReadiness -Config $config
+        return @{ ExitCode = 0; Success = $true }
+    }
+
+    try {
+        $outcome = Register-AutoOSClaudeAutostartTask -Config $config
+        Write-AutoOSClaudeHostReadiness -Config $config
+
+        switch ($outcome) {
+            'skipped'  { return @{ ExitCode = $script:ExitCodeAlreadyInstalled; Success = $true } }
+            'failed'   { return @{ ExitCode = 1; Success = $false; Output = 'could not register the scheduled tasks' } }
+            default    { return @{ ExitCode = 0; Success = $true } }
+        }
+    } catch {
+        Write-AutoOSLine "could not configure Claude autostart: $($_.Exception.Message)" -Level warn
+        return @{ ExitCode = 1; Output = $_.Exception.Message; Success = $false }
+    }
+}
+
+function Write-AutoOSClaudeHostReadiness {
+    <#
+      .SYNOPSIS
+        Say at install time whether a restored session will have anywhere to appear.
+      .DESCRIPTION
+        A restore with no terminal host does nothing (ADR 0002). Naming that here
+        beats letting the user find out after a reboot.
+    #>
+    param([hashtable]$Config)
+
+    if (Get-AutoOSClaudeTerminalHost -Config $Config) {
+        Write-AutoOSLine 'restored sessions will open in Windows Terminal tabs' -Level ok
+    } else {
+        Write-AutoOSLine 'Windows Terminal was not found - restore will refuse to start a session it cannot show you' -Level warn
+        Write-AutoOSLine 'install it with: winget install Microsoft.WindowsTerminal' -Level muted
+    }
+    if (-not (Get-Command -Name 'claude' -ErrorAction SilentlyContinue)) {
+        Write-AutoOSLine 'claude is not on PATH yet - autostart stays idle until Claude Code is installed' -Level warn
+    }
 }
 
 function Install-AutoOSPoshTheme {
@@ -913,8 +1036,9 @@ Export-ModuleMember -Function `
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
     Write-AutoOSOmnigraphReadiness,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
-    Add-AutoOSGitToPath, Add-AutoOSAgyToPath, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
-    Install-AutoOSHerdr, Install-AutoOSAgy, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
+    Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSAgyToPath, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
+    Install-AutoOSHerdr, Install-AutoOSAgy, Install-AutoOSClaudeAutostart,
+    Write-AutoOSClaudeHostReadiness, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,

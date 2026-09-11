@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -226,6 +227,38 @@ def run_install(ids: list[str], answers: dict, dry: bool) -> None:
             RUN["running"] = False
 
 
+def example_block(name):
+    """One top-level block of autoos.config.example.json, or {}.
+
+    The example is the single home for the shipped defaults, so the server reads
+    them from there rather than restating them.
+    """
+    path = ROOT / "autoos.config.example.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get(name) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def detected_answers():
+    """Answers we can read off the machine instead of asking for them.
+
+    A prefilled field is only an improvement when the value is real; a plausible
+    looking placeholder is worse than an empty box, because it reads as answered.
+    """
+    answers = {}
+    for key, args in (("git_user_name", ["user.name"]), ("git_user_email", ["user.email"])):
+        try:
+            res = subprocess.run(["git", "config", "--global"] + args,
+                                 capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        value = res.stdout.strip()
+        if res.returncode == 0 and value:
+            answers[key] = value
+    return answers
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "AutoOS"
 
@@ -246,6 +279,37 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, code: int, obj) -> None:
         self._send(code, json.dumps(obj).encode(), "application/json")
+
+    # ── claude session state ────────────────────────────────────────────────
+    # The engine is the single source for discovery and the state format; the
+    # server only forwards it, so the card and the CLI can never disagree.
+
+    def _claude_engine(self, command):
+        """Run one engine command and return its stdout, or None."""
+        script = ROOT / "lib" / "linux" / "claude_sessions.py"
+        if not script.is_file():
+            return None
+        try:
+            res = subprocess.run([sys.executable, str(script), command],
+                                 capture_output=True, text=True, cwd=str(ROOT), timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return res.stdout if res.returncode == 0 else None
+
+    def _claude_state(self):
+        """What the card needs to answer "will my sessions come back?"."""
+        state = {"sessions": [], "captured_at_iso": None}
+        raw = self._claude_engine("state")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                state["sessions"] = parsed.get("sessions", [])
+                state["captured_at_iso"] = parsed.get("captured_at_iso")
+            except ValueError:
+                pass
+        unit = Path.home() / ".config" / "systemd" / "user" / "claude-sessions-restore.service"
+        state["installed"] = unit.is_file()
+        return state
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -293,14 +357,21 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, data)
                 except Exception as exc:
                     return self._json(500, {"error": f"failed to read config: {exc}"})
-            ex_file = ROOT / "autoos.config.example.json"
-            if ex_file.is_file():
-                try:
-                    data = json.loads(ex_file.read_text(encoding="utf-8"))
-                    return self._json(200, data)
-                except Exception:
-                    pass
-            return self._json(200, {"version": 1, "profile": "workstation", "answers": {}})
+            # No config yet. Seed it from the machine, never from the example
+            # file: its answers are illustrative ("Your Name", "you@example.com")
+            # and serving them puts fake identity in the form, where it looks
+            # answered and gets saved as though it were real.
+            return self._json(200, {
+                "version": 1,
+                "profile": "workstation",
+                "answers": detected_answers(),
+                "claude_autostart": example_block("claude_autostart"),
+            })
+
+        if u.path == "/api/claude/sessions":
+            # `state`, never `snapshot`: a GET must not have side effects, and the
+            # first version re-recorded the machine's sessions on every page load.
+            return self._json(200, self._claude_state())
 
         return self._json(404, {"error": "not found"})
 
@@ -308,6 +379,13 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if not self._authed(parse_qs(u.query)):
             return self._json(403, {"error": "bad or missing token"})
+        if u.path == "/api/claude/snapshot":
+            out = self._claude_engine("snapshot")
+            if out is None:
+                return self._json(500, {"error": "could not run the session snapshot"})
+            payload = self._claude_state()
+            payload["ok"] = True
+            return self._json(200, payload)
         if u.path == "/api/config":
             length = int(self.headers.get("Content-Length") or 0)
             try:

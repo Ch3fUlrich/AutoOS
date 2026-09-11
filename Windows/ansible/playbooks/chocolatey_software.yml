@@ -20,7 +20,9 @@
         choco_packages:
           - 7zip
           - powertoys
-          - treesizefree
+          # Swapped with the local catalog: WizTree scans a volume by reading the
+          # MFT directly, where TreeSize Free walks the tree.
+          - wiztree
           - nerd-fonts-meslo
           - oh-my-posh
           - firefox

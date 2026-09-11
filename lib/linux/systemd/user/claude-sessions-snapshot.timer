@@ -1,0 +1,28 @@
+# Snapshot the live Claude Code sessions every @INTERVAL@ minutes.
+#
+# The window of loss is therefore at most @INTERVAL@ minutes of session
+# *membership* — a session opened just before a crash may be missing. It is never
+# conversation content, which lives in the transcript either way.
+#
+# WHY OnCalendar AND NOT OnUnitActiveSec: a monotonic-only timer
+# (OnBootSec= + OnUnitActiveSec=) stops scheduling once boot+interval has passed
+# without the service having run in the current boot, which silently ends the
+# snapshots — and a feature whose snapshots quietly stopped looks identical to one
+# that works right up until the reboot you needed it for. Persistent= additionally
+# catches up a run missed while the machine was off.
+#
+# @INTERVAL@ and @APPDIR@ are substituted by install.sh; the checked-in file is a
+# template, not something to edit and copy by hand.
+[Unit]
+Description=Periodic snapshot of live Claude Code sessions
+Documentation=file://@APPROOT@/docs/decisions/0001-discover-claude-sessions-from-transcripts.md
+
+[Timer]
+OnBootSec=3min
+OnCalendar=*:0/@INTERVAL@
+Persistent=true
+RandomizedDelaySec=30
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -258,6 +258,98 @@ if it "sudo is resolved into AUTOOS_SUDO exactly once"; then
     else assert_eq "$AUTOOS_SUDO" ""; fi
 fi
 
+# "Is it already installed?" - PATH alone misses everything a user-scope
+# installer, snap or flatpak drops outside it. Probed against a scratch HOME so
+# the answers do not depend on what happens to be installed here.
+
+if it "the bin directories PATH routinely omits are all probed"; then
+    dirs="$( SYS_HOME=/home/nobody; _extra_bin_dirs )"
+    missing=""
+    for want in /home/nobody/.local/bin /snap/bin /usr/local/bin \
+                /var/lib/flatpak/exports/bin /home/nobody/.local/share/flatpak/exports/bin; do
+        [[ "$dirs" == *"$want"* ]] || missing="$missing $want"
+    done
+    if [[ -z "$missing" ]]; then pass; else fail "not probed:$missing"; fi
+fi
+
+if it "a command in ~/.local/bin is found when PATH does not list it"; then
+    tmp="$(mktemp -d)"; mkdir -p "$tmp/.local/bin"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/.local/bin/autoos-probe"
+    chmod +x "$tmp/.local/bin/autoos-probe"
+    if ( SYS_HOME="$tmp"; PATH="/usr/bin:/bin"; has_bin autoos-probe ); then pass
+    else fail "the home .local/bin directory was not searched"; fi
+    rm -rf "$tmp"
+fi
+
+if it "a command that exists nowhere is never invented"; then
+    tmp="$(mktemp -d)"
+    if ( SYS_HOME="$tmp"; has_bin autoos-definitely-not-installed ); then
+        fail "reported a command that does not exist"
+    else pass; fi
+    rm -rf "$tmp"
+fi
+
+if it "a user-scope gh install is detected without it being on PATH"; then
+    tmp="$(mktemp -d)"; mkdir -p "$tmp/.local/bin"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/.local/bin/gh"
+    chmod +x "$tmp/.local/bin/gh"
+    if ( SYS_HOME="$tmp"; PATH="/usr/bin:/bin"; script_is_installed gh ); then pass
+    else fail "gh in ~/.local/bin was not detected"; fi
+    rm -rf "$tmp"
+fi
+
+if it "a script component that is genuinely absent stays absent"; then
+    tmp="$(mktemp -d)"
+    # shellcheck disable=SC2123  # narrowing PATH is the point of this probe
+    if ( SYS_HOME="$tmp"; PATH="$tmp/empty:$tmp/none"; script_is_installed xpipe ); then
+        fail "xpipe reported installed with nothing on disk"
+    else pass; fi
+    rm -rf "$tmp"
+fi
+
+if it "the workstation profile carries git and the GitHub CLI on both platforms"; then
+    if python3 - <<'PY'
+import json, pathlib, sys
+bad = []
+for name in ("linux.json", "windows.json"):
+    doc = json.loads((pathlib.Path("catalog") / name).read_text(encoding="utf-8"))
+    have = {c["id"]: c.get("profiles", []) for cat in doc["categories"] for c in cat["components"]}
+    for want in ("git", "gh"):
+        if "workstation" not in have.get(want, []):
+            bad.append(f"{name}:{want}")
+if bad:
+    print(f"not in the workstation profile: {bad}", file=sys.stderr)
+    sys.exit(1)
+PY
+    then pass; else fail "git/gh missing from a workstation profile"; fi
+fi
+
+if it "windows asks for the same git identity linux already asks for"; then
+    if python3 - <<'PY'
+import json, pathlib, sys
+root = pathlib.Path("catalog")
+win = json.loads((root / "windows.json").read_text(encoding="utf-8"))
+lin = json.loads((root / "linux.json").read_text(encoding="utf-8"))
+missing = [k for k in ("git_user_name", "git_user_email") if k not in win.get("prompts", {})]
+if missing:
+    print(f"windows.json never asks {missing}", file=sys.stderr)
+    sys.exit(1)
+for key in ("git_user_name", "git_user_email"):
+    if win["prompts"][key].get("question") != lin["prompts"][key].get("question"):
+        print(f"{key} asks a different question on each platform", file=sys.stderr)
+        sys.exit(1)
+wired = [c for cat in win["categories"] for c in cat["components"]
+         if "git_user_name" in (c.get("prompt") or "")]
+if not wired:
+    print("no windows component consumes git_user_name", file=sys.stderr)
+    sys.exit(1)
+if not all(c.get("postInstall") for c in wired):
+    print("the git identity prompt has no post-install step to apply it", file=sys.stderr)
+    sys.exit(1)
+PY
+    then pass; else fail "windows git identity is asked but never applied"; fi
+fi
+
 # ─── Idempotency ────────────────────────────────────────────────────────────
 describe "idempotency"
 
@@ -680,12 +772,21 @@ if it "external links open safely"; then
     else fail "external links must carry rel=noopener noreferrer"; fi
 fi
 
-if it "the page offers an explicit light/dark/auto theme"; then
+if it "the theme can be switched, and still starts from the OS preference"; then
+    # The three-button Auto/Light/Dark group is one toggle now. What matters is
+    # unchanged: the user can override, and an un-overridden page follows the OS.
     ok=1
-    for marker in 'data-theme-choice="auto"' 'data-theme-choice="light"' 'data-theme-choice="dark"'; do
+    for marker in 'id="themeToggle"' 'id="themeIcon"' 'function applyTheme' \
+                  'function currentThemeIsDark' 'prefers-color-scheme: dark'; do
         grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
     done
-    if (( ok )); then pass; else fail "theme switcher markers missing"; fi
+    # "auto" must survive as the stored default, or a fresh page picks a theme
+    # for the user instead of asking their OS.
+    grep -q 'PREF.get("theme", "auto")' web/index.html ||
+        { ok=0; echo "missing: auto as the stored default" >&2; }
+    grep -q 'removeAttribute("data-theme")' web/index.html ||
+        { ok=0; echo "missing: auto clears the stamp so the OS decides" >&2; }
+    if (( ok )); then pass; else fail "the theme toggle is incomplete"; fi
 fi
 
 if it "every colour token is defined on bare :root, not only behind a theme"; then
@@ -716,9 +817,12 @@ if it "the big cards are collapsible"; then
     if [[ "$n" -ge 4 ]]; then pass; else fail "expected >=4 collapsible cards, found $n"; fi
 fi
 
-if it "the profile card carries an inline component summary"; then
+if it "the selected profile shows what it actually installs"; then
+    # The summary used to be inline in each profile button; it is one full-width
+    # detail panel below a row of chips now. Same job: the selected profile has
+    # to say what you are about to install without leaving the card.
     ok=1
-    for marker in "psummary" "renderProfileSummary" "psum-grid" "psum-card"; do
+    for marker in "profile-chip" "profileDetail" "renderProfileSummary" "psum-grid" "psum-card"; do
         grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
     done
     if (( ok )); then pass; else fail "profile summary markers missing"; fi
@@ -755,9 +859,17 @@ if it "system, profile, components and install order share one tab"; then
     fi
 fi
 
-if it "only two tabs remain"; then
-    n="$(grep -c 'class="tab" role="tab"' web/index.html || true)"
-    assert_eq "$n" "2"
+if it "navigation stays bounded and every section has a panel"; then
+    # This began as "only two tabs remain" against a tab strip. The strip is a
+    # dropdown now, and the point was never the number two: it was that sections
+    # do not sprawl and that each one actually leads somewhere.
+    n="$(grep -c 'role="menuitemradio"' web/index.html || true)"
+    panels="$(grep -c '<section role="region" id="panel-' web/index.html || true)"
+    if [ "$n" -le 5 ] && [ "$n" -eq "$panels" ]; then
+        pass
+    else
+        fail "$n menu items and $panels panels (expected equal, and at most 5)"
+    fi
 fi
 
 if it "the core stack is available on all three platforms"; then
@@ -799,8 +911,12 @@ if it "Handy is offered on every platform"; then
 fi
 
 if it "the UI shows installed applications and allows filtering"; then
+    # The header pill is gone; the inventory has its own section with its own
+    # search, and the catalog keeps its installed filter. Both still have to work.
     ok=1
-    for marker in "installedPill" "filterInstalled" "installedCount" "filterInstalledOnly" 'data-installed' "✓ installed"; do
+    for marker in "installedList" "installedSearch" "renderInstalledTab" \
+                  "filterInstalled" "installedCount" "filterInstalledOnly" \
+                  'data-installed' "✓ installed"; do
         grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
     done
     if (( ok )); then pass; else fail "web/index.html is missing installed-app markers"; fi
@@ -961,6 +1077,345 @@ if it "custom_is_installed detects agent-skills under Documents/code or Document
     rm -rf "$tmp"
     if [[ $rc_code -eq 0 && $rc_Code -eq 0 ]]; then pass
     else fail "rc_code=$rc_code rc_Code=$rc_Code"; fi
+fi
+
+describe "claude autostart"
+
+# A fixture transcript tree shaped exactly like ~/.claude/projects: one directory
+# per working directory, one *.jsonl per session, with cwd and sessionId carried
+# in the records themselves (ADR 0001). mtimes are set explicitly because the
+# liveness window is the thing under test and git cannot preserve them.
+cs_fixture_tree() {
+    local root="$1"; shift
+    local cwd uuid age slug dir
+    while [ $# -gt 0 ]; do
+        cwd="$1"; uuid="$2"; age="$3"; shift 3
+        slug="$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
+        dir="$root/projects/$slug"
+        mkdir -p "$dir"
+        printf '{"cwd": "%s", "uuid": "%s"}' "$cwd" "$uuid" |
+            python3 "$ROOT/tests/helpers/make_transcript.py" "$dir/$uuid.jsonl" "$age"
+    done
+}
+
+cs_engine() { python3 "$ROOT/lib/linux/claude_sessions.py" "$@"; }
+
+if it "snapshot records every live session with the cwd read from its transcript"; then
+    tmp="$(mktemp -d)"
+    cs_fixture_tree "$tmp" /home/u/alpha 11111111-1111-1111-1111-111111111111 2 \
+                           /home/u/beta  22222222-2222-2222-2222-222222222222 3
+    out="$(AUTOOS_CLAUDE_HOME="$tmp" AUTOOS_CLAUDE_LIVE_COUNT=2 \
+           AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" cs_engine snapshot 2>&1)"
+    got="$(printf '%s' "$out" | python3 "$ROOT/tests/helpers/read_state.py" summary 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$got" = "2|/home/u/alpha|11111111-1111-1111-1111-111111111111|/home/u/beta" ]; then
+        pass
+    else
+        fail "got [$got] from: $out"
+    fi
+fi
+
+if it "a transcript older than the liveness window is not restored"; then
+    tmp="$(mktemp -d)"
+    cs_fixture_tree "$tmp" /home/u/fresh 11111111-1111-1111-1111-111111111111 5 \
+                           /home/u/stale 22222222-2222-2222-2222-222222222222 900
+    out="$(AUTOOS_CLAUDE_HOME="$tmp" AUTOOS_CLAUDE_LIVE_COUNT=1 \
+           AUTOOS_CLAUDE_LIVENESS_WINDOW_MINS=240 \
+           AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" cs_engine snapshot 2>&1)"
+    got="$(printf '%s' "$out" | python3 "$ROOT/tests/helpers/read_state.py" cwds 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$got" = "/home/u/fresh" ]; then pass; else fail "expected only the fresh session, got [$got]"; fi
+fi
+
+if it "max_sessions keeps the most recently active, not an arbitrary slice"; then
+    tmp="$(mktemp -d)"
+    cs_fixture_tree "$tmp" /home/u/a 11111111-1111-1111-1111-111111111111 30 \
+                           /home/u/b 22222222-2222-2222-2222-222222222222 2 \
+                           /home/u/c 33333333-3333-3333-3333-333333333333 10
+    out="$(AUTOOS_CLAUDE_HOME="$tmp" AUTOOS_CLAUDE_LIVE_COUNT=3 AUTOOS_CLAUDE_MAX_SESSIONS=2 \
+           AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" cs_engine snapshot 2>&1)"
+    got="$(printf '%s' "$out" | python3 "$ROOT/tests/helpers/read_state.py" cwds 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$got" = "/home/u/b|/home/u/c" ]; then pass; else fail "expected the two newest, got [$got]"; fi
+fi
+
+if it "one session is recorded once even when it left transcripts in two places"; then
+    # Observed on a real machine: the same session id under two project slugs (a
+    # scratchpad directory alongside the repo). Restoring it twice opens two
+    # terminals fighting over one conversation.
+    tmp="$(mktemp -d)"
+    cs_fixture_tree "$tmp" /home/u/proj          11111111-1111-1111-1111-111111111111 4 \
+                           /home/u/proj/scratch  11111111-1111-1111-1111-111111111111 2
+    out="$(AUTOOS_CLAUDE_HOME="$tmp" AUTOOS_CLAUDE_LIVE_COUNT=1 \
+           AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" cs_engine snapshot 2>&1)"
+    got="$(printf '%s' "$out" | python3 "$ROOT/tests/helpers/read_state.py" cwds 2>/dev/null || true)"
+    rm -rf "$tmp"
+    # The newer of the two wins, so the surviving record is the live one.
+    if [ "$got" = "/home/u/proj/scratch" ]; then pass; else fail "expected one record, got [$got]"; fi
+fi
+
+if it "a snapshot with nothing live never clobbers a good one"; then
+    tmp="$(mktemp -d)"
+    cs_fixture_tree "$tmp" /home/u/alpha 11111111-1111-1111-1111-111111111111 2
+    AUTOOS_CLAUDE_HOME="$tmp" AUTOOS_CLAUDE_LIVE_COUNT=1 \
+        AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" cs_engine snapshot >/dev/null 2>&1
+    # The timer fires again mid-boot, before anything is up. Overwriting here is
+    # what erases the record the next restore depends on.
+    AUTOOS_CLAUDE_HOME="$tmp" AUTOOS_CLAUDE_LIVE_COUNT=0 \
+        AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" cs_engine snapshot >/dev/null 2>&1
+    got="$(python3 "$ROOT/tests/helpers/read_state.py" count "$tmp/state.json" 2>/dev/null || echo ERR)"
+    rm -rf "$tmp"
+    if [ "$got" = "1" ]; then pass; else fail "snapshot was clobbered: [$got] session(s) left"; fi
+fi
+
+if it "plan emits one START per restorable session and SKIPs the rest with a reason"; then
+    tmp="$(mktemp -d)"
+    cat > "$tmp/state.json" <<'JSONEOF'
+{"version":2,"captured_at":100,"sessions":[
+ {"session_uuid":"11111111-1111-1111-1111-111111111111","name":"alpha","cwd":"/home/u/alpha","remote_control":true},
+ {"session_uuid":"","name":"broken","cwd":"/home/u/broken","remote_control":false}]}
+JSONEOF
+    plan="$(AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" cs_engine plan 2>&1)"
+    rm -rf "$tmp"
+    starts="$(printf '%s\n' "$plan" | grep -c '^START' || true)"
+    skips="$(printf '%s\n' "$plan" | grep -c '^SKIP' || true)"
+    if [ "$starts" = "1" ] && [ "$skips" = "1" ] &&
+       printf '%s\n' "$plan" | grep -q "START.11111111-1111-1111-1111-111111111111.alpha./home/u/alpha.1"; then
+        pass
+    else
+        fail "unexpected plan ($starts START, $skips SKIP): $plan"
+    fi
+fi
+
+if it "remote_control=never strips --rc from a session that was recorded with it"; then
+    tmp="$(mktemp -d)"
+    cat > "$tmp/state.json" <<'JSONEOF'
+{"version":2,"captured_at":100,"sessions":[
+ {"session_uuid":"11111111-1111-1111-1111-111111111111","name":"alpha","cwd":"/home/u/alpha","remote_control":true}]}
+JSONEOF
+    plan="$(AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" AUTOOS_CLAUDE_REMOTE_CONTROL=never cs_engine plan 2>&1)"
+    rm -rf "$tmp"
+    if printf '%s\n' "$plan" | grep -q "alpha./home/u/alpha.0$"; then
+        pass
+    else
+        fail "rc not stripped: $plan"
+    fi
+fi
+
+if it "restore does nothing while autostart is disabled in the configuration"; then
+    # `enabled` was in the shipped schema and the web card from the start, and no
+    # code ever read it. It is a real pause switch now, or it should not be there.
+    tmp="$(mktemp -d)"
+    cat > "$tmp/state.json" <<'JSONEOF'
+{"version":2,"captured_at":100,"sessions":[
+ {"session_uuid":"11111111-1111-1111-1111-111111111111","name":"alpha","cwd":"/tmp","remote_control":false}]}
+JSONEOF
+    mkdir -p "$tmp/bin"
+    printf '#!/bin/sh\ntouch "%s/launched"\n' "$tmp" > "$tmp/bin/claude"
+    printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/tmux"
+    chmod +x "$tmp/bin/claude" "$tmp/bin/tmux"
+    out="$(PATH="$tmp/bin:$PATH" AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" \
+           AUTOOS_CLAUDE_ENABLED=0 AUTOOS_NO_COLOR=1 \
+           bash "$ROOT/lib/linux/claude-sessions.sh" restore 2>&1)"
+    launched=0; [ -f "$tmp/launched" ] && launched=1
+    rm -rf "$tmp"
+    if [ "$launched" -eq 0 ] && printf '%s\n' "$out" | grep -qi 'disabled'; then
+        pass
+    else
+        fail "launched=$launched out: $out"
+    fi
+fi
+
+if it "restore refuses to start a TUI when no terminal host is available"; then
+    tmp="$(mktemp -d)"
+    cat > "$tmp/state.json" <<'JSONEOF'
+{"version":2,"captured_at":100,"sessions":[
+ {"session_uuid":"11111111-1111-1111-1111-111111111111","name":"alpha","cwd":"/tmp","remote_control":false}]}
+JSONEOF
+    # A PATH carrying a fake `claude` but neither herdr nor tmux: the session is
+    # restorable, there is simply nowhere a human could ever see it (ADR 0002).
+    mkdir -p "$tmp/bin"
+    printf '#!/bin/sh\ntouch "%s/launched"\n' "$tmp" > "$tmp/bin/claude"
+    chmod +x "$tmp/bin/claude"
+    # Host discovery runs for real (`auto`); both hosts are made unusable rather
+    # than merely absent, so the result is the same on a developer box that has
+    # tmux installed as on a bare one.
+    printf '#!/bin/sh\nexit 1\n' > "$tmp/bin/tmux"; chmod +x "$tmp/bin/tmux"
+    out="$(PATH="$tmp/bin:$PATH" HERDR_BIN="$tmp/bin/herdr-absent" \
+           AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" \
+           AUTOOS_CLAUDE_TERMINAL_HOST=auto AUTOOS_NO_COLOR=1 \
+           bash "$ROOT/lib/linux/claude-sessions.sh" restore 2>&1)"
+    launched=0; [ -f "$tmp/launched" ] && launched=1
+    rm -rf "$tmp"
+    if [ "$launched" -eq 0 ] && printf '%s\n' "$out" | grep -qi 'no terminal host'; then
+        pass
+    else
+        fail "launched=$launched out: $out"
+    fi
+fi
+
+if it "an inactive snapshot timer is reported once, not twice"; then
+    # `systemctl is-active` PRINTS its answer and exits non-zero when the unit is
+    # not running, so `|| echo inactive` appended a second line and the status
+    # screen rendered "inactive" on two lines. Found by running it under WSL.
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/bin"
+    printf '#!/bin/sh
+echo inactive
+exit 3
+' > "$tmp/bin/systemctl"
+    chmod +x "$tmp/bin/systemctl"
+    out="$(PATH="$tmp/bin:$PATH" AUTOOS_CLAUDE_STATE_FILE="$tmp/state.json" AUTOOS_NO_COLOR=1            bash "$ROOT/lib/linux/claude-sessions.sh" status 2>&1)"
+    rm -rf "$tmp"
+    n="$(printf '%s
+' "$out" | grep -c 'inactive' || true)"
+    if [ "$n" = "1" ]; then
+        pass
+    else
+        fail "expected one 'inactive' line, got $n: $out"
+    fi
+fi
+
+if it "a snapshot that was never taken has no age"; then
+    # "never (never)" - the age of something that never happened is not a second
+    # fact about it.
+    tmp="$(mktemp -d)"
+    out="$(AUTOOS_CLAUDE_STATE_FILE="$tmp/missing.json" cs_engine summary 2>&1)"
+    rm -rf "$tmp"
+    if printf '%s
+' "$out" | grep -q "^last_snapshot	never$"; then
+        pass
+    else
+        fail "expected a bare 'never', got: $out"
+    fi
+fi
+
+if it "the live-process probe answers on the real system without throwing"; then
+    # Principle 9: the seam every test above uses must not be the only path that
+    # is ever exercised. This runs the probe production actually takes.
+    n="$(cs_engine probe-live 2>&1 || echo ERR)"
+    if [[ "$n" =~ ^[0-9]+$ ]]; then pass; else fail "probe-live returned [$n]"; fi
+fi
+
+if it "claude-autostart is defined for linux and windows, and not for macos"; then
+    ok=1
+    for f in catalog/linux.json catalog/windows.json; do
+        python3 "$ROOT/tests/helpers/catalog_has.py" "$f" claude-autostart || { ok=0; echo "missing in $f" >&2; }
+    done
+    # macOS routes through lib/linux/install.sh, which writes systemd units. On a
+    # machine with no systemd that reports `installed` and does nothing.
+    if python3 "$ROOT/tests/helpers/catalog_has.py" catalog/macos.json claude-autostart; then
+        ok=0; echo "macos still lists claude-autostart" >&2
+    fi
+    if (( ok )); then pass; else fail "catalog membership wrong"; fi
+fi
+
+if it "every claude_autostart key the web UI writes is a key the scripts read"; then
+    # The first implementation wrote resume_prompt_mode/interval_minutes while the
+    # scripts read resume_mode/snapshot_interval_mins, so the card saved nothing.
+    if python3 "$ROOT/tests/helpers/check_config_keys.py"; then
+        pass
+    else
+        fail "web UI and config schema disagree (see above)"
+    fi
+fi
+
+if it "every key the configuration form groups is a real catalog prompt"; then
+    # The form used to hardcode six fields. Three of them (git_user_name,
+    # ollama_models, antigravity_url) are Linux-only prompts, so on Windows it
+    # rendered boxes whose answers no installer would ever read.
+    if python3 "$ROOT/tests/helpers/check_config_sections.py"; then
+        pass
+    else
+        fail "the configuration form groups a key no catalog asks (see above)"
+    fi
+fi
+
+if it "each panel owns one job: overview chooses, system reports, configure sets"; then
+    # Overview had grown to six cards covering three unrelated jobs. A card in the
+    # wrong panel is how it grew the first time, so the split is pinned here.
+    if python3 "$ROOT/tests/helpers/check_panels.py"; then
+        pass
+    else
+        fail "a card is in the wrong panel (see above)"
+    fi
+fi
+
+if it "the component list is compact until Details is asked for"; then
+    ok=1
+    grep -q 'id="detailToggle"' web/index.html || { ok=0; echo "missing: the Details toggle" >&2; }
+    grep -q 'body:not(\[data-detail="on"\]) .item .item-meta{display:none}' web/index.html ||
+        grep -q 'body:not(\[data-detail="on"\]) .item .item-meta,' web/index.html ||
+        { ok=0; echo "missing: the compact-mode rule for .item-meta" >&2; }
+    grep -q 'class="item-icon"' web/index.html || { ok=0; echo "missing: the component icon" >&2; }
+    if (( ok )); then pass; else fail "the catalog is not compact by default"; fi
+fi
+
+if it "a quick install queues rather than racing another run"; then
+    ok=1
+    for marker in 'data-quick=' 'function queueQuickInstall' 'let quickQueue' 'id="headerProgress"'; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    # The server rejects a second concurrent run with 409, so the client must not
+    # start one; it has to wait for poll() to report the first has finished.
+    grep -q 'if (running || !quickQueue.length) return;' web/index.html ||
+        { ok=0; echo "missing: the drain guard against a concurrent run" >&2; }
+    if (( ok )); then pass; else fail "quick install is not queued safely"; fi
+fi
+
+if it "the install order leaves out what is already installed"; then
+    if grep -q 'if (BY_ID.get(id)?.installed) continue;' web/index.html; then
+        pass
+    else
+        fail "the install order still lists components the run will skip"
+    fi
+fi
+
+if it "the section menu is a real menu, not a button that looks like one"; then
+    # A dropdown has to be openable, closable and walkable from the keyboard, or
+    # it is navigation only a mouse can reach.
+    ok=1
+    for marker in 'id="tabMenuBtn"' 'aria-haspopup="menu"' 'role="menuitemradio"'                   'function openTabMenu' 'function closeTabMenu'; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    grep -q 'e.key === "Escape"' web/index.html || { ok=0; echo "missing: Escape closes the menu" >&2; }
+    grep -q 'e.key === "ArrowDown"' web/index.html || { ok=0; echo "missing: arrow-key navigation" >&2; }
+    # With no tablist left, role="tabpanel" would be a lie.
+    grep -q 'role="tabpanel"' web/index.html && { ok=0; echo "a tabpanel survives with no tablist" >&2; }
+    if (( ok )); then pass; else fail "the section menu is not keyboard-operable"; fi
+fi
+
+if it "the page carries its own favicon"; then
+    # The local server has no asset route, so every load was logging a 403 for
+    # /favicon.ico; an inline data URI costs no request at all.
+    if grep -q 'rel="icon" href="data:image/svg' web/index.html; then
+        pass
+    else
+        fail "no inline favicon"
+    fi
+fi
+
+if it "the reduced-motion guard for the indeterminate progress bar survives"; then
+    if grep -q 'prefers-reduced-motion:reduce){.bar.indeterminate>div{animation:none}' web/index.html; then
+        pass
+    else
+        fail "the card-chooser stylesheet dropped the reduced-motion rule again"
+    fi
+fi
+
+if it "the claude card, chooser and configure affordance are present in the page"; then
+    ok=1
+    for marker in 'id="cardClaudeAutostart"' 'id="cardChooserBar"' 'id="claudeRefreshBtn"' 'data-configure-card'; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "cardClaudeAutostart markers missing"; fi
+fi
+
+if it "no inline onclick handler is introduced in the web UI"; then
+    # Inline handlers force HTML-escaping a value into a JS string context, which
+    # is the wrong escaper; the page uses delegated listeners everywhere else.
+    n="$(grep -c 'onclick="' web/index.html || true)"
+    if [ "$n" = "0" ]; then pass; else fail "$n inline onclick handler(s) left"; fi
 fi
 
 describe "wsl detection"

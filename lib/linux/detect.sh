@@ -14,6 +14,39 @@
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# ─── Where commands hide when they are not on PATH ──────────────────────────
+# `command -v` only ever answers for the PATH of the shell asking. That PATH is
+# wrong more often than not here: ~/.local/bin is added by a login profile this
+# script has not sourced, /snap/bin is missing under sudo, and flatpak exports
+# its binaries somewhere no non-desktop session ever looks. Every directory
+# below is a real place a package manager puts a command.
+_extra_bin_dirs() {
+    local home_="${SYS_HOME:-$HOME}"
+    printf '%s\n' \
+        "$home_/.local/bin" \
+        "$home_/bin" \
+        "$home_/.cargo/bin" \
+        "$home_/.local/share/flatpak/exports/bin" \
+        /usr/local/bin \
+        /usr/bin \
+        /usr/sbin \
+        /snap/bin \
+        /var/lib/flatpak/exports/bin
+}
+
+# Installed, or not here at all. Never "probably": the file has to exist and be
+# executable, which is why a leftover configuration directory cannot fake it.
+has_bin() {
+    local name="$1" dir
+    # if-blocks, not `has_cmd x && return 0`: under `set -e` a failing AND-list
+    # at the tail of a function is what aborts the caller's whole script.
+    if has_cmd "$name"; then return 0; fi
+    while IFS= read -r dir; do
+        if [[ -n "$dir" && -f "$dir/$name" && -x "$dir/$name" ]]; then return 0; fi
+    done < <(_extra_bin_dirs)
+    return 1
+}
+
 # macOS keeps none of the /proc and /etc/os-release furniture the Linux path
 # reads, so it gets its own probe rather than a pile of conditionals.
 detect_macos() {
@@ -377,24 +410,28 @@ launch_hint() {
 }
 
 script_is_installed() {
+    # has_bin, not has_cmd: every one of these installs somewhere PATH does not
+    # necessarily reach - ~/.local/bin, /snap/bin or a flatpak export - and a
+    # missed detection here reinstalls software the user already has.
     case "$1" in
         oh-my-zsh)       [[ -d "$SYS_HOME/.oh-my-zsh" ]] ;;
         zsh-plugins)     [[ -d "$SYS_HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]] ;;
         powerlevel10k)   [[ -d "$SYS_HOME/.oh-my-zsh/custom/themes/powerlevel10k" ]] ;;
         meslo-nerd-font) [[ -f "$SYS_HOME/.local/share/fonts/MesloLGS NF Regular.ttf" ]] ;;
-        nodesource-lts)  has_cmd node ;;
-        docker)          has_cmd docker ;;
-        tailscale)       has_cmd tailscale ;;
-        antigravity)     has_cmd antigravity ;;
-        xpipe)           has_cmd xpipe ;;
-        herdr)           has_cmd herdr ;;
-        handy)           has_cmd handy || [[ -x /usr/bin/handy ]] ;;
-        vscode)          has_cmd code ;;
-        agy)             has_cmd agy || [[ -x "$SYS_HOME/.local/bin/agy" ]] ;;
-        gh)              has_cmd gh ;;
-        uv)              has_cmd uv || [[ -x "$SYS_HOME/.local/bin/uv" || -x "$SYS_HOME/.cargo/bin/uv" ]] ;;
-        ollama)          has_cmd ollama ;;
-        google-chrome)   has_cmd google-chrome || has_cmd google-chrome-stable ;;
+        nodesource-lts)  has_bin node ;;
+        docker)          has_bin docker ;;
+        tailscale)       has_bin tailscale ;;
+        antigravity)     has_bin antigravity ;;
+        xpipe)           has_bin xpipe ;;
+        herdr)           has_bin herdr ;;
+        handy)           has_bin handy ;;
+        vscode)          has_bin code ;;
+        agy)             has_bin agy ;;
+        gh)              has_bin gh ;;
+        uv)              has_bin uv ;;
+        ollama)          has_bin ollama ;;
+        claude-autostart) [[ -f "$SYS_HOME/.config/systemd/user/claude-sessions-restore.service" ]] ;;
+        google-chrome)   has_bin google-chrome || has_bin google-chrome-stable ;;
         bitwarden-chrome) [[ -f /opt/google/chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
                          [[ -f /usr/share/google-chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
                          [[ -f /etc/opt/chrome/policies/managed/bitwarden.json ]] ;;

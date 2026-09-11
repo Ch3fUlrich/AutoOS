@@ -180,6 +180,11 @@ only skips when neither that nor the binary is available. Install them where you
   `shellcheck` is parsed as a directive even when you meant prose.
 - A `<button>` styled as a card vertically centres its content unless you set
   `display:flex; flex-direction:column`.
+- An author `display:` rule **beats the browser's own `[hidden]{display:none}`**,
+  so `<div class="menu" hidden>` where `.menu{display:flex}` renders open on every
+  load. Every class that sets `display` and is used with `hidden` needs its own
+  `.thing[hidden]{display:none}`. This shipped twice in one afternoon: the section
+  menu and the header progress bar.
 
 ## 7. Definition of done
 

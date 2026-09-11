@@ -28,6 +28,7 @@ LIB="$AUTOOS_ROOT/lib/linux"
 # catalog-only modes that run before detection.
 CATALOG="$AUTOOS_ROOT/catalog/linux.json"
 PROFILE=""; ONLY=""; ASSUME_YES=0; DO_SERVE=0; PORT=8777; BIND="127.0.0.1"
+CLAUDE_SESSIONS=""
 LIST_ONLY=0; CHECK_ONLY=0; DO_UNDO=0; FROM_STATE=""
 STATE_PATH="$AUTOOS_ROOT/.autoos-state.json"
 STATE_PROFILE=""; STATE_SELECTED=""
@@ -43,6 +44,8 @@ AutoOS — post-install provisioning for Linux
   --dry-run          Print every command without changing anything
   --yes, -y          Non-interactive: take profile defaults, skip confirmation
   --no-color         Disable ANSI colour
+  --claude-sessions [status|snapshot|restore|configure]
+                     Report or drive the Claude session autostart
   --serve            Browser UI instead of the terminal menu (headless boxes)
   --port N           Port for --serve (default 8777)
   --bind ADDR        Bind address for --serve (default 127.0.0.1)
@@ -76,6 +79,11 @@ while [[ $# -gt 0 ]]; do
         --yes|-y)  ASSUME_YES=1; shift ;;
         --no-color) AUTOOS_NO_COLOR=1; shift ;;
         --serve)   DO_SERVE=1; shift ;;
+        --claude-sessions) CLAUDE_SESSIONS="${2:-status}"
+                   case "$CLAUDE_SESSIONS" in
+                       status|snapshot|restore|configure) shift 2 ;;
+                       *) CLAUDE_SESSIONS="status"; shift ;;
+                   esac ;;
         --port)    PORT="${2:-8777}"; shift 2 ;;
         --bind)    BIND="${2:-127.0.0.1}"; shift 2 ;;
         --list)    LIST_ONLY=1; shift ;;
@@ -216,6 +224,15 @@ if (( DO_UNDO )); then
 fi
 
 # ─── Browser mode ───────────────────────────────────────────────────────────
+# ─── Claude session autostart ───────────────────────────────────────────────
+# A first-class entry point rather than "go and run this file under lib/": the
+# status of a background service is exactly the thing people need after a reboot.
+if [[ -n "$CLAUDE_SESSIONS" ]]; then
+    args=("$CLAUDE_SESSIONS")
+    (( AUTOOS_DRY_RUN )) && args+=(--dry-run)
+    AUTOOS_ROOT="$AUTOOS_ROOT" exec bash "$LIB/claude-sessions.sh" "${args[@]}"
+fi
+
 if (( DO_SERVE )); then
     # shellcheck source=lib/linux/serve.sh
     . "$LIB/serve.sh"

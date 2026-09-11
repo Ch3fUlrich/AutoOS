@@ -9,5 +9,17 @@
     "antigravity_url": "",
     "ollama_models": "nomic-embed-text",
     "context7_api_key": ""
+  },
+  "claude_autostart": {
+    "enabled": true,
+    "snapshot_interval_mins": 5,
+    "liveness_window_mins": 240,
+    "max_sessions": 8,
+    "resume_mode": "full",
+    "fallback": "continue",
+    "fallback_cwd": "",
+    "fallback_name": "main",
+    "remote_control": "snapshot",
+    "terminal_host": "auto"
   }
 }

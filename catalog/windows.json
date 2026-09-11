@@ -142,15 +142,15 @@
           "homepage": "https://learn.microsoft.com/windows/powertoys/"
         },
         {
-          "id": "treesize",
-          "name": "TreeSize Free",
-          "description": "Find what is eating the disk",
+          "id": "wiztree",
+          "name": "WizTree",
+          "description": "Find what is eating the disk, by reading the MFT",
           "provider": "winget",
-          "package": "JAMSoftware.TreeSize.Free",
+          "package": "AntibodySoftware.WizTree",
           "profiles": [
             "workstation"
           ],
-          "homepage": "https://www.jam-software.com/treesize_free"
+          "homepage": "https://diskanalyzer.com/"
         }
       ]
     },
@@ -165,7 +165,8 @@
           "description": "Version control",
           "provider": "winget",
           "package": "Git.Git",
-          "postInstall": "Add-AutoOSGitToPath",
+          "postInstall": "Set-AutoOSGitConfig",
+          "prompt": "git_user_name, git_user_email",
           "profiles": [
             "workstation",
             "ai-coding",
@@ -176,6 +177,22 @@
           "installedNames": [
             "Git"
           ]
+        },
+        {
+          "id": "gh",
+          "name": "GitHub CLI",
+          "description": "GitHub command-line tool for git, PRs and issues",
+          "provider": "winget",
+          "package": "GitHub.cli",
+          "requires": [
+            "git"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "gh --version",
+          "homepage": "https://cli.github.com/"
         },
         {
           "id": "nodejs",
@@ -209,6 +226,22 @@
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
         },
         {
+          "id": "claude-autostart",
+          "name": "Claude autostart",
+          "description": "Reopens the Claude Code sessions you had before a reboot",
+          "provider": "script",
+          "package": "claude-autostart",
+          "requires": [
+            "claude-code"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code",
+          "launcher": "none"
+        },
+        {
           "id": "agy",
           "name": "Antigravity CLI",
           "description": "Google's terminal coding agent",
@@ -233,7 +266,10 @@
             "workstation",
             "ai-coding"
           ],
-          "homepage": "https://claude.ai/download"
+          "homepage": "https://claude.ai/download",
+          "installedNames": [
+            "Claude"
+          ]
         },
         {
           "id": "handy",
@@ -577,7 +613,10 @@
           "provider": "winget",
           "package": "SlackTechnologies.Slack",
           "profiles": [],
-          "homepage": "https://slack.com/"
+          "homepage": "https://slack.com/",
+          "installedAppx": [
+            "91750D7E.Slack"
+          ]
         },
         {
           "id": "zoom",
@@ -586,7 +625,10 @@
           "provider": "winget",
           "package": "Zoom.Zoom",
           "profiles": [],
-          "homepage": "https://zoom.us/"
+          "homepage": "https://zoom.us/",
+          "installedNames": [
+            "Zoom Workplace"
+          ]
         },
         {
           "id": "whatsapp",
@@ -671,7 +713,10 @@
           "provider": "winget",
           "package": "ownCloud.ownCloudDesktop",
           "profiles": [],
-          "homepage": "https://owncloud.com/desktop-app/"
+          "homepage": "https://owncloud.com/desktop-app/",
+          "installedNames": [
+            "ownCloud"
+          ]
         },
         {
           "id": "googledrive",
@@ -802,6 +847,16 @@
       "question": "Herdr install source",
       "default": "npm:herdr",
       "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in winget, so AutoOS needs to be told where it lives."
+    },
+    "git_user_name": {
+      "question": "Git commit author name (e.g. Jane Doe)",
+      "default": "",
+      "help": "Sets git config --global user.name so commits on this machine have your author name."
+    },
+    "git_user_email": {
+      "question": "Git commit author email (e.g. jane@example.com)",
+      "default": "",
+      "help": "Sets git config --global user.email so commits on this machine have your email."
     },
     "context7_api_key": {
       "question": "Upstash Context7 API key (blank to use default rate limit)",
