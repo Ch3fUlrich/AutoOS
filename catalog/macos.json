@@ -172,23 +172,6 @@
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
         },
         {
-          "id": "gemini-cli",
-          "name": "Gemini CLI",
-          "description": "Google's terminal AI assistant",
-          "provider": "npm",
-          "package": "@google/gemini-cli",
-          "verify": "gemini --version",
-          "homepage": "https://github.com/google-gemini/gemini-cli",
-          "requires": [
-            "nodejs"
-          ],
-          "profiles": [
-            "workstation",
-            "ai-coding",
-            "rescue"
-          ]
-        },
-        {
           "id": "agy",
           "name": "Antigravity CLI",
           "description": "Google's terminal coding agent",
@@ -201,9 +184,11 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "light"
+            "light",
+            "rescue"
           ],
-          "homepage": "https://antigravity.google/"
+          "homepage": "https://antigravity.google/product/antigravity-cli",
+          "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
         },
         {
           "id": "claude-desktop",

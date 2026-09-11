@@ -386,11 +386,39 @@ install_herdr() {
 }
 
 install_agy() {
+    # Google's Antigravity CLI, replacing Gemini CLI at the human partner's
+    # direction (Gemini CLI is not deprecated - this is a deliberate product
+    # choice, not a response to a broken package).
+    #
+    # This used to be `curl -fsSL $url | bash` - an unverified remote script
+    # piped straight into a shell (A14, the exact finding this branch exists
+    # to remove: a pipe can't be inspected and can be swapped mid-stream).
+    # Google publishes no checksum for this installer, unlike oh-my-zsh's
+    # pinned sha256 in install_oh_my_zsh() above, so a hash can't be verified
+    # here either. The minimum acceptable bar instead: download to a file,
+    # log the exact URL, verify it is non-empty and actually looks like a
+    # script, and only then execute the FILE - never the pipe.
+    local url="https://antigravity.google/cli/install.sh"
     if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would install Antigravity CLI via antigravity.google/cli/install.sh"
+        ui_muted "would download and run the Antigravity CLI installer from $url"
         return 0
     fi
-    curl -fsSL https://antigravity.google/cli/install.sh | bash
+    ui_muted "downloading Antigravity CLI installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_err "failed to download Antigravity CLI installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_err "Antigravity CLI installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    bash "$tmp" || rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
 install_claude_autostart() {

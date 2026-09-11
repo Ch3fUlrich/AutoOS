@@ -12,11 +12,11 @@
 #   ai [args...]              run the default backend (claude, unless
 #                              AUTOOS_AI_DEFAULT overrides it)
 #   ai <backend> [args...]    run a specific backend by its registry id,
-#                              e.g. `ai gemini "..."`
+#                              e.g. `ai agy "..."`
 #   ai --list                 show every registered backend and whether its
 #                              binary is actually on this machine
 #
-# claude and gemini stay callable directly under their own names — this
+# claude and agy stay callable directly under their own names — this
 # dispatcher is an addition, not a replacement.
 #
 # Env overrides (the test suite uses these; a real install never needs to):

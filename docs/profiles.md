@@ -50,18 +50,36 @@ undocumented second package list is exactly the drift that caused finding A12.
 | `./setup.sh --profile rescue` | NodeSource, via the catalog's `nodejs` entry (`provider: "script"`) |
 | `templates/rescue-bootstrap.sh` on a booted stick | Ubuntu's own `nodejs` / `npm` apt packages |
 
-Both AI CLIs (`claude-code`, `gemini-cli`) `require: ["nodejs"]` and carry the
-`rescue` profile, so either route gets you a working `claude` and `gemini`.
+`claude-code` `require: ["nodejs"]` and carries the `rescue` profile, so either
+route gets you a working `claude`. `agy` (Antigravity CLI — replaces Gemini
+CLI at the human partner's direction; Gemini CLI is not deprecated, this is a
+deliberate product choice) is a standalone downloaded binary and needs no
+runtime at all, so it is unaffected by which Node.js a route picked.
 
 The bootstrap deviates because a stick handed to a stranger cannot pipe an
 unverified remote script into a shell (`curl … | bash`, finding A14), and
 because the NodeSource apt source file was re-added on every run, which broke
 idempotency (A13). apt is idempotent on its own and needs no trust decision at
-2am on a broken machine.
+2am on a broken machine. `agy`'s own installer has the same `curl | bash`
+shape and is fixed the same way in both `lib/linux/install.sh` and
+`templates/rescue-bootstrap.sh`: download to a file, verify it is non-empty
+and looks like a script, then execute the file — never the pipe. On Windows,
+`agy` installs from a signed winget package (`Google.AntigravityCLI`)
+instead, so there is no unverified-script step there at all.
 
 **Everything else** in `rescue-bootstrap.sh` is cross-checked against
 `catalog/linux.json` in both directions by `tests/run-tests.sh`, so no other
 package can drift. Node is the one exception.
+
+### `agy` headless mode needs a prior interactive login
+
+`agy -p "prompt"` (headless mode, used for scripted/non-interactive calls)
+authenticates from credentials cached by an earlier *interactive* `agy`
+session — there is no API-key environment variable like Gemini CLI's. On a
+rescue stick this matters: a machine that is offline, or that has never run
+`agy` interactively before, cannot use `agy -p` at all. `claude -p` has no
+such requirement. `rescue-bootstrap.sh` prints this limitation in its summary
+whenever `agy` is present, and it is written down here for the same reason.
 
 ## How the suggestion is picked
 

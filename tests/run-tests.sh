@@ -240,11 +240,13 @@ fi
 if it "rescue ships both AI CLIs"; then
     got="$(catalog_profile_defaults rescue)"
     assert_contains "$got" "claude-code"
-    assert_contains "$got" "gemini-cli"
+    assert_contains "$got" "agy"
 fi
 
 if it "neither AI CLI depends on the other (rescue)"; then
-    # B8: an outage that kills one must leave the other installed.
+    # B8: an outage that kills one must leave the other installed. claude-code
+    # and agy (Antigravity CLI, which replaced gemini-cli at the human
+    # partner's direction) are asserted mutually independent here.
     #
     # Three ways this used to pass without testing anything. `$(...)` captures
     # stdout only, so a Python traceback left "$out" empty and the test passed
@@ -256,7 +258,7 @@ if it "neither AI CLI depends on the other (rescue)"; then
 import json, sys
 cat = json.load(open('catalog/linux.json'))
 comps = {c['id']: c for g in cat['categories'] for c in g['components']}
-want = ('claude-code', 'gemini-cli')
+want = ('claude-code', 'agy')
 absent = [i for i in want if i not in comps]
 if absent:
     sys.exit('NOT-IN-CATALOG: ' + ' '.join(absent))
@@ -264,7 +266,7 @@ bad = [i for i in want if set(want) & set(comps[i].get('requires', []))]
 print('COUPLED: ' + ' '.join(bad) if bad else 'CHECKED ' + ' '.join(want))
 " 2>&1)"; rc=$?
     out="${out//$'\r'/}"   # not through a pipe: $? must stay python3's own
-    if [[ $rc -eq 0 && "$out" == "CHECKED claude-code gemini-cli" ]]; then
+    if [[ $rc -eq 0 && "$out" == "CHECKED claude-code agy" ]]; then
         pass
     else
         fail "rc=$rc out=[${out:0:300}]"
@@ -2212,6 +2214,26 @@ exec "$@"
 EOS
     cat > "$BS_BIN/curl" <<'EOS'
 #!/usr/bin/env bash
+# Covers two call shapes: network_reachable()'s `--head` probe (just needs
+# exit 0) and install_agy_cli()'s `-o <file> <url>` download, which needs to
+# leave behind something that looks like a real installer script (starts
+# with "#!", non-empty) so install_agy_cli()'s own safety check passes. The
+# written "installer" drops a fake `agy` binary into $FAKE_BIN_DIR — the same
+# directory npm's fake binaries land in below — the way the real one would
+# install a real binary somewhere on PATH.
+out=""
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "-o" ]] && out="$a"
+    prev="$a"
+done
+if [[ -n "$out" ]]; then
+    cat > "$out" <<'INSTALLER'
+#!/usr/bin/env bash
+: > "$FAKE_BIN_DIR/agy"
+chmod +x "$FAKE_BIN_DIR/agy"
+INSTALLER
+fi
 exit 0
 EOS
     cat > "$BS_BIN/dpkg" <<'EOS'
@@ -2241,7 +2263,6 @@ if [[ "${1:-}" == "install" ]]; then
     for a in "$@"; do
         bin=""
         [[ "$a" == "@anthropic-ai/claude-code" ]] && bin=claude
-        [[ "$a" == "@google/gemini-cli" ]] && bin=gemini
         [[ -n "$bin" ]] || continue
         printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_BIN_DIR/$bin"
         chmod +x "$FAKE_BIN_DIR/$bin"
@@ -2273,9 +2294,11 @@ if it "rescue-bootstrap run twice installs nothing the second time and says skip
     installed1="$(printf '%s\n' "$out1" | grep -c '^  installed ' || true)"
     # B4: npm install -g writes to /usr/lib/node_modules, so it must be
     # privileged like every other install here. Without $AUTOOS_SUDO it fails
-    # EACCES on exactly the path require_root() exists to support.
+    # EACCES on exactly the path require_root() exists to support. Only
+    # claude goes through npm now — agy is a standalone downloaded binary.
     npm_sudo="$(grep -cF 'npm(sudo=1) install -g ' "$BS_LOG" || true)"
     npm_bare="$(grep -cF 'npm(sudo=0)' "$BS_LOG" || true)"
+    agy_installed1="$(printf '%s\n' "$out1" | grep -cF '  installed agy' || true)"
 
     out2="$(bootstrap_sandbox_run)"; rc2=$?
     installed2="$(printf '%s\n' "$out2" | grep -c '^  installed ' || true)"
@@ -2286,7 +2309,8 @@ if it "rescue-bootstrap run twice installs nothing the second time and says skip
 
     if [[ $rc1 -eq 0 && $rc2 -eq 0 \
         && "$installed1" -gt 0 \
-        && "$npm_sudo" -eq 2 && "$npm_bare" -eq 0 \
+        && "$npm_sudo" -eq 1 && "$npm_bare" -eq 0 \
+        && "$agy_installed1" -eq 1 \
         && "$installed2" -eq 0 \
         && "$out2" == *"0 installed,"* \
         && "$out2" == *"ai registry"*"every shipped backend already registered"* \
@@ -2296,7 +2320,7 @@ if it "rescue-bootstrap run twice installs nothing the second time and says skip
         && "$marker_present" -eq 1 ]]; then
         pass
     else
-        fail "rc1=$rc1 rc2=$rc2 installed1=$installed1 installed2=$installed2 npm_sudo=$npm_sudo npm_bare=$npm_bare backups=$bs_backups marker=$marker_present | run2='${out2:0:600}'"
+        fail "rc1=$rc1 rc2=$rc2 installed1=$installed1 installed2=$installed2 npm_sudo=$npm_sudo npm_bare=$npm_bare agy_installed1=$agy_installed1 backups=$bs_backups marker=$marker_present | run2='${out2:0:600}'"
     fi
 fi
 
@@ -2316,7 +2340,7 @@ if it "rescue-bootstrap keeps the operator's API key and extra AI backend on a s
     # (Deliberately not key-shaped — this repository is public, AGENTS.md
     # hard rule 1.)
     printf 'ollama:ollama:Local Ollama\n' >> "$BS_REGISTRY"
-    grep -v '^gemini:' "$BS_REGISTRY" > "$BS_REGISTRY.edit" && mv "$BS_REGISTRY.edit" "$BS_REGISTRY"
+    grep -v '^agy:' "$BS_REGISTRY" > "$BS_REGISTRY.edit" && mv "$BS_REGISTRY.edit" "$BS_REGISTRY"
     printf '# my own key, pasted here as the file invites\nexport ANTHROPIC_API_KEY=AUTOOS-TEST-FIXTURE-NOT-A-KEY\n' \
         >> "$BS_PROFILE"
 
@@ -2325,7 +2349,7 @@ if it "rescue-bootstrap keeps the operator's API key and extra AI backend on a s
     key_lines="$(grep -c 'AUTOOS-TEST-FIXTURE-NOT-A-KEY' "$BS_PROFILE" || true)"
     ollama_lines="$(grep -c '^ollama:ollama:Local Ollama$' "$BS_REGISTRY" || true)"
     claude_lines="$(grep -c '^claude:' "$BS_REGISTRY" || true)"
-    gemini_lines="$(grep -c '^gemini:' "$BS_REGISTRY" || true)"
+    agy_lines="$(grep -c '^agy:' "$BS_REGISTRY" || true)"
     profile_backups="$(find "$(dirname "$BS_PROFILE")" -name 'autoos-ai.sh.autoos-backup-*' 2>/dev/null | wc -l | tr -d ' ')"
     registry_backups="$(find "$(dirname "$BS_REGISTRY")" -name 'ai-clients.conf.autoos-backup-*' 2>/dev/null | wc -l | tr -d ' ')"
 
@@ -2335,20 +2359,20 @@ if it "rescue-bootstrap keeps the operator's API key and extra AI backend on a s
         && "$key_lines" -eq 1 \
         && "$ollama_lines" -eq 1 \
         && "$claude_lines" -eq 1 \
-        && "$gemini_lines" -eq 1 \
+        && "$agy_lines" -eq 1 \
         && "$profile_backups" -eq 1 \
         && "$registry_backups" -eq 1 \
         && "$out2" == *"kept your edits"* ]]; then
         pass
     else
-        fail "rc1=$rc1 rc2=$rc2 key=$key_lines ollama=$ollama_lines claude=$claude_lines gemini=$gemini_lines profile_backups=$profile_backups registry_backups=$registry_backups | run2='${out2:0:600}'"
+        fail "rc1=$rc1 rc2=$rc2 key=$key_lines ollama=$ollama_lines claude=$claude_lines agy=$agy_lines profile_backups=$profile_backups registry_backups=$registry_backups | run2='${out2:0:600}'"
     fi
 fi
 
 if it "ai dispatcher --list names both backends (template)"; then
     out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" bash templates/ai-dispatcher.sh --list 2>&1)"
     rc=$?
-    if [[ $rc -eq 0 && "$out" == *"claude"* && "$out" == *"gemini"* ]]; then
+    if [[ $rc -eq 0 && "$out" == *"claude"* && "$out" == *"agy"* ]]; then
         pass
     else
         fail "expected both backends listed (rc=$rc): ${out:0:200}"
@@ -2356,25 +2380,25 @@ if it "ai dispatcher --list names both backends (template)"; then
 fi
 
 if it "ai dispatcher falls back cleanly when the default binary is absent (template)"; then
-    # Hermetic: a fake PATH provides only "gemini", never touches the real
+    # Hermetic: a fake PATH provides only "agy", never touches the real
     # machine, and never installs anything. Restricted to /usr/bin:/bin so a
-    # real claude/gemini binary elsewhere on this machine's PATH (e.g. this
+    # real claude/agy binary elsewhere on this machine's PATH (e.g. this
     # very agent's own `claude`) cannot leak into the test.
     fakebin="$(mktemp -d)"
-    cat >"$fakebin/gemini" <<'EOS'
+    cat >"$fakebin/agy" <<'EOS'
 #!/usr/bin/env bash
-printf 'gemini-fake:%s\n' "$*"
+printf 'agy-fake:%s\n' "$*"
 EOS
-    chmod +x "$fakebin/gemini"
+    chmod +x "$fakebin/agy"
     out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" \
            PATH="$fakebin:/usr/bin:/bin" \
            bash templates/ai-dispatcher.sh "hello" 2>&1)"
     rc=$?
     rm -rf "$fakebin"
-    if [[ $rc -eq 0 && "$out" == *"gemini-fake:hello"* && "$out" == *"not installed"* ]]; then
+    if [[ $rc -eq 0 && "$out" == *"agy-fake:hello"* && "$out" == *"not installed"* ]]; then
         pass
     else
-        fail "expected a clean fallback to gemini (rc=$rc): ${out:0:200}"
+        fail "expected a clean fallback to agy (rc=$rc): ${out:0:200}"
     fi
 fi
 
@@ -2387,17 +2411,17 @@ if it "ai dispatcher honours an explicit backend even when it differs from the d
 #!/usr/bin/env bash
 printf 'claude-fake:%s\n' "$*"
 EOS
-    cat >"$fakebin/gemini" <<'EOS'
+    cat >"$fakebin/agy" <<'EOS'
 #!/usr/bin/env bash
-printf 'gemini-fake:%s\n' "$*"
+printf 'agy-fake:%s\n' "$*"
 EOS
-    chmod +x "$fakebin/claude" "$fakebin/gemini"
+    chmod +x "$fakebin/claude" "$fakebin/agy"
     out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" \
            PATH="$fakebin:/usr/bin:/bin" \
-           bash templates/ai-dispatcher.sh gemini "hi" 2>&1)"
+           bash templates/ai-dispatcher.sh agy "hi" 2>&1)"
     rc=$?
     rm -rf "$fakebin"
-    if [[ $rc -eq 0 && "$out" == "gemini-fake:hi" ]]; then
+    if [[ $rc -eq 0 && "$out" == "agy-fake:hi" ]]; then
         pass
     else
         fail "expected the explicitly-named backend to run (rc=$rc): ${out:0:200}"

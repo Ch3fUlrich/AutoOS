@@ -289,7 +289,8 @@ install_rescue_tools() {
     install_apt_group "backup"         borgbackup restic
 }
 
-# ─── Node.js (required by both AI CLIs) ────────────────────────────────────
+# ─── Node.js (required by Claude Code; Antigravity CLI is a standalone
+# binary and needs no runtime) ───────────────────────────────────────────────
 # Deliberately Ubuntu's own `nodejs`/`npm` apt packages, not the NodeSource
 # `curl | bash` setup script the original scripts used: that is what made
 # them non-idempotent (A13, a repo file re-added on every run) and unverified
@@ -301,7 +302,7 @@ install_nodejs() {
         return 0
     fi
     if ! network_reachable; then
-        ui_warn "nodejs/npm — offline, cannot install (both AI CLIs will be skipped)"
+        ui_warn "nodejs/npm — offline, cannot install (claude will be skipped)"
         return 0
     fi
     apt_update_once
@@ -310,38 +311,89 @@ install_nodejs() {
         >/tmp/autoos-rescue-apt-node.log 2>&1; then
         ui_line "installed" "nodejs/npm"
     else
-        ui_warn "nodejs/npm — install failed (both AI CLIs will be skipped)"
+        ui_warn "nodejs/npm — install failed (claude will be skipped)"
     fi
 }
 
 # ─── both AI CLIs, each isolated so one failure is never both (B8) ─────────
+# claude-code (npm, needs Node — see install_nodejs() above) and agy (a
+# standalone binary, needs only network) install very differently now, so
+# each gets its own branch instead of the old one-size-fits-all npm loop —
+# but the B8 property (one failing client must never take the other with it)
+# still holds: each branch appends to $failed independently and neither can
+# short-circuit the other.
 install_ai_clis() {
-    command -v npm >/dev/null || { ui_warn "no npm — skipping both AI CLIs"; return 0; }
-    local cli failed=""
-    for cli in "@anthropic-ai/claude-code:claude" "@google/gemini-cli:gemini"; do
-        local pkg="${cli%%:*}" bin="${cli##*:}"
+    local failed=""
+
+    if command -v claude >/dev/null; then
+        ui_line "skipped" "claude already installed"                # AGENTS.md §4
+    elif ! command -v npm >/dev/null; then
+        ui_warn "claude — no npm, cannot install"
+        failed+="claude "
+    elif ! network_reachable; then
+        ui_warn "claude — offline, cannot install"
+        failed+="claude "
+    else
         # `npm install -g` writes to /usr/lib/node_modules and /usr/local/bin,
         # so it needs $AUTOOS_SUDO exactly like every other privileged command
         # here. Without it the normal Ubuntu live session — user "ubuntu" with
         # passwordless sudo, i.e. NOT uid 0 — installed every apt package fine
-        # and then failed both AI CLIs with EACCES, surfacing only as a terse
-        # "AI CLIs unavailable: claude gemini".
+        # and then failed claude with EACCES, surfacing only as a terse
+        # "AI CLIs unavailable: claude".
         # shellcheck disable=SC2086  # AUTOOS_SUDO is intentionally unquoted: empty, or the single word "sudo"
-        if command -v "$bin" >/dev/null; then
-            ui_line "skipped" "$bin already installed"          # AGENTS.md §4
-        elif ! network_reachable; then
-            ui_warn "$bin — offline, cannot install"
-            failed+="$bin "
-        elif $AUTOOS_SUDO npm install -g "$pkg" >/tmp/autoos-rescue-npm.log 2>&1; then
-            ui_line "installed" "$bin"
+        if $AUTOOS_SUDO npm install -g @anthropic-ai/claude-code >/tmp/autoos-rescue-npm.log 2>&1; then
+            ui_line "installed" "claude"
         else
-            failed+="$bin "                                      # never fails the whole run
+            failed+="claude "                                      # never fails the whole run
         fi
-    done
+    fi
+
+    if command -v agy >/dev/null; then
+        ui_line "skipped" "agy already installed"                   # AGENTS.md §4
+    elif ! network_reachable; then
+        ui_warn "agy — offline, cannot install"
+        failed+="agy "
+    elif install_agy_cli; then
+        ui_line "installed" "agy"
+    else
+        failed+="agy "                                              # never fails the whole run
+    fi
+
     [[ -z "$failed" ]] || ui_warn "AI CLIs unavailable: $failed"
 }
 
-# ─── the `ai` dispatcher (claude default, gemini and any future backend
+# Google's Antigravity CLI installer, replacing Gemini CLI at the human
+# partner's direction — Gemini CLI is not deprecated; this is a deliberate
+# product choice, not a response to a broken package.
+#
+# This used to be `curl -fsSL $url | bash`: an unverified remote script piped
+# straight into a shell (A14, the exact finding this branch exists to
+# remove — a pipe can't be inspected and can be swapped mid-stream). Google
+# publishes no checksum for this installer, so a hash can't be pinned the way
+# oh-my-zsh's is in lib/linux/install.sh's install_oh_my_zsh(). The minimum
+# acceptable bar instead: download to a file, log the exact URL, verify it is
+# non-empty and actually looks like a script, and only then execute the
+# FILE — never the pipe.
+install_agy_cli() {
+    local url="https://antigravity.google/cli/install.sh"
+    ui_info "downloading Antigravity CLI installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_warn "Antigravity CLI installer from $url does not look like a script — aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    bash "$tmp" >/tmp/autoos-rescue-agy.log 2>&1 || rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
+# ─── the `ai` dispatcher (claude default, agy and any future backend
 # selectable by name) — shipped as data next to this script, installed
 # verbatim, never generated inline here ─────────────────────────────────────
 install_ai_dispatcher() {
@@ -431,12 +483,17 @@ write_ai_profile() {
 # `ai` is a small dispatcher (/usr/local/bin/ai) that picks a backend from
 # /etc/autoos/ai-clients.conf. Claude is the default; run `ai --list` to see
 # what is actually installed on this stick, or call a backend by name
-# directly: `ai gemini "..."`, or the CLIs themselves: `claude ...`, `gemini ...`.
+# directly: `ai agy "..."`, or the CLIs themselves: `claude ...`, `agy ...`.
 #
 # No API key is ever written here. Uncomment and paste your own below, or use
-# `claude login` / `gemini` interactive auth instead.
+# `claude login` interactive auth instead.
 # export ANTHROPIC_API_KEY=
-# export GEMINI_API_KEY=
+#
+# agy (Antigravity CLI) has no API-key env var: `agy -p "..."` (headless)
+# only works with credentials cached from a prior *interactive* `agy`
+# session. Run `agy` once, log in, then headless use works — but that is not
+# possible on an offline machine that has never run `agy` interactively
+# before. See docs/profiles.md.
 EOF
     # This file invites the operator to paste their own key into it
     # ("Uncomment and paste your own below"), so the moment it exists it is
@@ -466,6 +523,9 @@ print_summary() {
         ui_warn "could not install: ${MISSING[*]}"
     else
         ui_info "every rescue tool is present"
+    fi
+    if command -v agy >/dev/null 2>&1; then
+        ui_warn "agy (Antigravity CLI) headless mode needs a prior interactive login — run 'agy' once to authenticate before 'agy -p ...' works. Not possible on an offline machine with no earlier session."
     fi
 }
 

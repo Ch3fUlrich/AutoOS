@@ -288,34 +288,24 @@ function Install-AutoOSComponent {
     'installed'
 }
 
+# agy (Antigravity CLI, replacing Gemini CLI at the human partner's direction)
+# used to be dispatched here via `irm https://antigravity.google/cli/install.ps1
+# | iex` — an unverified remote script piped straight into a shell (A14).
+# Google publishes a signed winget package (Google.AntigravityCLI, x64 +
+# arm64, sha256-pinned installers) that does the verification for us, so
+# catalog/windows.json now installs it with provider "winget" instead and
+# there is no longer a script path for it here.
 function Invoke-AutoOSScriptProvider {
     param([Parameter(Mandatory)][psobject]$Component)
     switch ($Component.Package) {
         'meslo-nerd-font' { return Install-AutoOSNerdFont }
         'herdr'           { return Install-AutoOSHerdr }
         'claude-autostart'{ return Install-AutoOSClaudeAutostart }
-        'agy'             { return Install-AutoOSAgy }
         default           { return @{ ExitCode = 1; Output = "no script for '$($Component.Package)'" } }
     }
 }
 
-function Install-AutoOSAgy {
-    if ($script:DryRun) {
-        Write-AutoOSLine "would install Antigravity CLI via antigravity.google/cli/install.ps1" -Level muted
-        return @{ ExitCode = 0; Success = $true }
-    }
-    try {
-        & powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://antigravity.google/cli/install.ps1 | iex"
-        return @{ ExitCode = $LASTEXITCODE; Success = ($LASTEXITCODE -eq 0) }
-    } catch {
-        return @{ ExitCode = 1; Output = $_.Exception.Message; Success = $false }
-    }
-}
-
 # ─── Post-install steps ─────────────────────────────────────────────────────
-function Add-AutoOSAgyToPath {
-    Add-AutoOSPathEntry -Directory @(Join-Path $env:LOCALAPPDATA 'agy\bin') | Out-Null
-}
 
 function Add-AutoOSGitToPath {
     Add-AutoOSPathEntry -Directory @("$env:ProgramFiles\Git\cmd") | Out-Null
@@ -1036,8 +1026,8 @@ Export-ModuleMember -Function `
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
     Write-AutoOSOmnigraphReadiness,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
-    Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSAgyToPath, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
-    Install-AutoOSHerdr, Install-AutoOSAgy, Install-AutoOSClaudeAutostart,
+    Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
+    Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,
     Write-AutoOSClaudeHostReadiness, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Install-AutoOSMcpGraphify,
