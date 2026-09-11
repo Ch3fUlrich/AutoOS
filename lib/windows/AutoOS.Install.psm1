@@ -307,6 +307,49 @@ function Invoke-AutoOSScriptProvider {
 
 # ─── Post-install steps ─────────────────────────────────────────────────────
 
+function Invoke-AutoOSOllamaPull {
+    <#
+      .SYNOPSIS Pull one Ollama model, idempotently.
+      .DESCRIPTION
+        Shared by the three local-ai model postInstall wrappers below — a
+        catalog postInstall is invoked with no arguments (see
+        Invoke-AutoOSPostInstall), so each model needs its own thin named
+        wrapper; this is the one place that actually knows how to pull one.
+        `ollama list` is checked first so a model already pulled reports
+        nothing new to do, matching every other installer's "skipped" bar
+        (AGENTS.md §4) even though the catalog's own custom-provider
+        pre-check (Get-AutoOSInstalledStatus) already does the same test.
+    #>
+    param([Parameter(Mandatory)][string]$Model)
+    if ($script:DryRun) {
+        Write-AutoOSLine "would pull ollama model: $Model" -Level muted
+        return
+    }
+    if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
+        Write-AutoOSLine "ollama command not found; skipping model pull for $Model" -Level warn
+        return
+    }
+    $existing = & ollama list 2>$null
+    if ($existing -match [regex]::Escape($Model)) {
+        Write-AutoOSLine "ollama model $Model already pulled" -Level muted
+        return
+    }
+    Write-AutoOSLine "pulling Ollama model: $Model" -Level step
+    & ollama pull $Model
+    if ($LASTEXITCODE -ne 0) {
+        Write-AutoOSLine "failed to pull ollama model: $Model" -Level warn
+    }
+}
+
+# local-ai profile (B21): qwen3:4b is the pre-ticked default (2.5 GB, 256K
+# context — long enough to paste a dmesg/SMART dump into), qwen3:1.7b and
+# qwen2.5-coder:7b are offered but not pre-ticked. Sizes are verified against
+# ollama.com and live in each catalog entry's description, which a test
+# enforces.
+function Install-AutoOSOllamaModelQwen34B { Invoke-AutoOSOllamaPull -Model 'qwen3:4b' }
+function Install-AutoOSOllamaModelQwen317B { Invoke-AutoOSOllamaPull -Model 'qwen3:1.7b' }
+function Install-AutoOSOllamaModelQwenCoder7B { Invoke-AutoOSOllamaPull -Model 'qwen2.5-coder:7b' }
+
 function Add-AutoOSGitToPath {
     Add-AutoOSPathEntry -Directory @("$env:ProgramFiles\Git\cmd") | Out-Null
 }
@@ -1032,4 +1075,5 @@ Export-ModuleMember -Function `
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
-    Invoke-AutoOSScriptProvider
+    Invoke-AutoOSScriptProvider,
+    Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B

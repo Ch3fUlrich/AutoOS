@@ -7,6 +7,7 @@
     "light": "Small board (Raspberry Pi 5 and similar) — Claude Code, Tailscale and Herdr only.",
     "server": "Headless server — shell, networking and containers, no GUI.",
     "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
+    "local-ai": "Local AI inference with Ollama — no API key and no network, but models are 1.4-4.7 GB.",
     "custom": "Start with nothing ticked and choose by hand.",
     "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
   },
@@ -542,11 +543,57 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "server"
+            "server",
+            "local-ai"
           ],
           "verify": "ollama --version",
           "notes": "Powers local LLMs and nomic-embed-text for Omnigraph semantic recall.",
           "homepage": "https://ollama.com/"
+        },
+        {
+          "id": "ollama-model-qwen3-4b",
+          "name": "Qwen3 4B",
+          "description": "General-purpose local model, 2.5 GB download, 256K context",
+          "provider": "custom",
+          "package": "qwen3:4b",
+          "postInstall": "pull_ollama_model_qwen3_4b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama list | grep -q qwen3:4b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "notes": "Pre-ticked default: small enough to load fast off USB, and its 256K context fits a full dmesg/SMART dump.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-1-7b",
+          "name": "Qwen3 1.7B",
+          "description": "Smaller/faster general-purpose local model, 1.4 GB download",
+          "provider": "custom",
+          "package": "qwen3:1.7b",
+          "postInstall": "pull_ollama_model_qwen3_1_7b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama list | grep -q qwen3:1.7b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "profiles": []
+        },
+        {
+          "id": "ollama-model-qwen2-5-coder-7b",
+          "name": "Qwen2.5 Coder 7B",
+          "description": "Coding-focused local model, 4.7 GB download",
+          "provider": "custom",
+          "package": "qwen2.5-coder:7b",
+          "postInstall": "pull_ollama_model_qwen25_coder_7b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama list | grep -q qwen2.5-coder:7b",
+          "homepage": "https://ollama.com/library/qwen2.5-coder",
+          "profiles": []
         },
         {
           "id": "mcp-serena",

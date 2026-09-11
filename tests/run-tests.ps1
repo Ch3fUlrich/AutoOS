@@ -160,6 +160,27 @@ Test-Case 'light profile does not include desktop customisation' {
     Assert-NotContains $light 'windhawk'
 }
 
+Test-Case 'local-ai profile ships ollama' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $localAi = @($a | Where-Object { 'local-ai' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-Contains $localAi 'ollama'
+}
+
+Test-Case 'local-ai is not pulled in by the rescue profile' {
+    # Two orders of magnitude apart: ~400 MB of rescue tools vs 1.4-4.7 GB of
+    # model weights (B21) — a user who asked for a rescue stick has not asked
+    # for that.
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $rescue = @($a | Where-Object { 'rescue' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-NotContains $rescue 'ollama'
+}
+
+Test-Case 'every local-ai model component states its download size' {
+    $models = @($winCatalog.categories.components | Where-Object { $_.id -like 'ollama-model-*' })
+    $bad = @($models | Where-Object { $_.description -notmatch '[0-9]+(\.[0-9]+)?\s?GB' } | ForEach-Object { $_.id })
+    Assert-True ($bad.Count -eq 0) "model entries with no size in the description: $($bad -join ' ')"
+}
+
 # ─── Dependency resolution ──────────────────────────────────────────────────
 Describe-Group 'dependency resolution'
 

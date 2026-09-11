@@ -273,6 +273,46 @@ print('COUPLED: ' + ' '.join(bad) if bad else 'CHECKED ' + ' '.join(want))
     fi
 fi
 
+if it "local-ai profile ships ollama"; then
+    # A plain assert_contains on the substring "ollama" would pass vacuously
+    # against "ollama-model-qwen3-4b" even if the "ollama" id itself were
+    # never in the default set — pad with spaces for an exact id match, the
+    # same guard the rescue-profile tests above use.
+    got=" $(catalog_profile_defaults local-ai) "
+    [[ "$got" == *" ollama "* ]] && pass || fail "ollama not in local-ai defaults: [$got]"
+fi
+
+if it "local-ai is NOT pulled in by the rescue profile"; then
+    # Two orders of magnitude apart: ~400 MB of rescue tools vs 1.4-4.7 GB of
+    # model weights (B21) — a user who asked for a rescue stick has not asked
+    # for that.
+    got="$(catalog_profile_defaults rescue)"
+    if [[ -z "$got" ]]; then
+        fail "catalog_profile_defaults rescue returned nothing — the assertion below would pass vacuously"
+    else
+        # Exact id match, not a substring check — "ollama" is also a
+        # substring of "ollama-model-qwen3-4b", which must never be true
+        # either, but a bare assert_not_contains would only catch that half.
+        padded=" $got "
+        if [[ "$padded" != *" ollama "* && "$padded" != *"ollama-model-"* ]]; then
+            pass
+        else
+            fail "expected NOT to contain ollama or an ollama-model-* id: [$got]"
+        fi
+    fi
+fi
+
+if it "every local-ai model component states its download size"; then
+    out="$(python3 -c "
+import json,re
+cat=json.load(open('catalog/linux.json'))
+bad=[c['id'] for g in cat['categories'] for c in g['components']
+     if c['id'].startswith('ollama-model-')
+     and not re.search(r'[0-9]+(\.[0-9]+)?\s?GB', c.get('description',''))]
+print(' '.join(bad))")"
+    [[ -z "$out" ]] && pass || fail "model entries with no size in the description: $out"
+fi
+
 # ─── Dependency resolution ──────────────────────────────────────────────────
 describe "dependency resolution"
 

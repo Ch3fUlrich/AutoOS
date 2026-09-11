@@ -6,6 +6,7 @@
     "ai-coding": "Coding and AI tooling only, plus the terminal it runs in.",
     "light": "Minimal remote-access box — Claude Code, Tailscale and Herdr only.",
     "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
+    "local-ai": "Local AI inference with Ollama — no API key and no network, but models are 1.4-4.7 GB.",
     "custom": "Start with nothing ticked and choose by hand.",
     "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
   },
@@ -262,6 +263,63 @@
           "verify": "agy --version",
           "homepage": "https://antigravity.google/product/antigravity-cli",
           "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
+        },
+        {
+          "id": "ollama",
+          "name": "Ollama",
+          "description": "Local AI model runtime",
+          "provider": "winget",
+          "package": "Ollama.Ollama",
+          "verify": "ollama --version",
+          "homepage": "https://ollama.com/",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-4b",
+          "name": "Qwen3 4B",
+          "description": "General-purpose local model, 2.5 GB download, 256K context",
+          "provider": "custom",
+          "package": "qwen3:4b",
+          "postInstall": "Install-AutoOSOllamaModelQwen34B",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama list | grep -q qwen3:4b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "notes": "Pre-ticked default: small enough to load fast off USB, and its 256K context fits a full dmesg/SMART dump.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-1-7b",
+          "name": "Qwen3 1.7B",
+          "description": "Smaller/faster general-purpose local model, 1.4 GB download",
+          "provider": "custom",
+          "package": "qwen3:1.7b",
+          "postInstall": "Install-AutoOSOllamaModelQwen317B",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama list | grep -q qwen3:1.7b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "profiles": []
+        },
+        {
+          "id": "ollama-model-qwen2-5-coder-7b",
+          "name": "Qwen2.5 Coder 7B",
+          "description": "Coding-focused local model, 4.7 GB download",
+          "provider": "custom",
+          "package": "qwen2.5-coder:7b",
+          "postInstall": "Install-AutoOSOllamaModelQwenCoder7B",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama list | grep -q qwen2.5-coder:7b",
+          "homepage": "https://ollama.com/library/qwen2.5-coder",
+          "profiles": []
         },
         {
           "id": "claude-desktop",

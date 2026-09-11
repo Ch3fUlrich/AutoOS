@@ -82,6 +82,12 @@ custom_is_installed() {
         mcp-context7)
             mcp_has_server context7 || antigravity_has_server context7
             ;;
+        # local-ai (B21) models — pulled via `ollama pull`, so "installed"
+        # means "ollama list already names this tag", not a package-manager
+        # record.
+        qwen3:4b | qwen3:1.7b | qwen2.5-coder:7b)
+            has_cmd ollama && ollama list 2>/dev/null | grep -qF -- "$1"
+            ;;
         *) return 1 ;;
     esac
 }
@@ -655,6 +661,43 @@ setup_ollama_models() {
         ollama pull "$m" || ui_warn "failed to pull ollama model: $m"
     done
 }
+
+# ─── local-ai profile (B21) ─────────────────────────────────────────────────
+# One catalog component per model, each `requires: ["ollama"]` and each with
+# its own postInstall — a postInstall is invoked with no arguments (see
+# run_post_install), so a shared implementation needs one thin wrapper per
+# model rather than one function parameterised by catalog data.
+#
+# `ollama list` is checked first so an already-pulled model reports nothing
+# new to do here too — belt and braces alongside custom_is_installed's own
+# pre-check below, since that pre-check also gates whether postInstall runs
+# at all only for the "skipped" path, not the "installed" one.
+pull_ollama_model() {
+    local model="$1"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would pull ollama model: $model"
+        return 0
+    fi
+    if ! has_cmd ollama; then
+        ui_warn "ollama command not found; skipping model pull for $model"
+        return 0
+    fi
+    if ollama list 2>/dev/null | grep -qF -- "$model"; then
+        ui_muted "ollama model $model already pulled"
+        return 0
+    fi
+    ui_step "pulling Ollama model: $model"
+    ollama pull "$model" || ui_warn "failed to pull ollama model: $model"
+}
+
+# qwen3:4b is the pre-ticked default (2.5 GB, 256K context — long enough to
+# paste a dmesg/SMART dump into); qwen3:1.7b and qwen2.5-coder:7b are offered
+# under the local-ai profile but not pre-ticked. Sizes are verified against
+# ollama.com and live in each catalog entry's description, which a test
+# enforces.
+pull_ollama_model_qwen3_4b()        { pull_ollama_model "qwen3:4b"; }
+pull_ollama_model_qwen3_1_7b()      { pull_ollama_model "qwen3:1.7b"; }
+pull_ollama_model_qwen25_coder_7b() { pull_ollama_model "qwen2.5-coder:7b"; }
 
 setup_git_config() {
     local name email

@@ -34,6 +34,7 @@ menu afterwards.
 | `server` | — | ✅ | — | Headless: shell, networking, containers, no GUI |
 | `everyday` | ✅ | ✅ | ✅ | Personal desktop; available apps and vendor setup steps vary by platform |
 | `rescue` | ✅ | ✅ | ✅ | Disaster-recovery USB stick: disk/filesystem repair, hardware diagnostics and Windows recovery tools for whoever gets handed the drive |
+| `local-ai` | ✅ | ✅ | ✅ | Offline AI inference via Ollama — no API key, no network, but 1.4-4.7 GB per model (B21) |
 | `custom` | ✅ | ✅ | ✅ | Nothing pre-ticked |
 
 `server` does not exist on Windows or macOS, so a headless machine there is
@@ -80,6 +81,32 @@ rescue stick this matters: a machine that is offline, or that has never run
 `agy` interactively before, cannot use `agy -p` at all. `claude -p` has no
 such requirement. `rescue-bootstrap.sh` prints this limitation in its summary
 whenever `agy` is present, and it is written down here for the same reason.
+
+### `local-ai`: kept strictly separate from `rescue` (B21)
+
+`local-ai` ships `ollama` plus three models, each its own catalog component
+(`ollama-model-<name>`, `requires: ["ollama"]`), so a model already pulled
+reports `skipped` just like any other component:
+
+| Model | Download | Notes |
+|---|---|---|
+| `qwen3:4b` (pre-ticked default) | 2.5 GB | 256K context — long enough to paste a full `dmesg`/SMART dump into |
+| `qwen3:1.7b` | 1.4 GB | Offered, not pre-ticked — smaller/faster |
+| `qwen2.5-coder:7b` | 4.7 GB | Offered, not pre-ticked — coding-focused |
+
+Every model entry states its download size in its `description`, and a test
+enforces that. This is deliberately **its own profile, never folded into
+`rescue`**: the entire rescue toolkit is ~400 MB of packages, one model here
+is 1.4-4.7 GB — two orders of magnitude apart. A user who asked for a rescue
+stick has not asked for that, and a test (`local-ai is NOT pulled in by the
+rescue profile`) holds the line.
+
+The size matters specifically because a rescue stick runs on a *broken*
+machine — often 4-8 GB RAM, no GPU, loading from USB at roughly 15-25 MB/s, so
+a 20 GB model costs on the order of 15 minutes just to load off the stick
+before it can answer anything. The three models above were chosen small on
+purpose; `qwen3:4b`'s 256K context is the specific reason it is the default,
+not just the smallest option.
 
 ## How the suggestion is picked
 
