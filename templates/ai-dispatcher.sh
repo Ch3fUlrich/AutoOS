@@ -57,14 +57,18 @@ is_known_id() {
 }
 
 print_list() {
-    local id bin desc status label
-    printf '%-10s %-16s %-14s %s\n' "ID" "BINARY" "STATUS" "DESCRIPTION"
+    local id bin desc status marker
+    # D2: the marker used to be appended to the ID column ("claude (default)"),
+    # which overflowed that column's fixed width and shifted every other
+    # column out of alignment on exactly that row. It gets its own column now
+    # instead, so no id — however long — can ever push the row out of line.
+    printf '%-10s %-16s %-14s %-7s %s\n' "ID" "BINARY" "STATUS" "DEFAULT" "DESCRIPTION"
     while IFS=: read -r id bin desc; do
         [[ -z "$id" || "$id" == \#* ]] && continue
         if command -v "$bin" >/dev/null 2>&1; then status="installed"; else status="not installed"; fi
-        label="$id"
-        [[ "$id" == "$DEFAULT_ID" ]] && label="${id} (default)"
-        printf '%-10s %-16s %-14s %s\n' "$label" "$bin" "$status" "$desc"
+        marker=""
+        [[ "$id" == "$DEFAULT_ID" ]] && marker="yes"
+        printf '%-10s %-16s %-14s %-7s %s\n' "$id" "$bin" "$status" "$marker" "$desc"
     done < "$REGISTRY"
 }
 
@@ -85,6 +89,13 @@ if [[ $# -gt 0 ]] && is_known_id "$1"; then
     backend_id="$1"
     shift
     explicit=1
+elif [[ $# -gt 1 && "$1" =~ ^[a-z0-9_-]+$ ]]; then
+    # D1: "$1" is shaped like a backend id (and something follows it, so it
+    # isn't just a one-word prompt) but isn't a registered one — e.g. a typo
+    # like `ai gemeni "..."`. Real ambiguity is why this doesn't refuse to
+    # run: `ai "why did this fail?"` must still fall through to the default
+    # backend. So this only ever warns and continues, never blocks.
+    printf 'ai: "%s" is not a known backend, treating it as part of the prompt; see ai --list\n' "$1" >&2
 fi
 
 bin="$(registry_field "$backend_id" 2)"

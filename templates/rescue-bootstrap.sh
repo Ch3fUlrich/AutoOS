@@ -25,6 +25,12 @@
 #        behind network_reachable() so an offline stick still gets whatever
 #        is on the ISO's local apt cache and reports a clear summary for the
 #        rest, instead of dying.
+#   B19  network_reachable() above made this script offline-*tolerant*, not
+#        offline-*capable*: a stick with no network still got nothing, because
+#        nothing pointed apt at a local cache. Fixed by register_offline_cache()
+#        below, which — when lib/linux/imagecache.sh has pre-built one next to
+#        this script — registers it as a local apt repo before the first
+#        install, so the rescue toolkit installs with the network fully down.
 #   A1/2 A committed plaintext credential and a malformed SHA-512 hash. Not this
 #        script's concern directly (see templates/user-data.example and
 #        templates/preseed.cfg.example), but it never writes a credential
@@ -85,6 +91,81 @@ network_reachable() {
     [[ "$NETWORK_OK" == "yes" ]]
 }
 
+# ─── local offline package cache (B19) ─────────────────────────────────────
+# A rescue stick meets exactly the machines that have no working network, so
+# apt needs a source that isn't the internet. lib/linux/imagecache.sh builds
+# `<stick_root>/rescue/debs` ahead of time (a real apt repo: .deb files plus
+# Packages.gz) for the ISO's own release; this only ever *consumes* it.
+OFFLINE_CACHE_DIR=""
+OFFLINE_CACHE_REGISTERED=0
+
+detect_offline_cache() {
+    local candidate
+    # The bootstrap script sits at the stick root, so the cache built beside
+    # it is "rescue/debs" relative to SCRIPT_DIR. /cdrom is where Ubuntu's
+    # live session mounts the boot medium itself, which is the same stick
+    # under a different, well-known path — accept either.
+    for candidate in "$SCRIPT_DIR/rescue/debs" /cdrom/rescue/debs; do
+        if [[ -f "$candidate/Packages.gz" ]]; then
+            OFFLINE_CACHE_DIR="$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# apt_can_install(): true when apt has *something* to install from — real
+# network, or a registered local cache. Without this, a fully offline stick
+# would still see network_reachable() fail and skip every apt group before
+# ever trying the local repo apt itself already knows how to use.
+apt_can_install() {
+    network_reachable && return 0
+    [[ "$OFFLINE_CACHE_REGISTERED" -eq 1 ]]
+}
+
+register_offline_cache() {
+    detect_offline_cache || return 0
+
+    local abs_dir list_file entry tmp
+    abs_dir="$(cd "$OFFLINE_CACHE_DIR" && pwd)"
+    # AUTOOS_OFFLINE_APT_LIST: test-only override (the test suite uses this to
+    # avoid ever writing to a real /etc/apt/sources.list.d; a real install
+    # never needs to set it — same pattern as AUTOOS_AI_REGISTRY in
+    # templates/ai-dispatcher.sh).
+    list_file="${AUTOOS_OFFLINE_APT_LIST:-/etc/apt/sources.list.d/autoos-offline.list}"
+    # [trusted=yes] is a deliberate, narrow trade-off, not a shortcut taken
+    # everywhere: this one repo is generated locally on this same stick,
+    # minutes before it is used, and ships no GPG key to check it against —
+    # so apt is told not to require a signature *for this source only*.
+    # NEVER add [trusted=yes] to a real network apt source.
+    entry="deb [trusted=yes] file:${abs_dir} ./"
+
+    # One visible line every run: an unsigned local repo is an intentional,
+    # narrow exception and the person at the keyboard should know it's active.
+    ui_warn "using local, UNSIGNED offline package cache: $abs_dir (no GPG check — see rescue-bootstrap.sh B19 comment)"
+
+    if [[ -f "$list_file" ]] && grep -qF "$entry" "$list_file" 2>/dev/null; then
+        ui_line "skipped" "offline cache already registered ($list_file)"
+    else
+        tmp="$(mktemp)"
+        cat >"$tmp" <<EOF
+# AutoOS rescue stick — local offline package cache (B19). Unsigned on
+# purpose: this repo has no GPG key, it is built fresh on this same stick.
+# Left in place after bootstrap (not removed at the end) so a later manual
+# \`apt-get install\` on this machine can still reach the rescue tools with
+# no network — it only ever resolves while this path exists on this stick.
+$entry
+EOF
+        # shellcheck disable=SC2086
+        $AUTOOS_SUDO install -m 644 "$tmp" "$list_file"
+        rm -f "$tmp"
+        ui_line "installed" "offline cache registered ($list_file)"
+    fi
+
+    OFFLINE_CACHE_REGISTERED=1
+    apt_update_once
+}
+
 # ─── apt install in small, named groups (A12) ──────────────────────────────
 pkg_installed() { dpkg -s "$1" >/dev/null 2>&1; }
 
@@ -113,9 +194,9 @@ install_apt_group() {
     done
     (( ${#to_install[@]} == 0 )) && return 0
 
-    if ! network_reachable; then
+    if ! apt_can_install; then
         for pkg in "${to_install[@]}"; do
-            ui_warn "$pkg — offline, cannot install ($group_name)"
+            ui_warn "$pkg — offline and no local cache, cannot install ($group_name)"
             MISSING+=("$pkg")
         done
         return 0
@@ -273,6 +354,7 @@ main() {
         ui_line "skipped" "rescue-bootstrap already ran on $(cat "$MARKER" 2>/dev/null || printf unknown) — re-verifying"
     fi
 
+    register_offline_cache
     install_rescue_tools
     install_nodejs
     install_ai_clis

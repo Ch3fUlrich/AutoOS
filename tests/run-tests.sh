@@ -82,6 +82,8 @@ cd "$ROOT" || { echo "cannot enter $ROOT" >&2; exit 1; }
 . lib/linux/detect.sh
 # shellcheck source=../lib/linux/catalog.sh
 . lib/linux/catalog.sh
+# shellcheck source=../lib/linux/imagecache.sh
+. lib/linux/imagecache.sh
 # shellcheck source=../lib/linux/install.sh
 . lib/linux/install.sh
 
@@ -1494,6 +1496,261 @@ if it "the payload the UI reads exposes the environment"; then
 fi
 
 # ─── Answer-file templates & rescue bootstrap (installer USB, task 9) ──────
+describe "offline package cache (imagecache)"
+
+if it "imagecache_codename extracts the release codename from .disk/info (cache)"; then
+    # The exact string proven live against Ubuntu 26.04.1: a naive
+    # `sed 's/.*"\(...\)/'` is greedy and runs to the LAST quote, silently
+    # returning empty. grep -o is what must be used instead.
+    tmp_stick="$(mktemp -d)"
+    mkdir -p "$tmp_stick/.disk"
+    printf 'Ubuntu 26.04.1 LTS "Resolute Raccoon" - Release amd64 (20260826)\n' > "$tmp_stick/.disk/info"
+    got="$(imagecache_codename "$tmp_stick" 2>/dev/null)"
+    rm -rf "$tmp_stick"
+    assert_eq "$got" "resolute"
+fi
+
+if it "imagecache_codename hard-fails on an empty codename instead of returning it silently (cache)"; then
+    tmp_stick="$(mktemp -d)"
+    mkdir -p "$tmp_stick/.disk"
+    printf 'no quoted codename on this line at all\n' > "$tmp_stick/.disk/info"
+    out="$(imagecache_codename "$tmp_stick" 2>&1)"; rc=$?
+    rm -rf "$tmp_stick"
+    if [[ $rc -ne 0 && -n "$out" ]]; then pass; else fail "expected a non-zero exit and an error message, got rc=$rc: $out"; fi
+fi
+
+if it "imagecache_packages matches the catalog's rescue-profile apt packages exactly, same as the template test below (cache)"; then
+    # Independent cross-check against the same source of truth the
+    # rescue-bootstrap template test below uses (plan finding A12): two
+    # different readers of catalog/linux.json must agree, or the catalog has
+    # stopped being the single source of truth.
+    catalog_pkgs="$(python3 -c "
+import json
+data = json.load(open('catalog/linux.json'))
+pkgs = set()
+for cat in data['categories']:
+    for c in cat['components']:
+        if c.get('provider') == 'apt' and 'rescue' in c.get('profiles', []):
+            pkgs.add(c['package'])
+print('\n'.join(sorted(pkgs)))
+" | tr -d '\r')"
+    got_pkgs="$(imagecache_packages catalog/linux.json | tr -d '\r')"
+    assert_eq "$got_pkgs" "$catalog_pkgs"
+fi
+
+if it "imagecache_build never re-downloads a package whose .deb is already cached (cache)"; then
+    # Fully hermetic: fake apt-get and dpkg-scanpackages on PATH, a synthetic
+    # catalog, a throwaway stick root. Never touches the real apt, a real USB
+    # device, or /mnt/j.
+    tmp_stick="$(mktemp -d)"
+    fakebin="$(mktemp -d)"
+    catalog_json="$tmp_stick/catalog.json"
+    fake_apt_log="$tmp_stick/apt.log"
+
+    cat > "$catalog_json" <<'JSON'
+{
+  "categories": [
+    { "id": "test", "name": "Test", "components": [
+      {"id":"foo","name":"Foo","description":"d","provider":"apt","package":"foo","profiles":["rescue"]},
+      {"id":"bar","name":"Bar","description":"d","provider":"apt","package":"bar","profiles":["rescue"]}
+    ] }
+  ],
+  "profiles": { "rescue": {"name":"Rescue"} }
+}
+JSON
+
+    cat > "$fakebin/apt-get" <<'EOS'
+#!/usr/bin/env bash
+# Fake apt-get: logs every invocation, and for a download-only install drops
+# an empty placeholder .deb per requested package into the cache dir named
+# by -o Dir::Cache=... . Never touches the real system.
+printf 'apt-get %s\n' "$*" >>"$FAKE_APT_LOG"
+cache="" mode="" pkgs=()
+for arg in "$@"; do
+    case "$arg" in
+        -o) continue ;;
+        Dir::Cache=*) cache="${arg#Dir::Cache=}" ;;
+        Dir::*|APT::*|Acquire::*) : ;;
+        update) mode="update" ;;
+        install) mode="install" ;;
+        -d|-y|--no-install-recommends) : ;;
+        -*) : ;;
+        *) pkgs+=("$arg") ;;
+    esac
+done
+if [[ "$mode" == "install" && -n "$cache" ]]; then
+    mkdir -p "$cache/archives"
+    for p in "${pkgs[@]}"; do : > "$cache/archives/${p}_1.0_amd64.deb"; done
+fi
+exit 0
+EOS
+    cat > "$fakebin/dpkg-scanpackages" <<'EOS'
+#!/usr/bin/env bash
+# Fake dpkg-scanpackages: enough structure for gzip to have something to
+# compress and for the caller to count entries; not a real Packages file.
+dir="${1:-.}"
+for f in "$dir"/*.deb; do
+    [[ -e "$f" ]] || continue
+    printf 'Package: %s\nFilename: %s\n\n' "$(basename "$f")" "$f"
+done
+exit 0
+EOS
+    chmod +x "$fakebin/apt-get" "$fakebin/dpkg-scanpackages"
+
+    mkdir -p "$tmp_stick/.disk"
+    printf 'Ubuntu 26.04.1 LTS "Resolute Raccoon" - Release amd64 (20260826)\n' > "$tmp_stick/.disk/info"
+
+    # AUTOOS_SUDO="": without this override the function inherits whatever
+    # the earlier "sudo is resolved into AUTOOS_SUDO exactly once" detection
+    # test left behind (this machine's Windows 11 ships its own sudo.exe),
+    # and `sudo mkdir ...` under Git Bash silently fails to create the
+    # directory — hermetic tests must not depend on that leaking in.
+    out1="$(AUTOOS_SUDO="" PATH="$fakebin:$PATH" FAKE_APT_LOG="$fake_apt_log" imagecache_build "$tmp_stick" "$catalog_json" 2>&1)"
+    rc1=$?
+    log1="$(cat "$fake_apt_log" 2>/dev/null)"
+    : > "$fake_apt_log"
+    out2="$(AUTOOS_SUDO="" PATH="$fakebin:$PATH" FAKE_APT_LOG="$fake_apt_log" imagecache_build "$tmp_stick" "$catalog_json" 2>&1)"
+    rc2=$?
+    log2="$(cat "$fake_apt_log" 2>/dev/null)"
+    deb_count=$(find "$tmp_stick/rescue/debs" -maxdepth 1 -name '*.deb' 2>/dev/null | wc -l | tr -d ' ')
+    has_index=0; [[ -f "$tmp_stick/rescue/debs/Packages.gz" ]] && has_index=1
+
+    rm -rf "$tmp_stick" "$fakebin"
+
+    if [[ $rc1 -eq 0 && $rc2 -eq 0 \
+        && "$log1" == *"install"*"foo"* && "$log1" == *"bar"* \
+        && -z "$log2" \
+        && "$out2" == *"already cached"* \
+        && "$out2" == *"verified"* \
+        && "$deb_count" -eq 2 && "$has_index" -eq 1 ]]; then
+        pass
+    else
+        fail "run1 rc=$rc1 log='${log1:0:150}' | run2 rc=$rc2 log='${log2:0:150}' out2='${out2: -200}' debs=$deb_count index=$has_index"
+    fi
+fi
+
+if it "imagecache_build fails loudly on a partial cache and names exactly what's missing, then a top-up fetches only that (cache)"; then
+    # Reproduces the exact defect a manual build hit: the builder's own
+    # "N .deb files" summary looked complete while one catalog package
+    # (mdadm) was silently absent. Here a 3-package catalog and a fake
+    # apt-get that "forgets" one package on the first run stand in for that:
+    # imagecache_build must report failure and name the missing package, and
+    # a second run (the package now available) must fetch ONLY that one
+    # package — never re-touching the two already cached — and end verified.
+    tmp_stick="$(mktemp -d)"
+    fakebin="$(mktemp -d)"
+    catalog_json="$tmp_stick/catalog.json"
+    fake_apt_log="$tmp_stick/apt.log"
+
+    cat > "$catalog_json" <<'JSON'
+{
+  "categories": [
+    { "id": "test", "name": "Test", "components": [
+      {"id":"foo","name":"Foo","description":"d","provider":"apt","package":"foo","profiles":["rescue"]},
+      {"id":"bar","name":"Bar","description":"d","provider":"apt","package":"bar","profiles":["rescue"]},
+      {"id":"baz","name":"Baz","description":"d","provider":"apt","package":"baz","profiles":["rescue"]}
+    ] }
+  ],
+  "profiles": { "rescue": {"name":"Rescue"} }
+}
+JSON
+
+    # FAKE_APT_DROP names one package this fake apt-get pretends never came
+    # down, just like the real dependency-resolution quirk that dropped mdadm.
+    cat > "$fakebin/apt-get" <<'EOS'
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "$*" >>"$FAKE_APT_LOG"
+cache="" mode="" pkgs=()
+for arg in "$@"; do
+    case "$arg" in
+        -o) continue ;;
+        Dir::Cache=*) cache="${arg#Dir::Cache=}" ;;
+        Dir::*|APT::*|Acquire::*) : ;;
+        update) mode="update" ;;
+        install) mode="install" ;;
+        -d|-y|--no-install-recommends) : ;;
+        -*) : ;;
+        *) pkgs+=("$arg") ;;
+    esac
+done
+if [[ "$mode" == "install" && -n "$cache" ]]; then
+    mkdir -p "$cache/archives"
+    for p in "${pkgs[@]}"; do
+        [[ -n "${FAKE_APT_DROP:-}" && "$p" == "$FAKE_APT_DROP" ]] && continue
+        : > "$cache/archives/${p}_1.0_amd64.deb"
+    done
+fi
+exit 0
+EOS
+    cat > "$fakebin/dpkg-scanpackages" <<'EOS'
+#!/usr/bin/env bash
+dir="${1:-.}"
+for f in "$dir"/*.deb; do
+    [[ -e "$f" ]] || continue
+    printf 'Package: %s\nFilename: %s\n\n' "$(basename "$f")" "$f"
+done
+exit 0
+EOS
+    chmod +x "$fakebin/apt-get" "$fakebin/dpkg-scanpackages"
+
+    mkdir -p "$tmp_stick/.disk"
+    printf 'Ubuntu 26.04.1 LTS "Resolute Raccoon" - Release amd64 (20260826)\n' > "$tmp_stick/.disk/info"
+
+    out1="$(AUTOOS_SUDO="" PATH="$fakebin:$PATH" FAKE_APT_LOG="$fake_apt_log" FAKE_APT_DROP="baz" \
+            imagecache_build "$tmp_stick" "$catalog_json" 2>&1)"
+    rc1=$?
+    : > "$fake_apt_log"
+    out2="$(AUTOOS_SUDO="" PATH="$fakebin:$PATH" FAKE_APT_LOG="$fake_apt_log" \
+            imagecache_build "$tmp_stick" "$catalog_json" 2>&1)"
+    rc2=$?
+    log2="$(cat "$fake_apt_log" 2>/dev/null)"
+    pkg_count_in_index="$(gunzip -c "$tmp_stick/rescue/debs/Packages.gz" 2>/dev/null | grep -c '^Package:')"
+
+    rm -rf "$tmp_stick" "$fakebin"
+
+    if [[ $rc1 -ne 0 && "$out1" == *"missing"* && "$out1" == *"baz"* \
+        && $rc2 -eq 0 && "$out2" == *"verified"* \
+        && "$log2" == *"baz"* && "$log2" != *"foo"* && "$log2" != *"bar"* \
+        && "$pkg_count_in_index" -eq 3 ]]; then
+        pass
+    else
+        fail "rc1=$rc1 out1='${out1: -200}' | rc2=$rc2 log2='$log2' index_count=$pkg_count_in_index"
+    fi
+fi
+
+if it "imagecache_verify audits an existing cache without rebuilding it (cache)"; then
+    # Pure function, no apt-get/dpkg-scanpackages needed: it only globs for
+    # <pkg>_*.deb, so this proves the audit works standalone against
+    # whatever is already on a stick — the "run it later without a rebuild"
+    # requirement.
+    tmp_stick="$(mktemp -d)"
+    catalog_json="$tmp_stick/catalog.json"
+    cat > "$catalog_json" <<'JSON'
+{
+  "categories": [
+    { "id": "test", "name": "Test", "components": [
+      {"id":"foo","name":"Foo","description":"d","provider":"apt","package":"foo","profiles":["rescue"]},
+      {"id":"bar","name":"Bar","description":"d","provider":"apt","package":"bar","profiles":["rescue"]}
+    ] }
+  ],
+  "profiles": { "rescue": {"name":"Rescue"} }
+}
+JSON
+    mkdir -p "$tmp_stick/rescue/debs"
+    : > "$tmp_stick/rescue/debs/foo_2.1_amd64.deb"
+    # "bar" deliberately absent.
+
+    out="$(imagecache_verify "$tmp_stick" "$catalog_json" 2>&1)"; rc=$?
+    rm -rf "$tmp_stick"
+
+    if [[ $rc -ne 0 && "$out" == *"bar"* && "$out" != *"foo"* ]]; then
+        pass
+    else
+        fail "expected failure naming only 'bar' as missing (rc=$rc): ${out:0:200}"
+    fi
+fi
+
+# ─── Answer-file templates ──────────────────────────────────────────────────
 describe "answer file templates"
 
 if it "no template contains a credential"; then
@@ -1548,6 +1805,71 @@ if it "the rescue bootstrap template is shellcheck clean"; then
         if [[ $rc -eq 0 ]]; then pass; else fail "(via docker) $(printf '%s' "$out" | head -20)"; fi
     else
         skip "no shellcheck binary and no usable docker"
+    fi
+fi
+
+if it "[trusted=yes] never appears on a real network apt source line (template)"; then
+    # [trusted=yes] belongs only on the one local, generated-on-this-stick
+    # file:// repo — never on an archive.ubuntu.com/security.ubuntu.com line.
+    if grep -E 'trusted=yes' templates/rescue-bootstrap.sh | grep -qE 'archive\.ubuntu\.com|security\.ubuntu\.com'; then
+        fail "[trusted=yes] found on a network apt source line"
+    else pass; fi
+fi
+
+if it "rescue-bootstrap registers the local offline cache as an unsigned local apt source, idempotently (template)"; then
+    # Hermetic: an isolated fake "stick root" with a fake cache and a fake
+    # apt-get, and AUTOOS_OFFLINE_APT_LIST redirected to a temp file so this
+    # never touches a real /etc/apt/sources.list.d. A real copy of the
+    # template (minus the trailing `main "$@"` call) is sourced from inside
+    # the fake stick root so SCRIPT_DIR resolves exactly as it would on the
+    # real stick, next to a real "rescue/debs" cache directory — see
+    # detect_offline_cache() in templates/rescue-bootstrap.sh.
+    fake_stick="$(mktemp -d)"
+    mkdir -p "$fake_stick/rescue/debs"
+    : > "$fake_stick/rescue/debs/Packages.gz"
+    sed '$d' templates/rescue-bootstrap.sh > "$fake_stick/rescue-bootstrap.sh"
+
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/apt-get" <<'EOS'
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "$*" >>"$FAKE_APT_LOG"
+exit 0
+EOS
+    chmod +x "$fakebin/apt-get"
+
+    fake_list="$fake_stick/autoos-offline.list"
+    fake_apt_log="$fake_stick/apt.log"
+
+    out="$(
+        PATH="$fakebin:/usr/bin:/bin" \
+        AUTOOS_OFFLINE_APT_LIST="$fake_list" \
+        AUTOOS_SUDO="" \
+        FAKE_APT_LOG="$fake_apt_log" \
+        bash -c '
+            source "$1"
+            NETWORK_OK="no"   # force the offline branch without a real network probe
+            register_offline_cache
+            printf "REGISTERED=%s\n" "$OFFLINE_CACHE_REGISTERED"
+            if apt_can_install; then printf "CAN_INSTALL=yes\n"; else printf "CAN_INSTALL=no\n"; fi
+            register_offline_cache   # second call: must be idempotent, not append a duplicate line
+        ' _ "$fake_stick/rescue-bootstrap.sh" 2>&1
+    )"
+    rc=$?
+    list_content="$(cat "$fake_list" 2>/dev/null)"
+    list_line_count="$(grep -c '^deb \[trusted=yes\]' "$fake_list" 2>/dev/null || true)"
+    abs_cache="$(cd "$fake_stick/rescue/debs" && pwd)"
+    rm -rf "$fake_stick" "$fakebin"
+
+    if [[ $rc -eq 0 \
+        && "$out" == *"UNSIGNED"* \
+        && "$out" == *"REGISTERED=1"* \
+        && "$out" == *"CAN_INSTALL=yes"* \
+        && "$out" == *"offline cache already registered"* \
+        && "$list_content" == *"deb [trusted=yes] file:${abs_cache} ./"* \
+        && "$list_line_count" -eq 1 ]]; then
+        pass
+    else
+        fail "rc=$rc list_lines=$list_line_count out=${out:0:400}"
     fi
 fi
 
@@ -1607,6 +1929,53 @@ EOS
         pass
     else
         fail "expected the explicitly-named backend to run (rc=$rc): ${out:0:200}"
+    fi
+fi
+
+if it "ai dispatcher warns once on an unrecognized backend-shaped token instead of misrouting silently (template)"; then
+    # D1: `ai gemeni "..."` (a typo) used to silently run the default backend
+    # with "gemeni" as literal prompt text and exit 0 — no signal that the
+    # backend name was never recognized. It must still fall through to the
+    # default (real ambiguity: `ai "why did this fail?"` is a single arg and
+    # must never be treated as an unknown backend), but now with one warning.
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/claude" <<'EOS'
+#!/usr/bin/env bash
+printf 'claude-fake:%s\n' "$*"
+EOS
+    chmod +x "$fakebin/claude"
+    out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" \
+           PATH="$fakebin:/usr/bin:/bin" \
+           bash templates/ai-dispatcher.sh gemeni "hi" 2>&1)"
+    rc=$?
+    rm -rf "$fakebin"
+    if [[ $rc -eq 0 \
+        && "$out" == *'ai: "gemeni" is not a known backend, treating it as part of the prompt; see ai --list'* \
+        && "$out" == *"claude-fake:gemeni hi"* ]]; then
+        pass
+    else
+        fail "expected a warning plus the default backend fed 'gemeni hi' verbatim (rc=$rc): ${out:0:300}"
+    fi
+fi
+
+if it "ai dispatcher prints no warning for a single-argument prompt, even one shaped like an id (template)"; then
+    # The other half of D1's ambiguity guard: a lone word with nothing after
+    # it must never be second-guessed as an unrecognized backend.
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/claude" <<'EOS'
+#!/usr/bin/env bash
+printf 'claude-fake:%s\n' "$*"
+EOS
+    chmod +x "$fakebin/claude"
+    out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" \
+           PATH="$fakebin:/usr/bin:/bin" \
+           bash templates/ai-dispatcher.sh diagnose 2>&1)"
+    rc=$?
+    rm -rf "$fakebin"
+    if [[ $rc -eq 0 && "$out" == "claude-fake:diagnose" && "$out" != *"not a known backend"* ]]; then
+        pass
+    else
+        fail "expected no warning for a single-word prompt (rc=$rc): ${out:0:200}"
     fi
 fi
 
