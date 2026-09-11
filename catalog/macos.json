@@ -5,6 +5,7 @@
     "workstation": "Full desktop workstation - the same coding and AI stack as the other platforms.",
     "ai-coding": "Coding and AI tooling plus the shell, no GUI extras.",
     "light": "Minimal remote-access box - Claude Code, Tailscale and Herdr only.",
+    "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
     "custom": "Start with nothing ticked and choose by hand.",
     "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
   },
@@ -165,9 +166,27 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "light"
+            "light",
+            "rescue"
           ],
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
+        },
+        {
+          "id": "gemini-cli",
+          "name": "Gemini CLI",
+          "description": "Google's terminal AI assistant",
+          "provider": "npm",
+          "package": "@google/gemini-cli",
+          "verify": "gemini --version",
+          "homepage": "https://github.com/google-gemini/gemini-cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "rescue"
+          ]
         },
         {
           "id": "agy",

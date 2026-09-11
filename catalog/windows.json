@@ -5,6 +5,7 @@
     "workstation": "Full development workstation — everything below that fits the hardware.",
     "ai-coding": "Coding and AI tooling only, plus the terminal it runs in.",
     "light": "Minimal remote-access box — Claude Code, Tailscale and Herdr only.",
+    "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
     "custom": "Start with nothing ticked and choose by hand.",
     "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
   },
@@ -220,10 +221,28 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "light"
+            "light",
+            "rescue"
           ],
           "verify": "claude --version",
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
+        },
+        {
+          "id": "gemini-cli",
+          "name": "Gemini CLI",
+          "description": "Google's terminal AI assistant",
+          "provider": "npm",
+          "package": "@google/gemini-cli",
+          "verify": "gemini --version",
+          "homepage": "https://github.com/google-gemini/gemini-cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "rescue"
+          ]
         },
         {
           "id": "claude-autostart",
@@ -522,7 +541,8 @@
           "package": "7zip.7zip",
           "profiles": [
             "workstation",
-            "everyday"
+            "everyday",
+            "rescue"
           ],
           "verify": "7z",
           "homepage": "https://www.7-zip.org/",
@@ -742,7 +762,8 @@
           "provider": "winget",
           "package": "REALiX.HWiNFO",
           "profiles": [
-            "everyday"
+            "everyday",
+            "rescue"
           ],
           "homepage": "https://www.hwinfo.com/",
           "installedNames": [
@@ -831,6 +852,91 @@
           "installedNames": [
             "Unified Remote Server",
             "Unified Remote"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rescue",
+      "name": "Disaster Recovery",
+      "description": "Disk, filesystem, hardware and installer-USB tools for a rescue stick.",
+      "components": [
+        {
+          "id": "crystaldiskinfo",
+          "name": "CrystalDiskInfo",
+          "description": "Disk health, S.M.A.R.T. status and temperature monitor",
+          "provider": "winget",
+          "package": "CrystalDewWorld.CrystalDiskInfo",
+          "homepage": "https://crystalmark.info/en/software/crystaldiskinfo/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "testdisk",
+          "name": "TestDisk & PhotoRec",
+          "description": "Recover lost partitions and undelete files",
+          "provider": "winget",
+          "package": "CGSecurity.TestDisk",
+          "homepage": "https://www.cgsecurity.org/wiki/TestDisk",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "windirstat",
+          "name": "WinDirStat",
+          "description": "Visualise what is filling up the disk",
+          "provider": "winget",
+          "package": "WinDirStat.WinDirStat",
+          "homepage": "https://windirstat.net/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "sysinternals",
+          "name": "Sysinternals Suite",
+          "description": "Process Explorer, Autoruns and the rest of the PsTools",
+          "provider": "winget",
+          "package": "Microsoft.Sysinternals.Suite",
+          "homepage": "https://learn.microsoft.com/sysinternals/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "ventoy",
+          "name": "Ventoy",
+          "description": "Multi-ISO bootable USB creator",
+          "provider": "winget",
+          "package": "Ventoy.Ventoy",
+          "homepage": "https://www.ventoy.net/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "rufus",
+          "name": "Rufus",
+          "description": "Format and create bootable USB drives from an ISO",
+          "provider": "winget",
+          "package": "Rufus.Rufus",
+          "homepage": "https://rufus.ie/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "usbipd-win",
+          "name": "usbipd-win",
+          "description": "Share local USB devices with WSL2 and Hyper-V guests",
+          "provider": "winget",
+          "package": "dorssel.usbipd-win",
+          "verify": "usbipd --version",
+          "homepage": "https://github.com/dorssel/usbipd-win",
+          "profiles": [
+            "rescue"
           ]
         }
       ]

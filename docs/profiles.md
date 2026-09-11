@@ -33,6 +33,7 @@ menu afterwards.
 | `light` | ✅ | ✅ | ✅ | Raspberry Pi 5 and similar — Claude Code, Tailscale, Herdr |
 | `server` | — | ✅ | — | Headless: shell, networking, containers, no GUI |
 | `everyday` | ✅ | ✅ | ✅ | Personal desktop; available apps and vendor setup steps vary by platform |
+| `rescue` | ✅ | ✅ | ✅ | Disaster-recovery USB stick: disk/filesystem repair, hardware diagnostics and Windows recovery tools for whoever gets handed the drive |
 | `custom` | ✅ | ✅ | ✅ | Nothing pre-ticked |
 
 `server` does not exist on Windows or macOS, so a headless machine there is

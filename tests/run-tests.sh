@@ -188,6 +188,37 @@ if it "workstation is a superset of light"; then
     assert_eq "$missing" ""
 fi
 
+if it "rescue profile carries the disk-recovery core"; then
+    got="$(catalog_profile_defaults rescue)"
+    ok=1
+    for id in smartmontools nvme-cli ddrescue testdisk gdisk; do
+        [[ " $got " == *" $id "* ]] || { ok=0; echo "missing: $id" >&2; }
+    done
+    (( ok )) && pass || fail "rescue profile is incomplete"
+fi
+
+if it "rescue profile stays off the desktop"; then
+    assert_not_contains "$(catalog_profile_defaults rescue)" "antigravity"
+fi
+
+if it "rescue ships both AI CLIs"; then
+    got="$(catalog_profile_defaults rescue)"
+    assert_contains "$got" "claude-code"
+    assert_contains "$got" "gemini-cli"
+fi
+
+if it "neither AI CLI depends on the other"; then
+    # B8: an outage that kills one must leave the other installed.
+    out="$(python3 -c "
+import json
+cat=json.load(open('catalog/linux.json'))
+comps={c['id']: c for g in cat['categories'] for c in g['components']}
+bad=[i for i in ('claude-code','gemini-cli')
+     if i in comps and ({'claude-code','gemini-cli'} & set(comps[i].get('requires',[])))]
+print(' '.join(bad))")"
+    [[ -z "$out" ]] && pass || fail "AI CLIs are coupled: $out"
+fi
+
 # ─── Dependency resolution ──────────────────────────────────────────────────
 describe "dependency resolution"
 

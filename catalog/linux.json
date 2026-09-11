@@ -6,6 +6,7 @@
     "ai-coding": "Coding and AI tooling plus the shell, no desktop packages.",
     "light": "Small board (Raspberry Pi 5 and similar) — Claude Code, Tailscale and Herdr only.",
     "server": "Headless server — shell, networking and containers, no GUI.",
+    "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
     "custom": "Start with nothing ticked and choose by hand.",
     "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
   },
@@ -319,10 +320,28 @@
             "workstation",
             "ai-coding",
             "light",
-            "server"
+            "server",
+            "rescue"
           ],
           "verify": "claude --version",
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
+        },
+        {
+          "id": "gemini-cli",
+          "name": "Gemini CLI",
+          "description": "Google's terminal AI assistant",
+          "provider": "npm",
+          "package": "@google/gemini-cli",
+          "verify": "gemini --version",
+          "homepage": "https://github.com/google-gemini/gemini-cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "rescue"
+          ]
         },
         {
           "id": "claude-autostart",
@@ -658,7 +677,8 @@
           "package": "wireguard",
           "profiles": [
             "workstation",
-            "server"
+            "server",
+            "rescue"
           ],
           "homepage": "https://www.wireguard.com/"
         },
@@ -913,6 +933,351 @@
           ],
           "homepage": "https://www.unifiedremote.com/download",
           "notes": "Install the Unified Remote app on your phone and pair with this server. Review remote access settings before use."
+        }
+      ]
+    },
+    {
+      "id": "rescue",
+      "name": "Disaster Recovery",
+      "description": "Disk, filesystem, hardware and Windows-repair tools for a rescue USB.",
+      "components": [
+        {
+          "id": "smartmontools",
+          "name": "smartmontools",
+          "description": "S.M.A.R.T. disk health monitoring and self-tests",
+          "provider": "apt",
+          "package": "smartmontools",
+          "verify": "smartctl --version",
+          "homepage": "https://www.smartmontools.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "nvme-cli",
+          "name": "nvme-cli",
+          "description": "Query and manage NVMe SSDs from the command line",
+          "provider": "apt",
+          "package": "nvme-cli",
+          "verify": "nvme version",
+          "homepage": "https://github.com/linux-nvme/nvme-cli",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "hdparm",
+          "name": "hdparm",
+          "description": "Inspect and tune SATA/PATA drive parameters",
+          "provider": "apt",
+          "package": "hdparm",
+          "verify": "hdparm -V",
+          "homepage": "https://sourceforge.net/projects/hdparm/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "pciutils",
+          "name": "pciutils",
+          "description": "List and inspect PCI devices (lspci)",
+          "provider": "apt",
+          "package": "pciutils",
+          "verify": "lspci --version",
+          "homepage": "https://mj.ucw.cz/sw/pciutils/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "usbutils",
+          "name": "usbutils",
+          "description": "List and inspect USB devices (lsusb)",
+          "provider": "apt",
+          "package": "usbutils",
+          "verify": "lsusb --version",
+          "homepage": "https://github.com/gregkh/usbutils",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "lshw",
+          "name": "lshw",
+          "description": "Detailed hardware configuration report",
+          "provider": "apt",
+          "package": "lshw",
+          "verify": "lshw -version",
+          "homepage": "https://ezix.org/project/wiki/HardwareLiSter",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "dmidecode",
+          "name": "dmidecode",
+          "description": "Dump BIOS/UEFI DMI (SMBIOS) table contents",
+          "provider": "apt",
+          "package": "dmidecode",
+          "verify": "dmidecode --version",
+          "homepage": "https://www.nongnu.org/dmidecode/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "inxi",
+          "name": "inxi",
+          "description": "Full system hardware and driver summary",
+          "provider": "apt",
+          "package": "inxi",
+          "verify": "inxi -V",
+          "homepage": "https://github.com/smxi/inxi",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "lm-sensors",
+          "name": "lm-sensors",
+          "description": "Read CPU and board temperature/voltage sensors",
+          "provider": "apt",
+          "package": "lm-sensors",
+          "verify": "sensors -v",
+          "homepage": "https://github.com/lm-sensors/lm-sensors",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "memtester",
+          "name": "memtester",
+          "description": "Stress-test RAM for a failing module while booted",
+          "provider": "apt",
+          "package": "memtester",
+          "homepage": "https://pyropus.ca/software/memtester/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "stress-ng",
+          "name": "stress-ng",
+          "description": "Load-test CPU, memory and I/O under stress",
+          "provider": "apt",
+          "package": "stress-ng",
+          "verify": "stress-ng --version",
+          "homepage": "https://github.com/ColinIanKing/stress-ng",
+          "notes": "Not in the original rescue list — added so a rescue stick can also load-test suspect hardware.",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "f3",
+          "name": "F3 (Fight Flash Fraud)",
+          "description": "Detect counterfeit flash drives that lie about their size",
+          "provider": "apt",
+          "package": "f3",
+          "homepage": "https://fight-flash-fraud.readthedocs.io/en/latest/",
+          "notes": "Not in the original rescue list — added because fake-capacity USB sticks are exactly what a rescue kit should catch.",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "gdisk",
+          "name": "gdisk",
+          "description": "Interactive and scriptable GPT partition editor",
+          "provider": "apt",
+          "package": "gdisk",
+          "verify": "sgdisk --version",
+          "homepage": "https://www.rodsbooks.com/gdisk/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "parted",
+          "name": "GNU Parted",
+          "description": "Create, resize and delete disk partitions",
+          "provider": "apt",
+          "package": "parted",
+          "verify": "parted --version",
+          "homepage": "https://www.gnu.org/software/parted/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "testdisk",
+          "name": "TestDisk & PhotoRec",
+          "description": "Recover lost partitions and undelete files",
+          "provider": "apt",
+          "package": "testdisk",
+          "homepage": "https://www.cgsecurity.org/wiki/TestDisk",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "ddrescue",
+          "name": "GNU ddrescue",
+          "description": "Copy data off a failing disk, retrying bad sectors",
+          "provider": "apt",
+          "package": "gddrescue",
+          "verify": "ddrescue --version",
+          "homepage": "https://www.gnu.org/software/ddrescue/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "e2fsprogs",
+          "name": "e2fsprogs",
+          "description": "Create and check ext2/ext3/ext4 filesystems",
+          "provider": "apt",
+          "package": "e2fsprogs",
+          "verify": "e2fsck -V",
+          "homepage": "https://e2fsprogs.sourceforge.net/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "btrfs-progs",
+          "name": "btrfs-progs",
+          "description": "Create and check Btrfs filesystems",
+          "provider": "apt",
+          "package": "btrfs-progs",
+          "verify": "btrfs --version",
+          "homepage": "https://btrfs.readthedocs.io/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "xfsprogs",
+          "name": "xfsprogs",
+          "description": "Create and check XFS filesystems",
+          "provider": "apt",
+          "package": "xfsprogs",
+          "verify": "mkfs.xfs -V",
+          "homepage": "https://xfs.wiki.kernel.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "ntfs-3g",
+          "name": "ntfs-3g",
+          "description": "Read and write NTFS filesystems from Linux",
+          "provider": "apt",
+          "package": "ntfs-3g",
+          "verify": "ntfs-3g --version",
+          "homepage": "https://github.com/tuxera/ntfs-3g",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "dosfstools",
+          "name": "dosfstools",
+          "description": "Create and check FAT/VFAT filesystems",
+          "provider": "apt",
+          "package": "dosfstools",
+          "homepage": "https://github.com/dosfstools/dosfstools",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "exfatprogs",
+          "name": "exfatprogs",
+          "description": "Create and check exFAT filesystems",
+          "provider": "apt",
+          "package": "exfatprogs",
+          "verify": "mkfs.exfat --version",
+          "homepage": "https://github.com/exfatprogs/exfatprogs",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "dislocker",
+          "name": "dislocker",
+          "description": "Mount BitLocker-encrypted Windows volumes",
+          "provider": "apt",
+          "package": "dislocker",
+          "arch": ["x64"],
+          "homepage": "https://github.com/Aorimn/dislocker",
+          "notes": "Debian-family only; no Fedora path yet.",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "chntpw",
+          "name": "chntpw",
+          "description": "Reset lost Windows account passwords offline",
+          "provider": "apt",
+          "package": "chntpw",
+          "arch": ["x64"],
+          "homepage": "https://pogostick.net/~pnh/ntpasswd/",
+          "notes": "Debian-family only; no Fedora path yet.",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "efibootmgr",
+          "name": "efibootmgr",
+          "description": "Inspect and repair UEFI boot entries",
+          "provider": "apt",
+          "package": "efibootmgr",
+          "verify": "efibootmgr --version",
+          "homepage": "https://github.com/rhboot/efibootmgr",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "arch-install-scripts",
+          "name": "arch-install-scripts",
+          "description": "Chroot bootstrap helpers (pacstrap, genfstab)",
+          "provider": "apt",
+          "package": "arch-install-scripts",
+          "homepage": "https://gitlab.archlinux.org/archlinux/arch-install-scripts",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "clonezilla",
+          "name": "Clonezilla",
+          "description": "Clone or image a whole disk for backup or restore",
+          "provider": "apt",
+          "package": "clonezilla",
+          "homepage": "https://clonezilla.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "gparted",
+          "name": "GParted",
+          "description": "Graphical partition editor",
+          "provider": "apt",
+          "package": "gparted",
+          "verify": "gparted --version",
+          "homepage": "https://gparted.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "nmap",
+          "name": "nmap",
+          "description": "Network discovery and port scanning",
+          "provider": "apt",
+          "package": "nmap",
+          "verify": "nmap --version",
+          "homepage": "https://nmap.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "tcpdump",
+          "name": "tcpdump",
+          "description": "Capture and inspect network traffic",
+          "provider": "apt",
+          "package": "tcpdump",
+          "verify": "tcpdump --version",
+          "homepage": "https://www.tcpdump.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "iperf3",
+          "name": "iperf3",
+          "description": "Measure network throughput between two hosts",
+          "provider": "apt",
+          "package": "iperf3",
+          "verify": "iperf3 --version",
+          "homepage": "https://github.com/esnet/iperf",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "ethtool",
+          "name": "ethtool",
+          "description": "Query and configure Ethernet NIC settings",
+          "provider": "apt",
+          "package": "ethtool",
+          "verify": "ethtool --version",
+          "homepage": "https://www.kernel.org/pub/software/network/ethtool/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "borgbackup",
+          "name": "BorgBackup",
+          "description": "Deduplicating, encrypted backup tool",
+          "provider": "apt",
+          "package": "borgbackup",
+          "verify": "borg --version",
+          "homepage": "https://www.borgbackup.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "restic",
+          "name": "restic",
+          "description": "Fast, encrypted backups to local or cloud storage",
+          "provider": "apt",
+          "package": "restic",
+          "verify": "restic version",
+          "homepage": "https://restic.net/",
+          "profiles": ["rescue"]
         }
       ]
     }
