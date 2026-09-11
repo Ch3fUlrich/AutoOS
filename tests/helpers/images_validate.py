@@ -34,6 +34,18 @@ import sys
 WRITE_MODES = {"hybrid", "raw"}
 KINDS = {"installer", "live-persistent", "full-os"}
 
+# Finding A6 reopened: Task 4 left every entry's `key` as "-", which silently
+# disables signature verification — `sig` names a detached signature but
+# there is nothing to check it against, so the checksum is only as
+# trustworthy as the mirror serving it. "-" means "not yet verified", not
+# "no key exists"; a WRONG fingerprint here is worse than none at all (it
+# fails 100% of the time, which is indistinguishable from an attack and
+# reliably gets verification switched off), so this only ever checks SHAPE —
+# a real gpg fingerprint is a 40-character uppercase hex string — never
+# which key was entered. Whether the specific fingerprint is correct is a
+# human-verification question, not a schema one.
+_GPG_FPR = re.compile(r"[0-9A-F]{40}")
+
 # UI affordances that become a free-text field, never a downloadable image —
 # they have no `index`, no `homepage` and no `sums` by construction (plan
 # Task 4 Step 3/4). This has to be a named set with an explicit carve-out,
@@ -100,6 +112,13 @@ def validate(entry, problems, seen_ids):
 
     if not entry.get("sums"):
         problems.append(f"{where}: missing 'sums' — every real image needs a checksum source")
+
+    key = entry.get("key")
+    if key is not None and key != "-" and not _GPG_FPR.fullmatch(key):
+        problems.append(
+            f"{where}: 'key' must be '-' or a 40-character uppercase hex "
+            f"gpg fingerprint, got '{key}'"
+        )
 
 
 def main(argv):

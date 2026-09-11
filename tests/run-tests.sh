@@ -91,6 +91,16 @@ release_sha256_of() {
     ' "$1" 2>/dev/null
 }
 
+# fake_usb <fixture-name>
+# Prints a synthetic `lsblk -J -b -o NAME,MODEL,SIZE,RM,TRAN,MOUNTPOINT,TYPE`
+# document for one of the named fixtures in tests/helpers/fake_usb.py, for
+# assignment straight into AUTOOS_FAKE_LSBLK. Never touches the live
+# machine's disks (AGENTS.md §5) — see that file for what each fixture is
+# shaped like and why.
+fake_usb() {
+    python3 "$ROOT/tests/helpers/fake_usb.py" "$1"
+}
+
 # ─── Load the libraries under test ──────────────────────────────────────────
 cd "$ROOT" || { echo "cannot enter $ROOT" >&2; exit 1; }
 # shellcheck source=../lib/linux/ui.sh
@@ -105,6 +115,8 @@ cd "$ROOT" || { echo "cannot enter $ROOT" >&2; exit 1; }
 . lib/linux/install.sh
 # shellcheck source=../lib/linux/download.sh
 . lib/linux/download.sh
+# shellcheck source=../lib/linux/usb.sh
+. lib/linux/usb.sh
 
 AUTOOS_NO_COLOR=1
 ui_init
@@ -169,6 +181,20 @@ bad=[i['id'] for i in json.load(open('catalog/images.json'))['images']
      if i['id'] not in PSEUDO and not i.get('sums')]
 print(' '.join(bad)); sys.exit(1 if bad else 0)")"; rc=$?
     [[ $rc -eq 0 ]] && pass || fail "no checksum source: $out"
+fi
+
+if it "every image key is '-' or a 40-character uppercase hex fingerprint"; then
+    # Finding A6 reopened: a wrong fingerprint is worse than none (it fails
+    # verification 100% of the time, indistinguishable from an attack, and
+    # that is precisely how verification gets switched off entirely) — so
+    # this checks shape only, never which key was typed in.
+    out="$(python3 -c "
+import json, re, sys
+fpr = re.compile(r'[0-9A-F]{40}')
+bad = [i['id'] for i in json.load(open('catalog/images.json'))['images']
+       if i.get('key') not in (None, '-') and not fpr.fullmatch(i['key'])]
+print(' '.join(bad)); sys.exit(1 if bad else 0)")"; rc=$?
+    [[ $rc -eq 0 ]] && pass || fail "malformed key fingerprint: $out"
 fi
 
 if it "a raw-write image is never offered to ventoy's copy path"; then
@@ -2062,6 +2088,59 @@ if it "a cached, already-verified file is skipped, not refetched"; then
     out="$(fetch_verified "file://$tmp/src" "$tmp/out" "$sum" - - 2>&1)"
     assert_contains "$out" "skipped"
     rm -rf "$tmp"
+fi
+
+# ─── USB device enumeration and the safety guard ────────────────────────────
+# Task 5 of plan 2026-09-11-installer-usb-and-rescue-profile: usb_guard() is
+# the only thing standing between the installer-USB writer and a live
+# workstation disk, so this block gets the most tests and no shortcuts. Every
+# fixture is synthetic (tests/helpers/fake_usb.py via AUTOOS_FAKE_LSBLK) —
+# this suite must never enumerate the real machine's disks (AGENTS.md §5).
+# Every test name below carries "usb" so `--filter usb` actually reaches it —
+# a filter that matches zero tests reports a clean run indistinguishable
+# from a real pass, which bit two earlier tasks in this same plan.
+describe "usb safety"
+
+if it "usb_guard refuses the disk holding the root filesystem"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb root_is_sda)" usb_guard /dev/sda 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"root filesystem"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_guard refuses a non-removable internal disk"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb internal_nvme)" usb_guard /dev/nvme0n1 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"not removable"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_guard refuses a disk with a mounted partition"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_mounted)" usb_guard /dev/sdb 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"mounted"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_guard refuses a stick smaller than the image"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb tiny_stick)" \
+           AUTOOS_IMAGE_BYTES=8000000000 usb_guard /dev/sdb 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"too small"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_guard accepts a real removable usb stick that is big enough"; then
+    AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_IMAGE_BYTES=4000000000 \
+        usb_guard /dev/sdb && pass || fail "rejected a valid target"
+fi
+
+if it "usb_list still offers a USB SSD reporting as fixed (A10)"; then
+    # A10: DriveType/RM alone misses USB SSDs (commonly behind a UAS/UASP
+    # bridge, reporting RM=0/"fixed"). Bus type is the signal.
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_ssd_fixed)" usb_list)"
+    assert_contains "$out" "/dev/sdb"
+fi
+
+if it "usb_require_elevation refuses to plan a write without root (B10)"; then
+    out="$(AUTOOS_SUDO="" AUTOOS_FAKE_UID=1000 usb_require_elevation 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"sudo"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_require_elevation is satisfied when already root (B10)"; then
+    AUTOOS_SUDO="" AUTOOS_FAKE_UID=0 usb_require_elevation && pass || fail "refused root"
 fi
 
 # ─── Answer-file templates ──────────────────────────────────────────────────

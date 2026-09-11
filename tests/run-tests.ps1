@@ -32,6 +32,7 @@ Import-Module (Join-Path $Lib 'AutoOS.Install.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Download.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Serve.psm1')   -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.State.psm1')   -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.Usb.psm1')     -Force -DisableNameChecking
 
 $script:Pass = 0
 $script:Fail = 0
@@ -1305,6 +1306,193 @@ Test-Case 'a cached, already-verified file is skipped, not refetched' {
     $text = $sw.ToString()
     Assert-True ($text -like '*skipped*') "expected to contain [skipped] in [$text]"
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+
+# ─── USB device enumeration and the safety guard ────────────────────────────
+# Task 5 of plan 2026-09-11-installer-usb-and-rescue-profile: Assert-
+# AutoOSUsbSafe is the only thing standing between the installer-USB writer
+# and a live workstation disk, so this block gets the most tests and no
+# shortcuts — the exact mirror of lib/linux/usb.sh's "usb safety" tests.
+# Every fixture is synthetic ($env:AUTOOS_FAKE_DISKS) — this suite must
+# never enumerate the real machine's disks (AGENTS.md §5). Every test name
+# carries "usb" so `-Filter usb` actually reaches it.
+Describe-Group 'usb safety'
+
+function New-FakeUsbDisk {
+    param(
+        [int]$Number, [string]$Model, [long]$Size, [string]$BusType,
+        [bool]$IsBoot = $false, [bool]$IsSystem = $false, [bool]$IsRemovable = $false,
+        [string]$DriveLetter = $null
+    )
+    # Every field _Get-AutoOSUsbRawDisks/_ConvertTo-AutoOSUsbRecord reads is
+    # present explicitly - Set-StrictMode turns a missing one into a hard
+    # error rather than a silently-$null one, which is the point: an
+    # incomplete fixture must fail loudly, never quietly under-test the guard.
+    [pscustomobject]@{
+        Number      = $Number
+        Model       = $Model
+        Size        = $Size
+        BusType     = $BusType
+        IsBoot      = $IsBoot
+        IsSystem    = $IsSystem
+        IsRemovable = $IsRemovable
+        Partitions  = @([pscustomobject]@{ DriveLetter = $DriveLetter })
+    }
+}
+
+# The internal boot disk present in every fixture below, distinct from the
+# "Disk 5" target every other fixture uses — the same shape the plan brief
+# measured on the human partner's real machine (five non-removable internal
+# disks alongside the one real USB target). Every fixture except
+# root_is_boot_disk names a DIFFERENT DeviceId to Assert-AutoOSUsbSafe than
+# this one, so its presence is what proves the guard looks past "some system
+# disk exists" to "is THIS the system disk".
+function New-FakeBootDisk {
+    New-FakeUsbDisk -Number 0 -Model 'Boot SSD' -Size 256060514304 -BusType 'NVMe' `
+        -IsBoot $true -IsSystem $true -DriveLetter 'C'
+}
+
+function Get-FakeUsbDisksJson {
+    param([Parameter(Mandatory)][string]$Fixture)
+
+    $bootDisk = New-FakeBootDisk
+    $disks = switch ($Fixture) {
+        # The most dangerous case: disk 0 itself is the system/boot disk.
+        'root_is_boot_disk' { @($bootDisk) }
+
+        # A second internal disk, distinct from the boot disk: not
+        # removable, not USB/SCSI. Must be refused even though it does not
+        # hold Windows.
+        'internal_nvme' {
+            @($bootDisk, (New-FakeUsbDisk -Number 1 -Model 'WD Black SN850' `
+                -Size 1000204886016 -BusType 'NVMe'))
+        }
+
+        # Removable, USB, but has an assigned drive letter — must refuse
+        # until the caller unmounts it.
+        'usb_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'SanDisk Ultra' `
+                -Size 32017047552 -BusType 'USB' -IsRemovable $true -DriveLetter 'E'))
+        }
+
+        # Removable, USB, unmounted — but smaller than the image the caller
+        # asks for ($env:AUTOOS_IMAGE_BYTES in the test).
+        'tiny_stick' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Kingston DataTraveler' `
+                -Size 4000000000 -BusType 'USB' -IsRemovable $true))
+        }
+
+        # The real target, measured on the human partner's machine:
+        # Disk 5, "Intenso Office Line", BusType USB, IsSystem False,
+        # IsBoot False, 31,437,766,656 bytes, unmounted.
+        'good_stick' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true))
+        }
+
+        # Finding A10: a USB SSD (commonly behind a UAS/UASP bridge)
+        # enumerates as BusType 'SCSI' with IsRemovable=$false. Must still be
+        # surfaced by Get-AutoOSUsbDevice - BusType alone is the signal.
+        'usb_ssd_fixed' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Samsung T7 (USB enclosure)' `
+                -Size 2000398934016 -BusType 'SCSI' -IsRemovable $false))
+        }
+
+        default { throw "unknown fake-usb fixture: $Fixture" }
+    }
+    ConvertTo-Json -InputObject @($disks) -Depth 6
+}
+
+function Invoke-WithFakeUsbEnv {
+    # Sets the AUTOOS_FAKE_* environment variables for the duration of
+    # $Body, then always clears them - $env: vars persist for the whole
+    # session (unlike bash's `VAR=x cmd` subshell scoping), so a test that
+    # forgot to clean up would silently contaminate every test after it.
+    param(
+        [string]$Fixture,
+        [Nullable[long]]$ImageBytes = $null,
+        [scriptblock]$Body
+    )
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture $Fixture
+    if ($null -ne $ImageBytes) { $env:AUTOOS_IMAGE_BYTES = [string]$ImageBytes }
+    try {
+        & $Body
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses the disk holding the system volume' {
+    Invoke-WithFakeUsbEnv -Fixture 'root_is_boot_disk' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE0' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*system disk*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses a non-removable internal disk' {
+    Invoke-WithFakeUsbEnv -Fixture 'internal_nvme' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE1' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*not removable*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses a usb disk with a mounted volume' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*mounted*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses a usb stick smaller than the image' {
+    Invoke-WithFakeUsbEnv -Fixture 'tiny_stick' -ImageBytes 8000000000 -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*too small*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe accepts a real removable usb stick that is big enough' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $result = Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5'
+        Assert-True ($null -ne $result -and $result.DeviceId -eq '\\.\PHYSICALDRIVE5') 'rejected a valid target'
+    }
+}
+
+Test-Case 'Get-AutoOSUsbDevice still offers a USB SSD reporting as fixed (A10)' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_ssd_fixed' -Body {
+        $devices = @(Get-AutoOSUsbDevice)
+        Assert-Contains ($devices | ForEach-Object { $_.DeviceId }) '\\.\PHYSICALDRIVE5'
+    }
+}
+
+Test-Case 'Assert-AutoOSElevated refuses to plan a usb write without admin (B10)' {
+    $env:AUTOOS_FAKE_ELEVATED = '0'
+    try {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSElevated | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*Administrator*') "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Assert-AutoOSElevated is satisfied for a usb write when already admin (B10)' {
+    $env:AUTOOS_FAKE_ELEVATED = '1'
+    try {
+        $result = Assert-AutoOSElevated
+        Assert-True $result.IsElevated 'refused an already-elevated session'
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+    }
 }
 
 # ─── Static analysis ────────────────────────────────────────────────────────
