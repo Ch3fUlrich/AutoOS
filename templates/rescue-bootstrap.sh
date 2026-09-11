@@ -320,12 +320,19 @@ install_ai_clis() {
     local cli failed=""
     for cli in "@anthropic-ai/claude-code:claude" "@google/gemini-cli:gemini"; do
         local pkg="${cli%%:*}" bin="${cli##*:}"
+        # `npm install -g` writes to /usr/lib/node_modules and /usr/local/bin,
+        # so it needs $AUTOOS_SUDO exactly like every other privileged command
+        # here. Without it the normal Ubuntu live session — user "ubuntu" with
+        # passwordless sudo, i.e. NOT uid 0 — installed every apt package fine
+        # and then failed both AI CLIs with EACCES, surfacing only as a terse
+        # "AI CLIs unavailable: claude gemini".
+        # shellcheck disable=SC2086  # AUTOOS_SUDO is intentionally unquoted: empty, or the single word "sudo"
         if command -v "$bin" >/dev/null; then
             ui_line "skipped" "$bin already installed"          # AGENTS.md §4
         elif ! network_reachable; then
             ui_warn "$bin — offline, cannot install"
             failed+="$bin "
-        elif npm install -g "$pkg" >/tmp/autoos-rescue-npm.log 2>&1; then
+        elif $AUTOOS_SUDO npm install -g "$pkg" >/tmp/autoos-rescue-npm.log 2>&1; then
             ui_line "installed" "$bin"
         else
             failed+="$bin "                                      # never fails the whole run
