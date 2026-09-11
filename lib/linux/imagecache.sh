@@ -271,11 +271,37 @@ EOF
 # Packages/Packages.gz, since it checksums them — get that order backwards
 # and apt is handed a Release whose checksums don't match, which it rejects
 # outright (worse than no Release at all).
+#
+# Privilege: imagecache_build() creates $out and copies the .deb files into it
+# with $AUTOOS_SUDO, so $out can perfectly well be root-owned. The index used
+# to be written without it and only worked by accident on a FAT stick, where
+# ownership comes from the mount options rather than the filesystem — on ext4,
+# or any root-owned $out, the shell redirection below failed. Every write into
+# $out now goes through $AUTOOS_SUDO like the rest of this file. Note that a
+# plain `$AUTOOS_SUDO cmd >file` would NOT have been enough: the redirection
+# is performed by *this* shell, before sudo ever runs.
 imagecache_index() {
-    local out="$1"
+    local out="$1" staging
 
-    if ! ( cd "$out" && dpkg-scanpackages . /dev/null 2>/dev/null >Packages && gzip -9kf Packages ); then
+    # Generated into a temp file this process is certain it can write, then
+    # placed with the same privilege the .deb files were copied with.
+    staging="$(mktemp)"
+    if ! ( cd "$out" && dpkg-scanpackages . /dev/null 2>/dev/null ) >"$staging"; then
+        rm -f "$staging"
         ui_err "imagecache: failed to index $out as an apt repository"
+        return 1
+    fi
+    # shellcheck disable=SC2086  # AUTOOS_SUDO is intentionally unquoted: empty, or the single word "sudo"
+    if ! $AUTOOS_SUDO install -m 644 "$staging" "$out/Packages"; then
+        rm -f "$staging"
+        ui_err "imagecache: cannot write $out/Packages"
+        return 1
+    fi
+    rm -f "$staging"
+
+    # shellcheck disable=SC2086
+    if ! ( cd "$out" && $AUTOOS_SUDO gzip -9kf Packages ); then
+        ui_err "imagecache: cannot write $out/Packages.gz"
         return 1
     fi
 
@@ -287,17 +313,28 @@ imagecache_index() {
 # that build this cache); falls back to a hand-written minimum when it isn't
 # available. Both paths write through a temp file and `mv` into place so an
 # interrupted run can never leave a truncated Release for apt to reject.
+#
+# Same privilege rule as imagecache_index above: the content is generated into
+# a temp file outside $out (always writable), then staged and renamed inside
+# $out under $AUTOOS_SUDO. The rename stays *within* $out so it is atomic —
+# apt rejects a repository whose Release does not match Packages outright, so a
+# half-written one is worse than none. Mode 644 is explicit because mktemp
+# creates 600 and apt's file: method fetches as the unprivileged _apt user.
 imagecache_write_release() {
     local out="$1"
-    local tmp
+    local tmp staging
 
     if has_cmd apt-ftparchive; then
-        tmp="$(mktemp "$out/Release.XXXXXX")"
-        if ( cd "$out" && apt-ftparchive release . ) >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
-            mv "$tmp" "$out/Release"
-            return 0
+        staging="$(mktemp)"
+        if ( cd "$out" && apt-ftparchive release . ) >"$staging" 2>/dev/null && [[ -s "$staging" ]]; then
+            if imagecache_place_release "$staging" "$out"; then
+                rm -f "$staging"
+                return 0
+            fi
+            rm -f "$staging"
+            return 1
         fi
-        rm -f "$tmp"
+        rm -f "$staging"
         ui_warn "imagecache: apt-ftparchive failed to generate Release — writing one by hand"
     fi
 
@@ -311,7 +348,7 @@ imagecache_write_release() {
     # apt rejects the whole index outright — always read from the files that
     # are actually on disk right now, never a cached/assumed value.
     local tmp2 f sha size
-    tmp2="$(mktemp "$out/Release.XXXXXX")"
+    tmp2="$(mktemp)"
     {
         printf 'Origin: AutoOS\n'
         printf 'Label: AutoOS rescue offline cache\n'
@@ -328,7 +365,39 @@ imagecache_write_release() {
             printf ' %s %s %s\n' "$sha" "$size" "$f"
         done
     } >"$tmp2"
-    mv "$tmp2" "$out/Release"
+    if ! imagecache_place_release "$tmp2" "$out"; then
+        rm -f "$tmp2"
+        return 1
+    fi
+    rm -f "$tmp2"
+}
+
+# imagecache_place_release <staged-content> <out>
+# Moves generated Release content into <out>/Release atomically and with the
+# same privilege every other write into <out> uses. The intermediate lives
+# inside <out> so the final `mv` is a same-filesystem rename; apt must never
+# observe a partially written Release.
+imagecache_place_release() {
+    local src="$1" out="$2" tmp
+    # shellcheck disable=SC2086  # AUTOOS_SUDO is intentionally unquoted: empty, or the single word "sudo"
+    tmp="$($AUTOOS_SUDO mktemp "$out/Release.XXXXXX")" || {
+        ui_err "imagecache: cannot create a temporary Release in $out"
+        return 1
+    }
+    # shellcheck disable=SC2086
+    if ! $AUTOOS_SUDO install -m 644 "$src" "$tmp"; then
+        # shellcheck disable=SC2086
+        $AUTOOS_SUDO rm -f "$tmp"
+        ui_err "imagecache: cannot write $out/Release"
+        return 1
+    fi
+    # shellcheck disable=SC2086
+    if ! $AUTOOS_SUDO mv "$tmp" "$out/Release"; then
+        # shellcheck disable=SC2086
+        $AUTOOS_SUDO rm -f "$tmp"
+        ui_err "imagecache: cannot replace $out/Release"
+        return 1
+    fi
 }
 
 # imagecache_verify <stick_root> <catalog_path>
