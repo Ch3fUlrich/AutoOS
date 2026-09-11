@@ -145,6 +145,7 @@ in the machine, and cannot work on Linux. So AutoOS offers the user a real choic
 | `ventoy` *(default)* | Windows + Linux | `Ventoy2Disk.exe VTOYCLI /I /Drive:E: /GPT` / `Ventoy2Disk.sh -i -g /dev/sdX` | Scriptable, multi-boot: install once, then **add an OS by copying an ISO**. A second distribution costs a file copy, not a reflash. |
 | `wsl` | Windows only | `usbipd attach` → real `/dev/sdX` inside WSL2 → `dd` / `mmdebstrap` / `parted` | The entire Linux toolchain on Windows. Required for `full-os` sticks. No Rufus. |
 | `native` | Linux only | `dd` / `parted` / `mmdebstrap` directly | No extra dependency at all. |
+| `uefi-copy` | Windows + Linux, **no admin** | Copy the ISO's contents onto an existing FAT32 partition | The only engine that needs no elevation at all. See B16 — it is what makes this feature usable on a locked-down machine, and it is how the first real stick was built. |
 | `rufus` | Windows only | Launch the GUI, hand the user the settings, wait | Escape hatch for an image the others cannot handle. **Explicitly marked interactive**; unavailable under `--dry-run` and in the browser UI. |
 
 Requirement 4.1.1 — "rufus should also be installed if not present on windows" — is met as a
@@ -340,6 +341,54 @@ A half-written stick cannot be restored to what it held before. What the plan re
 
 Owner: Task 7.
 
+### B16. `uefi-copy` — a bootable stick with no administrator rights at all
+
+Every other engine needs elevation: `Ventoy2Disk` writes a partition table, `usbipd bind` needs
+admin, `dd` needs the raw device. On a machine where the user cannot elevate — a work laptop, a
+locked-down desktop, or simply an unattended agent session that cannot answer a UAC prompt — all
+three are unavailable, and the feature is unavailable with them.
+
+It does not have to be. A modern Linux ISO is already a UEFI boot structure; the firmware needs
+only a FAT32 partition containing `EFI/boot/bootx64.efi`. **Copying the ISO's contents onto an
+already-FAT32 USB stick produces a bootable UEFI installer** — no partitioning, no bootloader
+install, no elevation, no Rufus and no Ventoy.
+
+Verified against Ubuntu 26.04.1 "Resolute Raccoon" (build 20260826) on 2026-09-11:
+
+| Check | Result |
+|---|---|
+| `EFI/boot/bootx64.efi` present | yes, plus `grubx64.efi` and `mmx64.efi` |
+| Largest file inside the ISO | `casper/minimal.squashfs`, **3,432,136,704 B (3.20 GiB)** — under FAT32's 4 GiB ceiling |
+| Total payload | 6,474,467,630 B (6.03 GiB) |
+| How `boot/grub/grub.cfg` finds its root | **it does not need to** — the menu entries are bare `linux /casper/vmlinuz` / `initrd /casper/initrd`, with no `search --label` and no UUID. GRUB sets `$root` to the partition it booted from, and casper's initramfs then scans every block device for `/casper/`. |
+
+That last row is what makes the engine safe rather than lucky: there is no label to match, so the
+stick's existing FAT32 label is irrelevant. **Re-verify it per image** — an ISO whose `grub.cfg`
+*does* `search --label` will not boot from a copy, and that check belongs in the planner.
+
+**State the limits plainly, in the UI, every time this engine is chosen:**
+
+- **UEFI only.** No MBR boot code is written, so a legacy-BIOS/CSM-only machine will not boot it.
+  For a *rescue* stick aimed at old or broken hardware this is a real restriction, not a footnote.
+- **The stick must already be FAT32**, and formatting one is itself an elevated operation.
+- **No file inside the image may exceed 4 GiB.** Check before copying, and refuse with the
+  offending filename rather than failing 20 minutes into a copy.
+- **No persistence by default** — see B17.
+
+### B17. Persistence without repartitioning
+
+A rescue stick whose tools vanish on reboot is a live CD with extra steps. `uefi-copy` cannot add a
+partition, but casper can persist into a **file**: a `casper-rw` ext4 image on the FAT32 partition,
+with `persistent` appended to the kernel command line in `boot/grub/grub.cfg`.
+
+FAT32 caps that file just under 4 GiB, so allocate 4,000 MiB and no more. Creating it needs a
+`mkfs.ext4`, which on Windows means WSL — root inside WSL, not Windows administrator, so it stays
+within the no-elevation budget.
+
+**Treat this as probe-then-commit, not as a promise.** Casper's file-based persistence has changed
+across releases; the planner must verify it took effect on first boot (write a marker, reboot, look
+for it) and the UI must not claim persistence that was never confirmed. Owner: Task 7.
+
 ### B9. WSL becomes an install *target*, not just a component (Phase 4)
 
 `wsl` is added to `catalog/windows.json` as an ordinary component (`wsl --install
@@ -410,6 +459,12 @@ CHANGELOG.md                         MOD
 
 ## Part D — Tasks
 
+> **The `--filter` argument matches a TEST NAME, not a describe-group name.**
+> `tests/run-tests.ps1:48` is `if ($Filter -and $Name -notlike "*$Filter*") { return }`, and the
+> bash harness does the same. Individual test names are written in the singular ("light **profile**
+> is the Pi set"), so `--filter profiles` matches **zero tests** and reports a clean run — a silent
+> pass that looks exactly like a real one. Always eyeball the test count a filtered run prints.
+
 ### Phase 1 — the `rescue` profile (ships alone; no USB code at all)
 
 #### Task 1: `rescue` profile and rescue components
@@ -443,7 +498,7 @@ fi
 - [ ] **Step 2: Run it and watch it fail**
 
 ```bash
-bash tests/run-tests.sh --filter profiles
+bash tests/run-tests.sh --filter profile
 ```
 
 Expected: `rescue profile carries the disk-recovery core` FAILS listing all five ids, because
@@ -532,7 +587,7 @@ fi
 - [ ] **Step 6: Run the tests**
 
 ```bash
-bash tests/run-tests.sh --filter profiles && pwsh -File tests/run-tests.ps1 -Filter profiles
+bash tests/run-tests.sh --filter profile && pwsh -File tests/run-tests.ps1 -Filter profiles
 ```
 
 Expected: PASS, and the catalog schema test still passes because no new field was introduced.
