@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "omnigraph": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modernrelay/omnigraph-mcp"
+      ],
+      "env": {
+        "OMNIGRAPH_BASE_URL": "${OMNIGRAPH_BASE_URL}",
+        "OMNIGRAPH_TOKEN": "${OMNIGRAPH_TOKEN}",
+        "OMNIGRAPH_GRAPH_ID": "autoos"
+      }
+    }
+  }
+}
