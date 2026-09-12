@@ -1658,6 +1658,108 @@ Test-Case 'usb: setup.ps1 -Undo states plainly that a USB write cannot be undone
     Assert-True ($out -like '*USB*') "out=$out"
 }
 
+# ─── Browser UI: the three USB endpoints (Task 11b) ────────────────────────
+# Task 11 shipped web/index.html's "Create installer USB" button and
+# lib/linux/serve.py's three endpoints, but never mirrored them into
+# AutoOS.Serve.psm1 - the button 404'd on every call on the platform the
+# human partner actually runs. Get-AutoOSServeUsbCatalog/-UsbDevices/
+# -UsbCreateResult are the module-level, exported, directly-callable mirror
+# of serve.py's usb_images_response/usb_devices_response/
+# usb_create_response, for the identical reason those are module-level in
+# serve.py: a test can call them without starting a real HttpListener.
+# Every test name below carries "usb" so `-Filter usb` reaches it.
+function Invoke-WithModuleScope {
+    # Reaches into AutoOS.Serve.psm1's module scope to set/clear
+    # $script:RunInfo.Running directly - the in-memory run-lock
+    # /api/install and /api/usb/create both check - without spinning up a
+    # real installer/usb-create subprocess just to flip one flag.
+    param([scriptblock]$Body)
+    $mod = Get-Module AutoOS.Serve
+    & $mod $Body
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCatalog excludes the interactive rufus engine' {
+    $env:AUTOOS_FAKE_ARCH = 'x64'
+    try {
+        $catalog = Get-AutoOSServeUsbCatalog -RepoRoot $Root
+        $ids = @($catalog.engines | ForEach-Object { $_.id })
+        Assert-NotContains $ids 'rufus'
+        Assert-Contains $ids 'ventoy'
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbDevices reports elevated=false with a reason when unelevated' {
+    $env:AUTOOS_FAKE_ELEVATED = '0'
+    try {
+        $result = Get-AutoOSServeUsbDevices
+        Assert-True (-not $result.elevated) 'expected elevated=false'
+        Assert-True ([string]$result.reason -like '*Administrator*') "reason=$($result.reason)"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult refuses a device Assert-AutoOSUsbSafe would refuse' {
+    Invoke-WithFakeUsbEnv -Fixture 'root_is_boot_disk' -Body {
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE0'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 400 -and [string]$result.Payload.error -like '*system disk*') `
+            "code=$($result.Code) error=$($result.Payload.error)"
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult guards the device before checking image/engine' {
+    Invoke-WithFakeUsbEnv -Fixture 'root_is_boot_disk' -Body {
+        # No image/engine at all - if the guard ran second this would come
+        # back "image and engine are both required" instead.
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE0' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 400 -and [string]$result.Payload.error -like '*system disk*') `
+            "code=$($result.Code) error=$($result.Payload.error)"
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult returns 409 while a run is already in progress' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        Invoke-WithModuleScope { $script:RunInfo.Running = $true }
+        try {
+            $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+            $result = Get-AutoOSServeUsbCreateResult -Body $body
+            Assert-True ($result.Code -eq 409 -and [string]$result.Payload.error -like '*already in progress*') `
+                "code=$($result.Code) error=$($result.Payload.error)"
+        } finally {
+            Invoke-WithModuleScope { $script:RunInfo.Running = $false }
+        }
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult returns 409 for a second write, not just during an install' {
+    # /api/install and /api/usb/create share one in-memory run flag - this
+    # is the "409 while an install runs" half of that contract, exercised
+    # from the usb-create side.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        Invoke-WithModuleScope { $script:RunInfo.Running = $true; $script:RunInfo.Summary = 'installing components' }
+        try {
+            $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+            $result = Get-AutoOSServeUsbCreateResult -Body $body
+            Assert-True ($result.Code -eq 409) "expected 409 while an install runs, got $($result.Code)"
+        } finally {
+            Invoke-WithModuleScope { $script:RunInfo.Running = $false; $script:RunInfo.Summary = '' }
+        }
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult accepts a valid request and reports the device' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 202 -and $result.Payload.device -eq '\\.\PHYSICALDRIVE5') `
+            "code=$($result.Code) payload=$($result.Payload | ConvertTo-Json -Compress)"
+    }
+}
+
 # ─── Static analysis ────────────────────────────────────────────────────────
 Describe-Group 'static analysis'
 

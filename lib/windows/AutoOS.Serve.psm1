@@ -20,6 +20,7 @@ Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1')      -DisableNameChecki
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Detect.psm1')  -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Catalog.psm1') -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Install.psm1') -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'AutoOS.Usb.psm1')     -DisableNameChecking
 
 $script:Log     = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 $script:RunInfo = [hashtable]::Synchronized(@{ Running = $false; Done = 0; Total = 0; Summary = ''; Current = $null })
@@ -162,6 +163,168 @@ function Start-AutoOSInstallJob {
     # One pending read per stream. Both streams must be read as they fill: an
     # installer that writes enough to stderr while nobody drains it blocks on a
     # full pipe buffer and the run hangs with no output and no error.
+    $script:OutTask = $script:Proc.StandardOutput.ReadLineAsync()
+    $script:ErrTask = $script:Proc.StandardError.ReadLineAsync()
+}
+
+function Get-AutoOSServeUsbCatalog {
+    <#
+      .SYNOPSIS
+        Task 11b: mirror of lib/linux/serve.py's usb_images_response.
+      .DESCRIPTION
+        Images are served unfiltered - the dialog itself narrows by kind
+        and writeMode. Engines are filtered to this machine's platform/arch
+        AND to non-interactive ones, so rufus (interactive: true, GUI-only)
+        never reaches the browser on either platform - it needs a human at
+        a GUI, which the browser UI cannot drive (task-11 brief).
+
+        Module-level and exported so a test can call it directly, the same
+        reason serve.py's version is a plain function rather than inlined
+        in do_GET.
+      #>
+    param([Parameter(Mandatory)][string]$RepoRoot)
+    $imagesPath = Join-Path $RepoRoot 'catalog\images.json'
+    $images = @((Get-Content -LiteralPath $imagesPath -Raw -Encoding UTF8 | ConvertFrom-Json).images)
+    $engines = @(Get-AutoOSUsbEngineList -Platform (Get-AutoOSUsbCurrentOs) -Arch (Get-AutoOSUsbCurrentArch) |
+                 Where-Object { -not $_.interactive })
+    [ordered]@{ images = $images; engines = $engines }
+}
+
+function Get-AutoOSServeUsbDevices {
+    <#
+      .SYNOPSIS
+        Task 11b: mirror of lib/linux/serve.py's usb_devices_response.
+      .DESCRIPTION
+        Elevation is surfaced here, not discovered at write time, so the
+        browser can disable the create button with a reason instead of
+        offering an action that would fail on "Access is denied".
+      #>
+    [CmdletBinding()]
+    param()
+    $devices = @(Get-AutoOSUsbDevice | ForEach-Object {
+        [ordered]@{
+            device = $_.DeviceId; model = $(if ($_.Model) { $_.Model } else { '(unknown model)' })
+            size = $_.SizeBytes; removable = [bool]$_.IsRemovable; bus = $_.Bus
+        }
+    })
+    $elev = Test-AutoOSElevated
+    [ordered]@{ devices = $devices; elevated = $elev.IsElevated; reason = $elev.Reason }
+}
+
+function Get-AutoOSServeUsbCreateResult {
+    <#
+      .SYNOPSIS
+        Validates a /api/usb/create request; never writes to a device.
+        Returns [pscustomobject]@{ Code; Payload } - Code 202 means the
+        caller should start Start-AutoOSUsbCreateJob.
+      .DESCRIPTION
+        Task 11b: mirror of lib/linux/serve.py's usb_create_response.
+        Module-level and exported (not inlined in the route) for the exact
+        reason serve.py gives for its own version being module-level: a
+        test can call this directly with $env:AUTOOS_FAKE_DISKS and
+        $script:RunInfo.Running set, without starting a real HttpListener.
+
+        The device-safety check (Assert-AutoOSUsbSafe) runs before
+        anything else, mirroring the guard's own "most dangerous mistake
+        first" ordering: a bad device is refused before this function ever
+        looks at whether the rest of the request is even well-formed. The
+        run-lock check happens last, against $script:RunInfo.Running - the
+        exact same in-memory state /api/install uses, so a write while an
+        install runs, or a second write, both return 409.
+      #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Body)
+
+    $device = if ($Body.PSObject.Properties.Name -contains 'device') { [string]$Body.device } else { '' }
+    if (-not $device) {
+        return [pscustomobject]@{ Code = 400; Payload = @{ error = 'a target device is required' } }
+    }
+
+    $engine = if ($Body.PSObject.Properties.Name -contains 'engine') { [string]$Body.engine } else { '' }
+    $guardMode = if ($engine -eq 'uefi-copy') { 'MountedFat32Writable' } else { 'Unmounted' }
+    try {
+        Assert-AutoOSUsbSafe -DeviceId $device -Mode $guardMode | Out-Null
+    } catch {
+        return [pscustomobject]@{ Code = 400; Payload = @{ error = $_.Exception.Message } }
+    }
+
+    $image = if ($Body.PSObject.Properties.Name -contains 'image') { [string]$Body.image } else { '' }
+    $kind = if (($Body.PSObject.Properties.Name -contains 'kind') -and $Body.kind) { [string]$Body.kind } else { 'installer' }
+    if (-not $image -or -not $engine) {
+        return [pscustomobject]@{ Code = 400; Payload = @{ error = 'image and engine are both required' } }
+    }
+
+    if ($script:RunInfo.Running) {
+        return [pscustomobject]@{ Code = 409; Payload = @{ error = 'a run is already in progress' } }
+    }
+
+    [pscustomobject]@{
+        Code = 202
+        Payload = @{ ok = $true; image = $image; kind = $kind; engine = $engine; device = $device }
+    }
+}
+
+function Start-AutoOSUsbCreateJob {
+    <#
+      .SYNOPSIS
+        Runs the same plan-then-execute CLI path setup.ps1 -CreateUsb uses,
+        as a background job the server loop streams like an install.
+      .DESCRIPTION
+        Task 11b: the exact Windows mirror of lib/linux/serve.py's
+        run_usb_create. -DryRun is always forced here, never taken from the
+        request - the browser path must never trigger a real write, and
+        this is belt-and-suspenders on top of New-AutoOSUsbPlan's own
+        checks rather than the only thing standing between this endpoint
+        and a real write.
+
+        Shares $script:Log / $script:RunInfo / $script:Proc with
+        Start-AutoOSInstallJob on purpose: an install and a USB create must
+        never run side by side, and joining the same in-memory run state is
+        what makes the caller's "a run is already in progress" (409) check
+        cover both.
+      #>
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$Image,
+        [Parameter(Mandatory)][string]$Kind,
+        [Parameter(Mandatory)][string]$Engine,
+        [Parameter(Mandatory)][string]$Device
+    )
+    $script:Log.Clear()
+    $script:RunInfo.Running = $true
+    $script:RunInfo.Done    = 0
+    $script:RunInfo.Total   = 1
+    $script:RunInfo.Summary = ''
+    $script:RunInfo.Current = $null
+
+    $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                (Join-Path $RepoRoot 'setup.ps1'),
+                '-CreateUsb', '-Image', $Image, '-Kind', $Kind, '-Engine', $Engine,
+                '-UsbDevice', $Device, '-WipeTargetDisk', '-DryRun', '-Yes', '-NoColor')
+
+    [void]$script:Log.Add(@{ level = 'step'; text = '$ powershell ' + ($psArgs -join ' ') })
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName  = (Get-Command powershell).Source
+    $psi.Arguments = ($psArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+    $psi.WorkingDirectory       = $RepoRoot
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+    $psi.StandardErrorEncoding  = New-Object Text.UTF8Encoding($false)
+    $psi.UseShellExecute        = $false
+    $psi.CreateNoWindow         = $true
+    $psi.EnvironmentVariables['AUTOOS_NO_COLOR'] = '1'
+
+    try { $script:Proc = [System.Diagnostics.Process]::Start($psi) }
+    catch {
+        $script:RunInfo.Running = $false
+        $script:RunInfo.Summary = 'could not start usb create'
+        throw
+    }
+
+    # Same async-read pattern as Start-AutoOSInstallJob (see
+    # Update-AutoOSInstallLog for why a reader thread cannot do this).
     $script:OutTask = $script:Proc.StandardOutput.ReadLineAsync()
     $script:ErrTask = $script:Proc.StandardError.ReadLineAsync()
 }
@@ -501,6 +664,61 @@ function Start-AutoOSServer {
                     installed       = (Test-AutoOSClaudeAutostartInstalled)
                 }
             }
+            elseif ($path -eq '/api/images') {
+                # Task 11b: mirror of lib/linux/serve.py's usb_images_response.
+                # Get-AutoOSServeUsbCatalog is module-level and exported so a
+                # test can call it directly (AGENTS.md §5 / the bash side's
+                # own convention), the same reason serve.py's version is a
+                # plain function rather than inlined in do_GET.
+                try {
+                    & $json 200 (Get-AutoOSServeUsbCatalog -RepoRoot $RepoRoot)
+                } catch {
+                    & $json 500 @{ error = $_.Exception.Message }
+                }
+            }
+            elseif ($path -eq '/api/usb/devices') {
+                # Task 11b: mirror of usb_devices_response - elevation is
+                # surfaced here, not discovered at write time, so the
+                # browser can disable the create button with a reason
+                # instead of offering an action that would fail later.
+                try {
+                    & $json 200 (Get-AutoOSServeUsbDevices)
+                } catch {
+                    & $json 500 @{ error = $_.Exception.Message }
+                }
+            }
+            elseif ($path -eq '/api/usb/create' -and $req.HttpMethod -eq 'POST') {
+                # Task 11b: mirror of usb_create_response/do_POST - the
+                # validation (device guard first, then image/engine, then
+                # the run-lock) lives in Get-AutoOSServeUsbCreateResult so a
+                # test can call it directly with $script:RunInfo.Running
+                # pre-set, exactly like the bash side calls
+                # usb_create_response() directly per its own docstring.
+                $rawBody = (New-Object IO.StreamReader($req.InputStream, $req.ContentEncoding)).ReadToEnd()
+                $parseFailed = $false
+                $body = $null
+                try { $body = $rawBody | ConvertFrom-Json } catch { $parseFailed = $true }
+                if ($parseFailed) {
+                    & $json 400 @{ error = 'payload must be JSON' }
+                } elseif ($body -isnot [pscustomobject]) {
+                    & $json 400 @{ error = 'payload must be a JSON object' }
+                } else {
+                    $result = Get-AutoOSServeUsbCreateResult -Body $body
+                    if ($result.Code -ne 202) {
+                        & $json $result.Code $result.Payload
+                    } else {
+                        # Reserved by Start-AutoOSUsbCreateJob itself (sets
+                        # $script:RunInfo.Running = $true before returning),
+                        # the same instant the SAME in-memory state
+                        # /api/install checks - so a second write, or a
+                        # write during an install, sees Running already
+                        # true and gets 409 from Get-AutoOSServeUsbCreateResult.
+                        Start-AutoOSUsbCreateJob -RepoRoot $RepoRoot -Image $result.Payload.image `
+                            -Kind $result.Payload.kind -Engine $result.Payload.engine -Device $result.Payload.device
+                        & $json 202 @{ started = $true }
+                    }
+                }
+            }
             elseif ($path -eq '/api/install' -and $req.HttpMethod -eq 'POST') {
                 if ($script:RunInfo.Running) {
                     & $json 409 @{ error = 'a run is already in progress' }
@@ -548,4 +766,5 @@ function Start-AutoOSServer {
     }
 }
 
-Export-ModuleMember -Function Start-AutoOSServer, Get-AutoOSServeState, Get-AutoOSLineLevel, Start-AutoOSInstallJob, Update-AutoOSInstallLog
+Export-ModuleMember -Function Start-AutoOSServer, Get-AutoOSServeState, Get-AutoOSLineLevel, Start-AutoOSInstallJob, Update-AutoOSInstallLog, `
+    Start-AutoOSUsbCreateJob, Get-AutoOSServeUsbCatalog, Get-AutoOSServeUsbDevices, Get-AutoOSServeUsbCreateResult

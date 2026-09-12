@@ -1068,7 +1068,7 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
 let STATE = null, BY_ID = new Map(), REQUIRED_BY = new Map();
 let picked = new Set(), activeProfile = null;
 let running = false, logOffset = 0;
-let usbCatalog = null, usbDevicesData = null;
+let usbCatalog = null, usbDevicesData = null, usbCatalogUnavailable = null;
 let filterInstalledOnly = false;
 let CONFIG_DATA = null;
 
@@ -1333,6 +1333,7 @@ async function boot() {
   el("usbDevice").addEventListener("change", updateUsbConfirm);
   el("usbEngine").addEventListener("change", updateUsbConfirm);
   refreshUsbElevation();
+  loadUsbCatalogOnce();
 
   try {
     const cfRes = await fetch(api("/api/config"));
@@ -2545,6 +2546,14 @@ function fmtBytes(n) {
 
 function updateUsbButtonState() {
   const btn = el("createUsb");
+  // Task 11b: an older server (or a platform that hasn't shipped these
+  // endpoints yet) must produce a disabled button with a reason, never a
+  // control that opens an empty dialog or 404s when clicked.
+  if (usbCatalogUnavailable) {
+    btn.disabled = true;
+    btn.title = usbCatalogUnavailable;
+    return;
+  }
   if (!usbDevicesData) return;
   btn.disabled = running || !usbDevicesData.elevated;
   btn.title = usbDevicesData.elevated ? "" : (usbDevicesData.reason || "not elevated");
@@ -2564,10 +2573,18 @@ async function loadUsbCatalogOnce() {
   if (usbCatalog) return usbCatalog;
   try {
     const r = await fetch(api("/api/images"));
-    usbCatalog = r.ok ? await r.json() : { images: [], engines: [] };
+    if (r.ok) {
+      usbCatalog = await r.json();
+      usbCatalogUnavailable = null;
+    } else {
+      usbCatalog = { images: [], engines: [] };
+      usbCatalogUnavailable = "this server does not support installer USB creation (HTTP " + r.status + ")";
+    }
   } catch (e) {
     usbCatalog = { images: [], engines: [] };
+    usbCatalogUnavailable = "could not reach the server for the installer USB catalog";
   }
+  updateUsbButtonState();
   return usbCatalog;
 }
 
