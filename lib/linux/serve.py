@@ -297,6 +297,33 @@ def usb_images_response() -> dict:
     return {"images": images, "engines": engines}
 
 
+def _image_size_bytes(image_id: str) -> int:
+    """catalog/images.json's sizeGb for <image_id>, in bytes, or 0.
+
+    Finding F12: usb_guard's own size check (usb.sh:369) compares the
+    target device against $AUTOOS_IMAGE_BYTES, defaulting to 0 - "unknown,
+    never a refusal" - when the caller never told it. The CLI path
+    (usb_plan, usb.sh:696) always computes this before calling usb_guard;
+    this is the same lookup for the HTTP path, which used to call usb_guard
+    with no AUTOOS_IMAGE_BYTES at all and so accepted a device smaller than
+    the image with a 202. 0 (unknown image, missing/unreadable catalog, or
+    no sizeGb on this entry - e.g. custom-url/custom-local) intentionally
+    reproduces the old "never a refusal on size" behaviour rather than
+    inventing a size limit this catalog entry never declared.
+    """
+    try:
+        images = json.loads((ROOT / "catalog" / "images.json").read_text(encoding="utf-8")).get("images", [])
+    except (OSError, ValueError):
+        return 0
+    entry = next((e for e in images if e.get("id") == image_id), None)
+    if entry is None:
+        return 0
+    size_gb = entry.get("sizeGb")
+    if not isinstance(size_gb, (int, float)):
+        return 0
+    return int(round(size_gb * 1_000_000_000))
+
+
 def usb_create_response(body: dict) -> tuple[int, dict]:
     """Validate a USB-create request. Never writes to a device.
 
@@ -310,23 +337,28 @@ def usb_create_response(body: dict) -> tuple[int, dict]:
     The device-safety check (usb_guard) runs before anything else, mirroring
     usb_guard's own "most dangerous mistake first" ordering: a bad device is
     refused before this function ever looks at whether the rest of the
-    request is even well-formed.
+    request is even well-formed. image/engine are read (but not yet
+    validated as present) ahead of the guard call so their sizeGb/mode can
+    feed that same guard call (finding F12) without disturbing this
+    "guard first" order - the "image and engine are both required" check
+    below still runs after the guard, exactly as before.
     """
     device = str(body.get("device") or "")
     if not device:
         return 400, {"error": "a target device is required"}
 
+    image = str(body.get("image") or "")
     engine = str(body.get("engine") or "")
+    image_bytes = _image_size_bytes(image)
     mode = "mounted-fat32-writable" if engine == "uefi-copy" else "unmounted"
     guard = _run_bash(
         'set -euo pipefail\ncd "$AUTOOS_ROOT"\n' + _USB_SOURCE +
-        f"usb_guard {shlex.quote(device)} {shlex.quote(mode)}\n"
+        f"AUTOOS_IMAGE_BYTES={image_bytes} usb_guard {shlex.quote(device)} {shlex.quote(mode)}\n"
     )
     if guard.returncode != 0:
         reason = (guard.stderr or guard.stdout or "device refused by usb_guard").strip()
         return 400, {"error": reason}
 
-    image = str(body.get("image") or "")
     kind = str(body.get("kind") or "installer")
     if not image or not engine:
         return 400, {"error": "image and engine are both required"}
@@ -346,11 +378,21 @@ def run_usb_create(image: str, kind: str, engine: str, device: str) -> None:
     documents itself as emitting commands and running nothing, so this is
     belt-and-suspenders rather than the only thing standing between this
     button and a real write - but it is a cheap and explicit one.
+
+    Finding F11': --wipe-target-disk used to be passed here too. setup.sh's
+    --dry-run flag sets AUTOOS_DRY_RUN=1 itself (setup.sh:95), so this was
+    never actually a live-wipe path as Gemini's review first framed it - but
+    a browser PREVIEW acknowledging "the target device's current contents
+    are lost" is gratuitous, and leaves exactly one missing flag between a
+    preview and a real wipe. Dropped from the command line, and
+    AUTOOS_DRY_RUN=1 is now also set directly in `env` (belt-and-suspenders
+    alongside the --dry-run flag already on the command line) so nothing
+    about this call depends on a single flag surviving unchanged.
     """
     global STATE_CACHE
-    env = dict(os.environ, AUTOOS_NO_COLOR="1", AUTOOS_PROGRESS_EVENTS="1")
+    env = dict(os.environ, AUTOOS_NO_COLOR="1", AUTOOS_PROGRESS_EVENTS="1", AUTOOS_DRY_RUN="1")
     cmd = ["bash", "setup.sh", "--create-usb", "--image", image, "--kind", kind,
-           "--engine", engine, "--usb-device", device, "--wipe-target-disk",
+           "--engine", engine, "--usb-device", device,
            "--dry-run", "--yes", "--no-color"]
 
     with LOCK:

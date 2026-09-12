@@ -112,10 +112,20 @@ def to_int(v):
 
 
 def load_devices():
+    # Finding F8: a parse/read failure here used to be swallowed into an
+    # empty device list, which made every caller (including usb_guard's own
+    # root-disk check) behave as if lsblk had truthfully reported "no
+    # devices" - _disk_of_mountpoint("/") then returns nothing, and
+    # usb_guard's `[[ -n "$root_disk" && ... ]]` check is SKIPPED entirely
+    # rather than refusing. It only failed safe by accident (the bus check
+    # also sees an empty list and refuses). A discovery failure must be
+    # fatal here so bash callers can tell "no devices" apart from "could not
+    # ask" and refuse in the latter case.
     try:
         data = json.load(sys.stdin)
-    except Exception:
-        return []
+    except Exception as exc:
+        print(f"usb: could not parse lsblk output: {exc}", file=sys.stderr)
+        sys.exit(2)
     return data.get("blockdevices") or []
 
 
@@ -225,9 +235,13 @@ _disk_of_mountpoint() {
 # header). <device> is a whole-disk path like /dev/sdb; basename strips the
 # /dev/ prefix to match lsblk's bare NAME field.
 _is_removable_or_usb() {
-    local dev="$1" name info rm tran
+    local dev="$1" name info rm tran rc
     name="$(basename -- "$dev")"
-    info="$(_lsblk_json | _usb_py disk_info "$name")"
+    info="$(_lsblk_json | _usb_py disk_info "$name")"; rc=$?
+    if (( rc != 0 )); then
+        ui_err "usb_guard: device discovery failed while checking $dev - refusing rather than risk a false pass (finding F8)"
+        return 1
+    fi
     [[ -z "$info" ]] && return 1
     IFS=$'\t' read -r rm tran _ <<<"$info"
     [[ "$rm" == "1" || "$tran" == "usb" ]]
@@ -239,9 +253,17 @@ _is_removable_or_usb() {
 # which cares specifically about "/") — any mounted partition on the target
 # disk must be unmounted before a write, or the write corrupts a live mount.
 _has_mounted_partition() {
-    local dev="$1" name result
+    local dev="$1" name result rc
     name="$(basename -- "$dev")"
-    result="$(_lsblk_json | _usb_py has_mounted_partition "$name")"
+    result="$(_lsblk_json | _usb_py has_mounted_partition "$name")"; rc=$?
+    if (( rc != 0 )); then
+        # Fail closed in the direction "unmounted" mode needs: a device we
+        # cannot ask about is treated as IF it had a mounted partition, so
+        # the caller refuses rather than proceeding on missing information
+        # (finding F8).
+        ui_err "usb_guard: device discovery failed while checking $dev for mounted partitions - refusing rather than risk a false pass (finding F8)"
+        return 0
+    fi
     [[ "$result" == "1" ]]
 }
 
@@ -265,6 +287,80 @@ _size_bytes() {
     info="$(_lsblk_json | _usb_py disk_info "$name")"
     IFS=$'\t' read -r _ _ size <<<"$info"
     printf '%s\n' "${size:-0}"
+}
+
+# _usb_disk_identity <device>
+# Prints a stable identity for <device> - the /dev/disk/by-id entry (serial
+# or WWN) that resolves to it - so a device that has been unplugged and
+# replaced with something else between plan time and write time (findings
+# F3/F6: a classic TOCTOU on a destructive operation) can be told apart from
+# the same physical stick still sitting in the same port. Prints "unknown"
+# when no by-id entry names this device: a real but serial-less USB stick,
+# or (every test in this suite, AGENTS.md SS5) a fixture with no
+# /dev/disk/by-id at all. usb_reverify below never treats "unknown" as a
+# mismatch on its own, mirroring this file's existing convention that
+# undeterminable information (AUTOOS_IMAGE_BYTES unset) is never itself a
+# refusal - but a KNOWN identity that no longer matches always is.
+_usb_disk_identity() {
+    local dev="$1"
+    if [[ -n "${AUTOOS_FAKE_DISK_ID+x}" ]]; then
+        printf '%s\n' "${AUTOOS_FAKE_DISK_ID:-unknown}"
+        return 0
+    fi
+    # AGENTS.md SS5: this module must never enumerate a real disk during the
+    # test suite. AUTOOS_FAKE_LSBLK is the same "are we under test" signal
+    # _lsblk_json itself already gates on - confirmed live on a Windows dev
+    # box: its own MSYS layer maps /dev/sdX to REAL physical disks (down to
+    # a real /dev/disk/by-id with real serials), so a fixture using a name
+    # like /dev/sdb is not guaranteed fictional the way it is on a
+    # from-scratch Linux box. A test that wants a specific identity sets
+    # AUTOOS_FAKE_DISK_ID (above); every other test gets "unknown" here,
+    # never a real by-id walk.
+    if [[ -n "${AUTOOS_FAKE_LSBLK:-}" ]]; then
+        printf 'unknown\n'
+        return 0
+    fi
+    local name link target
+    name="$(basename -- "$dev")"
+    if [[ -d /dev/disk/by-id ]]; then
+        for link in /dev/disk/by-id/*; do
+            [[ -e "$link" ]] || continue
+            target="$(readlink -f -- "$link" 2>/dev/null)"
+            if [[ "$(basename -- "$target")" == "$name" ]]; then
+                printf '%s\n' "$(basename -- "$link")"
+                return 0
+            fi
+        done
+    fi
+    printf 'unknown\n'
+}
+
+# usb_reverify <device> <mode> <image_bytes> <pinned_id>
+# Re-runs usb_guard, in the SAME mode usb_plan used, immediately before the
+# destructive step that follows it in the plan (findings F3/F6) - usb_guard
+# running once at plan time proves nothing about the device by the time a
+# much later write actually happens; a plan can sit in a browser tab, or be
+# replayed, with the real disk table having moved on underneath it. Also
+# re-checks <device>'s own identity against <pinned_id> (usb_plan's own
+# _usb_disk_identity call, at plan time, above): a device can enumerate
+# safely under the very same node and still be a DIFFERENT physical disk
+# than the one a human selected, if it was unplugged and something else was
+# plugged in during the gap. <image_bytes> is passed literally rather than
+# read from AUTOOS_IMAGE_BYTES because this line is dispatched by whatever
+# process later reads the plan off stdin (usb_execute) - possibly with none
+# of usb_plan's own environment left by then.
+usb_reverify() {
+    local dev="$1" mode="$2" image_bytes="$3" pinned="$4"
+
+    AUTOOS_IMAGE_BYTES="$image_bytes" usb_guard "$dev" "$mode" || return 1
+
+    local current
+    current="$(_usb_disk_identity "$dev")"
+    if [[ "$pinned" != "unknown" && "$current" != "$pinned" ]]; then
+        ui_err "usb_reverify: $dev's identity changed since it was selected (was $pinned, now $current) - it may have been unplugged and replaced; refusing to write. Re-select the device and start over."
+        return 1
+    fi
+    return 0
 }
 
 # usb_list
@@ -317,14 +413,25 @@ usb_list() {
 # "mounted-fat32-writable" — that mode always inspects the device's
 # partitions, never the whole-disk row.
 usb_guard() {
-    local dev="$1" mode="${2:-unmounted}" root_disk size
+    local dev="$1" mode="${2:-unmounted}" root_disk size rc
 
     if [[ -z "$dev" ]]; then
         ui_err "usb_guard: no device given"
         return 1
     fi
 
-    root_disk="$(_disk_of_mountpoint /)"
+    # Finding F8: _disk_of_mountpoint's own pipeline now exits non-zero when
+    # device discovery itself failed (load_devices() above), rather than
+    # silently printing nothing the way a real "no device mounted at /"
+    # answer would. Checked explicitly, first, right where the comment used
+    # to just trust an empty root_disk meant "no root disk" - this refusal
+    # runs before ANY other check, matching this function's own "the worst
+    # mistake gets the shortest path to refusal" ordering.
+    root_disk="$(_disk_of_mountpoint /)"; rc=$?
+    if (( rc != 0 )); then
+        ui_err "usb_guard: could not determine the root filesystem's disk (device discovery failed) - refusing rather than risk treating an unknown disk as safe (finding F8)"
+        return 1
+    fi
     if [[ -n "$root_disk" && "$dev" == "$root_disk" ]]; then
         ui_err "$dev holds the root filesystem"
         return 1
@@ -350,6 +457,20 @@ usb_guard() {
                 return 1
             fi
             IFS=$'\t' read -r mp fstype ro <<<"$info"
+            # Finding F2': the bus/removable check above only rules out the
+            # HOST's own internal ESP - it says nothing about an ESP that
+            # lives on a USB device that is not the root device, which is
+            # exactly the shape a machine BOOTED FROM this rescue stick has.
+            # Without this, any mounted, writable vfat partition on a USB
+            # disk was accepted here, /boot/efi included. Refused on
+            # mountpoint alone, before the fstype/ro checks below, and
+            # regardless of what the bus check already decided.
+            case "$mp" in
+                /|/boot|/boot/efi|/usr|/var|/home)
+                    ui_err "$dev's mounted partition is $mp - refusing to treat a live system mountpoint as a USB write target, whatever the bus type (finding F2')"
+                    return 1
+                    ;;
+            esac
             if [[ "$fstype" != "vfat" ]]; then
                 ui_err "$dev's mounted partition is '${fstype:-unknown}', not FAT32 — uefi-copy requires an existing FAT32 partition"
                 return 1
@@ -679,7 +800,7 @@ usb_plan() {
         return 1
     fi
 
-    if [[ "$eng_interactive" == "1" ]] && (( AUTOOS_DRY_RUN )); then
+    if [[ "$eng_interactive" == "1" ]] && (( ${AUTOOS_DRY_RUN:-0} )); then
         ui_err "engine '$engine' is interactive and unavailable under --dry-run"
         return 1
     fi
@@ -696,8 +817,22 @@ usb_plan() {
     image_bytes="$(awk -v g="$img_size_gb" 'BEGIN{printf "%.0f", (g == "" ? 0 : g) * 1000000000}')"
     AUTOOS_IMAGE_BYTES="$image_bytes" usb_guard "$dev" "$guard_mode" || return 1
 
+    # Findings F3/F6: this usb_guard call only proves the device is safe
+    # RIGHT NOW, at plan time - usb_execute may run the plan this function
+    # emits an arbitrary amount of time later (a browser preview sat on,
+    # setup.sh re-invoked from a saved plan, ...), during which the device
+    # can be unmounted-and-replugged as a different disk under the same
+    # node. Pinning the identity here and emitting a usb_reverify step as
+    # the very first line of the plan means the destructive step never runs
+    # without a fresh usb_guard pass AND a fresh identity check immediately
+    # before it, not just once, long before, at plan time.
+    local pinned_id
+    pinned_id="$(_usb_disk_identity "$dev")"
+
     local local_path
     local_path="$(download_cache_dir)/${image_id}.iso"
+
+    printf 'usb_reverify %s %s %s %s\n' "$dev" "$guard_mode" "$image_bytes" "$pinned_id"
 
     case "$engine" in
         ventoy)
@@ -784,7 +919,40 @@ _usb_device_present() {
 # the source) is exactly the class of thing Step 5 defers to the human
 # hardware run, not something this function fakes confidence about.
 _usb_verify_readback() {
-    _usb_device_present "$1"
+    local dev="$1"
+    _usb_device_present "$dev" || return 1
+
+    # Finding F10: enumerating again (above) only proves the device node is
+    # still there - it says nothing about whether a valid filesystem/
+    # partition table actually landed on it. blkid and partprobe both force
+    # the kernel to actually read the on-disk structures rather than trust
+    # whatever it cached from before the write.
+    if [[ -n "${AUTOOS_FAKE_READBACK:-}" ]]; then
+        [[ "$AUTOOS_FAKE_READBACK" == "1" ]]
+        return
+    fi
+
+    # Only exercises the real block layer outside the test suite.
+    # AUTOOS_FAKE_LSBLK is this file's own "are we under test" signal
+    # (_lsblk_json above already gates on it) - deliberately NOT `[[ -e
+    # "$dev" ]]`: confirmed live on a Windows dev box, its own MSYS layer
+    # maps /dev/sdX to REAL physical disks, so a fixture-driven test naming
+    # /dev/sdb is not guaranteed to name a nonexistent path the way it would
+    # be on a from-scratch Linux box. AGENTS.md SS5 says this module must
+    # never touch a real disk in tests; gating on the fixture flag itself is
+    # the only check that holds regardless of what the host's /dev happens
+    # to contain.
+    [[ -z "${AUTOOS_FAKE_LSBLK:-}" ]] || return 0
+
+    if has_cmd blkid && ! $AUTOOS_SUDO blkid "$dev" >/dev/null 2>&1; then
+        ui_err "usb_execute: blkid could not read a filesystem/partition signature off $dev after the write"
+        return 1
+    fi
+    if has_cmd partprobe && ! $AUTOOS_SUDO partprobe -d -s "$dev" >/dev/null 2>&1; then
+        ui_err "usb_execute: partprobe could not re-read $dev's partition table after the write"
+        return 1
+    fi
+    return 0
 }
 
 # _usb_report_write_failure <device>
@@ -817,9 +985,92 @@ _usb_report_write_failure() {
 # This is the one place that gap is bridged.
 _usb_dispatch_step() {
     local dev="$1" line="$2"
-    case "$line" in
-        "Ventoy2Disk.sh "*) usb_write_ventoy "$dev" ;;
-        *) eval "$line" ;;
+
+    # Finding F4: this used to be `eval "$line"` for anything that was not
+    # the one special-cased Ventoy2Disk.sh line - and device/image values
+    # reach a plan from a browser POST body (serve.py's usb_create_response
+    # -> setup.sh --create-usb -> usb_plan), so `eval` on that string was
+    # the wrong primitive even though today's inputs happen to be
+    # constrained. `read -ra` below only ever WORD-SPLITS the line on
+    # whitespace - it never lets `;`, `` ` ``, `$()`, `|` or `&` inside a
+    # value start new shell syntax, unlike eval. Every branch also checks
+    # the exact word count/shape usb_plan is known to emit; anything else
+    # (a stray extra token, a line usb_plan never actually produces) is
+    # refused rather than run.
+    local -a words=()
+    read -ra words <<<"$line"
+    local cmd="${words[0]:-}"
+
+    case "$cmd" in
+        usb_reverify)
+            if [[ ${#words[@]} -ne 5 ]]; then
+                ui_err "usb_execute: malformed usb_reverify step: $line"
+                return 1
+            fi
+            usb_reverify "${words[1]}" "${words[2]}" "${words[3]}" "${words[4]}"
+            ;;
+        Ventoy2Disk.sh)
+            # usb_plan deliberately keeps "Ventoy2Disk.sh -i -g <dev>"
+            # literal in its own output (the existing "usb planning" tests
+            # assert that exact string appears under --dry-run, and a human
+            # previewing a plan should see the real tool that will run, not
+            # an internal function name) even though the binary it names is
+            # not actually on PATH until usb_write_ventoy has fetched,
+            # verified and extracted it. This is the one place that gap is
+            # bridged.
+            if [[ ${#words[@]} -ne 4 || "${words[1]}" != "-i" || "${words[2]}" != "-g" ]]; then
+                ui_err "usb_execute: malformed Ventoy2Disk.sh step: $line"
+                return 1
+            fi
+            usb_write_ventoy "${words[3]}"
+            ;;
+        usb_copy_image)
+            if [[ ${#words[@]} -lt 3 ]]; then
+                ui_err "usb_execute: malformed usb_copy_image step: $line"
+                return 1
+            fi
+            usb_copy_image "${words[@]:1}"
+            ;;
+        usb_write_raw)
+            if [[ ${#words[@]} -ne 4 ]]; then
+                ui_err "usb_execute: malformed usb_write_raw step: $line"
+                return 1
+            fi
+            usb_write_raw "${words[1]}" "${words[2]}" "${words[3]}"
+            ;;
+        wsl.exe)
+            case "${words[1]:-}" in
+                --import)
+                    if [[ ${#words[@]} -ne 5 || "${words[2]}" != "AutoOSRescue" ]]; then
+                        ui_err "usb_execute: malformed wsl.exe --import step: $line"
+                        return 1
+                    fi
+                    wsl.exe --import AutoOSRescue "${words[3]}" "${words[4]}"
+                    ;;
+                -e)
+                    if [[ ${#words[@]} -ne 8 || "${words[2]}" != "dd" ]]; then
+                        ui_err "usb_execute: malformed wsl.exe dd step: $line"
+                        return 1
+                    fi
+                    wsl.exe -e dd "${words[3]}" "${words[4]}" "${words[5]}" "${words[6]}" "${words[7]}"
+                    ;;
+                *)
+                    ui_err "usb_execute: unknown wsl.exe step shape: $line"
+                    return 1
+                    ;;
+            esac
+            ;;
+        rufus.exe)
+            if [[ ${#words[@]} -ne 3 || "${words[1]}" != "-i" ]]; then
+                ui_err "usb_execute: malformed rufus.exe step: $line"
+                return 1
+            fi
+            rufus.exe -i "${words[2]}"
+            ;;
+        *)
+            ui_err "usb_execute: refusing a plan step that does not match a known command shape: $line"
+            return 1
+            ;;
     esac
 }
 
@@ -1153,8 +1404,8 @@ _usb_copy_target_mount() {
 
 # _usb_copy_mount_data_partition <device>
 # The ventoy path: Ventoy2Disk.sh has just partitioned <device> but mounted
-# nothing. Mounts the larger of its partitions (Ventoy's data partition;
-# the small VTOYEFI partition is always the smaller one) at a fresh
+# nothing. Mounts its data partition (Ventoy's fixed layout: partition 1 -
+# the small VTOYEFI partition is always partition 2, finding F7) at a fresh
 # temporary directory and prints that path. Needs root - the ventoy engine
 # already requires elevation for the partitioning step above this one, so
 # nothing about uefi-copy's "no elevation at all" promise is affected.
@@ -1165,14 +1416,40 @@ _usb_copy_target_mount() {
 _usb_copy_mount_data_partition() {
     local dev="$1" name line part fstype mnt
     name="$(basename -- "$dev")"
-    line="$(_lsblk_json | _usb_py partitions_of "$name" | sort -t $'\t' -k2,2rn | head -1)"
+
+    # Finding F7: give the kernel a chance to actually finish re-reading the
+    # partition table Ventoy2Disk.sh just wrote before asking lsblk about
+    # it - without this, partition reads race the kernel's own re-read (and,
+    # on a desktop session, its automounter), and can see a stale or empty
+    # table. Gated on AUTOOS_FAKE_LSBLK being UNSET (this file's own "are we
+    # under test" signal, same as _lsblk_json) rather than on whether $dev
+    # exists as a device node: confirmed live on a Windows dev box, its own
+    # MSYS layer maps /dev/sdX to REAL physical disks, so a fixture using a
+    # name like /dev/sdb cannot be assumed nonexistent on every host this
+    # suite runs on (AGENTS.md SS5: never touch a real disk in tests). Both
+    # commands are best-effort even in production - neither exists on every
+    # system this runs on, and a failure here is never itself a reason to
+    # refuse.
+    if [[ -z "${AUTOOS_FAKE_LSBLK:-}" ]]; then
+        has_cmd udevadm && udevadm settle --timeout=10 2>/dev/null
+        has_cmd blockdev && $AUTOOS_SUDO blockdev --rereadpt "$dev" 2>/dev/null
+    fi
+
+    # Ventoy's own partition layout is fixed: partition 1 is always the
+    # data partition, partition 2 is always the small VTOYEFI partition.
+    # Matched here by partition INDEX (a version-aware sort on the
+    # partition's own name, e.g. sdb1 before sdb2 before sdb10) rather than
+    # by size or by whichever partition happens to already be mounted -
+    # finding F7 - since a size-based guess is one unusual image away from
+    # picking the wrong side.
+    line="$(_lsblk_json | _usb_py partitions_of "$name" | sort -t $'\t' -k1,1V | head -1)"
     if [[ -z "$line" ]]; then
         ui_err "usb_copy_image: $dev has no partitions to write onto - did Ventoy2Disk.sh run first?" >&2
         return 1
     fi
     IFS=$'\t' read -r part _ fstype _ _ <<<"$line"
     if [[ "$fstype" == "iso9660" ]]; then
-        ui_err "usb_copy_image: $dev's largest partition is ISO9660 - this stick was written with a raw block copy (finding A11) and is read-only. It must be rewritten (wipefs) before ventoy can use it." >&2
+        ui_err "usb_copy_image: $dev's data partition is ISO9660 - this stick was written with a raw block copy (finding A11) and is read-only. It must be rewritten (wipefs) before ventoy can use it." >&2
         return 1
     fi
 
@@ -1292,8 +1569,19 @@ usb_copy_image() {
 
     if (( owned_mount )); then
         sync 2>/dev/null
-        $AUTOOS_SUDO umount "$mnt" 2>/dev/null
-        rmdir "$mnt" 2>/dev/null
+        # Finding F9: umount's own exit status used to be discarded, so a
+        # filesystem that failed to flush/unmount still reported the whole
+        # copy as successful. A failed unmount here means the device may
+        # still have unflushed writes sitting in a stale mount - treated as
+        # a hard failure of this call, and the mountpoint is deliberately
+        # left in place (not rmdir'd) rather than pretending cleanup
+        # succeeded too.
+        if ! $AUTOOS_SUDO umount "$mnt" 2>/dev/null; then
+            ui_err "usb_copy_image: could not unmount $mnt after writing to $dev (finding F9) - the write may not be fully flushed; do not unplug $dev until it is unmounted manually"
+            rc=1
+        else
+            rmdir "$mnt" 2>/dev/null
+        fi
     fi
 
     return "$rc"
@@ -1382,8 +1670,14 @@ with open(path, "w", encoding="utf-8") as fh:
 
     if (( owned_mount )); then
         sync 2>/dev/null
-        $AUTOOS_SUDO umount "$mnt" 2>/dev/null
-        rmdir "$mnt" 2>/dev/null
+        # Finding F9 (same fix as usb_copy_image above): do not discard
+        # umount's own exit status.
+        if ! $AUTOOS_SUDO umount "$mnt" 2>/dev/null; then
+            ui_err "usb_ventoy_add_persistence: could not unmount $mnt after writing to $dev (finding F9) - the write may not be fully flushed"
+            rc=1
+        else
+            rmdir "$mnt" 2>/dev/null
+        fi
     fi
 
     return "$rc"

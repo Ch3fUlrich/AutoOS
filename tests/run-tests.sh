@@ -1293,6 +1293,21 @@ PY
     assert_contains "$out" "root filesystem"
 fi
 
+if it "the usb create endpoint refuses a device smaller than the image over the HTTP path (finding F12)"; then
+    # Finding F12: usb_create_response used to call usb_guard with no
+    # AUTOOS_IMAGE_BYTES at all, so the size check compared against 0 and a
+    # device smaller than the image still got a 202. tiny_stick is 4 GB;
+    # ubuntu-desktop-lts declares sizeGb: 6 in catalog/images.json.
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb tiny_stick)" python3 - <<'PY'
+import sys; sys.path.insert(0, "lib/linux")
+from serve import usb_create_response
+print(usb_create_response({"device": "/dev/sdb", "image": "ubuntu-desktop-lts", "engine": "ventoy"}))
+PY
+)"
+    assert_contains "$out" "400"
+    assert_contains "$out" "too small"
+fi
+
 if it "the usb create endpoint refuses a second write while one is already running"; then
     out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" python3 - <<'PY'
 import sys; sys.path.insert(0, "lib/linux")
@@ -2319,6 +2334,26 @@ if it "usb_list still offers a USB SSD reporting as fixed (A10)"; then
     assert_contains "$out" "/dev/sdb"
 fi
 
+if it "usb_guard refuses when device discovery itself fails, rather than treating it as an empty list (F8)"; then
+    # Finding F8: lsblk output that fails to parse used to become an empty
+    # device list, which made root_disk resolve to nothing and skipped the
+    # root-disk check entirely - it only failed safe by accident (the bus
+    # check also saw an empty list). Malformed AUTOOS_FAKE_LSBLK stands in
+    # for "lsblk itself failed/produced garbage" without needing a real
+    # broken lsblk.
+    out="$(AUTOOS_FAKE_LSBLK="not valid json" usb_guard /dev/sdb 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"discovery failed"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_guard (mounted-fat32-writable mode) refuses a USB-hosted /boot/efi regardless of bus (F2-prime)"; then
+    # Finding F2': reachable whenever the machine booted from USB - the
+    # bus/removable check alone accepts this (it IS a real USB device), so
+    # the mountpoint itself must be refused, not just the bus type.
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_boot_efi_mounted)" \
+           usb_guard /dev/sdb mounted-fat32-writable 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"/boot/efi"* ]] && pass || fail "rc=$rc: $out"
+fi
+
 if it "usb_require_elevation refuses to plan a write without root (B10)"; then
     out="$(AUTOOS_SUDO="" AUTOOS_FAKE_UID=1000 usb_require_elevation 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"sudo"* ]] && pass || fail "rc=$rc: $out"
@@ -2427,6 +2462,29 @@ if it "usb_plan: uefi-copy needs no elevation but every other engine does (B10)"
     else fail "rc=$rc_uefi: $out_uefi"; fi
 fi
 
+if it "usb_plan pins the device identity and emits a re-verify step immediately before the destructive lines (F3/F6)"; then
+    # Findings F3/F6: usb_guard running once at plan time proves nothing by
+    # the time the plan is actually executed, possibly much later - the
+    # plan must carry a fresh usb_guard + identity re-check as its own first
+    # step rather than relying on a stale comment.
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FAKE_DISK_ID=serial-XYZ \
+           usb_plan ubuntu-desktop-lts installer ventoy /dev/sdb)"
+    first_line="$(echo "$out" | head -1)"
+    [[ "$first_line" == "usb_reverify /dev/sdb unmounted "*" serial-XYZ" ]] \
+        && pass || fail "first plan line was: $first_line"
+fi
+
+if it "usb_reverify refuses when the device's identity no longer matches what was pinned at plan time (F3/F6 TOCTOU)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FAKE_DISK_ID=serial-CURRENT \
+           usb_reverify /dev/sdb unmounted 0 serial-PINNED 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"identity changed"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "usb_reverify accepts when the device's identity still matches what was pinned (F3/F6)"; then
+    AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FAKE_DISK_ID=serial-SAME \
+        usb_reverify /dev/sdb unmounted 0 serial-SAME && pass || fail "rejected a matching identity"
+fi
+
 if it "usb --undo states plainly that a USB write cannot be undone"; then
     out="$( bash setup.sh --undo --dry-run 2>&1 )"
     assert_contains "$out" "USB"
@@ -2457,8 +2515,40 @@ if it "usb_execute: a failed write never leaves the stick claimed as successful"
 fi
 
 if it "usb_execute: reports Ready to boot only once every step succeeds and the device still reads back (B15)"; then
-    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_execute /dev/sdb <<<"echo hello" 2>&1)"; rc=$?
+    # A plain "echo hello" plan line used to exercise this test via eval -
+    # finding F4 removed eval, so a real step here must match one of
+    # usb_plan's own known command shapes. AUTOOS_DRY_RUN=1 keeps it from
+    # actually touching anything, the same way every other dry-run test in
+    # this file does.
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_DRY_RUN=1 \
+           usb_execute /dev/sdb <<<"usb_write_raw /dev/sdb /tmp/x.iso 100" 2>&1)"; rc=$?
     [[ $rc -eq 0 && "$out" == *"Ready to boot: /dev/sdb"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
+if it "usb_execute: a plan step with an unrecognised command shape is refused, never executed (finding F4)"; then
+    # Finding F4: usb_execute used to `eval "$line"` on anything that was
+    # not the special-cased Ventoy2Disk.sh line, and device/image values in
+    # a real plan reach here from a browser POST body. A line shaped like
+    # "cmd; other-cmd args" proves the fix two ways at once: the whole line
+    # is refused (unknown "echo" command shape), AND the "; touch $marker"
+    # half is never independently executed - eval would have run it as a
+    # second shell command, but read -ra only ever word-splits, so it stays
+    # one inert literal argument.
+    marker="$(mktemp -u)"
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
+           usb_execute /dev/sdb <<<"echo pwned; touch $marker" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && ! -e "$marker" && "$out" == *"known command shape"* ]]; then pass
+    else fail "rc=$rc marker=$( [[ -e "$marker" ]] && echo EXISTS || echo absent ) out=$out"; fi
+    rm -f "$marker"
+fi
+
+if it "usb_execute refuses to report success when the write does not actually read back (finding F10)"; then
+    # AUTOOS_FAKE_READBACK=0 forces _usb_verify_readback's own check to
+    # fail even though the device still enumerates (good_stick) - proving
+    # this checks more than mere presence.
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_DRY_RUN=1 AUTOOS_FAKE_READBACK=0 \
+           usb_execute /dev/sdb <<<"usb_write_raw /dev/sdb /tmp/x.iso 100" 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"did not read back"* ]] && pass || fail "rc=$rc out=$out"
 fi
 
 if it "usb_execute: a step failure names the stick as removed when it truly vanished, not a generic error"; then
@@ -2599,6 +2689,34 @@ if it "usb_execute: usb_copy_image refuses a >4GiB inner file before copying any
     out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_fat32_mounted)" AUTOOS_FAKE_ISO_MAX_FILE_BYTES=5000000000 \
            AUTOOS_FAKE_ISO_MAX_FILE_NAME="casper/big.squashfs" usb_copy_image /dev/sdb /tmp/x.iso 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"casper/big.squashfs"* && "$out" == *"4 GiB"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
+if it "usb_execute: usb_copy_image fails the whole call when umount itself fails after the write (finding F9)"; then
+    fakebin="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fakebin/mount"
+    printf '#!/usr/bin/env bash\necho "umount: fake failure" >&2\nexit 1\n' >"$fakebin/umount"
+    chmod +x "$fakebin/mount" "$fakebin/umount"
+    img="$(mktemp)"; printf 'x' >"$img"
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
+           AUTOOS_FAKE_ISO_MAX_FILE_BYTES=1000000 AUTOOS_FAKE_ISO_MAX_FILE_NAME=x \
+           usb_copy_image /dev/sdb "$img" 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"could not unmount"* ]] && pass || fail "rc=$rc out=$out"
+    rm -rf "$fakebin"; rm -f "$img"
+fi
+
+if it "usb_execute: usb_copy_image mounts ventoy's data partition by index, not by size (finding F7)"; then
+    fakebin="$(mktemp -d)"
+    record="$(mktemp)"
+    printf '#!/usr/bin/env bash\necho "$1" >> %s\nexit 0\n' "$record" >"$fakebin/mount"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fakebin/umount"
+    chmod +x "$fakebin/mount" "$fakebin/umount"
+    img="$(mktemp)"; printf 'x' >"$img"
+    PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_FAKE_LSBLK="$(fake_usb ventoy_partitions_reversed)" \
+        AUTOOS_FAKE_ISO_MAX_FILE_BYTES=1000000 AUTOOS_FAKE_ISO_MAX_FILE_NAME=x \
+        usb_copy_image /dev/sdb "$img" >/dev/null 2>&1
+    mounted="$(cat "$record")"
+    [[ "$mounted" == "/dev/sdb1" ]] && pass || fail "mounted: $mounted (expected /dev/sdb1, the lower-index partition, not sdb2 which is larger)"
+    rm -rf "$fakebin"; rm -f "$img" "$record"
 fi
 
 if it "usb_execute: usb_ventoy_add_persistence caps the default 16GB at half the stick's size (B17)"; then

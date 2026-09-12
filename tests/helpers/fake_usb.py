@@ -160,6 +160,34 @@ FIXTURES = {
             _part("sdb1", 31400000000, True, "usb", None, fstype="iso9660", ro=True),
         ]),
     ]},
+
+    # Finding F2': the bus/removable check alone cannot catch an ESP that
+    # lives on a USB device that is not the root device — exactly the case
+    # for a machine actually booted from this rescue stick. A vfat
+    # partition, writable, mounted at /boot/efi, on an otherwise perfectly
+    # ordinary USB stick — every other check in mounted-fat32-writable mode
+    # would accept this without the F2' mountpoint refusal.
+    "usb_boot_efi_mounted": lambda: {"blockdevices": [
+        _boot_disk(),
+        _disk("sdb", "Intenso Office Line", 31437766656, True, "usb", children=[
+            _part("sdb1", 31400000000, True, "usb", "/boot/efi",
+                  fstype="vfat", ro=False),
+        ]),
+    ]},
+
+    # Finding F7: two unmounted partitions where the SMALLER one (sdb1,
+    # Ventoy's actual data partition by index) is not the larger one —
+    # exercises _usb_copy_mount_data_partition's partition selection: a
+    # size-based "largest wins" heuristic picks sdb2 here (wrong); matching
+    # by partition index (sdb1 before sdb2) picks the right one regardless
+    # of which happens to be bigger.
+    "ventoy_partitions_reversed": lambda: {"blockdevices": [
+        _boot_disk(),
+        _disk("sdb", "Ventoy Stick", 32000000000, True, "usb", children=[
+            _part("sdb1", 500000000, True, "usb", None),
+            _part("sdb2", 31000000000, True, "usb", None),
+        ]),
+    ]},
 }
 
 
