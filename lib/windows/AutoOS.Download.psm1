@@ -175,5 +175,228 @@ function Get-AutoOSVerifiedFile {
     (Resolve-Path -LiteralPath $Destination).ProviderPath
 }
 
+# ─── Task 4B: catalog entry -> concrete download URL ───────────────────────
+# catalog/images.json deliberately never stores a version (plan finding A9):
+# each real entry gives an `index` release-listing URL and a `file` filename
+# regex instead of a URL. Resolve-AutoOSImageUrl is the missing bridge
+# between that and Get-AutoOSVerifiedFile above, which needs one concrete
+# URI. Mirrors lib/linux/download.sh's image_resolve() function-for-function
+# - see that file's own comment block for the full rationale (Ubuntu's
+# directory-of-releases shape vs Debian's current/-symlink shape, the LTS
+# selection rule, and why ambiguity is always an error).
+
+# _Get-AutoOSDownloadRoot — same convention as AutoOS.Usb.psm1's
+# Get-AutoOSUsbCatalogRoot: $PSScriptRoot always points at lib\windows
+# regardless of the caller's cwd, so two parents up is the repo root for
+# every caller, production or test. Kept private and duplicated rather than
+# calling into AutoOS.Usb.psm1: that module is not guaranteed to be the one
+# importing this one.
+function _Get-AutoOSDownloadRoot {
+    (Resolve-Path (Join-Path $PSScriptRoot '..\..')).ProviderPath
+}
+
+# _Get-AutoOSImageFetchUri <DirUri>
+# <DirUri> is always directory-shaped (a catalog `index` value, or a
+# subdirectory this resolver picked) - exactly what a live http(s) index
+# server understands, so those pass through unchanged. file:// has no server
+# behind it to invent an index.html response for a bare directory URI, so -
+# only for that scheme, and only so tests can point `index` at a fixture
+# tree with no network involved - this asks for that page by its
+# conventional name explicitly.
+function _Get-AutoOSImageFetchUri {
+    param([Parameter(Mandatory)][string]$DirUri)
+    if ($DirUri -match '^file://') { return $DirUri.TrimEnd('/') + '/index.html' }
+    return $DirUri
+}
+
+# _Resolve-AutoOSImagePage <HtmlPath> <BaseUrl> <FileRegex> <SumsField>
+#                          <SigField> <Stage:top|leaf> <LtsWanted>
+# Parses one already-fetched directory-listing page. Returns a
+# [pscustomobject] with .Status = 'ok' (.Url/.File/.Sums/.Sig set),
+# 'recurse' (.Subdir set, Stage 'top' only) or 'error' (.Message set).
+# Never guesses: ambiguous matches and unmatched patterns are always
+# 'error', never a first-match - see lib/linux/download.sh's
+# _image_resolve_parse_page for the full rationale, identical here.
+function _Resolve-AutoOSImagePage {
+    param(
+        [Parameter(Mandatory)][string]$HtmlPath,
+        [Parameter(Mandatory)][string]$BaseUrl,
+        [Parameter(Mandatory)][string]$FileRegex,
+        [string]$SumsField,
+        [string]$SigField,
+        [Parameter(Mandatory)][ValidateSet('top', 'leaf')][string]$Stage,
+        [switch]$LtsWanted
+    )
+    $html = Get-Content -LiteralPath $HtmlPath -Raw
+
+    $hrefs = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($html, 'href\s*=\s*["' + "'" + ']([^"' + "'" + ']+)["' + "'" + ']', 'IgnoreCase')) {
+        $h = $m.Groups[1].Value
+        if (-not $h) { continue }
+        if ($h -eq '../' -or $h -eq './' -or $h -eq '/') { continue }
+        if ($h.StartsWith('?') -or $h.StartsWith('#') -or $h.StartsWith('mailto:')) { continue }
+        $hrefs.Add($h)
+    }
+
+    function ConvertTo-AutoOSHrefBasename([string]$href) {
+        $trimmed = $href.TrimEnd('/')
+        $seg = $trimmed.Substring($trimmed.LastIndexOf('/') + 1)
+        return $seg.Split('?')[0]
+    }
+
+    function Test-AutoOSFieldIsPattern([string]$s) {
+        if (-not $s -or $s -eq '-') { return $false }
+        return [regex]::IsMatch($s, '[\[\]\(\)\+\\\$\^\*]')
+    }
+
+    function Resolve-AutoOSSidecar([string]$Kind, [string]$Field, [string]$Base, $Hrefs) {
+        if (-not $Field -or $Field -eq '-') { return [pscustomobject]@{ Url = '-'; ErrorMessage = $null } }
+        if (Test-AutoOSFieldIsPattern $Field) {
+            $names = @($Hrefs | Where-Object { -not $_.EndsWith('/') -and (ConvertTo-AutoOSHrefBasename $_) -match $Field } |
+                ForEach-Object { ConvertTo-AutoOSHrefBasename $_ } | Sort-Object -Unique)
+            if ($names.Count -eq 0) {
+                return [pscustomobject]@{ Url = $null; ErrorMessage = "$Kind pattern '$Field' matched nothing under $Base" }
+            }
+            if ($names.Count -gt 1) {
+                return [pscustomobject]@{ Url = $null; ErrorMessage = "$Kind pattern '$Field' matched multiple files under ${Base}: $($names -join ', ')" }
+            }
+            return [pscustomobject]@{ Url = $Base + $names[0]; ErrorMessage = $null }
+        }
+        return [pscustomobject]@{ Url = $Base + $Field; ErrorMessage = $null }
+    }
+
+    $direct = @($hrefs | Where-Object { -not $_.EndsWith('/') -and (ConvertTo-AutoOSHrefBasename $_) -match $FileRegex })
+    if ($direct.Count -gt 0) {
+        $names = @($direct | ForEach-Object { ConvertTo-AutoOSHrefBasename $_ } | Sort-Object -Unique)
+        if ($names.Count -gt 1) {
+            return [pscustomobject]@{
+                Status  = 'error'
+                Message = "pattern '$FileRegex' matched multiple files at ${BaseUrl}: $($names -join ', ') - refusing to guess, no ordering rule is defined for files at the same directory level"
+            }
+        }
+        $fname = $names[0]
+        $sums = Resolve-AutoOSSidecar -Kind 'sums' -Field $SumsField -Base $BaseUrl -Hrefs $hrefs
+        if ($sums.ErrorMessage) { return [pscustomobject]@{ Status = 'error'; Message = $sums.ErrorMessage } }
+        $sig = Resolve-AutoOSSidecar -Kind 'sig' -Field $SigField -Base $BaseUrl -Hrefs $hrefs
+        if ($sig.ErrorMessage) { return [pscustomobject]@{ Status = 'error'; Message = $sig.ErrorMessage } }
+        return [pscustomobject]@{ Status = 'ok'; Url = $BaseUrl + $fname; File = $fname; Sums = $sums.Url; Sig = $sig.Url }
+    }
+
+    if ($Stage -eq 'leaf') {
+        return [pscustomobject]@{ Status = 'error'; Message = "pattern '$FileRegex' matched nothing under $BaseUrl" }
+    }
+
+    $candidates = @()
+    foreach ($h in $hrefs) {
+        if (-not $h.EndsWith('/')) { continue }
+        $name = ConvertTo-AutoOSHrefBasename $h
+        if ($name -match '^([0-9]+)\.([0-9]+)(?:\.([0-9]+))?$') {
+            $major = [int]$Matches[1]; $minor = [int]$Matches[2]
+            $patch = if ($Matches[3]) { [int]$Matches[3] } else { 0 }
+            $candidates += [pscustomobject]@{ Major = $major; Minor = $minor; Patch = $patch; Name = $name }
+        }
+    }
+    if ($candidates.Count -eq 0) {
+        return [pscustomobject]@{
+            Status  = 'error'
+            Message = "pattern '$FileRegex' matched nothing under $BaseUrl (no files and no version-numbered subdirectories found either)"
+        }
+    }
+
+    if ($LtsWanted) {
+        $eligible = @($candidates | Where-Object { $_.Minor -eq 4 -and ($_.Major % 2) -eq 0 })
+        if ($eligible.Count -eq 0) {
+            $names = ($candidates | Sort-Object Major, Minor, Patch | ForEach-Object { $_.Name }) -join ', '
+            return [pscustomobject]@{
+                Status  = 'error'
+                Message = "no LTS release directory (an even-numbered year's .04) found under $BaseUrl among: $names"
+            }
+        }
+        $chosen = $eligible | Sort-Object Major, Minor, Patch | Select-Object -Last 1
+    } else {
+        $chosen = $candidates | Sort-Object Major, Minor, Patch | Select-Object -Last 1
+    }
+
+    return [pscustomobject]@{ Status = 'recurse'; Subdir = "$BaseUrl$($chosen.Name)/" }
+}
+
+function Resolve-AutoOSImageUrl {
+    <#
+      .SYNOPSIS
+        Resolves one catalog/images.json entry to a concrete download
+        record: Url, File, Sums (a SHA256SUMS URL, or '-'), Sig (a
+        signature URL, or '-'). Throws a specific, clear message rather
+        than guessing - see lib/linux/download.sh's image_resolve() for
+        the full rationale (identical algorithm, mirrored here).
+
+      .DESCRIPTION
+        -CatalogPath defaults to <repo root>\catalog\images.json; tests pass
+        a scratch catalog instead so catalog\images.json itself is never
+        touched by a test run.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ImageId,
+        [string]$CatalogPath
+    )
+
+    if ($ImageId -in @('custom-url', 'custom-local')) {
+        throw "Resolve-AutoOSImageUrl: '$ImageId' is a UI affordance (a user-supplied URL or local file path), not a catalog entry - there is no index to resolve it against"
+    }
+
+    if (-not $CatalogPath) {
+        $CatalogPath = Join-Path (_Get-AutoOSDownloadRoot) 'catalog\images.json'
+    }
+    if (-not (Test-Path -LiteralPath $CatalogPath)) {
+        throw "Resolve-AutoOSImageUrl: cannot read $CatalogPath"
+    }
+    $catalog = Get-Content -LiteralPath $CatalogPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $entry = @($catalog.images) | Where-Object { $_.id -eq $ImageId } | Select-Object -First 1
+    if (-not $entry) {
+        throw "Resolve-AutoOSImageUrl: no catalog entry for image id '$ImageId' in $CatalogPath"
+    }
+
+    $index = [string]$entry.index
+    $fileRe = [string]$entry.file
+    $sumsField = [string]$entry.sums
+    $sigField = [string]$entry.sig
+    if (-not $index -or -not $fileRe) {
+        throw "Resolve-AutoOSImageUrl: catalog entry '$ImageId' has no 'index'/'file' to resolve"
+    }
+    if (-not $index.EndsWith('/')) { $index += '/' }
+
+    $ltsWanted = $ImageId -like '*-lts'
+
+    $work = Join-Path ([IO.Path]::GetTempPath()) ('aos_resolve_' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+    try {
+        $topHtml = Join-Path $work 'top.html'
+        Get-AutoOSVerifiedFile -Uri (_Get-AutoOSImageFetchUri $index) -Destination $topHtml | Out-Null
+        $result = _Resolve-AutoOSImagePage -HtmlPath $topHtml -BaseUrl $index -FileRegex $fileRe `
+            -SumsField $sumsField -SigField $sigField -Stage 'top' -LtsWanted:$ltsWanted
+
+        if ($result.Status -eq 'recurse') {
+            $subdir = $result.Subdir
+            $leafHtml = Join-Path $work 'leaf.html'
+            Get-AutoOSVerifiedFile -Uri (_Get-AutoOSImageFetchUri $subdir) -Destination $leafHtml | Out-Null
+            $result = _Resolve-AutoOSImagePage -HtmlPath $leafHtml -BaseUrl $subdir -FileRegex $fileRe `
+                -SumsField $sumsField -SigField $sigField -Stage 'leaf' -LtsWanted:$ltsWanted
+        }
+
+        if ($result.Status -ne 'ok') {
+            throw "Resolve-AutoOSImageUrl: $($result.Message)"
+        }
+
+        [pscustomobject]@{
+            Url  = $result.Url
+            File = $result.File
+            Sums = $result.Sums
+            Sig  = $result.Sig
+        }
+    } finally {
+        Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
+    }
+}
+
 Export-ModuleMember -Function `
-    Get-AutoOSDownloadCacheDir, Get-AutoOSVerifiedFile, Test-AutoOSSha256Match, Test-AutoOSGpgSignature
+    Get-AutoOSDownloadCacheDir, Get-AutoOSVerifiedFile, Test-AutoOSSha256Match, Test-AutoOSGpgSignature, `
+    Resolve-AutoOSImageUrl

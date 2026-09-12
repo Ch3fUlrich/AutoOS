@@ -1308,6 +1308,115 @@ Test-Case 'a cached, already-verified file is skipped, not refetched' {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
+# ─── image_resolve (Task 4B) ────────────────────────────────────────────────
+# Mirrors lib/linux/download.sh's own "image_resolve" test block one-for-one
+# (same fixtures under tests\helpers\image_index_fixtures, same scenarios).
+# file:// is fine here (unlike the bash suite's loopback-server workaround):
+# Resolve-AutoOSImageUrl does its own string-joining of relative hrefs
+# against the page's own directory URI, so a fixture-tree file:// URI
+# behaves identically to a live server's for every case tested below - no
+# real network is ever touched.
+Describe-Group 'image_resolve'
+
+function ConvertTo-AutoOSTestDirUri {
+    param([string]$Path)
+    ([Uri]($Path.TrimEnd('\') + '\')).AbsoluteUri
+}
+
+$imgFixtureRoot = Join-Path $Root 'tests\helpers\image_index_fixtures'
+
+function New-AutoOSImageTestCatalog {
+    param(
+        [string]$Id, [string]$FixtureSubdir, [string]$FileRegex,
+        [string]$Sums = 'SHA256SUMS', [string]$Sig = '-'
+    )
+    $indexUri = ConvertTo-AutoOSTestDirUri (Join-Path $imgFixtureRoot $FixtureSubdir)
+    $path = Join-Path ([IO.Path]::GetTempPath()) ('aos_img_cat_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @{ images = @(@{ id = $Id; index = $indexUri; file = $FileRegex; sums = $Sums; sig = $Sig }) } |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding UTF8
+    $path
+}
+
+Test-Case 'image_resolve: an LTS entry picks the current LTS release, never an interim one' {
+    $cat = New-AutoOSImageTestCatalog -Id 'ubuntu-desktop-lts' -FixtureSubdir 'ubuntu_releases' `
+        -FileRegex 'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.gpg'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat
+        # One Assert-True per Test-Case, same convention as every other test
+        # in this suite (Pass/Fail print $script:Current, so more than one
+        # assertion per case would double-count and re-print the name).
+        $ok = ($r.File -eq 'ubuntu-26.04.1-desktop-amd64.iso') -and
+            ($r.Url -like '*26.04.1/ubuntu-26.04.1-desktop-amd64.iso') -and
+            ($r.Sig -like '*26.04.1/SHA256SUMS.gpg') -and
+            ($r.Url -notlike '*25.10*') -and ($r.Url -notlike '*24.04.5*')
+        Assert-True $ok "file=$($r.File) url=$($r.Url) sig=$($r.Sig)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case "image_resolve: Debian's current/ symlink shape resolves with no directory recursion" {
+    $cat = New-AutoOSImageTestCatalog -Id 'debian-netinst-stable' -FixtureSubdir 'debian_iso_cd' `
+        -FileRegex 'debian-[0-9]+\.[0-9]+\.[0-9]+-amd64-netinst\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.sign'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'debian-netinst-stable' -CatalogPath $cat
+        $ok = ($r.File -eq 'debian-13.1.0-amd64-netinst.iso') -and ($r.Sig -like '*debian_iso_cd/SHA256SUMS.sign')
+        Assert-True $ok "file=$($r.File) sig=$($r.Sig)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: a pattern matching nothing throws loudly, never guesses' {
+    $cat = New-AutoOSImageTestCatalog -Id 'nothing-here' -FixtureSubdir 'no_match' -FileRegex 'nonexistent-[0-9]+\.iso$'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'nothing-here' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*matched nothing*') "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: a pattern matching several files throws, never a silent first-match' {
+    $cat = New-AutoOSImageTestCatalog -Id 'ambiguous' -FixtureSubdir 'multiple_match' `
+        -FileRegex 'debian-[0-9]+\.[0-9]+\.[0-9]+-amd64-netinst\.iso$'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'ambiguous' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*matched multiple*' -and $msg -like '*debian-13.1.0-amd64-netinst.iso*' -and $msg -like '*debian-13.2.0-amd64-netinst.iso*') `
+            "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: an -lts id with only interim directories present throws instead of picking one' {
+    $cat = New-AutoOSImageTestCatalog -Id 'ubuntu-desktop-lts' -FixtureSubdir 'ubuntu_only_interim' `
+        -FileRegex 'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.gpg'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no LTS release directory*') "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: custom-url is a specific refusal, not a crash' {
+    $threw = $false; $msg = ''
+    try { Resolve-AutoOSImageUrl -ImageId 'custom-url' | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=$msg"
+}
+
+Test-Case 'image_resolve: custom-local is a specific refusal, not a crash' {
+    $threw = $false; $msg = ''
+    try { Resolve-AutoOSImageUrl -ImageId 'custom-local' | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=$msg"
+}
+
+Test-Case 'image_resolve: an unknown image id throws a clear error, not a crash' {
+    $threw = $false; $msg = ''
+    try { Resolve-AutoOSImageUrl -ImageId 'totally-not-a-real-image-id' -CatalogPath (Join-Path $Root 'catalog\images.json') | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*no catalog entry*') "threw=$threw msg=$msg"
+}
+
 # ─── USB device enumeration and the safety guard ────────────────────────────
 # Task 5 of plan 2026-09-11-installer-usb-and-rescue-profile: Assert-
 # AutoOSUsbSafe is the only thing standing between the installer-USB writer

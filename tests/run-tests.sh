@@ -2455,6 +2455,115 @@ if it "a cached, already-verified file is skipped, not refetched"; then
     rm -rf "$tmp"
 fi
 
+# ─── image_resolve (Task 4B) ────────────────────────────────────────────────
+# Bridges catalog/images.json's index+file-regex entries to a concrete
+# download URL (the gap that left --create-usb unable to actually fetch an
+# image). Every test here serves its fixtures through a real loopback HTTP
+# server (tests/helpers/image_index_fixtures/) rather than a file:// URL:
+# image_resolve joins relative hrefs against the page's own URL itself, and
+# that join has to see a real directory-shaped base URL the same way a live
+# index server would hand one back - see _start_test_http_server's own
+# comment above for why file:// does not stand in for that on this suite's
+# Windows/Git-Bash hosts. No test here reaches the real internet.
+describe "image_resolve"
+
+read -r _img_srv_pid _img_srv_port < <(_start_test_http_server "$ROOT/tests/helpers/image_index_fixtures")
+_img_cache="$(mktemp -d)"
+
+# _image_resolve_test_catalog <id> <fixture-subdir> <file-regex> [sums] [sig]
+# Writes a one-entry scratch images.json pointing `index` at this test run's
+# loopback fixture server, and echoes its path. AUTOOS_ROOT/catalog/images.json
+# itself is never touched (constraint: catalog/*.json stays off limits) -
+# image_resolve's optional second argument exists for exactly this.
+_image_resolve_test_catalog() {
+    local id="$1" subdir="$2" file_re="$3" sums="${4:-SHA256SUMS}" sig="${5:--}"
+    local f; f="$(mktemp)"
+    python3 - "$f" "$id" "http://127.0.0.1:${_img_srv_port}/${subdir}/" "$file_re" "$sums" "$sig" <<'PY'
+import json, sys
+f, id_, index, file_re, sums, sig = sys.argv[1:7]
+with open(f, "w", encoding="utf-8") as fh:
+    json.dump({"images": [{"id": id_, "index": index, "file": file_re, "sums": sums, "sig": sig}]}, fh)
+PY
+    echo "$f"
+}
+
+if it "image_resolve: an LTS entry picks the current LTS release, never an interim one"; then
+    cat_json="$(_image_resolve_test_catalog ubuntu-desktop-lts ubuntu_releases \
+        'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' SHA256SUMS SHA256SUMS.gpg)"
+    out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve ubuntu-desktop-lts "$cat_json" 2>&1)"; rc=$?
+    base="http://127.0.0.1:${_img_srv_port}/ubuntu_releases/26.04.1"
+    if [[ $rc -eq 0 && "$out" == *"url=${base}/ubuntu-26.04.1-desktop-amd64.iso"* \
+        && "$out" == *"file=ubuntu-26.04.1-desktop-amd64.iso"* \
+        && "$out" == *"sums=${base}/SHA256SUMS"* && "$out" == *"sig=${base}/SHA256SUMS.gpg"* \
+        && "$out" != *"25.10"* && "$out" != *"24.04.5"* && "$out" != *"22.04.5"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
+    rm -f "$cat_json"
+fi
+
+if it "image_resolve: Debian's current/ symlink shape resolves with no directory recursion"; then
+    cat_json="$(_image_resolve_test_catalog debian-netinst-stable debian_iso_cd \
+        'debian-[0-9]+\.[0-9]+\.[0-9]+-amd64-netinst\.iso$' SHA256SUMS SHA256SUMS.sign)"
+    out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve debian-netinst-stable "$cat_json" 2>&1)"; rc=$?
+    base="http://127.0.0.1:${_img_srv_port}/debian_iso_cd"
+    if [[ $rc -eq 0 && "$out" == *"url=${base}/debian-13.1.0-amd64-netinst.iso"* \
+        && "$out" == *"file=debian-13.1.0-amd64-netinst.iso"* \
+        && "$out" == *"sums=${base}/SHA256SUMS"* && "$out" == *"sig=${base}/SHA256SUMS.sign"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
+    rm -f "$cat_json"
+fi
+
+if it "image_resolve: a pattern matching nothing fails loudly and non-zero, never guesses"; then
+    cat_json="$(_image_resolve_test_catalog nothing-here no_match 'nonexistent-[0-9]+\.iso$' - -)"
+    out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve nothing-here "$cat_json" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"matched nothing"* ]]; then pass; else fail "rc=$rc out=$out"; fi
+    rm -f "$cat_json"
+fi
+
+if it "image_resolve: a pattern matching several files is an error, never a silent first-match"; then
+    cat_json="$(_image_resolve_test_catalog ambiguous multiple_match \
+        'debian-[0-9]+\.[0-9]+\.[0-9]+-amd64-netinst\.iso$' - -)"
+    out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve ambiguous "$cat_json" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"matched multiple"* \
+        && "$out" == *"debian-13.1.0-amd64-netinst.iso"* && "$out" == *"debian-13.2.0-amd64-netinst.iso"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
+    rm -f "$cat_json"
+fi
+
+if it "image_resolve: an -lts id with only interim directories present fails loudly instead of picking one"; then
+    cat_json="$(_image_resolve_test_catalog ubuntu-desktop-lts ubuntu_only_interim \
+        'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' SHA256SUMS SHA256SUMS.gpg)"
+    out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve ubuntu-desktop-lts "$cat_json" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"no LTS release directory"* ]]; then pass; else fail "rc=$rc out=$out"; fi
+    rm -f "$cat_json"
+fi
+
+if it "image_resolve: custom-url is a specific refusal, not a crash"; then
+    out="$(image_resolve custom-url "$ROOT/catalog/images.json" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"UI affordance"* ]]; then pass; else fail "rc=$rc out=$out"; fi
+fi
+
+if it "image_resolve: custom-local is a specific refusal, not a crash"; then
+    out="$(image_resolve custom-local "$ROOT/catalog/images.json" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"UI affordance"* ]]; then pass; else fail "rc=$rc out=$out"; fi
+fi
+
+if it "image_resolve: an unknown image id is a clear error, not a crash"; then
+    out="$(image_resolve totally-not-a-real-image-id "$ROOT/catalog/images.json" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"no catalog entry"* ]]; then pass; else fail "rc=$rc out=$out"; fi
+fi
+
+kill "$_img_srv_pid" 2>/dev/null
+rm -rf "$_img_cache"
+
 # ─── USB device enumeration and the safety guard ────────────────────────────
 # Task 5 of plan 2026-09-11-installer-usb-and-rescue-profile: usb_guard() is
 # the only thing standing between the installer-USB writer and a live
