@@ -1435,6 +1435,17 @@ function Get-FakeUsbDisksJson {
                 -FileSystem 'FAT32' -IsReadOnly $true))
         }
 
+        # Finding F2': mounted, FAT32, writable, on a real USB/removable
+        # disk that is neither IsBoot nor IsSystem — every other check in
+        # MountedFat32Writable mode accepts this, but its drive letter is
+        # the live system drive, the Windows analogue of a USB-hosted
+        # /boot/efi (lib/linux/usb.sh's own F2' fixture).
+        'usb_system_drive_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter $env:SystemDrive.TrimEnd(':') `
+                -FileSystem 'FAT32' -IsReadOnly $false))
+        }
+
         default { throw "unknown fake-usb fixture: $Fixture" }
     }
     ConvertTo-Json -InputObject @($disks) -Depth 6
@@ -1581,6 +1592,15 @@ Test-Case 'usb: Assert-AutoOSUsbSafe still defaults to Unmounted mode when none 
     }
 }
 
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a volume mounted at the system drive, regardless of bus (finding F2-prime)' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_system_drive_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*system drive*') "threw=$threw msg=[$msg]"
+    }
+}
+
 # ─── The write planner (Task 6) ─────────────────────────────────────────────
 # New-AutoOSUsbPlan turns (image, kind, engine, device) into the exact
 # write commands, checks every compatibility/platform/lock/safety question
@@ -1717,6 +1737,20 @@ Test-Case 'usb: Get-AutoOSServeUsbCreateResult guards the device before checking
         $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE0' }
         $result = Get-AutoOSServeUsbCreateResult -Body $body
         Assert-True ($result.Code -eq 400 -and [string]$result.Payload.error -like '*system disk*') `
+            "code=$($result.Code) error=$($result.Payload.error)"
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult refuses a device smaller than the image (finding F12)' {
+    # Finding F12 (mirror of lib/linux/serve.py's usb_create_response): this
+    # used to call Assert-AutoOSUsbSafe with no $env:AUTOOS_IMAGE_BYTES at
+    # all, so the size check compared against 0 and a device smaller than
+    # the image still got a 202. tiny_stick is 4 GB; ubuntu-desktop-lts
+    # declares sizeGb: 6 in catalog\images.json.
+    Invoke-WithFakeUsbEnv -Fixture 'tiny_stick' -Body {
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 400 -and [string]$result.Payload.error -like '*too small*') `
             "code=$($result.Code) error=$($result.Payload.error)"
     }
 }

@@ -263,6 +263,18 @@ function Assert-AutoOSUsbSafe {
             if (-not $target.MountedLetter) {
                 throw "$DeviceId has no mounted volume — mount a FAT32 volume on it first (uefi-copy writes onto an existing mounted filesystem, not the raw device)"
             }
+            # Finding F2' (mirror of lib/linux/usb.sh's usb_guard): the bus/
+            # removable check above only rules out disks Windows itself
+            # considers system/boot - it says nothing about a system-critical
+            # volume that happens to live on a USB disk, which is exactly the
+            # case for a machine actually booted from this rescue stick.
+            # Refused on the drive letter alone, before the filesystem/
+            # read-only checks below, whatever the bus type says.
+            $sysDrive = $env:SystemDrive
+            if ($sysDrive) { $sysDrive = $sysDrive.TrimEnd(':') }
+            if ($sysDrive -and $target.MountedLetter -eq $sysDrive) {
+                throw "$DeviceId's mounted volume ($($target.MountedLetter):) is the system drive — refusing to treat a live system volume as a USB write target, whatever the bus type (finding F2')"
+            }
             if ($target.MountedFileSystem -ne 'FAT32') {
                 $fs = if ($target.MountedFileSystem) { $target.MountedFileSystem } else { 'unknown' }
                 throw "$DeviceId's mounted volume ($($target.MountedLetter):) is '$fs', not FAT32 — uefi-copy requires an existing FAT32 volume"

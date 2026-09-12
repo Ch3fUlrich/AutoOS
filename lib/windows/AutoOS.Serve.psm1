@@ -240,15 +240,39 @@ function Get-AutoOSServeUsbCreateResult {
         return [pscustomobject]@{ Code = 400; Payload = @{ error = 'a target device is required' } }
     }
 
+    $image = if ($Body.PSObject.Properties.Name -contains 'image') { [string]$Body.image } else { '' }
     $engine = if ($Body.PSObject.Properties.Name -contains 'engine') { [string]$Body.engine } else { '' }
     $guardMode = if ($engine -eq 'uefi-copy') { 'MountedFat32Writable' } else { 'Unmounted' }
+
+    # Finding F12 (mirror of lib/linux/serve.py's usb_create_response): this
+    # used to call Assert-AutoOSUsbSafe with no $env:AUTOOS_IMAGE_BYTES at
+    # all, so its size check compared the device against 0 and a device
+    # smaller than the image still got a 202. Looked up the same way
+    # New-AutoOSUsbPlan already does for the CLI path - 0 (unknown image,
+    # unreadable catalog, or no sizeGb on this entry) intentionally
+    # reproduces the old "never a refusal on size" behaviour rather than
+    # inventing a limit this catalog entry never declared.
+    $imageBytes = 0
+    try {
+        $catalogImage = Get-AutoOSUsbImage -Id $image
+        if ($catalogImage -and $catalogImage.sizeGb) {
+            $imageBytes = [int64][math]::Round([double]$catalogImage.sizeGb * 1000000000)
+        }
+    } catch {
+        $imageBytes = 0
+    }
+
+    $prevImageBytes = $env:AUTOOS_IMAGE_BYTES
+    $env:AUTOOS_IMAGE_BYTES = [string]$imageBytes
     try {
         Assert-AutoOSUsbSafe -DeviceId $device -Mode $guardMode | Out-Null
     } catch {
         return [pscustomobject]@{ Code = 400; Payload = @{ error = $_.Exception.Message } }
+    } finally {
+        if ($null -eq $prevImageBytes) { Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_IMAGE_BYTES = $prevImageBytes }
     }
 
-    $image = if ($Body.PSObject.Properties.Name -contains 'image') { [string]$Body.image } else { '' }
     $kind = if (($Body.PSObject.Properties.Name -contains 'kind') -and $Body.kind) { [string]$Body.kind } else { 'installer' }
     if (-not $image -or -not $engine) {
         return [pscustomobject]@{ Code = 400; Payload = @{ error = 'image and engine are both required' } }
@@ -297,10 +321,19 @@ function Start-AutoOSUsbCreateJob {
     $script:RunInfo.Summary = ''
     $script:RunInfo.Current = $null
 
+    # Finding F11' (mirror of lib/linux/serve.py's run_usb_create):
+    # -WipeTargetDisk used to be passed here too even though this is only
+    # ever a browser PREVIEW - -DryRun already neutralises it, but
+    # acknowledging "contents are lost" from a preview is gratuitous, and it
+    # left exactly one missing flag between a preview and a real wipe.
+    # Dropped, and AUTOOS_DRY_RUN=1 is now also set directly in the child
+    # process's environment (belt-and-suspenders alongside -DryRun on the
+    # command line already) so nothing about this call depends on a single
+    # flag surviving unchanged.
     $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                 (Join-Path $RepoRoot 'setup.ps1'),
                 '-CreateUsb', '-Image', $Image, '-Kind', $Kind, '-Engine', $Engine,
-                '-UsbDevice', $Device, '-WipeTargetDisk', '-DryRun', '-Yes', '-NoColor')
+                '-UsbDevice', $Device, '-DryRun', '-Yes', '-NoColor')
 
     [void]$script:Log.Add(@{ level = 'step'; text = '$ powershell ' + ($psArgs -join ' ') })
 
@@ -315,6 +348,7 @@ function Start-AutoOSUsbCreateJob {
     $psi.UseShellExecute        = $false
     $psi.CreateNoWindow         = $true
     $psi.EnvironmentVariables['AUTOOS_NO_COLOR'] = '1'
+    $psi.EnvironmentVariables['AUTOOS_DRY_RUN'] = '1'
 
     try { $script:Proc = [System.Diagnostics.Process]::Start($psi) }
     catch {
