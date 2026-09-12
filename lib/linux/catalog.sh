@@ -88,6 +88,69 @@ sys.exit(1 if problems else 0)
 PY
 }
 
+# engine_validate <engines.json path> <catalog dir> — prints one problem per
+# line, exit 1 if any. Validates catalog/engines.json's own shape: it is a
+# different catalog *type* from the component catalogs above (top-level
+# 'engines', not 'categories'), so it needs its own rules rather than being
+# forced through catalog_validate. <catalog dir> is scanned for every
+# categories-shaped catalog (linux/macos/windows) so an engine's 'requires'
+# can be checked against the real, cross-platform set of component ids — an
+# engine like ventoy is windows-only-required even though it can also run on
+# linux, so checking against a single platform's catalog would misreport it.
+engine_validate() {
+    catalog_require_python || return 1
+    python3 - "$1" "$2" <<'PY'
+import glob, json, os, sys
+path, catalog_dir = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        cat = json.load(fh)
+except Exception as exc:
+    print(f"engines: not valid JSON ({exc})"); sys.exit(1)
+
+engines = cat.get("engines")
+if not engines:
+    print("engines: missing 'engines'"); sys.exit(1)
+
+component_ids = set()
+for p in glob.glob(os.path.join(catalog_dir, "*.json")):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        continue
+    for grp in data.get("categories", []):
+        for c in grp.get("components", []):
+            if c.get("id"):
+                component_ids.add(c["id"])
+
+REQUIRED = ("id", "name", "platforms", "kinds", "interactive")
+problems, seen = [], set()
+for e in engines:
+    eid = e.get("id")
+    where = f"engine '{eid}'" if eid else "engine with no id"
+    missing = [k for k in REQUIRED if k not in e]
+    if missing:
+        problems.append(f"{where}: missing {missing}")
+        continue
+    if eid in seen:
+        problems.append(f"{where}: duplicate id")
+    seen.add(eid)
+    if not isinstance(e["interactive"], bool):
+        problems.append(f"{where}: 'interactive' must be a bool")
+    if not e["platforms"]:
+        problems.append(f"{where}: 'platforms' must not be empty")
+    if not e["kinds"]:
+        problems.append(f"{where}: 'kinds' must not be empty")
+    for r in e.get("requires", []):
+        if r not in component_ids:
+            problems.append(f"{where}: requires unknown component '{r}'")
+
+for p in problems: print(p)
+sys.exit(1 if problems else 0)
+PY
+}
+
 # catalog_load <path> <arch> <is_headless>
 # Fills the CAT_* arrays with components that can run on this machine.
 catalog_load() {

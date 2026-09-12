@@ -128,12 +128,45 @@ ui_init
 # ─── Catalog-only modes ─────────────────────────────────────────────────────
 if (( CHECK_ONLY )); then
     # Validate every catalog, not just this machine's: a typo in macos.json must
-    # fail CI on a Linux runner too.
+    # fail CI on a Linux runner too. catalog/*.json holds more than one catalog
+    # *type* (component catalogs, images.json, engines.json), each with a
+    # different top-level shape, so dispatch by that shape rather than
+    # assuming every file here is a component catalog — and rather than
+    # trusting the filename, which silently mis-validates a renamed file.
     rc=0
     for cat in "$AUTOOS_ROOT"/catalog/*.json; do
         [[ -f "$cat" ]] || continue
-        if catalog_validate "$cat"; then ui_ok "$(basename "$cat") is valid."
-        else ui_err "$(basename "$cat") has problems."; rc=1; fi
+        catalog_require_python || exit 1
+        cat_type="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    print("invalid"); sys.exit(0)
+for key in ("categories", "images", "engines"):
+    if key in data:
+        print(key); sys.exit(0)
+print("unknown")
+' "$cat")"
+        case "$cat_type" in
+            categories)
+                if catalog_validate "$cat"; then ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            images)
+                if python3 "$AUTOOS_ROOT/tests/helpers/images_validate.py" "$cat"; then
+                    ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            engines)
+                if engine_validate "$cat" "$AUTOOS_ROOT/catalog"; then
+                    ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            *)
+                # An unrecognised shape must fail loudly, not be skipped —
+                # a silently-skipped malformed catalog is how a bad one
+                # reaches a user (AGENTS.md §5).
+                ui_err "$(basename "$cat"): unknown catalog type"; rc=1 ;;
+        esac
     done
     exit $rc
 fi

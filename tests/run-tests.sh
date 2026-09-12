@@ -304,6 +304,26 @@ print(' / '.join(bad))")"
     [[ -z "$out" ]] && pass || fail "$out"
 fi
 
+if it "engine_validate rejects a malformed engines.json (scratch copy)"; then
+    # engine_validate is --check-catalog's dispatch target for the 'engines'
+    # catalog type (setup.sh, regression fix). Mutate a scratch copy, never
+    # catalog/engines.json itself: 'requires' names a component that exists
+    # in no component catalog, and a required field is missing outright.
+    tmp="$(mktemp)"
+    cat >"$tmp" <<'JSON'
+{"engines":[
+  {"id":"ghost-engine","name":"Ghost","platforms":["linux"],"kinds":["installer"],"requires":["not-a-real-component"]}
+]}
+JSON
+    out="$(engine_validate "$tmp" catalog 2>&1)"; rc=$?
+    rm -f "$tmp"
+    if [[ $rc -ne 0 && "$out" == *"missing"* && "$out" == *"interactive"* ]]; then
+        pass
+    else
+        fail "expected a missing-'interactive' problem, got rc=$rc: $out"
+    fi
+fi
+
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
 describe "catalog loading"
 detect_system
@@ -748,6 +768,21 @@ fi
 if it "--check-catalog succeeds"; then
     bash setup.sh --check-catalog >/dev/null 2>&1
     assert_ok $?
+fi
+
+if it "--check-catalog validates all five catalogs by type, not just component catalogs"; then
+    # Regression: setup.sh used to run every catalog/*.json through the
+    # component-catalog validator, which rejects images.json and
+    # engines.json outright (they have no 'categories' key). Assert every
+    # file is actually reported valid, not just that the overall rc is 0 —
+    # rc could go green for the wrong reason (e.g. an empty glob).
+    out="$(bash setup.sh --check-catalog 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out" == *"engines.json is valid"* && "$out" == *"images.json is valid"* \
+        && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
 fi
 
 if it "catalog_probe_installed identifies installed components"; then
