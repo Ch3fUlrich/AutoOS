@@ -4,7 +4,9 @@
 # Runs inside an Ubuntu 26.04.1 LTS live session booted from the rescue stick
 # (it also works on an already-installed machine). It installs the
 # "Disaster Recovery" toolkit from catalog/linux.json's `rescue` category,
-# plus both AI CLIs and a small dispatcher for them.
+# both networked AI CLIs (claude, agy) and oterm (the local-ai TUI client),
+# and a small dispatcher (`ai`) that picks whichever of those — including a
+# plain `ollama` fallback with no API key or network — is actually usable.
 #
 # This replaces an older pair of scripts that had five known defects, and
 # every design choice below exists to fix one of them:
@@ -75,6 +77,7 @@ MARKER="$PREFIX/var/lib/autoos/rescue-bootstrap.done"
 AI_REGISTRY_DEST="$PREFIX/etc/autoos/ai-clients.conf"
 AI_BIN_DEST="$PREFIX/usr/local/bin/ai"
 AI_PROFILE_DEST="$PREFIX/etc/profile.d/autoos-ai.sh"
+OLLAMA_CHAT_DEST="$PREFIX/usr/local/bin/ollama-chat"
 
 # ─── tiny, self-contained UI (no dependency on lib/linux/ui.sh: this script
 # must work even when only templates/ was copied onto the stick) ───────────
@@ -207,6 +210,27 @@ EOF
 
     OFFLINE_CACHE_REGISTERED=1
     apt_update_once
+}
+
+# ─── offline pip wheelhouse (Task 13) ──────────────────────────────────────
+# oterm is Python, not apt, so it needs its own offline cache: a directory of
+# wheels/sdists for oterm AND its full dependency tree, built ahead of time
+# by lib/linux/imagecache.sh's imagecache_wheelhouse_build() and consumed
+# here with `pip install --no-index --find-links` — the same
+# built-ahead-of-time / consumed-offline split as register_offline_cache()
+# above, just for pip instead of apt.
+WHEELHOUSE_DIR=""
+
+detect_wheelhouse() {
+    local candidate
+    for candidate in "$SCRIPT_DIR/rescue/wheels" /cdrom/rescue/wheels; do
+        if compgen -G "$candidate"/oterm-*.whl >/dev/null 2>&1 \
+            || compgen -G "$candidate"/oterm-*.tar.gz >/dev/null 2>&1; then
+            WHEELHOUSE_DIR="$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # ─── apt install in small, named groups (A12) ──────────────────────────────
@@ -362,6 +386,53 @@ install_ai_clis() {
     [[ -z "$failed" ]] || ui_warn "AI CLIs unavailable: $failed"
 }
 
+# ─── oterm (Task 13, the local-ai TUI client) ──────────────────────────────
+# Prefers the offline wheelhouse (see detect_wheelhouse() above) so a stick
+# with the wheels cache built ahead of time installs it with the network
+# fully down, same as install_rescue_tools() does for apt via
+# register_offline_cache(). Falls back to a normal networked `pip install`
+# when no wheelhouse is present, and degrades to a warning — never a hard
+# failure — when neither python3 nor network is available, matching every
+# other installer in this script (B8: one missing tool never blocks the
+# rest of the run).
+install_oterm() {
+    if command -v oterm >/dev/null 2>&1; then
+        ui_line "skipped" "oterm already installed"                  # AGENTS.md §4
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        ui_warn "oterm — python3 not found, cannot install"
+        return 0
+    fi
+
+    if detect_wheelhouse; then
+        ui_info "installing oterm from offline wheelhouse ($WHEELHOUSE_DIR)"
+        if python3 -m pip install --user --no-index --find-links "$WHEELHOUSE_DIR" oterm \
+            >/tmp/autoos-rescue-oterm.log 2>&1; then
+            ui_line "installed" "oterm (offline wheelhouse)"
+        else
+            ui_warn "oterm — offline install from wheelhouse failed (see /tmp/autoos-rescue-oterm.log)"
+        fi
+        return 0
+    fi
+
+    if ! network_reachable; then
+        ui_warn "oterm — offline and no wheelhouse cache, cannot install"
+        return 0
+    fi
+
+    ui_info "installing oterm via pip"
+    # --break-system-packages only as a second attempt (PEP 668): the plain,
+    # safer call is always tried first and this one only runs if it was
+    # refused, same order as install_ai_clis()'s neighbours use for apt.
+    if python3 -m pip install --user oterm >/tmp/autoos-rescue-oterm.log 2>&1 \
+        || python3 -m pip install --user --break-system-packages oterm >/tmp/autoos-rescue-oterm.log 2>&1; then
+        ui_line "installed" "oterm"
+    else
+        ui_warn "oterm — install failed (see /tmp/autoos-rescue-oterm.log)"
+    fi
+}
+
 # Google's Antigravity CLI installer, replacing Gemini CLI at the human
 # partner's direction — Gemini CLI is not deprecated; this is a deliberate
 # product choice, not a response to a broken package.
@@ -418,6 +489,30 @@ install_ai_dispatcher() {
         # shellcheck disable=SC2086
         $AUTOOS_SUDO install -m 755 "$src_bin" "$AI_BIN_DEST"
         ui_line "installed" "ai dispatcher ($AI_BIN_DEST)"
+    fi
+
+    install_ollama_chat_wrapper
+}
+
+# The "local" backend's binary (see templates/ai-clients.conf and
+# templates/ollama-chat.sh's own header for why this wrapper exists at all).
+# Same idempotency rule as the dispatcher itself just above: it is our code,
+# so a second run over an identical file reports "skipped", never
+# re-installed.
+install_ollama_chat_wrapper() {
+    local src="$SCRIPT_DIR/ollama-chat.sh"
+    if [[ ! -f "$src" ]]; then
+        ui_warn "ollama-chat.sh missing next to rescue-bootstrap.sh — 'ai local' will not work"
+        return 0
+    fi
+    # shellcheck disable=SC2086
+    $AUTOOS_SUDO mkdir -p "$(dirname "$OLLAMA_CHAT_DEST")"
+    if [[ -f "$OLLAMA_CHAT_DEST" ]] && cmp -s "$src" "$OLLAMA_CHAT_DEST"; then
+        ui_line "skipped" "ollama-chat ($OLLAMA_CHAT_DEST, unchanged)"
+    else
+        # shellcheck disable=SC2086
+        $AUTOOS_SUDO install -m 755 "$src" "$OLLAMA_CHAT_DEST"
+        ui_line "installed" "ollama-chat ($OLLAMA_CHAT_DEST)"
     fi
 }
 
@@ -541,6 +636,7 @@ main() {
     install_rescue_tools
     install_nodejs
     install_ai_clis
+    install_oterm
     install_ai_dispatcher
     write_ai_profile
     print_summary

@@ -267,6 +267,14 @@ function Get-AutoOSInstalledStatus {
             }
             return 'not-detected'
         }
+        if ($Component.Package -eq 'oterm') {
+            # oterm (Task 13) has no winget/choco package (verified 2026-09-12
+            # against winget.run and community.chocolatey.org) — it is
+            # installed via pip, so there is no package-manager record to
+            # probe; a plain `Get-Command` is the only reliable signal, same
+            # as agent-skills/mcp-* above.
+            return $(if (Get-Command oterm -ErrorAction SilentlyContinue) { 'installed' } else { 'not-detected' })
+        }
         return $status
     }
     if ($Component.Provider -eq 'psmodule') {

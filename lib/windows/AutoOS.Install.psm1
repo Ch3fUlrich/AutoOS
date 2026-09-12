@@ -350,6 +350,37 @@ function Install-AutoOSOllamaModelQwen34B { Invoke-AutoOSOllamaPull -Model 'qwen
 function Install-AutoOSOllamaModelQwen317B { Invoke-AutoOSOllamaPull -Model 'qwen3:1.7b' }
 function Install-AutoOSOllamaModelQwenCoder7B { Invoke-AutoOSOllamaPull -Model 'qwen2.5-coder:7b' }
 
+function Install-AutoOSOterm {
+    <#
+      .SYNOPSIS Install oterm (the Ollama TUI client) via pip.
+      .DESCRIPTION
+        Verified 2026-09-12: oterm has no winget or Chocolatey package
+        (winget.run and community.chocolatey.org both return zero matches).
+        pip is the only cross-platform install path the upstream docs
+        (ggozad.github.io/oterm/installation) list, so this is a "custom"
+        provider postInstall rather than a normal winget/choco entry.
+    #>
+    if ($script:DryRun) {
+        Write-AutoOSLine 'would install oterm via pip (pip install --user oterm)' -Level muted
+        return
+    }
+    if (Get-Command oterm -ErrorAction SilentlyContinue) {
+        Write-AutoOSLine 'oterm already installed' -Level muted
+        return
+    }
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
+    if (-not $py) {
+        Write-AutoOSLine 'python not found; skipping oterm' -Level warn
+        return
+    }
+    Write-AutoOSLine 'installing oterm (pip)' -Level step
+    & $py.Source -m pip install --user oterm
+    if ($LASTEXITCODE -ne 0) {
+        Write-AutoOSLine 'oterm install failed' -Level warn
+    }
+}
+
 function Add-AutoOSGitToPath {
     Add-AutoOSPathEntry -Directory @("$env:ProgramFiles\Git\cmd") | Out-Null
 }
@@ -1076,4 +1107,5 @@ Export-ModuleMember -Function `
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Invoke-AutoOSScriptProvider,
-    Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B
+    Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,
+    Install-AutoOSOterm

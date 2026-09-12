@@ -249,6 +249,22 @@
           "profiles": []
         },
         {
+          "id": "oterm",
+          "name": "oterm",
+          "description": "Terminal UI chat client for Ollama models",
+          "provider": "brew",
+          "package": "oterm",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "oterm --help",
+          "homepage": "https://github.com/ggozad/oterm",
+          "notes": "In homebrew/core since oterm 0.13.1 — verified via formulae.brew.sh.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
           "id": "claude-desktop",
           "name": "Claude Desktop",
           "description": "Claude desktop application",

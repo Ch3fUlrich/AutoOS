@@ -442,3 +442,157 @@ imagecache_verify() {
     ui_err "imagecache: ${#missing[@]} rescue package(s) missing from $out: ${missing[*]}"
     return 1
 }
+
+# ─── offline pip wheelhouse (Task 13) ──────────────────────────────────────
+# oterm (the local-ai TUI client, catalog/*.json) ships no apt/snap package,
+# only pip — and the machines a rescue stick exists for are exactly the ones
+# with no network to reach PyPI from. This is the same B19 problem the .deb
+# cache above solves, one layer up the stack: <stick_root>/rescue/wheels is
+# built here, ahead of time, on a machine WITH network, and consumed offline
+# by templates/rescue-bootstrap.sh's `pip install --no-index --find-links`.
+#
+# imagecache_wheelhouse_packages <catalog_path>
+# Prints, one per line, the "package" field of every "custom"-provider
+# component whose postInstall matches the oterm installers this repo ships
+# (install_oterm / Install-AutoOSOterm) and that carries the "local-ai"
+# profile — the catalog stays the single source of truth even though there
+# is currently exactly one such package, same principle as
+# imagecache_packages() above for apt.
+imagecache_wheelhouse_packages() {
+    local catalog_path="$1"
+
+    if [[ ! -r "$catalog_path" ]]; then
+        ui_err "imagecache: catalog not found at $catalog_path"
+        return 1
+    fi
+    if ! has_cmd python3; then
+        ui_err "imagecache: python3 is required to read the component catalog but was not found."
+        return 1
+    fi
+
+    # tr -d '\r': see imagecache_packages() above for why this is needed even
+    # on Linux/WSL2 test runs.
+    python3 - "$catalog_path" <<'PY' | tr -d '\r'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    cat = json.load(fh)
+pkgs = set()
+for grp in cat.get("categories", []):
+    for c in grp.get("components", []):
+        post = str(c.get("postInstall") or "")
+        if post in ("install_oterm", "Install-AutoOSOterm") and "local-ai" in c.get("profiles", []):
+            pkgs.add(str(c["package"]))
+for p in sorted(pkgs):
+    print(p)
+PY
+}
+
+# imagecache_wheelhouse_build <stick_root> <catalog_path>
+# Populates <stick_root>/rescue/wheels with wheels/sdists for oterm AND its
+# full dependency tree (`pip download` resolves and fetches every
+# transitive dependency, not just the top-level package — oterm alone pulls
+# in textual, pydantic-ai, typer, and each of those has its own tree) —
+# --no-deps is deliberately never passed, since the whole point is the
+# complete closure, not just the leaf package.
+#
+# Safe to run twice (AGENTS.md §4): a file count before and after is compared
+# so a run that fetches nothing new reports it plainly, matching the .deb
+# cache's own "skipped" reporting above — though unlike imagecache_build's
+# per-.deb `<pkg>_*.deb` glob check, individual wheel filenames are not
+# skipped here before download: pip itself decides what it still needs to
+# fetch into --dest, and a wheel already present is left alone rather than
+# re-fetched, so no separate pre-check duplicates that decision.
+imagecache_wheelhouse_build() {
+    local stick_root="$1" catalog_path="$2"
+    local out before after count pkg
+    local -a pkgs
+
+    out="$stick_root/rescue/wheels"
+
+    if ! has_cmd python3; then
+        ui_err "imagecache: python3 not found — cannot build the pip wheelhouse"
+        return 1
+    fi
+    if ! python3 -m pip --version >/dev/null 2>&1; then
+        ui_err "imagecache: python3 has no pip — cannot build the pip wheelhouse (apt-get install python3-pip)"
+        return 1
+    fi
+
+    pkgs=()
+    while IFS= read -r pkg; do
+        [[ -n "$pkg" ]] && pkgs+=("$pkg")
+    done < <(imagecache_wheelhouse_packages "$catalog_path")
+    if (( ${#pkgs[@]} == 0 )); then
+        ui_warn "imagecache: no oterm-shaped local-ai package found in $catalog_path"
+        return 1
+    fi
+
+    mkdir -p "$out"
+    before="$(find "$out" -maxdepth 1 \( -name '*.whl' -o -name '*.tar.gz' \) 2>/dev/null | wc -l | tr -d ' ')"
+
+    ui_info "imagecache: downloading ${pkgs[*]} + its full dependency tree into $out"
+    if ! python3 -m pip download --dest "$out" "${pkgs[@]}" \
+        >/tmp/autoos-imagecache-wheelhouse.log 2>&1; then
+        ui_err "imagecache: pip download failed (see /tmp/autoos-imagecache-wheelhouse.log)"
+        return 1
+    fi
+
+    after="$(find "$out" -maxdepth 1 \( -name '*.whl' -o -name '*.tar.gz' \) 2>/dev/null | wc -l | tr -d ' ')"
+    count="$after"
+    if (( after == before )); then
+        ui_info "imagecache: wheelhouse unchanged — every wheel already cached ($count file(s))"
+    else
+        ui_ok "imagecache: $count wheel/sdist file(s) in $out ($((after - before)) new)"
+    fi
+
+    # A file count is not evidence the cache actually resolves offline (the
+    # exact lesson imagecache_verify's own comment above names: a cache that
+    # "looked complete" was silently missing a package) — always finish with
+    # the real audit below, and let its exit status be this function's exit
+    # status.
+    imagecache_wheelhouse_verify "$stick_root" "$catalog_path"
+}
+
+# imagecache_wheelhouse_verify <stick_root> <catalog_path>
+# Proves the wheelhouse is actually usable offline: asks pip to resolve the
+# catalog's oterm-shaped package from <stick_root>/rescue/wheels ALONE
+# (--no-index --find-links, plus --dry-run so nothing is installed and no
+# network is touched — --dry-run needs pip >=22.2, well inside Ubuntu
+# 26.04.1's shipped version) rather than trusting a file count. Independently
+# callable, like imagecache_verify above, so an existing wheelhouse can be
+# audited without rebuilding it.
+imagecache_wheelhouse_verify() {
+    local stick_root="$1" catalog_path="$2"
+    local out pkg
+    local -a pkgs
+
+    out="$stick_root/rescue/wheels"
+
+    if [[ ! -d "$out" ]]; then
+        ui_err "imagecache: no wheelhouse at $out"
+        return 1
+    fi
+    if ! has_cmd python3; then
+        ui_err "imagecache: python3 not found — cannot verify the wheelhouse"
+        return 1
+    fi
+
+    pkgs=()
+    while IFS= read -r pkg; do
+        [[ -n "$pkg" ]] && pkgs+=("$pkg")
+    done < <(imagecache_wheelhouse_packages "$catalog_path")
+    if (( ${#pkgs[@]} == 0 )); then
+        ui_warn "imagecache: no oterm-shaped local-ai package found in $catalog_path"
+        return 1
+    fi
+
+    if python3 -m pip install --dry-run --no-index --find-links "$out" "${pkgs[@]}" \
+        >/tmp/autoos-imagecache-wheelhouse-verify.log 2>&1; then
+        ui_ok "imagecache: verified — ${pkgs[*]} resolve fully from $out with no network"
+        return 0
+    fi
+
+    ui_err "imagecache: ${pkgs[*]} do NOT fully resolve from $out alone (see /tmp/autoos-imagecache-wheelhouse-verify.log)"
+    return 1
+}

@@ -469,6 +469,22 @@ if it "local-ai is NOT pulled in by the rescue profile"; then
     fi
 fi
 
+if it "local-ai profile ships oterm, pre-ticked and requiring ollama"; then
+    # Same exact-id-match guard as the "ships ollama" test above — a bare
+    # substring check would pass vacuously.
+    got=" $(catalog_profile_defaults local-ai) "
+    if [[ "$got" != *" oterm "* ]]; then
+        fail "oterm not in local-ai defaults: [$got]"
+    else
+        reqs="$(python3 -c "
+import json
+cat=json.load(open('catalog/linux.json'))
+c=[c for g in cat['categories'] for c in g['components'] if c['id']=='oterm'][0]
+print(' '.join(c.get('requires', [])))")"
+        [[ "$reqs" == "ollama" ]] && pass || fail "oterm requires: [$reqs], expected exactly 'ollama'"
+    fi
+fi
+
 if it "every local-ai model component states its download size"; then
     out="$(python3 -c "
 import json,re
@@ -2261,6 +2277,120 @@ JSON
     fi
 fi
 
+if it "imagecache_wheelhouse_packages reads oterm's package name off its own postInstall, from the real catalog (cache)"; then
+    # Same principle as imagecache_packages' catalog cross-check above, one
+    # layer up for pip: the wheelhouse builder must never hand-maintain a
+    # second copy of "which package is oterm" — it has to come from the
+    # catalog entries that actually install it (install_oterm /
+    # Install-AutoOSOterm), or the two can drift silently.
+    got="$(imagecache_wheelhouse_packages catalog/linux.json | tr -d '\r')"
+    assert_eq "$got" "oterm"
+fi
+
+if it "imagecache_wheelhouse_build downloads oterm's full dependency tree and verifies it resolves fully offline (cache)"; then
+    # Hermetic: python3/pip is faked so this touches no real network and
+    # installs nothing — the fake still routes catalog-reading invocations
+    # (the "python3 - <script>" shape imagecache_wheelhouse_packages uses)
+    # through the REAL python3, since faking a JSON parser in bash would just
+    # be a second, driftable copy of the parsing logic this test exists to
+    # avoid.
+    real_python3="$(command -v python3)"
+    tmp_stick="$(mktemp -d)"
+    fakebin="$(mktemp -d)"
+    fake_pip_log="$tmp_stick/pip.log"
+    : > "$fake_pip_log"
+
+    cat > "$fakebin/python3" <<EOS
+#!/usr/bin/env bash
+if [[ "\$1" == "-m" && "\$2" == "pip" ]]; then
+    shift 2
+    case "\$1" in
+        --version) echo "pip 24.0 from fake"; exit 0 ;;
+        download)
+            shift
+            dest=""
+            while [[ \$# -gt 0 ]]; do
+                case "\$1" in --dest) dest="\$2"; shift 2 ;; *) shift ;; esac
+            done
+            printf 'download %s\n' "\$*" >>"$fake_pip_log"
+            mkdir -p "\$dest"
+            # A real \`pip download\` fetches the whole dependency tree, not
+            # just the leaf package — this fake drops a stand-in for a few of
+            # oterm's actual transitive dependencies too, so a test asserting
+            # "more than one file landed" is asserting something real.
+            : > "\$dest/oterm-0.24.0-py3-none-any.whl"
+            : > "\$dest/textual-8.2.8-py3-none-any.whl"
+            : > "\$dest/pydantic-2.13.5-py3-none-any.whl"
+            exit 0
+            ;;
+        install)
+            printf 'install %s\n' "\$*" >>"$fake_pip_log"
+            exit 0
+            ;;
+        *) exit 1 ;;
+    esac
+fi
+exec "$real_python3" "\$@"
+EOS
+    chmod +x "$fakebin/python3"
+
+    out1="$(PATH="$fakebin:$PATH" imagecache_wheelhouse_build "$tmp_stick" catalog/linux.json 2>&1)"; rc1=$?
+    file_count=$(find "$tmp_stick/rescue/wheels" -maxdepth 1 \( -name '*.whl' -o -name '*.tar.gz' \) 2>/dev/null | wc -l | tr -d ' ')
+    downloads="$(grep -c '^download ' "$fake_pip_log" || true)"
+
+    rm -rf "$tmp_stick" "$fakebin"
+
+    if [[ $rc1 -eq 0 && "$file_count" -eq 3 && "$downloads" -eq 1 \
+        && "$out1" == *"verified"*"resolve fully from"*"with no network"* ]]; then
+        pass
+    else
+        fail "rc1=$rc1 file_count=$file_count downloads=$downloads out1='${out1:0:400}'"
+    fi
+fi
+
+if it "imagecache_wheelhouse_build reports nothing new on a second run against an already-complete cache (cache)"; then
+    real_python3="$(command -v python3)"
+    tmp_stick="$(mktemp -d)"
+    fakebin="$(mktemp -d)"
+
+    cat > "$fakebin/python3" <<EOS
+#!/usr/bin/env bash
+if [[ "\$1" == "-m" && "\$2" == "pip" ]]; then
+    shift 2
+    case "\$1" in
+        --version) echo "pip 24.0 from fake"; exit 0 ;;
+        download)
+            shift
+            dest=""
+            while [[ \$# -gt 0 ]]; do
+                case "\$1" in --dest) dest="\$2"; shift 2 ;; *) shift ;; esac
+            done
+            mkdir -p "\$dest"
+            # Idempotent stand-in for pip's own behaviour: a file already
+            # sitting in --dest is left alone, nothing new appears.
+            : > "\$dest/oterm-0.24.0-py3-none-any.whl"
+            exit 0
+            ;;
+        install) exit 0 ;;
+        *) exit 1 ;;
+    esac
+fi
+exec "$real_python3" "\$@"
+EOS
+    chmod +x "$fakebin/python3"
+
+    PATH="$fakebin:$PATH" imagecache_wheelhouse_build "$tmp_stick" catalog/linux.json >/dev/null 2>&1
+    out2="$(PATH="$fakebin:$PATH" imagecache_wheelhouse_build "$tmp_stick" catalog/linux.json 2>&1)"; rc2=$?
+
+    rm -rf "$tmp_stick" "$fakebin"
+
+    if [[ $rc2 -eq 0 && "$out2" == *"unchanged"*"already cached"* ]]; then
+        pass
+    else
+        fail "rc2=$rc2 out2='${out2:0:400}'"
+    fi
+fi
+
 # ─── Verified download (Task 3) ─────────────────────────────────────────────
 describe "verified download"
 
@@ -2968,7 +3098,7 @@ bootstrap_sandbox_setup() {
     : > "$BS_DPKG_DB"
 
     cp templates/rescue-bootstrap.sh templates/ai-clients.conf \
-       templates/ai-dispatcher.sh "$BS_STICK/"
+       templates/ai-dispatcher.sh templates/ollama-chat.sh "$BS_STICK/"
 
     cat > "$BS_BIN/id" <<'EOS'
 #!/usr/bin/env bash
@@ -3141,13 +3271,82 @@ if it "rescue-bootstrap keeps the operator's API key and extra AI backend on a s
     fi
 fi
 
-if it "ai dispatcher --list names both backends (template)"; then
+if it "ai dispatcher --list names all three backends, including local (template)"; then
     out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" bash templates/ai-dispatcher.sh --list 2>&1)"
     rc=$?
-    if [[ $rc -eq 0 && "$out" == *"claude"* && "$out" == *"agy"* ]]; then
+    if [[ $rc -eq 0 && "$out" == *"claude"* && "$out" == *"agy"* && "$out" == *"local"* && "$out" == *"ollama-chat"* ]]; then
         pass
     else
-        fail "expected both backends listed (rc=$rc): ${out:0:200}"
+        fail "expected all three backends listed (rc=$rc): ${out:0:300}"
+    fi
+fi
+
+if it "ai dispatcher local backend execs ollama-chat, never oterm (template)"; then
+    # oterm is documented interactive-only (no piped/one-shot mode), so the
+    # 'local' registry record must point at ollama-chat, not oterm — this
+    # drives that fact through the real dispatcher rather than just reading
+    # the registry file.
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/ollama-chat" <<'EOS'
+#!/usr/bin/env bash
+printf 'ollama-chat-fake:%s\n' "$*"
+EOS
+    chmod +x "$fakebin/ollama-chat"
+    out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" \
+           PATH="$fakebin:/usr/bin:/bin" \
+           bash templates/ai-dispatcher.sh local "why did this drive fail?" 2>&1)"
+    rc=$?
+    rm -rf "$fakebin"
+    if [[ $rc -eq 0 && "$out" == "ollama-chat-fake:why did this drive fail?" ]]; then
+        pass
+    else
+        fail "expected 'local' to exec ollama-chat verbatim (rc=$rc): ${out:0:200}"
+    fi
+fi
+
+if it "ollama-chat wrapper runs the pinned model non-interactively when it is pulled (template)"; then
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/ollama" <<'EOS'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "list" ]]; then
+    printf 'NAME\tID\tSIZE\tMODIFIED\n'
+    printf 'qwen3:4b\tabc123\t2.5 GB\tnow\n'
+    exit 0
+fi
+printf 'ollama-run:%s\n' "$*"
+EOS
+    chmod +x "$fakebin/ollama"
+    out="$(PATH="$fakebin:/usr/bin:/bin" bash templates/ollama-chat.sh "diagnose this" 2>&1)"
+    rc=$?
+    rm -rf "$fakebin"
+    if [[ $rc -eq 0 && "$out" == "ollama-run:run qwen3:4b diagnose this" ]]; then
+        pass
+    else
+        fail "expected 'ollama run qwen3:4b ...' with no fallback warning (rc=$rc): ${out:0:200}"
+    fi
+fi
+
+if it "ollama-chat wrapper falls back to whatever model IS pulled when the pinned default is missing (template)"; then
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/ollama" <<'EOS'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "list" ]]; then
+    printf 'NAME\tID\tSIZE\tMODIFIED\n'
+    printf 'qwen3:1.7b\tdef456\t1.4 GB\tnow\n'
+    exit 0
+fi
+printf 'ollama-run:%s\n' "$*"
+EOS
+    chmod +x "$fakebin/ollama"
+    out="$(PATH="$fakebin:/usr/bin:/bin" AUTOOS_OLLAMA_MODEL="qwen3:4b" bash templates/ollama-chat.sh "diagnose this" 2>&1)"
+    rc=$?
+    rm -rf "$fakebin"
+    if [[ $rc -eq 0 \
+        && "$out" == *'model "qwen3:4b" is not pulled — using "qwen3:1.7b" instead'* \
+        && "$out" == *"ollama-run:run qwen3:1.7b diagnose this"* ]]; then
+        pass
+    else
+        fail "expected a fallback warning plus a run against the pulled model (rc=$rc): ${out:0:300}"
     fi
 fi
 

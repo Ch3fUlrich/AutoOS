@@ -322,6 +322,23 @@
           "profiles": []
         },
         {
+          "id": "oterm",
+          "name": "oterm",
+          "description": "Terminal UI chat client for Ollama models",
+          "provider": "custom",
+          "package": "oterm",
+          "postInstall": "Install-AutoOSOterm",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "oterm --help",
+          "homepage": "https://github.com/ggozad/oterm",
+          "notes": "No winget/choco package exists upstream (checked winget.run and community.chocolatey.org); installed via pip. Interactive TUI only — 'ai local' is the scriptable path to the same models.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
           "id": "claude-desktop",
           "name": "Claude Desktop",
           "description": "Claude desktop application",

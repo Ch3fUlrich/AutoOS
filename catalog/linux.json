@@ -596,6 +596,23 @@
           "profiles": []
         },
         {
+          "id": "oterm",
+          "name": "oterm",
+          "description": "Terminal UI chat client for Ollama models",
+          "provider": "custom",
+          "package": "oterm",
+          "postInstall": "install_oterm",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "oterm --help",
+          "homepage": "https://github.com/ggozad/oterm",
+          "notes": "No apt/snap package exists upstream; installed via pip. Interactive TUI only — 'ai local' is the scriptable path to the same models.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
           "id": "mcp-serena",
           "name": "Serena MCP Server",
           "description": "Semantic code navigation and symbol search MCP server",

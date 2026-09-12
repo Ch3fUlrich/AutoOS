@@ -88,6 +88,9 @@ custom_is_installed() {
         qwen3:4b | qwen3:1.7b | qwen2.5-coder:7b)
             has_cmd ollama && ollama list 2>/dev/null | grep -qF -- "$1"
             ;;
+        oterm)
+            has_cmd oterm
+            ;;
         *) return 1 ;;
     esac
 }
@@ -748,6 +751,50 @@ pull_ollama_model() {
 pull_ollama_model_qwen3_4b()        { pull_ollama_model "qwen3:4b"; }
 pull_ollama_model_qwen3_1_7b()      { pull_ollama_model "qwen3:1.7b"; }
 pull_ollama_model_qwen25_coder_7b() { pull_ollama_model "qwen2.5-coder:7b"; }
+
+# oterm (Task 13): the TUI client for Ollama. Verified 2026-09-12 that oterm
+# ships no apt/snap/winget/choco package — pip (and brew, macOS-only, handled
+# by catalog/macos.json's own "brew" provider instead of this function) is
+# the only cross-platform install path the upstream docs
+# (ggozad.github.io/oterm/installation) name. Debian/Ubuntu marks the system
+# Python "externally managed" (PEP 668) since ~24.04, so a bare
+# `pip install` is refused outright; `--user` keeps it out of site-packages
+# and `--break-system-packages` (pip's own documented escape hatch for
+# exactly this case) is only tried once the safer plain call is refused.
+install_oterm() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install oterm via pip (python3 -m pip install --user oterm)"
+        return 0
+    fi
+    if has_cmd oterm; then
+        ui_muted "oterm already installed"
+        return 0
+    fi
+    if ! has_cmd python3; then
+        ui_warn "python3 not found; skipping oterm"
+        return 0
+    fi
+    if ! python3 -m pip --version >/dev/null 2>&1; then
+        if ! has_cmd apt-get; then
+            ui_warn "pip not available and no apt-get to install it; skipping oterm"
+            return 0
+        fi
+        ui_step "installing python3-pip (required by oterm)"
+        apt_update_once
+        if ! $AUTOOS_SUDO apt-get install -y --no-install-recommends python3-pip \
+            >/tmp/autoos-oterm-pip-bootstrap.log 2>&1; then
+            ui_warn "could not install python3-pip; skipping oterm (see /tmp/autoos-oterm-pip-bootstrap.log)"
+            return 0
+        fi
+    fi
+    ui_step "installing oterm (pip)"
+    if python3 -m pip install --user oterm >/tmp/autoos-oterm-pip.log 2>&1 \
+        || python3 -m pip install --user --break-system-packages oterm >/tmp/autoos-oterm-pip.log 2>&1; then
+        ui_ok "oterm installed"
+    else
+        ui_warn "oterm install failed (see /tmp/autoos-oterm-pip.log)"
+    fi
+}
 
 setup_git_config() {
     local name email
