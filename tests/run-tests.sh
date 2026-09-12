@@ -1238,6 +1238,77 @@ if it "the payload carries installed component flags"; then
     if (( ok )); then pass; else fail "serve.py does not report installed components"; fi
 fi
 
+# ─── USB creation UI (Task 11) ──────────────────────────────────────────────
+# The human partner's original request: a button on the action bar that pops
+# a dialog asking which OS to put on a stick. Assertions here stay light
+# (existence, the [hidden] trap, module-level shape, the guard refusal) —
+# the real proof this renders and behaves is Playwright driving the live
+# page, not more grep here.
+
+if it "the action bar offers usb creation"; then
+    grep -q 'id="createUsb"' web/index.html && pass || fail "no create-usb button"
+fi
+
+if it "the usb dialog is hidden by the hidden attribute, not only by a class"; then
+    # AGENTS.md §6: an author `display:` rule beats the browser's own
+    # [hidden]{display:none}. This shipped twice in one afternoon already
+    # (the section menu, the header progress bar) - assert on whitespace-
+    # normalised CSS so a reformat cannot silently disable this guard.
+    css="$(tr -s ' \t\n' ' ' < web/index.html)"
+    [[ "$css" == *'.usb-dialog[hidden] {display:none'* || "$css" == *'.usb-dialog[hidden]{display:none'* ]] \
+        && pass || fail "usb dialog will render open on every load"
+fi
+
+if it "rufus never reaches the browser's usb engine list (it needs a human at a GUI)"; then
+    out="$(python3 - <<'PY'
+import sys; sys.path.insert(0, "lib/linux")
+from serve import usb_images_response
+data = usb_images_response()
+print("rufus" if any(e["id"] == "rufus" for e in data["engines"]) else "ok")
+PY
+)"
+    [[ "$out" == "ok" ]] && pass || fail "rufus (interactive: true) was offered in the browser"
+fi
+
+if it "the create-usb button is disabled when the server is not elevated"; then
+    grep -q 'elevated' web/index.html && pass || fail "page never reads the elevated flag"
+fi
+
+# `usb_create_response(body: dict) -> tuple[int, dict]` is a MODULE-LEVEL
+# function. `Handler` subclasses BaseHTTPRequestHandler and its helpers all
+# take `self`, so `Handler._usb_create_body(dict)` would pass the dict AS
+# self and raise TypeError - the repo already solves this correctly:
+# classify() is module-level for exactly this reason (serve.py, near the
+# top). AUTOOS_FAKE_LSBLK is the same synthetic-fixture mechanism the "usb
+# safety" tests below use (AGENTS.md §5: never touch a real disk in tests) -
+# it reaches usb_create_response's own subprocess call because os.environ is
+# inherited, not replaced.
+if it "the usb create endpoint refuses an unguarded device"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb root_is_sda)" python3 - <<'PY'
+import sys; sys.path.insert(0, "lib/linux")
+from serve import usb_create_response          # module-level, NOT a Handler method
+print(usb_create_response({"device": "/dev/sda", "image": "ubuntu-desktop-lts"}))
+PY
+)"
+    assert_contains "$out" "root filesystem"
+fi
+
+if it "the usb create endpoint refuses a second write while one is already running"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" python3 - <<'PY'
+import sys; sys.path.insert(0, "lib/linux")
+from serve import usb_create_response, RUN, LOCK
+with LOCK:
+    RUN["running"] = True
+try:
+    print(usb_create_response({"device": "/dev/sdb", "image": "ubuntu-desktop-lts", "engine": "ventoy"}))
+finally:
+    with LOCK:
+        RUN["running"] = False
+PY
+)"
+    assert_contains "$out" "already in progress"
+fi
+
 # ─── WSL detection ──────────────────────────────────────────────────────────
 describe "MCP wiring"
 

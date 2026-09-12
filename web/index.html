@@ -514,6 +514,26 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
 .tally .autoc{color:var(--dep);font-weight:700}
 .actionbar .spacer{margin-left:auto}
 .hint{font-size:.77rem;color:var(--ink-faint)}
+/* ─── usb-create dialog ──────────────────────────────────────────────── */
+.usb-dialog{
+  position:fixed;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.5);
+}
+/* An author `display:flex` rule beats the browser's own [hidden]{display:none}
+   (AGENTS.md §6 — this shipped twice in one afternoon already), so this class
+   needs its own explicit override rather than relying on the attribute alone. */
+.usb-dialog[hidden]{display:none}
+.usb-dialog-panel{
+  background:var(--surface);border:1px solid var(--rule-strong);border-radius:8px;
+  padding:20px;max-width:420px;width:90%;display:flex;flex-direction:column;gap:10px;
+  box-shadow:0 8px 30px rgba(0,0,0,.3);
+}
+.usb-dialog-panel label{display:flex;flex-direction:column;gap:4px;font-size:.85rem}
+.usb-dialog-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:8px}
+.usb-dialog-confirm{
+  font-size:.82rem;border-left:3px solid var(--err);background:var(--err-soft);
+  border-radius:4px;padding:8px 10px;
+}
 .empty{color:var(--ink-muted);font-size:.85rem;padding:14px;text-align:center}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 @media (max-width:640px){
@@ -1009,6 +1029,31 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
     <span class="spacer"></span>
     <span class="hint" id="elevHint"></span>
     <button class="primary" id="run" type="button">Install selected</button>
+    <button id="createUsb" type="button" disabled>Create installer USB</button>
+  </div>
+</div>
+
+<div class="usb-dialog" id="usbDialog" hidden>
+  <div class="usb-dialog-panel" role="dialog" aria-modal="true" aria-labelledby="usbDialogTitle">
+    <h2 id="usbDialogTitle">Create installer USB</h2>
+    <p class="hint">Dry run only — this previews the exact write plan and never touches a disk.</p>
+    <label>Image
+      <select id="usbImage"></select>
+    </label>
+    <label>Kind
+      <select id="usbKind"></select>
+    </label>
+    <label>Engine
+      <select id="usbEngine"></select>
+    </label>
+    <label>Target device
+      <select id="usbDevice"><option value="">Loading devices…</option></select>
+    </label>
+    <div class="usb-dialog-confirm" id="usbConfirm" hidden></div>
+    <div class="usb-dialog-actions">
+      <button type="button" id="usbCancel">Cancel</button>
+      <button class="primary" type="button" id="usbConfirmBtn" disabled>Create (dry run)</button>
+    </div>
   </div>
 </div>
 
@@ -1023,6 +1068,7 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
 let STATE = null, BY_ID = new Map(), REQUIRED_BY = new Map();
 let picked = new Set(), activeProfile = null;
 let running = false, logOffset = 0;
+let usbCatalog = null, usbDevicesData = null;
 let filterInstalledOnly = false;
 let CONFIG_DATA = null;
 
@@ -1277,6 +1323,16 @@ async function boot() {
     applyFilter();
   };
   el("run").onclick         = runInstall;
+  el("createUsb").onclick   = openUsbDialog;
+  el("usbCancel").onclick   = closeUsbDialog;
+  el("usbConfirmBtn").onclick = startUsbCreate;
+  el("usbDialog").addEventListener("click", e => { if (e.target === el("usbDialog")) closeUsbDialog(); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && !el("usbDialog").hidden) closeUsbDialog(); });
+  el("usbImage").addEventListener("change", () => { populateUsbKindOptions(); populateUsbEngineOptions(); });
+  el("usbKind").addEventListener("change", populateUsbEngineOptions);
+  el("usbDevice").addEventListener("change", updateUsbConfirm);
+  el("usbEngine").addEventListener("change", updateUsbConfirm);
+  refreshUsbElevation();
 
   try {
     const cfRes = await fetch(api("/api/config"));
@@ -2134,6 +2190,7 @@ function sync() {
       (auto.size ? ' · <span class="autoc">' + auto.size + " pulled in as dependencies</span>" : "")
     : "nothing selected";
   el("run").disabled = running || eff.size === 0;
+  updateUsbButtonState();
 
   renderProfileSummary();
   renderTiers();
@@ -2466,6 +2523,134 @@ function renderProgress(d) {
   if (known) el("currentBar").setAttribute("aria-valuenow", String(Math.max(0, Math.min(100, c.percent))));
   else el("currentBar").removeAttribute("aria-valuenow");
   el("currentDetail").textContent = c ? (c.phase + " · " + (known ? c.percent + "% · " : active ? "percentage unavailable · " : "") + (c.elapsedSeconds || 0) + "s") : d.running ? "Detecting and planning…" : "Waiting to start";
+}
+
+/* ── USB creation dialog (Task 11) ───────────────────────────────────────
+ * Image / kind / engine / device, with the device list fetched fresh every
+ * time the dialog opens (a stick plugged in five minutes ago should show
+ * up). The confirm box names the device model, size and "destroyed" in the
+ * dialog itself (AGENTS.md hard rule 3: a destructive action must be chosen
+ * and seen, not waved through by window.confirm). Progress reuses the exact
+ * poll()/renderProgress() the install path already drives — usb_write_raw's
+ * own NN% lines land in the same current-item bar, nothing new invented. */
+
+const USB_KIND_LABEL = { installer: "Installer", "live-persistent": "Live (persistent)", "full-os": "Full OS" };
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n <= 0) return "unknown size";
+  const gb = n / 1e9;
+  return gb >= 1 ? gb.toFixed(1) + " GB" : (n / 1e6).toFixed(0) + " MB";
+}
+
+function updateUsbButtonState() {
+  const btn = el("createUsb");
+  if (!usbDevicesData) return;
+  btn.disabled = running || !usbDevicesData.elevated;
+  btn.title = usbDevicesData.elevated ? "" : (usbDevicesData.reason || "not elevated");
+}
+
+async function refreshUsbElevation() {
+  try {
+    const r = await fetch(api("/api/usb/devices"));
+    usbDevicesData = r.ok ? await r.json() : { devices: [], elevated: false, reason: "HTTP " + r.status };
+  } catch (e) {
+    usbDevicesData = { devices: [], elevated: false, reason: "could not reach the server" };
+  }
+  updateUsbButtonState();
+}
+
+async function loadUsbCatalogOnce() {
+  if (usbCatalog) return usbCatalog;
+  try {
+    const r = await fetch(api("/api/images"));
+    usbCatalog = r.ok ? await r.json() : { images: [], engines: [] };
+  } catch (e) {
+    usbCatalog = { images: [], engines: [] };
+  }
+  return usbCatalog;
+}
+
+function populateUsbKindOptions() {
+  const image = usbCatalog.images.find(i => i.id === el("usbImage").value);
+  const kinds = (image && image.kinds && image.kinds.length) ? image.kinds : ["installer"];
+  el("usbKind").innerHTML = kinds.map(k =>
+    '<option value="' + esc(k) + '">' + esc(USB_KIND_LABEL[k] || k) + "</option>").join("");
+}
+
+function populateUsbEngineOptions() {
+  const image = usbCatalog.images.find(i => i.id === el("usbImage").value);
+  const kind = el("usbKind").value;
+  const engines = (usbCatalog.engines || []).filter(e =>
+    (e.kinds || []).includes(kind) &&
+    (!image || !image.writeMode || (e.writeModes || []).includes(image.writeMode)));
+  el("usbEngine").innerHTML = engines.length
+    ? engines.map(e => '<option value="' + esc(e.id) + '">' + esc(e.name) + "</option>").join("")
+    : '<option value="">No compatible engine on this machine</option>';
+  updateUsbConfirm();
+}
+
+function updateUsbConfirm() {
+  const box = el("usbConfirm"), btn = el("usbConfirmBtn");
+  const dev = usbDevicesData?.devices.find(d => d.device === el("usbDevice").value);
+  if (!dev) { box.hidden = true; btn.disabled = true; return; }
+  box.hidden = false;
+  box.innerHTML = "<b>" + esc(dev.model) + "</b> (" + esc(dev.device) + ", " + fmtBytes(dev.size) +
+    ") — all data on this device will be destroyed.";
+  btn.disabled = !el("usbImage").value || !el("usbEngine").value;
+}
+
+async function refreshUsbDevices() {
+  const sel = el("usbDevice");
+  sel.innerHTML = '<option value="">Loading devices…</option>';
+  await refreshUsbElevation();
+  const devices = usbDevicesData.devices || [];
+  sel.innerHTML = devices.length
+    ? '<option value="">Choose a device…</option>' + devices.map(d =>
+        '<option value="' + esc(d.device) + '">' + esc(d.device) + " — " + esc(d.model) +
+        " (" + fmtBytes(d.size) + ")</option>").join("")
+    : '<option value="">No USB devices found</option>';
+  updateUsbConfirm();
+}
+
+async function openUsbDialog() {
+  if (el("createUsb").disabled) return;
+  el("usbDialog").hidden = false;
+  await loadUsbCatalogOnce();
+  el("usbImage").innerHTML = usbCatalog.images.map(i =>
+    '<option value="' + esc(i.id) + '">' + esc(i.name) + "</option>").join("");
+  populateUsbKindOptions();
+  populateUsbEngineOptions();
+  await refreshUsbDevices();
+}
+
+function closeUsbDialog() { el("usbDialog").hidden = true; }
+
+async function startUsbCreate() {
+  if (running || el("usbConfirmBtn").disabled) return;
+  const image = el("usbImage").value, kind = el("usbKind").value,
+        engine = el("usbEngine").value, device = el("usbDevice").value;
+  if (!image || !engine || !device) return;
+  closeUsbDialog();
+  running = true;
+  el("run").disabled = true;
+  updateUsbButtonState();
+  el("log").textContent = "";
+  logOffset = 0;
+  renderProgress({ running: true, total: 1, done: 0, current: null });
+  el("runStatus").textContent = "previewing installer USB write (dry run)…";
+  showTab("run");
+
+  const r = await fetch(api("/api/usb/create"), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image, kind, engine, device })
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    appendLog([{ level: "err", text: "Server refused the request: " + (body.error || ("HTTP " + r.status)) }]);
+    running = false; sync(); return;
+  }
+  poll();
 }
 
 async function refreshInstalled() {
