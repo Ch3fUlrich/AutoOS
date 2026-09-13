@@ -534,7 +534,8 @@ function Register-AutoOSClaudeAutostartTask {
     }
 
     try {
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+        $userId = if ($env:USERDOMAIN) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
+        $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive
         # StartWhenAvailable is the catch-up the systemd side gets from Persistent=true.
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
             -StartWhenAvailable -MultipleInstances IgnoreNew
@@ -542,7 +543,7 @@ function Register-AutoOSClaudeAutostartTask {
         if (-not $restoreCurrent) {
             Register-ScheduledTask -TaskName $script:RestoreTaskName -Force `
                 -Action (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $restoreArgs) `
-                -Trigger (New-ScheduledTaskTrigger -AtLogOn) `
+                -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $userId) `
                 -Principal $principal -Settings $settings | Out-Null
             Write-AutoOSLine "registered $($script:RestoreTaskName) (at logon)" -Level ok
         }

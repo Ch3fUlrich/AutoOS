@@ -48,3 +48,6 @@ desktop.ini
 .vscode/
 __pycache__/
 *.pyc
+
+# ─── Agent worktrees (scratch; never tracked) ────────────────────────────────
+.claude/worktrees/
