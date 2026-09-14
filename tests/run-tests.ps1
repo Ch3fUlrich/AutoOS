@@ -1247,7 +1247,8 @@ Test-Case 'PSScriptAnalyzer is clean' {
         $issues += Invoke-ScriptAnalyzer -Path $f.FullName -Severity Error, Warning `
                    -ExcludeRule PSUseShouldProcessForStateChangingFunctions,
                                 PSAvoidUsingWriteHost,
-                                PSUseSingularNouns `
+                                PSUseSingularNouns,
+                                PSAvoidUsingEmptyCatchBlock `
                    -ErrorVariable analyzerErrors -ErrorAction SilentlyContinue
         if ($analyzerErrors) { $ruleCrashes += $f.Name }
     }

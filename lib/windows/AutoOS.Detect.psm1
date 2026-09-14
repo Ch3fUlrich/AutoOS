@@ -49,6 +49,7 @@ function Get-AutoOSShimDirectory {
         (Join-Path $env:ProgramData 'scoop\shims'),
         # Chocolatey.
         (Join-Path $env:ProgramData 'chocolatey\bin'),
+        $(if ($env:ChocolateyInstall) { Join-Path $env:ChocolateyInstall 'bin' }),
         # winget's own shim directory for portable packages.
         (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'),
         (Join-Path $env:ProgramFiles 'WinGet\Links'),
