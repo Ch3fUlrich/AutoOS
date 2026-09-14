@@ -1456,6 +1456,52 @@ fi
 # ─── Documentation ──────────────────────────────────────────────────────────
 describe "documentation"
 
+if it "check-links.py broken_links identifies only bad relative links"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os
+import sys
+import tempfile
+import importlib.util
+
+sys.argv = ["tests/check-links.py"]
+spec = importlib.util.spec_from_file_location("check_links", "tests/check-links.py")
+check_links = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(check_links)
+
+with tempfile.TemporaryDirectory() as d:
+    os.makedirs(os.path.join(d, "subdir"))
+    with open(os.path.join(d, "test1.md"), "w", encoding="utf-8") as f:
+        f.write("[Valid link](test2.md)\n")
+        f.write("[Broken link](missing.md)\n")
+        f.write("[External link](https://example.com)\n")
+        f.write("[Mailto link](mailto:test@example.com)\n")
+        f.write("[Anchor link](#some-header)\n")
+        f.write("[Fragment link](test2.md#header)\n")
+        f.write("[Empty link]()\n")
+    with open(os.path.join(d, "test2.md"), "w", encoding="utf-8") as f:
+        f.write("[Dir link](subdir/test3.md)\n")
+    with open(os.path.join(d, "subdir", "test3.md"), "w", encoding="utf-8") as f:
+        f.write("[Up link](../test1.md)\n")
+        f.write("[Broken up link](../missing.md)\n")
+        f.write("[Broken dir link](missing/file.md)\n")
+        f.write("[Self link](test3.md)\n")
+
+    files = ["test1.md", "test2.md", "subdir/test3.md"]
+    problems = check_links.broken_links(d, files)
+
+    expected = [
+        "test1.md: [Broken link] -> missing.md",
+        "subdir/test3.md: [Broken up link] -> ../missing.md",
+        "subdir/test3.md: [Broken dir link] -> missing/file.md"
+    ]
+
+    if problems != expected:
+        print(f"Expected {expected}, got {problems}")
+PY
+)"
+    assert_eq "$failures" ""
+fi
+
 if it "every relative link in the docs resolves"; then
     out="$(python3 tests/check-links.py . 2>&1)"; rc=$?
     if [[ $rc -eq 0 ]]; then pass; else fail "$out"; fi
