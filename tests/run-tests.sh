@@ -655,7 +655,9 @@ if it "every component has a homepage link"; then
 import json, glob
 bad = []
 for p in sorted(glob.glob("catalog/*.json")):
-    for grp in json.load(open(p, encoding="utf-8")).get("categories", []):
+    with open(p, encoding="utf-8") as f:
+        data = json.load(f)
+    for grp in data.get("categories", []):
         for c in grp.get("components", []):
             if not c.get("homepage"):
                 bad.append(p + ":" + c["id"])
@@ -745,7 +747,8 @@ if it "the dependency graph the UI draws has no orphan requirements"; then
 import json, glob
 bad = []
 for p in sorted(glob.glob("catalog/*.json")):
-    d = json.load(open(p, encoding="utf-8"))
+    with open(p, encoding="utf-8") as f:
+        d = json.load(f)
     ids = {c["id"] for g in d.get("categories", []) for c in g.get("components", [])}
     for g in d.get("categories", []):
         for c in g.get("components", []):
@@ -881,7 +884,9 @@ import json, glob, collections
 have = collections.defaultdict(set)
 for p in glob.glob("catalog/*.json"):
     plat = p.replace("catalog", "").strip("/\\").replace(".json", "")
-    for g in json.load(open(p, encoding="utf-8"))["categories"]:
+    with open(p, encoding="utf-8") as f:
+        data = json.load(f)
+    for g in data["categories"]:
         for c in g["components"]:
             have[c["id"]].add(plat)
 core = ["claude-code", "git", "nodejs", "docker", "tailscale",
