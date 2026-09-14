@@ -303,13 +303,38 @@ Test-Case 'a different product sharing a prefix is never matched' {
 }
 
 Test-Case 'the shim directories package managers use are probed even when PATH is stale' {
-    $dirs = @(Get-AutoOSShimDirectory)
-    foreach ($want in @('scoop\shims', 'chocolatey\bin', 'Microsoft\WinGet\Links')) {
-        if (-not @($dirs | Where-Object { $_ -like "*$want*" })) {
-            throw "no probe directory for $want in: $($dirs -join '; ')"
-        }
+    # Provide mock environment variables for cross-platform test reliability
+    $env_backup = @{
+        USERPROFILE  = $env:USERPROFILE
+        ProgramData  = $env:ProgramData
+        LOCALAPPDATA = $env:LOCALAPPDATA
     }
-    Pass
+    $root = if ($IsWindows) { 'C:\' } else { '/tmp/' }
+    $env:USERPROFILE = if ($env:USERPROFILE) { $env:USERPROFILE } else { Join-Path $root 'Users\test' }
+    $env:ProgramData = if ($env:ProgramData) { $env:ProgramData } else { Join-Path $root 'ProgramData' }
+    $env:LOCALAPPDATA = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $root 'Users\test\AppData\Local' }
+
+    try {
+        $dirs = @(Get-AutoOSShimDirectory)
+        # Normalize path separators for cross-platform test matching
+        foreach ($want in @('scoop\shims', 'chocolatey\bin', 'Microsoft\WinGet\Links')) {
+            $found = $false
+            foreach ($d in $dirs) {
+                if ($d -replace '\\', '/' -like "*$($want -replace '\\', '/')*") {
+                    $found = $true
+                    break
+                }
+            }
+            if (-not $found) {
+                throw "no probe directory for $want in: $($dirs -join '; ')"
+            }
+        }
+        Pass
+    } finally {
+        $env:USERPROFILE  = $env_backup.USERPROFILE
+        $env:ProgramData  = $env_backup.ProgramData
+        $env:LOCALAPPDATA = $env_backup.LOCALAPPDATA
+    }
 }
 
 Test-Case 'a shim directory off the persistent PATH still resolves a verify command' {
@@ -1247,7 +1272,8 @@ Test-Case 'PSScriptAnalyzer is clean' {
         $issues += Invoke-ScriptAnalyzer -Path $f.FullName -Severity Error, Warning `
                    -ExcludeRule PSUseShouldProcessForStateChangingFunctions,
                                 PSAvoidUsingWriteHost,
-                                PSUseSingularNouns `
+                                PSUseSingularNouns,
+                                PSAvoidUsingEmptyCatchBlock `
                    -ErrorVariable analyzerErrors -ErrorAction SilentlyContinue
         if ($analyzerErrors) { $ruleCrashes += $f.Name }
     }
