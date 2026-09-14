@@ -52,7 +52,7 @@ def run(args):
             chunks.put(None)
 
     threading.Thread(target=read, daemon=True).start()
-    pending, percent, next_update = "", None, 0.0
+    pending_list, percent, next_update = [], None, 0.0
     decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
     exit_seen = None
     try:
@@ -82,9 +82,18 @@ def run(args):
                 if proc.poll() is not None:
                     break
                 continue
-            pending += decoder.decode(chunk)
+
+            decoded = decoder.decode(chunk)
+            if not decoded:
+                continue
+
+            pending_list.append(decoded)
+            if '\n' not in decoded and '\r' not in decoded:
+                continue
+
+            pending = "".join(pending_list)
             lines = re.split(r"[\r\n]", pending)
-            pending = lines.pop()[-8192:]
+            pending_list = [lines.pop()[-8192:]]
             for line in lines:
                 line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line)
                 if not line.strip():
@@ -94,6 +103,7 @@ def run(args):
                 if match:
                     percent = int(match[1])
                     snapshot(event, started, percent)
+        pending = "".join(pending_list)
         if pending:
             print("  " + pending, flush=True)
         return proc.wait(timeout=2)
