@@ -303,13 +303,25 @@ Test-Case 'a different product sharing a prefix is never matched' {
 }
 
 Test-Case 'the shim directories package managers use are probed even when PATH is stale' {
-    $dirs = @(Get-AutoOSShimDirectory)
-    foreach ($want in @('scoop\shims', 'chocolatey\bin', 'Microsoft\WinGet\Links')) {
-        if (-not @($dirs | Where-Object { $_ -like "*$want*" })) {
-            throw "no probe directory for $want in: $($dirs -join '; ')"
+    $env_USERPROFILE_backup = $env:USERPROFILE
+    $env_ProgramData_backup = $env:ProgramData
+    $env_LOCALAPPDATA_backup = $env:LOCALAPPDATA
+    $env:USERPROFILE = if ($env:USERPROFILE) { $env:USERPROFILE } else { 'C:\Users\runneradmin' }
+    $env:ProgramData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
+    $env:LOCALAPPDATA = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { 'C:\Users\runneradmin\AppData\Local' }
+    try {
+        $dirs = @(Get-AutoOSShimDirectory)
+        foreach ($want in @('scoop\shims', 'chocolatey\bin', 'Microsoft\WinGet\Links')) {
+            if (-not @($dirs | Where-Object { $_ -like "*$want*" })) {
+                throw "no probe directory for $want in: $($dirs -join '; ')"
+            }
         }
+        Pass
+    } finally {
+        $env:USERPROFILE = $env_USERPROFILE_backup
+        $env:ProgramData = $env_ProgramData_backup
+        $env:LOCALAPPDATA = $env_LOCALAPPDATA_backup
     }
-    Pass
 }
 
 Test-Case 'a shim directory off the persistent PATH still resolves a verify command' {

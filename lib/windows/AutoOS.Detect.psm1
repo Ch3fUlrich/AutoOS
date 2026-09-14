@@ -40,20 +40,24 @@ function Get-AutoOSShimDirectory {
         not necessarily written itself there, and a per-user shim directory is
         only on PATH for the user who ran the installer.
     #>
-    $home_ = $env:USERPROFILE
+    $home_ = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
+    $progData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
+    $localApp = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { $(Join-Path $home_ 'AppData\Local') }
+    $progFiles = if ($env:ProgramFiles) { $env:ProgramFiles } else { 'C:\Program Files' }
+    $appData = if ($env:APPDATA) { $env:APPDATA } else { $(Join-Path $home_ 'AppData\Roaming') }
     @(
         # Scoop: user-scope by default, global when SCOOP_GLOBAL is set.
         (Join-Path $home_ 'scoop\shims'),
         $(if ($env:SCOOP) { Join-Path $env:SCOOP 'shims' }),
         $(if ($env:SCOOP_GLOBAL) { Join-Path $env:SCOOP_GLOBAL 'shims' }),
-        (Join-Path $env:ProgramData 'scoop\shims'),
+        (Join-Path $progData 'scoop\shims'),
         # Chocolatey.
-        (Join-Path $env:ProgramData 'chocolatey\bin'),
+        (Join-Path $progData 'chocolatey\bin'),
         # winget's own shim directory for portable packages.
-        (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'),
-        (Join-Path $env:ProgramFiles 'WinGet\Links'),
+        (Join-Path $localApp 'Microsoft\WinGet\Links'),
+        (Join-Path $progFiles 'WinGet\Links'),
         # npm -g, pipx/uv and cargo all install here and all rely on PATH.
-        (Join-Path $env:APPDATA 'npm'),
+        (Join-Path $appData 'npm'),
         (Join-Path $home_ '.local\bin'),
         (Join-Path $home_ '.cargo\bin'),
         (Join-Path $home_ 'bin')
