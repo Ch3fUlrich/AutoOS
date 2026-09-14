@@ -1490,6 +1490,38 @@ if it "shellcheck is clean"; then
     fi
 fi
 
+# ─── Process ────────────────────────────────────────────────────────────────
+describe "process wrapper"
+
+if it "process.py run() rejects invalid timeout limits"; then
+    failures="$(python3 - <<'PY'
+import sys
+import os
+import io
+import contextlib
+sys.path.insert(0, './lib/linux')
+import process
+
+failures = []
+
+for bad in ["0", "86401", "not_a_number"]:
+    os.environ["AUTOOS_INSTALL_TIMEOUT_SECONDS"] = bad
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        res = process.run(["echo", "test"])
+    if res != 2:
+        failures.append(f"Expected 2 for {bad}, got {res}")
+    err_out = stderr.getvalue()
+    if "between 1 and 86400" not in err_out:
+        failures.append(f"Expected error message for {bad}, got: {err_out}")
+
+if failures:
+    print("\n".join(failures))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 printf '\n%s%s%s\n' "$DIM" "$(printf '─%.0s' $(seq 1 56))" "$RESET"
 printf '  %spassed %d%s   %sfailed %d%s   %sskipped %d%s\n' \
