@@ -118,6 +118,68 @@ JSON
     fi
 fi
 
+# ─── Shared LLM model catalogue (single source of truth) ──────────────────
+describe "llm models"
+
+if it "llm-models.json is valid and every id is unique"; then
+    if python3 - <<'PY'
+import json, sys
+doc = json.load(open("catalog/llm-models.json", encoding="utf-8"))
+models = doc["models"]
+assert len(models) >= 20, f"expected >= 20 models, got {len(models)}"
+ids = [m["id"] for m in models]
+dupes = {i for i in ids if ids.count(i) > 1}
+assert not dupes, f"duplicate ids: {dupes}"
+for m in models:
+    assert m.get("openrouter_id") or m.get("direct"), f"{m['id']}: neither openrouter_id nor direct"
+    assert isinstance(m["context"], int) and isinstance(m["output"], int), f"{m['id']}: bad windows"
+PY
+    then pass; else fail "llm-models.json invalid"; fi
+fi
+
+if it "the installers project every shared model instead of hardcoding"; then
+    # Single-source/DRY: no model id or price may appear as a literal in the
+    # installers. Everything is projected from llm-models.json.
+    if python3 - <<'PY'
+import json, re, sys
+models = json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]
+bad = []
+for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
+    src = open(path, encoding="utf-8").read()
+    for m in models:
+        if m.get("openrouter_id"):
+            oid = m["openrouter_id"]
+            # projected via _openrouter_models()/Get-OpenRouterModelEntry, never a literal key
+            if re.search(r"""['"]""" + re.escape(oid) + r"""['"]\s*[:=]""", src):
+                bad.append(f"{path}: hardcoded openrouter id {oid}")
+        for price_key in ("paid_input_price", "paid_output_price"):
+            if price_key in m and re.search(r"\b" + re.escape(repr(m[price_key])) + r"\b", src):
+                bad.append(f"{path}: hardcoded price {m[price_key]} from {m['id']}")
+if bad:
+    print("\n".join(bad)); sys.exit(1)
+PY
+    then pass; else fail "installers hardcode shared model data (see above)"; fi
+fi
+
+if it "the openhands projector covers every shared model"; then
+    if python3 - <<'PY'
+import json, re, sys
+models = json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]
+for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
+    src = open(path, encoding="utf-8").read()
+    calls = set()
+    for call in re.findall(r"_profile_for\(([^)]*)\)", src):
+        calls.update(re.findall(r"['\"]([^'\"]+)['\"]", call))
+    missing = {m["id"] for m in models if m["id"] not in calls and m["id"] != "muse-spark"}
+    muse_aliases = {"muse-spark-1.3", "muse-spark-1.3-contributor"}
+    if "muse-spark" not in calls or not muse_aliases <= calls:
+        print(f"{path}: muse-spark aliases incomplete: {sorted(calls)}"); sys.exit(1)
+    if missing:
+        print(f"{path}: unprojected models: {sorted(missing)}"); sys.exit(1)
+PY
+    then pass; else fail "openhands projector misses a shared model (see above)"; fi
+fi
+
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
 describe "catalog loading"
 detect_system
@@ -654,7 +716,8 @@ if it "every component has a homepage link"; then
     missing="$(python3 - <<'PY'
 import json, glob
 bad = []
-for p in sorted(glob.glob("catalog/*.json")):
+# OS catalogs only: llm-models.json is a model catalogue, not components.
+for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     for grp in json.load(open(p, encoding="utf-8")).get("categories", []):
         for c in grp.get("components", []):
             if not c.get("homepage"):
@@ -744,7 +807,8 @@ if it "the dependency graph the UI draws has no orphan requirements"; then
     bad="$(python3 - <<'PY'
 import json, glob
 bad = []
-for p in sorted(glob.glob("catalog/*.json")):
+# OS catalogs only: llm-models.json is a model catalogue, not components.
+for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     d = json.load(open(p, encoding="utf-8"))
     ids = {c["id"] for g in d.get("categories", []) for c in g.get("components", [])}
     for g in d.get("categories", []):
@@ -879,7 +943,8 @@ if it "the core stack is available on all three platforms"; then
     missing="$(python3 - <<'PY'
 import json, glob, collections
 have = collections.defaultdict(set)
-for p in glob.glob("catalog/*.json"):
+# OS catalogs only: llm-models.json is keyed by model id, not component id.
+for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     plat = p.replace("catalog", "").strip("/\\").replace(".json", "")
     for g in json.load(open(p, encoding="utf-8"))["categories"]:
         for c in g["components"]:
@@ -906,7 +971,7 @@ if it "the payload carries the platform list"; then
 fi
 
 if it "Handy is offered on every platform"; then
-    n="$(grep -l '"id": "handy"' catalog/*.json | wc -l)"
+    n="$(grep -l '"id": "handy"' catalog/windows.json catalog/linux.json catalog/macos.json | wc -l)"
     assert_eq "$n" "3"
 fi
 

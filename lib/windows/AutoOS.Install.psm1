@@ -1066,11 +1066,35 @@ function Set-AutoOSOpenCodeConfig {
         foreach ($p in $existing['provider'].PSObject.Properties) { $providers[$p.Name] = $p.Value }
     }
 
+    $modelsFile = Join-Path $script:RepoRoot 'catalog\llm-models.json'
+    $repoModels = (Get-Content -Path $modelsFile -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    $repoById = @{}
+    foreach ($m in $repoModels) { $repoById[$m.id] = $m }
+
+    function Get-OpenRouterModelEntry($m) {
+        # Projects one shared entry into the OpenCode provider shape.
+        # `cost` uses the paid counterpart where one exists, so estimates
+        # hold past the free cap; free variants themselves bill $0.
+        $inPrice = if ($m.PSObject.Properties.Name.Contains('paid_input_price') -and $null -ne $m.paid_input_price) { $m.paid_input_price } else { $m.input_price }
+        $outPrice = if ($m.PSObject.Properties.Name.Contains('paid_output_price') -and $null -ne $m.paid_output_price) { $m.paid_output_price } else { $m.output_price }
+        $cost = [ordered]@{ input = $inPrice * 1e6; output = $outPrice * 1e6 }
+        if ($m.PSObject.Properties.Name.Contains('cache_read_price') -and $m.cache_read_price) {
+            $cost['cache_read'] = $m.cache_read_price * 1e6
+        }
+        $entry = [ordered]@{
+            name  = $m.name
+            limit = [ordered]@{ context = $m.context; output = $m.output }
+            cost  = $cost
+        }
+        if ($m.PSObject.Properties.Name.Contains('reasoning') -and $m.reasoning) { $entry['reasoning'] = $true }
+        return $entry
+    }
+
     $providers['ollama'] = [ordered]@{
-        npm     = '@ai-sdk/openai'
+        npm     = $repoById['ollama-qwen2.5-coder'].direct.npm
         name    = 'Ollama'
         options = [ordered]@{
-            baseURL = 'http://127.0.0.1:11434/v1'
+            baseURL = $repoById['ollama-qwen2.5-coder'].direct.base_url
         }
         models  = [ordered]@{
             'qwen2.5-coder:7b' = [ordered]@{ name = 'Qwen 2.5 Coder 7B' }
@@ -1093,19 +1117,21 @@ function Set-AutoOSOpenCodeConfig {
 
     $museKey = if ($env:MUSE_API_KEY) { $env:MUSE_API_KEY } elseif ($secrets.ContainsKey('muse')) { $secrets['muse'] } else { $null }
     if ($museKey) {
+        $muse = $repoById['muse-spark']
+        $museModelId = $muse.direct.model.Split('/', 2)[1]
         $providers['meta'] = [ordered]@{
-            npm     = '@ai-sdk/openai'
+            npm     = $muse.direct.npm
             name    = 'Meta'
             options = [ordered]@{
-                baseURL = 'https://api.meta.ai/v1'
+                baseURL = $muse.direct.base_url
                 apiKey  = $museKey
             }
             models  = [ordered]@{
-                'muse-spark-1.3-contributor' = [ordered]@{
-                    name      = 'Muse Spark 1.3 Contributor'
+                $museModelId = [ordered]@{
+                    name      = $muse.name
                     reasoning = $true
-                    limit     = [ordered]@{ context = 1048576; output = 131072 }
-                    options   = [ordered]@{ reasoningEffort = 'high' }
+                    limit     = [ordered]@{ context = $muse.context; output = $muse.output }
+                    options   = [ordered]@{ reasoningEffort = $muse.direct.reasoning_effort }
                 }
             }
         }
@@ -1113,27 +1139,38 @@ function Set-AutoOSOpenCodeConfig {
 
     $deepseekKey = if ($env:DEEPSEEK_API_KEY) { $env:DEEPSEEK_API_KEY } elseif ($secrets.ContainsKey('deepseek')) { $secrets['deepseek'] } else { $null }
     if ($deepseekKey) {
+        $ds = $repoById['deepseek-chat'].direct
+        $dsModels = [ordered]@{}
+        foreach ($mid in @('deepseek-chat', 'deepseek-reasoner')) {
+            $dm = $repoById[$mid]
+            $entry = [ordered]@{
+                name  = $dm.name
+                limit = [ordered]@{ context = $dm.context; output = $dm.output }
+            }
+            if ($dm.PSObject.Properties.Name.Contains('reasoning') -and $dm.reasoning) { $entry['reasoning'] = $true }
+            $dsModels[$mid] = $entry
+        }
         $providers['deepseek'] = [ordered]@{
-            npm     = '@ai-sdk/openai'
+            npm     = $ds.npm
             name    = 'DeepSeek'
             options = [ordered]@{
-                baseURL = 'https://api.deepseek.com'
+                baseURL = $ds.base_url
                 apiKey  = $deepseekKey
             }
-            models  = [ordered]@{
-                'deepseek-chat'     = [ordered]@{ name = 'DeepSeek V3'; limit = [ordered]@{ context = 1048576; output = 65536 } }
-                'deepseek-reasoner' = [ordered]@{ name = 'DeepSeek R1'; reasoning = $true; limit = [ordered]@{ context = 1048576; output = 65536 } }
-            }
+            models  = $dsModels
         }
     }
 
-    # OpenRouter free-tier catalogue (September 2026, verified against
-    # https://openrouter.ai/api/v1/models). `limit` carries the free-variant
-    # context window; `cost` is per 1M tokens from the paid counterpart, so
-    # chat spend stays estimable once a free cap is exhausted. Free variants
-    # themselves bill $0.
+    # Projected from catalog/llm-models.json (single source of truth):
+    # `limit` carries the free-variant context window; `cost` is per 1M
+    # tokens, so chat spend stays estimable once a free cap is exhausted.
     $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
     if ($openrouterKey) {
+        $orModels = [ordered]@{}
+        foreach ($m in $repoModels) {
+            if (-not $m.openrouter_id) { continue }
+            $orModels[$m.openrouter_id] = Get-OpenRouterModelEntry $m
+        }
         $providers['openrouter'] = [ordered]@{
             npm     = '@ai-sdk/openai-compatible'
             name    = 'OpenRouter'
@@ -1141,92 +1178,7 @@ function Set-AutoOSOpenCodeConfig {
                 baseURL = 'https://openrouter.ai/api/v1'
                 apiKey  = $openrouterKey
             }
-            models  = [ordered]@{
-                'free' = [ordered]@{
-                    name  = 'OpenRouter Free Auto-Router'
-                    limit = [ordered]@{ context = 200000; output = 32768 }
-                    cost  = [ordered]@{ input = 0; output = 0 }
-                }
-                'nvidia/nemotron-3-ultra-550b-a55b:free' = [ordered]@{
-                    name      = 'Nemotron 3 Ultra (Free)'
-                    reasoning = $true
-                    limit     = [ordered]@{ context = 1000000; output = 32768 }
-                    cost      = [ordered]@{ input = 0.6; output = 2.4; cache_read = 0.12 }
-                }
-                'nvidia/nemotron-3-super-120b-a12b:free' = [ordered]@{
-                    name      = 'Nemotron 3 Super (Free)'
-                    reasoning = $true
-                    limit     = [ordered]@{ context = 262144; output = 32768 }
-                    cost      = [ordered]@{ input = 0.08; output = 0.45 }
-                }
-                'nvidia/nemotron-3.5-lightning:free' = [ordered]@{
-                    name  = 'Nemotron 3.5 Lightning (Free)'
-                    limit = [ordered]@{ context = 1000000; output = 32768 }
-                    cost  = [ordered]@{ input = 0.08; output = 0.2; cache_read = 0.04 }
-                }
-                'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free' = [ordered]@{
-                    name      = 'Nemotron 3 Nano Omni (Free)'
-                    reasoning = $true
-                    limit     = [ordered]@{ context = 256000; output = 32768 }
-                    cost      = [ordered]@{ input = 0; output = 0 }
-                }
-                'poolside/laguna-s-2.1:free' = [ordered]@{
-                    name  = 'Laguna S 2.1 (Free)'
-                    limit = [ordered]@{ context = 262144; output = 32768 }
-                    cost  = [ordered]@{ input = 0.09; output = 0.18; cache_read = 0.009 }
-                }
-                'poolside/laguna-xs-2.1:free' = [ordered]@{
-                    name  = 'Laguna XS 2.1 (Free)'
-                    limit = [ordered]@{ context = 262144; output = 32768 }
-                    cost  = [ordered]@{ input = 0.06; output = 0.12; cache_read = 0.03 }
-                }
-                'cohere/north-mini-code:free' = [ordered]@{
-                    name  = 'North Mini Code (Free)'
-                    limit = [ordered]@{ context = 256000; output = 32768 }
-                    cost  = [ordered]@{ input = 0; output = 0 }
-                }
-                'nex-agi/nex-n2.5-pro:free' = [ordered]@{
-                    name  = 'Nex-N2.5-Pro (Free)'
-                    limit = [ordered]@{ context = 262144; output = 32768 }
-                    cost  = [ordered]@{ input = 0; output = 0 }
-                }
-                'nex-agi/nex-n2.5-mini:free' = [ordered]@{
-                    name  = 'Nex-N2.5-Mini (Free)'
-                    limit = [ordered]@{ context = 262144; output = 32768 }
-                    cost  = [ordered]@{ input = 0; output = 0 }
-                }
-                'thinkingmachines/inkling:free' = [ordered]@{
-                    name  = 'Inkling (Free)'
-                    limit = [ordered]@{ context = 1048576; output = 32768 }
-                    cost  = [ordered]@{ input = 1.0; output = 4.05; cache_read = 0.17 }
-                }
-                'thinkingmachines/inkling-small:free' = [ordered]@{
-                    name  = 'Inkling Small (Free)'
-                    limit = [ordered]@{ context = 1048576; output = 32768 }
-                    cost  = [ordered]@{ input = 0.45; output = 1.2; cache_read = 0.1 }
-                }
-                'dots-studio/dots-3-note-preview:free' = [ordered]@{
-                    name      = 'Dots3-Note Preview (Free)'
-                    reasoning = $true
-                    limit     = [ordered]@{ context = 512000; output = 32768 }
-                    cost      = [ordered]@{ input = 0; output = 0 }
-                }
-                'inclusionai/ling-3.0-flash-fin:free' = [ordered]@{
-                    name  = 'Ling 3.0 Flash Fin (Free)'
-                    limit = [ordered]@{ context = 262144; output = 32768 }
-                    cost  = [ordered]@{ input = 0.06; output = 0.18; cache_read = 0.012 }
-                }
-                'inclusionai/ling-3.0-flash-sante:free' = [ordered]@{
-                    name  = 'Ling 3.0 Flash Sante (Free)'
-                    limit = [ordered]@{ context = 262144; output = 32768 }
-                    cost  = [ordered]@{ input = 0; output = 0 }
-                }
-                'inclusionai/ling-3.0-flash-vl:free' = [ordered]@{
-                    name  = 'Ling 3.0 Flash VL (Free)'
-                    limit = [ordered]@{ context = 262144; output = 32768 }
-                    cost  = [ordered]@{ input = 0.06; output = 0.18; cache_read = 0.012 }
-                }
-            }
+            models  = $orModels
         }
     }
 
@@ -1234,9 +1186,9 @@ function Set-AutoOSOpenCodeConfig {
 
     if (-not $existing.Contains('model') -or -not $existing['model']) {
         if ($museKey) {
-            $existing['model'] = 'meta/muse-spark-1.3-contributor'
+            $existing['model'] = 'meta/' + $repoById['muse-spark'].direct.model.Split('/', 2)[1]
         } else {
-            $existing['model'] = 'ollama/qwen2.5-coder:7b'
+            $existing['model'] = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
         }
     }
 
@@ -1255,6 +1207,15 @@ function Set-AutoOSOpenCodeConfig {
         type    = 'local'
         command = @('uvx', '--from', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
         enabled = $true
+    }
+    $mcpServers['omnigraph'] = [ordered]@{
+        type    = 'local'
+        command = @('npx', '-y', '@modernrelay/omnigraph-mcp')
+        enabled = $true
+        environment = [ordered]@{
+            OMNIGRAPH_BASE_URL = 'http://localhost:8080'
+            OMNIGRAPH_GRAPH_ID = 'autoos'
+        }
     }
     $mcpServers['playwright'] = [ordered]@{
         type    = 'local'
@@ -1358,11 +1319,39 @@ function Set-AutoOSOpenHandsConfig {
     }
 
     if ($pythonCmd) {
+        $modelsFile = Join-Path $script:RepoRoot 'catalog\llm-models.json'
+        $modelsJson = (Get-Content -Path $modelsFile -Raw -Encoding UTF8).Replace('\', '\\')
         $setupScript = @"
 import os, sys, json
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
+
+REPO_MODELS = json.loads('MODELS_JSON_PLACEHOLDER')['models']
+REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
+
+def _profile_for(mid, key, name=None):
+    m = REPO_BY_ID[mid]
+    if m.get('openrouter_id'):
+        model = 'openrouter/' + m['openrouter_id']
+    else:
+        model = m['direct']['model']
+    p = {'model': model, 'max_input_tokens': m['context'],
+         'max_output_tokens': m['output'],
+         'input_cost_per_token': m['input_price'],
+         'output_cost_per_token': m['output_price']}
+    if m.get('direct', {}).get('base_url'):
+        p['base_url'] = m['direct']['base_url']
+    if m.get('reasoning'):
+        p['reasoning_effort'] = 'high'
+    for opt in ('paid_input_price', 'paid_output_price', 'cache_read_price'):
+        dst = {'paid_input_price': 'paid_input_cost_per_token',
+               'paid_output_price': 'paid_output_cost_per_token',
+               'cache_read_price': 'cache_read_cost_per_token'}[opt]
+        if m.get(opt) is not None:
+            p[dst] = m[opt]
+    p['api_key'] = key
+    return (name or mid) + '.json', p
 
 openhands_dir = sys.argv[1]
 muse_key = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != 'null' else None
@@ -1385,21 +1374,24 @@ agent_settings.setdefault('agent_kind', 'openhands')
 agent_settings.setdefault('agent', 'CodeActAgent')
 
 llm = agent_settings.setdefault('llm', {})
+_muse = REPO_BY_ID['muse-spark']['direct']
+_ds = REPO_BY_ID['deepseek-chat']['direct']
 if muse_key:
-    llm['model'] = 'openai/muse-spark-1.3-contributor'
-    llm['base_url'] = 'https://api.meta.ai/v1'
+    llm['model'] = _muse['model']
+    llm['base_url'] = _muse['base_url']
     llm['api_key'] = muse_key
 elif deepseek_key:
-    llm['model'] = 'deepseek/deepseek-chat'
-    llm['base_url'] = 'https://api.deepseek.com'
+    llm['model'] = _ds['model']
+    llm['base_url'] = _ds['base_url']
     llm['api_key'] = deepseek_key
 elif openrouter_key:
     llm['model'] = 'openrouter/openrouter/free'
     llm['base_url'] = 'https://openrouter.ai/api/v1'
     llm['api_key'] = openrouter_key
 else:
-    llm['model'] = 'ollama/qwen2.5-coder:7b'
-    llm['base_url'] = 'http://127.0.0.1:11434/v1'
+    _local = REPO_BY_ID['ollama-qwen2.5-coder']['direct']
+    llm['model'] = _local['model']
+    llm['base_url'] = _local['base_url']
 
 llm['max_input_tokens'] = 1048576
 llm['max_output_tokens'] = 65536
@@ -1431,7 +1423,8 @@ mcp_cfg['omnigraph'] = {
     'transport': 'stdio',
     'command': 'npx',
     'args': ['-y', '@modernrelay/omnigraph-mcp'],
-    'description': 'Shared organizational graph and decision repository',
+    'env': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'},
+    'description': 'Project memory graph for this repository (repo-scoped, not global)',
     'timeout': 120.0,
     'enabled': True
 }
@@ -1470,33 +1463,32 @@ with open(settings_file, 'w', encoding='utf-8') as f:
     json.dump(settings, f, indent=2)
 
 profiles_dir = os.path.join(openhands_dir, 'profiles')
-# Prices are USD per token (OpenRouter, September 2026). Free variants bill
-# $0 while under the daily cap; the paid-counterpart rates apply past it.
-# cost_per_token = input + output lets a chat client estimate spend from
-# prompt/completion token counts: spend = in_tokens*in_price + out_tokens*out_price.
-profiles = {
-    'deepseek-chat.json': {'model': 'deepseek/deepseek-chat', 'max_input_tokens': 131072, 'max_output_tokens': 8192, 'input_cost_per_token': 2.8e-07, 'output_cost_per_token': 4.2e-07, 'api_key': deepseek_key},
-    'deepseek-reasoner.json': {'model': 'deepseek/deepseek-reasoner', 'max_input_tokens': 131072, 'max_output_tokens': 65536, 'reasoning_effort': 'high', 'input_cost_per_token': 2.8e-07, 'output_cost_per_token': 4.2e-07, 'api_key': deepseek_key},
-    'muse-spark-1.3.json': {'model': 'openai/muse-spark-1.3-contributor', 'base_url': 'https://api.meta.ai/v1', 'max_input_tokens': 1048576, 'max_output_tokens': 131072, 'reasoning_effort': 'high', 'input_cost_per_token': 1e-07, 'output_cost_per_token': 2e-07, 'api_key': muse_key},
-    'muse-spark-1.3-contributor.json': {'model': 'openai/muse-spark-1.3-contributor', 'base_url': 'https://api.meta.ai/v1', 'max_input_tokens': 1048576, 'max_output_tokens': 131072, 'reasoning_effort': 'high', 'input_cost_per_token': 1e-07, 'output_cost_per_token': 2e-07, 'api_key': muse_key},
-    'openrouter-free.json': {'model': 'openrouter/openrouter/free', 'max_input_tokens': 200000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
-    'openrouter-nemotron-ultra.json': {'model': 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', 'max_input_tokens': 1000000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 6e-07, 'paid_output_cost_per_token': 2.4e-06, 'api_key': openrouter_key},
-    'openrouter-nemotron-super.json': {'model': 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 8e-08, 'paid_output_cost_per_token': 4.5e-07, 'api_key': openrouter_key},
-    'openrouter-nemotron-lightning.json': {'model': 'openrouter/nvidia/nemotron-3.5-lightning:free', 'max_input_tokens': 1000000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 8e-08, 'paid_output_cost_per_token': 2e-07, 'api_key': openrouter_key},
-    'openrouter-nemotron-nano-omni.json': {'model': 'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', 'max_input_tokens': 256000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
-    'openrouter-laguna.json': {'model': 'openrouter/poolside/laguna-s-2.1:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 9e-08, 'paid_output_cost_per_token': 1.8e-07, 'api_key': openrouter_key},
-    'openrouter-laguna-xs.json': {'model': 'openrouter/poolside/laguna-xs-2.1:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 6e-08, 'paid_output_cost_per_token': 1.2e-07, 'api_key': openrouter_key},
-    'openrouter-north-mini-code.json': {'model': 'openrouter/cohere/north-mini-code:free', 'max_input_tokens': 256000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
-    'openrouter-nex-pro.json': {'model': 'openrouter/nex-agi/nex-n2.5-pro:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
-    'openrouter-nex-mini.json': {'model': 'openrouter/nex-agi/nex-n2.5-mini:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
-    'openrouter-inkling.json': {'model': 'openrouter/thinkingmachines/inkling:free', 'max_input_tokens': 1048576, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 1e-06, 'paid_output_cost_per_token': 4.05e-06, 'api_key': openrouter_key},
-    'openrouter-inkling-small.json': {'model': 'openrouter/thinkingmachines/inkling-small:free', 'max_input_tokens': 1048576, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 4.5e-07, 'paid_output_cost_per_token': 1.2e-06, 'api_key': openrouter_key},
-    'openrouter-dots3-note.json': {'model': 'openrouter/dots-studio/dots-3-note-preview:free', 'max_input_tokens': 512000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
-    'openrouter-ling-fin.json': {'model': 'openrouter/inclusionai/ling-3.0-flash-fin:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 6e-08, 'paid_output_cost_per_token': 1.8e-07, 'api_key': openrouter_key},
-    'openrouter-ling-sante.json': {'model': 'openrouter/inclusionai/ling-3.0-flash-sante:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
-    'openrouter-ling-vl.json': {'model': 'openrouter/inclusionai/ling-3.0-flash-vl:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 6e-08, 'paid_output_cost_per_token': 1.8e-07, 'api_key': openrouter_key},
-    'ollama-qwen2.5-coder.json': {'model': 'ollama/qwen2.5-coder:7b', 'base_url': 'http://127.0.0.1:11434/v1', 'max_input_tokens': 32768, 'max_output_tokens': 8192, 'input_cost_per_token': 0, 'output_cost_per_token': 0}
-}
+# Prices are USD per token from catalog/llm-models.json. Free variants bill
+# $0 while under the daily cap; paid_*_cost_per_token applies past it, so
+# spend = in_tokens*in_price + out_tokens*out_price stays auditable.
+profiles = dict([
+    _profile_for('deepseek-chat', deepseek_key),
+    _profile_for('deepseek-reasoner', deepseek_key),
+    _profile_for('muse-spark', muse_key, 'muse-spark-1.3'),
+    _profile_for('muse-spark', muse_key, 'muse-spark-1.3-contributor'),
+    _profile_for('openrouter-free', openrouter_key),
+    _profile_for('openrouter-nemotron-ultra', openrouter_key),
+    _profile_for('openrouter-nemotron-super', openrouter_key),
+    _profile_for('openrouter-nemotron-lightning', openrouter_key),
+    _profile_for('openrouter-nemotron-nano-omni', openrouter_key),
+    _profile_for('openrouter-laguna', openrouter_key),
+    _profile_for('openrouter-laguna-xs', openrouter_key),
+    _profile_for('openrouter-north-mini-code', openrouter_key),
+    _profile_for('openrouter-nex-pro', openrouter_key),
+    _profile_for('openrouter-nex-mini', openrouter_key),
+    _profile_for('openrouter-inkling', openrouter_key),
+    _profile_for('openrouter-inkling-small', openrouter_key),
+    _profile_for('openrouter-dots3-note', openrouter_key),
+    _profile_for('openrouter-ling-fin', openrouter_key),
+    _profile_for('openrouter-ling-sante', openrouter_key),
+    _profile_for('openrouter-ling-vl', openrouter_key),
+    _profile_for('ollama-qwen2.5-coder', None),
+])
 for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), 'w', encoding='utf-8') as f:
         json.dump(p_data, f, indent=2)
@@ -1513,6 +1505,7 @@ for name, a_data in acp_agents.items():
     with open(os.path.join(agent_profiles_dir, name), 'w', encoding='utf-8') as f:
         json.dump(a_data, f, indent=2)
 "@
+        $setupScript = $setupScript.Replace('MODELS_JSON_PLACEHOLDER', $modelsJson)
         $argMuse = if ($museKey) { $museKey } else { 'null' }
         $argDeepseek = if ($deepseekKey) { $deepseekKey } else { 'null' }
         $argOpenrouter = if ($openrouterKey) { $openrouterKey } else { 'null' }

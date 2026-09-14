@@ -105,7 +105,7 @@ if (( CHECK_ONLY )); then
     # Validate every catalog, not just this machine's: a typo in macos.json must
     # fail CI on a Linux runner too.
     rc=0
-    for cat in "$AUTOOS_ROOT"/catalog/*.json; do
+    for cat in "$AUTOOS_ROOT"/catalog/windows.json "$AUTOOS_ROOT"/catalog/linux.json "$AUTOOS_ROOT"/catalog/macos.json; do
         [[ -f "$cat" ]] || continue
         if catalog_validate "$cat"; then ui_ok "$(basename "$cat") is valid."
         else ui_err "$(basename "$cat") has problems."; rc=1; fi

@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AutoOS shared LLM model catalogue",
+  "description": "Single source of truth for every model AutoOS configures in OpenCode and OpenHands on every platform. Versions: prices in USD, contexts in tokens. Prices are per-token; OpenCode `cost` is derived per-1M (x1e6). Verified September 2026 against https://openrouter.ai/api/v1/models (free variants) and the LiteLLM price database (paid direct APIs).",
+  "type": "object",
+  "required": ["version", "models"],
+  "properties": {
+    "version": { "type": "string" },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "context", "output"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable kebab-case key. OpenHands profile file is <id>.json; OpenRouter model id is openrouter/<openrouter_id>."
+          },
+          "name": { "type": "string", "description": "Human-readable label shown in model pickers." },
+          "openrouter_id": {
+            "type": "string",
+            "description": "Model id on OpenRouter (incl. :free suffix for free variants). Omitted for always-local models."
+          },
+          "direct": {
+            "type": "object",
+            "description": "Direct (non-OpenRouter) access: OpenCode provider block + OpenHands base_url. Omitted for OpenRouter-only models.",
+            "required": ["provider", "base_url", "model"],
+            "properties": {
+              "provider": { "type": "string" },
+              "base_url": { "type": "string" },
+              "model": { "type": "string" },
+              "npm": { "type": "string" },
+              "reasoning_effort": { "type": "string" }
+            }
+          },
+          "context": { "type": "integer", "description": "Free-variant context window in tokens." },
+          "output": { "type": "integer", "description": "Max completion tokens." },
+          "reasoning": { "type": "boolean" },
+          "input_price": {
+            "type": "number",
+            "description": "USD per token while under the free cap. 0 for free variants."
+          },
+          "output_price": { "type": "number" },
+          "paid_input_price": {
+            "type": "number",
+            "description": "USD per token on the paid counterpart once the free cap is exhausted. Omitted when the model has no paid tier."
+          },
+          "paid_output_price": { "type": "number" },
+          "cache_read_price": {
+            "type": "number",
+            "description": "USD per cached input token on the paid counterpart, when published."
+          },
+          "default_for": {
+            "type": "string",
+            "description": "Which API-key condition makes this the default model (opencode + openhands default selection)."
+          }
+        }
+      }
+    }
+  }
+}

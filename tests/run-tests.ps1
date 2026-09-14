@@ -111,6 +111,31 @@ Test-Case 'a malformed catalog is rejected' {
         "expected provider/kebab/ghost problems, got: $joined"
 }
 
+# ─── Shared LLM model catalogue (single source of truth) ────────────────
+Describe-Group 'llm models'
+
+Test-Case 'llm-models.json is valid and has unique ids' {
+    $doc = Get-Content (Join-Path $Root 'catalog\llm-models.json') -Raw | ConvertFrom-Json
+    $ids = @($doc.models | ForEach-Object { $_.id })
+    Assert-True ($ids.Count -ge 20) "expected >= 20 models, got $($ids.Count)"
+    $dupes = @($ids | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+    @(Assert-True ($dupes.Count -eq 0) ("duplicate model ids: " + ($dupes -join ', ')))
+    foreach ($m in $doc.models) {
+        $hasOr = $m.PSObject.Properties.Name.Contains('openrouter_id') -and $m.openrouter_id
+        $hasDirect = $m.PSObject.Properties.Name.Contains('direct') -and $m.direct
+        if (-not $hasOr -and -not $hasDirect) { throw "model '$($m.id)' has neither openrouter_id nor direct" }
+    }
+}
+
+Test-Case 'the windows installer projects the shared catalogue' {
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
+    Assert-True ($src -match 'catalog.llm-models\.json') 'shared llm-models.json is not loaded'
+    foreach ($witness in @('REPO_MODELS', 'repoById', 'Get-OpenRouterModelEntry', '_profile_for')) {
+        Assert-True ($src.Contains($witness)) "'$witness' projector missing"
+    }
+    Assert-True (($src -split '_profile_for\(').Count -ge 20) 'expected >= 19 profile projections'
+}
+
 Test-Case 'every winget component has a non-empty package id' {
     $bad = @()
     foreach ($cat in $winCatalog.categories) {

@@ -1146,11 +1146,42 @@ setup_opencode_config() {
     local secrets_file="$SYS_HOME/Documents/Code/agent-skills/secrets/api_keys.conf"
     [[ -f "$secrets_file" ]] || secrets_file="$SYS_HOME/Documents/code/agent-skills/secrets/api_keys.conf"
 
+    # catalog/llm-models.json is the single source of truth for model data.
+    # The repo root is anchored off this script, never off the caller's cwd.
+    local models_file
+    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/llm-models.json"
+
     python3 -c "
 import json, os, sys
 
 config_path = sys.argv[1]
 secrets_path = sys.argv[2]
+models_file = sys.argv[3]
+
+# Model data lives in catalog/llm-models.json (single source of truth).
+# Everything below projects it into OpenCode's shape; nothing here
+# duplicates an id, a context window or a price.
+with open(models_file, 'r', encoding='utf-8') as _mf:
+    REPO_MODELS = json.load(_mf)['models']
+REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
+
+def _opencode_cost(m):
+    base = m.get('paid_input_price', m['input_price']), m.get('paid_output_price', m['output_price'])
+    cost = {'input': base[0] * 1e6, 'output': base[1] * 1e6}
+    if m.get('cache_read_price'):
+        cost['cache_read'] = m['cache_read_price'] * 1e6
+    return cost
+
+def _openrouter_models():
+    out = {}
+    for m in REPO_MODELS:
+        if not m.get('openrouter_id'):
+            continue
+        entry = {'name': m['name'], 'limit': {'context': m['context'], 'output': m['output']}, 'cost': _opencode_cost(m)}
+        if m.get('reasoning'):
+            entry['reasoning'] = True
+        out[m['openrouter_id']] = entry
+    return out
 
 data = {}
 if os.path.isfile(config_path):
@@ -1173,11 +1204,12 @@ if os.path.isfile(secrets_path):
         pass
 
 providers = data.get('provider', {})
+_ollama = REPO_BY_ID['ollama-qwen2.5-coder']['direct']
 providers['ollama'] = {
-    'npm': '@ai-sdk/openai-compatible',
+    'npm': _ollama['npm'],
     'name': 'Ollama (Local)',
     'options': {
-        'baseURL': 'http://127.0.0.1:11434/v1'
+        'baseURL': _ollama['base_url']
     },
     'models': {
         'qwen2.5-coder:7b': {'name': 'Qwen 2.5 Coder 7B'},
@@ -1187,50 +1219,46 @@ providers['ollama'] = {
 
 muse_key = os.environ.get('MUSE_API_KEY') or secrets.get('muse')
 if muse_key:
+    _muse = REPO_BY_ID['muse-spark']['direct']
     providers['meta'] = {
-        'npm': '@ai-sdk/openai-compatible',
+        'npm': _muse['npm'],
         'name': 'Meta AI (Muse Spark)',
         'options': {
-            'baseURL': 'https://api.meta.ai/v1',
+            'baseURL': _muse['base_url'],
             'apiKey': muse_key
         },
         'models': {
-            'muse-spark-1.3-contributor': {
-                'name': 'Muse Spark 1.3 Contributor',
+            _muse['model'].split('/', 1)[1]: {
+                'name': REPO_BY_ID['muse-spark']['name'],
                 'reasoning': True,
-                'limit': {'context': 1048576, 'output': 131072},
-                'options': {'reasoningEffort': 'high'}
+                'limit': {'context': REPO_BY_ID['muse-spark']['context'], 'output': REPO_BY_ID['muse-spark']['output']},
+                'options': {'reasoningEffort': _muse['reasoning_effort']}
             }
         }
     }
 
 deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
 if deepseek_key:
+    def _deepseek_entry(mid):
+        m = REPO_BY_ID[mid]
+        entry = {'name': m['name'], 'limit': {'context': m['context'], 'output': m['output']}}
+        if m.get('reasoning'):
+            entry['reasoning'] = True
+        return entry
+    _ds = REPO_BY_ID['deepseek-chat']['direct']
     providers['deepseek'] = {
-        'npm': '@ai-sdk/openai',
+        'npm': _ds['npm'],
         'name': 'DeepSeek',
         'options': {
-            'baseURL': 'https://api.deepseek.com',
+            'baseURL': _ds['base_url'],
             'apiKey': deepseek_key
         },
         'models': {
-            'deepseek-chat': {
-                'name': 'DeepSeek V3',
-                'limit': {'context': 1048576, 'output': 65536}
-            },
-            'deepseek-reasoner': {
-                'name': 'DeepSeek R1',
-                'reasoning': True,
-                'limit': {'context': 1048576, 'output': 65536}
-            }
+            'deepseek-chat': _deepseek_entry('deepseek-chat'),
+            'deepseek-reasoner': _deepseek_entry('deepseek-reasoner')
         }
     }
 
-# OpenRouter free-tier catalogue (September 2026, verified against
-# https://openrouter.ai/api/v1/models). `limit` carries the free-variant
-# context window; `cost` is per 1M tokens from the paid counterpart, so
-# chat spend stays estimable once a free cap is exhausted. Free variants
-# themselves bill $0.
 openrouter_key = os.environ.get('OPENROUTER_API_KEY') or secrets.get('openrouter')
 if openrouter_key:
     providers['openrouter'] = {
@@ -1240,97 +1268,16 @@ if openrouter_key:
             'baseURL': 'https://openrouter.ai/api/v1',
             'apiKey': openrouter_key
         },
-        'models': {
-            'free': {
-                'name': 'OpenRouter Free Auto-Router',
-                'limit': {'context': 200000, 'output': 32768},
-                'cost': {'input': 0, 'output': 0}
-            },
-            'nvidia/nemotron-3-ultra-550b-a55b:free': {
-                'name': 'Nemotron 3 Ultra (Free)', 'reasoning': True,
-                'limit': {'context': 1000000, 'output': 32768},
-                'cost': {'input': 0.6, 'output': 2.4, 'cache_read': 0.12}
-            },
-            'nvidia/nemotron-3-super-120b-a12b:free': {
-                'name': 'Nemotron 3 Super (Free)', 'reasoning': True,
-                'limit': {'context': 262144, 'output': 32768},
-                'cost': {'input': 0.08, 'output': 0.45}
-            },
-            'nvidia/nemotron-3.5-lightning:free': {
-                'name': 'Nemotron 3.5 Lightning (Free)',
-                'limit': {'context': 1000000, 'output': 32768},
-                'cost': {'input': 0.08, 'output': 0.2, 'cache_read': 0.04}
-            },
-            'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free': {
-                'name': 'Nemotron 3 Nano Omni (Free)', 'reasoning': True,
-                'limit': {'context': 256000, 'output': 32768},
-                'cost': {'input': 0, 'output': 0}
-            },
-            'poolside/laguna-s-2.1:free': {
-                'name': 'Laguna S 2.1 (Free)',
-                'limit': {'context': 262144, 'output': 32768},
-                'cost': {'input': 0.09, 'output': 0.18, 'cache_read': 0.009}
-            },
-            'poolside/laguna-xs-2.1:free': {
-                'name': 'Laguna XS 2.1 (Free)',
-                'limit': {'context': 262144, 'output': 32768},
-                'cost': {'input': 0.06, 'output': 0.12, 'cache_read': 0.03}
-            },
-            'cohere/north-mini-code:free': {
-                'name': 'North Mini Code (Free)',
-                'limit': {'context': 256000, 'output': 32768},
-                'cost': {'input': 0, 'output': 0}
-            },
-            'nex-agi/nex-n2.5-pro:free': {
-                'name': 'Nex-N2.5-Pro (Free)',
-                'limit': {'context': 262144, 'output': 32768},
-                'cost': {'input': 0, 'output': 0}
-            },
-            'nex-agi/nex-n2.5-mini:free': {
-                'name': 'Nex-N2.5-Mini (Free)',
-                'limit': {'context': 262144, 'output': 32768},
-                'cost': {'input': 0, 'output': 0}
-            },
-            'thinkingmachines/inkling:free': {
-                'name': 'Inkling (Free)',
-                'limit': {'context': 1048576, 'output': 32768},
-                'cost': {'input': 1.0, 'output': 4.05, 'cache_read': 0.17}
-            },
-            'thinkingmachines/inkling-small:free': {
-                'name': 'Inkling Small (Free)',
-                'limit': {'context': 1048576, 'output': 32768},
-                'cost': {'input': 0.45, 'output': 1.2, 'cache_read': 0.1}
-            },
-            'dots-studio/dots-3-note-preview:free': {
-                'name': 'Dots3-Note Preview (Free)', 'reasoning': True,
-                'limit': {'context': 512000, 'output': 32768},
-                'cost': {'input': 0, 'output': 0}
-            },
-            'inclusionai/ling-3.0-flash-fin:free': {
-                'name': 'Ling 3.0 Flash Fin (Free)',
-                'limit': {'context': 262144, 'output': 32768},
-                'cost': {'input': 0.06, 'output': 0.18, 'cache_read': 0.012}
-            },
-            'inclusionai/ling-3.0-flash-sante:free': {
-                'name': 'Ling 3.0 Flash Sante (Free)',
-                'limit': {'context': 262144, 'output': 32768},
-                'cost': {'input': 0, 'output': 0}
-            },
-            'inclusionai/ling-3.0-flash-vl:free': {
-                'name': 'Ling 3.0 Flash VL (Free)',
-                'limit': {'context': 262144, 'output': 32768},
-                'cost': {'input': 0.06, 'output': 0.18, 'cache_read': 0.012}
-            }
-        }
+        'models': _openrouter_models()
     }
 
 data['provider'] = providers
 
 if not data.get('model'):
     if muse_key:
-        data['model'] = 'meta/muse-spark-1.3-contributor'
+        data['model'] = 'meta/' + REPO_BY_ID['muse-spark']['direct']['model'].split('/', 1)[1]
     else:
-        data['model'] = 'ollama/qwen2.5-coder:7b'
+        data['model'] = 'ollama/' + REPO_BY_ID['ollama-qwen2.5-coder']['direct']['model'].split('/', 1)[1]
 
 mcps = data.get('mcp', {})
 mcps['serena'] = {
@@ -1343,6 +1290,12 @@ mcps['graphify'] = {
     'command': ['uvx', '--from', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
     'enabled': True
 }
+mcps['omnigraph'] = {
+    'type': 'local',
+    'command': ['npx', '-y', '@modernrelay/omnigraph-mcp'],
+    'enabled': True,
+    'environment': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'}
+}
 mcps['playwright'] = {
     'type': 'local',
     'command': ['npx', '-y', '@playwright/mcp@latest'],
@@ -1354,7 +1307,7 @@ tmp_file = config_path + '.tmp'
 with open(tmp_file, 'w', encoding='utf-8') as f:
     json.dump(data, f, indent=2)
 os.replace(tmp_file, config_path)
-" "$config_file" "$secrets_file"
+" "$config_file" "$secrets_file" "$models_file"
 
     ui_ok "OpenCode configuration written to $config_file"
     cp "$config_file" "$config_dir/opencode.json"
@@ -1392,11 +1345,42 @@ setup_openhands_config() {
 
     catalog_require_python || return 0
 
-    python3 - "$openhands_dir" "$secrets_file" <<'PY'
+    local models_file
+    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/llm-models.json"
+
+    python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
 import os, sys, json
 
 openhands_dir = sys.argv[1]
 secrets_file = sys.argv[2] if len(sys.argv) > 2 else ""
+models_file = sys.argv[3] if len(sys.argv) > 3 else ""
+
+with open(models_file, "r", encoding="utf-8") as _mf:
+    REPO_MODELS = json.load(_mf)["models"]
+REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
+
+def _profile_for(mid, key, name=None):
+    m = REPO_BY_ID[mid]
+    if m.get("openrouter_id"):
+        model = "openrouter/" + m["openrouter_id"]
+    else:
+        model = m["direct"]["model"]
+    p = {"model": model, "max_input_tokens": m["context"],
+         "max_output_tokens": m["output"],
+         "input_cost_per_token": m["input_price"],
+         "output_cost_per_token": m["output_price"]}
+    if m.get("direct", {}).get("base_url"):
+        p["base_url"] = m["direct"]["base_url"]
+    if m.get("reasoning"):
+        p["reasoning_effort"] = "high"
+    for opt in ("paid_input_price", "paid_output_price", "cache_read_price"):
+        dst = {"paid_input_price": "paid_input_cost_per_token",
+               "paid_output_price": "paid_output_cost_per_token",
+               "cache_read_price": "cache_read_cost_per_token"}[opt]
+        if m.get(opt) is not None:
+            p[dst] = m[opt]
+    p["api_key"] = key
+    return (name or mid) + ".json", p
 
 secrets = {}
 if secrets_file and os.path.isfile(secrets_file):
@@ -1431,21 +1415,24 @@ agent_settings.setdefault("agent_kind", "openhands")
 agent_settings.setdefault("agent", "CodeActAgent")
 
 llm = agent_settings.setdefault("llm", {})
+_muse = REPO_BY_ID["muse-spark"]["direct"]
+_ds = REPO_BY_ID["deepseek-chat"]["direct"]
 if muse_key:
-    llm["model"] = "openai/muse-spark-1.3-contributor"
-    llm["base_url"] = "https://api.meta.ai/v1"
+    llm["model"] = _muse["model"]
+    llm["base_url"] = _muse["base_url"]
     llm["api_key"] = muse_key
 elif deepseek_key:
-    llm["model"] = "deepseek/deepseek-chat"
-    llm["base_url"] = "https://api.deepseek.com"
+    llm["model"] = _ds["model"]
+    llm["base_url"] = _ds["base_url"]
     llm["api_key"] = deepseek_key
 elif openrouter_key:
     llm["model"] = "openrouter/openrouter/free"
     llm["base_url"] = "https://openrouter.ai/api/v1"
     llm["api_key"] = openrouter_key
 else:
-    llm["model"] = "ollama/qwen2.5-coder:7b"
-    llm["base_url"] = "http://127.0.0.1:11434/v1"
+    _local = REPO_BY_ID["ollama-qwen2.5-coder"]["direct"]
+    llm["model"] = _local["model"]
+    llm["base_url"] = _local["base_url"]
 
 llm["max_input_tokens"] = 1048576
 llm["max_output_tokens"] = 65536
@@ -1477,7 +1464,8 @@ mcp_cfg["omnigraph"] = {
     "transport": "stdio",
     "command": "npx",
     "args": ["-y", "@modernrelay/omnigraph-mcp"],
-    "description": "Shared organizational graph and decision repository",
+    "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
+    "description": "Project memory graph for this repository (repo-scoped, not global)",
     "timeout": 120.0,
     "enabled": True,
 }
@@ -1515,32 +1503,32 @@ with open(settings_file, "w", encoding="utf-8") as f:
     json.dump(settings, f, indent=2)
 
 profiles_dir = os.path.join(openhands_dir, "profiles")
-# Prices are USD per token (OpenRouter, September 2026). Free variants bill
-# $0 while under the daily cap; the paid-counterpart rates apply past it.
-# spend = in_tokens*in_price + out_tokens*out_price per chat.
-profiles = {
-    "deepseek-chat.json": {"model": "deepseek/deepseek-chat", "max_input_tokens": 131072, "max_output_tokens": 8192, "input_cost_per_token": 2.8e-07, "output_cost_per_token": 4.2e-07, "api_key": deepseek_key},
-    "deepseek-reasoner.json": {"model": "deepseek/deepseek-reasoner", "max_input_tokens": 131072, "max_output_tokens": 65536, "reasoning_effort": "high", "input_cost_per_token": 2.8e-07, "output_cost_per_token": 4.2e-07, "api_key": deepseek_key},
-    "muse-spark-1.3.json": {"model": "openai/muse-spark-1.3-contributor", "base_url": "https://api.meta.ai/v1", "max_input_tokens": 1048576, "max_output_tokens": 131072, "reasoning_effort": "high", "input_cost_per_token": 1e-07, "output_cost_per_token": 2e-07, "api_key": muse_key},
-    "muse-spark-1.3-contributor.json": {"model": "openai/muse-spark-1.3-contributor", "base_url": "https://api.meta.ai/v1", "max_input_tokens": 1048576, "max_output_tokens": 131072, "reasoning_effort": "high", "input_cost_per_token": 1e-07, "output_cost_per_token": 2e-07, "api_key": muse_key},
-    "openrouter-free.json": {"model": "openrouter/openrouter/free", "max_input_tokens": 200000, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "api_key": openrouter_key},
-    "openrouter-nemotron-ultra.json": {"model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "max_input_tokens": 1000000, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "paid_input_cost_per_token": 6e-07, "paid_output_cost_per_token": 2.4e-06, "api_key": openrouter_key},
-    "openrouter-nemotron-super.json": {"model": "openrouter/nvidia/nemotron-3-super-120b-a12b:free", "max_input_tokens": 262144, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "paid_input_cost_per_token": 8e-08, "paid_output_cost_per_token": 4.5e-07, "api_key": openrouter_key},
-    "openrouter-nemotron-lightning.json": {"model": "openrouter/nvidia/nemotron-3.5-lightning:free", "max_input_tokens": 1000000, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "paid_input_cost_per_token": 8e-08, "paid_output_cost_per_token": 2e-07, "api_key": openrouter_key},
-    "openrouter-nemotron-nano-omni.json": {"model": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "max_input_tokens": 256000, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "api_key": openrouter_key},
-    "openrouter-laguna.json": {"model": "openrouter/poolside/laguna-s-2.1:free", "max_input_tokens": 262144, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "paid_input_cost_per_token": 9e-08, "paid_output_cost_per_token": 1.8e-07, "api_key": openrouter_key},
-    "openrouter-laguna-xs.json": {"model": "openrouter/poolside/laguna-xs-2.1:free", "max_input_tokens": 262144, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "paid_input_cost_per_token": 6e-08, "paid_output_cost_per_token": 1.2e-07, "api_key": openrouter_key},
-    "openrouter-north-mini-code.json": {"model": "openrouter/cohere/north-mini-code:free", "max_input_tokens": 256000, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "api_key": openrouter_key},
-    "openrouter-nex-pro.json": {"model": "openrouter/nex-agi/nex-n2.5-pro:free", "max_input_tokens": 262144, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "api_key": openrouter_key},
-    "openrouter-nex-mini.json": {"model": "openrouter/nex-agi/nex-n2.5-mini:free", "max_input_tokens": 262144, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "api_key": openrouter_key},
-    "openrouter-inkling.json": {"model": "openrouter/thinkingmachines/inkling:free", "max_input_tokens": 1048576, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "paid_input_cost_per_token": 1e-06, "paid_output_cost_per_token": 4.05e-06, "api_key": openrouter_key},
-    "openrouter-inkling-small.json": {"model": "openrouter/thinkingmachines/inkling-small:free", "max_input_tokens": 1048576, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "paid_input_cost_per_token": 4.5e-07, "paid_output_cost_per_token": 1.2e-06, "api_key": openrouter_key},
-    "openrouter-dots3-note.json": {"model": "openrouter/dots-studio/dots-3-note-preview:free", "max_input_tokens": 512000, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "api_key": openrouter_key},
-    "openrouter-ling-fin.json": {"model": "openrouter/inclusionai/ling-3.0-flash-fin:free", "max_input_tokens": 262144, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "paid_input_cost_per_token": 6e-08, "paid_output_cost_per_token": 1.8e-07, "api_key": openrouter_key},
-    "openrouter-ling-sante.json": {"model": "openrouter/inclusionai/ling-3.0-flash-sante:free", "max_input_tokens": 262144, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "api_key": openrouter_key},
-    "openrouter-ling-vl.json": {"model": "openrouter/inclusionai/ling-3.0-flash-vl:free", "max_input_tokens": 262144, "max_output_tokens": 32768, "input_cost_per_token": 0, "output_cost_per_token": 0, "paid_input_cost_per_token": 6e-08, "paid_output_cost_per_token": 1.8e-07, "api_key": openrouter_key},
-    "ollama-qwen2.5-coder.json": {"model": "ollama/qwen2.5-coder:7b", "base_url": "http://127.0.0.1:11434/v1", "max_input_tokens": 32768, "max_output_tokens": 8192, "input_cost_per_token": 0, "output_cost_per_token": 0}
-}
+# Prices are USD per token from catalog/llm-models.json. Free variants bill
+# $0 while under the daily cap; paid_*_cost_per_token applies past it, so
+# spend = in_tokens*in_price + out_tokens*out_price stays auditable.
+profiles = dict([
+    _profile_for("deepseek-chat", deepseek_key),
+    _profile_for("deepseek-reasoner", deepseek_key),
+    _profile_for("muse-spark", muse_key, "muse-spark-1.3"),
+    _profile_for("muse-spark", muse_key, "muse-spark-1.3-contributor"),
+    _profile_for("openrouter-free", openrouter_key),
+    _profile_for("openrouter-nemotron-ultra", openrouter_key),
+    _profile_for("openrouter-nemotron-super", openrouter_key),
+    _profile_for("openrouter-nemotron-lightning", openrouter_key),
+    _profile_for("openrouter-nemotron-nano-omni", openrouter_key),
+    _profile_for("openrouter-laguna", openrouter_key),
+    _profile_for("openrouter-laguna-xs", openrouter_key),
+    _profile_for("openrouter-north-mini-code", openrouter_key),
+    _profile_for("openrouter-nex-pro", openrouter_key),
+    _profile_for("openrouter-nex-mini", openrouter_key),
+    _profile_for("openrouter-inkling", openrouter_key),
+    _profile_for("openrouter-inkling-small", openrouter_key),
+    _profile_for("openrouter-dots3-note", openrouter_key),
+    _profile_for("openrouter-ling-fin", openrouter_key),
+    _profile_for("openrouter-ling-sante", openrouter_key),
+    _profile_for("openrouter-ling-vl", openrouter_key),
+    _profile_for("ollama-qwen2.5-coder", None),
+])
 for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), "w", encoding="utf-8") as f:
         json.dump(p_data, f, indent=2)
