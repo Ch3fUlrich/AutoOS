@@ -266,7 +266,7 @@ function Get-AutoOSExampleBlock {
     try {
         $block = (Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json).$Name
         if ($block) { return $block }
-    } catch { }
+    } catch { $null }
     @{}
 }
 
@@ -286,7 +286,7 @@ function Get-AutoOSDetectedAnswers {
         try {
             $value = (& git config --global $pair.Setting 2>$null | Select-Object -First 1)
             if ($value) { $answers[$pair.Key] = [string]$value }
-        } catch { }
+        } catch { $null }
     }
     $answers
 }
