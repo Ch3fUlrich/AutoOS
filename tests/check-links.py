@@ -20,12 +20,22 @@ SKIP_PREFIXES = ("http://", "https://", "#", "mailto:")
 
 
 def markdown_files(root: str) -> list[str]:
-    patterns = ["README.md", "AGENTS.md", "CLAUDE.md", "docs/*.md", "**/README.md"]
-    found: set[str] = set()
-    for pat in patterns:
-        for path in glob.glob(os.path.join(root, pat), recursive=True):
-            if os.path.isfile(path) and ".git" not in path.split(os.sep):
-                found.add(os.path.relpath(path, root))
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        if ".git" in dirnames:
+            dirnames.remove(".git")
+
+        rel_dir = os.path.relpath(dirpath, root)
+        is_root = rel_dir == "."
+
+        for f in filenames:
+            if f == "README.md":
+                found.append(f if is_root else os.path.join(rel_dir, f))
+            elif rel_dir == "docs" and f.endswith(".md"):
+                found.append(os.path.join(rel_dir, f))
+            elif is_root and f in ("AGENTS.md", "CLAUDE.md"):
+                found.append(f)
+
     return sorted(found)
 
 
