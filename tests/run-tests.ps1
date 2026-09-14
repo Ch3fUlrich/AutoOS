@@ -303,13 +303,19 @@ Test-Case 'a different product sharing a prefix is never matched' {
 }
 
 Test-Case 'the shim directories package managers use are probed even when PATH is stale' {
-    $dirs = @(Get-AutoOSShimDirectory)
-    foreach ($want in @('scoop\shims', 'chocolatey\bin', 'Microsoft\WinGet\Links')) {
-        if (-not @($dirs | Where-Object { $_ -like "*$want*" })) {
-            throw "no probe directory for $want in: $($dirs -join '; ')"
+    $oldProgramData = $env:ProgramData
+    $env:ProgramData = 'C:\ProgramData'
+    try {
+        $dirs = @(Get-AutoOSShimDirectory)
+        foreach ($want in @('scoop\shims', 'chocolatey\bin', 'Microsoft\WinGet\Links')) {
+            if (-not @($dirs | Where-Object { $_ -like "*$want*" })) {
+                throw "no probe directory for $want in: $($dirs -join '; ')"
+            }
         }
+        Pass
+    } finally {
+        $env:ProgramData = $oldProgramData
     }
-    Pass
 }
 
 Test-Case 'a shim directory off the persistent PATH still resolves a verify command' {
@@ -810,7 +816,8 @@ Test-Case '-Only accepts a comma-separated list through -File' {
     # powershell -File passes every argument literally, so "a,b" arrives as one
     # string. The browser UI shells out exactly that way, so a multi-component
     # install used to fail as "unknown component id(s): a,b".
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $setup `
+    $pwshExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
+    $out = & $pwshExe -NoProfile -ExecutionPolicy Bypass -File $setup `
              -Only 'git,nodejs' -Yes -NoColor -DryRun 2>&1
     Assert-True ($LASTEXITCODE -eq 0 -and ($out -join "`n") -notmatch 'Unknown component') `
                 "exit $LASTEXITCODE : $($out | Select-Object -Last 3)"
@@ -1197,6 +1204,7 @@ Test-Case 'the scheduled-task arguments are stable, so a second run can skip' {
 }
 
 Test-Case 'an unregistered task never counts as current' {
+    # If Get-ScheduledTask does not exist (e.g. on Linux/WSL), it safely returns false.
     Assert-Equal (Test-AutoOSClaudeTaskCurrent -TaskName 'AutoOS-Claude-DoesNotExist' -Arguments 'x') $false
 }
 
