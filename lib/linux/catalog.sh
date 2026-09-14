@@ -158,14 +158,16 @@ PLAN_AUTO=""
 catalog_resolve() {
     local requested=("$@")
     local -a wanted=() queue=("$@")
+    local -A wanted_set=()
     local id dep i
 
     while ((${#queue[@]})); do
         id="${queue[0]}"; queue=("${queue[@]:1}")
-        [[ " ${wanted[*]} " == *" $id "* ]] && continue
+        [[ -n "${wanted_set[$id]:-}" ]] && continue
         i="$(catalog_index_of "$id")" || continue
         if [[ "${CAT_PROVIDER[i]}" == manual ]]; then ui_err "AutoOS cannot install $id; use its vendor link for manual setup."; return 1; fi
         wanted+=("$id")
+        wanted_set["$id"]=1
         if [[ -n "${CAT_REQUIRES[i]}" ]]; then
             IFS=',' read -ra deps <<<"${CAT_REQUIRES[i]}"
             for dep in "${deps[@]}"; do
@@ -174,26 +176,26 @@ catalog_resolve() {
         fi
     done
 
-    local -a done_list=() visiting=()
+    local -A done_set=() visiting_set=()
     local ordered=""
 
     _visit() {
         local node="$1" idx d
-        [[ " ${done_list[*]} " == *" $node "* ]] && return 0
-        if [[ " ${visiting[*]} " == *" $node "* ]]; then
+        [[ -n "${done_set[$node]:-}" ]] && return 0
+        if [[ -n "${visiting_set[$node]:-}" ]]; then
             ui_err "Dependency cycle in catalog at '$node'"; return 1
         fi
-        visiting+=("$node")
+        visiting_set["$node"]=1
         idx="$(catalog_index_of "$node")" || return 0
         if [[ -n "${CAT_REQUIRES[idx]}" ]]; then
             IFS=',' read -ra ds <<<"${CAT_REQUIRES[idx]}"
             for d in "${ds[@]}"; do
                 [[ -z "$d" ]] && continue
-                [[ " ${wanted[*]} " == *" $d "* ]] && { _visit "$d" || return 1; }
+                [[ -n "${wanted_set[$d]:-}" ]] && { _visit "$d" || return 1; }
             done
         fi
-        visiting=("${visiting[@]/$node}")
-        done_list+=("$node")
+        unset "visiting_set[$node]"
+        done_set["$node"]=1
         ordered+="$node "
         return 0
     }
