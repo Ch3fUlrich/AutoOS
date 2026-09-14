@@ -562,6 +562,84 @@ fi
 # ─── Terminal interactive UI ────────────────────────────────────────────────
 describe "terminal interactive UI"
 
+if it "ui_init disables color when NO_COLOR is set"; then
+    (
+        export NO_COLOR="1" AUTOOS_NO_COLOR="" AUTOOS_USE_COLOR="1"
+        ui_init
+        assert_eq "$AUTOOS_USE_COLOR" "0"
+    ) && pass || fail "color was not disabled"
+fi
+
+if it "ui_init disables color when TERM is dumb"; then
+    (
+        export TERM="dumb" AUTOOS_NO_COLOR="" AUTOOS_USE_COLOR="1" NO_COLOR=""
+        ui_init
+        assert_eq "$AUTOOS_USE_COLOR" "0"
+    ) && pass || fail "color was not disabled for dumb terminal"
+fi
+
+if it "ui_init writes a run header to AUTOOS_LOG when set"; then
+    tmp="$(mktemp)"
+    (
+        export AUTOOS_LOG="$tmp"
+        ui_init
+    )
+    if grep -q "=== AutoOS run " "$tmp"; then pass; else fail "log header missing"; fi
+    rm -f "$tmp"
+fi
+
+if it "ui logging functions output correctly with colors"; then
+    (
+        export AUTOOS_USE_COLOR=1
+
+        ok_out="$(ui_ok "success")"
+        expected_ok="  $(_c ok)+$(_c reset) success"
+        assert_eq "$ok_out" "$expected_ok" || exit 1
+
+        warn_out="$(ui_warn "warning")"
+        expected_warn="  $(_c warn)!$(_c reset) $(_c warn)warning$(_c reset)"
+        assert_eq "$warn_out" "$expected_warn" || exit 1
+
+        err_out="$(ui_err "error")"
+        expected_err="  $(_c err)x$(_c reset) $(_c err)error$(_c reset)"
+        assert_eq "$err_out" "$expected_err" || exit 1
+    ) && pass || fail "color formatting mismatch"
+fi
+
+if it "ui logging functions output correctly without colors"; then
+    (
+        export AUTOOS_USE_COLOR=0
+
+        ok_out="$(ui_ok "success")"
+        expected_ok="  + success"
+        assert_eq "$ok_out" "$expected_ok" || exit 1
+
+        warn_out="$(ui_warn "warning")"
+        expected_warn="  ! warning"
+        assert_eq "$warn_out" "$expected_warn" || exit 1
+
+        err_out="$(ui_err "error")"
+        expected_err="  x error"
+        assert_eq "$err_out" "$expected_err" || exit 1
+    ) && pass || fail "no-color formatting mismatch"
+fi
+
+if it "ui logging functions strip ANSI codes when writing to log"; then
+    tmp="$(mktemp)"
+    (
+        export AUTOOS_USE_COLOR=1
+        export AUTOOS_LOG="$tmp"
+        ui_init
+        ui_warn "test warning" >/dev/null
+    )
+    content="$(cat "$tmp")"
+    rm -f "$tmp"
+
+    # Check that content was written and does not contain ANSI escape codes
+    if [[ "$content" == *"test warning"* ]] && ! grep -q $'\x1b' <<< "$content"; then pass
+    else fail "log contains ANSI or missing content: $content"; fi
+fi
+
 if it "ui_select_radio returns default when non-interactive"; then
     (
         export AUTOOS_NONINTERACTIVE=1
