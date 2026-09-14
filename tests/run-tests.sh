@@ -905,6 +905,50 @@ if it "the payload carries the platform list"; then
     grep -q "component_platforms" lib/linux/serve.py && pass || fail "serve.py does not compute platforms"
 fi
 
+if it "component_platforms computes cross-platform availability correctly"; then
+    if python3 - <<'PY'
+import sys, os, pathlib, json, tempfile
+sys.path.insert(0, './lib/linux')
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    import serve
+    serve.ROOT = pathlib.Path(tmpdir)
+    cat_dir = serve.ROOT / "catalog"
+    cat_dir.mkdir()
+
+    # Create fake catalogs
+    windows = {"categories": [{"components": [{"id": "c1"}, {"id": "c2"}]}]}
+    linux = {"categories": [{"components": [{"id": "c2"}, {"id": "c3"}]}]}
+    macos = {"categories": [{"components": [{"id": "c1"}, {"id": "c3"}]}]}
+
+    (cat_dir / "windows.json").write_text(json.dumps(windows), encoding="utf-8")
+    (cat_dir / "linux.json").write_text(json.dumps(linux), encoding="utf-8")
+    (cat_dir / "macos.json").write_text(json.dumps(macos), encoding="utf-8")
+
+    sys.argv = ["serve.py"]
+
+    serve._PLATFORMS_CACHE = None
+    res = serve.component_platforms()
+
+    if sorted(res.keys()) != ["c1", "c2", "c3"]:
+        print("keys wrong:", res, file=sys.stderr)
+        sys.exit(1)
+
+    if sorted(res["c1"]) != sorted(["macos", "windows"]):
+        print("c1 wrong:", res["c1"], file=sys.stderr)
+        sys.exit(1)
+
+    if sorted(res["c2"]) != sorted(["linux", "windows"]):
+        print("c2 wrong:", res["c2"], file=sys.stderr)
+        sys.exit(1)
+
+    if sorted(res["c3"]) != sorted(["linux", "macos"]):
+        print("c3 wrong:", res["c3"], file=sys.stderr)
+        sys.exit(1)
+PY
+    then pass; else fail "component_platforms returned incorrect mappings"; fi
+fi
+
 if it "Handy is offered on every platform"; then
     n="$(grep -l '"id": "handy"' catalog/*.json | wc -l)"
     assert_eq "$n" "3"
