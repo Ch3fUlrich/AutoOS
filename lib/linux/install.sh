@@ -1124,6 +1124,347 @@ print(json.dumps({
     return 0
 }
 
+setup_opencode_config() {
+    local config_dir="$SYS_HOME/.config/opencode"
+    local config_file="$config_dir/config.json"
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would configure OpenCode in $config_file"
+        return 0
+    fi
+
+    mkdir -p "$config_dir"
+    if [[ -f "$config_file" ]]; then
+        local ts
+        ts="$(date +%Y%m%d%H%M%S)"
+        cp "$config_file" "${config_file}.autoos-backup-${ts}"
+    fi
+
+    local secrets_file="$SYS_HOME/Documents/Code/agent-skills/secrets/api_keys.conf"
+    [[ -f "$secrets_file" ]] || secrets_file="$SYS_HOME/Documents/code/agent-skills/secrets/api_keys.conf"
+
+    python3 -c "
+import json, os, sys
+
+config_path = sys.argv[1]
+secrets_path = sys.argv[2]
+
+data = {}
+if os.path.isfile(config_path):
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+
+secrets = {}
+if os.path.isfile(secrets_path):
+    try:
+        with open(secrets_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    secrets[k.strip().lower()] = v.strip().strip('\"\'')
+    except Exception:
+        pass
+
+providers = data.get('provider', {})
+providers['ollama'] = {
+    'npm': '@ai-sdk/openai-compatible',
+    'name': 'Ollama (Local)',
+    'options': {
+        'baseURL': 'http://127.0.0.1:11434/v1'
+    },
+    'models': {
+        'qwen2.5-coder:7b': {'name': 'Qwen 2.5 Coder 7B'},
+        'qwen3:30b': {'name': 'Qwen 3 30B'}
+    }
+}
+
+muse_key = os.environ.get('MUSE_API_KEY') or secrets.get('muse')
+if muse_key:
+    providers['meta'] = {
+        'npm': '@ai-sdk/openai-compatible',
+        'name': 'Meta AI (Muse Spark)',
+        'options': {
+            'baseURL': 'https://api.meta.ai/v1',
+            'apiKey': muse_key
+        },
+        'models': {
+            'muse-spark-1.3-contributor': {
+                'name': 'Muse Spark 1.3 Contributor',
+                'reasoning': True,
+                'limit': {'context': 1048576, 'output': 131072},
+                'options': {'reasoningEffort': 'high'}
+            }
+        }
+    }
+
+deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
+if deepseek_key:
+    providers['deepseek'] = {
+        'npm': '@ai-sdk/openai',
+        'name': 'DeepSeek',
+        'options': {
+            'baseURL': 'https://api.deepseek.com',
+            'apiKey': deepseek_key
+        },
+        'models': {
+            'deepseek-chat': {
+                'name': 'DeepSeek V3',
+                'limit': {'context': 1048576, 'output': 65536}
+            },
+            'deepseek-reasoner': {
+                'name': 'DeepSeek R1',
+                'reasoning': True,
+                'limit': {'context': 1048576, 'output': 65536}
+            }
+        }
+    }
+
+openrouter_key = os.environ.get('OPENROUTER_API_KEY') or secrets.get('openrouter')
+if openrouter_key:
+    providers['openrouter'] = {
+        'npm': '@ai-sdk/openai-compatible',
+        'name': 'OpenRouter',
+        'options': {
+            'baseURL': 'https://openrouter.ai/api/v1',
+            'apiKey': openrouter_key
+        },
+        'models': {
+            'free': {'name': 'OpenRouter Free Auto-Router'},
+            'nvidia/nemotron-3-ultra-550b-a55b:free': {'name': 'Nemotron 3 Ultra (Free)', 'reasoning': True},
+            'poolside/laguna-s-2.1:free': {'name': 'Laguna S 2.1 (Free)'},
+            'cohere/north-mini-code:free': {'name': 'North Mini Code (Free)'},
+            'nvidia/nemotron-3.5-lightning:free': {'name': 'Nemotron 3.5 Lightning (Free)'},
+            'dots-studio/dots-3-note-preview:free': {'name': 'Dots3-Note Preview (Free)', 'reasoning': True},
+            'nex-agi/nex-n2.5-pro:free': {'name': 'Nex-N2.5-Pro (Free)'}
+        }
+    }
+
+data['provider'] = providers
+
+if not data.get('model'):
+    if muse_key:
+        data['model'] = 'meta/muse-spark-1.3-contributor'
+    else:
+        data['model'] = 'ollama/qwen2.5-coder:7b'
+
+mcps = data.get('mcp', {})
+mcps['serena'] = {
+    'type': 'local',
+    'command': ['uvx', '--from', 'serena-agent', 'serena', 'start-mcp-server', '--context', 'claude-code', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
+    'enabled': True
+}
+mcps['graphify'] = {
+    'type': 'local',
+    'command': ['uvx', '--from', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
+    'enabled': True
+}
+mcps['playwright'] = {
+    'type': 'local',
+    'command': ['npx', '-y', '@playwright/mcp@latest'],
+    'enabled': True
+}
+data['mcp'] = mcps
+
+tmp_file = config_path + '.tmp'
+with open(tmp_file, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2)
+os.replace(tmp_file, config_path)
+" "$config_file" "$secrets_file"
+
+    ui_ok "OpenCode configuration written to $config_file"
+    cp "$config_file" "$config_dir/opencode.json"
+}
+
+setup_openhands_config() {
+    local openhands_dir="$SYS_HOME/.openhands"
+    local settings_file="$openhands_dir/settings.json"
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would configure OpenHands in $openhands_dir"
+        return 0
+    fi
+
+    mkdir -p "$openhands_dir/profiles" "$openhands_dir/agent-profiles" "$openhands_dir/automation"
+
+    if [[ -f "$settings_file" ]]; then
+        local ts
+        ts="$(date +%Y%m%d-%H%M%S)"
+        cp "$settings_file" "${settings_file}.autoos-backup-${ts}"
+    fi
+
+    local code_root="$SYS_HOME/Documents/Code"
+    if [[ -d "$SYS_HOME/Documents/code" ]]; then
+        code_root="$SYS_HOME/Documents/code"
+    fi
+    local skills_source="$code_root/agent-skills/skills"
+    local skills_target="$openhands_dir/skills"
+    if [[ -d "$skills_source" && ! -e "$skills_target" ]]; then
+        ln -s "$skills_source" "$skills_target" 2>/dev/null || true
+        ui_ok "Linked agent-skills to OpenHands skills directory"
+    fi
+
+    local secrets_file="$code_root/agent-skills/secrets/api_keys.conf"
+
+    catalog_require_python || return 0
+
+    python3 - "$openhands_dir" "$secrets_file" <<'PY'
+import os, sys, json
+
+openhands_dir = sys.argv[1]
+secrets_file = sys.argv[2] if len(sys.argv) > 2 else ""
+
+secrets = {}
+if secrets_file and os.path.isfile(secrets_file):
+    try:
+        with open(secrets_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    secrets[k.strip().lower()] = v.strip().strip("\"'")
+    except Exception:
+        pass
+
+muse_key = os.environ.get("MUSE_API_KEY") or secrets.get("muse")
+deepseek_key = os.environ.get("DEEPSEEK_API_KEY") or secrets.get("deepseek")
+openrouter_key = os.environ.get("OPENROUTER_API_KEY") or secrets.get("openrouter")
+context7_key = os.environ.get("CONTEXT7_API_KEY") or secrets.get("context7")
+
+settings_file = os.path.join(openhands_dir, "settings.json")
+settings = {}
+if os.path.isfile(settings_file):
+    try:
+        with open(settings_file, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+    except Exception:
+        settings = {}
+
+settings.setdefault("schema_version", 2)
+agent_settings = settings.setdefault("agent_settings", {})
+agent_settings.setdefault("schema_version", 5)
+agent_settings.setdefault("agent_kind", "openhands")
+agent_settings.setdefault("agent", "CodeActAgent")
+
+llm = agent_settings.setdefault("llm", {})
+if muse_key:
+    llm["model"] = "openai/muse-spark-1.3-contributor"
+    llm["base_url"] = "https://api.meta.ai/v1"
+    llm["api_key"] = muse_key
+elif deepseek_key:
+    llm["model"] = "deepseek/deepseek-chat"
+    llm["base_url"] = "https://api.deepseek.com"
+    llm["api_key"] = deepseek_key
+elif openrouter_key:
+    llm["model"] = "openrouter/openrouter/free"
+    llm["base_url"] = "https://openrouter.ai/api/v1"
+    llm["api_key"] = openrouter_key
+else:
+    llm["model"] = "ollama/qwen2.5-coder:7b"
+    llm["base_url"] = "http://127.0.0.1:11434/v1"
+
+llm["max_input_tokens"] = 1048576
+llm["max_output_tokens"] = 65536
+llm["reasoning_effort"] = "high"
+llm["drop_params"] = True
+llm["modify_params"] = True
+
+agent_context = agent_settings.setdefault("agent_context", {})
+agent_context["load_user_skills"] = True
+
+mcp_cfg = agent_settings.setdefault("mcp_config", {})
+mcp_cfg["serena"] = {
+    "transport": "stdio",
+    "command": "uvx",
+    "args": ["--from", "serena-agent", "serena", "start-mcp-server", "--context", "claude-code", "--open-web-dashboard", "false", "--enable-gui-log-window", "false"],
+    "description": "Code navigation, symbol index, semantic editing",
+    "timeout": 120.0,
+    "enabled": True,
+}
+mcp_cfg["graphify"] = {
+    "transport": "stdio",
+    "command": "uvx",
+    "args": ["--from", "graphifyy[mcp]", "python", "-m", "graphify.serve", "graphify-out/graph.json"],
+    "description": "Codebase knowledge graph and dependency intelligence",
+    "timeout": 120.0,
+    "enabled": True,
+}
+mcp_cfg["omnigraph"] = {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modernrelay/omnigraph-mcp"],
+    "description": "Shared organizational graph and decision repository",
+    "timeout": 120.0,
+    "enabled": True,
+}
+ctx7_args = ["-y", "@upstash/context7-mcp"]
+if context7_key:
+    ctx7_args.extend(["--api-key", context7_key])
+mcp_cfg["context7"] = {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ctx7_args,
+    "description": "Upstash Context7 semantic search and retrieval",
+    "timeout": 120.0,
+    "enabled": True,
+}
+mcp_cfg["playwright"] = {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@playwright/mcp"],
+    "description": "Browser automation and end-to-end verification",
+    "timeout": 120.0,
+    "enabled": True,
+}
+mcp_cfg["cao-ops"] = {
+    "transport": "stdio",
+    "command": "bash",
+    "args": ["-c", "export PATH=\"$HOME/.local/bin:$PATH\"; export CAO_HOME_DIR=\"$HOME/.cao\"; cao-ops-mcp-server"],
+    "description": "CLI Agent Orchestrator 3-level coordination bridge",
+    "timeout": 120.0,
+    "enabled": True,
+}
+if "github" in mcp_cfg:
+    del mcp_cfg["github"]
+
+with open(settings_file, "w", encoding="utf-8") as f:
+    json.dump(settings, f, indent=2)
+
+profiles_dir = os.path.join(openhands_dir, "profiles")
+profiles = {
+    "deepseek-chat.json": {"model": "deepseek/deepseek-chat", "max_input_tokens": 1048576, "max_output_tokens": 65536, "api_key": deepseek_key},
+    "deepseek-reasoner.json": {"model": "deepseek/deepseek-reasoner", "max_input_tokens": 1048576, "max_output_tokens": 65536, "reasoning_effort": "high", "api_key": deepseek_key},
+    "muse-spark-1.3.json": {"model": "openai/muse-spark-1.3-contributor", "base_url": "https://api.meta.ai/v1", "max_input_tokens": 1048576, "max_output_tokens": 131072, "reasoning_effort": "high", "api_key": muse_key},
+    "muse-spark-1.3-contributor.json": {"model": "openai/muse-spark-1.3-contributor", "base_url": "https://api.meta.ai/v1", "max_input_tokens": 1048576, "max_output_tokens": 131072, "reasoning_effort": "high", "api_key": muse_key},
+    "openrouter-free.json": {"model": "openrouter/openrouter/free", "max_input_tokens": 1048576, "max_output_tokens": 32768, "api_key": openrouter_key},
+    "openrouter-nemotron-ultra.json": {"model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "max_input_tokens": 1048576, "max_output_tokens": 32768, "api_key": openrouter_key},
+    "openrouter-laguna.json": {"model": "openrouter/poolside/laguna-s-2.1:free", "max_input_tokens": 262144, "max_output_tokens": 32768, "api_key": openrouter_key},
+    "openrouter-dots3-note.json": {"model": "openrouter/dots-studio/dots-3-note-preview:free", "max_input_tokens": 1048576, "max_output_tokens": 32768, "api_key": openrouter_key},
+    "ollama-qwen2.5-coder.json": {"model": "ollama/qwen2.5-coder:7b", "base_url": "http://127.0.0.1:11434/v1", "max_input_tokens": 32768, "max_output_tokens": 8192}
+}
+for name, p_data in profiles.items():
+    with open(os.path.join(profiles_dir, name), "w", encoding="utf-8") as f:
+        json.dump(p_data, f, indent=2)
+
+agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
+acp_agents = {
+    "claude-sonnet.json": {"name": "Claude Sonnet ACP", "model": "anthropic/claude-3-7-sonnet-latest", "description": "Claude Sonnet coding agent"},
+    "claude-opus.json": {"name": "Claude Opus ACP", "model": "anthropic/claude-3-opus-latest", "description": "Claude Opus high-reasoning agent"},
+    "claude-haiku.json": {"name": "Claude Haiku ACP", "model": "anthropic/claude-3-5-haiku-latest", "description": "Claude Haiku fast execution agent"},
+    "agy-gemini-3.8-flash.json": {"name": "Gemini 3.8 Flash ACP", "model": "gemini/gemini-2.5-flash", "description": "Fast Google Antigravity Gemini agent"},
+    "agy-gemini-pro.json": {"name": "Gemini Pro ACP", "model": "gemini/gemini-2.5-pro", "description": "Deep reasoning Antigravity Gemini agent"}
+}
+for name, a_data in acp_agents.items():
+    with open(os.path.join(agent_profiles_dir, name), "w", encoding="utf-8") as f:
+        json.dump(a_data, f, indent=2)
+PY
+
+    ui_ok "OpenHands configuration and profiles written to $openhands_dir"
+}
+
 run_post_install() {
     local fn="$1"
     [[ -z "$fn" ]] && return 0

@@ -6,7 +6,8 @@
     "ai-coding": "Coding and AI tooling plus the shell, no GUI extras.",
     "light": "Minimal remote-access box - Claude Code, Tailscale and Herdr only.",
     "custom": "Start with nothing ticked and choose by hand.",
-    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
+    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing.",
+    "rescue": "Disaster-recovery toolkit and emergency AI recovery environment."
   },
   "categories": [
     {
@@ -184,7 +185,43 @@
             "ai-coding",
             "light"
           ],
+          "verify": "agy --version",
           "homepage": "https://antigravity.google/"
+        },
+        {
+          "id": "opencode",
+          "name": "OpenCode CLI",
+          "description": "AI coding agent with local-model support",
+          "provider": "npm",
+          "package": "opencode-ai",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "rescue"
+          ],
+          "verify": "opencode --version",
+          "postInstall": "setup_opencode_config",
+          "homepage": "https://opencode.ai/"
+        },
+        {
+          "id": "openhands",
+          "name": "OpenHands Agent Canvas",
+          "description": "Multi-agent orchestration canvas and UI for OpenHands",
+          "provider": "npm",
+          "package": "@openhands/agent-canvas",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "agent-canvas --version",
+          "postInstall": "setup_openhands_config",
+          "homepage": "https://github.com/All-Hands-AI/OpenHands"
         },
         {
           "id": "claude-desktop",
