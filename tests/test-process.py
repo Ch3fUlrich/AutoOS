@@ -34,6 +34,26 @@ class ProgressTests(unittest.TestCase):
         server.record_line('@@AUTOOS_PROGRESS {"done":4,"total":3}')
         self.assertEqual(server.RUN['done'], 1)
 
+    def test_record_line_edge_cases(self):
+        server = load('autoos_serve', 'lib/linux/serve.py')
+        server.RUN.update(done=0, total=3, current=None)
+        server.LOG.clear()
+
+        cases = [
+            '@@AUTOOS_PROGRESS {broken',               # json.JSONDecodeError (ValueError)
+            '@@AUTOOS_PROGRESS "string"',              # TypeError (when int() fails on dict lookup)
+            '@@AUTOOS_PROGRESS {"done": "x"}',         # KeyError (missing total) / ValueError (int("x"))
+            '@@AUTOOS_PROGRESS {"total": 3}',          # KeyError (missing done)
+            '@@AUTOOS_PROGRESS {"done": -1, "total": 3}',  # Out of bounds: done < 0
+            '@@AUTOOS_PROGRESS {"done": 4, "total": 3}',   # Out of bounds: done > total
+            '@@AUTOOS_PROGRESS {"done": 1}',           # KeyError (missing total)
+        ]
+
+        for case in cases:
+            server.record_line(case)
+            self.assertEqual(server.RUN['done'], 0)
+            self.assertEqual(len(server.LOG), 0)
+
     def test_unknown_percentage_stays_null(self):
         runner = load('autoos_process', 'lib/linux/process.py')
         output = io.StringIO()
