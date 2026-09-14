@@ -613,6 +613,75 @@ fi
 # ─── Browser UI payload ─────────────────────────────────────────────────────
 describe "browser UI"
 
+if it "build_state extracts state correctly"; then
+    failures="$(python3 - <<'PY'
+import sys, json, importlib.util
+
+sys.argv = ['serve.py', '.', '8777', '127.0.0.1', '0']
+sys.path.insert(0, './lib/linux')
+
+spec = importlib.util.spec_from_file_location("serve", "./lib/linux/serve.py")
+serve = importlib.util.module_from_spec(spec)
+sys.modules["serve"] = serve
+spec.loader.exec_module(serve)
+
+fake_info = {
+  "platform": "linux",
+  "system": {
+    "host": "testhost", "distribution": "Ubuntu", "architecture": "x64", "model": "PC",
+    "cpu": "Intel", "cores": "4", "memory": "8 GB", "free disk": "100 GB",
+    "user": "testuser", "display": "graphical", "environment": "unknown"
+  },
+  "suggested": "workstation",
+  "wsl": {"isWsl": False, "version": "", "distro": ""},
+  "installed": {"git": "installed"}
+}
+
+def mock_run(*args, **kwargs):
+    class MockOut:
+        returncode = 0
+        stdout = json.dumps(fake_info)
+        stderr = ""
+    return MockOut()
+
+orig_run = serve.subprocess.run
+serve.subprocess.run = mock_run
+
+bad = []
+try:
+    state = serve.build_state()
+    if state["platform"] != "Linux":
+        bad.append(f"expected Linux platform, got {state['platform']}")
+    if state["system"]["host"] != "testhost":
+        bad.append(f"host mismatch, got {state['system']['host']}")
+
+    def mock_run_error(*args, **kwargs):
+        class MockOut:
+            returncode = 1
+            stdout = ""
+            stderr = "probe script failed"
+        return MockOut()
+
+    serve.subprocess.run = mock_run_error
+    try:
+        serve.build_state()
+        bad.append("expected RuntimeError")
+    except RuntimeError as e:
+        if "probe script failed" not in str(e):
+            bad.append(f"expected 'probe script failed' in RuntimeError, got {e}")
+except Exception as e:
+    import traceback
+    bad.append(f"Exception: {traceback.format_exc()}")
+finally:
+    serve.subprocess.run = orig_run
+
+if bad:
+    print("\n".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
 if it "classify handles edge cases correctly"; then
     failures="$(python3 - <<'PY'
 import sys
