@@ -1127,6 +1127,11 @@ function Set-AutoOSOpenCodeConfig {
         }
     }
 
+    # OpenRouter free-tier catalogue (September 2026, verified against
+    # https://openrouter.ai/api/v1/models). `limit` carries the free-variant
+    # context window; `cost` is per 1M tokens from the paid counterpart, so
+    # chat spend stays estimable once a free cap is exhausted. Free variants
+    # themselves bill $0.
     $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
     if ($openrouterKey) {
         $providers['openrouter'] = [ordered]@{
@@ -1137,13 +1142,90 @@ function Set-AutoOSOpenCodeConfig {
                 apiKey  = $openrouterKey
             }
             models  = [ordered]@{
-                'free'                                   = [ordered]@{ name = 'OpenRouter Free Auto-Router' }
-                'nvidia/nemotron-3-ultra-550b-a55b:free' = [ordered]@{ name = 'Nemotron 3 Ultra (Free)'; reasoning = $true }
-                'poolside/laguna-s-2.1:free'             = [ordered]@{ name = 'Laguna S 2.1 (Free)' }
-                'cohere/north-mini-code:free'            = [ordered]@{ name = 'North Mini Code (Free)' }
-                'nvidia/nemotron-3.5-lightning:free'     = [ordered]@{ name = 'Nemotron 3.5 Lightning (Free)' }
-                'dots-studio/dots-3-note-preview:free'   = [ordered]@{ name = 'Dots3-Note Preview (Free)'; reasoning = $true }
-                'nex-agi/nex-n2.5-pro:free'              = [ordered]@{ name = 'Nex-N2.5-Pro (Free)' }
+                'free' = [ordered]@{
+                    name  = 'OpenRouter Free Auto-Router'
+                    limit = [ordered]@{ context = 200000; output = 32768 }
+                    cost  = [ordered]@{ input = 0; output = 0 }
+                }
+                'nvidia/nemotron-3-ultra-550b-a55b:free' = [ordered]@{
+                    name      = 'Nemotron 3 Ultra (Free)'
+                    reasoning = $true
+                    limit     = [ordered]@{ context = 1000000; output = 32768 }
+                    cost      = [ordered]@{ input = 0.6; output = 2.4; cache_read = 0.12 }
+                }
+                'nvidia/nemotron-3-super-120b-a12b:free' = [ordered]@{
+                    name      = 'Nemotron 3 Super (Free)'
+                    reasoning = $true
+                    limit     = [ordered]@{ context = 262144; output = 32768 }
+                    cost      = [ordered]@{ input = 0.08; output = 0.45 }
+                }
+                'nvidia/nemotron-3.5-lightning:free' = [ordered]@{
+                    name  = 'Nemotron 3.5 Lightning (Free)'
+                    limit = [ordered]@{ context = 1000000; output = 32768 }
+                    cost  = [ordered]@{ input = 0.08; output = 0.2; cache_read = 0.04 }
+                }
+                'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free' = [ordered]@{
+                    name      = 'Nemotron 3 Nano Omni (Free)'
+                    reasoning = $true
+                    limit     = [ordered]@{ context = 256000; output = 32768 }
+                    cost      = [ordered]@{ input = 0; output = 0 }
+                }
+                'poolside/laguna-s-2.1:free' = [ordered]@{
+                    name  = 'Laguna S 2.1 (Free)'
+                    limit = [ordered]@{ context = 262144; output = 32768 }
+                    cost  = [ordered]@{ input = 0.09; output = 0.18; cache_read = 0.009 }
+                }
+                'poolside/laguna-xs-2.1:free' = [ordered]@{
+                    name  = 'Laguna XS 2.1 (Free)'
+                    limit = [ordered]@{ context = 262144; output = 32768 }
+                    cost  = [ordered]@{ input = 0.06; output = 0.12; cache_read = 0.03 }
+                }
+                'cohere/north-mini-code:free' = [ordered]@{
+                    name  = 'North Mini Code (Free)'
+                    limit = [ordered]@{ context = 256000; output = 32768 }
+                    cost  = [ordered]@{ input = 0; output = 0 }
+                }
+                'nex-agi/nex-n2.5-pro:free' = [ordered]@{
+                    name  = 'Nex-N2.5-Pro (Free)'
+                    limit = [ordered]@{ context = 262144; output = 32768 }
+                    cost  = [ordered]@{ input = 0; output = 0 }
+                }
+                'nex-agi/nex-n2.5-mini:free' = [ordered]@{
+                    name  = 'Nex-N2.5-Mini (Free)'
+                    limit = [ordered]@{ context = 262144; output = 32768 }
+                    cost  = [ordered]@{ input = 0; output = 0 }
+                }
+                'thinkingmachines/inkling:free' = [ordered]@{
+                    name  = 'Inkling (Free)'
+                    limit = [ordered]@{ context = 1048576; output = 32768 }
+                    cost  = [ordered]@{ input = 1.0; output = 4.05; cache_read = 0.17 }
+                }
+                'thinkingmachines/inkling-small:free' = [ordered]@{
+                    name  = 'Inkling Small (Free)'
+                    limit = [ordered]@{ context = 1048576; output = 32768 }
+                    cost  = [ordered]@{ input = 0.45; output = 1.2; cache_read = 0.1 }
+                }
+                'dots-studio/dots-3-note-preview:free' = [ordered]@{
+                    name      = 'Dots3-Note Preview (Free)'
+                    reasoning = $true
+                    limit     = [ordered]@{ context = 512000; output = 32768 }
+                    cost      = [ordered]@{ input = 0; output = 0 }
+                }
+                'inclusionai/ling-3.0-flash-fin:free' = [ordered]@{
+                    name  = 'Ling 3.0 Flash Fin (Free)'
+                    limit = [ordered]@{ context = 262144; output = 32768 }
+                    cost  = [ordered]@{ input = 0.06; output = 0.18; cache_read = 0.012 }
+                }
+                'inclusionai/ling-3.0-flash-sante:free' = [ordered]@{
+                    name  = 'Ling 3.0 Flash Sante (Free)'
+                    limit = [ordered]@{ context = 262144; output = 32768 }
+                    cost  = [ordered]@{ input = 0; output = 0 }
+                }
+                'inclusionai/ling-3.0-flash-vl:free' = [ordered]@{
+                    name  = 'Ling 3.0 Flash VL (Free)'
+                    limit = [ordered]@{ context = 262144; output = 32768 }
+                    cost  = [ordered]@{ input = 0.06; output = 0.18; cache_read = 0.012 }
+                }
             }
         }
     }
@@ -1388,16 +1470,32 @@ with open(settings_file, 'w', encoding='utf-8') as f:
     json.dump(settings, f, indent=2)
 
 profiles_dir = os.path.join(openhands_dir, 'profiles')
+# Prices are USD per token (OpenRouter, September 2026). Free variants bill
+# $0 while under the daily cap; the paid-counterpart rates apply past it.
+# cost_per_token = input + output lets a chat client estimate spend from
+# prompt/completion token counts: spend = in_tokens*in_price + out_tokens*out_price.
 profiles = {
-    'deepseek-chat.json': {'model': 'deepseek/deepseek-chat', 'max_input_tokens': 1048576, 'max_output_tokens': 65536, 'api_key': deepseek_key},
-    'deepseek-reasoner.json': {'model': 'deepseek/deepseek-reasoner', 'max_input_tokens': 1048576, 'max_output_tokens': 65536, 'reasoning_effort': 'high', 'api_key': deepseek_key},
-    'muse-spark-1.3.json': {'model': 'openai/muse-spark-1.3-contributor', 'base_url': 'https://api.meta.ai/v1', 'max_input_tokens': 1048576, 'max_output_tokens': 131072, 'reasoning_effort': 'high', 'api_key': muse_key},
-    'muse-spark-1.3-contributor.json': {'model': 'openai/muse-spark-1.3-contributor', 'base_url': 'https://api.meta.ai/v1', 'max_input_tokens': 1048576, 'max_output_tokens': 131072, 'reasoning_effort': 'high', 'api_key': muse_key},
-    'openrouter-free.json': {'model': 'openrouter/openrouter/free', 'max_input_tokens': 1048576, 'max_output_tokens': 32768, 'api_key': openrouter_key},
-    'openrouter-nemotron-ultra.json': {'model': 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', 'max_input_tokens': 1048576, 'max_output_tokens': 32768, 'api_key': openrouter_key},
-    'openrouter-laguna.json': {'model': 'openrouter/poolside/laguna-s-2.1:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'api_key': openrouter_key},
-    'openrouter-dots3-note.json': {'model': 'openrouter/dots-studio/dots-3-note-preview:free', 'max_input_tokens': 1048576, 'max_output_tokens': 32768, 'api_key': openrouter_key},
-    'ollama-qwen2.5-coder.json': {'model': 'ollama/qwen2.5-coder:7b', 'base_url': 'http://127.0.0.1:11434/v1', 'max_input_tokens': 32768, 'max_output_tokens': 8192}
+    'deepseek-chat.json': {'model': 'deepseek/deepseek-chat', 'max_input_tokens': 131072, 'max_output_tokens': 8192, 'input_cost_per_token': 2.8e-07, 'output_cost_per_token': 4.2e-07, 'api_key': deepseek_key},
+    'deepseek-reasoner.json': {'model': 'deepseek/deepseek-reasoner', 'max_input_tokens': 131072, 'max_output_tokens': 65536, 'reasoning_effort': 'high', 'input_cost_per_token': 2.8e-07, 'output_cost_per_token': 4.2e-07, 'api_key': deepseek_key},
+    'muse-spark-1.3.json': {'model': 'openai/muse-spark-1.3-contributor', 'base_url': 'https://api.meta.ai/v1', 'max_input_tokens': 1048576, 'max_output_tokens': 131072, 'reasoning_effort': 'high', 'input_cost_per_token': 1e-07, 'output_cost_per_token': 2e-07, 'api_key': muse_key},
+    'muse-spark-1.3-contributor.json': {'model': 'openai/muse-spark-1.3-contributor', 'base_url': 'https://api.meta.ai/v1', 'max_input_tokens': 1048576, 'max_output_tokens': 131072, 'reasoning_effort': 'high', 'input_cost_per_token': 1e-07, 'output_cost_per_token': 2e-07, 'api_key': muse_key},
+    'openrouter-free.json': {'model': 'openrouter/openrouter/free', 'max_input_tokens': 200000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
+    'openrouter-nemotron-ultra.json': {'model': 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', 'max_input_tokens': 1000000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 6e-07, 'paid_output_cost_per_token': 2.4e-06, 'api_key': openrouter_key},
+    'openrouter-nemotron-super.json': {'model': 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 8e-08, 'paid_output_cost_per_token': 4.5e-07, 'api_key': openrouter_key},
+    'openrouter-nemotron-lightning.json': {'model': 'openrouter/nvidia/nemotron-3.5-lightning:free', 'max_input_tokens': 1000000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 8e-08, 'paid_output_cost_per_token': 2e-07, 'api_key': openrouter_key},
+    'openrouter-nemotron-nano-omni.json': {'model': 'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', 'max_input_tokens': 256000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
+    'openrouter-laguna.json': {'model': 'openrouter/poolside/laguna-s-2.1:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 9e-08, 'paid_output_cost_per_token': 1.8e-07, 'api_key': openrouter_key},
+    'openrouter-laguna-xs.json': {'model': 'openrouter/poolside/laguna-xs-2.1:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 6e-08, 'paid_output_cost_per_token': 1.2e-07, 'api_key': openrouter_key},
+    'openrouter-north-mini-code.json': {'model': 'openrouter/cohere/north-mini-code:free', 'max_input_tokens': 256000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
+    'openrouter-nex-pro.json': {'model': 'openrouter/nex-agi/nex-n2.5-pro:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
+    'openrouter-nex-mini.json': {'model': 'openrouter/nex-agi/nex-n2.5-mini:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
+    'openrouter-inkling.json': {'model': 'openrouter/thinkingmachines/inkling:free', 'max_input_tokens': 1048576, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 1e-06, 'paid_output_cost_per_token': 4.05e-06, 'api_key': openrouter_key},
+    'openrouter-inkling-small.json': {'model': 'openrouter/thinkingmachines/inkling-small:free', 'max_input_tokens': 1048576, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 4.5e-07, 'paid_output_cost_per_token': 1.2e-06, 'api_key': openrouter_key},
+    'openrouter-dots3-note.json': {'model': 'openrouter/dots-studio/dots-3-note-preview:free', 'max_input_tokens': 512000, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
+    'openrouter-ling-fin.json': {'model': 'openrouter/inclusionai/ling-3.0-flash-fin:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 6e-08, 'paid_output_cost_per_token': 1.8e-07, 'api_key': openrouter_key},
+    'openrouter-ling-sante.json': {'model': 'openrouter/inclusionai/ling-3.0-flash-sante:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'api_key': openrouter_key},
+    'openrouter-ling-vl.json': {'model': 'openrouter/inclusionai/ling-3.0-flash-vl:free', 'max_input_tokens': 262144, 'max_output_tokens': 32768, 'input_cost_per_token': 0, 'output_cost_per_token': 0, 'paid_input_cost_per_token': 6e-08, 'paid_output_cost_per_token': 1.8e-07, 'api_key': openrouter_key},
+    'ollama-qwen2.5-coder.json': {'model': 'ollama/qwen2.5-coder:7b', 'base_url': 'http://127.0.0.1:11434/v1', 'max_input_tokens': 32768, 'max_output_tokens': 8192, 'input_cost_per_token': 0, 'output_cost_per_token': 0}
 }
 for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), 'w', encoding='utf-8') as f:
