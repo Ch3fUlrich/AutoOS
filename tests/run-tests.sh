@@ -1456,6 +1456,51 @@ fi
 # ─── Documentation ──────────────────────────────────────────────────────────
 describe "documentation"
 
+if it "check-links identifies broken links correctly and ignores valid ones"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/docs"
+    touch "$tmp/README.md" "$tmp/docs/setup.md"
+    cat > "$tmp/docs/index.md" <<'EOF'
+[Valid local](../README.md)
+[Valid peer](setup.md)
+[Valid peer with fragment](setup.md#section)
+[External](https://example.com/broken)
+[Fragment only](#local-section)
+[Mailto](mailto:test@example.com)
+[Broken local](../missing.md)
+[Broken peer](missing.md)
+EOF
+
+    out="$(python3 - "$tmp" <<'PY'
+import sys
+import os
+import importlib.util
+
+tmp_dir = sys.argv[1]
+sys.argv = ["check-links.py"]
+sys.path.insert(0, ".")
+spec = importlib.util.spec_from_file_location("check_links", "tests/check-links.py")
+check_links = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(check_links)
+
+problems = check_links.broken_links(tmp_dir, ["docs/index.md"])
+for p in problems:
+    print(p)
+PY
+)"
+
+    rm -rf "$tmp"
+
+    expected="docs/index.md: [Broken local] -> ../missing.md
+docs/index.md: [Broken peer] -> missing.md"
+
+    if [ "$out" = "$expected" ]; then
+        pass
+    else
+        fail "expected specific broken links, got: $out"
+    fi
+fi
+
 if it "every relative link in the docs resolves"; then
     out="$(python3 tests/check-links.py . 2>&1)"; rc=$?
     if [[ $rc -eq 0 ]]; then pass; else fail "$out"; fi
