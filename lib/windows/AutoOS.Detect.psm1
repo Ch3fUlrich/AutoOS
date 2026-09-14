@@ -43,20 +43,21 @@ function Get-AutoOSShimDirectory {
     $home_ = $env:USERPROFILE
     @(
         # Scoop: user-scope by default, global when SCOOP_GLOBAL is set.
-        (Join-Path $home_ 'scoop\shims'),
+        $(if ($home_) { Join-Path $home_ 'scoop\shims' }),
         $(if ($env:SCOOP) { Join-Path $env:SCOOP 'shims' }),
         $(if ($env:SCOOP_GLOBAL) { Join-Path $env:SCOOP_GLOBAL 'shims' }),
-        (Join-Path $env:ProgramData 'scoop\shims'),
+        $(if ($env:ProgramData) { Join-Path $env:ProgramData 'scoop\shims' }),
         # Chocolatey.
-        (Join-Path $env:ProgramData 'chocolatey\bin'),
+        $(if ($env:ProgramData) { Join-Path $env:ProgramData 'chocolatey\bin' }),
+        "C:\ProgramData\chocolatey\bin",
         # winget's own shim directory for portable packages.
-        (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'),
-        (Join-Path $env:ProgramFiles 'WinGet\Links'),
+        $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links' }),
+        $(if ($env:ProgramFiles) { Join-Path $env:ProgramFiles 'WinGet\Links' }),
         # npm -g, pipx/uv and cargo all install here and all rely on PATH.
-        (Join-Path $env:APPDATA 'npm'),
-        (Join-Path $home_ '.local\bin'),
-        (Join-Path $home_ '.cargo\bin'),
-        (Join-Path $home_ 'bin')
+        $(if ($env:APPDATA) { Join-Path $env:APPDATA 'npm' }),
+        $(if ($home_) { Join-Path $home_ '.local\bin' }),
+        $(if ($home_) { Join-Path $home_ '.cargo\bin' }),
+        $(if ($home_) { Join-Path $home_ 'bin' })
     ) | Where-Object { $_ }
 }
 
