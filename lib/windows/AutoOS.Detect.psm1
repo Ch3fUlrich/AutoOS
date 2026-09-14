@@ -43,19 +43,19 @@ function Get-AutoOSShimDirectory {
     $home_ = $env:USERPROFILE
     @(
         # Scoop: user-scope by default, global when SCOOP_GLOBAL is set.
-        (Join-Path $home_ 'scoop\shims'),
-        $(if ($env:SCOOP) { Join-Path $env:SCOOP 'shims' }),
-        $(if ($env:SCOOP_GLOBAL) { Join-Path $env:SCOOP_GLOBAL 'shims' }),
-        (Join-Path $env:ProgramData 'scoop\shims'),
+        (Join-Path $home_ 'scoop\shims')
+        if ($env:SCOOP) { Join-Path $env:SCOOP 'shims' }
+        if ($env:SCOOP_GLOBAL) { Join-Path $env:SCOOP_GLOBAL 'shims' }
+        (Join-Path $env:ProgramData 'scoop\shims')
         # Chocolatey.
-        (Join-Path $env:ProgramData 'chocolatey\bin'),
+        (Join-Path $env:ProgramData 'chocolatey\bin')
         # winget's own shim directory for portable packages.
-        (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'),
-        (Join-Path $env:ProgramFiles 'WinGet\Links'),
+        (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links')
+        (Join-Path $env:ProgramFiles 'WinGet\Links')
         # npm -g, pipx/uv and cargo all install here and all rely on PATH.
-        (Join-Path $env:APPDATA 'npm'),
-        (Join-Path $home_ '.local\bin'),
-        (Join-Path $home_ '.cargo\bin'),
+        (Join-Path $env:APPDATA 'npm')
+        (Join-Path $home_ '.local\bin')
+        (Join-Path $home_ '.cargo\bin')
         (Join-Path $home_ 'bin')
     ) | Where-Object { $_ }
 }
@@ -122,7 +122,7 @@ function Get-AutoOSWingetPackageProcess {
         $process = [Diagnostics.Process]::Start($psi)
         # Close stdin so a prompt that slipped past --disable-interactivity reads
         # EOF and gives up, instead of sitting there until the timeout.
-        try { $process.StandardInput.Close() } catch { }
+        try { $process.StandardInput.Close() } catch { $null = $_ }
         $process
     } catch { $null }
 }
@@ -144,7 +144,7 @@ function Get-AutoOSWingetPackageResult {
             $Process.Kill()
         }
     } catch { $packages = @() }
-    finally { try { $Process.Dispose() } catch { } }
+    finally { try { $Process.Dispose() } catch { $null = $_ } }
     $packages
 }
 
@@ -237,7 +237,14 @@ function Get-AutoOSInstalledStatus {
     if ($Component.Provider -eq 'script' -and $Component.Package -eq 'claude-autostart') {
         # Get-ScheduledTask is a CIM call; cache it like every other probe so that
         # rendering the catalog does not pay for one per row.
-        $status = if (Get-ScheduledTask -TaskName 'AutoOS-Claude-Restore' -ErrorAction SilentlyContinue) { 'installed' } else { 'not-detected' }
+        $status = 'not-detected'
+        $task = Get-ScheduledTask -TaskName 'AutoOS-Claude-Snapshot' -ErrorAction SilentlyContinue
+        if ($task) {
+            $act = @($task.Actions)[0]
+            if ($act -and $act.Execute -eq 'wscript.exe' -and (Get-ScheduledTask -TaskName 'AutoOS-Claude-Restore' -ErrorAction SilentlyContinue)) {
+                $status = 'installed'
+            }
+        }
         if (-not $Inventory) { $script:InstalledCache[$key] = $status }
         return $status
     }

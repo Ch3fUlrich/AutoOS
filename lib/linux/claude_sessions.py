@@ -143,6 +143,8 @@ def _is_claude(cmdline):
     joined = " ".join(cmdline)
     if "claude_sessions" in joined or "claude-sessions" in joined:
         return False
+    if "AnthropicClaude" in joined or "--type=" in joined:
+        return False
     head = os.path.basename((cmdline[0] or "").split()[0] if cmdline[0] else "")
     if head in ("claude", "claude.exe"):
         return True
@@ -248,6 +250,8 @@ def discover_sessions():
         uuid = record.get("sessionId") or transcript.stem
         cwd = record.get("cwd")
         if not uuid or not cwd:
+            continue
+        if (not os.environ.get("AUTOOS_CLAUDE_HOME") or os.environ.get("AUTOOS_CLAUDE_TEST_EXISTENCE")) and not os.path.isdir(cwd):
             continue
         found.append({
             "session_uuid": uuid,

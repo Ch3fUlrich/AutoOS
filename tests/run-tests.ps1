@@ -1115,6 +1115,31 @@ Test-Case 'a session with no recorded id is skipped with a reason, not started' 
     finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case 'discovery skips sessions whose working directory does not exist' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $real = Join-Path $tmp 'real'
+    [void](New-Item -ItemType Directory -Path $real -Force)
+    $ghost = Join-Path $tmp 'ghost'
+    try {
+        Use-ClaudeFixture -Sessions @(
+            @{ Cwd = $real;  Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 2 }
+            @{ Cwd = $ghost; Uuid = '22222222-2222-2222-2222-222222222222'; AgeMinutes = 2 }
+        ) -Body {
+            $env:AUTOOS_CLAUDE_TEST_EXISTENCE = '1'
+            try {
+                $found = @(Find-AutoOSClaudeSessions)
+                Assert-Equal $found.Count 1
+                Assert-Equal $found[0].session_uuid '11111111-1111-1111-1111-111111111111'
+            } finally {
+                Remove-Item Env:\AUTOOS_CLAUDE_TEST_EXISTENCE -ErrorAction SilentlyContinue
+            }
+        }
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'the defaults come from the shipped example config, not a second copy' {
     # Three homes for these values (here, claude_sessions.py, the example file) is
     # how the web UI ended up writing keys nothing read.
