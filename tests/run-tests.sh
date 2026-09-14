@@ -382,6 +382,38 @@ if it "dry run never writes"; then
     if [[ -f "$tmp" ]]; then rm -f "$tmp"; fail "dry run created the file"; else pass; fi
 fi
 
+if it "append_line_once joins multi-word lines and adds the AutoOS header"; then
+    tmp="$(mktemp)"; rm -f "$tmp"
+    AUTOOS_DRY_RUN=0
+    append_line_once "$tmp" "M4" "export" "FOO=1" "# M4" >/dev/null
+    out="$(cat "$tmp")"
+    rm -f "$tmp" "$tmp".autoos-backup-* 2>/dev/null
+    if [[ "$out" == $'\n# added by AutoOS\nexport FOO=1 # M4' ]]; then pass
+    else fail "unexpected content: $(printf '%q' "$out")"; fi
+fi
+
+if it "append_line_once prevents duplicate lines on multiple calls"; then
+    tmp="$(mktemp)"; rm -f "$tmp"
+    AUTOOS_DRY_RUN=0
+    append_line_once "$tmp" "M_DUP" "line 1 # M_DUP" >/dev/null
+    append_line_once "$tmp" "M_DUP" "line 1 # M_DUP" >/dev/null
+    append_line_once "$tmp" "M_DUP" "line 1 # M_DUP" >/dev/null
+    out="$(cat "$tmp")"
+    rm -f "$tmp" "$tmp".autoos-backup-* 2>/dev/null
+    if [[ "$out" == $'\n# added by AutoOS\nline 1 # M_DUP' ]]; then pass
+    else fail "duplicate lines found: $(printf '%q' "$out")"; fi
+fi
+
+if it "append_line_once creates missing parent directories"; then
+    tmp="$(mktemp -d)"
+    target="$tmp/missing/dir/file"
+    AUTOOS_DRY_RUN=0
+    append_line_once "$target" "M5" "line  # M5" >/dev/null
+    if [[ -f "$target" ]]; then pass
+    else fail "parent directories or file were not created"; fi
+    rm -rf "$tmp"
+fi
+
 # ─── End-to-end plan stability ──────────────────────────────────────────────
 describe "end-to-end (dry run only)"
 
