@@ -380,38 +380,47 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed(parse_qs(u.query)):
             return self._json(403, {"error": "bad or missing token"})
         if u.path == "/api/claude/snapshot":
-            out = self._claude_engine("snapshot")
-            if out is None:
-                return self._json(500, {"error": "could not run the session snapshot"})
-            payload = self._claude_state()
-            payload["ok"] = True
-            return self._json(200, payload)
+            return self._post_claude_snapshot()
         if u.path == "/api/config":
-            length = int(self.headers.get("Content-Length") or 0)
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}")
-                if not isinstance(body, dict):
-                    return self._json(400, {"error": "payload must be a JSON object"})
-                cfg_file = ROOT / "autoos.config.json"
-                tmp_file = ROOT / "autoos.config.json.tmp"
-                original = cfg_file.read_text(encoding="utf-8-sig") if cfg_file.exists() else None
-                merged = json.loads(original) if original is not None else {}
-                if not isinstance(merged, dict):
-                    raise ValueError("Existing configuration must be an object")
-                for key, value in body.items():
-                    if key == "answers" and isinstance(value, dict) and isinstance(merged.get(key), dict):
-                        merged[key].update(value)
-                    else:
-                        merged[key] = value
-                if original is not None:
-                    cfg_file.with_name(cfg_file.name + f".autoos-backup-{time.time_ns()}").write_text(original, encoding="utf-8")
-                tmp_file.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
-                tmp_file.replace(cfg_file)
-                return self._json(200, {"ok": True, "saved": str(cfg_file)})
-            except Exception as exc:
-                return self._json(500, {"error": f"failed to save config: {exc}"})
-        if u.path != "/api/install":
-            return self._json(404, {"error": "not found"})
+            return self._post_config()
+        if u.path == "/api/install":
+            return self._post_install()
+        return self._json(404, {"error": "not found"})
+
+    def _post_claude_snapshot(self):
+        out = self._claude_engine("snapshot")
+        if out is None:
+            return self._json(500, {"error": "could not run the session snapshot"})
+        payload = self._claude_state()
+        payload["ok"] = True
+        return self._json(200, payload)
+
+    def _post_config(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                return self._json(400, {"error": "payload must be a JSON object"})
+            cfg_file = ROOT / "autoos.config.json"
+            tmp_file = ROOT / "autoos.config.json.tmp"
+            original = cfg_file.read_text(encoding="utf-8-sig") if cfg_file.exists() else None
+            merged = json.loads(original) if original is not None else {}
+            if not isinstance(merged, dict):
+                raise ValueError("Existing configuration must be an object")
+            for key, value in body.items():
+                if key == "answers" and isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key].update(value)
+                else:
+                    merged[key] = value
+            if original is not None:
+                cfg_file.with_name(cfg_file.name + f".autoos-backup-{time.time_ns()}").write_text(original, encoding="utf-8")
+            tmp_file.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+            tmp_file.replace(cfg_file)
+            return self._json(200, {"ok": True, "saved": str(cfg_file)})
+        except Exception as exc:
+            return self._json(500, {"error": f"failed to save config: {exc}"})
+
+    def _post_install(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
         ids = [str(i) for i in body.get("ids", []) if i]
