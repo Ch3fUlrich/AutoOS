@@ -299,14 +299,34 @@ function Invoke-AutoOSScriptProvider {
     }
 }
 
+function Invoke-AutoOSAgyDownloadAndExtract {
+    param([string]$InstallDir, [string]$ZipPath)
+    $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    $platform = if ($arch -eq 'ARM64') { 'windows_arm64' } else { 'windows_amd64' }
+
+    $manifestUrl = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/$platform.json"
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $manifest = Invoke-RestMethod -Uri $manifestUrl
+
+    Invoke-WebRequest -Uri $manifest.url -OutFile $ZipPath -UseBasicParsing
+    Expand-Archive -LiteralPath $ZipPath -DestinationPath $InstallDir -Force
+    Remove-Item -LiteralPath $ZipPath -Force
+}
+
 function Install-AutoOSAgy {
+    $installDir = "$env:LOCALAPPDATA\Programs\Agency"
+    $zipPath = "$env:TEMP\agy.zip"
+
     if ($script:DryRun) {
-        Write-AutoOSLine "would install Antigravity CLI via antigravity.google/cli/install.ps1" -Level muted
+        Write-AutoOSLine "would download and extract Agency to $installDir" -Level muted
         return @{ ExitCode = 0; Success = $true }
     }
     try {
-        & powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://antigravity.google/cli/install.ps1 | iex"
-        return @{ ExitCode = $LASTEXITCODE; Success = ($LASTEXITCODE -eq 0) }
+        if (-not (Test-Path $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
+
+        Invoke-AutoOSAgyDownloadAndExtract -InstallDir $installDir -ZipPath $zipPath
+
+        return @{ ExitCode = 0; Success = $true }
     } catch {
         return @{ ExitCode = 1; Output = $_.Exception.Message; Success = $false }
     }
@@ -314,7 +334,7 @@ function Install-AutoOSAgy {
 
 # ─── Post-install steps ─────────────────────────────────────────────────────
 function Add-AutoOSAgyToPath {
-    Add-AutoOSPathEntry -Directory @(Join-Path $env:LOCALAPPDATA 'agy\bin') | Out-Null
+    Add-AutoOSPathEntry -Directory @(Join-Path $env:LOCALAPPDATA 'Programs\Agency') | Out-Null
 }
 
 function Add-AutoOSGitToPath {
