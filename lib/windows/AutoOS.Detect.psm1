@@ -122,7 +122,7 @@ function Get-AutoOSWingetPackageProcess {
         $process = [Diagnostics.Process]::Start($psi)
         # Close stdin so a prompt that slipped past --disable-interactivity reads
         # EOF and gives up, instead of sitting there until the timeout.
-        try { $process.StandardInput.Close() } catch { }
+        try { $process.StandardInput.Close() } catch { $null = $_ }
         $process
     } catch { $null }
 }
@@ -144,7 +144,7 @@ function Get-AutoOSWingetPackageResult {
             $Process.Kill()
         }
     } catch { $packages = @() }
-    finally { try { $Process.Dispose() } catch { } }
+    finally { try { $Process.Dispose() } catch { $null = $_ } }
     $packages
 }
 

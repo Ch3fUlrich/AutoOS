@@ -43,7 +43,7 @@ function Get-AutoOSClaudeDefaults {
                 foreach ($p in $block.PSObject.Properties) { $table[$p.Name] = $p.Value }
                 if ($table.Count -gt 0) { return $table }
             }
-        } catch { }
+        } catch { $null = $_ }
     }
     @{
         enabled = $true; snapshot_interval_mins = 5; liveness_window_mins = 240
@@ -272,7 +272,7 @@ function Get-AutoOSClaudeState {
                     sessions        = @($doc.sessions)
                 }
             }
-        } catch { }
+        } catch { $null = $_ }
     }
     [pscustomobject]@{ version = $script:StateVersion; captured_at = 0; captured_at_iso = $null; sessions = @() }
 }
