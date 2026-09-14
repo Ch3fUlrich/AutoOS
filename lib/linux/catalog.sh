@@ -16,6 +16,8 @@
 CATALOG_PATH=""
 declare -a CAT_ID CAT_NAME CAT_DESC CAT_PROVIDER CAT_PACKAGE CAT_REQUIRES
 declare -a CAT_PROFILES CAT_POST CAT_PROMPT CAT_NOTES CAT_GROUP CAT_VERIFY CAT_CASK
+declare -A CAT_PROMPT_Q CAT_PROMPT_D CAT_PROMPT_H CAT_PROFILE_DESC
+declare -a CAT_PROFILE_KEYS
 
 catalog_require_python() {
     if ! has_cmd python3; then
@@ -98,16 +100,38 @@ catalog_load() {
     CAT_ID=(); CAT_NAME=(); CAT_DESC=(); CAT_PROVIDER=(); CAT_PACKAGE=()
     CAT_REQUIRES=(); CAT_PROFILES=(); CAT_POST=(); CAT_PROMPT=(); CAT_NOTES=(); CAT_GROUP=()
     CAT_VERIFY=(); CAT_CASK=(); CAT_HOMEPAGE=(); CAT_INSTALLED=()
+    CAT_PROMPT_Q=(); CAT_PROMPT_D=(); CAT_PROMPT_H=()
+    CAT_PROFILE_DESC=(); CAT_PROFILE_KEYS=()
 
     # Delimiter is US (0x1f), NOT tab: tab is an IFS *whitespace* character, so
     # bash collapses runs of them and every empty field shifts the columns left.
-    while IFS=$'\x1f' read -r id name desc provider package requires profiles post prompt notes group verify cask homepage; do
-        [[ -z "$id" ]] && continue
-        CAT_ID+=("$id");           CAT_NAME+=("$name");     CAT_DESC+=("$desc")
-        CAT_PROVIDER+=("$provider");CAT_PACKAGE+=("$package");CAT_REQUIRES+=("$requires")
-        CAT_PROFILES+=("$profiles");CAT_POST+=("$post");     CAT_PROMPT+=("$prompt")
-        CAT_NOTES+=("$notes");      CAT_GROUP+=("$group");   CAT_VERIFY+=("$verify")
-        CAT_CASK+=("$cask"); CAT_HOMEPAGE+=("$homepage"); CAT_INSTALLED+=(0)
+    local state="components"
+    while IFS=$'\x1f' read -r col1 col2 col3 col4 col5 col6 col7 col8 col9 col10 col11 col12 col13 col14; do
+        if [[ "$col1" == "---PROMPTS---" ]]; then
+            state="prompts"
+            continue
+        elif [[ "$col1" == "---PROFILES---" ]]; then
+            state="profiles"
+            continue
+        fi
+
+        if [[ "$state" == "components" ]]; then
+            [[ -z "$col1" ]] && continue
+            CAT_ID+=("$col1");             CAT_NAME+=("$col2");       CAT_DESC+=("$col3")
+            CAT_PROVIDER+=("$col4");       CAT_PACKAGE+=("$col5");    CAT_REQUIRES+=("$col6")
+            CAT_PROFILES+=("$col7");       CAT_POST+=("$col8");       CAT_PROMPT+=("$col9")
+            CAT_NOTES+=("$col10");         CAT_GROUP+=("$col11");     CAT_VERIFY+=("$col12")
+            CAT_CASK+=("$col13");          CAT_HOMEPAGE+=("$col14");  CAT_INSTALLED+=(0)
+        elif [[ "$state" == "prompts" ]]; then
+            [[ -z "$col1" ]] && continue
+            CAT_PROMPT_Q["$col1"]="$col2"
+            CAT_PROMPT_D["$col1"]="$col3"
+            CAT_PROMPT_H["$col1"]="$col4"
+        elif [[ "$state" == "profiles" ]]; then
+            [[ -z "$col1" ]] && continue
+            CAT_PROFILE_KEYS+=("$col1")
+            CAT_PROFILE_DESC["$col1"]="$col2"
+        fi
     done < <(python3 - "$path" "$arch" "$headless" <<'PY'
 import json, sys
 path, arch, headless = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
@@ -128,6 +152,19 @@ for grp in cat.get("categories", []):
             c.get("verify","") or "",
             "1" if c.get("cask") else "0", c.get("homepage", ""),
         ]))
+
+print("---PROMPTS---")
+prompts = cat.get("prompts", {})
+for k, v in prompts.items():
+    if not isinstance(v, dict): continue
+    q = (v.get("question", "") or "").replace("\x1f", " ")
+    d = (v.get("default", "") or "").replace("\x1f", " ")
+    h = (v.get("help", "") or "").replace("\x1f", " ")
+    print(f"{k}\x1f{q}\x1f{d}\x1f{h}")
+
+print("---PROFILES---")
+for name, desc in (cat.get("profiles") or {}).items():
+    print(f"{name}\x1f{desc}")
 PY
     )
 }
@@ -211,21 +248,21 @@ catalog_resolve() {
 
 # catalog_prompt_field <path> <prompt-key> <field>
 catalog_prompt_field() {
-    python3 - "$1" "$2" "$3" <<'PY'
-import json, sys
-cat = json.load(open(sys.argv[1], encoding="utf-8"))
-print((cat.get("prompts", {}).get(sys.argv[2], {}) or {}).get(sys.argv[3], "") or "")
-PY
+    local key="$2" field="$3"
+    case "$field" in
+        question) echo "${CAT_PROMPT_Q[$key]:-}" ;;
+        default)  echo "${CAT_PROMPT_D[$key]:-}" ;;
+        help)     echo "${CAT_PROMPT_H[$key]:-}" ;;
+        *)        echo "" ;;
+    esac
 }
 
 # catalog_profile_list <path> — echoes "name<TAB>description" per profile.
 catalog_profile_list() {
-    python3 - "$1" <<'PY'
-import json, sys
-cat = json.load(open(sys.argv[1], encoding="utf-8"))
-for name, desc in (cat.get("profiles") or {}).items():
-    print(f"{name}\t{desc}")
-PY
+    local k
+    for k in "${CAT_PROFILE_KEYS[@]}"; do
+        printf '%s\t%s\n' "$k" "${CAT_PROFILE_DESC[$k]}"
+    done
 }
 
 catalog_detect_installed() {
@@ -237,8 +274,5 @@ catalog_detect_installed() {
 }
 
 catalog_has_profile() {
-    python3 - "$CATALOG_PATH" "$1" <<'PY'
-import json,sys
-sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1],encoding='utf8'))['profiles'] else 1)
-PY
+    [[ -n "${CAT_PROFILE_DESC[$1]+_}" ]]
 }
