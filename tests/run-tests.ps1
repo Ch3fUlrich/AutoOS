@@ -304,7 +304,7 @@ Test-Case 'a different product sharing a prefix is never matched' {
 
 Test-Case 'the shim directories package managers use are probed even when PATH is stale' {
     $dirs = @(Get-AutoOSShimDirectory)
-    foreach ($want in @('scoop\shims', 'chocolatey\bin', 'WinGet\Links')) {
+    foreach ($want in @('scoop\shims', 'chocolatey\bin', 'Microsoft\WinGet\Links', 'WinGet\Links')) {
         if (-not @($dirs | Where-Object { $_ -like "*$want*" })) {
             throw "no probe directory for $want in: $($dirs -join '; ')"
         }
