@@ -1079,6 +1079,38 @@ if it "custom_is_installed detects agent-skills under Documents/code or Document
     else fail "rc_code=$rc_code rc_Code=$rc_Code"; fi
 fi
 
+if it "custom_is_installed detects a populated native CAO home"; then
+    tmp="$(mktemp -d)"
+    (
+        SYS_HOME="$tmp"
+        mkdir -p "$tmp/.cao/db"
+        custom_is_installed wsl-agent-home
+    )
+    rc_full=$?
+    (
+        SYS_HOME="$tmp"
+        rm -rf "$tmp/.cao"
+        custom_is_installed wsl-agent-home
+    )
+    rc_empty=$?
+    rm -rf "$tmp"
+    if [[ $rc_full -eq 0 && $rc_empty -ne 0 ]]; then pass
+    else fail "rc_full=$rc_full rc_empty=$rc_empty"; fi
+fi
+
+if it "setup_wsl_agent_home is a no-op off WSL and dry-runnable on WSL"; then
+    tmp="$(mktemp -d)"
+    ( SYS_HOME="$tmp" SYS_IS_WSL=0 AUTOOS_DRY_RUN=0 setup_wsl_agent_home >/dev/null 2>&1 )
+    rc_off=$?
+    [[ -e "$tmp/.bashrc" ]] && rc_off=99
+    ( SYS_HOME="$tmp" SYS_IS_WSL=1 AUTOOS_DRY_RUN=1 setup_wsl_agent_home >/dev/null 2>&1 )
+    rc_dry=$?
+    [[ -e "$tmp/.bashrc" ]] && rc_dry=99
+    rm -rf "$tmp"
+    if [[ $rc_off -eq 0 && $rc_dry -eq 0 ]]; then pass
+    else fail "rc_off=$rc_off rc_dry=$rc_dry"; fi
+fi
+
 describe "claude autostart"
 
 # A fixture transcript tree shaped exactly like ~/.claude/projects: one directory

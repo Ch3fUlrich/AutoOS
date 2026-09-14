@@ -396,6 +396,21 @@
           "homepage": "https://github.com/All-Hands-AI/OpenHands"
         },
         {
+          "id": "wsl-agent-home",
+          "name": "WSL native agent home",
+          "description": "CAO home on ext4, exports CAO_HOME_DIR",
+          "provider": "custom",
+          "package": "wsl-agent-home",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "test -d ~/.cao",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/blob/main/docs/wsl-agent-home.md",
+          "postInstall": "setup_wsl_agent_home"
+        },
+        {
           "id": "handy",
           "name": "Handy",
           "description": "Offline speech-to-text — dictate instead of typing",

@@ -67,6 +67,9 @@ custom_is_installed() {
         git-config)
             has_cmd git && [[ -n "$(git config --global user.name 2>/dev/null || true)" ]]
             ;;
+        wsl-agent-home)
+            [[ -d "$SYS_HOME/.cao" && -n "$(ls -A "$SYS_HOME/.cao" 2>/dev/null || true)" ]]
+            ;;
         agent-skills)
             [[ -d "$SYS_HOME/Documents/Code/agent-skills" || -d "$SYS_HOME/Documents/code/agent-skills" ]]
             ;;
@@ -1463,6 +1466,49 @@ for name, a_data in acp_agents.items():
 PY
 
     ui_ok "OpenHands configuration and profiles written to $openhands_dir"
+}
+
+# ─── WSL agent home (native ext4) ───────────────────────────────────────────
+# drvfs (/mnt/c, 9p) cannot host FIFOs or AF_UNIX sockets, so anything that
+# creates named pipes or sockets must live on the native ext4 filesystem.
+# Known victim: cli-agent-orchestrator's FIFO_DIR (os.mkfifo -> Errno 95
+# EOPNOTSUPP when CAO_HOME_DIR sits under ~/.aws symlinked to /mnt/c).
+# This function is a deliberate no-op off WSL: on bare metal ~/.aws is real
+# ext4 and the default CAO home works fine.
+setup_wsl_agent_home() {
+    (( SYS_IS_WSL )) || { ui_muted "not WSL - native agent home not needed"; return 0; }
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would relocate CAO home to $SYS_HOME/.cao on native ext4"
+        return 0
+    fi
+    local cao_native="$SYS_HOME/.cao"
+    local cao_legacy="$SYS_HOME/.aws/cli-agent-orchestrator"
+    local cao_home="${CAO_HOME_DIR:-$cao_native}"
+
+    mkdir -p "$cao_native"
+    # A drvfs-backed CAO home cannot host FIFOs: move live state (not logs or
+    # locks) onto ext4, keep a timestamped backup, leave an empty dir behind
+    # so the legacy path never dangles.
+    if [[ -d "$cao_legacy" && ! -L "$cao_legacy" ]]; then
+        if ! python3 -c "import os; os.mkfifo('$cao_legacy/.autoos-fifo-probe')" 2>/dev/null; then
+            local ts backup
+            ts="$(date +%Y%m%d-%H%M%S)"
+            backup="${cao_legacy}.backup-${ts}"
+            ui_info "CAO home $cao_legacy is on drvfs (no FIFO support) - relocating live state to $cao_native"
+            cp -a "$cao_legacy" "$backup"
+            for sub in agent-context agent-store db workflows skills profiles; do
+                [[ -d "$cao_legacy/$sub" ]] && cp -a "$cao_legacy/$sub/." "$cao_native/$sub/"
+            done
+            [[ -f "$cao_legacy/settings.json" ]] && cp -a "$cao_legacy/settings.json" "$cao_native/settings.json"
+            ui_ok "legacy CAO home backed up to $backup"
+        else
+            rm -f "$cao_legacy/.autoos-fifo-probe"
+        fi
+    fi
+    # Every CAO entry point must see the same home: export once per shell.
+    append_line_once "$SYS_HOME/.bashrc" "CAO_HOME_DIR" "export CAO_HOME_DIR=\"$cao_home\"  # added by AutoOS (wsl-agent-home)"
+    append_line_once "$SYS_HOME/.profile" "CAO_HOME_DIR" "export CAO_HOME_DIR=\"$cao_home\"  # added by AutoOS (wsl-agent-home)"
+    ui_ok "CAO home on native ext4: $cao_home (CAO_HOME_DIR exported)"
 }
 
 run_post_install() {
