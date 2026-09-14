@@ -111,9 +111,10 @@ detect_system() {
     # ─── Distribution ───────────────────────────────────────────────────────
     SYS_DISTRO_ID="unknown"; SYS_DISTRO_NAME="unknown"
     SYS_DISTRO_VERSION=""; SYS_DISTRO_CODENAME=""; SYS_DISTRO_LIKE=""
-    if [[ -r /etc/os-release ]]; then
+    local root="${SYS_ROOT:-}"
+    if [[ -r "$root/etc/os-release" ]]; then
         # shellcheck disable=SC1091
-        . /etc/os-release
+        . "$root/etc/os-release"
         SYS_DISTRO_ID="${ID:-unknown}"
         SYS_DISTRO_NAME="${PRETTY_NAME:-${NAME:-unknown}}"
         SYS_DISTRO_VERSION="${VERSION_ID:-}"
@@ -138,10 +139,10 @@ detect_system() {
 
     # ─── Board / virtualisation ─────────────────────────────────────────────
     SYS_MODEL="unknown"; SYS_IS_PI=0; SYS_IS_WSL=0; SYS_IS_CONTAINER=0
-    if [[ -r /proc/device-tree/model ]]; then
-        SYS_MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || echo unknown)"
-    elif [[ -r /sys/devices/virtual/dmi/id/product_name ]]; then
-        SYS_MODEL="$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || echo unknown)"
+    if [[ -r "$root/proc/device-tree/model" ]]; then
+        SYS_MODEL="$(tr -d '\0' <"$root/proc/device-tree/model" 2>/dev/null || echo unknown)"
+    elif [[ -r "$root/sys/devices/virtual/dmi/id/product_name" ]]; then
+        SYS_MODEL="$(cat "$root/sys/devices/virtual/dmi/id/product_name" 2>/dev/null || echo unknown)"
     fi
     if [[ "$SYS_MODEL" == *"Raspberry Pi"* ]]; then SYS_IS_PI=1; fi
     # WSL: three independent signals, because none is reliable alone. The env
@@ -150,26 +151,26 @@ detect_system() {
     SYS_WSL_VERSION=""; SYS_WSL_DISTRO=""
     if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
         SYS_IS_WSL=1; SYS_WSL_DISTRO="$WSL_DISTRO_NAME"
-    elif grep -qi microsoft /proc/version 2>/dev/null; then
+    elif grep -qi microsoft "$root/proc/version" 2>/dev/null; then
         SYS_IS_WSL=1
-    elif grep -qiE 'microsoft|wsl' /proc/sys/kernel/osrelease 2>/dev/null; then
+    elif grep -qiE 'microsoft|wsl' "$root/proc/sys/kernel/osrelease" 2>/dev/null; then
         SYS_IS_WSL=1
     fi
     if (( SYS_IS_WSL )); then
         # WSL2 ships a real Linux kernel tagged microsoft-standard-WSL2 and has
         # /run/WSL; WSL1 is a syscall translation layer on an NT-era version string.
-        if grep -qiE 'wsl2|microsoft-standard' /proc/sys/kernel/osrelease 2>/dev/null \
-           || grep -qi 'WSL2' /proc/version 2>/dev/null \
-           || [[ -d /run/WSL ]]; then
+        if grep -qiE 'wsl2|microsoft-standard' "$root/proc/sys/kernel/osrelease" 2>/dev/null \
+           || grep -qi 'WSL2' "$root/proc/version" 2>/dev/null \
+           || [[ -d "$root/run/WSL" ]]; then
             SYS_WSL_VERSION=2
         else
             SYS_WSL_VERSION=1
         fi
-        if [[ -z "$SYS_WSL_DISTRO" && -r /etc/wsl.conf ]]; then
-            SYS_WSL_DISTRO="$(awk -F= '/^[[:space:]]*hostname/{gsub(/ /,"",$2); print $2}' /etc/wsl.conf 2>/dev/null)"
+        if [[ -z "$SYS_WSL_DISTRO" && -r "$root/etc/wsl.conf" ]]; then
+            SYS_WSL_DISTRO="$(awk -F= '/^[[:space:]]*hostname/{gsub(/ /,"",$2); print $2}' "$root/etc/wsl.conf" 2>/dev/null)"
         fi
     fi
-    if [[ -f /.dockerenv ]] || grep -qE '(docker|lxc|containerd)' /proc/1/cgroup 2>/dev/null; then
+    if [[ -f "$root/.dockerenv" ]] || grep -qE '(docker|lxc|containerd)' "$root/proc/1/cgroup" 2>/dev/null; then
         SYS_IS_CONTAINER=1
     fi
 
@@ -186,10 +187,10 @@ detect_system() {
 
     # ─── Hardware ───────────────────────────────────────────────────────────
     SYS_CPU_CORES="$(nproc 2>/dev/null || echo 1)"
-    SYS_CPU_NAME="$(awk -F': ' '/^model name|^Model/{print $2; exit}' /proc/cpuinfo 2>/dev/null || echo unknown)"
+    SYS_CPU_NAME="$(awk -F': ' '/^model name|^Model/{print $2; exit}' "$root/proc/cpuinfo" 2>/dev/null || echo unknown)"
     if [[ -z "$SYS_CPU_NAME" ]]; then SYS_CPU_NAME="unknown"; fi
     local mem_kb
-    mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+    mem_kb="$(awk '/^MemTotal:/{print $2}' "$root/proc/meminfo" 2>/dev/null || echo 0)"
     SYS_RAM_GB="$(awk -v k="$mem_kb" 'BEGIN{printf "%.1f", k/1048576}')"
     SYS_FREE_DISK_GB="$(df -BG / 2>/dev/null | awk 'NR==2{gsub("G","",$4); print $4}' || echo 0)"
     if [[ -z "$SYS_FREE_DISK_GB" ]]; then SYS_FREE_DISK_GB=0; fi
