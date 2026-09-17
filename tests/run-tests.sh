@@ -2525,12 +2525,33 @@ if it "image_resolve: a pattern matching nothing fails loudly and non-zero, neve
     rm -f "$cat_json"
 fi
 
-if it "image_resolve: a pattern matching several files is an error, never a silent first-match"; then
+if it "image_resolve: a pattern matching several files that differ by more than a version is an error, never a silent first-match"; then
+    # Same version, different arch - a regex broader than its author meant.
+    # No ordering rule applies here, unlike the point-release case below.
     cat_json="$(_image_resolve_test_catalog ambiguous multiple_match \
-        'debian-[0-9]+\.[0-9]+\.[0-9]+-amd64-netinst\.iso$' - -)"
+        'debian-[0-9]+\.[0-9]+\.[0-9]+-(amd64|arm64)-netinst\.iso$' - -)"
     out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve ambiguous "$cat_json" 2>&1)"; rc=$?
     if [[ $rc -ne 0 && "$out" == *"matched multiple"* \
-        && "$out" == *"debian-13.1.0-amd64-netinst.iso"* && "$out" == *"debian-13.2.0-amd64-netinst.iso"* ]]; then
+        && "$out" == *"debian-13.2.0-amd64-netinst.iso"* && "$out" == *"debian-13.2.0-arm64-netinst.iso"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
+    rm -f "$cat_json"
+fi
+
+if it "image_resolve: a point release listed beside its .0 release in one directory resolves to the highest version (live 26.04.1 shape)"; then
+    # Found on the first real run, 2026-09-17: releases.ubuntu.com/26.04.1/
+    # lists ubuntu-26.04-desktop-amd64.iso AND ubuntu-26.04.1-desktop-amd64.iso.
+    # Names identical except for one dotted version number are the same
+    # artefact at different point releases - the highest wins. Missing
+    # components compare as 0, so 26.04 < 26.04.1.
+    cat_json="$(_image_resolve_test_catalog ubuntu-desktop-lts ubuntu_point_release \
+        'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' SHA256SUMS SHA256SUMS.gpg)"
+    out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve ubuntu-desktop-lts "$cat_json" 2>&1)"; rc=$?
+    base="http://127.0.0.1:${_img_srv_port}/ubuntu_point_release"
+    if [[ $rc -eq 0 && "$out" == *"url=${base}/ubuntu-26.04.1-desktop-amd64.iso"* \
+        && "$out" == *"file=ubuntu-26.04.1-desktop-amd64.iso"* && "$out" == *"sums=${base}/SHA256SUMS"* ]]; then
         pass
     else
         fail "rc=$rc out=$out"
@@ -3008,6 +3029,20 @@ if it "usb_execute: dispatches a usb_fetch_image plan line into the real downloa
     else fail "rc=$rc out=$out"; fi
     kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
     rm -rf "$rel" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_execute: a failure in the fetch step says the device was not touched, never 'rewrite from wipefs' (usb_fetch_image)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FORCE_FAIL=1 \
+           usb_execute /dev/sdb <<<"usb_fetch_image ubuntu-desktop-lts /tmp/x.iso" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"not touched"* && "$out" != *"wipefs"* && "$out" != *"Ready to boot"* ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+fi
+
+if it "usb_execute: a failure in a write step still reports no-rollback, rewrite from wipefs (usb_fetch_image)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FORCE_FAIL=1 AUTOOS_TRACE=1 \
+           usb_execute /dev/sdb <<<"usb_write_raw /dev/sdb /tmp/x.iso 100" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"wipefs"* && "$out" != *"not touched"* ]]; then pass
+    else fail "rc=$rc out=$out"; fi
 fi
 
 if it "usb_execute: a usb_fetch_image line with the wrong word count is refused, never run (usb_fetch_image)"; then

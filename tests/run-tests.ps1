@@ -1308,6 +1308,117 @@ Test-Case 'a cached, already-verified file is skipped, not refetched' {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
+function Start-AutoOSTestHttpServer {
+    # A throwaway python http.server on 127.0.0.1 and an OS-assigned port,
+    # serving -Directory. Mirror of tests/run-tests.sh's
+    # _start_test_http_server: polls a port file the server writes before
+    # serve_forever(), so there is no read-before-bound race. Returns
+    # @{ Process; Port }; the caller must Stop-Process it.
+    param([Parameter(Mandatory)][string]$Directory)
+    $portFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_port_' + [Guid]::NewGuid().ToString('N'))
+    # A script file, not `python -c`: quoting a one-liner through
+    # Start-Process's argument list mangles it, and the port file must be
+    # CLOSED (flushed) before serve_forever() blocks forever.
+    $script = "$portFile.py"
+    $lines = @(
+        'import http.server, socketserver, sys, os',
+        'os.chdir(sys.argv[1])',
+        'h = socketserver.TCPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)',
+        'with open(sys.argv[2], "w") as f:',
+        '    f.write(str(h.server_address[1]))',
+        'h.serve_forever()'
+    )
+    [IO.File]::WriteAllText($script, ($lines -join "`n") + "`n")
+    $proc = Start-Process python -PassThru -WindowStyle Hidden -ArgumentList @(('"' + $script + '"'), ('"' + $Directory + '"'), ('"' + $portFile + '"'))
+    $port = $null
+    for ($i = 0; $i -lt 50; $i++) {
+        if ((Test-Path -LiteralPath $portFile) -and (Get-Item -LiteralPath $portFile).Length -gt 0) {
+            $port = [int](Get-Content -LiteralPath $portFile -Raw).Trim(); break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    Remove-Item -LiteralPath $portFile, $script -Force -ErrorAction SilentlyContinue
+    if (-not $port) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw 'test http server did not report a port' }
+    @{ Process = $proc; Port = $port }
+}
+
+Test-Case 'verified download: an http URL is streamed to disk through curl.exe and verifies (http)' {
+    # Windows PowerShell 5.1's Invoke-WebRequest -OutFile buffers the whole
+    # response in memory - unusable for a 6 GB ISO (found on the first real
+    # run, 2026-09-17). Get-AutoOSRawDownload must take the curl.exe route
+    # for http(s); this proves it against a loopback server, no internet.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_http_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp
+    try {
+        $src = Join-Path $tmp 'src.bin'
+        [IO.File]::WriteAllBytes($src, [byte[]](1..200000 | ForEach-Object { $_ % 251 }))
+        $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+        $out = Join-Path $tmp 'out.bin'
+        Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/src.bin" -Destination $out -Sha256 $sum | Out-Null
+        Assert-True ((Test-Path -LiteralPath $out) -and ((Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash -eq $sum)) 'downloaded file missing or digest differs'
+    } finally {
+        Stop-Process -Id $srv.Process.Id -Force -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: an http 404 is a transport failure that leaves no .part behind (http)' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_http_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp
+    try {
+        $out = Join-Path $tmp 'out.bin'
+        $threw = $false; $msg = ''
+        try { Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/does-not-exist.bin" -Destination $out -Sha256 ('0' * 64) | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*transport failure*' -and -not (Test-Path -LiteralPath "$out.part") -and -not (Test-Path -LiteralPath $out)) "threw=$threw msg=[$msg]"
+    } finally {
+        Stop-Process -Id $srv.Process.Id -Force -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: gpg stderr chatter (gpg-agent directory created) is not a failure, only the exit code is (gpg)' {
+    # The first real run on 2026-09-17 died here: gpg prints "gpg-agent[n]:
+    # directory '...' created" to stderr on every fresh GNUPGHOME, and under
+    # the module's $ErrorActionPreference = 'Stop' that became a terminating
+    # NativeCommandError before any signature was checked (handoff L6). A
+    # fake gpg.cmd on PATH that chatters on stderr and exits 0 reproduces it
+    # without a keyserver or a real key.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_gpg_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $shim = Join-Path $tmp 'gpg.cmd'
+    [IO.File]::WriteAllText($shim, "@echo gpg-agent[1234]: directory 'private-keys-v1.d' created 1>&2`r`n@exit /b 0`r`n")
+    $src = Join-Path $tmp 'src'; Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $sig = Join-Path $tmp 'src.gpg'; Set-Content -LiteralPath $sig -Value 'not-a-real-signature' -NoNewline
+    $prevPath = $env:Path
+    $env:Path = "$tmp;$prevPath"
+    try {
+        $ok = Test-AutoOSGpgSignature -Path $src -SignatureUri (ConvertTo-AutoOSTestFileUri $sig) -Fingerprint 'ABCDEF0123456789'
+        Assert-True ($ok -eq $true) "expected `$true from a gpg that exits 0 despite stderr chatter, got [$ok]"
+    } finally {
+        $env:Path = $prevPath
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: a signature check that throws leaves no .part behind (gpg)' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_gpg_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'; Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $prevPath = $env:Path
+    # An empty PATH dir first and no gpg anywhere: Get-Command gpg fails and
+    # Test-AutoOSGpgSignature throws 'gpg not found' - the throwing path.
+    $env:Path = (Join-Path $tmp 'nothing')
+    try {
+        $threw = $false; $msg = ''
+        try { Get-AutoOSVerifiedFile -Uri (ConvertTo-AutoOSTestFileUri $src) -Destination $out -SignatureUri 'file:///nonexistent.sig' -GpgFingerprint 'ABCDEF0123456789' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*signature verification failed*' -and -not (Test-Path -LiteralPath "$out.part") -and -not (Test-Path -LiteralPath $out)) "threw=$threw msg=[$msg] part=$(Test-Path -LiteralPath "$out.part")"
+    } finally {
+        $env:Path = $prevPath
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
 # ─── image_resolve (Task 4B) ────────────────────────────────────────────────
 # Mirrors lib/linux/download.sh's own "image_resolve" test block one-for-one
 # (same fixtures under tests\helpers\image_index_fixtures, same scenarios).
@@ -1373,15 +1484,30 @@ Test-Case 'image_resolve: a pattern matching nothing throws loudly, never guesse
     } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
 }
 
-Test-Case 'image_resolve: a pattern matching several files throws, never a silent first-match' {
+Test-Case 'image_resolve: a pattern matching several files that differ by more than a version throws, never a silent first-match' {
+    # Same version, different arch - a regex broader than its author meant.
+    # No ordering rule applies here, unlike the point-release case below.
     $cat = New-AutoOSImageTestCatalog -Id 'ambiguous' -FixtureSubdir 'multiple_match' `
-        -FileRegex 'debian-[0-9]+\.[0-9]+\.[0-9]+-amd64-netinst\.iso$'
+        -FileRegex 'debian-[0-9]+\.[0-9]+\.[0-9]+-(amd64|arm64)-netinst\.iso$'
     try {
         $threw = $false; $msg = ''
         try { Resolve-AutoOSImageUrl -ImageId 'ambiguous' -CatalogPath $cat | Out-Null }
         catch { $threw = $true; $msg = $_.Exception.Message }
-        Assert-True ($threw -and $msg -like '*matched multiple*' -and $msg -like '*debian-13.1.0-amd64-netinst.iso*' -and $msg -like '*debian-13.2.0-amd64-netinst.iso*') `
+        Assert-True ($threw -and $msg -like '*matched multiple*' -and $msg -like '*debian-13.2.0-amd64-netinst.iso*' -and $msg -like '*debian-13.2.0-arm64-netinst.iso*') `
             "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: a point release listed beside its .0 release in one directory resolves to the highest version (live 26.04.1 shape)' {
+    # Found on the first real run, 2026-09-17: releases.ubuntu.com/26.04.1/
+    # lists ubuntu-26.04-desktop-amd64.iso AND ubuntu-26.04.1-desktop-amd64.iso.
+    # Names identical except for one dotted version number are the same
+    # artefact at different point releases - the highest wins (26.04 < 26.04.1).
+    $cat = New-AutoOSImageTestCatalog -Id 'ubuntu-desktop-lts' -FixtureSubdir 'ubuntu_point_release' `
+        -FileRegex 'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.gpg'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat
+        Assert-True ($r.File -eq 'ubuntu-26.04.1-desktop-amd64.iso' -and $r.Url -like '*/ubuntu_point_release/ubuntu-26.04.1-desktop-amd64.iso' -and $r.Sums -like '*/SHA256SUMS') "got: $($r | ConvertTo-Json -Compress)"
     } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
 }
 
@@ -2010,6 +2136,22 @@ Test-Case 'usb: Invoke-AutoOSUsbPlan routes an Invoke-AutoOSUsbFetchImage line t
             } | Out-Null
         } catch { $threw = $true; $msg = $_.Exception.Message }
         Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbPlan reports a fetch-step failure as "not touched", never "rewrite from wipefs" (fetch)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_FORCE_FAIL = '1'
+        try {
+            $script:usbFetchFailThrew = $false
+            $text = Invoke-AutoOSCapturedConsole {
+                try { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbFetchImage ubuntu-desktop-lts C:\x\y.iso') }
+                catch { $script:usbFetchFailThrew = $true }
+            }
+            Assert-True ($script:usbFetchFailThrew -and $text -like '*not touched*' -and $text -notlike '*wipefs*') "threw=$($script:usbFetchFailThrew) text=$text"
+        } finally {
+            Remove-Item Env:\AUTOOS_FORCE_FAIL -ErrorAction SilentlyContinue
+        }
     }
 }
 

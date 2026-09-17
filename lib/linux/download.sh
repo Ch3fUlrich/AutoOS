@@ -331,13 +331,36 @@ direct = [h for h in hrefs if not h.endswith("/") and file_re.search(basename(h)
 
 if direct:
     names = sorted({basename(h) for h in direct})
-    if len(names) > 1:
-        print("status=error")
-        print(f"msg=pattern '{file_re_str}' matched multiple files at {base_url}: {', '.join(names)} "
-              "- refusing to guess, no ordering rule is defined for files at the same directory level")
-        sys.exit(0)
-
     fname = names[0]
+    if len(names) > 1:
+        # The one ordering signal that IS defined at a single directory
+        # level (found live on 2026-09-17: releases.ubuntu.com/26.04.1/
+        # lists ubuntu-26.04-desktop-amd64.iso beside
+        # ubuntu-26.04.1-desktop-amd64.iso): names that are identical
+        # except for one dotted version number are the same artefact at
+        # different point releases, and the highest version is the newest.
+        # Anything else - same version with a different arch/flavour, a
+        # name with no version at all - stays an error, never a first-match.
+        VERSION_TOKEN = re.compile(r"[0-9]+(?:\.[0-9]+)+")
+        shapes = set()
+        versions = []
+        for n in names:
+            vm = VERSION_TOKEN.search(n)
+            if not vm:
+                shapes.add(None)
+                break
+            shapes.add(n[:vm.start()] + "{v}" + n[vm.end():])
+            versions.append((tuple(int(x) for x in vm.group(0).split(".")), n))
+        same_shape = len(shapes) == 1 and None not in shapes
+        distinct = len({v for v, _ in versions}) == len(versions)
+        if same_shape and distinct:
+            fname = max(versions)[1]
+        else:
+            print("status=error")
+            print(f"msg=pattern '{file_re_str}' matched multiple files at {base_url}: {', '.join(names)} "
+                  "- refusing to guess: they do not differ only by a version number, so no ordering rule applies")
+            sys.exit(0)
+
     sums_url, sums_err = resolve_sidecar("sums", sums_field, base_url, hrefs)
     if sums_err:
         print("status=error"); print(f"msg={sums_err}"); sys.exit(0)

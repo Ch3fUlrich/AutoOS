@@ -59,7 +59,42 @@ function Get-AutoOSRawDownload {
         Copy-Item -LiteralPath $localPath -Destination $OutFile -Force
         return
     }
+
+    # curl.exe first (it ships with Windows 10 1803+ / 11): it STREAMS to
+    # disk. Windows PowerShell 5.1's Invoke-WebRequest -OutFile buffers the
+    # whole response in memory before writing, which cannot work for a
+    # multi-gigabyte ISO, and even on the part it managed the first real
+    # run on 2026-09-17 crawled at ~1 MB/s where curl did 450 MB/s on the
+    # same URL. -L follows the mirror redirect (plan finding A8); -f turns
+    # an HTTP error page into a non-zero exit instead of a saved HTML file
+    # under the ISO's name (A7) - the same flags lib/linux/download.sh uses.
+    # stderr (curl's own error text) must not become a terminating error
+    # under this module's $ErrorActionPreference = 'Stop' (handoff L6):
+    # the exit code is the verdict, the text is only for the message.
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $errText = & $curl.Source -fsSL --retry 3 --retry-delay 2 -o $OutFile -- $Uri 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) {
+                throw "curl exited $LASTEXITCODE downloading ${Uri}: $($errText.Trim())"
+            }
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+        return
+    }
+
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # Windows PowerShell 5.1's Invoke-WebRequest updates its progress bar per
+    # buffer and that costs more than the transfer itself: the first real
+    # 6 GB ISO download on 2026-09-17 crawled at ~1.3 MB/s with it on.
+    # Progress for a USB build is reported by the caller anyway, never by
+    # this helper, so the bar is pure overhead here. Scoped to this
+    # function: $ProgressPreference is dynamically scoped, so callers'
+    # own setting is untouched once we return.
+    $ProgressPreference = 'SilentlyContinue'
     Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10
 }
 
@@ -89,12 +124,23 @@ function Test-AutoOSGpgSignature {
         Get-AutoOSRawDownload -Uri $SignatureUri -OutFile $sigTmp
         $prevHome = $env:GNUPGHOME
         $env:GNUPGHOME = $gnupgHome
+        # gpg writes harmless notices to stderr ("gpg-agent[n]: directory
+        # '...private-keys-v1.d' created" on every fresh GNUPGHOME, which is
+        # EVERY call here). Under this module's $ErrorActionPreference =
+        # 'Stop', a native command's stderr line redirected with 2> becomes
+        # a terminating NativeCommandError (handoff lesson L6) - the first
+        # real run on 2026-09-17 died on exactly that notice, before the
+        # signature was ever checked. Only the exit code is the verdict;
+        # stderr is noise for the duration of the two native calls.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         try {
-            & $gpg.Source --batch --quiet --keyserver hkps://keyserver.ubuntu.com --recv-keys $Fingerprint 2>$null | Out-Null
+            & $gpg.Source --batch --quiet --no-tty --keyserver hkps://keyserver.ubuntu.com --recv-keys $Fingerprint 2>$null | Out-Null
             if ($LASTEXITCODE -ne 0) { return $false }
-            & $gpg.Source --batch --quiet --verify $sigTmp $Path 2>$null | Out-Null
+            & $gpg.Source --batch --quiet --no-tty --verify $sigTmp $Path 2>$null | Out-Null
             return ($LASTEXITCODE -eq 0)
         } finally {
+            $ErrorActionPreference = $prevEap
             if ($null -eq $prevHome) { Remove-Item Env:\GNUPGHOME -ErrorAction SilentlyContinue }
             else { $env:GNUPGHOME = $prevHome }
         }
@@ -155,9 +201,22 @@ function Get-AutoOSVerifiedFile {
         throw "checksum mismatch for $Uri"
     }
 
-    if ($SignatureUri -and -not (Test-AutoOSGpgSignature -Path $tmp -SignatureUri $SignatureUri -Fingerprint $GpgFingerprint)) {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-        throw "signature verification failed for $Uri"
+    if ($SignatureUri) {
+        # try/catch, not just the boolean: a signature check that THROWS
+        # (gpg missing, signature download failed, ...) used to skip the
+        # cleanup below and leave a .part behind - the same "half file
+        # nobody can tell from a real one" this function exists to prevent.
+        $sigOk = $false
+        try {
+            $sigOk = Test-AutoOSGpgSignature -Path $tmp -SignatureUri $SignatureUri -Fingerprint $GpgFingerprint
+        } catch {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            throw "signature verification failed for ${Uri}: $($_.Exception.Message)"
+        }
+        if (-not $sigOk) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            throw "signature verification failed for $Uri"
+        }
     }
 
     $destDir = Split-Path -Parent $Destination
@@ -268,13 +327,39 @@ function _Resolve-AutoOSImagePage {
     $direct = @($hrefs | Where-Object { -not $_.EndsWith('/') -and (ConvertTo-AutoOSHrefBasename $_) -match $FileRegex })
     if ($direct.Count -gt 0) {
         $names = @($direct | ForEach-Object { ConvertTo-AutoOSHrefBasename $_ } | Sort-Object -Unique)
+        $fname = $names[0]
         if ($names.Count -gt 1) {
-            return [pscustomobject]@{
-                Status  = 'error'
-                Message = "pattern '$FileRegex' matched multiple files at ${BaseUrl}: $($names -join ', ') - refusing to guess, no ordering rule is defined for files at the same directory level"
+            # The one ordering signal that IS defined at a single directory
+            # level (found live on 2026-09-17: releases.ubuntu.com/26.04.1/
+            # lists ubuntu-26.04-desktop-amd64.iso beside
+            # ubuntu-26.04.1-desktop-amd64.iso): names identical except for
+            # one dotted version number are the same artefact at different
+            # point releases, and the highest version is the newest. Anything
+            # else stays an error. [regex]::Match, not -match (lesson L6).
+            $shapes = @{}
+            $versions = @()
+            $parsable = $true
+            foreach ($n in $names) {
+                $vm = [regex]::Match($n, '[0-9]+(?:\.[0-9]+)+')
+                if (-not $vm.Success) { $parsable = $false; break }
+                $shapes[$n.Substring(0, $vm.Index) + '{v}' + $n.Substring($vm.Index + $vm.Length)] = $true
+                $parts = @($vm.Value.Split('.') | ForEach-Object { [int]$_ })
+                while ($parts.Count -lt 4) { $parts += 0 }
+                $versions += [pscustomobject]@{
+                    Key  = ('{0:D6}.{1:D6}.{2:D6}.{3:D6}' -f $parts[0], $parts[1], $parts[2], $parts[3])
+                    Name = $n
+                }
+            }
+            $distinct = @($versions | ForEach-Object { $_.Key } | Sort-Object -Unique).Count
+            if ($parsable -and $shapes.Count -eq 1 -and $distinct -eq $versions.Count) {
+                $fname = ($versions | Sort-Object Key | Select-Object -Last 1).Name
+            } else {
+                return [pscustomobject]@{
+                    Status  = 'error'
+                    Message = "pattern '$FileRegex' matched multiple files at ${BaseUrl}: $($names -join ', ') - refusing to guess: they do not differ only by a version number, so no ordering rule applies"
+                }
             }
         }
-        $fname = $names[0]
         $sums = Resolve-AutoOSSidecar -Kind 'sums' -Field $SumsField -Base $BaseUrl -Hrefs $hrefs
         if ($sums.ErrorMessage) { return [pscustomobject]@{ Status = 'error'; Message = $sums.ErrorMessage } }
         $sig = Resolve-AutoOSSidecar -Kind 'sig' -Field $SigField -Base $BaseUrl -Hrefs $hrefs

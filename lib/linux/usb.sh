@@ -1154,10 +1154,23 @@ usb_execute() {
         return 1
     fi
 
-    local step
+    # A plan's first lines (usb_fetch_image, usb_reverify) touch only the
+    # cache and the device table. A failure THERE must not be reported as
+    # "there is no rollback, rewrite from wipefs" - the first real run on
+    # 2026-09-17 failed inside the resolver and said exactly that about a
+    # stick nothing had written to. Track when the destructive part begins.
+    local step destructive_started=0
     for step in "${steps[@]}"; do
+        case "${step%% *}" in
+            usb_fetch_image|usb_reverify) ;;
+            *) destructive_started=1 ;;
+        esac
         if ! _usb_run_step "$dev" "$step"; then
-            _usb_report_write_failure "$dev"
+            if (( destructive_started )); then
+                _usb_report_write_failure "$dev"
+            else
+                ui_err "usb_execute: stopped at '${step%% *}' before any write step ran - $dev was not touched and does not need rewriting"
+            fi
             return 1
         fi
     done

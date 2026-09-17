@@ -667,10 +667,20 @@ function Invoke-AutoOSUsbPlan {
         throw "Invoke-AutoOSUsbPlan: empty plan - nothing to run"
     }
 
+    # A plan's fetch line touches only the cache. A failure THERE must not
+    # be reported as "there is no rollback, rewrite from wipefs" - the
+    # first real run on 2026-09-17 failed inside the resolver and said
+    # exactly that about a stick nothing had written to.
+    $destructiveStarted = $false
     foreach ($line in $steps) {
+        if ($line -notmatch '^Invoke-AutoOSUsbFetchImage\s') { $destructiveStarted = $true }
         try {
             Invoke-AutoOSUsbPlanStep -DeviceId $DeviceId -Line $line
         } catch {
+            if (-not $destructiveStarted) {
+                Write-AutoOSLine "usb_execute: stopped before any write step ran ($($_.Exception.Message)) - $DeviceId was not touched and does not need rewriting." -Level error
+                throw
+            }
             $stillThere = @(Get-AutoOSUsbDevice | Where-Object { $_.DeviceId -eq $DeviceId })
             if ($stillThere.Count -gt 0) {
                 Write-AutoOSLine "usb_execute: write to $DeviceId failed ($($_.Exception.Message)). There is no rollback (B15) - the stick must be rewritten from wipefs onward; do not retry automatically." -Level error

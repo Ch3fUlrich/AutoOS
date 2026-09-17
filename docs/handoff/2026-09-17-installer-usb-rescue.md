@@ -147,6 +147,39 @@ empty listing right after plug-in as a race, not a bug. A real Windows run also 
 PATH (Ubuntu's manifest is signature-verified; `Test-AutoOSGpgSignature` throws without it) and
 none is installed on this host; WSL has gpg/curl but cannot see the stick without usbipd.
 
+**The first real run (Windows, 2026-09-17, later the same day)** — stick rebuilt as agreed
+(elevated one-off script, serial-gated; GnuPG 2.5.22 installed via winget so the Windows fetch
+path can verify Ubuntu's manifest), then `setup.ps1 -CreateUsb -Image ubuntu-desktop-lts -Engine
+uefi-copy -UsbDevice \\.\PHYSICALDRIVE5 -WipeTargetDisk`. Each attempt found one real defect,
+each fixed test-first on both platforms:
+
+1. **Resolver ambiguity on the live index.** `releases.ubuntu.com/26.04.1/` lists
+   `ubuntu-26.04-desktop-amd64.iso` beside `ubuntu-26.04.1-desktop-amd64.iso`. The parser now
+   applies the one ordering rule that exists at a single directory level: matches identical
+   except for one dotted version number are the same artefact, highest version wins (26.04 <
+   26.04.1). Anything else (same version, different arch) is still an error — the
+   `multiple_match` fixture was changed to that shape; new fixture `ubuntu_point_release`.
+2. **gpg stderr under `$ErrorActionPreference='Stop'`** (lesson L6, live): every fresh
+   GNUPGHOME makes gpg print "gpg-agent: directory … created" to stderr, which became a
+   terminating error before the signature was checked. `Test-AutoOSGpgSignature` now runs the
+   two native calls with the preference set to Continue and judges by exit code only;
+   `Get-AutoOSVerifiedFile` deletes its `.part` when the signature check *throws*, not only
+   when it returns false. Tested with a fake `gpg.cmd` shim.
+3. **`Invoke-WebRequest -OutFile` cannot download a 6 GB file** (Windows PowerShell 5.1
+   buffers the whole response in memory, and crawled at ~1 MB/s on the part it managed).
+   `Get-AutoOSRawDownload` now uses the `curl.exe` that ships with Windows (`-fsSL --retry 3`,
+   same flags as `download.sh`), streaming to disk; Invoke-WebRequest remains the fallback.
+   Tested against a loopback python server (new `Start-AutoOSTestHttpServer` helper).
+4. **Executor message.** A failure in the fetch step used to say "there is no rollback — rewrite
+   from wipefs" about a stick nothing had written to. Both executors now track when the
+   destructive part begins and say "was not touched" before it.
+
+After those, the manifest verified against Ubuntu's real key and the ISO download ran — at
+**~0.7 MB/s, which is what `releases.ubuntu.com` itself served this host** (measured directly
+with curl, twice; a mirror list on the catalog entry is the obvious follow-up). The download
+takes ~2 h at that rate; see the next dated handoff or the git log for whether the copy onto
+J: and a boot were reached.
+
 Still true after this session: **nobody has booted a stick built by this tool**, the
 `custom-url` / `custom-local` pseudo-entries are still not plumbed through the CLI (usb_plan
 already refuses them — no `writeMode`), the Windows plan still has no re-verify step, and
