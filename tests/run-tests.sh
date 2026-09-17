@@ -3295,6 +3295,28 @@ DDEOF
     rm -rf "$fakebin"; rm -f "$img"
 fi
 
+if it "usb_execute: _usb_copy_readback reports a same-size content change, a missing file and a size change, and nothing for an identical tree (usb copy readback)"; then
+    # The second real build on 2026-09-17 finished and printed "Ready to
+    # boot" while the stick had silently replaced one 16 KB cluster of
+    # md5sum.txt with garbage at the same size. Only reading back catches
+    # that; this is the pure dir-vs-dir function the copy path calls.
+    rb="$(mktemp -d)"
+    mkdir -p "$rb/src/casper" "$rb/dst/casper" "$rb/src/EFI/boot" "$rb/dst/EFI/boot"
+    for rel in md5sum.txt casper/minimal.squashfs EFI/boot/bootx64.efi casper/vmlinuz; do
+        head -c 40000 /dev/urandom >"$rb/src/$rel"; cp "$rb/src/$rel" "$rb/dst/$rel"
+    done
+    clean_out="$(_usb_copy_readback "$rb/src" "$rb/dst" 2>&1)"; clean_rc=$?
+    # Same size, one "cluster" of garbage in the middle - the live shape.
+    head -c 16384 /dev/urandom | dd of="$rb/dst/md5sum.txt" bs=1 seek=8192 conv=notrunc status=none
+    rm -f "$rb/dst/casper/vmlinuz"
+    head -c 1000 "$rb/src/EFI/boot/bootx64.efi" >"$rb/dst/EFI/boot/bootx64.efi"
+    out="$(_usb_copy_readback "$rb/src" "$rb/dst" 2>&1)"; rc=$?
+    if [[ $clean_rc -eq 0 && -z "$clean_out" && $rc -ne 0 && "$out" == *"content differs (same size): md5sum.txt"* \
+          && "$out" == *"missing on the stick: casper/vmlinuz"* && "$out" == *"size differs: EFI/boot/bootx64.efi"* ]]; then pass
+    else fail "clean_rc=$clean_rc clean_out=[$clean_out] rc=$rc out=$out"; fi
+    rm -rf "$rb"
+fi
+
 if it "usb_execute: usb_copy_image's dry run writes nothing"; then
     out="$(AUTOOS_DRY_RUN=1 usb_copy_image /dev/sdb /tmp/x.iso /tmp/extra.sh 2>&1)"; rc=$?
     [[ $rc -eq 0 && "$out" == *"would copy"* ]] && pass || fail "rc=$rc out=$out"

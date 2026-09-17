@@ -213,13 +213,30 @@ by itself, finished, **flushed**, and "Ready to boot" was printed at ~13:21. Ver
 read-only: all 951 ISO files present with the ISO's exact byte total, volume Healthy, `EFI\boot\
 bootx64.efi`, `grubx64.efi`, `boot\grub\grub.cfg`, `casper\vmlinuz`/`initrd`/`minimal.squashfs`
 and `.disk\info` all in place, ISO dismounted. **That is the first stick this tool has ever
-finished building.** It has still not been booted — that needs the human partner to boot a
-machine from it (UEFI only: `uefi-copy` sticks have no legacy boot path), which no agent may do.
+finished building — and it is NOT bootable-trustworthy**: a read-only check afterwards found
+`casper/minimal.squashfs` (same size, different MD5 than the manifest, which the ISO's own copy
+matches) and even the 72 KB `md5sum.txt` corrupted on the stick — exactly one 16 KB cluster
+(offsets 8192–24575, the FAT32 cluster size) replaced by random bytes, stable on re-read. The
+stick accepts writes and returns different bytes: failing flash. **Replace the stick.** The
+tool's part of that failure — "Ready to boot" printed without ever reading anything back — is
+defect 9:
 
-**The stick itself is suspect**: two FAT32 corruptions and two multi-minute controller stalls in
-one day (always right after the 3.4 GB file, so most likely the controller's own housekeeping
-after a large sequential write). Treat a stall as "wait ten minutes", a third corruption as
-"replace the stick", neither as a tool bug.
+9. **No read-back.** B15's "reads back" only checked that the device still enumerated. Both copy
+   engines now compare every file on the stick with the image (size + SHA-256; bash reads the
+   stick with `dd iflag=direct` so the page cache cannot answer) and refuse with "do not boot
+   it, replace the stick" on any mismatch. `Test-AutoOSUsbCopyReadback` / `_usb_copy_readback`
+   are pure directory-vs-directory functions, unit-tested with the live corruption shape.
+   Windows reads through the file cache after `Write-VolumeCache`; a `FILE_FLAG_NO_BUFFERING`
+   read would be stricter and is a follow-up.
+
+The next build must be on a different stick; it has still not been booted — that needs the
+human partner to boot a machine from it (UEFI only: `uefi-copy` sticks have no legacy boot
+path), which no agent may do.
+
+**The stick is faulty** (serial `960806056010`): two FAT32 corruptions, two multi-minute
+controller stalls (always right after the 3.4 GB file) and, decisively, silent data corruption
+of a freshly written cluster in one day. Do not use it for further builds; keep it only as a
+known-bad device to exercise the read-back refusal against.
 
 Still true after this session: **nobody has booted a stick built by this tool** (one has now been
 *built* by it, see above — the boot is the next thing to do, by a human), the

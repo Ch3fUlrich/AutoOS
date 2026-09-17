@@ -1672,6 +1672,48 @@ _usb_copy_mount_data_partition() {
     printf '%s\n' "$mnt"
 }
 
+# _usb_readback_sha256 <file>
+# SHA-256 of <file> read with O_DIRECT where the kernel allows it (dd
+# iflag=direct - vfat and exfat do), so the bytes come from the DEVICE and
+# not from the page cache that still holds what cp just wrote. Falls back
+# to a plain read on filesystems/hosts that refuse direct I/O, which is
+# weaker (the cache may answer) but never wrong in the other direction.
+_usb_readback_sha256() {
+    local f="$1" sum size
+    size="$(_usb_file_size "$f")"
+    sum="$(dd if="$f" bs=4M iflag=direct status=none 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
+    # The SHA-256 of nothing: dd refused (direct I/O unsupported) or the
+    # file really is empty - only the empty file may keep that answer.
+    if [[ -z "$sum" || ( "$sum" == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" && "$size" != "0" ) ]]; then
+        sum="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
+    fi
+    printf '%s\n' "$sum"
+}
+
+# _usb_copy_readback <source_root> <dest_root>
+# Compares every file under <source_root> with its copy under <dest_root>
+# by size and SHA-256; names each mismatch (missing / size / content) via
+# ui_err and returns non-zero if there was any. The read-back step of
+# _usb_copy_onto, kept as a pure directory-vs-directory function so it is
+# tested with temp dirs and never needs a loop mount or a real stick.
+_usb_copy_readback() {
+    local src_root="$1" dst_root="$2" f rel bad=0
+    src_root="${src_root%/}"; dst_root="${dst_root%/}"
+    while IFS= read -r -d '' f; do
+        rel="${f#"$src_root"/}"
+        if [[ ! -f "$dst_root/$rel" ]]; then
+            ui_err "readback: missing on the stick: $rel"; bad=$((bad + 1)); continue
+        fi
+        if [[ "$(_usb_file_size "$f")" != "$(_usb_file_size "$dst_root/$rel")" ]]; then
+            ui_err "readback: size differs: $rel"; bad=$((bad + 1)); continue
+        fi
+        if [[ "$(sha256sum "$f" | awk '{print $1}')" != "$(_usb_readback_sha256 "$dst_root/$rel")" ]]; then
+            ui_err "readback: content differs (same size): $rel"; bad=$((bad + 1))
+        fi
+    done < <(find "$src_root" -type f -print0 2>/dev/null)
+    (( bad == 0 ))
+}
+
 # _usb_copy_onto <image_path> <mountpoint> [extra_file...]
 # Mounts <image_path> read-only (a loop mount - the source is a plain ISO
 # file, never the physical device), refuses before copying anything if any
@@ -1713,6 +1755,21 @@ _usb_copy_onto() {
 
         if ! cp -a "$src_mnt/." "$mnt/"; then
             ui_err "usb_copy_image: copying $image onto $mnt failed"
+            $AUTOOS_SUDO umount "$src_mnt" 2>/dev/null; rmdir "$src_mnt" 2>/dev/null
+            return 1
+        fi
+        # Read back EVERY file and compare it with the image (B15: "reads
+        # back" means the bytes, not that the device still enumerates). The
+        # second real build on 2026-09-17 (Windows engine) finished, flushed
+        # and printed "Ready to boot" while the stick had silently replaced
+        # one 16 KB cluster of md5sum.txt and part of the 3.4 GB squashfs
+        # with garbage, at the right sizes, stable on re-read. cp cannot see
+        # that; only reading the stick can - sync first so the comparison
+        # reads what the device holds, not what is still queued to it.
+        sync 2>/dev/null
+        ui_info "reading back $mnt to verify every file against the image"
+        if ! _usb_copy_readback "$src_mnt" "$mnt"; then
+            ui_err "usb_copy_image: $mnt did not read back identical to $image - the stick is returning different bytes than were written (hardware fault, finding B15); do not boot it, and replace the stick"
             $AUTOOS_SUDO umount "$src_mnt" 2>/dev/null; rmdir "$src_mnt" 2>/dev/null
             return 1
         fi

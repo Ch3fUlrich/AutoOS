@@ -2246,6 +2246,33 @@ Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips a mirror whose bytes do not mat
     }
 }
 
+Test-Case 'usb: Test-AutoOSUsbCopyReadback reports a file whose bytes differ at the same size, a missing file and a size change, and nothing for an identical tree (copy readback)' {
+    # The second real build on 2026-09-17 finished and printed "Ready to
+    # boot" while the stick had silently replaced one 16 KB cluster of
+    # md5sum.txt with garbage at the same size. Only reading back catches
+    # that, so the read-back is a pure dir-vs-dir function tested here.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_rb_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $src = Join-Path $tmp 'src'; $dst = Join-Path $tmp 'dst'
+        foreach ($d in @("$src\casper", "$dst\casper", "$src\EFI\boot", "$dst\EFI\boot")) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+        $bytes = [byte[]](1..40000 | ForEach-Object { $_ % 253 })
+        foreach ($rel in @('md5sum.txt', 'casper\minimal.squashfs', 'EFI\boot\bootx64.efi', 'casper\vmlinuz')) {
+            [IO.File]::WriteAllBytes((Join-Path $src $rel), $bytes); [IO.File]::WriteAllBytes((Join-Path $dst $rel), $bytes)
+        }
+        $clean = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst)
+        # Same size, one "cluster" of garbage in the middle - the live shape.
+        $corrupt = [byte[]]$bytes.Clone(); for ($i = 8192; $i -lt 24576; $i++) { $corrupt[$i] = [byte](255 - $corrupt[$i]) }
+        [IO.File]::WriteAllBytes((Join-Path $dst 'md5sum.txt'), $corrupt)
+        Remove-Item -LiteralPath (Join-Path $dst 'casper\vmlinuz') -Force
+        [IO.File]::WriteAllBytes((Join-Path $dst 'EFI\boot\bootx64.efi'), $bytes[0..999])
+        $bad = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst)
+        $byPath = @{}; foreach ($b in $bad) { $byPath[$b.Path] = $b.Reason }
+        Assert-True ($clean.Count -eq 0 -and $bad.Count -eq 3 -and $byPath['md5sum.txt'] -eq 'content' -and $byPath['casper\vmlinuz'] -eq 'missing' -and $byPath['EFI\boot\bootx64.efi'] -eq 'size') "clean=$($clean.Count) bad=$(($bad | ForEach-Object { "$($_.Path)=$($_.Reason)" }) -join ',')"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'usb: Test-AutoOSRobocopyFailed treats only exit codes 0..7 as success - negative and out-of-range codes are failures (copy)' {
     # robocopy killed or losing its destination mid-copy can exit with a
     # negative or otherwise out-of-range code; "-ge 8" read those as

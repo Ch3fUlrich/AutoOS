@@ -979,6 +979,42 @@ function Test-AutoOSRobocopyFailed {
     return ($ExitCode -lt 0 -or $ExitCode -gt 7)
 }
 
+function Test-AutoOSUsbCopyReadback {
+    <#
+      .SYNOPSIS
+        Compares every file under -SourceRoot with its copy under -DestRoot
+        by size and SHA-256 and returns one record per mismatch (Path,
+        Reason: missing | size | content). Empty result = identical.
+      .DESCRIPTION
+        The read-back step of Invoke-AutoOSUsbCopyImage, kept as a pure
+        directory-vs-directory function so it is unit-tested with temp
+        dirs and never needs a mounted ISO or a real stick. Streams every
+        file through Get-AutoOSFileSha256, so memory stays flat for a
+        multi-gigabyte squashfs.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$DestRoot
+    )
+    $srcRoot = $SourceRoot.TrimEnd('\') + '\'
+    $dstRoot = $DestRoot.TrimEnd('\') + '\'
+    $bad = @()
+    foreach ($f in Get-ChildItem -LiteralPath $srcRoot -Recurse -File -Force -ErrorAction SilentlyContinue) {
+        $rel = $f.FullName.Substring($srcRoot.Length)
+        $dst = Join-Path $dstRoot $rel
+        if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) {
+            $bad += [pscustomobject]@{ Path = $rel; Reason = 'missing' }; continue
+        }
+        if ((Get-Item -LiteralPath $dst).Length -ne $f.Length) {
+            $bad += [pscustomobject]@{ Path = $rel; Reason = 'size' }; continue
+        }
+        if ((Get-AutoOSFileSha256 -Path $f.FullName) -ne (Get-AutoOSFileSha256 -Path $dst)) {
+            $bad += [pscustomobject]@{ Path = $rel; Reason = 'content' }
+        }
+    }
+    return $bad
+}
+
 function Invoke-AutoOSUsbCopyImage {
     [CmdletBinding()]
     param(
@@ -1017,20 +1053,35 @@ function Invoke-AutoOSUsbCopyImage {
         if (Test-AutoOSRobocopyFailed -ExitCode $LASTEXITCODE) {
             throw "Invoke-AutoOSUsbCopyImage: robocopy reported a failure copying $ImagePath onto $destRoot (exit $LASTEXITCODE)"
         }
+
+        # Flush before anyone is told the stick is ready. robocopy returns
+        # when Windows has ACCEPTED the writes, not when the stick has them:
+        # on the first real build (2026-09-17) the stick was pulled after
+        # "Ready to boot" was printed and came back with an empty boot
+        # partition. The bash mirror (usb_copy_image) does sync + umount for
+        # the same reason; Write-VolumeCache is the per-volume sync.
+        try {
+            Write-VolumeCache -DriveLetter $target.MountedLetter -ErrorAction Stop
+        } catch {
+            throw "Invoke-AutoOSUsbCopyImage: could not flush $($target.MountedLetter): after the copy ($($_.Exception.Message)) - the stick may hold unflushed writes; do not unplug it, and treat this build as incomplete"
+        }
+
+        # Read back EVERY file and compare it with the source (B15: "reads
+        # back" means the bytes, not that the device still enumerates). The
+        # second real build on 2026-09-17 finished, flushed, printed "Ready
+        # to boot" - and the stick had silently replaced one 16 KB cluster
+        # of md5sum.txt and part of the 3.4 GB squashfs with garbage, at
+        # the right sizes, stable on re-read. robocopy cannot see that; only
+        # reading the stick can. Costs one full read of the stick; a stick
+        # that cannot afford that cannot be trusted to boot either.
+        Write-AutoOSLine "reading back $destRoot to verify every file against the image" -Level info
+        $bad = @(Test-AutoOSUsbCopyReadback -SourceRoot $srcRoot -DestRoot $destRoot)
+        if ($bad.Count -gt 0) {
+            $shown = ($bad | Select-Object -First 5 | ForEach-Object { "$($_.Path) ($($_.Reason))" }) -join '; '
+            throw "Invoke-AutoOSUsbCopyImage: $($bad.Count) file(s) on $destRoot did not read back identical to the image: $shown - the stick is returning different bytes than were written (hardware fault, finding B15); do not boot it, and replace the stick"
+        }
     } finally {
         Dismount-DiskImage -ImagePath $ImagePath -ErrorAction SilentlyContinue | Out-Null
-    }
-
-    # Flush before anyone is told the stick is ready. robocopy returns when
-    # Windows has ACCEPTED the writes, not when the stick has them: on the
-    # first real build (2026-09-17) the stick was pulled after "Ready to
-    # boot" was printed and came back with an empty boot partition. The
-    # bash mirror (usb_copy_image) does sync + umount for the same reason;
-    # Write-VolumeCache is the Windows equivalent of sync for one volume.
-    try {
-        Write-VolumeCache -DriveLetter $target.MountedLetter -ErrorAction Stop
-    } catch {
-        throw "Invoke-AutoOSUsbCopyImage: could not flush $($target.MountedLetter): after the copy ($($_.Exception.Message)) - the stick may hold unflushed writes; do not unplug it, and treat this build as incomplete"
     }
 
     $rescueDir = Join-Path $destRoot 'rescue'
@@ -1187,5 +1238,5 @@ Export-ModuleMember -Function `
     New-AutoOSUsbPlan, Get-AutoOSUsbEngine, Get-AutoOSUsbImage, Get-AutoOSUsbEngineList, `
     Get-AutoOSUsbCurrentOs, Get-AutoOSUsbCurrentArch, Test-AutoOSUsbRunActive, `
     Invoke-AutoOSUsbPlan, Invoke-AutoOSUsbFetchImage, Get-AutoOSUsbSumsDigest, `
-    Write-AutoOSUsbRaw, Invoke-AutoOSUsbCopyImage, Test-AutoOSRobocopyFailed, `
+    Write-AutoOSUsbRaw, Invoke-AutoOSUsbCopyImage, Test-AutoOSRobocopyFailed, Test-AutoOSUsbCopyReadback, `
     Install-AutoOSUsbVentoy, Add-AutoOSUsbVentoyPersistence, Get-AutoOSUsbVentoyCacheDir
