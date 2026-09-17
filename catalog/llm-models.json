@@ -211,7 +211,7 @@
     {
       "id": "ollama-qwen2.5-coder",
       "name": "Qwen 2.5 Coder 7B (Local)",
-      "direct": { "provider": "ollama", "base_url": "http://127.0.0.1:11434/v1", "model": "ollama/qwen2.5-coder:7b", "npm": "@ai-sdk/openai-compatible" },
+      "direct": { "provider": "ollama", "base_url": "http://host.docker.internal:11434/v1", "model": "ollama/qwen2.5-coder:7b", "npm": "@ai-sdk/openai-compatible" },
       "context": 32768,
       "output": 8192,
       "input_price": 0,
