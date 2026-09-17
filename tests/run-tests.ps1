@@ -2246,6 +2246,16 @@ Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips a mirror whose bytes do not mat
     }
 }
 
+Test-Case 'usb: Test-AutoOSRobocopyFailed treats only exit codes 0..7 as success - negative and out-of-range codes are failures (copy)' {
+    # robocopy killed or losing its destination mid-copy can exit with a
+    # negative or otherwise out-of-range code; "-ge 8" read those as
+    # success. 0..7 is the documented success bitmask (copied/extras/
+    # mismatches); 8 = some files failed, 16 = fatal.
+    $ok = @(0, 1, 2, 3, 4, 5, 6, 7) | ForEach-Object { Test-AutoOSRobocopyFailed -ExitCode $_ }
+    $bad = @(8, 9, 16, 24, -1, -1073741510, 259) | ForEach-Object { Test-AutoOSRobocopyFailed -ExitCode $_ }
+    Assert-True ((@($ok | Where-Object { $_ }).Count -eq 0) -and (@($bad | Where-Object { -not $_ }).Count -eq 0)) "ok=$($ok -join ',') bad=$($bad -join ',')"
+}
+
 Test-Case 'usb: Invoke-AutoOSUsbFetchImage creates a cache directory that does not exist yet, as on a first run (fetch)' {
     $fx = New-AutoOSUsbFetchFixture -Mode good
     try {

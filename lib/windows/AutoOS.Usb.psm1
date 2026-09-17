@@ -962,6 +962,23 @@ function Write-AutoOSUsbRaw {
 # the image exceeds FAT32's 4 GiB per-file ceiling, naming the offending
 # file - failing 20 minutes into a multi-gigabyte copy is exactly what this
 # guards against.
+function Test-AutoOSRobocopyFailed {
+    <#
+      .SYNOPSIS
+        $true when a robocopy exit code means the copy is not complete.
+      .DESCRIPTION
+        robocopy's exit code is a bitmask: 1 copied, 2 extras, 4 mismatches
+        (all fine), 8 some files FAILED, 16 fatal - so only 0..7 is success.
+        Checked as "not in 0..7" rather than "-ge 8" because a robocopy that
+        is killed, crashes or loses its destination device mid-copy can
+        exit with a NEGATIVE or otherwise out-of-range code, and "-ge 8"
+        reads every one of those as success. Kept as its own pure function
+        so the rule is unit-tested without running robocopy.
+    #>
+    param([Parameter(Mandatory)][int]$ExitCode)
+    return ($ExitCode -lt 0 -or $ExitCode -gt 7)
+}
+
 function Invoke-AutoOSUsbCopyImage {
     [CmdletBinding()]
     param(
@@ -997,11 +1014,23 @@ function Invoke-AutoOSUsbCopyImage {
         }
 
         robocopy $srcRoot $destRoot /E /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS | Out-Null
-        if ($LASTEXITCODE -ge 8) {
+        if (Test-AutoOSRobocopyFailed -ExitCode $LASTEXITCODE) {
             throw "Invoke-AutoOSUsbCopyImage: robocopy reported a failure copying $ImagePath onto $destRoot (exit $LASTEXITCODE)"
         }
     } finally {
         Dismount-DiskImage -ImagePath $ImagePath -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    # Flush before anyone is told the stick is ready. robocopy returns when
+    # Windows has ACCEPTED the writes, not when the stick has them: on the
+    # first real build (2026-09-17) the stick was pulled after "Ready to
+    # boot" was printed and came back with an empty boot partition. The
+    # bash mirror (usb_copy_image) does sync + umount for the same reason;
+    # Write-VolumeCache is the Windows equivalent of sync for one volume.
+    try {
+        Write-VolumeCache -DriveLetter $target.MountedLetter -ErrorAction Stop
+    } catch {
+        throw "Invoke-AutoOSUsbCopyImage: could not flush $($target.MountedLetter): after the copy ($($_.Exception.Message)) - the stick may hold unflushed writes; do not unplug it, and treat this build as incomplete"
     }
 
     $rescueDir = Join-Path $destRoot 'rescue'
@@ -1158,5 +1187,5 @@ Export-ModuleMember -Function `
     New-AutoOSUsbPlan, Get-AutoOSUsbEngine, Get-AutoOSUsbImage, Get-AutoOSUsbEngineList, `
     Get-AutoOSUsbCurrentOs, Get-AutoOSUsbCurrentArch, Test-AutoOSUsbRunActive, `
     Invoke-AutoOSUsbPlan, Invoke-AutoOSUsbFetchImage, Get-AutoOSUsbSumsDigest, `
-    Write-AutoOSUsbRaw, Invoke-AutoOSUsbCopyImage, `
+    Write-AutoOSUsbRaw, Invoke-AutoOSUsbCopyImage, Test-AutoOSRobocopyFailed, `
     Install-AutoOSUsbVentoy, Add-AutoOSUsbVentoyPersistence, Get-AutoOSUsbVentoyCacheDir
