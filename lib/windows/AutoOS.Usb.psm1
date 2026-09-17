@@ -513,14 +513,14 @@ function Invoke-AutoOSUsbReverify {
 # without a console; the chooser itself degrades to "first item / default
 # answer" when not interactive, which the tests use to drive it.
 
-function Get-AutoOSUsbChooserImages {
+function Get-AutoOSUsbChooserImageItem {
     Get-AutoOSUsbImageCatalog | Where-Object { $_.id -notin @('custom-url', 'custom-local') } | ForEach-Object {
         $size = if ($_.PSObject.Properties['sizeGb']) { "$($_.sizeGb) GB" } else { '' }
         [pscustomobject]@{ Id = $_.id; Name = $_.name; Description = ((@($_.kinds) -join ', ') + " - $size").Trim(' -'); Badge = '' }
     }
 }
 
-function Get-AutoOSUsbChooserKinds {
+function Get-AutoOSUsbChooserKindItem {
     param([Parameter(Mandatory)][string]$ImageId)
     $image = Get-AutoOSUsbImage -Id $ImageId
     if (-not $image) { return @() }
@@ -535,7 +535,7 @@ function Get-AutoOSUsbChooserKinds {
     }
 }
 
-function Get-AutoOSUsbChooserEngines {
+function Get-AutoOSUsbChooserEngineItem {
     # The terminal MAY list rufus (a human is present to drive its GUI) -
     # the browser never does; it is badged "interactive".
     param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$WriteMode)
@@ -547,7 +547,7 @@ function Get-AutoOSUsbChooserEngines {
         }
 }
 
-function Get-AutoOSUsbChooserDevices {
+function Get-AutoOSUsbChooserDeviceItem {
     Get-AutoOSUsbDevice | ForEach-Object {
         [pscustomobject]@{ Id = $_.DeviceId; Name = $_.Model; Description = ('{0:N1} GB' -f ($_.SizeBytes / 1e9)); Badge = $_.Bus }
     }
@@ -567,18 +567,18 @@ function Invoke-AutoOSUsbChooser {
     [CmdletBinding()]
     param([string]$Image, [string]$Kind, [string]$Engine, [string]$Device, [switch]$DryRun)
 
-    $images = @(Get-AutoOSUsbChooserImages)
+    $images = @(Get-AutoOSUsbChooserImageItem)
     if ($images.Count -eq 0) { Write-AutoOSLine 'No images in catalog\images.json' -Level error; return $null }
     $default = if ($Image) { $Image } else { $images[0].Id }
     $Image = Show-AutoOSRadioMenu -Items $images -Title 'Choose an image' -DefaultId $default
 
-    $kinds = @(Get-AutoOSUsbChooserKinds -ImageId $Image)
+    $kinds = @(Get-AutoOSUsbChooserKindItem -ImageId $Image)
     if ($kinds.Count -eq 0) { Write-AutoOSLine "Image '$Image' offers no kinds" -Level error; return $null }
     $default = if ($Kind) { $Kind } else { $kinds[0].Id }
     $Kind = Show-AutoOSRadioMenu -Items $kinds -Title 'What should the stick be' -DefaultId $default
 
     $writeMode = [string](Get-AutoOSUsbImage -Id $Image).writeMode
-    $engines = @(Get-AutoOSUsbChooserEngines -Kind $Kind -WriteMode $writeMode)
+    $engines = @(Get-AutoOSUsbChooserEngineItem -Kind $Kind -WriteMode $writeMode)
     if ($engines.Count -eq 0) {
         Write-AutoOSLine "No engine on this machine can build a '$Kind' stick from '$Image' ($writeMode image)" -Level error
         return $null
@@ -586,7 +586,7 @@ function Invoke-AutoOSUsbChooser {
     $default = if ($Engine) { $Engine } elseif ($engines.Id -contains 'ventoy') { 'ventoy' } else { $engines[0].Id }
     $Engine = Show-AutoOSRadioMenu -Items $engines -Title 'Choose a write engine' -DefaultId $default
 
-    $devices = @(Get-AutoOSUsbChooserDevices)
+    $devices = @(Get-AutoOSUsbChooserDeviceItem)
     if ($devices.Count -eq 0) { Write-AutoOSLine 'No USB devices found - plug the stick in and try again' -Level error; return $null }
     $default = if ($Device) { $Device } else { $devices[0].Id }
     $Device = Show-AutoOSRadioMenu -Items $devices -Title 'Choose the target device' -DefaultId $default
@@ -1424,7 +1424,7 @@ Export-ModuleMember -Function `
     Get-AutoOSUsbDevice, Assert-AutoOSUsbSafe, Test-AutoOSElevated, Assert-AutoOSElevated, `
     New-AutoOSUsbPlan, Get-AutoOSUsbEngine, Get-AutoOSUsbImage, Get-AutoOSUsbEngineList, `
     Get-AutoOSUsbDiskIdentity, Invoke-AutoOSUsbReverify, `
-    Get-AutoOSUsbChooserImages, Get-AutoOSUsbChooserKinds, Get-AutoOSUsbChooserEngines, Get-AutoOSUsbChooserDevices, Invoke-AutoOSUsbChooser, `
+    Get-AutoOSUsbChooserImageItem, Get-AutoOSUsbChooserKindItem, Get-AutoOSUsbChooserEngineItem, Get-AutoOSUsbChooserDeviceItem, Invoke-AutoOSUsbChooser, `
     Get-AutoOSUsbCurrentOs, Get-AutoOSUsbCurrentArch, Test-AutoOSUsbRunActive, `
     Invoke-AutoOSUsbPlan, Invoke-AutoOSUsbFetchImage, Get-AutoOSUsbSumsDigest, `
     Write-AutoOSUsbRaw, Invoke-AutoOSUsbCopyImage, Test-AutoOSRobocopyFailed, Test-AutoOSUsbCopyReadback, `

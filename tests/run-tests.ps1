@@ -2349,7 +2349,7 @@ Test-Case 'usb: Invoke-AutoOSUsbFetchImage creates a cache directory that does n
 }
 
 Test-Case 'usb chooser: image items name every real image and exclude the custom pseudo-entries (chooser)' {
-    $items = @(Get-AutoOSUsbChooserImages)
+    $items = @(Get-AutoOSUsbChooserImageItem)
     $ids = @($items | ForEach-Object { $_.Id })
     $ubuntu = $items | Where-Object { $_.Id -eq 'ubuntu-desktop-lts' }
     Assert-True (($ids -contains 'ubuntu-desktop-lts') -and ($ids -notcontains 'custom-url') -and ($ids -notcontains 'custom-local') -and $ubuntu.Description -like '*installer, live-persistent*6 GB*') "ids=$($ids -join ',') desc=$($ubuntu.Description)"
@@ -2358,8 +2358,8 @@ Test-Case 'usb chooser: image items name every real image and exclude the custom
 Test-Case 'usb chooser: engine items list what Windows can build for the kind; rufus is offered to the terminal, badged interactive (chooser)' {
     $env:AUTOOS_FAKE_ARCH = 'x64'
     try {
-        $hybrid = @(Get-AutoOSUsbChooserEngines -Kind 'installer' -WriteMode 'hybrid')
-        $raw = @(Get-AutoOSUsbChooserEngines -Kind 'installer' -WriteMode 'raw')
+        $hybrid = @(Get-AutoOSUsbChooserEngineItem -Kind 'installer' -WriteMode 'hybrid')
+        $raw = @(Get-AutoOSUsbChooserEngineItem -Kind 'installer' -WriteMode 'raw')
         $rufus = $hybrid | Where-Object { $_.Id -eq 'rufus' }
         $ventoy = $hybrid | Where-Object { $_.Id -eq 'ventoy' }
         Assert-True ($rufus.Badge -eq 'interactive' -and $ventoy.Badge -eq 'default' -and (@($hybrid.Id) -contains 'uefi-copy') -and (@($raw.Id) -notcontains 'ventoy') -and (@($raw.Id) -contains 'native')) "hybrid=$($hybrid.Id -join ',') raw=$($raw.Id -join ',')"

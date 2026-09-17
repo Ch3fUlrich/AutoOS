@@ -10,6 +10,7 @@ Start here. Each page is short and answers one question.
 | [Profiles & detection](profiles.md) | What does it work out about my machine, and what does each profile mean? |
 | [The catalog](catalog.md) | How do I add software, and what does each field do? |
 | [Browser UI](web-ui.md) | How do I drive a headless machine from a browser? |
+| [Building a bootable USB stick](usb-creator.md) | How do I make an installer or rescue stick, and what do I do when it will not boot? |
 | [Replay, verification & undo](state-and-undo.md) | How do I repeat a setup, prove it worked, and get back? |
 | [Architecture](architecture.md) | How is it built, and why that way? |
 | [Testing](testing.md) | How do I check a change before shipping it? |
