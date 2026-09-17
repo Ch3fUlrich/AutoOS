@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — installer / rescue USB
+
+- **`--create-usb` / `-CreateUsb` builds a bootable stick end to end**: resolve the image from
+  its catalog entry (never a pinned version), fetch the vendor's GPG-signed checksum manifest,
+  fetch the image — from a catalog mirror when one is listed — and verify it, re-check the
+  target device immediately before the first destructive step, write with the chosen engine,
+  flush, then **read every file back and compare it with the image** before saying
+  `Ready to boot`. A real write needs `--wipe-target-disk` / `-WipeTargetDisk`; `--dry-run`
+  shows the plan and touches nothing. See [usb-creator.md](docs/usb-creator.md) and
+  [ADR 0004](docs/decisions/0004-ventoy-and-wsl-not-rufus.md).
+- **A terminal chooser** (image → kind → engine → device) when `--create-usb` is run
+  interactively without every flag, and a *Create installer USB* entry in the profile menu.
+  The confirmation names the device, its model, its size and that all data on it will be
+  destroyed; a non-interactive run never consents on the user's behalf.
+- **`rescue` and `local-ai` profiles**, Claude Code and `agy` as independent entries, an `ai`
+  dispatcher with a local backend, offline `.deb` cache and pip wheelhouse for the stick.
+- Catalog: `images.json` (version-free image entries with checksum/signature/key and an
+  optional `mirrors` list), `engines.json` (five write engines).
+
 ### Fixed — `claude-autostart`
 
 - **It recorded no sessions on Windows.** Discovery parsed process command lines,

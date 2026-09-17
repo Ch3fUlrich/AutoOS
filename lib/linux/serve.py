@@ -13,6 +13,7 @@ import errno
 import json
 import os
 import secrets
+import shlex
 import signal
 import subprocess
 import sys
@@ -227,6 +228,200 @@ def run_install(ids: list[str], answers: dict, dry: bool) -> None:
             RUN["running"] = False
 
 
+def _run_bash(script: str) -> subprocess.CompletedProcess:
+    """Run a snippet with the repo's shell modules sourced, AUTOOS_ROOT set.
+
+    Every AUTOOS_FAKE_* / AUTOOS_* testing knob usb.sh already understands
+    (AUTOOS_FAKE_LSBLK, AUTOOS_FAKE_UID, ...) reaches this subprocess
+    unchanged, because os.environ is inherited rather than replaced — the
+    same reason a test can call usb_create_response() directly with
+    AUTOOS_FAKE_LSBLK exported in its own shell and see it honoured here.
+    """
+    env = dict(os.environ, AUTOOS_ROOT=str(ROOT))
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                          cwd=str(ROOT), env=env)
+
+
+_USB_SOURCE = '. lib/linux/ui.sh; . lib/linux/detect.sh; . lib/linux/download.sh; . lib/linux/usb.sh\n'
+
+
+def usb_devices_response() -> dict:
+    """Live USB candidates plus whether this process can actually write one.
+
+    B10: elevation is surfaced here, not discovered at write time, so the
+    browser can disable the create button with a reason instead of
+    offering an action that would fail on "Access is denied".
+    """
+    listing = _run_bash('set -euo pipefail\ncd "$AUTOOS_ROOT"\n' + _USB_SOURCE + 'usb_list\n')
+    devices = []
+    if listing.returncode == 0:
+        for line in listing.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 5:
+                continue
+            dev, model, size, rm, tran = parts[:5]
+            try:
+                size = int(size)
+            except ValueError:
+                size = 0
+            devices.append({
+                "device": dev, "model": model or "(unknown model)", "size": size,
+                "removable": rm == "1", "bus": tran,
+            })
+
+    elevation = _run_bash('set -euo pipefail\ncd "$AUTOOS_ROOT"\n' + _USB_SOURCE + 'usb_require_elevation\n')
+    elevated = elevation.returncode == 0
+    reason = "" if elevated else (elevation.stderr or elevation.stdout or "not elevated").strip()
+    return {"devices": devices, "elevated": elevated, "reason": reason}
+
+
+def usb_images_response() -> dict:
+    """Static catalog data the dialog needs: images plus this machine's engines.
+
+    Filtered here (not in the page) so the page never has to know an
+    engine's platform/arch rules, and so `rufus` (interactive: true) never
+    reaches the browser at all - it needs a human at a GUI (task-11 brief).
+    """
+    images = json.loads((ROOT / "catalog" / "images.json").read_text(encoding="utf-8")).get("images", [])
+    engines_all = json.loads((ROOT / "catalog" / "engines.json").read_text(encoding="utf-8")).get("engines", [])
+    platform = "macos" if sys.platform == "darwin" else "linux"
+    try:
+        import platform as _platform
+        arch = "arm64" if _platform.machine().lower() in ("arm64", "aarch64") else "x64"
+    except Exception:
+        arch = "x64"
+    engines = [
+        e for e in engines_all
+        if not e.get("interactive") and platform in e.get("platforms", []) and arch in e.get("arch", [])
+    ]
+    return {"images": images, "engines": engines}
+
+
+def _image_size_bytes(image_id: str) -> int:
+    """catalog/images.json's sizeGb for <image_id>, in bytes, or 0.
+
+    Finding F12: usb_guard's own size check (usb.sh:369) compares the
+    target device against $AUTOOS_IMAGE_BYTES, defaulting to 0 - "unknown,
+    never a refusal" - when the caller never told it. The CLI path
+    (usb_plan, usb.sh:696) always computes this before calling usb_guard;
+    this is the same lookup for the HTTP path, which used to call usb_guard
+    with no AUTOOS_IMAGE_BYTES at all and so accepted a device smaller than
+    the image with a 202. 0 (unknown image, missing/unreadable catalog, or
+    no sizeGb on this entry - e.g. custom-url/custom-local) intentionally
+    reproduces the old "never a refusal on size" behaviour rather than
+    inventing a size limit this catalog entry never declared.
+    """
+    try:
+        images = json.loads((ROOT / "catalog" / "images.json").read_text(encoding="utf-8")).get("images", [])
+    except (OSError, ValueError):
+        return 0
+    entry = next((e for e in images if e.get("id") == image_id), None)
+    if entry is None:
+        return 0
+    size_gb = entry.get("sizeGb")
+    if not isinstance(size_gb, (int, float)):
+        return 0
+    return int(round(size_gb * 1_000_000_000))
+
+
+def usb_create_response(body: dict) -> tuple[int, dict]:
+    """Validate a USB-create request. Never writes to a device.
+
+    MODULE-LEVEL, not a Handler method: Handler subclasses
+    BaseHTTPRequestHandler and every one of its helpers takes `self` as the
+    first argument, so `Handler._usb_create(body)` would receive the dict
+    AS self and raise TypeError the moment a test - or do_POST - called it
+    with a plain dict. classify() above is module-level for the identical
+    reason, and this function follows the same rule.
+
+    The device-safety check (usb_guard) runs before anything else, mirroring
+    usb_guard's own "most dangerous mistake first" ordering: a bad device is
+    refused before this function ever looks at whether the rest of the
+    request is even well-formed. image/engine are read (but not yet
+    validated as present) ahead of the guard call so their sizeGb/mode can
+    feed that same guard call (finding F12) without disturbing this
+    "guard first" order - the "image and engine are both required" check
+    below still runs after the guard, exactly as before.
+    """
+    device = str(body.get("device") or "")
+    if not device:
+        return 400, {"error": "a target device is required"}
+
+    image = str(body.get("image") or "")
+    engine = str(body.get("engine") or "")
+    image_bytes = _image_size_bytes(image)
+    mode = "mounted-fat32-writable" if engine == "uefi-copy" else "unmounted"
+    guard = _run_bash(
+        'set -euo pipefail\ncd "$AUTOOS_ROOT"\n' + _USB_SOURCE +
+        f"AUTOOS_IMAGE_BYTES={image_bytes} usb_guard {shlex.quote(device)} {shlex.quote(mode)}\n"
+    )
+    if guard.returncode != 0:
+        reason = (guard.stderr or guard.stdout or "device refused by usb_guard").strip()
+        return 400, {"error": reason}
+
+    kind = str(body.get("kind") or "installer")
+    if not image or not engine:
+        return 400, {"error": "image and engine are both required"}
+
+    with LOCK:
+        if RUN["running"]:
+            return 409, {"error": "a run is already in progress"}
+
+    return 202, {"ok": True, "image": image, "kind": kind, "engine": engine, "device": device}
+
+
+def run_usb_create(image: str, kind: str, engine: str, device: str) -> None:
+    """Preview a USB write through the same plan-then-execute CLI path.
+
+    Always --dry-run: task-11's constraints are explicit that the browser
+    must never trigger a real write. usb_plan (which --create-usb runs)
+    documents itself as emitting commands and running nothing, so this is
+    belt-and-suspenders rather than the only thing standing between this
+    button and a real write - but it is a cheap and explicit one.
+
+    Finding F11': --wipe-target-disk used to be passed here too. setup.sh's
+    --dry-run flag sets AUTOOS_DRY_RUN=1 itself (setup.sh:95), so this was
+    never actually a live-wipe path as Gemini's review first framed it - but
+    a browser PREVIEW acknowledging "the target device's current contents
+    are lost" is gratuitous, and leaves exactly one missing flag between a
+    preview and a real wipe. Dropped from the command line, and
+    AUTOOS_DRY_RUN=1 is now also set directly in `env` (belt-and-suspenders
+    alongside the --dry-run flag already on the command line) so nothing
+    about this call depends on a single flag surviving unchanged.
+    """
+    global STATE_CACHE
+    env = dict(os.environ, AUTOOS_NO_COLOR="1", AUTOOS_PROGRESS_EVENTS="1", AUTOOS_DRY_RUN="1")
+    cmd = ["bash", "setup.sh", "--create-usb", "--image", image, "--kind", kind,
+           "--engine", engine, "--usb-device", device,
+           "--dry-run", "--yes", "--no-color"]
+
+    with LOCK:
+        LOG.append({"level": "step", "text": "$ " + " ".join(cmd)})
+
+    try:
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            record_line(raw.rstrip("\r\n"))
+        proc.wait()
+        with LOCK:
+            RUN["summary"] = "finished (exit %d)" % proc.returncode
+            LOG.append({
+                "level": "ok" if proc.returncode == 0 else "err",
+                "text": "--- exit code %d ---" % proc.returncode,
+            })
+    except Exception as exc:
+        with LOCK:
+            RUN["summary"] = "usb create failed: " + str(exc)
+            LOG.append({"level": "err", "text": RUN["summary"]})
+    finally:
+        with STATE_LOCK:
+            STATE_CACHE = None
+        with LOCK:
+            RUN["running"] = False
+
+
 def example_block(name):
     """One top-level block of autoos.config.example.json, or {}.
 
@@ -373,6 +568,18 @@ class Handler(BaseHTTPRequestHandler):
             # first version re-recorded the machine's sessions on every page load.
             return self._json(200, self._claude_state())
 
+        if u.path == "/api/images":
+            try:
+                return self._json(200, usb_images_response())
+            except Exception as exc:
+                return self._json(500, {"error": str(exc)})
+
+        if u.path == "/api/usb/devices":
+            try:
+                return self._json(200, usb_devices_response())
+            except Exception as exc:
+                return self._json(500, {"error": str(exc)})
+
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -410,6 +617,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "saved": str(cfg_file)})
             except Exception as exc:
                 return self._json(500, {"error": f"failed to save config: {exc}"})
+        if u.path == "/api/usb/create":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return self._json(400, {"error": "payload must be JSON"})
+            if not isinstance(body, dict):
+                return self._json(400, {"error": "payload must be a JSON object"})
+            code, payload = usb_create_response(body)
+            if code != 202:
+                return self._json(code, payload)
+            # Reserve before starting the worker, under the SAME lock /api/install
+            # uses - a write must never run alongside an install, or another write.
+            with LOCK:
+                if RUN["running"]:
+                    return self._json(409, {"error": "a run is already in progress"})
+                LOG.clear()
+                RUN.update(running=True, done=0, total=1, summary="", current=None)
+            threading.Thread(
+                target=run_usb_create,
+                args=(payload["image"], payload["kind"], payload["engine"], payload["device"]),
+                daemon=True,
+            ).start()
+            return self._json(202, {"started": True})
+
         if u.path != "/api/install":
             return self._json(404, {"error": "not found"})
         length = int(self.headers.get("Content-Length") or 0)

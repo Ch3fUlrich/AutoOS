@@ -1,0 +1,59 @@
+{
+  "engines": [
+    {
+      "id": "ventoy",
+      "name": "Ventoy",
+      "platforms": ["linux", "windows"],
+      "arch": ["x64"],
+      "kinds": ["installer", "live-persistent"],
+      "writeModes": ["hybrid"],
+      "requires": ["ventoy"],
+      "interactive": false,
+      "notes": "Installs a boot manager once (Ventoy2Disk.sh -i -g), then images are copied on as plain files - never offered a writeMode: raw image (finding A11). Ventoy ships x86_64 binaries only, so this engine is hidden on arm64 rather than offered and broken (AGENTS.md §3)."
+    },
+    {
+      "id": "uefi-copy",
+      "name": "UEFI file copy",
+      "platforms": ["linux", "windows"],
+      "arch": ["x64", "arm64"],
+      "kinds": ["installer", "live-persistent"],
+      "writeModes": ["hybrid"],
+      "requires": [],
+      "interactive": false,
+      "notes": "Copies a hybrid ISO's files onto a partition the caller already formatted and mounted - no install-to-device step, and no elevation, unlike every other engine here. Needs the target mounted, writable and FAT32; the guard runs in 'mounted-fat32-writable' mode for this engine instead of the usual 'unmounted' mode every other engine requires."
+    },
+    {
+      "id": "wsl",
+      "name": "WSL2 passthrough",
+      "platforms": ["windows"],
+      "arch": ["x64", "arm64"],
+      "kinds": ["installer", "live-persistent", "full-os"],
+      "writeModes": ["hybrid", "raw"],
+      "requires": ["usbipd-win"],
+      "interactive": false,
+      "notes": "Attaches the physical USB device into a WSL2 distro via usbipd-win so a real Linux dd is available on Windows; the only engine that can build a full-os (portable installed OS) stick."
+    },
+    {
+      "id": "native",
+      "name": "Native raw write",
+      "platforms": ["linux", "macos", "windows"],
+      "arch": ["x64", "arm64"],
+      "kinds": ["installer", "live-persistent"],
+      "writeModes": ["hybrid", "raw"],
+      "requires": [],
+      "interactive": false,
+      "notes": "Block-for-block dd (or the platform's raw-disk-write equivalent). Works for both writeModes because a hybrid ISO is dd-writable too; this is the only non-interactive engine a writeMode: raw image (e.g. proxmox-ve) can ever be planned onto, together with wsl and rufus."
+    },
+    {
+      "id": "rufus",
+      "name": "Rufus",
+      "platforms": ["windows"],
+      "arch": ["x64"],
+      "kinds": ["installer", "live-persistent"],
+      "writeModes": ["hybrid", "raw"],
+      "requires": ["rufus"],
+      "interactive": true,
+      "notes": "GUI-driven; AutoOS can only launch it and hand it the image, never script the write itself. interactive: true means this engine is unavailable under --dry-run and in the browser UI (plan B11/B12), which cannot drive a foreground dialog."
+    }
+  ]
+}

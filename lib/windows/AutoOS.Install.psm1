@@ -288,33 +288,97 @@ function Install-AutoOSComponent {
     'installed'
 }
 
+# agy (Antigravity CLI, replacing Gemini CLI at the human partner's direction)
+# used to be dispatched here via `irm https://antigravity.google/cli/install.ps1
+# | iex` — an unverified remote script piped straight into a shell (A14).
+# Google publishes a signed winget package (Google.AntigravityCLI, x64 +
+# arm64, sha256-pinned installers) that does the verification for us, so
+# catalog/windows.json now installs it with provider "winget" instead and
+# there is no longer a script path for it here.
 function Invoke-AutoOSScriptProvider {
     param([Parameter(Mandatory)][psobject]$Component)
     switch ($Component.Package) {
         'meslo-nerd-font' { return Install-AutoOSNerdFont }
         'herdr'           { return Install-AutoOSHerdr }
         'claude-autostart'{ return Install-AutoOSClaudeAutostart }
-        'agy'             { return Install-AutoOSAgy }
         default           { return @{ ExitCode = 1; Output = "no script for '$($Component.Package)'" } }
     }
 }
 
-function Install-AutoOSAgy {
+# ─── Post-install steps ─────────────────────────────────────────────────────
+
+function Invoke-AutoOSOllamaPull {
+    <#
+      .SYNOPSIS Pull one Ollama model, idempotently.
+      .DESCRIPTION
+        Shared by the three local-ai model postInstall wrappers below — a
+        catalog postInstall is invoked with no arguments (see
+        Invoke-AutoOSPostInstall), so each model needs its own thin named
+        wrapper; this is the one place that actually knows how to pull one.
+        `ollama list` is checked first so a model already pulled reports
+        nothing new to do, matching every other installer's "skipped" bar
+        (AGENTS.md §4) even though the catalog's own custom-provider
+        pre-check (Get-AutoOSInstalledStatus) already does the same test.
+    #>
+    param([Parameter(Mandatory)][string]$Model)
     if ($script:DryRun) {
-        Write-AutoOSLine "would install Antigravity CLI via antigravity.google/cli/install.ps1" -Level muted
-        return @{ ExitCode = 0; Success = $true }
+        Write-AutoOSLine "would pull ollama model: $Model" -Level muted
+        return
     }
-    try {
-        & powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://antigravity.google/cli/install.ps1 | iex"
-        return @{ ExitCode = $LASTEXITCODE; Success = ($LASTEXITCODE -eq 0) }
-    } catch {
-        return @{ ExitCode = 1; Output = $_.Exception.Message; Success = $false }
+    if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
+        Write-AutoOSLine "ollama command not found; skipping model pull for $Model" -Level warn
+        return
+    }
+    $existing = & ollama list 2>$null
+    if ($existing -match [regex]::Escape($Model)) {
+        Write-AutoOSLine "ollama model $Model already pulled" -Level muted
+        return
+    }
+    Write-AutoOSLine "pulling Ollama model: $Model" -Level step
+    & ollama pull $Model
+    if ($LASTEXITCODE -ne 0) {
+        Write-AutoOSLine "failed to pull ollama model: $Model" -Level warn
     }
 }
 
-# ─── Post-install steps ─────────────────────────────────────────────────────
-function Add-AutoOSAgyToPath {
-    Add-AutoOSPathEntry -Directory @(Join-Path $env:LOCALAPPDATA 'agy\bin') | Out-Null
+# local-ai profile (B21): qwen3:4b is the pre-ticked default (2.5 GB, 256K
+# context — long enough to paste a dmesg/SMART dump into), qwen3:1.7b and
+# qwen2.5-coder:7b are offered but not pre-ticked. Sizes are verified against
+# ollama.com and live in each catalog entry's description, which a test
+# enforces.
+function Install-AutoOSOllamaModelQwen34B { Invoke-AutoOSOllamaPull -Model 'qwen3:4b' }
+function Install-AutoOSOllamaModelQwen317B { Invoke-AutoOSOllamaPull -Model 'qwen3:1.7b' }
+function Install-AutoOSOllamaModelQwenCoder7B { Invoke-AutoOSOllamaPull -Model 'qwen2.5-coder:7b' }
+
+function Install-AutoOSOterm {
+    <#
+      .SYNOPSIS Install oterm (the Ollama TUI client) via pip.
+      .DESCRIPTION
+        Verified 2026-09-12: oterm has no winget or Chocolatey package
+        (winget.run and community.chocolatey.org both return zero matches).
+        pip is the only cross-platform install path the upstream docs
+        (ggozad.github.io/oterm/installation) list, so this is a "custom"
+        provider postInstall rather than a normal winget/choco entry.
+    #>
+    if ($script:DryRun) {
+        Write-AutoOSLine 'would install oterm via pip (pip install --user oterm)' -Level muted
+        return
+    }
+    if (Get-Command oterm -ErrorAction SilentlyContinue) {
+        Write-AutoOSLine 'oterm already installed' -Level muted
+        return
+    }
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
+    if (-not $py) {
+        Write-AutoOSLine 'python not found; skipping oterm' -Level warn
+        return
+    }
+    Write-AutoOSLine 'installing oterm (pip)' -Level step
+    & $py.Source -m pip install --user oterm
+    if ($LASTEXITCODE -ne 0) {
+        Write-AutoOSLine 'oterm install failed' -Level warn
+    }
 }
 
 function Add-AutoOSGitToPath {
@@ -1534,12 +1598,13 @@ Export-ModuleMember -Function `
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
     Write-AutoOSOmnigraphReadiness,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
-    Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSAgyToPath, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
-    Install-AutoOSHerdr, Install-AutoOSAgy, Install-AutoOSClaudeAutostart,
+    Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
+    Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,
     Write-AutoOSClaudeHostReadiness, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
-    Invoke-AutoOSScriptProvider
-
+    Invoke-AutoOSScriptProvider,
+    Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,
+    Install-AutoOSOterm

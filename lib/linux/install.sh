@@ -85,6 +85,15 @@ custom_is_installed() {
         mcp-context7)
             mcp_has_server context7 || antigravity_has_server context7
             ;;
+        # local-ai (B21) models — pulled via `ollama pull`, so "installed"
+        # means "ollama list already names this tag", not a package-manager
+        # record.
+        qwen3:4b | qwen3:1.7b | qwen2.5-coder:7b)
+            has_cmd ollama && ollama list 2>/dev/null | grep -qF -- "$1"
+            ;;
+        oterm)
+            has_cmd oterm
+            ;;
         *) return 1 ;;
     esac
 }
@@ -389,11 +398,39 @@ install_herdr() {
 }
 
 install_agy() {
+    # Google's Antigravity CLI, replacing Gemini CLI at the human partner's
+    # direction (Gemini CLI is not deprecated - this is a deliberate product
+    # choice, not a response to a broken package).
+    #
+    # This used to be `curl -fsSL $url | bash` - an unverified remote script
+    # piped straight into a shell (A14, the exact finding this branch exists
+    # to remove: a pipe can't be inspected and can be swapped mid-stream).
+    # Google publishes no checksum for this installer, unlike oh-my-zsh's
+    # pinned sha256 in install_oh_my_zsh() above, so a hash can't be verified
+    # here either. The minimum acceptable bar instead: download to a file,
+    # log the exact URL, verify it is non-empty and actually looks like a
+    # script, and only then execute the FILE - never the pipe.
+    local url="https://antigravity.google/cli/install.sh"
     if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would install Antigravity CLI via antigravity.google/cli/install.sh"
+        ui_muted "would download and run the Antigravity CLI installer from $url"
         return 0
     fi
-    curl -fsSL https://antigravity.google/cli/install.sh | bash
+    ui_muted "downloading Antigravity CLI installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_err "failed to download Antigravity CLI installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_err "Antigravity CLI installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    bash "$tmp" || rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
 install_claude_autostart() {
@@ -597,19 +634,69 @@ install_gh() {
 }
 
 install_uv() {
+    # Found alongside the install_ollama fix while adding the A14 regression
+    # guard below: this had the identical unverified pipe-to-shell pattern
+    # (curl ... | sh) that this branch exists to remove — a pipe can't be
+    # inspected before it runs and can be swapped mid-stream; a downloaded
+    # file can be both. Astral publishes no checksum for this installer,
+    # unlike oh-my-zsh's pinned sha256 in install_oh_my_zsh() above, so a
+    # hash can't be verified here either. Same minimum bar as install_agy()
+    # and install_ollama(): download to a file, log the exact URL, verify it
+    # is non-empty and actually looks like a script, and only then execute
+    # the FILE - never the pipe.
+    local url="https://astral.sh/uv/install.sh"
     if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would install uv via astral.sh/uv/install.sh"
+        ui_muted "would download and run the uv installer from $url"
         return 0
     fi
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ui_muted "downloading uv installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -LsSf -o "$tmp" "$url"; then
+        ui_err "failed to download uv installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_err "uv installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    sh "$tmp" || rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
 install_ollama() {
+    # This used to be `curl -fsSL $url | sh` - an unverified remote script
+    # piped straight into a shell (A14, the exact finding this branch exists
+    # to remove: a pipe can't be inspected and can be swapped mid-stream).
+    # Ollama publishes no checksum for this installer, unlike oh-my-zsh's
+    # pinned sha256 in install_oh_my_zsh() above, so a hash can't be verified
+    # here either. The minimum acceptable bar instead: download to a file,
+    # log the exact URL, verify it is non-empty and actually looks like a
+    # script, and only then execute the FILE - never the pipe.
+    local url="https://ollama.com/install.sh"
     if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would install Ollama via ollama.com/install.sh"
+        ui_muted "would download and run the Ollama installer from $url"
         return 0
     fi
-    curl -fsSL https://ollama.com/install.sh | sh
+    ui_muted "downloading Ollama installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_err "failed to download Ollama installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_err "Ollama installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    sh "$tmp" || rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
 setup_ollama_models() {
@@ -629,6 +716,87 @@ setup_ollama_models() {
         ui_step "pulling Ollama model: $m"
         ollama pull "$m" || ui_warn "failed to pull ollama model: $m"
     done
+}
+
+# ─── local-ai profile (B21) ─────────────────────────────────────────────────
+# One catalog component per model, each `requires: ["ollama"]` and each with
+# its own postInstall — a postInstall is invoked with no arguments (see
+# run_post_install), so a shared implementation needs one thin wrapper per
+# model rather than one function parameterised by catalog data.
+#
+# `ollama list` is checked first so an already-pulled model reports nothing
+# new to do here too — belt and braces alongside custom_is_installed's own
+# pre-check below, since that pre-check also gates whether postInstall runs
+# at all only for the "skipped" path, not the "installed" one.
+pull_ollama_model() {
+    local model="$1"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would pull ollama model: $model"
+        return 0
+    fi
+    if ! has_cmd ollama; then
+        ui_warn "ollama command not found; skipping model pull for $model"
+        return 0
+    fi
+    if ollama list 2>/dev/null | grep -qF -- "$model"; then
+        ui_muted "ollama model $model already pulled"
+        return 0
+    fi
+    ui_step "pulling Ollama model: $model"
+    ollama pull "$model" || ui_warn "failed to pull ollama model: $model"
+}
+
+# qwen3:4b is the pre-ticked default (2.5 GB, 256K context — long enough to
+# paste a dmesg/SMART dump into); qwen3:1.7b and qwen2.5-coder:7b are offered
+# under the local-ai profile but not pre-ticked. Sizes are verified against
+# ollama.com and live in each catalog entry's description, which a test
+# enforces.
+pull_ollama_model_qwen3_4b()        { pull_ollama_model "qwen3:4b"; }
+pull_ollama_model_qwen3_1_7b()      { pull_ollama_model "qwen3:1.7b"; }
+pull_ollama_model_qwen25_coder_7b() { pull_ollama_model "qwen2.5-coder:7b"; }
+
+# oterm (Task 13): the TUI client for Ollama. Verified 2026-09-12 that oterm
+# ships no apt/snap/winget/choco package — pip (and brew, macOS-only, handled
+# by catalog/macos.json's own "brew" provider instead of this function) is
+# the only cross-platform install path the upstream docs
+# (ggozad.github.io/oterm/installation) name. Debian/Ubuntu marks the system
+# Python "externally managed" (PEP 668) since ~24.04, so a bare
+# `pip install` is refused outright; `--user` keeps it out of site-packages
+# and `--break-system-packages` (pip's own documented escape hatch for
+# exactly this case) is only tried once the safer plain call is refused.
+install_oterm() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install oterm via pip (python3 -m pip install --user oterm)"
+        return 0
+    fi
+    if has_cmd oterm; then
+        ui_muted "oterm already installed"
+        return 0
+    fi
+    if ! has_cmd python3; then
+        ui_warn "python3 not found; skipping oterm"
+        return 0
+    fi
+    if ! python3 -m pip --version >/dev/null 2>&1; then
+        if ! has_cmd apt-get; then
+            ui_warn "pip not available and no apt-get to install it; skipping oterm"
+            return 0
+        fi
+        ui_step "installing python3-pip (required by oterm)"
+        apt_update_once
+        if ! $AUTOOS_SUDO apt-get install -y --no-install-recommends python3-pip \
+            >/tmp/autoos-oterm-pip-bootstrap.log 2>&1; then
+            ui_warn "could not install python3-pip; skipping oterm (see /tmp/autoos-oterm-pip-bootstrap.log)"
+            return 0
+        fi
+    fi
+    ui_step "installing oterm (pip)"
+    if python3 -m pip install --user oterm >/tmp/autoos-oterm-pip.log 2>&1 \
+        || python3 -m pip install --user --break-system-packages oterm >/tmp/autoos-oterm-pip.log 2>&1; then
+        ui_ok "oterm installed"
+    else
+        ui_warn "oterm install failed (see /tmp/autoos-oterm-pip.log)"
+    fi
 }
 
 setup_git_config() {

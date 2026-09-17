@@ -29,8 +29,10 @@ Import-Module (Join-Path $Lib 'AutoOS.Ui.psm1')      -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Detect.psm1')  -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Catalog.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Install.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.Download.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Serve.psm1')   -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.State.psm1')   -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.Usb.psm1')     -Force -DisableNameChecking
 
 $script:Pass = 0
 $script:Fail = 0
@@ -183,6 +185,27 @@ Test-Case 'light profile does not include desktop customisation' {
     $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
     $light = @($a | Where-Object { 'light' -in $_.Profiles } | ForEach-Object { $_.Id })
     Assert-NotContains $light 'windhawk'
+}
+
+Test-Case 'local-ai profile ships ollama' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $localAi = @($a | Where-Object { 'local-ai' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-Contains $localAi 'ollama'
+}
+
+Test-Case 'local-ai is not pulled in by the rescue profile' {
+    # Two orders of magnitude apart: ~400 MB of rescue tools vs 1.4-4.7 GB of
+    # model weights (B21) — a user who asked for a rescue stick has not asked
+    # for that.
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $rescue = @($a | Where-Object { 'rescue' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-NotContains $rescue 'ollama'
+}
+
+Test-Case 'every local-ai model component states its download size' {
+    $models = @($winCatalog.categories.components | Where-Object { $_.id -like 'ollama-model-*' })
+    $bad = @($models | Where-Object { $_.description -notmatch '[0-9]+(\.[0-9]+)?\s?GB' } | ForEach-Object { $_.id })
+    Assert-True ($bad.Count -eq 0) "model entries with no size in the description: $($bad -join ' ')"
 }
 
 # ─── Dependency resolution ──────────────────────────────────────────────────
@@ -1268,6 +1291,1318 @@ Test-Case 'a round-trip timestamp is read back as the date it was written' {
 Test-Case 'dry run is off by default' {
     $html = Get-Content (Join-Path $Root 'web\index.html') -Raw
     Assert-True ($html -match '<input type="checkbox" id="dryRun">')
+}
+
+# ─── Verified download (Task 3) ─────────────────────────────────────────────
+Describe-Group 'verified download'
+
+function ConvertTo-AutoOSTestFileUri {
+    param([string]$Path)
+    ([Uri]$Path).AbsoluteUri
+}
+
+Test-Case 'a checksum mismatch fails and leaves nothing behind' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_dl_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'
+    Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $uri = ConvertTo-AutoOSTestFileUri $src
+    $threw = $false
+    try {
+        Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 ('0' * 68) | Out-Null
+    } catch {
+        $threw = $true
+    }
+    Assert-True ($threw -and -not (Test-Path -LiteralPath $out)) `
+        "threw=$threw, out exists=$(Test-Path -LiteralPath $out)"
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+
+Test-Case 'a matching checksum succeeds' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_dl_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'
+    Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $uri = ConvertTo-AutoOSTestFileUri $src
+    $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+    Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 $sum | Out-Null
+    Assert-True ((Test-Path -LiteralPath $out) -and (Get-Item -LiteralPath $out).Length -gt 0) `
+        "verified download did not produce the file"
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+
+Test-Case 'a cached, already-verified file is skipped, not refetched' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_dl_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'
+    Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $uri = ConvertTo-AutoOSTestFileUri $src
+    $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+    Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 $sum | Out-Null
+
+    # Get-AutoOSVerifiedFile reports through Write-AutoOSLine, which writes
+    # straight to [Console]::Out rather than the pipeline, so the skip
+    # message is captured by redirecting the real Console stream - the
+    # PowerShell equivalent of the bash suite capturing fetch_verified's own
+    # combined stdout+stderr.
+    $sw = [IO.StringWriter]::new()
+    $origOut = [Console]::Out
+    [Console]::SetOut($sw)
+    try {
+        Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 $sum | Out-Null
+    } finally {
+        [Console]::SetOut($origOut)
+    }
+    $text = $sw.ToString()
+    Assert-True ($text -like '*skipped*') "expected to contain [skipped] in [$text]"
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+
+function Start-AutoOSTestHttpServer {
+    # A throwaway HTTP server on 127.0.0.1 and an OS-assigned port, serving
+    # GET of the files under -Directory. Mirror of tests/run-tests.sh's
+    # _start_test_http_server, but written in PowerShell on a TcpListener
+    # inside a background job: the first version launched python via
+    # Start-Process and never got a port back on the windows-latest CI
+    # runner. No python, no HttpListener URL ACL, nothing to install.
+    # Returns @{ Job; Port }; the caller must Stop-AutoOSTestHttpServer it.
+    param([Parameter(Mandatory)][string]$Directory)
+    $portFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_port_' + [Guid]::NewGuid().ToString('N'))
+    $job = Start-Job -ArgumentList $Directory, $portFile -ScriptBlock {
+        param($dir, $portFile)
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        [IO.File]::WriteAllText($portFile, [string]$listener.LocalEndpoint.Port)
+        while ($true) {
+            $client = $listener.AcceptTcpClient()
+            try {
+                $stream = $client.GetStream()
+                $reader = [IO.StreamReader]::new($stream)
+                $request = $reader.ReadLine()
+                while ($true) { $h = $reader.ReadLine(); if ($null -eq $h -or $h -eq '') { break } }
+                $status = '404 Not Found'; $body = [byte[]]::new(0)
+                if ($request -match '^GET\s+(\S+)') {
+                    $path = [Uri]::UnescapeDataString(($Matches[1] -split '\?')[0]).TrimStart('/').Replace('/', '\')
+                    $full = Join-Path $dir $path
+                    if ((Test-Path -LiteralPath $full -PathType Container)) { $full = Join-Path $full 'index.html' }
+                    if (Test-Path -LiteralPath $full -PathType Leaf) {
+                        $body = [IO.File]::ReadAllBytes($full); $status = '200 OK'
+                    }
+                }
+                $head = [Text.Encoding]::ASCII.GetBytes("HTTP/1.0 $status`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n")
+                $stream.Write($head, 0, $head.Length)
+                if ($body.Length) { $stream.Write($body, 0, $body.Length) }
+                $stream.Flush()
+            } catch {
+                # A client that hangs up mid-request is not the server's problem.
+                Write-Verbose "test http server: $($_.Exception.Message)"
+            } finally {
+                $client.Close()
+            }
+        }
+    }
+    $port = $null
+    for ($i = 0; $i -lt 100; $i++) {
+        if ((Test-Path -LiteralPath $portFile) -and (Get-Item -LiteralPath $portFile).Length -gt 0) {
+            $port = [int](Get-Content -LiteralPath $portFile -Raw).Trim(); break
+        }
+        if ($job.State -in @('Failed', 'Completed', 'Stopped')) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Remove-Item -LiteralPath $portFile -Force -ErrorAction SilentlyContinue
+    if (-not $port) {
+        $why = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        throw "test http server did not report a port (job state $($job.State)) $why"
+    }
+    @{ Job = $job; Port = $port }
+}
+
+function Stop-AutoOSTestHttpServer {
+    param($Server)
+    if ($Server -and $Server.Job) { Remove-Job -Job $Server.Job -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'verified download: an http URL is streamed to disk through curl.exe and verifies (http)' {
+    # Windows PowerShell 5.1's Invoke-WebRequest -OutFile buffers the whole
+    # response in memory - unusable for a 6 GB ISO (found on the first real
+    # run, 2026-09-17). Get-AutoOSRawDownload must take the curl.exe route
+    # for http(s); this proves it against a loopback server, no internet.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_http_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp
+    try {
+        $src = Join-Path $tmp 'src.bin'
+        [IO.File]::WriteAllBytes($src, [byte[]](1..200000 | ForEach-Object { $_ % 251 }))
+        $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+        $out = Join-Path $tmp 'out.bin'
+        Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/src.bin" -Destination $out -Sha256 $sum | Out-Null
+        Assert-True ((Test-Path -LiteralPath $out) -and ((Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash -eq $sum)) 'downloaded file missing or digest differs'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: an http 404 is a transport failure that leaves no .part behind (http)' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_http_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp
+    try {
+        $out = Join-Path $tmp 'out.bin'
+        $threw = $false; $msg = ''
+        try { Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/does-not-exist.bin" -Destination $out -Sha256 ('0' * 64) | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*transport failure*' -and -not (Test-Path -LiteralPath "$out.part") -and -not (Test-Path -LiteralPath $out)) "threw=$threw msg=[$msg]"
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: hashes and verifies a file under Windows PowerShell 5.1, the engine setup.ps1 actually runs in (5.1)' {
+    # This suite runs under pwsh 7; setup.ps1 is launched with powershell.exe
+    # 5.1 (elevated launches in particular). The first real 6 GB download on
+    # 2026-09-17 completed and then failed in the 5.1 process with
+    # "Get-FileHash is not recognized" - a path no test had ever run under
+    # 5.1. The hash now goes through .NET; this proves the whole
+    # download-and-verify path under the real engine.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_51_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $src = Join-Path $tmp 'src'; Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+        $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+        $out = Join-Path $tmp 'out'
+        $probe = Join-Path $tmp 'probe.ps1'
+        $mod = Join-Path $Root 'lib\windows\AutoOS.Download.psm1'
+        $lines = @(
+            'Set-StrictMode -Version Latest',
+            "`$ErrorActionPreference = 'Stop'",
+            "Import-Module '$mod' -DisableNameChecking -Force",
+            "Get-AutoOSVerifiedFile -Uri '$(([Uri]$src).AbsoluteUri)' -Destination '$out' -Sha256 '$sum' | Out-Null",
+            "'VERIFIED-51 ' + (Get-AutoOSFileSha256 -Path '$out')"
+        )
+        [IO.File]::WriteAllText($probe, ($lines -join "`r`n") + "`r`n", [Text.Encoding]::ASCII)
+        $res = (& powershell -NoProfile -ExecutionPolicy Bypass -File $probe 2>&1) -join "`n"
+        Assert-True ($LASTEXITCODE -eq 0 -and $res -like "*VERIFIED-51 $($sum.ToLowerInvariant())*" -and (Test-Path -LiteralPath $out)) "exit=$LASTEXITCODE out=$res"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: gpg stderr chatter (gpg-agent directory created) is not a failure, only the exit code is (gpg)' {
+    # The first real run on 2026-09-17 died here: gpg prints "gpg-agent[n]:
+    # directory '...' created" to stderr on every fresh GNUPGHOME, and under
+    # the module's $ErrorActionPreference = 'Stop' that became a terminating
+    # NativeCommandError before any signature was checked (handoff L6). A
+    # fake gpg.cmd on PATH that chatters on stderr and exits 0 reproduces it
+    # without a keyserver or a real key.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_gpg_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $shim = Join-Path $tmp 'gpg.cmd'
+    [IO.File]::WriteAllText($shim, "@echo gpg-agent[1234]: directory 'private-keys-v1.d' created 1>&2`r`n@exit /b 0`r`n")
+    $src = Join-Path $tmp 'src'; Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $sig = Join-Path $tmp 'src.gpg'; Set-Content -LiteralPath $sig -Value 'not-a-real-signature' -NoNewline
+    $prevPath = $env:Path
+    $env:Path = "$tmp;$prevPath"
+    try {
+        $ok = Test-AutoOSGpgSignature -Path $src -SignatureUri (ConvertTo-AutoOSTestFileUri $sig) -Fingerprint 'ABCDEF0123456789'
+        Assert-True ($ok -eq $true) "expected `$true from a gpg that exits 0 despite stderr chatter, got [$ok]"
+    } finally {
+        $env:Path = $prevPath
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: a signature check that throws leaves no .part behind (gpg)' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_gpg_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'; Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $prevPath = $env:Path
+    # An empty PATH dir first and no gpg anywhere: Get-Command gpg fails and
+    # Test-AutoOSGpgSignature throws 'gpg not found' - the throwing path.
+    $env:Path = (Join-Path $tmp 'nothing')
+    try {
+        $threw = $false; $msg = ''
+        try { Get-AutoOSVerifiedFile -Uri (ConvertTo-AutoOSTestFileUri $src) -Destination $out -SignatureUri 'file:///nonexistent.sig' -GpgFingerprint 'ABCDEF0123456789' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*signature verification failed*' -and -not (Test-Path -LiteralPath "$out.part") -and -not (Test-Path -LiteralPath $out)) "threw=$threw msg=[$msg] part=$(Test-Path -LiteralPath "$out.part")"
+    } finally {
+        $env:Path = $prevPath
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── image_resolve (Task 4B) ────────────────────────────────────────────────
+# Mirrors lib/linux/download.sh's own "image_resolve" test block one-for-one
+# (same fixtures under tests\helpers\image_index_fixtures, same scenarios).
+# file:// is fine here (unlike the bash suite's loopback-server workaround):
+# Resolve-AutoOSImageUrl does its own string-joining of relative hrefs
+# against the page's own directory URI, so a fixture-tree file:// URI
+# behaves identically to a live server's for every case tested below - no
+# real network is ever touched.
+Describe-Group 'image_resolve'
+
+function ConvertTo-AutoOSTestDirUri {
+    param([string]$Path)
+    ([Uri]($Path.TrimEnd('\') + '\')).AbsoluteUri
+}
+
+$imgFixtureRoot = Join-Path $Root 'tests\helpers\image_index_fixtures'
+
+function New-AutoOSImageTestCatalog {
+    param(
+        [string]$Id, [string]$FixtureSubdir, [string]$FileRegex,
+        [string]$Sums = 'SHA256SUMS', [string]$Sig = '-'
+    )
+    $indexUri = ConvertTo-AutoOSTestDirUri (Join-Path $imgFixtureRoot $FixtureSubdir)
+    $path = Join-Path ([IO.Path]::GetTempPath()) ('aos_img_cat_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @{ images = @(@{ id = $Id; index = $indexUri; file = $FileRegex; sums = $Sums; sig = $Sig }) } |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding UTF8
+    $path
+}
+
+Test-Case 'image_resolve: an LTS entry picks the current LTS release, never an interim one' {
+    $cat = New-AutoOSImageTestCatalog -Id 'ubuntu-desktop-lts' -FixtureSubdir 'ubuntu_releases' `
+        -FileRegex 'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.gpg'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat
+        # One Assert-True per Test-Case, same convention as every other test
+        # in this suite (Pass/Fail print $script:Current, so more than one
+        # assertion per case would double-count and re-print the name).
+        $ok = ($r.File -eq 'ubuntu-26.04.1-desktop-amd64.iso') -and
+            ($r.Url -like '*26.04.1/ubuntu-26.04.1-desktop-amd64.iso') -and
+            ($r.Sig -like '*26.04.1/SHA256SUMS.gpg') -and
+            ($r.Url -notlike '*25.10*') -and ($r.Url -notlike '*24.04.5*')
+        Assert-True $ok "file=$($r.File) url=$($r.Url) sig=$($r.Sig)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case "image_resolve: Debian's current/ symlink shape resolves with no directory recursion" {
+    $cat = New-AutoOSImageTestCatalog -Id 'debian-netinst-stable' -FixtureSubdir 'debian_iso_cd' `
+        -FileRegex 'debian-[0-9]+\.[0-9]+\.[0-9]+-amd64-netinst\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.sign'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'debian-netinst-stable' -CatalogPath $cat
+        $ok = ($r.File -eq 'debian-13.1.0-amd64-netinst.iso') -and ($r.Sig -like '*debian_iso_cd/SHA256SUMS.sign')
+        Assert-True $ok "file=$($r.File) sig=$($r.Sig)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: a pattern matching nothing throws loudly, never guesses' {
+    $cat = New-AutoOSImageTestCatalog -Id 'nothing-here' -FixtureSubdir 'no_match' -FileRegex 'nonexistent-[0-9]+\.iso$'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'nothing-here' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*matched nothing*') "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: a pattern matching several files that differ by more than a version throws, never a silent first-match' {
+    # Same version, different arch - a regex broader than its author meant.
+    # No ordering rule applies here, unlike the point-release case below.
+    $cat = New-AutoOSImageTestCatalog -Id 'ambiguous' -FixtureSubdir 'multiple_match' `
+        -FileRegex 'debian-[0-9]+\.[0-9]+\.[0-9]+-(amd64|arm64)-netinst\.iso$'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'ambiguous' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*matched multiple*' -and $msg -like '*debian-13.2.0-amd64-netinst.iso*' -and $msg -like '*debian-13.2.0-arm64-netinst.iso*') `
+            "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: a point release listed beside its .0 release in one directory resolves to the highest version (live 26.04.1 shape)' {
+    # Found on the first real run, 2026-09-17: releases.ubuntu.com/26.04.1/
+    # lists ubuntu-26.04-desktop-amd64.iso AND ubuntu-26.04.1-desktop-amd64.iso.
+    # Names identical except for one dotted version number are the same
+    # artefact at different point releases - the highest wins (26.04 < 26.04.1).
+    $cat = New-AutoOSImageTestCatalog -Id 'ubuntu-desktop-lts' -FixtureSubdir 'ubuntu_point_release' `
+        -FileRegex 'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.gpg'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat
+        Assert-True ($r.File -eq 'ubuntu-26.04.1-desktop-amd64.iso' -and $r.Url -like '*/ubuntu_point_release/ubuntu-26.04.1-desktop-amd64.iso' -and $r.Sums -like '*/SHA256SUMS') "got: $($r | ConvertTo-Json -Compress)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: an -lts id with only interim directories present throws instead of picking one' {
+    $cat = New-AutoOSImageTestCatalog -Id 'ubuntu-desktop-lts' -FixtureSubdir 'ubuntu_only_interim' `
+        -FileRegex 'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.gpg'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no LTS release directory*') "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: custom-url is a specific refusal, not a crash' {
+    $threw = $false; $msg = ''
+    try { Resolve-AutoOSImageUrl -ImageId 'custom-url' | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=$msg"
+}
+
+Test-Case 'image_resolve: custom-local is a specific refusal, not a crash' {
+    $threw = $false; $msg = ''
+    try { Resolve-AutoOSImageUrl -ImageId 'custom-local' | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=$msg"
+}
+
+Test-Case 'image_resolve: an unknown image id throws a clear error, not a crash' {
+    $threw = $false; $msg = ''
+    try { Resolve-AutoOSImageUrl -ImageId 'totally-not-a-real-image-id' -CatalogPath (Join-Path $Root 'catalog\images.json') | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*no catalog entry*') "threw=$threw msg=$msg"
+}
+
+# ─── USB device enumeration and the safety guard ────────────────────────────
+# Task 5 of plan 2026-09-11-installer-usb-and-rescue-profile: Assert-
+# AutoOSUsbSafe is the only thing standing between the installer-USB writer
+# and a live workstation disk, so this block gets the most tests and no
+# shortcuts — the exact mirror of lib/linux/usb.sh's "usb safety" tests.
+# Every fixture is synthetic ($env:AUTOOS_FAKE_DISKS) — this suite must
+# never enumerate the real machine's disks (AGENTS.md §5). Every test name
+# carries "usb" so `-Filter usb` actually reaches it.
+Describe-Group 'usb safety'
+
+function New-FakeUsbDisk {
+    param(
+        [int]$Number, [string]$Model, [long]$Size, [string]$BusType,
+        [bool]$IsBoot = $false, [bool]$IsSystem = $false, [bool]$IsRemovable = $false,
+        [string]$DriveLetter = $null,
+        # FileSystem/IsReadOnly (Task 6): what Assert-AutoOSUsbSafe's
+        # 'MountedFat32Writable' mode (the uefi-copy engine's guard mode)
+        # checks — the exact mirror of tests/helpers/fake_usb.py's
+        # fstype/ro fields.
+        [string]$FileSystem = '',
+        [bool]$IsReadOnly = $false
+    )
+    # Every field _Get-AutoOSUsbRawDisks/_ConvertTo-AutoOSUsbRecord reads is
+    # present explicitly - Set-StrictMode turns a missing one into a hard
+    # error rather than a silently-$null one, which is the point: an
+    # incomplete fixture must fail loudly, never quietly under-test the guard.
+    [pscustomobject]@{
+        Number      = $Number
+        Model       = $Model
+        Size        = $Size
+        BusType     = $BusType
+        IsBoot      = $IsBoot
+        IsSystem    = $IsSystem
+        IsRemovable = $IsRemovable
+        Partitions  = @([pscustomobject]@{
+            DriveLetter = $DriveLetter
+            FileSystem  = $FileSystem
+            IsReadOnly  = $IsReadOnly
+        })
+    }
+}
+
+# The internal boot disk present in every fixture below, distinct from the
+# "Disk 5" target every other fixture uses — the same shape the plan brief
+# measured on the human partner's real machine (five non-removable internal
+# disks alongside the one real USB target). Every fixture except
+# root_is_boot_disk names a DIFFERENT DeviceId to Assert-AutoOSUsbSafe than
+# this one, so its presence is what proves the guard looks past "some system
+# disk exists" to "is THIS the system disk".
+function New-FakeBootDisk {
+    New-FakeUsbDisk -Number 0 -Model 'Boot SSD' -Size 256060514304 -BusType 'NVMe' `
+        -IsBoot $true -IsSystem $true -DriveLetter 'C'
+}
+
+function Get-FakeUsbDisksJson {
+    param([Parameter(Mandatory)][string]$Fixture)
+
+    $bootDisk = New-FakeBootDisk
+    $disks = switch ($Fixture) {
+        # The most dangerous case: disk 0 itself is the system/boot disk.
+        'root_is_boot_disk' { @($bootDisk) }
+
+        # A second internal disk, distinct from the boot disk: not
+        # removable, not USB/SCSI. Must be refused even though it does not
+        # hold Windows.
+        'internal_nvme' {
+            @($bootDisk, (New-FakeUsbDisk -Number 1 -Model 'WD Black SN850' `
+                -Size 1000204886016 -BusType 'NVMe'))
+        }
+
+        # Removable, USB, but has an assigned drive letter — must refuse
+        # until the caller unmounts it.
+        'usb_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'SanDisk Ultra' `
+                -Size 32017047552 -BusType 'USB' -IsRemovable $true -DriveLetter 'E'))
+        }
+
+        # Removable, USB, unmounted — but smaller than the image the caller
+        # asks for ($env:AUTOOS_IMAGE_BYTES in the test).
+        'tiny_stick' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Kingston DataTraveler' `
+                -Size 4000000000 -BusType 'USB' -IsRemovable $true))
+        }
+
+        # The real target, measured on the human partner's machine:
+        # Disk 5, "Intenso Office Line", BusType USB, IsSystem False,
+        # IsBoot False, 31,437,766,656 bytes, unmounted.
+        'good_stick' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true))
+        }
+
+        # Finding A10: a USB SSD (commonly behind a UAS/UASP bridge)
+        # enumerates as BusType 'SCSI' with IsRemovable=$false. Must still be
+        # surfaced by Get-AutoOSUsbDevice - BusType alone is the signal.
+        'usb_ssd_fixed' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Samsung T7 (USB enclosure)' `
+                -Size 2000398934016 -BusType 'SCSI' -IsRemovable $false))
+        }
+
+        # Task 6 (B16): the uefi-copy engine writes onto an EXISTING
+        # mounted FAT32 volume rather than the raw disk, so
+        # Assert-AutoOSUsbSafe's 'MountedFat32Writable' mode wants the
+        # opposite of every fixture above — mounted, not unmounted. This is
+        # the human partner's real stick shape: Disk 5, FAT32, writable,
+        # already mounted at J:.
+        'usb_fat32_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter 'J' `
+                -FileSystem 'FAT32' -IsReadOnly $false))
+        }
+
+        # Same target, but its mounted volume is NTFS, not FAT32 — the
+        # guard must name the actual filesystem so the refusal is actionable.
+        'usb_wrong_fs_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter 'J' `
+                -FileSystem 'NTFS' -IsReadOnly $false))
+        }
+
+        # FAT32, mounted, but read-only — uefi-copy needs to write to it.
+        'usb_fat32_readonly' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter 'J' `
+                -FileSystem 'FAT32' -IsReadOnly $true))
+        }
+
+        # Finding F2': mounted, FAT32, writable, on a real USB/removable
+        # disk that is neither IsBoot nor IsSystem — every other check in
+        # MountedFat32Writable mode accepts this, but its drive letter is
+        # the live system drive, the Windows analogue of a USB-hosted
+        # /boot/efi (lib/linux/usb.sh's own F2' fixture).
+        'usb_system_drive_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter $env:SystemDrive.TrimEnd(':') `
+                -FileSystem 'FAT32' -IsReadOnly $false))
+        }
+
+        default { throw "unknown fake-usb fixture: $Fixture" }
+    }
+    ConvertTo-Json -InputObject @($disks) -Depth 6
+}
+
+function Invoke-WithFakeUsbEnv {
+    # Sets the AUTOOS_FAKE_* environment variables for the duration of
+    # $Body, then always clears them - $env: vars persist for the whole
+    # session (unlike bash's `VAR=x cmd` subshell scoping), so a test that
+    # forgot to clean up would silently contaminate every test after it.
+    param(
+        [string]$Fixture,
+        [Nullable[long]]$ImageBytes = $null,
+        [scriptblock]$Body
+    )
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture $Fixture
+    if ($null -ne $ImageBytes) { $env:AUTOOS_IMAGE_BYTES = [string]$ImageBytes }
+    try {
+        & $Body
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-AutoOSCapturedConsole {
+    # Write-AutoOSLine writes straight to [Console]::Out rather than the
+    # pipeline (see the verified-download tests above), so a function's own
+    # progress/refusal lines are captured by redirecting the real Console
+    # stream for the duration of -Body. Returns the captured text; -Body's
+    # own exception, if any, is rethrown after the stream is restored.
+    param([scriptblock]$Body)
+    # Both streams: Write-AutoOSLine -Level error goes to [Console]::Error.
+    $sw = [IO.StringWriter]::new()
+    $origOut = [Console]::Out
+    $origErr = [Console]::Error
+    [Console]::SetOut($sw)
+    [Console]::SetError($sw)
+    try { & $Body | Out-Null } finally { [Console]::SetOut($origOut); [Console]::SetError($origErr) }
+    $sw.ToString()
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses the disk holding the system volume' {
+    Invoke-WithFakeUsbEnv -Fixture 'root_is_boot_disk' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE0' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*system disk*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses a non-removable internal disk' {
+    Invoke-WithFakeUsbEnv -Fixture 'internal_nvme' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE1' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*not removable*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses a usb disk with a mounted volume' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*mounted*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses a usb stick smaller than the image' {
+    Invoke-WithFakeUsbEnv -Fixture 'tiny_stick' -ImageBytes 8000000000 -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*too small*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe accepts a real removable usb stick that is big enough' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $result = Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5'
+        Assert-True ($null -ne $result -and $result.DeviceId -eq '\\.\PHYSICALDRIVE5') 'rejected a valid target'
+    }
+}
+
+Test-Case 'Get-AutoOSUsbDevice still offers a USB SSD reporting as fixed (A10)' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_ssd_fixed' -Body {
+        $devices = @(Get-AutoOSUsbDevice)
+        Assert-Contains ($devices | ForEach-Object { $_.DeviceId }) '\\.\PHYSICALDRIVE5'
+    }
+}
+
+Test-Case 'Assert-AutoOSElevated refuses to plan a usb write without admin (B10)' {
+    $env:AUTOOS_FAKE_ELEVATED = '0'
+    try {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSElevated | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*Administrator*') "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Assert-AutoOSElevated is satisfied for a usb write when already admin (B10)' {
+    $env:AUTOOS_FAKE_ELEVATED = '1'
+    try {
+        $result = Assert-AutoOSElevated
+        Assert-True $result.IsElevated 'refused an already-elevated session'
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── Engine-aware guard modes (Task 6, B16) ─────────────────────────────────
+# The real-hardware bug that started Task 6: Assert-AutoOSUsbSafe correctly
+# refused every internal disk, then refused the legitimate USB stick too,
+# because the only mode it knew was "must be unmounted" — wrong for
+# uefi-copy, which writes onto a volume that is ALREADY mounted. The -Mode
+# parameter is what fixes this; every branch gets its own fixture and test.
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) accepts an already-mounted writable FAT32 target' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_fat32_mounted' -Body {
+        $result = Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable
+        Assert-True ($null -ne $result) 'rejected a valid uefi-copy target'
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a target with nothing mounted' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no mounted volume*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a mounted volume that is not FAT32' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_wrong_fs_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*not FAT32*' -and $msg -like '*NTFS*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a read-only FAT32 volume' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_fat32_readonly' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*read-only*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe still defaults to Unmounted mode when none is given' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*mounted*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a volume mounted at the system drive, regardless of bus (finding F2-prime)' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_system_drive_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*system drive*') "threw=$threw msg=[$msg]"
+    }
+}
+
+# ─── The write planner (Task 6) ─────────────────────────────────────────────
+# New-AutoOSUsbPlan turns (image, kind, engine, device) into the exact
+# write commands, checks every compatibility/platform/lock/safety question
+# first, and runs nothing — the exact mirror of lib/linux/usb.sh's
+# usb_plan(). Every test name below carries "usb" so `-Filter usb` reaches it.
+Test-Case 'usb: New-AutoOSUsbPlan names the device and Ventoy for a dry run' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $plan = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' `
+            -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        $joined = $plan -join "`n"
+        Assert-True ($joined -like '*PHYSICALDRIVE5*') "device missing from plan: $joined"
+        Assert-True ($joined -like '*Ventoy2Disk*') "Ventoy2Disk missing from plan: $joined"
+        Assert-True ($joined -notlike '*installed*') "unexpected 'installed' in plan: $joined"
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan fetches and verifies the image as its first line, before anything touches the device (plan fetch)' {
+    # The seam the 2026-09-17 handoff names as the single gap stopping the
+    # headline feature: Resolve-AutoOSImageUrl existed, Get-AutoOSVerifiedFile
+    # existed, and the plan named a cache path nobody ever filled.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $env:AUTOOS_CACHE_DIR = 'C:\scratch\images'
+        try {
+            $plan = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' `
+                -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        } finally {
+            Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue
+        }
+        Assert-Equal $plan[0] 'Invoke-AutoOSUsbFetchImage ubuntu-desktop-lts C:\scratch\images\ubuntu-desktop-lts.iso'
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan pins the device identity and emits a re-verify step immediately before the destructive lines (F3/F6, plan reverify)' {
+    # Mirror of the bash F3/F6 test: until 2026-09-17 the Windows plan had
+    # no re-verify at all. The fetch line precedes it (the hour-long step
+    # must not sit between the re-verify and the write).
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $env:AUTOOS_FAKE_DISK_ID = 'serial-XYZ'
+        try {
+            $plan = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        } finally { Remove-Item Env:\AUTOOS_FAKE_DISK_ID -ErrorAction SilentlyContinue }
+        $rev = [array]::IndexOf($plan, 'Invoke-AutoOSUsbReverify \\.\PHYSICALDRIVE5 Unmounted 6000000000 serial-XYZ')
+        $ventoy = [array]::IndexOf($plan, 'Ventoy2Disk.exe -I -G \\.\PHYSICALDRIVE5')
+        Assert-True ($rev -ge 1 -and $ventoy -eq ($rev + 1) -and $plan[0] -like 'Invoke-AutoOSUsbFetchImage *') "plan=$($plan -join ' | ')"
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbReverify refuses when the device identity no longer matches what was pinned (F3/F6 TOCTOU, reverify)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_FAKE_DISK_ID = 'serial-CURRENT'
+        try {
+            $threw = $false; $msg = ''
+            try { Invoke-AutoOSUsbReverify -DeviceId '\\.\PHYSICALDRIVE5' -Mode 'Unmounted' -ImageBytes 0 -PinnedId 'serial-PINNED' }
+            catch { $threw = $true; $msg = $_.Exception.Message }
+            Assert-True ($threw -and $msg -like '*identity changed*') "threw=$threw msg=[$msg]"
+        } finally { Remove-Item Env:\AUTOOS_FAKE_DISK_ID -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbReverify accepts when the device identity still matches, and a plan line dispatches to it (reverify)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_FAKE_DISK_ID = 'serial-SAME'
+        try {
+            Invoke-AutoOSUsbReverify -DeviceId '\\.\PHYSICALDRIVE5' -Mode 'Unmounted' -ImageBytes 0 -PinnedId 'serial-SAME'
+            # Through the executor, as the real plan line, with nothing
+            # destructive after it: dispatch must reach the function (a
+            # malformed/unknown line would throw), and it must not throw.
+            $threw = $false; $msg = ''
+            try { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbReverify \\.\PHYSICALDRIVE5 Unmounted 0 serial-SAME') | Out-Null }
+            catch { $threw = $true; $msg = $_.Exception.Message }
+            Assert-True (-not $threw) "unexpected throw: $msg"
+        } finally { Remove-Item Env:\AUTOOS_FAKE_DISK_ID -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan adds the Ventoy persistence step for live-persistent only (plan persistence)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $live = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'live-persistent' -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        $inst = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        Assert-True ($live[-1] -eq 'Add-AutoOSUsbVentoyPersistence \\.\PHYSICALDRIVE5' -and $live[-2] -like 'Invoke-AutoOSUsbCopyImage *' -and (($inst -join "`n") -notlike '*Persistence*')) "live=$($live -join ' | ') inst=$($inst -join ' | ')"
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan never plans a raw image onto ventoy''s copy path' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $threw = $false; $msg = ''
+        try { New-AutoOSUsbPlan -ImageId 'proxmox-ve' -Kind 'installer' -Engine 'ventoy' `
+            -DeviceId '\\.\PHYSICALDRIVE5' -DryRun | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*raw*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan refuses a full-os kind on an engine that cannot build one' {
+    $threw = $false; $msg = ''
+    try { New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'full-os' -Engine 'ventoy' `
+        -DeviceId '\\.\PHYSICALDRIVE5' -DryRun | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*cannot build*') "threw=$threw msg=[$msg]"
+}
+
+Test-Case 'usb: the ventoy engine is hidden on arm64, not offered and broken' {
+    $env:AUTOOS_FAKE_ARCH = 'arm64'
+    try {
+        $ids = @(Get-AutoOSUsbEngineList -Platform 'windows' -Arch (Get-AutoOSUsbCurrentArch) | ForEach-Object { $_.id })
+        Assert-NotContains $ids 'ventoy'
+        Assert-Contains $ids 'native'
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan refuses a second write while one is already in progress' {
+    $env:AUTOOS_FAKE_RUN_ACTIVE = '1'
+    try {
+        $threw = $false; $msg = ''
+        try { New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' `
+            -DeviceId '\\.\PHYSICALDRIVE5' -DryRun | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*already in progress*') "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_RUN_ACTIVE -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: setup.ps1 -CreateUsb dry run names the device and Ventoy' {
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture 'good_stick'
+    $env:AUTOOS_IMAGE_BYTES = '4000000000'
+    try {
+        $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb `
+            -Image 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' `
+            -UsbDevice '\\.\PHYSICALDRIVE5' -DryRun -NoColor 2>&1) -join "`n"
+        Assert-True ($out -like '*PHYSICALDRIVE5*' -and $out -like '*Ventoy2Disk*') "out=$out"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── setup.ps1 actually executing a plan ───────────────────────────────────
+# Until 2026-09-17 a -CreateUsb WITHOUT -DryRun printed the plan and exited
+# 0 - a "create" that created nothing; Invoke-AutoOSUsbPlan had no caller
+# outside the tests. These two prove the wiring without a dry-run flag,
+# which AGENTS.md §5 otherwise reserves for end-to-end tests: both are
+# guaranteed to run no step - the first refuses before Invoke-AutoOSUsbPlan
+# is ever reached, the second is stopped by AUTOOS_FORCE_FAIL on the very
+# first step - both run against the synthetic disk fixture with elevation
+# faked, and both assert the scratch cache dir came out exactly as it went in.
+function Invoke-AutoOSSetupUsbRealRun {
+    param([string[]]$ExtraArgs, [string]$Scratch)
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture 'good_stick'
+    $env:AUTOOS_IMAGE_BYTES = '4000000000'
+    $env:AUTOOS_FAKE_ELEVATED = '1'
+    $env:AUTOOS_CACHE_DIR = $Scratch
+    try {
+        $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb `
+            -Image 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' `
+            -UsbDevice '\\.\PHYSICALDRIVE5' -NoColor @ExtraArgs 2>&1) -join "`n"
+        [pscustomobject]@{ Out = $out; ExitCode = $LASTEXITCODE }
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: setup.ps1 -CreateUsb without -WipeTargetDisk shows the plan, then refuses before running any step (execute)' {
+    $scratch = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_usb_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $r = Invoke-AutoOSSetupUsbRealRun -Scratch $scratch -ExtraArgs @()
+        $left = @(Get-ChildItem -LiteralPath $scratch -Recurse -Force).Count
+        Assert-True ($r.ExitCode -ne 0 -and $r.Out -like '*-WipeTargetDisk*' -and $r.Out -like '*Invoke-AutoOSUsbFetchImage*' `
+            -and $r.Out -notlike '*TRACE*' -and $r.Out -notlike '*Ready to boot*' -and $left -eq 0) "exit=$($r.ExitCode) left=$left out=$($r.Out)"
+    } finally {
+        Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: setup.ps1 -CreateUsb with -WipeTargetDisk hands the printed plan to Invoke-AutoOSUsbPlan (execute)' {
+    $scratch = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_usb_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $env:AUTOOS_FORCE_FAIL = '1'
+    $env:AUTOOS_TRACE = '1'
+    try {
+        $r = Invoke-AutoOSSetupUsbRealRun -Scratch $scratch -ExtraArgs @('-WipeTargetDisk')
+        $left = @(Get-ChildItem -LiteralPath $scratch -Recurse -Force).Count
+        # The forced failure must land on the FETCH step - proof that the
+        # first thing a real run does is download, not touch the device.
+        Assert-True ($r.ExitCode -ne 0 -and $r.Out -like '*TRACE Invoke-AutoOSUsbFetchImage ubuntu-desktop-lts*' `
+            -and $r.Out -like '*forced failure*' -and $r.Out -notlike '*Ready to boot*' -and $left -eq 0) "exit=$($r.ExitCode) left=$left out=$($r.Out)"
+    } finally {
+        Remove-Item Env:\AUTOOS_FORCE_FAIL -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_TRACE -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── Invoke-AutoOSUsbFetchImage: the resolver-to-downloader bridge ──────────
+# Mirror of the bash suite's "usb fetch" block: a scratch release directory
+# (a tiny text file standing in for the ISO plus a real SHA256SUMS computed
+# from it) reached over file:// the same way the image_resolve tests above
+# reach their fixtures, and a scratch catalog whose one entry points at it.
+# No test here reaches the real internet or the real catalog. Every test
+# name carries "usb" and "fetch" so `-Filter usb` and `-Filter fetch` both
+# reach them.
+function New-AutoOSUsbFetchFixture {
+    # -Mode good lists the image's real digest, bad an all-zero one, missing
+    # a different filename entirely. -Sums '-' models a catalog entry with
+    # no checksum manifest at all.
+    param([string]$Mode = 'good', [string]$Sums = 'SHA256SUMS', [string[]]$Mirrors = @())
+    $rel = Join-Path ([IO.Path]::GetTempPath()) ('aos_fetch_' + [Guid]::NewGuid().ToString('N'))
+    $dir = Join-Path $rel '1.0'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $iso = Join-Path $dir 'testos-1.0-amd64.iso'
+    [IO.File]::WriteAllText($iso, "AUTOOS TEST IMAGE - not a real ISO`n")
+    $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $iso).Hash.ToLowerInvariant()
+    $line = switch ($Mode) {
+        'good'    { "$sum *testos-1.0-amd64.iso" }
+        'bad'     { ('0' * 64) + ' *testos-1.0-amd64.iso' }
+        'missing' { "$sum *something-else.iso" }
+    }
+    [IO.File]::WriteAllText((Join-Path $dir 'SHA256SUMS'), "$line`n")
+    $html = '<html><body><pre><a href="../">../</a>' + "`n" +
+            '<a href="testos-1.0-amd64.iso">testos-1.0-amd64.iso</a>' + "`n" +
+            '<a href="SHA256SUMS">SHA256SUMS</a>' + "`n" + '</pre></body></html>'
+    [IO.File]::WriteAllText((Join-Path $dir 'index.html'), $html)
+    $cat = Join-Path $rel 'images.json'
+    $entry = @{ id = 'testos'; name = 'Test OS'; homepage = 'http://127.0.0.1/'
+                index = (ConvertTo-AutoOSTestDirUri $dir); file = 'testos-[0-9.]+-amd64\.iso$'
+                sums = $Sums; sig = '-'; key = '-'; kinds = @('installer'); writeMode = 'hybrid'; sizeGb = 0.001 }
+    if ($Mirrors.Count -gt 0) { $entry['mirrors'] = @($Mirrors) }
+    @{ images = @($entry) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cat -Encoding UTF8
+    [pscustomobject]@{ Root = $rel; Catalog = $cat; Iso = $iso; Dir = $dir; Dest = (Join-Path $rel 'cache\testos.iso') }
+}
+
+function New-AutoOSUsbFetchMirror {
+    # A second release dir with the same 1.0\ layout served over loopback
+    # http as a "mirror": an exact copy, or one whose image bytes differ
+    # from what the canonical manifest publishes. Returns @{ Root; Server }.
+    param([Parameter(Mandatory)][string]$FixtureDir, [string]$Mode = 'good')
+    $m = Join-Path ([IO.Path]::GetTempPath()) ('aos_mirror_' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path (Join-Path $m '1.0') -Force | Out-Null
+    Copy-Item -Path (Join-Path $FixtureDir '*') -Destination (Join-Path $m '1.0') -Force
+    if ($Mode -eq 'corrupt') { [IO.File]::WriteAllText((Join-Path $m '1.0\testos-1.0-amd64.iso'), "CORRUPT MIRROR COPY`n") }
+    $srv = Start-AutoOSTestHttpServer -Directory $m
+    # Url is the mirror's equivalent of the catalog `index` (the release
+    # directory itself), so the resolved relative filename appends cleanly.
+    @{ Root = $m; Server = $srv; Url = "http://127.0.0.1:$($srv.Port)/1.0/" }
+}
+
+Test-Case 'usb: Get-AutoOSUsbSumsDigest reads coreutils, starred and BSD-style manifests and ignores non-SHA-256 lines (fetch)' {
+    $m = Join-Path ([IO.Path]::GetTempPath()) ('aos_sums_' + [Guid]::NewGuid().ToString('N'))
+    $d = { param($n) ([string]$n) * 64 }
+    $lines = @(
+        'd41d8cd98f00b204e9800998ecf8427e *plain.iso',
+        "$(& $d 1)  plain.iso",
+        "$(& $d 2) *starred.iso",
+        "$(& $d 3)  ./dotslash.iso",
+        "SHA256 (bsd.iso) = $(& $d 4)"
+    )
+    [IO.File]::WriteAllText($m, ($lines -join "`n") + "`n")
+    try {
+        $r1 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'plain.iso'
+        $r2 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'starred.iso'
+        $r3 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'dotslash.iso'
+        $r4 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'bsd.iso'
+        $r5 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'absent.iso'
+        Assert-True ($r1 -eq (& $d 1) -and $r2 -eq (& $d 2) -and $r3 -eq (& $d 3) -and $r4 -eq (& $d 4) -and $null -eq $r5) "plain=$r1 starred=$r2 dotslash=$r3 bsd=$r4 absent=[$r5]"
+    } finally {
+        Remove-Item -Force $m -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage downloads the image, verifies it against the published SHA256SUMS and keeps the manifest beside it (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    try {
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog }
+        $same = (Test-Path -LiteralPath $fx.Dest) -and ((Get-FileHash -LiteralPath $fx.Dest).Hash -eq (Get-FileHash -LiteralPath $fx.Iso).Hash)
+        Assert-True ($same -and (Test-Path -LiteralPath "$($fx.Dest).sums") -and $text -like '*verified image*') "same=$same out=$text"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage reports a second run as skipped, never a refetch (fetch idempotent)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    try {
+        Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog }
+        Assert-True ($text -like '*skipped: testos.iso already downloaded*') "out=$text"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage refuses a checksum mismatch and leaves nothing at the destination (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode bad
+    try {
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*checksum mismatch*' -and -not (Test-Path -LiteralPath $fx.Dest) -and -not (Test-Path -LiteralPath "$($fx.Dest).part")) "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage refuses a manifest that does not list the image before any image download (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode missing
+    try {
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*does not list*' -and -not (Test-Path -LiteralPath $fx.Dest)) "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage refuses a catalog entry with no checksum manifest, nothing fetched (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good -Sums '-'
+    try {
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no checksum manifest*' -and -not (Test-Path -LiteralPath $fx.Dest) -and -not (Test-Path -LiteralPath "$($fx.Dest).sums")) "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage: custom-local is a specific refusal, not a fetch attempt (fetch)' {
+    $threw = $false; $msg = ''
+    try { Invoke-AutoOSUsbFetchImage -ImageId 'custom-local' -Destination 'C:\nowhere\x.iso' | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=[$msg]"
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbPlan routes an Invoke-AutoOSUsbFetchImage line to the fetch, keeping a path with spaces as one argument (fetch)' {
+    # custom-local's specific refusal is the proof the line reached the
+    # function with both arguments intact: Invoke-Expression would have
+    # split "C:\some dir\x.iso" into two positional arguments and failed
+    # to bind instead. Driven through the exported Invoke-AutoOSUsbPlan (a
+    # one-line plan) since the per-step dispatcher is module-private; the
+    # fake disk fixture is what its failure path enumerates.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $threw = $false; $msg = ''
+        try {
+            Invoke-AutoOSCapturedConsole {
+                Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbFetchImage custom-local C:\some dir\x.iso')
+            } | Out-Null
+        } catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbPlan refuses a plan step with an unrecognised command shape and never executes it (finding F4, execute)' {
+    # Windows half of F4: the dispatcher used Invoke-Expression for every
+    # line it did not special-case, so a line shaped like "cmd; other-cmd"
+    # would have run both halves. Now every known shape is matched
+    # explicitly and anything else is refused - the marker must not exist.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $marker = Join-Path $env:TEMP ('aos_f4_' + [Guid]::NewGuid().ToString('N'))
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @("Write-Host pwned; New-Item -ItemType File -Path '$marker'") } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*known command shape*' -and -not (Test-Path -LiteralPath $marker)) "threw=$threw msg=[$msg] marker=$(Test-Path -LiteralPath $marker)"
+        Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbPlan reports a fetch-step failure as "not touched", never "rewrite from wipefs" (fetch)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_FORCE_FAIL = '1'
+        try {
+            $script:usbFetchFailThrew = $false
+            $text = Invoke-AutoOSCapturedConsole {
+                try { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbFetchImage ubuntu-desktop-lts C:\x\y.iso') }
+                catch { $script:usbFetchFailThrew = $true }
+            }
+            Assert-True ($script:usbFetchFailThrew -and $text -like '*not touched*' -and $text -notlike '*wipefs*') "threw=$($script:usbFetchFailThrew) text=$text"
+        } finally {
+            Remove-Item Env:\AUTOOS_FORCE_FAIL -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage uses a healthy mirror before the canonical source, verified against the canonical manifest (fetch mirror)' {
+    # The canonical copy is corrupted AFTER its manifest was written: were
+    # the canonical source tried first, the digest check would fail.
+    # Success therefore proves the mirror served the bytes.
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    $mir = New-AutoOSUsbFetchMirror -FixtureDir $fx.Dir -Mode good
+    try {
+        $fx2 = New-AutoOSUsbFetchFixture -Mode good -Mirrors @($mir.Url)
+        [IO.File]::WriteAllText($fx2.Iso, "CANONICAL COPY NOW CORRUPT`n")
+        # Same bytes on the mirror as fx2's manifest expects: both fixtures
+        # write the identical test image, so their digests agree.
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx2.Dest -CatalogPath $fx2.Catalog }
+        $same = (Test-Path -LiteralPath $fx2.Dest) -and ((Get-FileHash -LiteralPath $fx2.Dest).Hash -eq (Get-FileHash -LiteralPath $fx.Iso).Hash)
+        Assert-True ($same -and $text -like "*from $($mir.Url)testos-1.0-amd64.iso*" -and $text -like '*verified image*') "same=$same out=$text"
+        Remove-Item -Recurse -Force $fx2.Root -ErrorAction SilentlyContinue
+    } finally {
+        Stop-AutoOSTestHttpServer $mir.Server
+        Remove-Item -Recurse -Force $fx.Root, $mir.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips an unreachable mirror with a warning and uses the canonical source (fetch mirror)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good -Mirrors @('http://127.0.0.1:1/1.0/')
+    try {
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog }
+        Assert-True ((Test-Path -LiteralPath $fx.Dest) -and $text -like '*http://127.0.0.1:1/1.0/testos-1.0-amd64.iso failed*' -and $text -like '*trying the next source*' -and $text -like '*verified image*') "out=$text"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips a mirror whose bytes do not match the manifest, the canonical copy wins (fetch mirror)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    $mir = New-AutoOSUsbFetchMirror -FixtureDir $fx.Dir -Mode corrupt
+    try {
+        $fx2 = New-AutoOSUsbFetchFixture -Mode good -Mirrors @($mir.Url)
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx2.Dest -CatalogPath $fx2.Catalog }
+        $same = (Test-Path -LiteralPath $fx2.Dest) -and ((Get-FileHash -LiteralPath $fx2.Dest).Hash -eq (Get-FileHash -LiteralPath $fx2.Iso).Hash)
+        Assert-True ($same -and $text -like '*checksum mismatch*' -and $text -like '*trying the next source*') "same=$same out=$text"
+        Remove-Item -Recurse -Force $fx2.Root -ErrorAction SilentlyContinue
+    } finally {
+        Stop-AutoOSTestHttpServer $mir.Server
+        Remove-Item -Recurse -Force $fx.Root, $mir.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Test-AutoOSUsbCopyReadback reports a file whose bytes differ at the same size, a missing file and a size change, and nothing for an identical tree (copy readback)' {
+    # The second real build on 2026-09-17 finished and printed "Ready to
+    # boot" while the stick had silently replaced one 16 KB cluster of
+    # md5sum.txt with garbage at the same size. Only reading back catches
+    # that, so the read-back is a pure dir-vs-dir function tested here.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_rb_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $src = Join-Path $tmp 'src'; $dst = Join-Path $tmp 'dst'
+        foreach ($d in @("$src\casper", "$dst\casper", "$src\EFI\boot", "$dst\EFI\boot")) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+        $bytes = [byte[]](1..40000 | ForEach-Object { $_ % 253 })
+        foreach ($rel in @('md5sum.txt', 'casper\minimal.squashfs', 'EFI\boot\bootx64.efi', 'casper\vmlinuz')) {
+            [IO.File]::WriteAllBytes((Join-Path $src $rel), $bytes); [IO.File]::WriteAllBytes((Join-Path $dst $rel), $bytes)
+        }
+        $clean = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst)
+        # Same size, one "cluster" of garbage in the middle - the live shape.
+        $corrupt = [byte[]]$bytes.Clone(); for ($i = 8192; $i -lt 24576; $i++) { $corrupt[$i] = [byte](255 - $corrupt[$i]) }
+        [IO.File]::WriteAllBytes((Join-Path $dst 'md5sum.txt'), $corrupt)
+        Remove-Item -LiteralPath (Join-Path $dst 'casper\vmlinuz') -Force
+        [IO.File]::WriteAllBytes((Join-Path $dst 'EFI\boot\bootx64.efi'), $bytes[0..999])
+        $bad = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst)
+        $byPath = @{}; foreach ($b in $bad) { $byPath[$b.Path] = $b.Reason }
+        Assert-True ($clean.Count -eq 0 -and $bad.Count -eq 3 -and $byPath['md5sum.txt'] -eq 'content' -and $byPath['casper\vmlinuz'] -eq 'missing' -and $byPath['EFI\boot\bootx64.efi'] -eq 'size') "clean=$($clean.Count) bad=$(($bad | ForEach-Object { "$($_.Path)=$($_.Reason)" }) -join ',')"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Test-AutoOSRobocopyFailed treats only exit codes 0..7 as success - negative and out-of-range codes are failures (copy)' {
+    # robocopy killed or losing its destination mid-copy can exit with a
+    # negative or otherwise out-of-range code; "-ge 8" read those as
+    # success. 0..7 is the documented success bitmask (copied/extras/
+    # mismatches); 8 = some files failed, 16 = fatal.
+    $ok = @(0, 1, 2, 3, 4, 5, 6, 7) | ForEach-Object { Test-AutoOSRobocopyFailed -ExitCode $_ }
+    $bad = @(8, 9, 16, 24, -1, -1073741510, 259) | ForEach-Object { Test-AutoOSRobocopyFailed -ExitCode $_ }
+    Assert-True ((@($ok | Where-Object { $_ }).Count -eq 0) -and (@($bad | Where-Object { -not $_ }).Count -eq 0)) "ok=$($ok -join ',') bad=$($bad -join ',')"
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage creates a cache directory that does not exist yet, as on a first run (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    try {
+        $dest = Join-Path $fx.Root 'brand\new\dir\testos.iso'
+        Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $dest -CatalogPath $fx.Catalog } | Out-Null
+        Assert-True (Test-Path -LiteralPath $dest) "expected $dest to exist"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb chooser: image items name every real image and exclude the custom pseudo-entries (chooser)' {
+    $items = @(Get-AutoOSUsbChooserImageItem)
+    $ids = @($items | ForEach-Object { $_.Id })
+    $ubuntu = $items | Where-Object { $_.Id -eq 'ubuntu-desktop-lts' }
+    Assert-True (($ids -contains 'ubuntu-desktop-lts') -and ($ids -notcontains 'custom-url') -and ($ids -notcontains 'custom-local') -and $ubuntu.Description -like '*installer, live-persistent*6 GB*') "ids=$($ids -join ',') desc=$($ubuntu.Description)"
+}
+
+Test-Case 'usb chooser: engine items list what Windows can build for the kind; rufus is offered to the terminal, badged interactive (chooser)' {
+    $env:AUTOOS_FAKE_ARCH = 'x64'
+    try {
+        $hybrid = @(Get-AutoOSUsbChooserEngineItem -Kind 'installer' -WriteMode 'hybrid')
+        $raw = @(Get-AutoOSUsbChooserEngineItem -Kind 'installer' -WriteMode 'raw')
+        $rufus = $hybrid | Where-Object { $_.Id -eq 'rufus' }
+        $ventoy = $hybrid | Where-Object { $_.Id -eq 'ventoy' }
+        Assert-True ($rufus.Badge -eq 'interactive' -and $ventoy.Badge -eq 'default' -and (@($hybrid.Id) -contains 'uefi-copy') -and (@($raw.Id) -notcontains 'ventoy') -and (@($raw.Id) -contains 'native')) "hybrid=$($hybrid.Id -join ',') raw=$($raw.Id -join ',')"
+    } finally { Remove-Item Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'usb chooser: a non-interactive run takes the default at every step and never consents to the write itself (chooser)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_NONINTERACTIVE = '1'; $env:AUTOOS_FAKE_ARCH = 'x64'
+        try {
+            $text = Invoke-AutoOSCapturedConsole { $script:chooserResult = Invoke-AutoOSUsbChooser }
+            $dry = $null
+            $textDry = Invoke-AutoOSCapturedConsole { $script:chooserDry = Invoke-AutoOSUsbChooser -DryRun }
+            $dry = $script:chooserDry
+            Assert-True (($null -eq $script:chooserResult) -and $text -like '*Not confirmed*' `
+                -and $dry.Image -eq 'ubuntu-desktop-lts' -and $dry.Kind -eq 'installer' -and $dry.Engine -eq 'ventoy' -and $dry.Device -eq '\\.\PHYSICALDRIVE5' -and (-not $dry.Wipe) `
+                -and $textDry -like '*PHYSICALDRIVE5*' -and $textDry -like '*GB*') "result=$($script:chooserResult) text=$text dry=$($dry | ConvertTo-Json -Compress) textDry=$textDry"
+        } finally {
+            Remove-Item Env:\AUTOOS_NONINTERACTIVE, Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Test-Case 'usb chooser: the profile menu offers Create installer USB and a non-interactive -CreateUsb without flags still refuses (chooser)' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb -NoColor 2>&1) -join "`n"
+    Assert-True ($LASTEXITCODE -eq 2 -and $out -like '*requires -Image*' -and ((Get-Content $setup -Raw) -like "*Id = 'create-usb'; Name = 'Create installer USB'*")) "exit=$LASTEXITCODE out=$out"
+}
+
+Test-Case 'usb: setup.ps1 -Undo states plainly that a USB write cannot be undone' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -Undo -DryRun -NoColor 2>&1) -join "`n"
+    Assert-True ($out -like '*USB*') "out=$out"
+}
+
+# ─── Browser UI: the three USB endpoints (Task 11b) ────────────────────────
+# Task 11 shipped web/index.html's "Create installer USB" button and
+# lib/linux/serve.py's three endpoints, but never mirrored them into
+# AutoOS.Serve.psm1 - the button 404'd on every call on the platform the
+# human partner actually runs. Get-AutoOSServeUsbCatalog/-UsbDevices/
+# -UsbCreateResult are the module-level, exported, directly-callable mirror
+# of serve.py's usb_images_response/usb_devices_response/
+# usb_create_response, for the identical reason those are module-level in
+# serve.py: a test can call them without starting a real HttpListener.
+# Every test name below carries "usb" so `-Filter usb` reaches it.
+function Invoke-WithModuleScope {
+    # Reaches into AutoOS.Serve.psm1's module scope to set/clear
+    # $script:RunInfo.Running directly - the in-memory run-lock
+    # /api/install and /api/usb/create both check - without spinning up a
+    # real installer/usb-create subprocess just to flip one flag.
+    param([scriptblock]$Body)
+    $mod = Get-Module AutoOS.Serve
+    & $mod $Body
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCatalog excludes the interactive rufus engine' {
+    $env:AUTOOS_FAKE_ARCH = 'x64'
+    try {
+        $catalog = Get-AutoOSServeUsbCatalog -RepoRoot $Root
+        $ids = @($catalog.engines | ForEach-Object { $_.id })
+        Assert-NotContains $ids 'rufus'
+        Assert-Contains $ids 'ventoy'
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbDevices reports elevated=false with a reason when unelevated' {
+    $env:AUTOOS_FAKE_ELEVATED = '0'
+    try {
+        $result = Get-AutoOSServeUsbDevices
+        Assert-True (-not $result.elevated) 'expected elevated=false'
+        Assert-True ([string]$result.reason -like '*Administrator*') "reason=$($result.reason)"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult refuses a device Assert-AutoOSUsbSafe would refuse' {
+    Invoke-WithFakeUsbEnv -Fixture 'root_is_boot_disk' -Body {
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE0'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 400 -and [string]$result.Payload.error -like '*system disk*') `
+            "code=$($result.Code) error=$($result.Payload.error)"
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult guards the device before checking image/engine' {
+    Invoke-WithFakeUsbEnv -Fixture 'root_is_boot_disk' -Body {
+        # No image/engine at all - if the guard ran second this would come
+        # back "image and engine are both required" instead.
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE0' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 400 -and [string]$result.Payload.error -like '*system disk*') `
+            "code=$($result.Code) error=$($result.Payload.error)"
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult refuses a device smaller than the image (finding F12)' {
+    # Finding F12 (mirror of lib/linux/serve.py's usb_create_response): this
+    # used to call Assert-AutoOSUsbSafe with no $env:AUTOOS_IMAGE_BYTES at
+    # all, so the size check compared against 0 and a device smaller than
+    # the image still got a 202. tiny_stick is 4 GB; ubuntu-desktop-lts
+    # declares sizeGb: 6 in catalog\images.json.
+    Invoke-WithFakeUsbEnv -Fixture 'tiny_stick' -Body {
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 400 -and [string]$result.Payload.error -like '*too small*') `
+            "code=$($result.Code) error=$($result.Payload.error)"
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult returns 409 while a run is already in progress' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        Invoke-WithModuleScope { $script:RunInfo.Running = $true }
+        try {
+            $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+            $result = Get-AutoOSServeUsbCreateResult -Body $body
+            Assert-True ($result.Code -eq 409 -and [string]$result.Payload.error -like '*already in progress*') `
+                "code=$($result.Code) error=$($result.Payload.error)"
+        } finally {
+            Invoke-WithModuleScope { $script:RunInfo.Running = $false }
+        }
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult returns 409 for a second write, not just during an install' {
+    # /api/install and /api/usb/create share one in-memory run flag - this
+    # is the "409 while an install runs" half of that contract, exercised
+    # from the usb-create side.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        Invoke-WithModuleScope { $script:RunInfo.Running = $true; $script:RunInfo.Summary = 'installing components' }
+        try {
+            $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+            $result = Get-AutoOSServeUsbCreateResult -Body $body
+            Assert-True ($result.Code -eq 409) "expected 409 while an install runs, got $($result.Code)"
+        } finally {
+            Invoke-WithModuleScope { $script:RunInfo.Running = $false; $script:RunInfo.Summary = '' }
+        }
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult accepts a valid request and reports the device' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 202 -and $result.Payload.device -eq '\\.\PHYSICALDRIVE5') `
+            "code=$($result.Code) payload=$($result.Payload | ConvertTo-Json -Compress)"
+    }
 }
 
 # ─── Static analysis ────────────────────────────────────────────────────────

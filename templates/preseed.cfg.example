@@ -1,0 +1,68 @@
+# AutoOS installer/rescue USB — sanitised Debian-installer preseed template.
+#
+# Companion to templates/user-data.example for media that still boot the
+# classic Debian Installer instead of Ubuntu's subiquity/autoinstall. The
+# same two hard rules apply here as everywhere else in this repository
+# (AGENTS.md):
+#
+#   1. No real secret ships in this file. Every value that looks like it
+#      should be private is the literal placeholder CHANGE-ME-AT-CREATION-TIME,
+#      substituted at USB-creation time — see the account-setup section below.
+#   3. No disk is wiped without the operator asking for it — see the
+#      partitioning section below.
+
+### Localization
+d-i debian-installer/locale string en_US.UTF-8
+d-i keyboard-configuration/xkb-keymap select us
+
+### Network
+d-i netcfg/choose_interface select auto
+d-i netcfg/get_hostname string autoos-rescue
+d-i netcfg/get_domain string unassigned-domain
+
+### Account setup
+# A full SHA-512 crypt hash, never a plaintext password. The USB-creation
+# tool replaces CHANGE-ME-AT-CREATION-TIME with the hash of a freshly
+# generated passphrase (shown to the operator exactly once, B7), produced by
+# `openssl passwd -6` — falling back to `mkpasswd -m sha512crypt` — and it
+# refuses to write this file at all if neither tool is present (B12). Do not
+# hand-roll SHA-512-crypt: Python's `crypt` module is POSIX-only and was
+# removed in Python 3.13, and getting the algorithm subtly wrong by hand is
+# exactly how the previous incident happened — a committed plaintext password
+# (A1) next to a hash truncated to 82 of the required 86 characters (A2),
+# which locks you out of the machine you just installed.
+d-i passwd/user-fullname string AutoOS Rescue
+d-i passwd/username string rescue
+d-i passwd/user-password-crypted password CHANGE-ME-AT-CREATION-TIME
+d-i passwd/root-login boolean false
+
+### Partitioning — INTERACTIVE BY DEFAULT.
+#
+# partman-auto/method is left UNSET on purpose: an installer with no
+# partman-auto/method stops and asks a human to lay out partitions by hand,
+# same as a manual install. This is the direct fix for A3, where the original
+# scripts wiped the whole target disk automatically with no prompt at all,
+# and it matches AGENTS.md hard rule 3 ("every destructive action is opt-in
+# and announced").
+#
+# Only when the operator explicitly passed --wipe-target-disk at USB-creation
+# time (recorded by the creation tool as AUTOOS_WIPE_TARGET_DISK) does the
+# generator uncomment a block shaped like the one below, with the disk field
+# filled in from the disk the operator confirmed — named by model and size in
+# full, e.g. "Samsung 980 PRO 1TB (/dev/nvme0n1) will be ERASED" — never a
+# bare "largest disk" guess.
+#
+# d-i partman-auto/disk string CHANGE-ME-AT-CREATION-TIME
+# d-i partman-auto/method string regular
+# d-i partman-auto/choose_recipe select atomic
+# d-i partman-partitioning/confirm_write_new_label boolean true
+# d-i partman/choose_partition select finish
+# d-i partman/confirm boolean true
+# d-i partman/confirm_nooverwrite boolean true
+
+### Base system / packages
+tasksel tasksel/first multiselect standard, ssh-server
+d-i pkgsel/include string openssh-server
+
+### Finish
+d-i finish-install/reboot_in_progress note
