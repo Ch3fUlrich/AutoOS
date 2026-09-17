@@ -89,10 +89,77 @@ echo "merge-tree exit: $?   (0 = clean, 1 = conflicts)"
 
 ---
 
+## 2b. What the second 2026-09-17 session changed (read after section 2)
+
+A later session on the same day owned section 5's item 1 — and found the gap was bigger than
+written: not only did `usb_plan` never call `image_resolve`, **neither entry point ever executed
+a plan.** `--create-usb` without `--dry-run` printed the plan and exited 0; `usb_execute` /
+`Invoke-AutoOSUsbPlan` had no caller outside the tests. Both halves are now wired, on both
+platforms, test-first:
+
+- **`usb_fetch_image <image_id> <dest>`** (`lib/linux/usb.sh`) / **`Invoke-AutoOSUsbFetchImage`**
+  (`AutoOS.Usb.psm1`): `image_resolve` → fetch the vendor's checksum manifest (GPG-verified when
+  the catalog names `sig` + `key`) → read the SHA-256 for the resolved file (`_usb_sums_digest_for`
+  / `Get-AutoOSUsbSumsDigest`: coreutils, starred and BSD `SHA256 (f) = h` shapes; 64-hex only,
+  so an MD5 line can never match) → `fetch_verified` against it. Manifest kept as `<dest>.sums`.
+  Refuses pseudo-entries, entries with no `sums`, a manifest that omits the file, and every
+  download failure, leaving nothing behind. Second run is `skipped`.
+- **The plan now leads with it.** `usb_plan` / `New-AutoOSUsbPlan` emit
+  `usb_fetch_image <id> <cache>/<id>.iso` (Windows: `Invoke-AutoOSUsbFetchImage …`) as line 1,
+  *before* `usb_reverify` — deliberately: the fetch is the hour-long step and must not sit
+  between the re-verify and the write. The F3/F6 test now asserts "re-verify immediately before
+  the first destructive line", not "first line". Dry runs trace and skip it; the
+  "dry run leaves the filesystem untouched" test still proves the cache dir stays empty.
+- **`setup.sh` / `setup.ps1` execute.** After the plan and the elevation check, a non-dry-run
+  now pipes the printed plan into `usb_execute` / `Invoke-AutoOSUsbPlan` — **only with
+  `--wipe-target-disk` / `-WipeTargetDisk`**; without it the run shows the plan and refuses
+  (a plan is not consent, and neither is `--yes`). The flag changed meaning from
+  "acknowledged, ignored" to "required opt-in"; usage text, README and
+  `docs/getting-started.md#flags` say so.
+- Two bugs the new tests caught on the way: the Windows fetch wrote its `.part` before the
+  cache directory existed (a first-run failure; fixed on both sides by creating `dirname dest`),
+  and `[IO.File]::ReadLines` + an early `return` left the `.sums` file locked so the second run
+  could not replace it (now `ReadAllLines`).
+
+Counts recorded for this session on the Windows Git Bash host: bash `--filter usb` **70/0**,
+`--filter fetch` **15/1** (the 1 is the host-only `file://` curl failure), full bash **252 passed /
+8 failed / 2 skipped** — all 8 host-only (three `verified download` `file://` cases,
+`catalog_probe_installed` needing `dpkg-query`, three state/config round-trips whose expected and
+got strings print identically = CR difference, `shellcheck is clean` = SC1017 on the CRLF checkout;
+none touch files this session changed); full pwsh **212/1** (the 1 is `PSScriptAnalyzer is clean`,
+pre-existing findings in `AutoOS.ClaudeAutostart/Detect/Download/Serve.psm1`, none in touched
+files); shellcheck via docker on CR-stripped copies of the touched `.sh` files: clean apart from
+three pre-existing SC2034 in `setup.sh`.
+
+**The test stick, re-inspected read-only on 2026-09-17 (second session):** enumerates as
+`\\.\PHYSICALDRIVE5`, serial `960806056010`, MBR, one FAT32 partition, drive letter `J:` back.
+`chkdsk J:` (no repair flags) reports problems it could not correct: `boot\grub` holds directory
+entries with garbage names and ~4 GB sizes, ~14 GB sit in lost cluster chains, and the offline
+`.deb` cache is gone (`rescue\debs` and `pool\` hold zero `.deb`). `casper/minimal.squashfs`
+*lists* at its expected size (3,432,136,704 B) but **reading it fails with "The file or directory
+is corrupted and unreadable"**, and a lookup in `md5sum.txt` returned nothing — the payload is
+not intact either. The stick must be rebuilt from scratch; nothing on it is worth preserving
+except the human partner's own files. It also carries the human partner's
+own files (`ROG-STRIX-…-ASUS-4505.CAP`, `BIOSRenamer.exe`) — copy those off before any rebuild.
+`setup.ps1 -ListUsb` reported "No USB devices found" for the first ~minute after plug-in
+(`Get-Partition` failed with "No MSFT_Partition objects") and then listed it correctly — treat an
+empty listing right after plug-in as a race, not a bug. A real Windows run also needs `gpg` on
+PATH (Ubuntu's manifest is signature-verified; `Test-AutoOSGpgSignature` throws without it) and
+none is installed on this host; WSL has gpg/curl but cannot see the stick without usbipd.
+
+Still true after this session: **nobody has booted a stick built by this tool**, the
+`custom-url` / `custom-local` pseudo-entries are still not plumbed through the CLI (usb_plan
+already refuses them — no `writeMode`), the Windows plan still has no re-verify step, and
+plan lines are word-split so a cache path containing a space breaks the bash executor (the
+Windows dispatcher now handles it for the fetch line only).
+
+---
+
 ## 3. Where things stand (as verified 2026-09-17)
 
 Branch **`feat/installer-usb-rescue-profile`**, pushed to `origin`, tip `10ca8ed`, **32 commits,
-not merged.** Branch point `1eab6fc`. `main` was 6 commits ahead.
+not merged.** Branch point `1eab6fc`. `main` was 6 commits ahead. *(The handoff commit `64b9b8f`
+and the second session's commit came after; section 2 tells you how to re-check.)*
 
 ### Done, tested and committed
 
@@ -160,11 +227,14 @@ read the printed counts.**
 
 ## 5. Remaining work, in priority order
 
-1. **Wire `image_resolve` into the planner.** It exists and is tested; `usb_plan` never calls it. So
-   `--create-usb` can plan a write and **cannot download an image end-to-end.** This is the single
-   gap that stops the headline feature being complete. It survived three separate tasks because
-   each report mentioned it honestly in one clause and none owned it. Own it.
-2. **Resolve the merge** (section 4). Land it on `main`.
+1. ~~**Wire `image_resolve` into the planner.**~~ **Done (section 2b)** — and the executor is now
+   called from both entry points. What remains of it: the first *real* run against the test
+   stick (serial `960806056010`, section 7) — every path below the fetch has only ever run under
+   `AUTOOS_DRY_RUN` / `AUTOOS_FORCE_FAIL` or against loopback fixtures.
+2. **Resolve the merge** (section 4). Land it on `main`. The second session's changes touch
+   `setup.sh`, `lib/linux/usb.sh`, `tests/run-tests.sh` (already in the conflict set) and
+   `setup.ps1`, `lib/windows/AutoOS.Usb.psm1`, `tests/run-tests.ps1`, `README.md`,
+   `docs/getting-started.md` — re-run `git merge-tree` before assuming section 4's list.
 3. **Terminal chooser (plan Task 10)** — image → kind → engine → device, reusing the existing
    interactive selection helpers from commit `f8ae521`. The browser has this flow; the terminal
    still needs the flags typed by hand. Unlike the browser, the terminal **may** offer `rufus`,
@@ -216,6 +286,19 @@ The ledger that held these is gone. They are here so you do not pay for them aga
 - **L8 — Subagents stall and die.** One spent 525k tokens then waited on a monitor it had spawned and
   committed nothing; one died to a rate limit mid-task. Tell every subagent: run each test once, no
   monitors or polling, **commit before reporting**.
+- **L9 — "Plan-then-execute" had no execute.** Six tasks built and tested a planner and an
+  executor and nobody checked that any entry point called the second. A grep for callers of
+  `usb_execute` / `Invoke-AutoOSUsbPlan` outside `tests/` returned nothing. When a feature is
+  described as a pipeline, grep each stage's *callers*, not just its tests.
+- **L10 — On this Windows host, the checkout is CRLF (`git ls-files --eol` → `w/crlf`) even though
+  `.gitattributes` says `eol=lf`.** Git Bash tolerates it, the suite's shellcheck-in-docker does
+  not (`SC1017 literal carriage return` on every `.sh`), and a `bash` reached from PowerShell
+  fails on line 10. Lint copies stripped with `tr -d '\r'`; the index is LF, so commits are fine.
+  The `verified download … skipped, not refetched` and `catalog` `dpkg-query` failures are the
+  same class: host-only.
+- **L11 — PowerShell `foreach` over `[IO.File]::ReadLines()` with an early `return` leaks the
+  file handle.** The next `Move-Item` onto that file fails "could not move verified file into
+  place". Use `ReadAllLines` for small files. The idempotency test is what caught it.
 
 ---
 

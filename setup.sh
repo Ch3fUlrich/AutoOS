@@ -66,12 +66,12 @@ AutoOS — post-install provisioning for Linux
   --undo             Restore files AutoOS backed up (does NOT uninstall packages)
                      (does not cover a USB write — that cannot be undone)
 
-  --create-usb           Plan an installer/rescue USB write (--dry-run to preview only)
+  --create-usb           Build a bootable installer/rescue USB (--dry-run shows the plan only)
   --image <id>            catalog/images.json entry to write
   --kind <kind>            installer | live-persistent | full-os (default: installer)
   --engine <id>            catalog/engines.json entry to write with
   --usb-device <path>      Target device, e.g. /dev/sdb
-  --wipe-target-disk       Acknowledge the target disk's current contents are lost
+  --wipe-target-disk       Required for a real write: confirms the target disk's contents may be destroyed
   --list-usb              List candidate USB devices and exit
   --list-engines          List write engines available on this machine and exit
   --help, -h         This text
@@ -312,7 +312,31 @@ if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
             fi
         fi
     fi
-    exit 0
+
+    if (( AUTOOS_DRY_RUN )); then
+        exit 0
+    fi
+
+    # The real write. Until this was wired, a --create-usb without
+    # --dry-run printed the plan and exited 0 - a "create" that created
+    # nothing. usb_execute (lib/linux/usb.sh) is the only thing that ever
+    # runs a plan line; it gets exactly the lines printed above, on stdin.
+    #
+    # AGENTS.md hard rule 3: every destructive action is opt-in and
+    # announced. The plan above is the announcement; --wipe-target-disk is
+    # the opt-in. Without it a real run stops HERE, after showing what it
+    # would do, having downloaded and written nothing - a plan is not
+    # consent, and neither is --yes (which answers the install menu's
+    # questions, not "may I destroy this disk").
+    if (( ! USB_WIPE )); then
+        ui_err "refusing to write $USB_DEVICE: re-run with --wipe-target-disk to confirm that everything on it may be destroyed (the plan above is exactly what would run)"
+        exit 1
+    fi
+    ui_section "Writing $USB_DEVICE"
+    if printf '%s\n' "$usb_plan_out" | usb_execute "$USB_DEVICE"; then
+        exit 0
+    fi
+    exit 1
 fi
 
 # ─── 1. Detect ──────────────────────────────────────────────────────────────

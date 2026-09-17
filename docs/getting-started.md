@@ -62,6 +62,10 @@ Both entry points accept the same ideas; only the spelling differs.
 | `-SaveState <file>` | `--save-state <file>` | Where to write run state |
 | `-NoVerify` | `--no-verify` | Skip the post-install "does it run?" check |
 | `-Undo` | `--undo` | [Restore backed-up files](state-and-undo.md#undo) |
+| `-CreateUsb -Image <id> -Engine <id> -UsbDevice <dev>` | `--create-usb --image <id> --engine <id> --usb-device <dev>` | Build a bootable installer/rescue USB from a [`catalog/images.json`](../catalog/images.json) entry; with `-DryRun`/`--dry-run` only the plan is shown |
+| `-WipeTargetDisk` | `--wipe-target-disk` | Required for a real USB write: confirms everything on the target may be destroyed |
+| `-Kind <kind>` | `--kind <kind>` | `installer` (default), `live-persistent` or `full-os` |
+| `-ListUsb` / `-ListEngines` | `--list-usb` / `--list-engines` | Discover candidate devices and the write engines this machine offers |
 
 ## Recipes
 

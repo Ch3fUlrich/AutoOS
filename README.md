@@ -116,6 +116,8 @@ Details: [Profiles & detection](docs/profiles.md).
 ./setup.sh --from-state .autoos-state.json  # repeat a previous machine's setup
 ./setup.sh --undo                           # restore the files it backed up
 ./setup.sh --list                           # every component id
+./setup.sh --create-usb --image ubuntu-desktop-lts --engine ventoy \
+           --usb-device /dev/sdb --dry-run  # preview a rescue-stick write
 ```
 
 ```powershell
@@ -123,7 +125,11 @@ Details: [Profiles & detection](docs/profiles.md).
 .\setup.ps1 -Only claude-code,tailscale -Yes
 .\setup.ps1 -FromState .autoos-state.json
 .\setup.ps1 -Undo
+.\setup.ps1 -CreateUsb -Image ubuntu-desktop-lts -Engine ventoy -UsbDevice \\.\PHYSICALDRIVE5 -DryRun
 ```
+
+A USB write only happens with `--wipe-target-disk` / `-WipeTargetDisk` in
+addition; without it the plan is shown and nothing is downloaded or written.
 
 `--dry-run` prints every command that *would* run and touches nothing. It is
 the right way to see what a profile means before committing to it.

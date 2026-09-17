@@ -1726,6 +1726,22 @@ Test-Case 'usb: New-AutoOSUsbPlan names the device and Ventoy for a dry run' {
     }
 }
 
+Test-Case 'usb: New-AutoOSUsbPlan fetches and verifies the image as its first line, before anything touches the device (plan fetch)' {
+    # The seam the 2026-09-17 handoff names as the single gap stopping the
+    # headline feature: Resolve-AutoOSImageUrl existed, Get-AutoOSVerifiedFile
+    # existed, and the plan named a cache path nobody ever filled.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $env:AUTOOS_CACHE_DIR = 'C:\scratch\images'
+        try {
+            $plan = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' `
+                -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        } finally {
+            Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue
+        }
+        Assert-Equal $plan[0] 'Invoke-AutoOSUsbFetchImage ubuntu-desktop-lts C:\scratch\images\ubuntu-desktop-lts.iso'
+    }
+}
+
 Test-Case 'usb: New-AutoOSUsbPlan never plans a raw image onto ventoy''s copy path' {
     Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
         $threw = $false; $msg = ''
@@ -1779,6 +1795,232 @@ Test-Case 'usb: setup.ps1 -CreateUsb dry run names the device and Ventoy' {
     } finally {
         Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
         Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── setup.ps1 actually executing a plan ───────────────────────────────────
+# Until 2026-09-17 a -CreateUsb WITHOUT -DryRun printed the plan and exited
+# 0 - a "create" that created nothing; Invoke-AutoOSUsbPlan had no caller
+# outside the tests. These two prove the wiring without a dry-run flag,
+# which AGENTS.md §5 otherwise reserves for end-to-end tests: both are
+# guaranteed to run no step - the first refuses before Invoke-AutoOSUsbPlan
+# is ever reached, the second is stopped by AUTOOS_FORCE_FAIL on the very
+# first step - both run against the synthetic disk fixture with elevation
+# faked, and both assert the scratch cache dir came out exactly as it went in.
+function Invoke-AutoOSSetupUsbRealRun {
+    param([string[]]$ExtraArgs, [string]$Scratch)
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture 'good_stick'
+    $env:AUTOOS_IMAGE_BYTES = '4000000000'
+    $env:AUTOOS_FAKE_ELEVATED = '1'
+    $env:AUTOOS_CACHE_DIR = $Scratch
+    try {
+        $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb `
+            -Image 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' `
+            -UsbDevice '\\.\PHYSICALDRIVE5' -NoColor @ExtraArgs 2>&1) -join "`n"
+        [pscustomobject]@{ Out = $out; ExitCode = $LASTEXITCODE }
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: setup.ps1 -CreateUsb without -WipeTargetDisk shows the plan, then refuses before running any step (execute)' {
+    $scratch = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_usb_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $r = Invoke-AutoOSSetupUsbRealRun -Scratch $scratch -ExtraArgs @()
+        $left = @(Get-ChildItem -LiteralPath $scratch -Recurse -Force).Count
+        Assert-True ($r.ExitCode -ne 0 -and $r.Out -like '*-WipeTargetDisk*' -and $r.Out -like '*Invoke-AutoOSUsbFetchImage*' `
+            -and $r.Out -notlike '*TRACE*' -and $r.Out -notlike '*Ready to boot*' -and $left -eq 0) "exit=$($r.ExitCode) left=$left out=$($r.Out)"
+    } finally {
+        Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: setup.ps1 -CreateUsb with -WipeTargetDisk hands the printed plan to Invoke-AutoOSUsbPlan (execute)' {
+    $scratch = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_usb_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $env:AUTOOS_FORCE_FAIL = '1'
+    $env:AUTOOS_TRACE = '1'
+    try {
+        $r = Invoke-AutoOSSetupUsbRealRun -Scratch $scratch -ExtraArgs @('-WipeTargetDisk')
+        $left = @(Get-ChildItem -LiteralPath $scratch -Recurse -Force).Count
+        # The forced failure must land on the FETCH step - proof that the
+        # first thing a real run does is download, not touch the device.
+        Assert-True ($r.ExitCode -ne 0 -and $r.Out -like '*TRACE Invoke-AutoOSUsbFetchImage ubuntu-desktop-lts*' `
+            -and $r.Out -like '*forced failure*' -and $r.Out -notlike '*Ready to boot*' -and $left -eq 0) "exit=$($r.ExitCode) left=$left out=$($r.Out)"
+    } finally {
+        Remove-Item Env:\AUTOOS_FORCE_FAIL -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_TRACE -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── Invoke-AutoOSUsbFetchImage: the resolver-to-downloader bridge ──────────
+# Mirror of the bash suite's "usb fetch" block: a scratch release directory
+# (a tiny text file standing in for the ISO plus a real SHA256SUMS computed
+# from it) reached over file:// the same way the image_resolve tests above
+# reach their fixtures, and a scratch catalog whose one entry points at it.
+# No test here reaches the real internet or the real catalog. Every test
+# name carries "usb" and "fetch" so `-Filter usb` and `-Filter fetch` both
+# reach them.
+function New-AutoOSUsbFetchFixture {
+    # -Mode good lists the image's real digest, bad an all-zero one, missing
+    # a different filename entirely. -Sums '-' models a catalog entry with
+    # no checksum manifest at all.
+    param([string]$Mode = 'good', [string]$Sums = 'SHA256SUMS')
+    $rel = Join-Path ([IO.Path]::GetTempPath()) ('aos_fetch_' + [Guid]::NewGuid().ToString('N'))
+    $dir = Join-Path $rel '1.0'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $iso = Join-Path $dir 'testos-1.0-amd64.iso'
+    [IO.File]::WriteAllText($iso, "AUTOOS TEST IMAGE - not a real ISO`n")
+    $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $iso).Hash.ToLowerInvariant()
+    $line = switch ($Mode) {
+        'good'    { "$sum *testos-1.0-amd64.iso" }
+        'bad'     { ('0' * 64) + ' *testos-1.0-amd64.iso' }
+        'missing' { "$sum *something-else.iso" }
+    }
+    [IO.File]::WriteAllText((Join-Path $dir 'SHA256SUMS'), "$line`n")
+    $html = '<html><body><pre><a href="../">../</a>' + "`n" +
+            '<a href="testos-1.0-amd64.iso">testos-1.0-amd64.iso</a>' + "`n" +
+            '<a href="SHA256SUMS">SHA256SUMS</a>' + "`n" + '</pre></body></html>'
+    [IO.File]::WriteAllText((Join-Path $dir 'index.html'), $html)
+    $cat = Join-Path $rel 'images.json'
+    @{ images = @(@{ id = 'testos'; name = 'Test OS'; homepage = 'http://127.0.0.1/'
+                     index = (ConvertTo-AutoOSTestDirUri $dir); file = 'testos-[0-9.]+-amd64\.iso$'
+                     sums = $Sums; sig = '-'; key = '-'; kinds = @('installer'); writeMode = 'hybrid'; sizeGb = 0.001 }) } |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cat -Encoding UTF8
+    [pscustomobject]@{ Root = $rel; Catalog = $cat; Iso = $iso; Dest = (Join-Path $rel 'cache\testos.iso') }
+}
+
+function Invoke-AutoOSCapturedConsole {
+    # Write-AutoOSLine writes straight to [Console]::Out rather than the
+    # pipeline (see the verified-download tests above), so the fetch's own
+    # progress/skip lines are captured by redirecting the real Console
+    # stream for the duration of -Body. Returns the captured text; -Body's
+    # own exception, if any, is rethrown after the stream is restored.
+    param([scriptblock]$Body)
+    $sw = [IO.StringWriter]::new()
+    $origOut = [Console]::Out
+    [Console]::SetOut($sw)
+    try { & $Body | Out-Null } finally { [Console]::SetOut($origOut) }
+    $sw.ToString()
+}
+
+Test-Case 'usb: Get-AutoOSUsbSumsDigest reads coreutils, starred and BSD-style manifests and ignores non-SHA-256 lines (fetch)' {
+    $m = Join-Path ([IO.Path]::GetTempPath()) ('aos_sums_' + [Guid]::NewGuid().ToString('N'))
+    $d = { param($n) ([string]$n) * 64 }
+    $lines = @(
+        'd41d8cd98f00b204e9800998ecf8427e *plain.iso',
+        "$(& $d 1)  plain.iso",
+        "$(& $d 2) *starred.iso",
+        "$(& $d 3)  ./dotslash.iso",
+        "SHA256 (bsd.iso) = $(& $d 4)"
+    )
+    [IO.File]::WriteAllText($m, ($lines -join "`n") + "`n")
+    try {
+        $r1 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'plain.iso'
+        $r2 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'starred.iso'
+        $r3 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'dotslash.iso'
+        $r4 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'bsd.iso'
+        $r5 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'absent.iso'
+        Assert-True ($r1 -eq (& $d 1) -and $r2 -eq (& $d 2) -and $r3 -eq (& $d 3) -and $r4 -eq (& $d 4) -and $null -eq $r5) "plain=$r1 starred=$r2 dotslash=$r3 bsd=$r4 absent=[$r5]"
+    } finally {
+        Remove-Item -Force $m -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage downloads the image, verifies it against the published SHA256SUMS and keeps the manifest beside it (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    try {
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog }
+        $same = (Test-Path -LiteralPath $fx.Dest) -and ((Get-FileHash -LiteralPath $fx.Dest).Hash -eq (Get-FileHash -LiteralPath $fx.Iso).Hash)
+        Assert-True ($same -and (Test-Path -LiteralPath "$($fx.Dest).sums") -and $text -like '*verified image*') "same=$same out=$text"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage reports a second run as skipped, never a refetch (fetch idempotent)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    try {
+        Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog }
+        Assert-True ($text -like '*skipped: testos.iso already downloaded*') "out=$text"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage refuses a checksum mismatch and leaves nothing at the destination (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode bad
+    try {
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*checksum mismatch*' -and -not (Test-Path -LiteralPath $fx.Dest) -and -not (Test-Path -LiteralPath "$($fx.Dest).part")) "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage refuses a manifest that does not list the image before any image download (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode missing
+    try {
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*does not list*' -and -not (Test-Path -LiteralPath $fx.Dest)) "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage refuses a catalog entry with no checksum manifest, nothing fetched (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good -Sums '-'
+    try {
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no checksum manifest*' -and -not (Test-Path -LiteralPath $fx.Dest) -and -not (Test-Path -LiteralPath "$($fx.Dest).sums")) "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage: custom-local is a specific refusal, not a fetch attempt (fetch)' {
+    $threw = $false; $msg = ''
+    try { Invoke-AutoOSUsbFetchImage -ImageId 'custom-local' -Destination 'C:\nowhere\x.iso' | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=[$msg]"
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbPlan routes an Invoke-AutoOSUsbFetchImage line to the fetch, keeping a path with spaces as one argument (fetch)' {
+    # custom-local's specific refusal is the proof the line reached the
+    # function with both arguments intact: Invoke-Expression would have
+    # split "C:\some dir\x.iso" into two positional arguments and failed
+    # to bind instead. Driven through the exported Invoke-AutoOSUsbPlan (a
+    # one-line plan) since the per-step dispatcher is module-private; the
+    # fake disk fixture is what its failure path enumerates.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $threw = $false; $msg = ''
+        try {
+            Invoke-AutoOSCapturedConsole {
+                Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbFetchImage custom-local C:\some dir\x.iso')
+            } | Out-Null
+        } catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage creates a cache directory that does not exist yet, as on a first run (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    try {
+        $dest = Join-Path $fx.Root 'brand\new\dir\testos.iso'
+        Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $dest -CatalogPath $fx.Catalog } | Out-Null
+        Assert-True (Test-Path -LiteralPath $dest) "expected $dest to exist"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
     }
 }
 

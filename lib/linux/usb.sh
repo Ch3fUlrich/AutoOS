@@ -742,6 +742,13 @@ usb_run_in_progress() {
 #      RUN/LOCK via usb_run_in_progress
 #   8. usb_guard, in the mode this engine requires (B16)
 #
+# The plan it prints is always, in order:
+#   usb_fetch_image <image_id> <cache path>   resolve + verified download
+#   usb_reverify <dev> ...                    fresh guard + identity check
+#   <the engine's write line(s)>              the destructive part
+# so nothing destructive is ever reached without a verified image already
+# on disk and a re-check of the device immediately beforehand.
+#
 # Elevation (B10) is deliberately NOT checked here: it is a property of who
 # can run the emitted commands, not of whether the plan itself is
 # coherent, and Task 7's usb_execute test calls usb_plan directly, outside
@@ -831,6 +838,17 @@ usb_plan() {
 
     local local_path
     local_path="$(download_cache_dir)/${image_id}.iso"
+
+    # The image itself: resolved (image_resolve), checksum-verified and
+    # cached by usb_fetch_image, which is the FIRST line of every plan and
+    # the only slow one. It runs before usb_reverify on purpose: a
+    # multi-gigabyte download can take an hour, and the re-verify below
+    # exists to run immediately before the destructive lines, not an hour
+    # before them. Under --dry-run this line is traced and skipped like
+    # every other (the "dry run leaves the filesystem untouched" test
+    # proves the cache dir stays empty), so usb_plan itself still runs
+    # nothing and touches no network.
+    printf 'usb_fetch_image %s %s\n' "$image_id" "$local_path"
 
     printf 'usb_reverify %s %s %s %s\n' "$dev" "$guard_mode" "$image_bytes" "$pinned_id"
 
@@ -1009,6 +1027,13 @@ _usb_dispatch_step() {
             fi
             usb_reverify "${words[1]}" "${words[2]}" "${words[3]}" "${words[4]}"
             ;;
+        usb_fetch_image)
+            if [[ ${#words[@]} -ne 3 ]]; then
+                ui_err "usb_execute: malformed usb_fetch_image step: $line"
+                return 1
+            fi
+            usb_fetch_image "${words[1]}" "${words[2]}"
+            ;;
         Ventoy2Disk.sh)
             # usb_plan deliberately keeps "Ventoy2Disk.sh -i -g <dev>"
             # literal in its own output (the existing "usb planning" tests
@@ -1144,6 +1169,140 @@ usb_execute() {
 
     ui_ok "Ready to boot: $dev"
     return 0
+}
+
+# ─── usb_fetch_image: the resolver-to-downloader bridge ─────────────────────
+# Until this existed, image_resolve (lib/linux/download.sh) and
+# fetch_verified were each written and tested, and usb_plan named a cache
+# path nobody ever filled: --create-usb could plan a write but never
+# download the image it planned to write. This is the join.
+
+# _usb_sums_digest_for <manifest> <filename>
+# Prints the lower-case SHA-256 hex digest <manifest> lists for <filename>,
+# or nothing. Reads the two shapes the catalog's checksum files actually
+# come in:
+#   <hex>  <file>   /  <hex> *<file>     GNU coreutils (Ubuntu, Debian,
+#                                        SystemRescue's .sha256)
+#   SHA256 (<file>) = <hex>              BSD style (Fedora's CHECKSUM)
+# A leading "./" or "*" on the filename is stripped; anything else must
+# match exactly. Only a 64-hex-character digest is accepted, so an MD5 or
+# SHA-1 line for the same file (Ubuntu ships MD5SUMS too) can never be
+# mistaken for the SHA-256 one - the same anchoring lesson
+# tests/run-tests.sh's release_sha256_of() records.
+_usb_sums_digest_for() {
+    local manifest="$1" name="$2"
+    [[ -r "$manifest" ]] || return 1
+    awk -v want="$name" '
+        function is_sha256(s) { return (length(s) == 64 && s ~ /^[0-9A-Fa-f]+$/) }
+        function strip(f) { sub(/^\*/, "", f); sub(/^\.\//, "", f); return f }
+        # BSD: SHA256 (file) = hex
+        $1 == "SHA256" && NF >= 4 && $3 == "=" && $2 == "(" want ")" {
+            if (is_sha256($4)) { print tolower($4); exit }
+        }
+        # coreutils: hex  file  /  hex *file
+        NF >= 2 && is_sha256($1) && strip($2) == want { print tolower($1); exit }
+    ' "$manifest"
+}
+
+# usb_fetch_image <image_id> <dest>
+# The first step of every plan usb_plan emits, and the only one that talks
+# to the network. Resolves <image_id> to a concrete URL (image_resolve),
+# fetches the vendor's checksum manifest (GPG-verified against the
+# catalog's `key` whenever the entry names a `sig`), reads this image's
+# SHA-256 out of it, then fetches the image itself through fetch_verified
+# against that digest - so the file a later step writes to the stick has
+# always been checked against a published digest, never trusted bare. The
+# manifest is kept beside the image as <dest>.sums so a run can be audited
+# by hand afterwards.
+#
+# Idempotent (AGENTS.md §4): a cached <dest> that still matches the digest
+# is reported as "skipped" by fetch_verified, not refetched. The manifest
+# IS refetched every run - it is small, and a stale one is exactly how a
+# superseded point release would be silently written.
+#
+# Refuses, never guesses: a pseudo-entry (custom-url/custom-local), an
+# entry with no `sums`, a manifest that does not list the resolved file,
+# and every fetch_verified failure are each a clear message and non-zero,
+# with nothing left at <dest> (fetch_verified deletes its own partial).
+usb_fetch_image() {
+    local image_id="$1" dest="$2"
+
+    if [[ -z "$image_id" || -z "$dest" ]]; then
+        ui_err "usb_fetch_image: usage: usb_fetch_image <image_id> <dest>"
+        return 1
+    fi
+    if _image_resolve_is_pseudo "$image_id"; then
+        ui_err "usb_fetch_image: '$image_id' is a UI affordance (a user-supplied URL or local file), not a downloadable catalog entry - there is nothing to fetch"
+        return 1
+    fi
+    if (( ${AUTOOS_DRY_RUN:-0} )); then
+        ui_muted "would resolve $image_id, download it to $dest and verify it against the vendor's published SHA-256"
+        return 0
+    fi
+
+    local resolved
+    if ! resolved="$(image_resolve "$image_id")"; then
+        ui_err "usb_fetch_image: could not resolve '$image_id' to a download URL"
+        return 1
+    fi
+    local url file sums sig key
+    url="$(_image_resolve_kv "$resolved" url)"
+    file="$(_image_resolve_kv "$resolved" file)"
+    sums="$(_image_resolve_kv "$resolved" sums)"
+    sig="$(_image_resolve_kv "$resolved" sig)"
+    key="$(_image_field "$image_id" key)"
+    [[ -z "$key" ]] && key="-"
+    [[ -z "$sig" ]] && sig="-"
+
+    if [[ -z "$url" || -z "$file" ]]; then
+        ui_err "usb_fetch_image: image_resolve returned no url/file for '$image_id'"
+        return 1
+    fi
+    if [[ -z "$sums" || "$sums" == "-" ]]; then
+        ui_err "usb_fetch_image: catalog entry '$image_id' names no checksum manifest - refusing to write an image nothing can verify"
+        return 1
+    fi
+    if [[ "$sig" != "-" && "$key" == "-" ]]; then
+        ui_err "usb_fetch_image: catalog entry '$image_id' names a signature but no GPG key fingerprint to check it against"
+        return 1
+    fi
+
+    # fetch_verified writes its .part next to <dest> before it ever creates
+    # <dest>'s directory. image_resolve happens to mkdir the cache dir just
+    # above, but <dest> is the caller's choice and need not live there -
+    # created here explicitly rather than relied on as a side effect.
+    if ! mkdir -p -- "$(dirname -- "$dest")"; then
+        ui_err "usb_fetch_image: cannot create $(dirname -- "$dest")"
+        return 1
+    fi
+
+    local sums_file="${dest}.sums" rc=0
+    ui_info "fetching checksum manifest for $image_id"
+    # No digest to check the manifest against (it is the source of digests);
+    # its own integrity comes from the detached signature when there is one.
+    fetch_verified "$sums" "$sums_file" - "$sig" "$key" || rc=$?
+    case "$rc" in
+        0) ;;
+        3) ui_err "usb_fetch_image: the signature on $sums did not verify against key $key - refusing to trust its digests"; return 1 ;;
+        *) ui_err "usb_fetch_image: could not fetch checksum manifest $sums (fetch_verified rc=$rc)"; return 1 ;;
+    esac
+
+    local digest
+    digest="$(_usb_sums_digest_for "$sums_file" "$file")"
+    if [[ -z "$digest" ]]; then
+        ui_err "usb_fetch_image: $(basename -- "$sums_file") does not list a SHA-256 for '$file' - refusing to download an image with no published digest"
+        return 1
+    fi
+
+    ui_info "fetching $file"
+    rc=0
+    fetch_verified "$url" "$dest" "$digest" - - || rc=$?
+    case "$rc" in
+        0) ui_ok "verified image: $dest"; return 0 ;;
+        2) ui_err "usb_fetch_image: checksum mismatch - $file did not match the digest $(basename -- "$sums_file") publishes for it; nothing was kept"; return 1 ;;
+        4) ui_err "usb_fetch_image: download of $url failed; nothing was kept"; return 1 ;;
+        *) ui_err "usb_fetch_image: fetch_verified failed (rc=$rc) for $url"; return 1 ;;
+    esac
 }
 
 # ─── usb_write_ventoy ────────────────────────────────────────────────────────

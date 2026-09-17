@@ -2741,11 +2741,39 @@ if it "usb_plan pins the device identity and emits a re-verify step immediately 
     # the time the plan is actually executed, possibly much later - the
     # plan must carry a fresh usb_guard + identity re-check as its own first
     # step rather than relying on a stale comment.
+    # "Immediately before" is the property, not "first": the download step
+    # now precedes it (an hour-long fetch must not sit between the
+    # re-verify and the write), so this locates the re-verify line and
+    # checks the very next line is the first destructive one.
     out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FAKE_DISK_ID=serial-XYZ \
            usb_plan ubuntu-desktop-lts installer ventoy /dev/sdb)"
-    first_line="$(echo "$out" | head -1)"
-    [[ "$first_line" == "usb_reverify /dev/sdb unmounted "*" serial-XYZ" ]] \
-        && pass || fail "first plan line was: $first_line"
+    reverify_no="$(printf '%s\n' "$out" | grep -n '^usb_reverify ' | head -1 | cut -d: -f1)"
+    destructive_no="$(printf '%s\n' "$out" | grep -n '^Ventoy2Disk.sh ' | head -1 | cut -d: -f1)"
+    reverify_line="$(printf '%s\n' "$out" | sed -n "${reverify_no:-0}p")"
+    if [[ -n "$reverify_no" && -n "$destructive_no" && $((reverify_no + 1)) -eq "$destructive_no" \
+          && "$reverify_line" == "usb_reverify /dev/sdb unmounted "*" serial-XYZ" ]]; then pass
+    else fail "reverify at line ${reverify_no:-none}, first destructive at ${destructive_no:-none}: $out"; fi
+fi
+
+if it "usb_plan: the first plan line fetches and verifies the image, before anything touches the device (usb plan fetch)"; then
+    # The seam the 2026-09-17 handoff names as the single gap stopping the
+    # headline feature: image_resolve existed, fetch_verified existed, and
+    # usb_plan named a cache path nobody ever filled. The plan must now
+    # carry the download as its own first step so usb_execute runs it.
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_CACHE_DIR=/scratch/images \
+           usb_plan ubuntu-desktop-lts installer ventoy /dev/sdb)"
+    first_line="$(printf '%s\n' "$out" | head -1)"
+    assert_eq "$first_line" "usb_fetch_image ubuntu-desktop-lts /scratch/images/ubuntu-desktop-lts.iso"
+fi
+
+if it "usb_plan: every engine's plan starts with the fetch step and never names the cache path before it (usb plan fetch)"; then
+    # uefi-copy has its own fixture (mounted FAT32); the raw/native engine
+    # shares good_stick. Both must lead with the same fetch line.
+    out_native="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_plan proxmox-ve installer native /dev/sdb)"
+    out_uefi="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_fat32_mounted)" usb_plan ubuntu-desktop-lts installer uefi-copy /dev/sdb)"
+    if [[ "$(printf '%s\n' "$out_native" | head -1)" == "usb_fetch_image proxmox-ve "* \
+          && "$(printf '%s\n' "$out_uefi" | head -1)" == "usb_fetch_image ubuntu-desktop-lts "* ]]; then pass
+    else fail "native: $(printf '%s\n' "$out_native" | head -1) / uefi: $(printf '%s\n' "$out_uefi" | head -1)"; fi
 fi
 
 if it "usb_reverify refuses when the device's identity no longer matches what was pinned at plan time (F3/F6 TOCTOU)"; then
@@ -2762,6 +2790,230 @@ fi
 if it "usb --undo states plainly that a USB write cannot be undone"; then
     out="$( bash setup.sh --undo --dry-run 2>&1 )"
     assert_contains "$out" "USB"
+fi
+
+# ─── setup.sh actually executing a plan ────────────────────────────────────
+# Until 2026-09-17 a --create-usb WITHOUT --dry-run printed the plan and
+# exited 0 - a "create" that created nothing; usb_execute had no caller
+# outside the tests. These two prove the wiring without a dry-run flag,
+# which AGENTS.md §5 otherwise reserves for end-to-end tests: both are
+# guaranteed to run no step - the first refuses before usb_execute is ever
+# reached, the second is stopped by AUTOOS_FORCE_FAIL on the very first
+# step - and both run against the synthetic lsblk fixture, and assert the
+# scratch cache dir came out exactly as it went in.
+if it "usb_plan: a real --create-usb without --wipe-target-disk shows the plan, then refuses before running any step (usb execute)"; then
+    scratch="$(mktemp -d)"
+    out="$(AUTOOS_CACHE_DIR="$scratch" AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FAKE_UID=0 \
+           bash setup.sh --create-usb --image ubuntu-desktop-lts --kind installer \
+           --engine ventoy --usb-device /dev/sdb --no-color 2>&1)"; rc=$?
+    listing="$(find "$scratch" | sort)"
+    if [[ $rc -ne 0 && "$out" == *"--wipe-target-disk"* && "$out" == *"usb_fetch_image"* \
+          && "$out" != *"TRACE"* && "$out" != *"Ready to boot"* && "$listing" == "$scratch" ]]; then pass
+    else fail "rc=$rc listing=[$listing] out=$out"; fi
+    rm -rf "$scratch"
+fi
+
+if it "usb_plan: a real --create-usb with --wipe-target-disk hands the printed plan to usb_execute (usb execute)"; then
+    scratch="$(mktemp -d)"
+    out="$(AUTOOS_CACHE_DIR="$scratch" AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FAKE_UID=0 \
+           AUTOOS_FORCE_FAIL=1 AUTOOS_TRACE=1 \
+           bash setup.sh --create-usb --image ubuntu-desktop-lts --kind installer \
+           --engine ventoy --usb-device /dev/sdb --wipe-target-disk --no-color 2>&1)"; rc=$?
+    listing="$(find "$scratch" | sort)"
+    # The forced failure must land on the FETCH step - proof that the first
+    # thing a real run does is download, not touch the device.
+    if [[ $rc -ne 0 && "$out" == *"TRACE usb_fetch_image ubuntu-desktop-lts"* \
+          && "$out" == *"forced failure"* && "$out" != *"Ready to boot"* && "$listing" == "$scratch" ]]; then pass
+    else fail "rc=$rc listing=[$listing] out=$out"; fi
+    rm -rf "$scratch"
+fi
+
+# ─── usb_fetch_image: the resolver-to-downloader bridge ─────────────────────
+# image_resolve (tested above, against loopback index fixtures) and
+# fetch_verified (tested above, against loopback files) were each done;
+# nothing joined them, so --create-usb could never download the image it
+# planned to write. Every test here serves a scratch release directory over
+# _start_test_http_server - a tiny text file standing in for the ISO, plus
+# a real SHA256SUMS computed from it - and points image_resolve at it
+# through a scratch AUTOOS_ROOT whose catalog/images.json is the only file
+# in it. No test here reaches the real internet or the real catalog. Every
+# test name carries "usb_fetch_image" and "usb" so `--filter fetch` and
+# `--filter usb` both reach them (lesson L2: filters match test names).
+describe "usb fetch"
+
+# _usb_fetch_fixture <good|bad|missing>
+# Builds the scratch release dir and prints its path. <good> lists the
+# image's real digest, <bad> lists an all-zero one, <missing> lists a
+# different filename entirely.
+_usb_fetch_fixture() {
+    local mode="$1" rel sum
+    rel="$(mktemp -d)"
+    mkdir -p "$rel/1.0"
+    printf 'AUTOOS TEST IMAGE - not a real ISO\n' >"$rel/1.0/testos-1.0-amd64.iso"
+    sum="$(sha256sum "$rel/1.0/testos-1.0-amd64.iso" | awk '{print $1}')"
+    case "$mode" in
+        good)    printf '%s *testos-1.0-amd64.iso\n' "$sum" >"$rel/1.0/SHA256SUMS" ;;
+        bad)     printf '%064d *testos-1.0-amd64.iso\n' 0 >"$rel/1.0/SHA256SUMS" ;;
+        missing) printf '%s *something-else.iso\n' "$sum" >"$rel/1.0/SHA256SUMS" ;;
+    esac
+    cat >"$rel/1.0/index.html" <<'HTML'
+<html><body><pre><a href="../">../</a>
+<a href="testos-1.0-amd64.iso">testos-1.0-amd64.iso</a>
+<a href="SHA256SUMS">SHA256SUMS</a>
+</pre></body></html>
+HTML
+    printf '%s\n' "$rel"
+}
+
+# _usb_fetch_root <port> [sums-field]
+# Writes a scratch AUTOOS_ROOT holding only catalog/images.json, with one
+# entry whose index is the loopback server's 1.0/ directory. Prints the
+# root. The image entry carries every field the real catalog schema has so
+# usb_plan and usb_fetch_image read it exactly like a shipped entry.
+_usb_fetch_root() {
+    local port="$1" sums="${2:-SHA256SUMS}" root
+    root="$(mktemp -d)"
+    mkdir -p "$root/catalog"
+    python3 - "$root/catalog/images.json" "http://127.0.0.1:${port}/1.0/" "$sums" <<'PY'
+import json, sys
+path, index, sums = sys.argv[1:4]
+entry = {"id": "testos", "name": "Test OS", "homepage": "http://127.0.0.1/",
+         "index": index, "file": r"testos-[0-9.]+-amd64\.iso$", "sums": sums, "sig": "-", "key": "-",
+         "kinds": ["installer"], "writeMode": "hybrid", "sizeGb": 0.001}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump({"images": [entry]}, fh)
+PY
+    printf '%s\n' "$root"
+}
+
+if it "_usb_sums_digest_for reads coreutils, starred and BSD-style manifests and ignores non-SHA-256 lines (usb_fetch_image)"; then
+    m="$(mktemp)"
+    good="$(printf '%064d' 7)"
+    cat >"$m" <<EOF
+d41d8cd98f00b204e9800998ecf8427e *plain.iso
+$(printf '%064d' 1)  plain.iso
+$(printf '%064d' 2) *starred.iso
+$(printf '%064d' 3)  ./dotslash.iso
+SHA256 (bsd.iso) = $(printf '%064d' 4)
+EOF
+    r1="$(_usb_sums_digest_for "$m" plain.iso)"
+    r2="$(_usb_sums_digest_for "$m" starred.iso)"
+    r3="$(_usb_sums_digest_for "$m" dotslash.iso)"
+    r4="$(_usb_sums_digest_for "$m" bsd.iso)"
+    r5="$(_usb_sums_digest_for "$m" absent.iso)"
+    if [[ "$r1" == "$(printf '%064d' 1)" && "$r2" == "$(printf '%064d' 2)" && "$r3" == "$(printf '%064d' 3)" \
+          && "$r4" == "$(printf '%064d' 4)" && -z "$r5" ]]; then pass
+    else fail "plain=$r1 starred=$r2 dotslash=$r3 bsd=$r4 absent=[$r5] (good=$good)"; fi
+    rm -f "$m"
+fi
+
+if it "usb_fetch_image downloads the image, verifies it against the served SHA256SUMS and keeps the manifest beside it (usb_fetch_image)"; then
+    rel="$(_usb_fetch_fixture good)"
+    read -r srv_pid srv_port < <(_start_test_http_server "$rel")
+    root="$(_usb_fetch_root "$srv_port")"
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache" usb_fetch_image testos "$cache/testos.iso" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out" == *"verified image"* && -s "$cache/testos.iso" && -s "$cache/testos.iso.sums" ]] \
+        && cmp -s "$cache/testos.iso" "$rel/1.0/testos-1.0-amd64.iso"; then pass
+    else fail "rc=$rc out=$out"; fi
+    kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
+    rm -rf "$rel" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_fetch_image: a second run is a cache hit reported as skipped, never a refetch (usb_fetch_image idempotent)"; then
+    rel="$(_usb_fetch_fixture good)"
+    read -r srv_pid srv_port < <(_start_test_http_server "$rel")
+    root="$(_usb_fetch_root "$srv_port")"
+    cache="$(mktemp -d)"
+    AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache" usb_fetch_image testos "$cache/testos.iso" >/dev/null 2>&1
+    out2="$(AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache" usb_fetch_image testos "$cache/testos.iso" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out2" == *"skipped"* && "$out2" == *"testos.iso already downloaded"* ]]; then pass
+    else fail "rc=$rc out=$out2"; fi
+    kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
+    rm -rf "$rel" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_fetch_image: a checksum mismatch is refused and leaves nothing at the destination (usb_fetch_image)"; then
+    rel="$(_usb_fetch_fixture bad)"
+    read -r srv_pid srv_port < <(_start_test_http_server "$rel")
+    root="$(_usb_fetch_root "$srv_port")"
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache" usb_fetch_image testos "$cache/testos.iso" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"checksum mismatch"* && ! -e "$cache/testos.iso" && ! -e "$cache/testos.iso.part" ]]; then pass
+    else fail "rc=$rc iso=$( [[ -e "$cache/testos.iso" ]] && echo EXISTS || echo absent ) out=$out"; fi
+    kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
+    rm -rf "$rel" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_fetch_image: a manifest that does not list the image is refused before any image download (usb_fetch_image)"; then
+    rel="$(_usb_fetch_fixture missing)"
+    read -r srv_pid srv_port < <(_start_test_http_server "$rel")
+    root="$(_usb_fetch_root "$srv_port")"
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache" usb_fetch_image testos "$cache/testos.iso" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"does not list"* && ! -e "$cache/testos.iso" ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+    kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
+    rm -rf "$rel" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_fetch_image: a catalog entry with no checksum manifest is refused with nothing fetched (usb_fetch_image)"; then
+    rel="$(_usb_fetch_fixture good)"
+    read -r srv_pid srv_port < <(_start_test_http_server "$rel")
+    root="$(_usb_fetch_root "$srv_port" -)"
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache" usb_fetch_image testos "$cache/testos.iso" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"no checksum manifest"* && ! -e "$cache/testos.iso" && ! -e "$cache/testos.iso.sums" ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+    kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
+    rm -rf "$rel" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_fetch_image: creates a cache directory that does not exist yet, as on a machine's first run (usb_fetch_image)"; then
+    rel="$(_usb_fetch_fixture good)"
+    read -r srv_pid srv_port < <(_start_test_http_server "$rel")
+    root="$(_usb_fetch_root "$srv_port")"
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache/images" usb_fetch_image testos "$cache/brand/new/dir/testos.iso" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && -s "$cache/brand/new/dir/testos.iso" ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+    kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
+    rm -rf "$rel" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_fetch_image: custom-local is a specific refusal, not a fetch attempt (usb_fetch_image)"; then
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_CACHE_DIR="$cache" usb_fetch_image custom-local "$cache/x.iso" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"UI affordance"* && -z "$(find "$cache" -mindepth 1)" ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+    rm -rf "$cache"
+fi
+
+if it "usb_fetch_image: a dry run says what it would download and touches nothing (usb_fetch_image)"; then
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_DRY_RUN=1 AUTOOS_CACHE_DIR="$cache" usb_fetch_image ubuntu-desktop-lts "$cache/x.iso" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out" == *"would resolve ubuntu-desktop-lts"* && -z "$(find "$cache" -mindepth 1)" ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+    rm -rf "$cache"
+fi
+
+if it "usb_execute: dispatches a usb_fetch_image plan line into the real download path (usb_fetch_image)"; then
+    rel="$(_usb_fetch_fixture good)"
+    read -r srv_pid srv_port < <(_start_test_http_server "$rel")
+    root="$(_usb_fetch_root "$srv_port")"
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache" AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
+           usb_execute /dev/sdb <<<"usb_fetch_image testos $cache/testos.iso" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && -s "$cache/testos.iso" && "$out" == *"Ready to boot: /dev/sdb"* ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+    kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
+    rm -rf "$rel" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_execute: a usb_fetch_image line with the wrong word count is refused, never run (usb_fetch_image)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
+           usb_execute /dev/sdb <<<"usb_fetch_image ubuntu-desktop-lts" 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"malformed usb_fetch_image step"* ]] && pass || fail "rc=$rc out=$out"
 fi
 
 # ─── The write executor (Task 7) ────────────────────────────────────────────

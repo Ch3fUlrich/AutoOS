@@ -224,6 +224,31 @@ if ($CreateUsb -or $ListUsb -or $ListEngines) {
             }
         }
     }
+
+    if ($DryRun) { exit 0 }
+
+    # The real write. Until this was wired, a -CreateUsb without -DryRun
+    # printed the plan and exited 0 - a "create" that created nothing.
+    # Invoke-AutoOSUsbPlan (lib\windows\AutoOS.Usb.psm1) is the only thing
+    # that ever runs a plan line; it gets exactly the lines printed above.
+    #
+    # AGENTS.md hard rule 3: every destructive action is opt-in and
+    # announced. The plan above is the announcement; -WipeTargetDisk is the
+    # opt-in. Without it a real run stops HERE, after showing what it would
+    # do, having downloaded and written nothing - a plan is not consent,
+    # and neither is -Yes (which answers the install menu's questions, not
+    # "may I destroy this disk").
+    if (-not $WipeTargetDisk) {
+        Write-AutoOSLine "refusing to write ${UsbDevice}: re-run with -WipeTargetDisk to confirm that everything on it may be destroyed (the plan above is exactly what would run)" -Level error
+        exit 1
+    }
+    Write-AutoOSSection "Writing $UsbDevice"
+    try {
+        Invoke-AutoOSUsbPlan -DeviceId $UsbDevice -Plan $plan
+    } catch {
+        Write-AutoOSLine $_.Exception.Message -Level error
+        exit 1
+    }
     exit 0
 }
 

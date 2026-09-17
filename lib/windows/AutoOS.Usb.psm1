@@ -537,6 +537,13 @@ function New-AutoOSUsbPlan {
     $localPath = Join-Path (Get-AutoOSDownloadCacheDir) "$ImageId.iso"
 
     $lines = [System.Collections.Generic.List[string]]::new()
+    # The image itself: resolved (Resolve-AutoOSImageUrl), checksum-verified
+    # and cached by Invoke-AutoOSUsbFetchImage, the FIRST line of every plan
+    # and the only slow one - it runs before anything touches the device, so
+    # a failed or interrupted download never leaves a half-written stick.
+    # Under -DryRun this line is traced and skipped like every other, so
+    # New-AutoOSUsbPlan itself still runs nothing and touches no network.
+    $lines.Add("Invoke-AutoOSUsbFetchImage $ImageId $localPath")
     switch ($Engine) {
         'ventoy' {
             # Ventoy is a two-step engine: install the boot manager onto
@@ -613,6 +620,16 @@ function Invoke-AutoOSUsbPlanStep {
         return
     }
 
+    # [regex]::Match rather than -match: -match overwrites $Matches on every
+    # evaluation, so a later -match in this function would silently discard
+    # these captures (handoff lesson L6). Matched explicitly, not left to
+    # Invoke-Expression below, so a cache path containing a space (a
+    # Windows user name with one is common) still arrives as ONE argument.
+    $fetch = [regex]::Match($Line, '^Invoke-AutoOSUsbFetchImage\s+(\S+)\s+(.+?)\s*$')
+    if ($fetch.Success) {
+        Invoke-AutoOSUsbFetchImage -ImageId $fetch.Groups[1].Value -Destination $fetch.Groups[2].Value
+        return
+    }
     if ($Line -match '^Ventoy2Disk\.exe\s') {
         Install-AutoOSUsbVentoy -DeviceId $DeviceId
         return
@@ -671,6 +688,154 @@ function Invoke-AutoOSUsbPlan {
     }
 
     Write-AutoOSLine "Ready to boot: $DeviceId" -Level ok
+}
+
+# ─── Invoke-AutoOSUsbFetchImage: the resolver-to-downloader bridge ──────────
+# Until this existed, Resolve-AutoOSImageUrl and Get-AutoOSVerifiedFile were
+# each written and tested, and New-AutoOSUsbPlan named a cache path nobody
+# ever filled: -CreateUsb could plan a write but never download the image
+# it planned to write. This is the join - the mirror of lib/linux/usb.sh's
+# usb_fetch_image, same contract, same refusals.
+
+function Get-AutoOSUsbSumsDigest {
+    <#
+      .SYNOPSIS
+        The lower-case SHA-256 hex digest -ManifestPath lists for -FileName,
+        or $null. Mirror of usb.sh's _usb_sums_digest_for.
+      .DESCRIPTION
+        Reads the two shapes the catalog's checksum files actually come in:
+          <hex>  <file>  /  <hex> *<file>    GNU coreutils (Ubuntu, Debian,
+                                             SystemRescue's .sha256)
+          SHA256 (<file>) = <hex>            BSD style (Fedora's CHECKSUM)
+        A leading "*" or "./" on the filename is stripped; anything else
+        must match exactly. Only a 64-hex-character digest is accepted, so
+        an MD5 or SHA-1 line for the same file can never be mistaken for
+        the SHA-256 one. [regex]::Match, not -match: -match overwrites
+        $Matches on every evaluation (handoff lesson L6).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ManifestPath,
+        [Parameter(Mandatory)][string]$FileName
+    )
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { return $null }
+    # ReadAllLines, not ReadLines: a `return` out of a foreach over the lazy
+    # ReadLines enumerator leaves its file handle open in PowerShell, and the
+    # next run's Move-Item onto the same .sums file then fails "could not
+    # move verified file into place" - the idempotency test caught it.
+    foreach ($raw in [IO.File]::ReadAllLines($ManifestPath)) {
+        $line = $raw.Trim()
+        if (-not $line) { continue }
+        $bsd = [regex]::Match($line, '^SHA256\s+\((.+)\)\s*=\s*([0-9A-Fa-f]{64})$')
+        if ($bsd.Success -and $bsd.Groups[1].Value -eq $FileName) {
+            return $bsd.Groups[2].Value.ToLowerInvariant()
+        }
+        $gnu = [regex]::Match($line, '^([0-9A-Fa-f]{64})\s+\*?(?:\./)?(.+)$')
+        if ($gnu.Success -and $gnu.Groups[2].Value -eq $FileName) {
+            return $gnu.Groups[1].Value.ToLowerInvariant()
+        }
+    }
+    return $null
+}
+
+function Invoke-AutoOSUsbFetchImage {
+    <#
+      .SYNOPSIS
+        The first step of every plan New-AutoOSUsbPlan emits, and the only
+        one that talks to the network: resolves -ImageId to a concrete URL,
+        fetches the vendor's checksum manifest (GPG-verified against the
+        catalog's `key` whenever the entry names a `sig`), reads this
+        image's SHA-256 out of it, then fetches the image itself through
+        Get-AutoOSVerifiedFile against that digest - so the file a later
+        step writes to the stick has always been checked against a
+        published digest, never trusted bare. The manifest is kept beside
+        the image as <Destination>.sums so a run can be audited afterwards.
+      .DESCRIPTION
+        Idempotent (AGENTS.md §4): a cached -Destination that still matches
+        the digest is reported as "skipped" by Get-AutoOSVerifiedFile, not
+        refetched. The manifest IS refetched every run - it is small, and a
+        stale one is exactly how a superseded point release would be
+        silently written.
+
+        Refuses, never guesses: a pseudo-entry (custom-url/custom-local),
+        an entry with no `sums`, a manifest that does not list the resolved
+        file, and every download failure each throw a clear message, with
+        nothing left at -Destination (Get-AutoOSVerifiedFile deletes its
+        own partial).
+      .PARAMETER CatalogPath
+        Defaults to <repo root>\catalog\images.json; tests pass a scratch
+        catalog pointing at a local fixture instead. A plan line never
+        carries it.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ImageId,
+        [Parameter(Mandatory)][string]$Destination,
+        [string]$CatalogPath
+    )
+
+    if ($ImageId -in @('custom-url', 'custom-local')) {
+        throw "usb_fetch_image: '$ImageId' is a UI affordance (a user-supplied URL or local file), not a downloadable catalog entry - there is nothing to fetch"
+    }
+    if ($env:AUTOOS_DRY_RUN -eq '1') {
+        Write-AutoOSLine "would resolve $ImageId, download it to $Destination and verify it against the vendor's published SHA-256" -Level muted
+        return
+    }
+
+    if (-not $CatalogPath) {
+        $CatalogPath = Join-Path (Get-AutoOSUsbCatalogRoot) 'catalog\images.json'
+    }
+    $entry = @((Get-Content -LiteralPath $CatalogPath -Raw -Encoding UTF8 | ConvertFrom-Json).images) |
+        Where-Object { $_.id -eq $ImageId } | Select-Object -First 1
+    if (-not $entry) {
+        throw "usb_fetch_image: no catalog entry for image id '$ImageId' in $CatalogPath"
+    }
+
+    $resolved = Resolve-AutoOSImageUrl -ImageId $ImageId -CatalogPath $CatalogPath
+    $sums = [string]$resolved.Sums
+    $sig = [string]$resolved.Sig
+    $key = [string]$entry.key
+    if (-not $sums -or $sums -eq '-') {
+        throw "usb_fetch_image: catalog entry '$ImageId' names no checksum manifest - refusing to write an image nothing can verify"
+    }
+    if (-not $sig -or $sig -eq '-') {
+        $sig = ''; $key = ''
+    } elseif (-not $key -or $key -eq '-') {
+        throw "usb_fetch_image: catalog entry '$ImageId' names a signature but no GPG key fingerprint to check it against"
+    }
+
+    # Get-AutoOSVerifiedFile writes its .part next to the destination before
+    # it ever creates the destination's directory, and on a machine's very
+    # first run the cache dir (Get-AutoOSDownloadCacheDir) does not exist
+    # yet - the fetch tests caught exactly that. Created here, once, for
+    # both the manifest and the image.
+    $destDir = Split-Path -Parent $Destination
+    if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    }
+
+    $sumsFile = "$Destination.sums"
+    Write-AutoOSLine "fetching checksum manifest for $ImageId" -Level info
+    try {
+        # No digest to check the manifest against (it is the source of
+        # digests); its own integrity comes from the detached signature
+        # when there is one.
+        Get-AutoOSVerifiedFile -Uri $sums -Destination $sumsFile -SignatureUri $sig -GpgFingerprint $key | Out-Null
+    } catch {
+        throw "usb_fetch_image: could not fetch or verify checksum manifest ${sums}: $($_.Exception.Message)"
+    }
+
+    $digest = Get-AutoOSUsbSumsDigest -ManifestPath $sumsFile -FileName ([string]$resolved.File)
+    if (-not $digest) {
+        throw "usb_fetch_image: $(Split-Path -Leaf $sumsFile) does not list a SHA-256 for '$($resolved.File)' - refusing to download an image with no published digest"
+    }
+
+    Write-AutoOSLine "fetching $($resolved.File)" -Level info
+    try {
+        Get-AutoOSVerifiedFile -Uri ([string]$resolved.Url) -Destination $Destination -Sha256 $digest | Out-Null
+    } catch {
+        throw "usb_fetch_image: $($_.Exception.Message); nothing was kept"
+    }
+    Write-AutoOSLine "verified image: $Destination" -Level ok
 }
 
 # Write-AutoOSUsbRaw -DeviceId -ImagePath -ImageBytes
@@ -947,5 +1112,6 @@ Export-ModuleMember -Function `
     Get-AutoOSUsbDevice, Assert-AutoOSUsbSafe, Test-AutoOSElevated, Assert-AutoOSElevated, `
     New-AutoOSUsbPlan, Get-AutoOSUsbEngine, Get-AutoOSUsbImage, Get-AutoOSUsbEngineList, `
     Get-AutoOSUsbCurrentOs, Get-AutoOSUsbCurrentArch, Test-AutoOSUsbRunActive, `
-    Invoke-AutoOSUsbPlan, Write-AutoOSUsbRaw, Invoke-AutoOSUsbCopyImage, `
+    Invoke-AutoOSUsbPlan, Invoke-AutoOSUsbFetchImage, Get-AutoOSUsbSumsDigest, `
+    Write-AutoOSUsbRaw, Invoke-AutoOSUsbCopyImage, `
     Install-AutoOSUsbVentoy, Add-AutoOSUsbVentoyPersistence, Get-AutoOSUsbVentoyCacheDir
