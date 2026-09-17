@@ -324,6 +324,68 @@ JSON
     fi
 fi
 
+# ─── Shared LLM model catalogue (single source of truth) ──────────────────
+describe "llm models"
+
+if it "llm-models.json is valid and every id is unique"; then
+    if python3 - <<'PY'
+import json, sys
+doc = json.load(open("catalog/llm-models.json", encoding="utf-8"))
+models = doc["models"]
+assert len(models) >= 20, f"expected >= 20 models, got {len(models)}"
+ids = [m["id"] for m in models]
+dupes = {i for i in ids if ids.count(i) > 1}
+assert not dupes, f"duplicate ids: {dupes}"
+for m in models:
+    assert m.get("openrouter_id") or m.get("direct"), f"{m['id']}: neither openrouter_id nor direct"
+    assert isinstance(m["context"], int) and isinstance(m["output"], int), f"{m['id']}: bad windows"
+PY
+    then pass; else fail "llm-models.json invalid"; fi
+fi
+
+if it "the installers project every shared model instead of hardcoding"; then
+    # Single-source/DRY: no model id or price may appear as a literal in the
+    # installers. Everything is projected from llm-models.json.
+    if python3 - <<'PY'
+import json, re, sys
+models = json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]
+bad = []
+for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
+    src = open(path, encoding="utf-8").read()
+    for m in models:
+        if m.get("openrouter_id"):
+            oid = m["openrouter_id"]
+            # projected via _openrouter_models()/Get-OpenRouterModelEntry, never a literal key
+            if re.search(r"""['"]""" + re.escape(oid) + r"""['"]\s*[:=]""", src):
+                bad.append(f"{path}: hardcoded openrouter id {oid}")
+        for price_key in ("paid_input_price", "paid_output_price"):
+            if price_key in m and re.search(r"\b" + re.escape(repr(m[price_key])) + r"\b", src):
+                bad.append(f"{path}: hardcoded price {m[price_key]} from {m['id']}")
+if bad:
+    print("\n".join(bad)); sys.exit(1)
+PY
+    then pass; else fail "installers hardcode shared model data (see above)"; fi
+fi
+
+if it "the openhands projector covers every shared model"; then
+    if python3 - <<'PY'
+import json, re, sys
+models = json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]
+for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
+    src = open(path, encoding="utf-8").read()
+    calls = set()
+    for call in re.findall(r"_profile_for\(([^)]*)\)", src):
+        calls.update(re.findall(r"['\"]([^'\"]+)['\"]", call))
+    missing = {m["id"] for m in models if m["id"] not in calls and m["id"] != "muse-spark"}
+    muse_aliases = {"muse-spark-1.3", "muse-spark-1.3-contributor"}
+    if "muse-spark" not in calls or not muse_aliases <= calls:
+        print(f"{path}: muse-spark aliases incomplete: {sorted(calls)}"); sys.exit(1)
+    if missing:
+        print(f"{path}: unprojected models: {sorted(missing)}"); sys.exit(1)
+PY
+    then pass; else fail "openhands projector misses a shared model (see above)"; fi
+fi
+
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
 describe "catalog loading"
 detect_system
@@ -1013,7 +1075,8 @@ if it "every component has a homepage link"; then
     missing="$(python3 - <<'PY'
 import json, glob
 bad = []
-for p in sorted(glob.glob("catalog/*.json")):
+# OS catalogs only: llm-models.json is a model catalogue, not components.
+for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     for grp in json.load(open(p, encoding="utf-8")).get("categories", []):
         for c in grp.get("components", []):
             if not c.get("homepage"):
@@ -1103,7 +1166,8 @@ if it "the dependency graph the UI draws has no orphan requirements"; then
     bad="$(python3 - <<'PY'
 import json, glob
 bad = []
-for p in sorted(glob.glob("catalog/*.json")):
+# OS catalogs only: llm-models.json is a model catalogue, not components.
+for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     d = json.load(open(p, encoding="utf-8"))
     ids = {c["id"] for g in d.get("categories", []) for c in g.get("components", [])}
     for g in d.get("categories", []):
@@ -1238,7 +1302,8 @@ if it "the core stack is available on all three platforms"; then
     missing="$(python3 - <<'PY'
 import json, glob, collections
 have = collections.defaultdict(set)
-for p in glob.glob("catalog/*.json"):
+# OS catalogs only: llm-models.json is keyed by model id, not component id.
+for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     plat = p.replace("catalog", "").strip("/\\").replace(".json", "")
     for g in json.load(open(p, encoding="utf-8"))["categories"]:
         for c in g["components"]:
@@ -1265,7 +1330,7 @@ if it "the payload carries the platform list"; then
 fi
 
 if it "Handy is offered on every platform"; then
-    n="$(grep -l '"id": "handy"' catalog/*.json | wc -l)"
+    n="$(grep -l '"id": "handy"' catalog/windows.json catalog/linux.json catalog/macos.json | wc -l)"
     assert_eq "$n" "3"
 fi
 
@@ -1522,6 +1587,38 @@ if it "custom_is_installed detects agent-skills under Documents/code or Document
     rm -rf "$tmp"
     if [[ $rc_code -eq 0 && $rc_Code -eq 0 ]]; then pass
     else fail "rc_code=$rc_code rc_Code=$rc_Code"; fi
+fi
+
+if it "custom_is_installed detects a populated native CAO home"; then
+    tmp="$(mktemp -d)"
+    (
+        SYS_HOME="$tmp"
+        mkdir -p "$tmp/.cao/db"
+        custom_is_installed wsl-agent-home
+    )
+    rc_full=$?
+    (
+        SYS_HOME="$tmp"
+        rm -rf "$tmp/.cao"
+        custom_is_installed wsl-agent-home
+    )
+    rc_empty=$?
+    rm -rf "$tmp"
+    if [[ $rc_full -eq 0 && $rc_empty -ne 0 ]]; then pass
+    else fail "rc_full=$rc_full rc_empty=$rc_empty"; fi
+fi
+
+if it "setup_wsl_agent_home is a no-op off WSL and dry-runnable on WSL"; then
+    tmp="$(mktemp -d)"
+    ( SYS_HOME="$tmp" SYS_IS_WSL=0 AUTOOS_DRY_RUN=0 setup_wsl_agent_home >/dev/null 2>&1 )
+    rc_off=$?
+    [[ -e "$tmp/.bashrc" ]] && rc_off=99
+    ( SYS_HOME="$tmp" SYS_IS_WSL=1 AUTOOS_DRY_RUN=1 setup_wsl_agent_home >/dev/null 2>&1 )
+    rc_dry=$?
+    [[ -e "$tmp/.bashrc" ]] && rc_dry=99
+    rm -rf "$tmp"
+    if [[ $rc_off -eq 0 && $rc_dry -eq 0 ]]; then pass
+    else fail "rc_off=$rc_off rc_dry=$rc_dry"; fi
 fi
 
 describe "claude autostart"
@@ -2848,7 +2945,8 @@ if it "usb chooser: a non-interactive run takes the default at every step and ne
     # The chooser sets globals, so it must run in THIS shell (a $(...)
     # capture would be a subshell and lose them); its output goes to a file.
     chooser_log="$(mktemp)"
-    res="$( export AUTOOS_NONINTERACTIVE=1 AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" SYS_OS=linux SYS_ARCH=x64
+    fake_lsblk="$(fake_usb good_stick)"
+    res="$( export AUTOOS_NONINTERACTIVE=1 AUTOOS_FAKE_LSBLK="$fake_lsblk" SYS_OS=linux SYS_ARCH=x64
             USB_IMAGE=""; USB_KIND=""; USB_ENGINE=""; USB_DEVICE=""; USB_WIPE=0
             usb_choose_interactively >"$chooser_log" 2>&1; rc=$?
             printf '%s|%s|%s|%s|%s|%s' "$USB_IMAGE" "$USB_KIND" "$USB_ENGINE" "$USB_DEVICE" "$USB_WIPE" "$rc" )"
@@ -2860,7 +2958,8 @@ if it "usb chooser: a non-interactive run takes the default at every step and ne
 fi
 
 if it "usb chooser: a dry run asks for no confirmation and shows the summary naming the device, model and size (usb chooser)"; then
-    out="$( export AUTOOS_NONINTERACTIVE=1 AUTOOS_DRY_RUN=1 AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" SYS_OS=linux SYS_ARCH=x64
+    fake_lsblk="$(fake_usb good_stick)"
+    out="$( export AUTOOS_NONINTERACTIVE=1 AUTOOS_DRY_RUN=1 AUTOOS_FAKE_LSBLK="$fake_lsblk" SYS_OS=linux SYS_ARCH=x64
             USB_IMAGE=""; USB_KIND=""; USB_ENGINE=""; USB_DEVICE=""; USB_WIPE=0
             usb_choose_interactively 2>&1 && echo RC0 )"
     if [[ "$out" == *"RC0"* && "$out" == *"/dev/sdb"* && "$out" == *"GB"* && "$out" != *"Not confirmed"* ]]; then pass

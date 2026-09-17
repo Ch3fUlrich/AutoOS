@@ -1083,6 +1083,504 @@ function Install-AutoOSMcpContext7 {
     }
 }
 
+function Set-AutoOSOpenCodeConfig {
+    <#
+      .SYNOPSIS Configure OpenCode CLI with local Ollama, MCP tools, and optional keys.
+
+      .DESCRIPTION
+        Configures OpenCode in ~/.config/opencode/opencode.json (and copies to
+        %APPDATA%\opencode\config.json for Windows compatibility).
+        Works 100% keyless by default against local Ollama (http://127.0.0.1:11434/v1).
+        If API keys are present in env or secrets/api_keys.conf, registers Meta (muse-spark-1.3)
+        and DeepSeek (deepseek-chat).
+    #>
+    $configDir = Join-Path $HOME '.config\opencode'
+    $configFile = Join-Path $configDir 'opencode.json'
+
+    if ($script:DryRun) {
+        Write-AutoOSLine "would configure OpenCode in $configFile" -Level muted
+        return
+    }
+
+    if (-not (Test-Path $configDir)) {
+        New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+    }
+
+    $existing = [ordered]@{}
+    if (Test-Path $configFile) {
+        try {
+            $raw = Get-Content -Path $configFile -Raw -Encoding UTF8
+            if ($raw.Trim()) {
+                $parsed = $raw | ConvertFrom-Json
+                foreach ($p in $parsed.PSObject.Properties) { $existing[$p.Name] = $p.Value }
+            }
+        } catch {
+            Write-AutoOSLine "$configFile is not valid JSON - leaving it alone." -Level warn
+            return
+        }
+        Copy-Item $configFile "$configFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
+
+    if (-not $existing.Contains('$schema')) {
+        $existing['$schema'] = 'https://opencode.ai/config.json'
+    }
+
+    $providers = [ordered]@{}
+    if ($existing.Contains('provider') -and $existing['provider']) {
+        foreach ($p in $existing['provider'].PSObject.Properties) { $providers[$p.Name] = $p.Value }
+    }
+
+    $modelsFile = Join-Path $script:RepoRoot 'catalog\llm-models.json'
+    $repoModels = (Get-Content -Path $modelsFile -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    $repoById = @{}
+    foreach ($m in $repoModels) { $repoById[$m.id] = $m }
+
+    function Get-OpenRouterModelEntry($m) {
+        # Projects one shared entry into the OpenCode provider shape.
+        # `cost` uses the paid counterpart where one exists, so estimates
+        # hold past the free cap; free variants themselves bill $0.
+        $inPrice = if ($m.PSObject.Properties.Name.Contains('paid_input_price') -and $null -ne $m.paid_input_price) { $m.paid_input_price } else { $m.input_price }
+        $outPrice = if ($m.PSObject.Properties.Name.Contains('paid_output_price') -and $null -ne $m.paid_output_price) { $m.paid_output_price } else { $m.output_price }
+        $cost = [ordered]@{ input = $inPrice * 1e6; output = $outPrice * 1e6 }
+        if ($m.PSObject.Properties.Name.Contains('cache_read_price') -and $m.cache_read_price) {
+            $cost['cache_read'] = $m.cache_read_price * 1e6
+        }
+        $entry = [ordered]@{
+            name  = $m.name
+            limit = [ordered]@{ context = $m.context; output = $m.output }
+            cost  = $cost
+        }
+        if ($m.PSObject.Properties.Name.Contains('reasoning') -and $m.reasoning) { $entry['reasoning'] = $true }
+        return $entry
+    }
+
+    $providers['ollama'] = [ordered]@{
+        npm     = $repoById['ollama-qwen2.5-coder'].direct.npm
+        name    = 'Ollama'
+        options = [ordered]@{
+            baseURL = $repoById['ollama-qwen2.5-coder'].direct.base_url
+        }
+        models  = [ordered]@{
+            'qwen2.5-coder:7b' = [ordered]@{ name = 'Qwen 2.5 Coder 7B' }
+            'qwen3:30b'        = [ordered]@{ name = 'Qwen 3 30B' }
+            'hermes3:8b'       = [ordered]@{ name = 'Hermes 3 8B' }
+        }
+    }
+
+    $secretsPath = Join-Path $HOME 'Documents\Code\agent-skills\secrets\api_keys.conf'
+    $secrets = @{}
+    if (Test-Path $secretsPath) {
+        Get-Content $secretsPath -Encoding UTF8 | ForEach-Object {
+            $line = $_.Trim()
+            if ($line -and -not $line.StartsWith('#') -and $line -match '=') {
+                $parts = $line.Split('=', 2)
+                $secrets[$parts[0].Trim()] = $parts[1].Trim()
+            }
+        }
+    }
+
+    $museKey = if ($env:MUSE_API_KEY) { $env:MUSE_API_KEY } elseif ($secrets.ContainsKey('muse')) { $secrets['muse'] } else { $null }
+    if ($museKey) {
+        $muse = $repoById['muse-spark']
+        $museModelId = $muse.direct.model.Split('/', 2)[1]
+        $providers['meta'] = [ordered]@{
+            npm     = $muse.direct.npm
+            name    = 'Meta'
+            options = [ordered]@{
+                baseURL = $muse.direct.base_url
+                apiKey  = $museKey
+            }
+            models  = [ordered]@{
+                $museModelId = [ordered]@{
+                    name      = $muse.name
+                    reasoning = $true
+                    limit     = [ordered]@{ context = $muse.context; output = $muse.output }
+                    options   = [ordered]@{ reasoningEffort = $muse.direct.reasoning_effort }
+                }
+            }
+        }
+    }
+
+    $deepseekKey = if ($env:DEEPSEEK_API_KEY) { $env:DEEPSEEK_API_KEY } elseif ($secrets.ContainsKey('deepseek')) { $secrets['deepseek'] } else { $null }
+    if ($deepseekKey) {
+        $ds = $repoById['deepseek-chat'].direct
+        $dsModels = [ordered]@{}
+        foreach ($mid in @('deepseek-chat', 'deepseek-reasoner')) {
+            $dm = $repoById[$mid]
+            $entry = [ordered]@{
+                name  = $dm.name
+                limit = [ordered]@{ context = $dm.context; output = $dm.output }
+            }
+            if ($dm.PSObject.Properties.Name.Contains('reasoning') -and $dm.reasoning) { $entry['reasoning'] = $true }
+            $dsModels[$mid] = $entry
+        }
+        $providers['deepseek'] = [ordered]@{
+            npm     = $ds.npm
+            name    = 'DeepSeek'
+            options = [ordered]@{
+                baseURL = $ds.base_url
+                apiKey  = $deepseekKey
+            }
+            models  = $dsModels
+        }
+    }
+
+    # Projected from catalog/llm-models.json (single source of truth):
+    # `limit` carries the free-variant context window; `cost` is per 1M
+    # tokens, so chat spend stays estimable once a free cap is exhausted.
+    $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
+    if ($openrouterKey) {
+        $orModels = [ordered]@{}
+        foreach ($m in $repoModels) {
+            if (-not $m.openrouter_id) { continue }
+            $orModels[$m.openrouter_id] = Get-OpenRouterModelEntry $m
+        }
+        $providers['openrouter'] = [ordered]@{
+            npm     = '@ai-sdk/openai-compatible'
+            name    = 'OpenRouter'
+            options = [ordered]@{
+                baseURL = 'https://openrouter.ai/api/v1'
+                apiKey  = $openrouterKey
+            }
+            models  = $orModels
+        }
+    }
+
+    $existing['provider'] = $providers
+
+    if (-not $existing.Contains('model') -or -not $existing['model']) {
+        if ($museKey) {
+            $existing['model'] = 'meta/' + $repoById['muse-spark'].direct.model.Split('/', 2)[1]
+        } else {
+            $existing['model'] = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
+        }
+    }
+
+
+    $mcpServers = [ordered]@{}
+    if ($existing.Contains('mcp') -and $existing['mcp']) {
+        foreach ($p in $existing['mcp'].PSObject.Properties) { $mcpServers[$p.Name] = $p.Value }
+    }
+
+    $mcpServers['serena'] = [ordered]@{
+        type    = 'local'
+        command = @('uvx', '--from', 'serena-agent', 'serena', 'start-mcp-server', '--context', 'claude-code', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false')
+        enabled = $true
+    }
+    $mcpServers['graphify'] = [ordered]@{
+        type    = 'local'
+        command = @('uvx', '--from', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
+        enabled = $true
+    }
+    $mcpServers['omnigraph'] = [ordered]@{
+        type    = 'local'
+        command = @('npx', '-y', '@modernrelay/omnigraph-mcp')
+        enabled = $true
+        environment = [ordered]@{
+            OMNIGRAPH_BASE_URL = 'http://localhost:8080'
+            OMNIGRAPH_GRAPH_ID = 'autoos'
+        }
+    }
+    $mcpServers['playwright'] = [ordered]@{
+        type    = 'local'
+        command = @('npx', '-y', '@playwright/mcp@latest')
+        enabled = $true
+    }
+
+    $existing['mcp'] = $mcpServers
+
+    $json = $existing | ConvertTo-Json -Depth 10
+    $json | Out-File -FilePath $configFile -Encoding utf8
+    Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
+
+    if ($env:APPDATA) {
+        $appDataDir = Join-Path $env:APPDATA 'opencode'
+        if (-not (Test-Path $appDataDir)) { New-Item -ItemType Directory -Path $appDataDir -Force | Out-Null }
+        $appDataFile = Join-Path $appDataDir 'config.json'
+        $json | Out-File -FilePath $appDataFile -Encoding utf8
+    }
+}
+
+function Set-AutoOSOpenHandsConfig {
+    <#
+      .SYNOPSIS Configure OpenHands settings, models, profiles, skills, and automations.
+
+      .DESCRIPTION
+        Configures OpenHands in ~/.openhands/settings.json, creates model profiles in
+        ~/.openhands/profiles/ (with 1M token contexts for DeepSeek and Muse Spark Contributor),
+        wires agent-skills via junction/symlink, creates ACP agent profiles, and
+        seeds default configuration.
+    #>
+    $openhandsDir = Join-Path $HOME '.openhands'
+    $settingsFile = Join-Path $openhandsDir 'settings.json'
+
+    if ($script:DryRun) {
+        Write-AutoOSLine "would configure OpenHands in $openhandsDir" -Level muted
+        return
+    }
+
+    if (-not (Test-Path $openhandsDir)) {
+        New-Item -ItemType Directory -Path $openhandsDir -Force | Out-Null
+    }
+
+    $profilesDir = Join-Path $openhandsDir 'profiles'
+    if (-not (Test-Path $profilesDir)) {
+        New-Item -ItemType Directory -Path $profilesDir -Force | Out-Null
+    }
+
+    $agentProfilesDir = Join-Path $openhandsDir 'agent-profiles'
+    if (-not (Test-Path $agentProfilesDir)) {
+        New-Item -ItemType Directory -Path $agentProfilesDir -Force | Out-Null
+    }
+
+    $autoDir = Join-Path $openhandsDir 'automation'
+    if (-not (Test-Path $autoDir)) {
+        New-Item -ItemType Directory -Path $autoDir -Force | Out-Null
+    }
+
+    if (Test-Path $settingsFile) {
+        Copy-Item $settingsFile "$settingsFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
+
+    $secretsPath = Join-Path $HOME 'Documents\Code\agent-skills\secrets\api_keys.conf'
+    if (-not (Test-Path $secretsPath)) {
+        $secretsPath = Join-Path $HOME 'Documents\code\agent-skills\secrets\api_keys.conf'
+    }
+    $secrets = @{}
+    if (Test-Path $secretsPath) {
+        Get-Content $secretsPath -Encoding UTF8 | ForEach-Object {
+            $line = $_.Trim()
+            if ($line -and -not $line.StartsWith('#') -and $line -match '=') {
+                $parts = $line.Split('=', 2)
+                $secrets[$parts[0].Trim()] = $parts[1].Trim()
+            }
+        }
+    }
+
+    $museKey = if ($env:MUSE_API_KEY) { $env:MUSE_API_KEY } elseif ($secrets.ContainsKey('muse')) { $secrets['muse'] } else { $null }
+    $deepseekKey = if ($env:DEEPSEEK_API_KEY) { $env:DEEPSEEK_API_KEY } elseif ($secrets.ContainsKey('deepseek')) { $secrets['deepseek'] } else { $null }
+    $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
+    $context7Key = if ($env:CONTEXT7_API_KEY) { $env:CONTEXT7_API_KEY } elseif ($secrets.ContainsKey('context7')) { $secrets['context7'] } else { $null }
+
+    $myDocs = [Environment]::GetFolderPath('MyDocuments')
+    $skillsSource = Join-Path $myDocs 'Code\agent-skills\skills'
+    if (-not (Test-Path $skillsSource)) {
+        $skillsSource = Join-Path $myDocs 'code\agent-skills\skills'
+    }
+    $skillsTarget = Join-Path $openhandsDir 'skills'
+    if ((Test-Path $skillsSource) -and -not (Test-Path $skillsTarget)) {
+        try {
+            cmd.exe /c "mklink /J `"$skillsTarget`" `"$skillsSource`"" | Out-Null
+            Write-AutoOSLine "Linked agent-skills to OpenHands skills directory" -Level ok
+        } catch {
+            Write-AutoOSLine "Could not create skills junction: $_" -Level warn
+        }
+    }
+
+    $pythonCmd = (Get-Command python -ErrorAction SilentlyContinue)
+    if (-not $pythonCmd) {
+        $pythonCmd = (Get-Command py -ErrorAction SilentlyContinue)
+    }
+
+    if ($pythonCmd) {
+        $modelsFile = Join-Path $script:RepoRoot 'catalog\llm-models.json'
+        $modelsJson = (Get-Content -Path $modelsFile -Raw -Encoding UTF8).Replace('\', '\\')
+        $setupScript = @"
+import os, sys, json
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
+REPO_MODELS = json.loads('MODELS_JSON_PLACEHOLDER')['models']
+REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
+
+def _profile_for(mid, key, name=None):
+    m = REPO_BY_ID[mid]
+    if m.get('openrouter_id'):
+        model = 'openrouter/' + m['openrouter_id']
+    else:
+        model = m['direct']['model']
+    p = {'model': model, 'max_input_tokens': m['context'],
+         'max_output_tokens': m['output'],
+         'input_cost_per_token': m['input_price'],
+         'output_cost_per_token': m['output_price']}
+    if m.get('direct', {}).get('base_url'):
+        p['base_url'] = m['direct']['base_url']
+    if m.get('reasoning'):
+        p['reasoning_effort'] = 'high'
+    for opt in ('paid_input_price', 'paid_output_price', 'cache_read_price'):
+        dst = {'paid_input_price': 'paid_input_cost_per_token',
+               'paid_output_price': 'paid_output_cost_per_token',
+               'cache_read_price': 'cache_read_cost_per_token'}[opt]
+        if m.get(opt) is not None:
+            p[dst] = m[opt]
+    p['api_key'] = key
+    return (name or mid) + '.json', p
+
+openhands_dir = sys.argv[1]
+muse_key = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != 'null' else None
+deepseek_key = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != 'null' else None
+openrouter_key = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] != 'null' else None
+
+settings_file = os.path.join(openhands_dir, 'settings.json')
+settings = {}
+if os.path.isfile(settings_file):
+    try:
+        with open(settings_file, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+    except Exception:
+        settings = {}
+
+settings.setdefault('schema_version', 2)
+agent_settings = settings.setdefault('agent_settings', {})
+agent_settings.setdefault('schema_version', 5)
+agent_settings.setdefault('agent_kind', 'openhands')
+agent_settings.setdefault('agent', 'CodeActAgent')
+
+llm = agent_settings.setdefault('llm', {})
+_muse = REPO_BY_ID['muse-spark']['direct']
+_ds = REPO_BY_ID['deepseek-chat']['direct']
+if muse_key:
+    llm['model'] = _muse['model']
+    llm['base_url'] = _muse['base_url']
+    llm['api_key'] = muse_key
+elif deepseek_key:
+    llm['model'] = _ds['model']
+    llm['base_url'] = _ds['base_url']
+    llm['api_key'] = deepseek_key
+elif openrouter_key:
+    llm['model'] = 'openrouter/openrouter/free'
+    llm['base_url'] = 'https://openrouter.ai/api/v1'
+    llm['api_key'] = openrouter_key
+else:
+    _local = REPO_BY_ID['ollama-qwen2.5-coder']['direct']
+    llm['model'] = _local['model']
+    llm['base_url'] = _local['base_url']
+
+llm['max_input_tokens'] = 1048576
+llm['max_output_tokens'] = 65536
+llm['reasoning_effort'] = 'high'
+llm['drop_params'] = True
+llm['modify_params'] = True
+
+agent_context = agent_settings.setdefault('agent_context', {})
+agent_context['load_user_skills'] = True
+
+mcp_cfg = agent_settings.setdefault('mcp_config', {})
+mcp_cfg['serena'] = {
+    'transport': 'stdio',
+    'command': 'uvx',
+    'args': ['--from', 'serena-agent', 'serena', 'start-mcp-server', '--project-from-cwd', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
+    'description': 'Semantic code retrieval and symbol intelligence',
+    'timeout': 120.0,
+    'enabled': True
+}
+mcp_cfg['graphify'] = {
+    'transport': 'stdio',
+    'command': 'uv',
+    'args': ['--quiet', 'run', '--with', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
+    'description': 'Codebase dependency knowledge graph',
+    'timeout': 120.0,
+    'enabled': True
+}
+mcp_cfg['omnigraph'] = {
+    'transport': 'stdio',
+    'command': 'npx',
+    'args': ['-y', '@modernrelay/omnigraph-mcp'],
+    'env': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'},
+    'description': 'Project memory graph for this repository (repo-scoped, not global)',
+    'timeout': 120.0,
+    'enabled': True
+}
+ctx7_args = ['-y', '@upstash/context7-mcp']
+context7_key = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != 'null' else os.environ.get('CONTEXT7_API_KEY')
+if context7_key:
+    ctx7_args.extend(['--api-key', context7_key])
+mcp_cfg['context7'] = {
+    'transport': 'stdio',
+    'command': 'npx',
+    'args': ctx7_args,
+    'description': 'Upstash Context7 semantic search and retrieval',
+    'timeout': 120.0,
+    'enabled': True
+}
+mcp_cfg['playwright'] = {
+    'transport': 'stdio',
+    'command': 'npx',
+    'args': ['-y', '@playwright/mcp'],
+    'description': 'Browser automation and end-to-end verification',
+    'timeout': 120.0,
+    'enabled': True
+}
+mcp_cfg['cao-ops'] = {
+    'transport': 'stdio',
+    'command': 'wsl',
+    'args': ['-d', 'Ubuntu', 'bash', '-c', 'export PATH=\"$HOME/.local/bin:$PATH\"; export CAO_HOME_DIR=\"$HOME/.cao\"; cao-ops-mcp-server'],
+    'description': 'CLI Agent Orchestrator 3-level coordination bridge',
+    'timeout': 120.0,
+    'enabled': True
+}
+if 'github' in mcp_cfg:
+    del mcp_cfg['github']
+
+with open(settings_file, 'w', encoding='utf-8') as f:
+    json.dump(settings, f, indent=2)
+
+profiles_dir = os.path.join(openhands_dir, 'profiles')
+# Prices are USD per token from catalog/llm-models.json. Free variants bill
+# $0 while under the daily cap; paid_*_cost_per_token applies past it, so
+# spend = in_tokens*in_price + out_tokens*out_price stays auditable.
+profiles = dict([
+    _profile_for('deepseek-chat', deepseek_key),
+    _profile_for('deepseek-reasoner', deepseek_key),
+    _profile_for('muse-spark', muse_key, 'muse-spark-1.3'),
+    _profile_for('muse-spark', muse_key, 'muse-spark-1.3-contributor'),
+    _profile_for('openrouter-free', openrouter_key),
+    _profile_for('openrouter-nemotron-ultra', openrouter_key),
+    _profile_for('openrouter-nemotron-super', openrouter_key),
+    _profile_for('openrouter-nemotron-lightning', openrouter_key),
+    _profile_for('openrouter-nemotron-nano-omni', openrouter_key),
+    _profile_for('openrouter-laguna', openrouter_key),
+    _profile_for('openrouter-laguna-xs', openrouter_key),
+    _profile_for('openrouter-north-mini-code', openrouter_key),
+    _profile_for('openrouter-nex-pro', openrouter_key),
+    _profile_for('openrouter-nex-mini', openrouter_key),
+    _profile_for('openrouter-inkling', openrouter_key),
+    _profile_for('openrouter-inkling-small', openrouter_key),
+    _profile_for('openrouter-dots3-note', openrouter_key),
+    _profile_for('openrouter-ling-fin', openrouter_key),
+    _profile_for('openrouter-ling-sante', openrouter_key),
+    _profile_for('openrouter-ling-vl', openrouter_key),
+    _profile_for('ollama-qwen2.5-coder', None),
+])
+for name, p_data in profiles.items():
+    with open(os.path.join(profiles_dir, name), 'w', encoding='utf-8') as f:
+        json.dump(p_data, f, indent=2)
+
+agent_profiles_dir = os.path.join(openhands_dir, 'agent-profiles')
+acp_agents = {
+    'claude-sonnet.json': {'name': 'Claude Sonnet ACP', 'model': 'anthropic/claude-3-7-sonnet-latest', 'description': 'Claude Sonnet coding agent'},
+    'claude-opus.json': {'name': 'Claude Opus ACP', 'model': 'anthropic/claude-3-opus-latest', 'description': 'Claude Opus high-reasoning agent'},
+    'claude-haiku.json': {'name': 'Claude Haiku ACP', 'model': 'anthropic/claude-3-5-haiku-latest', 'description': 'Claude Haiku fast execution agent'},
+    'agy-gemini-3.8-flash.json': {'name': 'Gemini 3.8 Flash ACP', 'model': 'gemini/gemini-2.5-flash', 'description': 'Fast Google Antigravity Gemini agent'},
+    'agy-gemini-pro.json': {'name': 'Gemini Pro ACP', 'model': 'gemini/gemini-2.5-pro', 'description': 'Deep reasoning Antigravity Gemini agent'}
+}
+for name, a_data in acp_agents.items():
+    with open(os.path.join(agent_profiles_dir, name), 'w', encoding='utf-8') as f:
+        json.dump(a_data, f, indent=2)
+"@
+        $setupScript = $setupScript.Replace('MODELS_JSON_PLACEHOLDER', $modelsJson)
+        $argMuse = if ($museKey) { $museKey } else { 'null' }
+        $argDeepseek = if ($deepseekKey) { $deepseekKey } else { 'null' }
+        $argOpenrouter = if ($openrouterKey) { $openrouterKey } else { 'null' }
+        $argContext7 = if ($context7Key) { $context7Key } else { 'null' }
+
+        & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7
+    }
+
+    Write-AutoOSLine "OpenHands configuration and profiles written to $openhandsDir" -Level ok
+}
+
 function Invoke-AutoOSPostInstall {
     param([Parameter(Mandatory)][psobject]$Component)
     if (-not $Component.PostInstall) { return }
@@ -1106,6 +1604,7 @@ Export-ModuleMember -Function `
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
+    Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,
     Install-AutoOSOterm

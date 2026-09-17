@@ -67,6 +67,9 @@ custom_is_installed() {
         git-config)
             has_cmd git && [[ -n "$(git config --global user.name 2>/dev/null || true)" ]]
             ;;
+        wsl-agent-home)
+            [[ -d "$SYS_HOME/.cao" && -n "$(ls -A "$SYS_HOME/.cao" 2>/dev/null || true)" ]]
+            ;;
         agent-skills)
             [[ -d "$SYS_HOME/Documents/Code/agent-skills" || -d "$SYS_HOME/Documents/code/agent-skills" ]]
             ;;
@@ -1290,6 +1293,471 @@ print(json.dumps({
     fi
     ui_info "Restart Claude Code and Antigravity — MCP servers are only read at session start."
     return 0
+}
+
+setup_opencode_config() {
+    local config_dir="$SYS_HOME/.config/opencode"
+    local config_file="$config_dir/config.json"
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would configure OpenCode in $config_file"
+        return 0
+    fi
+
+    mkdir -p "$config_dir"
+    if [[ -f "$config_file" ]]; then
+        local ts
+        ts="$(date +%Y%m%d%H%M%S)"
+        cp "$config_file" "${config_file}.autoos-backup-${ts}"
+    fi
+
+    local secrets_file="$SYS_HOME/Documents/Code/agent-skills/secrets/api_keys.conf"
+    [[ -f "$secrets_file" ]] || secrets_file="$SYS_HOME/Documents/code/agent-skills/secrets/api_keys.conf"
+
+    # catalog/llm-models.json is the single source of truth for model data.
+    # The repo root is anchored off this script, never off the caller's cwd.
+    local models_file
+    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/llm-models.json"
+
+    python3 -c "
+import json, os, sys
+
+config_path = sys.argv[1]
+secrets_path = sys.argv[2]
+models_file = sys.argv[3]
+
+# Model data lives in catalog/llm-models.json (single source of truth).
+# Everything below projects it into OpenCode's shape; nothing here
+# duplicates an id, a context window or a price.
+with open(models_file, 'r', encoding='utf-8') as _mf:
+    REPO_MODELS = json.load(_mf)['models']
+REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
+
+def _opencode_cost(m):
+    base = m.get('paid_input_price', m['input_price']), m.get('paid_output_price', m['output_price'])
+    cost = {'input': base[0] * 1e6, 'output': base[1] * 1e6}
+    if m.get('cache_read_price'):
+        cost['cache_read'] = m['cache_read_price'] * 1e6
+    return cost
+
+def _openrouter_models():
+    out = {}
+    for m in REPO_MODELS:
+        if not m.get('openrouter_id'):
+            continue
+        entry = {'name': m['name'], 'limit': {'context': m['context'], 'output': m['output']}, 'cost': _opencode_cost(m)}
+        if m.get('reasoning'):
+            entry['reasoning'] = True
+        out[m['openrouter_id']] = entry
+    return out
+
+data = {}
+if os.path.isfile(config_path):
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+
+secrets = {}
+if os.path.isfile(secrets_path):
+    try:
+        with open(secrets_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    secrets[k.strip().lower()] = v.strip().strip('\"\'')
+    except Exception:
+        pass
+
+providers = data.get('provider', {})
+_ollama = REPO_BY_ID['ollama-qwen2.5-coder']['direct']
+providers['ollama'] = {
+    'npm': _ollama['npm'],
+    'name': 'Ollama (Local)',
+    'options': {
+        'baseURL': _ollama['base_url']
+    },
+    'models': {
+        'qwen2.5-coder:7b': {'name': 'Qwen 2.5 Coder 7B'},
+        'qwen3:30b': {'name': 'Qwen 3 30B'}
+    }
+}
+
+muse_key = os.environ.get('MUSE_API_KEY') or secrets.get('muse')
+if muse_key:
+    _muse = REPO_BY_ID['muse-spark']['direct']
+    providers['meta'] = {
+        'npm': _muse['npm'],
+        'name': 'Meta AI (Muse Spark)',
+        'options': {
+            'baseURL': _muse['base_url'],
+            'apiKey': muse_key
+        },
+        'models': {
+            _muse['model'].split('/', 1)[1]: {
+                'name': REPO_BY_ID['muse-spark']['name'],
+                'reasoning': True,
+                'limit': {'context': REPO_BY_ID['muse-spark']['context'], 'output': REPO_BY_ID['muse-spark']['output']},
+                'options': {'reasoningEffort': _muse['reasoning_effort']}
+            }
+        }
+    }
+
+deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
+if deepseek_key:
+    def _deepseek_entry(mid):
+        m = REPO_BY_ID[mid]
+        entry = {'name': m['name'], 'limit': {'context': m['context'], 'output': m['output']}}
+        if m.get('reasoning'):
+            entry['reasoning'] = True
+        return entry
+    _ds = REPO_BY_ID['deepseek-chat']['direct']
+    providers['deepseek'] = {
+        'npm': _ds['npm'],
+        'name': 'DeepSeek',
+        'options': {
+            'baseURL': _ds['base_url'],
+            'apiKey': deepseek_key
+        },
+        'models': {
+            'deepseek-chat': _deepseek_entry('deepseek-chat'),
+            'deepseek-reasoner': _deepseek_entry('deepseek-reasoner')
+        }
+    }
+
+openrouter_key = os.environ.get('OPENROUTER_API_KEY') or secrets.get('openrouter')
+if openrouter_key:
+    providers['openrouter'] = {
+        'npm': '@ai-sdk/openai-compatible',
+        'name': 'OpenRouter',
+        'options': {
+            'baseURL': 'https://openrouter.ai/api/v1',
+            'apiKey': openrouter_key
+        },
+        'models': _openrouter_models()
+    }
+
+data['provider'] = providers
+
+if not data.get('model'):
+    if muse_key:
+        data['model'] = 'meta/' + REPO_BY_ID['muse-spark']['direct']['model'].split('/', 1)[1]
+    else:
+        data['model'] = 'ollama/' + REPO_BY_ID['ollama-qwen2.5-coder']['direct']['model'].split('/', 1)[1]
+
+mcps = data.get('mcp', {})
+mcps['serena'] = {
+    'type': 'local',
+    'command': ['uvx', '--from', 'serena-agent', 'serena', 'start-mcp-server', '--context', 'claude-code', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
+    'enabled': True
+}
+mcps['graphify'] = {
+    'type': 'local',
+    'command': ['uvx', '--from', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
+    'enabled': True
+}
+mcps['omnigraph'] = {
+    'type': 'local',
+    'command': ['npx', '-y', '@modernrelay/omnigraph-mcp'],
+    'enabled': True,
+    'environment': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'}
+}
+mcps['playwright'] = {
+    'type': 'local',
+    'command': ['npx', '-y', '@playwright/mcp@latest'],
+    'enabled': True
+}
+data['mcp'] = mcps
+
+tmp_file = config_path + '.tmp'
+with open(tmp_file, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2)
+os.replace(tmp_file, config_path)
+" "$config_file" "$secrets_file" "$models_file"
+
+    ui_ok "OpenCode configuration written to $config_file"
+    cp "$config_file" "$config_dir/opencode.json"
+}
+
+setup_openhands_config() {
+    local openhands_dir="$SYS_HOME/.openhands"
+    local settings_file="$openhands_dir/settings.json"
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would configure OpenHands in $openhands_dir"
+        return 0
+    fi
+
+    mkdir -p "$openhands_dir/profiles" "$openhands_dir/agent-profiles" "$openhands_dir/automation"
+
+    if [[ -f "$settings_file" ]]; then
+        local ts
+        ts="$(date +%Y%m%d-%H%M%S)"
+        cp "$settings_file" "${settings_file}.autoos-backup-${ts}"
+    fi
+
+    local code_root="$SYS_HOME/Documents/Code"
+    if [[ -d "$SYS_HOME/Documents/code" ]]; then
+        code_root="$SYS_HOME/Documents/code"
+    fi
+    local skills_source="$code_root/agent-skills/skills"
+    local skills_target="$openhands_dir/skills"
+    if [[ -d "$skills_source" && ! -e "$skills_target" ]]; then
+        ln -s "$skills_source" "$skills_target" 2>/dev/null || true
+        ui_ok "Linked agent-skills to OpenHands skills directory"
+    fi
+
+    local secrets_file="$code_root/agent-skills/secrets/api_keys.conf"
+
+    catalog_require_python || return 0
+
+    local models_file
+    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/llm-models.json"
+
+    python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
+import os, sys, json
+
+openhands_dir = sys.argv[1]
+secrets_file = sys.argv[2] if len(sys.argv) > 2 else ""
+models_file = sys.argv[3] if len(sys.argv) > 3 else ""
+
+with open(models_file, "r", encoding="utf-8") as _mf:
+    REPO_MODELS = json.load(_mf)["models"]
+REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
+
+def _profile_for(mid, key, name=None):
+    m = REPO_BY_ID[mid]
+    if m.get("openrouter_id"):
+        model = "openrouter/" + m["openrouter_id"]
+    else:
+        model = m["direct"]["model"]
+    p = {"model": model, "max_input_tokens": m["context"],
+         "max_output_tokens": m["output"],
+         "input_cost_per_token": m["input_price"],
+         "output_cost_per_token": m["output_price"]}
+    if m.get("direct", {}).get("base_url"):
+        p["base_url"] = m["direct"]["base_url"]
+    if m.get("reasoning"):
+        p["reasoning_effort"] = "high"
+    for opt in ("paid_input_price", "paid_output_price", "cache_read_price"):
+        dst = {"paid_input_price": "paid_input_cost_per_token",
+               "paid_output_price": "paid_output_cost_per_token",
+               "cache_read_price": "cache_read_cost_per_token"}[opt]
+        if m.get(opt) is not None:
+            p[dst] = m[opt]
+    p["api_key"] = key
+    return (name or mid) + ".json", p
+
+secrets = {}
+if secrets_file and os.path.isfile(secrets_file):
+    try:
+        with open(secrets_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    secrets[k.strip().lower()] = v.strip().strip("\"'")
+    except Exception:
+        pass
+
+muse_key = os.environ.get("MUSE_API_KEY") or secrets.get("muse")
+deepseek_key = os.environ.get("DEEPSEEK_API_KEY") or secrets.get("deepseek")
+openrouter_key = os.environ.get("OPENROUTER_API_KEY") or secrets.get("openrouter")
+context7_key = os.environ.get("CONTEXT7_API_KEY") or secrets.get("context7")
+
+settings_file = os.path.join(openhands_dir, "settings.json")
+settings = {}
+if os.path.isfile(settings_file):
+    try:
+        with open(settings_file, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+    except Exception:
+        settings = {}
+
+settings.setdefault("schema_version", 2)
+agent_settings = settings.setdefault("agent_settings", {})
+agent_settings.setdefault("schema_version", 5)
+agent_settings.setdefault("agent_kind", "openhands")
+agent_settings.setdefault("agent", "CodeActAgent")
+
+llm = agent_settings.setdefault("llm", {})
+_muse = REPO_BY_ID["muse-spark"]["direct"]
+_ds = REPO_BY_ID["deepseek-chat"]["direct"]
+if muse_key:
+    llm["model"] = _muse["model"]
+    llm["base_url"] = _muse["base_url"]
+    llm["api_key"] = muse_key
+elif deepseek_key:
+    llm["model"] = _ds["model"]
+    llm["base_url"] = _ds["base_url"]
+    llm["api_key"] = deepseek_key
+elif openrouter_key:
+    llm["model"] = "openrouter/openrouter/free"
+    llm["base_url"] = "https://openrouter.ai/api/v1"
+    llm["api_key"] = openrouter_key
+else:
+    _local = REPO_BY_ID["ollama-qwen2.5-coder"]["direct"]
+    llm["model"] = _local["model"]
+    llm["base_url"] = _local["base_url"]
+
+llm["max_input_tokens"] = 1048576
+llm["max_output_tokens"] = 65536
+llm["reasoning_effort"] = "high"
+llm["drop_params"] = True
+llm["modify_params"] = True
+
+agent_context = agent_settings.setdefault("agent_context", {})
+agent_context["load_user_skills"] = True
+
+mcp_cfg = agent_settings.setdefault("mcp_config", {})
+mcp_cfg["serena"] = {
+    "transport": "stdio",
+    "command": "uvx",
+    "args": ["--from", "serena-agent", "serena", "start-mcp-server", "--context", "claude-code", "--open-web-dashboard", "false", "--enable-gui-log-window", "false"],
+    "description": "Code navigation, symbol index, semantic editing",
+    "timeout": 120.0,
+    "enabled": True,
+}
+mcp_cfg["graphify"] = {
+    "transport": "stdio",
+    "command": "uvx",
+    "args": ["--from", "graphifyy[mcp]", "python", "-m", "graphify.serve", "graphify-out/graph.json"],
+    "description": "Codebase knowledge graph and dependency intelligence",
+    "timeout": 120.0,
+    "enabled": True,
+}
+mcp_cfg["omnigraph"] = {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modernrelay/omnigraph-mcp"],
+    "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
+    "description": "Project memory graph for this repository (repo-scoped, not global)",
+    "timeout": 120.0,
+    "enabled": True,
+}
+ctx7_args = ["-y", "@upstash/context7-mcp"]
+if context7_key:
+    ctx7_args.extend(["--api-key", context7_key])
+mcp_cfg["context7"] = {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ctx7_args,
+    "description": "Upstash Context7 semantic search and retrieval",
+    "timeout": 120.0,
+    "enabled": True,
+}
+mcp_cfg["playwright"] = {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@playwright/mcp"],
+    "description": "Browser automation and end-to-end verification",
+    "timeout": 120.0,
+    "enabled": True,
+}
+mcp_cfg["cao-ops"] = {
+    "transport": "stdio",
+    "command": "bash",
+    "args": ["-c", "export PATH=\"$HOME/.local/bin:$PATH\"; export CAO_HOME_DIR=\"$HOME/.cao\"; cao-ops-mcp-server"],
+    "description": "CLI Agent Orchestrator 3-level coordination bridge",
+    "timeout": 120.0,
+    "enabled": True,
+}
+if "github" in mcp_cfg:
+    del mcp_cfg["github"]
+
+with open(settings_file, "w", encoding="utf-8") as f:
+    json.dump(settings, f, indent=2)
+
+profiles_dir = os.path.join(openhands_dir, "profiles")
+# Prices are USD per token from catalog/llm-models.json. Free variants bill
+# $0 while under the daily cap; paid_*_cost_per_token applies past it, so
+# spend = in_tokens*in_price + out_tokens*out_price stays auditable.
+profiles = dict([
+    _profile_for("deepseek-chat", deepseek_key),
+    _profile_for("deepseek-reasoner", deepseek_key),
+    _profile_for("muse-spark", muse_key, "muse-spark-1.3"),
+    _profile_for("muse-spark", muse_key, "muse-spark-1.3-contributor"),
+    _profile_for("openrouter-free", openrouter_key),
+    _profile_for("openrouter-nemotron-ultra", openrouter_key),
+    _profile_for("openrouter-nemotron-super", openrouter_key),
+    _profile_for("openrouter-nemotron-lightning", openrouter_key),
+    _profile_for("openrouter-nemotron-nano-omni", openrouter_key),
+    _profile_for("openrouter-laguna", openrouter_key),
+    _profile_for("openrouter-laguna-xs", openrouter_key),
+    _profile_for("openrouter-north-mini-code", openrouter_key),
+    _profile_for("openrouter-nex-pro", openrouter_key),
+    _profile_for("openrouter-nex-mini", openrouter_key),
+    _profile_for("openrouter-inkling", openrouter_key),
+    _profile_for("openrouter-inkling-small", openrouter_key),
+    _profile_for("openrouter-dots3-note", openrouter_key),
+    _profile_for("openrouter-ling-fin", openrouter_key),
+    _profile_for("openrouter-ling-sante", openrouter_key),
+    _profile_for("openrouter-ling-vl", openrouter_key),
+    _profile_for("ollama-qwen2.5-coder", None),
+])
+for name, p_data in profiles.items():
+    with open(os.path.join(profiles_dir, name), "w", encoding="utf-8") as f:
+        json.dump(p_data, f, indent=2)
+
+agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
+acp_agents = {
+    "claude-sonnet.json": {"name": "Claude Sonnet ACP", "model": "anthropic/claude-3-7-sonnet-latest", "description": "Claude Sonnet coding agent"},
+    "claude-opus.json": {"name": "Claude Opus ACP", "model": "anthropic/claude-3-opus-latest", "description": "Claude Opus high-reasoning agent"},
+    "claude-haiku.json": {"name": "Claude Haiku ACP", "model": "anthropic/claude-3-5-haiku-latest", "description": "Claude Haiku fast execution agent"},
+    "agy-gemini-3.8-flash.json": {"name": "Gemini 3.8 Flash ACP", "model": "gemini/gemini-2.5-flash", "description": "Fast Google Antigravity Gemini agent"},
+    "agy-gemini-pro.json": {"name": "Gemini Pro ACP", "model": "gemini/gemini-2.5-pro", "description": "Deep reasoning Antigravity Gemini agent"}
+}
+for name, a_data in acp_agents.items():
+    with open(os.path.join(agent_profiles_dir, name), "w", encoding="utf-8") as f:
+        json.dump(a_data, f, indent=2)
+PY
+
+    ui_ok "OpenHands configuration and profiles written to $openhands_dir"
+}
+
+# ─── WSL agent home (native ext4) ───────────────────────────────────────────
+# drvfs (/mnt/c, 9p) cannot host FIFOs or AF_UNIX sockets, so anything that
+# creates named pipes or sockets must live on the native ext4 filesystem.
+# Known victim: cli-agent-orchestrator's FIFO_DIR (os.mkfifo -> Errno 95
+# EOPNOTSUPP when CAO_HOME_DIR sits under ~/.aws symlinked to /mnt/c).
+# This function is a deliberate no-op off WSL: on bare metal ~/.aws is real
+# ext4 and the default CAO home works fine.
+setup_wsl_agent_home() {
+    (( SYS_IS_WSL )) || { ui_muted "not WSL - native agent home not needed"; return 0; }
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would relocate CAO home to $SYS_HOME/.cao on native ext4"
+        return 0
+    fi
+    local cao_native="$SYS_HOME/.cao"
+    local cao_legacy="$SYS_HOME/.aws/cli-agent-orchestrator"
+    local cao_home="${CAO_HOME_DIR:-$cao_native}"
+
+    mkdir -p "$cao_native"
+    # A drvfs-backed CAO home cannot host FIFOs: move live state (not logs or
+    # locks) onto ext4, keep a timestamped backup, leave an empty dir behind
+    # so the legacy path never dangles.
+    if [[ -d "$cao_legacy" && ! -L "$cao_legacy" ]]; then
+        if ! python3 -c "import os; os.mkfifo('$cao_legacy/.autoos-fifo-probe')" 2>/dev/null; then
+            local ts backup
+            ts="$(date +%Y%m%d-%H%M%S)"
+            backup="${cao_legacy}.backup-${ts}"
+            ui_info "CAO home $cao_legacy is on drvfs (no FIFO support) - relocating live state to $cao_native"
+            cp -a "$cao_legacy" "$backup"
+            for sub in agent-context agent-store db workflows skills profiles; do
+                [[ -d "$cao_legacy/$sub" ]] && cp -a "$cao_legacy/$sub/." "$cao_native/$sub/"
+            done
+            [[ -f "$cao_legacy/settings.json" ]] && cp -a "$cao_legacy/settings.json" "$cao_native/settings.json"
+            ui_ok "legacy CAO home backed up to $backup"
+        else
+            rm -f "$cao_legacy/.autoos-fifo-probe"
+        fi
+    fi
+    # Every CAO entry point must see the same home: export once per shell.
+    append_line_once "$SYS_HOME/.bashrc" "CAO_HOME_DIR" "export CAO_HOME_DIR=\"$cao_home\"  # added by AutoOS (wsl-agent-home)"
+    append_line_once "$SYS_HOME/.profile" "CAO_HOME_DIR" "export CAO_HOME_DIR=\"$cao_home\"  # added by AutoOS (wsl-agent-home)"
+    ui_ok "CAO home on native ext4: $cao_home (CAO_HOME_DIR exported)"
 }
 
 run_post_install() {

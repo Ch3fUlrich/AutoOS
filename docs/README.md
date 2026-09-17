@@ -17,5 +17,6 @@ Start here. Each page is short and answers one question.
 | [Remote provisioning](remote-provisioning.md) | How do I set up a machine that isn't this one? |
 | [Security](security.md) | What are the sharp edges, and what must never be committed? |
 | [Troubleshooting](troubleshooting.md) | It broke. Now what? |
+| [WSL native agent home](wsl-agent-home.md) | Why do agent tools need native ext4 state on WSL? |
 
 Working on this repo with an AI agent? [AGENTS.md](../AGENTS.md) is the contract.

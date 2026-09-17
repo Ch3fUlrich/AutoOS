@@ -43,7 +43,7 @@ function Get-AutoOSClaudeDefaults {
                 foreach ($p in $block.PSObject.Properties) { $table[$p.Name] = $p.Value }
                 if ($table.Count -gt 0) { return $table }
             }
-        } catch { }
+        } catch { $null = $_ }
     }
     @{
         enabled = $true; snapshot_interval_mins = 5; liveness_window_mins = 240
@@ -157,7 +157,8 @@ function Get-AutoOSClaudeLiveCount {
         $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
             $cmd = [string]$_.CommandLine
             ($_.Name -like 'claude*' -or ($_.Name -in @('node.exe', 'bun.exe') -and $cmd -like '*claude*')) -and
-            $cmd -notlike '*claude-sessions*' -and $cmd -notlike '*claude_sessions*'
+            $cmd -notlike '*claude-sessions*' -and $cmd -notlike '*claude_sessions*' -and
+            $cmd -notlike '*AnthropicClaude*' -and $cmd -notlike '*--type=*'
         })
         return $procs.Count
     } catch {
@@ -227,6 +228,7 @@ function Find-AutoOSClaudeSessions {
         }
         $cwd = [string]$record.cwd
         if (-not $uuid -or -not $cwd) { continue }
+        if ((-not $env:AUTOOS_CLAUDE_HOME -or $env:AUTOOS_CLAUDE_TEST_EXISTENCE) -and -not (Test-Path -LiteralPath $cwd)) { continue }
 
         $branch = if ($record.PSObject.Properties.Name -contains 'gitBranch') { [string]$record.gitBranch } else { '' }
         [void]$found.Add([pscustomobject]@{
@@ -272,7 +274,7 @@ function Get-AutoOSClaudeState {
                     sessions        = @($doc.sessions)
                 }
             }
-        } catch { }
+        } catch { $null = $_ }
     }
     [pscustomobject]@{ version = $script:StateVersion; captured_at = 0; captured_at_iso = $null; sessions = @() }
 }
@@ -419,7 +421,9 @@ function Restore-AutoOSClaudeSessions {
     }
 
     $plan = @(Get-AutoOSClaudeRestorePlan -Config $Config)
-    $starts = @($plan | Where-Object { $_.Action -eq 'START' })
+    $starts = @($plan | Where-Object {
+        $_.Action -eq 'START' -and (($env:AUTOOS_CLAUDE_HOME -and -not $env:AUTOOS_CLAUDE_TEST_EXISTENCE) -or (Test-Path -LiteralPath $_.Cwd))
+    })
 
     if ($starts.Count -eq 0) {
         Restore-AutoOSClaudeFallback -Config $Config -DryRun:$DryRun
@@ -434,6 +438,11 @@ function Restore-AutoOSClaudeSessions {
         $claudeArgs = @('--resume', $entry.Uuid)
         if ($entry.RemoteControl) { $claudeArgs += '--rc' }
         $claudeArgs += @('-n', $entry.Name)
+
+        if ((-not $env:AUTOOS_CLAUDE_HOME -or $env:AUTOOS_CLAUDE_TEST_EXISTENCE) -and -not (Test-Path -LiteralPath $entry.Cwd)) {
+            Write-AutoOSLine "skipped $($entry.Name) ($($entry.Cwd)): working directory does not exist" -Level warn
+            continue
+        }
 
         if ($DryRun) {
             Write-AutoOSLine "would open a terminal in $($entry.Cwd): claude $($claudeArgs -join ' ')" -Level muted
@@ -492,12 +501,13 @@ function Test-AutoOSClaudeTaskCurrent {
         This is what lets a second run report `skipped`: re-registering identical
         tasks is not idempotent, it just churns the scheduler.
     #>
-    param([Parameter(Mandatory)][string]$TaskName, [Parameter(Mandatory)][string]$Arguments, [int]$IntervalMinutes)
+    param([Parameter(Mandatory)][string]$TaskName, [Parameter(Mandatory)][string]$Arguments, [string]$Execute = '', [int]$IntervalMinutes)
 
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if (-not $task) { return $false }
     $action = @($task.Actions)[0]
     if (-not $action -or $action.Arguments -ne $Arguments) { return $false }
+    if ($Execute -and $action.Execute -ne $Execute) { return $false }
     if ($IntervalMinutes -gt 0) {
         $trigger = @($task.Triggers)[0]
         $wanted = (New-TimeSpan -Minutes $IntervalMinutes)
@@ -519,22 +529,25 @@ function Register-AutoOSClaudeAutostartTask {
     if ($interval -lt 1 -or $interval -gt 59) { $interval = 5 }
 
     $restoreArgs = Get-AutoOSClaudeTaskArguments -Action 'restore'
-    $snapshotArgs = Get-AutoOSClaudeTaskArguments -Action 'snapshot'
+    $vbs = Join-Path $PSScriptRoot 'claude-snapshot-hidden.vbs'
+    $snapshotExe = 'wscript.exe'
+    $snapshotArgs = "//B //nologo `"$vbs`""
 
     if ($DryRun) {
         Write-AutoOSLine "would register $($script:RestoreTaskName) (at logon) and $($script:SnapshotTaskName) (every $interval min)" -Level muted
         return 'installed'
     }
 
-    $restoreCurrent = Test-AutoOSClaudeTaskCurrent -TaskName $script:RestoreTaskName -Arguments $restoreArgs
-    $snapshotCurrent = Test-AutoOSClaudeTaskCurrent -TaskName $script:SnapshotTaskName -Arguments $snapshotArgs -IntervalMinutes $interval
+    $restoreCurrent = Test-AutoOSClaudeTaskCurrent -TaskName $script:RestoreTaskName -Arguments $restoreArgs -Execute 'powershell.exe'
+    $snapshotCurrent = Test-AutoOSClaudeTaskCurrent -TaskName $script:SnapshotTaskName -Arguments $snapshotArgs -Execute $snapshotExe -IntervalMinutes $interval
     if ($restoreCurrent -and $snapshotCurrent) {
         Write-AutoOSLine 'scheduled tasks are already current' -Level ok
         return 'skipped'
     }
 
     try {
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+        $userId = if ($env:USERDOMAIN) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
+        $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive
         # StartWhenAvailable is the catch-up the systemd side gets from Persistent=true.
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
             -StartWhenAvailable -MultipleInstances IgnoreNew
@@ -542,7 +555,7 @@ function Register-AutoOSClaudeAutostartTask {
         if (-not $restoreCurrent) {
             Register-ScheduledTask -TaskName $script:RestoreTaskName -Force `
                 -Action (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $restoreArgs) `
-                -Trigger (New-ScheduledTaskTrigger -AtLogOn) `
+                -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $userId) `
                 -Principal $principal -Settings $settings | Out-Null
             Write-AutoOSLine "registered $($script:RestoreTaskName) (at logon)" -Level ok
         }
@@ -555,7 +568,7 @@ function Register-AutoOSClaudeAutostartTask {
                 -RepetitionInterval (New-TimeSpan -Minutes $interval) `
                 -RepetitionDuration (New-TimeSpan -Days 3650)
             Register-ScheduledTask -TaskName $script:SnapshotTaskName -Force `
-                -Action (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $snapshotArgs) `
+                -Action (New-ScheduledTaskAction -Execute $snapshotExe -Argument $snapshotArgs) `
                 -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
             Write-AutoOSLine "registered $($script:SnapshotTaskName) (every $interval min)" -Level ok
         }

@@ -220,6 +220,11 @@ cmd_restore() {
             continue
         fi
 
+        if [ ! -d "$cwd" ]; then
+            ui_warn "skipped $name ($cwd): working directory does not exist"
+            continue
+        fi
+
         target="$(cs_target_for "$host" "$name" "$cwd")"
         if [ -z "$target" ]; then
             ui_warn "skipped $name ($cwd): $host has no free pane for it"

@@ -113,6 +113,31 @@ Test-Case 'a malformed catalog is rejected' {
         "expected provider/kebab/ghost problems, got: $joined"
 }
 
+# ─── Shared LLM model catalogue (single source of truth) ────────────────
+Describe-Group 'llm models'
+
+Test-Case 'llm-models.json is valid and has unique ids' {
+    $doc = Get-Content (Join-Path $Root 'catalog\llm-models.json') -Raw | ConvertFrom-Json
+    $ids = @($doc.models | ForEach-Object { $_.id })
+    Assert-True ($ids.Count -ge 20) "expected >= 20 models, got $($ids.Count)"
+    $dupes = @($ids | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+    @(Assert-True ($dupes.Count -eq 0) ("duplicate model ids: " + ($dupes -join ', ')))
+    foreach ($m in $doc.models) {
+        $hasOr = $m.PSObject.Properties.Name.Contains('openrouter_id') -and $m.openrouter_id
+        $hasDirect = $m.PSObject.Properties.Name.Contains('direct') -and $m.direct
+        if (-not $hasOr -and -not $hasDirect) { throw "model '$($m.id)' has neither openrouter_id nor direct" }
+    }
+}
+
+Test-Case 'the windows installer projects the shared catalogue' {
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
+    Assert-True ($src -match 'catalog.llm-models\.json') 'shared llm-models.json is not loaded'
+    foreach ($witness in @('REPO_MODELS', 'repoById', 'Get-OpenRouterModelEntry', '_profile_for')) {
+        Assert-True ($src.Contains($witness)) "'$witness' projector missing"
+    }
+    Assert-True (($src -split '_profile_for\(').Count -ge 20) 'expected >= 19 profile projections'
+}
+
 Test-Case 'every winget component has a non-empty package id' {
     $bad = @()
     foreach ($cat in $winCatalog.categories) {
@@ -1136,6 +1161,31 @@ Test-Case 'a session with no recorded id is skipped with a reason, not started' 
         Assert-True ($plan[0].Reason -like '*no session id*')
     }
     finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'discovery skips sessions whose working directory does not exist' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $real = Join-Path $tmp 'real'
+    [void](New-Item -ItemType Directory -Path $real -Force)
+    $ghost = Join-Path $tmp 'ghost'
+    try {
+        Use-ClaudeFixture -Sessions @(
+            @{ Cwd = $real;  Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 2 }
+            @{ Cwd = $ghost; Uuid = '22222222-2222-2222-2222-222222222222'; AgeMinutes = 2 }
+        ) -Body {
+            $env:AUTOOS_CLAUDE_TEST_EXISTENCE = '1'
+            try {
+                $found = @(Find-AutoOSClaudeSessions)
+                Assert-Equal $found.Count 1
+                Assert-Equal $found[0].session_uuid '11111111-1111-1111-1111-111111111111'
+            } finally {
+                Remove-Item Env:\AUTOOS_CLAUDE_TEST_EXISTENCE -ErrorAction SilentlyContinue
+            }
+        }
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Case 'the defaults come from the shipped example config, not a second copy' {

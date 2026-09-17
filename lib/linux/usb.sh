@@ -913,12 +913,12 @@ usb_plan() {
 # usb_chooser_image_items — "id|name|kinds|size" for every real image.
 usb_chooser_image_items() {
     local id name kinds size
-    local -a f=()
+    local -a fields=()
     while IFS= read -r id; do
         [[ -z "$id" ]] && continue
         _image_resolve_is_pseudo "$id" && continue
-        f=(); mapfile -t f < <(_image_field "$id" name kinds sizeGb)
-        name="${f[0]:-$id}"; kinds="${f[1]:-}"; size="${f[2]:-}"
+        fields=(); mapfile -t fields < <(_image_field "$id" name kinds sizeGb)
+        name="${fields[0]:-$id}"; kinds="${fields[1]:-}"; size="${fields[2]:-}"
         printf '%s|%s|%s|%s\n' "$id" "$name" "${kinds//,/, }" "${size:+${size} GB}"
     done < <(_usb_catalog_py "$(_usb_root_dir)/catalog/images.json" images list "" "")
 }
@@ -947,16 +947,16 @@ usb_chooser_kind_items() {
 # drive its GUI) - the browser never does; it is badged "interactive".
 usb_chooser_engine_items() {
     local kind="$1" write_mode="$2" eid
-    local -a f=()
+    local -a fields=()
     while IFS= read -r eid; do
         [[ -z "$eid" ]] && continue
-        f=(); mapfile -t f < <(_engine_field "$eid" name kinds writeModes interactive)
-        [[ ",${f[1]:-}," == *",$kind,"* ]] || continue
-        [[ ",${f[2]:-}," == *",$write_mode,"* ]] || continue
+        fields=(); mapfile -t fields < <(_engine_field "$eid" name kinds writeModes interactive)
+        [[ ",${fields[1]:-}," == *",$kind,"* ]] || continue
+        [[ ",${fields[2]:-}," == *",$write_mode,"* ]] || continue
         local badge=""
-        [[ "${f[3]:-0}" == "1" ]] && badge="interactive"
+        [[ "${fields[3]:-0}" == "1" ]] && badge="interactive"
         [[ "$eid" == "ventoy" ]] && badge="default"
-        printf '%s|%s|%s|%s\n' "$eid" "${f[0]:-$eid}" "builds: ${f[1]//,/, }" "$badge"
+        printf '%s|%s|%s|%s\n' "$eid" "${fields[0]:-$eid}" "builds: ${fields[1]//,/, }" "$badge"
     done < <(_engine_list_for_platform "$(_usb_current_os)" "$(_usb_current_arch)")
 }
 

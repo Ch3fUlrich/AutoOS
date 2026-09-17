@@ -8,7 +8,8 @@
     "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
     "local-ai": "Local AI inference with Ollama — no API key and no network, but models are 1.4-4.7 GB.",
     "custom": "Start with nothing ticked and choose by hand.",
-    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
+    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing.",
+    "rescue": "Disaster-recovery toolkit and emergency AI recovery environment."
   },
   "categories": [
     {
@@ -337,6 +338,41 @@
           "profiles": [
             "local-ai"
           ]
+        },
+        {
+          "id": "opencode",
+          "name": "OpenCode CLI",
+          "description": "AI coding agent with local-model support",
+          "provider": "npm",
+          "package": "opencode-ai",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "rescue"
+          ],
+          "verify": "opencode --version",
+          "postInstall": "Set-AutoOSOpenCodeConfig",
+          "homepage": "https://opencode.ai/"
+        },
+        {
+          "id": "openhands",
+          "name": "OpenHands Agent Canvas",
+          "description": "Multi-agent orchestration canvas and UI for OpenHands",
+          "provider": "npm",
+          "package": "@openhands/agent-canvas",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "agent-canvas --version",
+          "postInstall": "Set-AutoOSOpenHandsConfig",
+          "homepage": "https://github.com/All-Hands-AI/OpenHands"
         },
         {
           "id": "claude-desktop",

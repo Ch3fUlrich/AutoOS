@@ -134,6 +134,12 @@ if (( CHECK_ONLY )); then
     # assuming every file here is a component catalog — and rather than
     # trusting the filename, which silently mis-validates a renamed file.
     rc=0
+    # Every file under catalog/, dispatched by its top-level shape:
+    # component catalogs ("categories"), images.json ("images"),
+    # engines.json ("engines") and llm-models.json ("models"). Two branches
+    # once fixed the same problem two ways - one by dispatching on shape,
+    # one by listing the three OS files by name - and merged to the
+    # narrower list, which silently stopped checking images/engines.
     for cat in "$AUTOOS_ROOT"/catalog/*.json; do
         [[ -f "$cat" ]] || continue
         catalog_require_python || exit 1
@@ -144,12 +150,30 @@ try:
         data = json.load(fh)
 except Exception:
     print("invalid"); sys.exit(0)
-for key in ("categories", "images", "engines"):
+for key in ("categories", "images", "engines", "models"):
     if key in data:
         print(key); sys.exit(0)
+if "$schema" in data:
+    print("schema"); sys.exit(0)
 print("unknown")
 ' "$cat")"
         case "$cat_type" in
+            schema)
+                # A JSON Schema shipped beside a catalog (llm-models.schema.json):
+                # parsed successfully above, and that is all it needs here.
+                ui_ok "$(basename "$cat") is valid." ;;
+            models)
+                # The shared LLM model list: shape check here (a list of
+                # entries with unique ids); tests/run-tests.sh's "llm
+                # models" block checks the projection into the installers.
+                if python3 -c '
+import json, sys
+models = json.load(open(sys.argv[1], encoding="utf-8")).get("models")
+ok = isinstance(models, list) and models and all(isinstance(m, dict) and m.get("id") for m in models)
+ids = [m.get("id") for m in models] if ok else []
+sys.exit(0 if ok and len(ids) == len(set(ids)) else 1)
+' "$cat"; then ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
             categories)
                 if catalog_validate "$cat"; then ui_ok "$(basename "$cat") is valid."
                 else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
