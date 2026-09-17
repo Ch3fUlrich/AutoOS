@@ -323,25 +323,30 @@ read the printed counts.**
    called from both entry points. What remains of it: the first *real* run against the test
    stick (serial `960806056010`, section 7) — every path below the fetch has only ever run under
    `AUTOOS_DRY_RUN` / `AUTOOS_FORCE_FAIL` or against loopback fixtures.
-2. **Resolve the merge** (section 4). Land it on `main`. The second session's changes touch
-   `setup.sh`, `lib/linux/usb.sh`, `tests/run-tests.sh` (already in the conflict set) and
-   `setup.ps1`, `lib/windows/AutoOS.Usb.psm1`, `tests/run-tests.ps1`, `README.md`,
-   `docs/getting-started.md` — re-run `git merge-tree` before assuming section 4's list.
-3. **Terminal chooser (plan Task 10)** — image → kind → engine → device, reusing the existing
-   interactive selection helpers from commit `f8ae521`. The browser has this flow; the terminal
-   still needs the flags typed by hand. Unlike the browser, the terminal **may** offer `rufus`,
-   since a human is present to drive its GUI. The confirmation must name the device model, its
-   size, and that all data on it will be destroyed.
-4. **Docs (plan Task 12)** — `docs/usb-creator.md`, ADR `docs/decisions/0004-ventoy-and-wsl-not-rufus.md`,
-   README flags. **Link to `catalog/images.json`; do not restate the image list** (finding A23).
-   State the limitations flatly: `uefi-copy` is UEFI-only; FAT32 caps one file at 4,294,967,295 B;
-   nobody has booted a stick built by this tool.
-5. Wire `usb_ventoy_add_persistence` into `usb_plan` for `kind=live-persistent`.
-6. Minor, parked: `backup_file "$dest" || true` in `rescue-bootstrap.sh` discards the backup's exit
-   status and then prints "backup taken" regardless. No data is lost, but the message can lie.
-7. `usb_copy_image`'s real mount/copy path has only its guards tested — there was no loop-device
-   support in the test environment. The Windows engine command strings have never run on real
-   hardware.
+2. ~~**Resolve the merge** (section 4).~~ **Done 2026-09-17** (merge commit `22ceaec`): the four
+   conflicts resolved as section 4 says, `agy` checked by eye (winget won), `rescue` merged as a
+   union (41 members on Linux, 12 on Windows), and the semantic conflict it predicted was real:
+   `main`'s `1436ad2` had narrowed `--check-catalog` to the three OS files, which silently
+   stopped checking `images.json`/`engines.json`; the union keeps the by-shape dispatch and adds
+   `models` and `$schema` shapes for `llm-models.json` / `llm-models.schema.json`.
+3. ~~**Terminal chooser (plan Task 10)**~~ **Done 2026-09-17** (`c737339`): `usb_choose_interactively`
+   / `Invoke-AutoOSUsbChooser` over the `f8ae521` helpers, reached from `--create-usb` without
+   flags in an interactive session and from a *Create installer USB* entry in the profile menu
+   (the create path became `create_usb_flow` / `Invoke-AutoOSCreateUsbFlow` so both can call it).
+   Terminal may offer `rufus` (badged interactive); confirmation names device, model, size and
+   destruction, defaults to No; a non-interactive run never consents on the user's behalf.
+4. ~~**Docs (plan Task 12)**~~ **Done 2026-09-17** (`8b4b3a4`): `docs/usb-creator.md`, ADR 0004,
+   docs index row, CHANGELOG section; README flags and `docs/getting-started.md#flags` earlier.
+5. ~~Wire `usb_ventoy_add_persistence`~~ **Done** (`c737339`): a `live-persistent` ventoy plan ends
+   with the persistence line on both platforms.
+6. ~~`backup_file … || true`~~ **Done** (`c737339`): the profile message says what happened; the ai
+   registry refuses to overwrite without a backup.
+7. `usb_copy_image`'s real Linux mount/copy path still has only its guards tested — no loop
+   device in the test environment. The **Windows** engine path has now run on real hardware
+   (`uefi-copy`, section 2b); `ventoy`, `native`, `wsl` and `rufus` command strings have not.
+8. **Still open after this session:** the first boot of a built stick (human, on a *different*
+   stick — the Intenso is faulty); an unbuffered (`FILE_FLAG_NO_BUFFERING`) read-back on Windows;
+   `custom-url` / `custom-local` are still not plumbed through the CLI (usb_plan refuses them).
 
 ---
 
