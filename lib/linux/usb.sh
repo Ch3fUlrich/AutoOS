@@ -861,6 +861,13 @@ usb_plan() {
             # call it — usb_plan runs nothing.
             printf 'Ventoy2Disk.sh -i -g %s\n' "$dev"
             printf 'usb_copy_image %s %s\n' "$dev" "$local_path"
+            # live-persistent on Ventoy = the persistence plugin (B17/B18):
+            # a .dat overlay registered in ventoy/ventoy.json, added after
+            # the image is on the data partition. usb_ventoy_add_persistence
+            # caps the size at half the stick itself.
+            if [[ "$kind" == "live-persistent" ]]; then
+                printf 'usb_ventoy_add_persistence %s\n' "$dev"
+            fi
             ;;
         uefi-copy)
             printf 'usb_copy_image %s %s\n' "$dev" "$local_path"
@@ -892,6 +899,135 @@ usb_plan() {
             return 1
             ;;
     esac
+}
+
+# ─── Terminal chooser (Task 10) ─────────────────────────────────────────────
+# image → kind → engine → device, each step a ui_select_radio over items the
+# catalogs and usb_list provide, ending in a confirmation that names the
+# device, its model, its size and that all data on it will be destroyed
+# (AGENTS.md hard rule 3). The item builders are plain printers so they are
+# testable without a terminal; usb_choose_interactively itself degrades to
+# "first item / default answer" when not interactive (that is what the
+# ui_* helpers do), which the tests use to drive it end to end.
+
+# usb_chooser_image_items — "id|name|kinds|size" for every real image.
+usb_chooser_image_items() {
+    local id name kinds size
+    local -a f=()
+    while IFS= read -r id; do
+        [[ -z "$id" ]] && continue
+        _image_resolve_is_pseudo "$id" && continue
+        f=(); mapfile -t f < <(_image_field "$id" name kinds sizeGb)
+        name="${f[0]:-$id}"; kinds="${f[1]:-}"; size="${f[2]:-}"
+        printf '%s|%s|%s|%s\n' "$id" "$name" "${kinds//,/, }" "${size:+${size} GB}"
+    done < <(_usb_catalog_py "$(_usb_root_dir)/catalog/images.json" images list "" "")
+}
+
+# usb_chooser_kind_items <image_id> — "kind|kind|what it means|" for the
+# kinds that image offers.
+usb_chooser_kind_items() {
+    local image_id="$1" kinds k desc
+    kinds="$(_image_field "$image_id" kinds)"
+    IFS=',' read -ra _kinds <<<"$kinds"
+    for k in "${_kinds[@]}"; do
+        [[ -z "$k" ]] && continue
+        case "$k" in
+            installer)       desc="boot the installer and install onto a machine" ;;
+            live-persistent) desc="boot the live system; changes survive on the stick" ;;
+            full-os)         desc="a complete portable installed OS on the stick" ;;
+            *)               desc="" ;;
+        esac
+        printf '%s|%s|%s|\n' "$k" "$k" "$desc"
+    done
+}
+
+# usb_chooser_engine_items <kind> <write_mode> — "id|name|note|badge" for
+# every engine this machine offers that can build <kind> from a
+# <write_mode> image. The terminal MAY list rufus (a human is present to
+# drive its GUI) - the browser never does; it is badged "interactive".
+usb_chooser_engine_items() {
+    local kind="$1" write_mode="$2" eid
+    local -a f=()
+    while IFS= read -r eid; do
+        [[ -z "$eid" ]] && continue
+        f=(); mapfile -t f < <(_engine_field "$eid" name kinds writeModes interactive)
+        [[ ",${f[1]:-}," == *",$kind,"* ]] || continue
+        [[ ",${f[2]:-}," == *",$write_mode,"* ]] || continue
+        local badge=""
+        [[ "${f[3]:-0}" == "1" ]] && badge="interactive"
+        [[ "$eid" == "ventoy" ]] && badge="default"
+        printf '%s|%s|%s|%s\n' "$eid" "${f[0]:-$eid}" "builds: ${f[1]//,/, }" "$badge"
+    done < <(_engine_list_for_platform "$(_usb_current_os)" "$(_usb_current_arch)")
+}
+
+# usb_chooser_device_items — "path|model|size GB|bus" from usb_list.
+usb_chooser_device_items() {
+    local dpath dmodel dsize drm dtran gb
+    while IFS=$'\t' read -r dpath dmodel dsize drm dtran; do
+        [[ -z "$dpath" ]] && continue
+        gb="$(awk -v b="$dsize" 'BEGIN{printf "%.1f", b/1000000000}')"
+        printf '%s|%s|%s GB|%s\n' "$dpath" "${dmodel:-unknown model}" "$gb" "${dtran:-}"
+    done < <(usb_list)
+}
+
+# usb_choose_interactively
+# Fills USB_IMAGE, USB_KIND, USB_ENGINE and USB_DEVICE (any already set is
+# the default for its step), then - unless AUTOOS_DRY_RUN - asks for the
+# one confirmation that matters and sets USB_WIPE=1 on yes. Returns 1 when
+# there is nothing to choose from or the write was not confirmed. Under a
+# non-interactive session every step takes its default, and the
+# confirmation defaults to NO: a scripted run must pass --wipe-target-disk
+# itself rather than have this function consent on its behalf.
+usb_choose_interactively() {
+    local -a items=()
+
+    mapfile -t items < <(usb_chooser_image_items)
+    if [[ ${#items[@]} -eq 0 ]]; then ui_err "No images in catalog/images.json"; return 1; fi
+    ui_select_radio USB_IMAGE "Choose an image" "${USB_IMAGE:-${items[0]%%|*}}" "${items[@]}"
+
+    mapfile -t items < <(usb_chooser_kind_items "$USB_IMAGE")
+    if [[ ${#items[@]} -eq 0 ]]; then ui_err "Image '$USB_IMAGE' offers no kinds"; return 1; fi
+    ui_select_radio USB_KIND "What should the stick be" "${USB_KIND:-${items[0]%%|*}}" "${items[@]}"
+
+    local write_mode
+    write_mode="$(_image_field "$USB_IMAGE" writeMode)"
+    mapfile -t items < <(usb_chooser_engine_items "$USB_KIND" "$write_mode")
+    if [[ ${#items[@]} -eq 0 ]]; then
+        ui_err "No engine on this machine can build a '$USB_KIND' stick from '$USB_IMAGE' ($write_mode image)"
+        return 1
+    fi
+    local default_engine="${USB_ENGINE:-}"
+    if [[ -z "$default_engine" ]]; then
+        default_engine="${items[0]%%|*}"
+        local it; for it in "${items[@]}"; do [[ "${it%%|*}" == ventoy ]] && default_engine=ventoy; done
+    fi
+    ui_select_radio USB_ENGINE "Choose a write engine" "$default_engine" "${items[@]}"
+
+    mapfile -t items < <(usb_chooser_device_items)
+    if [[ ${#items[@]} -eq 0 ]]; then ui_err "No USB devices found - plug the stick in and try again"; return 1; fi
+    ui_select_radio USB_DEVICE "Choose the target device" "${USB_DEVICE:-${items[0]%%|*}}" "${items[@]}"
+
+    local model="unknown model" size="?" it
+    for it in "${items[@]}"; do
+        if [[ "${it%%|*}" == "$USB_DEVICE" ]]; then
+            IFS='|' read -r _ model size _ <<<"$it"
+        fi
+    done
+
+    ui_section "USB write"
+    ui_kv "Image"  "$USB_IMAGE ($USB_KIND)"
+    ui_kv "Engine" "$USB_ENGINE"
+    ui_kv "Device" "$USB_DEVICE — $model, $size"
+    if (( ${AUTOOS_DRY_RUN:-0} )); then
+        ui_info "dry run: the plan will be shown, nothing written"
+        return 0
+    fi
+    if ui_confirm "Write to $USB_DEVICE ($model, $size)? ALL DATA ON IT WILL BE DESTROYED." n; then
+        USB_WIPE=1
+        return 0
+    fi
+    ui_err "Not confirmed - nothing was written. (A non-interactive run must pass --wipe-target-disk itself.)"
+    return 1
 }
 
 # ─── The write executor (Task 7) ────────────────────────────────────────────
@@ -1062,6 +1198,13 @@ _usb_dispatch_step() {
                 return 1
             fi
             usb_write_raw "${words[1]}" "${words[2]}" "${words[3]}"
+            ;;
+        usb_ventoy_add_persistence)
+            if [[ ${#words[@]} -lt 2 || ${#words[@]} -gt 3 ]]; then
+                ui_err "usb_execute: malformed usb_ventoy_add_persistence step: $line"
+                return 1
+            fi
+            usb_ventoy_add_persistence "${words[@]:1}"
             ;;
         wsl.exe)
             case "${words[1]:-}" in
@@ -1863,16 +2006,12 @@ usb_copy_image() {
 # total size so persistence can never claim more room than the image itself
 # plus headroom needs.
 #
-# Not wired into usb_plan's own output: Task 6's ventoy branch prints the
-# same two lines regardless of <kind>, and adding a kind-conditional third
-# line there is a decision about the already-verified planner's contract
-# that this task's given tests never exercise. This function is a
-# standalone, independently callable and independently tested capability;
-# wiring a kind=live-persistent plan line to call it is left to whichever
-# task owns that decision. B17 also flags this as "probe-then-commit, not a
-# promise" - confirming persistence actually survives a reboot needs a
-# second boot of the real stick, which is exactly the class of check Step 5
-# defers to the human hardware run.
+# Wired into usb_plan since 2026-09-17: the ventoy branch emits
+# `usb_ventoy_add_persistence <dev>` as its last line for kind=live-persistent
+# only, after usb_copy_image, and _usb_dispatch_step accepts that shape.
+# B17 flags this as "probe-then-commit, not a promise" - confirming
+# persistence actually survives a reboot needs a second boot of the real
+# stick, which is exactly the class of check only the human hardware run can do.
 usb_ventoy_add_persistence() {
     local dev="$1" size_gb="${2:-16}"
 

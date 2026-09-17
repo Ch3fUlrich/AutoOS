@@ -1735,6 +1735,23 @@ function Invoke-WithFakeUsbEnv {
     }
 }
 
+function Invoke-AutoOSCapturedConsole {
+    # Write-AutoOSLine writes straight to [Console]::Out rather than the
+    # pipeline (see the verified-download tests above), so a function's own
+    # progress/refusal lines are captured by redirecting the real Console
+    # stream for the duration of -Body. Returns the captured text; -Body's
+    # own exception, if any, is rethrown after the stream is restored.
+    param([scriptblock]$Body)
+    # Both streams: Write-AutoOSLine -Level error goes to [Console]::Error.
+    $sw = [IO.StringWriter]::new()
+    $origOut = [Console]::Out
+    $origErr = [Console]::Error
+    [Console]::SetOut($sw)
+    [Console]::SetError($sw)
+    try { & $Body | Out-Null } finally { [Console]::SetOut($origOut); [Console]::SetError($origErr) }
+    $sw.ToString()
+}
+
 Test-Case 'Assert-AutoOSUsbSafe refuses the disk holding the system volume' {
     Invoke-WithFakeUsbEnv -Fixture 'root_is_boot_disk' -Body {
         $threw = $false; $msg = ''
@@ -1894,6 +1911,57 @@ Test-Case 'usb: New-AutoOSUsbPlan fetches and verifies the image as its first li
             Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue
         }
         Assert-Equal $plan[0] 'Invoke-AutoOSUsbFetchImage ubuntu-desktop-lts C:\scratch\images\ubuntu-desktop-lts.iso'
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan pins the device identity and emits a re-verify step immediately before the destructive lines (F3/F6, plan reverify)' {
+    # Mirror of the bash F3/F6 test: until 2026-09-17 the Windows plan had
+    # no re-verify at all. The fetch line precedes it (the hour-long step
+    # must not sit between the re-verify and the write).
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $env:AUTOOS_FAKE_DISK_ID = 'serial-XYZ'
+        try {
+            $plan = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        } finally { Remove-Item Env:\AUTOOS_FAKE_DISK_ID -ErrorAction SilentlyContinue }
+        $rev = [array]::IndexOf($plan, 'Invoke-AutoOSUsbReverify \\.\PHYSICALDRIVE5 Unmounted 6000000000 serial-XYZ')
+        $ventoy = [array]::IndexOf($plan, 'Ventoy2Disk.exe -I -G \\.\PHYSICALDRIVE5')
+        Assert-True ($rev -ge 1 -and $ventoy -eq ($rev + 1) -and $plan[0] -like 'Invoke-AutoOSUsbFetchImage *') "plan=$($plan -join ' | ')"
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbReverify refuses when the device identity no longer matches what was pinned (F3/F6 TOCTOU, reverify)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_FAKE_DISK_ID = 'serial-CURRENT'
+        try {
+            $threw = $false; $msg = ''
+            try { Invoke-AutoOSUsbReverify -DeviceId '\\.\PHYSICALDRIVE5' -Mode 'Unmounted' -ImageBytes 0 -PinnedId 'serial-PINNED' }
+            catch { $threw = $true; $msg = $_.Exception.Message }
+            Assert-True ($threw -and $msg -like '*identity changed*') "threw=$threw msg=[$msg]"
+        } finally { Remove-Item Env:\AUTOOS_FAKE_DISK_ID -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbReverify accepts when the device identity still matches, and a plan line dispatches to it (reverify)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_FAKE_DISK_ID = 'serial-SAME'
+        try {
+            Invoke-AutoOSUsbReverify -DeviceId '\\.\PHYSICALDRIVE5' -Mode 'Unmounted' -ImageBytes 0 -PinnedId 'serial-SAME'
+            # Through the executor, as the real plan line, with nothing
+            # destructive after it: dispatch must reach the function (a
+            # malformed/unknown line would throw), and it must not throw.
+            $threw = $false; $msg = ''
+            try { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbReverify \\.\PHYSICALDRIVE5 Unmounted 0 serial-SAME') | Out-Null }
+            catch { $threw = $true; $msg = $_.Exception.Message }
+            Assert-True (-not $threw) "unexpected throw: $msg"
+        } finally { Remove-Item Env:\AUTOOS_FAKE_DISK_ID -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan adds the Ventoy persistence step for live-persistent only (plan persistence)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $live = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'live-persistent' -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        $inst = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        Assert-True ($live[-1] -eq 'Add-AutoOSUsbVentoyPersistence \\.\PHYSICALDRIVE5' -and $live[-2] -like 'Invoke-AutoOSUsbCopyImage *' -and (($inst -join "`n") -notlike '*Persistence*')) "live=$($live -join ' | ') inst=$($inst -join ' | ')"
     }
 }
 
@@ -2062,20 +2130,6 @@ function New-AutoOSUsbFetchMirror {
     # Url is the mirror's equivalent of the catalog `index` (the release
     # directory itself), so the resolved relative filename appends cleanly.
     @{ Root = $m; Server = $srv; Url = "http://127.0.0.1:$($srv.Port)/1.0/" }
-}
-
-function Invoke-AutoOSCapturedConsole {
-    # Write-AutoOSLine writes straight to [Console]::Out rather than the
-    # pipeline (see the verified-download tests above), so the fetch's own
-    # progress/skip lines are captured by redirecting the real Console
-    # stream for the duration of -Body. Returns the captured text; -Body's
-    # own exception, if any, is rethrown after the stream is restored.
-    param([scriptblock]$Body)
-    $sw = [IO.StringWriter]::new()
-    $origOut = [Console]::Out
-    [Console]::SetOut($sw)
-    try { & $Body | Out-Null } finally { [Console]::SetOut($origOut) }
-    $sw.ToString()
 }
 
 Test-Case 'usb: Get-AutoOSUsbSumsDigest reads coreutils, starred and BSD-style manifests and ignores non-SHA-256 lines (fetch)' {
@@ -2292,6 +2346,46 @@ Test-Case 'usb: Invoke-AutoOSUsbFetchImage creates a cache directory that does n
     } finally {
         Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
     }
+}
+
+Test-Case 'usb chooser: image items name every real image and exclude the custom pseudo-entries (chooser)' {
+    $items = @(Get-AutoOSUsbChooserImages)
+    $ids = @($items | ForEach-Object { $_.Id })
+    $ubuntu = $items | Where-Object { $_.Id -eq 'ubuntu-desktop-lts' }
+    Assert-True (($ids -contains 'ubuntu-desktop-lts') -and ($ids -notcontains 'custom-url') -and ($ids -notcontains 'custom-local') -and $ubuntu.Description -like '*installer, live-persistent*6 GB*') "ids=$($ids -join ',') desc=$($ubuntu.Description)"
+}
+
+Test-Case 'usb chooser: engine items list what Windows can build for the kind; rufus is offered to the terminal, badged interactive (chooser)' {
+    $env:AUTOOS_FAKE_ARCH = 'x64'
+    try {
+        $hybrid = @(Get-AutoOSUsbChooserEngines -Kind 'installer' -WriteMode 'hybrid')
+        $raw = @(Get-AutoOSUsbChooserEngines -Kind 'installer' -WriteMode 'raw')
+        $rufus = $hybrid | Where-Object { $_.Id -eq 'rufus' }
+        $ventoy = $hybrid | Where-Object { $_.Id -eq 'ventoy' }
+        Assert-True ($rufus.Badge -eq 'interactive' -and $ventoy.Badge -eq 'default' -and (@($hybrid.Id) -contains 'uefi-copy') -and (@($raw.Id) -notcontains 'ventoy') -and (@($raw.Id) -contains 'native')) "hybrid=$($hybrid.Id -join ',') raw=$($raw.Id -join ',')"
+    } finally { Remove-Item Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'usb chooser: a non-interactive run takes the default at every step and never consents to the write itself (chooser)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_NONINTERACTIVE = '1'; $env:AUTOOS_FAKE_ARCH = 'x64'
+        try {
+            $text = Invoke-AutoOSCapturedConsole { $script:chooserResult = Invoke-AutoOSUsbChooser }
+            $dry = $null
+            $textDry = Invoke-AutoOSCapturedConsole { $script:chooserDry = Invoke-AutoOSUsbChooser -DryRun }
+            $dry = $script:chooserDry
+            Assert-True (($null -eq $script:chooserResult) -and $text -like '*Not confirmed*' `
+                -and $dry.Image -eq 'ubuntu-desktop-lts' -and $dry.Kind -eq 'installer' -and $dry.Engine -eq 'ventoy' -and $dry.Device -eq '\\.\PHYSICALDRIVE5' -and (-not $dry.Wipe) `
+                -and $textDry -like '*PHYSICALDRIVE5*' -and $textDry -like '*GB*') "result=$($script:chooserResult) text=$text dry=$($dry | ConvertTo-Json -Compress) textDry=$textDry"
+        } finally {
+            Remove-Item Env:\AUTOOS_NONINTERACTIVE, Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Test-Case 'usb chooser: the profile menu offers Create installer USB and a non-interactive -CreateUsb without flags still refuses (chooser)' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb -NoColor 2>&1) -join "`n"
+    Assert-True ($LASTEXITCODE -eq 2 -and $out -like '*requires -Image*' -and ((Get-Content $setup -Raw) -like "*Id = 'create-usb'; Name = 'Create installer USB'*")) "exit=$LASTEXITCODE out=$out"
 }
 
 Test-Case 'usb: setup.ps1 -Undo states plainly that a USB write cannot be undone' {

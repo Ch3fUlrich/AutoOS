@@ -217,7 +217,10 @@ fi
 # lib/linux/usb.sh), so nothing below this point writes to a disk, only to
 # stdout. --list-engines and --create-usb --dry-run both have to work
 # without ever reaching the main install pipeline's "Detect" banner.
-if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
+# create_usb_flow — the whole --create-usb / --list-usb / --list-engines
+# path as a function so the top-level menu's "Create installer USB" entry
+# (Task 10) can reach it too. Returns the exit status; the callers exit.
+create_usb_flow() {
     # detect_system is silent (sets SYS_* globals; prints nothing) and is
     # skipped whenever EITHER SYS_OS or SYS_ARCH is already set. That is
     # what lets B11/B13's tests simulate macOS and arm64 independently,
@@ -233,7 +236,7 @@ if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
     # refuse cleanly here rather than fail unpredictably inside usb_list.
     if [[ "$(_usb_current_os)" == "macos" ]]; then
         ui_err "USB creation is not supported on macOS"
-        exit 1
+        return 1
     fi
 
     if (( LIST_ENGINES )); then
@@ -250,7 +253,7 @@ if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
             tag=""; [[ "$einteractive" == "1" ]] && tag=" (interactive)"
             printf '  %-12s %s%s\n' "$eid" "$ename" "$tag"
         done < <(_engine_list_for_platform "$(_usb_current_os)" "$(_usb_current_arch)")
-        exit 0
+        return 0
     fi
 
     if (( LIST_USB )); then
@@ -262,13 +265,20 @@ if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
             found_usb=$((found_usb + 1))
         done < <(usb_list)
         (( found_usb == 0 )) && ui_info "No USB devices found."
-        exit 0
+        return 0
     fi
 
     # DO_CREATE_USB
+    # Task 10: an interactive session that did not give every flag gets the
+    # four-step chooser (image -> kind -> engine -> device) and the one
+    # confirmation that names the device and that its data is destroyed;
+    # a non-interactive one keeps the explicit refusal below.
+    if [[ -z "$USB_IMAGE" || -z "$USB_ENGINE" || -z "$USB_DEVICE" ]] && ui_is_interactive; then
+        usb_choose_interactively || return 1
+    fi
     if [[ -z "$USB_IMAGE" || -z "$USB_ENGINE" || -z "$USB_DEVICE" ]]; then
         ui_err "--create-usb requires --image, --engine and --usb-device (--list-engines / --list-usb to discover values)"
-        exit 2
+        return 2
     fi
     # AGENTS.md hard rule 3: every destructive action is opt-in and
     # announced. usb_plan below refuses nothing based on --wipe-target-disk
@@ -291,7 +301,7 @@ if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
     fi
     printf '%s\n' "$usb_plan_out"
     if (( usb_plan_rc != 0 )); then
-        exit 1
+        return 1
     fi
 
     # Elevation (B10): checked here, once the plan is known to be coherent,
@@ -308,13 +318,13 @@ if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
                 ui_warn "$usb_elev_out"
             else
                 ui_err "$usb_elev_out"
-                exit 1
+                return 1
             fi
         fi
     fi
 
     if (( AUTOOS_DRY_RUN )); then
-        exit 0
+        return 0
     fi
 
     # The real write. Until this was wired, a --create-usb without
@@ -330,13 +340,17 @@ if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
     # questions, not "may I destroy this disk").
     if (( ! USB_WIPE )); then
         ui_err "refusing to write $USB_DEVICE: re-run with --wipe-target-disk to confirm that everything on it may be destroyed (the plan above is exactly what would run)"
-        exit 1
+        return 1
     fi
     ui_section "Writing $USB_DEVICE"
     if printf '%s\n' "$usb_plan_out" | usb_execute "$USB_DEVICE"; then
-        exit 0
+        return 0
     fi
-    exit 1
+    return 1
+}
+
+if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
+    if create_usb_flow; then exit 0; else exit $?; fi
 fi
 
 # ─── 1. Detect ──────────────────────────────────────────────────────────────
@@ -456,7 +470,12 @@ elif [[ -z "$PROFILE" ]]; then
             [[ "$pname" == "$SUGGESTED" ]] && p_badge="suggested"
             p_opts+=("${pname}|${pname}|${pdesc}|${p_badge}")
         done < <(catalog_profile_list "$CATALOG")
+        p_opts+=("create-usb|Create installer USB|Build a bootable rescue/installer stick instead of installing|")
         ui_select_radio PROFILE "Choose installation profile" "$SUGGESTED" "${p_opts[@]}"
+        if [[ "$PROFILE" == "create-usb" ]]; then
+            DO_CREATE_USB=1
+            if create_usb_flow; then exit 0; else exit $?; fi
+        fi
     fi
 fi
 if ! catalog_has_profile "$PROFILE"; then ui_err "Unknown profile '$PROFILE'"; exit 2; fi

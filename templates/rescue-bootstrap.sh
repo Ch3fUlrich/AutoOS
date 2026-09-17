@@ -556,7 +556,13 @@ install_ai_registry() {
         return 0
     fi
 
-    backup_file "$AI_REGISTRY_DEST" || true
+    # Hard rule 5: no backup, no overwrite. `|| true` here used to let a
+    # failed backup fall straight through to the install below.
+    if ! backup_file "$AI_REGISTRY_DEST"; then
+        rm -f "$tmp"
+        ui_err "ai registry: could not back up $AI_REGISTRY_DEST - leaving it untouched"
+        return 1
+    fi
     # shellcheck disable=SC2086
     $AUTOOS_SUDO install -m 644 "$tmp" "$AI_REGISTRY_DEST"
     rm -f "$tmp"
@@ -599,8 +605,13 @@ EOF
         if cmp -s "$tmp" "$dest"; then
             ui_line "skipped" "$dest (unchanged)"
         else
-            backup_file "$dest" || true          # hard rule 5, before deciding
-            ui_line "skipped" "$dest (kept your edits — backup taken)"
+            # Hard rule 5, before deciding - and say what actually happened:
+            # `|| true` used to print "backup taken" whether or not it was.
+            if backup_file "$dest"; then
+                ui_line "skipped" "$dest (kept your edits — backup taken)"
+            else
+                ui_line "skipped" "$dest (kept your edits — backup FAILED, nothing was overwritten)"
+            fi
         fi
         rm -f "$tmp"
         return 0

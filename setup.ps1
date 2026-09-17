@@ -159,7 +159,15 @@ if ($CheckCatalog) {
 # AutoOS.Usb.psm1), so nothing below this point writes to a disk, only to
 # the console. -ListEngines and -CreateUsb -DryRun both have to work
 # without ever reaching the main install pipeline's "Detect" banner.
-if ($CreateUsb -or $ListUsb -or $ListEngines) {
+# Invoke-AutoOSCreateUsbFlow - the whole -CreateUsb / -ListUsb / -ListEngines
+# path as a function so the top-level menu's "Create installer USB" entry
+# (Task 10) can reach it too. Returns the exit code; the callers exit.
+function Invoke-AutoOSCreateUsbFlow {
+    # Pipeline output from the steps below (the executor's TRACE lines, for
+    # one) must reach the console, so the exit code travels in a script
+    # variable rather than as the function's return value.
+    $script:CreateUsbExit = 0
+    $img = $Image; $knd = $Kind; $eng = $Engine; $dev = $UsbDevice; $wipe = [bool]$WipeTargetDisk
     if ($ListEngines) {
         Write-AutoOSSection 'USB write engines available on this machine'
         $engines = @(Get-AutoOSUsbEngineList -Platform (Get-AutoOSUsbCurrentOs) -Arch (Get-AutoOSUsbCurrentArch))
@@ -167,7 +175,7 @@ if ($CreateUsb -or $ListUsb -or $ListEngines) {
             $tag = if ($e.interactive) { ' (interactive)' } else { '' }
             Write-AutoOSLine ("  {0,-12} {1}{2}" -f $e.id, $e.name, $tag)
         }
-        exit 0
+        $script:CreateUsbExit = 0; return
     }
 
     if ($ListUsb) {
@@ -179,13 +187,23 @@ if ($CreateUsb -or $ListUsb -or $ListEngines) {
         foreach ($d in $devices) {
             Write-AutoOSLine ("  {0,-18} {1,-24} {2} bytes" -f $d.DeviceId, $d.Model, $d.SizeBytes)
         }
-        exit 0
+        $script:CreateUsbExit = 0; return
     }
 
     # $CreateUsb
-    if (-not $Image -or -not $Engine -or -not $UsbDevice) {
+    # Task 10: an interactive session that did not give every flag gets the
+    # four-step chooser (image -> kind -> engine -> device) and the one
+    # confirmation that names the device and that its data is destroyed;
+    # a non-interactive one keeps the explicit refusal below.
+    if ((-not $img -or -not $eng -or -not $dev) -and (Test-AutoOSInteractive)) {
+        $choice = Invoke-AutoOSUsbChooser -Image $img -Kind $knd -Engine $eng -Device $dev -DryRun:$DryRun.IsPresent
+        if (-not $choice) { return 1 }
+        $img = $choice.Image; $knd = $choice.Kind; $eng = $choice.Engine; $dev = $choice.Device
+        if ($choice.Wipe) { $wipe = $true }
+    }
+    if (-not $img -or -not $eng -or -not $dev) {
         Write-AutoOSLine '-CreateUsb requires -Image, -Engine and -UsbDevice (-ListEngines / -ListUsb to discover values)' -Level error
-        exit 2
+        $script:CreateUsbExit = 2; return
     }
     # AGENTS.md hard rule 3: every destructive action is opt-in and
     # announced. New-AutoOSUsbPlan below refuses nothing based on
@@ -194,14 +212,14 @@ if ($CreateUsb -or $ListUsb -or $ListEngines) {
     # target's current contents are lost, so the flag is acknowledged here
     # rather than silently accepted-and-ignored if a user thought passing
     # it would gate something.
-    if ($WipeTargetDisk) {
+    if ($wipe) {
         Write-AutoOSLine "Acknowledged: the target device's current contents will be overwritten." -Level muted
     }
     try {
-        $plan = @(New-AutoOSUsbPlan -ImageId $Image -Kind $Kind -Engine $Engine -DeviceId $UsbDevice -DryRun:$DryRun.IsPresent)
+        $plan = @(New-AutoOSUsbPlan -ImageId $img -Kind $knd -Engine $eng -DeviceId $dev -DryRun:$DryRun.IsPresent)
     } catch {
         Write-AutoOSLine $_.Exception.Message -Level error
-        exit 1
+        $script:CreateUsbExit = 1; return
     }
     foreach ($line in $plan) { Write-AutoOSLine $line }
 
@@ -213,14 +231,14 @@ if ($CreateUsb -or $ListUsb -or $ListEngines) {
     # the plan above even when unelevated — that gap belongs in the
     # preview, not hidden behind a hard failure that would stop the plan
     # from ever being shown.
-    if ($Engine -ne 'uefi-copy') {
+    if ($eng -ne 'uefi-copy') {
         $elev = Test-AutoOSElevated
         if (-not $elev.IsElevated) {
             if ($DryRun) {
                 Write-AutoOSLine $elev.Reason -Level warn
             } else {
                 Write-AutoOSLine $elev.Reason -Level error
-                exit 1
+                $script:CreateUsbExit = 1; return
             }
         }
     }
@@ -238,18 +256,23 @@ if ($CreateUsb -or $ListUsb -or $ListEngines) {
     # do, having downloaded and written nothing - a plan is not consent,
     # and neither is -Yes (which answers the install menu's questions, not
     # "may I destroy this disk").
-    if (-not $WipeTargetDisk) {
-        Write-AutoOSLine "refusing to write ${UsbDevice}: re-run with -WipeTargetDisk to confirm that everything on it may be destroyed (the plan above is exactly what would run)" -Level error
-        exit 1
+    if (-not $wipe) {
+        Write-AutoOSLine "refusing to write ${dev}: re-run with -WipeTargetDisk to confirm that everything on it may be destroyed (the plan above is exactly what would run)" -Level error
+        $script:CreateUsbExit = 1; return
     }
-    Write-AutoOSSection "Writing $UsbDevice"
+    Write-AutoOSSection "Writing $dev"
     try {
-        Invoke-AutoOSUsbPlan -DeviceId $UsbDevice -Plan $plan
+        Invoke-AutoOSUsbPlan -DeviceId $dev -Plan $plan
     } catch {
         Write-AutoOSLine $_.Exception.Message -Level error
-        exit 1
+        $script:CreateUsbExit = 1; return
     }
-    exit 0
+    $script:CreateUsbExit = 0; return
+}
+
+if ($CreateUsb -or $ListUsb -or $ListEngines) {
+    Invoke-AutoOSCreateUsbFlow
+    exit $script:CreateUsbExit
 }
 
 # ─── What is already here ───────────────────────────────────────────────────
@@ -404,7 +427,9 @@ if ($FromState) {
                 Badge       = $badge
             }
         }
+        $profileItems += [pscustomobject]@{ Id = 'create-usb'; Name = 'Create installer USB'; Description = 'Build a bootable rescue/installer stick instead of installing'; Badge = '' }
         $InstallProfile = Show-AutoOSRadioMenu -Items $profileItems -Title 'Choose installation profile' -DefaultId $suggested
+        if ($InstallProfile -eq 'create-usb') { Invoke-AutoOSCreateUsbFlow; exit $script:CreateUsbExit }
     }
 }
 if ($InstallProfile -notin $profileNames) { throw "Unknown profile: $InstallProfile" }

@@ -2787,6 +2787,22 @@ if it "usb_plan: the first plan line fetches and verifies the image, before anyt
     assert_eq "$first_line" "usb_fetch_image ubuntu-desktop-lts /scratch/images/ubuntu-desktop-lts.iso"
 fi
 
+if it "usb_plan: a live-persistent ventoy plan ends with the persistence step, an installer plan has none (usb plan persistence)"; then
+    live="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_plan ubuntu-desktop-lts live-persistent ventoy /dev/sdb)"
+    inst="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_plan ubuntu-desktop-lts installer ventoy /dev/sdb)"
+    last_live="$(printf '%s\n' "$live" | tail -1)"
+    prev_live="$(printf '%s\n' "$live" | tail -2 | head -1)"
+    if [[ "$last_live" == "usb_ventoy_add_persistence /dev/sdb" && "$prev_live" == "usb_copy_image /dev/sdb "* \
+          && "$inst" != *"usb_ventoy_add_persistence"* ]]; then pass
+    else fail "live=$live / inst=$inst"; fi
+fi
+
+if it "usb_execute: a usb_ventoy_add_persistence line with the wrong word count is refused, never run (usb plan persistence)"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
+           usb_execute /dev/sdb <<<"usb_ventoy_add_persistence /dev/sdb 16 extra" 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"malformed usb_ventoy_add_persistence step"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
 if it "usb_plan: every engine's plan starts with the fetch step and never names the cache path before it (usb plan fetch)"; then
     # uefi-copy has its own fixture (mounted FAT32); the raw/native engine
     # shares good_stick. Both must lead with the same fetch line.
@@ -2806,6 +2822,55 @@ fi
 if it "usb_reverify accepts when the device's identity still matches what was pinned (F3/F6)"; then
     AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FAKE_DISK_ID=serial-SAME \
         usb_reverify /dev/sdb unmounted 0 serial-SAME && pass || fail "rejected a matching identity"
+fi
+
+if it "usb chooser: image items name every real image and exclude the custom pseudo-entries (usb chooser)"; then
+    out="$(usb_chooser_image_items)"
+    if [[ "$out" == *"ubuntu-desktop-lts|Ubuntu Desktop (LTS)|installer, live-persistent|6 GB"* && "$out" != *"custom-url"* && "$out" != *"custom-local"* ]]; then pass
+    else fail "$out"; fi
+fi
+
+if it "usb chooser: engine items list what this platform can build for the kind, and the terminal may offer rufus, badged interactive (usb chooser)"; then
+    linux="$(SYS_OS=linux SYS_ARCH=x64 usb_chooser_engine_items installer hybrid)"
+    windows="$(SYS_OS=windows SYS_ARCH=x64 usb_chooser_engine_items installer hybrid)"
+    if [[ "$linux" == *"ventoy|Ventoy|"*"|default"* && "$linux" == *"uefi-copy|"* && "$linux" == *"native|"* \
+          && "$linux" != *"rufus"* && "$linux" != *"wsl|"* \
+          && "$windows" == *"rufus|"*"|interactive"* && "$windows" == *"wsl|"* ]]; then pass
+    else fail "linux=$linux / windows=$windows"; fi
+fi
+
+if it "usb chooser: a raw image is only offered engines that write raw (usb chooser)"; then
+    out="$(SYS_OS=linux SYS_ARCH=x64 usb_chooser_engine_items installer raw)"
+    [[ "$out" == *"native|"* && "$out" != *"ventoy"* && "$out" != *"uefi-copy"* ]] && pass || fail "$out"
+fi
+
+if it "usb chooser: a non-interactive run takes the default at every step and never consents to the write itself (usb chooser)"; then
+    # The chooser sets globals, so it must run in THIS shell (a $(...)
+    # capture would be a subshell and lose them); its output goes to a file.
+    chooser_log="$(mktemp)"
+    res="$( export AUTOOS_NONINTERACTIVE=1 AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" SYS_OS=linux SYS_ARCH=x64
+            USB_IMAGE=""; USB_KIND=""; USB_ENGINE=""; USB_DEVICE=""; USB_WIPE=0
+            usb_choose_interactively >"$chooser_log" 2>&1; rc=$?
+            printf '%s|%s|%s|%s|%s|%s' "$USB_IMAGE" "$USB_KIND" "$USB_ENGINE" "$USB_DEVICE" "$USB_WIPE" "$rc" )"
+    out="$(cat "$chooser_log")"; rm -f "$chooser_log"
+    IFS='|' read -r img kind eng dev wipe rc <<<"$res"
+    if [[ "$img" == "ubuntu-desktop-lts" && "$kind" == "installer" && "$eng" == "ventoy" && "$dev" == "/dev/sdb" \
+          && "$wipe" == "0" && "$rc" != "0" && "$out" == *"Not confirmed"* ]]; then pass
+    else fail "$res / $out"; fi
+fi
+
+if it "usb chooser: a dry run asks for no confirmation and shows the summary naming the device, model and size (usb chooser)"; then
+    out="$( export AUTOOS_NONINTERACTIVE=1 AUTOOS_DRY_RUN=1 AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" SYS_OS=linux SYS_ARCH=x64
+            USB_IMAGE=""; USB_KIND=""; USB_ENGINE=""; USB_DEVICE=""; USB_WIPE=0
+            usb_choose_interactively 2>&1 && echo RC0 )"
+    if [[ "$out" == *"RC0"* && "$out" == *"/dev/sdb"* && "$out" == *"GB"* && "$out" != *"Not confirmed"* ]]; then pass
+    else fail "$out"; fi
+fi
+
+if it "usb chooser: the profile menu offers Create installer USB and a non-interactive --create-usb without flags still refuses (usb chooser)"; then
+    out="$(AUTOOS_NONINTERACTIVE=1 bash setup.sh --create-usb --no-color 2>&1)"; rc=$?
+    if grep -q 'create-usb|Create installer USB' setup.sh && [[ $rc -eq 2 && "$out" == *"requires --image"* ]]; then pass
+    else fail "rc=$rc out=$out"; fi
 fi
 
 if it "usb --undo states plainly that a USB write cannot be undone"; then

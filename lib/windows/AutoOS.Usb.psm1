@@ -443,6 +443,173 @@ function Test-AutoOSUsbRunActive {
     Test-Path -LiteralPath (Get-AutoOSUsbRunLockPath)
 }
 
+function Get-AutoOSUsbDiskIdentity {
+    <#
+      .SYNOPSIS
+        A stable identity for -DeviceId (its serial number), or 'unknown'.
+        Mirror of lib/linux/usb.sh's _usb_disk_identity.
+      .DESCRIPTION
+        $env:AUTOOS_FAKE_DISK_ID substitutes an identity under test (an
+        empty value means 'unknown'); when the fake disk table is in use
+        and no identity is faked, this is 'unknown' - never a real Get-Disk
+        walk during the suite (AGENTS.md SS5).
+    #>
+    param([Parameter(Mandatory)][string]$DeviceId)
+    if ($null -ne $env:AUTOOS_FAKE_DISK_ID) {
+        if ($env:AUTOOS_FAKE_DISK_ID) { return $env:AUTOOS_FAKE_DISK_ID }
+        return 'unknown'
+    }
+    if ($env:AUTOOS_FAKE_DISKS) { return 'unknown' }
+    $numberText = $DeviceId -replace '^\\\\\.\\PHYSICALDRIVE', ''
+    $number = 0
+    if (-not [int]::TryParse($numberText, [ref]$number)) { return 'unknown' }
+    try {
+        $serial = [string](Get-Disk -Number $number -ErrorAction Stop).SerialNumber
+        if ($serial.Trim()) { return $serial.Trim() }
+    } catch {
+        Write-Verbose "Get-AutoOSUsbDiskIdentity: Get-Disk failed for ${DeviceId}: $($_.Exception.Message)"
+    }
+    return 'unknown'
+}
+
+function Invoke-AutoOSUsbReverify {
+    <#
+      .SYNOPSIS
+        Re-runs Assert-AutoOSUsbSafe in the SAME mode the plan used and
+        re-checks the device's identity against the one pinned at plan
+        time, immediately before the first destructive step (findings
+        F3/F6). Mirror of lib/linux/usb.sh's usb_reverify: a plan can sit
+        in a browser tab or be replayed while the real disk table moves on
+        underneath it, and a different stick can enumerate under the very
+        same id after an unplug. Throws with the reason.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DeviceId,
+        [Parameter(Mandatory)][string]$Mode,
+        [Parameter(Mandatory)][int64]$ImageBytes,
+        [Parameter(Mandatory)][string]$PinnedId
+    )
+    $prevImageBytes = $env:AUTOOS_IMAGE_BYTES
+    $env:AUTOOS_IMAGE_BYTES = [string]$ImageBytes
+    try {
+        Assert-AutoOSUsbSafe -DeviceId $DeviceId -Mode $Mode | Out-Null
+    } finally {
+        if ($null -eq $prevImageBytes) { Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_IMAGE_BYTES = $prevImageBytes }
+    }
+    $current = Get-AutoOSUsbDiskIdentity -DeviceId $DeviceId
+    if ($PinnedId -ne 'unknown' -and $current -ne $PinnedId) {
+        throw "usb_reverify: $DeviceId's identity changed since it was selected (was $PinnedId, now $current) - it may have been unplugged and replaced; refusing to write. Re-select the device and start over."
+    }
+}
+
+# ─── Terminal chooser (Task 10) ─────────────────────────────────────────────
+# image → kind → engine → device, each a Show-AutoOSRadioMenu over items
+# the catalogs and Get-AutoOSUsbDevice provide, ending in the one
+# confirmation that matters: device, model, size and "all data on it will
+# be destroyed" (AGENTS.md hard rule 3). Mirror of lib/linux/usb.sh's
+# usb_choose_interactively. The item builders are pure so they are tested
+# without a console; the chooser itself degrades to "first item / default
+# answer" when not interactive, which the tests use to drive it.
+
+function Get-AutoOSUsbChooserImages {
+    Get-AutoOSUsbImageCatalog | Where-Object { $_.id -notin @('custom-url', 'custom-local') } | ForEach-Object {
+        $size = if ($_.PSObject.Properties['sizeGb']) { "$($_.sizeGb) GB" } else { '' }
+        [pscustomobject]@{ Id = $_.id; Name = $_.name; Description = ((@($_.kinds) -join ', ') + " - $size").Trim(' -'); Badge = '' }
+    }
+}
+
+function Get-AutoOSUsbChooserKinds {
+    param([Parameter(Mandatory)][string]$ImageId)
+    $image = Get-AutoOSUsbImage -Id $ImageId
+    if (-not $image) { return @() }
+    foreach ($k in @($image.kinds)) {
+        $desc = switch ($k) {
+            'installer'       { 'boot the installer and install onto a machine' }
+            'live-persistent' { 'boot the live system; changes survive on the stick' }
+            'full-os'         { 'a complete portable installed OS on the stick' }
+            default           { '' }
+        }
+        [pscustomobject]@{ Id = $k; Name = $k; Description = $desc; Badge = '' }
+    }
+}
+
+function Get-AutoOSUsbChooserEngines {
+    # The terminal MAY list rufus (a human is present to drive its GUI) -
+    # the browser never does; it is badged "interactive".
+    param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$WriteMode)
+    Get-AutoOSUsbEngineList -Platform (Get-AutoOSUsbCurrentOs) -Arch (Get-AutoOSUsbCurrentArch) |
+        Where-Object { (@($_.kinds) -contains $Kind) -and (@($_.writeModes) -contains $WriteMode) } |
+        ForEach-Object {
+            $badge = if ($_.interactive) { 'interactive' } elseif ($_.id -eq 'ventoy') { 'default' } else { '' }
+            [pscustomobject]@{ Id = $_.id; Name = $_.name; Description = ('builds: ' + (@($_.kinds) -join ', ')); Badge = $badge }
+        }
+}
+
+function Get-AutoOSUsbChooserDevices {
+    Get-AutoOSUsbDevice | ForEach-Object {
+        [pscustomobject]@{ Id = $_.DeviceId; Name = $_.Model; Description = ('{0:N1} GB' -f ($_.SizeBytes / 1e9)); Badge = $_.Bus }
+    }
+}
+
+function Invoke-AutoOSUsbChooser {
+    <#
+      .SYNOPSIS
+        Runs the four-step chooser and returns @{ Image; Kind; Engine;
+        Device; Wipe }, or $null when there was nothing to choose from or
+        the write was not confirmed. Any parameter already given is that
+        step's default. Under a non-interactive session every step takes
+        its default and the confirmation defaults to NO - a scripted run
+        must pass -WipeTargetDisk itself. -DryRun skips the confirmation
+        (nothing will be written).
+    #>
+    [CmdletBinding()]
+    param([string]$Image, [string]$Kind, [string]$Engine, [string]$Device, [switch]$DryRun)
+
+    $images = @(Get-AutoOSUsbChooserImages)
+    if ($images.Count -eq 0) { Write-AutoOSLine 'No images in catalog\images.json' -Level error; return $null }
+    $default = if ($Image) { $Image } else { $images[0].Id }
+    $Image = Show-AutoOSRadioMenu -Items $images -Title 'Choose an image' -DefaultId $default
+
+    $kinds = @(Get-AutoOSUsbChooserKinds -ImageId $Image)
+    if ($kinds.Count -eq 0) { Write-AutoOSLine "Image '$Image' offers no kinds" -Level error; return $null }
+    $default = if ($Kind) { $Kind } else { $kinds[0].Id }
+    $Kind = Show-AutoOSRadioMenu -Items $kinds -Title 'What should the stick be' -DefaultId $default
+
+    $writeMode = [string](Get-AutoOSUsbImage -Id $Image).writeMode
+    $engines = @(Get-AutoOSUsbChooserEngines -Kind $Kind -WriteMode $writeMode)
+    if ($engines.Count -eq 0) {
+        Write-AutoOSLine "No engine on this machine can build a '$Kind' stick from '$Image' ($writeMode image)" -Level error
+        return $null
+    }
+    $default = if ($Engine) { $Engine } elseif ($engines.Id -contains 'ventoy') { 'ventoy' } else { $engines[0].Id }
+    $Engine = Show-AutoOSRadioMenu -Items $engines -Title 'Choose a write engine' -DefaultId $default
+
+    $devices = @(Get-AutoOSUsbChooserDevices)
+    if ($devices.Count -eq 0) { Write-AutoOSLine 'No USB devices found - plug the stick in and try again' -Level error; return $null }
+    $default = if ($Device) { $Device } else { $devices[0].Id }
+    $Device = Show-AutoOSRadioMenu -Items $devices -Title 'Choose the target device' -DefaultId $default
+    $chosen = $devices | Where-Object { $_.Id -eq $Device } | Select-Object -First 1
+    $model = if ($chosen) { $chosen.Name } else { 'unknown model' }
+    $size = if ($chosen) { $chosen.Description } else { '?' }
+
+    Write-AutoOSSection 'USB write'
+    Write-AutoOSLine "  Image:  $Image ($Kind)"
+    Write-AutoOSLine "  Engine: $Engine"
+    Write-AutoOSLine "  Device: $Device - $model, $size"
+    $wipe = $false
+    if ($DryRun) {
+        Write-AutoOSLine 'dry run: the plan will be shown, nothing written' -Level info
+    } elseif (Read-AutoOSConfirm -Question "Write to $Device ($model, $size)? ALL DATA ON IT WILL BE DESTROYED." -Default $false) {
+        $wipe = $true
+    } else {
+        Write-AutoOSLine 'Not confirmed - nothing was written. (A non-interactive run must pass -WipeTargetDisk itself.)' -Level error
+        return $null
+    }
+    [pscustomobject]@{ Image = $Image; Kind = $Kind; Engine = $Engine; Device = $Device; Wipe = $wipe }
+}
+
 function New-AutoOSUsbPlan {
     <#
       .SYNOPSIS
@@ -536,6 +703,13 @@ function New-AutoOSUsbPlan {
 
     $localPath = Join-Path (Get-AutoOSDownloadCacheDir) "$ImageId.iso"
 
+    # Findings F3/F6 (mirror of usb_plan): the guard above only proves the
+    # device is safe NOW. The plan may run much later, after an unplug and a
+    # different stick under the same id, so its identity is pinned here and
+    # re-checked by Invoke-AutoOSUsbReverify immediately before the first
+    # destructive line.
+    $pinnedId = Get-AutoOSUsbDiskIdentity -DeviceId $DeviceId
+
     $lines = [System.Collections.Generic.List[string]]::new()
     # The image itself: resolved (Resolve-AutoOSImageUrl), checksum-verified
     # and cached by Invoke-AutoOSUsbFetchImage, the FIRST line of every plan
@@ -544,6 +718,7 @@ function New-AutoOSUsbPlan {
     # Under -DryRun this line is traced and skipped like every other, so
     # New-AutoOSUsbPlan itself still runs nothing and touches no network.
     $lines.Add("Invoke-AutoOSUsbFetchImage $ImageId $localPath")
+    $lines.Add("Invoke-AutoOSUsbReverify $DeviceId $guardMode $imageBytes $pinnedId")
     switch ($Engine) {
         'ventoy' {
             # Ventoy is a two-step engine: install the boot manager onto
@@ -553,6 +728,12 @@ function New-AutoOSUsbPlan {
             # it — New-AutoOSUsbPlan runs nothing.
             $lines.Add("Ventoy2Disk.exe -I -G $DeviceId")
             $lines.Add("Invoke-AutoOSUsbCopyImage $DeviceId $localPath")
+            # live-persistent on Ventoy = the persistence plugin (B17/B18),
+            # added after the image is on the data partition; the size is
+            # capped at half the stick by Add-AutoOSUsbVentoyPersistence.
+            if ($Kind -eq 'live-persistent') {
+                $lines.Add("Add-AutoOSUsbVentoyPersistence $DeviceId")
+            }
         }
         'uefi-copy' {
             $lines.Add("Invoke-AutoOSUsbCopyImage $DeviceId $localPath")
@@ -630,6 +811,12 @@ function Invoke-AutoOSUsbPlanStep {
         Invoke-AutoOSUsbFetchImage -ImageId $fetch.Groups[1].Value -Destination $fetch.Groups[2].Value
         return
     }
+    $rev = [regex]::Match($Line, '^Invoke-AutoOSUsbReverify\s+(\S+)\s+(\S+)\s+(\d+)\s+(\S+)\s*$')
+    if ($rev.Success) {
+        Invoke-AutoOSUsbReverify -DeviceId $rev.Groups[1].Value -Mode $rev.Groups[2].Value `
+            -ImageBytes ([int64]$rev.Groups[3].Value) -PinnedId $rev.Groups[4].Value
+        return
+    }
     if ($Line -match '^Ventoy2Disk\.exe\s') {
         Install-AutoOSUsbVentoy -DeviceId $DeviceId
         return
@@ -673,7 +860,7 @@ function Invoke-AutoOSUsbPlan {
     # exactly that about a stick nothing had written to.
     $destructiveStarted = $false
     foreach ($line in $steps) {
-        if ($line -notmatch '^Invoke-AutoOSUsbFetchImage\s') { $destructiveStarted = $true }
+        if ($line -notmatch '^Invoke-AutoOSUsb(FetchImage|Reverify)\s') { $destructiveStarted = $true }
         try {
             Invoke-AutoOSUsbPlanStep -DeviceId $DeviceId -Line $line
         } catch {
@@ -1236,6 +1423,8 @@ function Add-AutoOSUsbVentoyPersistence {
 Export-ModuleMember -Function `
     Get-AutoOSUsbDevice, Assert-AutoOSUsbSafe, Test-AutoOSElevated, Assert-AutoOSElevated, `
     New-AutoOSUsbPlan, Get-AutoOSUsbEngine, Get-AutoOSUsbImage, Get-AutoOSUsbEngineList, `
+    Get-AutoOSUsbDiskIdentity, Invoke-AutoOSUsbReverify, `
+    Get-AutoOSUsbChooserImages, Get-AutoOSUsbChooserKinds, Get-AutoOSUsbChooserEngines, Get-AutoOSUsbChooserDevices, Invoke-AutoOSUsbChooser, `
     Get-AutoOSUsbCurrentOs, Get-AutoOSUsbCurrentArch, Test-AutoOSUsbRunActive, `
     Invoke-AutoOSUsbPlan, Invoke-AutoOSUsbFetchImage, Get-AutoOSUsbSumsDigest, `
     Write-AutoOSUsbRaw, Invoke-AutoOSUsbCopyImage, Test-AutoOSRobocopyFailed, Test-AutoOSUsbCopyReadback, `
