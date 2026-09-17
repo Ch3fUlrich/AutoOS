@@ -1065,8 +1065,8 @@ function Install-AutoOSUsbVentoy {
         $shaText = (Invoke-WebRequest -Uri $shaAsset.browser_download_url -UseBasicParsing).Content
         $wantLine = ($shaText -split "`r?`n") | Where-Object { $_ -match [regex]::Escape($asset.name) } | Select-Object -First 1
         $want = if ($wantLine) { ($wantLine.Trim() -split '\s+')[0] } else { $null }
-        $have = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
-        if (-not $want -or $have.ToLowerInvariant() -ne $want.ToLowerInvariant()) {
+        $have = Get-AutoOSFileSha256 -Path $zipPath
+        if (-not $want -or $have -ne $want.ToLowerInvariant()) {
             Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
             throw "Install-AutoOSUsbVentoy: checksum mismatch for $($asset.name) - refusing to install an unverified Ventoy"
         }

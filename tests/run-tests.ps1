@@ -1377,6 +1377,35 @@ Test-Case 'verified download: an http 404 is a transport failure that leaves no 
     }
 }
 
+Test-Case 'verified download: hashes and verifies a file under Windows PowerShell 5.1, the engine setup.ps1 actually runs in (5.1)' {
+    # This suite runs under pwsh 7; setup.ps1 is launched with powershell.exe
+    # 5.1 (elevated launches in particular). The first real 6 GB download on
+    # 2026-09-17 completed and then failed in the 5.1 process with
+    # "Get-FileHash is not recognized" - a path no test had ever run under
+    # 5.1. The hash now goes through .NET; this proves the whole
+    # download-and-verify path under the real engine.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_51_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $src = Join-Path $tmp 'src'; Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+        $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+        $out = Join-Path $tmp 'out'
+        $probe = Join-Path $tmp 'probe.ps1'
+        $mod = Join-Path $Root 'lib\windows\AutoOS.Download.psm1'
+        $lines = @(
+            'Set-StrictMode -Version Latest',
+            "`$ErrorActionPreference = 'Stop'",
+            "Import-Module '$mod' -DisableNameChecking -Force",
+            "Get-AutoOSVerifiedFile -Uri '$(([Uri]$src).AbsoluteUri)' -Destination '$out' -Sha256 '$sum' | Out-Null",
+            "'VERIFIED-51 ' + (Get-AutoOSFileSha256 -Path '$out')"
+        )
+        [IO.File]::WriteAllText($probe, ($lines -join "`r`n") + "`r`n", [Text.Encoding]::ASCII)
+        $res = (& powershell -NoProfile -ExecutionPolicy Bypass -File $probe 2>&1) -join "`n"
+        Assert-True ($LASTEXITCODE -eq 0 -and $res -like "*VERIFIED-51 $($sum.ToLowerInvariant())*" -and (Test-Path -LiteralPath $out)) "exit=$LASTEXITCODE out=$res"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'verified download: gpg stderr chatter (gpg-agent directory created) is not a failure, only the exit code is (gpg)' {
     # The first real run on 2026-09-17 died here: gpg prints "gpg-agent[n]:
     # directory '...' created" to stderr on every fresh GNUPGHOME, and under

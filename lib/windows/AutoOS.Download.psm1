@@ -41,11 +41,38 @@ function Get-AutoOSDownloadCacheDir {
 
 # Case-insensitive SHA-256 compare via Get-FileHash - the PowerShell
 # equivalent of the sha256sum/shasum pair lib/linux/download.sh uses.
+function Get-AutoOSFileSha256 {
+    <#
+      .SYNOPSIS
+        Lower-case SHA-256 hex of a file, streamed through .NET.
+      .DESCRIPTION
+        Not Get-FileHash: on the first real 6 GB download (2026-09-17,
+        Windows PowerShell 5.1 launched by setup.ps1) the module's call to
+        Get-FileHash failed with "not recognized as the name of a cmdlet"
+        right after the download completed, although the same cmdlet
+        resolves in a fresh session. Whatever the autoload state of
+        Microsoft.PowerShell.Utility in that process, a hash of the file
+        we are about to write to a disk must not depend on it. .NET's
+        SHA256 is always present and streams, so memory stays flat for
+        any file size.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $bytes = $sha.ComputeHash($stream)
+    } finally {
+        $stream.Dispose()
+        $sha.Dispose()
+    }
+    ([BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+}
+
 function Test-AutoOSSha256Match {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Want)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
-    $have = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
-    $have.ToLowerInvariant() -eq $Want.ToLowerInvariant()
+    $have = Get-AutoOSFileSha256 -Path $Path
+    $have -eq $Want.ToLowerInvariant()
 }
 
 # Fetches <Uri> to <OutFile>. file:// sources are copied directly since
@@ -483,5 +510,5 @@ function Resolve-AutoOSImageUrl {
 }
 
 Export-ModuleMember -Function `
-    Get-AutoOSDownloadCacheDir, Get-AutoOSVerifiedFile, Test-AutoOSSha256Match, Test-AutoOSGpgSignature, `
-    Resolve-AutoOSImageUrl
+    Get-AutoOSDownloadCacheDir, Get-AutoOSVerifiedFile, Test-AutoOSSha256Match, Get-AutoOSFileSha256, `
+    Test-AutoOSGpgSignature, Resolve-AutoOSImageUrl
