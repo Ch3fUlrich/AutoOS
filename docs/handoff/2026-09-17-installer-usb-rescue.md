@@ -174,13 +174,55 @@ each fixed test-first on both platforms:
    from wipefs" about a stick nothing had written to. Both executors now track when the
    destructive part begins and say "was not touched" before it.
 
-After those, the manifest verified against Ubuntu's real key and the ISO download ran — at
-**~0.7 MB/s, which is what `releases.ubuntu.com` itself served this host** (measured directly
-with curl, twice; a mirror list on the catalog entry is the obvious follow-up). The download
-takes ~2 h at that rate; see the next dated handoff or the git log for whether the copy onto
-J: and a boot were reached.
+5. **Origin throughput.** With 1–4 fixed, the manifest verified against Ubuntu's real key and the
+   ISO download ran — at ~0.7 MB/s, which is what `releases.ubuntu.com` itself served this host
+   (measured directly with curl, twice), i.e. ~3 h for 6.5 GB, while `mirror.init7.net` did
+   ~490 MB/s and `ftp.halifax.rwth-aachen.de` ~130 MB/s on the same file. Catalog entries may
+   now carry an optional `mirrors` list (validated: https, trailing slash, same layout as
+   `index`); the canonical index still chooses the file and the canonical signed manifest still
+   fixes its digest, only the bytes may come from a mirror, verified against that digest. A
+   mirror that is unreachable, 404s or serves wrong bytes is skipped with a warning; the
+   canonical URL is the last resort. Both Ubuntu entries list the two mirrors above.
+6. **`Get-FileHash` "not recognized"** in the powershell.exe 5.1 process, right after the first
+   complete download — although it resolves in a fresh 5.1 session and from a nested module in
+   a probe (cause not found). Hashing now streams through .NET `SHA256` (`Get-AutoOSFileSha256`),
+   and a new test runs the download-and-verify path under powershell.exe 5.1, which no test had
+   ever done: the suite runs under pwsh 7 and the 5.1 engine only ever ran dry-run/refusal tests.
 
-Still true after this session: **nobody has booted a stick built by this tool**, the
+With all six fixed, `setup.ps1 -CreateUsb … -Engine uefi-copy -WipeTargetDisk` resolved
+26.04.1, GPG-verified the manifest, fetched the 6,482,409,472-byte ISO from init7 in about a
+minute, verified it, mounted it and ran `robocopy` onto J:. That first copy took ~21 minutes for
+951 files / 6.47 GB and **stalled for ~10 minutes in the middle** with the Windows System log
+showing `disk` event 153 ("IO operation … was retried") for disk 5, the device write counter at
+zero and a one-deep queue — the stick's own controller, not the tool; a probe write to K: on the
+same device took >20 s. It then completed, printed "Ready to boot", and the stick was replugged
+straight away: it came back with J: "Full Repair Needed" and unreadable. Two more defects from
+that, fixed and unit-tested:
+
+7. **No flush before "Ready to boot".** `Invoke-AutoOSUsbCopyImage` returned when robocopy did,
+   i.e. when Windows had accepted the writes, not when the stick had them. It now runs
+   `Write-VolumeCache` on the target letter and fails hard (do-not-unplug message) if that
+   fails — the bash side's `sync` + `umount` equivalent.
+8. **robocopy exit codes.** `-ge 8` read a negative / out-of-range code (killed, destination
+   vanished) as success. `Test-AutoOSRobocopyFailed` now treats anything outside 0..7 as failure.
+
+J: was quick-formatted again (elevated, serial-gated) and the build re-run at 13:07: the fetch
+step reported `skipped` (cache hit — the idempotency claim holds end to end), the copy stalled
+again at the same point (right after the 3.4 GB `minimal.squashfs`, ~6 min this time), resumed
+by itself, finished, **flushed**, and "Ready to boot" was printed at ~13:21. Verified afterwards,
+read-only: all 951 ISO files present with the ISO's exact byte total, volume Healthy, `EFI\boot\
+bootx64.efi`, `grubx64.efi`, `boot\grub\grub.cfg`, `casper\vmlinuz`/`initrd`/`minimal.squashfs`
+and `.disk\info` all in place, ISO dismounted. **That is the first stick this tool has ever
+finished building.** It has still not been booted — that needs the human partner to boot a
+machine from it (UEFI only: `uefi-copy` sticks have no legacy boot path), which no agent may do.
+
+**The stick itself is suspect**: two FAT32 corruptions and two multi-minute controller stalls in
+one day (always right after the 3.4 GB file, so most likely the controller's own housekeeping
+after a large sequential write). Treat a stall as "wait ten minutes", a third corruption as
+"replace the stick", neither as a tool bug.
+
+Still true after this session: **nobody has booted a stick built by this tool** (one has now been
+*built* by it, see above — the boot is the next thing to do, by a human), the
 `custom-url` / `custom-local` pseudo-entries are still not plumbed through the CLI (usb_plan
 already refuses them — no `writeMode`), the Windows plan still has no re-verify step, and
 plan lines are word-split so a cache path containing a space breaks the bash executor (the
