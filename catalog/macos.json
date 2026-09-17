@@ -5,9 +5,10 @@
     "workstation": "Full desktop workstation - the same coding and AI stack as the other platforms.",
     "ai-coding": "Coding and AI tooling plus the shell, no GUI extras.",
     "light": "Minimal remote-access box - Claude Code, Tailscale and Herdr only.",
+    "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
+    "local-ai": "Local AI inference with Ollama — no API key and no network, but models are 1.4-4.7 GB.",
     "custom": "Start with nothing ticked and choose by hand.",
-    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing.",
-    "rescue": "Disaster-recovery toolkit and emergency AI recovery environment."
+    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
   },
   "categories": [
     {
@@ -166,7 +167,8 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "light"
+            "light",
+            "rescue"
           ],
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
         },
@@ -183,45 +185,84 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "light"
-          ],
-          "verify": "agy --version",
-          "homepage": "https://antigravity.google/"
-        },
-        {
-          "id": "opencode",
-          "name": "OpenCode CLI",
-          "description": "AI coding agent with local-model support",
-          "provider": "npm",
-          "package": "opencode-ai",
-          "requires": [
-            "nodejs"
-          ],
-          "profiles": [
-            "workstation",
-            "ai-coding",
+            "light",
             "rescue"
           ],
-          "verify": "opencode --version",
-          "postInstall": "setup_opencode_config",
-          "homepage": "https://opencode.ai/"
+          "homepage": "https://antigravity.google/product/antigravity-cli",
+          "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
         },
         {
-          "id": "openhands",
-          "name": "OpenHands Agent Canvas",
-          "description": "Multi-agent orchestration canvas and UI for OpenHands",
-          "provider": "npm",
-          "package": "@openhands/agent-canvas",
-          "requires": [
-            "nodejs"
-          ],
+          "id": "ollama",
+          "name": "Ollama",
+          "description": "Local AI model runtime",
+          "provider": "brew",
+          "package": "ollama",
+          "verify": "ollama --version",
+          "homepage": "https://ollama.com/",
           "profiles": [
-            "workstation",
-            "ai-coding"
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-4b",
+          "name": "Qwen3 4B",
+          "description": "General-purpose local model, 2.5 GB download, 256K context",
+          "provider": "custom",
+          "package": "qwen3:4b",
+          "postInstall": "pull_ollama_model_qwen3_4b",
+          "requires": [
+            "ollama"
           ],
-          "verify": "agent-canvas --version",
-          "postInstall": "setup_openhands_config",
-          "homepage": "https://github.com/All-Hands-AI/OpenHands"
+          "verify": "ollama show qwen3:4b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "notes": "Pre-ticked default: small enough to load fast off USB, and its 256K context fits a full dmesg/SMART dump.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-1-7b",
+          "name": "Qwen3 1.7B",
+          "description": "Smaller/faster general-purpose local model, 1.4 GB download",
+          "provider": "custom",
+          "package": "qwen3:1.7b",
+          "postInstall": "pull_ollama_model_qwen3_1_7b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen3:1.7b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "profiles": []
+        },
+        {
+          "id": "ollama-model-qwen2-5-coder-7b",
+          "name": "Qwen2.5 Coder 7B",
+          "description": "Coding-focused local model, 4.7 GB download",
+          "provider": "custom",
+          "package": "qwen2.5-coder:7b",
+          "postInstall": "pull_ollama_model_qwen25_coder_7b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen2.5-coder:7b",
+          "homepage": "https://ollama.com/library/qwen2.5-coder",
+          "profiles": []
+        },
+        {
+          "id": "oterm",
+          "name": "oterm",
+          "description": "Terminal UI chat client for Ollama models",
+          "provider": "brew",
+          "package": "oterm",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "oterm --help",
+          "homepage": "https://github.com/ggozad/oterm",
+          "notes": "In homebrew/core since oterm 0.13.1 — verified via formulae.brew.sh.",
+          "profiles": [
+            "local-ai"
+          ]
         },
         {
           "id": "claude-desktop",

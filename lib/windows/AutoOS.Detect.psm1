@@ -263,6 +263,25 @@ function Get-AutoOSInstalledStatus {
                 } catch { continue }
             }
         }
+        if ($Component.Package -in @('qwen3:4b', 'qwen3:1.7b', 'qwen2.5-coder:7b')) {
+            # local-ai (B21) models: pulled via `ollama pull`, so "installed"
+            # means "ollama list already names this tag" — there is no
+            # package-manager record to probe otherwise.
+            $ollama = Get-Command ollama -ErrorAction SilentlyContinue
+            if ($ollama) {
+                $list = & ollama list 2>$null
+                if ($list -match [regex]::Escape($Component.Package)) { return 'installed' }
+            }
+            return 'not-detected'
+        }
+        if ($Component.Package -eq 'oterm') {
+            # oterm (Task 13) has no winget/choco package (verified 2026-09-12
+            # against winget.run and community.chocolatey.org) — it is
+            # installed via pip, so there is no package-manager record to
+            # probe; a plain `Get-Command` is the only reliable signal, same
+            # as agent-skills/mcp-* above.
+            return $(if (Get-Command oterm -ErrorAction SilentlyContinue) { 'installed' } else { 'not-detected' })
+        }
         return $status
     }
     if ($Component.Provider -eq 'psmodule') {

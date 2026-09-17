@@ -98,7 +98,16 @@ param(
     [string]$SaveState,
     [string]$Config,
     [switch]$NoVerify,
-    [switch]$Undo
+    [switch]$Undo,
+    # Task 6 (installer-USB planner): -CreateUsb and its companions.
+    [switch]$CreateUsb,
+    [string]$Image,
+    [string]$Kind = 'installer',
+    [string]$Engine,
+    [string]$UsbDevice,
+    [switch]$WipeTargetDisk,
+    [switch]$ListUsb,
+    [switch]$ListEngines
 )
 
 Set-StrictMode -Version Latest
@@ -122,6 +131,7 @@ Import-Module (Join-Path $LibDir 'AutoOS.Detect.psm1')  -Force -DisableNameCheck
 Import-Module (Join-Path $LibDir 'AutoOS.Catalog.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.Install.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.State.psm1')   -Force -DisableNameChecking
+Import-Module (Join-Path $LibDir 'AutoOS.Usb.psm1')     -Force -DisableNameChecking
 
 if ($NoColor) { Set-AutoOSColor $false }
 if ($NoVerify) { Set-AutoOSVerify $false }
@@ -141,6 +151,130 @@ if ($CheckCatalog) {
     }
     foreach ($p in $problems) { Write-AutoOSLine $p -Level error }
     exit 1
+}
+
+# ─── USB creation (Task 6) ──────────────────────────────────────────────────
+# A pure planner-and-guard flow, standalone like the catalog-only modes
+# above: New-AutoOSUsbPlan runs nothing itself (its own docstring in
+# AutoOS.Usb.psm1), so nothing below this point writes to a disk, only to
+# the console. -ListEngines and -CreateUsb -DryRun both have to work
+# without ever reaching the main install pipeline's "Detect" banner.
+# Invoke-AutoOSCreateUsbFlow - the whole -CreateUsb / -ListUsb / -ListEngines
+# path as a function so the top-level menu's "Create installer USB" entry
+# (Task 10) can reach it too. Returns the exit code; the callers exit.
+function Invoke-AutoOSCreateUsbFlow {
+    # The USB parameters arrive explicitly (not read from the script scope)
+    # so PSScriptAnalyzer can see them used. Pipeline output from the
+    # steps below (the executor's TRACE lines, for one) must reach the
+    # console, so the exit code travels in a script variable rather than
+    # as the function's return value.
+    param([string]$img, [string]$knd, [string]$eng, [string]$dev, [bool]$wipe)
+    $script:CreateUsbExit = 0
+    if ($ListEngines) {
+        Write-AutoOSSection 'USB write engines available on this machine'
+        $engines = @(Get-AutoOSUsbEngineList -Platform (Get-AutoOSUsbCurrentOs) -Arch (Get-AutoOSUsbCurrentArch))
+        foreach ($e in $engines) {
+            $tag = if ($e.interactive) { ' (interactive)' } else { '' }
+            Write-AutoOSLine ("  {0,-12} {1}{2}" -f $e.id, $e.name, $tag)
+        }
+        $script:CreateUsbExit = 0; return
+    }
+
+    if ($ListUsb) {
+        Write-AutoOSSection 'Candidate USB devices'
+        $devices = @(Get-AutoOSUsbDevice)
+        if ($devices.Count -eq 0) {
+            Write-AutoOSLine 'No USB devices found.' -Level info
+        }
+        foreach ($d in $devices) {
+            Write-AutoOSLine ("  {0,-18} {1,-24} {2} bytes" -f $d.DeviceId, $d.Model, $d.SizeBytes)
+        }
+        $script:CreateUsbExit = 0; return
+    }
+
+    # $CreateUsb
+    # Task 10: an interactive session that did not give every flag gets the
+    # four-step chooser (image -> kind -> engine -> device) and the one
+    # confirmation that names the device and that its data is destroyed;
+    # a non-interactive one keeps the explicit refusal below.
+    if ((-not $img -or -not $eng -or -not $dev) -and (Test-AutoOSInteractive)) {
+        $choice = Invoke-AutoOSUsbChooser -Image $img -Kind $knd -Engine $eng -Device $dev -DryRun:$DryRun.IsPresent
+        if (-not $choice) { return 1 }
+        $img = $choice.Image; $knd = $choice.Kind; $eng = $choice.Engine; $dev = $choice.Device
+        if ($choice.Wipe) { $wipe = $true }
+    }
+    if (-not $img -or -not $eng -or -not $dev) {
+        Write-AutoOSLine '-CreateUsb requires -Image, -Engine and -UsbDevice (-ListEngines / -ListUsb to discover values)' -Level error
+        $script:CreateUsbExit = 2; return
+    }
+    # AGENTS.md hard rule 3: every destructive action is opt-in and
+    # announced. New-AutoOSUsbPlan below refuses nothing based on
+    # -WipeTargetDisk (Task 7 owns the actual write and its own
+    # confirmation), but a plan for a raw-write engine already means the
+    # target's current contents are lost, so the flag is acknowledged here
+    # rather than silently accepted-and-ignored if a user thought passing
+    # it would gate something.
+    if ($wipe) {
+        Write-AutoOSLine "Acknowledged: the target device's current contents will be overwritten." -Level muted
+    }
+    try {
+        $plan = @(New-AutoOSUsbPlan -ImageId $img -Kind $knd -Engine $eng -DeviceId $dev -DryRun:$DryRun.IsPresent)
+    } catch {
+        Write-AutoOSLine $_.Exception.Message -Level error
+        $script:CreateUsbExit = 1; return
+    }
+    foreach ($line in $plan) { Write-AutoOSLine $line }
+
+    # Elevation (B10): checked here, once the plan is known to be coherent,
+    # not deferred to write time — the failure this prevents is a dry run
+    # that looks perfect followed by "Access is denied" on the one run
+    # that matters. uefi-copy writes onto an already-mounted volume and
+    # needs no elevation; every other engine does. A dry run still shows
+    # the plan above even when unelevated — that gap belongs in the
+    # preview, not hidden behind a hard failure that would stop the plan
+    # from ever being shown.
+    if ($eng -ne 'uefi-copy') {
+        $elev = Test-AutoOSElevated
+        if (-not $elev.IsElevated) {
+            if ($DryRun) {
+                Write-AutoOSLine $elev.Reason -Level warn
+            } else {
+                Write-AutoOSLine $elev.Reason -Level error
+                $script:CreateUsbExit = 1; return
+            }
+        }
+    }
+
+    if ($DryRun) { exit 0 }
+
+    # The real write. Until this was wired, a -CreateUsb without -DryRun
+    # printed the plan and exited 0 - a "create" that created nothing.
+    # Invoke-AutoOSUsbPlan (lib\windows\AutoOS.Usb.psm1) is the only thing
+    # that ever runs a plan line; it gets exactly the lines printed above.
+    #
+    # AGENTS.md hard rule 3: every destructive action is opt-in and
+    # announced. The plan above is the announcement; -WipeTargetDisk is the
+    # opt-in. Without it a real run stops HERE, after showing what it would
+    # do, having downloaded and written nothing - a plan is not consent,
+    # and neither is -Yes (which answers the install menu's questions, not
+    # "may I destroy this disk").
+    if (-not $wipe) {
+        Write-AutoOSLine "refusing to write ${dev}: re-run with -WipeTargetDisk to confirm that everything on it may be destroyed (the plan above is exactly what would run)" -Level error
+        $script:CreateUsbExit = 1; return
+    }
+    Write-AutoOSSection "Writing $dev"
+    try {
+        Invoke-AutoOSUsbPlan -DeviceId $dev -Plan $plan
+    } catch {
+        Write-AutoOSLine $_.Exception.Message -Level error
+        $script:CreateUsbExit = 1; return
+    }
+    $script:CreateUsbExit = 0; return
+}
+
+if ($CreateUsb -or $ListUsb -or $ListEngines) {
+    Invoke-AutoOSCreateUsbFlow -img $Image -knd $Kind -eng $Engine -dev $UsbDevice -wipe ([bool]$WipeTargetDisk)
+    exit $script:CreateUsbExit
 }
 
 # ─── What is already here ───────────────────────────────────────────────────
@@ -238,6 +372,11 @@ if ($blockers.Count) {
 # ─── Undo ───────────────────────────────────────────────────────────────────
 if ($Undo) {
     Invoke-AutoOSUndo -DryRun:$DryRun.IsPresent -AssumeYes:$Yes.IsPresent
+    # B13: a USB write does not participate in -SaveState/-FromState/-Undo
+    # at all — say so plainly rather than silently leaving a user's last
+    # USB write out of what "undo" covers, which they would reasonably
+    # expect it to.
+    Write-AutoOSLine 'A USB write is not tracked by AutoOS and cannot be undone.' -Level muted
     exit 0
 }
 
@@ -290,7 +429,9 @@ if ($FromState) {
                 Badge       = $badge
             }
         }
+        $profileItems += [pscustomobject]@{ Id = 'create-usb'; Name = 'Create installer USB'; Description = 'Build a bootable rescue/installer stick instead of installing'; Badge = '' }
         $InstallProfile = Show-AutoOSRadioMenu -Items $profileItems -Title 'Choose installation profile' -DefaultId $suggested
+        if ($InstallProfile -eq 'create-usb') { Invoke-AutoOSCreateUsbFlow -img $Image -knd $Kind -eng $Engine -dev $UsbDevice -wipe ([bool]$WipeTargetDisk); exit $script:CreateUsbExit }
     }
 }
 if ($InstallProfile -notin $profileNames) { throw "Unknown profile: $InstallProfile" }

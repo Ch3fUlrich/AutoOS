@@ -65,11 +65,11 @@ would be blocking defects under this repository's own rules.
 
 | # | Finding | Where | Rule |
 |---|---|---|---|
-| **A1** | A password hash is committed, and a plaintext password beside it: `d-i passwd/user-password password rescue`. AGENTS.md is explicit that "just a placeholder that looks real" still counts. | `user-data:17`, `preseed.cfg:20-21` | Hard rule 1 |
-| **A2** | That hash is **malformed**. SHA-512 crypt requires an 86-character body; this one is **82**. Subiquity will reject the schema or set an unusable password — you cannot log in to the machine you just installed. | `user-data:17` | correctness |
-| **A3** | **Unannounced whole-disk wipe.** `storage: layout: name: direct`, and `partman-auto/method regular` + `choose_recipe atomic` + `confirm_write_new_label true`, erase the target's first disk with no prompt. Boot this stick on the wrong machine and it eats it. | `user-data:20-22`, `preseed.cfg:29-35` | Hard rule 3 |
+| **A1** | A password hash is committed, and a plaintext password beside it: `d-i passwd/user-password password rescue`. AGENTS.md is explicit that "just a placeholder that looks real" still counts. | `user-data:13`, `preseed.cfg:21-22` | Hard rule 1 |
+| **A2** | That hash is **malformed**. SHA-512 crypt requires an 86-character body; this one is **82**. Subiquity will reject the schema or set an unusable password — you cannot log in to the machine you just installed. | `user-data:13` | correctness |
+| **A3** | **Unannounced whole-disk wipe.** `storage: layout: name: direct`, and `partman-auto/method regular` + `choose_recipe atomic` + `confirm_write_new_label true`, erase the target's first disk with no prompt. Boot this stick on the wrong machine and it eats it. | `user-data:17-19`, `preseed.cfg:27-28` | Hard rule 3 |
 | **A4** | `ubuntu-26.04.1-desktop-amd64.iso` (6.1 GB) sits beside the scripts, and `.gitignore` covers `*.exe` but has **no `*.iso` rule**. One `git add -A` permanently bloats a public repo. | working tree, `.gitignore` | Hard rule 2 |
-| **A5** | `rufus.exe`, `rufus.ini` and `ISOs/` are all written to `$PSScriptRoot`. If the script lands in `lib/windows/`, `$PSScriptRoot` *is* the repository. | `Create-RescueStick.ps1:33,214,224` | Hard rule 2 |
+| **A5** | `rufus.exe`, `rufus.ini` and `ISOs/` are all written to `$PSScriptRoot`. If the script lands in `lib/windows/`, `$PSScriptRoot` *is* the repository. | `Create-RescueStick.ps1:30,229-230,237` | Hard rule 2 |
 
 ### A6–A14 — High: it will fail in the field
 
@@ -91,10 +91,16 @@ would be blocking defects under this repository's own rules.
   not. And `DriveType -eq 'Removable'` misses USB SSDs entirely — they enumerate as `Fixed`.
 - **A11 — DD mode makes the copy step impossible.** A Proxmox stick written in DD mode is
   read-only ISO9660. The `Copy-Item` cannot succeed, and nothing guards it.
-- **A12 — One `set -e` package install, so one missing package kills the run.** `dislocker` is not
-  in Fedora's default repositories (RPM Fusion / COPR), nor is `chntpw`; `arch-install-scripts` is
-  Debian-only and correctly absent from the Fedora list — which proves the two lists were
-  hand-diffed and will drift. A single `dnf install -y` aborts the whole bootstrap on first miss.
+- **A12 — One `set -e` package install, so one missing package kills the run.** A single
+  `dnf install -y` or `apt-get install -y` of ~50 packages aborts the *entire* bootstrap on the
+  first unavailable name, discarding the 49 that would have succeeded. `arch-install-scripts` is
+  Debian-only and correctly absent from the Fedora list, which shows the two lists were hand-diffed
+  and will drift apart on the next edit.
+  **Correction, 2026-09-11:** an earlier draft of this finding claimed `dislocker` and `chntpw` are
+  absent from Fedora's default repositories. That is wrong — both ship in Fedora's own repos
+  (`dislocker` 0.7.3 across F43–45, Rawhide and EPEL; verified at
+  [packages.fedoraproject.org](https://packages.fedoraproject.org/pkgs/dislocker/dislocker/)).
+  The structural defect stands on its own; the package examples do not support it.
 - **A13 — Not idempotent.** A second run re-adds the NodeSource repository, re-runs
   `npm install -g`, and rewrites `/etc/profile.d/gemini-env.sh`. AGENTS.md §4 requires `skipped`.
 - **A14 — `curl … | bash` three times, unverified** — and on a rescue stick booted with no network
@@ -139,6 +145,7 @@ in the machine, and cannot work on Linux. So AutoOS offers the user a real choic
 | `ventoy` *(default)* | Windows + Linux | `Ventoy2Disk.exe VTOYCLI /I /Drive:E: /GPT` / `Ventoy2Disk.sh -i -g /dev/sdX` | Scriptable, multi-boot: install once, then **add an OS by copying an ISO**. A second distribution costs a file copy, not a reflash. |
 | `wsl` | Windows only | `usbipd attach` → real `/dev/sdX` inside WSL2 → `dd` / `mmdebstrap` / `parted` | The entire Linux toolchain on Windows. Required for `full-os` sticks. No Rufus. |
 | `native` | Linux only | `dd` / `parted` / `mmdebstrap` directly | No extra dependency at all. |
+| `uefi-copy` | Windows + Linux, **no admin** | Copy the ISO's contents onto an existing FAT32 partition | **The documented fallback**, kept deliberately (human partner, 2026-09-11: "keep the not-elevated solution as a backup"). Needs no elevation at all. See B16; it is how the first real stick was built. |
 | `rufus` | Windows only | Launch the GUI, hand the user the settings, wait | Escape hatch for an image the others cannot handle. **Explicitly marked interactive**; unavailable under `--dry-run` and in the browser UI. |
 
 Requirement 4.1.1 — "rufus should also be installed if not present on windows" — is met as a
@@ -251,6 +258,216 @@ implementer must honour:
   the `ai` alias and a commented `# export …_API_KEY=` line — a comment, not a value. Hard rule 1
   applies to the artifact this repository *produces*, not only to the repository itself.
 
+### B10. Elevation is checked before the plan is shown, not at the moment of writing
+
+Every raw-disk path needs admin/root: `Ventoy2Disk.*`, `Get-Disk`/`Clear-Disk`, `usbipd bind`, and
+`dd`. The failure mode this avoids is the one the whole plan-then-execute design exists to avoid —
+a `--dry-run` that looks perfect, followed by `Access is denied` the one time it writes for real.
+
+- **Linux/macOS:** `$AUTOOS_SUDO` is already set once at startup (empty when root). If it is empty
+  and `id -u` is not 0, refuse *before planning* and print the exact command to re-run.
+- **Windows:** `([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`.
+  Do not attempt to self-elevate — a re-launch loses the session's log file.
+- **Browser UI:** `/api/usb/devices` returns `"elevated": false` and the button renders disabled
+  with the reason, rather than offering an action that cannot succeed.
+
+Owner: Task 5 (the check), Task 6 (refuse at plan time), Task 11 (the UI surface).
+
+### B11. macOS refuses cleanly, because `setup.sh` is a shared entry point
+
+`setup.sh` serves Linux **and** macOS. `--create-usb` on Darwin must exit non-zero with
+"USB creation is not supported on macOS — the rescue profile's recovery tools are", not fall into
+whatever `usb_list` does against `diskutil`-shaped output it was never written for. Owner: Task 6,
+with a test that fakes `SYS_OS=macos`.
+
+### B12. Generating the autoinstall password hash is genuinely hard on Windows
+
+B7 promises a password generated at creation time. The obvious tool does not exist: Python's
+`crypt` module is POSIX-only and was **removed in Python 3.13**, and Windows has no glibc
+`crypt(3)`. Resolution, in order of preference:
+
+1. `openssl passwd -6 "$plain"` — present on every target Linux, and on Windows via the OpenSSL
+   that ships with Git for Windows.
+2. `mkpasswd -m sha512crypt` where `whois` is installed.
+3. Under the WSL engine, shell out to the distro: `wsl -d <distro> -- openssl passwd -6 …`.
+4. **If none is available, refuse to write an answer file at all** and tell the user to set the
+   password at first boot.
+
+**Never bundle a hand-rolled SHA-512-crypt implementation.** Getting it subtly wrong produces
+exactly finding A2 — an 82-character hash that looks fine and locks you out. Owner: Task 9.
+
+### B13. Concurrency, unplug, arm64, and replay
+
+Four things the first draft did not mention at all, each of which is cheap now and expensive later.
+
+- **Concurrency.** `serve.py` already guards concurrent component installs with a `RUN`/`LOCK` pair
+  (`lib/linux/serve.py:421-427`). USB creation joins **that same lock**, not a second one: a write
+  requested while an install is running returns `409`, and so does a second write. Two package
+  managers against one machine is bad; two writers against one block device is worse. The terminal
+  path takes a lock file in the cache directory for the same reason.
+- **Unplug mid-write.** `dd` and Ventoy both fail with EIO, which is indistinguishable from a
+  genuine I/O error until you look. `usb_execute` re-runs `usb_list` on failure: if the device is
+  gone, the message is "the stick was removed during the write"; otherwise it is the underlying
+  error. **Never retry automatically** — a re-plugged stick can enumerate under a different name,
+  and a blind retry then writes to whatever now holds that name.
+- **arm64 / Raspberry Pi.** Ventoy ships x86_64 binaries only. On arm64 the `ventoy` engine is
+  **hidden, not shown-and-failing** (AGENTS.md §3), leaving `native` (raw write) as the only
+  engine. `catalog/engines.json` therefore carries an `arch` array like every catalog component.
+- **Replay and undo.** `--save-state`, `--from-state` and `--undo` are existing flags. A USB write
+  **does not participate**: it is not a component, it is not reversible, and a stick is not part of
+  this machine's state. `--undo` must say so explicitly — silently ignoring a flag the user
+  reasonably expects to cover their last action is worse than refusing it.
+
+### B14. `dd status=progress` emits no percentage — the runner needs one computed
+
+`lib/linux/process.py:93` extracts progress with `re.search(r"(?<!\d)(100|\d{1,2})(?:\.\d+)?\s*%", line)`,
+and `dd status=progress` prints bytes copied and a transfer rate with **no `%` anywhere**. Left
+alone, the current bar silently degrades to `percentage unavailable` (`process.py:26`) — not the
+behaviour the UI task promises.
+
+So `usb_write_raw` does not hand `dd` straight to the runner. It knows the image size, so it reads
+`dd`'s byte counter and emits its own `NN%` lines, which the existing regex then parses unchanged.
+Owner: Task 7; Task 11 only consumes it.
+
+### B15. There is no rollback, and pretending otherwise is the dangerous option
+
+A half-written stick cannot be restored to what it held before. What the plan requires instead:
+
+- The failure message says plainly that the stick is now unbootable and must be rewritten.
+- A rewrite always starts from `wipefs -a` / a full re-partition, so **a retry is always safe** and
+  `usb_guard` needs no special case for a partially-written device.
+- "Ready to boot" is printed only after the writer exits 0 **and** the resulting filesystem reads
+  back — an exit code alone has already been shown to be insufficient (A7).
+
+Owner: Task 7.
+
+### B16. `uefi-copy` — a bootable stick with no administrator rights at all
+
+Every other engine needs elevation: `Ventoy2Disk` writes a partition table, `usbipd bind` needs
+admin, `dd` needs the raw device. On a machine where the user cannot elevate — a work laptop, a
+locked-down desktop, or simply an unattended agent session that cannot answer a UAC prompt — all
+three are unavailable, and the feature is unavailable with them.
+
+It does not have to be. A modern Linux ISO is already a UEFI boot structure; the firmware needs
+only a FAT32 partition containing `EFI/boot/bootx64.efi`. **Copying the ISO's contents onto an
+already-FAT32 USB stick produces a bootable UEFI installer** — no partitioning, no bootloader
+install, no elevation, no Rufus and no Ventoy.
+
+Verified against Ubuntu 26.04.1 "Resolute Raccoon" (build 20260826) on 2026-09-11:
+
+| Check | Result |
+|---|---|
+| `EFI/boot/bootx64.efi` present | yes, plus `grubx64.efi` and `mmx64.efi` |
+| Largest file inside the ISO | `casper/minimal.squashfs`, **3,432,136,704 B (3.20 GiB)** — under FAT32's 4 GiB ceiling |
+| Total payload | 6,474,467,630 B (6.03 GiB) |
+| How `boot/grub/grub.cfg` finds its root | **it does not need to** — the menu entries are bare `linux /casper/vmlinuz` / `initrd /casper/initrd`, with no `search --label` and no UUID. GRUB sets `$root` to the partition it booted from, and casper's initramfs then scans every block device for `/casper/`. |
+
+That last row is what makes the engine safe rather than lucky: there is no label to match, so the
+stick's existing FAT32 label is irrelevant. **Re-verify it per image** — an ISO whose `grub.cfg`
+*does* `search --label` will not boot from a copy, and that check belongs in the planner.
+
+**State the limits plainly, in the UI, every time this engine is chosen:**
+
+- **UEFI only.** No MBR boot code is written, so a legacy-BIOS/CSM-only machine will not boot it.
+  For a *rescue* stick aimed at old or broken hardware this is a real restriction, not a footnote.
+- **The stick must already be FAT32**, and formatting one is itself an elevated operation.
+- **No file inside the image may exceed 4 GiB.** Check before copying, and refuse with the
+  offending filename rather than failing 20 minutes into a copy.
+- **No persistence by default** — see B17.
+
+### B17. Persistence without repartitioning
+
+A rescue stick whose tools vanish on reboot is a live CD with extra steps. `uefi-copy` cannot add a
+partition, but casper can persist into a **file**: a `casper-rw` ext4 image on the FAT32 partition,
+with `persistent` appended to the kernel command line in `boot/grub/grub.cfg`.
+
+FAT32 caps that file just under 4 GiB, so allocate 4,000 MiB and no more. Creating it needs a
+`mkfs.ext4`, which on Windows means WSL — root inside WSL, not Windows administrator, so it stays
+within the no-elevation budget.
+
+**Treat this as probe-then-commit, not as a promise.** Casper's file-based persistence has changed
+across releases; the planner must verify it took effect on first boot (write a marker, reboot, look
+for it) and the UI must not claim persistence that was never confirmed. Owner: Task 7.
+
+### B18. Elevation is available — so `ventoy` stays the default and gains legacy BIOS
+
+Settled 2026-09-11: *"elevated shell is fine since a lot of applications need elevated shell, but
+keep the not-elevated solution as a backup."*
+
+That resolves the tension B16 opened. The engine order is:
+
+1. **`ventoy`** — the default. Needs elevation, and in exchange writes a partition table and an MBR
+   boot sector, so a stick boots on **legacy BIOS/CSM as well as UEFI**. For a rescue stick aimed at
+   old or broken hardware this is the difference between working and not.
+2. **`uefi-copy`** — the fallback, selected automatically when the process is not elevated and
+   elevation cannot be obtained. Prints exactly one line saying the stick will be UEFI-only and
+   why, so the limitation is never a surprise at the boot menu.
+
+The planner picks the fallback on its own rather than failing, and says which it picked and why.
+
+### B19. An offline package cache, because a rescue stick meets machines with no network
+
+Settled 2026-09-11: *"yes do it."*
+
+`rescue-bootstrap.sh` needs `apt` to reach the internet, and the machines this stick exists for are
+exactly the ones with no working network. So the stick carries its own `.deb` cache.
+
+**The version trap that makes this non-trivial:** packages must match the *live ISO's* release, not
+the build machine's. This machine's WSL is Ubuntu **24.04** while the ISO is **26.04**, so a naive
+`apt-get download` produces packages that fail dependency resolution on the target — worse than no
+cache, because it fails *after* you have booted a broken machine.
+
+The build therefore creates a throwaway chroot of the **image's own release** and downloads into it:
+
+```bash
+mmdebstrap --variant=apt --include=ca-certificates resolute /tmp/rescue-chroot \
+           http://archive.ubuntu.com/ubuntu
+chroot /tmp/rescue-chroot apt-get -y --download-only install <the rescue package set>
+cp /tmp/rescue-chroot/var/cache/apt/archives/*.deb <stick>/rescue/debs/
+```
+
+The release codename comes from the image catalog entry, never a hardcoded string, so this cannot
+silently drift from the ISO it ships beside. `rescue-bootstrap.sh` then prefers the local cache
+(`apt-get install --no-download -o Dir::Cache::archives=<stick>/rescue/debs`) and falls back to the
+network when a package is missing. Budget ~2 GB on the stick.
+
+### B20. `ai` is a dispatcher over a registry, not an alias to one tool
+
+Settled 2026-09-11: *"claude and [the other] should both be ai, but claude should be the default.
+Make it possible to ship multiple ais, since there will be other ai clients added in the future."*
+
+So `ai` is a small command over a data file, not an alias — the same catalog-is-data rule AGENTS.md
+§2 applies to software:
+
+- `/etc/autoos/ai-clients.conf` — one `id:binary:description` record per line.
+- `ai "question"` runs the default (`claude`); `ai gemini "question"` dispatches by id;
+  `ai --list` shows every registered client with an installed/not-installed column.
+- `AUTOOS_AI_DEFAULT` overrides the default without editing a file.
+- If the default is absent but another client is present, it says so and names the working one,
+  rather than failing with `claude: command not found`.
+
+Adding a third AI CLI is then one line in a config file and one catalog entry. Owner: Task 9.
+
+### B21. A separate `local-ai` profile, because the models are enormous
+
+Settled 2026-09-11: *"the user should be capable of requesting ollama and models to run local ai
+stuff… add those local ai capabilities as an additional profile and warn because of the big size."*
+
+Local inference is exactly right for a rescue stick — it is the only way the AI tooling works on a
+machine with no network, and it needs no API key, which is the other standing constraint.
+
+It is **its own profile**, never folded into `rescue`, because the size difference is two orders of
+magnitude: the entire rescue toolkit is ~400 MB of packages; one useful local model is 4–20 GB.
+A user who asked for a rescue stick has not asked for that.
+
+- Profile id `local-ai`: `ollama`, plus model pulls as separate catalog components.
+- **Every model component states its download size in its `description`**, and the plan summary
+  shows the total before the confirmation — an unannounced 20 GB download on a metered connection
+  is the kind of surprise AGENTS.md hard rule 3 exists to prevent.
+- Models are `custom`-provider components whose `postInstall` runs `ollama pull`, so the existing
+  idempotency applies: a model already pulled reports `skipped`.
+- Default suggestion is one small general model (~4 GB), not the largest available.
+
 ### B9. WSL becomes an install *target*, not just a component (Phase 4)
 
 `wsl` is added to `catalog/windows.json` as an ordinary component (`wsl --install
@@ -321,6 +538,12 @@ CHANGELOG.md                         MOD
 
 ## Part D — Tasks
 
+> **The `--filter` argument matches a TEST NAME, not a describe-group name.**
+> `tests/run-tests.ps1:48` is `if ($Filter -and $Name -notlike "*$Filter*") { return }`, and the
+> bash harness does the same. Individual test names are written in the singular ("light **profile**
+> is the Pi set"), so `--filter profiles` matches **zero tests** and reports a clean run — a silent
+> pass that looks exactly like a real one. Always eyeball the test count a filtered run prints.
+
 ### Phase 1 — the `rescue` profile (ships alone; no USB code at all)
 
 #### Task 1: `rescue` profile and rescue components
@@ -354,7 +577,7 @@ fi
 - [ ] **Step 2: Run it and watch it fail**
 
 ```bash
-bash tests/run-tests.sh --filter profiles
+bash tests/run-tests.sh --filter profile
 ```
 
 Expected: `rescue profile carries the disk-recovery core` FAILS listing all five ids, because
@@ -443,7 +666,7 @@ fi
 - [ ] **Step 6: Run the tests**
 
 ```bash
-bash tests/run-tests.sh --filter profiles && pwsh -File tests/run-tests.ps1 -Filter profiles
+bash tests/run-tests.sh --filter profile && pwsh -File tests/run-tests.ps1 -Filter profiles
 ```
 
 Expected: PASS, and the catalog schema test still passes because no new field was introduced.
@@ -493,6 +716,70 @@ git add .gitignore && git commit -m "chore: never track an ISO or the download c
 ```
 
 ---
+
+#### Task 1B: the `local-ai` profile
+
+**Files:** Modify `catalog/linux.json`, `catalog/windows.json`, `catalog/macos.json`;
+`tests/run-tests.sh`, `tests/run-tests.ps1`, `docs/profiles.md`
+
+**Interfaces:**
+- Produces: profile id `local-ai`; component ids `ollama`, `ollama-model-<name>`.
+
+- [ ] **Step 1: Write the failing tests.** The size warning is the point of this task, so it is
+  what the tests guard:
+
+```bash
+if it "local-ai profile ships ollama"; then
+    assert_contains "$(catalog_profile_defaults local-ai)" "ollama"
+fi
+
+if it "local-ai is NOT pulled in by the rescue profile"; then
+    # Two orders of magnitude apart: ~400 MB of tools vs 4-20 GB of weights.
+    assert_not_contains "$(catalog_profile_defaults rescue)" "ollama"
+fi
+
+if it "every model component states its download size"; then
+    out="$(python3 -c "
+import json,re
+cat=json.load(open('catalog/linux.json'))
+bad=[c['id'] for g in cat['categories'] for c in g['components']
+     if c['id'].startswith('ollama-model-')
+     and not re.search(r'[0-9]+(\.[0-9]+)?\s?GB', c.get('description',''))]
+print(' '.join(bad))")"
+    [[ -z "$out" ]] && pass || fail "model entries with no size in the description: $out"
+fi
+```
+
+- [ ] **Step 2: Run them and watch them fail** — `bash tests/run-tests.sh --filter local-ai`.
+  Confirm the printed test count is non-zero before believing a pass.
+
+- [ ] **Step 3: Add the profile key** to all three catalogs:
+
+```jsonc
+"local-ai": "Local AI inference with Ollama — no API key and no network, but models are 4-20 GB."
+```
+
+- [ ] **Step 4: Add the components.** `ollama` (provider `script`, the vendor's own installer, with
+  its checksum verified per Task 3's helper), then one entry per model, each naming its size:
+
+```jsonc
+{
+  "id": "ollama-model-llama3.2",
+  "name": "Llama 3.2 3B",
+  "description": "General-purpose local model, 2.0 GB download",
+  "provider": "custom",
+  "postInstall": "pull_ollama_model",
+  "requires": ["ollama"],
+  "verify": "ollama list | grep -q llama3.2",
+  "homepage": "https://ollama.com/library/llama3.2",
+  "profiles": ["local-ai"]
+}
+```
+
+- [ ] **Step 5: Make the plan summary total the download size** before the confirmation, so a user
+  sees "this will download 14 GB" while they can still say no.
+
+- [ ] **Step 6: Run the filtered tests, update `docs/profiles.md`, commit.**
 
 ### Phase 2 — verified download and USB writing
 
@@ -663,6 +950,26 @@ fi
   `kinds` (allowed: `installer`, `live-persistent`, `full-os`), and a missing `homepage`. Make it
   fail loudly per AGENTS.md §5 rather than special-casing.
 
+  **The two pseudo-entries are the one carve-out, and it must be explicit in the validator or the
+  schema test fails on the entries Step 4 adds.** `custom-url` and `custom-local` are UI affordances
+  that become a text field, not downloadable images — they have no `index`, no `homepage` and no
+  `sums` by construction. Encode that as a named set, not as a blanket "skip if missing":
+
+```python
+PSEUDO = {"custom-url", "custom-local"}   # UI text fields, not downloadable images
+
+def validate(entry):
+    if entry["id"] in PSEUDO:
+        # Must still be kebab-case, must still declare kinds, must NOT claim a
+        # checksum it cannot have — a pseudo-entry with `sums` is a real bug.
+        require_kebab(entry["id"]); require_kinds(entry)
+        if entry.get("sums") or entry.get("index"):
+            fail(f"{entry['id']} is a pseudo-entry but declares a download source")
+        return
+    require_https_index(entry); require_homepage(entry); require_sums(entry)
+    ...
+```
+
 - [ ] **Step 4: Write `catalog/images.json`** with these entries, all version-free (B4). Use
   Ubuntu's `meta-release-lts` / the `releases.ubuntu.com` index for `resolve: ubuntu-lts`:
 
@@ -769,11 +1076,30 @@ usb_guard() {
   (`BusType -in 'USB','SCSI'`) joined to `Get-Partition`, and treat `IsBoot`/`IsSystem` as an
   automatic refusal. Read `$env:AUTOOS_FAKE_DISKS` (JSON) in place of `Get-Disk` when set.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Add the elevation guard (B10)** — `usb_require_elevation` / `Assert-AutoOSElevated`,
+  returning a structured result so the browser UI can render it rather than only throwing:
+
+```bash
+if it "refuses to plan a write without root"; then
+    out="$( AUTOOS_SUDO="" AUTOOS_FAKE_UID=1000 usb_require_elevation 2>&1 )"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"sudo"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "is satisfied when already root"; then
+    AUTOOS_SUDO="" AUTOOS_FAKE_UID=0 usb_require_elevation && pass || fail "refused root"
+fi
+```
+
+  On Windows use
+  `([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`.
+  **Do not self-elevate** — a re-launch loses the session's log file, which is the thing the user
+  needs when a write fails.
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add lib/linux/usb.sh lib/windows/AutoOS.Usb.psm1 tests/
-git commit -m "feat(usb): device enumeration and a guard that refuses the system disk"
+git commit -m "feat(usb): device enumeration, a guard that refuses the system disk, elevation check"
 ```
 
 #### Task 6: the write plan, and `--dry-run` that touches nothing
@@ -838,16 +1164,74 @@ fi
 - [ ] **Step 6: Add the "dry run leaves the filesystem untouched" assertion** to the existing
   `describe "end-to-end (dry run only)"` block, covering `--create-usb` alongside the installer.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Refuse the platforms and architectures that cannot do this (B11, B13).**
+  `setup.sh` is the shared Linux **and macOS** entry point, and Ventoy ships x86_64 binaries only:
+
+```bash
+if it "macOS is refused cleanly, not left to fail inside usb_list"; then
+    out="$( SYS_OS=macos bash setup.sh --create-usb --image ubuntu-desktop-lts \
+            --kind installer --engine native --usb-device /dev/disk2 2>&1 )"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"not supported on macOS"* ]] && pass || fail "rc=$rc: $out"
+fi
+
+if it "the ventoy engine is hidden on arm64, not offered and broken"; then
+    out="$( SYS_ARCH=arm64 bash setup.sh --create-usb --list-engines 2>&1 )"
+    assert_not_contains "$out" "ventoy"
+    assert_contains     "$out" "native"
+fi
+```
+
+  `catalog/engines.json` therefore carries an `arch` array, exactly like a catalog component, and
+  an engine that cannot run on the detected machine is **hidden**, not shown-and-failing
+  (AGENTS.md §3).
+
+- [ ] **Step 8: Take the existing run lock, do not invent a second one (B13).** `serve.py` already
+  serialises component installs through `RUN`/`LOCK` (`lib/linux/serve.py:421-427`). USB creation
+  joins that same lock: a write requested while an install is running returns `409`, and so does a
+  second write. The terminal path takes a lock file in the cache directory for the same reason.
+
+```bash
+if it "a second write is refused while one is running"; then
+    out="$( AUTOOS_FAKE_RUN_ACTIVE=1 usb_plan ubuntu-desktop-lts installer ventoy /dev/sdb 2>&1 )"
+    rc=$?
+    [[ $rc -ne 0 && "$out" == *"already in progress"* ]] && pass || fail "rc=$rc: $out"
+fi
+```
+
+- [ ] **Step 9: Make `--undo` say what it cannot do (B13).** A USB write does not participate in
+  `--save-state` / `--from-state` / `--undo`. Silently ignoring a flag the user reasonably expects
+  to cover their last action is worse than refusing it:
+
+```bash
+if it "undo states plainly that a USB write cannot be undone"; then
+    out="$( bash setup.sh --undo --dry-run 2>&1 )"
+    assert_contains "$out" "USB"
+fi
+```
+
+- [ ] **Step 10: Commit**
 
 ```bash
 git add lib/linux/usb.sh lib/windows/AutoOS.Usb.psm1 setup.sh setup.ps1 catalog/engines.json tests/
-git commit -m "feat(usb): plan-then-execute with a dry run that opens no disk handle"
+git commit -m "feat(usb): plan-then-execute, platform and arch guards, one shared run lock"
 ```
 
 #### Task 7: execute the plan — Ventoy and raw, Linux first
 
 **Files:** Modify `lib/linux/usb.sh`; modify `lib/windows/AutoOS.Usb.psm1`
+
+**Interfaces:**
+- Consumes: `usb_plan` (Task 6) on **stdin, one command per line**; `fetch_verified` (Task 3);
+  `usb_guard` (Task 5); `templates/rescue-bootstrap.sh` (Task 9, which is why Task 9 runs first).
+- Produces (bash):
+  - `usb_execute <device>` — reads the plan on stdin, runs it, returns 0 only when every step
+    exited 0 **and** the resulting filesystem reads back (B15).
+  - `usb_write_ventoy <device>` — installs Ventoy; returns 0 or a named error.
+  - `usb_write_raw <device> <image_path> <image_bytes>` — raw write; emits its own `NN%` progress
+    lines because `dd` emits none (B14).
+  - `usb_copy_image <device> <image_path> [extra_file...]` — copies the ISO **and the rescue
+    templates** onto a Ventoy stick; refuses on a raw-written stick, which is read-only (A11).
+- Produces (PowerShell): `Invoke-AutoOSUsbPlan -DeviceId -Plan [string[]]` with the same contract.
 
 - [ ] **Step 1: Write the failing test** — execution is asserted through the command runner, never
   against a disk:
@@ -878,10 +1262,20 @@ fi
   plugin: create a `.dat` file of the requested size with `dd`, register it in
   `ventoy/ventoy.json`. Default 16 GB, capped at half the stick.
 
-- [ ] **Step 5: Run the tests, then run it for real, once, on a real stick** — the only manual
-  step in this plan, and it is non-negotiable per AGENTS.md §7 ("Do not report work as done
-  because the code looks right"). Boot the stick. Record the machine and the result in the commit
-  body.
+- [ ] **Step 5: Hand the real-hardware check to the human partner. Do not perform it yourself.**
+
+  **An implementing agent must never write to a physical disk.** Hard rule 3 requires a destructive
+  action to be chosen by *the user*, and an agent selecting a block device off a checklist is not
+  that — nothing in this repository lets an agent confirm by eye that `/dev/sdb` is the stick the
+  human meant rather than their backup drive. AGENTS.md §7 still demands the feature be run for
+  real, so the split is:
+
+  - The agent produces the exact command, runs the full suite, and stops.
+  - The agent reports `DONE_WITH_CONCERNS`, naming the unverified path in its report.
+  - The human partner runs it against a stick they can see, boots it, and reports back.
+  - The result is recorded in the commit body or a follow-up commit, naming the machine.
+
+  A task is reviewable and mergeable without the hardware check; it is not *finished* without it.
 
 - [ ] **Step 6: Run it a second time** and confirm it reports `skipped` for the already-verified
   ISO in the cache and re-writes only what changed.
@@ -897,29 +1291,52 @@ fi
   `Mount-AutoOSUsbInWsl -DeviceId` → the `/dev/sdX` path inside WSL, or throws;
   `Dismount-AutoOSUsbFromWsl -Handle` → always safe to call, always called from `finally`.
 
-- [ ] **Step 1: Write the failing test** in `tests/run-tests.ps1`, against synthetic state:
+- [ ] **Step 1: Write the failing test** in `tests/run-tests.ps1`, against synthetic state.
+
+  **This suite is deliberately not Pester** — AGENTS.md §5 says so, and `tests/run-tests.ps1`
+  defines its own DSL at lines 44-82: `Describe-Group`, `Test-Case`, `Pass`, `Skip`,
+  `Assert-Equal`, `Assert-True`, `Assert-Contains`, `Assert-NotContains`. There is no `It` and no
+  `Should`; using them fails with "the term 'It' is not recognized". Note also that
+  `Assert-Contains` tests **collection membership** (`-contains`), not substring — for a substring
+  check use `Assert-True ($text -match 'pattern')`.
 
 ```powershell
-It 'falls back to usbipd when wsl --mount rejects a flash drive' {
+Describe-Group 'wsl engine planning'
+
+Test-Case 'falls back to usbipd when wsl --mount rejects a flash drive' {
     $env:AUTOOS_FAKE_WSL_MOUNT_RESULT = '0x8007000f'
-    $plan = New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' `
-                              -Engine 'wsl' -DeviceId 'PHYSICALDRIVE2' -WhatIf
-    $plan -join "`n" | Should -Match 'usbipd attach --wsl'
+    try {
+        $plan = New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' `
+                                  -Engine 'wsl' -DeviceId 'PHYSICALDRIVE2'
+        Assert-True (($plan -join [Environment]::NewLine) -match 'usbipd attach --wsl') `
+                    'plan never falls back to usbipd'
+    } finally { $env:AUTOOS_FAKE_WSL_MOUNT_RESULT = $null }
 }
 
-It 'always plans a detach, even for a plan that fails' {
+Test-Case 'the last planned step is always a detach' {
     $plan = New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' `
-                              -Engine 'wsl' -DeviceId 'PHYSICALDRIVE2' -WhatIf
-    $plan[-1] | Should -Match 'usbipd detach'
+                              -Engine 'wsl' -DeviceId 'PHYSICALDRIVE2'
+    Assert-True ($plan[-1] -match 'usbipd detach') `
+                "last planned step was [$($plan[-1])], not a detach"
 }
 
-It 'refuses the wsl engine when WSL2 is absent' {
+Test-Case 'refuses the wsl engine when WSL2 is absent' {
     $env:AUTOOS_FAKE_WSL_STATE = '{"Installed":false}'
-    { New-AutoOSUsbPlan -Engine 'wsl' -ImageId 'ubuntu-desktop-lts' `
-                        -Kind 'installer' -DeviceId 'PHYSICALDRIVE2' } |
-        Should -Throw '*WSL2 is not installed*'
+    try {
+        $threw = $false
+        try {
+            New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' `
+                              -Engine 'wsl' -DeviceId 'PHYSICALDRIVE2' | Out-Null
+        } catch { $threw = $_.Exception.Message -match 'WSL2 is not installed' }
+        Assert-True $threw 'planning succeeded on a machine with no WSL2'
+    } finally { $env:AUTOOS_FAKE_WSL_STATE = $null }
 }
 ```
+
+  `New-AutoOSUsbPlan` is a **planner**: it returns `[string[]]` and runs nothing, so these tests
+  need no `-WhatIf` switch and Task 6 must not add one — its signature stays exactly
+  `New-AutoOSUsbPlan -ImageId -Kind -Engine -DeviceId`. The `finally` blocks matter: a fake-state
+  environment variable left set leaks into every later test in the same process.
 
 - [ ] **Step 2: Run and watch fail.**
 
@@ -938,7 +1355,9 @@ It 'refuses the wsl engine when WSL2 is absent' {
   then `grub-install --removable --target=x86_64-efi`. This is the path that needs no ISO at all
   and is why the WSL engine exists.
 
-- [ ] **Step 7: Run the tests; then build one real stick and boot it.** Record the result.
+- [ ] **Step 7: Run the tests. Hand the real-hardware check to the human partner**, exactly as
+  Task 7 Step 5 sets out — the agent never attaches or writes a physical device, it reports
+  `DONE_WITH_CONCERNS` naming the unverified path.
 
 - [ ] **Step 8: Commit.**
 
@@ -1056,10 +1475,16 @@ if it "the usb dialog is hidden by the hidden attribute, not only by a class"; t
         || fail "usb dialog will render open on every load"
 fi
 
+# `usb_create_response(body: dict) -> tuple[int, dict]` is a MODULE-LEVEL function.
+# `Handler` is a BaseHTTPRequestHandler subclass whose helpers all take `self`
+# (serve.py:268-289), so `Handler._usb_create_body(dict)` would pass the dict AS
+# self and raise TypeError. The repo already solves this the right way: `classify()`
+# at serve.py:175 is module-level precisely so a test can import and call it.
 if it "the create endpoint refuses an unguarded device"; then
     out="$(python3 - <<'PY'
-import lib.linux.serve as s
-print(s.Handler._usb_create_body({"device": "/dev/sda", "image": "ubuntu-desktop-lts"}))
+import sys; sys.path.insert(0, "lib/linux")
+from serve import usb_create_response          # module-level, NOT a Handler method
+print(usb_create_response({"device": "/dev/sda", "image": "ubuntu-desktop-lts"}))
 PY
 )"
     assert_contains "$out" "root filesystem"
@@ -1083,6 +1508,18 @@ fi
   rather than inventing a second one.
 - [ ] **Step 6: Make the confirm step a real confirmation** — the device model, size and
   "destroys all data" in the dialog, not a `window.confirm`.
+
+- [ ] **Step 6b: Surface elevation and the run lock in the UI (B10, B13).** `/api/usb/devices`
+  returns `"elevated": bool`; when false the button renders **disabled with the reason**, because
+  offering an action that cannot succeed is the failure mode B10 exists to prevent.
+  `/api/usb/create` returns `409` while any run — install or write — holds the lock, and the page
+  shows that as "a run is already in progress", reusing the string the install path already uses.
+
+```bash
+if it "the create button is disabled when the server is not elevated"; then
+    grep -q 'elevated' web/index.html && pass || fail "page never reads the elevated flag"
+fi
+```
 - [ ] **Step 7: Drive it with Playwright** before claiming it works — open the page, open the
   dialog, assert the device list renders and the button is disabled until a device is chosen.
 - [ ] **Step 8: Run the tests, commit.**

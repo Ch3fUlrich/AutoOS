@@ -5,6 +5,8 @@
     "workstation": "Full development workstation — everything below that fits the hardware.",
     "ai-coding": "Coding and AI tooling only, plus the terminal it runs in.",
     "light": "Minimal remote-access box — Claude Code, Tailscale and Herdr only.",
+    "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
+    "local-ai": "Local AI inference with Ollama — no API key and no network, but models are 1.4-4.7 GB.",
     "custom": "Start with nothing ticked and choose by hand.",
     "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing.",
     "rescue": "Disaster-recovery toolkit and emergency AI recovery environment."
@@ -221,7 +223,8 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "light"
+            "light",
+            "rescue"
           ],
           "verify": "claude --version",
           "homepage": "https://docs.anthropic.com/en/docs/claude-code"
@@ -246,16 +249,95 @@
           "id": "agy",
           "name": "Antigravity CLI",
           "description": "Google's terminal coding agent",
-          "provider": "script",
-          "package": "agy",
-          "postInstall": "Add-AutoOSAgyToPath",
+          "provider": "winget",
+          "package": "Google.AntigravityCLI",
+          "arch": [
+            "x64",
+            "arm64"
+          ],
           "profiles": [
             "workstation",
             "ai-coding",
-            "light"
+            "light",
+            "rescue"
           ],
           "verify": "agy --version",
-          "homepage": "https://antigravity.google/"
+          "homepage": "https://antigravity.google/product/antigravity-cli",
+          "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
+        },
+        {
+          "id": "ollama",
+          "name": "Ollama",
+          "description": "Local AI model runtime",
+          "provider": "winget",
+          "package": "Ollama.Ollama",
+          "verify": "ollama --version",
+          "homepage": "https://ollama.com/",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-4b",
+          "name": "Qwen3 4B",
+          "description": "General-purpose local model, 2.5 GB download, 256K context",
+          "provider": "custom",
+          "package": "qwen3:4b",
+          "postInstall": "Install-AutoOSOllamaModelQwen34B",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen3:4b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "notes": "Pre-ticked default: small enough to load fast off USB, and its 256K context fits a full dmesg/SMART dump.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-1-7b",
+          "name": "Qwen3 1.7B",
+          "description": "Smaller/faster general-purpose local model, 1.4 GB download",
+          "provider": "custom",
+          "package": "qwen3:1.7b",
+          "postInstall": "Install-AutoOSOllamaModelQwen317B",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen3:1.7b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "profiles": []
+        },
+        {
+          "id": "ollama-model-qwen2-5-coder-7b",
+          "name": "Qwen2.5 Coder 7B",
+          "description": "Coding-focused local model, 4.7 GB download",
+          "provider": "custom",
+          "package": "qwen2.5-coder:7b",
+          "postInstall": "Install-AutoOSOllamaModelQwenCoder7B",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen2.5-coder:7b",
+          "homepage": "https://ollama.com/library/qwen2.5-coder",
+          "profiles": []
+        },
+        {
+          "id": "oterm",
+          "name": "oterm",
+          "description": "Terminal UI chat client for Ollama models",
+          "provider": "custom",
+          "package": "oterm",
+          "postInstall": "Install-AutoOSOterm",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "oterm --help",
+          "homepage": "https://github.com/ggozad/oterm",
+          "notes": "No winget/choco package exists upstream (checked winget.run and community.chocolatey.org); installed via pip. Interactive TUI only — 'ai local' is the scriptable path to the same models.",
+          "profiles": [
+            "local-ai"
+          ]
         },
         {
           "id": "opencode",
@@ -558,7 +640,8 @@
           "package": "7zip.7zip",
           "profiles": [
             "workstation",
-            "everyday"
+            "everyday",
+            "rescue"
           ],
           "verify": "7z",
           "homepage": "https://www.7-zip.org/",
@@ -778,7 +861,8 @@
           "provider": "winget",
           "package": "REALiX.HWiNFO",
           "profiles": [
-            "everyday"
+            "everyday",
+            "rescue"
           ],
           "homepage": "https://www.hwinfo.com/",
           "installedNames": [
@@ -867,6 +951,91 @@
           "installedNames": [
             "Unified Remote Server",
             "Unified Remote"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rescue",
+      "name": "Disaster Recovery",
+      "description": "Disk, filesystem, hardware and installer-USB tools for a rescue stick.",
+      "components": [
+        {
+          "id": "crystaldiskinfo",
+          "name": "CrystalDiskInfo",
+          "description": "Disk health, S.M.A.R.T. status and temperature monitor",
+          "provider": "winget",
+          "package": "CrystalDewWorld.CrystalDiskInfo",
+          "homepage": "https://crystalmark.info/en/software/crystaldiskinfo/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "testdisk",
+          "name": "TestDisk & PhotoRec",
+          "description": "Recover lost partitions and undelete files",
+          "provider": "winget",
+          "package": "CGSecurity.TestDisk",
+          "homepage": "https://www.cgsecurity.org/wiki/TestDisk",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "windirstat",
+          "name": "WinDirStat",
+          "description": "Visualise what is filling up the disk",
+          "provider": "winget",
+          "package": "WinDirStat.WinDirStat",
+          "homepage": "https://windirstat.net/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "sysinternals",
+          "name": "Sysinternals Suite",
+          "description": "Process Explorer, Autoruns and the rest of the PsTools",
+          "provider": "winget",
+          "package": "Microsoft.Sysinternals.Suite",
+          "homepage": "https://learn.microsoft.com/sysinternals/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "ventoy",
+          "name": "Ventoy",
+          "description": "Multi-ISO bootable USB creator",
+          "provider": "winget",
+          "package": "Ventoy.Ventoy",
+          "homepage": "https://www.ventoy.net/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "rufus",
+          "name": "Rufus",
+          "description": "Format and create bootable USB drives from an ISO",
+          "provider": "winget",
+          "package": "Rufus.Rufus",
+          "homepage": "https://rufus.ie/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "usbipd-win",
+          "name": "usbipd-win",
+          "description": "Share local USB devices with WSL2 and Hyper-V guests",
+          "provider": "winget",
+          "package": "dorssel.usbipd-win",
+          "verify": "usbipd --version",
+          "homepage": "https://github.com/dorssel/usbipd-win",
+          "profiles": [
+            "rescue"
           ]
         }
       ]
