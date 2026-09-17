@@ -962,8 +962,8 @@ usb_chooser_engine_items() {
 
 # usb_chooser_device_items — "path|model|size GB|bus" from usb_list.
 usb_chooser_device_items() {
-    local dpath dmodel dsize drm dtran gb
-    while IFS=$'\t' read -r dpath dmodel dsize drm dtran; do
+    local dpath dmodel dsize _drm dtran gb
+    while IFS=$'\t' read -r dpath dmodel dsize _drm dtran; do
         [[ -z "$dpath" ]] && continue
         gb="$(awk -v b="$dsize" 'BEGIN{printf "%.1f", b/1000000000}')"
         printf '%s|%s|%s GB|%s\n' "$dpath" "${dmodel:-unknown model}" "$gb" "${dtran:-}"
@@ -1023,6 +1023,8 @@ usb_choose_interactively() {
         return 0
     fi
     if ui_confirm "Write to $USB_DEVICE ($model, $size)? ALL DATA ON IT WILL BE DESTROYED." n; then
+        # setup.sh's create_usb_flow reads this global as the write consent.
+        # shellcheck disable=SC2034
         USB_WIPE=1
         return 0
     fi

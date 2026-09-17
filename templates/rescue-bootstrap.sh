@@ -404,6 +404,15 @@ install_oterm() {
         ui_warn "oterm — python3 not found, cannot install"
         return 0
     fi
+    # `pip install --user` puts the console script in ~/.local/bin, which is
+    # not on PATH in every session (a fresh live boot, sudo, CI): a second
+    # run then found no `oterm` command and installed it again - the exact
+    # "installed, not skipped" the Linux CI caught. The package, not the
+    # command, is what proves it is there.
+    if python3 -m pip show oterm >/dev/null 2>&1; then
+        ui_line "skipped" "oterm already installed (pip user site; ~/.local/bin may not be on PATH)"
+        return 0
+    fi
 
     if detect_wheelhouse; then
         ui_info "installing oterm from offline wheelhouse ($WHEELHOUSE_DIR)"

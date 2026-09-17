@@ -163,11 +163,13 @@ if ($CheckCatalog) {
 # path as a function so the top-level menu's "Create installer USB" entry
 # (Task 10) can reach it too. Returns the exit code; the callers exit.
 function Invoke-AutoOSCreateUsbFlow {
-    # Pipeline output from the steps below (the executor's TRACE lines, for
-    # one) must reach the console, so the exit code travels in a script
-    # variable rather than as the function's return value.
+    # The USB parameters arrive explicitly (not read from the script scope)
+    # so PSScriptAnalyzer can see them used. Pipeline output from the
+    # steps below (the executor's TRACE lines, for one) must reach the
+    # console, so the exit code travels in a script variable rather than
+    # as the function's return value.
+    param([string]$img, [string]$knd, [string]$eng, [string]$dev, [bool]$wipe)
     $script:CreateUsbExit = 0
-    $img = $Image; $knd = $Kind; $eng = $Engine; $dev = $UsbDevice; $wipe = [bool]$WipeTargetDisk
     if ($ListEngines) {
         Write-AutoOSSection 'USB write engines available on this machine'
         $engines = @(Get-AutoOSUsbEngineList -Platform (Get-AutoOSUsbCurrentOs) -Arch (Get-AutoOSUsbCurrentArch))
@@ -271,7 +273,7 @@ function Invoke-AutoOSCreateUsbFlow {
 }
 
 if ($CreateUsb -or $ListUsb -or $ListEngines) {
-    Invoke-AutoOSCreateUsbFlow
+    Invoke-AutoOSCreateUsbFlow -img $Image -knd $Kind -eng $Engine -dev $UsbDevice -wipe ([bool]$WipeTargetDisk)
     exit $script:CreateUsbExit
 }
 
@@ -429,7 +431,7 @@ if ($FromState) {
         }
         $profileItems += [pscustomobject]@{ Id = 'create-usb'; Name = 'Create installer USB'; Description = 'Build a bootable rescue/installer stick instead of installing'; Badge = '' }
         $InstallProfile = Show-AutoOSRadioMenu -Items $profileItems -Title 'Choose installation profile' -DefaultId $suggested
-        if ($InstallProfile -eq 'create-usb') { Invoke-AutoOSCreateUsbFlow; exit $script:CreateUsbExit }
+        if ($InstallProfile -eq 'create-usb') { Invoke-AutoOSCreateUsbFlow -img $Image -knd $Kind -eng $Engine -dev $UsbDevice -wipe ([bool]$WipeTargetDisk); exit $script:CreateUsbExit }
     }
 }
 if ($InstallProfile -notin $profileNames) { throw "Unknown profile: $InstallProfile" }

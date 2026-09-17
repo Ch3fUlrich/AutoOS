@@ -1359,37 +1359,68 @@ Test-Case 'a cached, already-verified file is skipped, not refetched' {
 }
 
 function Start-AutoOSTestHttpServer {
-    # A throwaway python http.server on 127.0.0.1 and an OS-assigned port,
-    # serving -Directory. Mirror of tests/run-tests.sh's
-    # _start_test_http_server: polls a port file the server writes before
-    # serve_forever(), so there is no read-before-bound race. Returns
-    # @{ Process; Port }; the caller must Stop-Process it.
+    # A throwaway HTTP server on 127.0.0.1 and an OS-assigned port, serving
+    # GET of the files under -Directory. Mirror of tests/run-tests.sh's
+    # _start_test_http_server, but written in PowerShell on a TcpListener
+    # inside a background job: the first version launched python via
+    # Start-Process and never got a port back on the windows-latest CI
+    # runner. No python, no HttpListener URL ACL, nothing to install.
+    # Returns @{ Job; Port }; the caller must Stop-AutoOSTestHttpServer it.
     param([Parameter(Mandatory)][string]$Directory)
     $portFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_port_' + [Guid]::NewGuid().ToString('N'))
-    # A script file, not `python -c`: quoting a one-liner through
-    # Start-Process's argument list mangles it, and the port file must be
-    # CLOSED (flushed) before serve_forever() blocks forever.
-    $script = "$portFile.py"
-    $lines = @(
-        'import http.server, socketserver, sys, os',
-        'os.chdir(sys.argv[1])',
-        'h = socketserver.TCPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)',
-        'with open(sys.argv[2], "w") as f:',
-        '    f.write(str(h.server_address[1]))',
-        'h.serve_forever()'
-    )
-    [IO.File]::WriteAllText($script, ($lines -join "`n") + "`n")
-    $proc = Start-Process python -PassThru -WindowStyle Hidden -ArgumentList @(('"' + $script + '"'), ('"' + $Directory + '"'), ('"' + $portFile + '"'))
+    $job = Start-Job -ArgumentList $Directory, $portFile -ScriptBlock {
+        param($dir, $portFile)
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        [IO.File]::WriteAllText($portFile, [string]$listener.LocalEndpoint.Port)
+        while ($true) {
+            $client = $listener.AcceptTcpClient()
+            try {
+                $stream = $client.GetStream()
+                $reader = [IO.StreamReader]::new($stream)
+                $request = $reader.ReadLine()
+                while ($true) { $h = $reader.ReadLine(); if ($null -eq $h -or $h -eq '') { break } }
+                $status = '404 Not Found'; $body = [byte[]]::new(0)
+                if ($request -match '^GET\s+(\S+)') {
+                    $path = [Uri]::UnescapeDataString(($Matches[1] -split '\?')[0]).TrimStart('/').Replace('/', '\')
+                    $full = Join-Path $dir $path
+                    if ((Test-Path -LiteralPath $full -PathType Container)) { $full = Join-Path $full 'index.html' }
+                    if (Test-Path -LiteralPath $full -PathType Leaf) {
+                        $body = [IO.File]::ReadAllBytes($full); $status = '200 OK'
+                    }
+                }
+                $head = [Text.Encoding]::ASCII.GetBytes("HTTP/1.0 $status`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n")
+                $stream.Write($head, 0, $head.Length)
+                if ($body.Length) { $stream.Write($body, 0, $body.Length) }
+                $stream.Flush()
+            } catch {
+                # A client that hangs up mid-request is not the server's problem.
+                Write-Verbose "test http server: $($_.Exception.Message)"
+            } finally {
+                $client.Close()
+            }
+        }
+    }
     $port = $null
-    for ($i = 0; $i -lt 50; $i++) {
+    for ($i = 0; $i -lt 100; $i++) {
         if ((Test-Path -LiteralPath $portFile) -and (Get-Item -LiteralPath $portFile).Length -gt 0) {
             $port = [int](Get-Content -LiteralPath $portFile -Raw).Trim(); break
         }
+        if ($job.State -in @('Failed', 'Completed', 'Stopped')) { break }
         Start-Sleep -Milliseconds 100
     }
-    Remove-Item -LiteralPath $portFile, $script -Force -ErrorAction SilentlyContinue
-    if (-not $port) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw 'test http server did not report a port' }
-    @{ Process = $proc; Port = $port }
+    Remove-Item -LiteralPath $portFile -Force -ErrorAction SilentlyContinue
+    if (-not $port) {
+        $why = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        throw "test http server did not report a port (job state $($job.State)) $why"
+    }
+    @{ Job = $job; Port = $port }
+}
+
+function Stop-AutoOSTestHttpServer {
+    param($Server)
+    if ($Server -and $Server.Job) { Remove-Job -Job $Server.Job -Force -ErrorAction SilentlyContinue }
 }
 
 Test-Case 'verified download: an http URL is streamed to disk through curl.exe and verifies (http)' {
@@ -1407,7 +1438,7 @@ Test-Case 'verified download: an http URL is streamed to disk through curl.exe a
         Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/src.bin" -Destination $out -Sha256 $sum | Out-Null
         Assert-True ((Test-Path -LiteralPath $out) -and ((Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash -eq $sum)) 'downloaded file missing or digest differs'
     } finally {
-        Stop-Process -Id $srv.Process.Id -Force -ErrorAction SilentlyContinue
+        Stop-AutoOSTestHttpServer $srv
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
 }
@@ -1422,7 +1453,7 @@ Test-Case 'verified download: an http 404 is a transport failure that leaves no 
         catch { $threw = $true; $msg = $_.Exception.Message }
         Assert-True ($threw -and $msg -like '*transport failure*' -and -not (Test-Path -LiteralPath "$out.part") -and -not (Test-Path -LiteralPath $out)) "threw=$threw msg=[$msg]"
     } finally {
-        Stop-Process -Id $srv.Process.Id -Force -ErrorAction SilentlyContinue
+        Stop-AutoOSTestHttpServer $srv
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
 }
@@ -2288,6 +2319,21 @@ Test-Case 'usb: Invoke-AutoOSUsbPlan routes an Invoke-AutoOSUsbFetchImage line t
     }
 }
 
+Test-Case 'usb: Invoke-AutoOSUsbPlan refuses a plan step with an unrecognised command shape and never executes it (finding F4, execute)' {
+    # Windows half of F4: the dispatcher used Invoke-Expression for every
+    # line it did not special-case, so a line shaped like "cmd; other-cmd"
+    # would have run both halves. Now every known shape is matched
+    # explicitly and anything else is refused - the marker must not exist.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $marker = Join-Path $env:TEMP ('aos_f4_' + [Guid]::NewGuid().ToString('N'))
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @("Write-Host pwned; New-Item -ItemType File -Path '$marker'") } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*known command shape*' -and -not (Test-Path -LiteralPath $marker)) "threw=$threw msg=[$msg] marker=$(Test-Path -LiteralPath $marker)"
+        Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'usb: Invoke-AutoOSUsbPlan reports a fetch-step failure as "not touched", never "rewrite from wipefs" (fetch)' {
     Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
         $env:AUTOOS_FORCE_FAIL = '1'
@@ -2320,7 +2366,7 @@ Test-Case 'usb: Invoke-AutoOSUsbFetchImage uses a healthy mirror before the cano
         Assert-True ($same -and $text -like "*from $($mir.Url)testos-1.0-amd64.iso*" -and $text -like '*verified image*') "same=$same out=$text"
         Remove-Item -Recurse -Force $fx2.Root -ErrorAction SilentlyContinue
     } finally {
-        Stop-Process -Id $mir.Server.Process.Id -Force -ErrorAction SilentlyContinue
+        Stop-AutoOSTestHttpServer $mir.Server
         Remove-Item -Recurse -Force $fx.Root, $mir.Root -ErrorAction SilentlyContinue
     }
 }
@@ -2345,7 +2391,7 @@ Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips a mirror whose bytes do not mat
         Assert-True ($same -and $text -like '*checksum mismatch*' -and $text -like '*trying the next source*') "same=$same out=$text"
         Remove-Item -Recurse -Force $fx2.Root -ErrorAction SilentlyContinue
     } finally {
-        Stop-Process -Id $mir.Server.Process.Id -Force -ErrorAction SilentlyContinue
+        Stop-AutoOSTestHttpServer $mir.Server
         Remove-Item -Recurse -Force $fx.Root, $mir.Root -ErrorAction SilentlyContinue
     }
 }

@@ -271,17 +271,17 @@ function Get-AutoOSVerifiedFile {
 # directory-of-releases shape vs Debian's current/-symlink shape, the LTS
 # selection rule, and why ambiguity is always an error).
 
-# _Get-AutoOSDownloadRoot — same convention as AutoOS.Usb.psm1's
+# Get-AutoOSDownloadRoot — same convention as AutoOS.Usb.psm1's
 # Get-AutoOSUsbCatalogRoot: $PSScriptRoot always points at lib\windows
 # regardless of the caller's cwd, so two parents up is the repo root for
 # every caller, production or test. Kept private and duplicated rather than
 # calling into AutoOS.Usb.psm1: that module is not guaranteed to be the one
 # importing this one.
-function _Get-AutoOSDownloadRoot {
+function Get-AutoOSDownloadRoot {
     (Resolve-Path (Join-Path $PSScriptRoot '..\..')).ProviderPath
 }
 
-# _Get-AutoOSImageFetchUri <DirUri>
+# Get-AutoOSImageFetchUri <DirUri>
 # <DirUri> is always directory-shaped (a catalog `index` value, or a
 # subdirectory this resolver picked) - exactly what a live http(s) index
 # server understands, so those pass through unchanged. file:// has no server
@@ -289,13 +289,13 @@ function _Get-AutoOSDownloadRoot {
 # only for that scheme, and only so tests can point `index` at a fixture
 # tree with no network involved - this asks for that page by its
 # conventional name explicitly.
-function _Get-AutoOSImageFetchUri {
+function Get-AutoOSImageFetchUri {
     param([Parameter(Mandatory)][string]$DirUri)
     if ($DirUri -match '^file://') { return $DirUri.TrimEnd('/') + '/index.html' }
     return $DirUri
 }
 
-# _Resolve-AutoOSImagePage <HtmlPath> <BaseUrl> <FileRegex> <SumsField>
+# Resolve-AutoOSImagePage <HtmlPath> <BaseUrl> <FileRegex> <SumsField>
 #                          <SigField> <Stage:top|leaf> <LtsWanted>
 # Parses one already-fetched directory-listing page. Returns a
 # [pscustomobject] with .Status = 'ok' (.Url/.File/.Sums/.Sig set),
@@ -303,7 +303,7 @@ function _Get-AutoOSImageFetchUri {
 # Never guesses: ambiguous matches and unmatched patterns are always
 # 'error', never a first-match - see lib/linux/download.sh's
 # _image_resolve_parse_page for the full rationale, identical here.
-function _Resolve-AutoOSImagePage {
+function Resolve-AutoOSImagePage {
     param(
         [Parameter(Mandatory)][string]$HtmlPath,
         [Parameter(Mandatory)][string]$BaseUrl,
@@ -456,7 +456,7 @@ function Resolve-AutoOSImageUrl {
     }
 
     if (-not $CatalogPath) {
-        $CatalogPath = Join-Path (_Get-AutoOSDownloadRoot) 'catalog\images.json'
+        $CatalogPath = Join-Path (Get-AutoOSDownloadRoot) 'catalog\images.json'
     }
     if (-not (Test-Path -LiteralPath $CatalogPath)) {
         throw "Resolve-AutoOSImageUrl: cannot read $CatalogPath"
@@ -482,15 +482,15 @@ function Resolve-AutoOSImageUrl {
     New-Item -ItemType Directory -Path $work -Force | Out-Null
     try {
         $topHtml = Join-Path $work 'top.html'
-        Get-AutoOSVerifiedFile -Uri (_Get-AutoOSImageFetchUri $index) -Destination $topHtml | Out-Null
-        $result = _Resolve-AutoOSImagePage -HtmlPath $topHtml -BaseUrl $index -FileRegex $fileRe `
+        Get-AutoOSVerifiedFile -Uri (Get-AutoOSImageFetchUri $index) -Destination $topHtml | Out-Null
+        $result = Resolve-AutoOSImagePage -HtmlPath $topHtml -BaseUrl $index -FileRegex $fileRe `
             -SumsField $sumsField -SigField $sigField -Stage 'top' -LtsWanted:$ltsWanted
 
         if ($result.Status -eq 'recurse') {
             $subdir = $result.Subdir
             $leafHtml = Join-Path $work 'leaf.html'
-            Get-AutoOSVerifiedFile -Uri (_Get-AutoOSImageFetchUri $subdir) -Destination $leafHtml | Out-Null
-            $result = _Resolve-AutoOSImagePage -HtmlPath $leafHtml -BaseUrl $subdir -FileRegex $fileRe `
+            Get-AutoOSVerifiedFile -Uri (Get-AutoOSImageFetchUri $subdir) -Destination $leafHtml | Out-Null
+            $result = Resolve-AutoOSImagePage -HtmlPath $leafHtml -BaseUrl $subdir -FileRegex $fileRe `
                 -SumsField $sumsField -SigField $sigField -Stage 'leaf' -LtsWanted:$ltsWanted
         }
 

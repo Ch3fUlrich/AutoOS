@@ -817,16 +817,57 @@ function Invoke-AutoOSUsbPlanStep {
             -ImageBytes ([int64]$rev.Groups[3].Value) -PinnedId $rev.Groups[4].Value
         return
     }
-    if ($Line -match '^Ventoy2Disk\.exe\s') {
+    # Finding F4, Windows half: this used to be Invoke-Expression for every
+    # other line - PowerShell's eval, on a string whose device/image values
+    # can arrive from a browser POST body. Each known plan shape is now
+    # matched explicitly ([regex]::Match, not -match: lesson L6) and called
+    # with named parameters; anything else is refused, exactly as
+    # lib/linux/usb.sh's _usb_dispatch_step does.
+    $ventoy = [regex]::Match($Line, '^Ventoy2Disk\.exe\s+-I\s+-G\s+(\S+)\s*$')
+    if ($ventoy.Success) {
+        if ($ventoy.Groups[1].Value -ne $DeviceId) {
+            throw "usb_execute: plan step names $($ventoy.Groups[1].Value) but this run targets $DeviceId - refusing"
+        }
         Install-AutoOSUsbVentoy -DeviceId $DeviceId
         return
     }
-    # Every other line is either a real function this module (or its
-    # siblings) already defines - Invoke-AutoOSUsbCopyImage,
-    # Write-AutoOSUsbRaw - or an external tool (wsl.exe, rufus.exe).
-    # Invoke-Expression is PowerShell's eval, the same role bash's
-    # `eval "$line"` plays in the Linux mirror.
-    Invoke-Expression $Line
+    $copy = [regex]::Match($Line, '^Invoke-AutoOSUsbCopyImage\s+(\S+)\s+(.+?)\s*$')
+    if ($copy.Success) {
+        Invoke-AutoOSUsbCopyImage -DeviceId $copy.Groups[1].Value -ImagePath $copy.Groups[2].Value
+        return
+    }
+    $raw = [regex]::Match($Line, '^Write-AutoOSUsbRaw\s+(\S+)\s+(.+?)\s+(\d+)\s*$')
+    if ($raw.Success) {
+        Write-AutoOSUsbRaw -DeviceId $raw.Groups[1].Value -ImagePath $raw.Groups[2].Value -ImageBytes ([int64]$raw.Groups[3].Value)
+        return
+    }
+    $persist = [regex]::Match($Line, '^Add-AutoOSUsbVentoyPersistence\s+(\S+)(?:\s+(\d+))?\s*$')
+    if ($persist.Success) {
+        if ($persist.Groups[2].Success) {
+            Add-AutoOSUsbVentoyPersistence -DeviceId $persist.Groups[1].Value -SizeGb ([int]$persist.Groups[2].Value)
+        } else {
+            Add-AutoOSUsbVentoyPersistence -DeviceId $persist.Groups[1].Value
+        }
+        return
+    }
+    $wslImport = [regex]::Match($Line, '^wsl\.exe\s+--import\s+AutoOSRescue\s+(\S+)\s+(.+?)\s*$')
+    if ($wslImport.Success) {
+        & wsl.exe --import AutoOSRescue $wslImport.Groups[1].Value $wslImport.Groups[2].Value
+        if ($LASTEXITCODE -ne 0) { throw "wsl.exe --import exited $LASTEXITCODE" }
+        return
+    }
+    $wslDd = [regex]::Match($Line, '^wsl\.exe\s+-e\s+dd\s+if=(.+?)\s+of=(\S+)\s+bs=4M\s+status=progress\s+conv=fsync\s*$')
+    if ($wslDd.Success) {
+        & wsl.exe -e dd "if=$($wslDd.Groups[1].Value)" "of=$($wslDd.Groups[2].Value)" bs=4M status=progress conv=fsync
+        if ($LASTEXITCODE -ne 0) { throw "wsl.exe dd exited $LASTEXITCODE" }
+        return
+    }
+    $rufus = [regex]::Match($Line, '^rufus\.exe\s+-i\s+(.+?)\s*$')
+    if ($rufus.Success) {
+        & rufus.exe -i $rufus.Groups[1].Value
+        return
+    }
+    throw "usb_execute: refusing a plan step that does not match a known command shape: $Line"
 }
 
 function Invoke-AutoOSUsbPlan {

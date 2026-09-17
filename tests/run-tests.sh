@@ -3825,6 +3825,22 @@ EOS
 [[ "${1:-}" == "-s" ]] || exit 1
 grep -qx -- "${2:-}" "$FAKE_DPKG_DB" 2>/dev/null
 EOS
+    # python3: a stateful stub, so install_oterm never runs a REAL
+    # `pip install --user oterm` on the machine running the suite (the Linux
+    # CI runner did exactly that, and installed it twice because
+    # ~/.local/bin is not on the sandbox PATH). `pip install` records a
+    # marker; `pip show oterm` reports it; everything else is a no-op.
+    cat > "$BS_BIN/python3" <<'EOS'
+#!/usr/bin/env bash
+printf 'python3 %s\n' "$*" >>"$FAKE_CMD_LOG"
+if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then
+    case "${3:-}" in
+        install) touch "$FAKE_DPKG_DB.pip-oterm"; exit 0 ;;
+        show)    [[ -e "$FAKE_DPKG_DB.pip-oterm" ]]; exit $? ;;
+    esac
+fi
+exit 0
+EOS
     cat > "$BS_BIN/apt-get" <<'EOS'
 #!/usr/bin/env bash
 printf 'apt-get %s\n' "$*" >>"$FAKE_CMD_LOG"
