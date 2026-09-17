@@ -120,6 +120,23 @@ def validate(entry, problems, seen_ids):
             f"gpg fingerprint, got '{key}'"
         )
 
+    # `mirrors` (optional): alternative directory roots with the SAME layout
+    # as `index`, used only to serve the big file faster once the canonical
+    # index has chosen it and the signed manifest has fixed its digest
+    # (usb_fetch_image / Invoke-AutoOSUsbFetchImage). Shape only: https,
+    # trailing slash so the resolved relative path appends cleanly.
+    mirrors = entry.get("mirrors")
+    if mirrors is not None:
+        if not isinstance(mirrors, list):
+            problems.append(f"{where}: 'mirrors' must be a list of URLs")
+        else:
+            for m in mirrors:
+                if not str(m).startswith("https://") or not str(m).endswith("/"):
+                    problems.append(
+                        f"{where}: mirror '{m}' must be an https:// URL ending in '/' "
+                        "(a directory with the same layout as 'index')"
+                    )
+
 
 def main(argv):
     if len(argv) != 2:

@@ -839,13 +839,48 @@ function Invoke-AutoOSUsbFetchImage {
         throw "usb_fetch_image: $(Split-Path -Leaf $sumsFile) does not list a SHA-256 for '$($resolved.File)' - refusing to download an image with no published digest"
     }
 
-    Write-AutoOSLine "fetching $($resolved.File)" -Level info
-    try {
-        Get-AutoOSVerifiedFile -Uri ([string]$resolved.Url) -Destination $Destination -Sha256 $digest | Out-Null
-    } catch {
-        throw "usb_fetch_image: $($_.Exception.Message); nothing was kept"
+    # Mirrors (the catalog entry's optional `mirrors` list): the canonical
+    # index decides WHICH file and the signed manifest decides its digest;
+    # any mirror with the same directory layout may then serve the bytes,
+    # because Get-AutoOSVerifiedFile checks them against that digest
+    # whatever their origin. Measured on 2026-09-17: releases.ubuntu.com
+    # served this host at ~0.7 MB/s (a 6 GB ISO in ~3 h) while
+    # mirror.init7.net did ~490 MB/s (13 s). A mirror that fails is skipped
+    # with a warning; the canonical URL is always the last resort, so a
+    # wrong mirror list can only ever cost time.
+    $url = [string]$resolved.Url
+    $index = [string]$entry.index
+    if ($index -and -not $index.EndsWith('/')) { $index += '/' }
+    $candidates = @()
+    if ($index -and $url.StartsWith($index)) {
+        $rel = $url.Substring($index.Length)
+        # Property-safe under Set-StrictMode: most entries have no `mirrors`.
+        $mirrorProp = $entry.PSObject.Properties['mirrors']
+        $mirrorList = if ($mirrorProp) { @($mirrorProp.Value) } else { @() }
+        foreach ($m in $mirrorList) {
+            if (-not $m) { continue }
+            $mirror = [string]$m
+            if (-not $mirror.EndsWith('/')) { $mirror += '/' }
+            $candidates += ($mirror + $rel)
+        }
     }
-    Write-AutoOSLine "verified image: $Destination" -Level ok
+    $candidates += $url
+
+    $lastError = ''
+    for ($i = 0; $i -lt $candidates.Count; $i++) {
+        Write-AutoOSLine "fetching $($resolved.File) from $($candidates[$i])" -Level info
+        try {
+            Get-AutoOSVerifiedFile -Uri $candidates[$i] -Destination $Destination -Sha256 $digest | Out-Null
+            Write-AutoOSLine "verified image: $Destination" -Level ok
+            return
+        } catch {
+            $lastError = $_.Exception.Message
+            if ($i -lt $candidates.Count - 1) {
+                Write-AutoOSLine "usb_fetch_image: $($candidates[$i]) failed ($lastError) - trying the next source" -Level warn
+            }
+        }
+    }
+    throw "usb_fetch_image: ${lastError}; nothing was kept"
 }
 
 # Write-AutoOSUsbRaw -DeviceId -ImagePath -ImageBytes

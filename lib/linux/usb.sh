@@ -1307,15 +1307,53 @@ usb_fetch_image() {
         return 1
     fi
 
-    ui_info "fetching $file"
-    rc=0
-    fetch_verified "$url" "$dest" "$digest" - - || rc=$?
-    case "$rc" in
-        0) ui_ok "verified image: $dest"; return 0 ;;
-        2) ui_err "usb_fetch_image: checksum mismatch - $file did not match the digest $(basename -- "$sums_file") publishes for it; nothing was kept"; return 1 ;;
-        4) ui_err "usb_fetch_image: download of $url failed; nothing was kept"; return 1 ;;
-        *) ui_err "usb_fetch_image: fetch_verified failed (rc=$rc) for $url"; return 1 ;;
-    esac
+    # Mirrors (the catalog entry's optional `mirrors` list): the canonical
+    # index decides WHICH file and the signed manifest decides its digest;
+    # any mirror with the same directory layout may then serve the bytes,
+    # because fetch_verified checks them against that digest whatever
+    # their origin. Measured on 2026-09-17: releases.ubuntu.com served this
+    # host at ~0.7 MB/s (a 6 GB ISO in ~3 h) while mirror.init7.net did
+    # ~490 MB/s (13 s). A mirror that fails - unreachable, 404, or a digest
+    # mismatch - is skipped with a warning; the canonical URL is always the
+    # last resort, so a wrong mirror list can only ever cost time.
+    local index rel mirrors_csv mirror candidate
+    local -a mirrors=() candidates=()
+    index="$(_image_field "$image_id" index)"
+    [[ -n "$index" && "$index" != */ ]] && index="$index/"
+    rel=""
+    [[ -n "$index" && "$url" == "$index"* ]] && rel="${url#"$index"}"
+    if [[ -n "$rel" ]]; then
+        mirrors_csv="$(_image_field "$image_id" mirrors)"
+        IFS=',' read -ra mirrors <<<"$mirrors_csv"
+        for mirror in "${mirrors[@]}"; do
+            [[ -z "$mirror" ]] && continue
+            [[ "$mirror" != */ ]] && mirror="$mirror/"
+            candidates+=("${mirror}${rel}")
+        done
+    fi
+    candidates+=("$url")
+
+    local total="${#candidates[@]}" i=0
+    for candidate in "${candidates[@]}"; do
+        i=$((i + 1))
+        ui_info "fetching $file from $candidate"
+        rc=0
+        fetch_verified "$candidate" "$dest" "$digest" - - || rc=$?
+        if (( rc == 0 )); then
+            ui_ok "verified image: $dest"
+            return 0
+        fi
+        if (( i < total )); then
+            ui_warn "usb_fetch_image: $candidate failed (fetch_verified rc=$rc) - trying the next source"
+            continue
+        fi
+        case "$rc" in
+            2) ui_err "usb_fetch_image: checksum mismatch - $file did not match the digest $(basename -- "$sums_file") publishes for it; nothing was kept" ;;
+            4) ui_err "usb_fetch_image: download of $candidate failed; nothing was kept" ;;
+            *) ui_err "usb_fetch_image: fetch_verified failed (rc=$rc) for $candidate" ;;
+        esac
+    done
+    return 1
 }
 
 # ─── usb_write_ventoy ────────────────────────────────────────────────────────

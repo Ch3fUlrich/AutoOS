@@ -1994,7 +1994,7 @@ function New-AutoOSUsbFetchFixture {
     # -Mode good lists the image's real digest, bad an all-zero one, missing
     # a different filename entirely. -Sums '-' models a catalog entry with
     # no checksum manifest at all.
-    param([string]$Mode = 'good', [string]$Sums = 'SHA256SUMS')
+    param([string]$Mode = 'good', [string]$Sums = 'SHA256SUMS', [string[]]$Mirrors = @())
     $rel = Join-Path ([IO.Path]::GetTempPath()) ('aos_fetch_' + [Guid]::NewGuid().ToString('N'))
     $dir = Join-Path $rel '1.0'
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -2012,11 +2012,27 @@ function New-AutoOSUsbFetchFixture {
             '<a href="SHA256SUMS">SHA256SUMS</a>' + "`n" + '</pre></body></html>'
     [IO.File]::WriteAllText((Join-Path $dir 'index.html'), $html)
     $cat = Join-Path $rel 'images.json'
-    @{ images = @(@{ id = 'testos'; name = 'Test OS'; homepage = 'http://127.0.0.1/'
-                     index = (ConvertTo-AutoOSTestDirUri $dir); file = 'testos-[0-9.]+-amd64\.iso$'
-                     sums = $Sums; sig = '-'; key = '-'; kinds = @('installer'); writeMode = 'hybrid'; sizeGb = 0.001 }) } |
-        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cat -Encoding UTF8
-    [pscustomobject]@{ Root = $rel; Catalog = $cat; Iso = $iso; Dest = (Join-Path $rel 'cache\testos.iso') }
+    $entry = @{ id = 'testos'; name = 'Test OS'; homepage = 'http://127.0.0.1/'
+                index = (ConvertTo-AutoOSTestDirUri $dir); file = 'testos-[0-9.]+-amd64\.iso$'
+                sums = $Sums; sig = '-'; key = '-'; kinds = @('installer'); writeMode = 'hybrid'; sizeGb = 0.001 }
+    if ($Mirrors.Count -gt 0) { $entry['mirrors'] = @($Mirrors) }
+    @{ images = @($entry) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cat -Encoding UTF8
+    [pscustomobject]@{ Root = $rel; Catalog = $cat; Iso = $iso; Dir = $dir; Dest = (Join-Path $rel 'cache\testos.iso') }
+}
+
+function New-AutoOSUsbFetchMirror {
+    # A second release dir with the same 1.0\ layout served over loopback
+    # http as a "mirror": an exact copy, or one whose image bytes differ
+    # from what the canonical manifest publishes. Returns @{ Root; Server }.
+    param([Parameter(Mandatory)][string]$FixtureDir, [string]$Mode = 'good')
+    $m = Join-Path ([IO.Path]::GetTempPath()) ('aos_mirror_' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path (Join-Path $m '1.0') -Force | Out-Null
+    Copy-Item -Path (Join-Path $FixtureDir '*') -Destination (Join-Path $m '1.0') -Force
+    if ($Mode -eq 'corrupt') { [IO.File]::WriteAllText((Join-Path $m '1.0\testos-1.0-amd64.iso'), "CORRUPT MIRROR COPY`n") }
+    $srv = Start-AutoOSTestHttpServer -Directory $m
+    # Url is the mirror's equivalent of the catalog `index` (the release
+    # directory itself), so the resolved relative filename appends cleanly.
+    @{ Root = $m; Server = $srv; Url = "http://127.0.0.1:$($srv.Port)/1.0/" }
 }
 
 function Invoke-AutoOSCapturedConsole {
@@ -2152,6 +2168,52 @@ Test-Case 'usb: Invoke-AutoOSUsbPlan reports a fetch-step failure as "not touche
         } finally {
             Remove-Item Env:\AUTOOS_FORCE_FAIL -ErrorAction SilentlyContinue
         }
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage uses a healthy mirror before the canonical source, verified against the canonical manifest (fetch mirror)' {
+    # The canonical copy is corrupted AFTER its manifest was written: were
+    # the canonical source tried first, the digest check would fail.
+    # Success therefore proves the mirror served the bytes.
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    $mir = New-AutoOSUsbFetchMirror -FixtureDir $fx.Dir -Mode good
+    try {
+        $fx2 = New-AutoOSUsbFetchFixture -Mode good -Mirrors @($mir.Url)
+        [IO.File]::WriteAllText($fx2.Iso, "CANONICAL COPY NOW CORRUPT`n")
+        # Same bytes on the mirror as fx2's manifest expects: both fixtures
+        # write the identical test image, so their digests agree.
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx2.Dest -CatalogPath $fx2.Catalog }
+        $same = (Test-Path -LiteralPath $fx2.Dest) -and ((Get-FileHash -LiteralPath $fx2.Dest).Hash -eq (Get-FileHash -LiteralPath $fx.Iso).Hash)
+        Assert-True ($same -and $text -like "*from $($mir.Url)testos-1.0-amd64.iso*" -and $text -like '*verified image*') "same=$same out=$text"
+        Remove-Item -Recurse -Force $fx2.Root -ErrorAction SilentlyContinue
+    } finally {
+        Stop-Process -Id $mir.Server.Process.Id -Force -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $fx.Root, $mir.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips an unreachable mirror with a warning and uses the canonical source (fetch mirror)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good -Mirrors @('http://127.0.0.1:1/1.0/')
+    try {
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog }
+        Assert-True ((Test-Path -LiteralPath $fx.Dest) -and $text -like '*http://127.0.0.1:1/1.0/testos-1.0-amd64.iso failed*' -and $text -like '*trying the next source*' -and $text -like '*verified image*') "out=$text"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips a mirror whose bytes do not match the manifest, the canonical copy wins (fetch mirror)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    $mir = New-AutoOSUsbFetchMirror -FixtureDir $fx.Dir -Mode corrupt
+    try {
+        $fx2 = New-AutoOSUsbFetchFixture -Mode good -Mirrors @($mir.Url)
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx2.Dest -CatalogPath $fx2.Catalog }
+        $same = (Test-Path -LiteralPath $fx2.Dest) -and ((Get-FileHash -LiteralPath $fx2.Dest).Hash -eq (Get-FileHash -LiteralPath $fx2.Iso).Hash)
+        Assert-True ($same -and $text -like '*checksum mismatch*' -and $text -like '*trying the next source*') "same=$same out=$text"
+        Remove-Item -Recurse -Force $fx2.Root -ErrorAction SilentlyContinue
+    } finally {
+        Stop-Process -Id $mir.Server.Process.Id -Force -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $fx.Root, $mir.Root -ErrorAction SilentlyContinue
     }
 }
 

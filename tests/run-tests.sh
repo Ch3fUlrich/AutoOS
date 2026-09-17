@@ -2892,19 +2892,35 @@ HTML
 # root. The image entry carries every field the real catalog schema has so
 # usb_plan and usb_fetch_image read it exactly like a shipped entry.
 _usb_fetch_root() {
-    local port="$1" sums="${2:-SHA256SUMS}" root
+    local port="$1" sums="${2:-SHA256SUMS}" mirrors="${3:-}" root
     root="$(mktemp -d)"
     mkdir -p "$root/catalog"
-    python3 - "$root/catalog/images.json" "http://127.0.0.1:${port}/1.0/" "$sums" <<'PY'
+    python3 - "$root/catalog/images.json" "http://127.0.0.1:${port}/1.0/" "$sums" "$mirrors" <<'PY'
 import json, sys
-path, index, sums = sys.argv[1:4]
+path, index, sums, mirrors = sys.argv[1:5]
 entry = {"id": "testos", "name": "Test OS", "homepage": "http://127.0.0.1/",
          "index": index, "file": r"testos-[0-9.]+-amd64\.iso$", "sums": sums, "sig": "-", "key": "-",
          "kinds": ["installer"], "writeMode": "hybrid", "sizeGb": 0.001}
+if mirrors:
+    entry["mirrors"] = [m for m in mirrors.split(",") if m]
 with open(path, "w", encoding="utf-8") as fh:
     json.dump({"images": [entry]}, fh)
 PY
     printf '%s\n' "$root"
+}
+
+# _usb_fetch_mirror_of <fixture-dir> <good|corrupt>
+# A second release dir with the same 1.0/ layout, served as a "mirror":
+# an exact copy, or one whose image bytes differ from what the canonical
+# manifest publishes. Prints its path.
+_usb_fetch_mirror_of() {
+    local src="$1" mode="$2" m
+    m="$(mktemp -d)"
+    cp -r "$src/1.0" "$m/1.0"
+    if [[ "$mode" == corrupt ]]; then
+        printf 'CORRUPT MIRROR COPY\n' >"$m/1.0/testos-1.0-amd64.iso"
+    fi
+    printf '%s\n' "$m"
 }
 
 if it "_usb_sums_digest_for reads coreutils, starred and BSD-style manifests and ignores non-SHA-256 lines (usb_fetch_image)"; then
@@ -2988,6 +3004,54 @@ if it "usb_fetch_image: a catalog entry with no checksum manifest is refused wit
     else fail "rc=$rc out=$out"; fi
     kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
     rm -rf "$rel" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_fetch_image: a healthy mirror serves the image before the canonical source, verified against the canonical manifest (usb_fetch_image mirror)"; then
+    # The canonical copy is deliberately corrupted AFTER its manifest was
+    # written: if the canonical source were tried first, the digest check
+    # would fail. Success therefore proves the mirror served the bytes.
+    rel="$(_usb_fetch_fixture good)"
+    mir="$(_usb_fetch_mirror_of "$rel" good)"
+    printf 'CANONICAL COPY NOW CORRUPT\n' >"$rel/1.0/testos-1.0-amd64.iso"
+    read -r srv_pid srv_port < <(_start_test_http_server "$rel")
+    read -r mir_pid mir_port < <(_start_test_http_server "$mir")
+    root="$(_usb_fetch_root "$srv_port" SHA256SUMS "http://127.0.0.1:${mir_port}/1.0/")"
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache" usb_fetch_image testos "$cache/testos.iso" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out" == *"from http://127.0.0.1:${mir_port}/1.0/testos-1.0-amd64.iso"* \
+          && "$out" == *"verified image"* ]] && cmp -s "$cache/testos.iso" "$mir/1.0/testos-1.0-amd64.iso"; then pass
+    else fail "rc=$rc out=$out"; fi
+    kill "$srv_pid" "$mir_pid" 2>/dev/null; wait "$srv_pid" "$mir_pid" 2>/dev/null
+    rm -rf "$rel" "$mir" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_fetch_image: an unreachable mirror is skipped with a warning and the canonical source used (usb_fetch_image mirror)"; then
+    rel="$(_usb_fetch_fixture good)"
+    read -r srv_pid srv_port < <(_start_test_http_server "$rel")
+    # Port 1 on loopback: nothing listens there, so curl fails fast.
+    root="$(_usb_fetch_root "$srv_port" SHA256SUMS "http://127.0.0.1:1/1.0/")"
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache" usb_fetch_image testos "$cache/testos.iso" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out" == *"http://127.0.0.1:1/1.0/testos-1.0-amd64.iso failed"* \
+          && "$out" == *"trying the next source"* && "$out" == *"verified image"* ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+    kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
+    rm -rf "$rel" "$root" "$cache" 2>/dev/null
+fi
+
+if it "usb_fetch_image: a mirror serving bytes that do not match the manifest is skipped, the canonical copy wins (usb_fetch_image mirror)"; then
+    rel="$(_usb_fetch_fixture good)"
+    mir="$(_usb_fetch_mirror_of "$rel" corrupt)"
+    read -r srv_pid srv_port < <(_start_test_http_server "$rel")
+    read -r mir_pid mir_port < <(_start_test_http_server "$mir")
+    root="$(_usb_fetch_root "$srv_port" SHA256SUMS "http://127.0.0.1:${mir_port}/1.0/")"
+    cache="$(mktemp -d)"
+    out="$(AUTOOS_ROOT="$root" AUTOOS_CACHE_DIR="$cache" usb_fetch_image testos "$cache/testos.iso" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out" == *"rc=2"* && "$out" == *"trying the next source"* ]] \
+        && cmp -s "$cache/testos.iso" "$rel/1.0/testos-1.0-amd64.iso"; then pass
+    else fail "rc=$rc out=$out"; fi
+    kill "$srv_pid" "$mir_pid" 2>/dev/null; wait "$srv_pid" "$mir_pid" 2>/dev/null
+    rm -rf "$rel" "$mir" "$root" "$cache" 2>/dev/null
 fi
 
 if it "usb_fetch_image: creates a cache directory that does not exist yet, as on a machine's first run (usb_fetch_image)"; then
