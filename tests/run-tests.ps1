@@ -3150,6 +3150,50 @@ Test-Case 'Set-AutoOSOpenHandsConfig prepends the OpenHands guard to all four ex
     Assert-True ($body -match "WindowsPowerShell\\profile\.ps1") 'Windows PowerShell all-hosts profile.ps1 not guarded'
 }
 
+Describe-Group 'mcp pins'
+
+Test-Case 'mcp pins: lib/ carries no floating package spec' {
+    $needles = @('serena-agent', 'graphifyy[mcp]', '@playwright/mcp', '@upstash/context7-mcp', '@modernrelay/omnigraph-mcp')
+    $files = @(Get-ChildItem -Path $Lib -Filter '*.psm1' -File) +
+             @(Get-ChildItem -Path (Join-Path $Root 'lib\linux') -Filter '*.sh' -File)
+    foreach ($f in $files) {
+        $text = Get-Content -Path $f.FullName -Raw -Encoding UTF8
+        foreach ($needle in $needles) {
+            if ($text.Contains($needle)) { throw "$($f.FullName) still contains '$needle'" }
+        }
+    }
+    Pass
+}
+
+Test-Case 'mcp pins: no pinned version string appears under lib/' {
+    $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $versions = @()
+    foreach ($p in $harness.mcp_servers.PSObject.Properties) {
+        $pkg = $p.Value.package
+        if ($pkg -match '@([0-9][^@]*)$') { $versions += $Matches[1] }
+        elseif ($pkg -match '==(.+)$') { $versions += $Matches[1] }
+    }
+    $files = @(Get-ChildItem -Path (Join-Path $Root 'lib') -Recurse -File)
+    foreach ($f in $files) {
+        $text = Get-Content -Path $f.FullName -Raw -Encoding UTF8
+        foreach ($v in $versions) {
+            if ($text.Contains($v)) { throw "$($f.FullName) still contains pinned version '$v'" }
+        }
+    }
+    Pass
+}
+
+Test-Case 'mcp pins: the client excludeTools list equals serena.excluded_tools' {
+    $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $want = @($harness.mcp_servers.serena.excluded_tools)
+    Assert-Equal (@(Get-AutoOSSerenaExcludedTools) -join ',') ($want -join ',')
+    Assert-Equal (Get-AutoOSMcpPackage -Name 'serena') $harness.mcp_servers.serena.package
+    $src = Get-Content (Join-Path $Lib 'AutoOS.Install.psm1') -Raw -Encoding UTF8
+    Assert-True ($src -match 'excludeTools\s*=\s*@\(Get-AutoOSSerenaExcludedTools\)') 'the Antigravity serena spec does not use Get-AutoOSSerenaExcludedTools'
+    Assert-True ($src -match '\$canonical = @\(Get-AutoOSSerenaExcludedTools\)') 'Set-AutoOSSerenaExclusions does not use Get-AutoOSSerenaExcludedTools'
+    Assert-True ($src -notmatch "excludeTools\s*=\s*@\('onboarding'") 'a hardcoded excludeTools list is still present'
+}
+
 Test-Case 'the embedded OpenHands setup script writes the resolved Ollama address' {
     # Runs the real here-string against a temp ~/.openhands. USERPROFILE, HOME
     # and LOCALAPPDATA point into the temp dir too, so its uv-cache walk finds
@@ -3173,9 +3217,11 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         Assert-True (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json')) 'vendored agent profiles not copied'
         # OpenHands ignores an MCP timeout today and may soon read it as milliseconds (#3254)
         Assert-True (-not @($settings.agent_settings.mcp_config.PSObject.Properties.Value | Where-Object { $_.PSObject.Properties.Name -contains 'timeout' })) 'an MCP server still has a timeout'
-        # every MCP server is pinned: a floating npx/uvx spec changes under the user
-        $pins = [ordered]@{ omnigraph = '@modernrelay/omnigraph-mcp@0.8.0'; serena = 'serena-agent==1.7.0'
-                            playwright = '@playwright/mcp@0.0.81'; context7 = '@upstash/context7-mcp@4.1.1'; graphify = 'graphifyy[mcp]==0.9.63' }
+        # every MCP server is pinned: a floating npx/uvx spec changes under the user.
+        # Expected specs come from the harness, the one source of truth for the pins.
+        $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $pins = [ordered]@{}
+        foreach ($p in $harness.mcp_servers.PSObject.Properties) { $pins[$p.Name] = $p.Value.package }
         foreach ($k in $pins.Keys) { Assert-Contains $settings.agent_settings.mcp_config.$k.args $pins[$k] }
     } finally {
         foreach ($k in $saved.Keys) {

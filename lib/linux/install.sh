@@ -979,6 +979,28 @@ mcp_has_server() {
     return 1
 }
 
+# MCP package specs live in catalog/agent-harness.json, never inline. AUTOOS_ROOT
+# is set by setup.sh before this file is sourced; the fallback keeps the helpers
+# usable when install.sh is sourced directly (the test suite).
+AUTOOS_HARNESS="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/catalog/agent-harness.json"
+
+mcp_package() {
+    python3 -c '
+import json, sys
+with open(sys.argv[2], encoding="utf-8") as f:
+    print(json.load(f)["mcp_servers"][sys.argv[1]]["package"])
+' "$1" "$AUTOOS_HARNESS"
+}
+
+serena_excluded_tools() {
+    python3 -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    for tool in json.load(f)["mcp_servers"]["serena"]["excluded_tools"]:
+        print(tool)
+' "$AUTOOS_HARNESS"
+}
+
 register_mcp_server() {
     local name="$1" scope="$2" workdir="$3"; shift 3
     if ! has_cmd claude; then
@@ -1085,20 +1107,23 @@ PY
 
 install_mcp_serena() {
     ui_info "Setting up Serena MCP server (Claude Code + Antigravity)"
+    local serena_pkg
+    serena_pkg="$(mcp_package serena)"
     register_mcp_server serena user "$SYS_HOME" \
-        uvx --from serena-agent serena start-mcp-server --open-web-dashboard false --enable-gui-log-window false
+        uvx --from "$serena_pkg" serena start-mcp-server --open-web-dashboard false --enable-gui-log-window false
 
     local serena_home="$SYS_HOME/.serena"
     local spec
-    spec="$(python3 -c "
-import json
+    spec="$(serena_excluded_tools | python3 -c '
+import json, sys
+tools = [line.rstrip("\n") for line in sys.stdin if line.strip()]
 print(json.dumps({
-    'command': 'uvx',
-    'args': ['--from', 'serena-agent', 'serena', 'start-mcp-server', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
-    'env': {'SERENA_HOME': '$serena_home'},
-    'excludeTools': ['onboarding', 'open_dashboard', 'initial_instructions', 'write_memory', 'read_memory', 'list_memories', 'delete_memory', 'rename_memory', 'edit_memory']
+    "command": "uvx",
+    "args": ["--from", sys.argv[1], "serena", "start-mcp-server", "--open-web-dashboard", "false", "--enable-gui-log-window", "false"],
+    "env": {"SERENA_HOME": sys.argv[2]},
+    "excludeTools": tools
 }))
-")"
+' "$serena_pkg" "$serena_home")"
     register_antigravity_mcp_server serena "$spec"
 
     # shellcheck disable=SC2119  # config_path is optional; the default (SYS_HOME/.serena/serena_config.yml) is what we want here
@@ -1143,12 +1168,6 @@ print(json.dumps({
 # shellcheck disable=SC2120  # config_path is optional: callers with no args get $SYS_HOME/.serena/serena_config.yml; tests pass a temp path explicitly
 ensure_serena_exclusions() {
     local config_path="${1:-$SYS_HOME/.serena/serena_config.yml}"
-    local canonical=(
-        create_text_file read_file execute_shell_command list_dir
-        search_for_pattern find_file replace_content replace_in_files
-        onboarding write_memory read_memory list_memories edit_memory
-        rename_memory delete_memory
-    )
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would ensure Serena's excluded_tools list is complete in ${config_path}"
@@ -1159,6 +1178,9 @@ ensure_serena_exclusions() {
         ui_warn "python3 is not installed - cannot verify Serena's excluded_tools list in ${config_path}"
         return 0
     fi
+
+    local canonical
+    mapfile -t canonical < <(serena_excluded_tools)
 
     local result rc=0
     result="$(python3 - "$config_path" "${canonical[@]}" 2>&1 <<'PY'
@@ -1490,37 +1512,57 @@ PY
 
 install_mcp_graphify() {
     ui_info "Setting up Graphify MCP server (Claude Code + Antigravity)"
+    local graphify_pkg
+    graphify_pkg="$(mcp_package graphify)"
     register_mcp_server graphify user "$SYS_HOME" \
-        uv --quiet run --with 'graphifyy[mcp]' python -m graphify.serve graphify-out/graph.json
+        uv --quiet run --with "$graphify_pkg" python -m graphify.serve graphify-out/graph.json
 
-    register_antigravity_mcp_server graphify '{"command":"uv","args":["--quiet","run","--with","graphifyy[mcp]","python","-m","graphify.serve","${workspaceFolder}/graphify-out/graph.json"]}'
+    local spec
+    spec="$(python3 -c '
+import json, sys
+print(json.dumps({"command": "uv", "args": ["--quiet", "run", "--with", sys.argv[1], "python", "-m", "graphify.serve", "${workspaceFolder}/graphify-out/graph.json"]}))
+' "$graphify_pkg")"
+    register_antigravity_mcp_server graphify "$spec"
 }
 
 install_mcp_playwright() {
     ui_info "Setting up Playwright MCP server (Claude Code + Antigravity)"
+    local playwright_pkg
+    playwright_pkg="$(mcp_package playwright)"
     register_mcp_server playwright user "$SYS_HOME" \
-        npx -y @playwright/mcp@latest
+        npx -y "$playwright_pkg"
 
-    register_antigravity_mcp_server playwright '{"command":"npx","args":["-y","@playwright/mcp@latest"]}'
+    local spec
+    spec="$(python3 -c '
+import json, sys
+print(json.dumps({"command": "npx", "args": ["-y", sys.argv[1]]}))
+' "$playwright_pkg")"
+    register_antigravity_mcp_server playwright "$spec"
 }
 
 install_mcp_context7() {
     ui_info "Setting up Context7 MCP server (Claude Code + Antigravity)"
-    local key
+    local context7_pkg key
+    context7_pkg="$(mcp_package context7)"
     key="$(answer context7_api_key "${CONTEXT7_API_KEY:-}")"
     if [[ -n "$key" ]]; then
         register_mcp_server context7 user "$SYS_HOME" \
-            npx -y @upstash/context7-mcp --api-key "$key"
+            npx -y "$context7_pkg" --api-key "$key"
         local spec
-        spec="$(python3 -c "
-import json
-print(json.dumps({'command': 'npx', 'args': ['-y', '@upstash/context7-mcp', '--api-key', '$key']}))
-")"
+        spec="$(python3 -c '
+import json, sys
+print(json.dumps({"command": "npx", "args": ["-y", sys.argv[1], "--api-key", sys.argv[2]]}))
+' "$context7_pkg" "$key")"
         register_antigravity_mcp_server context7 "$spec"
     else
         register_mcp_server context7 user "$SYS_HOME" \
-            npx -y @upstash/context7-mcp
-        register_antigravity_mcp_server context7 '{"command":"npx","args":["-y","@upstash/context7-mcp"]}'
+            npx -y "$context7_pkg"
+        local spec
+        spec="$(python3 -c '
+import json, sys
+print(json.dumps({"command": "npx", "args": ["-y", sys.argv[1]]}))
+' "$context7_pkg")"
+        register_antigravity_mcp_server context7 "$spec"
     fi
 }
 
@@ -1637,7 +1679,8 @@ install_agent_skills() {
         ui_warn "no .mcp.json in ${dest} — nothing to pin omnigraph to."
     fi
 
-    local omni_spec
+    local omni_pkg omni_spec
+    omni_pkg="$(mcp_package omnigraph)"
     omni_spec="$(python3 -c "
 import json, os
 env_vars = {'OMNIGRAPH_BASE_URL': '$base'}
@@ -1647,7 +1690,7 @@ if os.environ.get('OMNIGRAPH_TOKEN'):
     env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
 print(json.dumps({
     'command': 'npx',
-    'args': ['-y', '@modernrelay/omnigraph-mcp'],
+    'args': ['-y', '$omni_pkg'],
     'env': env_vars
 }))
 ")"
@@ -1753,6 +1796,10 @@ models_file = sys.argv[3]
 with open(models_file, 'r', encoding='utf-8') as _mf:
     REPO_MODELS = json.load(_mf)['models']
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
+# MCP package specs live in catalog/agent-harness.json, never inline.
+_harness_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'catalog', 'agent-harness.json')
+with open(_harness_file, 'r', encoding='utf-8') as _hf:
+    MCP_PACKAGES = {k: v['package'] for k, v in json.load(_hf)['mcp_servers'].items()}
 
 def _opencode_cost(m):
     base = m.get('paid_input_price', m['input_price']), m.get('paid_output_price', m['output_price'])
@@ -1880,23 +1927,28 @@ if not data.get('model'):
 mcps = data.get('mcp', {})
 mcps['serena'] = {
     'type': 'local',
-    'command': ['uvx', '--from', 'serena-agent', 'serena', 'start-mcp-server', '--context', 'claude-code', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
+    'command': ['uvx', '--from', MCP_PACKAGES['serena'], 'serena', 'start-mcp-server', '--context', 'claude-code', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
     'enabled': True
 }
 mcps['graphify'] = {
     'type': 'local',
-    'command': ['uvx', '--from', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
+    'command': ['uvx', '--from', MCP_PACKAGES['graphify'], 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
+    'enabled': True
+}
+mcps['context7'] = {
+    'type': 'local',
+    'command': ['npx', '-y', MCP_PACKAGES['context7']],
     'enabled': True
 }
 mcps['omnigraph'] = {
     'type': 'local',
-    'command': ['npx', '-y', '@modernrelay/omnigraph-mcp'],
+    'command': ['npx', '-y', MCP_PACKAGES['omnigraph']],
     'enabled': True,
     'environment': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'}
 }
 mcps['playwright'] = {
     'type': 'local',
-    'command': ['npx', '-y', '@playwright/mcp@latest'],
+    'command': ['npx', '-y', MCP_PACKAGES['playwright']],
     'enabled': True
 }
 data['mcp'] = mcps
@@ -2019,6 +2071,9 @@ def _profile_for(mid, key, name=None):
     return profile_name, p
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(models_file)))
+# MCP package specs live in catalog/agent-harness.json, never inline.
+with open(os.path.join(REPO_ROOT, "catalog", "agent-harness.json"), "r", encoding="utf-8") as _hf:
+    MCP_PACKAGES = {k: v["package"] for k, v in json.load(_hf)["mcp_servers"].items()}
 TEMPLATES = {}
 _templates_dir = os.path.join(REPO_ROOT, "openhands", "profiles")
 if os.path.isdir(_templates_dir):
@@ -2103,26 +2158,26 @@ mcp_cfg = agent_settings.setdefault("mcp_config", {})
 mcp_cfg["serena"] = {
     "transport": "stdio",
     "command": "uvx",
-    "args": ["--from", "serena-agent==1.7.0", "serena", "start-mcp-server", "--context", "claude-code", "--open-web-dashboard", "false", "--enable-gui-log-window", "false"],
+    "args": ["--from", MCP_PACKAGES["serena"], "serena", "start-mcp-server", "--context", "claude-code", "--open-web-dashboard", "false", "--enable-gui-log-window", "false"],
     "description": "Code navigation, symbol index, semantic editing",
     "enabled": True,
 }
 mcp_cfg["graphify"] = {
     "transport": "stdio",
     "command": "uvx",
-    "args": ["--from", "graphifyy[mcp]==0.9.63", "python", "-m", "graphify.serve", "graphify-out/graph.json"],
+    "args": ["--from", MCP_PACKAGES["graphify"], "python", "-m", "graphify.serve", "graphify-out/graph.json"],
     "description": "Codebase knowledge graph and dependency intelligence",
     "enabled": True,
 }
 mcp_cfg["omnigraph"] = {
     "transport": "stdio",
     "command": "npx",
-    "args": ["-y", "@modernrelay/omnigraph-mcp@0.8.0"],
+    "args": ["-y", MCP_PACKAGES["omnigraph"]],
     "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
     "description": "Project memory graph for this repository (repo-scoped, not global)",
     "enabled": True,
 }
-ctx7_args = ["-y", "@upstash/context7-mcp@4.1.1"]
+ctx7_args = ["-y", MCP_PACKAGES["context7"]]
 if context7_key:
     ctx7_args.extend(["--api-key", context7_key])
 mcp_cfg["context7"] = {
@@ -2135,7 +2190,7 @@ mcp_cfg["context7"] = {
 mcp_cfg["playwright"] = {
     "transport": "stdio",
     "command": "npx",
-    "args": ["-y", "@playwright/mcp@0.0.81"],
+    "args": ["-y", MCP_PACKAGES["playwright"]],
     "description": "Browser automation and end-to-end verification",
     "enabled": True,
 }
