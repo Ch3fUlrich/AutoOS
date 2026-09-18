@@ -210,9 +210,13 @@ _image_resolve_kv() {
 
 # _image_resolve_entry <catalog> <image_id>
 # Looks up one images.json entry by id and prints it as status=/index=/
-# file=/sums=/sig= lines - status=error + msg=... (never a crash) for an
-# unknown id or unreadable catalog, so image_resolve can report it as a
-# clear failure with no fetch attempted.
+# file=/sums=/sig=/leaf= lines - status=error + msg=... (never a crash) for
+# an unknown id or unreadable catalog, so image_resolve can report it as a
+# clear failure with no fetch attempted. leaf= is the entry's optional
+# `leaf` field (blank when absent): a relative path appended to the chosen
+# version directory before the leaf listing is fetched, for a catalog whose
+# release file sits more than one directory below the version dir it
+# recursed into (fedora-workstation: Workstation/x86_64/iso/).
 _image_resolve_entry() {
     local catalog="$1" id="$2"
     python3 - "$catalog" "$id" <<'PY'
@@ -238,6 +242,7 @@ print(f"index={entry.get('index') or ''}")
 print(f"file={entry.get('file') or ''}")
 print(f"sums={entry.get('sums') or ''}")
 print(f"sig={entry.get('sig') or ''}")
+print(f"leaf={entry.get('leaf') or ''}")
 PY
 }
 
@@ -381,8 +386,13 @@ if stage == "leaf":
     sys.exit(0)
 
 # stage == "top" and nothing matched directly: look for version-numbered
-# subdirectories (releases.ubuntu.com's shape) to recurse into.
-VERSION_DIR = re.compile(r'^([0-9]+)\.([0-9]+)(?:\.([0-9]+))?$')
+# subdirectories (releases.ubuntu.com's shape) to recurse into. The minor
+# (and patch) group is OPTIONAL: Fedora's releases/ lists bare integers
+# (44/, no dot at all) - a dir name with no dot is still a version, just one
+# whose missing parts compare as 0. That 0 default is also what keeps a
+# bare integer out of the LTS rule below without any extra logic: LTS
+# requires minor == 4 (an actual ".04"), and a missing minor is 0, never 4.
+VERSION_DIR = re.compile(r'^([0-9]+)(?:\.([0-9]+)(?:\.([0-9]+))?)?$')
 candidates = []
 for h in hrefs:
     if not h.endswith("/"):
@@ -390,7 +400,7 @@ for h in hrefs:
     m = VERSION_DIR.match(basename(h))
     if not m:
         continue
-    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    major, minor, patch = int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0)
     candidates.append(((major, minor, patch), basename(h)))
 
 if not candidates:
@@ -447,11 +457,12 @@ image_resolve() {
         return 1
     fi
 
-    local index file_re sums_field sig_field
+    local index file_re sums_field sig_field leaf_field
     index="$(_image_resolve_kv "$entry_out" index)"
     file_re="$(_image_resolve_kv "$entry_out" file)"
     sums_field="$(_image_resolve_kv "$entry_out" sums)"
     sig_field="$(_image_resolve_kv "$entry_out" sig)"
+    leaf_field="$(_image_resolve_kv "$entry_out" leaf)"
 
     if [[ -z "$index" || -z "$file_re" ]]; then
         ui_err "image_resolve: catalog entry '$image_id' has no 'index'/'file' to resolve - it may be a pseudo-entry missing from the check above, or a malformed catalog row"
@@ -482,6 +493,11 @@ image_resolve() {
 
     if [[ "$status" == recurse ]]; then
         local subdir; subdir="$(_image_resolve_kv "$parsed" subdir)"
+        # `leaf` (optional) only ever applies here, after the top stage has
+        # actually recursed - an entry that resolves directly at the top
+        # (Debian's current/ shape) never sees it, so every existing entry
+        # is unaffected by its mere presence in the schema.
+        [[ -n "$leaf_field" ]] && subdir="${subdir}${leaf_field}"
         if ! fetch_verified "$subdir" "$work/leaf.html" - - -; then
             ui_err "image_resolve: could not fetch $subdir"
             rm -rf "$work"

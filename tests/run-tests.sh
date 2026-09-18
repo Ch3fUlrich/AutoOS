@@ -240,6 +240,45 @@ print(' '.join(bad))")"
     [[ -z "$out" ]] && pass || fail "raw images claiming persistence: $out"
 fi
 
+if it "image catalog: fedora-workstation's file and sums patterns match the real upstream file names (verified 2026-09-18)"; then
+    # Pure regex check against the literal upstream names - no network. The
+    # 'file' pattern must match the live ISO name and must NOT match the
+    # CHECKSUM sidecar, and vice versa for 'sums'.
+    out="$(python3 -c "
+import json, re
+data = json.load(open('catalog/images.json', encoding='utf-8'))
+entry = next(e for e in data['images'] if e['id'] == 'fedora-workstation')
+file_re = re.compile(entry['file'])
+sums_re = re.compile(entry['sums'])
+iso = 'Fedora-Workstation-Live-44-1.7.x86_64.iso'
+checksum = 'Fedora-Workstation-44-1.7-x86_64-CHECKSUM'
+ok = (bool(file_re.search(iso)) and bool(sums_re.search(checksum))
+      and not sums_re.search(iso) and not file_re.search(checksum))
+print('OK' if ok else 'FAIL')
+")"
+    [[ "$out" == "OK" ]] && pass || fail "out=$out"
+fi
+
+if it "image catalog: images_validate.py rejects a bad 'leaf' (leading '/', missing trailing '/', or a '..' segment)"; then
+    # Scratch catalog only - catalog/images.json itself is never touched by
+    # a test (constraint stated at the top of this file).
+    tmp="$(mktemp)"
+    cat >"$tmp" <<'JSON'
+{"images":[
+  {"id":"bad-leaf-a","name":"n","homepage":"https://example.org","index":"https://example.org/releases/","leaf":"/Workstation/x86_64/iso/","file":"x$","sums":"SHA256SUMS","kinds":["installer"],"writeMode":"hybrid"},
+  {"id":"bad-leaf-b","name":"n","homepage":"https://example.org","index":"https://example.org/releases/","leaf":"Workstation/x86_64/iso","file":"x$","sums":"SHA256SUMS","kinds":["installer"],"writeMode":"hybrid"},
+  {"id":"bad-leaf-c","name":"n","homepage":"https://example.org","index":"https://example.org/releases/","leaf":"../etc/","file":"x$","sums":"SHA256SUMS","kinds":["installer"],"writeMode":"hybrid"}
+]}
+JSON
+    out="$(python3 tests/helpers/images_validate.py "$tmp" 2>&1)"; rc=$?
+    rm -f "$tmp"
+    if [[ $rc -ne 0 && "$out" == *"bad-leaf-a"* && "$out" == *"bad-leaf-b"* && "$out" == *"bad-leaf-c"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
+fi
+
 # ─── Engine catalog (Task 6, plan ruling P3) ────────────────────────────────
 # catalog/engines.json is the data-shaped home for B3's engine/kind
 # compatibility matrix — usb_plan() (lib/linux/usb.sh) looks entries up by
@@ -848,11 +887,43 @@ if it "--check-catalog validates all five catalogs by type, not just component c
 fi
 
 if it "catalog_probe_installed identifies installed components"; then
+    # is_installed() (lib/linux/install.sh) delegates to detect_installed_status()
+    # (lib/linux/detect.sh), which for a package-manager provider runs
+    # `python3 - <provider> <package> <cask>` and has THAT python3 process
+    # shell out further to dpkg-query/snap/brew/npm to query the host's real
+    # package database. Asserting against the real git/dpkg on this machine
+    # only passes on a host with dpkg - and a stub further down that chain
+    # (e.g. a fake dpkg-query) does not help either: this suite also runs on
+    # Git Bash on Windows, where python3 is a native Windows build whose
+    # subprocess calls cannot invoke an extension-less shebang script or a
+    # .cmd stub without a real dpkg-query to fall back to. So, same style as
+    # the rescue-bootstrap sandbox's stateful python3 stub below (BS_BIN):
+    # stub python3 itself, on a narrowed PATH, at the exact call shape
+    # detect_installed_status uses - `python3 - <provider> <package> <cask>`,
+    # answering "installed"/"not-detected" straight from argv$3 (the package)
+    # without touching a package database at all. That leaves
+    # catalog_probe_installed's OWN mapping logic (CAT_INSTALLED[i] set from
+    # the probe result) the only thing under test, deterministically on any
+    # host bash can run on.
+    cpi_bin="$(mktemp -d)"
+    cat > "$cpi_bin/python3" <<'EOS'
+#!/usr/bin/env bash
+[[ "${1:-}" == "-" ]] || exit 1
+case "${3:-}" in
+    tmux) printf 'not-detected\n' ;;
+    *)    printf 'installed\n' ;;
+esac
+EOS
+    chmod +x "$cpi_bin/python3"
+
     catalog_load catalog/linux.json x64 0
-    catalog_probe_installed
-    assert_ok $?
+    PATH="$cpi_bin:$PATH" catalog_probe_installed
+    rc=$?
     git_idx="$(catalog_index_of git)"
-    assert_eq "${CAT_INSTALLED[git_idx]}" "1"
+    tmux_idx="$(catalog_index_of tmux)"
+    rm -rf "$cpi_bin"
+    assert_ok "$rc"
+    assert_eq "${CAT_INSTALLED[git_idx]}:${CAT_INSTALLED[tmux_idx]}" "1:0"
 fi
 
 if it "--list shows installed components with a checkmark"; then
@@ -2567,19 +2638,25 @@ describe "image_resolve"
 read -r _img_srv_pid _img_srv_port < <(_start_test_http_server "$ROOT/tests/helpers/image_index_fixtures")
 _img_cache="$(mktemp -d)"
 
-# _image_resolve_test_catalog <id> <fixture-subdir> <file-regex> [sums] [sig]
+# _image_resolve_test_catalog <id> <fixture-subdir> <file-regex> [sums] [sig] [leaf]
 # Writes a one-entry scratch images.json pointing `index` at this test run's
 # loopback fixture server, and echoes its path. AUTOOS_ROOT/catalog/images.json
 # itself is never touched (constraint: catalog/*.json stays off limits) -
-# image_resolve's optional second argument exists for exactly this.
+# image_resolve's optional second argument exists for exactly this. <leaf>
+# mirrors the catalog's optional `leaf` field (fedora-workstation: the ISO
+# sits three directories below the chosen version dir) - omitted, it is left
+# out of the entry entirely so every existing caller above is unaffected.
 _image_resolve_test_catalog() {
-    local id="$1" subdir="$2" file_re="$3" sums="${4:-SHA256SUMS}" sig="${5:--}"
+    local id="$1" subdir="$2" file_re="$3" sums="${4:-SHA256SUMS}" sig="${5:--}" leaf="${6:-}"
     local f; f="$(mktemp)"
-    python3 - "$f" "$id" "http://127.0.0.1:${_img_srv_port}/${subdir}/" "$file_re" "$sums" "$sig" <<'PY'
+    python3 - "$f" "$id" "http://127.0.0.1:${_img_srv_port}/${subdir}/" "$file_re" "$sums" "$sig" "$leaf" <<'PY'
 import json, sys
-f, id_, index, file_re, sums, sig = sys.argv[1:7]
+f, id_, index, file_re, sums, sig, leaf = sys.argv[1:8]
+entry = {"id": id_, "index": index, "file": file_re, "sums": sums, "sig": sig}
+if leaf:
+    entry["leaf"] = leaf
 with open(f, "w", encoding="utf-8") as fh:
-    json.dump({"images": [{"id": id_, "index": index, "file": file_re, "sums": sums, "sig": sig}]}, fh)
+    json.dump({"images": [entry]}, fh)
 PY
     echo "$f"
 }
@@ -2660,6 +2737,36 @@ if it "image_resolve: an -lts id with only interim directories present fails lou
     cat_json="$(_image_resolve_test_catalog ubuntu-desktop-lts ubuntu_only_interim \
         'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' SHA256SUMS SHA256SUMS.gpg)"
     out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve ubuntu-desktop-lts "$cat_json" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"no LTS release directory"* ]]; then pass; else fail "rc=$rc out=$out"; fi
+    rm -f "$cat_json"
+fi
+
+if it "image_resolve: a fedora-shaped entry resolves via 'leaf' to the ISO and CHECKSUM three directories below the chosen version dir, picking the highest of 43/44 (image_resolve)"; then
+    # Real upstream shape (verified 2026-09-18): releases/ lists bare-integer
+    # version dirs (44/, no dot - VERSION_DIR must accept that), and the ISO
+    # is three levels below the chosen one (Workstation/x86_64/iso/) - `leaf`
+    # is what lets a single recursion step land there directly.
+    cat_json="$(_image_resolve_test_catalog fedora-workstation fedora_releases \
+        'Fedora-Workstation-Live-[0-9]+-[0-9.]+\.x86_64\.iso$' \
+        'Fedora-Workstation-[0-9]+-[0-9.]+-x86_64-CHECKSUM$' - 'Workstation/x86_64/iso/')"
+    out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve fedora-workstation "$cat_json" 2>&1)"; rc=$?
+    base="http://127.0.0.1:${_img_srv_port}/fedora_releases/44/Workstation/x86_64/iso"
+    if [[ $rc -eq 0 && "$out" == *"url=${base}/Fedora-Workstation-Live-44-1.7.x86_64.iso"* \
+        && "$out" == *"file=Fedora-Workstation-Live-44-1.7.x86_64.iso"* \
+        && "$out" == *"sums=${base}/Fedora-Workstation-44-1.7-x86_64-CHECKSUM"* \
+        && "$out" != *"/43/"* && "$out" != *"/test/"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
+    rm -f "$cat_json"
+fi
+
+if it "image_resolve: a bare-integer version directory (Fedora's '44/') is never LTS-eligible - it has no .04, so it must be ineligible (image_resolve)"; then
+    cat_json="$(_image_resolve_test_catalog fedora-workstation-lts fedora_releases \
+        'Fedora-Workstation-Live-[0-9]+-[0-9.]+\.x86_64\.iso$' \
+        'Fedora-Workstation-[0-9]+-[0-9.]+-x86_64-CHECKSUM$' -)"
+    out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve fedora-workstation-lts "$cat_json" 2>&1)"; rc=$?
     if [[ $rc -ne 0 && "$out" == *"no LTS release directory"* ]]; then pass; else fail "rc=$rc out=$out"; fi
     rm -f "$cat_json"
 fi
@@ -3013,6 +3120,120 @@ if it "usb_plan: a real --create-usb with --wipe-target-disk hands the printed p
     rm -rf "$scratch"
 fi
 
+# ─── custom-url / custom-local (an image the catalog does not describe) ────
+# usb_plan used to refuse both pseudo-entries outright: they have no
+# writeMode, so the engine check failed on an empty string. They are now
+# driven by --image-url / --image-path / --image-sha256 / --write-mode
+# (the USB_IMAGE_* / USB_WRITE_MODE globals here). Every name carries "usb"
+# and "custom" so --filter usb and --filter custom both reach them.
+describe "usb custom image"
+
+_custom_img="$(mktemp)"
+printf 'AUTOOS CUSTOM TEST IMAGE\n' >"$_custom_img"
+_custom_sha="$(sha256sum "$_custom_img" | awk '{print $1}')"
+_custom_bytes="$(_usb_file_size "$_custom_img")"
+
+if it "usb custom: custom-local plans the file itself as the write source, with its real size and - for no digest"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=hybrid USB_IMAGE_PATH="$_custom_img" \
+           usb_plan custom-local installer ventoy /dev/sdb 2>&1)"; rc=$?
+    first="$(printf '%s\n' "$out" | head -1)"
+    if [[ $rc -eq 0 && "$first" == "usb_fetch_image custom-local $_custom_img - $_custom_img" \
+          && "$out" == *"usb_reverify /dev/sdb unmounted $_custom_bytes "* \
+          && "$out" == *"usb_copy_image /dev/sdb $_custom_img"* ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+fi
+
+if it "usb custom: a custom image refuses without --write-mode, and a raw one is refused on ventoy but planned on native (A11)"; then
+    no_mode="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_IMAGE_PATH="$_custom_img" \
+               usb_plan custom-local installer ventoy /dev/sdb 2>&1)"; rc1=$?
+    raw_ventoy="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=raw USB_IMAGE_PATH="$_custom_img" \
+                  usb_plan custom-local installer ventoy /dev/sdb 2>&1)"; rc2=$?
+    raw_native="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=raw USB_IMAGE_PATH="$_custom_img" \
+                  usb_plan custom-local installer native /dev/sdb 2>&1)"; rc3=$?
+    bad_mode="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=iso USB_IMAGE_PATH="$_custom_img" \
+                usb_plan custom-local installer ventoy /dev/sdb 2>&1)"; rc4=$?
+    if [[ $rc1 -ne 0 && "$no_mode" == *"needs --write-mode"* && $rc2 -ne 0 && "$raw_ventoy" == *"cannot write a 'raw' image"* \
+          && $rc3 -eq 0 && "$raw_native" == *"usb_write_raw /dev/sdb $_custom_img $_custom_bytes"* \
+          && $rc4 -ne 0 && "$bad_mode" == *"must be 'hybrid' or 'raw'"* ]]; then pass
+    else fail "no_mode=[$no_mode] raw_ventoy=[$raw_ventoy] raw_native=[$raw_native] bad_mode=[$bad_mode]"; fi
+fi
+
+if it "usb custom: custom-local refuses a missing file, an empty file, a block device and a path with whitespace"; then
+    empty="$(mktemp)"
+    missing="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=hybrid USB_IMAGE_PATH=/no/such/file.iso \
+               usb_plan custom-local installer ventoy /dev/sdb 2>&1)"; rc1=$?
+    empty_out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=hybrid USB_IMAGE_PATH="$empty" \
+                 usb_plan custom-local installer ventoy /dev/sdb 2>&1)"; rc2=$?
+    # A block device is not a regular file: -f refuses it, so a typo can
+    # never make a disk the SOURCE of a write.
+    device="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=hybrid USB_IMAGE_PATH=/dev/null \
+              usb_plan custom-local installer ventoy /dev/sdb 2>&1)"; rc3=$?
+    spaced="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=hybrid USB_IMAGE_PATH="/tmp/has space.iso" \
+              usb_plan custom-local installer ventoy /dev/sdb 2>&1)"; rc4=$?
+    rm -f "$empty"
+    if [[ $rc1 -ne 0 && "$missing" == *"is not a readable file"* && $rc2 -ne 0 && "$empty_out" == *"is empty"* \
+          && $rc3 -ne 0 && "$device" == *"is not a readable file"* && $rc4 -ne 0 && "$spaced" == *"must not contain whitespace"* ]]; then pass
+    else fail "missing=[$missing] empty=[$empty_out] device=[$device] spaced=[$spaced]"; fi
+fi
+
+if it "usb custom: custom-url refuses without a digest, with a malformed digest and with a non-http scheme; plans a digest-keyed cache path otherwise"; then
+    sha="$(printf 'ab%.0s' {1..32})"
+    no_sha="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=hybrid USB_IMAGE_URL=https://example.invalid/x.iso \
+              usb_plan custom-url installer ventoy /dev/sdb 2>&1)"; rc1=$?
+    bad_sha="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=hybrid USB_IMAGE_URL=https://example.invalid/x.iso \
+               USB_IMAGE_SHA256=nothex usb_plan custom-url installer ventoy /dev/sdb 2>&1)"; rc2=$?
+    ftp="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=hybrid USB_IMAGE_URL=ftp://example.invalid/x.iso \
+           USB_IMAGE_SHA256="$sha" usb_plan custom-url installer ventoy /dev/sdb 2>&1)"; rc3=$?
+    ok="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_CACHE_DIR=/scratch/images USB_WRITE_MODE=hybrid \
+          USB_IMAGE_URL=https://example.invalid/x.iso USB_IMAGE_SHA256="${sha^^}" \
+          usb_plan custom-url installer ventoy /dev/sdb 2>&1)"; rc4=$?
+    first="$(printf '%s\n' "$ok" | head -1)"
+    if [[ $rc1 -ne 0 && "$no_sha" == *"needs --image-sha256"* && $rc2 -ne 0 && "$bad_sha" == *"64 hexadecimal"* \
+          && $rc3 -ne 0 && "$ftp" == *"http:// or https://"* && $rc4 -eq 0 \
+          && "$first" == "usb_fetch_image custom-url /scratch/images/custom-url-${sha:0:16}.iso $sha https://example.invalid/x.iso" ]]; then pass
+    else fail "no_sha=[$no_sha] bad_sha=[$bad_sha] ftp=[$ftp] ok=[$ok]"; fi
+fi
+
+if it "usb custom: executing custom-local verifies the digest - a wrong one stops before any write, not touched"; then
+    good_plan="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=hybrid USB_IMAGE_PATH="$_custom_img" \
+                 USB_IMAGE_SHA256="$_custom_sha" usb_plan custom-local installer ventoy /dev/sdb 2>/dev/null | head -1)"
+    bad_plan="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" USB_WRITE_MODE=hybrid USB_IMAGE_PATH="$_custom_img" \
+                USB_IMAGE_SHA256="$(printf '%064d' 0)" usb_plan custom-local installer ventoy /dev/sdb 2>/dev/null | head -1)"
+    good="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_execute /dev/sdb <<<"$good_plan" 2>&1)"; rc1=$?
+    bad="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_execute /dev/sdb <<<"$bad_plan" 2>&1)"; rc2=$?
+    if [[ $rc1 -eq 0 && "$good" == *"verified image"* && $rc2 -ne 0 \
+          && "$bad" == *"does not match the SHA-256 you supplied"* && "$bad" == *"not touched"* ]]; then pass
+    else fail "rc1=$rc1 good=[$good] rc2=$rc2 bad=[$bad]"; fi
+fi
+
+if it "usb custom: executing custom-url downloads and verifies against the supplied digest, and a second run is skipped"; then
+    srv_dir="$(mktemp -d)"
+    cp "$_custom_img" "$srv_dir/custom.iso"
+    read -r srv_pid srv_port < <(_start_test_http_server "$srv_dir")
+    cache="$(mktemp -d)"
+    plan="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_CACHE_DIR="$cache" USB_WRITE_MODE=hybrid \
+            USB_IMAGE_URL="http://127.0.0.1:${srv_port}/custom.iso" USB_IMAGE_SHA256="$_custom_sha" \
+            usb_plan custom-url installer ventoy /dev/sdb 2>/dev/null | head -1)"
+    first="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_execute /dev/sdb <<<"$plan" 2>&1)"; rc1=$?
+    second="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_execute /dev/sdb <<<"$plan" 2>&1)"; rc2=$?
+    dest="$cache/custom-url-${_custom_sha:0:16}.iso"
+    if [[ $rc1 -eq 0 && $rc2 -eq 0 && "$first" == *"verified image"* && "$second" == *"skipped"* ]] \
+        && cmp -s "$dest" "$_custom_img"; then pass
+    else fail "rc1=$rc1 rc2=$rc2 first=[$first] second=[$second]"; fi
+    kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null
+    rm -rf "$srv_dir" "$cache" 2>/dev/null
+fi
+
+if it "usb custom: setup.sh --create-usb with a custom-local image and --dry-run shows the plan and writes nothing"; then
+    out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" bash setup.sh --create-usb --image custom-local \
+           --image-path "$_custom_img" --write-mode hybrid --engine ventoy --usb-device /dev/sdb \
+           --dry-run --no-color 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out" == *"usb_fetch_image custom-local $_custom_img - $_custom_img"* ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+fi
+
+rm -f "$_custom_img"
+
 # ─── usb_fetch_image: the resolver-to-downloader bridge ─────────────────────
 # image_resolve (tested above, against loopback index fixtures) and
 # fetch_verified (tested above, against loopback files) were each done;
@@ -3230,10 +3451,14 @@ if it "usb_fetch_image: creates a cache directory that does not exist yet, as on
     rm -rf "$rel" "$root" "$cache" 2>/dev/null
 fi
 
-if it "usb_fetch_image: custom-local is a specific refusal, not a fetch attempt (usb_fetch_image)"; then
+if it "usb_fetch_image: custom-local without its source and digest is a specific refusal, not a fetch attempt (usb_fetch_image)"; then
+    # custom-local / custom-url are real images now (see "usb custom image"),
+    # but only on the 4-argument line usb_plan emits for them. Called the
+    # catalog way - no source, no digest - it must refuse by name and touch
+    # nothing, never fall through to image_resolve and the network.
     cache="$(mktemp -d)"
     out="$(AUTOOS_CACHE_DIR="$cache" usb_fetch_image custom-local "$cache/x.iso" 2>&1)"; rc=$?
-    if [[ $rc -ne 0 && "$out" == *"UI affordance"* && -z "$(find "$cache" -mindepth 1)" ]]; then pass
+    if [[ $rc -ne 0 && "$out" == *"needs its source and digest"* && -z "$(find "$cache" -mindepth 1)" ]]; then pass
     else fail "rc=$rc out=$out"; fi
     rm -rf "$cache"
 fi

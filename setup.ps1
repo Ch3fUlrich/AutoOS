@@ -60,6 +60,47 @@
 .PARAMETER Undo
     Restore files AutoOS backed up. Does NOT uninstall packages.
 
+.PARAMETER CreateUsb
+    Build a bootable installer/rescue USB stick. With -DryRun only the plan is
+    shown; a real write also needs -WipeTargetDisk. Run interactively without
+    -Image/-Engine/-UsbDevice to be walked through a chooser. docs/usb-creator.md.
+
+.PARAMETER Image
+    A catalog\images.json id, or custom-url / custom-local for an image the
+    catalog does not describe (then -WriteMode is required).
+
+.PARAMETER Kind
+    installer (default), live-persistent or full-os.
+
+.PARAMETER Engine
+    A catalog\engines.json id: ventoy, uefi-copy, native, wsl or rufus.
+
+.PARAMETER UsbDevice
+    The target, e.g. \\.\PHYSICALDRIVE5 (-ListUsb shows candidates).
+
+.PARAMETER WipeTargetDisk
+    Required for a real write: confirms everything on the target may be destroyed.
+
+.PARAMETER ImageUrl
+    With -Image custom-url: the http(s) URL to download. Needs -ImageSha256.
+
+.PARAMETER ImagePath
+    With -Image custom-local: an image file already on disk.
+
+.PARAMETER ImageSha256
+    The SHA-256 to verify a custom image against. Required for a URL; optional
+    for a local file (without it the file is used unverified, with a warning).
+
+.PARAMETER WriteMode
+    hybrid or raw - required for a custom image, because the catalog cannot say
+    how it must be written and a raw image copied onto Ventoy would not boot.
+
+.PARAMETER ListUsb
+    List candidate USB devices and exit.
+
+.PARAMETER ListEngines
+    List the write engines this machine offers and exit.
+
 .EXAMPLE
     .\setup.ps1
     Interactive: detect, choose a profile, tick components, install.
@@ -106,6 +147,11 @@ param(
     [string]$Engine,
     [string]$UsbDevice,
     [switch]$WipeTargetDisk,
+    # custom-url / custom-local (see docs/usb-creator.md):
+    [string]$ImageUrl,
+    [string]$ImagePath,
+    [string]$ImageSha256,
+    [string]$WriteMode,
     [switch]$ListUsb,
     [switch]$ListEngines
 )
@@ -168,7 +214,8 @@ function Invoke-AutoOSCreateUsbFlow {
     # steps below (the executor's TRACE lines, for one) must reach the
     # console, so the exit code travels in a script variable rather than
     # as the function's return value.
-    param([string]$img, [string]$knd, [string]$eng, [string]$dev, [bool]$wipe)
+    param([string]$img, [string]$knd, [string]$eng, [string]$dev, [bool]$wipe,
+          [string]$iurl, [string]$ipath, [string]$isha, [string]$wmode)
     $script:CreateUsbExit = 0
     if ($ListEngines) {
         Write-AutoOSSection 'USB write engines available on this machine'
@@ -218,7 +265,8 @@ function Invoke-AutoOSCreateUsbFlow {
         Write-AutoOSLine "Acknowledged: the target device's current contents will be overwritten." -Level muted
     }
     try {
-        $plan = @(New-AutoOSUsbPlan -ImageId $img -Kind $knd -Engine $eng -DeviceId $dev -DryRun:$DryRun.IsPresent)
+        $plan = @(New-AutoOSUsbPlan -ImageId $img -Kind $knd -Engine $eng -DeviceId $dev -DryRun:$DryRun.IsPresent `
+            -ImageUrl $iurl -ImagePath $ipath -ImageSha256 $isha -WriteMode $wmode)
     } catch {
         Write-AutoOSLine $_.Exception.Message -Level error
         $script:CreateUsbExit = 1; return
@@ -273,7 +321,8 @@ function Invoke-AutoOSCreateUsbFlow {
 }
 
 if ($CreateUsb -or $ListUsb -or $ListEngines) {
-    Invoke-AutoOSCreateUsbFlow -img $Image -knd $Kind -eng $Engine -dev $UsbDevice -wipe ([bool]$WipeTargetDisk)
+    Invoke-AutoOSCreateUsbFlow -img $Image -knd $Kind -eng $Engine -dev $UsbDevice -wipe ([bool]$WipeTargetDisk) `
+        -iurl $ImageUrl -ipath $ImagePath -isha $ImageSha256 -wmode $WriteMode
     exit $script:CreateUsbExit
 }
 
@@ -431,7 +480,11 @@ if ($FromState) {
         }
         $profileItems += [pscustomobject]@{ Id = 'create-usb'; Name = 'Create installer USB'; Description = 'Build a bootable rescue/installer stick instead of installing'; Badge = '' }
         $InstallProfile = Show-AutoOSRadioMenu -Items $profileItems -Title 'Choose installation profile' -DefaultId $suggested
-        if ($InstallProfile -eq 'create-usb') { Invoke-AutoOSCreateUsbFlow -img $Image -knd $Kind -eng $Engine -dev $UsbDevice -wipe ([bool]$WipeTargetDisk); exit $script:CreateUsbExit }
+        if ($InstallProfile -eq 'create-usb') {
+            Invoke-AutoOSCreateUsbFlow -img $Image -knd $Kind -eng $Engine -dev $UsbDevice -wipe ([bool]$WipeTargetDisk) `
+                -iurl $ImageUrl -ipath $ImagePath -isha $ImageSha256 -wmode $WriteMode
+            exit $script:CreateUsbExit
+        }
     }
 }
 if ($InstallProfile -notin $profileNames) { throw "Unknown profile: $InstallProfile" }
