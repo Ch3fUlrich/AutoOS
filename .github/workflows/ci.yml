@@ -19,8 +19,29 @@ jobs:
       - name: Install linters
         run: sudo apt-get update -y && sudo apt-get install -y shellcheck yamllint
 
-      - name: Test suite
-        run: bash tests/run-tests.sh
+      # The suite must never reach the internet (AGENTS.md SS5: tests assert
+      # on plans, never install). That rule used to be enforced only by each
+      # test stubbing the right commands, and it leaked: the rescue-bootstrap
+      # sandbox once let a real `pip install --user oterm` run on this
+      # runner. Now it is structural: the suite runs in a fresh network
+      # namespace with ONLY loopback up (the loopback HTTP fixture servers
+      # still work), dropped back to the runner user. A test that tries the
+      # real network fails fast instead of silently depending on it. The
+      # canary proves the isolation is actually in effect, so a runner-image
+      # change cannot quietly turn this back into an ordinary run.
+      - name: Test suite (loopback-only network)
+        run: |
+          sudo unshare --net -- bash -c '
+            set -e
+            ip link set lo up
+            if curl -sS --max-time 5 -o /dev/null https://example.com 2>/dev/null; then
+              echo "::error::the internet is reachable inside the test namespace - isolation is not in effect"
+              exit 1
+            fi
+            echo "network isolated: loopback only"
+            exec setpriv --reuid="$1" --regid="$2" --init-groups \
+              env HOME="$3" USER="$4" PATH="$5" bash tests/run-tests.sh
+          ' _ "$(id -u)" "$(id -g)" "$HOME" "$USER" "$PATH"
 
       - name: Progress regression tests
         run: |
@@ -48,8 +69,16 @@ jobs:
         shell: powershell
         run: Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
 
-      - name: Test suite
+      # Windows has no network namespaces, so this is the practical guard:
+      # every download path in the suite goes through curl.exe, which honours
+      # these variables, so a test that tries the real network hits a closed
+      # port and fails fast. Loopback (the fixture HTTP servers) is exempt.
+      - name: Test suite (network via a dead proxy)
         shell: powershell
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: 127.0.0.1,localhost
         run: .\tests\run-tests.ps1
 
       - name: Installer and shell regressions (Windows PowerShell)
