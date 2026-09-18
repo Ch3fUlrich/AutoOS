@@ -86,6 +86,9 @@ For an image the catalog does not describe, use `custom-local` (a file you alrea
 
 1. **Resolves** the image from its catalog entry: the release index decides the current file,
    so the catalog never pins a version. `-lts` ids pick the current LTS by Ubuntu's own rule.
+   When one release directory lists several matching files, the highest version wins only if
+   the names differ by a single dotted version number (a point release); any other ambiguity
+   is an error, never a first match.
 2. **Fetches and verifies**: the vendor's checksum manifest (GPG-verified when the catalog names
    a signature and key), then the image itself against that digest — from a catalog mirror when
    one is listed, the canonical site otherwise, verified the same either way. A second run finds
@@ -113,6 +116,9 @@ Only after all five does it say `Ready to boot`.
   a manifest match alone never proves bootability; the read-back step compares the whole tree.
 - On Windows, `wsl --mount --bare` cannot attach a USB flash drive; the `wsl` engine needs
   `usbipd-win`, which may ask for a reboot after installing.
+- On Windows, an image whose catalog entry names a signature needs `gpg` on `PATH`
+  (GnuPG, for example from winget). Without it the signature check fails and
+  nothing is written.
 - **Booting is the one check the tool cannot do.** Sticks have been built and verified by this
   tool; each one still has to be booted by a person.
 

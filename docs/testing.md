@@ -6,6 +6,15 @@ bash tests/run-tests.sh --wsl           # same suite, forced through WSL2 from W
 bash tests/run-tests.sh --filter state  # only matching test names
 ```
 
+`--wsl` re-runs the suite through `wslpath`, which does not exist in Git Bash.
+From Git Bash, start WSL yourself:
+`wsl bash -lc "cd /mnt/c/<path-to-checkout> && bash tests/run-tests.sh"`.
+
+`--filter` / `-Filter` is a substring match on **test names** (`it` /
+`Test-Case`), not on group names. A filter that matches nothing still prints a
+clean run, so read the `passed` count. Name a new test so the filter for its
+area (`usb`, `fetch`, `chooser`, ...) reaches it.
+
 ```powershell
 powershell -File tests\run-tests.ps1
 powershell -File tests\run-tests.ps1 -Filter catalog
@@ -48,6 +57,19 @@ Do not replace them with a framework.
 - **Catalog changes need no new test.** The schema test walks every entry.
 - **End-to-end tests are dry-run only**, and one of them asserts that a dry run
   executes no commands at all.
+- **Fake hardware comes from environment knobs**, never the live machine:
+  `AUTOOS_FAKE_LSBLK` (Linux, e.g. `python3 tests/helpers/fake_usb.py good_stick`),
+  `AUTOOS_FAKE_DISKS` (Windows), `AUTOOS_FAKE_UID`, `AUTOOS_FAKE_ELEVATED`,
+  `AUTOOS_FAKE_ARCH`, `AUTOOS_FAKE_DISK_ID`, `AUTOOS_FAKE_RUN_ACTIVE`,
+  `AUTOOS_FORCE_FAIL`, plus `AUTOOS_CACHE_DIR` and `AUTOOS_ROOT` for a scratch
+  cache or catalog root. In Git Bash `/dev/sdX` names **real** disks, so a test
+  is isolated by these knobs, never by checking whether a device path exists.
+- **Downloads are tested against a loopback server**: `_start_test_http_server`
+  (bash) and `Start-AutoOSTestHttpServer` / `Stop-AutoOSTestHttpServer`
+  (PowerShell). `Invoke-AutoOSCapturedConsole { ... }` captures what
+  `Write-AutoOSLine` printed. An `$env:` variable a test sets outlives the test:
+  set and clear it in `try` / `finally`.
+- Before trusting a new test, break the thing it guards and watch it fail.
 
 ## What is covered
 
@@ -93,9 +115,11 @@ sudo apt-get install -y shellcheck
 Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
 ```
 
-`PSUseSingularNouns` is excluded deliberately (these functions return
-collections). Everything else, including `PSAvoidAssignmentToAutomaticVariable`
-and `PSReviewUnusedParameter`, is treated as a real failure.
+Three rules are excluded deliberately: `PSUseSingularNouns` (these functions
+return collections), `PSUseShouldProcessForStateChangingFunctions` and
+`PSAvoidUsingWriteHost` (see the analyzer test in `tests/run-tests.ps1`).
+Everything else, including `PSAvoidAssignmentToAutomaticVariable` and
+`PSReviewUnusedParameter`, is treated as a real failure.
 
 ## CI
 
@@ -141,3 +165,4 @@ so that's never silently missed.
 - [ ] Ran with `--dry-run` and read the plan
 - [ ] Ran twice; the second run reports `skipped`
 - [ ] No secret, no binary, no absolute path containing a username in a tracked file
+- [ ] Changed a flag? Update `README.md` and the [flag table](getting-started.md#flags)
