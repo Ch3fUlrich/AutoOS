@@ -2214,6 +2214,7 @@ profiles_dir = os.path.join(openhands_dir, "profiles")
 profiles = dict([
     _profile_for("deepseek-chat", deepseek_key),
     _profile_for("deepseek-reasoner", deepseek_key),
+    _profile_for("deepseek-v4-flash", deepseek_key),
     _profile_for("muse-spark", muse_key, "muse-spark-1.3"),
     _profile_for("muse-spark", muse_key, "muse-spark-1.3-contributor"),
     _profile_for("openrouter-free", openrouter_key),
@@ -2246,10 +2247,13 @@ agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
 # the desired state and are copied verbatim on every setup. Their
 # llm_profile_ref values point at the canonical profile names written above.
+# Role profiles are generated from the harness below, not copied: copying them
+# here would race the generator and freeze the role's managed keys.
+_role_profiles = {r['openhands']['profile'] + '.json' for r in json.load(open(os.path.join(REPO_ROOT, 'catalog', 'agent-harness.json'), encoding='utf-8'))['roles'].values()}
 _vendored_agents = os.path.join(REPO_ROOT, "openhands", "agent-profiles")
 if os.path.isdir(_vendored_agents):
     for _fn in sorted(os.listdir(_vendored_agents)):
-        if not _fn.endswith(".json"):
+        if not _fn.endswith(".json") or _fn in _role_profiles:
             continue
         try:
             with open(os.path.join(_vendored_agents, _fn), "r", encoding="utf-8") as _af:
@@ -2259,6 +2263,21 @@ if os.path.isdir(_vendored_agents):
         except Exception:
             pass
 PY
+
+    # The role agent profiles are the generator's job: it merges the harness
+    # into whatever the embedded script left, so the roles stay in one place.
+    local harness_root harness_out harness_rc
+    harness_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    # "|| harness_rc=$?" keeps a failing generator from ending the run under set -e.
+    harness_rc=0
+    harness_out="$(python3 "$harness_root/lib/agent_harness.py" openhands --openhands-dir "$openhands_dir" --repo-root "$harness_root" 2>&1)" || harness_rc=$?
+    if (( harness_rc != 0 )); then
+        ui_warn "agent harness not applied to OpenHands (exit $harness_rc)"
+    else
+        while IFS= read -r _harness_line; do
+            [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
+        done <<< "$harness_out"
+    fi
 
     ui_ok "OpenHands configuration and profiles written to $openhands_dir"
 }
