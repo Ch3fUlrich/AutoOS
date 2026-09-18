@@ -664,6 +664,22 @@ if it "ensure_serena_exclusions preserves CRLF line endings and untouched conten
     rm -rf "$tmp"
 fi
 
+if it "ensure_serena_exclusions keeps each line's own ending outside the edited block (mixed CRLF/LF) (serena)"; then
+    tmp="$(mktemp -d)"
+    cfg="$tmp/serena_config.yml"
+    printf 'a_setting: 1\nb_setting: 2\r\nexcluded_tools:\r\n- read_file\r\ntrailer_key: keep_me\n' >"$cfg"
+    ( SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0; ensure_serena_exclusions "$cfg" ) >/dev/null 2>&1
+    if out="$(python3 - "$cfg" <<'PY' 2>&1
+import sys
+data = open(sys.argv[1], 'rb').read()
+assert data.startswith(b'a_setting: 1\nb_setting: 2\r\nexcluded_tools:'), data
+assert data.endswith(b'\ntrailer_key: keep_me\n') and not data.endswith(b'\r\n'), data
+assert b'- delete_memory' in data, data
+PY
+)"; then pass; else fail "$out"; fi
+    rm -rf "$tmp"
+fi
+
 if it "ensure_serena_exclusions preserves a non-UTF-8 byte outside the block untouched (serena)"; then
     tmp="$(mktemp -d)"
     cfg="$tmp/serena_config.yml"

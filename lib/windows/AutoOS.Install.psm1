@@ -1262,15 +1262,23 @@ function Set-AutoOSSerenaExclusions {
     $newline = "`n"
     if ($raw -match "`r`n") { $newline = "`r`n" }
 
+    # Each line keeps its own terminator ($ends[i]: CRLF, LF or '' for an
+    # unterminated last line), like the bash twin's splitlines(keepends=True).
+    # Only lines this function generates use the dominant $newline, so a file
+    # with mixed endings keeps every byte outside the edited block.
     $lines = [System.Collections.Generic.List[string]]::new()
-    $hadTrailingNewline = $false
+    $ends = [System.Collections.Generic.List[string]]::new()
     if ($raw.Length -gt 0) {
-        $hadTrailingNewline = $raw.EndsWith("`n")
-        $parts = [regex]::Split($raw, "`r`n|`n")
-        if ($hadTrailingNewline -and $parts.Length -gt 0) {
-            $parts = $parts[0..($parts.Length - 2)]
+        $pos = 0
+        foreach ($m in [regex]::Matches($raw, "`r`n|`n")) {
+            [void]$lines.Add($raw.Substring($pos, $m.Index - $pos))
+            [void]$ends.Add($m.Value)
+            $pos = $m.Index + $m.Length
         }
-        foreach ($p in $parts) { [void]$lines.Add($p) }
+        if ($pos -lt $raw.Length) {
+            [void]$lines.Add($raw.Substring($pos))
+            [void]$ends.Add('')
+        }
     }
 
     # Quote-aware, comment-aware scalar value: a quoted value runs up to its
@@ -1528,36 +1536,27 @@ function Set-AutoOSSerenaExclusions {
     }
     $itemLines = foreach ($m in $merged) { "- $m" }
 
-    # Append a final newline only when the generated excluded_tools block is
-    # the last thing in the file (it should always end cleanly, whether it
-    # was just created or the key was the file's last line) - OR when the
-    # original file already ended with one. Otherwise trailing content that
-    # never had a final newline (e.g. "...\nlast_key: x" with no newline)
-    # would gain one it never had, even though excluded_tools isn't the
-    # last key. $lines never carries per-line terminators (unlike the bash
-    # side's keepends() lines), so this has to be decided explicitly here.
-    $appendFinalNewline = $true
-
-    $newLines = [System.Collections.Generic.List[string]]::new()
+    # Untouched lines keep their own terminator ($ends); generated lines end
+    # with $newline. So the generated block always ends cleanly, while an
+    # untouched tail keeps its final newline, or its lack of one.
+    $sb = [System.Text.StringBuilder]::new()
     if ($keyStart -lt 0) {
-        foreach ($l in $lines) { [void]$newLines.Add($l) }
-        [void]$newLines.Add('excluded_tools:')
-        foreach ($il in $itemLines) { [void]$newLines.Add($il) }
-    } else {
-        for ($i = 0; $i -lt $keyStart; $i++) { [void]$newLines.Add($lines[$i]) }
-        [void]$newLines.Add($newKeyLineText)
-        foreach ($ic in $interiorComments) { [void]$newLines.Add($ic) }
-        foreach ($il in $itemLines) { [void]$newLines.Add($il) }
-        for ($i = $keyEndExclusive; $i -lt $lines.Count; $i++) { [void]$newLines.Add($lines[$i]) }
-        if ($keyEndExclusive -lt $lines.Count) {
-            # Original content follows the block - the file's own ending
-            # decides, not our block.
-            $appendFinalNewline = $hadTrailingNewline
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            # An unterminated last line needs a newline before the new block.
+            $end = if ($ends[$i] -eq '') { $newline } else { $ends[$i] }
+            [void]$sb.Append($lines[$i]).Append($end)
         }
+        [void]$sb.Append('excluded_tools:').Append($newline)
+        foreach ($il in $itemLines) { [void]$sb.Append($il).Append($newline) }
+    } else {
+        for ($i = 0; $i -lt $keyStart; $i++) { [void]$sb.Append($lines[$i]).Append($ends[$i]) }
+        [void]$sb.Append($newKeyLineText).Append($newline)
+        foreach ($ic in $interiorComments) { [void]$sb.Append($ic).Append($newline) }
+        foreach ($il in $itemLines) { [void]$sb.Append($il).Append($newline) }
+        for ($i = $keyEndExclusive; $i -lt $lines.Count; $i++) { [void]$sb.Append($lines[$i]).Append($ends[$i]) }
     }
 
-    $content = $newLines -join $newline
-    if ($appendFinalNewline) { $content += $newline }
+    $content = $sb.ToString()
     $contentBytes = $writeEncoding.GetBytes($content)
     $newBytes = if ($hadBom) { [byte[]](0xEF, 0xBB, 0xBF) + $contentBytes } else { $contentBytes }
 
