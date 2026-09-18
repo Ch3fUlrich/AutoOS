@@ -68,6 +68,144 @@ function Get-AutoOSFileSha256 {
     ([BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
 }
 
+# ─── Uncached (cache-bypassing) hashing, for verifying what a DEVICE holds ──
+# Get-AutoOSFileSha256 above reads through the Windows file cache, so right
+# after a copy it can hand back the bytes that were WRITTEN rather than the
+# bytes the device now stores. That is exactly the wrong answer when the
+# question is "did this stick really take the image" - the 2026-09-17 build
+# shipped a stick whose freshly written clusters read back as garbage, and a
+# cached read would have agreed the copy was fine. The Linux side already
+# avoids this with `dd iflag=direct`; FILE_FLAG_NO_BUFFERING is the Windows
+# equivalent.
+#
+# It cannot be done with a plain FileStream: FILE_FLAG_NO_BUFFERING requires
+# the read buffer to be sector-aligned and the requested count to be a
+# multiple of the sector size, and a managed byte[] carries no alignment
+# guarantee. Hence one small P/Invoke helper, compiled once per session, that
+# reads into a manually aligned unmanaged buffer. 4096 satisfies every common
+# sector size (512 and 4096 both divide it) and is itself a valid count.
+$script:AutoOSUncachedReaderReady = $false
+function Initialize-AutoOSUncachedReader {
+    if ($script:AutoOSUncachedReaderReady) { return }
+    if (-not ('AutoOSUncachedRead' -as [type])) {
+        # ASCII only, and no PowerShell interpolation inside: this is C#
+        # source, and a stray $ or a smart dash would break the compile
+        # (handoff lesson L6's cousin).
+        $source = @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
+
+public static class AutoOSUncachedRead
+{
+    const uint GENERIC_READ = 0x80000000;
+    const uint FILE_SHARE_READ = 0x00000001;
+    const uint FILE_SHARE_WRITE = 0x00000002;
+    const uint OPEN_EXISTING = 3;
+    const uint FILE_FLAG_NO_BUFFERING = 0x20000000;
+    const uint FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000;
+    const int ALIGN = 4096;
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern SafeFileHandle CreateFileW(
+        string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+        IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+        uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ReadFile(
+        SafeFileHandle hFile, IntPtr lpBuffer, uint nNumberOfBytesToRead,
+        out uint lpNumberOfBytesRead, IntPtr lpOverlapped);
+
+    // Hashes <path> reading straight from the device, never the cache.
+    // <length> is the file's real size. Measured 2026-09-18 on NTFS: at end
+    // of file ReadFile returns only the valid bytes even with no-buffering,
+    // so the clamp below never changes the answer there. It stays as a guard
+    // against a filesystem or driver that returns a whole final sector.
+    public static string Sha256(string path, int chunkSize, long length)
+    {
+        if (chunkSize <= 0 || chunkSize % ALIGN != 0)
+            throw new ArgumentException("chunkSize must be a positive multiple of 4096");
+
+        using (SafeFileHandle h = CreateFileW(path, GENERIC_READ,
+                   FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING,
+                   FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN, IntPtr.Zero))
+        {
+            if (h.IsInvalid)
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+
+            IntPtr raw = Marshal.AllocHGlobal(chunkSize + ALIGN);
+            try
+            {
+                long addr = raw.ToInt64();
+                IntPtr buffer = new IntPtr(((addr + ALIGN - 1) / ALIGN) * ALIGN);
+                byte[] managed = new byte[chunkSize];
+
+                using (SHA256 sha = SHA256.Create())
+                {
+                    long remaining = length;
+                    while (remaining > 0)
+                    {
+                        uint got;
+                        if (!ReadFile(h, buffer, (uint)chunkSize, out got, IntPtr.Zero))
+                            throw new Win32Exception(Marshal.GetLastWin32Error());
+                        if (got == 0)
+                            throw new IOException("unexpected end of file at " + remaining + " bytes remaining");
+                        int use = (int)Math.Min((long)got, remaining);
+                        Marshal.Copy(buffer, managed, 0, use);
+                        sha.TransformBlock(managed, 0, use, null, 0);
+                        remaining -= use;
+                    }
+                    sha.TransformFinalBlock(new byte[0], 0, 0);
+                    return BitConverter.ToString(sha.Hash).Replace("-", "").ToLowerInvariant();
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(raw);
+            }
+        }
+    }
+}
+'@
+        Add-Type -TypeDefinition $source -ErrorAction Stop
+    }
+    $script:AutoOSUncachedReaderReady = $true
+}
+
+function Get-AutoOSUncachedFileSha256 {
+    <#
+      .SYNOPSIS
+        Lower-case SHA-256 hex of a file, read with FILE_FLAG_NO_BUFFERING so
+        the bytes come from the DEVICE and not from the Windows file cache.
+        Throws when the uncached read is not possible; the caller decides
+        whether to fall back and say so.
+      .DESCRIPTION
+        The Windows counterpart of lib/linux/usb.sh's `dd iflag=direct`
+        read-back. An empty file has no sectors to read, so it short-circuits
+        to the well-known SHA-256 of zero bytes rather than opening a handle.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [int]$ChunkSize = 1048576
+    )
+    # AUTOOS_FAKE_NO_UNCACHED=1 simulates a filesystem or driver that refuses
+    # FILE_FLAG_NO_BUFFERING, so the read-back's fallback path is testable
+    # without such a device (AGENTS.md SS5).
+    if ($env:AUTOOS_FAKE_NO_UNCACHED -eq '1') {
+        throw 'uncached reads are unavailable (AUTOOS_FAKE_NO_UNCACHED)'
+    }
+    $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($item.Length -eq 0) {
+        return 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+    }
+    Initialize-AutoOSUncachedReader
+    return [AutoOSUncachedRead]::Sha256($item.FullName, $ChunkSize, $item.Length)
+}
+
 function Test-AutoOSSha256Match {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Want)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
@@ -511,4 +649,4 @@ function Resolve-AutoOSImageUrl {
 
 Export-ModuleMember -Function `
     Get-AutoOSDownloadCacheDir, Get-AutoOSVerifiedFile, Test-AutoOSSha256Match, Get-AutoOSFileSha256, `
-    Test-AutoOSGpgSignature, Resolve-AutoOSImageUrl
+    Get-AutoOSUncachedFileSha256, Test-AutoOSGpgSignature, Resolve-AutoOSImageUrl

@@ -1217,8 +1217,15 @@ function Test-AutoOSUsbCopyReadback {
         The read-back step of Invoke-AutoOSUsbCopyImage, kept as a pure
         directory-vs-directory function so it is unit-tested with temp
         dirs and never needs a mounted ISO or a real stick. Streams every
-        file through Get-AutoOSFileSha256, so memory stays flat for a
-        multi-gigabyte squashfs.
+        file, so memory stays flat for a multi-gigabyte squashfs.
+
+        The SOURCE is hashed normally; the DESTINATION is hashed with
+        Get-AutoOSUncachedFileSha256 (FILE_FLAG_NO_BUFFERING), so the bytes
+        come from the stick and not from the Windows file cache that still
+        holds what robocopy just wrote - the Windows counterpart of
+        usb.sh's `dd iflag=direct`. If an uncached read is not possible
+        (some filesystems or drivers refuse it), it falls back to a cached
+        read and says so once, rather than skipping the comparison.
     #>
     param(
         [Parameter(Mandatory)][string]$SourceRoot,
@@ -1227,6 +1234,7 @@ function Test-AutoOSUsbCopyReadback {
     $srcRoot = $SourceRoot.TrimEnd('\') + '\'
     $dstRoot = $DestRoot.TrimEnd('\') + '\'
     $bad = @()
+    $uncached = $true
     foreach ($f in Get-ChildItem -LiteralPath $srcRoot -Recurse -File -Force -ErrorAction SilentlyContinue) {
         $rel = $f.FullName.Substring($srcRoot.Length)
         $dst = Join-Path $dstRoot $rel
@@ -1236,7 +1244,17 @@ function Test-AutoOSUsbCopyReadback {
         if ((Get-Item -LiteralPath $dst).Length -ne $f.Length) {
             $bad += [pscustomobject]@{ Path = $rel; Reason = 'size' }; continue
         }
-        if ((Get-AutoOSFileSha256 -Path $f.FullName) -ne (Get-AutoOSFileSha256 -Path $dst)) {
+        $dstHash = $null
+        if ($uncached) {
+            try {
+                $dstHash = Get-AutoOSUncachedFileSha256 -Path $dst
+            } catch {
+                $uncached = $false
+                Write-AutoOSLine "read-back: an uncached read of $dstRoot is not possible here ($($_.Exception.Message)) - comparing through the file cache instead, which can miss corruption the device introduced after the write" -Level warn
+            }
+        }
+        if ($null -eq $dstHash) { $dstHash = Get-AutoOSFileSha256 -Path $dst }
+        if ((Get-AutoOSFileSha256 -Path $f.FullName) -ne $dstHash) {
             $bad += [pscustomobject]@{ Path = $rel; Reason = 'content' }
         }
     }
