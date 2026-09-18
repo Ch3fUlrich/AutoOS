@@ -610,6 +610,129 @@ function Invoke-AutoOSUsbChooser {
     [pscustomobject]@{ Image = $Image; Kind = $Kind; Engine = $Engine; Device = $Device; Wipe = $wipe }
 }
 
+# ─── custom-url / custom-local: an image the catalog does not describe ─────
+function Get-AutoOSUsbCustomImage {
+    <#
+      .SYNOPSIS
+        Validates the inputs for a custom-url / custom-local image and
+        returns @{ Source; Sha256 ('-' when none); Bytes (0 when unknown);
+        WriteMode }, or throws with the reason. Mirror of lib/linux/usb.sh's
+        _usb_custom_image_fields.
+      .DESCRIPTION
+        Refuses, never guesses:
+         - no -WriteMode: the catalog is what normally says whether an image
+           is hybrid or raw, and a raw image copied onto Ventoy's file path
+           does not boot (finding A11). A custom image must say which it is.
+         - a URL with no -ImageSha256: an unverified download never reaches
+           a disk.
+        Unlike bash, a Windows path MAY contain spaces: the plan line puts
+        the path last so the dispatcher can take the rest of the line for it.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ImageId,
+        [string]$ImageUrl,
+        [string]$ImagePath,
+        [string]$ImageSha256,
+        [string]$WriteMode
+    )
+    if (-not $WriteMode) {
+        throw "'$ImageId' needs -WriteMode hybrid|raw - the catalog cannot say how a custom image must be written, and a raw image copied onto Ventoy's file path would not boot"
+    }
+    if ($WriteMode -notin @('hybrid', 'raw')) {
+        throw "-WriteMode must be 'hybrid' or 'raw', got '$WriteMode'"
+    }
+    $sha = if ($ImageSha256) { $ImageSha256.ToLowerInvariant() } else { '' }
+    if ($sha -and -not [regex]::IsMatch($sha, '^[0-9a-f]{64}$')) {
+        throw '-ImageSha256 must be 64 hexadecimal characters'
+    }
+
+    switch ($ImageId) {
+        'custom-url' {
+            if (-not $ImageUrl) { throw 'custom-url needs -ImageUrl <http(s) URL>' }
+            if (-not [regex]::IsMatch($ImageUrl, '^https?://\S+$')) {
+                throw "-ImageUrl must be an http:// or https:// URL with no spaces, got '$ImageUrl'"
+            }
+            if (-not $sha) { throw 'custom-url needs -ImageSha256 - refusing to write an image nothing can verify' }
+            return [pscustomobject]@{ Source = $ImageUrl; Sha256 = $sha; Bytes = [int64]0; WriteMode = $WriteMode }
+        }
+        'custom-local' {
+            if (-not $ImagePath) { throw 'custom-local needs -ImagePath <file>' }
+            if (-not (Test-Path -LiteralPath $ImagePath -PathType Leaf)) {
+                throw "-ImagePath '$ImagePath' is not a readable file"
+            }
+            $item = Get-Item -LiteralPath $ImagePath
+            if ($item.Length -eq 0) { throw "-ImagePath '$ImagePath' is empty" }
+            $shaOut = if ($sha) { $sha } else { '-' }
+            return [pscustomobject]@{ Source = $item.FullName; Sha256 = $shaOut; Bytes = [int64]$item.Length; WriteMode = $WriteMode }
+        }
+        default { throw "'$ImageId' is not a custom image id" }
+    }
+}
+
+function Invoke-AutoOSUsbFetchCustomImage {
+    <#
+      .SYNOPSIS
+        The fetch step for an image the catalog does not describe. Mirror of
+        lib/linux/usb.sh's _usb_fetch_custom_image.
+      .DESCRIPTION
+        custom-url:   downloads -Source to -Destination through
+                      Get-AutoOSVerifiedFile against -Sha256 (required); a
+                      second run is a cache hit reported as skipped.
+        custom-local: -Destination IS -Source; nothing is copied. Checks the
+                      file is still there and verifies -Sha256 when one was
+                      given. Idempotent by construction: it writes nothing.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ImageId,
+        [Parameter(Mandatory)][string]$Sha256,
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $hasSha = ($Sha256 -and $Sha256 -ne '-')
+    if ($env:AUTOOS_DRY_RUN -eq '1') {
+        if ($ImageId -eq 'custom-url') {
+            Write-AutoOSLine "would download $Source to $Destination and verify it against the SHA-256 you supplied" -Level muted
+        } elseif ($hasSha) {
+            Write-AutoOSLine "would verify $Source against the SHA-256 you supplied and use it as the image" -Level muted
+        } else {
+            Write-AutoOSLine "would use $Source as the image, unverified (no -ImageSha256 given)" -Level muted
+        }
+        return
+    }
+
+    switch ($ImageId) {
+        'custom-url' {
+            if (-not $hasSha) { throw 'usb_fetch_image: custom-url without a SHA-256 - refusing to write an image nothing can verify' }
+            $destDir = Split-Path -Parent $Destination
+            if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+            }
+            Write-AutoOSLine "fetching $Source" -Level info
+            try {
+                Get-AutoOSVerifiedFile -Uri $Source -Destination $Destination -Sha256 $Sha256 | Out-Null
+            } catch {
+                throw "usb_fetch_image: $($_.Exception.Message); nothing was kept"
+            }
+            Write-AutoOSLine "verified image: $Destination" -Level ok
+        }
+        'custom-local' {
+            if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+                throw "usb_fetch_image: $Source is no longer a readable file"
+            }
+            if ($hasSha) {
+                if ((Get-AutoOSFileSha256 -Path $Source) -ne $Sha256.ToLowerInvariant()) {
+                    throw "usb_fetch_image: $Source does not match the SHA-256 you supplied - refusing to write it"
+                }
+                Write-AutoOSLine "verified image: $Source" -Level ok
+            } else {
+                Write-AutoOSLine "using $Source as supplied - no -ImageSha256 was given, so it has not been verified" -Level warn
+            }
+        }
+        default { throw "usb_fetch_image: '$ImageId' is not a custom image id" }
+    }
+}
+
 function New-AutoOSUsbPlan {
     <#
       .SYNOPSIS
@@ -645,11 +768,29 @@ function New-AutoOSUsbPlan {
         [Parameter(Mandatory)][string]$Kind,
         [Parameter(Mandatory)][string]$Engine,
         [Parameter(Mandatory)][string]$DeviceId,
-        [switch]$DryRun
+        [switch]$DryRun,
+        # custom-url / custom-local only (see Get-AutoOSUsbCustomImage):
+        [string]$ImageUrl,
+        [string]$ImagePath,
+        [string]$ImageSha256,
+        [string]$WriteMode
     )
 
     $image = Get-AutoOSUsbImage -Id $ImageId
     if (-not $image) { throw "unknown image '$ImageId'" }
+
+    # The catalog is what normally says how an image is written; for a
+    # custom image the caller must (validated before anything else - these
+    # are user-typed strings on the destructive path).
+    $custom = $null
+    $imageWriteMode = $null
+    if ($ImageId -in @('custom-url', 'custom-local')) {
+        $custom = Get-AutoOSUsbCustomImage -ImageId $ImageId -ImageUrl $ImageUrl -ImagePath $ImagePath `
+            -ImageSha256 $ImageSha256 -WriteMode $WriteMode
+        $imageWriteMode = $custom.WriteMode
+    } else {
+        $imageWriteMode = [string]$image.writeMode
+    }
 
     $eng = Get-AutoOSUsbEngine -Id $Engine
     if (-not $eng) { throw "unknown engine '$Engine'" }
@@ -663,8 +804,8 @@ function New-AutoOSUsbPlan {
         throw "image '$ImageId' ($($image.name)) does not offer kind '$Kind' — it offers: $($imgKinds -join ', ')"
     }
     $engWriteModes = @($eng.writeModes)
-    if ($engWriteModes -notcontains $image.writeMode) {
-        throw "engine '$Engine' cannot write a '$($image.writeMode)' image ('$ImageId') — it writes: $($engWriteModes -join ', ')"
+    if ($engWriteModes -notcontains $imageWriteMode) {
+        throw "engine '$Engine' cannot write a '$imageWriteMode' image ('$ImageId') — it writes: $($engWriteModes -join ', ')"
     }
 
     $curOs = Get-AutoOSUsbCurrentOs
@@ -687,7 +828,9 @@ function New-AutoOSUsbPlan {
     }
 
     $guardMode = if ($Engine -eq 'uefi-copy') { 'MountedFat32Writable' } else { 'Unmounted' }
-    $imageBytes = [int64][math]::Round([double]$image.sizeGb * 1000000000)
+    # A pseudo entry has no sizeGb at all, and Set-StrictMode Latest throws
+    # on reading a missing property - so this branches before touching it.
+    $imageBytes = if ($custom) { [int64]$custom.Bytes } else { [int64][math]::Round([double]$image.sizeGb * 1000000000) }
     $prevImageBytes = $env:AUTOOS_IMAGE_BYTES
     $env:AUTOOS_IMAGE_BYTES = [string]$imageBytes
     try {
@@ -701,7 +844,15 @@ function New-AutoOSUsbPlan {
         else { $env:AUTOOS_IMAGE_BYTES = $prevImageBytes }
     }
 
-    $localPath = Join-Path (Get-AutoOSDownloadCacheDir) "$ImageId.iso"
+    # A custom-local image is written from where it already is (copying a
+    # multi-gigabyte file into the cache first only costs time); a
+    # custom-url image is cached under its digest, so two URLs never share
+    # a slot and a changed digest never reuses a stale file.
+    $localPath = switch ($ImageId) {
+        'custom-local' { $custom.Source }
+        'custom-url'   { Join-Path (Get-AutoOSDownloadCacheDir) ('custom-url-' + $custom.Sha256.Substring(0, 16) + '.iso') }
+        default        { Join-Path (Get-AutoOSDownloadCacheDir) "$ImageId.iso" }
+    }
 
     # Findings F3/F6 (mirror of usb_plan): the guard above only proves the
     # device is safe NOW. The plan may run much later, after an unplug and a
@@ -717,7 +868,16 @@ function New-AutoOSUsbPlan {
     # a failed or interrupted download never leaves a half-written stick.
     # Under -DryRun this line is traced and skipped like every other, so
     # New-AutoOSUsbPlan itself still runs nothing and touches no network.
-    $lines.Add("Invoke-AutoOSUsbFetchImage $ImageId $localPath")
+    # Custom images carry their digest and source too. A Windows path may
+    # contain spaces, so the one field that can is always LAST (the
+    # dispatcher's regex takes the rest of the line for it):
+    #   custom-local: <id> <sha256|-> <path>          (dest IS the path)
+    #   custom-url:   <id> <sha256> <url> <dest>      (a URL has no spaces)
+    switch ($ImageId) {
+        'custom-local' { $lines.Add("Invoke-AutoOSUsbFetchImage custom-local $($custom.Sha256) $localPath") }
+        'custom-url'   { $lines.Add("Invoke-AutoOSUsbFetchImage custom-url $($custom.Sha256) $($custom.Source) $localPath") }
+        default        { $lines.Add("Invoke-AutoOSUsbFetchImage $ImageId $localPath") }
+    }
     $lines.Add("Invoke-AutoOSUsbReverify $DeviceId $guardMode $imageBytes $pinnedId")
     switch ($Engine) {
         'ventoy' {
@@ -806,6 +966,20 @@ function Invoke-AutoOSUsbPlanStep {
     # these captures (handoff lesson L6). Matched explicitly, not left to
     # Invoke-Expression below, so a cache path containing a space (a
     # Windows user name with one is common) still arrives as ONE argument.
+    # Custom shapes first: the generic catalog shape below would otherwise
+    # swallow them. The path field is always last so it may contain spaces.
+    $fetchLocal = [regex]::Match($Line, '^Invoke-AutoOSUsbFetchImage\s+custom-local\s+(\S+)\s+(.+?)\s*$')
+    if ($fetchLocal.Success) {
+        Invoke-AutoOSUsbFetchCustomImage -ImageId 'custom-local' -Sha256 $fetchLocal.Groups[1].Value `
+            -Source $fetchLocal.Groups[2].Value -Destination $fetchLocal.Groups[2].Value
+        return
+    }
+    $fetchUrl = [regex]::Match($Line, '^Invoke-AutoOSUsbFetchImage\s+custom-url\s+(\S+)\s+(\S+)\s+(.+?)\s*$')
+    if ($fetchUrl.Success) {
+        Invoke-AutoOSUsbFetchCustomImage -ImageId 'custom-url' -Sha256 $fetchUrl.Groups[1].Value `
+            -Source $fetchUrl.Groups[2].Value -Destination $fetchUrl.Groups[3].Value
+        return
+    }
     $fetch = [regex]::Match($Line, '^Invoke-AutoOSUsbFetchImage\s+(\S+)\s+(.+?)\s*$')
     if ($fetch.Success) {
         Invoke-AutoOSUsbFetchImage -ImageId $fetch.Groups[1].Value -Destination $fetch.Groups[2].Value
@@ -1012,7 +1186,7 @@ function Invoke-AutoOSUsbFetchImage {
     )
 
     if ($ImageId -in @('custom-url', 'custom-local')) {
-        throw "usb_fetch_image: '$ImageId' is a UI affordance (a user-supplied URL or local file), not a downloadable catalog entry - there is nothing to fetch"
+        throw "usb_fetch_image: '$ImageId' needs its source and digest (Invoke-AutoOSUsbFetchCustomImage, which New-AutoOSUsbPlan emits for it) - it is a user-supplied image, not a catalog entry to resolve"
     }
     if ($env:AUTOOS_DRY_RUN -eq '1') {
         Write-AutoOSLine "would resolve $ImageId, download it to $Destination and verify it against the vendor's published SHA-256" -Level muted
@@ -1482,7 +1656,7 @@ function Add-AutoOSUsbVentoyPersistence {
 Export-ModuleMember -Function `
     Get-AutoOSUsbDevice, Assert-AutoOSUsbSafe, Test-AutoOSElevated, Assert-AutoOSElevated, `
     New-AutoOSUsbPlan, Get-AutoOSUsbEngine, Get-AutoOSUsbImage, Get-AutoOSUsbEngineList, `
-    Get-AutoOSUsbDiskIdentity, Invoke-AutoOSUsbReverify, `
+    Get-AutoOSUsbDiskIdentity, Invoke-AutoOSUsbReverify, Get-AutoOSUsbCustomImage, Invoke-AutoOSUsbFetchCustomImage, `
     Get-AutoOSUsbChooserImageItem, Get-AutoOSUsbChooserKindItem, Get-AutoOSUsbChooserEngineItem, Get-AutoOSUsbChooserDeviceItem, Invoke-AutoOSUsbChooser, `
     Get-AutoOSUsbCurrentOs, Get-AutoOSUsbCurrentArch, Test-AutoOSUsbRunActive, `
     Invoke-AutoOSUsbPlan, Invoke-AutoOSUsbFetchImage, Get-AutoOSUsbSumsDigest, `
