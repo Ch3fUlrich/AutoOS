@@ -1458,6 +1458,32 @@ Test-Case 'verified download: an http 404 is a transport failure that leaves no 
     }
 }
 
+Test-Case 'verified download: an uncached (FILE_FLAG_NO_BUFFERING) read hashes identically to a cached one at every sector and chunk boundary (uncached)' {
+    # No-buffering reads must be sector-aligned in buffer and count, so the
+    # classic bugs live exactly at these sizes: an empty file, one byte,
+    # either side of a 512/4096 sector, and either side of a chunk. (It does
+    # NOT exercise the tail clamp: removing the clamp still passes, because
+    # ReadFile returns only valid bytes at end of file - see the C# comment.)
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_unc_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $rng = [System.Random]::new(4242)
+        $bad = @()
+        foreach ($n in @(0, 1, 511, 512, 513, 4095, 4096, 4097, 1048575, 1048576, 1048577, 3150001)) {
+            $p = Join-Path $tmp "f$n.bin"
+            $buf = [byte[]]::new($n); $rng.NextBytes($buf)
+            [IO.File]::WriteAllBytes($p, $buf)
+            $want = Get-AutoOSFileSha256 -Path $p
+            if ((Get-AutoOSUncachedFileSha256 -Path $p) -ne $want) { $bad += "$n(1MiB chunk)" }
+            if ((Get-AutoOSUncachedFileSha256 -Path $p -ChunkSize 4096) -ne $want) { $bad += "$n(4KiB chunk)" }
+        }
+        $refused = $false
+        try { Get-AutoOSUncachedFileSha256 -Path (Join-Path $tmp 'f4096.bin') -ChunkSize 1000 | Out-Null } catch { $refused = $true }
+        Assert-True ($bad.Count -eq 0 -and $refused) "mismatched sizes: $($bad -join ', '); unaligned chunk refused: $refused"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'verified download: hashes and verifies a file under Windows PowerShell 5.1, the engine setup.ps1 actually runs in (5.1)' {
     # This suite runs under pwsh 7; setup.ps1 is launched with powershell.exe
     # 5.1 (elevated launches in particular). The first real 6 GB download on
@@ -2393,6 +2419,43 @@ Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips a mirror whose bytes do not mat
     } finally {
         Stop-AutoOSTestHttpServer $mir.Server
         Remove-Item -Recurse -Force $fx.Root, $mir.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: the read-back hashes the destination uncached, and when that is impossible still compares and warns exactly once (copy readback uncached)' {
+    # The default path must NOT warn (it took the uncached read); a forced
+    # refusal must still catch a corrupted file - a fallback that skipped
+    # the comparison would be worse than no read-back at all - and must say
+    # so once, not once per file.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_rbu_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $src = Join-Path $tmp 'src'; $dst = Join-Path $tmp 'dst'
+        New-Item -ItemType Directory -Path $src, $dst -Force | Out-Null
+        $bytes = [byte[]](1..20000 | ForEach-Object { $_ % 251 })
+        foreach ($name in @('a.bin', 'b.bin', 'c.bin')) {
+            [IO.File]::WriteAllBytes((Join-Path $src $name), $bytes); [IO.File]::WriteAllBytes((Join-Path $dst $name), $bytes)
+        }
+        $script:rbDefault = $null
+        $textDefault = Invoke-AutoOSCapturedConsole { $script:rbDefault = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst) }
+
+        $corrupt = [byte[]]$bytes.Clone(); $corrupt[9000] = [byte](255 - $corrupt[9000])
+        [IO.File]::WriteAllBytes((Join-Path $dst 'b.bin'), $corrupt)
+        $env:AUTOOS_FAKE_NO_UNCACHED = '1'
+        try {
+            $script:rbForced = $null
+            $textForced = Invoke-AutoOSCapturedConsole { $script:rbForced = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst) }
+        } finally {
+            Remove-Item Env:\AUTOOS_FAKE_NO_UNCACHED -ErrorAction SilentlyContinue
+        }
+        # A phrase that occurs once per warning (the warning embeds the
+        # exception text, which also says "uncached read").
+        $warnings = ([regex]::Matches($textForced, 'comparing through the file cache instead')).Count
+        $forcedBad = @($script:rbForced | ForEach-Object { "$($_.Path)=$($_.Reason)" })
+        Assert-True ($script:rbDefault.Count -eq 0 -and $textDefault -notlike '*comparing through the file cache*' `
+            -and $forcedBad.Count -eq 1 -and $forcedBad[0] -eq 'b.bin=content' -and $warnings -eq 1) `
+            "default=$($script:rbDefault.Count) defaultText=[$textDefault] forced=$($forcedBad -join ',') warnings=$warnings"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
 }
 
