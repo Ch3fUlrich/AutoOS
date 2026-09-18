@@ -3155,6 +3155,10 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         Assert-True (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json')) 'vendored agent profiles not copied'
         # OpenHands ignores an MCP timeout today and may soon read it as milliseconds (#3254)
         Assert-True (-not @($settings.agent_settings.mcp_config.PSObject.Properties.Value | Where-Object { $_.PSObject.Properties.Name -contains 'timeout' })) 'an MCP server still has a timeout'
+        # every MCP server is pinned: a floating npx/uvx spec changes under the user
+        $pins = [ordered]@{ omnigraph = '@modernrelay/omnigraph-mcp@0.8.0'; serena = 'serena-agent==1.7.0'
+                            playwright = '@playwright/mcp@0.0.81'; context7 = '@upstash/context7-mcp@4.1.1'; graphify = 'graphifyy[mcp]==0.9.63' }
+        foreach ($k in $pins.Keys) { Assert-Contains $settings.agent_settings.mcp_config.$k.args $pins[$k] }
     } finally {
         foreach ($k in $saved.Keys) {
             # an unset variable must be unset again, not left pointing at $tmp

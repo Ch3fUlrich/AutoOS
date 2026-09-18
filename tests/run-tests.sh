@@ -655,7 +655,7 @@ spec = importlib.util.spec_from_file_location("check_serena_tools", "tools/check
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-assert mod.SERENA_FROM == "serena-agent"
+assert mod.SERENA_FROM == "serena-agent==1.7.0"
 with mock.patch("shutil.which", return_value=None):
     cmd = mod.default_command()
 assert cmd[:3] == ["uvx", "--from", mod.SERENA_FROM], cmd
@@ -687,6 +687,26 @@ assert not ok, "missing find_symbol should have failed judge()"
 sys.exit(0)
 PY
     then pass; else fail "judge() did not behave as expected (see above)"; fi
+fi
+
+if it "setup_openhands_config pins every MCP server it writes"; then
+    tmp="$(mktemp -d)"
+    out="$(
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
+        unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        curl() { return 6; }
+        setup_openhands_config >/dev/null 2>&1
+        python3 - "$tmp/.openhands" <<'PY'
+import json, sys, os
+m = json.load(open(os.path.join(sys.argv[1], "settings.json"), encoding="utf-8"))["agent_settings"]["mcp_config"]
+pins = {"omnigraph": "@modernrelay/omnigraph-mcp@0.8.0", "serena": "serena-agent==1.7.0",
+        "playwright": "@playwright/mcp@0.0.81", "context7": "@upstash/context7-mcp@4.1.1",
+        "graphify": "graphifyy[mcp]==0.9.63"}
+print(" ".join(k for k, v in pins.items() if v not in m[k]["args"]) or "all-pinned")
+PY
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "all-pinned"
 fi
 
 if it "vendored agent profiles reference existing llm profiles"; then
