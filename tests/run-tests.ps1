@@ -2911,6 +2911,73 @@ Test-Case 'Resolve-AutoOSOllamaBaseUrl: host.docker.internal only when Ollama an
     } finally { $env:OLLAMA_BASE_URL = $saved }
 }
 
+Test-Case 'Add-AutoOSProfileLine -Prepend puts the line first, exactly once' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
+    Set-Content -Path $p -Value 'Write-Host slow-profile' -Encoding utf8
+    $line = "if (`$env:AI_AGENT -eq 'openhands') { return }"
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line $line -Marker "AI_AGENT -eq 'openhands'" 6>$null
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line $line -Marker "AI_AGENT -eq 'openhands'" 6>$null
+        $lines = @(Get-Content -Path $p)
+        Assert-Equal $lines[0] '# added by AutoOS'
+        Assert-Equal $lines[1] $line
+        Assert-Equal @($lines | Where-Object { $_ -like '*AI_AGENT*' }).Count 1
+        Assert-Contains $lines 'Write-Host slow-profile'
+        # rule 5: the user's profile was backed up before the first write, once
+        Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 1
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Add-AutoOSProfileLine -Prepend keeps an ANSI profile byte-for-byte' {
+    # A Windows PowerShell 5.1 profile without a BOM is read as the ANSI code page.
+    # Re-encoding it as UTF-8 would turn every non-ASCII byte into U+FFFD.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
+    $orig = [byte[]](0x23, 0x20, 0x93, 0x20, 0x81, 0x66, 0xE9, 0x0D, 0x0A)   # cp1252 quote, a byte cp1252 leaves undefined, é
+    [IO.File]::WriteAllBytes($p, $orig)
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line 'X-GUARD' -Marker 'X-GUARD' 6>$null
+        $after = [IO.File]::ReadAllBytes($p)
+        $tail = $after[($after.Length - $orig.Length)..($after.Length - 1)]
+        Assert-Equal ([BitConverter]::ToString($tail)) ([BitConverter]::ToString($orig))
+        Assert-True ($after[0] -eq 0x23) 'a BOM was added to an ANSI profile'
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Add-AutoOSProfileLine -Prepend goes after a using/param preamble' {
+    # `using` and `param` must be a script's first statements; a guard above them
+    # would make every PowerShell start fail with a parse error.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
+    [IO.File]::WriteAllText($p, "using namespace System.Text`r`nparam([string]`$x)`r`nWrite-Host slow-profile`r`n")
+    $line = "if (`$env:AI_AGENT -eq 'openhands') { return }"
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line $line -Marker "AI_AGENT -eq 'openhands'" 6>$null
+        $lines = @(Get-Content -Path $p)
+        Assert-Equal $lines[0] 'using namespace System.Text'
+        Assert-Equal $lines[1] 'param([string]$x)'
+        Assert-Equal $lines[3] $line
+        Assert-Equal $lines[4] 'Write-Host slow-profile'
+        $errs = $null
+        [void][Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs)
+        Assert-Equal @($errs).Count 0
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSOpenHandsConfig prepends the OpenHands guard to both existing profiles' {
+    $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
+    Assert-True ($body -match 'Add-AutoOSProfileLine -Prepend') 'no -Prepend guard call'
+    Assert-True ($body -match "PowerShell\\Microsoft\.PowerShell_profile\.ps1") 'pwsh profile not guarded'
+    Assert-True ($body -match "WindowsPowerShell\\Microsoft\.PowerShell_profile\.ps1") 'Windows PowerShell profile not guarded'
+}
+
 Test-Case 'the embedded OpenHands setup script writes the resolved Ollama address' {
     # Runs the real here-string against a temp ~/.openhands. USERPROFILE, HOME
     # and LOCALAPPDATA point into the temp dir too, so its uv-cache walk finds

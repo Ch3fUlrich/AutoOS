@@ -651,12 +651,13 @@ function Install-AutoOSPoshTheme {
 
 function Add-AutoOSProfileLine {
     <#
-      .SYNOPSIS Append a line to a shell profile exactly once, with a backup.
+      .SYNOPSIS Append (or with -Prepend, prepend) a line to a shell profile exactly once, with a backup.
     #>
     param(
         [Parameter(Mandatory)][string]$ProfilePath,
         [Parameter(Mandatory)][string]$Line,
-        [Parameter(Mandatory)][string]$Marker
+        [Parameter(Mandatory)][string]$Marker,
+        [switch]$Prepend
     )
     $dir = Split-Path -Parent $ProfilePath
     if ($script:DryRun) {
@@ -675,7 +676,48 @@ function Add-AutoOSProfileLine {
     } else {
         New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
     }
-    Add-Content -Path $ProfilePath -Value "`n# added by AutoOS`n$Line"
+    if ($Prepend) {
+        # A guard is useless at the end of a profile: everything slow has already run.
+        # Rule 4: the rest of the file must come back unchanged, so it is decoded and
+        # re-encoded in its own encoding (a BOM-less 5.1 profile is usually ANSI).
+        $bytes = [IO.File]::ReadAllBytes($ProfilePath)
+        $bom = 0
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            $enc = [Text.UTF8Encoding]::new($false); $bom = 3
+        } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+            $enc = [Text.UnicodeEncoding]::new($false, $false); $bom = 2
+        } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+            $enc = [Text.UnicodeEncoding]::new($true, $false); $bom = 2
+        } elseif ($bytes.Length -eq 0) {
+            # a new profile: UTF-8 with BOM reads the same in 5.1 and 7
+            $enc = [Text.UTF8Encoding]::new($false); $bytes = [byte[]](0xEF, 0xBB, 0xBF); $bom = 3
+        } else {
+            try {
+                $enc = [Text.UTF8Encoding]::new($false, $true)
+                [void]$enc.GetString($bytes)
+            } catch {
+                # Some ANSI code page, which one is unknowable from here. Latin-1 maps every
+                # byte to one char and back, so the file round-trips unchanged whatever it
+                # was; `using`/`param` are ASCII, so the parser still finds them.
+                $enc = [Text.Encoding]::GetEncoding(28591)
+            }
+        }
+        $body = $enc.GetString($bytes, $bom, $bytes.Length - $bom)
+        # `using` and `param` must stay the first statements, so the guard goes after them.
+        $ast = [Management.Automation.Language.Parser]::ParseInput($body, [ref]$null, [ref]$null)
+        $at = 0
+        foreach ($u in $ast.UsingStatements) { $at = [Math]::Max($at, $u.Extent.EndOffset) }
+        if ($ast.ParamBlock) { $at = [Math]::Max($at, $ast.ParamBlock.Extent.EndOffset) }
+        $new = if ($at -eq 0) { "# added by AutoOS`r`n$Line`r`n$body" }
+               else { $body.Substring(0, $at) + "`r`n# added by AutoOS`r`n$Line" + $body.Substring($at) }
+        $out = [IO.MemoryStream]::new()
+        $out.Write($bytes, 0, $bom)
+        $newBytes = $enc.GetBytes($new)
+        $out.Write($newBytes, 0, $newBytes.Length)
+        [IO.File]::WriteAllBytes($ProfilePath, $out.ToArray())
+    } else {
+        Add-Content -Path $ProfilePath -Value "`n# added by AutoOS`n$Line"
+    }
     Write-AutoOSLine "profile updated: $ProfilePath" -Level ok
 }
 
@@ -1688,6 +1730,18 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
             & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot
         }
         finally { $env:OLLAMA_BASE_URL = $savedOllama }
+    }
+
+    # OpenHands probes PowerShell with a 5 s timeout and without -NoProfile
+    # (OpenHands/software-agent-sdk#5133; fix pending in #3913). It sets AI_AGENT, so a
+    # profile that returns at once for it keeps the probe fast. Existing profiles only.
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    foreach ($prof in @((Join-Path $docs 'PowerShell\Microsoft.PowerShell_profile.ps1'),
+                        (Join-Path $docs 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1'))) {
+        if (Test-Path $prof) {
+            Add-AutoOSProfileLine -Prepend -ProfilePath $prof -Marker "AI_AGENT -eq 'openhands'" `
+                -Line "if (`$env:AI_AGENT -eq 'openhands') { return }  # OpenHands' PowerShell probe times out after 5 s (software-agent-sdk#5133)"
+        }
     }
 
     Write-AutoOSLine "OpenHands configuration and profiles written to $openhandsDir" -Level ok
