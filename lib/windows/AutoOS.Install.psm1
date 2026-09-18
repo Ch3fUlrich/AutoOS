@@ -1611,7 +1611,6 @@ mcp_cfg['serena'] = {
     'command': 'uvx',
     'args': ['--from', 'serena-agent', 'serena', 'start-mcp-server', '--project-from-cwd', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
     'description': 'Semantic code retrieval and symbol intelligence',
-    'timeout': 120.0,
     'enabled': True
 }
 mcp_cfg['graphify'] = {
@@ -1619,7 +1618,6 @@ mcp_cfg['graphify'] = {
     'command': 'uv',
     'args': ['--quiet', 'run', '--with', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
     'description': 'Codebase dependency knowledge graph',
-    'timeout': 120.0,
     'enabled': True
 }
 mcp_cfg['omnigraph'] = {
@@ -1628,7 +1626,6 @@ mcp_cfg['omnigraph'] = {
     'args': ['-y', '@modernrelay/omnigraph-mcp'],
     'env': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'},
     'description': 'Project memory graph for this repository (repo-scoped, not global)',
-    'timeout': 120.0,
     'enabled': True
 }
 ctx7_args = ['-y', '@upstash/context7-mcp']
@@ -1640,7 +1637,6 @@ mcp_cfg['context7'] = {
     'command': 'npx',
     'args': ctx7_args,
     'description': 'Upstash Context7 semantic search and retrieval',
-    'timeout': 120.0,
     'enabled': True
 }
 mcp_cfg['playwright'] = {
@@ -1648,7 +1644,6 @@ mcp_cfg['playwright'] = {
     'command': 'npx',
     'args': ['-y', '@playwright/mcp'],
     'description': 'Browser automation and end-to-end verification',
-    'timeout': 120.0,
     'enabled': True
 }
 mcp_cfg['cao-ops'] = {
@@ -1656,7 +1651,6 @@ mcp_cfg['cao-ops'] = {
     'command': 'wsl',
     'args': ['-d', 'Ubuntu', 'bash', '-c', 'export PATH=\"$HOME/.local/bin:$PATH\"; export CAO_HOME_DIR=\"$HOME/.cao\"; cao-ops-mcp-server'],
     'description': 'CLI Agent Orchestrator 3-level coordination bridge',
-    'timeout': 120.0,
     'enabled': True
 }
 if 'github' in mcp_cfg:

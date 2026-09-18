@@ -2999,6 +2999,8 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         Assert-Equal $profile.base_url 'http://ollama:11434/v1'
         Assert-Equal $settings.agent_settings.llm.base_url 'http://ollama:11434/v1'
         Assert-True (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json')) 'vendored agent profiles not copied'
+        # OpenHands ignores an MCP timeout today and may soon read it as milliseconds (#3254)
+        Assert-True (-not @($settings.agent_settings.mcp_config.PSObject.Properties.Value | Where-Object { $_.PSObject.Properties.Name -contains 'timeout' })) 'an MCP server still has a timeout'
     } finally {
         foreach ($k in $saved.Keys) {
             # an unset variable must be unset again, not left pointing at $tmp
