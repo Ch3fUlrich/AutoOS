@@ -1,0 +1,27 @@
+name: Catalog live check
+
+on:
+  schedule:
+    # Monday 05:17 UTC - a quiet off-hour, clear of the top-of-hour rush
+    # other scheduled jobs pile onto.
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-check:
+    name: Live-resolve the image catalog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Deliberately NOT part of tests/run-tests.sh (ci.yml runs that suite
+      # with no route to the internet) - this is the one check that talks to
+      # upstream for real, so image rot in catalog/images.json is caught on
+      # a schedule instead of silently, the next time someone tries to burn
+      # a stick. Never wire this job into `push`/`pull_request`: an upstream
+      # host moving a file must not turn a contributor's unrelated PR red.
+      - name: Live-resolve every catalog image
+        run: bash tests/live-check-images.sh

@@ -137,6 +137,30 @@ def validate(entry, problems, seen_ids):
                         "(a directory with the same layout as 'index')"
                     )
 
+    # `leaf` (optional): a relative path appended to the chosen version
+    # directory before the leaf listing is fetched (image_resolve /
+    # Resolve-AutoOSImageUrl), for a release whose file sits more than one
+    # directory below the version dir the top stage recursed into
+    # (fedora-workstation: releases/44/ -> releases/44/Workstation/x86_64/iso/).
+    # Shape only, same spirit as a mirror URL: relative (never '/'-rooted -
+    # it is appended to a URL that already carries the scheme/host), ends in
+    # '/' so it concatenates cleanly with both the chosen dir and the
+    # filename that follows, and no '..' segment (it must never walk back out
+    # of the version directory it was resolved from).
+    leaf = entry.get("leaf")
+    if leaf is not None:
+        leaf_str = str(leaf)
+        if (
+            not isinstance(leaf, str)
+            or leaf_str.startswith("/")
+            or not leaf_str.endswith("/")
+            or any(seg == ".." for seg in leaf_str.split("/"))
+        ):
+            problems.append(
+                f"{where}: 'leaf' must be a relative path ending in '/', not starting with '/', "
+                "with no '..' segment"
+            )
+
 
 def main(argv):
     if len(argv) != 2:

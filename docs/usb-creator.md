@@ -54,6 +54,34 @@ Why Ventoy and WSL rather than Rufus as the default:
 - **The browser UI** ([web-ui.md](web-ui.md)) has the same flow but only ever previews the plan;
   it never writes.
 
+## Your own image
+
+For an image the catalog does not describe, use `custom-local` (a file you already have) or
+`custom-url` (one to download):
+
+```bash
+./setup.sh --create-usb --image custom-local --image-path ~/Downloads/my.iso --write-mode hybrid \
+           --image-sha256 <hex> --engine ventoy --usb-device /dev/sdb --dry-run
+./setup.sh --create-usb --image custom-url --image-url https://example.org/my.iso --write-mode hybrid \
+           --image-sha256 <hex> --engine ventoy --usb-device /dev/sdb --dry-run
+```
+
+```powershell
+.\setup.ps1 -CreateUsb -Image custom-local -ImagePath 'D:\isos\my image.iso' -WriteMode hybrid `
+            -Engine uefi-copy -UsbDevice \\.\PHYSICALDRIVE5 -DryRun
+```
+
+- **`--write-mode hybrid|raw` is required.** The catalog normally says how an image must be
+  written; for your own image you do. A `raw` image is refused on the copy engines (`ventoy`,
+  `uefi-copy`) because copied as a file it would not boot.
+- **`--image-sha256` is required for a URL.** An unverified download never reaches a disk.
+  For a local file it is optional; without it the file is used as-is, with a warning.
+- **A local file is written from where it is.** Nothing is copied into the cache, and the
+  file is only ever read. A block device is refused as a source.
+- **On Linux the path must not contain spaces** (plan steps are split on whitespace, never
+  evaluated). Windows paths may contain spaces.
+- A downloaded custom image is cached under its digest, so a second run is `skipped`.
+
 ## What a run does
 
 1. **Resolves** the image from its catalog entry: the release index decides the current file,
