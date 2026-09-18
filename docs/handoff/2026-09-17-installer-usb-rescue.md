@@ -344,9 +344,43 @@ read the printed counts.**
 7. `usb_copy_image`'s real Linux mount/copy path still has only its guards tested — no loop
    device in the test environment. The **Windows** engine path has now run on real hardware
    (`uefi-copy`, section 2b); `ventoy`, `native`, `wsl` and `rufus` command strings have not.
-8. **Still open after this session:** the first boot of a built stick (human, on a *different*
-   stick — the Intenso is faulty); an unbuffered (`FILE_FLAG_NO_BUFFERING`) read-back on Windows;
-   `custom-url` / `custom-local` are still not plumbed through the CLI (usb_plan refuses them).
+8. **2026-09-18 follow-up (PR after #100)** closed most of what item 8 used to list:
+   - **Unbuffered read-back on Windows — done.** `Get-AutoOSUncachedFileSha256` reads the stick
+     with `FILE_FLAG_NO_BUFFERING` (P/Invoke into a manually aligned buffer); the read-back
+     falls back to a cached compare with one warning if a driver refuses. Measured: on NTFS,
+     `ReadFile` returns only valid bytes at end of file even with no-buffering, so the tail
+     clamp is a guard, not load-bearing.
+   - **`custom-url` / `custom-local` — done** on both platforms (`--image-url` / `--image-path`
+     / `--image-sha256` / `--write-mode`). Write mode is required; a digest is required for a
+     URL. See `docs/usb-creator.md#your-own-image`.
+   - **The suites cannot reach the internet in CI.** Linux runs in a loopback-only network
+     namespace (measured 289/0 offline first); Windows points curl.exe at a dead proxy.
+   - **Four Git Bash-only test failures fixed** — three were a real bug: the state and config
+     loaders kept a trailing `\r` from native-Windows python3 output, so `--config` replays
+     failed with "Unknown profile 'light'".
+   - **Mirrors** for Debian netinst and Fedora (each verified to serve the same relative path).
+   - **Fedora had never resolved, five independent ways:** the filename pattern, a literal
+     `CHECKSUM` (the file is `Fedora-Workstation-44-1.7-x86_64-CHECKSUM`), an ISO three
+     directories below the version folder (new optional catalog field `leaf`), bare-integer
+     version folders the resolver never recognised (`44/` has no dot), and a canonical `index`
+     on `download.fedoraproject.org`, a geo-redirector that sent this machine to a mirror path
+     that 404s. The index is now `dl.fedoraproject.org` (master, no redirect); mirrors still
+     supply the bytes.
+   - **A live resolve of every catalog image (2026-09-18) shows four that still cannot
+     resolve, and probably never have:** `systemrescue` (its CDN returns 403 on the release
+     directory listing), `gparted-live` and `clonezilla-live` (SourceForge project pages, not
+     directory listings), `memtest86plus` (a GitHub releases page whose assets are not in the
+     HTML). They need the resolver to follow absolute download links or use the GitHub API;
+     until then the chooser offers images the tool cannot build. This is the most important
+     open catalog item.
+   - **Deliberately not done: splitting `run-tests.sh` / `run-tests.ps1` into per-area files.**
+     The human partner's main checkout has uncommitted additions to `tests/run-tests.sh`; a
+     split would make that work unmergeable. Do it after that lands, as its own PR, with
+     "identical test names and counts before and after" as the acceptance check.
+
+   **Still open:** the first boot of a built stick (human, on a *different* stick — the
+   Intenso is faulty); `ventoy`, `native`, `wsl`, `rufus` command strings on real hardware; the
+   Linux real mount/copy path (no loop device in CI).
 
 ---
 
