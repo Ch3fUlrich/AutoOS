@@ -111,6 +111,29 @@ and `PSReviewUnusedParameter`, is treated as a real failure.
 The `secrets` job exists because this repository has leaked credentials once. A
 cheap grep is worth more than trusting everyone to remember.
 
+The `linux` job's test suite never touches the network — CI runs it inside a
+network namespace with only loopback up, so a test that tried the real
+internet would fail fast instead of silently depending on it (see the
+isolation step in `ci.yml`). That means it cannot see catalog image rot: an
+upstream host moving a file, changing a listing's shape, or dropping a
+mirror. `tests/live-check-images.sh` is the separate, live counterpart —
+it resolves every real entry in `catalog/images.json` against the real
+resolver and HEAD-checks the resolved URL, checksum manifest and every
+mirror. It is deliberately kept out of `tests/run-tests.sh` and run instead
+by `.github/workflows/catalog-live-check.yml` on a weekly schedule, or by
+hand:
+
+```bash
+bash tests/live-check-images.sh
+```
+
+A short, explicit list at the top of that script names the images known to
+be currently unresolvable and why (see `catalog/images.json` for the full
+catalog) — a failure there is reported as `KNOWN`, not `FAIL`, and does not
+fail the run. Prune an id from that list the moment it starts resolving
+again; the script itself fails the run if a listed id unexpectedly resolves,
+so that's never silently missed.
+
 ## Definition of done
 
 - [ ] Both suites pass
