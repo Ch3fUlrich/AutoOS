@@ -1100,6 +1100,392 @@ print(json.dumps({
 }))
 ")"
     register_antigravity_mcp_server serena "$spec"
+
+    # shellcheck disable=SC2119  # config_path is optional; the default (SYS_HOME/.serena/serena_config.yml) is what we want here
+    ensure_serena_exclusions
+
+    # excludeTools above only reaches Serena when Claude Code/Antigravity start
+    # it with that flag. Serena's OWN global config is what every other MCP
+    # client (or a bare `serena start-mcp-server`) gets instead, so the probe
+    # below actually starts Serena and asks it, over real JSON-RPC, which
+    # tools it exposes - the only way to know ensure_serena_exclusions'
+    # file edit really took effect. It must run here, after the call above,
+    # and never inside ensure_serena_exclusions itself, so tests that call
+    # that function directly never spawn a real Serena process.
+    if has_cmd python3 && (has_cmd serena || has_cmd uvx) && (( ! AUTOOS_DRY_RUN )); then
+        local probe_out
+        if probe_out="$(python3 "${AUTOOS_ROOT}/tools/check-serena-tools.py" 2>&1)"; then
+            ui_ok "Serena tool exclusion probe: ${probe_out}"
+        else
+            ui_warn "Serena tool exclusion probe failed: ${probe_out}"
+        fi
+    fi
+}
+
+# ensure_serena_exclusions [config_path]
+# Serena's global config (~/.serena/serena_config.yml by default) has its own
+# excluded_tools list, independent of the excludeTools flag register_mcp_*
+# above bakes into each client's invocation. Anything missing from THIS list
+# is exposed to any MCP client that talks to Serena directly - onboarding and
+# the memory tools in particular, which this repo deliberately routes through
+# Omnigraph instead (see CLAUDE.md's "one tool per job"). This adds the
+# canonical 15 while leaving every other line of the file, including the
+# user's own extra exclusions and any comments, untouched.
+#
+# The whole read-merge-backup-write cycle lives in ONE python3 process
+# (below), never in bash: an earlier version captured python's stdout with
+# `result="$(...)"` and blindly `printf`'d it over the config, so a missing
+# python3, an unreadable/undecodable file, or config_path being a directory
+# silently truncated the file to a stray newline. Now python does its own
+# read, backup (shutil.copy2) and atomic write (temp file + os.replace) and
+# reports exactly one status word on stdout - SKIP, UPDATED or CREATED - or
+# a non-zero exit with a reason on stderr and the file left untouched.
+# shellcheck disable=SC2120  # config_path is optional: callers with no args get $SYS_HOME/.serena/serena_config.yml; tests pass a temp path explicitly
+ensure_serena_exclusions() {
+    local config_path="${1:-$SYS_HOME/.serena/serena_config.yml}"
+    local canonical=(
+        create_text_file read_file execute_shell_command list_dir
+        search_for_pattern find_file replace_content replace_in_files
+        onboarding write_memory read_memory list_memories edit_memory
+        rename_memory delete_memory
+    )
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would ensure Serena's excluded_tools list is complete in ${config_path}"
+        return 0
+    fi
+
+    if ! has_cmd python3; then
+        ui_warn "python3 is not installed - cannot verify Serena's excluded_tools list in ${config_path}"
+        return 0
+    fi
+
+    local result rc=0
+    result="$(python3 - "$config_path" "${canonical[@]}" 2>&1 <<'PY'
+import os
+import re
+import shutil
+import sys
+import time
+
+path = sys.argv[1]
+canonical = sys.argv[2:]
+canonical_set = set(canonical)
+
+
+def parse_scalar(s):
+    # Quote-aware, comment-aware scalar value: a quoted value runs up to its
+    # matching closing quote (a '#' inside the quotes is just a character);
+    # an unquoted value ends at the first whitespace-then-'#' (a trailing
+    # comment) or at end of string.
+    s = s.strip()
+    if not s:
+        return ""
+    if s[0] in ("'", '"'):
+        q = s[0]
+        i = 1
+        while i < len(s) and s[i] != q:
+            i += 1
+        return s[1:i] if i < len(s) else s[1:]
+    if s.startswith("#"):
+        return ""
+    m = re.search(r"\s#", s)
+    return s[: m.start()].strip() if m else s.strip()
+
+
+def split_flow(inner):
+    # Comma-split that does not split on a comma inside quotes.
+    items, cur, q = [], "", None
+    for c in inner:
+        if q:
+            cur += c
+            if c == q:
+                q = None
+        elif c in ("'", '"'):
+            q = c
+            cur += c
+        elif c == ",":
+            items.append(cur)
+            cur = ""
+        else:
+            cur += c
+    if cur.strip():
+        items.append(cur)
+    return items
+
+
+def strip_item_line(raw):
+    # Like parse_scalar, but also returns a trailing comment on the item
+    # line itself (e.g. "- 'read_file'  # canonical"), quote-aware: text
+    # after a quoted value's closing quote is a comment candidate exactly
+    # like text after an unquoted value. Returns (value, comment_or_None).
+    s = re.sub(r"^-\s*", "", raw.strip(), count=1)
+    if s and s[0] in ("'", '"'):
+        q = s[0]
+        i = 1
+        while i < len(s) and s[i] != q:
+            i += 1
+        if i < len(s):
+            value, tail = s[1:i], s[i + 1:]
+        else:
+            value, tail = s[1:], ""
+    elif s.startswith("#"):
+        value, tail = "", s
+    else:
+        m = re.search(r"\s#", s)
+        if m:
+            value, tail = s[: m.start()].strip(), s[m.start():]
+        else:
+            value, tail = s.strip(), ""
+    comment = tail.strip()
+    return value, (comment if comment.startswith("#") else None)
+
+
+def is_block_item(s):
+    # "-" is a list item only when followed by whitespace or nothing; "---"
+    # (a document separator) or "-foo" is ordinary text, not an item.
+    return s == "-" or (s.startswith("-") and s[1:2].isspace())
+
+
+def scan_flow(lines, newline, j, text_here, idx):
+    # Scans a bracketed flow list starting at text_here[idx:] (text_here is
+    # lines[j] with its terminator stripped), consuming further lines until
+    # the matching unquoted ']'. A '#' outside quotes, at the start of a
+    # physical line or preceded by whitespace, starts a comment that runs to
+    # the end of that line: it is stripped out of the buffer (so it can't
+    # swallow the next item) and returned separately.
+    buf, q, tail = "", None, None
+    inner_comments = []
+    n = len(lines)
+    while True:
+        seg = text_here
+        while idx < len(seg):
+            c = seg[idx]
+            if q:
+                buf += c
+                if c == q:
+                    q = None
+            elif c in ("'", '"'):
+                q = c
+                buf += c
+            elif c == "]" and not q:
+                tail = seg[idx + 1:]
+                break
+            elif c == "#" and not q and (idx == 0 or seg[idx - 1] in (" ", "\t")):
+                comment = seg[idx:].rstrip("\r\n")
+                if comment.strip():
+                    inner_comments.append(comment + newline)
+                break
+            else:
+                buf += c
+            idx += 1
+        if tail is not None:
+            break
+        j += 1
+        if j >= n:
+            tail = ""  # malformed/unterminated - stop at EOF
+            break
+        buf += "\n"
+        text_here = lines[j].rstrip("\r\n")
+        idx = 0
+    return buf, j, tail, inner_comments
+
+
+try:
+    with open(path, "rb") as fh:
+        raw_bytes = fh.read()
+    existed = True
+except FileNotFoundError:
+    raw_bytes = None
+    existed = False
+except OSError as exc:
+    print(f"cannot read {path}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+# surrogateescape round-trips ANY byte sequence (valid UTF-8 or not) exactly:
+# an invalid byte becomes a lone surrogate on decode and the identical byte
+# again on encode, so a stray non-UTF-8 byte anywhere outside the block we
+# touch survives unchanged.
+text = raw_bytes.decode("utf-8", errors="surrogateescape") if raw_bytes is not None else ""
+newline = "\r\n" if "\r\n" in text else "\n"
+lines = text.splitlines(keepends=True) if text else []
+
+key_start = None
+key_end = None  # exclusive
+existing = []
+interior_comments = []
+new_key_line_text = None
+
+i, n = 0, len(lines)
+while i < n:
+    line = lines[i]
+    if line.startswith("excluded_tools:"):
+        key_start = i
+        rest_nolnend = line[len("excluded_tools:"):].rstrip("\r\n")
+        rest = rest_nolnend.strip()
+
+        if rest.startswith("["):
+            # Flow form: [a, b] - possibly with a trailing comment, possibly
+            # spanning several lines before its closing ']'.
+            idx0 = rest_nolnend.index("[") + 1
+            buf, j, tail, inner = scan_flow(lines, newline, i, rest_nolnend, idx0)
+            for part in split_flow(buf):
+                val = parse_scalar(part)
+                if val:
+                    existing.append(val)
+            interior_comments.extend(inner)
+            key_end = j + 1
+            if tail and tail.strip().startswith("#"):
+                new_key_line_text = "excluded_tools:" + tail + newline
+            else:
+                new_key_line_text = "excluded_tools:" + newline
+
+        elif rest == "" or rest.startswith("#"):
+            # Bare key (or one with a trailing comment). The value is
+            # normally an indented block of "- item" lines starting on the
+            # next line, but it can also be a flow list moved to its own
+            # line ("excluded_tools:\n  [a, b]") - peek past any blank/
+            # comment lines for the first real content and dispatch on it.
+            k = i + 1
+            peek_comments = []
+            while k < n:
+                tk = lines[k].strip()
+                if tk == "":
+                    k += 1
+                elif tk.startswith("#"):
+                    peek_comments.append(lines[k])
+                    k += 1
+                else:
+                    break
+
+            if k < n and lines[k].strip().startswith("["):
+                text_k = lines[k].rstrip("\r\n")
+                idx0 = text_k.index("[") + 1
+                buf, j, tail, inner = scan_flow(lines, newline, k, text_k, idx0)
+                for part in split_flow(buf):
+                    val = parse_scalar(part)
+                    if val:
+                        existing.append(val)
+                interior_comments.extend(peek_comments)
+                interior_comments.extend(inner)
+                if tail and tail.strip().startswith("#"):
+                    interior_comments.append(tail.strip() + newline)
+                key_end = j + 1
+            else:
+                # Block form. A comment line only belongs to the block if
+                # another list item follows it later - move those to
+                # directly after the key line, in original order. A
+                # trailing comment after the last item (or before the next
+                # top-level key) is NOT ours and is left where it is. Blank
+                # lines inside the block are simply dropped.
+                j = i + 1
+                committed_end = i + 1
+                pending_comments = []
+                while j < n:
+                    l = lines[j]
+                    st = l.strip()
+                    if is_block_item(st):
+                        val, item_comment = strip_item_line(l)
+                        existing.append(val)
+                        interior_comments.extend(pending_comments)
+                        pending_comments = []
+                        if item_comment:
+                            interior_comments.append(item_comment + newline)
+                        j += 1
+                        committed_end = j
+                    elif st == "":
+                        j += 1
+                    elif st.startswith("#"):
+                        pending_comments.append(l)
+                        j += 1
+                    else:
+                        break
+                key_end = committed_end
+
+            # A key line reused verbatim (bare, commented, or the flow-on-
+            # its-own-line case above) must end with a real newline even
+            # when it was the last line of the file - otherwise the first
+            # generated item glues onto it ("excluded_tools:- item").
+            new_key_line_text = lines[key_start]
+            if not new_key_line_text.endswith("\n"):
+                new_key_line_text += newline
+        else:
+            # Some other scalar (e.g. "excluded_tools: null") - not a list
+            # AutoOS understands; replace it outright.
+            key_end = i + 1
+            new_key_line_text = "excluded_tools:" + newline
+        break
+    i += 1
+
+merged = list(canonical)
+seen = set(canonical_set)
+for item in existing:
+    if item and item not in seen:
+        merged.append(item)
+        seen.add(item)
+
+if canonical_set.issubset(set(existing)):
+    print("SKIP")
+    sys.exit(0)
+
+item_lines = [f"- {item}{newline}" for item in merged]
+
+if key_start is None:
+    prefix_lines = list(lines)
+    if prefix_lines and not prefix_lines[-1].endswith("\n"):
+        prefix_lines[-1] = prefix_lines[-1] + "\n"
+    new_lines = prefix_lines + [f"excluded_tools:{newline}"] + item_lines
+else:
+    block_lines = [new_key_line_text] + interior_comments + item_lines
+    new_lines = lines[:key_start] + block_lines + lines[key_end:]
+
+new_bytes = "".join(new_lines).encode("utf-8", errors="surrogateescape")
+
+directory = os.path.dirname(path)
+try:
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+except OSError as exc:
+    print(f"could not create directory {directory}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if existed:
+    try:
+        shutil.copy2(path, f"{path}.autoos-backup-{time.strftime('%Y%m%d-%H%M%S')}")
+    except OSError as exc:
+        print(f"could not back up {path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+tmp_path = f"{path}.autoos-tmp-{os.getpid()}"
+try:
+    with open(tmp_path, "wb") as fh:
+        fh.write(new_bytes)
+    os.replace(tmp_path, path)
+except OSError as exc:
+    try:
+        os.remove(tmp_path)
+    except OSError:
+        pass
+    print(f"could not write {path}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+print("CREATED" if not existed else "UPDATED")
+PY
+)"
+    rc=$?
+
+    if (( rc != 0 )); then
+        ui_warn "could not update Serena's excluded_tools in ${config_path}: ${result}"
+        return 0
+    fi
+
+    case "$result" in
+        SKIP)    ui_muted "Serena excluded_tools already complete (skipped)" ;;
+        CREATED) ui_ok "created ${config_path} with Serena's excluded_tools" ;;
+        UPDATED) ui_ok "updated Serena excluded_tools in ${config_path}" ;;
+        *)       ui_warn "unexpected result updating Serena excluded_tools: ${result}" ;;
+    esac
+    return 0
 }
 
 install_mcp_graphify() {
@@ -1717,29 +2103,26 @@ mcp_cfg = agent_settings.setdefault("mcp_config", {})
 mcp_cfg["serena"] = {
     "transport": "stdio",
     "command": "uvx",
-    "args": ["--from", "serena-agent", "serena", "start-mcp-server", "--context", "claude-code", "--open-web-dashboard", "false", "--enable-gui-log-window", "false"],
+    "args": ["--from", "serena-agent==1.7.0", "serena", "start-mcp-server", "--context", "claude-code", "--open-web-dashboard", "false", "--enable-gui-log-window", "false"],
     "description": "Code navigation, symbol index, semantic editing",
-    "timeout": 120.0,
     "enabled": True,
 }
 mcp_cfg["graphify"] = {
     "transport": "stdio",
     "command": "uvx",
-    "args": ["--from", "graphifyy[mcp]", "python", "-m", "graphify.serve", "graphify-out/graph.json"],
+    "args": ["--from", "graphifyy[mcp]==0.9.63", "python", "-m", "graphify.serve", "graphify-out/graph.json"],
     "description": "Codebase knowledge graph and dependency intelligence",
-    "timeout": 120.0,
     "enabled": True,
 }
 mcp_cfg["omnigraph"] = {
     "transport": "stdio",
     "command": "npx",
-    "args": ["-y", "@modernrelay/omnigraph-mcp"],
+    "args": ["-y", "@modernrelay/omnigraph-mcp@0.8.0"],
     "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
     "description": "Project memory graph for this repository (repo-scoped, not global)",
-    "timeout": 120.0,
     "enabled": True,
 }
-ctx7_args = ["-y", "@upstash/context7-mcp"]
+ctx7_args = ["-y", "@upstash/context7-mcp@4.1.1"]
 if context7_key:
     ctx7_args.extend(["--api-key", context7_key])
 mcp_cfg["context7"] = {
@@ -1747,15 +2130,13 @@ mcp_cfg["context7"] = {
     "command": "npx",
     "args": ctx7_args,
     "description": "Upstash Context7 semantic search and retrieval",
-    "timeout": 120.0,
     "enabled": True,
 }
 mcp_cfg["playwright"] = {
     "transport": "stdio",
     "command": "npx",
-    "args": ["-y", "@playwright/mcp"],
+    "args": ["-y", "@playwright/mcp@0.0.81"],
     "description": "Browser automation and end-to-end verification",
-    "timeout": 120.0,
     "enabled": True,
 }
 mcp_cfg["cao-ops"] = {
@@ -1763,7 +2144,6 @@ mcp_cfg["cao-ops"] = {
     "command": "bash",
     "args": ["-c", "export PATH=\"$HOME/.local/bin:$PATH\"; export CAO_HOME_DIR=\"$HOME/.cao\"; cao-ops-mcp-server"],
     "description": "CLI Agent Orchestrator 3-level coordination bridge",
-    "timeout": 120.0,
     "enabled": True,
 }
 if "github" in mcp_cfg:
