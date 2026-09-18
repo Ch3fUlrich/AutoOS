@@ -839,6 +839,27 @@ if it "agent harness installers: the OpenHands writer calls the generator and sk
     fi
 fi
 
+if it "agent harness installers: the OpenCode writer calls the generator"; then
+    body="$(declare -f setup_opencode_config)"
+    hands="$(declare -f setup_openhands_config)"
+    if { [[ "$body" == *'agent_harness.py" opencode'* ]] || [[ "$body" == *'agent_harness.py opencode'* ]]; } \
+        && declare -F autoos_skills_source >/dev/null \
+        && [[ "$body" == *'autoos_skills_source'* ]] \
+        && [[ "$hands" == *'autoos_skills_source'* ]]; then
+        pass
+    else
+        fail "setup_opencode_config does not call agent_harness.py opencode and use autoos_skills_source"
+    fi
+fi
+
+if it "agent harness: the generator's unit tests pass"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_agent_harness.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
+fi
+
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
 describe "catalog loading"
 detect_system
