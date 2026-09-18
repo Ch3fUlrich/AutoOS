@@ -19,6 +19,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! bash -n "${BASH_SOURCE[0]}"; then
+    printf 'run-tests.sh: syntax error, no test was run\n' >&2
+    exit 2
+fi
 FILTER=""
 for arg in "$@"; do
     case "$arg" in
@@ -32,8 +37,11 @@ for arg in "$@"; do
 done
 
 PASS=0; FAIL=0; SKIP=0
+SUMMARY_PRINTED=0
 CURRENT=""
 FAILED_NAMES=()
+
+trap 'rc=$?; if [[ $rc -eq 0 && $SUMMARY_PRINTED -eq 0 ]]; then printf "run-tests.sh: ended before the summary line\n" >&2; exit 1; fi' EXIT
 
 RED=''; GREEN=''; YELLOW=''; DIM=''; RESET=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -156,6 +164,31 @@ AUTOOS_NO_COLOR=1
 ui_init
 
 printf '%sAutoOS Linux test suite%s  (%s)\n' "$DIM" "$RESET" "$ROOT"
+
+# ─── Test harness self-tests ────────────────────────────────────────────────
+describe "test harness"
+
+if it "the suite exits non-zero when a syntax error stops it early"; then
+    tmp="$(mktemp -d)"
+    cp "$ROOT/tests/run-tests.sh" "$tmp/run-tests.sh"
+    python3 -c "
+import sys
+with open(sys.argv[1]) as f:
+    lines = f.readlines()
+last = -1
+for i, line in enumerate(lines):
+    if line.rstrip('\n') == 'fi':
+        last = i
+if last >= 0:
+    del lines[last]
+    with open(sys.argv[1], 'w') as f:
+        f.writelines(lines)
+" "$tmp/run-tests.sh"
+    bash "$tmp/run-tests.sh" --filter __no_such_test__ >/dev/null 2>&1
+    rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -ne 0 ]]; then pass; else fail "expected non-zero exit, got $rc"; fi
+fi
 
 # ─── Catalog schema ─────────────────────────────────────────────────────────
 describe "catalog schema"
@@ -4735,6 +4768,7 @@ printf '  %spassed %d%s   %sfailed %d%s   %sskipped %d%s\n' \
     "$GREEN" "$PASS" "$RESET" \
     "$( ((FAIL)) && printf '%s' "$RED" || printf '%s' "$DIM")" "$FAIL" "$RESET" \
     "$DIM" "$SKIP" "$RESET"
+SUMMARY_PRINTED=1
 if (( FAIL )); then
     printf '\n  failures:\n'
     for f in "${FAILED_NAMES[@]}"; do printf '    - %s\n' "$f"; done
