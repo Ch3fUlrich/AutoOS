@@ -2183,7 +2183,9 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
     # profile that returns at once for it keeps the probe fast. Existing profiles only.
     $docs = [Environment]::GetFolderPath('MyDocuments')
     foreach ($prof in @((Join-Path $docs 'PowerShell\Microsoft.PowerShell_profile.ps1'),
-                        (Join-Path $docs 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1'))) {
+                        (Join-Path $docs 'PowerShell\profile.ps1'),
+                        (Join-Path $docs 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1'),
+                        (Join-Path $docs 'WindowsPowerShell\profile.ps1'))) {
         if (Test-Path $prof) {
             Add-AutoOSProfileLine -Prepend -ProfilePath $prof -Marker "AI_AGENT -eq 'openhands'" `
                 -Line "if (`$env:AI_AGENT -eq 'openhands') { return }  # OpenHands' PowerShell probe times out after 5 s (software-agent-sdk#5133)"
