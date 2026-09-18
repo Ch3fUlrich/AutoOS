@@ -33,7 +33,7 @@ session. The first record in each file carries the fields we need, verbatim:
 ```
 
 So `cwd` is read, never reconstructed — the directory-name slug
-(`C--Users-mauls-Documents-Code-AutoOS`) is lossy and is never reversed.
+(`C--Users-<you>-Documents-Code-AutoOS`) is lossy and is never reversed.
 
 A session is recorded when **both** hold:
 
