@@ -113,6 +113,9 @@ Only after all five does it say `Ready to boot`.
   a manifest match alone never proves bootability; the read-back step compares the whole tree.
 - On Windows, `wsl --mount --bare` cannot attach a USB flash drive; the `wsl` engine needs
   `usbipd-win`, which may ask for a reboot after installing.
+- On Windows, an image whose catalog entry names a signature needs `gpg` on `PATH`
+  (GnuPG, for example from winget). Without it the signature check fails and
+  nothing is written.
 - **Booting is the one check the tool cannot do.** Sticks have been built and verified by this
   tool; each one still has to be booted by a person.
 

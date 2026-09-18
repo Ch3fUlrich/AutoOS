@@ -3,6 +3,12 @@
 `catalog/windows.json`, `catalog/linux.json` and `catalog/macos.json` describe
 **what** can be installed. `lib/` describes **how**.
 
+The same folder holds three catalogs of other types: `images.json` (bootable
+images for the [USB creator](usb-creator.md)), `engines.json` (USB write engines)
+and `llm-models.json` (with `llm-models.schema.json`). `--check-catalog` validates
+every file in `catalog/`, dispatched by its top-level shape; an unrecognised shape
+fails.
+
 Adding software must never require touching `setup.ps1` or `setup.sh`. If you
 find yourself editing an entry point to add a package, the schema is missing
 something — extend the schema instead.
