@@ -3240,6 +3240,35 @@ Test-Case 'agent harness installers: the OpenHands writer calls the generator an
     Assert-True ($body -match '_role_profiles') 'Set-AutoOSOpenHandsConfig does not skip role profiles'
 }
 
+Test-Case 'agent harness installers: the OpenCode writer calls the generator' {
+    $body = (Get-Command Set-AutoOSOpenCodeConfig).Definition
+    $hands = (Get-Command Set-AutoOSOpenHandsConfig).Definition
+    Assert-True ($body -match 'agent_harness\.py') 'Set-AutoOSOpenCodeConfig does not call agent_harness.py'
+    # LastIndexOf: the function's help comment also mentions %APPDATA%, so only
+    # the final occurrence is the actual copy guard.
+    Assert-True ($body.IndexOf('agent_harness.py') -lt $body.LastIndexOf('APPDATA')) 'agent_harness.py is not invoked before the APPDATA copy'
+    Assert-True ($body -match 'Get-AutoOSSkillsSource') 'Set-AutoOSOpenCodeConfig does not use Get-AutoOSSkillsSource'
+    Assert-True ($hands -match 'Get-AutoOSSkillsSource') 'Set-AutoOSOpenHandsConfig does not use Get-AutoOSSkillsSource'
+}
+
+Test-Case "agent harness: the generator's unit tests pass" {
+    $py = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-harness-tests-$PID.log"
+    try {
+        # Redirect to a file rather than 2>&1: unittest writes its result to
+        # stderr, and under 'Stop' PS 5.1 that can become a terminating error.
+        & $py.Source (Join-Path $Root 'tests\test_agent_harness.py') *> $log
+        $rc = $LASTEXITCODE
+        if ($rc -eq 0) {
+            Pass
+        } else {
+            $tail = (Get-Content $log -Tail 20) -join "`n"
+            throw "generator unit tests failed (exit $rc):`n$tail"
+        }
+    } finally { Remove-Item $log -ErrorAction SilentlyContinue }
+}
+
 Test-Case 'the embedded OpenHands setup script is valid Python' {
     # Set-AutoOSOpenHandsConfig pipes a literal here-string to `python -c`.
     # Nothing else parses it before a real install, so a missing `except`

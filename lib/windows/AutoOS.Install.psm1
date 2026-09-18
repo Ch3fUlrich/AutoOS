@@ -1667,6 +1667,22 @@ function Install-AutoOSMcpContext7 {
     }
 }
 
+function Get-AutoOSSkillsSource {
+    <#
+      .SYNOPSIS Locate the machine's agent-skills skills directory.
+
+      .DESCRIPTION
+        Returns the first existing of Documents\Code\agent-skills\skills and
+        Documents\code\agent-skills\skills, or $null when neither exists.
+    #>
+    $myDocs = [Environment]::GetFolderPath('MyDocuments')
+    foreach ($rel in @('Code\agent-skills\skills', 'code\agent-skills\skills')) {
+        $candidate = Join-Path $myDocs $rel
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
 function Set-AutoOSOpenCodeConfig {
     <#
       .SYNOPSIS Configure OpenCode CLI with local Ollama, MCP tools, and optional keys.
@@ -1683,6 +1699,7 @@ function Set-AutoOSOpenCodeConfig {
 
     if ($script:DryRun) {
         Write-AutoOSLine "would configure OpenCode in $configFile" -Level muted
+        Write-AutoOSLine 'would apply the agent harness (catalog/agent-harness.json)' -Level muted
         return
     }
 
@@ -1875,11 +1892,35 @@ function Set-AutoOSOpenCodeConfig {
     $json | Out-File -FilePath $configFile -Encoding utf8
     Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
 
+    # Merge the shared agent harness (roles, skills link) after the config is
+    # written. Judge by exit code only; no 2>&1, since under 'Stop' Windows
+    # PowerShell 5.1 turns a native stderr line into a terminating error.
+    $skillsSource = Get-AutoOSSkillsSource
+    if (-not $skillsSource) {
+        # Pass the would-be path even when missing: the generator records
+        # "skills: source missing" rather than failing.
+        $skillsSource = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Code\agent-skills\skills'
+    }
+    $pythonCmd = (Get-Command python -ErrorAction SilentlyContinue)
+    if (-not $pythonCmd) {
+        $pythonCmd = (Get-Command py -ErrorAction SilentlyContinue)
+    }
+    if ($pythonCmd) {
+        $harnessOut = & $pythonCmd.Source (Join-Path $script:RepoRoot 'lib\agent_harness.py') opencode --config $configFile --repo-root $script:RepoRoot --skills-source $skillsSource
+        if ($LASTEXITCODE -ne 0) {
+            Write-AutoOSLine "agent harness not applied to OpenCode (exit $LASTEXITCODE)" -Level warn
+        } else {
+            foreach ($line in $harnessOut) { Write-AutoOSLine $line -Level muted }
+        }
+    } else {
+        Write-AutoOSLine "agent harness not applied: python not found" -Level warn
+    }
+
     if ($env:APPDATA) {
         $appDataDir = Join-Path $env:APPDATA 'opencode'
         if (-not (Test-Path $appDataDir)) { New-Item -ItemType Directory -Path $appDataDir -Force | Out-Null }
         $appDataFile = Join-Path $appDataDir 'config.json'
-        $json | Out-File -FilePath $appDataFile -Encoding utf8
+        (Get-Content $configFile -Raw) | Out-File -FilePath $appDataFile -Encoding utf8
     }
 }
 
@@ -1932,13 +1973,9 @@ function Set-AutoOSOpenHandsConfig {
     $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
     $context7Key = if ($env:CONTEXT7_API_KEY) { $env:CONTEXT7_API_KEY } elseif ($secrets.ContainsKey('context7')) { $secrets['context7'] } else { $null }
 
-    $myDocs = [Environment]::GetFolderPath('MyDocuments')
-    $skillsSource = Join-Path $myDocs 'Code\agent-skills\skills'
-    if (-not (Test-Path $skillsSource)) {
-        $skillsSource = Join-Path $myDocs 'code\agent-skills\skills'
-    }
+    $skillsSource = Get-AutoOSSkillsSource
     $skillsTarget = Join-Path $openhandsDir 'skills'
-    if ((Test-Path $skillsSource) -and -not (Test-Path $skillsTarget)) {
+    if ($skillsSource -and (Test-Path $skillsSource) -and -not (Test-Path $skillsTarget)) {
         try {
             cmd.exe /c "mklink /J `"$skillsTarget`" `"$skillsSource`"" | Out-Null
             Write-AutoOSLine "Linked agent-skills to OpenHands skills directory" -Level ok

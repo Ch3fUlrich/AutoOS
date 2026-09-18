@@ -1756,12 +1756,26 @@ resolve_ollama_base_url() {
     return 0
 }
 
+# Prints the machine's agent-skills skills directory, or nothing when absent.
+autoos_skills_source() {
+    local code_root="$SYS_HOME/Documents/Code"
+    if [[ -d "$SYS_HOME/Documents/code" ]]; then
+        code_root="$SYS_HOME/Documents/code"
+    fi
+    local skills_source="$code_root/agent-skills/skills"
+    if [[ -d "$skills_source" ]]; then
+        printf '%s\n' "$skills_source"
+    fi
+    return 0
+}
+
 setup_opencode_config() {
     local config_dir="$SYS_HOME/.config/opencode"
     local config_file="$config_dir/config.json"
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would configure OpenCode in $config_file"
+        ui_muted "would apply the agent harness (catalog/agent-harness.json)"
         return 0
     fi
 
@@ -1960,6 +1974,26 @@ os.replace(tmp_file, config_path)
 " "$config_file" "$secrets_file" "$models_file"
 
     ui_ok "OpenCode configuration written to $config_file"
+
+    # Merge the shared agent harness (roles, skills link) after the config is
+    # written. Judge by exit code only; the generator's own notes are muted.
+    if has_cmd python3; then
+        local harness_out harness_rc skills_source
+        skills_source="$(autoos_skills_source)"
+        [[ -n "$skills_source" ]] || skills_source="$SYS_HOME/Documents/Code/agent-skills/skills"
+        harness_rc=0
+        harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
+        if (( harness_rc != 0 )); then
+            ui_warn "agent harness not applied to OpenCode (exit $harness_rc)"
+        else
+            while IFS= read -r _harness_line; do
+                [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
+            done <<< "$harness_out"
+        fi
+    else
+        ui_warn "agent harness not applied: python3 not found"
+    fi
+
     cp "$config_file" "$config_dir/opencode.json"
 }
 
@@ -1984,9 +2018,10 @@ setup_openhands_config() {
     if [[ -d "$SYS_HOME/Documents/code" ]]; then
         code_root="$SYS_HOME/Documents/code"
     fi
-    local skills_source="$code_root/agent-skills/skills"
+    local skills_source
+    skills_source="$(autoos_skills_source)"
     local skills_target="$openhands_dir/skills"
-    if [[ -d "$skills_source" && ! -e "$skills_target" ]]; then
+    if [[ -n "$skills_source" && ! -e "$skills_target" ]]; then
         ln -s "$skills_source" "$skills_target" 2>/dev/null || true
         ui_ok "Linked agent-skills to OpenHands skills directory"
     fi
