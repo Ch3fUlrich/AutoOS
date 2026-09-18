@@ -2061,26 +2061,26 @@ mcp_cfg = agent_settings.setdefault('mcp_config', {})
 mcp_cfg['serena'] = {
     'transport': 'stdio',
     'command': 'uvx',
-    'args': ['--from', 'serena-agent', 'serena', 'start-mcp-server', '--project-from-cwd', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
+    'args': ['--from', 'serena-agent==1.7.0', 'serena', 'start-mcp-server', '--project-from-cwd', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
     'description': 'Semantic code retrieval and symbol intelligence',
     'enabled': True
 }
 mcp_cfg['graphify'] = {
     'transport': 'stdio',
     'command': 'uv',
-    'args': ['--quiet', 'run', '--with', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
+    'args': ['--quiet', 'run', '--with', 'graphifyy[mcp]==0.9.63', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
     'description': 'Codebase dependency knowledge graph',
     'enabled': True
 }
 mcp_cfg['omnigraph'] = {
     'transport': 'stdio',
     'command': 'npx',
-    'args': ['-y', '@modernrelay/omnigraph-mcp'],
+    'args': ['-y', '@modernrelay/omnigraph-mcp@0.8.0'],
     'env': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'},
     'description': 'Project memory graph for this repository (repo-scoped, not global)',
     'enabled': True
 }
-ctx7_args = ['-y', '@upstash/context7-mcp']
+ctx7_args = ['-y', '@upstash/context7-mcp@4.1.1']
 context7_key = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != 'null' else os.environ.get('CONTEXT7_API_KEY')
 if context7_key:
     ctx7_args.extend(['--api-key', context7_key])
@@ -2094,7 +2094,7 @@ mcp_cfg['context7'] = {
 mcp_cfg['playwright'] = {
     'transport': 'stdio',
     'command': 'npx',
-    'args': ['-y', '@playwright/mcp'],
+    'args': ['-y', '@playwright/mcp@0.0.81'],
     'description': 'Browser automation and end-to-end verification',
     'enabled': True
 }

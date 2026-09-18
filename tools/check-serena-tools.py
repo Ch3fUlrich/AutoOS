@@ -56,7 +56,7 @@ REQUIRED_TOOL = "find_symbol"
 # The uvx fallback installs this package unpinned - a version bump can change
 # which tools Serena exposes without anyone touching this repo. Pinning it is
 # tracked as a follow-up; until then, this is the one place to pin it from.
-SERENA_FROM = "serena-agent"
+SERENA_FROM = "serena-agent==1.7.0"  # same pin as the installers' OpenHands mcp_config
 
 
 class RpcError(RuntimeError):

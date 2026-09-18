@@ -2103,26 +2103,26 @@ mcp_cfg = agent_settings.setdefault("mcp_config", {})
 mcp_cfg["serena"] = {
     "transport": "stdio",
     "command": "uvx",
-    "args": ["--from", "serena-agent", "serena", "start-mcp-server", "--context", "claude-code", "--open-web-dashboard", "false", "--enable-gui-log-window", "false"],
+    "args": ["--from", "serena-agent==1.7.0", "serena", "start-mcp-server", "--context", "claude-code", "--open-web-dashboard", "false", "--enable-gui-log-window", "false"],
     "description": "Code navigation, symbol index, semantic editing",
     "enabled": True,
 }
 mcp_cfg["graphify"] = {
     "transport": "stdio",
     "command": "uvx",
-    "args": ["--from", "graphifyy[mcp]", "python", "-m", "graphify.serve", "graphify-out/graph.json"],
+    "args": ["--from", "graphifyy[mcp]==0.9.63", "python", "-m", "graphify.serve", "graphify-out/graph.json"],
     "description": "Codebase knowledge graph and dependency intelligence",
     "enabled": True,
 }
 mcp_cfg["omnigraph"] = {
     "transport": "stdio",
     "command": "npx",
-    "args": ["-y", "@modernrelay/omnigraph-mcp"],
+    "args": ["-y", "@modernrelay/omnigraph-mcp@0.8.0"],
     "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
     "description": "Project memory graph for this repository (repo-scoped, not global)",
     "enabled": True,
 }
-ctx7_args = ["-y", "@upstash/context7-mcp"]
+ctx7_args = ["-y", "@upstash/context7-mcp@4.1.1"]
 if context7_key:
     ctx7_args.extend(["--api-key", context7_key])
 mcp_cfg["context7"] = {
@@ -2135,7 +2135,7 @@ mcp_cfg["context7"] = {
 mcp_cfg["playwright"] = {
     "transport": "stdio",
     "command": "npx",
-    "args": ["-y", "@playwright/mcp"],
+    "args": ["-y", "@playwright/mcp@0.0.81"],
     "description": "Browser automation and end-to-end verification",
     "enabled": True,
 }
