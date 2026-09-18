@@ -2911,6 +2911,227 @@ Test-Case 'Resolve-AutoOSOllamaBaseUrl: host.docker.internal only when Ollama an
     } finally { $env:OLLAMA_BASE_URL = $saved }
 }
 
+function Get-AutoOSConsoleCapture {
+    <#
+      .SYNOPSIS Run a scriptblock while Console.Out is redirected, returning what it wrote.
+      .DESCRIPTION
+        Write-AutoOSLine writes via [Console]::WriteLine/Write, not Write-Information,
+        so `6>&1` alone does not capture it (verified: only actual Write-Information/
+        Write-Host output crosses stream 6 - a bare Console.WriteLine bypasses the
+        PowerShell stream pipeline entirely). Redirecting Console.Out for the
+        duration of the call is the only way to capture that text in-process.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Body)
+    $origOut = [Console]::Out
+    $sw = New-Object IO.StringWriter
+    [Console]::SetOut($sw)
+    try { & $Body | Out-Null } finally { [Console]::SetOut($origOut) }
+    $sw.ToString()
+}
+
+# tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
+# YAML shapes both Set-AutoOSSerenaExclusions (here) and ensure_serena_exclusions
+# (tests/run-tests.sh) are graded against, so the two implementations cannot
+# quietly drift apart. Comparison is byte-for-byte (base64 of the raw bytes),
+# not line-based - CRLF, a UTF-8 BOM or a trailing blank line is a real diff.
+$autoosSerenaFixtureDir = Join-Path $Root 'tests\fixtures\serena'
+Get-ChildItem -Path $autoosSerenaFixtureDir -Filter '*.yml' | Where-Object { $_.Name -notlike '*.expected.yml' } | ForEach-Object {
+    $fixtureFile = $_
+    $fixtureName = $_.BaseName
+    $expectedPath = Join-Path $autoosSerenaFixtureDir "$fixtureName.expected.yml"
+
+    Test-Case "Set-AutoOSSerenaExclusions matches fixture '$fixtureName' byte-for-byte (serena)" {
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-fx-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        $p = Join-Path $tmp 'config.yml'
+        Copy-Item -Path $fixtureFile.FullName -Destination $p
+        try {
+            Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+            Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+            $gotB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+            $expB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($expectedPath))
+            Assert-Equal $gotB64 $expB64
+        } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    Test-Case "Set-AutoOSSerenaExclusions second run on fixture '$fixtureName' skips and writes nothing (serena)" {
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-fx-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        $p = Join-Path $tmp 'config.yml'
+        Copy-Item -Path $fixtureFile.FullName -Destination $p
+        try {
+            Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+            Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+            $hash1 = (Get-FileHash -Path $p -Algorithm SHA256).Hash
+            $out = Get-AutoOSConsoleCapture { Set-AutoOSSerenaExclusions -ConfigPath $p 6>&1 }
+            $hash2 = (Get-FileHash -Path $p -Algorithm SHA256).Hash
+            Assert-True ($out -like '*skipped*') "expected 'skipped' in output, got: [$out]"
+            Assert-Equal $hash2 $hash1
+            Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 1
+        } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'Set-AutoOSSerenaExclusions creates a missing config with just the key (serena)' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'nested\serena_config.yml'
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+
+        $got = @(Get-Content -Path $p) | Where-Object { $_ -match '^- ' } | ForEach-Object { $_ -replace '^- ', '' }
+        $want = @('create_text_file', 'read_file', 'execute_shell_command', 'list_dir', 'search_for_pattern',
+            'find_file', 'replace_content', 'replace_in_files', 'onboarding', 'write_memory', 'read_memory',
+            'list_memories', 'edit_memory', 'rename_memory', 'delete_memory')
+        Assert-Equal ($got -join ',') ($want -join ',')
+        Assert-Equal @(Get-Content -Path $p).Count 16
+        Assert-Equal @(Get-ChildItem -Path $tmp -Recurse -Filter '*.autoos-backup-*').Count 0
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSSerenaExclusions skips on the first run when all 15 are already present, any order (serena)' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'serena_config.yml'
+    $body = "excluded_tools:`r`n- delete_memory`r`n- create_text_file`r`n- read_file`r`n- execute_shell_command`r`n" +
+            "- list_dir`r`n- search_for_pattern`r`n- find_file`r`n- replace_content`r`n- replace_in_files`r`n" +
+            "- onboarding`r`n- write_memory`r`n- read_memory`r`n- list_memories`r`n- edit_memory`r`n- rename_memory`r`n"
+    [IO.File]::WriteAllText($p, $body)
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        $hash1 = (Get-FileHash -Path $p -Algorithm SHA256).Hash
+        $out = Get-AutoOSConsoleCapture { Set-AutoOSSerenaExclusions -ConfigPath $p 6>&1 }
+        $hash2 = (Get-FileHash -Path $p -Algorithm SHA256).Hash
+        Assert-True ($out -like '*skipped*') "expected 'skipped' in output, got: [$out]"
+        Assert-Equal $hash2 $hash1
+        Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 0
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSSerenaExclusions on a directory path warns and writes nothing (serena)' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $adir = Join-Path $tmp 'adir'
+    New-Item -ItemType Directory -Path $adir -Force | Out-Null
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        $out = Get-AutoOSConsoleCapture { Set-AutoOSSerenaExclusions -ConfigPath $adir 6>&1 }
+        Assert-True ($out -like '*directory*') "expected a directory warning, got: [$out]"
+        Assert-True (Test-Path $adir -PathType Container) 'the directory itself must survive'
+        Assert-Equal @(Get-ChildItem -Path $adir -Force).Count 0
+        Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 0
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# CRLF and a raw non-UTF-8 byte can't live in a committed *.yml fixture -
+# .gitattributes forces `*.yml text eol=lf`, which would silently rewrite a
+# checked-in CRLF fixture to LF and defeat the point of the test. These two
+# build their own bytes at run time instead, exactly like their bash twins.
+Test-Case 'Set-AutoOSSerenaExclusions preserves CRLF line endings and untouched content byte-for-byte (serena)' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'serena_config.yml'
+    $enc = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllBytes($p, $enc.GetBytes("# top comment`r`nother_key: 1`r`nexcluded_tools:`r`n- read_file`r`n- my_tool`r`nlast_key: x`r`n"))
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+        $bytes = [IO.File]::ReadAllBytes($p)
+        $cr = @($bytes | Where-Object { $_ -eq 0x0D }).Count
+        $lf = @($bytes | Where-Object { $_ -eq 0x0A }).Count
+        Assert-Equal $cr $lf
+        Assert-True ($cr -gt 0) 'expected at least one CRLF pair'
+        $firstLine = (Get-Content -Path $p)[0]
+        Assert-Equal $firstLine '# top comment'
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSSerenaExclusions preserves a non-UTF-8 byte outside the block untouched (serena)' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'serena_config.yml'
+    $prefix = [Text.Encoding]::ASCII.GetBytes("excluded_tools:`n- read_file`n#comment with byte: ")
+    $suffix = [Text.Encoding]::ASCII.GetBytes("`nlast_key: x`n")
+    $bytes = $prefix + [byte[]](0xE9) + $suffix
+    [IO.File]::WriteAllBytes($p, $bytes)
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+        $result = [IO.File]::ReadAllBytes($p)
+        $expectedTail = [Text.Encoding]::ASCII.GetBytes("#comment with byte: ") + [byte[]](0xE9) + [Text.Encoding]::ASCII.GetBytes("`nlast_key: x`n")
+        $tail = $result[($result.Length - $expectedTail.Length)..($result.Length - 1)]
+        Assert-Equal ([BitConverter]::ToString($tail)) ([BitConverter]::ToString($expectedTail))
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Add-AutoOSProfileLine -Prepend puts the line first, exactly once' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
+    Set-Content -Path $p -Value 'Write-Host slow-profile' -Encoding utf8
+    $line = "if (`$env:AI_AGENT -eq 'openhands') { return }"
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line $line -Marker "AI_AGENT -eq 'openhands'" 6>$null
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line $line -Marker "AI_AGENT -eq 'openhands'" 6>$null
+        $lines = @(Get-Content -Path $p)
+        Assert-Equal $lines[0] '# added by AutoOS'
+        Assert-Equal $lines[1] $line
+        Assert-Equal @($lines | Where-Object { $_ -like '*AI_AGENT*' }).Count 1
+        Assert-Contains $lines 'Write-Host slow-profile'
+        # rule 5: the user's profile was backed up before the first write, once
+        Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 1
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Add-AutoOSProfileLine -Prepend keeps an ANSI profile byte-for-byte' {
+    # A Windows PowerShell 5.1 profile without a BOM is read as the ANSI code page.
+    # Re-encoding it as UTF-8 would turn every non-ASCII byte into U+FFFD.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
+    $orig = [byte[]](0x23, 0x20, 0x93, 0x20, 0x81, 0x66, 0xE9, 0x0D, 0x0A)   # cp1252 quote, a byte cp1252 leaves undefined, é
+    [IO.File]::WriteAllBytes($p, $orig)
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line 'X-GUARD' -Marker 'X-GUARD' 6>$null
+        $after = [IO.File]::ReadAllBytes($p)
+        $tail = $after[($after.Length - $orig.Length)..($after.Length - 1)]
+        Assert-Equal ([BitConverter]::ToString($tail)) ([BitConverter]::ToString($orig))
+        Assert-True ($after[0] -eq 0x23) 'a BOM was added to an ANSI profile'
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Add-AutoOSProfileLine -Prepend goes after a using/param preamble' {
+    # `using` and `param` must be a script's first statements; a guard above them
+    # would make every PowerShell start fail with a parse error.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
+    [IO.File]::WriteAllText($p, "using namespace System.Text`r`nparam([string]`$x)`r`nWrite-Host slow-profile`r`n")
+    $line = "if (`$env:AI_AGENT -eq 'openhands') { return }"
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line $line -Marker "AI_AGENT -eq 'openhands'" 6>$null
+        $lines = @(Get-Content -Path $p)
+        Assert-Equal $lines[0] 'using namespace System.Text'
+        Assert-Equal $lines[1] 'param([string]$x)'
+        Assert-Equal $lines[3] $line
+        Assert-Equal $lines[4] 'Write-Host slow-profile'
+        $errs = $null
+        [void][Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs)
+        Assert-Equal @($errs).Count 0
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSOpenHandsConfig prepends the OpenHands guard to both existing profiles' {
+    $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
+    Assert-True ($body -match 'Add-AutoOSProfileLine -Prepend') 'no -Prepend guard call'
+    Assert-True ($body -match "PowerShell\\Microsoft\.PowerShell_profile\.ps1") 'pwsh profile not guarded'
+    Assert-True ($body -match "WindowsPowerShell\\Microsoft\.PowerShell_profile\.ps1") 'Windows PowerShell profile not guarded'
+}
+
 Test-Case 'the embedded OpenHands setup script writes the resolved Ollama address' {
     # Runs the real here-string against a temp ~/.openhands. USERPROFILE, HOME
     # and LOCALAPPDATA point into the temp dir too, so its uv-cache walk finds
@@ -2932,6 +3153,12 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         Assert-Equal $profile.base_url 'http://ollama:11434/v1'
         Assert-Equal $settings.agent_settings.llm.base_url 'http://ollama:11434/v1'
         Assert-True (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json')) 'vendored agent profiles not copied'
+        # OpenHands ignores an MCP timeout today and may soon read it as milliseconds (#3254)
+        Assert-True (-not @($settings.agent_settings.mcp_config.PSObject.Properties.Value | Where-Object { $_.PSObject.Properties.Name -contains 'timeout' })) 'an MCP server still has a timeout'
+        # every MCP server is pinned: a floating npx/uvx spec changes under the user
+        $pins = [ordered]@{ omnigraph = '@modernrelay/omnigraph-mcp@0.8.0'; serena = 'serena-agent==1.7.0'
+                            playwright = '@playwright/mcp@0.0.81'; context7 = '@upstash/context7-mcp@4.1.1'; graphify = 'graphifyy[mcp]==0.9.63' }
+        foreach ($k in $pins.Keys) { Assert-Contains $settings.agent_settings.mcp_config.$k.args $pins[$k] }
     } finally {
         foreach ($k in $saved.Keys) {
             # an unset variable must be unset again, not left pointing at $tmp

@@ -1,0 +1,16 @@
+excluded_tools:
+- create_text_file
+- execute_shell_command
+- list_dir
+- search_for_pattern
+- find_file
+- replace_content
+- replace_in_files
+- onboarding
+- write_memory
+- read_memory
+- list_memories
+- edit_memory
+- rename_memory
+- delete_memory
+- Read_File

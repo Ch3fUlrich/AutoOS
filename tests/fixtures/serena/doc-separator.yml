@@ -1,0 +1,4 @@
+excluded_tools:
+- read_file
+---
+last_key: x
