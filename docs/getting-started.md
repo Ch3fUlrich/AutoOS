@@ -64,6 +64,9 @@ Both entry points accept the same ideas; only the spelling differs.
 | `-Undo` | `--undo` | [Restore backed-up files](state-and-undo.md#undo) |
 | `-CreateUsb -Image <id> -Engine <id> -UsbDevice <dev>` | `--create-usb --image <id> --engine <id> --usb-device <dev>` | Build a bootable installer/rescue USB from a [`catalog/images.json`](../catalog/images.json) entry; with `-DryRun`/`--dry-run` only the plan is shown |
 | `-WipeTargetDisk` | `--wipe-target-disk` | Required for a real USB write: confirms everything on the target may be destroyed |
+| `-ImagePath <file>` / `-ImageUrl <url>` | `--image-path <file>` / `--image-url <url>` | With `custom-local` / `custom-url`: [your own image](usb-creator.md#your-own-image) |
+| `-ImageSha256 <hex>` | `--image-sha256 <hex>` | Digest to verify a custom image against (required for a URL) |
+| `-WriteMode <mode>` | `--write-mode <mode>` | `hybrid` or `raw`; required for a custom image |
 | `-Kind <kind>` | `--kind <kind>` | `installer` (default), `live-persistent` or `full-os` |
 | `-ListUsb` / `-ListEngines` | `--list-usb` / `--list-engines` | Discover candidate devices and the write engines this machine offers |
 
