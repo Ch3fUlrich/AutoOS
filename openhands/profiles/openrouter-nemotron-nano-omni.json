@@ -1,0 +1,20 @@
+{
+  "auth_type": "api_key",
+  "api_mode": "auto",
+  "stream": false,
+  "drop_params": true,
+  "modify_params": true,
+  "disable_stop_word": false,
+  "caching_prompt": true,
+  "log_completions": false,
+  "native_tool_calling": true,
+  "is_subscription": false,
+  "capability_overrides": {},
+  "litellm_extra_body": {},
+  "model": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "max_input_tokens": 256000,
+  "max_output_tokens": 32768,
+  "input_cost_per_token": 0,
+  "output_cost_per_token": 0,
+  "reasoning_effort": "high"
+}
