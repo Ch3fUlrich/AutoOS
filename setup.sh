@@ -160,7 +160,7 @@ try:
         data = json.load(fh)
 except Exception:
     print("invalid"); sys.exit(0)
-for key in ("categories", "images", "engines", "models"):
+for key in ("categories", "images", "engines", "models", "roles"):
     if key in data:
         print(key); sys.exit(0)
 if "$schema" in data:
@@ -183,6 +183,12 @@ ok = isinstance(models, list) and models and all(isinstance(m, dict) and m.get("
 ids = [m.get("id") for m in models] if ok else []
 sys.exit(0 if ok and len(ids) == len(set(ids)) else 1)
 ' "$cat"; then ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            roles)
+                # The agent harness (catalog/agent-harness.json): its one
+                # validator is the generator that consumes it.
+                if python3 "$AUTOOS_ROOT/lib/agent_harness.py" check --harness "$cat" >/dev/null; then
+                    ui_ok "$(basename "$cat") is valid."
                 else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
             categories)
                 if catalog_validate "$cat"; then ui_ok "$(basename "$cat") is valid."

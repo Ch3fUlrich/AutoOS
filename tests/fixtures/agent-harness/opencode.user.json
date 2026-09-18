@@ -1,0 +1,31 @@
+{
+  "provider": {
+    "anthropic": {
+      "options": {
+        "apiKey": "{env:ANTHROPIC_API_KEY}"
+      }
+    }
+  },
+  "model": "anthropic/claude-sonnet-4",
+  "mcp": {
+    "serena": {
+      "type": "local",
+      "command": ["uvx", "serena-agent"]
+    }
+  },
+  "permission": {
+    "bash": {
+      "*": "ask",
+      "npm *": "ask",
+      "git push*": "allow"
+    }
+  },
+  "instructions": [
+    "my-rules.md"
+  ],
+  "agent": {
+    "build": {
+      "model": "x/y"
+    }
+  }
+}

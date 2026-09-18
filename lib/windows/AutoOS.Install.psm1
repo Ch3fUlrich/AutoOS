@@ -25,6 +25,7 @@ $script:ExitCodeAlreadyInstalled = -1978335189
 $script:DryRun  = $false
 $script:Answers = @{}
 $script:RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$script:AgentHarness = $null
 
 function Initialize-AutoOSInstaller {
     param([bool]$DryRun = $false, [hashtable]$Answers = @{}, [string]$RepoRoot = $null)
@@ -774,6 +775,34 @@ function Get-AutoOSMcpServerNames {
     } | Where-Object { $_ })
 }
 
+function Get-AutoOSAgentHarness {
+    <#
+      .SYNOPSIS The parsed catalog/agent-harness.json, read from disk once.
+    #>
+    if ($null -eq $script:AgentHarness) {
+        $path = Join-Path $script:RepoRoot 'catalog\agent-harness.json'
+        $script:AgentHarness = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    $script:AgentHarness
+}
+
+function Get-AutoOSMcpPackage {
+    <#
+      .SYNOPSIS The pinned package spec for one MCP server, from the harness.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    $server = (Get-AutoOSAgentHarness).mcp_servers.$Name
+    if (-not $server) { throw "catalog/agent-harness.json has no MCP server '$Name'" }
+    $server.package
+}
+
+function Get-AutoOSSerenaExcludedTools {
+    <#
+      .SYNOPSIS Serena's excluded_tools list, the one list every client shares.
+    #>
+    @((Get-AutoOSAgentHarness).mcp_servers.serena.excluded_tools)
+}
+
 function Register-AutoOSMcpServer {
     <#
       .SYNOPSIS
@@ -1073,7 +1102,7 @@ function Set-AutoOSAntigravityMcp {
     }
     $servers['omnigraph'] = [ordered]@{
         command = 'npx'
-        args    = @('-y', '@modernrelay/omnigraph-mcp@0.8.0')
+        args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
         env     = $envBlock
     }
     $cfg['mcpServers'] = $servers
@@ -1132,16 +1161,17 @@ function Register-AutoOSAntigravityMcpServer {
 
 function Install-AutoOSMcpSerena {
     Write-AutoOSLine 'Configuring Serena MCP server (Claude Code + Antigravity)' -Level step
+    $serenaPkg = Get-AutoOSMcpPackage -Name 'serena'
     [void](Register-AutoOSMcpServer -Name 'serena' -Command 'uvx' -Scope 'user' -Arguments @(
-        '--from', 'serena-agent', 'serena', 'start-mcp-server',
+        '--from', $serenaPkg, 'serena', 'start-mcp-server',
         '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'))
 
     $serenaHome = Join-Path $HOME '.serena'
     Register-AutoOSAntigravityMcpServer -Name 'serena' -Spec ([ordered]@{
         command      = 'uvx'
-        args         = @('--from', 'serena-agent', 'serena', 'start-mcp-server', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false')
+        args         = @('--from', $serenaPkg, 'serena', 'start-mcp-server', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false')
         env          = @{ SERENA_HOME = $serenaHome }
-        excludeTools = @('onboarding', 'open_dashboard', 'initial_instructions', 'write_memory', 'read_memory', 'list_memories', 'delete_memory', 'rename_memory', 'edit_memory')
+        excludeTools = @(Get-AutoOSSerenaExcludedTools)
     })
 
     Set-AutoOSSerenaExclusions
@@ -1211,12 +1241,7 @@ function Set-AutoOSSerenaExclusions {
     #>
     param([string]$ConfigPath = (Join-Path $HOME '.serena\serena_config.yml'))
 
-    $canonical = @(
-        'create_text_file', 'read_file', 'execute_shell_command', 'list_dir',
-        'search_for_pattern', 'find_file', 'replace_content', 'replace_in_files',
-        'onboarding', 'write_memory', 'read_memory', 'list_memories', 'edit_memory',
-        'rename_memory', 'delete_memory'
-    )
+    $canonical = @(Get-AutoOSSerenaExcludedTools)
 
     if ($script:DryRun) {
         Write-AutoOSLine "would ensure Serena's excluded_tools list is complete in $ConfigPath" -Level muted
@@ -1262,15 +1287,23 @@ function Set-AutoOSSerenaExclusions {
     $newline = "`n"
     if ($raw -match "`r`n") { $newline = "`r`n" }
 
+    # Each line keeps its own terminator ($ends[i]: CRLF, LF or '' for an
+    # unterminated last line), like the bash twin's splitlines(keepends=True).
+    # Only lines this function generates use the dominant $newline, so a file
+    # with mixed endings keeps every byte outside the edited block.
     $lines = [System.Collections.Generic.List[string]]::new()
-    $hadTrailingNewline = $false
+    $ends = [System.Collections.Generic.List[string]]::new()
     if ($raw.Length -gt 0) {
-        $hadTrailingNewline = $raw.EndsWith("`n")
-        $parts = [regex]::Split($raw, "`r`n|`n")
-        if ($hadTrailingNewline -and $parts.Length -gt 0) {
-            $parts = $parts[0..($parts.Length - 2)]
+        $pos = 0
+        foreach ($m in [regex]::Matches($raw, "`r`n|`n")) {
+            [void]$lines.Add($raw.Substring($pos, $m.Index - $pos))
+            [void]$ends.Add($m.Value)
+            $pos = $m.Index + $m.Length
         }
-        foreach ($p in $parts) { [void]$lines.Add($p) }
+        if ($pos -lt $raw.Length) {
+            [void]$lines.Add($raw.Substring($pos))
+            [void]$ends.Add('')
+        }
     }
 
     # Quote-aware, comment-aware scalar value: a quoted value runs up to its
@@ -1528,36 +1561,27 @@ function Set-AutoOSSerenaExclusions {
     }
     $itemLines = foreach ($m in $merged) { "- $m" }
 
-    # Append a final newline only when the generated excluded_tools block is
-    # the last thing in the file (it should always end cleanly, whether it
-    # was just created or the key was the file's last line) - OR when the
-    # original file already ended with one. Otherwise trailing content that
-    # never had a final newline (e.g. "...\nlast_key: x" with no newline)
-    # would gain one it never had, even though excluded_tools isn't the
-    # last key. $lines never carries per-line terminators (unlike the bash
-    # side's keepends() lines), so this has to be decided explicitly here.
-    $appendFinalNewline = $true
-
-    $newLines = [System.Collections.Generic.List[string]]::new()
+    # Untouched lines keep their own terminator ($ends); generated lines end
+    # with $newline. So the generated block always ends cleanly, while an
+    # untouched tail keeps its final newline, or its lack of one.
+    $sb = [System.Text.StringBuilder]::new()
     if ($keyStart -lt 0) {
-        foreach ($l in $lines) { [void]$newLines.Add($l) }
-        [void]$newLines.Add('excluded_tools:')
-        foreach ($il in $itemLines) { [void]$newLines.Add($il) }
-    } else {
-        for ($i = 0; $i -lt $keyStart; $i++) { [void]$newLines.Add($lines[$i]) }
-        [void]$newLines.Add($newKeyLineText)
-        foreach ($ic in $interiorComments) { [void]$newLines.Add($ic) }
-        foreach ($il in $itemLines) { [void]$newLines.Add($il) }
-        for ($i = $keyEndExclusive; $i -lt $lines.Count; $i++) { [void]$newLines.Add($lines[$i]) }
-        if ($keyEndExclusive -lt $lines.Count) {
-            # Original content follows the block - the file's own ending
-            # decides, not our block.
-            $appendFinalNewline = $hadTrailingNewline
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            # An unterminated last line needs a newline before the new block.
+            $end = if ($ends[$i] -eq '') { $newline } else { $ends[$i] }
+            [void]$sb.Append($lines[$i]).Append($end)
         }
+        [void]$sb.Append('excluded_tools:').Append($newline)
+        foreach ($il in $itemLines) { [void]$sb.Append($il).Append($newline) }
+    } else {
+        for ($i = 0; $i -lt $keyStart; $i++) { [void]$sb.Append($lines[$i]).Append($ends[$i]) }
+        [void]$sb.Append($newKeyLineText).Append($newline)
+        foreach ($ic in $interiorComments) { [void]$sb.Append($ic).Append($newline) }
+        foreach ($il in $itemLines) { [void]$sb.Append($il).Append($newline) }
+        for ($i = $keyEndExclusive; $i -lt $lines.Count; $i++) { [void]$sb.Append($lines[$i]).Append($ends[$i]) }
     }
 
-    $content = $newLines -join $newline
-    if ($appendFinalNewline) { $content += $newline }
+    $content = $sb.ToString()
     $contentBytes = $writeEncoding.GetBytes($content)
     $newBytes = if ($hadBom) { [byte[]](0xEF, 0xBB, 0xBF) + $contentBytes } else { $contentBytes }
 
@@ -1599,45 +1623,64 @@ function Set-AutoOSSerenaExclusions {
 
 function Install-AutoOSMcpGraphify {
     Write-AutoOSLine 'Configuring Graphify MCP server (Claude Code + Antigravity)' -Level step
+    $graphifyPkg = Get-AutoOSMcpPackage -Name 'graphify'
     [void](Register-AutoOSMcpServer -Name 'graphify' -Command 'uv' -Scope 'user' -Arguments @(
-        '--quiet', 'run', '--with', 'graphifyy[mcp]', 'python', '-m',
+        '--quiet', 'run', '--with', $graphifyPkg, 'python', '-m',
         'graphify.serve', 'graphify-out/graph.json'))
 
     Register-AutoOSAntigravityMcpServer -Name 'graphify' -Spec ([ordered]@{
         command = 'uv'
-        args    = @('--quiet', 'run', '--with', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', '${workspaceFolder}/graphify-out/graph.json')
+        args    = @('--quiet', 'run', '--with', $graphifyPkg, 'python', '-m', 'graphify.serve', '${workspaceFolder}/graphify-out/graph.json')
     })
 }
 
 function Install-AutoOSMcpPlaywright {
     Write-AutoOSLine 'Configuring Playwright MCP server (Claude Code + Antigravity)' -Level step
+    $playwrightPkg = Get-AutoOSMcpPackage -Name 'playwright'
     [void](Register-AutoOSMcpServer -Name 'playwright' -Command 'npx' -Scope 'user' -Arguments @(
-        '-y', '@playwright/mcp@latest'))
+        '-y', $playwrightPkg))
 
     Register-AutoOSAntigravityMcpServer -Name 'playwright' -Spec ([ordered]@{
         command = 'npx'
-        args    = @('-y', '@playwright/mcp@latest')
+        args    = @('-y', $playwrightPkg)
     })
 }
 
 function Install-AutoOSMcpContext7 {
     Write-AutoOSLine 'Configuring Context7 MCP server (Claude Code + Antigravity)' -Level step
+    $context7Pkg = Get-AutoOSMcpPackage -Name 'context7'
     $key = Get-AutoOSAnswer 'context7_api_key' $env:CONTEXT7_API_KEY
     if ($key) {
         [void](Register-AutoOSMcpServer -Name 'context7' -Command 'npx' -Scope 'user' -Arguments @(
-            '-y', '@upstash/context7-mcp', '--api-key', $key))
+            '-y', $context7Pkg, '--api-key', $key))
         Register-AutoOSAntigravityMcpServer -Name 'context7' -Spec ([ordered]@{
             command = 'npx'
-            args    = @('-y', '@upstash/context7-mcp', '--api-key', $key)
+            args    = @('-y', $context7Pkg, '--api-key', $key)
         })
     } else {
         [void](Register-AutoOSMcpServer -Name 'context7' -Command 'npx' -Scope 'user' -Arguments @(
-            '-y', '@upstash/context7-mcp'))
+            '-y', $context7Pkg))
         Register-AutoOSAntigravityMcpServer -Name 'context7' -Spec ([ordered]@{
             command = 'npx'
-            args    = @('-y', '@upstash/context7-mcp')
+            args    = @('-y', $context7Pkg)
         })
     }
+}
+
+function Get-AutoOSSkillsSource {
+    <#
+      .SYNOPSIS Locate the machine's agent-skills skills directory.
+
+      .DESCRIPTION
+        Returns the first existing of Documents\Code\agent-skills\skills and
+        Documents\code\agent-skills\skills, or $null when neither exists.
+    #>
+    $myDocs = [Environment]::GetFolderPath('MyDocuments')
+    foreach ($rel in @('Code\agent-skills\skills', 'code\agent-skills\skills')) {
+        $candidate = Join-Path $myDocs $rel
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
 }
 
 function Set-AutoOSOpenCodeConfig {
@@ -1656,6 +1699,7 @@ function Set-AutoOSOpenCodeConfig {
 
     if ($script:DryRun) {
         Write-AutoOSLine "would configure OpenCode in $configFile" -Level muted
+        Write-AutoOSLine 'would apply the agent harness (catalog/agent-harness.json)' -Level muted
         return
     }
 
@@ -1814,17 +1858,22 @@ function Set-AutoOSOpenCodeConfig {
 
     $mcpServers['serena'] = [ordered]@{
         type    = 'local'
-        command = @('uvx', '--from', 'serena-agent', 'serena', 'start-mcp-server', '--context', 'claude-code', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false')
+        command = @('uvx', '--from', (Get-AutoOSMcpPackage -Name 'serena'), 'serena', 'start-mcp-server', '--context', 'claude-code', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false')
         enabled = $true
     }
     $mcpServers['graphify'] = [ordered]@{
         type    = 'local'
-        command = @('uvx', '--from', 'graphifyy[mcp]', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
+        command = @('uvx', '--from', (Get-AutoOSMcpPackage -Name 'graphify'), 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
+        enabled = $true
+    }
+    $mcpServers['context7'] = [ordered]@{
+        type    = 'local'
+        command = @('npx', '-y', (Get-AutoOSMcpPackage -Name 'context7'))
         enabled = $true
     }
     $mcpServers['omnigraph'] = [ordered]@{
         type    = 'local'
-        command = @('npx', '-y', '@modernrelay/omnigraph-mcp')
+        command = @('npx', '-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
         enabled = $true
         environment = [ordered]@{
             OMNIGRAPH_BASE_URL = 'http://localhost:8080'
@@ -1833,7 +1882,7 @@ function Set-AutoOSOpenCodeConfig {
     }
     $mcpServers['playwright'] = [ordered]@{
         type    = 'local'
-        command = @('npx', '-y', '@playwright/mcp@latest')
+        command = @('npx', '-y', (Get-AutoOSMcpPackage -Name 'playwright'))
         enabled = $true
     }
 
@@ -1843,11 +1892,35 @@ function Set-AutoOSOpenCodeConfig {
     $json | Out-File -FilePath $configFile -Encoding utf8
     Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
 
+    # Merge the shared agent harness (roles, skills link) after the config is
+    # written. Judge by exit code only; no 2>&1, since under 'Stop' Windows
+    # PowerShell 5.1 turns a native stderr line into a terminating error.
+    $skillsSource = Get-AutoOSSkillsSource
+    if (-not $skillsSource) {
+        # Pass the would-be path even when missing: the generator records
+        # "skills: source missing" rather than failing.
+        $skillsSource = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Code\agent-skills\skills'
+    }
+    $pythonCmd = (Get-Command python -ErrorAction SilentlyContinue)
+    if (-not $pythonCmd) {
+        $pythonCmd = (Get-Command py -ErrorAction SilentlyContinue)
+    }
+    if ($pythonCmd) {
+        $harnessOut = & $pythonCmd.Source (Join-Path $script:RepoRoot 'lib\agent_harness.py') opencode --config $configFile --repo-root $script:RepoRoot --skills-source $skillsSource
+        if ($LASTEXITCODE -ne 0) {
+            Write-AutoOSLine "agent harness not applied to OpenCode (exit $LASTEXITCODE)" -Level warn
+        } else {
+            foreach ($line in $harnessOut) { Write-AutoOSLine $line -Level muted }
+        }
+    } else {
+        Write-AutoOSLine "agent harness not applied: python not found" -Level warn
+    }
+
     if ($env:APPDATA) {
         $appDataDir = Join-Path $env:APPDATA 'opencode'
         if (-not (Test-Path $appDataDir)) { New-Item -ItemType Directory -Path $appDataDir -Force | Out-Null }
         $appDataFile = Join-Path $appDataDir 'config.json'
-        $json | Out-File -FilePath $appDataFile -Encoding utf8
+        (Get-Content $configFile -Raw) | Out-File -FilePath $appDataFile -Encoding utf8
     }
 }
 
@@ -1900,13 +1973,9 @@ function Set-AutoOSOpenHandsConfig {
     $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
     $context7Key = if ($env:CONTEXT7_API_KEY) { $env:CONTEXT7_API_KEY } elseif ($secrets.ContainsKey('context7')) { $secrets['context7'] } else { $null }
 
-    $myDocs = [Environment]::GetFolderPath('MyDocuments')
-    $skillsSource = Join-Path $myDocs 'Code\agent-skills\skills'
-    if (-not (Test-Path $skillsSource)) {
-        $skillsSource = Join-Path $myDocs 'code\agent-skills\skills'
-    }
+    $skillsSource = Get-AutoOSSkillsSource
     $skillsTarget = Join-Path $openhandsDir 'skills'
-    if ((Test-Path $skillsSource) -and -not (Test-Path $skillsTarget)) {
+    if ($skillsSource -and (Test-Path $skillsSource) -and -not (Test-Path $skillsTarget)) {
         try {
             cmd.exe /c "mklink /J `"$skillsTarget`" `"$skillsSource`"" | Out-Null
             Write-AutoOSLine "Linked agent-skills to OpenHands skills directory" -Level ok
@@ -1938,6 +2007,10 @@ _models_file = os.path.join(_repo_root_arg, 'catalog', 'llm-models.json')
 with open(_models_file, 'r', encoding='utf-8') as _mf:
     REPO_MODELS = json.load(_mf)['models']
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
+# MCP package specs live in catalog/agent-harness.json, never inlined here.
+_harness_file = os.path.join(_repo_root_arg, 'catalog', 'agent-harness.json')
+with open(_harness_file, 'r', encoding='utf-8') as _hf:
+    MCP_PACKAGES = {k: v['package'] for k, v in json.load(_hf)['mcp_servers'].items()}
 # Resolve-AutoOSOllamaBaseUrl's answer; empty keeps the catalog default. Applied
 # to the catalog entry so the profiles and the settings.json fallback agree.
 if os.environ.get('OLLAMA_BASE_URL'):
@@ -2061,26 +2134,26 @@ mcp_cfg = agent_settings.setdefault('mcp_config', {})
 mcp_cfg['serena'] = {
     'transport': 'stdio',
     'command': 'uvx',
-    'args': ['--from', 'serena-agent==1.7.0', 'serena', 'start-mcp-server', '--project-from-cwd', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
+    'args': ['--from', MCP_PACKAGES['serena'], 'serena', 'start-mcp-server', '--project-from-cwd', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
     'description': 'Semantic code retrieval and symbol intelligence',
     'enabled': True
 }
 mcp_cfg['graphify'] = {
     'transport': 'stdio',
     'command': 'uv',
-    'args': ['--quiet', 'run', '--with', 'graphifyy[mcp]==0.9.63', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
+    'args': ['--quiet', 'run', '--with', MCP_PACKAGES['graphify'], 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
     'description': 'Codebase dependency knowledge graph',
     'enabled': True
 }
 mcp_cfg['omnigraph'] = {
     'transport': 'stdio',
     'command': 'npx',
-    'args': ['-y', '@modernrelay/omnigraph-mcp@0.8.0'],
+    'args': ['-y', MCP_PACKAGES['omnigraph']],
     'env': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'},
     'description': 'Project memory graph for this repository (repo-scoped, not global)',
     'enabled': True
 }
-ctx7_args = ['-y', '@upstash/context7-mcp@4.1.1']
+ctx7_args = ['-y', MCP_PACKAGES['context7']]
 context7_key = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != 'null' else os.environ.get('CONTEXT7_API_KEY')
 if context7_key:
     ctx7_args.extend(['--api-key', context7_key])
@@ -2094,7 +2167,7 @@ mcp_cfg['context7'] = {
 mcp_cfg['playwright'] = {
     'transport': 'stdio',
     'command': 'npx',
-    'args': ['-y', '@playwright/mcp@0.0.81'],
+    'args': ['-y', MCP_PACKAGES['playwright']],
     'description': 'Browser automation and end-to-end verification',
     'enabled': True
 }
@@ -2118,6 +2191,7 @@ profiles_dir = os.path.join(openhands_dir, 'profiles')
 profiles = dict([
     _profile_for('deepseek-chat', deepseek_key),
     _profile_for('deepseek-reasoner', deepseek_key),
+    _profile_for('deepseek-v4-flash', deepseek_key),
     _profile_for('muse-spark', muse_key, 'muse-spark-1.3'),
     _profile_for('muse-spark', muse_key, 'muse-spark-1.3-contributor'),
     _profile_for('openrouter-free', openrouter_key),
@@ -2150,10 +2224,13 @@ agent_profiles_dir = os.path.join(openhands_dir, 'agent-profiles')
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
 # the desired state and are copied verbatim on every setup. Their
 # llm_profile_ref values point at the canonical profile names written above.
+# Role profiles are generated from the harness below, not copied: copying them
+# here would race the generator and freeze the role's managed keys.
+_role_profiles = {r['openhands']['profile'] + '.json' for r in json.load(open(os.path.join(repo_root, 'catalog', 'agent-harness.json'), encoding='utf-8'))['roles'].values()}
 _vendored_agents = os.path.join(repo_root, 'openhands', 'agent-profiles') if repo_root else ''
 if _vendored_agents and os.path.isdir(_vendored_agents):
     for _fn in sorted(os.listdir(_vendored_agents)):
-        if not _fn.endswith('.json'):
+        if not _fn.endswith('.json') or _fn in _role_profiles:
             continue
         try:
             with open(os.path.join(_vendored_agents, _fn), 'r', encoding='utf-8') as _af:
@@ -2176,6 +2253,17 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
             & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot
         }
         finally { $env:OLLAMA_BASE_URL = $savedOllama }
+
+        # The role agent profiles are the generator's job: it merges the
+        # harness into whatever the embedded script left, so the roles stay in
+        # one place. Judge by exit code only; no 2>&1, since under 'Stop' Windows
+        # PowerShell 5.1 turns a native stderr line into a terminating error.
+        $harnessOut = & $pythonCmd.Source (Join-Path $script:RepoRoot 'lib\agent_harness.py') openhands --openhands-dir $openhandsDir --repo-root $script:RepoRoot
+        if ($LASTEXITCODE -ne 0) {
+            Write-AutoOSLine "agent harness not applied to OpenHands (exit $LASTEXITCODE)" -Level warn
+        } else {
+            foreach ($line in $harnessOut) { Write-AutoOSLine $line -Level muted }
+        }
     }
 
     # OpenHands probes PowerShell with a 5 s timeout and without -NoProfile
@@ -2183,7 +2271,9 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
     # profile that returns at once for it keeps the probe fast. Existing profiles only.
     $docs = [Environment]::GetFolderPath('MyDocuments')
     foreach ($prof in @((Join-Path $docs 'PowerShell\Microsoft.PowerShell_profile.ps1'),
-                        (Join-Path $docs 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1'))) {
+                        (Join-Path $docs 'PowerShell\profile.ps1'),
+                        (Join-Path $docs 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1'),
+                        (Join-Path $docs 'WindowsPowerShell\profile.ps1'))) {
         if (Test-Path $prof) {
             Add-AutoOSProfileLine -Prepend -ProfilePath $prof -Marker "AI_AGENT -eq 'openhands'" `
                 -Line "if (`$env:AI_AGENT -eq 'openhands') { return }  # OpenHands' PowerShell probe times out after 5 s (software-agent-sdk#5133)"
@@ -2208,6 +2298,7 @@ function Invoke-AutoOSPostInstall {
 Export-ModuleMember -Function `
     Initialize-AutoOSInstaller, Get-AutoOSAnswer, Invoke-AutoOSProcess, Add-AutoOSPathEntry,
     Read-AutoOSSecretsFile, Read-AutoOSApiSecrets, Resolve-AutoOSOllamaBaseUrl,
+    Get-AutoOSMcpPackage, Get-AutoOSSerenaExcludedTools,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
     Write-AutoOSOmnigraphReadiness,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,

@@ -3047,6 +3047,22 @@ Test-Case 'Set-AutoOSSerenaExclusions preserves CRLF line endings and untouched 
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case "Set-AutoOSSerenaExclusions keeps each line's own ending outside the edited block (mixed CRLF/LF) (serena)" {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'serena_config.yml'
+    $enc = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllBytes($p, $enc.GetBytes("a_setting: 1`nb_setting: 2`r`nexcluded_tools:`r`n- read_file`r`ntrailer_key: keep_me`n"))
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+        $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($p))
+        Assert-True ($text.StartsWith("a_setting: 1`nb_setting: 2`r`nexcluded_tools:")) "the lines before the block changed: [$text]"
+        Assert-True ($text.EndsWith("`ntrailer_key: keep_me`n") -and -not $text.EndsWith("`r`n")) "the LF trailer changed: [$text]"
+        Assert-True ($text.Contains('- delete_memory')) 'the canonical list was not merged'
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 Test-Case 'Set-AutoOSSerenaExclusions preserves a non-UTF-8 byte outside the block untouched (serena)' {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -3125,11 +3141,57 @@ Test-Case 'Add-AutoOSProfileLine -Prepend goes after a using/param preamble' {
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-Test-Case 'Set-AutoOSOpenHandsConfig prepends the OpenHands guard to both existing profiles' {
+Test-Case 'Set-AutoOSOpenHandsConfig prepends the OpenHands guard to all four existing profiles' {
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'Add-AutoOSProfileLine -Prepend') 'no -Prepend guard call'
     Assert-True ($body -match "PowerShell\\Microsoft\.PowerShell_profile\.ps1") 'pwsh profile not guarded'
+    Assert-True ($body -match "'PowerShell\\profile\.ps1'") 'pwsh all-hosts profile.ps1 not guarded'
     Assert-True ($body -match "WindowsPowerShell\\Microsoft\.PowerShell_profile\.ps1") 'Windows PowerShell profile not guarded'
+    Assert-True ($body -match "WindowsPowerShell\\profile\.ps1") 'Windows PowerShell all-hosts profile.ps1 not guarded'
+}
+
+Describe-Group 'mcp pins'
+
+Test-Case 'mcp pins: lib/ carries no floating package spec' {
+    $needles = @('serena-agent', 'graphifyy[mcp]', '@playwright/mcp', '@upstash/context7-mcp', '@modernrelay/omnigraph-mcp')
+    $files = @(Get-ChildItem -Path $Lib -Filter '*.psm1' -File) +
+             @(Get-ChildItem -Path (Join-Path $Root 'lib\linux') -Filter '*.sh' -File)
+    foreach ($f in $files) {
+        $text = Get-Content -Path $f.FullName -Raw -Encoding UTF8
+        foreach ($needle in $needles) {
+            if ($text.Contains($needle)) { throw "$($f.FullName) still contains '$needle'" }
+        }
+    }
+    Pass
+}
+
+Test-Case 'mcp pins: no pinned version string appears under lib/' {
+    $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $versions = @()
+    foreach ($p in $harness.mcp_servers.PSObject.Properties) {
+        $pkg = $p.Value.package
+        if ($pkg -match '@([0-9][^@]*)$') { $versions += $Matches[1] }
+        elseif ($pkg -match '==(.+)$') { $versions += $Matches[1] }
+    }
+    $files = @(Get-ChildItem -Path (Join-Path $Root 'lib') -Recurse -File)
+    foreach ($f in $files) {
+        $text = Get-Content -Path $f.FullName -Raw -Encoding UTF8
+        foreach ($v in $versions) {
+            if ($text.Contains($v)) { throw "$($f.FullName) still contains pinned version '$v'" }
+        }
+    }
+    Pass
+}
+
+Test-Case 'mcp pins: the client excludeTools list equals serena.excluded_tools' {
+    $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $want = @($harness.mcp_servers.serena.excluded_tools)
+    Assert-Equal (@(Get-AutoOSSerenaExcludedTools) -join ',') ($want -join ',')
+    Assert-Equal (Get-AutoOSMcpPackage -Name 'serena') $harness.mcp_servers.serena.package
+    $src = Get-Content (Join-Path $Lib 'AutoOS.Install.psm1') -Raw -Encoding UTF8
+    Assert-True ($src -match 'excludeTools\s*=\s*@\(Get-AutoOSSerenaExcludedTools\)') 'the Antigravity serena spec does not use Get-AutoOSSerenaExcludedTools'
+    Assert-True ($src -match '\$canonical = @\(Get-AutoOSSerenaExcludedTools\)') 'Set-AutoOSSerenaExclusions does not use Get-AutoOSSerenaExcludedTools'
+    Assert-True ($src -notmatch "excludeTools\s*=\s*@\('onboarding'") 'a hardcoded excludeTools list is still present'
 }
 
 Test-Case 'the embedded OpenHands setup script writes the resolved Ollama address' {
@@ -3152,12 +3214,15 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
         Assert-Equal $profile.base_url 'http://ollama:11434/v1'
         Assert-Equal $settings.agent_settings.llm.base_url 'http://ollama:11434/v1'
-        Assert-True (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json')) 'vendored agent profiles not copied'
+        Assert-True (Test-Path (Join-Path $oh 'agent-profiles\claude-sonnet.json')) 'non-role vendored agent profile not copied'
+        Assert-True (-not (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json'))) 'role profile copied by the embedded script instead of the generator'
         # OpenHands ignores an MCP timeout today and may soon read it as milliseconds (#3254)
         Assert-True (-not @($settings.agent_settings.mcp_config.PSObject.Properties.Value | Where-Object { $_.PSObject.Properties.Name -contains 'timeout' })) 'an MCP server still has a timeout'
-        # every MCP server is pinned: a floating npx/uvx spec changes under the user
-        $pins = [ordered]@{ omnigraph = '@modernrelay/omnigraph-mcp@0.8.0'; serena = 'serena-agent==1.7.0'
-                            playwright = '@playwright/mcp@0.0.81'; context7 = '@upstash/context7-mcp@4.1.1'; graphify = 'graphifyy[mcp]==0.9.63' }
+        # every MCP server is pinned: a floating npx/uvx spec changes under the user.
+        # Expected specs come from the harness, the one source of truth for the pins.
+        $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $pins = [ordered]@{}
+        foreach ($p in $harness.mcp_servers.PSObject.Properties) { $pins[$p.Name] = $p.Value.package }
         foreach ($k in $pins.Keys) { Assert-Contains $settings.agent_settings.mcp_config.$k.args $pins[$k] }
     } finally {
         foreach ($k in $saved.Keys) {
@@ -3167,6 +3232,41 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         }
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+Test-Case 'agent harness installers: the OpenHands writer calls the generator and skips role profiles' {
+    $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
+    Assert-True ($body -match "agent_harness\.py[\s'\)]*openhands") 'Set-AutoOSOpenHandsConfig does not call agent_harness.py openhands'
+    Assert-True ($body -match '_role_profiles') 'Set-AutoOSOpenHandsConfig does not skip role profiles'
+}
+
+Test-Case 'agent harness installers: the OpenCode writer calls the generator' {
+    $body = (Get-Command Set-AutoOSOpenCodeConfig).Definition
+    $hands = (Get-Command Set-AutoOSOpenHandsConfig).Definition
+    Assert-True ($body -match 'agent_harness\.py') 'Set-AutoOSOpenCodeConfig does not call agent_harness.py'
+    # LastIndexOf: the function's help comment also mentions %APPDATA%, so only
+    # the final occurrence is the actual copy guard.
+    Assert-True ($body.IndexOf('agent_harness.py') -lt $body.LastIndexOf('APPDATA')) 'agent_harness.py is not invoked before the APPDATA copy'
+    Assert-True ($body -match 'Get-AutoOSSkillsSource') 'Set-AutoOSOpenCodeConfig does not use Get-AutoOSSkillsSource'
+    Assert-True ($hands -match 'Get-AutoOSSkillsSource') 'Set-AutoOSOpenHandsConfig does not use Get-AutoOSSkillsSource'
+}
+
+Test-Case "agent harness: the generator's unit tests pass" {
+    $py = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-harness-tests-$PID.log"
+    try {
+        # Redirect to a file rather than 2>&1: unittest writes its result to
+        # stderr, and under 'Stop' PS 5.1 that can become a terminating error.
+        & $py.Source (Join-Path $Root 'tests\test_agent_harness.py') *> $log
+        $rc = $LASTEXITCODE
+        if ($rc -eq 0) {
+            Pass
+        } else {
+            $tail = (Get-Content $log -Tail 20) -join "`n"
+            throw "generator unit tests failed (exit $rc):`n$tail"
+        }
+    } finally { Remove-Item $log -ErrorAction SilentlyContinue }
 }
 
 Test-Case 'the embedded OpenHands setup script is valid Python' {

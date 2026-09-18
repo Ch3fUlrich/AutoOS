@@ -23,6 +23,16 @@
       "cache_read_price": 2.8e-08
     },
     {
+      "id": "deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash",
+      "direct": { "provider": "deepseek", "base_url": "https://api.deepseek.com", "model": "deepseek/deepseek-v4-flash", "npm": "@ai-sdk/openai" },
+      "context": 1048576,
+      "output": 393216,
+      "input_price": 3e-07,
+      "output_price": 1.2e-06,
+      "cache_read_price": 6e-09
+    },
+    {
       "id": "muse-spark",
       "name": "Muse Spark 1.3 Contributor",
       "direct": { "provider": "meta", "base_url": "https://api.meta.ai/v1", "model": "openai/muse-spark-1.3-contributor", "npm": "@ai-sdk/openai", "reasoning_effort": "high" },
