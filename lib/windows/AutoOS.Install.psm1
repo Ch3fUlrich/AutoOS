@@ -1143,6 +1143,458 @@ function Install-AutoOSMcpSerena {
         env          = @{ SERENA_HOME = $serenaHome }
         excludeTools = @('onboarding', 'open_dashboard', 'initial_instructions', 'write_memory', 'read_memory', 'list_memories', 'delete_memory', 'rename_memory', 'edit_memory')
     })
+
+    Set-AutoOSSerenaExclusions
+
+    # excludeTools above only reaches Serena when Claude Code/Antigravity start
+    # it with that flag. Serena's OWN global config is what every other MCP
+    # client (or a bare `serena start-mcp-server`) gets instead, so this probe
+    # actually starts Serena and asks it, over real JSON-RPC, which tools it
+    # exposes - the only way to know Set-AutoOSSerenaExclusions' file edit
+    # really took effect. It must run here, after the call above, and never
+    # inside Set-AutoOSSerenaExclusions itself, so tests that call that
+    # function directly never spawn a real Serena process.
+    $py = Get-Command python3 -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+    $hasSerenaOrUvx = (Get-Command serena -ErrorAction SilentlyContinue) -or (Get-Command uvx -ErrorAction SilentlyContinue)
+    if ($py -and $hasSerenaOrUvx -and -not $script:DryRun) {
+        $probeScript = Join-Path $script:RepoRoot 'tools\check-serena-tools.py'
+        # Under $ErrorActionPreference = 'Stop' (this module's default), Windows
+        # PowerShell 5.1 turns every native stderr LINE that `2>&1` merges in into
+        # a terminating error - so a probe that actually passed (exit 0, with some
+        # stderr chatter) still landed in the catch block and reported "failed".
+        # A local 'Continue' for the duration of just this native call keeps its
+        # stderr merely informational; only $LASTEXITCODE decides pass/fail.
+        $savedEap = $ErrorActionPreference
+        $launchFailed = $false
+        try {
+            $ErrorActionPreference = 'Continue'
+            $probeOut = & $py.Source $probeScript 2>&1 | Out-String
+        } catch {
+            $launchFailed = $true
+            $probeOut = $_.Exception.Message
+        } finally {
+            $ErrorActionPreference = $savedEap
+        }
+        if (-not $launchFailed -and $LASTEXITCODE -eq 0) {
+            Write-AutoOSLine "Serena tool exclusion probe: $($probeOut.Trim())" -Level ok
+        } else {
+            Write-AutoOSLine "Serena tool exclusion probe failed: $($probeOut.Trim())" -Level warn
+        }
+    }
+}
+
+function Set-AutoOSSerenaExclusions {
+    <#
+      .SYNOPSIS Ensure Serena's global config excludes AutoOS's canonical tool list.
+
+      .DESCRIPTION
+        Mirrors ensure_serena_exclusions() in lib/linux/install.sh, line for
+        line where PowerShell allows it - the two must treat every YAML shape
+        below identically, since both are exercised against the very same
+        fixture files. Serena's global config (~/.serena/serena_config.yml by
+        default) has its own excluded_tools list, independent of the
+        excludeTools flag Register-AutoOS*McpServer bakes into each client's
+        invocation. Anything missing from THIS list is exposed to any MCP
+        client that talks to Serena directly - onboarding and the memory
+        tools in particular, which this repo deliberately routes through
+        Omnigraph instead (see CLAUDE.md's "one tool per job"). This adds the
+        canonical 15 while leaving every other BYTE of the file - the user's
+        own extra exclusions, comments, encoding and line endings - untouched.
+
+        Bytes, not text: the file is decoded strictly as UTF-8 first (BOM
+        preserved if present); if that throws, it falls back to Latin-1,
+        which - like Python's errors='surrogateescape' on the bash side -
+        maps every one of the 256 byte values to exactly one char and back,
+        so an untouched region round-trips byte-for-byte even if the file
+        isn't valid UTF-8 (e.g. a stray non-UTF-8 byte in someone's comment).
+    #>
+    param([string]$ConfigPath = (Join-Path $HOME '.serena\serena_config.yml'))
+
+    $canonical = @(
+        'create_text_file', 'read_file', 'execute_shell_command', 'list_dir',
+        'search_for_pattern', 'find_file', 'replace_content', 'replace_in_files',
+        'onboarding', 'write_memory', 'read_memory', 'list_memories', 'edit_memory',
+        'rename_memory', 'delete_memory'
+    )
+
+    if ($script:DryRun) {
+        Write-AutoOSLine "would ensure Serena's excluded_tools list is complete in $ConfigPath" -Level muted
+        return
+    }
+
+    $existsAsAny = Test-Path $ConfigPath
+    $existed = Test-Path $ConfigPath -PathType Leaf
+    if ($existsAsAny -and -not $existed) {
+        Write-AutoOSLine "could not update Serena's excluded_tools in $ConfigPath - it is a directory" -Level warn
+        return
+    }
+
+    $hadBom = $false
+    $writeEncoding = [Text.UTF8Encoding]::new($false)
+    $raw = ''
+    if ($existed) {
+        try {
+            $rawBytes = [IO.File]::ReadAllBytes($ConfigPath)
+        } catch {
+            Write-AutoOSLine "could not update Serena's excluded_tools in $ConfigPath - $($_.Exception.Message)" -Level warn
+            return
+        }
+        $offset = 0
+        if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
+            $hadBom = $true
+            $offset = 3
+        }
+        try {
+            $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+            $raw = $strictUtf8.GetString($rawBytes, $offset, $rawBytes.Length - $offset)
+            $writeEncoding = [Text.UTF8Encoding]::new($false)
+        } catch {
+            if ($hadBom) {
+                Write-AutoOSLine "could not update Serena's excluded_tools in $ConfigPath - has a UTF-8 BOM but is not valid UTF-8" -Level warn
+                return
+            }
+            $writeEncoding = [Text.Encoding]::GetEncoding(28591)
+            $raw = $writeEncoding.GetString($rawBytes, 0, $rawBytes.Length)
+        }
+    }
+
+    $newline = "`n"
+    if ($raw -match "`r`n") { $newline = "`r`n" }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $hadTrailingNewline = $false
+    if ($raw.Length -gt 0) {
+        $hadTrailingNewline = $raw.EndsWith("`n")
+        $parts = [regex]::Split($raw, "`r`n|`n")
+        if ($hadTrailingNewline -and $parts.Length -gt 0) {
+            $parts = $parts[0..($parts.Length - 2)]
+        }
+        foreach ($p in $parts) { [void]$lines.Add($p) }
+    }
+
+    # Quote-aware, comment-aware scalar value: a quoted value runs up to its
+    # matching closing quote (a '#' inside the quotes is just a character);
+    # an unquoted value ends at the first whitespace-then-'#' (a trailing
+    # comment) or at end of string.
+    function Get-AutoOSSerenaScalar([string]$Value) {
+        $s = $Value.Trim()
+        if ($s.Length -eq 0) { return '' }
+        if ($s[0] -eq "'" -or $s[0] -eq '"') {
+            $q = $s[0]
+            $i = 1
+            while ($i -lt $s.Length -and $s[$i] -ne $q) { $i++ }
+            if ($i -lt $s.Length) { return $s.Substring(1, $i - 1) }
+            return $s.Substring(1)
+        }
+        if ($s.StartsWith('#')) { return '' }
+        $m = [regex]::Match($s, '\s#')
+        if ($m.Success) { return $s.Substring(0, $m.Index).Trim() }
+        return $s.Trim()
+    }
+
+    # Comma-split that does not split on a comma inside quotes.
+    function Get-AutoOSSerenaFlowItems([string]$Inner) {
+        $items = [System.Collections.Generic.List[string]]::new()
+        $cur = ''
+        $q = $null
+        foreach ($ch in $Inner.ToCharArray()) {
+            if ($q) {
+                $cur += $ch
+                if ($ch -eq $q) { $q = $null }
+            } elseif ($ch -eq "'" -or $ch -eq '"') {
+                $q = $ch
+                $cur += $ch
+            } elseif ($ch -eq ',') {
+                [void]$items.Add($cur)
+                $cur = ''
+            } else {
+                $cur += $ch
+            }
+        }
+        if ($cur.Trim().Length -gt 0) { [void]$items.Add($cur) }
+        return $items
+    }
+
+    # Like Get-AutoOSSerenaScalar, but also returns a trailing comment on the
+    # item line itself (e.g. "- 'read_file'  # canonical"), quote-aware:
+    # text after a quoted value's closing quote is a comment candidate
+    # exactly like text after an unquoted value. Returns a hashtable with
+    # Value and Comment (Comment is $null when there wasn't one).
+    function Get-AutoOSSerenaItemValue([string]$Line) {
+        $s = $Line.Trim() -replace '^-\s*', ''
+        $value = ''
+        $tail = ''
+        if ($s.Length -gt 0 -and ($s[0] -eq "'" -or $s[0] -eq '"')) {
+            $q = $s[0]
+            $i = 1
+            while ($i -lt $s.Length -and $s[$i] -ne $q) { $i++ }
+            if ($i -lt $s.Length) {
+                $value = $s.Substring(1, $i - 1)
+                $tail = $s.Substring($i + 1)
+            } else {
+                $value = $s.Substring(1)
+            }
+        } elseif ($s.StartsWith('#')) {
+            $tail = $s
+        } else {
+            $m = [regex]::Match($s, '\s#')
+            if ($m.Success) {
+                $value = $s.Substring(0, $m.Index).Trim()
+                $tail = $s.Substring($m.Index)
+            } else {
+                $value = $s.Trim()
+            }
+        }
+        $comment = $tail.Trim()
+        return @{ Value = $value; Comment = $(if ($comment.StartsWith('#')) { $comment } else { $null }) }
+    }
+
+    # "-" is a list item only when followed by whitespace or nothing; "---"
+    # (a document separator) or "-foo" is ordinary text, not an item.
+    function Test-AutoOSSerenaBlockItem([string]$S) {
+        if ($S -eq '-') { return $true }
+        if (-not $S.StartsWith('-')) { return $false }
+        return $S.Length -gt 1 -and [char]::IsWhiteSpace($S[1])
+    }
+
+    # Scans a bracketed flow list starting at $TextHere.Substring($Idx)
+    # ($TextHere is $Lines[$J] - no terminator to strip, PowerShell's $lines
+    # never carry one), consuming further lines until the matching unquoted
+    # ']'. A '#' outside quotes, at the start of a physical line or preceded
+    # by whitespace, starts a comment that runs to the end of that line: it
+    # is stripped out of the buffer (so it can't swallow the next item) and
+    # returned separately. Returns a hashtable: Buf, EndLine, Tail, Comments.
+    function Get-AutoOSSerenaFlowScan([System.Collections.Generic.List[string]]$Lines, [int]$J, [string]$TextHere, [int]$Idx) {
+        $buf = ''
+        $q = $null
+        $tail = $null
+        $comments = [System.Collections.Generic.List[string]]::new()
+        while ($true) {
+            $seg = $TextHere
+            while ($Idx -lt $seg.Length) {
+                $c = $seg[$Idx]
+                if ($q) {
+                    $buf += $c
+                    if ($c -eq $q) { $q = $null }
+                } elseif ($c -eq "'" -or $c -eq '"') {
+                    $q = $c
+                    $buf += $c
+                } elseif ($c -eq ']' -and -not $q) {
+                    $tail = $seg.Substring($Idx + 1)
+                    break
+                } elseif ($c -eq '#' -and -not $q -and ($Idx -eq 0 -or $seg[$Idx - 1] -eq ' ' -or $seg[$Idx - 1] -eq "`t")) {
+                    $comment = $seg.Substring($Idx)
+                    if ($comment.Trim().Length -gt 0) { [void]$comments.Add($comment) }
+                    break
+                } else {
+                    $buf += $c
+                }
+                $Idx++
+            }
+            if ($null -ne $tail) { break }
+            $J++
+            if ($J -ge $Lines.Count) { $tail = ''; break }
+            $buf += "`n"
+            $TextHere = $Lines[$J]
+            $Idx = 0
+        }
+        return @{ Buf = $buf; EndLine = $J; Tail = $tail; Comments = $comments }
+    }
+
+    $keyStart = -1
+    $keyEndExclusive = -1
+    $existing = [System.Collections.Generic.List[string]]::new()
+    $interiorComments = [System.Collections.Generic.List[string]]::new()
+    $newKeyLineText = $null
+
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].StartsWith('excluded_tools:')) {
+            $keyStart = $i
+            $restNoLnEnd = $lines[$i].Substring('excluded_tools:'.Length)
+            $rest = $restNoLnEnd.Trim()
+
+            if ($rest.StartsWith('[')) {
+                # Flow form: [a, b] - possibly with a trailing comment,
+                # possibly spanning several lines before its closing ']'.
+                $idx0 = $restNoLnEnd.IndexOf('[') + 1
+                $scan = Get-AutoOSSerenaFlowScan $lines $i $restNoLnEnd $idx0
+                foreach ($part in (Get-AutoOSSerenaFlowItems $scan.Buf)) {
+                    $val = Get-AutoOSSerenaScalar $part
+                    if ($val) { [void]$existing.Add($val) }
+                }
+                foreach ($c in $scan.Comments) { [void]$interiorComments.Add($c) }
+                $keyEndExclusive = $scan.EndLine + 1
+                if ($scan.Tail -and $scan.Tail.Trim().StartsWith('#')) {
+                    $newKeyLineText = 'excluded_tools:' + $scan.Tail
+                } else {
+                    $newKeyLineText = 'excluded_tools:'
+                }
+            } elseif ($rest -eq '' -or $rest.StartsWith('#')) {
+                # Bare key (or one with a trailing comment). The value is
+                # normally an indented block of "- item" lines starting on
+                # the next line, but it can also be a flow list moved to its
+                # own line ("excluded_tools:\n  [a, b]") - peek past any
+                # blank/comment lines for the first real content and
+                # dispatch on it.
+                $k = $i + 1
+                $peekComments = [System.Collections.Generic.List[string]]::new()
+                while ($k -lt $lines.Count) {
+                    $tk = $lines[$k].Trim()
+                    if ($tk -eq '') { $k++ }
+                    elseif ($tk.StartsWith('#')) { [void]$peekComments.Add($lines[$k]); $k++ }
+                    else { break }
+                }
+
+                if ($k -lt $lines.Count -and $lines[$k].Trim().StartsWith('[')) {
+                    $textK = $lines[$k]
+                    $idx0 = $textK.IndexOf('[') + 1
+                    $scan = Get-AutoOSSerenaFlowScan $lines $k $textK $idx0
+                    foreach ($part in (Get-AutoOSSerenaFlowItems $scan.Buf)) {
+                        $val = Get-AutoOSSerenaScalar $part
+                        if ($val) { [void]$existing.Add($val) }
+                    }
+                    foreach ($c in $peekComments) { [void]$interiorComments.Add($c) }
+                    foreach ($c in $scan.Comments) { [void]$interiorComments.Add($c) }
+                    if ($scan.Tail -and $scan.Tail.Trim().StartsWith('#')) { [void]$interiorComments.Add($scan.Tail.Trim()) }
+                    $keyEndExclusive = $scan.EndLine + 1
+                } else {
+                    # Block form. A comment line only belongs to the block if
+                    # another list item follows it later - move those to
+                    # directly after the key line, in original order. A
+                    # trailing comment after the last item (or before the
+                    # next top-level key) is NOT ours and is left where it
+                    # is. Blank lines inside the block are simply dropped.
+                    $j = $i + 1
+                    $committedEnd = $i + 1
+                    $pendingComments = [System.Collections.Generic.List[string]]::new()
+                    while ($j -lt $lines.Count) {
+                        $l = $lines[$j]
+                        $trimmed = $l.Trim()
+                        if (Test-AutoOSSerenaBlockItem $trimmed) {
+                            $itemResult = Get-AutoOSSerenaItemValue $l
+                            [void]$existing.Add($itemResult.Value)
+                            foreach ($pc in $pendingComments) { [void]$interiorComments.Add($pc) }
+                            $pendingComments.Clear()
+                            if ($itemResult.Comment) { [void]$interiorComments.Add($itemResult.Comment) }
+                            $j++
+                            $committedEnd = $j
+                        } elseif ($trimmed -eq '') {
+                            $j++
+                        } elseif ($trimmed.StartsWith('#')) {
+                            [void]$pendingComments.Add($l)
+                            $j++
+                        } else {
+                            break
+                        }
+                    }
+                    $keyEndExclusive = $committedEnd
+                }
+                $newKeyLineText = $lines[$keyStart]
+            } else {
+                # Some other scalar (e.g. "excluded_tools: null") - not a
+                # list AutoOS understands; replace it outright.
+                $keyEndExclusive = $i + 1
+                $newKeyLineText = 'excluded_tools:'
+            }
+            break
+        }
+    }
+
+    # Serena tool names are case-sensitive; PowerShell's -notcontains is not
+    # (it falls back to -eq's default case-insensitive string comparison),
+    # so an existing "Read_File" would wrongly count as satisfying the
+    # canonical "read_file" and this would report "skipped" when it should
+    # add both. -cnotcontains forces an ordinal, case-sensitive comparison -
+    # the same one $seen (a HashSet[string], case-sensitive by default) and
+    # Python's `set`/`in` already use on the bash side.
+    $allPresent = $true
+    foreach ($c in $canonical) {
+        if ($existing -cnotcontains $c) { $allPresent = $false; break }
+    }
+    if ($allPresent) {
+        Write-AutoOSLine 'Serena excluded_tools already complete (skipped)' -Level muted
+        return
+    }
+
+    $merged = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($c in $canonical) { [void]$merged.Add($c); [void]$seen.Add($c) }
+    foreach ($item in $existing) {
+        if ($item -and -not $seen.Contains($item)) {
+            [void]$merged.Add($item)
+            [void]$seen.Add($item)
+        }
+    }
+    $itemLines = foreach ($m in $merged) { "- $m" }
+
+    # Append a final newline only when the generated excluded_tools block is
+    # the last thing in the file (it should always end cleanly, whether it
+    # was just created or the key was the file's last line) - OR when the
+    # original file already ended with one. Otherwise trailing content that
+    # never had a final newline (e.g. "...\nlast_key: x" with no newline)
+    # would gain one it never had, even though excluded_tools isn't the
+    # last key. $lines never carries per-line terminators (unlike the bash
+    # side's keepends() lines), so this has to be decided explicitly here.
+    $appendFinalNewline = $true
+
+    $newLines = [System.Collections.Generic.List[string]]::new()
+    if ($keyStart -lt 0) {
+        foreach ($l in $lines) { [void]$newLines.Add($l) }
+        [void]$newLines.Add('excluded_tools:')
+        foreach ($il in $itemLines) { [void]$newLines.Add($il) }
+    } else {
+        for ($i = 0; $i -lt $keyStart; $i++) { [void]$newLines.Add($lines[$i]) }
+        [void]$newLines.Add($newKeyLineText)
+        foreach ($ic in $interiorComments) { [void]$newLines.Add($ic) }
+        foreach ($il in $itemLines) { [void]$newLines.Add($il) }
+        for ($i = $keyEndExclusive; $i -lt $lines.Count; $i++) { [void]$newLines.Add($lines[$i]) }
+        if ($keyEndExclusive -lt $lines.Count) {
+            # Original content follows the block - the file's own ending
+            # decides, not our block.
+            $appendFinalNewline = $hadTrailingNewline
+        }
+    }
+
+    $content = $newLines -join $newline
+    if ($appendFinalNewline) { $content += $newline }
+    $contentBytes = $writeEncoding.GetBytes($content)
+    $newBytes = if ($hadBom) { [byte[]](0xEF, 0xBB, 0xBF) + $contentBytes } else { $contentBytes }
+
+    $cfgDir = Split-Path -Parent $ConfigPath
+    try {
+        if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+    } catch {
+        Write-AutoOSLine "could not update Serena's excluded_tools in $ConfigPath - $($_.Exception.Message)" -Level warn
+        return
+    }
+
+    if ($existed) {
+        try {
+            Copy-Item $ConfigPath "$ConfigPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        } catch {
+            Write-AutoOSLine "could not update Serena's excluded_tools in $ConfigPath - could not back it up: $($_.Exception.Message)" -Level warn
+            return
+        }
+    }
+
+    # Temp file + rename: the config is either fully replaced or left
+    # completely untouched, never partially written.
+    $tmpPath = "$ConfigPath.autoos-tmp-$PID"
+    try {
+        [IO.File]::WriteAllBytes($tmpPath, $newBytes)
+        Move-Item -Path $tmpPath -Destination $ConfigPath -Force
+    } catch {
+        if (Test-Path $tmpPath) { Remove-Item -Path $tmpPath -Force -ErrorAction SilentlyContinue }
+        Write-AutoOSLine "could not update Serena's excluded_tools in $ConfigPath - $($_.Exception.Message)" -Level warn
+        return
+    }
+
+    if ($existed) {
+        Write-AutoOSLine "updated Serena excluded_tools in $ConfigPath" -Level ok
+    } else {
+        Write-AutoOSLine "created $ConfigPath with Serena's excluded_tools" -Level ok
+    }
 }
 
 function Install-AutoOSMcpGraphify {
@@ -1763,7 +2215,7 @@ Export-ModuleMember -Function `
     Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,
     Write-AutoOSClaudeHostReadiness, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
-    Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Install-AutoOSMcpGraphify,
+    Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
     Invoke-AutoOSScriptProvider,

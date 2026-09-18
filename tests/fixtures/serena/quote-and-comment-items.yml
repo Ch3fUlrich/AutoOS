@@ -1,0 +1,4 @@
+excluded_tools:
+- 'read_file'  # canonical
+- 'my#tool'
+last_key: x
