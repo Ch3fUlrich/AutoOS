@@ -32,6 +32,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added — installer / rescue USB
 
+- **Your own image:** `--image custom-local --image-path <file>` or
+  `--image custom-url --image-url <url> --image-sha256 <hex>`, with a required
+  `--write-mode hybrid|raw`. See [usb-creator.md](docs/usb-creator.md#your-own-image).
+- **The Windows read-back reads the stick itself**, not the file cache
+  (`FILE_FLAG_NO_BUFFERING`), matching Linux's `dd iflag=direct`.
+- **Verified mirrors** for Debian netinst and Fedora Workstation.
+- **CI runs both suites with no route to the internet**, so a test can no longer
+  install or download anything for real.
+
+### Fixed — installer / rescue USB
+
+- **Fedora Workstation never resolved**: its filename pattern, checksum filename,
+  directory depth and bare-integer version folders no longer matched upstream, and its
+  index went through a geo-redirector that could land on a broken mirror. It now resolves
+  from `dl.fedoraproject.org` (new optional catalog field `leaf` for the deep ISO folder).
+- **`--config` replays failed on Git Bash for Windows** with "Unknown profile" — the
+  config and state loaders kept a trailing carriage return from native python3.
+
 - **`--create-usb` / `-CreateUsb` builds a bootable stick end to end**: resolve the image from
   its catalog entry (never a pinned version), fetch the vendor's GPG-signed checksum manifest,
   fetch the image — from a catalog mirror when one is listed — and verify it, re-check the

@@ -854,6 +854,12 @@ except Exception:
     pass
 '
     local line
+    # tr -d '\r': a python3 invoked from a native Windows install (this repo
+    # is tested from Git Bash as well as WSL2/Linux, per AGENTS.md §5) writes
+    # CRLF line endings to a text-mode stdout even inside a Unix-style shell.
+    # Left in, the trailing \r rides along on CONFIG_PROFILE - "light\r" never
+    # equals any known profile, so a saved run replayed with --config fails
+    # with "Unknown profile 'light'" even though the file says "light".
     while IFS= read -r line; do
         if [[ "$line" =~ ^PROFILE=(.*)$ ]]; then
             CONFIG_PROFILE="${BASH_REMATCH[1]}"
@@ -862,7 +868,7 @@ except Exception:
             local v="${BASH_REMATCH[2]}"
             AUTOOS_ANSWERS["$k"]="$v"
         fi
-    done < <(python3 -c "$py_script" "$cfg_path")
+    done < <(python3 -c "$py_script" "$cfg_path" | tr -d '\r')
 }
 
 autoos_config_save() {
@@ -1943,13 +1949,20 @@ autoos_state_load() {
     local path="$1"
     [[ -f "$path" ]] || { ui_err "No state file at $path"; return 1; }
     catalog_require_python || return 1
+    # tr -d '\r': a python3 invoked from a native Windows install (this repo
+    # is tested from Git Bash as well as WSL2/Linux, per AGENTS.md §5) writes
+    # CRLF line endings to a text-mode stdout even inside a Unix-style shell.
+    # Left in, the \r rides along on the LAST field of every line - here,
+    # every answer value - so a save/load round trip comes back with a value
+    # that looks identical when printed but never equals the one that was
+    # saved.
     while IFS=$'\x1f' read -r key value; do
         case "$key" in
             __profile)  STATE_PROFILE="$value" ;;
             __selected) STATE_SELECTED="$value" ;;
             *)          [[ -n "$key" ]] && AUTOOS_ANSWERS["$key"]="$value" ;;
         esac
-    done < <(python3 - "$path" <<'PY'
+    done < <(python3 - "$path" <<'PY' | tr -d '\r'
 import json, sys
 US = chr(31)
 d = json.load(open(sys.argv[1], encoding="utf-8"))

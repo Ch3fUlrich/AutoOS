@@ -39,6 +39,8 @@ STATE_PROFILE=""; STATE_SELECTED=""
 # Task 6 (installer-USB planner): --create-usb and its companions.
 DO_CREATE_USB=0; USB_IMAGE=""; USB_KIND="installer"; USB_ENGINE=""; USB_DEVICE=""
 USB_WIPE=0; LIST_USB=0; LIST_ENGINES=0
+# custom-url / custom-local inputs, read by usb_plan (lib/linux/usb.sh).
+USB_IMAGE_URL=""; USB_IMAGE_PATH=""; USB_IMAGE_SHA256=""; USB_WRITE_MODE=""
 
 usage() {
     cat <<'EOF'
@@ -72,6 +74,10 @@ AutoOS — post-install provisioning for Linux
   --engine <id>            catalog/engines.json entry to write with
   --usb-device <path>      Target device, e.g. /dev/sdb
   --wipe-target-disk       Required for a real write: confirms the target disk's contents may be destroyed
+  --image-url <url>        With --image custom-url: the image to download (needs --image-sha256)
+  --image-path <file>      With --image custom-local: an image already on disk
+  --image-sha256 <hex>     Digest to verify a custom image against (required for a URL)
+  --write-mode <mode>      hybrid | raw - required for a custom image
   --list-usb              List candidate USB devices and exit
   --list-engines          List write engines available on this machine and exit
   --help, -h         This text
@@ -116,6 +122,10 @@ while [[ $# -gt 0 ]]; do
         --engine)            USB_ENGINE="${2:-}"; shift 2 ;;
         --usb-device)        USB_DEVICE="${2:-}"; shift 2 ;;
         --wipe-target-disk)  USB_WIPE=1; shift ;;
+        --image-url)         USB_IMAGE_URL="${2:-}"; shift 2 ;;
+        --image-path)        USB_IMAGE_PATH="${2:-}"; shift 2 ;;
+        --image-sha256)      USB_IMAGE_SHA256="${2:-}"; shift 2 ;;
+        --write-mode)        USB_WRITE_MODE="${2:-}"; shift 2 ;;
         --list-usb)          LIST_USB=1; shift ;;
         --list-engines)      LIST_ENGINES=1; shift ;;
         --help|-h) usage; exit 0 ;;

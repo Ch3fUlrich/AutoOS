@@ -1458,6 +1458,32 @@ Test-Case 'verified download: an http 404 is a transport failure that leaves no 
     }
 }
 
+Test-Case 'verified download: an uncached (FILE_FLAG_NO_BUFFERING) read hashes identically to a cached one at every sector and chunk boundary (uncached)' {
+    # No-buffering reads must be sector-aligned in buffer and count, so the
+    # classic bugs live exactly at these sizes: an empty file, one byte,
+    # either side of a 512/4096 sector, and either side of a chunk. (It does
+    # NOT exercise the tail clamp: removing the clamp still passes, because
+    # ReadFile returns only valid bytes at end of file - see the C# comment.)
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_unc_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $rng = [System.Random]::new(4242)
+        $bad = @()
+        foreach ($n in @(0, 1, 511, 512, 513, 4095, 4096, 4097, 1048575, 1048576, 1048577, 3150001)) {
+            $p = Join-Path $tmp "f$n.bin"
+            $buf = [byte[]]::new($n); $rng.NextBytes($buf)
+            [IO.File]::WriteAllBytes($p, $buf)
+            $want = Get-AutoOSFileSha256 -Path $p
+            if ((Get-AutoOSUncachedFileSha256 -Path $p) -ne $want) { $bad += "$n(1MiB chunk)" }
+            if ((Get-AutoOSUncachedFileSha256 -Path $p -ChunkSize 4096) -ne $want) { $bad += "$n(4KiB chunk)" }
+        }
+        $refused = $false
+        try { Get-AutoOSUncachedFileSha256 -Path (Join-Path $tmp 'f4096.bin') -ChunkSize 1000 | Out-Null } catch { $refused = $true }
+        Assert-True ($bad.Count -eq 0 -and $refused) "mismatched sizes: $($bad -join ', '); unaligned chunk refused: $refused"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'verified download: hashes and verifies a file under Windows PowerShell 5.1, the engine setup.ps1 actually runs in (5.1)' {
     # This suite runs under pwsh 7; setup.ps1 is launched with powershell.exe
     # 5.1 (elevated launches in particular). The first real 6 GB download on
@@ -1549,12 +1575,16 @@ $imgFixtureRoot = Join-Path $Root 'tests\helpers\image_index_fixtures'
 function New-AutoOSImageTestCatalog {
     param(
         [string]$Id, [string]$FixtureSubdir, [string]$FileRegex,
-        [string]$Sums = 'SHA256SUMS', [string]$Sig = '-'
+        [string]$Sums = 'SHA256SUMS', [string]$Sig = '-', [string]$Leaf = ''
     )
     $indexUri = ConvertTo-AutoOSTestDirUri (Join-Path $imgFixtureRoot $FixtureSubdir)
     $path = Join-Path ([IO.Path]::GetTempPath()) ('aos_img_cat_' + [Guid]::NewGuid().ToString('N') + '.json')
-    @{ images = @(@{ id = $Id; index = $indexUri; file = $FileRegex; sums = $Sums; sig = $Sig }) } |
-        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding UTF8
+    $entry = @{ id = $Id; index = $indexUri; file = $FileRegex; sums = $Sums; sig = $Sig }
+    # Omitted (default '') the same way every pre-existing caller above uses
+    # it: left out of the entry entirely, mirroring the bash suite's
+    # _image_resolve_test_catalog and the "absent means ''" catalog contract.
+    if ($Leaf) { $entry['leaf'] = $Leaf }
+    @{ images = @($entry) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding UTF8
     $path
 }
 
@@ -1627,6 +1657,36 @@ Test-Case 'image_resolve: an -lts id with only interim directories present throw
     try {
         $threw = $false; $msg = ''
         try { Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no LTS release directory*') "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case "image_resolve: a fedora-shaped entry resolves via 'leaf' to the ISO and CHECKSUM three directories below the chosen version dir, picking the highest of 43/44" {
+    # Real upstream shape (verified 2026-09-18): releases/ lists bare-integer
+    # version dirs (44/, no dot), and the ISO sits three levels below the
+    # chosen one (Workstation/x86_64/iso/) - 'leaf' is what lets a single
+    # recursion step land there directly.
+    $cat = New-AutoOSImageTestCatalog -Id 'fedora-workstation' -FixtureSubdir 'fedora_releases' `
+        -FileRegex 'Fedora-Workstation-Live-[0-9]+-[0-9.]+\.x86_64\.iso$' `
+        -Sums 'Fedora-Workstation-[0-9]+-[0-9.]+-x86_64-CHECKSUM$' -Sig '-' -Leaf 'Workstation/x86_64/iso/'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'fedora-workstation' -CatalogPath $cat
+        $ok = ($r.File -eq 'Fedora-Workstation-Live-44-1.7.x86_64.iso') -and
+            ($r.Url -like '*/44/Workstation/x86_64/iso/Fedora-Workstation-Live-44-1.7.x86_64.iso') -and
+            ($r.Sums -like '*/44/Workstation/x86_64/iso/Fedora-Workstation-44-1.7-x86_64-CHECKSUM') -and
+            ($r.Url -notlike '*/43/*') -and ($r.Url -notlike '*/test/*')
+        Assert-True $ok "file=$($r.File) url=$($r.Url) sums=$($r.Sums)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case "image_resolve: a bare-integer version directory (Fedora's '44/') is never LTS-eligible - it has no .04, so it must be ineligible" {
+    $cat = New-AutoOSImageTestCatalog -Id 'fedora-workstation-lts' -FixtureSubdir 'fedora_releases' `
+        -FileRegex 'Fedora-Workstation-Live-[0-9]+-[0-9.]+\.x86_64\.iso$' `
+        -Sums 'Fedora-Workstation-[0-9]+-[0-9.]+-x86_64-CHECKSUM$' -Sig '-'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'fedora-workstation-lts' -CatalogPath $cat | Out-Null }
         catch { $threw = $true; $msg = $_.Exception.Message }
         Assert-True ($threw -and $msg -like '*no LTS release directory*') "threw=$threw msg=$msg"
     } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
@@ -2294,28 +2354,162 @@ Test-Case 'usb: Invoke-AutoOSUsbFetchImage refuses a catalog entry with no check
     }
 }
 
-Test-Case 'usb: Invoke-AutoOSUsbFetchImage: custom-local is a specific refusal, not a fetch attempt (fetch)' {
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage: custom-local without its source and digest is a specific refusal, not a fetch attempt (fetch)' {
+    # custom-local / custom-url are real images now, but only through
+    # Invoke-AutoOSUsbFetchCustomImage. Called the catalog way they must
+    # refuse by name, never fall through to Resolve-AutoOSImageUrl.
     $threw = $false; $msg = ''
     try { Invoke-AutoOSUsbFetchImage -ImageId 'custom-local' -Destination 'C:\nowhere\x.iso' | Out-Null }
     catch { $threw = $true; $msg = $_.Exception.Message }
-    Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=[$msg]"
+    Assert-True ($threw -and $msg -like '*needs its source and digest*') "threw=$threw msg=[$msg]"
 }
 
-Test-Case 'usb: Invoke-AutoOSUsbPlan routes an Invoke-AutoOSUsbFetchImage line to the fetch, keeping a path with spaces as one argument (fetch)' {
-    # custom-local's specific refusal is the proof the line reached the
-    # function with both arguments intact: Invoke-Expression would have
-    # split "C:\some dir\x.iso" into two positional arguments and failed
-    # to bind instead. Driven through the exported Invoke-AutoOSUsbPlan (a
-    # one-line plan) since the per-step dispatcher is module-private; the
-    # fake disk fixture is what its failure path enumerates.
+Test-Case 'usb: Invoke-AutoOSUsbPlan routes a fetch line to the fetch, keeping a path with spaces as one argument (fetch)' {
+    # The error naming the WHOLE spaced path is the proof the line reached
+    # the function with the path intact: a dispatcher that split on spaces
+    # would have reported only "dir\x.iso", or bound "C:\some" to the wrong
+    # parameter. custom-local's line carries the path LAST precisely so a
+    # Windows path may contain spaces. Driven through the exported
+    # Invoke-AutoOSUsbPlan since the per-step dispatcher is module-private.
     Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
         $threw = $false; $msg = ''
         try {
             Invoke-AutoOSCapturedConsole {
-                Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbFetchImage custom-local C:\some dir\x.iso')
+                Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbFetchImage custom-local - C:\some dir\x.iso')
             } | Out-Null
         } catch { $threw = $true; $msg = $_.Exception.Message }
-        Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=[$msg]"
+        Assert-True ($threw -and $msg -like '*C:\some dir\x.iso is no longer a readable file*') "threw=$threw msg=[$msg]"
+    }
+}
+
+# ─── custom-url / custom-local (an image the catalog does not describe) ────
+# Mirror of the bash suite's "usb custom image" block. Every name carries
+# "usb" and "custom" so -Filter usb and -Filter custom both reach them.
+function New-AutoOSCustomImageFixture {
+    # A throwaway image in a directory whose name contains a SPACE, because
+    # a Windows path may legitimately contain one and the plan must carry it.
+    $dir = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos custom " + [Guid]::NewGuid().ToString('N')))).FullName
+    $img = Join-Path $dir 'my image.iso'
+    [IO.File]::WriteAllText($img, "AUTOOS CUSTOM TEST IMAGE`n")
+    [pscustomobject]@{ Dir = $dir; Image = $img; Sha = (Get-AutoOSFileSha256 -Path $img); Bytes = (Get-Item -LiteralPath $img).Length }
+}
+
+function Invoke-AutoOSCustomPlan {
+    # Returns @{ Plan; Error } so a refusal is asserted on its message.
+    param([hashtable]$Arguments)
+    try {
+        [pscustomobject]@{ Plan = @(New-AutoOSUsbPlan -Kind installer -DeviceId '\\.\PHYSICALDRIVE5' -DryRun @Arguments); Error = '' }
+    } catch {
+        [pscustomobject]@{ Plan = @(); Error = $_.Exception.Message }
+    }
+}
+
+Test-Case 'usb custom: custom-local plans the file itself as the write source, with its real size and "-" for no digest' {
+    $fx = New-AutoOSCustomImageFixture
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        try {
+            $r = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = $fx.Image; WriteMode = 'hybrid' }
+            $joined = $r.Plan -join "`n"
+            Assert-True ($r.Plan[0] -eq "Invoke-AutoOSUsbFetchImage custom-local - $($fx.Image)" `
+                -and $joined -like "*Invoke-AutoOSUsbReverify \\.\PHYSICALDRIVE5 Unmounted $($fx.Bytes) *" `
+                -and $joined -like "*Invoke-AutoOSUsbCopyImage \\.\PHYSICALDRIVE5 $($fx.Image)*") "error=[$($r.Error)] plan=$joined"
+        } finally { Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb custom: a custom image refuses without -WriteMode, and a raw one is refused on Ventoy but planned on native (A11)' {
+    $fx = New-AutoOSCustomImageFixture
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        try {
+            $noMode = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = $fx.Image }
+            $rawVentoy = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = $fx.Image; WriteMode = 'raw' }
+            $rawNative = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'native'; ImagePath = $fx.Image; WriteMode = 'raw' }
+            $badMode = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = $fx.Image; WriteMode = 'iso' }
+            Assert-True ($noMode.Error -like '*needs -WriteMode*' -and $rawVentoy.Error -like "*cannot write a 'raw' image*" `
+                -and ($rawNative.Plan -join "`n") -like '*Write-AutoOSUsbRaw*' -and $badMode.Error -like "*must be 'hybrid' or 'raw'*") `
+                "noMode=[$($noMode.Error)] rawVentoy=[$($rawVentoy.Error)] rawNative=[$($rawNative.Plan -join ' | ')] badMode=[$($badMode.Error)]"
+        } finally { Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb custom: custom-local refuses a missing file and an empty file' {
+    $fx = New-AutoOSCustomImageFixture
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        try {
+            $empty = Join-Path $fx.Dir 'empty.iso'; [IO.File]::WriteAllBytes($empty, [byte[]]::new(0))
+            $missing = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = (Join-Path $fx.Dir 'nope.iso'); WriteMode = 'hybrid' }
+            $emptyR = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = $empty; WriteMode = 'hybrid' }
+            Assert-True ($missing.Error -like '*is not a readable file*' -and $emptyR.Error -like '*is empty*') "missing=[$($missing.Error)] empty=[$($emptyR.Error)]"
+        } finally { Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb custom: custom-url refuses without a digest, with a malformed digest, and with a non-http scheme; plans a digest-keyed cache path otherwise' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $sha = 'ab' * 32
+        $env:AUTOOS_CACHE_DIR = 'C:\scratch\images'
+        try {
+            $noSha = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-url'; Engine = 'ventoy'; ImageUrl = 'https://example.invalid/x.iso'; WriteMode = 'hybrid' }
+            $badSha = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-url'; Engine = 'ventoy'; ImageUrl = 'https://example.invalid/x.iso'; WriteMode = 'hybrid'; ImageSha256 = 'nothex' }
+            $ftp = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-url'; Engine = 'ventoy'; ImageUrl = 'ftp://example.invalid/x.iso'; WriteMode = 'hybrid'; ImageSha256 = $sha }
+            $ok = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-url'; Engine = 'ventoy'; ImageUrl = 'https://example.invalid/x.iso'; WriteMode = 'hybrid'; ImageSha256 = $sha.ToUpperInvariant() }
+        } finally { Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue }
+        Assert-True ($noSha.Error -like '*needs -ImageSha256*' -and $badSha.Error -like '*64 hexadecimal*' -and $ftp.Error -like '*http:// or https://*' `
+            -and $ok.Plan[0] -eq "Invoke-AutoOSUsbFetchImage custom-url $sha https://example.invalid/x.iso C:\scratch\images\custom-url-$($sha.Substring(0,16)).iso") `
+            "noSha=[$($noSha.Error)] badSha=[$($badSha.Error)] ftp=[$($ftp.Error)] ok=[$($ok.Plan -join ' | ')]"
+    }
+}
+
+Test-Case 'usb custom: executing custom-local verifies the digest - a wrong one stops before any write, "not touched"' {
+    $fx = New-AutoOSCustomImageFixture
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        try {
+            $good = @(New-AutoOSUsbPlan -ImageId custom-local -Kind installer -Engine ventoy -DeviceId '\\.\PHYSICALDRIVE5' -DryRun -ImagePath $fx.Image -WriteMode hybrid -ImageSha256 $fx.Sha)
+            $bad = @(New-AutoOSUsbPlan -ImageId custom-local -Kind installer -Engine ventoy -DeviceId '\\.\PHYSICALDRIVE5' -DryRun -ImagePath $fx.Image -WriteMode hybrid -ImageSha256 ('0' * 64))
+            $goodText = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @($good[0]) }
+            $script:customBadMsg = ''
+            $badText = Invoke-AutoOSCapturedConsole {
+                try { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @($bad[0]) } catch { $script:customBadMsg = $_.Exception.Message }
+            }
+            Assert-True ($goodText -like '*verified image*' -and $script:customBadMsg -like '*does not match the SHA-256 you supplied*' -and $badText -like '*not touched*') `
+                "good=[$goodText] badMsg=[$($script:customBadMsg)] bad=[$badText]"
+        } finally { Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb custom: executing custom-url downloads and verifies against the supplied digest, and a second run is skipped' {
+    $fx = New-AutoOSCustomImageFixture
+    $srv = Start-AutoOSTestHttpServer -Directory $fx.Dir
+    $cache = Join-Path $fx.Dir 'cache'
+    $url = "http://127.0.0.1:$($srv.Port)/my%20image.iso"
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_CACHE_DIR = $cache
+        try {
+            $plan = @(New-AutoOSUsbPlan -ImageId custom-url -Kind installer -Engine ventoy -DeviceId '\\.\PHYSICALDRIVE5' -DryRun -ImageUrl $url -WriteMode hybrid -ImageSha256 $fx.Sha)
+            $first = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @($plan[0]) }
+            $second = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @($plan[0]) }
+            $dest = Join-Path $cache ('custom-url-' + $fx.Sha.Substring(0, 16) + '.iso')
+            $same = (Test-Path -LiteralPath $dest) -and ((Get-AutoOSFileSha256 -Path $dest) -eq $fx.Sha)
+            Assert-True ($same -and $first -like '*verified image*' -and $second -like '*skipped*') "same=$same first=[$first] second=[$second]"
+        } finally {
+            Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue
+            Stop-AutoOSTestHttpServer $srv
+            Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Test-Case 'usb custom: setup.ps1 -CreateUsb with a custom-local image and -DryRun shows the plan and writes nothing' {
+    $fx = New-AutoOSCustomImageFixture
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture 'good_stick'
+    try {
+        $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb -Image custom-local -ImagePath $fx.Image `
+            -WriteMode hybrid -Engine ventoy -UsbDevice '\\.\PHYSICALDRIVE5' -DryRun -NoColor 2>&1) -join "`n"
+        $code = $LASTEXITCODE
+        Assert-True ($code -eq 0 -and $out -like "*Invoke-AutoOSUsbFetchImage custom-local - $($fx.Image)*") "exit=$code out=$out"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue
     }
 }
 
@@ -2393,6 +2587,43 @@ Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips a mirror whose bytes do not mat
     } finally {
         Stop-AutoOSTestHttpServer $mir.Server
         Remove-Item -Recurse -Force $fx.Root, $mir.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: the read-back hashes the destination uncached, and when that is impossible still compares and warns exactly once (copy readback uncached)' {
+    # The default path must NOT warn (it took the uncached read); a forced
+    # refusal must still catch a corrupted file - a fallback that skipped
+    # the comparison would be worse than no read-back at all - and must say
+    # so once, not once per file.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_rbu_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $src = Join-Path $tmp 'src'; $dst = Join-Path $tmp 'dst'
+        New-Item -ItemType Directory -Path $src, $dst -Force | Out-Null
+        $bytes = [byte[]](1..20000 | ForEach-Object { $_ % 251 })
+        foreach ($name in @('a.bin', 'b.bin', 'c.bin')) {
+            [IO.File]::WriteAllBytes((Join-Path $src $name), $bytes); [IO.File]::WriteAllBytes((Join-Path $dst $name), $bytes)
+        }
+        $script:rbDefault = $null
+        $textDefault = Invoke-AutoOSCapturedConsole { $script:rbDefault = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst) }
+
+        $corrupt = [byte[]]$bytes.Clone(); $corrupt[9000] = [byte](255 - $corrupt[9000])
+        [IO.File]::WriteAllBytes((Join-Path $dst 'b.bin'), $corrupt)
+        $env:AUTOOS_FAKE_NO_UNCACHED = '1'
+        try {
+            $script:rbForced = $null
+            $textForced = Invoke-AutoOSCapturedConsole { $script:rbForced = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst) }
+        } finally {
+            Remove-Item Env:\AUTOOS_FAKE_NO_UNCACHED -ErrorAction SilentlyContinue
+        }
+        # A phrase that occurs once per warning (the warning embeds the
+        # exception text, which also says "uncached read").
+        $warnings = ([regex]::Matches($textForced, 'comparing through the file cache instead')).Count
+        $forcedBad = @($script:rbForced | ForEach-Object { "$($_.Path)=$($_.Reason)" })
+        Assert-True ($script:rbDefault.Count -eq 0 -and $textDefault -notlike '*comparing through the file cache*' `
+            -and $forcedBad.Count -eq 1 -and $forcedBad[0] -eq 'b.bin=content' -and $warnings -eq 1) `
+            "default=$($script:rbDefault.Count) defaultText=[$textDefault] forced=$($forcedBad -join ',') warnings=$warnings"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
 }
 

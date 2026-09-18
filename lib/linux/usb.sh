@@ -772,6 +772,24 @@ usb_plan() {
     img_name="${_img_fields[0]:-}"; img_kinds="${_img_fields[1]:-}"
     img_write_mode="${_img_fields[2]:-}"; img_size_gb="${_img_fields[3]:-0}"
 
+    # custom-url / custom-local: the catalog describes neither the image nor
+    # how to write it, so what it would have said comes from the caller
+    # (setup.sh's --image-url / --image-path / --image-sha256 /
+    # --write-mode, as the USB_IMAGE_* / USB_WRITE_MODE globals). Validated
+    # here, before anything else, because these are user-typed strings on
+    # the destructive path. custom_bytes is exact for a local file and 0
+    # ("unknown until downloaded") for a URL.
+    local custom_source="" custom_sha="-" custom_bytes=""
+    if _image_resolve_is_pseudo "$image_id"; then
+        local -a _custom=()
+        mapfile -t _custom < <(_usb_custom_image_fields "$image_id")
+        if [[ ${#_custom[@]} -ne 3 ]]; then
+            return 1
+        fi
+        custom_source="${_custom[0]}"; custom_sha="${_custom[1]}"; custom_bytes="${_custom[2]}"
+        img_write_mode="$USB_WRITE_MODE"
+    fi
+
     local eng_name eng_platforms eng_arch eng_kinds eng_write_modes eng_interactive
     local -a _eng_fields=()
     mapfile -t _eng_fields < <(_engine_field "$engine" name platforms arch kinds writeModes interactive)
@@ -821,7 +839,11 @@ usb_plan() {
     [[ "$engine" == "uefi-copy" ]] && guard_mode="mounted-fat32-writable"
 
     local image_bytes
-    image_bytes="$(awk -v g="$img_size_gb" 'BEGIN{printf "%.0f", (g == "" ? 0 : g) * 1000000000}')"
+    if [[ -n "$custom_bytes" ]]; then
+        image_bytes="$custom_bytes"
+    else
+        image_bytes="$(awk -v g="$img_size_gb" 'BEGIN{printf "%.0f", (g == "" ? 0 : g) * 1000000000}')"
+    fi
     AUTOOS_IMAGE_BYTES="$image_bytes" usb_guard "$dev" "$guard_mode" || return 1
 
     # Findings F3/F6: this usb_guard call only proves the device is safe
@@ -836,8 +858,16 @@ usb_plan() {
     local pinned_id
     pinned_id="$(_usb_disk_identity "$dev")"
 
+    # A custom-local image is written from where it already is - copying a
+    # multi-gigabyte file into the cache first would only cost time. A
+    # custom-url image is cached under its digest, so two different URLs
+    # never share a cache slot and a changed digest never reuses a stale file.
     local local_path
-    local_path="$(download_cache_dir)/${image_id}.iso"
+    case "$image_id" in
+        custom-local) local_path="$custom_source" ;;
+        custom-url)   local_path="$(download_cache_dir)/custom-url-${custom_sha:0:16}.iso" ;;
+        *)            local_path="$(download_cache_dir)/${image_id}.iso" ;;
+    esac
 
     # The image itself: resolved (image_resolve), checksum-verified and
     # cached by usb_fetch_image, which is the FIRST line of every plan and
@@ -848,7 +878,13 @@ usb_plan() {
     # every other (the "dry run leaves the filesystem untouched" test
     # proves the cache dir stays empty), so usb_plan itself still runs
     # nothing and touches no network.
-    printf 'usb_fetch_image %s %s\n' "$image_id" "$local_path"
+    # Custom images carry their digest and source on the same line, source
+    # last: `usb_fetch_image <id> <dest> <sha256|-> <url-or-path>`.
+    if [[ -n "$custom_source" ]]; then
+        printf 'usb_fetch_image %s %s %s %s\n' "$image_id" "$local_path" "$custom_sha" "$custom_source"
+    else
+        printf 'usb_fetch_image %s %s\n' "$image_id" "$local_path"
+    fi
 
     printf 'usb_reverify %s %s %s %s\n' "$dev" "$guard_mode" "$image_bytes" "$pinned_id"
 
@@ -1166,11 +1202,13 @@ _usb_dispatch_step() {
             usb_reverify "${words[1]}" "${words[2]}" "${words[3]}" "${words[4]}"
             ;;
         usb_fetch_image)
-            if [[ ${#words[@]} -ne 3 ]]; then
+            # 3 words for a catalog image, 5 for custom-url / custom-local
+            # (which also carry the digest and the source).
+            if [[ ${#words[@]} -ne 3 && ${#words[@]} -ne 5 ]]; then
                 ui_err "usb_execute: malformed usb_fetch_image step: $line"
                 return 1
             fi
-            usb_fetch_image "${words[1]}" "${words[2]}"
+            usb_fetch_image "${words[@]:1}"
             ;;
         Ventoy2Disk.sh)
             # usb_plan deliberately keeps "Ventoy2Disk.sh -i -g <dev>"
@@ -1362,6 +1400,140 @@ _usb_sums_digest_for() {
     ' "$manifest"
 }
 
+# ─── custom-url / custom-local: an image the catalog does not describe ─────
+# _usb_custom_image_fields <custom-url|custom-local>
+# Validates the caller's USB_IMAGE_URL / USB_IMAGE_PATH / USB_IMAGE_SHA256 /
+# USB_WRITE_MODE for a custom image and prints exactly three lines on success:
+#   <source>   the URL or the local path
+#   <sha256>   lower-case digest, or "-" when none was given (local only)
+#   <bytes>    the image size in bytes, or 0 when unknown (a URL)
+# Prints nothing and reports via ui_err (to stderr) on any refusal, so a
+# caller reading it with mapfile sees fewer than three lines and stops.
+#
+# Refuses, never guesses:
+#  - no --write-mode: the catalog is what normally says whether an image is
+#    hybrid or raw, and a raw image copied as a file onto Ventoy does not
+#    boot (finding A11). A custom image must say which it is.
+#  - a URL with no --image-sha256: an unverified download never reaches a
+#    disk. Every catalog image is checked against a vendor digest; a custom
+#    one is checked against the one the user supplies.
+#  - whitespace in a path or URL: plan lines are word-split by the executor
+#    (never eval'd - finding F4), so a space would silently split one
+#    argument into two.
+_usb_custom_image_fields() {
+    local image_id="$1"
+    local mode="${USB_WRITE_MODE:-}" sha="${USB_IMAGE_SHA256:-}"
+    sha="${sha,,}"
+
+    case "$mode" in
+        hybrid|raw) ;;
+        "") ui_err "usb_plan: '$image_id' needs --write-mode hybrid|raw - the catalog cannot say how a custom image must be written, and a raw image copied onto Ventoy's file path would not boot" >&2; return 1 ;;
+        *)  ui_err "usb_plan: --write-mode must be 'hybrid' or 'raw', got '$mode'" >&2; return 1 ;;
+    esac
+    if [[ -n "$sha" && ! "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+        ui_err "usb_plan: --image-sha256 must be 64 hexadecimal characters" >&2
+        return 1
+    fi
+
+    case "$image_id" in
+        custom-url)
+            local url="${USB_IMAGE_URL:-}"
+            if [[ -z "$url" ]]; then
+                ui_err "usb_plan: custom-url needs --image-url <http(s) URL>" >&2; return 1
+            fi
+            if [[ ! "$url" =~ ^https?://[^[:space:]]+$ ]]; then
+                ui_err "usb_plan: --image-url must be an http:// or https:// URL with no spaces, got '$url'" >&2; return 1
+            fi
+            if [[ -z "$sha" ]]; then
+                ui_err "usb_plan: custom-url needs --image-sha256 - refusing to write an image nothing can verify" >&2; return 1
+            fi
+            printf '%s\n%s\n0\n' "$url" "$sha"
+            ;;
+        custom-local)
+            local path="${USB_IMAGE_PATH:-}"
+            if [[ -z "$path" ]]; then
+                ui_err "usb_plan: custom-local needs --image-path <file>" >&2; return 1
+            fi
+            if [[ "$path" =~ [[:space:]] ]]; then
+                ui_err "usb_plan: --image-path must not contain whitespace (plan steps are split on it) - move or rename '$path'" >&2; return 1
+            fi
+            if [[ ! -f "$path" || ! -r "$path" ]]; then
+                ui_err "usb_plan: --image-path '$path' is not a readable file" >&2; return 1
+            fi
+            local bytes
+            bytes="$(_usb_file_size "$path")"
+            if [[ -z "$bytes" || "$bytes" == "0" ]]; then
+                ui_err "usb_plan: --image-path '$path' is empty" >&2; return 1
+            fi
+            printf '%s\n%s\n%s\n' "$path" "${sha:--}" "$bytes"
+            ;;
+        *)
+            ui_err "usb_plan: '$image_id' is not a custom image id" >&2; return 1
+            ;;
+    esac
+}
+
+# _usb_fetch_custom_image <custom-url|custom-local> <dest> <sha256|-> <source>
+# The fetch step for an image the catalog does not describe.
+#  custom-url:   downloads <source> to <dest> through fetch_verified against
+#                <sha256> (required - usb_plan never emits this line without
+#                one). A second run is a cache hit reported as skipped.
+#  custom-local: <dest> IS <source>; nothing is copied. Checks the file is
+#                still there and readable, and verifies <sha256> when one
+#                was given. Idempotent by construction: it writes nothing.
+_usb_fetch_custom_image() {
+    local image_id="$1" dest="$2" sha="$3" source="$4"
+
+    if (( ${AUTOOS_DRY_RUN:-0} )); then
+        if [[ "$image_id" == custom-url ]]; then
+            ui_muted "would download $source to $dest and verify it against the SHA-256 you supplied"
+        elif [[ "$sha" != "-" && -n "$sha" ]]; then
+            ui_muted "would verify $source against the SHA-256 you supplied and use it as the image"
+        else
+            ui_muted "would use $source as the image, unverified (no --image-sha256 given)"
+        fi
+        return 0
+    fi
+
+    case "$image_id" in
+        custom-url)
+            if [[ "$sha" == "-" || -z "$sha" ]]; then
+                ui_err "usb_fetch_image: custom-url without a SHA-256 - refusing to write an image nothing can verify"
+                return 1
+            fi
+            if ! mkdir -p -- "$(dirname -- "$dest")"; then
+                ui_err "usb_fetch_image: cannot create $(dirname -- "$dest")"
+                return 1
+            fi
+            ui_info "fetching $source"
+            local rc=0
+            fetch_verified "$source" "$dest" "$sha" - - || rc=$?
+            case "$rc" in
+                0) ui_ok "verified image: $dest"; return 0 ;;
+                2) ui_err "usb_fetch_image: checksum mismatch - $source did not match the SHA-256 you supplied; nothing was kept"; return 1 ;;
+                4) ui_err "usb_fetch_image: download of $source failed; nothing was kept"; return 1 ;;
+                *) ui_err "usb_fetch_image: fetch_verified failed (rc=$rc) for $source"; return 1 ;;
+            esac
+            ;;
+        custom-local)
+            if [[ ! -f "$source" || ! -r "$source" ]]; then
+                ui_err "usb_fetch_image: $source is no longer a readable file"
+                return 1
+            fi
+            if [[ "$sha" != "-" && -n "$sha" ]]; then
+                if ! _sha256_matches "$source" "$sha"; then
+                    ui_err "usb_fetch_image: $source does not match the SHA-256 you supplied - refusing to write it"
+                    return 1
+                fi
+                ui_ok "verified image: $source"
+            else
+                ui_warn "using $source as supplied - no --image-sha256 was given, so it has not been verified"
+            fi
+            return 0
+            ;;
+    esac
+}
+
 # usb_fetch_image <image_id> <dest>
 # The first step of every plan usb_plan emits, and the only one that talks
 # to the network. Resolves <image_id> to a concrete URL (image_resolve),
@@ -1386,12 +1558,16 @@ usb_fetch_image() {
     local image_id="$1" dest="$2"
 
     if [[ -z "$image_id" || -z "$dest" ]]; then
-        ui_err "usb_fetch_image: usage: usb_fetch_image <image_id> <dest>"
+        ui_err "usb_fetch_image: usage: usb_fetch_image <image_id> <dest> [<sha256|-> <url-or-path>]"
         return 1
     fi
     if _image_resolve_is_pseudo "$image_id"; then
-        ui_err "usb_fetch_image: '$image_id' is a UI affordance (a user-supplied URL or local file), not a downloadable catalog entry - there is nothing to fetch"
-        return 1
+        if [[ $# -ne 4 ]]; then
+            ui_err "usb_fetch_image: '$image_id' needs its source and digest (usb_fetch_image $image_id <dest> <sha256|-> <url-or-path>) - it is a user-supplied image, not a catalog entry to resolve"
+            return 1
+        fi
+        _usb_fetch_custom_image "$image_id" "$dest" "$3" "$4"
+        return
     fi
     if (( ${AUTOOS_DRY_RUN:-0} )); then
         ui_muted "would resolve $image_id, download it to $dest and verify it against the vendor's published SHA-256"
