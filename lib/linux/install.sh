@@ -1295,6 +1295,32 @@ print(json.dumps({
     return 0
 }
 
+# resolve_ollama_base_url
+# Prints the Ollama endpoint the generated OpenCode/OpenHands configs should
+# use, or nothing to keep the catalog default (http://127.0.0.1:11434/v1).
+# OpenHands' agent-server runs on the host under agent-canvas (uvx) but in a
+# container under docker compose, and 127.0.0.1 inside a container is the
+# container itself. So:
+#   OLLAMA_BASE_URL set             -> that, normalised to end in /v1
+#   Ollama answers on
+#   host.docker.internal            -> that (Docker Desktop: reachable from the
+#                                      host AND from containers)
+#   otherwise                       -> nothing: the catalog default. A native
+#                                      Linux host has no host.docker.internal,
+#                                      and a host-run agent-canvas needs 127.0.0.1.
+resolve_ollama_base_url() {
+    if [[ -n "${OLLAMA_BASE_URL:-}" ]]; then
+        local url="${OLLAMA_BASE_URL%/}"
+        [[ "$url" == */v1 ]] || url="$url/v1"
+        printf '%s\n' "$url"
+        return 0
+    fi
+    if curl -fsS --max-time 2 -o /dev/null "http://host.docker.internal:11434/api/version" 2>/dev/null; then
+        printf '%s\n' "http://host.docker.internal:11434/v1"
+    fi
+    return 0
+}
+
 setup_opencode_config() {
     local config_dir="$SYS_HOME/.config/opencode"
     local config_file="$config_dir/config.json"
@@ -1319,7 +1345,10 @@ setup_opencode_config() {
     local models_file
     models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/llm-models.json"
 
-    python3 -c "
+    local ollama_url
+    ollama_url="$(resolve_ollama_base_url)"
+
+    OLLAMA_BASE_URL="$ollama_url" python3 -c "
 import json, os, sys
 
 config_path = sys.argv[1]
@@ -1359,20 +1388,29 @@ if os.path.isfile(config_path):
     except Exception:
         data = {}
 
-secrets = {}
-if os.path.isfile(secrets_path):
+def _read_secrets_into(path, secrets):
     try:
-        with open(secrets_path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith('#') and '=' in line:
                     k, v = line.split('=', 1)
-                    secrets[k.strip().lower()] = v.strip().strip('\"\'')
+                    # First occurrence of a key wins.
+                    secrets.setdefault(k.strip().lower(), v.strip().strip('\"\''))
     except Exception:
         pass
 
+secrets = {}
+# Only the real conf. api_keys.conf.example is never read: its placeholder
+# keys are truthy and would be written into the config as if real (401s).
+if os.path.isfile(secrets_path):
+    _read_secrets_into(secrets_path, secrets)
+
 providers = data.get('provider', {})
 _ollama = REPO_BY_ID['ollama-qwen2.5-coder']['direct']
+# resolve_ollama_base_url's answer; empty keeps the catalog default.
+if os.environ.get('OLLAMA_BASE_URL'):
+    _ollama['base_url'] = os.environ['OLLAMA_BASE_URL']
 providers['ollama'] = {
     'npm': _ollama['npm'],
     'name': 'Ollama (Local)',
@@ -1516,7 +1554,10 @@ setup_openhands_config() {
     local models_file
     models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/llm-models.json"
 
-    python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
+    local ollama_url
+    ollama_url="$(resolve_ollama_base_url)"
+
+    OLLAMA_BASE_URL="$ollama_url" python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
 import os, sys, json
 
 openhands_dir = sys.argv[1]
@@ -1526,21 +1567,56 @@ models_file = sys.argv[3] if len(sys.argv) > 3 else ""
 with open(models_file, "r", encoding="utf-8") as _mf:
     REPO_MODELS = json.load(_mf)["models"]
 REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
+# resolve_ollama_base_url's answer; empty keeps the catalog default. Applied to
+# the catalog entry so the profiles and the settings.json fallback agree.
+if os.environ.get("OLLAMA_BASE_URL"):
+    REPO_BY_ID["ollama-qwen2.5-coder"]["direct"]["base_url"] = os.environ["OLLAMA_BASE_URL"]
+
+def _read_secrets_file(path, secrets):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    # First occurrence of a key wins.
+                    secrets.setdefault(k.strip().lower(), v.strip().strip("\"'"))
+    except Exception:
+        pass
+
 
 def _profile_for(mid, key, name=None):
     m = REPO_BY_ID[mid]
+    profile_name = (name or mid) + ".json"
+    # Vendored structural template (openhands/profiles/<name>.json): model id,
+    # base_url, auth shape and the thinking flags. Token windows, prices and
+    # the api_key are projected below, so the catalog stays the single source
+    # of truth for everything numeric.
+    p = dict(TEMPLATES.get(profile_name, {}))
     if m.get("openrouter_id"):
         model = "openrouter/" + m["openrouter_id"]
     else:
         model = m["direct"]["model"]
-    p = {"model": model, "max_input_tokens": m["context"],
-         "max_output_tokens": m["output"],
-         "input_cost_per_token": m["input_price"],
-         "output_cost_per_token": m["output_price"]}
+    p.update({"model": model, "max_input_tokens": m["context"],
+              "max_output_tokens": m["output"],
+              "input_cost_per_token": m["input_price"],
+              "output_cost_per_token": m["output_price"]})
     if m.get("direct", {}).get("base_url"):
         p["base_url"] = m["direct"]["base_url"]
+    elif "base_url" in p and m.get("openrouter_id"):
+        # OpenRouter endpoints resolve server-side; never persist a stale URL.
+        del p["base_url"]
     if m.get("reasoning"):
         p["reasoning_effort"] = "high"
+    else:
+        # Explicit opt-out. The OpenHands SDK LLM model defaults to
+        # reasoning_effort=high + encrypted reasoning + a 200k thinking
+        # budget, and any sparse profile is materialized through those
+        # defaults. Non-thinking providers (Ollama) hard-fail such requests
+        # with '"model" does not support thinking'.
+        p["reasoning_effort"] = "none"
+        p["enable_encrypted_reasoning"] = False
+        p["extended_thinking_budget"] = None
     for opt in ("paid_input_price", "paid_output_price", "cache_read_price"):
         dst = {"paid_input_price": "paid_input_cost_per_token",
                "paid_output_price": "paid_output_cost_per_token",
@@ -1548,19 +1624,26 @@ def _profile_for(mid, key, name=None):
         if m.get(opt) is not None:
             p[dst] = m[opt]
     p["api_key"] = key
-    return (name or mid) + ".json", p
+    return profile_name, p
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(models_file)))
+TEMPLATES = {}
+_templates_dir = os.path.join(REPO_ROOT, "openhands", "profiles")
+if os.path.isdir(_templates_dir):
+    for _fn in os.listdir(_templates_dir):
+        if _fn.endswith(".json"):
+            try:
+                with open(os.path.join(_templates_dir, _fn), "r", encoding="utf-8") as _tf:
+                    TEMPLATES[_fn] = json.load(_tf)
+            except Exception:
+                pass
 
 secrets = {}
 if secrets_file and os.path.isfile(secrets_file):
-    try:
-        with open(secrets_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    secrets[k.strip().lower()] = v.strip().strip("\"'")
-    except Exception:
-        pass
+    # Only the real conf. api_keys.conf.example is never read: its placeholder
+    # keys are truthy and would make muse the default LLM with a key the
+    # provider rejects, instead of falling through to the local Ollama model.
+    _read_secrets_file(secrets_file, secrets)
 
 muse_key = os.environ.get("MUSE_API_KEY") or secrets.get("muse")
 deepseek_key = os.environ.get("DEEPSEEK_API_KEY") or secrets.get("deepseek")
@@ -1585,26 +1668,39 @@ agent_settings.setdefault("agent", "CodeActAgent")
 llm = agent_settings.setdefault("llm", {})
 _muse = REPO_BY_ID["muse-spark"]["direct"]
 _ds = REPO_BY_ID["deepseek-chat"]["direct"]
+# reasoning_effort must follow the chosen default: only thinking models get
+# "high". The unconditional "high" used to poison the local/Ollama fallback
+# (and deepseek-chat) with thinking params Ollama rejects outright.
+_default_reasoning = False
 if muse_key:
     llm["model"] = _muse["model"]
     llm["base_url"] = _muse["base_url"]
     llm["api_key"] = muse_key
+    _default_reasoning = bool(REPO_BY_ID["muse-spark"].get("reasoning"))
 elif deepseek_key:
     llm["model"] = _ds["model"]
     llm["base_url"] = _ds["base_url"]
     llm["api_key"] = deepseek_key
+    _default_reasoning = bool(REPO_BY_ID["deepseek-chat"].get("reasoning"))
 elif openrouter_key:
     llm["model"] = "openrouter/openrouter/free"
     llm["base_url"] = "https://openrouter.ai/api/v1"
     llm["api_key"] = openrouter_key
+    _default_reasoning = bool(REPO_BY_ID["openrouter-free"].get("reasoning"))
 else:
     _local = REPO_BY_ID["ollama-qwen2.5-coder"]["direct"]
     llm["model"] = _local["model"]
     llm["base_url"] = _local["base_url"]
+    _default_reasoning = bool(REPO_BY_ID["ollama-qwen2.5-coder"].get("reasoning"))
 
 llm["max_input_tokens"] = 1048576
 llm["max_output_tokens"] = 65536
-llm["reasoning_effort"] = "high"
+if _default_reasoning:
+    llm["reasoning_effort"] = "high"
+else:
+    llm["reasoning_effort"] = "none"
+    llm["enable_encrypted_reasoning"] = False
+    llm["extended_thinking_budget"] = None
 llm["drop_params"] = True
 llm["modify_params"] = True
 
@@ -1697,21 +1793,30 @@ profiles = dict([
     _profile_for("openrouter-ling-vl", openrouter_key),
     _profile_for("ollama-qwen2.5-coder", None),
 ])
+# Legacy alias: older setups wrote ollama-qwen-coder.json and existing UI
+# selections point at it. Keep it byte-identical to the canonical profile.
+_alias_src, _alias_data = _profile_for("ollama-qwen2.5-coder", None)
+profiles["ollama-qwen-coder.json"] = _alias_data
 for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), "w", encoding="utf-8") as f:
         json.dump(p_data, f, indent=2)
 
 agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
-acp_agents = {
-    "claude-sonnet.json": {"name": "Claude Sonnet ACP", "model": "anthropic/claude-3-7-sonnet-latest", "description": "Claude Sonnet coding agent"},
-    "claude-opus.json": {"name": "Claude Opus ACP", "model": "anthropic/claude-3-opus-latest", "description": "Claude Opus high-reasoning agent"},
-    "claude-haiku.json": {"name": "Claude Haiku ACP", "model": "anthropic/claude-3-5-haiku-latest", "description": "Claude Haiku fast execution agent"},
-    "agy-gemini-3.8-flash.json": {"name": "Gemini 3.8 Flash ACP", "model": "gemini/gemini-2.5-flash", "description": "Fast Google Antigravity Gemini agent"},
-    "agy-gemini-pro.json": {"name": "Gemini Pro ACP", "model": "gemini/gemini-2.5-pro", "description": "Deep reasoning Antigravity Gemini agent"}
-}
-for name, a_data in acp_agents.items():
-    with open(os.path.join(agent_profiles_dir, name), "w", encoding="utf-8") as f:
-        json.dump(a_data, f, indent=2)
+# Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
+# the desired state and are copied verbatim on every setup. Their
+# llm_profile_ref values point at the canonical profile names written above.
+_vendored_agents = os.path.join(REPO_ROOT, "openhands", "agent-profiles")
+if os.path.isdir(_vendored_agents):
+    for _fn in sorted(os.listdir(_vendored_agents)):
+        if not _fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(_vendored_agents, _fn), "r", encoding="utf-8") as _af:
+                _a_data = json.load(_af)
+            with open(os.path.join(agent_profiles_dir, _fn), "w", encoding="utf-8") as _of:
+                json.dump(_a_data, _of, indent=2)
+        except Exception:
+            pass
 PY
 
     ui_ok "OpenHands configuration and profiles written to $openhands_dir"

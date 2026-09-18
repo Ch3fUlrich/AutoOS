@@ -386,6 +386,95 @@ PY
     then pass; else fail "openhands projector misses a shared model (see above)"; fi
 fi
 
+if it "the vendored openhands profiles match the catalog snapshot"; then
+    # openhands/profiles/*.json carry a committed copy of the catalog numbers
+    # (windows, prices) plus the model id and thinking flags. The installers
+    # overlay fresh catalog numbers at setup (catalog wins), but a drifted
+    # template would ship stale prices to anyone reading the repo, so any
+    # mismatch fails here. api_key is injected at install time and absent.
+    if python3 - <<'PY'
+import json, glob, os, sys
+models = {m["id"]: m for m in json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]}
+aliases = {"muse-spark-1.3": "muse-spark", "muse-spark-1.3-contributor": "muse-spark",
+           "ollama-qwen-coder": "ollama-qwen2.5-coder"}
+price_dst = {"paid_input_price": "paid_input_cost_per_token",
+             "paid_output_price": "paid_output_cost_per_token",
+             "cache_read_price": "cache_read_cost_per_token"}
+files = sorted(glob.glob("openhands/profiles/*.json"))
+assert files, "no vendored profiles"
+for path in files:
+    name = os.path.basename(path)[:-5]
+    mid = aliases.get(name, name)
+    assert mid in models, f"{path}: unknown model {mid}"
+    m, p = models[mid], json.load(open(path, encoding="utf-8"))
+    want_model = ("openrouter/" + m["openrouter_id"]) if m.get("openrouter_id") else m["direct"]["model"]
+    checks = {"model": want_model, "max_input_tokens": m["context"],
+              "max_output_tokens": m["output"], "input_cost_per_token": m["input_price"],
+              "output_cost_per_token": m["output_price"],
+              "reasoning_effort": ("high" if m.get("reasoning") else "none")}
+    if m.get("direct", {}).get("base_url"):
+        checks["base_url"] = m["direct"]["base_url"]
+    for opt, dst in price_dst.items():
+        if m.get(opt) is not None:
+            checks[dst] = m[opt]
+    for k, v in checks.items():
+        assert p.get(k) == v, f"{path}: {k}={p.get(k)!r} != catalog {v!r}"
+    assert "api_key" not in p, f"{path}: must not vendor secrets"
+    if not m.get("reasoning"):
+        assert p.get("enable_encrypted_reasoning") is False, f"{path}: thinking not opted out"
+        assert p.get("extended_thinking_budget") is None, f"{path}: thinking budget not nulled"
+PY
+    then pass; else fail "vendored openhands profiles drifted from catalog (see above)"; fi
+fi
+
+if it "resolve_ollama_base_url: OLLAMA_BASE_URL wins and is normalised to /v1"; then
+    got="$(curl() { return 1; }; OLLAMA_BASE_URL="http://gpu-box:11434/" resolve_ollama_base_url)"
+    assert_eq "$got" "http://gpu-box:11434/v1"
+fi
+
+if it "resolve_ollama_base_url: host.docker.internal is chosen only when Ollama answers there"; then
+    got="$(unset OLLAMA_BASE_URL; curl() { [[ "$*" == *host.docker.internal:11434/api/version* ]]; }; resolve_ollama_base_url)"
+    assert_eq "$got" "http://host.docker.internal:11434/v1"
+fi
+
+if it "resolve_ollama_base_url: a native Linux host (no host.docker.internal) keeps the catalog default"; then
+    # Empty output = "use the catalog's 127.0.0.1", which is what a host-run
+    # agent-canvas (agent-server via uvx on the host) can reach.
+    got="$(unset OLLAMA_BASE_URL; curl() { return 6; }; resolve_ollama_base_url)"
+    assert_eq "$got" ""
+fi
+
+if it "setup_openhands_config writes the resolved Ollama address into the profile and the keyless default"; then
+    tmp="$(mktemp -d)"
+    out="$(
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
+        unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        curl() { return 6; }
+        OLLAMA_BASE_URL="http://ollama:11434" setup_openhands_config >/dev/null 2>&1
+        python3 - "$tmp/.openhands" <<'PY'
+import json, sys, os
+d = sys.argv[1]
+p = json.load(open(os.path.join(d, "profiles", "ollama-qwen2.5-coder.json"), encoding="utf-8"))
+s = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))
+print(p["base_url"], s["agent_settings"]["llm"]["base_url"], "api_key" in p and p["api_key"] is None)
+PY
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "http://ollama:11434/v1 http://ollama:11434/v1 True"
+fi
+
+if it "vendored agent profiles reference existing llm profiles"; then
+    if python3 - <<'PY'
+import json, glob, os, sys
+llm = {os.path.basename(p)[:-5] for p in glob.glob("openhands/profiles/*.json")}
+for path in sorted(glob.glob("openhands/agent-profiles/*.json")):
+    ref = json.load(open(path, encoding="utf-8")).get("llm_profile_ref")
+    if ref is not None:
+        assert ref in llm, f"{path}: llm_profile_ref {ref!r} has no vendored profile"
+PY
+    then pass; else fail "agent profile references missing llm profile (see above)"; fi
+fi
+
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
 describe "catalog loading"
 detect_system

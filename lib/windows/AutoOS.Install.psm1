@@ -57,6 +57,69 @@ function Get-AutoOSNativePercent {
     -1
 }
 
+function Read-AutoOSSecretsFile {
+    <#
+      .SYNOPSIS Read one api_keys.conf-style file into a hashtable (first wins).
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Secrets)
+    if (-not (Test-Path $Path)) { return }
+    Get-Content $Path -Encoding UTF8 | ForEach-Object {
+        $line = $_.Trim()
+        if ($line -and -not $line.StartsWith('#') -and $line -match '=') {
+            $parts = $line.Split('=', 2)
+            $key = $parts[0].Trim()
+            if (-not $Secrets.ContainsKey($key)) { $Secrets[$key] = $parts[1].Trim() }
+        }
+    }
+}
+
+function Read-AutoOSApiSecrets {
+    <#
+      .SYNOPSIS Load API keys: env is consulted by callers; the file fills the rest.
+
+      .DESCRIPTION
+        Reads only the real api_keys.conf. The shipped api_keys.conf.example
+        is never read: its placeholder keys are truthy, so a fallback to it
+        made muse the default LLM with a key the provider rejects (401)
+        instead of falling through to the local Ollama default.
+    #>
+    param([Parameter(Mandatory)][string]$SecretsPath)
+    $secrets = @{}
+    Read-AutoOSSecretsFile -Path $SecretsPath -Secrets $secrets
+    return $secrets
+}
+
+
+function Resolve-AutoOSOllamaBaseUrl {
+    <#
+      .SYNOPSIS The Ollama endpoint for the generated configs, or $null for the catalog default.
+
+      .DESCRIPTION
+        OpenHands' agent-server runs on the host under agent-canvas (uvx) but in
+        a container under docker compose, and 127.0.0.1 inside a container is the
+        container itself. So: OLLAMA_BASE_URL when set (normalised to /v1); else
+        host.docker.internal when Ollama answers there (Docker Desktop: reachable
+        from the host AND from containers); else $null, which keeps the catalog's
+        http://127.0.0.1:11434/v1 - right for a host-run agent-canvas, and for a
+        native Ollama bound to loopback. Same rules as resolve_ollama_base_url.
+    #>
+    param(
+        # Returns $true when Ollama answers at the URL. Injectable so tests
+        # never touch the network.
+        [scriptblock]$Probe = {
+            param($Url)
+            try { Invoke-RestMethod -Uri $Url -TimeoutSec 2 -ErrorAction Stop | Out-Null; $true } catch { $false }
+        }
+    )
+    if ($env:OLLAMA_BASE_URL) {
+        $url = $env:OLLAMA_BASE_URL.TrimEnd('/')
+        if ($url -notmatch '/v1$') { $url += '/v1' }
+        return $url
+    }
+    if (& $Probe 'http://host.docker.internal:11434/api/version') { return 'http://host.docker.internal:11434/v1' }
+    return $null
+}
+
 function Invoke-AutoOSProcess {
     <#
       .SYNOPSIS Run a command, honouring -DryRun; returns @{ ExitCode; Output }.
@@ -1134,6 +1197,8 @@ function Set-AutoOSOpenCodeConfig {
     $repoModels = (Get-Content -Path $modelsFile -Raw -Encoding UTF8 | ConvertFrom-Json).models
     $repoById = @{}
     foreach ($m in $repoModels) { $repoById[$m.id] = $m }
+    $ollamaUrl = Resolve-AutoOSOllamaBaseUrl
+    if ($ollamaUrl) { $repoById['ollama-qwen2.5-coder'].direct.base_url = $ollamaUrl }
 
     function Get-OpenRouterModelEntry($m) {
         # Projects one shared entry into the OpenCode provider shape.
@@ -1168,16 +1233,7 @@ function Set-AutoOSOpenCodeConfig {
     }
 
     $secretsPath = Join-Path $HOME 'Documents\Code\agent-skills\secrets\api_keys.conf'
-    $secrets = @{}
-    if (Test-Path $secretsPath) {
-        Get-Content $secretsPath -Encoding UTF8 | ForEach-Object {
-            $line = $_.Trim()
-            if ($line -and -not $line.StartsWith('#') -and $line -match '=') {
-                $parts = $line.Split('=', 2)
-                $secrets[$parts[0].Trim()] = $parts[1].Trim()
-            }
-        }
-    }
+    $secrets = Read-AutoOSApiSecrets -SecretsPath $secretsPath
 
     $museKey = if ($env:MUSE_API_KEY) { $env:MUSE_API_KEY } elseif ($secrets.ContainsKey('muse')) { $secrets['muse'] } else { $null }
     if ($museKey) {
@@ -1343,19 +1399,7 @@ function Set-AutoOSOpenHandsConfig {
     }
 
     $secretsPath = Join-Path $HOME 'Documents\Code\agent-skills\secrets\api_keys.conf'
-    if (-not (Test-Path $secretsPath)) {
-        $secretsPath = Join-Path $HOME 'Documents\code\agent-skills\secrets\api_keys.conf'
-    }
-    $secrets = @{}
-    if (Test-Path $secretsPath) {
-        Get-Content $secretsPath -Encoding UTF8 | ForEach-Object {
-            $line = $_.Trim()
-            if ($line -and -not $line.StartsWith('#') -and $line -match '=') {
-                $parts = $line.Split('=', 2)
-                $secrets[$parts[0].Trim()] = $parts[1].Trim()
-            }
-        }
-    }
+    $secrets = Read-AutoOSApiSecrets -SecretsPath $secretsPath
 
     $museKey = if ($env:MUSE_API_KEY) { $env:MUSE_API_KEY } elseif ($secrets.ContainsKey('muse')) { $secrets['muse'] } else { $null }
     $deepseekKey = if ($env:DEEPSEEK_API_KEY) { $env:DEEPSEEK_API_KEY } elseif ($secrets.ContainsKey('deepseek')) { $secrets['deepseek'] } else { $null }
@@ -1383,31 +1427,60 @@ function Set-AutoOSOpenHandsConfig {
     }
 
     if ($pythonCmd) {
-        $modelsFile = Join-Path $script:RepoRoot 'catalog\llm-models.json'
-        $modelsJson = (Get-Content -Path $modelsFile -Raw -Encoding UTF8).Replace('\', '\\')
-        $setupScript = @"
+        # Literal (single-quoted) here-string: the embedded Python contains
+        # $-expressions for bash ($HOME/$PATH) and Python comments ($0) that
+        # PowerShell must NOT expand. Under Set-StrictMode an expanding @"..@
+        # string throws InvalidOperation on every one of them, which broke
+        # automatic OpenHands setup entirely. The catalog is read from disk
+        # via the repo-root argument, never inlined into a string literal.
+        $setupScript = @'
 import os, sys, json
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
-REPO_MODELS = json.loads('MODELS_JSON_PLACEHOLDER')['models']
+_repo_root_arg = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] not in ('', 'null') else ''
+_models_file = os.path.join(_repo_root_arg, 'catalog', 'llm-models.json')
+with open(_models_file, 'r', encoding='utf-8') as _mf:
+    REPO_MODELS = json.load(_mf)['models']
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
+# Resolve-AutoOSOllamaBaseUrl's answer; empty keeps the catalog default. Applied
+# to the catalog entry so the profiles and the settings.json fallback agree.
+if os.environ.get('OLLAMA_BASE_URL'):
+    REPO_BY_ID['ollama-qwen2.5-coder']['direct']['base_url'] = os.environ['OLLAMA_BASE_URL']
 
 def _profile_for(mid, key, name=None):
     m = REPO_BY_ID[mid]
+    profile_name = (name or mid) + '.json'
+    # Vendored structural template (openhands/profiles/<name>.json): model id,
+    # base_url, auth shape and the thinking flags. Token windows, prices and
+    # the api_key are projected below, so the catalog stays the single source
+    # of truth for everything numeric.
+    p = dict(TEMPLATES.get(profile_name, {}))
     if m.get('openrouter_id'):
         model = 'openrouter/' + m['openrouter_id']
     else:
         model = m['direct']['model']
-    p = {'model': model, 'max_input_tokens': m['context'],
-         'max_output_tokens': m['output'],
-         'input_cost_per_token': m['input_price'],
-         'output_cost_per_token': m['output_price']}
+    p.update({'model': model, 'max_input_tokens': m['context'],
+              'max_output_tokens': m['output'],
+              'input_cost_per_token': m['input_price'],
+              'output_cost_per_token': m['output_price']})
     if m.get('direct', {}).get('base_url'):
         p['base_url'] = m['direct']['base_url']
+    elif 'base_url' in p and m.get('openrouter_id'):
+        # OpenRouter endpoints resolve server-side; never persist a stale URL.
+        del p['base_url']
     if m.get('reasoning'):
         p['reasoning_effort'] = 'high'
+    else:
+        # Explicit opt-out. The OpenHands SDK LLM model defaults to
+        # reasoning_effort=high + encrypted reasoning + a 200k thinking
+        # budget, and any sparse profile is materialized through those
+        # defaults. Non-thinking providers (Ollama) hard-fail such requests
+        # with '"model" does not support thinking'.
+        p['reasoning_effort'] = 'none'
+        p['enable_encrypted_reasoning'] = False
+        p['extended_thinking_budget'] = None
     for opt in ('paid_input_price', 'paid_output_price', 'cache_read_price'):
         dst = {'paid_input_price': 'paid_input_cost_per_token',
                'paid_output_price': 'paid_output_cost_per_token',
@@ -1415,9 +1488,20 @@ def _profile_for(mid, key, name=None):
         if m.get(opt) is not None:
             p[dst] = m[opt]
     p['api_key'] = key
-    return (name or mid) + '.json', p
+    return profile_name, p
 
 openhands_dir = sys.argv[1]
+repo_root = _repo_root_arg
+TEMPLATES = {}
+_templates_dir = os.path.join(repo_root, 'openhands', 'profiles') if repo_root else ''
+if _templates_dir and os.path.isdir(_templates_dir):
+    for _fn in os.listdir(_templates_dir):
+        if _fn.endswith('.json'):
+            try:
+                with open(os.path.join(_templates_dir, _fn), 'r', encoding='utf-8') as _tf:
+                    TEMPLATES[_fn] = json.load(_tf)
+            except Exception:
+                pass
 muse_key = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != 'null' else None
 deepseek_key = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != 'null' else None
 openrouter_key = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] != 'null' else None
@@ -1440,26 +1524,39 @@ agent_settings.setdefault('agent', 'CodeActAgent')
 llm = agent_settings.setdefault('llm', {})
 _muse = REPO_BY_ID['muse-spark']['direct']
 _ds = REPO_BY_ID['deepseek-chat']['direct']
+# reasoning_effort must follow the chosen default: only thinking models get
+# "high". The unconditional "high" used to poison the local/Ollama fallback
+# (and deepseek-chat) with thinking params Ollama rejects outright.
+_default_reasoning = False
 if muse_key:
     llm['model'] = _muse['model']
     llm['base_url'] = _muse['base_url']
     llm['api_key'] = muse_key
+    _default_reasoning = bool(REPO_BY_ID['muse-spark'].get('reasoning'))
 elif deepseek_key:
     llm['model'] = _ds['model']
     llm['base_url'] = _ds['base_url']
     llm['api_key'] = deepseek_key
+    _default_reasoning = bool(REPO_BY_ID['deepseek-chat'].get('reasoning'))
 elif openrouter_key:
     llm['model'] = 'openrouter/openrouter/free'
     llm['base_url'] = 'https://openrouter.ai/api/v1'
     llm['api_key'] = openrouter_key
+    _default_reasoning = bool(REPO_BY_ID['openrouter-free'].get('reasoning'))
 else:
     _local = REPO_BY_ID['ollama-qwen2.5-coder']['direct']
     llm['model'] = _local['model']
     llm['base_url'] = _local['base_url']
+    _default_reasoning = bool(REPO_BY_ID['ollama-qwen2.5-coder'].get('reasoning'))
 
 llm['max_input_tokens'] = 1048576
 llm['max_output_tokens'] = 65536
-llm['reasoning_effort'] = 'high'
+if _default_reasoning:
+    llm['reasoning_effort'] = 'high'
+else:
+    llm['reasoning_effort'] = 'none'
+    llm['enable_encrypted_reasoning'] = False
+    llm['extended_thinking_budget'] = None
 llm['drop_params'] = True
 llm['modify_params'] = True
 
@@ -1553,29 +1650,44 @@ profiles = dict([
     _profile_for('openrouter-ling-vl', openrouter_key),
     _profile_for('ollama-qwen2.5-coder', None),
 ])
+# Legacy alias: older setups wrote ollama-qwen-coder.json and existing UI
+# selections point at it. Keep it byte-identical to the canonical profile.
+_alias_src, _alias_data = _profile_for('ollama-qwen2.5-coder', None)
+profiles['ollama-qwen-coder.json'] = _alias_data
 for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), 'w', encoding='utf-8') as f:
         json.dump(p_data, f, indent=2)
 
 agent_profiles_dir = os.path.join(openhands_dir, 'agent-profiles')
-acp_agents = {
-    'claude-sonnet.json': {'name': 'Claude Sonnet ACP', 'model': 'anthropic/claude-3-7-sonnet-latest', 'description': 'Claude Sonnet coding agent'},
-    'claude-opus.json': {'name': 'Claude Opus ACP', 'model': 'anthropic/claude-3-opus-latest', 'description': 'Claude Opus high-reasoning agent'},
-    'claude-haiku.json': {'name': 'Claude Haiku ACP', 'model': 'anthropic/claude-3-5-haiku-latest', 'description': 'Claude Haiku fast execution agent'},
-    'agy-gemini-3.8-flash.json': {'name': 'Gemini 3.8 Flash ACP', 'model': 'gemini/gemini-2.5-flash', 'description': 'Fast Google Antigravity Gemini agent'},
-    'agy-gemini-pro.json': {'name': 'Gemini Pro ACP', 'model': 'gemini/gemini-2.5-pro', 'description': 'Deep reasoning Antigravity Gemini agent'}
-}
-for name, a_data in acp_agents.items():
-    with open(os.path.join(agent_profiles_dir, name), 'w', encoding='utf-8') as f:
-        json.dump(a_data, f, indent=2)
-"@
-        $setupScript = $setupScript.Replace('MODELS_JSON_PLACEHOLDER', $modelsJson)
+# Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
+# the desired state and are copied verbatim on every setup. Their
+# llm_profile_ref values point at the canonical profile names written above.
+_vendored_agents = os.path.join(repo_root, 'openhands', 'agent-profiles') if repo_root else ''
+if _vendored_agents and os.path.isdir(_vendored_agents):
+    for _fn in sorted(os.listdir(_vendored_agents)):
+        if not _fn.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(_vendored_agents, _fn), 'r', encoding='utf-8') as _af:
+                _a_data = json.load(_af)
+            with open(os.path.join(agent_profiles_dir, _fn), 'w', encoding='utf-8') as _of:
+                json.dump(_a_data, _of, indent=2)
+        except Exception:
+            pass
+'@
         $argMuse = if ($museKey) { $museKey } else { 'null' }
         $argDeepseek = if ($deepseekKey) { $deepseekKey } else { 'null' }
         $argOpenrouter = if ($openrouterKey) { $openrouterKey } else { 'null' }
         $argContext7 = if ($context7Key) { $context7Key } else { 'null' }
 
-        & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7
+        # The resolved address reaches the child through its environment; the
+        # caller's own OLLAMA_BASE_URL is restored afterwards.
+        $savedOllama = $env:OLLAMA_BASE_URL
+        try {
+            $env:OLLAMA_BASE_URL = Resolve-AutoOSOllamaBaseUrl
+            & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot
+        }
+        finally { $env:OLLAMA_BASE_URL = $savedOllama }
     }
 
     Write-AutoOSLine "OpenHands configuration and profiles written to $openhandsDir" -Level ok
@@ -1595,6 +1707,7 @@ function Invoke-AutoOSPostInstall {
 
 Export-ModuleMember -Function `
     Initialize-AutoOSInstaller, Get-AutoOSAnswer, Invoke-AutoOSProcess, Add-AutoOSPathEntry,
+    Read-AutoOSSecretsFile, Read-AutoOSApiSecrets, Resolve-AutoOSOllamaBaseUrl,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
     Write-AutoOSOmnigraphReadiness,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
