@@ -31,7 +31,8 @@ netsh http add urlacl url=http://+:8777/ user=$env:USERNAME
 ## Linux / macOS
 
 **`bad interpreter: /bin/bash^M`**
-The file has CRLF line endings. `.gitattributes` pins LF, so this means it was
+The file has CRLF line endings. `.gitattributes` pins LF (CRLF only for
+`.ps1`/`.psm1`/`.psd1`), so this means it was
 edited by something that ignored it:
 ```bash
 sed -i 's/\r$//' setup.sh
