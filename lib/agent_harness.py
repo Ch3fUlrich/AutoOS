@@ -7,6 +7,8 @@ One generator, used by both installers. Pure functions plus a small CLI:
     pin SERVER       print the pinned package for one MCP server
     serena-excluded  print Serena's excluded tools, one per line
     opencode         merge the harness into an OpenCode config
+    vendor           render the vendored OpenHands agent profiles
+    openhands        merge the harness into an installed ~/.openhands tree
 
 Only the standard library is used, and nothing here touches the network.
 """
@@ -16,6 +18,7 @@ import json
 import os
 import shutil
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -348,6 +351,16 @@ def _print_notes(notes):
         print("  note: %s" % note)
 
 
+def _backup_and_write(path, text):
+    """Write `text` to `path`, copying an existing file aside first (hard rule 5)."""
+    if os.path.exists(path):
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        shutil.copyfile(path, "%s.autoos-backup-%s" % (path, stamp))
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+
+
 def cmd_opencode(args):
     harness = load_harness(args.harness)
     config_path = args.config
@@ -389,12 +402,7 @@ def cmd_opencode(args):
         _print_notes(notes)
         return 0
 
-    if existed:
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        shutil.copyfile(config_path, "%s.autoos-backup-%s" % (config_path, stamp))
-    os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
-    with open(config_path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(desired, indent=2, ensure_ascii=False) + "\n")
+    _backup_and_write(config_path, json.dumps(desired, indent=2, ensure_ascii=False) + "\n")
     if link_needs_change:
         if os.path.islink(link_path) or _is_junction(link_path):
             _remove_link(link_path)
@@ -404,6 +412,180 @@ def cmd_opencode(args):
         % ("updated" if existed else "installed", config_path)
     )
     _print_notes(notes)
+    return 0
+
+
+# --------------------------------------------------------------------------- openhands
+
+
+def vendored_base(repo_root, profile):
+    """The vendored profile for `profile`; worker's shape when there is no file yet.
+
+    `implementer` is new, so its base is `worker.json` with a deterministic id and
+    revision 0. uuid5 keeps that id stable across runs and machines.
+    """
+    directory = os.path.join(repo_root, "openhands", "agent-profiles")
+    path = os.path.join(directory, profile + ".json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    with open(os.path.join(directory, "worker.json"), encoding="utf-8") as handle:
+        base = json.load(handle)
+    base["id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, "autoos-agent-profile:" + profile))
+    base["revision"] = 0
+    return base
+
+
+LEAF_SUFFIX = (
+    "Follow the AGENTS.md of the repository you work in and the coding-principles skill."
+)
+
+
+def render_profile(role_name, role, base, contract_ref):
+    """Return a copy of `base` carrying this role's OpenHands settings.
+
+    Managed keys are overwritten in place so the base's key order is kept; a key
+    the base does not have is appended. Everything the role does not own survives.
+    """
+    profile = copy.deepcopy(base)
+    openhands = role["openhands"]
+    profile["name"] = openhands["profile"]
+    profile["llm_profile_ref"] = openhands["llm_profile_ref"]
+    profile["enable_sub_agents"] = role["spawn"]
+    profile["mcp_server_refs"] = list(role["mcp"])
+    suffix = LEAF_SUFFIX
+    if role.get("leaf"):
+        suffix += " You are a leaf: follow the leaf contract at " + contract_ref + "."
+    if role.get("spawn"):
+        suffix += (
+            " You may start sub-agents: brief each one as a leaf under the leaf contract at "
+            + contract_ref
+            + ", then judge and commit its edits yourself."
+        )
+    profile["system_message_suffix"] = suffix
+    return profile
+
+
+def _serialize_profile(profile):
+    return json.dumps(profile, indent=2, ensure_ascii=False) + "\n"
+
+
+def _apply_file(path, text, dry_run):
+    """Write `text` idempotently and return the status word for its line.
+
+    Equal means equal JSON in the same key order, not equal bytes: OpenHands and
+    the installer's own writer format these files differently, and a formatting
+    difference alone must not cost a write and a backup on every run.
+    """
+    existed = os.path.exists(path)
+    if existed:
+        try:
+            with open(path, encoding="utf-8-sig") as handle:
+                current = json.load(handle)
+            if json.dumps(current) == json.dumps(json.loads(text)):
+                return "skipped"
+        except (OSError, ValueError):
+            pass
+    if dry_run:
+        return "would update" if existed else "would install"
+    _backup_and_write(path, text)
+    return "updated" if existed else "installed"
+
+
+def cmd_vendor(args):
+    harness = load_harness(args.harness)
+    roles = harness.get("roles") or {}
+    contract_ref = harness["rules"]["leaf_contract"]
+    directory = os.path.join(args.repo_root, "openhands", "agent-profiles")
+    # Render everything before writing: the new implementer base is worker.json, so
+    # worker.json must still hold its pre-vendor bytes when implementer reads it.
+    rendered = {}
+    for role_name, role in roles.items():
+        profile = role["openhands"]["profile"]
+        base = vendored_base(args.repo_root, profile)
+        rendered[profile] = _serialize_profile(
+            render_profile(role_name, role, base, contract_ref)
+        )
+    if args.check:
+        differing = []
+        for profile, text in rendered.items():
+            path = os.path.join(directory, profile + ".json")
+            try:
+                with open(path, "rb") as handle:
+                    current = handle.read()
+            except OSError:
+                current = None
+            if current != text.encode("utf-8"):
+                differing.append(path)
+        if differing:
+            for path in differing:
+                print("agent-harness vendor: differs %s" % path)
+            return 1
+        print("agent-harness vendor: ok")
+        return 0
+    for profile, text in rendered.items():
+        path = os.path.join(directory, profile + ".json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+    return 0
+
+
+def _installed_base(path):
+    """The parsed installed profile, or None when absent/unreadable/not an object."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8-sig") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _settings_status(settings_path, enable, dry_run):
+    """The status word for settings.json, or None when it must be left alone."""
+    if not os.path.exists(settings_path):
+        desired = {"agent_settings": {"enable_sub_agents": enable}}
+        return _apply_file(settings_path, _serialize_profile(desired), dry_run)
+    try:
+        with open(settings_path, encoding="utf-8-sig") as handle:
+            settings = json.load(handle)
+    except ValueError:
+        return None
+    if not isinstance(settings, dict):
+        return None
+    if "agent_settings" not in settings:
+        settings["agent_settings"] = {}
+    agent_settings = settings["agent_settings"]
+    if not isinstance(agent_settings, dict):
+        return None
+    agent_settings["enable_sub_agents"] = enable
+    return _apply_file(settings_path, _serialize_profile(settings), dry_run)
+
+
+def cmd_openhands(args):
+    harness = load_harness(args.harness)
+    roles = harness.get("roles") or {}
+    contract_ref = _join(args.repo_root, harness["rules"]["leaf_contract"])
+    enable = bool((roles.get("orchestrator") or {}).get("spawn"))
+
+    settings_path = os.path.join(args.openhands_dir, "settings.json")
+    status = _settings_status(settings_path, enable, args.dry_run)
+    if status is None:
+        print("agent-harness openhands: left alone %s" % settings_path)
+    else:
+        print("agent-harness openhands: %s %s" % (status, settings_path))
+
+    for role_name, role in roles.items():
+        profile = role["openhands"]["profile"]
+        path = os.path.join(args.openhands_dir, "agent-profiles", profile + ".json")
+        base = _installed_base(path)
+        if base is None:
+            base = vendored_base(args.repo_root, profile)
+        rendered = render_profile(role_name, role, base, contract_ref)
+        status = _apply_file(path, _serialize_profile(rendered), args.dry_run)
+        print("agent-harness openhands: %s %s" % (status, path))
     return 0
 
 
@@ -434,6 +616,17 @@ def build_parser():
     opencode.add_argument("--skills-source", required=True)
     opencode.add_argument("--dry-run", action="store_true")
     opencode.set_defaults(func=cmd_opencode)
+
+    vendor = with_harness(subparsers.add_parser("vendor"))
+    vendor.add_argument("--repo-root", required=True)
+    vendor.add_argument("--check", action="store_true")
+    vendor.set_defaults(func=cmd_vendor)
+
+    openhands = with_harness(subparsers.add_parser("openhands"))
+    openhands.add_argument("--openhands-dir", required=True)
+    openhands.add_argument("--repo-root", required=True)
+    openhands.add_argument("--dry-run", action="store_true")
+    openhands.set_defaults(func=cmd_openhands)
     return parser
 
 

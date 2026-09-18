@@ -362,5 +362,209 @@ class SkillsLinkTests(unittest.TestCase):
             self.assertEqual(marker.read_text(encoding="utf-8"), "mine")
 
 
+class RenderProfileTests(unittest.TestCase):
+    def render(self, name, base, contract_ref="docs/agents/leaf-contract.md"):
+        module = load_module()
+        role = harness_data()["roles"][name]
+        return module.render_profile(name, role, base, contract_ref)
+
+    def test_managed_keys_are_set_from_the_role_and_user_keys_kept(self):
+        role = harness_data()["roles"]["orchestrator"]
+        profile = self.render("orchestrator", {"custom": 1})
+        self.assertEqual(profile["name"], role["openhands"]["profile"])
+        self.assertEqual(profile["llm_profile_ref"], role["openhands"]["llm_profile_ref"])
+        self.assertEqual(profile["enable_sub_agents"], role["spawn"])
+        self.assertEqual(profile["mcp_server_refs"], role["mcp"])
+        self.assertEqual(profile["custom"], 1)
+
+    def test_base_key_order_is_kept(self):
+        base = OrderedDict([("first", 1), ("name", "old"), ("last", 2)])
+        profile = self.render("leaf-implementer", base)
+        self.assertEqual(list(profile)[:3], ["first", "name", "last"])
+
+    def test_a_leaf_suffix_names_the_contract_and_forbids_spawning(self):
+        profile = self.render("leaf-reviewer", {})
+        suffix = profile["system_message_suffix"]
+        self.assertTrue(
+            suffix.startswith(
+                "Follow the AGENTS.md of the repository you work in and the coding-principles skill."
+            )
+        )
+        self.assertIn(
+            " You are a leaf: follow the leaf contract at docs/agents/leaf-contract.md.",
+            suffix,
+        )
+        self.assertNotIn("sub-agents", suffix)
+
+    def test_a_spawning_suffix_names_the_contract_and_allows_sub_agents(self):
+        profile = self.render("orchestrator", {}, "/repo/docs/agents/leaf-contract.md")
+        suffix = profile["system_message_suffix"]
+        self.assertIn(
+            " You may start sub-agents: brief each one as a leaf under the leaf contract at "
+            "/repo/docs/agents/leaf-contract.md, then judge and commit its edits yourself.",
+            suffix,
+        )
+        self.assertNotIn("You are a leaf", suffix)
+
+
+class VendoredProfileTests(unittest.TestCase):
+    PROFILES = ("orchestrator", "suborchestrator", "implementer", "worker")
+    LEAVES = ("implementer", "worker")
+
+    def load(self, name):
+        path = ROOT / "openhands" / "agent-profiles" / (name + ".json")
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_spawning_profiles_enable_sub_agents_and_leaves_do_not(self):
+        for name in ("orchestrator", "suborchestrator"):
+            self.assertTrue(self.load(name)["enable_sub_agents"], name)
+        for name in self.LEAVES:
+            self.assertFalse(self.load(name)["enable_sub_agents"], name)
+
+    def test_the_reviewer_profile_uses_the_deepseek_model(self):
+        self.assertEqual(self.load("worker")["llm_profile_ref"], "deepseek-v4-flash")
+
+    def test_every_profile_names_agents_md_and_the_leaf_contract(self):
+        for name in self.PROFILES:
+            suffix = self.load(name)["system_message_suffix"]
+            self.assertIn("AGENTS.md", suffix, name)
+            self.assertIn("leaf-contract.md", suffix, name)
+
+    def test_leaf_profiles_do_not_get_omnigraph(self):
+        for name in self.LEAVES:
+            self.assertNotIn("omnigraph", self.load(name)["mcp_server_refs"], name)
+
+
+class VendorTests(unittest.TestCase):
+    def test_vendor_check_passes_on_the_repository(self):
+        result = run_cli(
+            "vendor", "--harness", str(HARNESS), "--repo-root", str(ROOT), "--check"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("agent-harness vendor: ok", result.stdout)
+
+    def test_vendor_check_names_a_drifted_role_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profiles = Path(tmp) / "openhands" / "agent-profiles"
+            shutil.copytree(ROOT / "openhands" / "agent-profiles", profiles)
+            drifted = profiles / "worker.json"
+            doc = json.loads(drifted.read_text(encoding="utf-8"))
+            doc["enable_sub_agents"] = True
+            drifted.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            result = run_cli(
+                "vendor", "--harness", str(HARNESS), "--repo-root", tmp, "--check"
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("worker", result.stdout)
+
+
+class OpenhandsTests(unittest.TestCase):
+    def run_openhands(self, openhands_dir, *extra):
+        return run_cli(
+            "openhands",
+            "--harness", str(HARNESS),
+            "--openhands-dir", str(openhands_dir),
+            "--repo-root", str(ROOT),
+            *extra,
+        )
+
+    def test_settings_merge_keeps_every_other_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            settings = {
+                "schema_version": 2,
+                "agent_settings": {
+                    "enable_sub_agents": False,
+                    "llm": {"model": "m"},
+                    "mcp_config": {"serena": {"command": "uvx"}},
+                },
+                "user_key": [1, 2],
+            }
+            (openhands_dir / "settings.json").write_text(
+                json.dumps(settings), encoding="utf-8"
+            )
+            result = self.run_openhands(openhands_dir)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            doc = json.loads(
+                (openhands_dir / "settings.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(doc["agent_settings"]["enable_sub_agents"])
+            self.assertEqual(doc["schema_version"], 2)
+            self.assertEqual(doc["agent_settings"]["llm"], {"model": "m"})
+            self.assertEqual(
+                doc["agent_settings"]["mcp_config"], {"serena": {"command": "uvx"}}
+            )
+            self.assertEqual(doc["user_key"], [1, 2])
+
+    def test_an_installed_profile_keeps_a_user_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            profiles = openhands_dir / "agent-profiles"
+            profiles.mkdir()
+            (profiles / "worker.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "id": "installed",
+                        "condenser": {"max_size": 99},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_openhands(openhands_dir)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            doc = json.loads((profiles / "worker.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["condenser"], {"max_size": 99})
+
+    def test_second_run_only_skips_and_changes_no_byte(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            first = self.run_openhands(openhands_dir)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            before = {
+                path.relative_to(openhands_dir).as_posix(): path.read_bytes()
+                for path in openhands_dir.rglob("*")
+                if path.is_file()
+            }
+            second = self.run_openhands(openhands_dir)
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            lines = [line for line in second.stdout.splitlines() if line.strip()]
+            self.assertTrue(lines)
+            for line in lines:
+                self.assertIn("skipped", line, line)
+            after = {
+                path.relative_to(openhands_dir).as_posix(): path.read_bytes()
+                for path in openhands_dir.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(before, after)
+
+    def test_a_reformatted_but_equal_install_is_skipped(self):
+        # The installer's embedded script rewrites settings.json with its own
+        # formatting (indent=2, no final newline) right before the harness runs;
+        # equal content must still read as skipped, with no write and no backup.
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            self.assertEqual(self.run_openhands(openhands_dir).returncode, 0)
+            for path in openhands_dir.rglob("*.json"):
+                path.write_text(json.dumps(json.loads(path.read_text(encoding="utf-8"))),
+                                encoding="utf-8")
+            before = {p.name: p.read_bytes() for p in openhands_dir.rglob("*") if p.is_file()}
+            second = self.run_openhands(openhands_dir)
+            for line in [l for l in second.stdout.splitlines() if l.strip()]:
+                self.assertIn("skipped", line, line)
+            after = {p.name: p.read_bytes() for p in openhands_dir.rglob("*") if p.is_file()}
+            self.assertEqual(before, after)
+
+    def test_dry_run_on_an_empty_dir_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp) / "openhands"
+            result = self.run_openhands(openhands_dir, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("would install", result.stdout)
+            self.assertFalse(openhands_dir.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
