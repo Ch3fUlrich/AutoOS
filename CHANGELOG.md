@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — OpenHands Agent Canvas
+
+- **Vendored OpenHands profiles** in `openhands/`: 21 LLM profiles projected from
+  `catalog/llm-models.json`, and 11 agent profiles forming a three-level hierarchy
+  (orchestrator → sub-orchestrator → worker, each with a free OpenRouter variant, plus
+  Claude Code and Gemini CLI over ACP). Both installers copy them into `~/.openhands`.
+  `tests/check-vendored.py` and two suite cases fail on any drift from the catalog.
+- **The Ollama address is chosen per host.** `OLLAMA_BASE_URL` wins when set. Otherwise
+  `host.docker.internal` is used when Ollama answers there. Otherwise the catalog's
+  `127.0.0.1` is kept. A containerised OpenHands and a host-run `agent-canvas` on native
+  Linux both reach Ollama now.
+- README section on installing, configuring and starting `agent-canvas`.
+- [ADR 0005](docs/decisions/0005-openai-agents-api-not-the-backbone.md) (proposed) and
+  [the survey](docs/research/2026-09-18-openai-agents-api.md) behind it: the OpenAI Agents
+  API is not the orchestration backbone, and OpenAI joins as one reviewer pool.
+
+### Fixed — OpenHands setup
+
+- **Windows OpenHands setup failed under `Set-StrictMode`.** The embedded Python was an
+  expanding here-string, so every `$` in it was evaluated by PowerShell. It is now a literal
+  here-string that reads the catalog from disk. One suite case parses it; another runs it
+  against a temp home.
+- Non-thinking models (Ollama, `deepseek-chat`) get explicit thinking opt-outs. They used to
+  inherit `reasoning_effort: high`, which Ollama rejects.
+
 ### Added — installer / rescue USB
 
 - **`--create-usb` / `-CreateUsb` builds a bootable stick end to end**: resolve the image from
