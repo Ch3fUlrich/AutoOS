@@ -1,6 +1,6 @@
 # 0005 — The OpenAI Agents API is not the orchestration backbone; OpenAI joins as one reviewer pool
 
-Status: proposed · 2026-09-18 · evidence: [the survey](../research/2026-09-18-openai-agents-api.md)
+Status: accepted · 2026-09-18 · evidence: [the survey](../research/2026-09-18-openai-agents-api.md)
 
 ## Context
 

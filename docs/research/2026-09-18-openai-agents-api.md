@@ -1,6 +1,6 @@
 # OpenAI Agents API: survey and fit for the AutoOS + agent-skills hierarchy
 
-Written 2026-09-18. Read-only research. Decision proposed in [ADR 0005](../decisions/0005-openai-agents-api-not-the-backbone.md). It replaces the second-hand §F of
+Written 2026-09-18. Read-only research. Decision accepted in [ADR 0005](../decisions/0005-openai-agents-api-not-the-backbone.md). It replaces the second-hand §F of
 `agent-skills/docs/superpowers/plans/2026-09-17-agent-orchestration-and-autoos-merge-SURVEY.md`.
 
 **Labels.** **[S]** = stated in a primary source I fetched today. **[M]** = measured this session
