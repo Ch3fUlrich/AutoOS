@@ -848,11 +848,43 @@ if it "--check-catalog validates all five catalogs by type, not just component c
 fi
 
 if it "catalog_probe_installed identifies installed components"; then
+    # is_installed() (lib/linux/install.sh) delegates to detect_installed_status()
+    # (lib/linux/detect.sh), which for a package-manager provider runs
+    # `python3 - <provider> <package> <cask>` and has THAT python3 process
+    # shell out further to dpkg-query/snap/brew/npm to query the host's real
+    # package database. Asserting against the real git/dpkg on this machine
+    # only passes on a host with dpkg - and a stub further down that chain
+    # (e.g. a fake dpkg-query) does not help either: this suite also runs on
+    # Git Bash on Windows, where python3 is a native Windows build whose
+    # subprocess calls cannot invoke an extension-less shebang script or a
+    # .cmd stub without a real dpkg-query to fall back to. So, same style as
+    # the rescue-bootstrap sandbox's stateful python3 stub below (BS_BIN):
+    # stub python3 itself, on a narrowed PATH, at the exact call shape
+    # detect_installed_status uses - `python3 - <provider> <package> <cask>`,
+    # answering "installed"/"not-detected" straight from argv$3 (the package)
+    # without touching a package database at all. That leaves
+    # catalog_probe_installed's OWN mapping logic (CAT_INSTALLED[i] set from
+    # the probe result) the only thing under test, deterministically on any
+    # host bash can run on.
+    cpi_bin="$(mktemp -d)"
+    cat > "$cpi_bin/python3" <<'EOS'
+#!/usr/bin/env bash
+[[ "${1:-}" == "-" ]] || exit 1
+case "${3:-}" in
+    tmux) printf 'not-detected\n' ;;
+    *)    printf 'installed\n' ;;
+esac
+EOS
+    chmod +x "$cpi_bin/python3"
+
     catalog_load catalog/linux.json x64 0
-    catalog_probe_installed
-    assert_ok $?
+    PATH="$cpi_bin:$PATH" catalog_probe_installed
+    rc=$?
     git_idx="$(catalog_index_of git)"
-    assert_eq "${CAT_INSTALLED[git_idx]}" "1"
+    tmux_idx="$(catalog_index_of tmux)"
+    rm -rf "$cpi_bin"
+    assert_ok "$rc"
+    assert_eq "${CAT_INSTALLED[git_idx]}:${CAT_INSTALLED[tmux_idx]}" "1:0"
 fi
 
 if it "--list shows installed components with a checkmark"; then
