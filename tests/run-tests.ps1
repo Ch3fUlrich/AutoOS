@@ -3047,6 +3047,22 @@ Test-Case 'Set-AutoOSSerenaExclusions preserves CRLF line endings and untouched 
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case "Set-AutoOSSerenaExclusions keeps each line's own ending outside the edited block (mixed CRLF/LF) (serena)" {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'serena_config.yml'
+    $enc = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllBytes($p, $enc.GetBytes("a_setting: 1`nb_setting: 2`r`nexcluded_tools:`r`n- read_file`r`ntrailer_key: keep_me`n"))
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+        $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($p))
+        Assert-True ($text.StartsWith("a_setting: 1`nb_setting: 2`r`nexcluded_tools:")) "the lines before the block changed: [$text]"
+        Assert-True ($text.EndsWith("`ntrailer_key: keep_me`n") -and -not $text.EndsWith("`r`n")) "the LF trailer changed: [$text]"
+        Assert-True ($text.Contains('- delete_memory')) 'the canonical list was not merged'
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 Test-Case 'Set-AutoOSSerenaExclusions preserves a non-UTF-8 byte outside the block untouched (serena)' {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
