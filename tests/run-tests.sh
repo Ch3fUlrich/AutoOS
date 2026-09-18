@@ -829,6 +829,16 @@ PY
     then pass; else fail "agent profile references missing llm profile (see above)"; fi
 fi
 
+if it "agent harness installers: the OpenHands writer calls the generator and skips role profiles"; then
+    body="$(declare -f setup_openhands_config)"
+    if [[ "$body" == *'agent_harness.py" openhands'* || "$body" == *'agent_harness.py openhands'* ]] \
+        && [[ "$body" == *'_role_profiles'* ]]; then
+        pass
+    else
+        fail "setup_openhands_config does not call agent_harness.py openhands and skip role profiles"
+    fi
+fi
+
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
 describe "catalog loading"
 detect_system

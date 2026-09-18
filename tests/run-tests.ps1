@@ -3214,7 +3214,8 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
         Assert-Equal $profile.base_url 'http://ollama:11434/v1'
         Assert-Equal $settings.agent_settings.llm.base_url 'http://ollama:11434/v1'
-        Assert-True (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json')) 'vendored agent profiles not copied'
+        Assert-True (Test-Path (Join-Path $oh 'agent-profiles\claude-sonnet.json')) 'non-role vendored agent profile not copied'
+        Assert-True (-not (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json'))) 'role profile copied by the embedded script instead of the generator'
         # OpenHands ignores an MCP timeout today and may soon read it as milliseconds (#3254)
         Assert-True (-not @($settings.agent_settings.mcp_config.PSObject.Properties.Value | Where-Object { $_.PSObject.Properties.Name -contains 'timeout' })) 'an MCP server still has a timeout'
         # every MCP server is pinned: a floating npx/uvx spec changes under the user.
@@ -3231,6 +3232,12 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         }
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+Test-Case 'agent harness installers: the OpenHands writer calls the generator and skips role profiles' {
+    $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
+    Assert-True ($body -match "agent_harness\.py[\s'\)]*openhands") 'Set-AutoOSOpenHandsConfig does not call agent_harness.py openhands'
+    Assert-True ($body -match '_role_profiles') 'Set-AutoOSOpenHandsConfig does not skip role profiles'
 }
 
 Test-Case 'the embedded OpenHands setup script is valid Python' {

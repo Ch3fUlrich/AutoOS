@@ -2154,6 +2154,7 @@ profiles_dir = os.path.join(openhands_dir, 'profiles')
 profiles = dict([
     _profile_for('deepseek-chat', deepseek_key),
     _profile_for('deepseek-reasoner', deepseek_key),
+    _profile_for('deepseek-v4-flash', deepseek_key),
     _profile_for('muse-spark', muse_key, 'muse-spark-1.3'),
     _profile_for('muse-spark', muse_key, 'muse-spark-1.3-contributor'),
     _profile_for('openrouter-free', openrouter_key),
@@ -2186,10 +2187,13 @@ agent_profiles_dir = os.path.join(openhands_dir, 'agent-profiles')
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
 # the desired state and are copied verbatim on every setup. Their
 # llm_profile_ref values point at the canonical profile names written above.
+# Role profiles are generated from the harness below, not copied: copying them
+# here would race the generator and freeze the role's managed keys.
+_role_profiles = {r['openhands']['profile'] + '.json' for r in json.load(open(os.path.join(repo_root, 'catalog', 'agent-harness.json'), encoding='utf-8'))['roles'].values()}
 _vendored_agents = os.path.join(repo_root, 'openhands', 'agent-profiles') if repo_root else ''
 if _vendored_agents and os.path.isdir(_vendored_agents):
     for _fn in sorted(os.listdir(_vendored_agents)):
-        if not _fn.endswith('.json'):
+        if not _fn.endswith('.json') or _fn in _role_profiles:
             continue
         try:
             with open(os.path.join(_vendored_agents, _fn), 'r', encoding='utf-8') as _af:
@@ -2212,6 +2216,17 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
             & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot
         }
         finally { $env:OLLAMA_BASE_URL = $savedOllama }
+
+        # The role agent profiles are the generator's job: it merges the
+        # harness into whatever the embedded script left, so the roles stay in
+        # one place. Judge by exit code only; no 2>&1, since under 'Stop' Windows
+        # PowerShell 5.1 turns a native stderr line into a terminating error.
+        $harnessOut = & $pythonCmd.Source (Join-Path $script:RepoRoot 'lib\agent_harness.py') openhands --openhands-dir $openhandsDir --repo-root $script:RepoRoot
+        if ($LASTEXITCODE -ne 0) {
+            Write-AutoOSLine "agent harness not applied to OpenHands (exit $LASTEXITCODE)" -Level warn
+        } else {
+            foreach ($line in $harnessOut) { Write-AutoOSLine $line -Level muted }
+        }
     }
 
     # OpenHands probes PowerShell with a 5 s timeout and without -NoProfile
