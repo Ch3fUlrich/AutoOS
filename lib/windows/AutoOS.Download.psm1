@@ -536,12 +536,19 @@ function Resolve-AutoOSImagePage {
         return [pscustomobject]@{ Status = 'error'; Message = "pattern '$FileRegex' matched nothing under $BaseUrl" }
     }
 
+    # The minor (and patch) group is OPTIONAL: Fedora's releases/ lists bare
+    # integers (44/, no dot at all) - a dir name with no dot is still a
+    # version, just one whose missing parts compare as 0. That 0 default is
+    # also what keeps a bare integer out of the LTS rule below without any
+    # extra logic: LTS requires Minor -eq 4 (an actual ".04"), and a missing
+    # minor is 0, never 4.
     $candidates = @()
     foreach ($h in $hrefs) {
         if (-not $h.EndsWith('/')) { continue }
         $name = ConvertTo-AutoOSHrefBasename $h
-        if ($name -match '^([0-9]+)\.([0-9]+)(?:\.([0-9]+))?$') {
-            $major = [int]$Matches[1]; $minor = [int]$Matches[2]
+        if ($name -match '^([0-9]+)(?:\.([0-9]+)(?:\.([0-9]+))?)?$') {
+            $major = [int]$Matches[1]
+            $minor = if ($Matches[2]) { [int]$Matches[2] } else { 0 }
             $patch = if ($Matches[3]) { [int]$Matches[3] } else { 0 }
             $candidates += [pscustomobject]@{ Major = $major; Minor = $minor; Patch = $patch; Name = $name }
         }
@@ -609,6 +616,11 @@ function Resolve-AutoOSImageUrl {
     $fileRe = [string]$entry.file
     $sumsField = [string]$entry.sums
     $sigField = [string]$entry.sig
+    # 'leaf' is optional and absent on every entry but fedora-workstation;
+    # under Set-StrictMode Latest, $entry.leaf on an object that lacks the
+    # property throws, so it must be read property-safely.
+    $leafProp = $entry.PSObject.Properties['leaf']
+    $leafField = if ($leafProp) { [string]$leafProp.Value } else { '' }
     if (-not $index -or -not $fileRe) {
         throw "Resolve-AutoOSImageUrl: catalog entry '$ImageId' has no 'index'/'file' to resolve"
     }
@@ -626,6 +638,11 @@ function Resolve-AutoOSImageUrl {
 
         if ($result.Status -eq 'recurse') {
             $subdir = $result.Subdir
+            # 'leaf' only ever applies here, after the top stage has
+            # actually recursed - an entry that resolves directly at the
+            # top (Debian's current/ shape) never sees it, so every
+            # existing entry is unaffected by its mere presence.
+            if ($leafField) { $subdir = $subdir + $leafField }
             $leafHtml = Join-Path $work 'leaf.html'
             Get-AutoOSVerifiedFile -Uri (Get-AutoOSImageFetchUri $subdir) -Destination $leafHtml | Out-Null
             $result = Resolve-AutoOSImagePage -HtmlPath $leafHtml -BaseUrl $subdir -FileRegex $fileRe `

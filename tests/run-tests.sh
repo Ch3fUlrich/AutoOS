@@ -240,6 +240,45 @@ print(' '.join(bad))")"
     [[ -z "$out" ]] && pass || fail "raw images claiming persistence: $out"
 fi
 
+if it "image catalog: fedora-workstation's file and sums patterns match the real upstream file names (verified 2026-09-18)"; then
+    # Pure regex check against the literal upstream names - no network. The
+    # 'file' pattern must match the live ISO name and must NOT match the
+    # CHECKSUM sidecar, and vice versa for 'sums'.
+    out="$(python3 -c "
+import json, re
+data = json.load(open('catalog/images.json', encoding='utf-8'))
+entry = next(e for e in data['images'] if e['id'] == 'fedora-workstation')
+file_re = re.compile(entry['file'])
+sums_re = re.compile(entry['sums'])
+iso = 'Fedora-Workstation-Live-44-1.7.x86_64.iso'
+checksum = 'Fedora-Workstation-44-1.7-x86_64-CHECKSUM'
+ok = (bool(file_re.search(iso)) and bool(sums_re.search(checksum))
+      and not sums_re.search(iso) and not file_re.search(checksum))
+print('OK' if ok else 'FAIL')
+")"
+    [[ "$out" == "OK" ]] && pass || fail "out=$out"
+fi
+
+if it "image catalog: images_validate.py rejects a bad 'leaf' (leading '/', missing trailing '/', or a '..' segment)"; then
+    # Scratch catalog only - catalog/images.json itself is never touched by
+    # a test (constraint stated at the top of this file).
+    tmp="$(mktemp)"
+    cat >"$tmp" <<'JSON'
+{"images":[
+  {"id":"bad-leaf-a","name":"n","homepage":"https://example.org","index":"https://example.org/releases/","leaf":"/Workstation/x86_64/iso/","file":"x$","sums":"SHA256SUMS","kinds":["installer"],"writeMode":"hybrid"},
+  {"id":"bad-leaf-b","name":"n","homepage":"https://example.org","index":"https://example.org/releases/","leaf":"Workstation/x86_64/iso","file":"x$","sums":"SHA256SUMS","kinds":["installer"],"writeMode":"hybrid"},
+  {"id":"bad-leaf-c","name":"n","homepage":"https://example.org","index":"https://example.org/releases/","leaf":"../etc/","file":"x$","sums":"SHA256SUMS","kinds":["installer"],"writeMode":"hybrid"}
+]}
+JSON
+    out="$(python3 tests/helpers/images_validate.py "$tmp" 2>&1)"; rc=$?
+    rm -f "$tmp"
+    if [[ $rc -ne 0 && "$out" == *"bad-leaf-a"* && "$out" == *"bad-leaf-b"* && "$out" == *"bad-leaf-c"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
+fi
+
 # ─── Engine catalog (Task 6, plan ruling P3) ────────────────────────────────
 # catalog/engines.json is the data-shaped home for B3's engine/kind
 # compatibility matrix — usb_plan() (lib/linux/usb.sh) looks entries up by
@@ -2599,19 +2638,25 @@ describe "image_resolve"
 read -r _img_srv_pid _img_srv_port < <(_start_test_http_server "$ROOT/tests/helpers/image_index_fixtures")
 _img_cache="$(mktemp -d)"
 
-# _image_resolve_test_catalog <id> <fixture-subdir> <file-regex> [sums] [sig]
+# _image_resolve_test_catalog <id> <fixture-subdir> <file-regex> [sums] [sig] [leaf]
 # Writes a one-entry scratch images.json pointing `index` at this test run's
 # loopback fixture server, and echoes its path. AUTOOS_ROOT/catalog/images.json
 # itself is never touched (constraint: catalog/*.json stays off limits) -
-# image_resolve's optional second argument exists for exactly this.
+# image_resolve's optional second argument exists for exactly this. <leaf>
+# mirrors the catalog's optional `leaf` field (fedora-workstation: the ISO
+# sits three directories below the chosen version dir) - omitted, it is left
+# out of the entry entirely so every existing caller above is unaffected.
 _image_resolve_test_catalog() {
-    local id="$1" subdir="$2" file_re="$3" sums="${4:-SHA256SUMS}" sig="${5:--}"
+    local id="$1" subdir="$2" file_re="$3" sums="${4:-SHA256SUMS}" sig="${5:--}" leaf="${6:-}"
     local f; f="$(mktemp)"
-    python3 - "$f" "$id" "http://127.0.0.1:${_img_srv_port}/${subdir}/" "$file_re" "$sums" "$sig" <<'PY'
+    python3 - "$f" "$id" "http://127.0.0.1:${_img_srv_port}/${subdir}/" "$file_re" "$sums" "$sig" "$leaf" <<'PY'
 import json, sys
-f, id_, index, file_re, sums, sig = sys.argv[1:7]
+f, id_, index, file_re, sums, sig, leaf = sys.argv[1:8]
+entry = {"id": id_, "index": index, "file": file_re, "sums": sums, "sig": sig}
+if leaf:
+    entry["leaf"] = leaf
 with open(f, "w", encoding="utf-8") as fh:
-    json.dump({"images": [{"id": id_, "index": index, "file": file_re, "sums": sums, "sig": sig}]}, fh)
+    json.dump({"images": [entry]}, fh)
 PY
     echo "$f"
 }
@@ -2692,6 +2737,36 @@ if it "image_resolve: an -lts id with only interim directories present fails lou
     cat_json="$(_image_resolve_test_catalog ubuntu-desktop-lts ubuntu_only_interim \
         'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' SHA256SUMS SHA256SUMS.gpg)"
     out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve ubuntu-desktop-lts "$cat_json" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && "$out" == *"no LTS release directory"* ]]; then pass; else fail "rc=$rc out=$out"; fi
+    rm -f "$cat_json"
+fi
+
+if it "image_resolve: a fedora-shaped entry resolves via 'leaf' to the ISO and CHECKSUM three directories below the chosen version dir, picking the highest of 43/44 (image_resolve)"; then
+    # Real upstream shape (verified 2026-09-18): releases/ lists bare-integer
+    # version dirs (44/, no dot - VERSION_DIR must accept that), and the ISO
+    # is three levels below the chosen one (Workstation/x86_64/iso/) - `leaf`
+    # is what lets a single recursion step land there directly.
+    cat_json="$(_image_resolve_test_catalog fedora-workstation fedora_releases \
+        'Fedora-Workstation-Live-[0-9]+-[0-9.]+\.x86_64\.iso$' \
+        'Fedora-Workstation-[0-9]+-[0-9.]+-x86_64-CHECKSUM$' - 'Workstation/x86_64/iso/')"
+    out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve fedora-workstation "$cat_json" 2>&1)"; rc=$?
+    base="http://127.0.0.1:${_img_srv_port}/fedora_releases/44/Workstation/x86_64/iso"
+    if [[ $rc -eq 0 && "$out" == *"url=${base}/Fedora-Workstation-Live-44-1.7.x86_64.iso"* \
+        && "$out" == *"file=Fedora-Workstation-Live-44-1.7.x86_64.iso"* \
+        && "$out" == *"sums=${base}/Fedora-Workstation-44-1.7-x86_64-CHECKSUM"* \
+        && "$out" != *"/43/"* && "$out" != *"/test/"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
+    rm -f "$cat_json"
+fi
+
+if it "image_resolve: a bare-integer version directory (Fedora's '44/') is never LTS-eligible - it has no .04, so it must be ineligible (image_resolve)"; then
+    cat_json="$(_image_resolve_test_catalog fedora-workstation-lts fedora_releases \
+        'Fedora-Workstation-Live-[0-9]+-[0-9.]+\.x86_64\.iso$' \
+        'Fedora-Workstation-[0-9]+-[0-9.]+-x86_64-CHECKSUM$' -)"
+    out="$(AUTOOS_CACHE_DIR="$_img_cache" image_resolve fedora-workstation-lts "$cat_json" 2>&1)"; rc=$?
     if [[ $rc -ne 0 && "$out" == *"no LTS release directory"* ]]; then pass; else fail "rc=$rc out=$out"; fi
     rm -f "$cat_json"
 fi

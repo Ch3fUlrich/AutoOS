@@ -1575,12 +1575,16 @@ $imgFixtureRoot = Join-Path $Root 'tests\helpers\image_index_fixtures'
 function New-AutoOSImageTestCatalog {
     param(
         [string]$Id, [string]$FixtureSubdir, [string]$FileRegex,
-        [string]$Sums = 'SHA256SUMS', [string]$Sig = '-'
+        [string]$Sums = 'SHA256SUMS', [string]$Sig = '-', [string]$Leaf = ''
     )
     $indexUri = ConvertTo-AutoOSTestDirUri (Join-Path $imgFixtureRoot $FixtureSubdir)
     $path = Join-Path ([IO.Path]::GetTempPath()) ('aos_img_cat_' + [Guid]::NewGuid().ToString('N') + '.json')
-    @{ images = @(@{ id = $Id; index = $indexUri; file = $FileRegex; sums = $Sums; sig = $Sig }) } |
-        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding UTF8
+    $entry = @{ id = $Id; index = $indexUri; file = $FileRegex; sums = $Sums; sig = $Sig }
+    # Omitted (default '') the same way every pre-existing caller above uses
+    # it: left out of the entry entirely, mirroring the bash suite's
+    # _image_resolve_test_catalog and the "absent means ''" catalog contract.
+    if ($Leaf) { $entry['leaf'] = $Leaf }
+    @{ images = @($entry) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding UTF8
     $path
 }
 
@@ -1653,6 +1657,36 @@ Test-Case 'image_resolve: an -lts id with only interim directories present throw
     try {
         $threw = $false; $msg = ''
         try { Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no LTS release directory*') "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case "image_resolve: a fedora-shaped entry resolves via 'leaf' to the ISO and CHECKSUM three directories below the chosen version dir, picking the highest of 43/44" {
+    # Real upstream shape (verified 2026-09-18): releases/ lists bare-integer
+    # version dirs (44/, no dot), and the ISO sits three levels below the
+    # chosen one (Workstation/x86_64/iso/) - 'leaf' is what lets a single
+    # recursion step land there directly.
+    $cat = New-AutoOSImageTestCatalog -Id 'fedora-workstation' -FixtureSubdir 'fedora_releases' `
+        -FileRegex 'Fedora-Workstation-Live-[0-9]+-[0-9.]+\.x86_64\.iso$' `
+        -Sums 'Fedora-Workstation-[0-9]+-[0-9.]+-x86_64-CHECKSUM$' -Sig '-' -Leaf 'Workstation/x86_64/iso/'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'fedora-workstation' -CatalogPath $cat
+        $ok = ($r.File -eq 'Fedora-Workstation-Live-44-1.7.x86_64.iso') -and
+            ($r.Url -like '*/44/Workstation/x86_64/iso/Fedora-Workstation-Live-44-1.7.x86_64.iso') -and
+            ($r.Sums -like '*/44/Workstation/x86_64/iso/Fedora-Workstation-44-1.7-x86_64-CHECKSUM') -and
+            ($r.Url -notlike '*/43/*') -and ($r.Url -notlike '*/test/*')
+        Assert-True $ok "file=$($r.File) url=$($r.Url) sums=$($r.Sums)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case "image_resolve: a bare-integer version directory (Fedora's '44/') is never LTS-eligible - it has no .04, so it must be ineligible" {
+    $cat = New-AutoOSImageTestCatalog -Id 'fedora-workstation-lts' -FixtureSubdir 'fedora_releases' `
+        -FileRegex 'Fedora-Workstation-Live-[0-9]+-[0-9.]+\.x86_64\.iso$' `
+        -Sums 'Fedora-Workstation-[0-9]+-[0-9.]+-x86_64-CHECKSUM$' -Sig '-'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'fedora-workstation-lts' -CatalogPath $cat | Out-Null }
         catch { $threw = $true; $msg = $_.Exception.Message }
         Assert-True ($threw -and $msg -like '*no LTS release directory*') "threw=$threw msg=$msg"
     } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
