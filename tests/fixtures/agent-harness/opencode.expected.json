@@ -1,0 +1,272 @@
+{
+  "provider": {
+    "anthropic": {
+      "options": {
+        "apiKey": "{env:ANTHROPIC_API_KEY}"
+      }
+    }
+  },
+  "model": "anthropic/claude-sonnet-4",
+  "mcp": {
+    "serena": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "serena-agent"
+      ]
+    }
+  },
+  "permission": {
+    "bash": {
+      "*": "ask",
+      "npm *": "ask",
+      "git push*": "deny",
+      "git merge*": "deny",
+      "git rebase*": "deny",
+      "git reset --hard*": "deny",
+      "git branch -D*": "deny",
+      "git clean*": "deny",
+      "git worktree remove*": "deny",
+      "*git *push*": "deny",
+      "*git *merge*": "deny",
+      "*git *rebase*": "deny",
+      "*git *reset --hard*": "deny",
+      "*git *branch -D*": "deny",
+      "*git *clean*": "deny",
+      "*git *worktree remove*": "deny",
+      "gh *": "deny",
+      "rm -rf /*": "deny",
+      "rm -rf ~*": "deny",
+      "sudo *": "deny",
+      "docker compose *": "deny",
+      "docker rm*": "deny",
+      "*auth.json*": "deny",
+      "*api_keys*": "deny",
+      "*.env*": "deny",
+      "env": "deny",
+      "env *": "deny",
+      "printenv*": "deny",
+      "git commit*": "deny",
+      "*git *commit*": "deny",
+      "*git *tag*": "deny",
+      "*git *update-ref*": "deny",
+      "*git *stash*": "deny",
+      "*git *checkout*": "deny",
+      "*git *switch*": "deny",
+      "*git *restore*": "deny",
+      "*.env.example*": "allow"
+    },
+    "skill": "allow",
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*auth.json": "deny",
+      "*api_keys*": "deny",
+      "*.env.example": "allow"
+    }
+  },
+  "instructions": [
+    "my-rules.md",
+    "/fake/skills/coding-principles/SKILL.md",
+    "/fake/autoos/docs/agents/leaf-contract.md"
+  ],
+  "agent": {
+    "build": {
+      "model": "x/y"
+    },
+    "orchestrator": {
+      "description": "Top of the tree: plans, briefs, judges and commits. May spawn.",
+      "mode": "primary",
+      "model": "meta/muse-spark-1.3-contributor",
+      "permission": {
+        "task": "allow",
+        "bash": {
+          "*": "allow",
+          "git push*": "deny",
+          "git merge*": "deny",
+          "git rebase*": "deny",
+          "git reset --hard*": "deny",
+          "git branch -D*": "deny",
+          "git clean*": "deny",
+          "git worktree remove*": "deny",
+          "*git *push*": "deny",
+          "*git *merge*": "deny",
+          "*git *rebase*": "deny",
+          "*git *reset --hard*": "deny",
+          "*git *branch -D*": "deny",
+          "*git *clean*": "deny",
+          "*git *worktree remove*": "deny",
+          "gh *": "deny",
+          "rm -rf /*": "deny",
+          "rm -rf ~*": "deny",
+          "sudo *": "deny",
+          "docker compose *": "deny",
+          "docker rm*": "deny",
+          "*auth.json*": "deny",
+          "*api_keys*": "deny",
+          "*.env*": "deny",
+          "env": "deny",
+          "env *": "deny",
+          "printenv*": "deny",
+          "git commit*": "allow",
+          "*git *commit*": "allow",
+          "*git *tag*": "allow",
+          "*git *update-ref*": "allow",
+          "*git *stash*": "allow",
+          "*git *checkout*": "allow",
+          "*git *switch*": "allow",
+          "*git *restore*": "allow",
+          "*.env.example*": "allow"
+        }
+      }
+    },
+    "suborchestrator": {
+      "description": "Owns one lane: briefs leaves, judges and commits. May spawn.",
+      "mode": "subagent",
+      "model": "meta/muse-spark-1.3-contributor",
+      "permission": {
+        "task": "allow",
+        "bash": {
+          "*": "allow",
+          "git push*": "deny",
+          "git merge*": "deny",
+          "git rebase*": "deny",
+          "git reset --hard*": "deny",
+          "git branch -D*": "deny",
+          "git clean*": "deny",
+          "git worktree remove*": "deny",
+          "*git *push*": "deny",
+          "*git *merge*": "deny",
+          "*git *rebase*": "deny",
+          "*git *reset --hard*": "deny",
+          "*git *branch -D*": "deny",
+          "*git *clean*": "deny",
+          "*git *worktree remove*": "deny",
+          "gh *": "deny",
+          "rm -rf /*": "deny",
+          "rm -rf ~*": "deny",
+          "sudo *": "deny",
+          "docker compose *": "deny",
+          "docker rm*": "deny",
+          "*auth.json*": "deny",
+          "*api_keys*": "deny",
+          "*.env*": "deny",
+          "env": "deny",
+          "env *": "deny",
+          "printenv*": "deny",
+          "git commit*": "allow",
+          "*git *commit*": "allow",
+          "*git *tag*": "allow",
+          "*git *update-ref*": "allow",
+          "*git *stash*": "allow",
+          "*git *checkout*": "allow",
+          "*git *switch*": "allow",
+          "*git *restore*": "allow",
+          "*.env.example*": "allow"
+        }
+      }
+    },
+    "leaf-implementer": {
+      "description": "Implements one closed task under the leaf contract. Never spawns or commits.",
+      "mode": "subagent",
+      "model": "meta/muse-spark-1.3-contributor",
+      "permission": {
+        "task": "deny",
+        "bash": {
+          "*": "allow",
+          "git push*": "deny",
+          "git merge*": "deny",
+          "git rebase*": "deny",
+          "git reset --hard*": "deny",
+          "git branch -D*": "deny",
+          "git clean*": "deny",
+          "git worktree remove*": "deny",
+          "*git *push*": "deny",
+          "*git *merge*": "deny",
+          "*git *rebase*": "deny",
+          "*git *reset --hard*": "deny",
+          "*git *branch -D*": "deny",
+          "*git *clean*": "deny",
+          "*git *worktree remove*": "deny",
+          "gh *": "deny",
+          "rm -rf /*": "deny",
+          "rm -rf ~*": "deny",
+          "sudo *": "deny",
+          "docker compose *": "deny",
+          "docker rm*": "deny",
+          "*auth.json*": "deny",
+          "*api_keys*": "deny",
+          "*.env*": "deny",
+          "env": "deny",
+          "env *": "deny",
+          "printenv*": "deny",
+          "git commit*": "deny",
+          "*git *commit*": "deny",
+          "*git *tag*": "deny",
+          "*git *update-ref*": "deny",
+          "*git *stash*": "deny",
+          "*git *checkout*": "deny",
+          "*git *switch*": "deny",
+          "*git *restore*": "deny",
+          "*.env.example*": "allow"
+        }
+      },
+      "tools": {
+        "playwright*": false,
+        "omnigraph*": false
+      }
+    },
+    "leaf-reviewer": {
+      "description": "Reviews one change under the leaf contract. Never spawns or commits.",
+      "mode": "subagent",
+      "model": "deepseek/deepseek-v4-flash",
+      "permission": {
+        "task": "deny",
+        "bash": {
+          "*": "allow",
+          "git push*": "deny",
+          "git merge*": "deny",
+          "git rebase*": "deny",
+          "git reset --hard*": "deny",
+          "git branch -D*": "deny",
+          "git clean*": "deny",
+          "git worktree remove*": "deny",
+          "*git *push*": "deny",
+          "*git *merge*": "deny",
+          "*git *rebase*": "deny",
+          "*git *reset --hard*": "deny",
+          "*git *branch -D*": "deny",
+          "*git *clean*": "deny",
+          "*git *worktree remove*": "deny",
+          "gh *": "deny",
+          "rm -rf /*": "deny",
+          "rm -rf ~*": "deny",
+          "sudo *": "deny",
+          "docker compose *": "deny",
+          "docker rm*": "deny",
+          "*auth.json*": "deny",
+          "*api_keys*": "deny",
+          "*.env*": "deny",
+          "env": "deny",
+          "env *": "deny",
+          "printenv*": "deny",
+          "git commit*": "deny",
+          "*git *commit*": "deny",
+          "*git *tag*": "deny",
+          "*git *update-ref*": "deny",
+          "*git *stash*": "deny",
+          "*git *checkout*": "deny",
+          "*git *switch*": "deny",
+          "*git *restore*": "deny",
+          "*.env.example*": "allow"
+        }
+      },
+      "tools": {
+        "playwright*": false,
+        "omnigraph*": false
+      }
+    }
+  },
+  "$schema": "https://opencode.ai/config.json"
+}

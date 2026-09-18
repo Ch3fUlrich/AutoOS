@@ -1,0 +1,175 @@
+{
+  "version": 1,
+  "description": "The agent harness, defined once. lib/agent_harness.py generates OpenCode's opencode.json blocks and OpenHands' agent profiles from this file. Rules and skills are referenced by path, never copied.",
+  "rules": {
+    "agents_md": "AGENTS.md",
+    "skills": [
+      "coding-principles"
+    ],
+    "leaf_contract": "docs/agents/leaf-contract.md"
+  },
+  "fences": {
+    "bash_deny_all": [
+      "git push*",
+      "git merge*",
+      "git rebase*",
+      "git reset --hard*",
+      "git branch -D*",
+      "git clean*",
+      "git worktree remove*",
+      "*git *push*",
+      "*git *merge*",
+      "*git *rebase*",
+      "*git *reset --hard*",
+      "*git *branch -D*",
+      "*git *clean*",
+      "*git *worktree remove*",
+      "gh *",
+      "rm -rf /*",
+      "rm -rf ~*",
+      "sudo *",
+      "docker compose *",
+      "docker rm*",
+      "*auth.json*",
+      "*api_keys*",
+      "*.env*",
+      "env",
+      "env *",
+      "printenv*"
+    ],
+    "bash_deny_leaf": [
+      "git commit*",
+      "*git *commit*",
+      "*git *tag*",
+      "*git *update-ref*",
+      "*git *stash*",
+      "*git *checkout*",
+      "*git *switch*",
+      "*git *restore*"
+    ],
+    "bash_allow_all": [
+      "*.env.example*"
+    ],
+    "read_deny_all": [
+      "*.env",
+      "*.env.*",
+      "*auth.json",
+      "*api_keys*"
+    ],
+    "read_allow_all": [
+      "*.env.example"
+    ]
+  },
+  "mcp_servers": {
+    "serena": {
+      "package": "serena-agent==1.7.0",
+      "excluded_tools": [
+        "create_text_file",
+        "read_file",
+        "execute_shell_command",
+        "list_dir",
+        "search_for_pattern",
+        "find_file",
+        "replace_content",
+        "replace_in_files",
+        "onboarding",
+        "write_memory",
+        "read_memory",
+        "list_memories",
+        "edit_memory",
+        "rename_memory",
+        "delete_memory"
+      ]
+    },
+    "graphify": {
+      "package": "graphifyy[mcp]==0.9.63"
+    },
+    "context7": {
+      "package": "@upstash/context7-mcp@4.1.1"
+    },
+    "playwright": {
+      "package": "@playwright/mcp@0.0.81"
+    },
+    "omnigraph": {
+      "package": "@modernrelay/omnigraph-mcp@0.8.0"
+    }
+  },
+  "roles": {
+    "orchestrator": {
+      "description": "Top of the tree: plans, briefs, judges and commits. May spawn.",
+      "spawn": true,
+      "leaf": false,
+      "opencode": {
+        "mode": "primary",
+        "model": "meta/muse-spark-1.3-contributor"
+      },
+      "openhands": {
+        "profile": "orchestrator",
+        "llm_profile_ref": "muse-spark-1.3"
+      },
+      "mcp": [
+        "serena",
+        "graphify",
+        "context7",
+        "omnigraph",
+        "playwright"
+      ]
+    },
+    "suborchestrator": {
+      "description": "Owns one lane: briefs leaves, judges and commits. May spawn.",
+      "spawn": true,
+      "leaf": false,
+      "opencode": {
+        "mode": "subagent",
+        "model": "meta/muse-spark-1.3-contributor"
+      },
+      "openhands": {
+        "profile": "suborchestrator",
+        "llm_profile_ref": "muse-spark-1.3"
+      },
+      "mcp": [
+        "serena",
+        "graphify",
+        "context7",
+        "omnigraph",
+        "playwright"
+      ]
+    },
+    "leaf-implementer": {
+      "description": "Implements one closed task under the leaf contract. Never spawns or commits.",
+      "spawn": false,
+      "leaf": true,
+      "opencode": {
+        "mode": "subagent",
+        "model": "meta/muse-spark-1.3-contributor"
+      },
+      "openhands": {
+        "profile": "implementer",
+        "llm_profile_ref": "muse-spark-1.3-contributor"
+      },
+      "mcp": [
+        "serena",
+        "graphify",
+        "context7"
+      ]
+    },
+    "leaf-reviewer": {
+      "description": "Reviews one change under the leaf contract. Never spawns or commits.",
+      "spawn": false,
+      "leaf": true,
+      "opencode": {
+        "mode": "subagent",
+        "model": "deepseek/deepseek-v4-flash"
+      },
+      "openhands": {
+        "profile": "worker",
+        "llm_profile_ref": "deepseek-v4-flash"
+      },
+      "mcp": [
+        "serena",
+        "graphify",
+        "context7"
+      ]
+    }
+  }
+}
