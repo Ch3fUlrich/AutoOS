@@ -3125,11 +3125,13 @@ Test-Case 'Add-AutoOSProfileLine -Prepend goes after a using/param preamble' {
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-Test-Case 'Set-AutoOSOpenHandsConfig prepends the OpenHands guard to both existing profiles' {
+Test-Case 'Set-AutoOSOpenHandsConfig prepends the OpenHands guard to all four existing profiles' {
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'Add-AutoOSProfileLine -Prepend') 'no -Prepend guard call'
     Assert-True ($body -match "PowerShell\\Microsoft\.PowerShell_profile\.ps1") 'pwsh profile not guarded'
+    Assert-True ($body -match "'PowerShell\\profile\.ps1'") 'pwsh all-hosts profile.ps1 not guarded'
     Assert-True ($body -match "WindowsPowerShell\\Microsoft\.PowerShell_profile\.ps1") 'Windows PowerShell profile not guarded'
+    Assert-True ($body -match "WindowsPowerShell\\profile\.ps1") 'Windows PowerShell all-hosts profile.ps1 not guarded'
 }
 
 Test-Case 'the embedded OpenHands setup script writes the resolved Ollama address' {
