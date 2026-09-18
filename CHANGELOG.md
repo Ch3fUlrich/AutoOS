@@ -17,7 +17,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `127.0.0.1` is kept. A containerised OpenHands and a host-run `agent-canvas` on native
   Linux both reach Ollama now.
 - README section on installing, configuring and starting `agent-canvas`.
-- [ADR 0005](docs/decisions/0005-openai-agents-api-not-the-backbone.md) (proposed) and
+- [ADR 0005](docs/decisions/0005-openai-agents-api-not-the-backbone.md) (accepted) and
   [the survey](docs/research/2026-09-18-openai-agents-api.md) behind it: the OpenAI Agents
   API is not the orchestration backbone, and OpenAI joins as one reviewer pool.
 
