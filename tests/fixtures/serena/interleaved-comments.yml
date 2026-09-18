@@ -1,0 +1,5 @@
+excluded_tools:
+- read_file
+# keep me
+- my_tool
+last_key: x
