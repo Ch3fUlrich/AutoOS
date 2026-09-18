@@ -19,6 +19,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! bash -n "${BASH_SOURCE[0]}"; then
+    printf 'run-tests.sh: syntax error, no test was run\n' >&2
+    exit 2
+fi
 FILTER=""
 for arg in "$@"; do
     case "$arg" in
@@ -32,8 +37,11 @@ for arg in "$@"; do
 done
 
 PASS=0; FAIL=0; SKIP=0
+SUMMARY_PRINTED=0
 CURRENT=""
 FAILED_NAMES=()
+
+trap 'rc=$?; if [[ $rc -eq 0 && $SUMMARY_PRINTED -eq 0 ]]; then printf "run-tests.sh: ended before the summary line\n" >&2; exit 1; fi' EXIT
 
 RED=''; GREEN=''; YELLOW=''; DIM=''; RESET=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -156,6 +164,31 @@ AUTOOS_NO_COLOR=1
 ui_init
 
 printf '%sAutoOS Linux test suite%s  (%s)\n' "$DIM" "$RESET" "$ROOT"
+
+# ─── Test harness self-tests ────────────────────────────────────────────────
+describe "test harness"
+
+if it "the suite exits non-zero when a syntax error stops it early"; then
+    tmp="$(mktemp -d)"
+    cp "$ROOT/tests/run-tests.sh" "$tmp/run-tests.sh"
+    python3 -c "
+import sys
+with open(sys.argv[1]) as f:
+    lines = f.readlines()
+last = -1
+for i, line in enumerate(lines):
+    if line.rstrip('\n') == 'fi':
+        last = i
+if last >= 0:
+    del lines[last]
+    with open(sys.argv[1], 'w') as f:
+        f.writelines(lines)
+" "$tmp/run-tests.sh"
+    bash "$tmp/run-tests.sh" --filter __no_such_test__ >/dev/null 2>&1
+    rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -ne 0 ]]; then pass; else fail "expected non-zero exit, got $rc"; fi
+fi
 
 # ─── Catalog schema ─────────────────────────────────────────────────────────
 describe "catalog schema"
@@ -631,6 +664,22 @@ if it "ensure_serena_exclusions preserves CRLF line endings and untouched conten
     rm -rf "$tmp"
 fi
 
+if it "ensure_serena_exclusions keeps each line's own ending outside the edited block (mixed CRLF/LF) (serena)"; then
+    tmp="$(mktemp -d)"
+    cfg="$tmp/serena_config.yml"
+    printf 'a_setting: 1\nb_setting: 2\r\nexcluded_tools:\r\n- read_file\r\ntrailer_key: keep_me\n' >"$cfg"
+    ( SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0; ensure_serena_exclusions "$cfg" ) >/dev/null 2>&1
+    if out="$(python3 - "$cfg" <<'PY' 2>&1
+import sys
+data = open(sys.argv[1], 'rb').read()
+assert data.startswith(b'a_setting: 1\nb_setting: 2\r\nexcluded_tools:'), data
+assert data.endswith(b'\ntrailer_key: keep_me\n') and not data.endswith(b'\r\n'), data
+assert b'- delete_memory' in data, data
+PY
+)"; then pass; else fail "$out"; fi
+    rm -rf "$tmp"
+fi
+
 if it "ensure_serena_exclusions preserves a non-UTF-8 byte outside the block untouched (serena)"; then
     tmp="$(mktemp -d)"
     cfg="$tmp/serena_config.yml"
@@ -649,13 +698,15 @@ fi
 if it "check-serena-tools has a SERENA_FROM constant used by the uvx fallback (serena)"; then
     if python3 - <<'PY'
 import importlib.util
+import json
 import unittest.mock as mock
 
 spec = importlib.util.spec_from_file_location("check_serena_tools", "tools/check-serena-tools.py")
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-assert mod.SERENA_FROM == "serena-agent==1.7.0"
+expected = json.load(open("catalog/agent-harness.json", encoding="utf-8"))["mcp_servers"]["serena"]["package"]
+assert mod.SERENA_FROM == expected, (mod.SERENA_FROM, expected)
 with mock.patch("shutil.which", return_value=None):
     cmd = mod.default_command()
 assert cmd[:3] == ["uvx", "--from", mod.SERENA_FROM], cmd
@@ -699,14 +750,71 @@ if it "setup_openhands_config pins every MCP server it writes"; then
         python3 - "$tmp/.openhands" <<'PY'
 import json, sys, os
 m = json.load(open(os.path.join(sys.argv[1], "settings.json"), encoding="utf-8"))["agent_settings"]["mcp_config"]
-pins = {"omnigraph": "@modernrelay/omnigraph-mcp@0.8.0", "serena": "serena-agent==1.7.0",
-        "playwright": "@playwright/mcp@0.0.81", "context7": "@upstash/context7-mcp@4.1.1",
-        "graphify": "graphifyy[mcp]==0.9.63"}
+# Expected specs come from the harness, the one source of truth for the pins.
+pins = {k: v["package"] for k, v in json.load(open("catalog/agent-harness.json", encoding="utf-8"))["mcp_servers"].items()}
 print(" ".join(k for k, v in pins.items() if v not in m[k]["args"]) or "all-pinned")
 PY
     )"
     rm -rf "$tmp"
     assert_eq "$out" "all-pinned"
+fi
+
+describe "mcp pins"
+
+if it "mcp pins: lib/ carries no floating package spec"; then
+    bad=""
+    for f in lib/windows/*.psm1 lib/linux/*.sh; do
+        for needle in 'serena-agent' 'graphifyy[mcp]' '@playwright/mcp' '@upstash/context7-mcp' '@modernrelay/omnigraph-mcp'; do
+            if grep -qF -- "$needle" "$f"; then bad="$f: $needle"; break 2; fi
+        done
+    done
+    if [[ -z "$bad" ]]; then pass; else fail "floating package name found in $bad"; fi
+fi
+
+if it "mcp pins: no pinned version string appears under lib/"; then
+    bad="$(python3 - <<'PY'
+import glob, json, os, re
+h = json.load(open("catalog/agent-harness.json", encoding="utf-8"))
+versions = []
+for server in h["mcp_servers"].values():
+    match = re.search(r"@([0-9][^@]*)$", server["package"]) or re.search(r"==(.+)$", server["package"])
+    if match:
+        versions.append(match.group(1))
+bad = []
+for path in glob.glob("lib/**/*", recursive=True):
+    if not os.path.isfile(path):
+        continue
+    text = open(path, encoding="utf-8", errors="replace").read()
+    for version in versions:
+        if version in text:
+            bad.append("%s: %s" % (path, version))
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$bad" ]]; then pass; else fail "pinned version found: $bad"; fi
+fi
+
+if it "mcp pins: the client excludeTools list equals serena.excluded_tools"; then
+    tmp="$(mktemp -d)"
+    spec_file="$tmp/spec.json"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        has_cmd() { return 1; }
+        register_mcp_server() { return 0; }
+        ensure_serena_exclusions() { return 0; }
+        register_antigravity_mcp_server() { printf '%s' "$2" >"$spec_file"; }
+        install_mcp_serena >/dev/null 2>&1
+    )
+    out="$(python3 - "$spec_file" <<'PY'
+import json, sys
+spec = json.load(open(sys.argv[1], encoding="utf-8"))
+want = json.load(open("catalog/agent-harness.json", encoding="utf-8"))["mcp_servers"]["serena"]["excluded_tools"]
+print("match" if spec.get("excludeTools") == want else "mismatch: %r" % spec.get("excludeTools"))
+PY
+)"
+    rm -rf "$tmp"
+    assert_eq "$out" "match"
 fi
 
 if it "vendored agent profiles reference existing llm profiles"; then
@@ -719,6 +827,37 @@ for path in sorted(glob.glob("openhands/agent-profiles/*.json")):
         assert ref in llm, f"{path}: llm_profile_ref {ref!r} has no vendored profile"
 PY
     then pass; else fail "agent profile references missing llm profile (see above)"; fi
+fi
+
+if it "agent harness installers: the OpenHands writer calls the generator and skips role profiles"; then
+    body="$(declare -f setup_openhands_config)"
+    if [[ "$body" == *'agent_harness.py" openhands'* || "$body" == *'agent_harness.py openhands'* ]] \
+        && [[ "$body" == *'_role_profiles'* ]]; then
+        pass
+    else
+        fail "setup_openhands_config does not call agent_harness.py openhands and skip role profiles"
+    fi
+fi
+
+if it "agent harness installers: the OpenCode writer calls the generator"; then
+    body="$(declare -f setup_opencode_config)"
+    hands="$(declare -f setup_openhands_config)"
+    if { [[ "$body" == *'agent_harness.py" opencode'* ]] || [[ "$body" == *'agent_harness.py opencode'* ]]; } \
+        && declare -F autoos_skills_source >/dev/null \
+        && [[ "$body" == *'autoos_skills_source'* ]] \
+        && [[ "$hands" == *'autoos_skills_source'* ]]; then
+        pass
+    else
+        fail "setup_opencode_config does not call agent_harness.py opencode and use autoos_skills_source"
+    fi
+fi
+
+if it "agent harness: the generator's unit tests pass"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_agent_harness.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
 fi
 
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
@@ -1175,7 +1314,7 @@ if it "--check-catalog validates all five catalogs by type, not just component c
     # rc could go green for the wrong reason (e.g. an empty glob).
     out="$(bash setup.sh --check-catalog 2>&1)"; rc=$?
     if [[ $rc -eq 0 && "$out" == *"engines.json is valid"* && "$out" == *"images.json is valid"* \
-        && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"* ]]; then
+        && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"*         && "$out" == *"agent-harness.json is valid"* ]]; then
         pass
     else
         fail "rc=$rc out=$out"
@@ -4735,6 +4874,7 @@ printf '  %spassed %d%s   %sfailed %d%s   %sskipped %d%s\n' \
     "$GREEN" "$PASS" "$RESET" \
     "$( ((FAIL)) && printf '%s' "$RED" || printf '%s' "$DIM")" "$FAIL" "$RESET" \
     "$DIM" "$SKIP" "$RESET"
+SUMMARY_PRINTED=1
 if (( FAIL )); then
     printf '\n  failures:\n'
     for f in "${FAILED_NAMES[@]}"; do printf '    - %s\n' "$f"; done
