@@ -35,7 +35,12 @@
       "*.env*",
       "env",
       "env *",
-      "printenv*"
+      "printenv*",
+      "*.claude.json*",
+      "*.config/opencode*",
+      "*.local/share/opencode*",
+      "set",
+      "cat /proc/*"
     ],
     "bash_deny_leaf": [
       "git commit*",
@@ -54,7 +59,8 @@
       "*.env",
       "*.env.*",
       "*auth.json",
-      "*api_keys*"
+      "*api_keys*",
+      "*.claude.json*"
     ],
     "read_allow_all": [
       "*.env.example"
