@@ -698,13 +698,15 @@ fi
 if it "check-serena-tools has a SERENA_FROM constant used by the uvx fallback (serena)"; then
     if python3 - <<'PY'
 import importlib.util
+import json
 import unittest.mock as mock
 
 spec = importlib.util.spec_from_file_location("check_serena_tools", "tools/check-serena-tools.py")
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-assert mod.SERENA_FROM == "serena-agent==1.7.0"
+expected = json.load(open("catalog/agent-harness.json", encoding="utf-8"))["mcp_servers"]["serena"]["package"]
+assert mod.SERENA_FROM == expected, (mod.SERENA_FROM, expected)
 with mock.patch("shutil.which", return_value=None):
     cmd = mod.default_command()
 assert cmd[:3] == ["uvx", "--from", mod.SERENA_FROM], cmd
@@ -748,14 +750,71 @@ if it "setup_openhands_config pins every MCP server it writes"; then
         python3 - "$tmp/.openhands" <<'PY'
 import json, sys, os
 m = json.load(open(os.path.join(sys.argv[1], "settings.json"), encoding="utf-8"))["agent_settings"]["mcp_config"]
-pins = {"omnigraph": "@modernrelay/omnigraph-mcp@0.8.0", "serena": "serena-agent==1.7.0",
-        "playwright": "@playwright/mcp@0.0.81", "context7": "@upstash/context7-mcp@4.1.1",
-        "graphify": "graphifyy[mcp]==0.9.63"}
+# Expected specs come from the harness, the one source of truth for the pins.
+pins = {k: v["package"] for k, v in json.load(open("catalog/agent-harness.json", encoding="utf-8"))["mcp_servers"].items()}
 print(" ".join(k for k, v in pins.items() if v not in m[k]["args"]) or "all-pinned")
 PY
     )"
     rm -rf "$tmp"
     assert_eq "$out" "all-pinned"
+fi
+
+describe "mcp pins"
+
+if it "mcp pins: lib/ carries no floating package spec"; then
+    bad=""
+    for f in lib/windows/*.psm1 lib/linux/*.sh; do
+        for needle in 'serena-agent' 'graphifyy[mcp]' '@playwright/mcp' '@upstash/context7-mcp' '@modernrelay/omnigraph-mcp'; do
+            if grep -qF -- "$needle" "$f"; then bad="$f: $needle"; break 2; fi
+        done
+    done
+    if [[ -z "$bad" ]]; then pass; else fail "floating package name found in $bad"; fi
+fi
+
+if it "mcp pins: no pinned version string appears under lib/"; then
+    bad="$(python3 - <<'PY'
+import glob, json, os, re
+h = json.load(open("catalog/agent-harness.json", encoding="utf-8"))
+versions = []
+for server in h["mcp_servers"].values():
+    match = re.search(r"@([0-9][^@]*)$", server["package"]) or re.search(r"==(.+)$", server["package"])
+    if match:
+        versions.append(match.group(1))
+bad = []
+for path in glob.glob("lib/**/*", recursive=True):
+    if not os.path.isfile(path):
+        continue
+    text = open(path, encoding="utf-8", errors="replace").read()
+    for version in versions:
+        if version in text:
+            bad.append("%s: %s" % (path, version))
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$bad" ]]; then pass; else fail "pinned version found: $bad"; fi
+fi
+
+if it "mcp pins: the client excludeTools list equals serena.excluded_tools"; then
+    tmp="$(mktemp -d)"
+    spec_file="$tmp/spec.json"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        has_cmd() { return 1; }
+        register_mcp_server() { return 0; }
+        ensure_serena_exclusions() { return 0; }
+        register_antigravity_mcp_server() { printf '%s' "$2" >"$spec_file"; }
+        install_mcp_serena >/dev/null 2>&1
+    )
+    out="$(python3 - "$spec_file" <<'PY'
+import json, sys
+spec = json.load(open(sys.argv[1], encoding="utf-8"))
+want = json.load(open("catalog/agent-harness.json", encoding="utf-8"))["mcp_servers"]["serena"]["excluded_tools"]
+print("match" if spec.get("excludeTools") == want else "mismatch: %r" % spec.get("excludeTools"))
+PY
+)"
+    rm -rf "$tmp"
+    assert_eq "$out" "match"
 fi
 
 if it "vendored agent profiles reference existing llm profiles"; then
@@ -1224,7 +1283,7 @@ if it "--check-catalog validates all five catalogs by type, not just component c
     # rc could go green for the wrong reason (e.g. an empty glob).
     out="$(bash setup.sh --check-catalog 2>&1)"; rc=$?
     if [[ $rc -eq 0 && "$out" == *"engines.json is valid"* && "$out" == *"images.json is valid"* \
-        && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"* ]]; then
+        && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"*         && "$out" == *"agent-harness.json is valid"* ]]; then
         pass
     else
         fail "rc=$rc out=$out"
