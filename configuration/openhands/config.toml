@@ -1,0 +1,58 @@
+# OpenHands LLM routing — OmniRoute first (docs/models.md).
+#
+# Docker path (recommended): don't mount this file, pass env instead —
+#   -e LLM_MODEL=auto/smart -e LLM_API_KEY=<client key>
+#   -e LLM_BASE_URL=http://host.docker.internal:20128/v1
+# (host.docker.internal because the container can't see your localhost.)
+#
+# Dev path (main.py / cli.py): point OpenHands at this file and use the
+# named [llm.*] sections + [agent.*] mapping below.
+# Keys: never here. Client key comes from the OmniRoute dashboard
+# (api-manager) at runtime. Real spend is tracked in the OmniRoute
+# dashboard, not the OpenHands cost column: OpenHands prices via the
+# LiteLLM cost map, which doesn't know OmniRoute's auto/* aliases.
+
+# ── Default: orchestrator tier ──────────────────────────────────────
+[llm]
+model = "auto/smart"
+base_url = "http://host.docker.internal:20128/v1"
+api_key = ""
+temperature = 0.0
+num_retries = 5
+# Conservative ceiling: auto/* routes across models with different windows.
+# Raise to 1000000 when you pin a strict combo (tier1-strict) instead.
+max_input_tokens = 128000
+max_output_tokens = 32000
+
+# ── Named tiers (dev path: pick per agent below) ────────────────────
+[llm.tier1]
+model = "auto/smart"
+base_url = "http://host.docker.internal:20128/v1"
+temperature = 0.0
+max_input_tokens = 128000
+max_output_tokens = 32000
+
+[llm.tier2]
+model = "auto"
+base_url = "http://host.docker.internal:20128/v1"
+temperature = 0.1
+max_input_tokens = 128000
+max_output_tokens = 16000
+
+[llm.tier3]
+model = "auto/cheap"
+base_url = "http://host.docker.internal:20128/v1"
+temperature = 0.2
+max_input_tokens = 64000
+max_output_tokens = 8000
+
+# Reserved: preliminary code-edit drafts go to the cheap tier.
+[llm.draft_editor]
+model = "auto/cheap"
+base_url = "http://host.docker.internal:20128/v1"
+temperature = 0.2
+top_p = 0.95
+
+# ── Agent mapping (dev path) ────────────────────────────────────────
+[agent.CodeActAgent]
+llm_config = "tier1"

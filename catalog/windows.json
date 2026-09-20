@@ -280,7 +280,7 @@
             "workstation",
             "ai-coding"
           ],
-          "verify": "zed --version",
+          "verify": "zed --help",
           "homepage": "https://zed.dev/",
           "notes": "Agent panel is pointed at the local OmniRoute gateway."
         },

@@ -34,6 +34,7 @@ logs/
 # ─── Agent tooling ──────────────────────────────────────────────────────────
 .serena/
 graphify-out/
+.playwright-mcp/
 .claude/settings.local.json
 
 # ─── OS / editor noise ──────────────────────────────────────────────────────

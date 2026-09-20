@@ -82,6 +82,14 @@
           "graphify.serve",
           "graphify-out/graph.json"
         ]
+      },
+      "playwright": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "@playwright/mcp@latest"
+        ]
       }
     }
   }
