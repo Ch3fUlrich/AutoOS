@@ -7,9 +7,10 @@ with a syntax error and silently reported success for everything.
 
 Usage:  python3 tests/check-links.py [repo-root]
 Exit:   0 = all links resolve, 1 = at least one is broken
-"""
-from __future__ import annotations
 
+Kept compatible with the oldest python3 around (WSL ships 3.6): no
+`from __future__` import and no builtin-generic annotations.
+"""
 import glob
 import os
 import re
@@ -19,9 +20,9 @@ LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 SKIP_PREFIXES = ("http://", "https://", "#", "mailto:")
 
 
-def markdown_files(root: str) -> list[str]:
+def markdown_files(root):
     patterns = ["README.md", "AGENTS.md", "CLAUDE.md", "docs/*.md", "**/README.md"]
-    found: set[str] = set()
+    found = set()
     for pat in patterns:
         for path in glob.glob(os.path.join(root, pat), recursive=True):
             if os.path.isfile(path) and ".git" not in path.split(os.sep):
@@ -29,8 +30,8 @@ def markdown_files(root: str) -> list[str]:
     return sorted(found)
 
 
-def broken_links(root: str) -> list[str]:
-    problems: list[str] = []
+def broken_links(root):
+    problems = []
     for rel in markdown_files(root):
         base = os.path.dirname(os.path.join(root, rel))
         with open(os.path.join(root, rel), encoding="utf-8") as fh:
@@ -47,7 +48,7 @@ def broken_links(root: str) -> list[str]:
     return problems
 
 
-def main() -> int:
+def main():
     root = sys.argv[1] if len(sys.argv) > 1 else "."
     problems = broken_links(root)
     total = len(markdown_files(root))

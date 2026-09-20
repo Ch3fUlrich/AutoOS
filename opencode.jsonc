@@ -1,0 +1,64 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Repo default: the LiteLLM router in infra/litellm (docs/models.md).
+  // tier1 = orchestrator, tier2 = spark-smart, tier3 = daily codegen driver.
+  // Override per user in ~/.config/opencode/opencode.jsonc; the proxy needs
+  // LITELLM_MASTER_KEY in the server environment, keys live in its .env.
+  "model": "litellm/tier1",
+  "providers": {
+    "litellm": {
+      "name": "AutoOS LiteLLM router",
+      "env": ["LITELLM_MASTER_KEY"],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:4000/v1"
+      },
+      "models": {
+        "tier1": {
+          "modelID": "tier1",
+          "name": "tier1 orchestrator (free-first)"
+        },
+        "tier2": {
+          "modelID": "tier2",
+          "name": "tier2 muse-spark smart (free-first)"
+        },
+        "tier3": {
+          "modelID": "tier3",
+          "name": "tier3 codegen driver (free-first)"
+        }
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "serena": {
+        "type": "local",
+        "command": [
+          "uvx",
+          "--from",
+          "serena-agent",
+          "serena",
+          "start-mcp-server",
+          "--open-web-dashboard",
+          "false",
+          "--enable-gui-log-window",
+          "false"
+        ]
+      },
+      "graphify": {
+        "type": "local",
+        "command": [
+          "uv",
+          "--quiet",
+          "run",
+          "--with",
+          "graphifyy[mcp]",
+          "python",
+          "-m",
+          "graphify.serve",
+          "graphify-out/graph.json"
+        ]
+      }
+    }
+  }
+}

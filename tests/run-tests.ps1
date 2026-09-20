@@ -594,9 +594,16 @@ Test-Case 'PSScriptAnalyzer is clean' {
 Test-Case 'every PowerShell file has a UTF-8 BOM' {
     # Windows PowerShell 5.1 decodes .ps1/.psm1 as ANSI without one, which turns
     # every box-drawing character into a parse error.
+    # Only shipped files are policed: anything git ignores (local-only helpers
+    # like additional_Features/, per-machine .serena/) is skipped.
     $missing = @()
+    $haveGit = $null -ne (Get-Command git -ErrorAction SilentlyContinue)
     foreach ($f in Get-ChildItem -Path $Root -Include *.ps1, *.psm1 -Recurse -File) {
-        if ($f.FullName -match '\\\.git\\') { continue }
+        if ($f.FullName -match '\\\.(git|serena)\\') { continue }
+        if ($haveGit) {
+            git -C $Root check-ignore -q $f.FullName 2>$null
+            if ($LASTEXITCODE -eq 0) { continue }
+        }
         $bytes = [IO.File]::ReadAllBytes($f.FullName)
         if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
             $missing += $f.Name

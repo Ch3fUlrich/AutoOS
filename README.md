@@ -225,6 +225,7 @@ Details: [Testing](docs/testing.md).
 | [Remote provisioning](docs/remote-provisioning.md) | How do I set up a machine that isn't this one? |
 | [Security](docs/security.md) | What must never be committed? |
 | [Troubleshooting](docs/troubleshooting.md) | It broke. Now what? |
+| [Model routing](docs/models.md) | Which AI model answers, and how do free-first fallbacks work? |
 
 Working on this repo with an AI agent? [AGENTS.md](AGENTS.md) is the contract.
 
