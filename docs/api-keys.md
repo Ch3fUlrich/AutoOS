@@ -48,6 +48,25 @@ this public repo, never for private code.
 | Cloudflare AI | Cloudflare dashboard | ~30M/mo (10k Neurons/day) | Check terms |
 | Vertex AI | Google Cloud | $300 signup credit (~300M tokens), billing account needed | Per terms |
 
+## 3. More free legs worth registering (thin quotas, real use)
+
+These don't carry agent loops alone — with weak autonomy, thin-but-reliable
+beats strong-but-flaky. All pool through OmniRoute's `auto*` combos.
+
+| Key | Free terms | Role it earns |
+|---|---|---|
+| SambaNova (account, no card) | 20 RPM but only 20 RPD / 200K TPD | Last-resort overflow only — 20 req/day caps it at commit-message / review-summary duty |
+| Cloudflare Workers AI (free Workers plan) | 10k Neurons/day (~$0.11 compute), all models share it, resets 00:00 UTC | GPT-OSS-120B / Qwen coders for short prompts; heavy prompts drain it fast |
+| Cohere (dashboard trial key, no card) | 1,000 calls/mo, 20 RPM chat, eval-only terms | RAG/rerank specialist, not a driver |
+| GitHub Models (GitHub account + marketplace opt-in) | Free daily quotas, frontier models tens of RPD | Demos and spot-checks; limits forbid loops |
+| Hugging Face (account) | $0.10/mo — demo tier, skip for agentic work | Catalog breadth only |
+| xAI / Anthropic / OpenAI | ~$5 signup credits, usually card-gated, expiring | One-time boost, not a strategy |
+
+Conflicts resolved: Llama 3.3 70B is listed free in several guides but left
+Groq free 2026-08-16 — treat it as degraded, prefer GPT-OSS-120B / Qwen3.8
+where both are offered. Gemini 2.5 Flash free is ~10 RPM / 250 RPD per model
+(concrete beats the old "1500/day" figure still floating around).
+
 ToS caution (single-user personal proxy is generally tolerated; resale is
 not): `opencode` ToS restricts Zen to internal use (flagged avoid for
 proxying), `muse-spark-web`/scraped-web routes flagged avoid, Groq/Mistral/

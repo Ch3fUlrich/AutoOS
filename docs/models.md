@@ -28,20 +28,28 @@ internal-use-only clause — paid/user keys are the clean legs.
 
 ## Tier mapping (repo defaults in `opencode.jsonc`)
 
-| Tier | OmniRoute model | Behavior |
+Free models are rarely autonomous-grade, so tiers map to **roles**, not just
+models — one smart driver + one fast looper + provider-of-last-resort:
+
+| Tier | Default model | Roles it covers (what `auto/*` picks among connected) |
 |---|---|---|
-| `tier1` orchestrator | `auto/smart` | Quality-first + explores; set caller effort to xhigh/Max for long runs |
-| `tier2` smart | `auto` | Balanced 16-factor scoring |
-| `tier3` driver | `auto/cheap` | Cost-weighted; codegen/review/lint |
+| `tier1` orchestrator | `auto/smart` | **Driver**: GLM-4.7/5.x-class or spark-xhigh (`oc/…`, contributor) · **Planner**: DeepSeek V4-Flash · paid: contributor → flash → your balance |
+| `tier2` smart | `auto` | **Explorer**: Gemini 2.5 Flash (1M ctx, grounding) · **Looper**: GPT-OSS-120B (Groq speed) · overflow: Mistral pool |
+| `tier3` driver | `auto/cheap` | **Grinder**: Qwen3.8-27B chunks · **Reviewer**: Mistral small / Devstral · **Judge**: cheap summarizer · paid: flash |
 
-Exact-control alternative: create a **priority combo** in
-dashboard → combos (or `omniroute combo create`) that encodes the old static
-chain, then send its exact name as the model:
+Guardrails for weak autonomy: slice tasks small, verify after each loop,
+keep a human checkpoint on unattended tier1 runs, and prefer deterministic
+priority combos over exploratory `auto/smart` (5-10% bandit exploration) for
+long runs. Respect quota shapes: GPT-OSS legs want short prompts (TPM caps),
+SambaNova-class legs get summary duty only (20 RPD).
 
-- `tier1-strict`: `oc/…` Zen-free spark → `meta/muse-spark-1.3-contributor`
-  (OpenRouter, $0.10/$0.20) → Meta-direct contributor (own credits) →
-  paid: `deepseek-v4.1-flash`. Paid rule preserved: contributor, else flash.
-- `tier3-strict`: Mistral free → Groq free → Gemini free → paid flash.
+Exact-control combos (dashboard → combos, or `omniroute combo create`; send
+the exact name as the model):
+
+- `tier1-strict`: `oc/` spark/GLM free → OpenRouter contributor ($0.10) →
+  Meta-direct contributor (own credits) → paid `deepseek-v4.1-flash`.
+- `tier2-strict`: Gemini Flash → Groq GPT-OSS → Mistral pool.
+- `tier3-strict`: Mistral Devstral → Groq/Qwen → Gemini → paid flash.
 
 Your OmniRoute balance (already topped up) is the final paid leg behind these.
 
@@ -61,6 +69,31 @@ Keys: dashboard → Providers → + Add Provider ([guide](api-keys.md)).
 Client key: dashboard → api-manager → Create API Key → env
 `AUTOOS_OMNIROUTE_KEY`. Fallback router: `configuration/litellm/` +
 `LITELLM_MASTER_KEY` (`litellm --test` after first start).
+
+## Verified provider IDs (live `omniroute providers available`, v3.8.50)
+
+Use these IDs when registering keys or building priority combos. `free`
+flag = free tier tracked in-catalog (verify current terms in-dashboard):
+
+| ID | Alias | Free | Notes for our tiers |
+|---|---|---|---|
+| `gemini` | `gemini` | yes | Explorer: Flash pooled |
+| `groq` | `groq` | yes | Looper: per-model 200K TPD caps |
+| `mistral` | `mistral` | yes | Biggest pool (~1B/mo); 2 RPM |
+| `deepseek` | `ds` | yes | Planner: 5M signup, 30-day expiry |
+| `moonshot` / `kimi` | `moonshot` | — | Kimi direct; coding keys via `kimi-coding-apikey` |
+| `openrouter` | `openrouter` | yes | Contributor $0.10 + `:free` pool ($10 → 1000 RPD) |
+| `meta-llama` | `meta` | — | Meta-direct contributor on own credits |
+| `opencode-zen` | `opencode-zen` | — | Zen paid + rotating free (`oc/…`) |
+| `zenmux` | `zm` | yes | Free Zen multiplexer |
+| `cohere` | `cohere` | yes | RAG/rerank, 1k calls/mo eval terms |
+| `cloudflare-ai` | `cf` | yes | 10k Neurons/day shared |
+| `llm7` / `nara` / `siliconflow` / `sambanova` | same | yes | 150M / 210M / uncapped / 20 RPD overflow legs |
+| `kilo-gateway` | `kg` | — | Rotating Auto-Free set |
+| `pollinations` / `huggingface` / `stepfun` | `pol` / `hf` | yes | Keyless/uncapped opportunistic legs |
+| `cerebras` | `cerebras` | trial | $5 credit + card only — not a free leg |
+
+Check more any time: `omniroute providers available --search <text>`.
 
 ## Connect each app (key = `AUTOOS_OMNIROUTE_KEY`)
 
@@ -86,43 +119,41 @@ Client key: dashboard → api-manager → Create API Key → env
     { "action": "shell", "resource": "sudo *", "effect": "ask" } ] }
   ```
 
-## Routing map
+## Routing map (default settings)
 
 ```mermaid
 flowchart TB
-    subgraph clients["Agents (one client key: AUTOOS_OMNIROUTE_KEY)"]
-        OC["opencode CLI/TUI\nomniroute/tier1·2·3"]
-        ZED["Zed agent panel\nauto/smart · auto · auto/cheap"]
-        NV["Neovim + sidekick\n(<leader>aa → opencode)"]
-        OH["OpenHands / Claude Code\nbase URL → :20128"]
+    subgraph clients["Agents — one client key (AUTOOS_OMNIROUTE_KEY)"]
+        OC["opencode CLI/TUI\ndefault omniroute/tier1"]
+        ZED["Zed agent panel\nauto/smart xhigh · auto · auto/cheap"]
+        NV["Neovim + sidekick\n<leader>aa → opencode"]
+        OH["OpenHands · Claude Code · scripts\nbase URL → :20128"]
     end
-    subgraph or["OmniRoute :20128 (primary)"]
-        AUTO["auto/* combos\nsmart · balanced · cheap\n16-factor scoring +\n5-30 min circuit breakers"]
-        PRI["priority combos\ntier1-strict · tier3-strict\nspark → contributor → flash"]
-        DASH["dashboard :20128\nproviders · free-tiers · quota"]
+    subgraph or["OmniRoute :20128 — DEFAULT PATH"]
+        SEL{"Which model?\nauto/* or strict combo"}
+        AUTO["auto/smart · auto · auto/cheap\n16-factor scoring:\nhealth 20 · quota 15 · cost 15\n+ 5-30 min circuit breakers"]
+        PRI["tierN-strict priority combos\ndriver → looper → flash"]
+        SCORE["per-request:\n1 score connections\n2 try best\n3 429/5xx → next\n4 all down → emergency free"]
     end
-    subgraph free["Free legs (register keys once)"]
-        MI["Mistral ~1B/mo"]
-        GE["Gemini Flash pooled"]
-        GR["Groq per-model caps"]
-        ZAI["Z.AI GLM uncapped"]
-        KILO["Kilo / Nara / llm7 / xKiro"]
-        ZEN["Zen oc/* rotating free"]
+    subgraph roles["Role legs (free first)"]
+        DRV["driver: oc/ GLM · spark-xhigh\nplanner: DeepSeek flash"]
+        EXP["explorer: Gemini 2.5 Flash\n1M ctx · 10 RPM / 250 RPD"]
+        LOOP["looper: GPT-OSS-120B\nGroq 200K TPD · short prompts"]
+        GRIND["grinder: Qwen3.8 · Devstral\nreviewer: Mistral pool 1B/mo"]
     end
-    subgraph paid["Paid legs (last resort)"]
-        BAL["Your OmniRoute balance"]
-        META["Meta direct contributor"]
-        ORC["OpenRouter contributor $0.10"]
-        DFL["DeepSeek V4.1 Flash"]
+    subgraph paid["Paid legs (quota exhausted)"]
+        BAL["OmniRoute balance (yours)"]
+        CON["contributor → DeepSeek flash"]
     end
-    subgraph fb["LiteLLM :4000 (manual fallback)"]
-        LT["tier1·2·3 static chains\nconfiguration/litellm/"]
+    subgraph fb["Fallback: user picks litellm/*"]
+        LT["LiteLLM :4000 static chains\ntier1 spark · tier2 gpt-oss\ntier3 devstral · paid flash"]
     end
-    OC & ZED & NV & OH --> or
-    AUTO & PRI --> free
-    AUTO & PRI -. quota exhausted .-> paid
+    OC & ZED & NV & OH --> SEL
+    SEL --> AUTO & PRI
+    AUTO & PRI --> SCORE
+    SCORE --> roles
+    SCORE -. "free legs exhausted" .-> paid
     OC -. "model litellm/*" .-> LT
-    DASH -. live used/remaining .-> AUTO
 ```
 
 ## Change the defaults
