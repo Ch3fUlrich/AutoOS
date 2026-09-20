@@ -14,6 +14,11 @@ One command per platform. It works out what kind of machine it is running on,
 suggests a sensible profile, lets you tick exactly what you want, shows you the
 plan, and only then installs anything.
 
+**Docs quick nav:** [Getting started](docs/getting-started.md) ·
+[Model routing](docs/models.md) · [API keys](docs/api-keys.md) ·
+[Browser UI](docs/web-ui.md) · [Catalog](docs/catalog.md) ·
+[all docs ↓](#documentation)
+
 ---
 
 ## Why it works this way
@@ -263,7 +268,7 @@ Details: [Testing](docs/testing.md).
 | [Security](docs/security.md) | What must never be committed? |
 | [Troubleshooting](docs/troubleshooting.md) | It broke. Now what? |
 | [Model routing](docs/models.md) | Which AI model answers, and how do free-first fallbacks work? |
-| [API keys](docs/api-keys.md) | Where does each LiteLLM key come from, and what does it cost? |
+| [API keys](docs/api-keys.md) | Where does each key come from, and what does it cost? |
 
 Working on this repo with an AI agent? [AGENTS.md](AGENTS.md) is the contract.
 
