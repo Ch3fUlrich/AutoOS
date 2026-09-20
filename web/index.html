@@ -297,6 +297,14 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
   border-color:var(--rule-strong);font-weight:700;
 }
 .chip-ok{background:var(--ok-soft);color:var(--ok)}
+.chip-missing{background:var(--warn-soft);color:var(--warn)}
+.providers{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
+.provider{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:8px 11px;border:1px solid var(--rule);border-radius:9px;background:var(--surface-2);
+}
+.provider .pname{font-weight:600;font-size:.84rem}
+.provider.off{opacity:.62}
 .prov{font-family:var(--mono);font-size:.67rem;font-weight:700;text-transform:lowercase}
 .prov-winget{background:#DCE9F8;color:#1B4D80}
 .prov-choco{background:#DCE4F8;color:#2A3F80}
@@ -447,6 +455,21 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
         <span class="card-sub">a starting set of ticks — change anything below</span>
       </summary>
       <div class="card-body"><div class="profiles" id="profiles"></div></div>
+    </details>
+
+    <details class="card" id="cardProviders" open>
+      <summary>
+        <span class="card-title">AI providers</span>
+        <span class="card-sub" id="providersSub">from configuration/api-keys.yml</span>
+      </summary>
+      <div class="card-body">
+        <div class="legend">
+          <span><span class="chip chip-ok">configured</span> a key is present</span>
+          <span><span class="chip chip-missing">missing</span> add one, or routing skips it</span>
+          <span>Values are never shown or sent to this page.</span>
+        </div>
+        <div class="providers" id="providers"></div>
+      </div>
     </details>
 
     <details class="card" id="cardCatalog" open>
@@ -692,6 +715,7 @@ async function boot() {
     ? "not elevated — machine-wide packages will be skipped" : "";
 
   renderProfiles();
+  renderProviders();
   renderCatalog();
   applyProfile(STATE.suggested);
 
@@ -703,6 +727,20 @@ async function boot() {
   el("run").onclick         = runInstall;
 
   resumeIfRunning();
+}
+
+/* ── providers, from configuration/api-keys.yml (values never sent) ────── */
+function renderProviders() {
+  const list = STATE.providers || [];
+  const done = list.filter(p => p.configured).length;
+  el("providersSub").textContent = done + " of " + list.length +
+    " configured · from configuration/api-keys.yml";
+  el("providers").innerHTML = list.map(p =>
+    '<div class="provider' + (p.configured ? "" : " off") + '">' +
+      '<span class="pname">' + esc(p.name) + "</span>" +
+      '<span class="chip ' + (p.configured ? "chip-ok" : "chip-missing") + '">' +
+        (p.configured ? "configured" : "missing") + "</span>" +
+    "</div>").join("");
 }
 
 /* ── profiles, with the selected one expanded into a summary ───────────── */

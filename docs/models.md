@@ -26,32 +26,95 @@ fallback. And OmniRoute recovers from Zen aggregate throttling gracefully; it
 does not remove the throttle. ToS: proxying Zen-free carries Anomaly’s
 internal-use-only clause — paid/user keys are the clean legs.
 
-## Tier mapping (repo defaults in `opencode.jsonc`)
+## Tier mapping (config lives in `configuration/omniroute/combos.json`)
 
 Free models are rarely autonomous-grade, so tiers map to **roles**, not just
-models — one smart driver + one fast looper + provider-of-last-resort:
+models — one smart driver + one fast looper + provider-of-last-resort. The
+combos are priority chains: try in order, hop on 429/error, free legs first,
+paid legs from the providers whose credit tiers are sanctioned
+(cerebras, sambanova, deepseek, meta, openrouter, zen) after them.
 
-| Tier | Default model | Roles it covers (what `auto/*` picks among connected) |
+| Tier | Context promise | Chain (verified against the live catalogs) |
 |---|---|---|
-| `tier1` orchestrator | `auto/smart` | **Driver**: GLM-4.7/5.x-class or spark-xhigh (`oc/…`, contributor) · **Planner**: DeepSeek V4-Flash · paid: contributor → flash → your balance |
-| `tier2` smart | `auto` | **Explorer**: Gemini 2.5 Flash (1M ctx, grounding) · **Looper**: GPT-OSS-120B (Groq speed) · overflow: Mistral pool |
-| `tier3` driver | `auto/cheap` | **Grinder**: Qwen3.8-27B chunks · **Reviewer**: Mistral small / Devstral · **Judge**: cheap summarizer · paid: flash |
+| `tier1` orchestrator | **1M only** | zen `muse-spark-1.3-contributor-free` → openrouter `meta/muse-spark-1.3-contributor` → zen `muse-spark-1.3` → zen `gemini-3.1-pro` |
+| `tier1-clean` | 1M, no training | zen `muse-spark-1.3` → zen `gemini-3.1-pro` |
+| `tier2` smart | ≤256k | gemini `gemini-3.8-flash` → groq `gpt-oss-120b` → cerebras `gpt-oss-120b` → sambanova `gpt-oss-120b` → openrouter `deepseek-v4.1-flash` → deepseek `deepseek-flash` |
+| `tier2-clean` | ≤256k, no training | groq → cerebras → sambanova `gpt-oss-120b` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
+| `tier3` driver | ≤128k | mistral `mistral-code-latest` → groq `qwen3.8-27b` → cerebras `qwen-3.8-27b` → mistral `mistral-small-latest` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
+| `tier3-clean` | ≤128k, no training | groq → cerebras `qwen-3.8-27b` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
 
-Guardrails for weak autonomy: slice tasks small, verify after each loop,
-keep a human checkpoint on unattended tier1 runs, and prefer deterministic
-priority combos over exploratory `auto/smart` (5-10% bandit exploration) for
-long runs. Respect quota shapes: GPT-OSS legs want short prompts (TPM caps),
-SambaNova-class legs get summary duty only (20 RPD).
+**Context rule (why the user-visible limit is honest):** `tier1` is curated to
+1M-context models only — anything smaller belongs in `tier2`. `opencode.jsonc`
+declares the matching `limit.context` (1M / 256k / 128k), so OpenCode's
+compaction and the picker's context display agree with what actually answers.
+`auto/*` remains as a zero-setup bootstrap with conservative limits.
 
-Exact-control combos (dashboard → combos, or `omniroute combo create`; send
-the exact name as the model):
+**Sensitive data work:** `*-clean` never routes a model or plan with a
+published prompt-training policy — no Zen promo `-free` models, no Gemini free
+tier, no Meta/openrouter *contributor* tiers, no Kilo Free. OmniRoute's own
+free-tier catalog flags the known trainers; we additionally curate them out.
+If in doubt, use `tierN-clean` and check the provider's current policy.
 
-- `tier1-strict`: `oc/` spark/GLM free → OpenRouter contributor ($0.10) →
-  Meta-direct contributor (own credits) → paid `deepseek-v4.1-flash`.
-- `tier2-strict`: Gemini Flash → Groq GPT-OSS → Mistral pool.
-- `tier3-strict`: Mistral Devstral → Groq/Qwen → Gemini → paid flash.
+**Meta direct:** your Meta Model API key is registered as `muse-code`. The
+installed OmniRoute's `muse-code` catalog ships Llama models only and rejects
+`muse-spark-*` ("not available in the active live catalog"), so Meta-direct
+spark is not in the tiers yet; Zen's paid `muse-spark-1.3` covers that need
+until OmniRoute ships the spark ids. Cloudflare Workers AI needs its Account
+ID in the dashboard before it can serve, so it is registered but unused.
 
-Your OmniRoute balance (already topped up) is the final paid leg behind these.
+Guardrails for weak autonomy: slice tasks small, verify after each loop, keep
+a human checkpoint on unattended tier1 runs. Respect quota shapes: GPT-OSS legs
+want short prompts (TPM caps), sambanova legs are $5-credit overflow.
+
+## Apply the config (first run and after edits)
+
+```bash
+./configuration/omniroute/apply.sh          # registers keys, builds combos
+./configuration/omniroute/apply.sh --dry-run
+omniroute simulate --combo tier1            # shows the resolved fallback tree
+```
+
+```powershell
+.\configuration\omniroute\apply.ps1
+.\configuration\omniroute\apply.ps1 -DryRun
+omniroute simulate --combo tier1
+```
+
+Apply reads `configuration/api-keys.yml` ([guide](api-keys.md)); providers
+without a key are skipped, combos are replaced in place, unknown model refs
+are dropped with a warning. If it says it could not read `/v1/models`, the
+`omniroute:` client key in that file is not accepted for catalog reads —
+routing still works, but re-run after fixing the key to get validation.
+
+The browser UI shows the same state without ever showing a key value:
+
+![AI providers card: 13 of 13 configured, from configuration/api-keys.yml](assets/webui-providers.png)
+
+## Known quirks on this machine (verified 2026-09-20)
+
+- **Groq and Cerebras sit behind Cloudflare** and answer `error 1010` to
+  Node's default User-Agent. The fix is a per-connection
+  `providerSpecificData.customUserAgent` (`curl/8.7.1`); `apply` sets it.
+  Without it, both providers fail with a 403 that looks like a network block.
+- **Muse Spark needs a real output budget.** It spends tokens on hidden
+  reasoning first; `max_tokens` under ~100 produces an empty response
+  (`upstream_empty_response`). OpenCode always sends a real budget, so this
+  only bites hand-rolled curl probes.
+- **Zen paid legs return 402** ("requires an opencode API key"): top up the
+  Zen balance / finish key setup in the Zen console. The free promo leg
+  (`muse-spark-1.3-contributor-free`) currently answers 500 at peak — the
+  priority chain hops past both to OpenRouter, which is why `tier1` still
+  works today.
+- **Meta direct (`muse-code`) 502s** in OmniRoute 3.8.50
+  (`Cannot read properties of undefined`), even for its own Llama models. The
+  key is registered and ready; Meta-direct spark enters the tiers when
+  OmniRoute fixes the provider. Use OpenRouter's `meta/muse-spark-*` (plain
+  ID = no training, `-contributor` = trains) meanwhile.
+- **Cloudflare Workers AI needs the Account ID** in the dashboard before it
+  can serve, so it is registered but not routed.
+- `/v1/models` returns 401 for a normal client key in this build; `apply`
+  warns instead of silently skipping validation, and `omniroute simulate
+  --combo <name>` shows the resolved chain without spending tokens.
 
 ## Run it
 

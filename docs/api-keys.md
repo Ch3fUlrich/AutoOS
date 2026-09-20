@@ -1,31 +1,44 @@
 # API keys — how to get each one
 
-Primary path is **OmniRoute**: install it, open the dashboard, register keys
-there. The LiteLLM `.env` (second table) is only needed for the manual
-fallback router. In both cases: keys live in git-ignored files and app
-environments — never in tracked files, chat logs, or screenshots.
-
-## 1. OmniRoute (primary)
+**One file, one command.** Every key goes into
+`configuration/api-keys.yml` (git-ignored; copy from
+`configuration/api-keys.example.yml`), then:
 
 ```bash
-npm install -g omniroute
-omniroute            # dashboard at http://localhost:20128
+./configuration/omniroute/apply.sh      # or apply.ps1 on Windows
 ```
 
-1. Dashboard → **api-manager → Create API Key** (name it e.g. `autoos`).
-   Client key shape: `sk-…`. Put it in env `AUTOOS_OMNIROUTE_KEY`.
-2. Dashboard → **Providers → + Add Provider** for each key below. Prefer
-   free/recurring first; the `auto*` combos and your priority combos do the
-   rest. Quota reality per provider is visible at `/dashboard/free-tiers`.
-3. Zero-config start works with no keys at all (`auto` answers via keyless
-   OpenCode Free) — then add keys to widen the free pool.
+That registers every key with OmniRoute (provider-specific quirks included)
+and builds the tier combos — see [configuration/README.md](../configuration/README.md).
+The client key apps send (`omniroute:`) comes from the OmniRoute dashboard →
+**api-manager → Create API Key**; it is not the same as the provider keys.
+The LiteLLM `.env` is only for the manual fallback router.
 
-OmniRoute numbers below come from its pool-deduped catalog (re-audited
-2026-09-02/03): ~1.62B documented free tokens/mo steady, +first-month signup
-credits. Counts move both ways as providers change tiers — the dashboard is
-the current truth, not this page.
+Keys never belong in tracked files, chat logs, or screenshots. Missing keys
+are fine — routing skips that provider.
 
-## 2. Provider keys (register in OmniRoute, or in LiteLLM `.env`)
+## Provider key → OmniRoute provider id
+
+`apply` maps the names in `api-keys.yml` automatically; this table is for
+registering by hand in the dashboard:
+
+| `api-keys.yml` name | OmniRoute provider id | Notes |
+|---|---|---|
+| `groq` | `groq` | Cloudflare-fronted: connection needs `customUserAgent` (apply sets `curl/8.7.1`; error 1010 otherwise) |
+| `google_ai_studio` | `gemini` | |
+| `mistral` | `mistral` | |
+| `cloudflare_workers_ai` | `cloudflare-ai` | needs your **Account ID** in the dashboard before it can serve |
+| `cohere` | `cohere` | |
+| `hugging_face` | `huggingface` | |
+| `cerebras` | `cerebras` | Cloudflare-fronted: `customUserAgent` (as groq) |
+| `SambaNova` | `sambanova` | |
+| `deepseek` | `deepseek` | |
+| `meta` | `muse-code` | Meta Model API (`api.meta.ai`); see the known issue in [models.md](models.md) |
+| `openrouter` | `openrouter` | |
+| `zen` | `opencode-zen` | free promo models + paid; paid legs need Zen balance |
+| `omniroute` | — | the **client** key apps use; not a provider |
+
+## Where to get them
 
 Ordered by free value. "Training" = free tier may train on prompts: fine for
 this public repo, never for private code.
@@ -48,7 +61,7 @@ this public repo, never for private code.
 | Cloudflare AI | Cloudflare dashboard | ~30M/mo (10k Neurons/day) | Check terms |
 | Vertex AI | Google Cloud | $300 signup credit (~300M tokens), billing account needed | Per terms |
 
-## 3. More free legs worth registering (thin quotas, real use)
+## More free legs worth registering (thin quotas, real use)
 
 These don't carry agent loops alone — with weak autonomy, thin-but-reliable
 beats strong-but-flaky. All pool through OmniRoute's `auto*` combos.
@@ -72,7 +85,7 @@ not): `opencode` ToS restricts Zen to internal use (flagged avoid for
 proxying), `muse-spark-web`/scraped-web routes flagged avoid, Groq/Mistral/
 Cerebras prohibit reselling keys. When in doubt, paid legs only.
 
-## 3. LiteLLM fallback `.env` (only if you use it)
+## LiteLLM fallback `.env` (only if you use it)
 
 Copy `configuration/litellm/.env.example` → `.env`. Same keys as above
 (`GROQ/CEREBRAS/GEMINI/MISTRAL/OPENROUTER/META/DEEPSEEK/OPENCODE_ZEN_API_KEY`)

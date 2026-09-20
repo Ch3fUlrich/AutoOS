@@ -201,10 +201,23 @@ Details: [Replay, verification & undo](docs/state-and-undo.md).
 ## AI model routing
 
 Every agent installed here — OpenCode CLI, Zed's agent panel, Neovim +
-sidekick, OpenHands — talks to **OmniRoute** on `http://127.0.0.1:20128`,
-which routes free-first across all registered keys with automatic fallback
-(`auto/smart`, `auto`, `auto/cheap` per tier). LiteLLM on `:4000` stays as
-the manual fallback. The web UI above is where you tick the whole stack:
+sidekick, OpenHands — talks to **OmniRoute** on `http://127.0.0.1:20128`.
+Routing is defined in one place, `configuration/`:
+
+```
+configuration/api-keys.yml        every provider key (git-ignored)
+configuration/omniroute/combos.json   the tier chains
+configuration/omniroute/apply.*   register keys + build the combos
+configuration/start-stack.*       start the gateway + an app, wired
+```
+
+`tier1` is 1M-context-only (orchestration), `tier2` holds everything under
+1M, `tier3` is the cheap driver; every tier has a `-clean` twin that excludes
+models/plans that train on prompts — pick `tierN-clean` for sensitive data.
+Free legs go first, the sanctioned paid legs (cerebras, sambanova, deepseek,
+meta, openrouter, zen) after them. LiteLLM on `:4000` stays as a manual
+fallback. Full tier tables, known provider quirks and the resolved fallback
+trees: [Model routing](docs/models.md).
 
 ![AutoOS web UI — Overview: detected system, profiles, components, install order](docs/assets/webui-overview.png)
 
@@ -213,9 +226,10 @@ the manual fallback. The web UI above is where you tick the whole stack:
 From a fresh OS to a working agent setup:
 
 ```powershell
-.\setup.ps1 -Profile ai-coding -Yes        # install the stack
-$env:AUTOOS_OMNIROUTE_KEY = 'sk-...'       # client key: OmniRoute dashboard -> api-manager
-.\configuration\start-stack.ps1 -App opencode   # gateway + app, wired
+.\setup.ps1 -Profile ai-coding -Yes                  # install the stack
+Copy-Item configuration\api-keys.example.yml configuration\api-keys.yml   # fill in
+.\configuration\omniroute\apply.ps1                  # register keys, build combos
+.\configuration\start-stack.ps1 -App opencode        # gateway + app, wired
 ```
 
 | App | Start (after keys are in) |
@@ -224,15 +238,16 @@ $env:AUTOOS_OMNIROUTE_KEY = 'sk-...'       # client key: OmniRoute dashboard -> 
 | Zed | `.\configuration\start-stack.ps1 -App zed` (agent panel pre-routed) |
 | Neovim + sidekick | `.\configuration\start-stack.ps1 -App nvim`, then `<leader>aa` |
 | OpenHands | `.\configuration\start-stack.ps1 -App openhands` (needs Docker Desktop running) |
-| Any CLI, zero config | `omniroute run <tool> --model auto/cheap` (injects env, writes nothing) |
+| Any CLI, zero config | `omniroute run <tool> --model tier2` (injects env, writes nothing) |
 
-`omniroute run opencode --model auto/cheap` launches opencode with
-`OPENAI_BASE_URL`/`API_KEY` pointed at the gateway and the model preset —
-no config file is written, so it is the fastest way to test routing. The
-repo's `opencode.jsonc` does the same thing persistently.
+`omniroute run opencode --model tier3` launches opencode with the gateway env
+injected and the model preset — no config file is written, so it is the
+fastest way to test routing. The repo's `opencode.jsonc` does the same thing
+persistently.
 
 Details: [Model routing](docs/models.md) (tiers, combos, routing map) ·
 [API keys](docs/api-keys.md) (where each key comes from) ·
+[configuration/](configuration/README.md) (what lives where) ·
 OpenHands config template: `configuration/openhands/config.toml`.
 
 ## Tests

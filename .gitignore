@@ -8,6 +8,7 @@ vault.yml
 !.env.example
 !*.example.yml
 !*.example.json
+configuration/api-keys.yml
 
 # ─── Downloaded installers and vendor binaries ──────────────────────────────
 installs/
@@ -36,6 +37,10 @@ logs/
 graphify-out/
 .playwright-mcp/
 .claude/settings.local.json
+
+# ─── Python bytecode ────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
 
 # ─── OS / editor noise ──────────────────────────────────────────────────────
 .DS_Store

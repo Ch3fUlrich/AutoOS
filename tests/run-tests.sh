@@ -742,7 +742,7 @@ print("%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/tier1|http://127.0.0.1:20128/v1|tier1,tier2,tier3|True|graphify,playwright,serena"
+        "omniroute/tier1|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|True|graphify,playwright,serena"
 fi
 
 if it "openhands template has tiers and no secrets"; then
@@ -872,6 +872,76 @@ fi
 if it "env template carries placeholders only"; then
     bad="$(grep -vE '^(#|$|[A-Z_]+=REPLACE_WITH_[A-Z_]+$)' configuration/litellm/.env.example || true)"
     assert_eq "$bad" ""
+fi
+
+if it "api-keys example carries placeholders only"; then
+    bad="$(grep -vE '^(#|$)' configuration/api-keys.example.yml |
+        grep -vE '^[A-Za-z_]+:[[:space:]]*REPLACE_WITH_[A-Z_]+$' || true)"
+    assert_eq "$bad" ""
+fi
+
+if it "combos.json parses and tier1 promises 1M"; then
+    report="$(python3 - <<'PY'
+import json
+d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
+names = [c["name"] for c in d["combos"]]
+problems = []
+if names != ["tier1", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean"]:
+    problems.append("names")
+for c in d["combos"]:
+    if not c["models"]:
+        problems.append(c["name"] + ":empty")
+    for m in c["models"]:
+        if "/" not in m:
+            problems.append(c["name"] + ":" + m)
+    if c["name"] == "tier1" and c.get("context") != "1M":
+        problems.append("tier1-context")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
+if it "apply handles the Cloudflare UA and meta mapping"; then
+    ok=1
+    grep -q 'customUserAgent' configuration/omniroute/apply.sh || ok=0
+    grep -q 'muse-code' configuration/omniroute/apply.sh || ok=0
+    grep -q 'provider-specific-data' configuration/omniroute/apply.sh || ok=0
+    if (( ok )); then pass; else fail "apply.sh is missing the provider quirks"; fi
+fi
+
+if it "opencode tiers declare matching context limits"; then
+    report="$(python3 - <<'PY'
+import json, re, io
+text = re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read())
+oc = json.loads(text)
+m = oc["providers"]["omniroute"]["models"]
+problems = []
+for name, ctx in (("tier1", 1000000), ("tier1-clean", 1000000),
+                  ("tier2", 262144), ("tier3", 131072),
+                  ("tier2-clean", 262144), ("tier3-clean", 131072)):
+    if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:
+        problems.append(name)
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
+if it "the serve payload exposes provider status without values"; then
+    ok=1
+    for marker in "provider_status" "api-keys.yml"; do
+        grep -q "$marker" lib/linux/serve.py || { ok=0; echo "serve.py missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "serve.py does not expose provider status"; fi
+fi
+
+if it "the providers card is in the web UI"; then
+    ok=1
+    for marker in "cardProviders" "renderProviders" "providersSub" "chip-missing"; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "providers card markers missing"; fi
 fi
 
 if it "new components name real profiles and verify commands"; then

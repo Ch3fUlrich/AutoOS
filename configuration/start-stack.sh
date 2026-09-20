@@ -7,8 +7,13 @@ set -euo pipefail
 
 GATEWAY="http://127.0.0.1:20128"
 APP="${1:-none}"
+KEYS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/api-keys.yml"
+if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" && -f "$KEYS_FILE" ]]; then
+    AUTOOS_OMNIROUTE_KEY="$(sed -n 's/^omniroute[[:space:]]*:[[:space:]]*//p' "$KEYS_FILE" | head -1 | sed -e 's/^"//' -e 's/"$//')"
+fi
 if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
-    echo "Set AUTOOS_OMNIROUTE_KEY first (OmniRoute dashboard -> api-manager -> Create API Key)."
+    echo "No OmniRoute client key. Add 'omniroute: sk-...' to configuration/api-keys.yml,"
+    echo "or export AUTOOS_OMNIROUTE_KEY. Then configure providers: ./configuration/omniroute/apply.sh"
     exit 1
 fi
 

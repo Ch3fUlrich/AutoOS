@@ -20,7 +20,18 @@ $ErrorActionPreference = 'Stop'
 $Gateway = 'http://127.0.0.1:20128'
 $Key = $env:AUTOOS_OMNIROUTE_KEY
 if ([string]::IsNullOrWhiteSpace($Key)) {
-    Write-Host 'Set $env:AUTOOS_OMNIROUTE_KEY first (OmniRoute dashboard -> api-manager -> Create API Key).'
+    # Fall back to the single source of truth for keys.
+    $keysFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'configuration\api-keys.yml'
+    if (Test-Path $keysFile) {
+        foreach ($line in (Get-Content $keysFile -Encoding utf8)) {
+            $t = $line.Trim()
+            if ($t -match '^omniroute\s*:\s*(.+)$') { $Key = $matches[1].Trim().Trim('"').Trim("'") ; break }
+        }
+    }
+}
+if ([string]::IsNullOrWhiteSpace($Key)) {
+    Write-Host 'No OmniRoute client key. Add `omniroute: sk-...` to configuration\api-keys.yml,'
+    Write-Host 'or set $env:AUTOOS_OMNIROUTE_KEY. Then configure providers: .\configuration\omniroute\apply.ps1'
     exit 1
 }
 

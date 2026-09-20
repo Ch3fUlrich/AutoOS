@@ -1,11 +1,14 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  // Repo default: OmniRoute on :20128 (docs/models.md) — auto-combos with
-  // quota-aware fallback across all connected free tiers. LiteLLM on :4000
-  // stays configured below as the manual fallback router.
-  // Override per user in ~/.config/opencode/opencode.jsonc. Client key via
-  // env AUTOOS_OMNIROUTE_KEY (dashboard -> api-manager); LITELLM_MASTER_KEY
-  // only matters when using the litellm/* fallback models.
+  // Repo default: OmniRoute on :20128 (docs/models.md). tier1/2/3 and their
+  // -clean variants are combos created by configuration/omniroute/apply.*
+  // (priority chains: free legs first, allowed paid legs after). "-clean"
+  // excludes every model/plan that trains on prompts — pick it for sensitive
+  // data. auto/* stays as a zero-setup bootstrap that always resolves.
+  // Limits below must match the combo curations: tier1 is 1M-context only;
+  // anything smaller belongs in tier2. Override per user in
+  // ~/.config/opencode/opencode.jsonc. Client key via env
+  // AUTOOS_OMNIROUTE_KEY (or configuration/api-keys.yml).
   "model": "omniroute/tier1",
   "providers": {
     "omniroute": {
@@ -17,16 +20,49 @@
       },
       "models": {
         "tier1": {
-          "modelID": "auto/smart",
-          "name": "tier1 orchestrator (auto smart + fallback)"
+          "modelID": "tier1",
+          "name": "tier1 orchestrator — 1M ctx (free-first)",
+          "limit": { "context": 1000000, "output": 32768 }
+        },
+        "tier1-clean": {
+          "modelID": "tier1-clean",
+          "name": "tier1 orchestrator — no training (sensitive data)",
+          "limit": { "context": 1000000, "output": 32768 }
         },
         "tier2": {
-          "modelID": "auto",
-          "name": "tier2 smart (auto balanced + fallback)"
+          "modelID": "tier2",
+          "name": "tier2 smart — ≤256k ctx (free-first)",
+          "limit": { "context": 262144, "output": 32768 }
+        },
+        "tier2-clean": {
+          "modelID": "tier2-clean",
+          "name": "tier2 smart — no training (sensitive data)",
+          "limit": { "context": 262144, "output": 32768 }
         },
         "tier3": {
+          "modelID": "tier3",
+          "name": "tier3 codegen driver — ≤128k ctx (cheapest)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
+        "tier3-clean": {
+          "modelID": "tier3-clean",
+          "name": "tier3 driver — no training (sensitive data)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
+        "auto/smart": {
+          "modelID": "auto/smart",
+          "name": "bootstrap: auto smart (no combo needed)",
+          "limit": { "context": 262144, "output": 32768 }
+        },
+        "auto": {
+          "modelID": "auto",
+          "name": "bootstrap: auto balanced",
+          "limit": { "context": 262144, "output": 32768 }
+        },
+        "auto/cheap": {
           "modelID": "auto/cheap",
-          "name": "tier3 codegen driver (auto cheap + fallback)"
+          "name": "bootstrap: auto cheapest",
+          "limit": { "context": 131072, "output": 16384 }
         }
       }
     },

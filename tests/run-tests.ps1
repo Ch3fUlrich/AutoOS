@@ -702,7 +702,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $oc = $stripped | ConvertFrom-Json
     Assert-Equal $oc.model 'omniroute/tier1'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name) -join ',') 'tier1,tier2,tier3'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'graphify,playwright,serena'
 }
@@ -844,13 +844,87 @@ Test-Case 'litellm installer falls back to the py launcher' {
     } finally { $env:PATH = $realPath }
 }
 
-Test-Case 'env template carries placeholders only' {    $bad = @()
+Test-Case 'env template carries placeholders only' {
+    $bad = @()
     foreach ($line in (Get-Content (Join-Path $Root 'configuration\litellm\.env.example') -Encoding utf8)) {
         $t = $line.Trim()
         if ($t -eq '' -or $t.StartsWith('#')) { continue }
         if ($t -notmatch '^[A-Z_]+=REPLACE_WITH_[A-Z_]+$') { $bad += $t }
     }
     Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'api-keys example carries placeholders only' {
+    $bad = @()
+    foreach ($line in (Get-Content (Join-Path $Root 'configuration\api-keys.example.yml') -Encoding utf8)) {
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        $val = ($t -split ':', 2)[1].Trim()
+        if ($val -notmatch '^REPLACE_WITH_[A-Z_]+$') { $bad += $t }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'provider status reads keys but never exposes them' {
+    $scratch = Join-Path $env:TEMP "autoos-keys-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        @(
+            'groq: gsk_SUPERSECRETVALUE123',
+            '# comment',
+            'deepseek:',
+            'mistral: 5xLsSecretValue',
+            'not-a-provider: nope'
+        ) | Out-File (Join-Path $scratch 'configuration\api-keys.yml') -Encoding utf8
+        $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+        $json = $status | ConvertTo-Json
+        Assert-True ($status.Count -eq 13) "expected 13 provider entries, got $($status.Count)"
+        $groq = $status | Where-Object { $_.id -eq 'groq' }
+        $ds = $status | Where-Object { $_.id -eq 'deepseek' }
+        Assert-True ($groq.configured -and -not $ds.configured) 'configured flags are wrong'
+        Assert-True ($json -notmatch 'SUPERSECRET|SecretValue') 'a key value leaked into the payload'
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'combos.json is valid, named and provider/model shaped' {
+    $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
+        ConvertFrom-Json).combos
+    $names = @($combos | ForEach-Object { $_.name })
+    Assert-Equal ($names -join ',') 'tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
+    foreach ($c in $combos) {
+        Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
+        foreach ($m in $c.models) {
+            Assert-True ($m -match '^[A-Za-z0-9@._/-]+$') "$($c.name): bad ref '$m'"
+        }
+    }
+    Assert-Equal (($combos | Where-Object { $_.name -eq 'tier1' }).context) '1M'
+}
+
+Test-Case 'apply scripts carry the Cloudflare User-Agent fix' {
+    $ps1 = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
+    $sh = Get-Content (Join-Path $Root 'configuration\omniroute\apply.sh') -Raw
+    foreach ($text in @($ps1, $sh)) {
+        Assert-True ($text -match 'customUserAgent') 'customUserAgent missing'
+        Assert-True ($text -match 'provider-specific-data') 'provider-specific-data flag missing'
+        Assert-True ($text -match 'muse-code') 'meta -> muse-code mapping missing'
+    }
+    Pass
+}
+
+Test-Case 'opencode tiers declare matching context limits' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $oc = $stripped | ConvertFrom-Json
+    $models = $oc.providers.omniroute.models
+    Assert-Equal $models.tier1.limit.context 1000000
+    Assert-Equal $models.'tier1-clean'.limit.context 1000000
+    Assert-Equal $models.tier2.limit.context 262144
+    Assert-Equal $models.tier3.limit.context 131072
+    foreach ($name in @('tier1', 'tier1-clean', 'tier2', 'tier2-clean', 'tier3', 'tier3-clean', 'auto', 'auto/cheap', 'auto/smart')) {
+        Assert-True ($null -ne $models.$name) "missing model $name"
+        Assert-Equal $models.$name.modelID $name
+    }
+    Pass
 }
 
 # ─── Summary ────────────────────────────────────────────────────────────────
