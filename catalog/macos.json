@@ -274,7 +274,7 @@
           ],
           "verify": "zed --version",
           "homepage": "https://zed.dev/",
-          "notes": "Agent panel is pointed at the local LiteLLM tier router."
+          "notes": "Agent panel is pointed at the local OmniRoute gateway."
         },
         {
           "id": "litellm",
@@ -289,7 +289,24 @@
           ],
           "verify": "litellm --version",
           "homepage": "https://docs.litellm.ai/",
-          "notes": "Needs configuration/litellm/.env with your keys; see docs/api-keys.md."
+          "notes": "Manual fallback router; primary is OmniRoute. Needs configuration/litellm/.env; see docs/api-keys.md."
+        },
+        {
+          "id": "omniroute",
+          "name": "OmniRoute gateway",
+          "description": "Local AI gateway: free tiers with auto fallback",
+          "provider": "npm",
+          "package": "omniroute",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "omniroute --version",
+          "homepage": "https://github.com/diegosouzapw/OmniRoute",
+          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first."
         },
         {
           "id": "opencode-cli",

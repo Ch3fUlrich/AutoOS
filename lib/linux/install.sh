@@ -405,11 +405,12 @@ install_litellm_proxy() {
 }
 
 route_zed_to_proxy() {
-    # Point Zed's agent panel at the local LiteLLM tier router. Only the
-    # provider id 'autoos-litellm' is written; every other setting is kept.
-    # The key comes from env AUTOOS_LITELLM_API_KEY, never from this file.
+    # Point Zed's agent panel at the local OmniRoute gateway (:20128).
+    # Only the provider id 'autoos-omniroute' is written; every other
+    # setting is kept. The client key comes from env AUTOOS_OMNIROUTE_KEY
+    # (dashboard -> api-manager), never from this file.
     local cfg_dir="$SYS_HOME/.config/zed" cfg="$cfg_dir/settings.json"
-    if (( AUTOOS_DRY_RUN )); then ui_muted "would route Zed agents to the LiteLLM proxy in $cfg"; return 0; fi
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would route Zed agents to OmniRoute in $cfg"; return 0; fi
     mkdir -p "$cfg_dir"
     if [[ -f "$cfg" ]]; then
         cp "$cfg" "$cfg.autoos-backup-$(date +%Y%m%d-%H%M%S)"
@@ -423,21 +424,21 @@ if os.path.exists(path):
         cfg = json.load(fh)
 lm = cfg.setdefault("language_models", {})
 oc = lm.setdefault("openai_compatible", {})
-oc["autoos-litellm"] = {
-    "api_url": "http://127.0.0.1:4000/v1",
+oc["autoos-omniroute"] = {
+    "api_url": "http://127.0.0.1:20128/v1",
     "available_models": [
-        {"name": "tier1", "display_name": "tier1 orchestrator (spark xhigh)",
+        {"name": "auto/smart", "display_name": "tier1 orchestrator (auto smart)",
          "max_tokens": 1000000, "reasoning_effort": "xhigh"},
-        {"name": "tier2", "display_name": "tier2 smart (free-first)",
-         "max_tokens": 131072},
-        {"name": "tier3", "display_name": "tier3 codegen driver (free-first)",
-         "max_tokens": 131072},
+        {"name": "auto", "display_name": "tier2 smart (auto balanced)",
+         "max_tokens": 256000},
+        {"name": "auto/cheap", "display_name": "tier3 driver (auto cheap)",
+         "max_tokens": 128000},
     ],
 }
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(cfg, fh, indent=2)
 PY
-    ui_ok "Zed agents routed to the LiteLLM proxy (key via AUTOOS_LITELLM_API_KEY)"
+    ui_ok "Zed agents routed to OmniRoute (key via AUTOOS_OMNIROUTE_KEY)"
     return 0
 }
 

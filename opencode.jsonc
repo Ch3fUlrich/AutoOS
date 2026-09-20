@@ -1,13 +1,37 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  // Repo default: the LiteLLM router in infra/litellm (docs/models.md).
-  // tier1 = orchestrator, tier2 = spark-smart, tier3 = daily codegen driver.
-  // Override per user in ~/.config/opencode/opencode.jsonc; the proxy needs
-  // LITELLM_MASTER_KEY in the server environment, keys live in its .env.
-  "model": "litellm/tier1",
+  // Repo default: OmniRoute on :20128 (docs/models.md) — auto-combos with
+  // quota-aware fallback across all connected free tiers. LiteLLM on :4000
+  // stays configured below as the manual fallback router.
+  // Override per user in ~/.config/opencode/opencode.jsonc. Client key via
+  // env AUTOOS_OMNIROUTE_KEY (dashboard -> api-manager); LITELLM_MASTER_KEY
+  // only matters when using the litellm/* fallback models.
+  "model": "omniroute/tier1",
   "providers": {
+    "omniroute": {
+      "name": "AutoOS OmniRoute gateway",
+      "env": ["AUTOOS_OMNIROUTE_KEY"],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:20128/v1"
+      },
+      "models": {
+        "tier1": {
+          "modelID": "auto/smart",
+          "name": "tier1 orchestrator (auto smart + fallback)"
+        },
+        "tier2": {
+          "modelID": "auto",
+          "name": "tier2 smart (auto balanced + fallback)"
+        },
+        "tier3": {
+          "modelID": "auto/cheap",
+          "name": "tier3 codegen driver (auto cheap + fallback)"
+        }
+      }
+    },
     "litellm": {
-      "name": "AutoOS LiteLLM router",
+      "name": "AutoOS LiteLLM router (manual fallback)",
       "env": ["LITELLM_MASTER_KEY"],
       "package": "@opencode/ai/providers/openai-compatible",
       "settings": {

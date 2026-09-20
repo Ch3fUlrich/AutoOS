@@ -1,30 +1,68 @@
 # API keys — how to get each one
 
-The router (`configuration/litellm/config.yaml`) reads all keys from
-`configuration/litellm/.env`. Copy `.env.example` there, fill in what you
-have — chains degrade gracefully, every key you add is one more free quota
-before paid fallback. Order below = most free value first.
+Primary path is **OmniRoute**: install it, open the dashboard, register keys
+there. The LiteLLM `.env` (second table) is only needed for the manual
+fallback router. In both cases: keys live in git-ignored files and app
+environments — never in tracked files, chat logs, or screenshots.
 
-| Env var | Where | Cost | Notes |
+## 1. OmniRoute (primary)
+
+```bash
+npm install -g omniroute
+omniroute            # dashboard at http://localhost:20128
+```
+
+1. Dashboard → **api-manager → Create API Key** (name it e.g. `autoos`).
+   Client key shape: `sk-…`. Put it in env `AUTOOS_OMNIROUTE_KEY`.
+2. Dashboard → **Providers → + Add Provider** for each key below. Prefer
+   free/recurring first; the `auto*` combos and your priority combos do the
+   rest. Quota reality per provider is visible at `/dashboard/free-tiers`.
+3. Zero-config start works with no keys at all (`auto` answers via keyless
+   OpenCode Free) — then add keys to widen the free pool.
+
+OmniRoute numbers below come from its pool-deduped catalog (re-audited
+2026-09-02/03): ~1.62B documented free tokens/mo steady, +first-month signup
+credits. Counts move both ways as providers change tiers — the dashboard is
+the current truth, not this page.
+
+## 2. Provider keys (register in OmniRoute, or in LiteLLM `.env`)
+
+Ordered by free value. "Training" = free tier may train on prompts: fine for
+this public repo, never for private code.
+
+| Key | Where | Free terms (Sep 2026) | Training? |
 |---|---|---|---|
-| `GROQ_API_KEY` | [console.groq.com/keys](https://console.groq.com/keys) — sign up, create key (`gsk_…`) | Free, no card. ~30 RPM / ~1k req/day | Fastest free tier; different infra, rarely fails together with others |
-| `CEREBRAS_API_KEY` | [inference.cerebras.ai](https://inference.cerebras.ai) — sign up, API keys section | Free, no card. 1M tokens/day | Lineup rotates; `gpt-oss-120b` is the stable anchor |
-| `GEMINI_API_KEY` | [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) — Google account, "Create API key" | Free, no card. Flash models only (Pro left free tier Apr 2026), dynamic limits | ⚠️ Free-tier prompts may be used to improve Google models — no private code on tier2/3 free |
-| `MISTRAL_API_KEY` | [console.mistral.ai/api-keys](https://console.mistral.ai/api-keys) — sign up, create key | Free mode, rate-limited, no card | `-latest` aliases are stable; prefer them over dated IDs |
-| `META_API_KEY` | [dev.meta.ai](https://dev.meta.ai) (Meta Model API) — generate key, base `https://api.meta.ai/v1` | $20 free starter credits, then pay-as-you-go | Your own credits for tier1; contributor tier (`-contributor` model IDs) trades training-data use for $0.10/$0.20 pricing |
-| `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) — sign up, create key | Top-up; free `:free` variants metered separately | Cheapest paid spark route (`meta/muse-spark-1.3-contributor`); good last-resort pool |
-| `DEEPSEEK_API_KEY` | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) — sign up, top up | Cheap paid direct | Backstop for tier3-paid |
-| `OPENCODE_ZEN_API_KEY` | [opencode.ai/auth](https://opencode.ai/auth) — sign in, billing, copy key | $20 prepaid, at-cost tokens + 4.4% + $0.30 card fee; auto-reload $20 under $5 (changeable) | Promo free models included; ⚠️ several permit training on prompts during free period — keep private code on paid routes |
-| `LITELLM_MASTER_KEY` | You invent it | Free | Random local password protecting your proxy; also the key your apps send |
+| Mistral | [console.mistral.ai/api-keys](https://console.mistral.ai/api-keys) | **Biggest documented pool: ~1B/mo per org**, 2 RPM, rate-limited free mode, no card | Check terms |
+| Gemini (AI Studio) | [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) | Flash-family pooled, uncapped figure, dynamic limits; Pro left free tier Apr 2026; 2.0 Flash dead Jun 2026 | **Yes** |
+| Groq | [console.groq.com/keys](https://console.groq.com/keys) | Per-model 200K tokens/day caps (~30M pool); llama-3.3-70b left free tier Aug 2026 — use GPT-OSS/Qwen/Llama current IDs | Check terms |
+| Z.AI / GLM | [z.ai](https://z.ai) | GLM-4-Flash/4.5/4.7 **permanently free**, uncapped + 20M signup bonus | Check terms |
+| Kilo gateway | Kilo Code app | Rotating "Auto Free" set (Nemotron 3, StepFun…), uncapped | Check terms |
+| Nara | router.bynara.id | ~210M/mo bucket | Check terms |
+| llm7 | token.llm7.io | 150M/mo, free token required | Check terms |
+| xKiro | xKiro | 150M/mo | Check terms |
+| OpenRouter | [openrouter.ai/keys](https://openrouter.ai/keys) | Free `:free` pool metered per request; **$10 top-up → 1000 req/day** (+24M/mo) | Per model |
+| OpenCode Zen | [opencode.ai/auth](https://opencode.ai/auth) | 6 rotating free coding models, uncapped; paid: $20 prepaid, at-cost + 4.4% + $0.30 | **Promo models yes** |
+| Meta Model API | [dev.meta.ai](https://dev.meta.ai) | $20 starter credits; contributor IDs (`-contributor`) = $0.10/$0.20 per 1M | **Contributor yes** |
+| DeepSeek | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) | 5M one-time, **expires after 30 days** | Check terms |
+| Cerebras | [inference.cerebras.ai](https://inference.cerebras.ai) | ⚠️ No-card 1M/day trial is **gone** — one-time $5 credit, card required | Check terms |
+| Cloudflare AI | Cloudflare dashboard | ~30M/mo (10k Neurons/day) | Check terms |
+| Vertex AI | Google Cloud | $300 signup credit (~300M tokens), billing account needed | Per terms |
+
+ToS caution (single-user personal proxy is generally tolerated; resale is
+not): `opencode` ToS restricts Zen to internal use (flagged avoid for
+proxying), `muse-spark-web`/scraped-web routes flagged avoid, Groq/Mistral/
+Cerebras prohibit reselling keys. When in doubt, paid legs only.
+
+## 3. LiteLLM fallback `.env` (only if you use it)
+
+Copy `configuration/litellm/.env.example` → `.env`. Same keys as above
+(`GROQ/CEREBRAS/GEMINI/MISTRAL/OPENROUTER/META/DEEPSEEK/OPENCODE_ZEN_API_KEY`)
+plus `LITELLM_MASTER_KEY` (a random local password you invent). Missing keys
+are fine — chains skip what they cannot authenticate.
 
 ## Rules
 
-- Keys live **only** in `configuration/litellm/.env` (git-ignored) and app
-  environments — never in tracked files, chat logs, or screenshots. Tracked
-  templates carry `REPLACE_WITH_…` placeholders.
-- Free tiers that train on prompts (Gemini free, contributor tiers, Zen promo
-  models): fine for open-source work like this repo, never for private code.
-  Paid routes (Meta direct non-contributor, Zen paid, DeepSeek direct) follow
-  zero-retention terms — check each provider's current policy.
-- Rotate a leaked key at the provider console immediately; the proxy needs no
-  config change, just the new value in `.env` and a restart.
+- Rotate a leaked key at the provider console immediately; proxy needs no
+  config change, just the new value + restart.
+- Free tiers churn monthly (this page already needed corrections 3 weeks
+  after writing). Re-check `/dashboard/free-tiers` before trusting a number.

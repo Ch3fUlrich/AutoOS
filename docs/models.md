@@ -1,56 +1,83 @@
-# Model routing — one LiteLLM proxy for every agent
+# Model routing — OmniRoute first, LiteLLM as fallback
 
 Every agent in this repo (OpenCode CLI/TUI, Zed Agent, OpenHands, Claude Code
-Desktop, ad-hoc scripts) talks to the **same local LiteLLM proxy**, which
-routes across three free-first tiers with paid fallbacks. One `.env` holds all
-keys, one `config.yaml` holds all routing, per-model pricing is fixed in one
-place so cost displays are correct everywhere.
+Desktop, ad-hoc scripts) talks to **OmniRoute on `:20128`**, which routes
+across all connected free tiers with quota-aware auto-fallback. LiteLLM on
+`:4000` stays configured as the manual fallback for anyone who prefers it.
 
-## The tiers (cheapest capable first — cost efficiency is the point)
+## Why OmniRoute over hand-maintained LiteLLM chains
 
-| Tier | Role | Chain |
+Our LiteLLM config rotted within 3 weeks: Cerebras killed no-card free,
+llama-3.3-70b left Groq free, Gemini cut limits 50-80%. OmniRoute's catalog
+re-audits this for us, and replaces static lists with live strategies:
+
+| Need | LiteLLM (fallback) | OmniRoute (primary) |
 |---|---|---|
-| `tier1` | Orchestration: Muse Spark 1.3, xhigh effort, 1M context, tool-calling. For long unattended runs | Zen `…-contributor-free` (promo) → OpenRouter `meta/muse-spark-1.3-contributor` ($0.10/$0.20) → Meta direct on your credits ($20 starter) |
-| `tier1-paid` | Paid escalation, orchestrators only | Meta-direct contributor → Zen `deepseek-v4.1-flash`. Nothing else — no opus/sonnet/fable by default |
-| `tier2` | Smart second level | Cerebras `gpt-oss-120b` → Groq `gpt-oss-120b` → Gemini `3.8-flash` (all free) → paid: Zen `deepseek-v4.1-flash` |
-| `tier3` | Daily driver: codegen, research, review, lint | Groq `llama-3.3-70b` → Mistral `devstral-small` → Gemini `2.5-flash` → Mistral `small` (all free) → paid: Zen `deepseek-v4.1-flash` → DeepSeek direct |
+| Fallback | Fixed ordered list per tier | 19 strategies: `priority`, `lkgp` (stick to last-good), `headroom`, `auto` (16-factor live scoring) |
+| Free tracking | Hand-edited comments | Pool-deduped catalog + `/dashboard/free-tiers` with live used/remaining |
+| Multi-key rotation | No | Each connection scored independently |
+| Zero-config start | No (needs `.env`) | `auto` answers keyless out of the box |
+| Token stretch | No | RTK→Caveman compression 15-95% (content-dependent, don't budget on it) |
+| Tool coverage | Manual per-app config | `omniroute setup-opencode` / `run opencode`, 36+ tools, one client key |
 
-Free deployments carry `rpm` guards matching their free quotas, the router
-serves least-used-first, a 429ing deployment cools down 2 minutes, and each
-tier falls to its `-paid` group only after retries. `drop_params` is on so one
-caller works against heterogeneous providers.
+Caveats: single-maintainer project shipping very fast (pin your installed
+version mentally; dashboard shows it) — which is exactly why LiteLLM stays as
+fallback. And OmniRoute recovers from Zen aggregate throttling gracefully; it
+does not remove the throttle. ToS: proxying Zen-free carries Anomaly’s
+internal-use-only clause — paid/user keys are the clean legs.
 
-**Caveats:**
-- `xhigh` is a reasoning-*effort* tier, not a model ID: aliases resolve to the
-  1.3 family, effort is the caller's control (Zed: `reasoning_effort: "xhigh"`,
-  Muse Code: Max level).
-- Contributor / promo-free routes trade training-data use for price — fine for
-  this public repo, never for private code; the paid legs are the clean ones.
-  Same for Gemini free tier (may train Google models).
-- Zen documents Claude/Spark under `/responses` or `/messages` while this
-  config speaks `/chat/completions`. DeepSeek/Kimi/GLM legs are on the safe
-  path; **run `litellm --test` after first start** and repoint anything that
-  errors on path — the chain degrades gracefully meanwhile.
+## Tier mapping (repo defaults in `opencode.jsonc`)
+
+| Tier | OmniRoute model | Behavior |
+|---|---|---|
+| `tier1` orchestrator | `auto/smart` | Quality-first + explores; set caller effort to xhigh/Max for long runs |
+| `tier2` smart | `auto` | Balanced 16-factor scoring |
+| `tier3` driver | `auto/cheap` | Cost-weighted; codegen/review/lint |
+
+Exact-control alternative: create a **priority combo** in
+dashboard → combos (or `omniroute combo create`) that encodes the old static
+chain, then send its exact name as the model:
+
+- `tier1-strict`: `oc/…` Zen-free spark → `meta/muse-spark-1.3-contributor`
+  (OpenRouter, $0.10/$0.20) → Meta-direct contributor (own credits) →
+  paid: `deepseek-v4.1-flash`. Paid rule preserved: contributor, else flash.
+- `tier3-strict`: Mistral free → Groq free → Gemini free → paid flash.
+
+Your OmniRoute balance (already topped up) is the final paid leg behind these.
 
 ## Run it
 
 ```bash
-pip install 'litellm[proxy]'   # or: pipx install "litellm[proxy]"
-cp configuration/litellm/.env.example configuration/litellm/.env  # fill in, never commit
-litellm --config configuration/litellm/config.yaml --port 4000
-litellm --config configuration/litellm/config.yaml --test
+npm install -g omniroute
+omniroute                       # dashboard http://localhost:20128
+omniroute doctor                # config, ports, runtime, liveness
+omniroute providers test-all    # every connection, at once
+omniroute setup-opencode        # writes opencode's own config (global;
+                                # repo opencode.jsonc still wins by precedence)
+omniroute run opencode --model auto/smart   # zero-config launch, nothing written
 ```
 
-Keys: [api-keys.md](api-keys.md). Add OpenRouter `:free` models as an extra
-free layer later by appending to the tier groups.
+Keys: dashboard → Providers → + Add Provider ([guide](api-keys.md)).
+Client key: dashboard → api-manager → Create API Key → env
+`AUTOOS_OMNIROUTE_KEY`. Fallback router: `configuration/litellm/` +
+`LITELLM_MASTER_KEY` (`litellm --test` after first start).
 
-## Connect each app (proxy: `http://127.0.0.1:4000/v1`, key = `LITELLM_MASTER_KEY`)
+## Connect each app (key = `AUTOOS_OMNIROUTE_KEY`)
 
-- **OpenCode** — repo default: root `opencode.jsonc` defines the `litellm`
-  provider (`tier1/2/3`) and pins `model: litellm/tier1`. Per session:
-  `/models`. Unattended runs: allow-by-default **V2** permissions in global
-  `~/.config/opencode/opencode.jsonc` (note: `providers`/`permissions`, not
-  the V1 `provider`/`permission` shape still floating around in blog posts):
+- **OpenCode** — repo default already points at `:20128`
+  (`omniroute/tierN`, `litellm/tierN` kept as fallback). Per session:
+  `/models`. Unattended: V2 allow-permissions in global config (see below).
+- **Zed** — setup writes provider `autoos-omniroute` (`auto/smart` xhigh,
+  `auto`, `auto/cheap`) into Zed's `settings.json`; key via env, never file.
+  Zen-free is *not* available through Zed's native OpenCode provider — via
+  OmniRoute (`oc/…`, `auto`) it is.
+- **Neovim + sidekick** — `install_lazyvim` enables the `ai.sidekick` extra;
+  `<leader>aa` runs opencode, which inherits the repo routing.
+- **Claude Code / Codex / others** — `omniroute run <tool>` injects env per
+  process, or `setup-*` writes the tool config. Base URL `…:20128/v1`.
+- **Headless boxes** — `server` profile ticks `opencode-cli` + `neovim`.
+- **Unattended permissions** (OpenCode V2 — `providers`/`permissions`, not
+  the V1 `provider`/`permission` shape in old blog posts):
   ```jsonc
   { "permissions": [
     { "action": "edit", "resource": "*", "effect": "allow" },
@@ -58,27 +85,48 @@ free layer later by appending to the tier groups.
     { "action": "shell", "resource": "rm -rf *", "effect": "ask" },
     { "action": "shell", "resource": "sudo *", "effect": "ask" } ] }
   ```
-  Keep the destructive asks — a smart model still makes dumb mistakes.
-- **Zed** — AutoOS writes an `openai_compatible` provider (`autoos-litellm`,
-  tiers as models, `reasoning_effort: "xhigh"` on tier1) into Zed's
-  `settings.json` during setup; the key comes from env `AUTOOS_LITELLM_API_KEY`
-  (set it to your master key), never from the file. Zen free models are *not*
-  available through Zed's native OpenCode provider — via the proxy they are.
-  Prefer the CLI driven through Zed's terminal over external-agent ACP unless
-  you need ACP events.
-- **Neovim + sidekick** — `install_lazyvim` enables LazyVim's
-  `ai.sidekick` extra (`<leader>aa` toggles the opencode panel). opencode.nvim
-  / avante.nvim are documented alternatives, not installed.
-- **Claude Code Desktop** — `ANTHROPIC_BASE_URL=http://127.0.0.1:4000/v1`,
-  `ANTHROPIC_API_KEY=<master key>`, model `tier1`.
-- **OpenHands** — OpenAI-compatible provider, base URL the proxy, model
-  `tier1`. Costs display correctly because the proxy reports real usage.
-- **Headless boxes** — no GUI → the `server` profile ticks `opencode-cli`
-  (and `neovim`): full terminal coding via TUI + sidekick, same tiers.
+
+## Routing map
+
+```mermaid
+flowchart TB
+    subgraph clients["Agents (one client key: AUTOOS_OMNIROUTE_KEY)"]
+        OC["opencode CLI/TUI\nomniroute/tier1·2·3"]
+        ZED["Zed agent panel\nauto/smart · auto · auto/cheap"]
+        NV["Neovim + sidekick\n(<leader>aa → opencode)"]
+        OH["OpenHands / Claude Code\nbase URL → :20128"]
+    end
+    subgraph or["OmniRoute :20128 (primary)"]
+        AUTO["auto/* combos\nsmart · balanced · cheap\n16-factor scoring +\n5-30 min circuit breakers"]
+        PRI["priority combos\ntier1-strict · tier3-strict\nspark → contributor → flash"]
+        DASH["dashboard :20128\nproviders · free-tiers · quota"]
+    end
+    subgraph free["Free legs (register keys once)"]
+        MI["Mistral ~1B/mo"]
+        GE["Gemini Flash pooled"]
+        GR["Groq per-model caps"]
+        ZAI["Z.AI GLM uncapped"]
+        KILO["Kilo / Nara / llm7 / xKiro"]
+        ZEN["Zen oc/* rotating free"]
+    end
+    subgraph paid["Paid legs (last resort)"]
+        BAL["Your OmniRoute balance"]
+        META["Meta direct contributor"]
+        ORC["OpenRouter contributor $0.10"]
+        DFL["DeepSeek V4.1 Flash"]
+    end
+    subgraph fb["LiteLLM :4000 (manual fallback)"]
+        LT["tier1·2·3 static chains\nconfiguration/litellm/"]
+    end
+    OC & ZED & NV & OH --> or
+    AUTO & PRI --> free
+    AUTO & PRI -. quota exhausted .-> paid
+    OC -. "model litellm/*" .-> LT
+    DASH -. live used/remaining .-> AUTO
+```
 
 ## Change the defaults
 
-Repo default (`litellm/tier1` in `opencode.jsonc`, tiers in
-`configuration/litellm/config.yaml`) is a starting point. Per-user overrides
-go in `~/.config/opencode/opencode.jsonc` (global merges under project),
-never by editing someone else's keys — there are no keys here to edit.
+Tiers in `opencode.jsonc`, combos in the OmniRoute dashboard, static chains
+in `configuration/litellm/config.yaml`. Per-user overrides go in
+`~/.config/opencode/opencode.jsonc` (global merges under project).

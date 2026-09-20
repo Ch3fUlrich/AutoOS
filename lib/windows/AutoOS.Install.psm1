@@ -453,14 +453,14 @@ function Install-AutoOSLitellm {
 
 function Set-AutoOSZedProxy {
     <#
-      .SYNOPSIS Point Zed's agent panel at the local LiteLLM tier router.
-      Only the provider id 'autoos-litellm' is written; every other Zed
-      setting is kept. The key comes from env AUTOOS_LITELLM_API_KEY.
+      .SYNOPSIS Point Zed's agent panel at the local OmniRoute gateway.
+      Only the provider id 'autoos-omniroute' is written; every other Zed
+      setting is kept. The key comes from env AUTOOS_OMNIROUTE_KEY.
     #>
     $cfgDir  = Join-Path $env:APPDATA 'Zed'
     $cfgPath = Join-Path $cfgDir 'settings.json'
     if ($script:DryRun) {
-        Write-AutoOSLine "would route Zed agents to the LiteLLM proxy in $cfgPath" -Level muted
+        Write-AutoOSLine "would route Zed agents to OmniRoute in $cfgPath" -Level muted
         return
     }
     if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
@@ -475,16 +475,16 @@ function Set-AutoOSZedProxy {
         Add-Member -InputObject $settings.language_models -NotePropertyName 'openai_compatible' -NotePropertyValue (New-Object psobject)
     }
     $entry = @{
-        api_url = 'http://127.0.0.1:4000/v1'
+        api_url = 'http://127.0.0.1:20128/v1'
         available_models = @(
-            @{ name = 'tier1'; display_name = 'tier1 orchestrator (spark xhigh)'; max_tokens = 1000000; reasoning_effort = 'xhigh' },
-            @{ name = 'tier2'; display_name = 'tier2 smart (free-first)'; max_tokens = 131072 },
-            @{ name = 'tier3'; display_name = 'tier3 codegen driver (free-first)'; max_tokens = 131072 }
+            @{ name = 'auto/smart'; display_name = 'tier1 orchestrator (auto smart)'; max_tokens = 1000000; reasoning_effort = 'xhigh' },
+            @{ name = 'auto'; display_name = 'tier2 smart (auto balanced)'; max_tokens = 256000 },
+            @{ name = 'auto/cheap'; display_name = 'tier3 driver (auto cheap)'; max_tokens = 128000 }
         )
     }
-    Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-litellm' -NotePropertyValue $entry -Force
+    Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-omniroute' -NotePropertyValue $entry -Force
     $settings | ConvertTo-Json -Depth 8 | Out-File -FilePath $cfgPath -Encoding utf8
-    Write-AutoOSLine 'Zed agents routed to the LiteLLM proxy (key via AUTOOS_LITELLM_API_KEY)' -Level ok
+    Write-AutoOSLine 'Zed agents routed to OmniRoute (key via AUTOOS_OMNIROUTE_KEY)' -Level ok
 }
 
 function Invoke-AutoOSPostInstall {
