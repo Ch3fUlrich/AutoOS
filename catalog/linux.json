@@ -4,8 +4,8 @@
   "profiles": {
     "workstation": "Full desktop workstation — same coding and AI stack as the Windows profile.",
     "ai-coding": "Coding and AI tooling plus the shell, no desktop packages.",
-    "light": "Small board (Raspberry Pi 5 and similar) — Claude Code, Tailscale and Herdr only.",
-    "server": "Headless server — shell, networking and containers, no GUI.",
+    "light": "Small board (Raspberry Pi 5 and similar) — Claude Code, OpenCode CLI, Tailscale and Herdr only.",
+    "server": "Headless server — shell, networking, containers and the OpenCode CLI, no GUI.",
     "custom": "Start with nothing ticked and choose by hand."
   },
   "categories": [
@@ -371,6 +371,59 @@
           ],
           "verify": "nvim --version",
           "homepage": "https://www.lazyvim.org/"
+        },
+        {
+          "id": "zed",
+          "name": "Zed",
+          "description": "Fast Rust editor with an AI agent panel",
+          "provider": "script",
+          "package": "zed",
+          "requires": [
+            "download-tools",
+            "litellm"
+          ],
+          "postInstall": "route_zed_to_proxy",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "zed --version",
+          "homepage": "https://zed.dev/",
+          "notes": "Agent panel is pointed at the local LiteLLM tier router."
+        },
+        {
+          "id": "litellm",
+          "name": "LiteLLM tier router",
+          "description": "Local LLM router: free-first tiers for all agents",
+          "provider": "custom",
+          "package": "litellm",
+          "postInstall": "install_litellm_proxy",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "litellm --version",
+          "homepage": "https://docs.litellm.ai/",
+          "notes": "Needs configuration/litellm/.env with your keys; see docs/api-keys.md."
+        },
+        {
+          "id": "opencode-cli",
+          "name": "OpenCode CLI",
+          "description": "Terminal AI coding agent (TUI) on the tier router",
+          "provider": "npm",
+          "package": "opencode-ai",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "opencode --version",
+          "homepage": "https://opencode.ai/"
         }
       ]
     },

@@ -91,6 +91,7 @@ script_is_installed() {
         herdr)           has_cmd herdr ;;
         handy)           has_cmd handy || [[ -x /usr/bin/handy ]] ;;
         vscode)          has_cmd code ;;
+        zed)             has_cmd zed ;;
         *)               return 1 ;;
     esac
 }
@@ -152,6 +153,7 @@ install_script() {
         herdr)           install_herdr ;;
         handy)           install_handy ;;
         vscode)          install_vscode ;;
+        zed)             install_zed ;;
         *) ui_err "no script installer for '$1'"; return 1 ;;
     esac
 }
@@ -344,11 +346,99 @@ add_user_to_docker_group() {
 
 install_lazyvim() {
     local dest="$SYS_HOME/.config/nvim"
-    if [[ -e "$dest" ]]; then ui_muted "nvim config already exists - leaving it alone"; return 0; fi
-    if (( AUTOOS_DRY_RUN )); then ui_muted "would install the LazyVim starter into $dest"; return 0; fi
-    git clone --depth 1 https://github.com/LazyVim/starter "$dest"
-    rm -rf "$dest/.git"
-    ui_ok "LazyVim starter installed"
+    if [[ -e "$dest" ]]; then
+        ui_muted "nvim config already exists - leaving it alone"
+    else
+        if (( AUTOOS_DRY_RUN )); then ui_muted "would install the LazyVim starter into $dest"; else
+            git clone --depth 1 https://github.com/LazyVim/starter "$dest"
+            rm -rf "$dest/.git"
+            ui_ok "LazyVim starter installed"
+        fi
+    fi
+    enable_sidekick_extra
+}
+
+enable_sidekick_extra() {
+    # Folke's sidekick.nvim embeds the opencode CLI in Neovim (<leader>aa).
+    # LazyVim ships it as an extra; enabling = one id in lazyvim.json.
+    local lj="$SYS_HOME/.config/nvim/lazyvim.json"
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would enable the sidekick extra in $lj"; return 0; fi
+    [[ -d "$SYS_HOME/.config/nvim" ]] || { ui_muted "no nvim config - skipping sidekick"; return 0; }
+    python3 - "$lj" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+extra = "lazyvim.plugins.extras.ai.sidekick"
+cfg = {}
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+extras = cfg.setdefault("extras", [])
+if extra not in extras:
+    extras.append(extra)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2)
+    print("enabled")
+else:
+    print("already")
+PY
+    ui_ok "sidekick extra enabled (<leader>aa toggles the opencode panel)"
+}
+
+install_zed() {
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would install Zed via https://zed.dev/install.sh"; return 0; fi
+    curl -fsSL https://zed.dev/install.sh | sh
+    ui_ok "Zed installed"
+}
+
+install_litellm_proxy() {
+    if has_cmd litellm; then ui_muted "litellm already installed"; return 0; fi
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would install litellm[proxy] via pipx or pip"; return 0; fi
+    if has_cmd pipx; then
+        pipx install 'litellm[proxy]' || ui_warn "pipx install failed - see docs/models.md for the manual step"
+    elif has_cmd python3; then
+        python3 -m pip install --user 'litellm[proxy]' || ui_warn "pip install failed - see docs/models.md for the manual step"
+    else
+        ui_warn "no python3 on PATH - install Python, then: pip install 'litellm[proxy]'"
+    fi
+    ui_info "next: copy configuration/litellm/.env.example to .env, add keys (docs/api-keys.md)"
+    return 0
+}
+
+route_zed_to_proxy() {
+    # Point Zed's agent panel at the local LiteLLM tier router. Only the
+    # provider id 'autoos-litellm' is written; every other setting is kept.
+    # The key comes from env AUTOOS_LITELLM_API_KEY, never from this file.
+    local cfg_dir="$SYS_HOME/.config/zed" cfg="$cfg_dir/settings.json"
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would route Zed agents to the LiteLLM proxy in $cfg"; return 0; fi
+    mkdir -p "$cfg_dir"
+    if [[ -f "$cfg" ]]; then
+        cp "$cfg" "$cfg.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    fi
+    python3 - "$cfg" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+cfg = {}
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+lm = cfg.setdefault("language_models", {})
+oc = lm.setdefault("openai_compatible", {})
+oc["autoos-litellm"] = {
+    "api_url": "http://127.0.0.1:4000/v1",
+    "available_models": [
+        {"name": "tier1", "display_name": "tier1 orchestrator (spark xhigh)",
+         "max_tokens": 1000000, "reasoning_effort": "xhigh"},
+        {"name": "tier2", "display_name": "tier2 smart (free-first)",
+         "max_tokens": 131072},
+        {"name": "tier3", "display_name": "tier3 codegen driver (free-first)",
+         "max_tokens": 131072},
+    ],
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(cfg, fh, indent=2)
+PY
+    ui_ok "Zed agents routed to the LiteLLM proxy (key via AUTOOS_LITELLM_API_KEY)"
+    return 0
 }
 
 install_agent_skills() {

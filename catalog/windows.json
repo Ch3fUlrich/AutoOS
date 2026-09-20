@@ -4,7 +4,7 @@
   "profiles": {
     "workstation": "Full development workstation — everything below that fits the hardware.",
     "ai-coding": "Coding and AI tooling only, plus the terminal it runs in.",
-    "light": "Minimal remote-access box — Claude Code, Tailscale and Herdr only.",
+    "light": "Minimal remote-access box — Claude Code, OpenCode CLI, Tailscale and Herdr only.",
     "custom": "Start with nothing ticked and choose by hand."
   },
   "categories": [
@@ -265,6 +265,56 @@
           ],
           "prompt": "omnigraph_url",
           "homepage": "https://github.com/Ch3fUlrich/agent-skills"
+        },
+        {
+          "id": "zed",
+          "name": "Zed",
+          "description": "Fast Rust editor with an AI agent panel",
+          "provider": "winget",
+          "package": "ZedIndustries.Zed",
+          "requires": [
+            "litellm"
+          ],
+          "postInstall": "Set-AutoOSZedProxy",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "zed --version",
+          "homepage": "https://zed.dev/",
+          "notes": "Agent panel is pointed at the local LiteLLM tier router."
+        },
+        {
+          "id": "litellm",
+          "name": "LiteLLM tier router",
+          "description": "Local LLM router: free-first tiers for all agents",
+          "provider": "custom",
+          "package": "litellm",
+          "postInstall": "Install-AutoOSLitellm",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "litellm --version",
+          "homepage": "https://docs.litellm.ai/",
+          "notes": "Needs configuration/litellm/.env with your keys; see docs/api-keys.md."
+        },
+        {
+          "id": "opencode-cli",
+          "name": "OpenCode CLI",
+          "description": "Terminal AI coding agent (TUI) on the tier router",
+          "provider": "npm",
+          "package": "opencode-ai",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "verify": "opencode --version",
+          "homepage": "https://opencode.ai/"
         }
       ]
     },

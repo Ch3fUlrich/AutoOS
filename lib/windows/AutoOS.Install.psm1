@@ -426,6 +426,67 @@ function Set-AutoOSAntigravityMcp {
     Write-AutoOSLine "Antigravity MCP config written to $cfgPath" -Level ok
 }
 
+function Install-AutoOSLitellm {
+    <#
+      .SYNOPSIS Install the litellm proxy (the tier router in configuration/litellm).
+    #>
+    if ($script:DryRun) {
+        Write-AutoOSLine 'would install litellm[proxy] via pipx or pip' -Level muted
+        return
+    }
+    if (Get-Command litellm -ErrorAction SilentlyContinue) {
+        Write-AutoOSLine 'litellm already installed' -Level muted
+        return
+    }
+    if (Get-Command pipx -ErrorAction SilentlyContinue) {
+        Invoke-AutoOSProcess -FilePath 'pipx' -Arguments @('install', 'litellm[proxy]') | Out-Null
+    } elseif (Get-Command py -ErrorAction SilentlyContinue) {
+        Invoke-AutoOSProcess -FilePath 'py' -Arguments @('-m', 'pip', 'install', '--user', 'litellm[proxy]') | Out-Null
+    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+        Invoke-AutoOSProcess -FilePath 'python' -Arguments @('-m', 'pip', 'install', '--user', 'litellm[proxy]') | Out-Null
+    } else {
+        Write-AutoOSLine "no Python on PATH - install it, then: pip install litellm[proxy]" -Level warn
+        return
+    }
+    Write-AutoOSLine 'next: copy configuration/litellm/.env.example to .env, add keys (docs/api-keys.md)' -Level info
+}
+
+function Set-AutoOSZedProxy {
+    <#
+      .SYNOPSIS Point Zed's agent panel at the local LiteLLM tier router.
+      Only the provider id 'autoos-litellm' is written; every other Zed
+      setting is kept. The key comes from env AUTOOS_LITELLM_API_KEY.
+    #>
+    $cfgDir  = Join-Path $env:APPDATA 'Zed'
+    $cfgPath = Join-Path $cfgDir 'settings.json'
+    if ($script:DryRun) {
+        Write-AutoOSLine "would route Zed agents to the LiteLLM proxy in $cfgPath" -Level muted
+        return
+    }
+    if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+    if (Test-Path $cfgPath) {
+        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
+    $settings = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw | ConvertFrom-Json } else { New-Object psobject }
+    if (-not $settings.language_models) {
+        Add-Member -InputObject $settings -NotePropertyName 'language_models' -NotePropertyValue (New-Object psobject)
+    }
+    if (-not $settings.language_models.openai_compatible) {
+        Add-Member -InputObject $settings.language_models -NotePropertyName 'openai_compatible' -NotePropertyValue (New-Object psobject)
+    }
+    $entry = @{
+        api_url = 'http://127.0.0.1:4000/v1'
+        available_models = @(
+            @{ name = 'tier1'; display_name = 'tier1 orchestrator (spark xhigh)'; max_tokens = 1000000; reasoning_effort = 'xhigh' },
+            @{ name = 'tier2'; display_name = 'tier2 smart (free-first)'; max_tokens = 131072 },
+            @{ name = 'tier3'; display_name = 'tier3 codegen driver (free-first)'; max_tokens = 131072 }
+        )
+    }
+    Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-litellm' -NotePropertyValue $entry -Force
+    $settings | ConvertTo-Json -Depth 8 | Out-File -FilePath $cfgPath -Encoding utf8
+    Write-AutoOSLine 'Zed agents routed to the LiteLLM proxy (key via AUTOOS_LITELLM_API_KEY)' -Level ok
+}
+
 function Invoke-AutoOSPostInstall {
     param([Parameter(Mandatory)][psobject]$Component)
     if (-not $Component.PostInstall) { return }
@@ -444,4 +505,5 @@ Export-ModuleMember -Function `
     Add-AutoOSGitToPath, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
     Install-AutoOSHerdr, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
+    Install-AutoOSLitellm, Set-AutoOSZedProxy,
     Invoke-AutoOSScriptProvider

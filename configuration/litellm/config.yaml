@@ -1,0 +1,126 @@
+# AutoOS LiteLLM router — single front door for every agent in this repo.
+#
+# Cost efficiency is the design goal, hence the 3-level hierarchy:
+#   tier1      orchestration — Muse Spark 1.3 family, xhigh effort.
+#              Long-horizon, tool-calling, 1M context. Free/promo first,
+#              own Meta credits next, paid backstop last.
+#   tier2      smart second level — strong reasoning, free quotas.
+#   tier3      daily driver — codegen, research, review, lint. Cheapest.
+#   tierN-paid paid escalation for tierN, tried in listed order.
+#
+# Paid rule: orchestrator escalation is muse-spark-1.3-contributor, else
+# deepseek-v4.1-flash. Nothing expensive (opus/sonnet/fable) is routed by
+# default — add it yourself if a task justifies it.
+#
+# Run:  litellm --config configuration/litellm/config.yaml --port 4000
+# Test: litellm --config configuration/litellm/config.yaml --test
+# Keys live in configuration/litellm/.env (git-ignored). Copy .env.example first.
+# Key guide: docs/api-keys.md
+
+model_list:
+  # ── tier1: orchestration, spark-first ──────────────────────────────
+  # 1. Zen promo (free, limited time). 2. OpenRouter contributor
+  # ($0.10/$0.20 per 1M — cheapest paid anywhere). 3. Meta direct on
+  # your own credits ($20 starter included).
+  - model_name: tier1
+    litellm_params:
+      model: openai/muse-spark-1.3-contributor-free
+      api_base: https://opencode.ai/zen/v1
+      api_key: os.environ/OPENCODE_ZEN_API_KEY
+  - model_name: tier1
+    litellm_params:
+      model: openrouter/meta/muse-spark-1.3-contributor
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: tier1
+    litellm_params:
+      model: meta/muse-spark-1.3-contributor
+      api_key: os.environ/META_API_KEY
+  # xhigh = highest reasoning-effort tier of the 1.3 family. Effort is a
+  # caller-side control, not a model ID (Zed: reasoning_effort "xhigh";
+  # Muse Code: Max level). The aliases above resolve to the 1.3 family.
+
+  # ── tier1-paid: contributor on own credits, else deepseek flash ────
+  - model_name: tier1-paid
+    litellm_params:
+      model: meta/muse-spark-1.3-contributor
+      api_key: os.environ/META_API_KEY
+  - model_name: tier1-paid
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_base: https://opencode.ai/zen/v1
+      api_key: os.environ/OPENCODE_ZEN_API_KEY
+
+  # ── tier2: smart second level, free quotas ─────────────────────────
+  - model_name: tier2
+    litellm_params:
+      model: cerebras/gpt-oss-120b
+      api_key: os.environ/CEREBRAS_API_KEY
+      rpm: 30 # free: 30 RPM / 1M tokens per day
+  - model_name: tier2
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      rpm: 30 # free: ~30 RPM / ~1k req per day
+  - model_name: tier2
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+      rpm: 10 # AI Studio free: flash only, dynamic limits — stay conservative
+
+  # ── tier2-paid: deepseek flash, nothing else ───────────────────────
+  - model_name: tier2-paid
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_base: https://opencode.ai/zen/v1
+      api_key: os.environ/OPENCODE_ZEN_API_KEY
+
+  # ── tier3: daily driver, cheapest capable ──────────────────────────
+  - model_name: tier3
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+      rpm: 30
+  - model_name: tier3
+    litellm_params:
+      model: mistral/devstral-small-latest
+      api_key: os.environ/MISTRAL_API_KEY
+      rpm: 10 # La Plateforme free mode is rate-limited
+  - model_name: tier3
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+      rpm: 10
+  - model_name: tier3
+    litellm_params:
+      model: mistral/mistral-small-latest
+      api_key: os.environ/MISTRAL_API_KEY
+      rpm: 10
+
+  # ── tier3-paid: deepseek flash, then DeepSeek direct ───────────────
+  - model_name: tier3-paid
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_base: https://opencode.ai/zen/v1
+      api_key: os.environ/OPENCODE_ZEN_API_KEY
+  - model_name: tier3-paid
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+router_settings:
+  routing_strategy: usage-based-routing-v2 # least-used free deployment first
+  num_retries: 3
+  timeout: 600 # long-horizon orchestration needs headroom, not the 5-min default
+  allowed_fails: 3
+  cooldown_time: 120 # cool a 429ing deployment for 2 min, serve from the rest
+  fallbacks:
+    - tier1: [tier1-paid]
+    - tier2: [tier2-paid]
+    - tier3: [tier3-paid]
+
+litellm_settings:
+  drop_params: true # heterogeneous providers reject unknown params; drop, don't fail
+  num_retries: 3
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

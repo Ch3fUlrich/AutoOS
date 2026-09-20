@@ -81,7 +81,7 @@ Run `--list` for the current set. The headline items:
 | Area | Includes |
 |---|---|
 | Terminal | Windows Terminal, PowerShell 7, Oh My Posh, zsh + Powerlevel10k, Nerd Fonts |
-| Coding & AI | Claude Code CLI, Claude Desktop, Antigravity, VS Code, Docker, Herdr, Node.js |
+| Coding & AI | Claude Code CLI, OpenCode CLI, Claude Desktop, Antigravity, Zed, VS Code, Docker, Herdr, Node.js, LiteLLM tier router |
 | Input | Handy — offline speech-to-text, so you can dictate prompts instead of typing them |
 | MCP stack | Clones [agent-skills](https://github.com/Ch3fUlrich/agent-skills) and wires up Serena / Graphify / Omnigraph / Superpowers — asking for your Omnigraph URL rather than hardcoding one |
 | Desktop (Windows) | Windhawk with the Explorer file-size and taskbar-clock mods, PowerToys |
@@ -226,6 +226,7 @@ Details: [Testing](docs/testing.md).
 | [Security](docs/security.md) | What must never be committed? |
 | [Troubleshooting](docs/troubleshooting.md) | It broke. Now what? |
 | [Model routing](docs/models.md) | Which AI model answers, and how do free-first fallbacks work? |
+| [API keys](docs/api-keys.md) | Where does each LiteLLM key come from, and what does it cost? |
 
 Working on this repo with an AI agent? [AGENTS.md](AGENTS.md) is the contract.
 
