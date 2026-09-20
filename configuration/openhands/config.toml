@@ -16,6 +16,13 @@
 # sections + [agent.*] mapping work there; the docker path ignores it.
 # Keys: never here. Real spend shows in the OmniRoute dashboard, not the
 # OpenHands cost column (it cannot know combo pricing).
+#
+# Agent Canvas (ghcr.io/openhands/agent-canvas, npm @openhands/agent-canvas)
+# is upstream's beta successor on port 8000 — NOT a drop-in for this path.
+# Verdict 2026-09-20 (docs/verification.md): stay on
+# docker.openhands.dev/openhands/openhands:latest until Canvas leaves beta
+# or this image is retired. Do not switch this file or start-stack.* to
+# Canvas without a fresh end-to-end LLM-profile proof.
 
 # ── Default: orchestrator tier ──────────────────────────────────────
 [llm]
@@ -23,7 +30,7 @@ model = "openai/tier1"
 base_url = "http://127.0.0.1:20128/v1"
 api_key = ""
 temperature = 0.0
-num_retries = 5
+num_retries = 3
 # Conservative ceiling: tier1 routes across 1M-context models (docs/models.md).
 max_input_tokens = 128000
 max_output_tokens = 32000

@@ -83,3 +83,26 @@ an older build can be found with `ss -ltnp | grep 8777` (Linux) or
 
 **Where are the logs?**
 `logs/autoos-<timestamp>.log`, plain text with the colour stripped.
+
+## Phone over Tailscale (remote UIs)
+
+Verified 2026-09-20: OpenHands `:3000` (dual-stack `::`, reachable on both
+interfaces), opencode serve `:4096` and the OmniRoute gateway `:20128` (both
+`0.0.0.0`) all answer on the Tailscale and LAN addresses below. No secrets
+here — every UI still needs its own credential (OpenHands login, opencode
+pairing, OmniRoute client key, AutoOS token).
+
+| UI | Phone URL (Tailscale) | Phone URL (LAN) |
+|---|---|---|
+| OpenHands | `http://<tail-ip>:3000` | `http://<lan-ip>:3000` |
+| opencode serve | `http://<tail-ip>:4096` | `http://<lan-ip>:4096` |
+| OmniRoute dashboard | `http://<tail-ip>:20128` | `http://<lan-ip>:20128` |
+| AutoOS browser UI | `http://<tail-ip>:8777` | `http://<lan-ip>:8777` |
+
+Check first when the phone cannot reach one: `configuration/healthcheck.ps1`
+(log-only) or with `-Fix` to resume the gateway/container. Tailscale itself
+is Automatic startup — verify with `tailscale ip -4`. The AutoOS browser UI
+row only answers while `setup.ps1 -Serve -Bind 0.0.0.0` runs (elevated shell,
+prints a per-run token); opencode serve only answers while
+`opencode serve --hostname 0.0.0.0 --port 4096` runs (see
+[configuration/README](../configuration/README.md)).

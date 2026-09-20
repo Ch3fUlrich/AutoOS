@@ -77,6 +77,7 @@ def provider_status() -> list:
         "meta": "Meta Model API",
         "openrouter": "OpenRouter",
         "zen": "OpenCode Zen",
+        "cheapinference": "Cheaper Inference (paid partner)",
         "omniroute": "OmniRoute client key",
     }
     have = set()

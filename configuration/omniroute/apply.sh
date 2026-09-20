@@ -67,6 +67,7 @@ PROVIDER_MAP=(
     "meta:muse-code"
     "openrouter:openrouter"
     "zen:opencode-zen"
+    "cheapinference:cheaperinference"
 )
 
 # Provider-specific connection data. groq and cerebras sit behind Cloudflare,

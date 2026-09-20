@@ -1,0 +1,27 @@
+# AutoOS AI stack resume (Linux systemd user unit, opt-in).
+#
+# Install (opt-in only, never automatic):
+#   mkdir -p ~/.config/systemd/user
+#   cp configuration/autostart/autoos-stack.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now autoos-stack.service
+#
+# Remove:
+#   systemctl --user disable --now autoos-stack.service
+#
+# The unit is Type=oneshot with RemainAfterExit=yes so a second start is a
+# no-op report, not a second gateway. The launcher itself is also double-run
+# safe (probes before starting anything).
+[Unit]
+Description=Resume the AutoOS AI stack (OmniRoute gateway + OpenHands container)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Adjust ExecStart to your checkout: %h is $HOME, so this assumes ~/AutoOS.
+ExecStart=%h/AutoOS/configuration/autostart/Start-AutoOSStack.sh
+
+[Install]
+WantedBy=default.target

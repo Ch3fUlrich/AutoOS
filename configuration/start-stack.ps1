@@ -14,7 +14,7 @@
   .\configuration\start-stack.ps1 -App opencode
 #>
 [CmdletBinding()]
-param([ValidateSet('opencode', 'zed', 'nvim', 'openhands', 'none')][string]$App = 'none')
+param([ValidateSet('opencode', 'zed', 'nvim', 'openhands', 'opencode-serve', 'none')][string]$App = 'none')
 
 $ErrorActionPreference = 'Stop'
 $Gateway = 'http://127.0.0.1:20128'
@@ -84,5 +84,23 @@ switch ($App) {
             docker.openhands.dev/openhands/openhands:latest
         Remove-Item Env:LLM_API_KEY -ErrorAction SilentlyContinue
         Write-Host 'OpenHands UI: http://localhost:3000'
+    }
+    'opencode-serve' {
+        # Phone fallback UI (docs/openhands-runbook.md rung 2): resume when
+        # down, no-op when up. 401 without pairing credentials = alive.
+        $ocUp = $false
+        try { $ocUp = (Invoke-WebRequest -Uri 'http://127.0.0.1:4096/' -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }
+        catch {
+            $r = $_.Exception.Response
+            if ($null -ne $r) { $ocUp = ([int]$r.StatusCode) -in 200, 401 }
+        }
+        if ($ocUp) { Write-Host 'opencode serve already up on :4096 - nothing to do.' }
+        elseif (-not (Get-Command opencode -ErrorAction SilentlyContinue)) {
+            Write-Host 'opencode is not installed. Run: .\setup.ps1 -Only opencode-cli -Yes'; exit 1
+        } else {
+            Write-Host 'Starting opencode serve in the background...'
+            Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', '0.0.0.0', '--port', '4096' -WindowStyle Hidden
+            Write-Host 'opencode serve should answer on http://localhost:4096 (401 = alive, pair via: opencode pair).'
+        }
     }
 }

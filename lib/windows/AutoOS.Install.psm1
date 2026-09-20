@@ -522,6 +522,108 @@ function Install-AutoOSOpenHands {
     }
 }
 
+function Install-AutoOSNeovim {
+    <#
+      .SYNOPSIS
+        Make nvim reachable and install the LazyVim starter config.
+      .DESCRIPTION
+        PATH is only ever appended to via Add-AutoOSPathEntry (the single PATH
+        code path) — never replaced. The LazyVim + sidekick steps mirror
+        install_lazyvim / enable_sidekick_extra in lib/linux/install.sh.
+        Idempotent: every step is a no-op when already done. Dry-run safe:
+        announces, writes nothing.
+    #>
+    $binDir = Join-Path $env:ProgramFiles 'Neovim\bin'
+    if (Test-Path (Join-Path $binDir 'nvim.exe')) {
+        $onPath = $false
+        foreach ($scope in @('User', 'Machine')) {
+            $scopePath = [Environment]::GetEnvironmentVariable('Path', $scope)
+            if ($scopePath -and (@($scopePath -split ';' |
+                    Where-Object { $_.TrimEnd('\') -ieq $binDir.TrimEnd('\') }).Count -gt 0)) {
+                $onPath = $true
+            }
+        }
+        if ($onPath) {
+            Write-AutoOSLine "Neovim already on PATH ($binDir)" -Level muted
+        } else {
+            Add-AutoOSPathEntry -Directory @($binDir) | Out-Null
+        }
+    } elseif (-not (Get-Command nvim -ErrorAction SilentlyContinue)) {
+        Write-AutoOSLine 'nvim.exe not found - install Neovim, then re-run' -Level warn
+    }
+    Install-AutoOSLazyVim
+}
+
+function Install-AutoOSLazyVim {
+    <#
+      .SYNOPSIS Clone the LazyVim starter config once, then enable sidekick.
+    #>
+    $dest = Join-Path $env:LOCALAPPDATA 'nvim'
+    if (Test-Path $dest) {
+        Write-AutoOSLine 'nvim config already exists - leaving it alone' -Level muted
+    } elseif ($script:DryRun) {
+        Write-AutoOSLine "would install the LazyVim starter into $dest" -Level muted
+    } else {
+        $cloned = Invoke-AutoOSProcess -FilePath 'git' -Arguments @(
+            'clone', '--depth', '1', 'https://github.com/LazyVim/starter', $dest)
+        if (-not $cloned.Success) {
+            Write-AutoOSLine 'LazyVim clone failed - check git, then re-run' -Level warn
+            return
+        }
+        Remove-Item (Join-Path $dest '.git') -Recurse -Force -ErrorAction SilentlyContinue
+        Write-AutoOSLine 'LazyVim starter installed' -Level ok
+    }
+    Enable-AutoOSSidekickExtra
+}
+
+function Enable-AutoOSSidekickExtra {
+    <#
+      .SYNOPSIS Enable Folke's sidekick.nvim extra (opencode in Neovim).
+      .DESCRIPTION
+        sidekick embeds the opencode CLI (<leader>aa), which inherits the repo
+        routing. Enabling = one id in lazyvim.json; every other key is kept,
+        and the file is backed up before the first write. Mirrors
+        enable_sidekick_extra in lib/linux/install.sh.
+    #>
+    $cfgDir = Join-Path $env:LOCALAPPDATA 'nvim'
+    $lj = Join-Path $cfgDir 'lazyvim.json'
+    $extra = 'lazyvim.plugins.extras.ai.sidekick'
+    if ($script:DryRun) {
+        Write-AutoOSLine "would enable the sidekick extra in $lj" -Level muted
+        return
+    }
+    if (-not (Test-Path $cfgDir)) {
+        Write-AutoOSLine 'no nvim config - skipping sidekick' -Level muted
+        return
+    }
+    $cfg = @{}
+    if (Test-Path $lj) {
+        try {
+            $parsed = Get-Content $lj -Raw | ConvertFrom-Json
+            if ($parsed -is [System.Collections.IEnumerable] -and $parsed -isnot [string]) {
+                Write-AutoOSLine "unexpected shape in $lj - leaving it alone" -Level warn
+                return
+            }
+            foreach ($p in $parsed.PSObject.Properties) {
+                $cfg[$p.Name] = $p.Value
+            }
+        } catch {
+            Write-AutoOSLine "could not parse $lj - leaving it alone" -Level warn
+            return
+        }
+        Copy-Item $lj "$lj.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
+    $extras = @()
+    if ($cfg.ContainsKey('extras')) { $extras = @($cfg['extras']) }
+    if ($extras -contains $extra) {
+        Write-AutoOSLine 'sidekick extra already enabled' -Level muted
+        return
+    }
+    $cfg['extras'] = @($extras) + @($extra)
+    $cfg | ConvertTo-Json -Depth 8 | Out-File -FilePath $lj -Encoding utf8
+    Write-AutoOSLine 'sidekick extra enabled (<leader>aa toggles the opencode panel)' -Level ok
+}
+
 function Invoke-AutoOSPostInstall {
     param([Parameter(Mandatory)][psobject]$Component)
     if (-not $Component.PostInstall) { return }
@@ -541,4 +643,5 @@ Export-ModuleMember -Function `
     Install-AutoOSHerdr, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Install-AutoOSLitellm, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
+    Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider

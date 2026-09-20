@@ -21,6 +21,9 @@ cloudflare_workers_ai: REPLACE_WITH_CLOUDFLARE_KEY
 cohere: REPLACE_WITH_COHERE_KEY
 hugging_face: REPLACE_WITH_HUGGINGFACE_KEY
 
+# ── Paid partner gateway (own key, own billing — sits between free/paid) ──
+cheapinference: REPLACE_WITH_CHEAPINFERENCE_KEY
+
 # ── Free tier with optional credits (paid fallback allowed) ─────────────────
 cerebras: REPLACE_WITH_CEREBRAS_KEY
 SambaNova: REPLACE_WITH_SAMBANOVA_KEY

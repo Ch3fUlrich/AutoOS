@@ -351,6 +351,24 @@
           "verify": "docker image inspect docker.openhands.dev/openhands/openhands:latest",
           "homepage": "https://www.all-hands.dev/",
           "notes": "Start with .\\configuration\\start-stack.ps1 -App openhands; LLM profiles: configuration/openhands/config.toml."
+        },
+        {
+          "id": "neovim",
+          "name": "Neovim + LazyVim",
+          "description": "Modal editor with the LazyVim starter config",
+          "provider": "winget",
+          "package": "Neovim.Neovim",
+          "requires": [
+            "git"
+          ],
+          "postInstall": "Install-AutoOSNeovim",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "nvim --version",
+          "homepage": "https://www.lazyvim.org/",
+          "notes": "Ensures nvim is on PATH, then enables the sidekick extra."
         }
       ]
     },

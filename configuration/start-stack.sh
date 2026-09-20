@@ -2,7 +2,7 @@
 # Start the AutoOS AI stack: OmniRoute gateway, then the app you pick.
 #
 #   export AUTOOS_OMNIROUTE_KEY='sk-...'   # dashboard -> api-manager
-#   ./configuration/start-stack.sh opencode|zed|nvim|openhands
+#   ./configuration/start-stack.sh opencode|zed|nvim|openhands|opencode-serve
 set -euo pipefail
 
 GATEWAY="http://127.0.0.1:20128"
@@ -59,5 +59,23 @@ case "$APP" in
             docker.openhands.dev/openhands/openhands:latest
         unset LLM_API_KEY
         echo "OpenHands UI: http://localhost:3000"
+        ;;
+    opencode-serve)
+        # Phone fallback UI (docs/openhands-runbook.md rung 2): resume when
+        # down, no-op when up. 401 without pairing credentials = alive.
+        if curl -s -m 5 -o /dev/null "http://127.0.0.1:4096/" 2>/dev/null; then
+            echo "opencode serve already up on :4096 - nothing to do."
+        elif ! command -v opencode >/dev/null; then
+            echo "opencode is not installed. Run: ./setup.sh --only opencode-cli --yes"
+            exit 1
+        else
+            echo "Starting opencode serve in the background..."
+            nohup opencode serve --hostname 0.0.0.0 --port 4096 >/tmp/opencode-serve.log 2>&1 &
+            for _ in $(seq 1 24); do
+                curl -s -m 5 -o /dev/null "http://127.0.0.1:4096/" 2>/dev/null && break
+                sleep 5
+            done
+            echo "opencode serve should answer on http://localhost:4096 (401 = alive, pair via: opencode pair)."
+        fi
         ;;
 esac

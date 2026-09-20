@@ -472,6 +472,24 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
       </div>
     </details>
 
+    <details class="card" id="cardTiers" open>
+      <summary>
+        <span class="card-title">Router tiers</span>
+        <span class="card-sub">OmniRoute :20128 · free-first, paid overflow after · status via providers card · backend apply/switch not yet wired</span>
+      </summary>
+      <div class="card-body">
+        <div class="legend">
+          <span>Role labels explain themselves; the tier1/2/3 ids never change.</span>
+          <span><span class="chip chip-by">-clean</span> same tier, nothing that trains on prompts</span>
+        </div>
+        <dl class="grid" id="routerTiers">
+          <div class="kv"><dt>tier1 · orchestrator-1M</dt><dd>1M ctx · spark-only + #high (xhigh) · sensitive: tier1-clean (paid legs only)</dd></div>
+          <div class="kv"><dt>tier2 · smart-reasoning-128k</dt><dd>≤128k ctx · gemini flash → gpt-oss → cheap-inference → deepseek → zen · sensitive: tier2-clean (paid only)</dd></div>
+          <div class="kv"><dt>tier3 · cheap-driver-128k</dt><dd>≤128k ctx · mistral code → qwen → cheap-inference → deepseek → zen · sensitive: tier3-clean (paid only)</dd></div>
+        </dl>
+      </div>
+    </details>
+
     <details class="card" id="cardCatalog" open>
       <summary>
         <span class="card-title">Components</span>

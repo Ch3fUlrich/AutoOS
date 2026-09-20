@@ -36,12 +36,44 @@ paid legs from the providers whose credit tiers are sanctioned
 
 | Tier | Context promise | Chain (verified against the live catalogs) |
 |---|---|---|
-| `tier1` orchestrator | **1M only** | zen `muse-spark-1.3-contributor-free` → openrouter `meta/muse-spark-1.3-contributor` → zen `muse-spark-1.3` → zen `gemini-3.1-pro` |
-| `tier1-clean` | 1M, no training | openrouter `meta/muse-spark-1.3` → zen `muse-spark-1.3` → zen `gemini-3.1-pro` |
-| `tier2` smart | ≤128k | gemini `gemini-3.8-flash` → groq `gpt-oss-120b` → cerebras `gpt-oss-120b` → sambanova `gpt-oss-120b` → openrouter `deepseek-v4.1-flash` → deepseek `deepseek-flash` |
-| `tier2-clean` | ≤128k, no training | groq → cerebras → sambanova `gpt-oss-120b` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
-| `tier3` driver | ≤128k | mistral `mistral-code-latest` → groq `qwen3.8-27b` → cerebras `qwen-3.8-27b` → mistral `mistral-small-latest` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
-| `tier3-clean` | ≤128k, no training | groq → cerebras `qwen-3.8-27b` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
+| `tier1` orchestrator | **1M only, spark-only** | zen `muse-spark-1.3-contributor-free` → openrouter `meta/muse-spark-1.3-contributor` → zen `muse-spark-1.3`. Callers add xhigh effort via `#high` variant (`omniroute/tier1#high`, ack-proven 2026-09-20). No `gemini-3.1-pro`: it reasons worse than `gemini-3.8-flash` while costing a 1M slot. |
+| `tier1-clean` | 1M, no training, **paid legs only** | openrouter `meta/muse-spark-1.3` (paid, trains nothing) → zen `muse-spark-1.3` (paid). No free legs: any big free model may train on prompts. |
+| `tier2` smart | ≤128k | gemini `gemini-3.8-flash` → groq `gpt-oss-120b` → cerebras `gpt-oss-120b` → sambanova `gpt-oss-120b` → cheap-inference `deepseek-v4-flash` / `glm-4.5-air` / `kimi-k3` → openrouter `deepseek/deepseek-v4.1-flash` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
+| `tier2-clean` | ≤128k, no training, **paid legs only** | deepseek `deepseek-flash` (direct) → openrouter `deepseek/deepseek-v4.1-flash` → zen `deepseek-v4.1-flash` → mistral `mistral-small-latest` (direct). No groq/cerebras/sambanova free legs. |
+| `tier3` driver | ≤128k | mistral `mistral-code-latest` → groq `qwen3.8-27b` → cerebras `qwen-3.8-27b` → cheap-inference `glm-4.5-air` / `minimax-m2.7` → mistral `mistral-small-latest` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
+| `tier3-clean` | ≤128k, no training, **paid legs only** | deepseek `deepseek-flash` (direct) → mistral `mistral-small-latest` (direct) → zen `deepseek-v4.1-flash`. No qwen free legs — lightweight paid review duty only. |
+
+## Role labels (display names — the `tier1/2/3` ids never change)
+
+The ids are a contract: saved selections, `--only` flags, `opencode.jsonc`
+keys and combo names all address tiers by id, so renaming an id would break
+all of them. What was missing was a self-explanatory name per tier. The role
+label is display only and appears identically in `combos.json` (`$comment`),
+`opencode.jsonc` model names, and the web UI router-tiers card:
+
+| Tier id | Role label | Capability requirement |
+|---|---|---|
+| `tier1` | **orchestrator-1M** | Long-horizon orchestration: plans, delegates, holds whole-repo context. 1M context required — anything smaller belongs in `tier2`. |
+| `tier2` | **smart-reasoning-128k** | Strong reasoning at mid context: review, second-level planning, hard debugging. Small-context models may sub-orchestrate here, never in `tier1`. |
+| `tier3` | **cheap-driver-128k** | Cheapest capable loop: codegen, edits, test-fix cycles, grinding through a task list. |
+
+## Client fallback ladder (when the top rung breaks, step down one)
+
+Every client below routes through OmniRoute on `:20128` with the same
+`tierN` combos, so dropping a rung never changes what answers — only the UI.
+No extra binaries: each rung is already in the catalog or ships with the CLI.
+
+| Rung | Client | How it routes | Reach for it when |
+|---|---|---|---|
+| 1 | OpenHands (Docker app, `:3000`) | `openai/tier1` → `:20128` | Heavy autonomous runs with a sandbox |
+| 2 | opencode CLI/TUI (default `omniroute/tier1`) | direct → `:20128` | OpenHands breaks or is overkill — same tiers, no container |
+| 3 | `opencode serve --port 4096` | same gateway, browser UI | Headless/remote use: drive opencode from a browser instead of the TUI |
+| 4 | Zed agent panel | `autoos-omniroute` provider → `:20128` | GUI editing with agents inline; needs a display |
+| 5 | Neovim + sidekick (`<leader>aa`) | inherits the repo opencode routing | Terminal editing, lowest resource rung (Pi, SSH) |
+
+OpenCode Desktop, if installed, reads the same `opencode.jsonc` routing and
+sits beside rung 2 — it is not in the catalog (downloaded from the vendor,
+never vendored here).
 
 **Context rule (why the user-visible limit is honest):** `tier1` is curated to
 1M-context models only — anything smaller belongs in `tier2`. `opencode.jsonc`
@@ -53,9 +85,16 @@ conservative limit.
 
 **Sensitive data work:** `*-clean` never routes a model or plan with a
 published prompt-training policy — no Zen promo `-free` models, no Gemini free
-tier, no Meta/openrouter *contributor* tiers, no Kilo Free. OmniRoute's own
-free-tier catalog flags the known trainers; we additionally curate them out.
-If in doubt, use `tierN-clean` and check the provider's current policy.
+tier, no Meta/openrouter *contributor* tiers, no Kilo Free. Assumption:
+**any big free model may train on prompts**, so `*-clean` chains use **paid
+legs only** (deepseek/openrouter/zen/mistral direct, Meta-direct paid spark
+when OmniRoute ships the IDs). Cheap-inference is paid (own key, own
+billing) but is a third-party reseller pool — `*-clean` stays direct-paid
+only, no reseller legs. Contributor tiers are paid but train by
+contract ($0.10 pricing is the tell) — they stay in `tier1`, never `*-clean`.
+OmniRoute's own free-tier catalog flags the known trainers; we additionally
+curate them out. If in doubt, use `tierN-clean` and check the provider's
+current policy.
 
 **Meta direct:** your Meta Model API key is registered as `muse-code`. The
 installed OmniRoute's `muse-code` catalog ships Llama models only and rejects

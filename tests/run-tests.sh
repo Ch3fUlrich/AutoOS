@@ -173,6 +173,21 @@ if it "light profile excludes desktop tooling"; then
     assert_not_contains "$got" "antigravity"
 fi
 
+if it "Pi keeps its whole set: light profile and router stack on arm64"; then
+    # Raspberry Pi 5 is headless arm64. Nothing the light profile or the
+    # :20128 routing stack needs may be hidden by the arch filter there.
+    catalog_load catalog/linux.json arm64 1
+    missing=""
+    for id in $(catalog_profile_defaults light); do
+        catalog_index_of "$id" >/dev/null 2>&1 || missing+="$id "
+    done
+    for id in nodejs omniroute opencode-cli neovim litellm zed; do
+        catalog_index_of "$id" >/dev/null 2>&1 || missing+="$id "
+    done
+    catalog_load catalog/linux.json x64 0
+    assert_eq "$missing" ""
+fi
+
 if it "custom profile pre-selects nothing"; then
     assert_eq "$(catalog_profile_defaults custom)" ""
 fi
@@ -828,6 +843,7 @@ if it "start-stack.sh is valid bash and names the client key"; then
     ok=1
     grep -q 'AUTOOS_OMNIROUTE_KEY' configuration/start-stack.sh || ok=0
     grep -q 'host.docker.internal' configuration/start-stack.sh || ok=0
+    grep -q 'opencode-serve' configuration/start-stack.sh || ok=0
     if (( ok )); then pass; else fail "start script is missing wiring"; fi
 fi
 
@@ -965,6 +981,21 @@ for c in d["combos"]:
             problems.append(c["name"] + ":" + m)
     if c["name"] == "tier1" and c.get("context") != "1M":
         problems.append("tier1-context")
+by = {c["name"]: c["models"] for c in d["combos"]}
+# tier1 is spark-only: gemini must never occupy a 1M slot again.
+if any("gemini" in m for m in by["tier1"]):
+    problems.append("tier1-gemini")
+# *-clean = paid legs only: no free pool may train on private prompts.
+# Free = contributor-free, -contributor (trains by contract), groq /
+# cerebras / sambanova / gemini hosts, mistral-code + qwen free pools.
+# Direct-key legs (mistral-small, deepseek, openrouter paid, zen paid)
+# bill past the pool on the same key, so they stay.
+import re
+free = re.compile(r"contributor-free|-contributor$|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen")
+for n in ("tier1-clean", "tier2-clean", "tier3-clean"):
+    bad = [m for m in by[n] if free.search(m)]
+    if bad:
+        problems.append(n + "-free:" + ",".join(bad))
 print(" ".join(problems))
 PY
 )"
@@ -986,6 +1017,29 @@ if it "apply --dry-run registers nothing and starts nothing"; then
     assert_contains "$out" "dry run"
     after="$(cat configuration/omniroute/combos.json)"
     assert_eq "$after" "$before"
+fi
+
+if it "tier depth is mandatory in opencode.jsonc agents"; then
+    report="$(python3 - <<'PY'
+import json, re, io
+text = re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read())
+a = json.loads(text)["agents"]
+def perms(n):
+    return [(p["action"], p["resource"], p["effect"]) for p in a[n]["permissions"]]
+t1, t2, t3 = perms("tier1-orchestrator"), perms("tier2-worker"), perms("tier3-reviewer")
+problems = []
+if t1[0] != ("subagent", "*", "deny") or t1[-1] != ("subagent", "tier2-worker", "allow"):
+    problems.append("tier1")
+if t2[0] != ("subagent", "*", "deny") or t2[-1] != ("subagent", "tier3-reviewer", "allow"):
+    problems.append("tier2")
+if t3 != [("subagent", "*", "deny")]:
+    problems.append("tier3-leaf")
+if a["tier3-reviewer"]["mode"] != "subagent":
+    problems.append("tier3-mode")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
 fi
 
 if it "opencode tiers declare matching context limits"; then
@@ -1051,6 +1105,53 @@ if it "ai-coding dry run plans the routing stack"; then
         [[ "$out" == *"$name"* ]] || { ok=0; echo "missing: $name" >&2; }
     done
     if (( ok )); then pass; else fail "routing stack missing from the plan"; fi
+fi
+
+if it "autostart and healthcheck files exist and parse"; then
+    ok=1
+    for f in configuration/autostart/Start-AutoOSStack.sh configuration/healthcheck.sh; do
+        [[ -f "$f" ]] || { ok=0; echo "missing: $f" >&2; }
+        bash -n "$f" || ok=0
+    done
+    for f in configuration/autostart/Start-AutoOSStack.ps1 configuration/healthcheck.ps1 \
+             configuration/autostart/autoos-stack.service; do
+        [[ -f "$f" ]] || { ok=0; echo "missing: $f" >&2; }
+    done
+    if (( ok )); then pass; else fail "autostart/healthcheck files missing or invalid"; fi
+fi
+
+if it "the systemd unit is installable and opt-in"; then
+    ok=1
+    for key in '\[Unit\]' '\[Service\]' '\[Install\]' 'ExecStart=' 'WantedBy=default.target' 'Type=oneshot'; do
+        grep -q "$key" configuration/autostart/autoos-stack.service || { ok=0; echo "missing: $key" >&2; }
+    done
+    grep -q 'systemctl --user enable' configuration/README.md || { ok=0; echo "not documented opt-in" >&2; }
+    if (( ok )); then pass; else fail "systemd unit incomplete"; fi
+fi
+
+if it "healthcheck is log-only without --fix"; then
+    ok=1
+    grep -q -- '--fix' configuration/healthcheck.sh || ok=0
+    # The resume call must only appear inside the --fix branch.
+    body_without_fix="$(sed '/if \[\[ $FIX/,/^fi$/d' configuration/healthcheck.sh)"
+    [[ "$body_without_fix" == *"Start-AutoOSStack"* ]] && ok=0
+    [[ "$body_without_fix" == *"docker start"* || "$body_without_fix" == *"nohup omniroute"* ]] && ok=0
+    grep -q '"401"' configuration/healthcheck.sh || ok=0
+    for p in 20128 3000 4096 8777; do
+        grep -q "$p" configuration/healthcheck.sh || { ok=0; echo "port $p missing" >&2; }
+    done
+    if (( ok )); then pass; else fail "healthcheck can start things without --fix"; fi
+fi
+
+if it "phone URLs are documented without secrets"; then
+    ok=1
+    for frag in "<tail-ip>:3000" "<tail-ip>:4096" "healthcheck"; do
+        grep -q "$frag" docs/troubleshooting.md || { ok=0; echo "missing: $frag" >&2; }
+    done
+    grep -qE 'sk-[A-Za-z0-9]{10,}' docs/troubleshooting.md && ok=0
+    # No machine-local IPs may be committed (repo is public).
+    if grep -qE '100\.70\.|192\.168\.178\.59' docs/troubleshooting.md; then ok=0; fi
+    if (( ok )); then pass; else fail "phone docs missing or leaking"; fi
 fi
 
 # ─── shellcheck (optional) ──────────────────────────────────────────────────

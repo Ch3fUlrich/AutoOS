@@ -36,6 +36,7 @@ registering by hand in the dashboard:
 | `meta` | `muse-code` | Meta Model API (`api.meta.ai`); see the known issue in [models.md](models.md) |
 | `openrouter` | `openrouter` | |
 | `zen` | `opencode-zen` | free promo models + paid; paid legs need Zen balance |
+| `cheapinference` | `cheaperinference` | paid partner gateway (`ci_live_…` key); legs sit between free and paid in tier2/tier3, never in `*-clean` |
 | `omniroute` | — | the **client** key apps use; not a provider |
 
 ## Where to get them
@@ -45,6 +46,7 @@ this public repo, never for private code.
 
 | Key | Where | Free terms (Sep 2026) | Training? |
 |---|---|---|---|
+| Cheaper Inference (partner) | [cheaperinference.com](https://cheaperinference.com) | **Paid partner gateway, not a free tier**: 42-model resale (30% under list), own `ci_live_…` key, own billing. Sits between free and paid in tier2/tier3 | Per upstream model |
 | Mistral | [console.mistral.ai/api-keys](https://console.mistral.ai/api-keys) | **Biggest documented pool: ~1B/mo per org**, 2 RPM, rate-limited free mode, no card | Check terms |
 | Gemini (AI Studio) | [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) | Flash-family pooled, uncapped figure, dynamic limits; Pro left free tier Apr 2026; 2.0 Flash dead Jun 2026 | **Yes** |
 | Groq | [console.groq.com/keys](https://console.groq.com/keys) | Per-model 200K tokens/day caps (~30M pool); llama-3.3-70b left free tier Aug 2026 — use GPT-OSS/Qwen/Llama current IDs | Check terms |

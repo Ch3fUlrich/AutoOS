@@ -45,6 +45,7 @@ function Get-AutoOSProviderStatus {
         'meta'                  = 'Meta Model API'
         'openrouter'            = 'OpenRouter'
         'zen'                   = 'OpenCode Zen'
+        'cheapinference'        = 'Cheaper Inference (paid partner)'
         'omniroute'             = 'OmniRoute client key'
     }
     $out = foreach ($name in $labels.Keys) {

@@ -720,6 +720,29 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'graphify,playwright,serena'
 }
 
+Test-Case 'tier depth is mandatory: only tier1 spawns, tier3 spawns nothing' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $agents = ($stripped | ConvertFrom-Json).agents
+    Assert-True ($null -ne $agents.'tier1-orchestrator') 'tier1-orchestrator agent missing'
+    Assert-True ($null -ne $agents.'tier2-worker') 'tier2-worker agent missing'
+    Assert-True ($null -ne $agents.'tier3-reviewer') 'tier3-reviewer agent missing'
+    # tier1 may launch tier2-worker and nothing else (deny-all first, narrow
+    # allow last — last matching rule wins).
+    $t1 = @($agents.'tier1-orchestrator'.permissions)
+    Assert-Equal $t1[0].action 'subagent'; Assert-Equal $t1[0].resource '*'; Assert-Equal $t1[0].effect 'deny'
+    Assert-Equal $t1[-1].resource 'tier2-worker'; Assert-Equal $t1[-1].effect 'allow'
+    # tier2 may launch tier3-reviewer and nothing else.
+    $t2 = @($agents.'tier2-worker'.permissions)
+    Assert-Equal $t2[0].effect 'deny'
+    Assert-Equal $t2[-1].resource 'tier3-reviewer'; Assert-Equal $t2[-1].effect 'allow'
+    # tier3 is a leaf: a lone deny-all, no allow rule.
+    $t3 = @($agents.'tier3-reviewer'.permissions)
+    Assert-Equal $t3.Count 1
+    Assert-Equal $t3[0].action 'subagent'; Assert-Equal $t3[0].resource '*'; Assert-Equal $t3[0].effect 'deny'
+    Assert-Equal $agents.'tier3-reviewer'.mode 'subagent'
+}
+
 Test-Case 'openhands template routes tiers with no secrets' {
     $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
     foreach ($section in @('[llm]', '[llm.tier1]', '[llm.tier2]', '[llm.tier3]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
@@ -754,6 +777,7 @@ Test-Case 'start scripts exist and name the client key' {
     $sh = Get-Content (Join-Path $Root 'configuration\start-stack.sh') -Raw
     Assert-True ($ps1 -match 'AUTOOS_OMNIROUTE_KEY' -and $sh -match 'AUTOOS_OMNIROUTE_KEY') 'key wiring missing'
     Assert-True ($ps1 -match 'openhands' -and $sh -match 'host\.docker\.internal') 'openhands launch missing'
+    Assert-True ($ps1 -match 'opencode-serve' -and $sh -match 'opencode-serve') 'phone-fallback launch missing'
     Pass
 }
 
@@ -803,6 +827,92 @@ Test-Case 'ai-coding ticks the whole routing stack' {
         Assert-Contains $ticks $id
     }
     Pass
+}
+
+Test-Case 'neovim component exists with winget id and lazyvim postInstall' {
+    $nv = Get-AutoOSWinComponent 'neovim'
+    Assert-True ($null -ne $nv) 'neovim missing from the windows catalog'
+    Assert-Equal "$($nv.provider)|$($nv.package)" 'winget|Neovim.Neovim'
+    Assert-Contains $nv.requires 'git'
+    Assert-Contains $nv.profiles 'ai-coding'
+    Assert-Equal $nv.postInstall 'Install-AutoOSNeovim'
+    Assert-Equal $nv.verify 'nvim --version'
+}
+
+Test-Case 'neovim is offered on arm64 Windows too' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem -Arch 'arm64'))
+    Assert-Contains ($a | ForEach-Object { $_.Id }) 'neovim'
+}
+
+Test-Case 'a dry run plans neovim and its git dependency' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -DryRun -Only neovim -Yes -NoColor 2>&1) -join "`n"
+    Assert-True ($LASTEXITCODE -eq 0) "exit $LASTEXITCODE : $($out | Select-Object -Last 3)"
+    Assert-True ($out -match 'Neovim') 'neovim missing from the dry-run plan'
+}
+
+Test-Case 'PATH is only ever written by Add-AutoOSPathEntry' {
+    # The single code path that may touch PATH. A second writer is how the
+    # repository once wiped a user's entire Path.
+    $src = Get-Content (Join-Path $Lib 'AutoOS.Install.psm1') -Raw
+    $writers = @([regex]::Matches($src, "SetEnvironmentVariable\(\s*'Path'"))
+    Assert-Equal $writers.Count 1
+    $fn = [regex]::Match($src, '(?s)function Install-AutoOSNeovim.*?(?=\r?\nfunction )').Value
+    Assert-True ($fn -match 'Add-AutoOSPathEntry') 'neovim bypasses the PATH code path'
+}
+
+Test-Case 'neovim postInstall hooks are exported' {
+    foreach ($fn in @('Install-AutoOSNeovim', 'Install-AutoOSLazyVim', 'Enable-AutoOSSidekickExtra')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn missing"
+    }
+    Pass
+}
+
+Test-Case 'neovim postInstall writes nothing in dry run' {
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path $env:TEMP "autoos-nvim-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        Install-AutoOSNeovim
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Assert-Equal (Test-Path (Join-Path $scratch 'nvim')) $false
+    } finally { $env:LOCALAPPDATA = $realLocal }
+}
+
+Test-Case 'neovim sidekick leaves a non-object config alone' {
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path $env:TEMP "autoos-nvim-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'nvim'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '["not","an","object"]' | Out-File (Join-Path $cfgDir 'lazyvim.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Enable-AutoOSSidekickExtra
+        $raw = Get-Content (Join-Path $cfgDir 'lazyvim.json') -Raw
+        Assert-True ($raw -match '"not"') 'a non-object config was rewritten'
+        Assert-Equal (@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count 0
+    } finally { $env:LOCALAPPDATA = $realLocal }
+}
+
+Test-Case 'neovim sidekick enabling merges one extra and keeps the rest' {
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path $env:TEMP "autoos-nvim-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'nvim'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '{"extras":["lazyvim.plugins.extras.lang.python"]}' |
+            Out-File (Join-Path $cfgDir 'lazyvim.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Enable-AutoOSSidekickExtra
+        Enable-AutoOSSidekickExtra
+        $j = Get-Content (Join-Path $cfgDir 'lazyvim.json') -Raw | ConvertFrom-Json
+        Assert-Contains $j.extras 'lazyvim.plugins.extras.ai.sidekick'
+        Assert-Contains $j.extras 'lazyvim.plugins.extras.lang.python'
+        Assert-Equal (@($j.extras | Where-Object { $_ -eq 'lazyvim.plugins.extras.ai.sidekick' }).Count) 1
+        Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
+    } finally { $env:LOCALAPPDATA = $realLocal }
 }
 
 # ── OpenHands self-checks (need Docker; they report, never install) ─────────
@@ -961,7 +1071,7 @@ Test-Case 'provider status reads keys but never exposes them' {
         ) | Out-File (Join-Path $scratch 'configuration\api-keys.yml') -Encoding utf8
         $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
         $json = $status | ConvertTo-Json
-        Assert-True ($status.Count -eq 13) "expected 13 provider entries, got $($status.Count)"
+        Assert-True ($status.Count -eq 14) "expected 14 provider entries, got $($status.Count)"
         $groq = $status | Where-Object { $_.id -eq 'groq' }
         $ds = $status | Where-Object { $_.id -eq 'deepseek' }
         Assert-True ($groq.configured -and -not $ds.configured) 'configured flags are wrong'
@@ -984,6 +1094,20 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
             Assert-True ($m -match '^[A-Za-z0-9@._/-]+$') "$($c.name): bad ref '$m'"
         }
         Assert-Equal $c.context $contexts[$c.name]
+    }
+    # tier1 is spark-only: gemini-3.1-pro reasons worse than 3.8-flash and
+    # must never occupy a 1M orchestrator slot again.
+    $t1 = @($combos | Where-Object { $_.name -eq 'tier1' })[0]
+    Assert-True (($t1.models -join ',') -notmatch 'gemini') 'gemini back in tier1'
+    # *-clean = paid legs only: no free pool may train on private prompts.
+    # Free legs = contributor-free, groq/cerebras/sambanova hosts, gemini
+    # free tier, -contributor (trains by contract), mistral-code + qwen
+    # free pools. Direct-key legs (mistral-small, deepseek, openrouter
+    # paid, zen paid) bill past the pool on the same key, so they stay.
+    $freeRe = 'contributor-free|-contributor$|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen'
+    foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
+        $free = @($c.models | Where-Object { $_ -match $freeRe })
+        Assert-Equal ($free -join ',') '' "$($c.name) carries free legs: $($free -join ',')"
     }
 }
 
@@ -1031,6 +1155,65 @@ Test-Case 'opencode tiers declare matching context limits' {
 }
 
 # â”€â”€â”€ Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Phone-remote resilience (autostart + healthcheck).
+Describe-Group 'phone-remote resilience'
+
+Test-Case 'autostart launchers exist and parse' {
+    foreach ($f in @('configuration\autostart\Start-AutoOSStack.ps1',
+                     'configuration\autostart\Register-AutoOSAutostart.ps1',
+                     'configuration\healthcheck.ps1')) {
+        Assert-True (Test-Path (Join-Path $Root $f)) "$f missing"
+        $errors = $null
+        $null = [System.Management.Automation.PSParser]::Tokenize(
+            (Get-Content (Join-Path $Root $f) -Raw), [ref]$errors)
+        Assert-Equal (@($errors)).Count 0
+    }
+}
+
+Test-Case 'autostart is opt-in and double-run safe' {
+    $reg = Get-Content (Join-Path $Root 'configuration\autostart\Register-AutoOSAutostart.ps1') -Raw
+    $start = Get-Content (Join-Path $Root 'configuration\autostart\Start-AutoOSStack.ps1') -Raw
+    Assert-True ($reg -match 'Unregister') 'no -Unregister removal path'
+    Assert-True ($reg -match '-Force') 're-register must replace in place'
+    Assert-True ($start -match 'nothing to do') 'launcher must no-op when already up'
+    Assert-True ($start -notmatch 'Remove-Item|rm -rf|uninstall') 'launcher must never be destructive'
+}
+
+Test-Case 'healthcheck probes four ports and resumes only with -Fix' {
+    $hc = Get-Content (Join-Path $Root 'configuration\healthcheck.ps1') -Raw
+    foreach ($p in @('20128', '3000', '4096', '8777')) {
+        Assert-True ($hc -match $p) "port $p not probed"
+    }
+    Assert-True ($hc -match '401') 'opencode 401-alive nuance missing'
+    # The resume call must sit inside the -Fix branch: log-only by default.
+    # (Matched by count, not by cutting the text: the header comment names the
+    # launcher too, so a cut-and-search would flag its own documentation.)
+    $fixBranch = [regex]::Match($hc, '(?s)if \(\$Fix.*').Value
+    Assert-True ($fixBranch -match '\&\s*\(Join-Path \$RepoRoot') 'the -Fix branch must invoke the launcher'
+    Assert-True (@([regex]::Matches($hc, 'Start-AutoOSStack')).Count -eq 3) `
+        'the launcher must be named exactly 3x (doc comment, log line, -Fix branch)'
+    Assert-True ($hc -notmatch 'Start-Process|docker start') `
+        'healthcheck itself must never start processes'
+}
+
+Test-Case 'phone URLs are documented without secrets' {
+    $doc = Get-Content (Join-Path $Root 'docs\troubleshooting.md') -Raw -Encoding utf8
+    foreach ($frag in @('<tail-ip>:3000', '<tail-ip>:4096', 'healthcheck')) {
+        Assert-True ($doc -match [regex]::Escape($frag)) "missing $frag"
+    }
+    Assert-True ($doc -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
+    Assert-True ($doc -notmatch '100\.70\.|192\.168\.178\.59') 'machine-local IP committed'
+}
+
+Test-Case 'canvas verdict keeps the current docker path' {
+    $ver = Get-Content (Join-Path $Root 'docs\verification.md') -Raw -Encoding utf8
+    $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
+    $ps1 = Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw
+    Assert-True ($ver -match 'Agent Canvas') 'no canvas verdict in verification.md'
+    Assert-True ($toml -match 'agent-canvas') 'config.toml must record the canvas decision'
+    Assert-True ($ps1 -match 'docker\.openhands\.dev/openhands/openhands:latest') 'docker path must stay intact'
+}
+
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')
 Write-Host ("  " + (C "passed $script:Pass" '38;5;71') +

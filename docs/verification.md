@@ -49,7 +49,9 @@ Notes from the runs:
 | `groq/openai/gpt-oss-120b` | OK — after the Cloudflare UA fix, see below |
 | `cerebras/gpt-oss-120b` | OK — same fix |
 | `opencode-zen/muse-spark-1.3-contributor-free` | 500 at peak (Zen side) |
-| `opencode-zen/muse-spark-1.3`, `opencode-zen/gemini-3.1-pro` | 402 — Zen paid balance/key not set up |
+| `opencode-zen/muse-spark-1.3` | 402 — Zen paid balance/key not set up |
+| `opencode-zen/gemini-3.1-pro` | REMOVED from tiers 2026-09-20 (reasons worse than 3.8-flash); 402 anyway |
+| `cheaperinference/deepseek-v4-flash`, `glm-4.5-air`, `kimi-k3`, `minimax-m2.7` | refs resolve in `simulate --combo tier2/tier3 --explain` (all CLOSED, quota 100%); live ack via the tier2/tier3 probes |
 | `muse-code/muse-spark-1.3` | not in the provider's live catalog (OmniRoute bug, below) |
 
 ## opencode CLI
@@ -117,3 +119,19 @@ opencode run --model omniroute/tier3 "Reply with exactly: ack"
 .\configuration\omniroute\apply.ps1 -Probe
 .\configuration\start-stack.ps1 -App openhands   # then configure the profile once
 ```
+
+## OpenHands Agent Canvas verdict (2026-09-20, no switch)
+
+Agent Canvas is real and is the current upstream direction: the
+`OpenHands/OpenHands` repo README is now Agent Canvas branding, with
+`@openhands/agent-canvas` on npm (v1.20.0 verified) and
+`ghcr.io/openhands/agent-canvas` (amd64 + arm64 verified via manifest).
+It serves on port **8000** (`/canvas` for the docker image), needs
+`PROJECTS_PATH` + `~/.openhands` mounts, and is labelled beta.
+
+Verdict: **stay on `docker.openhands.dev/openhands/openhands:latest` (:3000)
+for now.** The current path is verified end to end today (sandbox boots,
+message round-trips through `tier1`); Canvas is a different app surface
+(multi-backend control center, not a drop-in) and would need its own
+LLM-profile wiring proof before it replaces anything. Re-evaluate when
+Canvas leaves beta or the `:3000` image is retired.
