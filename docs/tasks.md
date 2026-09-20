@@ -13,7 +13,7 @@ reconcile. DONE-criteria must be checkable (`ack` probe, suite counts,
 | OpenHands runbook + 3-service resume | tier2-E | 2026-09-20 | runbook zero-context, start-stack + autostart resume serve, tests assert | Done 2026-09-20 |
 | Tier reshape (spark-only t1, paid-only clean, #high) | tier1 | 2026-09-20 | spark-only + paid-only tests green, dual-lens APPROVE | Done 2026-09-20 (281 PS / 108 sh) |
 | Cheap-inference legs + retry trim (≈3) | tier1 | 2026-09-20 | cinf legs in simulate, 286 PS green, config.toml 5→3 | Done 2026-09-20 |
-| Commit + push to main | tier1 | 2026-09-20 | remote main == local main, next box can pull | Running |
+| Push to main | tier1 | 2026-09-20 | BLOCKED: remote main is 64 commits ahead (USB/rescue + llm-models work since 2026-09-17); pushed feature branch instead | Done 2026-09-20 → `tier-orchestration-2026-09-20`, needs PR + rebase onto main |
 | `apply -Probe` re-date verification table | — | — | 6 combos ack NEW legs, verification.md re-dated | Queued |
 | Web Router-tiers backend (apply/switch) | — | — | endpoints + tests, card no longer display-only | Queued |
 | Agent Canvas re-evaluation | — | — | LLM-profile proof on current image | Queued |
