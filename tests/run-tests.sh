@@ -579,7 +579,8 @@ for p in glob.glob("catalog/*.json"):
         for c in g["components"]:
             have[c["id"]].add(plat)
 core = ["claude-code", "git", "nodejs", "docker", "tailscale",
-        "handy", "vscode", "herdr", "agent-skills", "nerd-font"]
+        "handy", "vscode", "herdr", "agent-skills", "nerd-font",
+        "zed", "litellm", "opencode-cli", "omniroute"]
 bad = [c for c in core if have[c] != {"windows", "linux", "macos"}]
 print(" ".join(bad))
 PY
@@ -602,6 +603,173 @@ fi
 if it "Handy is offered on every platform"; then
     n="$(grep -l '"id": "handy"' catalog/*.json | wc -l)"
     assert_eq "$n" "3"
+fi
+
+# ─── AI routing (omniroute / litellm / zed / opencode) ────────────────────
+describe "AI routing"
+
+if it "zed rides the script provider end to end"; then
+    ok=1
+    grep -q 'zed)             has_cmd zed' lib/linux/install.sh || ok=0
+    grep -q 'zed)             install_zed' lib/linux/install.sh || ok=0
+    ( PATH="/nonexistent-autoos-probe:$PATH"; script_is_installed zed ) 2>/dev/null && ok=0
+    stub="$(mktemp -d)"; printf '#!/bin/sh\nexit 0\n' >"$stub/zed"; chmod +x "$stub/zed"
+    ( PATH="$stub:$PATH"; script_is_installed zed ) >/dev/null 2>&1 || ok=0
+    rm -rf "$stub"
+    if (( ok )); then pass; else fail "zed dispatch or detection is broken"; fi
+fi
+
+if it "server profile ticks the headless terminal stack"; then
+    catalog_load catalog/linux.json x64 1
+    defaults="$(catalog_profile_defaults server)"
+    ok=1
+    for c in opencode-cli omniroute litellm neovim; do
+        [[ " $defaults" == *" $c "* ]] || { ok=0; echo "missing: $c" >&2; }
+    done
+    if (( ok )); then pass; else fail "server profile is missing headless components"; fi
+fi
+
+if it "zed requires the router on every platform"; then
+    bad="$(python3 - <<'PY'
+import json, glob
+bad = []
+for p in sorted(glob.glob("catalog/*.json")):
+    for g in json.load(open(p, encoding="utf-8"))["categories"]:
+        for c in g["components"]:
+            if c["id"] == "zed" and "litellm" not in c.get("requires", []):
+                bad.append(p)
+print(" ".join(bad))
+PY
+)"
+    assert_eq "$bad" ""
+fi
+
+if it "zed routing announces in dry run and writes nothing"; then
+    scratch="$(mktemp -d)"
+    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=1; route_zed_to_proxy ) 2>&1)"
+    if [[ "$out" == *"would route"* && ! -e "$scratch/.config/zed/settings.json" ]]; then pass
+    else fail "dry run wrote or stayed silent"; fi
+    rm -rf "$scratch"
+fi
+
+if it "zed routing merges one provider and keeps the rest"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/zed"
+    printf '{"theme":"mine"}' >"$scratch/.config/zed/settings.json"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; route_zed_to_proxy >/dev/null 2>&1 )
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; route_zed_to_proxy >/dev/null 2>&1 )
+    report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+oc = cfg.get("language_models", {}).get("openai_compatible", {}).get("autoos-omniroute", {})
+models = [m["name"] for m in oc.get("available_models", [])]
+print("%s|%s|%s" % (cfg.get("theme"), oc.get("api_url"), ",".join(models)))
+PY
+)"
+    backups="$(ls "$scratch"/.config/zed/settings.json.autoos-backup-* 2>/dev/null | wc -l)"
+    leaks="$(grep -cE 'sk-[A-Za-z0-9]{10,}' "$scratch/.config/zed/settings.json" || true)"
+    rm -rf "$scratch"
+    assert_eq "$report|backups=$backups|leaks=$leaks" \
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap|backups=1|leaks=0"
+fi
+
+if it "litellm installer announces in dry run and detects presence"; then
+    empty="$(mktemp -d)"
+    out="$( ( PATH="$empty:/usr/bin:/bin" AUTOOS_DRY_RUN=1; install_litellm_proxy ) 2>&1)"
+    stub="$(mktemp -d)"; printf '#!/bin/sh\nexit 0\n' >"$stub/litellm"; chmod +x "$stub/litellm"
+    out2="$( ( PATH="$stub:$PATH" AUTOOS_DRY_RUN=0; install_litellm_proxy ) 2>&1)"
+    rm -rf "$empty" "$stub"
+    if [[ "$out" == *"would install"* && "$out2" == *"already installed"* ]]; then pass
+    else fail "dry-run or presence path broken"; fi
+fi
+
+if it "sidekick extra is created once and never duplicated"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/nvim"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; enable_sidekick_extra >/dev/null 2>&1 )
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; enable_sidekick_extra >/dev/null 2>&1 )
+    n="$(grep -c 'lazyvim.plugins.extras.ai.sidekick' "$scratch/.config/nvim/lazyvim.json" || true)"
+    rm -rf "$scratch"
+    assert_eq "$n" "1"
+fi
+
+if it "sidekick enabling is a no-op without an nvim config"; then
+    scratch="$(mktemp -d)"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; enable_sidekick_extra >/dev/null 2>&1 )
+    if [[ -e "$scratch/.config/nvim/lazyvim.json" ]]; then rm -rf "$scratch"; fail "created config unasked"
+    else rm -rf "$scratch"; pass; fi
+fi
+
+if it "litellm fallback config is internally consistent"; then
+    report="$(python3 - <<'PY'
+import re, io
+text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
+groups = set(re.findall(r"(?m)^\s*-\s*model_name:\s*(\S+)\s*$", text))
+need = {"tier1", "tier1-paid", "tier2", "tier2-paid", "tier3", "tier3-paid"}
+fb = text.split("fallbacks:", 1)[1]
+refs = set(re.findall(r"[- ](\S+):\s*\[([^\]]*)\]", fb))
+problems = sorted(list(need - groups))
+for src, tgts in refs:
+    if src not in groups:
+        problems.append("src:" + src)
+    for t in [x.strip() for x in tgts.split(",")]:
+        if t not in groups:
+            problems.append("tgt:" + t)
+models = re.findall(r"(?m)^\s*model:\s*(\S+)\s*$", text)
+if [m for m in models if "cerebras" in m or "llama-3.3-70b" in m]:
+    problems.append("stale")
+if "drop_params" not in text or "os.environ/LITELLM_MASTER_KEY" not in text:
+    problems.append("settings")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
+if it "opencode repo config pins omniroute with litellm fallback"; then
+    report="$(python3 - <<'PY'
+import json, re, io
+text = io.open("opencode.jsonc", encoding="utf-8").read()
+text = re.sub(r"(?m)^\s*//.*$", "", text)
+oc = json.loads(text)
+p = oc["providers"]
+print("%s|%s|%s|%s|%s" % (
+    oc["model"],
+    p["omniroute"]["settings"]["baseURL"],
+    ",".join(sorted(p["omniroute"]["models"].keys())),
+    "litellm" in p,
+    ",".join(sorted(oc["mcp"]["servers"].keys()))))
+PY
+)"
+    assert_eq "$report" \
+        "omniroute/tier1|http://127.0.0.1:20128/v1|tier1,tier2,tier3|True|graphify,playwright,serena"
+fi
+
+if it "openhands template has tiers and no secrets"; then
+    ok=1
+    for s in '\[llm\]' '\[llm.tier1\]' '\[llm.tier2\]' '\[llm.tier3\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
+        grep -q "$s" configuration/openhands/config.toml || { ok=0; echo "missing: $s" >&2; }
+    done
+    grep -q 'host.docker.internal:20128' configuration/openhands/config.toml || ok=0
+    grep -qE 'sk-[A-Za-z0-9]{10,}' configuration/openhands/config.toml && ok=0
+    grep -q 'api_key = ""' configuration/openhands/config.toml || ok=0
+    if (( ok )); then pass; else fail "openhands template is incomplete or leaks secrets"; fi
+fi
+
+if it "start-stack.sh is valid bash and names the client key"; then
+    bash -n configuration/start-stack.sh || { fail "syntax error"; }
+    ok=1
+    grep -q 'AUTOOS_OMNIROUTE_KEY' configuration/start-stack.sh || ok=0
+    grep -q 'host.docker.internal' configuration/start-stack.sh || ok=0
+    if (( ok )); then pass; else fail "start script is missing wiring"; fi
+fi
+
+if it "no committed secrets in router files"; then
+    leaks="$(grep -rE 'sk-[A-Za-z0-9]{10,}' configuration/litellm/config.yaml \
+        configuration/litellm/.env.example opencode.jsonc \
+        configuration/openhands/config.toml 2>/dev/null || true)"
+    # .env.example is the sanctioned placeholder pattern; only real-looking keys fail.
+    if [[ -z "$leaks" ]]; then pass; else fail "credential-shaped value: $leaks"; fi
 fi
 
 # ─── WSL detection ──────────────────────────────────────────────────────────
@@ -656,6 +824,85 @@ if it "every docs page is linked from the index"; then
         grep -q "$base" docs/README.md || missing+="$base "
     done
     assert_eq "$missing" ""
+fi
+
+if it "install_zed announces in dry run"; then
+    out="$( ( AUTOOS_DRY_RUN=1; install_zed ) 2>&1)"
+    if [[ "$out" == *"would install Zed"* ]]; then pass
+    else fail "no dry-run announcement"; fi
+fi
+
+if it "zed routing reports a failed merge instead of success"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/zed"
+    # A directory where the file belongs makes the python merge fail.
+    rm -rf "$scratch/.config/zed/settings.json"
+    mkdir "$scratch/.config/zed/settings.json"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; route_zed_to_proxy >/dev/null 2>&1 ); rc=$?
+    rm -rf "$scratch"
+    assert_eq "$rc" "1"
+fi
+
+if it "existing nvim config keeps working and gains sidekick"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/nvim"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; install_lazyvim >/dev/null 2>&1 )
+    n="$(grep -c 'lazyvim.plugins.extras.ai.sidekick' "$scratch/.config/nvim/lazyvim.json" 2>/dev/null || true)"
+    rm -rf "$scratch"
+    assert_eq "$n" "1"
+fi
+
+if it "sidekick enabling announces in dry run and writes nothing"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/nvim"
+    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=1; enable_sidekick_extra ) 2>&1)"
+    if [[ "$out" == *"would enable"* && ! -e "$scratch/.config/nvim/lazyvim.json" ]]; then pass
+    else fail "dry run wrote or stayed silent"; fi
+    rm -rf "$scratch"
+fi
+
+if it "litellm installer uses pipx without installing anything"; then
+    stub="$(mktemp -d)"
+    printf '#!/bin/sh\ntouch "$0.called"\n' >"$stub/pipx"; chmod +x "$stub/pipx"
+    ( PATH="$stub:$PATH" AUTOOS_DRY_RUN=0; install_litellm_proxy >/dev/null 2>&1 )
+    if [[ -f "$stub/pipx.called" ]]; then rm -rf "$stub"; pass
+    else rm -rf "$stub"; fail "pipx stub was not invoked"; fi
+fi
+
+if it "env template carries placeholders only"; then
+    bad="$(grep -vE '^(#|$|[A-Z_]+=REPLACE_WITH_[A-Z_]+$)' configuration/litellm/.env.example || true)"
+    assert_eq "$bad" ""
+fi
+
+if it "new components name real profiles and verify commands"; then
+    bad="$(python3 - <<'PY'
+import json, glob
+problems = []
+for p in sorted(glob.glob("catalog/*.json")):
+    d = json.load(open(p, encoding="utf-8"))
+    profiles = set(d.get("profiles", {}).keys())
+    for g in d.get("categories", []):
+        for c in g.get("components", []):
+            if c["id"] not in ("zed", "litellm", "opencode-cli", "omniroute"):
+                continue
+            for prof in c.get("profiles", []):
+                if prof not in profiles:
+                    problems.append(p + ":" + c["id"] + ":" + prof)
+            if not c.get("verify"):
+                problems.append(p + ":" + c["id"] + ":no-verify")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$bad" ""
+fi
+
+if it "ai-coding dry run plans the routing stack"; then
+    out="$(bash setup.sh --profile ai-coding --dry-run --yes --no-color 2>&1)"
+    ok=1
+    for name in "OmniRoute gateway" "LiteLLM tier router" "OpenCode CLI" "Zed"; do
+        [[ "$out" == *"$name"* ]] || { ok=0; echo "missing: $name" >&2; }
+    done
+    if (( ok )); then pass; else fail "routing stack missing from the plan"; fi
 fi
 
 # ─── shellcheck (optional) ──────────────────────────────────────────────────

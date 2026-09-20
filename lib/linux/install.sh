@@ -409,7 +409,8 @@ route_zed_to_proxy() {
     # Only the provider id 'autoos-omniroute' is written; every other
     # setting is kept. The client key comes from env AUTOOS_OMNIROUTE_KEY
     # (dashboard -> api-manager), never from this file.
-    local cfg_dir="$SYS_HOME/.config/zed" cfg="$cfg_dir/settings.json"
+    local cfg_dir="$SYS_HOME/.config/zed"
+    local cfg="$cfg_dir/settings.json"
     if (( AUTOOS_DRY_RUN )); then ui_muted "would route Zed agents to OmniRoute in $cfg"; return 0; fi
     mkdir -p "$cfg_dir"
     if [[ -f "$cfg" ]]; then
@@ -438,6 +439,12 @@ oc["autoos-omniroute"] = {
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(cfg, fh, indent=2)
 PY
+    # A failed merge must not report success: setup.sh runs under set -e,
+    # but sourced/test contexts do not, so check explicitly.
+    if (( PIPESTATUS[0] != 0 )); then
+        ui_warn "could not update $cfg - is python3 working?"
+        return 1
+    fi
     ui_ok "Zed agents routed to OmniRoute (key via AUTOOS_OMNIROUTE_KEY)"
     return 0
 }

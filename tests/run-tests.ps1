@@ -612,6 +612,247 @@ Test-Case 'every PowerShell file has a UTF-8 BOM' {
     Assert-Equal ($missing -join ',') ''
 }
 
+# ─── AI routing stack (omniroute / litellm / zed / opencode) ───────────────
+Describe-Group 'ai routing'
+
+function Get-AutoOSWinComponent {
+    param([string]$Id)
+    foreach ($cat in $winCatalog.categories) {
+        foreach ($c in $cat.components) { if ($c.id -eq $Id) { return $c } }
+    }
+    return $null
+}
+
+Test-Case 'ai routing components exist with the right providers' {
+    $zed = Get-AutoOSWinComponent 'zed'
+    $lit = Get-AutoOSWinComponent 'litellm'
+    $oc = Get-AutoOSWinComponent 'opencode-cli'
+    $om = Get-AutoOSWinComponent 'omniroute'
+    Assert-True ($null -ne $zed -and $null -ne $lit -and $null -ne $oc -and $null -ne $om) 'missing component'
+    Assert-Equal "$($zed.provider)|$($lit.provider)|$($oc.provider)|$($om.provider)" 'winget|custom|npm|npm'
+    Assert-Equal "$($zed.package)|$($oc.package)|$($om.package)" 'ZedIndustries.Zed|opencode-ai|omniroute'
+}
+
+Test-Case 'zed routes through litellm and both ride ai-coding' {
+    $zed = Get-AutoOSWinComponent 'zed'
+    Assert-Contains $zed.requires 'litellm'
+    Assert-Contains $zed.profiles 'ai-coding'
+    Assert-Contains (Get-AutoOSWinComponent 'litellm').profiles 'ai-coding'
+    Assert-Contains (Get-AutoOSWinComponent 'omniroute').profiles 'ai-coding'
+}
+
+Test-Case 'opencode-cli is the headless fallback on light' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $light = @($a | Where-Object { 'light' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-Contains $light 'opencode-cli'
+}
+
+Test-Case 'ai postInstall hooks are exported' {
+    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSZedProxy')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn missing"
+    }
+    Pass
+}
+
+Test-Case 'litellm installer announces instead of running in dry run' {
+    Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+    Install-AutoOSLitellm
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    Pass
+}
+
+Test-Case 'zed routing writes nothing in dry run' {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        Set-AutoOSZedProxy
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Assert-Equal (Test-Path (Join-Path $scratch 'Zed\settings.json')) $false
+    } finally { $env:APPDATA = $realAppData }
+}
+
+Test-Case 'zed routing merges one provider and keeps the rest' {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'Zed'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '{"theme":"mine","language_models":{"openai":{"api_url":"https://x"}}}' |
+            Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Set-AutoOSZedProxy
+        Set-AutoOSZedProxy
+        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $s.theme 'mine'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_url 'http://127.0.0.1:20128/v1'
+        $models = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | ForEach-Object { $_.name })
+        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap'
+        Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
+        $raw = Get-Content (Join-Path $cfgDir 'settings.json') -Raw
+        Assert-True ($raw -notmatch 'sk-' -and $raw -notmatch 'AUTOOS_OMNIROUTE_KEY|api_key') 'secret leaked into settings'
+    } finally { $env:APPDATA = $realAppData }
+}
+
+Test-Case 'opencode repo config pins omniroute with litellm fallback' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $oc = $stripped | ConvertFrom-Json
+    Assert-Equal $oc.model 'omniroute/tier1'
+    Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name) -join ',') 'tier1,tier2,tier3'
+    Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
+    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'graphify,playwright,serena'
+}
+
+Test-Case 'openhands template routes tiers with no secrets' {
+    $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
+    foreach ($section in @('[llm]', '[llm.tier1]', '[llm.tier2]', '[llm.tier3]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
+        Assert-True ($toml -match [regex]::Escape($section)) "missing $section"
+    }
+    Assert-True ($toml -match 'host\.docker\.internal:20128') 'not pointed at the gateway'
+    Assert-True ($toml -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
+    Pass
+}
+
+Test-Case 'litellm fallback config is internally consistent' {
+    $yaml = Get-Content (Join-Path $Root 'configuration\litellm\config.yaml') -Raw -Encoding utf8
+    $groups = @([regex]::Matches($yaml, '(?m)^\s*-\s*model_name:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    foreach ($g in @('tier1', 'tier1-paid', 'tier2', 'tier2-paid', 'tier3', 'tier3-paid')) {
+        Assert-Contains $groups $g
+    }
+    $fb = [regex]::Match($yaml, '(?s)fallbacks:(.*?)(?:\r?\n\S|\z)').Groups[1].Value
+    foreach ($m in [regex]::Matches($fb, '[- ](\S+):\s*\[([^\]]*)\]')) {
+        Assert-Contains $groups $m.Groups[1].Value
+        foreach ($t in ($m.Groups[2].Value -split ',')) { Assert-Contains $groups $t.Trim() }
+    }
+    $models = [regex]::Matches($yaml, '(?m)^\s*model:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value }
+    Assert-True (($models -match 'cerebras').Count -eq 0 -and ($models -match 'llama-3\.3-70b').Count -eq 0) 'retired free legs still routed'
+    Assert-True ($yaml -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
+    Pass
+}
+
+Test-Case 'start scripts exist and name the client key' {
+    Assert-True (Test-Path (Join-Path $Root 'configuration\start-stack.ps1')) 'ps1 missing'
+    Assert-True (Test-Path (Join-Path $Root 'configuration\start-stack.sh')) 'sh missing'
+    $ps1 = Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw
+    $sh = Get-Content (Join-Path $Root 'configuration\start-stack.sh') -Raw
+    Assert-True ($ps1 -match 'AUTOOS_OMNIROUTE_KEY' -and $sh -match 'AUTOOS_OMNIROUTE_KEY') 'key wiring missing'
+    Assert-True ($ps1 -match 'openhands' -and $sh -match 'host\.docker\.internal') 'openhands launch missing'
+    Pass
+}
+
+Test-Case 'start-stack.ps1 parses without syntax errors' {
+    $errors = $null
+    $null = [System.Management.Automation.PSParser]::Tokenize(
+        (Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw), [ref]$errors)
+    Assert-Equal (@($errors)).Count 0
+}
+
+Test-Case 'litellm installer detects an existing install' {
+    $realPath = $env:PATH
+    $stub = Join-Path $env:TEMP "autoos-litstub-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path $stub -Force | Out-Null
+        '@echo off' + "`r`n" + 'echo litellm-stub' | Out-File (Join-Path $stub 'litellm.cmd') -Encoding ascii
+        $env:PATH = "$stub;$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Install-AutoOSLitellm
+        Pass
+    } finally { $env:PATH = $realPath }
+}
+
+Test-Case 'litellm installer warns without python' {
+    $realPath = $env:PATH
+    $empty = Join-Path $env:TEMP "autoos-noempty-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path $empty -Force | Out-Null
+        $env:PATH = $empty
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Install-AutoOSLitellm
+        Pass
+    } finally { $env:PATH = $realPath }
+}
+
+Test-Case 'zed routing creates a fresh config when none exists' {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Set-AutoOSZedProxy
+        $cfgPath = Join-Path $scratch 'Zed\settings.json'
+        Assert-True (Test-Path $cfgPath) 'settings.json not created'
+        $s = Get-Content $cfgPath -Raw | ConvertFrom-Json
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 3
+    } finally { $env:APPDATA = $realAppData }
+}
+
+Test-Case 'component profiles name real profiles and verify is set' {
+    $bad = @()
+    foreach ($file in @('catalog\windows.json', 'catalog\linux.json', 'catalog\macos.json')) {
+        $c = Get-Content (Join-Path $Root $file) -Raw -Encoding utf8 | ConvertFrom-Json
+        $profiles = @($c.profiles.PSObject.Properties.Name)
+        foreach ($cat in $c.categories) {
+            foreach ($comp in $cat.components) {
+                if ($comp.id -notin @('zed', 'litellm', 'opencode-cli', 'omniroute')) { continue }
+                foreach ($p in $comp.profiles) {
+                    if ($p -notin $profiles) { $bad += "$file/$($comp.id):$p" }
+                }
+                if ([string]::IsNullOrWhiteSpace($comp.verify)) { $bad += "$file/$($comp.id):no-verify" }
+            }
+        }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'ai-coding ticks the whole routing stack' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $ticks = @($a | Where-Object { 'ai-coding' -in $_.Profiles } | ForEach-Object { $_.Id })
+    foreach ($id in @('zed', 'litellm', 'opencode-cli', 'omniroute')) {
+        Assert-Contains $ticks $id
+    }
+    Pass
+}
+
+Test-Case 'litellm installer delegates to pipx when present' {
+    $realPath = $env:PATH
+    $stub = Join-Path $env:TEMP "autoos-pipxstub-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path $stub -Force | Out-Null
+        '@echo off' + "`r`n" + 'echo called > "%~dp0called.txt"' |
+            Out-File (Join-Path $stub 'pipx.cmd') -Encoding ascii
+        $env:PATH = "$stub;$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Install-AutoOSLitellm
+        Assert-True (Test-Path (Join-Path $stub 'called.txt')) 'pipx stub was not invoked'
+    } finally { $env:PATH = $realPath }
+}
+
+Test-Case 'litellm installer falls back to the py launcher' {
+    $realPath = $env:PATH
+    $stub = Join-Path $env:TEMP "autoos-pystub-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path $stub -Force | Out-Null
+        '@echo off' + "`r`n" + 'exit /b 0' | Out-File (Join-Path $stub 'py.cmd') -Encoding ascii
+        $env:PATH = "$stub;$env:SystemRoot\System32"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Install-AutoOSLitellm
+        Pass
+    } finally { $env:PATH = $realPath }
+}
+
+Test-Case 'env template carries placeholders only' {    $bad = @()
+    foreach ($line in (Get-Content (Join-Path $Root 'configuration\litellm\.env.example') -Encoding utf8)) {
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        if ($t -notmatch '^[A-Z_]+=REPLACE_WITH_[A-Z_]+$') { $bad += $t }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')

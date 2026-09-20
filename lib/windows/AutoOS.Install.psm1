@@ -468,10 +468,13 @@ function Set-AutoOSZedProxy {
         Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
     $settings = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw | ConvertFrom-Json } else { New-Object psobject }
-    if (-not $settings.language_models) {
+    # StrictMode turns a missing-property read into a throw (even member
+    # enumeration over an empty property set), so probe the collection with
+    # the indexer, which returns $null for a missing name instead of throwing.
+    if ($null -eq $settings.PSObject.Properties['language_models']) {
         Add-Member -InputObject $settings -NotePropertyName 'language_models' -NotePropertyValue (New-Object psobject)
     }
-    if (-not $settings.language_models.openai_compatible) {
+    if ($null -eq $settings.language_models.PSObject.Properties['openai_compatible']) {
         Add-Member -InputObject $settings.language_models -NotePropertyName 'openai_compatible' -NotePropertyValue (New-Object psobject)
     }
     $entry = @{
