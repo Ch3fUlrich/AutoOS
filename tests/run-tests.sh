@@ -580,7 +580,7 @@ for p in glob.glob("catalog/*.json"):
             have[c["id"]].add(plat)
 core = ["claude-code", "git", "nodejs", "docker", "tailscale",
         "handy", "vscode", "herdr", "agent-skills", "nerd-font",
-        "zed", "litellm", "opencode-cli", "omniroute"]
+        "zed", "litellm", "opencode-cli", "omniroute", "openhands"]
 bad = [c for c in core if have[c] != {"windows", "linux", "macos"}]
 print(" ".join(bad))
 PY
@@ -612,11 +612,78 @@ if it "zed rides the script provider end to end"; then
     ok=1
     grep -q 'zed)             has_cmd zed' lib/linux/install.sh || ok=0
     grep -q 'zed)             install_zed' lib/linux/install.sh || ok=0
-    ( PATH="/nonexistent-autoos-probe:$PATH"; script_is_installed zed ) 2>/dev/null && ok=0
-    stub="$(mktemp -d)"; printf '#!/bin/sh\nexit 0\n' >"$stub/zed"; chmod +x "$stub/zed"
-    ( PATH="$stub:$PATH"; script_is_installed zed ) >/dev/null 2>&1 || ok=0
-    rm -rf "$stub"
+    # has_cmd is stubbed so the test never depends on what this machine happens
+    # to have installed (Zed is present on the dev box via WSL interop).
+    ( has_cmd() { return 1; }; script_is_installed zed ) >/dev/null 2>&1 && ok=0
+    ( has_cmd() { return 0; }; script_is_installed zed ) >/dev/null 2>&1 || ok=0
     if (( ok )); then pass; else fail "zed dispatch or detection is broken"; fi
+fi
+
+if it "openhands pulls the current image and announces in dry run"; then
+    ok=1
+    grep -q 'docker.openhands.dev/openhands/openhands:latest' lib/linux/install.sh || ok=0
+    grep -q 'install_openhands' lib/linux/install.sh || ok=0
+    out="$( ( AUTOOS_DRY_RUN=1; install_openhands ) 2>&1)"
+    [[ "$out" == *"would pull"* ]] || ok=0
+    if (( ok )); then pass; else fail "openhands installer is stale or silent in dry run"; fi
+fi
+
+if it "openhands wires the LLM through OmniRoute in start-stack"; then
+    ok=1
+    for f in configuration/start-stack.ps1 configuration/start-stack.sh; do
+        grep -q 'LLM_MODEL=openai/tier1' "$f" || { ok=0; echo "missing model in $f" >&2; }
+        grep -q 'LLM_BASE_URL' "$f" || ok=0
+        grep -q 'docker.openhands.dev/openhands/openhands:latest' "$f" || ok=0
+        grep -q '3000:3000' "$f" || ok=0
+    done
+    if (( ok )); then pass; else fail "start-stack does not route OpenHands correctly"; fi
+fi
+
+if it "the OpenHands template carries the LiteLLM provider prefix"; then    # Every model line, not a sample: a new unprefixed line is the exact
+    # "LLM Provider NOT provided" mismatch this guards against.
+    bad="$(grep -nE '^[[:space:]]*model[[:space:]]*=' configuration/openhands/config.toml |
+        grep -v 'openai/' || true)"
+    ok=1
+    grep -q 'model = "openai/tier1"' configuration/openhands/config.toml || ok=0
+    grep -q 'model = "openai/tier3"' configuration/openhands/config.toml || ok=0
+    grep -q 'openai/tier1-clean' configuration/openhands/config.toml || ok=0
+    if [[ -n "$bad" ]]; then fail "model lines without the openai/ prefix: $bad"
+    elif (( ok )); then pass
+    else fail "template is missing the expected tier models"; fi
+fi
+
+if it "provider status never carries key values"; then
+    if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' 2>/dev/null; then
+        skip "python3 < 3.7 cannot import serve.py"
+    else
+        report="$(python3 - <<'PY'
+import importlib.util, json, os, pathlib, sys, tempfile
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-serve-"))
+(root / "configuration").mkdir()
+(root / "configuration" / "api-keys.yml").write_text(
+    "groq: gsk_SUPERSECRETVALUE123\ndeepseek:\nmistral: 5xLsSecretValue\n",
+    encoding="utf-8")
+spec = importlib.util.spec_from_file_location("autoos_serve", "lib/linux/serve.py")
+mod = importlib.util.module_from_spec(spec)
+sys.argv = ["serve.py", str(root), "0", "127.0.0.1", "0"]
+spec.loader.exec_module(mod)
+mod.ROOT = root
+status = mod.provider_status()
+text = json.dumps(status)
+problems = []
+groq = [p for p in status if p["id"] == "groq"]
+deepseek = [p for p in status if p["id"] == "deepseek"]
+if not groq or not groq[0]["configured"]:
+    problems.append("groq-not-configured")
+if deepseek and deepseek[0]["configured"]:
+    problems.append("empty-value-counted-as-configured")
+if "SUPERSECRET" in text or "SecretValue" in text:
+    problems.append("value-leaked")
+print(" ".join(problems))
+PY
+)"
+        assert_eq "$report" ""
+    fi
 fi
 
 if it "server profile ticks the headless terminal stack"; then
@@ -765,11 +832,13 @@ if it "start-stack.sh is valid bash and names the client key"; then
 fi
 
 if it "no committed secrets in router files"; then
-    leaks="$(grep -rE 'sk-[A-Za-z0-9]{10,}' configuration/litellm/config.yaml \
+    # Report file:line only - a failure message must never echo the value it
+    # found into logs or a terminal shared with anyone else.
+    hits="$(grep -rnE 'sk-[A-Za-z0-9]{10,}' configuration/litellm/config.yaml \
         configuration/litellm/.env.example opencode.jsonc \
-        configuration/openhands/config.toml 2>/dev/null || true)"
+        configuration/openhands/config.toml 2>/dev/null | cut -d: -f1,2 || true)"
     # .env.example is the sanctioned placeholder pattern; only real-looking keys fail.
-    if [[ -z "$leaks" ]]; then pass; else fail "credential-shaped value: $leaks"; fi
+    if [[ -z "$hits" ]]; then pass; else fail "credential-shaped value at: $hits"; fi
 fi
 
 # ─── WSL detection ──────────────────────────────────────────────────────────
@@ -910,6 +979,15 @@ if it "apply handles the Cloudflare UA and meta mapping"; then
     if (( ok )); then pass; else fail "apply.sh is missing the provider quirks"; fi
 fi
 
+if it "apply --dry-run registers nothing and starts nothing"; then
+    # combos.json must be byte-identical afterwards; the dry run must announce.
+    before="$(cat configuration/omniroute/combos.json)"
+    out="$(bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    assert_contains "$out" "dry run"
+    after="$(cat configuration/omniroute/combos.json)"
+    assert_eq "$after" "$before"
+fi
+
 if it "opencode tiers declare matching context limits"; then
     report="$(python3 - <<'PY'
 import json, re, io
@@ -918,8 +996,8 @@ oc = json.loads(text)
 m = oc["providers"]["omniroute"]["models"]
 problems = []
 for name, ctx in (("tier1", 1000000), ("tier1-clean", 1000000),
-                  ("tier2", 262144), ("tier3", 131072),
-                  ("tier2-clean", 262144), ("tier3-clean", 131072)):
+                  ("tier2", 131072), ("tier3", 131072),
+                  ("tier2-clean", 131072), ("tier3-clean", 131072)):
     if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:
         problems.append(name)
 print(" ".join(problems))
@@ -953,7 +1031,7 @@ for p in sorted(glob.glob("catalog/*.json")):
     profiles = set(d.get("profiles", {}).keys())
     for g in d.get("categories", []):
         for c in g.get("components", []):
-            if c["id"] not in ("zed", "litellm", "opencode-cli", "omniroute"):
+            if c["id"] not in ("zed", "litellm", "opencode-cli", "omniroute", "openhands"):
                 continue
             for prof in c.get("profiles", []):
                 if prof not in profiles:

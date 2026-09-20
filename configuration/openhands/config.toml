@@ -1,55 +1,65 @@
 # OpenHands LLM routing — OmniRoute first (docs/models.md).
 #
-# Docker path (recommended): don't mount this file, pass env instead —
-#   -e LLM_MODEL=auto/smart -e LLM_API_KEY=<client key>
-#   -e LLM_BASE_URL=http://host.docker.internal:20128/v1
-# (host.docker.internal because the container can't see your localhost.)
+# V1 (current Web app) configures the LLM in the Settings UI; the docker path
+# gets it from env vars, which configuration/start-stack.* sets for you:
 #
-# Dev path (main.py / cli.py): point OpenHands at this file and use the
-# named [llm.*] sections + [agent.*] mapping below.
-# Keys: never here. Client key comes from the OmniRoute dashboard
-# (api-manager) at runtime. Real spend is tracked in the OmniRoute
-# dashboard, not the OpenHands cost column: OpenHands prices via the
-# LiteLLM cost map, which doesn't know OmniRoute's auto/* aliases.
+#   LLM_MODEL=openai/tier1
+#   LLM_API_KEY=<OmniRoute client key>
+#   LLM_BASE_URL=http://host.docker.internal:20128/v1   # container -> host
+#
+# The `openai/` prefix is not decoration: LiteLLM uses it to pick the
+# OpenAI-compatible transport, and everything after the prefix is the model
+# name OmniRoute receives (`tier1` is the combo name). Without it, LiteLLM
+# reports "LLM Provider NOT provided" — the classic model-mismatch error.
+#
+# This file is the V0/dev-path template (main.py / cli.py). Named [llm.*]
+# sections + [agent.*] mapping work there; the docker path ignores it.
+# Keys: never here. Real spend shows in the OmniRoute dashboard, not the
+# OpenHands cost column (it cannot know combo pricing).
 
 # ── Default: orchestrator tier ──────────────────────────────────────
 [llm]
-model = "auto/smart"
-base_url = "http://host.docker.internal:20128/v1"
+model = "openai/tier1"
+base_url = "http://127.0.0.1:20128/v1"
 api_key = ""
 temperature = 0.0
 num_retries = 5
-# Conservative ceiling: auto/* routes across models with different windows.
-# Raise to 1000000 when you pin a strict combo (tier1-strict) instead.
+# Conservative ceiling: tier1 routes across 1M-context models (docs/models.md).
 max_input_tokens = 128000
 max_output_tokens = 32000
 
 # ── Named tiers (dev path: pick per agent below) ────────────────────
 [llm.tier1]
-model = "auto/smart"
-base_url = "http://host.docker.internal:20128/v1"
+model = "openai/tier1"
+base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.0
 max_input_tokens = 128000
 max_output_tokens = 32000
 
 [llm.tier2]
-model = "auto"
-base_url = "http://host.docker.internal:20128/v1"
+model = "openai/tier2"
+base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.1
 max_input_tokens = 128000
 max_output_tokens = 16000
 
 [llm.tier3]
-model = "auto/cheap"
-base_url = "http://host.docker.internal:20128/v1"
+model = "openai/tier3"
+base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.2
 max_input_tokens = 64000
 max_output_tokens = 8000
 
+# Sensitive data: swap tier ids for the -clean combos (no prompt training).
+[llm.tier1-clean]
+model = "openai/tier1-clean"
+base_url = "http://127.0.0.1:20128/v1"
+temperature = 0.0
+
 # Reserved: preliminary code-edit drafts go to the cheap tier.
 [llm.draft_editor]
-model = "auto/cheap"
-base_url = "http://host.docker.internal:20128/v1"
+model = "openai/tier3"
+base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.2
 top_p = 0.95
 

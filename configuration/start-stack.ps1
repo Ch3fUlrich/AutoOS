@@ -34,9 +34,15 @@ if ([string]::IsNullOrWhiteSpace($Key)) {
     Write-Host 'or set $env:AUTOOS_OMNIROUTE_KEY. Then configure providers: .\configuration\omniroute\apply.ps1'
     exit 1
 }
+# Export so the launched apps inherit it: opencode.jsonc and the Zed settings
+# carry no key by design ("key via env"), so without this the apps the script
+# launches would start unauthenticated.
+$env:AUTOOS_OMNIROUTE_KEY = $Key
 
 function Test-Gateway {
-    try { (Invoke-WebRequest -Uri "$Gateway/v1/models" -Headers @{ Authorization = "Bearer $Key" } -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 }
+    # /api/health, not /v1/models: the latter 401s for a normal client key in
+    # this build, so probing it would call a healthy gateway "down" forever.
+    try { (Invoke-WebRequest -Uri "$Gateway/api/health" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 }
     catch { $false }
 }
 
@@ -58,17 +64,25 @@ switch ($App) {
     'zed'       { & "$env:LOCALAPPDATA\Programs\Zed\zed.exe" . }
     'nvim'      { & nvim }
     'openhands' {
-        # Docker Desktop must be running; container reaches the gateway via host IP.
-        docker run -it --rm --pull=always `
-            -e LLM_MODEL=auto/smart `
-            -e LLM_API_KEY="$Key" `
+        # Docker Desktop must be running; the container reaches the gateway via
+        # host.docker.internal. Image name is the current upstream one (the old
+        # docker.all-hands.dev registry is gone). The sandbox/agent-server image
+        # is chosen by OpenHands itself on first conversation - do not pin it.
+        # The client key is exported and inherited with `-e LLM_API_KEY` (no
+        # value on the command line, so `ps` never shows it).
+        $env:LLM_API_KEY = $Key
+        docker run -it --rm `
+            -e LLM_MODEL=openai/tier1 `
+            -e LLM_API_KEY `
             -e LLM_BASE_URL="http://host.docker.internal:20128/v1" `
-            -e SANDBOX_RUNTIME_CONTAINER_IMAGE=docker.all-hands.dev/all-hands-ai/runtime:latest `
             -e LOG_ALL_EVENTS=true `
+            -p 3000:3000 `
             -v /var/run/docker.sock:/var/run/docker.sock `
             -v "$env:USERPROFILE\.openhands:/.openhands" `
             --add-host host.docker.internal:host-gateway `
             --name openhands-app `
-            docker.all-hands.dev/all-hands-ai/openhands:latest
+            docker.openhands.dev/openhands/openhands:latest
+        Remove-Item Env:LLM_API_KEY -ErrorAction SilentlyContinue
+        Write-Host 'OpenHands UI: http://localhost:3000'
     }
 }

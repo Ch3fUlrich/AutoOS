@@ -37,17 +37,19 @@ paid legs from the providers whose credit tiers are sanctioned
 | Tier | Context promise | Chain (verified against the live catalogs) |
 |---|---|---|
 | `tier1` orchestrator | **1M only** | zen `muse-spark-1.3-contributor-free` → openrouter `meta/muse-spark-1.3-contributor` → zen `muse-spark-1.3` → zen `gemini-3.1-pro` |
-| `tier1-clean` | 1M, no training | zen `muse-spark-1.3` → zen `gemini-3.1-pro` |
-| `tier2` smart | ≤256k | gemini `gemini-3.8-flash` → groq `gpt-oss-120b` → cerebras `gpt-oss-120b` → sambanova `gpt-oss-120b` → openrouter `deepseek-v4.1-flash` → deepseek `deepseek-flash` |
-| `tier2-clean` | ≤256k, no training | groq → cerebras → sambanova `gpt-oss-120b` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
+| `tier1-clean` | 1M, no training | openrouter `meta/muse-spark-1.3` → zen `muse-spark-1.3` → zen `gemini-3.1-pro` |
+| `tier2` smart | ≤128k | gemini `gemini-3.8-flash` → groq `gpt-oss-120b` → cerebras `gpt-oss-120b` → sambanova `gpt-oss-120b` → openrouter `deepseek-v4.1-flash` → deepseek `deepseek-flash` |
+| `tier2-clean` | ≤128k, no training | groq → cerebras → sambanova `gpt-oss-120b` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
 | `tier3` driver | ≤128k | mistral `mistral-code-latest` → groq `qwen3.8-27b` → cerebras `qwen-3.8-27b` → mistral `mistral-small-latest` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
 | `tier3-clean` | ≤128k, no training | groq → cerebras `qwen-3.8-27b` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
 
 **Context rule (why the user-visible limit is honest):** `tier1` is curated to
 1M-context models only — anything smaller belongs in `tier2`. `opencode.jsonc`
-declares the matching `limit.context` (1M / 256k / 128k), so OpenCode's
-compaction and the picker's context display agree with what actually answers.
-`auto/*` remains as a zero-setup bootstrap with conservative limits.
+declares the matching `limit.context` (1M for tier1, 128k for tier2/tier3,
+which is what OmniRoute computes as the minimum across each chain), so
+OpenCode's compaction and the picker's context display agree with what
+actually answers. `auto/*` remains as a zero-setup bootstrap with the same
+conservative limit.
 
 **Sensitive data work:** `*-clean` never routes a model or plan with a
 published prompt-training policy — no Zen promo `-free` models, no Gemini free
@@ -132,6 +134,23 @@ Keys: dashboard → Providers → + Add Provider ([guide](api-keys.md)).
 Client key: dashboard → api-manager → Create API Key → env
 `AUTOOS_OMNIROUTE_KEY`. Fallback router: `configuration/litellm/` +
 `LITELLM_MASTER_KEY` (`litellm --test` after first start).
+
+## Verify it (probe every combo)
+
+`apply` can prove the result end to end: it sends one tiny request to every
+combo and reports what answered. Cheap (a few hundred tokens per combo),
+idempotent, and the right way to check after provider or key changes:
+
+```bash
+./configuration/omniroute/apply.sh --probe
+```
+
+```powershell
+.\configuration\omniroute\apply.ps1 -Probe
+```
+
+A failing combo prints the full upstream error. The dated results of the last
+run are in [verification](verification.md).
 
 ## Verified provider IDs (live `omniroute providers available`, v3.8.50)
 

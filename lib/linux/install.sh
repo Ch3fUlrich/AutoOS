@@ -390,6 +390,27 @@ install_zed() {
     ui_ok "Zed installed"
 }
 
+install_openhands() {
+    # Pull the OpenHands image; the container itself is started on demand by
+    # configuration/start-stack.sh openhands, wired to the OmniRoute gateway.
+    local image="docker.openhands.dev/openhands/openhands:latest"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would pull ${image} (Docker daemon must be running)"
+        return 0
+    fi
+    if ! has_cmd docker; then
+        ui_warn "docker CLI not found - install Docker first, then re-run"
+        return 0
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        ui_warn "Docker daemon is not running - start it, then: docker pull ${image}"
+        return 0
+    fi
+    run docker pull "$image"
+    ui_ok "OpenHands image ready"
+    ui_info "start it with: ./configuration/start-stack.sh openhands"
+}
+
 install_litellm_proxy() {
     if has_cmd litellm; then ui_muted "litellm already installed"; return 0; fi
     if (( AUTOOS_DRY_RUN )); then ui_muted "would install litellm[proxy] via pipx or pip"; return 0; fi
@@ -429,11 +450,11 @@ oc["autoos-omniroute"] = {
     "api_url": "http://127.0.0.1:20128/v1",
     "available_models": [
         {"name": "auto/smart", "display_name": "tier1 orchestrator (auto smart)",
-         "max_tokens": 1000000, "reasoning_effort": "xhigh"},
+         "max_tokens": 131072, "reasoning_effort": "xhigh"},
         {"name": "auto", "display_name": "tier2 smart (auto balanced)",
-         "max_tokens": 256000},
+         "max_tokens": 131072},
         {"name": "auto/cheap", "display_name": "tier3 driver (auto cheap)",
-         "max_tokens": 128000},
+         "max_tokens": 131072},
     ],
 }
 with open(path, "w", encoding="utf-8") as fh:

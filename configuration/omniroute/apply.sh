@@ -7,7 +7,11 @@
 # Model refs the live catalog does not know are skipped with a warning, so a
 # renamed upstream model degrades one tier leg instead of breaking the run.
 #
-#   ./configuration/omniroute/apply.sh [--dry-run]
+#   ./configuration/omniroute/apply.sh [--dry-run] [--probe]
+#
+# --probe sends one tiny request per combo and reports what answered
+# (spends a few hundred tokens; skipped under --dry-run).
+# Requires python3 for JSON parsing and the probe's HTTP calls.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +20,19 @@ GATEWAY="http://127.0.0.1:20128"
 KEYS_FILE="$ROOT/configuration/api-keys.yml"
 COMBOS_FILE="$HERE/combos.json"
 DRY=0
-[[ "${1:-}" == "--dry-run" ]] && DRY=1
+PROBE=0
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY=1 ;;
+        --probe)   PROBE=1 ;;
+    esac
+done
+PROBE_COMBOS=()
+
+command -v python3 >/dev/null || {
+    echo "apply.sh needs python3 (JSON parsing + probe HTTP calls)."
+    exit 1
+}
 
 if [[ ! -f "$KEYS_FILE" ]]; then
     echo "Missing $KEYS_FILE — copy configuration/api-keys.example.yml and fill it in."
@@ -63,6 +79,11 @@ declare -A PROVIDER_DATA=(
 
 gateway_up() { curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1; }
 if ! gateway_up; then
+    if [[ $DRY -eq 1 ]]; then
+        echo "Gateway is down; dry run stops here (would start it with: omniroute --no-open --port 20128)."
+        echo "Done (dry run - nothing was started, registered or created)."
+        exit 0
+    fi
     echo "Starting OmniRoute (background)…"
     nohup omniroute --no-open --port 20128 >/tmp/omniroute-apply.log 2>&1 &
     for _ in $(seq 1 24); do gateway_up && break; sleep 5; done
@@ -86,8 +107,10 @@ register_provider() {
     if [[ -n "${PROVIDER_DATA[$provider_id]:-}" ]]; then
         data_args=(--provider-specific-data "${PROVIDER_DATA[$provider_id]}")
     fi
-    if env "$var=$value" omniroute providers add "$provider_id" --credential-env "$var" \
-            "${data_args[@]}" --yes >/dev/null 2>&1; then
+    # Subshell export, not `env VAR=value`: env would put the key in argv,
+    # where `ps` can read it for the lifetime of the call.
+    if ( export "$var=$value"; omniroute providers add "$provider_id" \
+            --credential-env "$var" "${data_args[@]}" --yes ) >/dev/null 2>&1; then
         echo "  + $provider_id registered"
     else
         echo "  ! $provider_id registration failed — register it in the dashboard"
@@ -125,7 +148,9 @@ while IFS=$'\t' read -r name strategy models; do
     IFS=',' read -ra refs <<<"$models"
     for ref in "${refs[@]}"; do
         [[ -z "$ref" ]] && continue
-        if [[ -z "$live_ids" || "$live_ids" == *"$ref"* ]]; then
+        # Exact line match: a substring test would accept a ref that is merely
+        # a prefix of a live id (e.g. .../muse-spark-1.3 vs ...-contributor).
+        if [[ -z "$live_ids" ]] || grep -qxF "$ref" <<<"$live_ids"; then
             keep+="${keep:+,}$ref"
         else
             dropped+="${dropped:+,}$ref"
@@ -140,11 +165,20 @@ while IFS=$'\t' read -r name strategy models; do
         echo "  - $name: would create [$strategy] with $keep"
         continue
     fi
-    omniroute combo delete "$name" --yes >/dev/null 2>&1 || true
+    # Create first, delete only what it replaces: if the create fails the old
+    # tier survives instead of leaving a hole. Delete-then-create can only run
+    # when create reports "already exists" AND a retry still fails.
     if omniroute combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
         echo "  + $name created ($strategy)"
+        PROBE_COMBOS+=("$name")
     else
-        echo "  ! $name creation failed"
+        omniroute combo delete "$name" --yes >/dev/null 2>&1 || true
+        if omniroute combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
+            echo "  + $name replaced ($strategy)"
+            PROBE_COMBOS+=("$name")
+        else
+            echo "  ! $name creation failed (previous version, if any, is untouched)"
+        fi
     fi
 done < <(python3 - "$COMBOS_FILE" <<'PY'
 import json, sys
@@ -153,5 +187,48 @@ for c in data.get("combos", []):
     print("%s\t%s\t%s" % (c["name"], c.get("strategy", "priority"), ",".join(c["models"])))
 PY
 )
+
+# ─── Probe: prove the combos answer, end to end ─────────────────────────────
+if [[ $PROBE -eq 1 ]]; then
+    key="${KEYS[omniroute]:-}"
+    if [[ -z "$key" || $DRY -eq 1 ]]; then
+        echo "Probe skipped (dry run, or no omniroute client key in api-keys.yml)."
+    elif (( ${#PROBE_COMBOS[@]} == 0 )); then
+        echo "Probe skipped (no combos were created)."
+    else
+        echo "Probe (one tiny request per combo):"
+        # The client key goes through the environment, never argv.
+        AUTOOS_PROBE_KEY="$key" python3 - "$GATEWAY" "${PROBE_COMBOS[@]}" <<'PY'
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+gateway = sys.argv[1]
+key = os.environ["AUTOOS_PROBE_KEY"]
+for name in sys.argv[2:]:
+    body = json.dumps({
+        "model": name,
+        "messages": [{"role": "user", "content": "Reply with: ok"}],
+        # 2048, not 256: reasoning models (spark) spend tokens on hidden
+        # thinking first and answer "empty" when the budget is tiny.
+        "max_tokens": 2048,
+    }).encode()
+    req = urllib.request.Request(
+        gateway + "/v1/chat/completions", data=body, method="POST",
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            served = json.loads(resp.read().decode()).get("model", "?")
+        print("  + %-12s served by %s" % (name, served))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode()[:200].replace("\n", " ")
+        print("  ! %-12s HTTP %s %s" % (name, e.code, detail))
+    except Exception as e:
+        print("  ! %-12s %s: %s" % (name, type(e).__name__, e))
+PY
+    fi
+fi
 
 echo "Done. Apps pick this up on next start (configuration/start-stack.sh)."

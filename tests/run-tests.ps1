@@ -86,7 +86,7 @@ Write-Host (C "  ($Root)" '2;38;5;245')
 
 $winCatalog = Get-AutoOSCatalog (Join-Path $Root 'catalog\windows.json')
 
-# ─── Catalog schema ─────────────────────────────────────────────────────────
+# â”€â”€â”€ Catalog schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'catalog schema'
 
 Test-Case 'windows catalog validates' {
@@ -121,7 +121,7 @@ Test-Case 'every winget component has a non-empty package id' {
     Assert-Equal ($bad -join ',') ''
 }
 
-# ─── Fixture-driven filtering ───────────────────────────────────────────────
+# â”€â”€â”€ Fixture-driven filtering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'component filtering'
 
 function New-FakeSystem {
@@ -160,7 +160,7 @@ Test-Case 'light profile does not include desktop customisation' {
     Assert-NotContains $light 'windhawk'
 }
 
-# ─── Dependency resolution ──────────────────────────────────────────────────
+# â”€â”€â”€ Dependency resolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'dependency resolution'
 
 $available = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
@@ -215,7 +215,7 @@ Test-Case 'a dependency cycle is reported, not silently dropped' {
     }
 }
 
-# ─── Detection heuristics ───────────────────────────────────────────────────
+# â”€â”€â”€ Detection heuristics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'detection'
 
 Test-Case 'arm64 maps to the light profile' {
@@ -250,7 +250,7 @@ Test-Case 'disabled virtualisation is a warning, not a blocker' {
     Assert-Equal $v[0].Severity 'warn'
 }
 
-# ─── PATH handling (the critical regression) ────────────────────────────────
+# â”€â”€â”€ PATH handling (the critical regression) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'PATH handling'
 
 Test-Case 'appending preserves every existing entry' {
@@ -283,7 +283,7 @@ Test-Case 'Add-AutoOSPathEntry makes no change in dry run' {
     Assert-Equal $after $before
 }
 
-# ─── UI ─────────────────────────────────────────────────────────────────────
+# â”€â”€â”€ UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'ui'
 
 Test-Case 'colour can be turned off completely' {
@@ -322,7 +322,7 @@ Test-Case 'plain log lines get no class' {
     Assert-Equal (Get-AutoOSLineLevel 'just some text') ''
 }
 
-# ─── End to end ─────────────────────────────────────────────────────────────
+# â”€â”€â”€ End to end â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'end-to-end (dry run only)'
 
 $setup = Join-Path $Root 'setup.ps1'
@@ -354,7 +354,7 @@ Test-Case 'an unknown component id is rejected' {
     Assert-True ($LASTEXITCODE -ne 0 -and $out -match 'Unknown component') "exit=$LASTEXITCODE out=$out"
 }
 
-# ─── Run state, verification, undo ──────────────────────────────────────────
+# â”€â”€â”€ Run state, verification, undo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'state, verify and undo'
 
 Test-Case 'macos catalog validates' {
@@ -442,7 +442,7 @@ Test-Case 'undo never uninstalls anything' {
         'the undo path contains an uninstall command'
 }
 
-# ─── Browser UI payload ─────────────────────────────────────────────────────
+# â”€â”€â”€ Browser UI payload â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'browser UI'
 
 Test-Case 'every component has a homepage link' {
@@ -549,7 +549,7 @@ Test-Case 'the payload reports the microphone' {
     Assert-Equal $state.system.microphone 'Test Mic'
 }
 
-# ─── Static analysis ────────────────────────────────────────────────────────
+# â”€â”€â”€ Static analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'static analysis'
 
 Test-Case 'PSScriptAnalyzer is clean' {
@@ -612,7 +612,7 @@ Test-Case 'every PowerShell file has a UTF-8 BOM' {
     Assert-Equal ($missing -join ',') ''
 }
 
-# ─── AI routing stack (omniroute / litellm / zed / opencode) ───────────────
+# â”€â”€â”€ AI routing stack (omniroute / litellm / zed / opencode) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Describe-Group 'ai routing'
 
 function Get-AutoOSWinComponent {
@@ -628,9 +628,12 @@ Test-Case 'ai routing components exist with the right providers' {
     $lit = Get-AutoOSWinComponent 'litellm'
     $oc = Get-AutoOSWinComponent 'opencode-cli'
     $om = Get-AutoOSWinComponent 'omniroute'
-    Assert-True ($null -ne $zed -and $null -ne $lit -and $null -ne $oc -and $null -ne $om) 'missing component'
-    Assert-Equal "$($zed.provider)|$($lit.provider)|$($oc.provider)|$($om.provider)" 'winget|custom|npm|npm'
-    Assert-Equal "$($zed.package)|$($oc.package)|$($om.package)" 'ZedIndustries.Zed|opencode-ai|omniroute'
+    $oh = Get-AutoOSWinComponent 'openhands'
+    Assert-True ($null -ne $zed -and $null -ne $lit -and $null -ne $oc -and $null -ne $om -and $null -ne $oh) 'missing component'
+    Assert-Equal "$($zed.provider)|$($lit.provider)|$($oc.provider)|$($om.provider)|$($oh.provider)" 'winget|custom|npm|npm|custom'
+    Assert-Equal "$($zed.package)|$($oc.package)|$($om.package)" 'ZedIndustries.Zed|@opencode/cli|omniroute'
+    Assert-Equal $oh.postInstall 'Install-AutoOSOpenHands'
+    Assert-True ($oh.verify -match 'docker\.openhands\.dev') 'openhands verify does not check the current image'
 }
 
 Test-Case 'zed routes through litellm and both ride ai-coding' {
@@ -656,9 +659,19 @@ Test-Case 'ai postInstall hooks are exported' {
 
 Test-Case 'litellm installer announces instead of running in dry run' {
     Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
-    Install-AutoOSLitellm
-    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
-    Pass
+    # Write-AutoOSLine goes to the console and the module log, not the output
+    # stream: capture it through a scratch log file, the only reliable way.
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-dry-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'would install litellm') 'no dry-run announcement in the log'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    }
 }
 
 Test-Case 'zed routing writes nothing in dry run' {
@@ -751,31 +764,6 @@ Test-Case 'start-stack.ps1 parses without syntax errors' {
     Assert-Equal (@($errors)).Count 0
 }
 
-Test-Case 'litellm installer detects an existing install' {
-    $realPath = $env:PATH
-    $stub = Join-Path $env:TEMP "autoos-litstub-$([Guid]::NewGuid().ToString('N'))"
-    try {
-        New-Item -ItemType Directory -Path $stub -Force | Out-Null
-        '@echo off' + "`r`n" + 'echo litellm-stub' | Out-File (Join-Path $stub 'litellm.cmd') -Encoding ascii
-        $env:PATH = "$stub;$realPath"
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
-        Install-AutoOSLitellm
-        Pass
-    } finally { $env:PATH = $realPath }
-}
-
-Test-Case 'litellm installer warns without python' {
-    $realPath = $env:PATH
-    $empty = Join-Path $env:TEMP "autoos-noempty-$([Guid]::NewGuid().ToString('N'))"
-    try {
-        New-Item -ItemType Directory -Path $empty -Force | Out-Null
-        $env:PATH = $empty
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
-        Install-AutoOSLitellm
-        Pass
-    } finally { $env:PATH = $realPath }
-}
-
 Test-Case 'zed routing creates a fresh config when none exists' {
     $realAppData = $env:APPDATA
     $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
@@ -811,56 +799,151 @@ Test-Case 'component profiles name real profiles and verify is set' {
 Test-Case 'ai-coding ticks the whole routing stack' {
     $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
     $ticks = @($a | Where-Object { 'ai-coding' -in $_.Profiles } | ForEach-Object { $_.Id })
-    foreach ($id in @('zed', 'litellm', 'opencode-cli', 'omniroute')) {
+    foreach ($id in @('zed', 'litellm', 'opencode-cli', 'omniroute', 'openhands')) {
         Assert-Contains $ticks $id
     }
     Pass
 }
 
+# ── OpenHands self-checks (need Docker; they report, never install) ─────────
+# The container takes a while to boot agent-server images, so these wait.
+function Wait-AutoOSHttp {
+    param([string]$Url, [int]$TimeoutSec = 120)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            if ((Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200) { return $true }
+        } catch { Start-Sleep 5 }
+    }
+    return $false
+}
+
+Test-Case 'openhands container answers on :3000' {
+    $names = (& docker ps --format '{{.Names}}' 2>$null) -join "`n"
+    if ($names -notmatch 'openhands') { Skip 'no openhands container running'; return }
+    Assert-True (Wait-AutoOSHttp 'http://localhost:3000/') 'OpenHands UI did not answer on :3000'
+}
+
+Test-Case 'openhands llm profile points at the gateway' {
+    $settingsPath = Join-Path $env:USERPROFILE '.openhands\settings.json'
+    if (-not (Test-Path $settingsPath)) { Skip 'no ~/.openhands/settings.json yet'; return }
+    $settings = Get-Content $settingsPath -Raw -Encoding utf8 | ConvertFrom-Json
+    $llm = $settings.agent_settings.llm
+    Assert-True ($null -ne $llm) 'agent_settings.llm missing'
+    Assert-Equal $llm.base_url 'http://host.docker.internal:20128/v1'
+    Assert-True ($llm.model -match '^openai/') 'model lacks the openai/ LiteLLM prefix'
+}
+
 Test-Case 'litellm installer delegates to pipx when present' {
     $realPath = $env:PATH
     $stub = Join-Path $env:TEMP "autoos-pipxstub-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-pipx-$([Guid]::NewGuid().ToString('N')).log"
     try {
         New-Item -ItemType Directory -Path $stub -Force | Out-Null
         '@echo off' + "`r`n" + 'echo called > "%~dp0called.txt"' |
             Out-File (Join-Path $stub 'pipx.cmd') -Encoding ascii
         $env:PATH = "$stub;$realPath"
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
         Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
         Assert-True (Test-Path (Join-Path $stub 'called.txt')) 'pipx stub was not invoked'
-    } finally { $env:PATH = $realPath }
+        Assert-True ($text -match 'configuration/litellm') 'no next-steps hint in the log'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Case 'litellm installer falls back to the py launcher' {
     $realPath = $env:PATH
     $stub = Join-Path $env:TEMP "autoos-pystub-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-py-$([Guid]::NewGuid().ToString('N')).log"
     try {
         New-Item -ItemType Directory -Path $stub -Force | Out-Null
-        '@echo off' + "`r`n" + 'exit /b 0' | Out-File (Join-Path $stub 'py.cmd') -Encoding ascii
+        '@echo off' + "`r`n" + 'echo called > "%~dp0called.txt"' |
+            Out-File (Join-Path $stub 'py.cmd') -Encoding ascii
         $env:PATH = "$stub;$env:SystemRoot\System32"
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
         Install-AutoOSLitellm
-        Pass
-    } finally { $env:PATH = $realPath }
+        Assert-True (Test-Path (Join-Path $stub 'called.txt')) 'py launcher stub was not invoked'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'litellm installer detects an existing install' {
+    $realPath = $env:PATH
+    $stub = Join-Path $env:TEMP "autoos-litstub-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-lit-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        New-Item -ItemType Directory -Path $stub -Force | Out-Null
+        '@echo off' + "`r`n" + 'exit /b 0' | Out-File (Join-Path $stub 'litellm.cmd') -Encoding ascii
+        $env:PATH = "$stub;$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'already installed') 'no already-installed message in the log'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'litellm installer warns when no python is available' {
+    $realPath = $env:PATH
+    $empty = Join-Path $env:TEMP "autoos-noempty-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-nopy-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        New-Item -ItemType Directory -Path $empty -Force | Out-Null
+        $env:PATH = $empty
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'no Python on PATH') 'no missing-python warning in the log'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Case 'env template carries placeholders only' {
     $bad = @()
+    $n = 0
     foreach ($line in (Get-Content (Join-Path $Root 'configuration\litellm\.env.example') -Encoding utf8)) {
+        $n++
         $t = $line.Trim()
         if ($t -eq '' -or $t.StartsWith('#')) { continue }
-        if ($t -notmatch '^[A-Z_]+=REPLACE_WITH_[A-Z_]+$') { $bad += $t }
+        if ($t -notmatch '^[A-Z_]+=REPLACE_WITH_[A-Z_]+$') { $bad += "line $n" }
     }
     Assert-Equal ($bad -join ',') ''
 }
 
 Test-Case 'api-keys example carries placeholders only' {
     $bad = @()
+    $n = 0
     foreach ($line in (Get-Content (Join-Path $Root 'configuration\api-keys.example.yml') -Encoding utf8)) {
+        $n++
         $t = $line.Trim()
         if ($t -eq '' -or $t.StartsWith('#')) { continue }
         $val = ($t -split ':', 2)[1].Trim()
-        if ($val -notmatch '^REPLACE_WITH_[A-Z_]+$') { $bad += $t }
+        if ($val -notmatch '^REPLACE_WITH_[A-Z_]+$') { $bad += "line $n" }
     }
     Assert-Equal ($bad -join ',') ''
 }
@@ -891,13 +974,31 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
     Assert-Equal ($names -join ',') 'tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
+    $contexts = @{
+        'tier1' = '1M'; 'tier1-clean' = '1M'; 'tier2' = '128k'
+        'tier2-clean' = '128k'; 'tier3' = '128k'; 'tier3-clean' = '128k'
+    }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
         foreach ($m in $c.models) {
             Assert-True ($m -match '^[A-Za-z0-9@._/-]+$') "$($c.name): bad ref '$m'"
         }
+        Assert-Equal $c.context $contexts[$c.name]
     }
-    Assert-Equal (($combos | Where-Object { $_.name -eq 'tier1' }).context) '1M'
+}
+
+Test-Case 'apply --dry-run registers nothing and starts nothing' {
+    # The suite runs $ErrorActionPreference = 'Stop', but the omniroute CLI
+    # writes a harmless warning to stderr on every call, which 5.1 promotes
+    # to a terminating error. So the -DryRun call runs in a child powershell:
+    # a stray preference or a non-zero exit can never abort the suite, and
+    # only the captured text counts. combos.json must be byte-identical after.
+    $combosPath = Join-Path $Root 'configuration\omniroute\combos.json'
+    $before = Get-Content $combosPath -Raw -Encoding utf8
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $Root 'configuration\omniroute\apply.ps1') -DryRun 2>&1 | Out-String
+    Assert-True ($out -match 'dry run stops here|would create|would register') 'dry run announced nothing'
+    Assert-Equal (Get-Content $combosPath -Raw -Encoding utf8) $before
 }
 
 Test-Case 'apply scripts carry the Cloudflare User-Agent fix' {
@@ -918,8 +1019,10 @@ Test-Case 'opencode tiers declare matching context limits' {
     $models = $oc.providers.omniroute.models
     Assert-Equal $models.tier1.limit.context 1000000
     Assert-Equal $models.'tier1-clean'.limit.context 1000000
-    Assert-Equal $models.tier2.limit.context 262144
+    Assert-Equal $models.tier2.limit.context 131072
+    Assert-Equal $models.'tier2-clean'.limit.context 131072
     Assert-Equal $models.tier3.limit.context 131072
+    Assert-Equal $models.'tier3-clean'.limit.context 131072
     foreach ($name in @('tier1', 'tier1-clean', 'tier2', 'tier2-clean', 'tier3', 'tier3-clean', 'auto', 'auto/cheap', 'auto/smart')) {
         Assert-True ($null -ne $models.$name) "missing model $name"
         Assert-Equal $models.$name.modelID $name
@@ -927,7 +1030,7 @@ Test-Case 'opencode tiers declare matching context limits' {
     Pass
 }
 
-# ─── Summary ────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')
 Write-Host ("  " + (C "passed $script:Pass" '38;5;71') +

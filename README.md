@@ -284,6 +284,7 @@ Details: [Testing](docs/testing.md).
 | [Troubleshooting](docs/troubleshooting.md) | It broke. Now what? |
 | [Model routing](docs/models.md) | Which AI model answers, and how do free-first fallbacks work? |
 | [API keys](docs/api-keys.md) | Where does each key come from, and what does it cost? |
+| [Verification](docs/verification.md) | What was tested and proven, and what is known broken? |
 
 Working on this repo with an AI agent? [AGENTS.md](AGENTS.md) is the contract.
 

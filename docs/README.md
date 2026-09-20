@@ -15,6 +15,8 @@ Start here. Each page is short and answers one question.
 | [Security](security.md) | What are the sharp edges, and what must never be committed? |
 | [Troubleshooting](troubleshooting.md) | It broke. Now what? |
 | [Model routing](models.md) | Which AI model answers, and how do free-first fallbacks work? |
-| [API keys](api-keys.md) | Where does each LiteLLM key come from, and what does it cost? |
+| [API keys](api-keys.md) | Where does each key come from, and what does it cost? |
+| [Verification](verification.md) | What was tested and proven, and what is known broken? |
+| [Handoff](handoff.md) | Done vs open tasks for the next agent |
 
 Working on this repo with an AI agent? [AGENTS.md](../AGENTS.md) is the contract.

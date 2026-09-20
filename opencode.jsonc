@@ -31,13 +31,13 @@
         },
         "tier2": {
           "modelID": "tier2",
-          "name": "tier2 smart — ≤256k ctx (free-first)",
-          "limit": { "context": 262144, "output": 32768 }
+          "name": "tier2 smart — ≤128k ctx (free-first)",
+          "limit": { "context": 131072, "output": 32768 }
         },
         "tier2-clean": {
           "modelID": "tier2-clean",
           "name": "tier2 smart — no training (sensitive data)",
-          "limit": { "context": 262144, "output": 32768 }
+          "limit": { "context": 131072, "output": 32768 }
         },
         "tier3": {
           "modelID": "tier3",
@@ -52,12 +52,12 @@
         "auto/smart": {
           "modelID": "auto/smart",
           "name": "bootstrap: auto smart (no combo needed)",
-          "limit": { "context": 262144, "output": 32768 }
+          "limit": { "context": 131072, "output": 32768 }
         },
         "auto": {
           "modelID": "auto",
           "name": "bootstrap: auto balanced",
-          "limit": { "context": 262144, "output": 32768 }
+          "limit": { "context": 131072, "output": 32768 }
         },
         "auto/cheap": {
           "modelID": "auto/cheap",

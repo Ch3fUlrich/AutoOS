@@ -313,7 +313,7 @@
           "name": "OpenCode CLI",
           "description": "Terminal AI coding agent (TUI) on the tier router",
           "provider": "npm",
-          "package": "opencode-ai",
+          "package": "@opencode/cli",
           "requires": [
             "nodejs"
           ],
@@ -323,7 +323,26 @@
             "light"
           ],
           "verify": "opencode --version",
-          "homepage": "https://opencode.ai/"
+          "homepage": "https://opencode.ai/",
+          "notes": "V2 CLI. The legacy npm package opencode-ai (V1) cannot read the V2 providers config."
+        },
+        {
+          "id": "openhands",
+          "name": "OpenHands",
+          "description": "Autonomous coding agent — Docker app, OmniRoute-routed",
+          "provider": "custom",
+          "package": "openhands",
+          "requires": [
+            "docker"
+          ],
+          "postInstall": "install_openhands",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "docker image inspect docker.openhands.dev/openhands/openhands:latest",
+          "homepage": "https://www.all-hands.dev/",
+          "notes": "Start with ./configuration/start-stack.sh openhands; LLM profiles: configuration/openhands/config.toml."
         }
       ]
     },

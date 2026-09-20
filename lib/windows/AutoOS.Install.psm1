@@ -480,14 +480,46 @@ function Set-AutoOSZedProxy {
     $entry = @{
         api_url = 'http://127.0.0.1:20128/v1'
         available_models = @(
-            @{ name = 'auto/smart'; display_name = 'tier1 orchestrator (auto smart)'; max_tokens = 1000000; reasoning_effort = 'xhigh' },
-            @{ name = 'auto'; display_name = 'tier2 smart (auto balanced)'; max_tokens = 256000 },
-            @{ name = 'auto/cheap'; display_name = 'tier3 driver (auto cheap)'; max_tokens = 128000 }
+            @{ name = 'auto/smart'; display_name = 'tier1 orchestrator (auto smart)'; max_tokens = 131072; reasoning_effort = 'xhigh' },
+            @{ name = 'auto'; display_name = 'tier2 smart (auto balanced)'; max_tokens = 131072 },
+            @{ name = 'auto/cheap'; display_name = 'tier3 driver (auto cheap)'; max_tokens = 131072 }
         )
     }
     Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-omniroute' -NotePropertyValue $entry -Force
     $settings | ConvertTo-Json -Depth 8 | Out-File -FilePath $cfgPath -Encoding utf8
     Write-AutoOSLine 'Zed agents routed to OmniRoute (key via AUTOOS_OMNIROUTE_KEY)' -Level ok
+}
+
+function Install-AutoOSOpenHands {
+    <#
+      .SYNOPSIS Pull the OpenHands image; the container is started on demand.
+      .DESCRIPTION
+        OpenHands runs as a Docker container wired to the OmniRoute gateway by
+        configuration/start-stack.ps1 -App openhands. Installing is "have the
+        image locally"; nothing is started here, so setup stays non-interactive.
+    #>
+    $image = 'docker.openhands.dev/openhands/openhands:latest'
+    if ($script:DryRun) {
+        Write-AutoOSLine "would pull $image (Docker Desktop must be running)" -Level muted
+        return
+    }
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Write-AutoOSLine 'docker CLI not found - install Docker Desktop, then re-run' -Level warn
+        return
+    }
+    $probe = Invoke-AutoOSProcess -FilePath 'docker' -Arguments @('info', '--format', '{{.ServerVersion}}')
+    if (-not $probe.Success) {
+        Write-AutoOSLine 'Docker daemon is not running - start Docker Desktop, then: docker pull ' -Level warn
+        Write-AutoOSLine "    $image" -Level muted
+        return
+    }
+    $pull = Invoke-AutoOSProcess -FilePath 'docker' -Arguments @('pull', $image)
+    if ($pull.Success) {
+        Write-AutoOSLine 'OpenHands image ready' -Level ok
+        Write-AutoOSLine 'start it with: .\configuration\start-stack.ps1 -App openhands' -Level info
+    } else {
+        Write-AutoOSLine "docker pull failed (exit $($pull.ExitCode)) - check Docker Desktop" -Level warn
+    }
 }
 
 function Invoke-AutoOSPostInstall {
@@ -508,5 +540,5 @@ Export-ModuleMember -Function `
     Add-AutoOSGitToPath, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
     Install-AutoOSHerdr, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
-    Install-AutoOSLitellm, Set-AutoOSZedProxy,
+    Install-AutoOSLitellm, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Invoke-AutoOSScriptProvider

@@ -47,7 +47,7 @@
     {
       "name": "tier2",
       "strategy": "priority",
-      "context": "256k",
+      "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
         "groq/openai/gpt-oss-120b",
@@ -60,7 +60,7 @@
     {
       "name": "tier2-clean",
       "strategy": "priority",
-      "context": "256k",
+      "context": "128k",
       "models": [
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
