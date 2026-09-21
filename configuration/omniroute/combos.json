@@ -1,0 +1,160 @@
+{
+  "$comment": [
+    "Router tiers for OmniRoute. Applied by apply.ps1 / apply.sh, which",
+    "validates every model against the live /v1/models catalog and skips",
+    "(with a warning) anything the catalog does not know.",
+    "",
+    "tier1  = orchestrator: 1M-context, long-horizon. Models below 1M belong",
+    "         in tier2 — the user-facing limit in opencode.jsonc says 1M.",
+    "tier2  = smart second level: strong reasoning, mid context.",
+    "tier3  = daily driver: cheapest capable codegen/review.",
+    "* -clean = same tier without models/plans that train on prompts: the",
+    "         choice for sensitive data. See docs/models.md.",
+    "",
+    "Role labels (display names only — tier1/2/3 ids are a contract and",
+    "never change: saved selections, --only flags and opencode.jsonc keys",
+    "all address them by id):",
+    "  tier1 = orchestrator-1M      (long-horizon orchestration, 1M required)",
+    "  tier2 = smart-reasoning-128k (strong reasoning, mid context)",
+    "  tier3 = cheap-driver-128k    (cheapest capable codegen/review loop)",
+    "The same labels appear as opencode.jsonc model names and in the web UI",
+    "router-tiers card, so every surface explains itself the same way.",
+    "",
+    "Per-model free→paid chains: each free leg is followed, further down the",
+    "same combo, by its paid twin on the same or a sanctioned provider, so a",
+    "quota-exhausted free leg degrades to paid instead of failing:",
+    "  spark free (zen contributor-free) → openrouter contributor → zen paid;",
+    "  gpt-oss free (groq) → cerebras/sambanova credit overflow, then the",
+    "  chain moves to deepseek flash (openrouter/deepseek direct) → zen",
+    "  paid, so every family still lands on a paid leg;",
+    "  qwen3.8 free (groq) → cerebras credit overflow;",
+    "  mistral-code/small free pool → mistral direct (same key bills past",
+    "  the free pool) → deepseek/zen paid. Direct-key legs (mistral, deepseek)",
+    "  are their own paid overflow: once the free pool is spent the same key",
+    "  is billed, so no extra twin entry is needed for them.",
+    "",
+    "tier1 is spark-only by design (2026-09-20): gemini-3.1-pro was dropped",
+    "because it reasons worse than gemini-3.8-flash while costing a 1M slot —",
+    "a weaker model in the orchestrator tier is a defect, not a fallback.",
+    "No 1M-context replacement is currently sanctioned, so tier1 degrades",
+    "within the spark family instead of hopping to a weaker family.",
+    "xhigh is caller-side reasoning effort, not a model ID: opencode callers",
+    "use the #high variant (omniroute/tier1#high, ack-proven), Zed sets",
+    "reasoning_effort xhigh (lib/**/install.*). The tier1-orchestrator agent",
+    "in opencode.jsonc pins omniroute/tier1#high.",
+    "",
+    "*-clean = privacy tiers: NO free legs at all. Assumption: any big free",
+    "model may train on prompts, so clean chains use paid legs only",
+    "  tier1-clean: openrouter plain spark (paid, trains nothing) → zen paid",
+    "    spark. Meta-direct paid spark joins when OmniRoute ships the spark",
+    "    IDs in the muse-code catalog (502/catalog bug open upstream).",
+    "  tier2-clean: deepseek direct → openrouter paid deepseek → zen paid",
+    "    flash → mistral-small direct. No groq/cerebras/sambanova free legs.",
+    "  tier3-clean: deepseek direct → mistral-small direct → zen paid flash.",
+    "    No qwen free legs. Lightweight paid review duty only.",
+    "  cheap-inference is NOT a free pool: it is the user's own paid partner",
+    "  gateway (own key, own billing), so its legs sit between free and paid",
+    "  in tier2/tier3 — never in *-clean (privacy tiers stay direct-paid).",
+    "Contributor tiers (-contributor) are paid but TRAIN by contract ($0.10",
+    "pricing is the tell) — they stay in tier1, never in *-clean.",
+    "strategy 'priority' = try in listed order, next on 429/error: free legs",
+    "first, paid legs from cerebras/sambanova/deepseek/meta/openrouter/zen",
+    "after them (those paid tiers are explicitly allowed).",
+    "  cheap-inference legs (cheaperinference/*) sit BETWEEN free and paid:",
+    "  they are the user's own paid partner gateway, so quota-exhausted free",
+    "  degrades to cheap-inference first, paid direct only after that.",
+    "  Ref form is cheaperinference/<id> with the gateway's own model id",
+    "  (e.g. cheaperinference/deepseek-v4-flash).",
+    "",
+    "Retries before provider-hop ≈3 (2026-09-20): global requestRetry=3 /",
+    "maxRetryIntervalSec=30 (api settings get-api-settings), resilience",
+    "waitForCooldown maxRetries=3 / maxRetryWaitSec=30 (resilience status),",
+    "comboCooldownWait maxAttempts=5 / maxWaitMs=90s / budgetMs=300s (only",
+    "for transient non-quota reasons; quota_exhausted hops immediately).",
+    "The dashboard resilience knobs (resilience config set) cover breaker",
+    "thresholds only — retry counts live in the settings above. Keep the",
+    "wait short so a dead leg hops instead of stalling the run.",
+    "",
+    "Model IDs verified against the live provider catalogs on 2026-09-20.",
+    "Cloudflare is registered but its Workers AI needs an Account ID in the",
+    "dashboard before it can serve; it is deliberately not in any tier yet.",
+    "Meta direct (muse-code) is registered but this OmniRoute build 502s on",
+    "it; spark goes through OpenRouter (contributor = trains, plain = clean).",
+    "groq and cerebras sit behind Cloudflare, which answers error-1010 to",
+    "Node's default UA - apply sets providerSpecificData.customUserAgent."
+  ],
+  "combos": [
+    {
+      "name": "tier1",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "opencode-zen/muse-spark-1.3-contributor-free",
+        "openrouter/meta/muse-spark-1.3-contributor",
+        "opencode-zen/muse-spark-1.3"
+      ]
+    },
+    {
+      "name": "tier1-clean",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "openrouter/meta/muse-spark-1.3",
+        "opencode-zen/muse-spark-1.3"
+      ]
+    },
+    {
+      "name": "tier2",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "gemini/gemini-3.8-flash",
+        "groq/openai/gpt-oss-120b",
+        "cerebras/gpt-oss-120b",
+        "sambanova/gpt-oss-120b",
+        "cheaperinference/deepseek-v4-flash",
+        "cheaperinference/glm-4.5-air",
+        "cheaperinference/kimi-k3",
+        "openrouter/deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-flash",
+        "opencode-zen/deepseek-v4.1-flash"
+      ]
+    },
+    {
+      "name": "tier2-clean",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "deepseek/deepseek-flash",
+        "openrouter/deepseek/deepseek-v4.1-flash",
+        "opencode-zen/deepseek-v4.1-flash",
+        "mistral/mistral-small-latest"
+      ]
+    },
+    {
+      "name": "tier3",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "mistral/mistral-code-latest",
+        "groq/qwen/qwen3.8-27b",
+        "cerebras/qwen-3.8-27b",
+        "cheaperinference/glm-4.5-air",
+        "cheaperinference/minimax-m2.7",
+        "mistral/mistral-small-latest",
+        "deepseek/deepseek-flash",
+        "opencode-zen/deepseek-v4.1-flash"
+      ]
+    },
+    {
+      "name": "tier3-clean",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "deepseek/deepseek-flash",
+        "mistral/mistral-small-latest",
+        "opencode-zen/deepseek-v4.1-flash"
+      ]
+    }
+  ]
+}

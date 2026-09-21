@@ -31,6 +31,50 @@ $script:Proc    = $null
 $script:OutTask = $null
 $script:ErrTask = $null
 
+function Get-AutoOSProviderStatus {
+    <#
+      .SYNOPSIS
+        Which AI providers have a key in configuration/api-keys.yml.
+      .DESCRIPTION
+        Values never leave this function: the payload carries only the
+        provider id, a display label and whether a key is present.
+    #>
+    param([string]$RepoRoot = $script:RepoRoot)
+    $labels = @{
+        'groq'                  = 'Groq'
+        'google_ai_studio'      = 'Google AI Studio (Gemini)'
+        'mistral'               = 'Mistral'
+        'cloudflare_workers_ai' = 'Cloudflare Workers AI'
+        'cohere'                = 'Cohere'
+        'hugging_face'          = 'Hugging Face'
+        'cerebras'              = 'Cerebras'
+        'sambanova'             = 'SambaNova'
+        'deepseek'              = 'DeepSeek'
+        'meta'                  = 'Meta Model API'
+        'openrouter'            = 'OpenRouter'
+        'zen'                   = 'OpenCode Zen'
+        'cheapinference'        = 'Cheaper Inference (paid partner)'
+        'omniroute'             = 'OmniRoute client key'
+    }
+    $out = foreach ($name in $labels.Keys) {
+        [ordered]@{ id = $name; name = $labels[$name]; configured = $false }
+    }
+    $file = Join-Path $RepoRoot 'configuration\api-keys.yml'
+    if (Test-Path $file) {
+        foreach ($line in (Get-Content $file -Encoding utf8)) {
+            $t = $line.Trim()
+            if ($t -eq '' -or $t.StartsWith('#') -or -not $t.Contains(':')) { continue }
+            $key = ($t -split ':', 2)[0].Trim().ToLowerInvariant()
+            $val = ($t -split ':', 2)[1].Trim().Trim('"').Trim("'")
+            foreach ($p in $out) {
+                if ($p.id -eq $key -and $val) { $p.configured = $true }
+            }
+        }
+    }
+    $result = @($out)
+    return $result
+}
+
 function Get-AutoOSLineLevel {
     param([string]$Line)
     $t = $Line.TrimStart()
@@ -109,6 +153,7 @@ function Get-AutoOSServeState {
         profiles  = $Catalog.profiles
         prompts   = $Catalog.prompts
         components = @($components)
+        providers = @(Get-AutoOSProviderStatus -RepoRoot (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
     }
 }
 
@@ -801,4 +846,4 @@ function Start-AutoOSServer {
 }
 
 Export-ModuleMember -Function Start-AutoOSServer, Get-AutoOSServeState, Get-AutoOSLineLevel, Start-AutoOSInstallJob, Update-AutoOSInstallLog, `
-    Start-AutoOSUsbCreateJob, Get-AutoOSServeUsbCatalog, Get-AutoOSServeUsbDevices, Get-AutoOSServeUsbCreateResult
+    Start-AutoOSUsbCreateJob, Get-AutoOSServeUsbCatalog, Get-AutoOSServeUsbDevices, Get-AutoOSServeUsbCreateResult, Get-AutoOSProviderStatus
