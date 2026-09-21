@@ -3259,9 +3259,13 @@ Test-Case "agent harness: the generator's unit tests pass" {
     $py = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-harness-tests-$PID.log"
+    $prevAction = $ErrorActionPreference
     try {
-        # Redirect to a file rather than 2>&1: unittest writes its result to
-        # stderr, and under 'Stop' PS 5.1 that can become a terminating error.
+        # unittest reports on stderr, and under the suite's 'Stop'
+        # preference PS 5.1 turns native stderr into a terminating error
+        # even when it is redirected to a file — so drop to Continue for
+        # exactly this call and judge by the exit code instead.
+        $ErrorActionPreference = 'Continue'
         & $py.Source (Join-Path $Root 'tests\test_agent_harness.py') *> $log
         $rc = $LASTEXITCODE
         if ($rc -eq 0) {
@@ -3270,7 +3274,7 @@ Test-Case "agent harness: the generator's unit tests pass" {
             $tail = (Get-Content $log -Tail 20) -join "`n"
             throw "generator unit tests failed (exit $rc):`n$tail"
         }
-    } finally { Remove-Item $log -ErrorAction SilentlyContinue }
+    } finally { $ErrorActionPreference = $prevAction; Remove-Item $log -ErrorAction SilentlyContinue }
 }
 
 Test-Case 'the embedded OpenHands setup script is valid Python' {
@@ -3285,7 +3289,10 @@ Test-Case 'the embedded OpenHands setup script is valid Python' {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-setup-$PID.py"
     [IO.File]::WriteAllText($tmp, $m.Groups[1].Value)
     try {
-        $out = & $py.Source -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' $tmp 2>&1
+        # NOTE: single-quoted -c string with doubled '' survives Windows
+        # PowerShell 5.1 native-argument quote stripping, which eats inner
+        # double quotes (NameError: name 'utf' is not defined).
+        $out = & $py.Source -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding=''utf-8'').read())' $tmp 2>&1
         Assert-True ($LASTEXITCODE -eq 0) "embedded python does not parse: $out"
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
