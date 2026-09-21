@@ -3212,8 +3212,12 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root *> $null
         $profile = Get-Content (Join-Path $oh 'profiles\ollama-qwen2.5-coder.json') -Raw | ConvertFrom-Json
         $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
-        Assert-Equal $profile.base_url 'http://ollama:11434/v1'
-        Assert-Equal $settings.agent_settings.llm.base_url 'http://ollama:11434/v1'
+        # LiteLLM's ollama routes append /api/...: a /v1 base gives 404 (measured 2026-09-19);
+        # ollama_chat/ uses /api/chat, which supports tool calls. OpenCode keeps /v1.
+        Assert-Equal $profile.base_url 'http://ollama:11434'
+        Assert-Equal $profile.model 'ollama_chat/qwen2.5-coder:7b'
+        Assert-Equal $settings.agent_settings.llm.base_url 'http://ollama:11434'
+        Assert-Equal $settings.agent_settings.llm.model 'ollama_chat/qwen2.5-coder:7b'
         Assert-True (Test-Path (Join-Path $oh 'agent-profiles\claude-sonnet.json')) 'non-role vendored agent profile not copied'
         Assert-True (-not (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json'))) 'role profile copied by the embedded script instead of the generator'
         # OpenHands ignores an MCP timeout today and may soon read it as milliseconds (#3254)
