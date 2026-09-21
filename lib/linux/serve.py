@@ -542,67 +542,83 @@ class Handler(BaseHTTPRequestHandler):
         state["installed"] = unit.is_file()
         return state
 
+    def _handle_get_index(self):
+        page = (ROOT / "web" / "index.html").read_bytes()
+        return self._send(200, page, "text/html; charset=utf-8")
+
+    def _handle_get_state(self):
+        try:
+            return self._json(200, cached_state())
+        except Exception as exc:  # surface the real reason to the page
+            return self._json(500, {"error": str(exc)})
+
+    def _handle_get_ping(self):
+        # Deliberately the cheapest thing this server does: the page polls it
+        # every couple of seconds to notice the moment this process goes away.
+        return self._json(200, {"ok": True, "running": RUN["running"]})
+
+    def _handle_get_log(self, qs):
+        try:
+            offset = max(0, int((qs.get("offset") or ["0"])[0]))
+        except ValueError:
+            return self._json(400, {"error": "offset must be an integer"})
+        with LOCK:
+            offset = min(offset, len(LOG))
+            lines = LOG[offset:]
+            payload = {
+                "lines": lines, "offset": offset + len(lines),
+                "running": RUN["running"], "done": RUN["done"],
+                "total": RUN["total"], "summary": RUN["summary"],
+                "current": RUN["current"],
+            }
+        return self._json(200, payload)
+
+    def _handle_get_config(self):
+        cfg_file = ROOT / "autoos.config.json"
+        if cfg_file.is_file():
+            try:
+                data = json.loads(cfg_file.read_text(encoding="utf-8"))
+                return self._json(200, data)
+            except Exception as exc:
+                return self._json(500, {"error": f"failed to read config: {exc}"})
+        # No config yet. Seed it from the machine, never from the example
+        # file: its answers are illustrative ("Your Name", "you@example.com")
+        # and serving them puts fake identity in the form, where it looks
+        # answered and gets saved as though it were real.
+        return self._json(200, {
+            "version": 1,
+            "profile": "workstation",
+            "answers": detected_answers(),
+            "claude_autostart": example_block("claude_autostart"),
+        })
+
+    def _handle_get_claude_sessions(self):
+        # `state`, never `snapshot`: a GET must not have side effects, and the
+        # first version re-recorded the machine's sessions on every page load.
+        return self._json(200, self._claude_state())
+
     def do_GET(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
 
         if u.path in ("/", "/index.html"):
-            page = (ROOT / "web" / "index.html").read_bytes()
-            return self._send(200, page, "text/html; charset=utf-8")
+            return self._handle_get_index()
 
         if not self._authed(qs):
             return self._json(403, {"error": "bad or missing token"})
 
-        if u.path == "/api/state":
-            try:
-                return self._json(200, cached_state())
-            except Exception as exc:  # surface the real reason to the page
-                return self._json(500, {"error": str(exc)})
-
-        if u.path == "/api/ping":
-            # Deliberately the cheapest thing this server does: the page polls it
-            # every couple of seconds to notice the moment this process goes away.
-            return self._json(200, {"ok": True, "running": RUN["running"]})
+        routes = {
+            "/api/state": self._handle_get_state,
+            "/api/ping": self._handle_get_ping,
+            "/api/config": self._handle_get_config,
+            "/api/claude/sessions": self._handle_get_claude_sessions,
+        }
 
         if u.path == "/api/log":
-            try:
-                offset = max(0, int((qs.get("offset") or ["0"])[0]))
-            except ValueError:
-                return self._json(400, {"error": "offset must be an integer"})
-            with LOCK:
-                offset = min(offset, len(LOG))
-                lines = LOG[offset:]
-                payload = {
-                    "lines": lines, "offset": offset + len(lines),
-                    "running": RUN["running"], "done": RUN["done"],
-                    "total": RUN["total"], "summary": RUN["summary"],
-                    "current": RUN["current"],
-                }
-            return self._json(200, payload)
+            return self._handle_get_log(qs)
 
-        if u.path == "/api/config":
-            cfg_file = ROOT / "autoos.config.json"
-            if cfg_file.is_file():
-                try:
-                    data = json.loads(cfg_file.read_text(encoding="utf-8"))
-                    return self._json(200, data)
-                except Exception as exc:
-                    return self._json(500, {"error": f"failed to read config: {exc}"})
-            # No config yet. Seed it from the machine, never from the example
-            # file: its answers are illustrative ("Your Name", "you@example.com")
-            # and serving them puts fake identity in the form, where it looks
-            # answered and gets saved as though it were real.
-            return self._json(200, {
-                "version": 1,
-                "profile": "workstation",
-                "answers": detected_answers(),
-                "claude_autostart": example_block("claude_autostart"),
-            })
-
-        if u.path == "/api/claude/sessions":
-            # `state`, never `snapshot`: a GET must not have side effects, and the
-            # first version re-recorded the machine's sessions on every page load.
-            return self._json(200, self._claude_state())
+        if handler := routes.get(u.path):
+            return handler()
 
         if u.path == "/api/images":
             try:
