@@ -60,8 +60,29 @@ never exist there — resolve through the main checkout, never copy secrets.
   — Zed ignores `api_key` there and hides keyless providers). Neovim+LazyVim
   + sidekick installed via `setup.ps1 -Only`. OpenHands image pulled;
   container start + profile proof is Open 5.
-- **Suites**: ps1 ~600 / sh ~380, green on 2026-09-21 (counts move; read the
-  runner output, not this file). CI runs both on push.
+- **Suites**: ps1 ~600 / sh ~390, gate re-running 2026-09-21 18:00 for the
+  router batch (tier spec+sync, Zed MCP, key mirror, pin compliance). CI runs
+  both on push.
+- **Tier profiles single-sourced**: `configuration/openhands/tier-profiles.json`
+  (model ids, token windows, reasoning flags, container-side base URL — no
+  keys); both embedded installers read it (inline tuples deleted);
+  `tools/sync-openhands-profiles.py` regenerates user profiles byte-identical
+  to installer output and runs from `start-stack.*` on every openhands start.
+- **Zed**: `autoos-omniroute` + `autoos-litellm` providers (9+6 models),
+  `bypass` profile (17/17 tools, tier1 default, opts into context servers),
+  top-level `context_servers` (serena+graphify, harness pins resolved at
+  runtime). Keys NEVER in settings.json (Zed ignores `api_key` there and
+  hides keyless providers): `AUTOOS_OMNIROUTE_API_KEY` /
+  `AUTOOS_LITELLM_API_KEY` env, persisted via setx. Restart Zed after key
+  changes — running processes never pick up setx.
+- **opencode desktop** shares the CLI config files (bundles CLI v2.0.11):
+  same stale-env rule, no separate key store.
+- **Key mirror**: `tools/mirror-litellm-env.py` (api-keys.yml → litellm/.env
+  + master-key gen, never prints values), tested both suites.
+- **MCP shape verdict**: opencode loads BOTH flat `mcp.<name>` AND nested
+  `mcp.servers.<name>` (cfgprobe, all connect) — no installer change.
+  Repo `opencode.jsonc` pins serena/graphify/playwright/context7 to harness
+  pins, asserted by both suites. Omnigraph stays in `.mcp.json` (per-repo env).
 - **Live processes** (all manually started, none autostart yet — see Open 7):
   `omniroute --no-open --port 20128`, `litellm --config ... --port 4000`.
   Machine env (setx, user scope): `AUTOOS_OMNIROUTE_KEY`,
@@ -108,9 +129,9 @@ never exist there — resolve through the main checkout, never copy secrets.
    (serena/graphify/playwright/context7) to harness pins, asserted by both
    suites. Left: context_servers for Zed, omnigraph stays in `.mcp.json`
    (per-repo env).
-6. **Key mirroring script** — `litellm/.env` was filled by an ad-hoc Temp
-   script; promote to `tools/` (api-keys.yml → .env + master key gen, never
-   prints values) with a test.
+6. **Key mirroring script** — DONE 2026-09-21: `tools/mirror-litellm-env.py`
+   (api-keys.yml → litellm/.env + master key gen, never prints values),
+   tested both suites.
 7. **Autostart** — gateway + litellm + OpenHands container resume after
    reboot (`configuration/autostart/`); Tailscale already Automatic.
 8. **Skills import (Phase 2)** — agent-skills repo → AutoOS `skills/` via
