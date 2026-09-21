@@ -2139,27 +2139,28 @@ agent_context = agent_settings.setdefault('agent_context', {})
 agent_context['load_user_skills'] = True
 
 mcp_cfg = agent_settings.setdefault('mcp_config', {})
+# No 'enabled' key on any entry: the live MCPServer schema
+# (openhands.sdk.mcp.config, additionalProperties false) rejects it with
+# extra_forbidden and 500s /api/v1/settings (measured 2026-09-21). Presence
+# in mcp_config means active; the suite pins this.
 mcp_cfg['serena'] = {
     'transport': 'stdio',
     'command': 'uvx',
     'args': ['--from', MCP_PACKAGES['serena'], 'serena', 'start-mcp-server', '--project-from-cwd', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'],
-    'description': 'Semantic code retrieval and symbol intelligence',
-    'enabled': True
+    'description': 'Semantic code retrieval and symbol intelligence'
 }
 mcp_cfg['graphify'] = {
     'transport': 'stdio',
     'command': 'uv',
     'args': ['--quiet', 'run', '--with', MCP_PACKAGES['graphify'], 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
-    'description': 'Codebase dependency knowledge graph',
-    'enabled': True
+    'description': 'Codebase dependency knowledge graph'
 }
 mcp_cfg['omnigraph'] = {
     'transport': 'stdio',
     'command': 'npx',
     'args': ['-y', MCP_PACKAGES['omnigraph']],
     'env': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'},
-    'description': 'Project memory graph for this repository (repo-scoped, not global)',
-    'enabled': True
+    'description': 'Project memory graph for this repository (repo-scoped, not global)'
 }
 ctx7_args = ['-y', MCP_PACKAGES['context7']]
 context7_key = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != 'null' else os.environ.get('CONTEXT7_API_KEY')
@@ -2169,22 +2170,19 @@ mcp_cfg['context7'] = {
     'transport': 'stdio',
     'command': 'npx',
     'args': ctx7_args,
-    'description': 'Upstash Context7 semantic search and retrieval',
-    'enabled': True
+    'description': 'Upstash Context7 semantic search and retrieval'
 }
 mcp_cfg['playwright'] = {
     'transport': 'stdio',
     'command': 'npx',
     'args': ['-y', MCP_PACKAGES['playwright']],
-    'description': 'Browser automation and end-to-end verification',
-    'enabled': True
+    'description': 'Browser automation and end-to-end verification'
 }
 mcp_cfg['cao-ops'] = {
     'transport': 'stdio',
     'command': 'wsl',
     'args': ['-d', 'Ubuntu', 'bash', '-c', 'export PATH=\"$HOME/.local/bin:$PATH\"; export CAO_HOME_DIR=\"$HOME/.cao\"; cao-ops-mcp-server'],
-    'description': 'CLI Agent Orchestrator 3-level coordination bridge',
-    'enabled': True
+    'description': 'CLI Agent Orchestrator 3-level coordination bridge'
 }
 if 'github' in mcp_cfg:
     del mcp_cfg['github']

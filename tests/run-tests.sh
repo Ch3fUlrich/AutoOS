@@ -2280,8 +2280,16 @@ if it "openhands launch is detached, probed and stale-settings safe"; then
     if (( ok )); then pass; else fail "openhands launch shape regressed"; fi
 fi
 
-if it "no committed secrets in router files"; then
-    # Report file:line only - a failure message must never echo the value it
+if it "OpenHands mcp_config carries no enabled key (live schema forbids it)"; then
+    # The live MCPServer model (additionalProperties false) rejects 'enabled'
+    # with extra_forbidden and 500s /api/v1/settings (measured 2026-09-21).
+    # Only the double-quoted form is asserted: the opencode writer's
+    # single-quoted 'enabled': True is schema-legal and stays.
+    n="$(grep -c '"enabled": True' lib/linux/install.sh || true)"
+    assert_eq "$n" "0"
+fi
+
+if it "no committed secrets in router files"; then    # Report file:line only - a failure message must never echo the value it
     # found into logs or a terminal shared with anyone else.
     hits="$(grep -rnE 'sk-[A-Za-z0-9]{10,}' configuration/litellm/config.yaml \
         configuration/litellm/.env.example opencode.jsonc \
