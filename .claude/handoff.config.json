@@ -1,0 +1,75 @@
+{
+  "$comment": [
+    "Phase 1 of the merge plan: PR #85, tier-orchestration integration, FINAL gate.",
+    "Skills import (Phase 2) gets its own sessions after FINAL is green.",
+    "NO SECRETS HERE - tokens are read from envFrom at preflight.",
+    "Provider routing with balances lives in briefTemplate (shared by all lanes)."
+  ],
+  "launcher": "claude",
+  "baseBranch": "main",
+  "branchPrefix": "merge",
+  "stateDir": "logs/handoff-sessions",
+  "doneNote": "docs/handoff/DONE-{{session}}.md",
+  "linkDirs": [
+    "graphify-out"
+  ],
+  "postWorktree": "py '{{skillDir}}\\trust_worktree.py' '{{worktree}}' --repo '{{repo}}'",
+  "subagents": {
+    "maxConcurrent": 2,
+    "maxDepth": 3,
+    "tiers": {
+      "mechanical": "sonnet",
+      "judgement": "opus"
+    },
+    "leafRule": true
+  },
+  "controllerBrief": "Orchestrate the merge-plan Phase 1 sessions with proper subagent usage and worktree isolation. Operator-owned steps (not lanes): closing GitHub PRs after their branches merge, and the Phase 2 skills import. Never edit the main checkout.\n\n{{sessionsTable}}",
+  "sessions": {
+    "PR85": {
+      "name": "pr85-record-line-tests",
+      "model": "sonnet",
+      "brief": "Land open PR #85 (edge-case tests for serve.py record_line) onto current main. Steps: git fetch origin pull/85/head into your worktree (never the main checkout); rebase/cherry-pick its commits onto your session branch; main already carries the CI-green fixes, so the PR's old red should clear — if anything is still red, fix it minimally. Verify: bash tests/run-tests.sh --filter record_line AND powershell -File tests/run-tests.ps1 -Filter 'record line'. Done means: PR #85's test coverage present on your branch, both filters green, DONE note with commit hashes. Do not merge into main yourself; the runner does that after guards."
+    },
+    "T1": {
+      "name": "tier-recon",
+      "model": "opus",
+      "brief": "Recon only — resolve nothing. From main cut the trial merge of origin/tier-orchestration-2026-09-20 (tip 4b8441a; use the origin/ ref, NEVER the stale local branch name) using git merge-tree (no worktree writes) plus one --no-commit trial merge in your worktree. Write docs/handoff/tier-conflict-map.md: the expected 12 conflicts (.gitignore, README.md, catalog/{linux,macos,windows}.json, docs/README.md, lib/linux/install.sh, lib/windows/AutoOS.Install.psm1, lib/windows/AutoOS.Serve.psm1, tests/check-links.py, tests/run-tests.{ps1,sh}) classified mechanical-vs-judgement; confirm lib/linux/serve.py and web/index.html auto-merge; list the additive set (configuration/**, opencode.jsonc, docs). Abort the trial merge afterwards so your branch carries ONLY the map doc. Done means: map doc committed, trial merge aborted (git status clean of merge state)."
+    },
+    "T2": {
+      "name": "tier-reconcile-merge",
+      "model": "opus",
+      "dependsOn": ["T1"],
+      "brief": "Execute the tier merge on branch integration/tier-2026-09-20 following docs/handoff/tier-conflict-map.md (read T1's DONE note first). Decisions, all binding: (1) catalog/agent-harness.json + lib/agent_harness.py stay the single source for AGENT behavior; tier configuration/** stays STANDALONE for service runtime — extend the generator with a --config-dir reader, do not absorb infra config into the harness. (2) Tier's tracked root opencode.jsonc does NOT survive as a rival source; its tier1/2/3 wiring is projected through the generator. (3) Precedence rules go in docs/decisions/0006-*.md. (4) Apply model-review items: dedicated non-writer-family reviewer profile in agent-harness.json; tier3 legs ordered for cross-family review; litellm tier2 legs gemini-first, 2-RPM mistral last. (5) The 12 known conflicts resolve with main winning on catalog/harness-generated files; replay tier's catalog additions through the generator. Forbidden: secrets, binaries, unlicensed text, touching skills/ (Phase 2), merging into main yourself. Verify before stopping: python tests/check-vendored.py, python tests/test_agent_harness.py, and both --filter runs for every file you touched. Double-run idempotency on installer paths you changed (second run reports skipped)."
+    },
+    "FINAL": {
+      "name": "final-suite",
+      "model": "sonnet",
+      "guardsOnly": true,
+      "dependsOn": ["PR85", "T2"]
+    }
+  },
+  "lanes": [["PR85"], ["T1", "T2"], ["FINAL"]],
+  "machineBudget": {
+    "maxCpuPercent": 75,
+    "maxWorkersPerSession": 8,
+    "note": "Full suites take ~15 min; other projects share this host."
+  },
+  "briefTemplate": "You are session {{session}} ({{sessionName}}). Your working directory is {{worktree}}, a git worktree on branch {{branch}} cut from {{baseBranch}} at launch; the main checkout is {{repo}} and you never edit it. First activate Serena by ABSOLUTE worktree path, then recall Omnigraph project memory, then start. AutoOS hard rules: never commit a secret or a binary; every destructive action needs prior opt-in recorded in your DONE note; read-modify-write for PATH/profile/config; back up user-owned files before touching them. No repo-wide git while other lanes run (no prune/gc/reset --hard/clean/stash/checkout .). You run under the auto-mode permission classifier: on refusal record the exact command, carry on without it, and state plainly what the operator must run by hand.\n\nPROVIDER ROUTING (balances 2026-09-21, free-first): free pools first — groq, cerebras free tier, google_ai_studio, hugging_face, cloudflare_workers_ai, mistral/cohere free, meta free, zen free, openrouter free models, local ollama. Paid overflow ONLY on free 429/exhaustion, cheapest fit first: deepseek ($13, bulk L3), cheapinference ($15, paid partner), cerebras ($10), sambanova ($10), meta ($10), openrouter ($1, last resort). Reviewer is never the writer's model family. Orchestrator muse-spark, workers deepseek-flash/gemini-flash, one-question reviews to local ollama first. Record model spend per DONE note.\n\n{{mcpPolicy}}\n\n{{brief}}\n\n{{subagentPolicy}}\n\nCommit small and often on {{branch}}, staging explicit paths only; never merge into {{baseBranch}} yourself. Read {{inbox}} at every decision point. When done (or blocked on operator-only input), write {{doneNote}} with landed commits, remains, refusals, and model spend, commit it, and stop.",
+  "allowedTools": [
+    "Bash",
+    "Edit",
+    "Write",
+    "Read",
+    "Glob",
+    "Grep",
+    "Agent",
+    "ToolSearch",
+    "Skill"
+  ],
+  "permissionMode": "auto",
+  "guards": {
+    "command": "pwsh",
+    "args": ["-NoProfile", "-File", "tools/check-merge-guards.ps1", "{{guards}}"],
+    "paths": ["tests/", "lib/", "catalog/"]
+  }
+}
