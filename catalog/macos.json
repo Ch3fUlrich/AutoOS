@@ -367,6 +367,93 @@
           "homepage": "https://docs.astral.sh/uv/"
         },
         {
+          "id": "zed",
+          "name": "Zed",
+          "description": "Fast Rust editor with an AI agent panel",
+          "provider": "brew",
+          "package": "zed",
+          "cask": true,
+          "requires": [
+            "litellm"
+          ],
+          "postInstall": "route_zed_to_proxy",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "zed --help",
+          "homepage": "https://zed.dev/",
+          "notes": "Agent panel is pointed at the local OmniRoute gateway."
+        },
+        {
+          "id": "litellm",
+          "name": "LiteLLM tier router",
+          "description": "Local LLM router: free-first tiers for all agents",
+          "provider": "custom",
+          "package": "litellm",
+          "postInstall": "install_litellm_proxy",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "litellm --version",
+          "homepage": "https://docs.litellm.ai/",
+          "notes": "Manual fallback router; primary is OmniRoute. Needs configuration/litellm/.env; see docs/api-keys.md."
+        },
+        {
+          "id": "omniroute",
+          "name": "OmniRoute gateway",
+          "description": "Local AI gateway: free tiers with auto fallback",
+          "provider": "npm",
+          "package": "omniroute",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "omniroute --version",
+          "homepage": "https://github.com/diegosouzapw/OmniRoute",
+          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first."
+        },
+        {
+          "id": "opencode-cli",
+          "name": "OpenCode CLI",
+          "description": "Terminal AI coding agent (TUI) on the tier router",
+          "provider": "npm",
+          "package": "@opencode/cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "verify": "opencode --version",
+          "homepage": "https://opencode.ai/",
+          "notes": "V2 CLI. The legacy npm package opencode-ai (V1) cannot read the V2 providers config."
+        },
+        {
+          "id": "openhands-docker",
+          "name": "OpenHands Docker",
+          "description": "Autonomous coding agent — Docker app, OmniRoute-routed",
+          "provider": "custom",
+          "package": "openhands",
+          "requires": [
+            "docker"
+          ],
+          "postInstall": "install_openhands",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "docker image inspect docker.openhands.dev/openhands/openhands:latest",
+          "homepage": "https://www.all-hands.dev/",
+          "notes": "Start with ./configuration/start-stack.sh openhands; LLM profiles: configuration/openhands/config.toml."
+        },
+        {
           "id": "mcp-serena",
           "name": "Serena MCP Server",
           "description": "Semantic code navigation and symbol search MCP server",

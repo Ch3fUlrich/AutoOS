@@ -1,0 +1,43 @@
+# AutoOS API keys — copy to configuration/api-keys.yml and fill in what you have.
+#
+#   cp configuration/api-keys.example.yml configuration/api-keys.yml
+#
+# The real file is git-ignored; this template is tracked and carries only
+# obvious placeholders. Every tool in AutoOS reads keys from the real file:
+#
+#   configuration/omniroute/apply.sh|ps1   registers them with OmniRoute
+#   configuration/start-stack.sh|ps1        starts apps with the client key
+#   the browser UI (--serve)                shows which providers are configured
+#
+# Get each key: docs/api-keys.md. Missing keys are fine — routing skips them.
+# Free tiers that train on prompts are excluded from the *-clean combos;
+# see docs/models.md ("Sensitive data work").
+
+# ── Free, no card ───────────────────────────────────────────────────────────
+groq: REPLACE_WITH_GROQ_KEY
+google_ai_studio: REPLACE_WITH_GOOGLE_AI_STUDIO_KEY
+mistral: REPLACE_WITH_MISTRAL_KEY
+cloudflare_workers_ai: REPLACE_WITH_CLOUDFLARE_KEY
+cohere: REPLACE_WITH_COHERE_KEY
+hugging_face: REPLACE_WITH_HUGGINGFACE_KEY
+
+# ── Paid partner gateway (own key, own billing — sits between free/paid) ──
+cheapinference: REPLACE_WITH_CHEAPINFERENCE_KEY
+
+# ── Free tier with optional credits (paid fallback allowed) ─────────────────
+cerebras: REPLACE_WITH_CEREBRAS_KEY
+SambaNova: REPLACE_WITH_SAMBANOVA_KEY
+deepseek: REPLACE_WITH_DEEPSEEK_KEY
+meta: REPLACE_WITH_META_MODEL_API_KEY
+openrouter: REPLACE_WITH_OPENROUTER_KEY
+
+# ── OpenCode Zen: free promo models + paid at-cost models ───────────────────
+zen: REPLACE_WITH_ZEN_KEY
+
+# ── OmniRoute itself ────────────────────────────────────────────────────────
+# Client key the apps send to http://127.0.0.1:20128/v1
+# (dashboard -> api-manager -> Create API Key).
+omniroute: REPLACE_WITH_OMNIROUTE_CLIENT_KEY
+# Optional: oma_live_… management token, only needed for remote management
+# calls. Local CLI management works without it.
+# omniroute_management: REPLACE_WITH_OMNIROUTE_ACCESS_TOKEN

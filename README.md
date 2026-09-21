@@ -14,6 +14,11 @@ One command per platform. It works out what kind of machine it is running on,
 suggests a sensible profile, lets you tick exactly what you want, shows you the
 plan, and only then installs anything.
 
+**Docs quick nav:** [Getting started](docs/getting-started.md) ·
+[Model routing](docs/models.md) · [API keys](docs/api-keys.md) ·
+[Browser UI](docs/web-ui.md) · [Catalog](docs/catalog.md) ·
+[all docs ↓](#documentation)
+
 ---
 
 ## Why it works this way
@@ -81,7 +86,7 @@ Run `--list` for the current set. The headline items:
 | Area | Includes |
 |---|---|
 | Terminal | Windows Terminal, PowerShell 7, Oh My Posh, zsh + Powerlevel10k, Nerd Fonts |
-| Coding & AI | Claude Code CLI, Claude autostart (reopens your sessions after a reboot), Claude Desktop, Antigravity, VS Code, Docker, Herdr, Node.js |
+| Coding & AI | Claude Code CLI, OpenCode CLI, Claude autostart (reopens your sessions after a reboot), Claude Desktop, Antigravity, Zed, VS Code, Docker, Herdr, Node.js, OmniRoute gateway, LiteLLM fallback router |
 | Input | Handy — offline speech-to-text, so you can dictate prompts instead of typing them |
 | MCP stack | Clones [agent-skills](https://github.com/Ch3fUlrich/agent-skills), registers Graphify with Claude Code and approves Omnigraph per-repo — asking for your Omnigraph URL rather than hardcoding one, and naming what is still missing rather than pretending it is wired |
 | Desktop (Windows) | Windhawk with the Explorer file-size and taskbar-clock mods, PowerToys |
@@ -283,6 +288,58 @@ to the tool that owns that record.
 
 Details: [Replay, verification & undo](docs/state-and-undo.md).
 
+## AI model routing
+
+Every agent installed here — OpenCode CLI, Zed's agent panel, Neovim +
+sidekick, OpenHands — talks to **OmniRoute** on `http://127.0.0.1:20128`.
+Routing is defined in one place, `configuration/`:
+
+```
+configuration/api-keys.yml        every provider key (git-ignored)
+configuration/omniroute/combos.json   the tier chains
+configuration/omniroute/apply.*   register keys + build the combos
+configuration/start-stack.*       start the gateway + an app, wired
+```
+
+`tier1` is 1M-context-only (orchestration), `tier2` holds everything under
+1M, `tier3` is the cheap driver; every tier has a `-clean` twin that excludes
+models/plans that train on prompts — pick `tierN-clean` for sensitive data.
+Free legs go first, the sanctioned paid legs (cerebras, sambanova, deepseek,
+meta, openrouter, zen) after them. LiteLLM on `:4000` stays as a manual
+fallback. Full tier tables, known provider quirks and the resolved fallback
+trees: [Model routing](docs/models.md).
+
+![AutoOS web UI — Overview: detected system, profiles, components, install order](docs/assets/webui-overview.png)
+
+![AutoOS web UI — Run & log: pre-install questions and live output](docs/assets/webui-runlog.png)
+
+From a fresh OS to a working agent setup:
+
+```powershell
+.\setup.ps1 -Profile ai-coding -Yes                  # install the stack
+Copy-Item configuration\api-keys.example.yml configuration\api-keys.yml   # fill in
+.\configuration\omniroute\apply.ps1                  # register keys, build combos
+.\configuration\start-stack.ps1 -App opencode        # gateway + app, wired
+```
+
+| App | Start (after keys are in) |
+|---|---|
+| OpenCode CLI / TUI | `.\configuration\start-stack.ps1 -App opencode` (or `opencode`) |
+| Zed | `.\configuration\start-stack.ps1 -App zed` (agent panel pre-routed) |
+| Neovim + sidekick | `.\configuration\start-stack.ps1 -App nvim`, then `<leader>aa` |
+| OpenHands | `.\configuration\start-stack.ps1 -App openhands` (needs Docker Desktop running) |
+| Any CLI, zero config | `omniroute run <tool> --model tier2` (injects env, writes nothing) |
+
+`omniroute run opencode --model tier3` launches opencode with the gateway env
+injected and the model preset — no config file is written, so it is the
+fastest way to test routing. The repo's `opencode.jsonc` does the same thing
+persistently.
+
+Details: [Model routing](docs/models.md) (tiers, combos, routing map) ·
+[API keys](docs/api-keys.md) (where each key comes from) ·
+[configuration/](configuration/README.md) (what lives where) ·
+OpenHands config template: `configuration/openhands/config.toml`.
+
 ## Tests
 
 ```bash
@@ -315,6 +372,9 @@ Details: [Testing](docs/testing.md).
 | [Remote provisioning](docs/remote-provisioning.md) | How do I set up a machine that isn't this one? |
 | [Security](docs/security.md) | What must never be committed? |
 | [Troubleshooting](docs/troubleshooting.md) | It broke. Now what? |
+| [Model routing](docs/models.md) | Which AI model answers, and how do free-first fallbacks work? |
+| [API keys](docs/api-keys.md) | Where does each key come from, and what does it cost? |
+| [Verification](docs/verification.md) | What was tested and proven, and what is known broken? |
 
 Working on this repo with an AI agent? [AGENTS.md](AGENTS.md) is the contract.
 
