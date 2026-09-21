@@ -23,7 +23,9 @@
     "Per-model free→paid chains: each free leg is followed, further down the",
     "same combo, by its paid twin on the same or a sanctioned provider, so a",
     "quota-exhausted free leg degrades to paid instead of failing:",
-    "  spark free (zen contributor-free) → openrouter contributor → zen paid;",
+    "  spark free (zen contributor-free) → openrouter contributor (paid).",
+    "  The plain muse-spark-1.3 is BLOCKED operator policy 2026-09-21:",
+    "  no combo may reference it; the contributor is the only spark.",
     "  gpt-oss free (groq) → cerebras/sambanova credit overflow, then the",
     "  chain moves to deepseek flash (openrouter/deepseek direct) → zen",
     "  paid, so every family still lands on a paid leg;",
@@ -44,10 +46,14 @@
     "in opencode.jsonc pins omniroute/tier1#high.",
     "",
     "*-clean = privacy tiers: NO free legs at all. Assumption: any big free",
-    "model may train on prompts, so clean chains use paid legs only",
-    "  tier1-clean: openrouter plain spark (paid, trains nothing) → zen paid",
-    "    spark. Meta-direct paid spark joins when OmniRoute ships the spark",
-    "    IDs in the muse-code catalog (502/catalog bug open upstream).",
+    "model may train on prompts, so clean chains use paid legs only.",
+    "  tier1-clean: openrouter contributor (paid). PRIVACY DOWNGRADE",
+    "    operator decision 2026-09-21: contributor legs TRAIN by contract,",
+    "    so tier1-clean no longer means trains-nothing — it means paid-only.",
+    "    The plain paid spark (trains nothing) was removed with the",
+    "    contributor-only block. Meta-direct paid spark joins when OmniRoute",
+    "    ships the spark IDs in the muse-code catalog (502/catalog bug open",
+    "    upstream).",
     "  tier2-clean: deepseek direct → openrouter paid deepseek → zen paid",
     "    flash → mistral-small direct. No groq/cerebras/sambanova free legs.",
     "  tier3-clean: deepseek direct → mistral-small direct → zen paid flash.",
@@ -56,7 +62,9 @@
     "  gateway (own key, own billing), so its legs sit between free and paid",
     "  in tier2/tier3 — never in *-clean (privacy tiers stay direct-paid).",
     "Contributor tiers (-contributor) are paid but TRAIN by contract ($0.10",
-    "pricing is the tell) — they stay in tier1, never in *-clean.",
+    "pricing is the tell) — they stay out of tier2-clean/tier3-clean, and",
+    "since 2026-09-21 they are also the tier1-clean legs (operator",
+    "contributor-only block; see tier1-clean note above).",
     "strategy 'priority' = try in listed order, next on 429/error: free legs",
     "first, paid legs from cerebras/sambanova/deepseek/meta/openrouter/zen",
     "after them (those paid tiers are explicitly allowed).",
@@ -90,8 +98,7 @@
       "context": "1M",
       "models": [
         "opencode-zen/muse-spark-1.3-contributor-free",
-        "openrouter/meta/muse-spark-1.3-contributor",
-        "opencode-zen/muse-spark-1.3"
+        "openrouter/meta/muse-spark-1.3-contributor"
       ]
     },
     {
@@ -99,8 +106,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "openrouter/meta/muse-spark-1.3",
-        "opencode-zen/muse-spark-1.3"
+        "openrouter/meta/muse-spark-1.3-contributor"
       ]
     },
     {
