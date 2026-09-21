@@ -55,8 +55,12 @@ if (-not (Test-Path $KeysFile)) {
 }
 
 if (-not (Get-Command omniroute -ErrorAction SilentlyContinue)) {
-    Write-Host 'OmniRoute CLI not installed. Run: .\setup.ps1 -Only omniroute -Yes'
-    exit 1
+    if ($DryRun) {
+        Write-Host 'OmniRoute CLI not installed - dry run continues with the static plan (nothing started, registered or created).'
+    } else {
+        Write-Host 'OmniRoute CLI not installed. Run: .\setup.ps1 -Only omniroute -Yes'
+        exit 1
+    }
 }
 
 # --- Gateway up? --- ---
@@ -66,17 +70,16 @@ function Test-Gateway {
 }
 if (-not (Test-Gateway)) {
     if ($DryRun) {
-        Write-Host 'Gateway is down; dry run stops here (would start it with: omniroute --no-open --port 20128).'
-        Write-Host 'Done (dry run - nothing was started, registered or created).'
-        exit 0
+        Write-Host 'Gateway is down; dry run continues with the static plan (would start it with: omniroute --no-open --port 20128).'
+    } else {
+        Write-Host 'Starting OmniRoute (background)...'
+        Start-Process -FilePath 'omniroute' -ArgumentList '--no-open', '--port', '20128' -WindowStyle Hidden
+        $tries = 0
+        while ((-not (Test-Gateway)) -and ($tries -lt 24)) { Start-Sleep 5; $tries++ }
+        if (-not (Test-Gateway)) { Write-Host 'Gateway did not start - run: omniroute doctor'; exit 1 }
     }
-    Write-Host 'Starting OmniRoute (background)...'
-    Start-Process -FilePath 'omniroute' -ArgumentList '--no-open', '--port', '20128' -WindowStyle Hidden
-    $tries = 0
-    while ((-not (Test-Gateway)) -and ($tries -lt 24)) { Start-Sleep 5; $tries++ }
-    if (-not (Test-Gateway)) { Write-Host 'Gateway did not start - run: omniroute doctor'; exit 1 }
 }
-Write-Host "Gateway OK on $Gateway"
+if (Test-Gateway) { Write-Host "Gateway OK on $Gateway" }
 
 # key name in api-keys.yml (lower-case) -> OmniRoute provider id
 $ProviderMap = [ordered]@{

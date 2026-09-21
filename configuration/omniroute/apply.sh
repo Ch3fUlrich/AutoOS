@@ -38,7 +38,14 @@ if [[ ! -f "$KEYS_FILE" ]]; then
     echo "Missing $KEYS_FILE — copy configuration/api-keys.example.yml and fill it in."
     [[ $DRY -eq 1 ]] || exit 1
 fi
-command -v omniroute >/dev/null || { echo "OmniRoute CLI not installed. Run: ./setup.sh --only omniroute --yes"; exit 1; }
+command -v omniroute >/dev/null || {
+    if [[ $DRY -eq 1 ]]; then
+        echo "OmniRoute CLI not installed - dry run continues with the static plan (nothing started, registered or created)."
+    else
+        echo "OmniRoute CLI not installed. Run: ./setup.sh --only omniroute --yes"
+        exit 1
+    fi
+}
 
 # ─── Parse the flat key: value map without needing PyYAML ───────────────────
 declare -A KEYS=()
@@ -81,16 +88,15 @@ declare -A PROVIDER_DATA=(
 gateway_up() { curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1; }
 if ! gateway_up; then
     if [[ $DRY -eq 1 ]]; then
-        echo "Gateway is down; dry run stops here (would start it with: omniroute --no-open --port 20128)."
-        echo "Done (dry run - nothing was started, registered or created)."
-        exit 0
+        echo "Gateway is down; dry run continues with the static plan (would start it with: omniroute --no-open --port 20128)."
+    else
+        echo "Starting OmniRoute (background)…"
+        nohup omniroute --no-open --port 20128 >/tmp/omniroute-apply.log 2>&1 &
+        for _ in $(seq 1 24); do gateway_up && break; sleep 5; done
+        gateway_up || { echo "Gateway did not start — run: omniroute doctor"; exit 1; }
     fi
-    echo "Starting OmniRoute (background)…"
-    nohup omniroute --no-open --port 20128 >/tmp/omniroute-apply.log 2>&1 &
-    for _ in $(seq 1 24); do gateway_up && break; sleep 5; done
-    gateway_up || { echo "Gateway did not start — run: omniroute doctor"; exit 1; }
 fi
-echo "Gateway OK on $GATEWAY"
+if gateway_up; then echo "Gateway OK on $GATEWAY"; fi
 
 # ─── Register providers ─────────────────────────────────────────────────────
 register_provider() {
