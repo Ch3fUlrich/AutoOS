@@ -2226,34 +2226,38 @@ for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), 'w', encoding='utf-8') as f:
         json.dump(p_data, f, indent=2)
 gw_key = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] != 'null' else None
-if gw_key:
-    # Gateway-routed tier profiles for the 3-level hierarchy. These are NOT
-    # catalog models (check-vendored covers repo-vendored profiles only), so
-    # costs stay 0 - billing happens at the gateway, not per profile. The
-    # openai/ prefix is the LiteLLM transport selector OpenHands requires;
-    # without it the provider is rejected as not provided. Base URL is container-side.
-    _gw = 'http://host.docker.internal:20128/v1'
-    for _tn, _tm, _tctx, _tout, _treason in [
-            ('tier1', 'openai/tier1', 1048576, 65536, True),
-            ('tier2', 'openai/tier2', 131072, 32768, False),
-            ('tier3', 'openai/tier3', 131072, 16384, False)]:
-        _gp = {'auth_type': 'api_key', 'api_mode': 'auto', 'stream': False,
-               'drop_params': True, 'modify_params': True,
-               'disable_stop_word': False, 'caching_prompt': True,
-               'log_completions': False, 'native_tool_calling': True,
-               'is_subscription': False, 'capability_overrides': {},
-               'litellm_extra_body': {}, 'model': _tm, 'base_url': _gw,
-               'max_input_tokens': _tctx, 'max_output_tokens': _tout,
-               'input_cost_per_token': 0, 'output_cost_per_token': 0,
-               'api_key': gw_key}
-        if _treason:
-            _gp['reasoning_effort'] = 'high'
-        else:
-            _gp['reasoning_effort'] = 'none'
-            _gp['enable_encrypted_reasoning'] = False
-            _gp['extended_thinking_budget'] = None
-        with open(os.path.join(profiles_dir, 'autoos-%s.json' % _tn), 'w', encoding='utf-8') as _ff:
-            json.dump(_gp, _ff, indent=2)
+_spec_file = os.path.join(repo_root, 'configuration', 'openhands', 'tier-profiles.json') if repo_root else ''
+if gw_key and _spec_file and os.path.isfile(_spec_file):
+    # Gateway-routed tier profiles for the 3-level hierarchy, read from the
+    # spec (single source - never inline tiers here). These are NOT catalog
+    # models (check-vendored covers repo-vendored profiles only). The openai/
+    # prefix is the LiteLLM transport selector OpenHands requires.
+    try:
+        with open(_spec_file, 'r', encoding='utf-8') as _sf:
+            _spec = json.load(_sf)
+        _gw = _spec['gateway_base_url']
+        for _t in _spec['tiers']:
+            _gp = {'auth_type': 'api_key', 'api_mode': 'auto', 'stream': False,
+                   'drop_params': True, 'modify_params': True,
+                   'disable_stop_word': False, 'caching_prompt': True,
+                   'log_completions': False, 'native_tool_calling': True,
+                   'is_subscription': False, 'capability_overrides': {},
+                   'litellm_extra_body': {}, 'model': _t['model'],
+                   'base_url': _gw,
+                   'max_input_tokens': _t['max_input_tokens'],
+                   'max_output_tokens': _t['max_output_tokens'],
+                   'input_cost_per_token': 0, 'output_cost_per_token': 0,
+                   'api_key': gw_key}
+            if _t.get('reasoning'):
+                _gp['reasoning_effort'] = 'high'
+            else:
+                _gp['reasoning_effort'] = 'none'
+                _gp['enable_encrypted_reasoning'] = False
+                _gp['extended_thinking_budget'] = None
+            with open(os.path.join(profiles_dir, 'autoos-%s.json' % _t['id']), 'w', encoding='utf-8') as _ff:
+                json.dump(_gp, _ff, indent=2)
+    except Exception:
+        pass
 
 agent_profiles_dir = os.path.join(openhands_dir, 'agent-profiles')
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
@@ -2392,7 +2396,7 @@ function Set-AutoOSZedProxy {
     $bypass = [ordered]@{
         name = 'bypass'
         tools = $bypassTools
-        enable_all_context_servers = $false
+        enable_all_context_servers = $true
         context_servers = [ordered]@{}
         default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 'tier1' }
     }
@@ -2437,6 +2441,24 @@ function Set-AutoOSZedProxy {
     if ($env:AUTOOS_LITELLM_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_LITELLM_API_KEY from the environment' -Level muted }
     else { Write-AutoOSLine 'AUTOOS_LITELLM_API_KEY not set - export the LiteLLM master key before starting Zed, or the fallback stays hidden' -Level warn }
     Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-litellm' -NotePropertyValue $litEntry -Force
+    # MCP context servers for the agent panel (Settings -> AI -> MCP Servers
+    # shows their status dots). Serena resolves its project per workspace at
+    # call time (the agent activates by absolute path); graphify serves the
+    # cwd-relative graph. enable_all_context_servers stays false on the auto
+    # profile; the bypass profile below opts in.
+    if ($null -eq $settings.PSObject.Properties['context_servers']) {
+        Add-Member -InputObject $settings -NotePropertyName 'context_servers' -NotePropertyValue (New-Object psobject)
+    }
+    $serenaCtx = [ordered]@{
+        command = 'uvx'
+        args = @('--from', 'serena-agent==1.7.0', 'serena', 'start-mcp-server')
+    }
+    Add-Member -InputObject $settings.context_servers -NotePropertyName 'serena' -NotePropertyValue $serenaCtx -Force
+    $graphifyCtx = [ordered]@{
+        command = 'uv'
+        args = @('run', '--with', 'graphifyy[mcp]==0.9.63', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
+    }
+    Add-Member -InputObject $settings.context_servers -NotePropertyName 'graphify' -NotePropertyValue $graphifyCtx -Force
     $settings | ConvertTo-Json -Depth 8 | Out-File -FilePath $cfgPath -Encoding utf8
     Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)' -Level ok
 }

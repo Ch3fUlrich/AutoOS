@@ -1,0 +1,40 @@
+{
+  "$comment": [
+    "Single source of truth for the OpenHands gateway tier profiles",
+    "(autoos-tier1/2/3.json): the 3-level hierarchy's selectable models.",
+    "Model ids are OmniRoute combo names with the openai/ LiteLLM transport",
+    "prefix OpenHands requires (without it: provider-not-provided). base_url",
+    "is container-side (host.docker.internal); the installer substitutes the",
+    "host-side URL nowhere - these profiles only ever run inside the container.",
+    "Costs stay 0: billing happens at the gateway, not per profile.",
+    "NO KEYS HERE: api_key is injected at install/start time from env",
+    "AUTOOS_OMNIROUTE_KEY or configuration/api-keys.yml (omniroute:).",
+    "Consumers: lib/**/install.* embedded setup (reads this file, never",
+    "inlines tiers), tools/sync-openhands-profiles.py (regenerates user",
+    "profiles; run by start-stack on every openhands start), both suites."
+  ],
+  "gateway_base_url": "http://host.docker.internal:20128/v1",
+  "tiers": [
+    {
+      "id": "tier1",
+      "model": "openai/tier1",
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "reasoning": true
+    },
+    {
+      "id": "tier2",
+      "model": "openai/tier2",
+      "max_input_tokens": 131072,
+      "max_output_tokens": 32768,
+      "reasoning": false
+    },
+    {
+      "id": "tier3",
+      "model": "openai/tier3",
+      "max_input_tokens": 131072,
+      "max_output_tokens": 16384,
+      "reasoning": false
+    }
+  ]
+}

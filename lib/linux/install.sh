@@ -1114,6 +1114,20 @@ lit = {
     "available_models": lit_models,
 }
 oc["autoos-litellm"] = lit
+# MCP context servers for the agent panel (Settings -> AI -> MCP Servers
+# shows their status dots). Serena resolves its project per workspace at
+# call time (the agent activates by absolute path); graphify serves the
+# cwd-relative graph. Pins match catalog/agent-harness.json.
+ctx = cfg.setdefault("context_servers", {})
+ctx["serena"] = {
+    "command": "uvx",
+    "args": ["--from", "serena-agent==1.7.0", "serena", "start-mcp-server"],
+}
+ctx["graphify"] = {
+    "command": "uv",
+    "args": ["run", "--with", "graphifyy[mcp]==0.9.63", "python",
+             "-m", "graphify.serve", "graphify-out/graph.json"],
+}
 # Bypass profile: every built-in tool on, no confirmations (global
 # tool_permissions.default allow). Existing profiles and per-tool rules stay.
 agent = cfg.setdefault("agent", {})
@@ -1126,7 +1140,7 @@ bypass_tools = {t: True for t in [
 profiles["bypass"] = {
     "name": "bypass",
     "tools": bypass_tools,
-    "enable_all_context_servers": False,
+    "enable_all_context_servers": True,
     "context_servers": {},
     "default_model": {"provider": "autoos-omniroute", "model": "tier1"},
 }
@@ -2475,34 +2489,38 @@ for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), "w", encoding="utf-8") as f:
         json.dump(p_data, f, indent=2)
 omni_key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or secrets.get("omniroute")
-if omni_key:
-    # Gateway-routed tier profiles for the 3-level hierarchy. These are NOT
-    # catalog models (check-vendored covers repo-vendored profiles only), so
-    # costs stay 0 - billing happens at the gateway, not per profile. The
-    # openai/ prefix is the LiteLLM transport selector OpenHands requires;
-    # without it: "LLM Provider NOT provided". Base URL is container-side.
-    _gw = "http://host.docker.internal:20128/v1"
-    for _tn, _tm, _tctx, _tout, _treason in [
-            ("tier1", "openai/tier1", 1048576, 65536, True),
-            ("tier2", "openai/tier2", 131072, 32768, False),
-            ("tier3", "openai/tier3", 131072, 16384, False)]:
-        _gp = {"auth_type": "api_key", "api_mode": "auto", "stream": False,
-               "drop_params": True, "modify_params": True,
-               "disable_stop_word": False, "caching_prompt": True,
-               "log_completions": False, "native_tool_calling": True,
-               "is_subscription": False, "capability_overrides": {},
-               "litellm_extra_body": {}, "model": _tm, "base_url": _gw,
-               "max_input_tokens": _tctx, "max_output_tokens": _tout,
-               "input_cost_per_token": 0, "output_cost_per_token": 0,
-               "api_key": omni_key}
-        if _treason:
-            _gp["reasoning_effort"] = "high"
-        else:
-            _gp["reasoning_effort"] = "none"
-            _gp["enable_encrypted_reasoning"] = False
-            _gp["extended_thinking_budget"] = None
-        with open(os.path.join(profiles_dir, "autoos-%s.json" % _tn), "w", encoding="utf-8") as _ff:
-            json.dump(_gp, _ff, indent=2)
+_spec_file = os.path.join(REPO_ROOT, "configuration", "openhands", "tier-profiles.json") if REPO_ROOT else ""
+if omni_key and _spec_file and os.path.isfile(_spec_file):
+    # Gateway-routed tier profiles for the 3-level hierarchy, read from the
+    # spec (single source - never inline tiers here). These are NOT catalog
+    # models (check-vendored covers repo-vendored profiles only). The openai/
+    # prefix is the LiteLLM transport selector OpenHands requires.
+    try:
+        with open(_spec_file, "r", encoding="utf-8") as _sf:
+            _spec = json.load(_sf)
+        _gw = _spec["gateway_base_url"]
+        for _t in _spec["tiers"]:
+            _gp = {"auth_type": "api_key", "api_mode": "auto", "stream": False,
+                   "drop_params": True, "modify_params": True,
+                   "disable_stop_word": False, "caching_prompt": True,
+                   "log_completions": False, "native_tool_calling": True,
+                   "is_subscription": False, "capability_overrides": {},
+                   "litellm_extra_body": {}, "model": _t["model"],
+                   "base_url": _gw,
+                   "max_input_tokens": _t["max_input_tokens"],
+                   "max_output_tokens": _t["max_output_tokens"],
+                   "input_cost_per_token": 0, "output_cost_per_token": 0,
+                   "api_key": omni_key}
+            if _t.get("reasoning"):
+                _gp["reasoning_effort"] = "high"
+            else:
+                _gp["reasoning_effort"] = "none"
+                _gp["enable_encrypted_reasoning"] = False
+                _gp["extended_thinking_budget"] = None
+            with open(os.path.join(profiles_dir, "autoos-%s.json" % _t["id"]), "w", encoding="utf-8") as _ff:
+                json.dump(_gp, _ff, indent=2)
+    except Exception:
+        pass
 
 agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are

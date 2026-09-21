@@ -565,6 +565,34 @@ PY
     assert_eq "$out" "ABSENT"
 fi
 
+if it "tier profiles come from the spec, installer and tool agree"; then
+    report="$(python3 - <<'PY'
+import json
+spec = json.load(open("configuration/openhands/tier-profiles.json", encoding="utf-8"))
+print("%s|%s|%s" % (
+    ",".join(t["id"] for t in spec["tiers"]),
+    spec["gateway_base_url"],
+    ",".join(t["model"] for t in spec["tiers"])))
+PY
+)"
+    assert_eq "$report" "tier1,tier2,tier3|http://host.docker.internal:20128/v1|openai/tier1,openai/tier2,openai/tier3"
+    # The embedded installer must read the spec, never inline tiers.
+    grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
+    # Generator round-trip with a fixture key (env hidden: the suite never
+    # asserts on live system state).
+    tmp="$(mktemp -d)"; printf 'omniroute: test-omni-key\n' >"$tmp/api-keys.yml"
+    out="$( ( unset AUTOOS_OMNIROUTE_KEY; python3 tools/sync-openhands-profiles.py --openhands-dir "$tmp" --keys-file "$tmp/api-keys.yml" ) 2>&1)"
+    rm -rf "$tmp"
+    assert_eq "$(printf '%s' "$out" | grep -c written)" "3"
+fi
+
+if it "start-stack regenerates tier profiles on openhands start"; then
+    ok=1
+    grep -q 'sync-openhands-profiles' configuration/start-stack.ps1 || { ok=0; echo "ps1 never syncs" >&2; }
+    grep -q 'sync-openhands-profiles' configuration/start-stack.sh || { ok=0; echo "sh never syncs" >&2; }
+    if (( ok )); then pass; else fail "tier profiles go stale between installs"; fi
+fi
+
 describe "Serena tool exclusions (serena)"
 
 # tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
@@ -2128,11 +2156,12 @@ print("%s|%s|%s|%s|%s|%s" % (
 bp = cfg.get("agent", {}).get("profiles", {}).get("bypass", {})
 btools = bp.get("tools", {})
 off = sorted(k for k, v in btools.items() if v is not True)
-print("bypass=%s|off=%s|provider=%s|model=%s|allow=%s" % (
+print("bypass=%s|off=%s|provider=%s|model=%s|allow=%s|ctx=%s" % (
     bp.get("name"), ",".join(off),
     bp.get("default_model", {}).get("provider"),
     bp.get("default_model", {}).get("model"),
-    cfg.get("agent", {}).get("tool_permissions", {}).get("default")))
+    cfg.get("agent", {}).get("tool_permissions", {}).get("default"),
+    ",".join(sorted(cfg.get("context_servers", {})))))
 PY
 )"
     backups="$(ls "$scratch"/.config/zed/settings.json.autoos-backup-* 2>/dev/null | wc -l)"
@@ -2144,7 +2173,7 @@ PY
     assert_eq "$line1" \
         "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|False|http://127.0.0.1:4000/v1|False"
     assert_eq "$line2" \
-        "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow"
+        "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow|ctx=graphify,serena"
     assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
 fi
 
@@ -2279,6 +2308,8 @@ if it "openhands launch is detached, probed and stale-settings safe"; then
         grep -q 'schema_version' "$f" || { ok=0; echo "no stale-settings guard: $f" >&2; }
         grep -q 'autoos-backup' "$f" || { ok=0; echo "no backup: $f" >&2; }
         grep -q 'docker logs openhands-app' "$f" || { ok=0; echo "no probe: $f" >&2; }
+        # Tier profiles re-project from the spec on every start (never stale).
+        grep -q 'sync-openhands-profiles' "$f" || { ok=0; echo "never syncs: $f" >&2; }
         # Only versions NEWER than the image (6+) move aside: a live v3 file
         # serves fine, so a blanket "!= 4" nuke would destroy working configs.
         grep -qE 'ge 6|>= 6|>=6' "$f" || { ok=0; echo "indiscriminate version nuke: $f" >&2; }
@@ -2293,6 +2324,25 @@ if it "OpenHands mcp_config carries no enabled key (live schema forbids it)"; th
     # single-quoted 'enabled': True is schema-legal and stays.
     n="$(grep -c '"enabled": True' lib/linux/install.sh || true)"
     assert_eq "$n" "0"
+fi
+
+if it "mirror-litellm-env projects keys without printing them"; then
+    tmp="$(mktemp -d)"
+    printf 'groq: dummy-groq-1\nmeta: dummy-meta-2\nzen: REPLACE_WITH_ZEN_KEY\n' >"$tmp/api-keys.yml"
+    out="$(python3 tools/mirror-litellm-env.py --keys "$tmp/api-keys.yml" --env "$tmp/.env" 2>&1)"
+    rc=$?
+    leaked="$(printf '%s' "$out" | grep -c 'dummy-' || true)"
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "mirror rc=$rc" >&2; }
+    [[ "$leaked" == "0" ]] || { ok=0; echo "value leaked" >&2; }
+    grep -q '^GROQ_API_KEY=dummy-groq-1$' "$tmp/.env" || { ok=0; echo "groq" >&2; }
+    grep -q '^META_API_KEY=dummy-meta-2$' "$tmp/.env" || { ok=0; echo "meta" >&2; }
+    grep -q '^OPENCODE_ZEN_API_KEY=REPLACE' "$tmp/.env" || { ok=0; echo "zen placeholder" >&2; }
+    grep -qE '^LITELLM_MASTER_KEY=[^R]' "$tmp/.env" || { ok=0; echo "master" >&2; }
+    python3 tools/mirror-litellm-env.py --check --keys "$tmp/api-keys.yml" --env "$tmp/.env" >/dev/null 2>&1
+    [[ $? -eq 0 ]] || { ok=0; echo "fresh check failed" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "mirror tool broken"; fi
 fi
 
 if it "no committed secrets in router files"; then    # Report file:line only - a failure message must never echo the value it

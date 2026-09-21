@@ -59,6 +59,15 @@ case "$APP" in
                 echo "Stale OpenHands settings (schema_version $oh_ver) moved aside."
             fi
         fi
+        # Re-project the tier profiles from the spec on every start: a rotated
+        # key, a re-curated spec, or a hand edit converges back automatically.
+        _ss_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+        if command -v python3 >/dev/null; then
+            python3 "$_ss_root/tools/sync-openhands-profiles.py" --openhands-dir "$HOME/.openhands" \
+                || echo "tier profile sync reported a problem - continuing with existing profiles"
+        else
+            echo "python3 not found - tier profile sync skipped (the installer covers it)"
+        fi
         if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app'; then
             docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app' \
                 || docker start openhands-app >/dev/null
