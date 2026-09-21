@@ -70,19 +70,55 @@ switch ($App) {
         # is chosen by OpenHands itself on first conversation - do not pin it.
         # The client key is exported and inherited with `-e LLM_API_KEY` (no
         # value on the command line, so `ps` never shows it).
-        $env:LLM_API_KEY = $Key
-        docker run -it --rm `
-            -e LLM_MODEL=openai/tier1 `
-            -e LLM_API_KEY `
-            -e LLM_BASE_URL="http://host.docker.internal:20128/v1" `
-            -e LOG_ALL_EVENTS=true `
-            -p 3000:3000 `
-            -v /var/run/docker.sock:/var/run/docker.sock `
-            -v "$env:USERPROFILE\.openhands:/.openhands" `
-            --add-host host.docker.internal:host-gateway `
-            --name openhands-app `
-            docker.openhands.dev/openhands/openhands:latest
-        Remove-Item Env:LLM_API_KEY -ErrorAction SilentlyContinue
+        # Stale user settings break the current image (measured 2026-09-21:
+        # a persisted schema_version 6 while the image supports 4 -> /api
+        # settings 500; meanwhile a live version-3 file serves fine, so only
+        # versions NEWER than the image (6+) and unparseable files move
+        # aside - with a backup, never a delete. OpenHands regenerates.
+        $ohSettings = Join-Path $env:USERPROFILE '.openhands\settings.json'
+        if (Test-Path $ohSettings) {
+            try { $ohVer = (Get-Content $ohSettings -Raw -Encoding utf8 | ConvertFrom-Json).schema_version }
+            catch { $ohVer = 'unparseable' }
+            $ohNum = 0
+            if ("$ohVer" -match '^\d+$') { $ohNum = [int]"$ohVer" }
+            if ($ohVer -eq 'unparseable' -or $ohNum -ge 6) {
+                $backup = "$ohSettings.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+                Copy-Item $ohSettings $backup -Force
+                Remove-Item $ohSettings -Force
+                Write-Host "Stale OpenHands settings (schema_version $ohVer) moved aside to $backup."
+            }
+        }
+        $existing = (& docker ps -a --format '{{.Names}}' 2>$null) -join "`n"
+        if ($existing -match '(?m)^openhands-app$') {
+            $running = (& docker ps --format '{{.Names}}' 2>$null) -join "`n"
+            if ($running -notmatch '(?m)^openhands-app$') { & docker start openhands-app | Out-Null }
+        } else {
+            $env:LLM_API_KEY = $Key
+            # Detached, no -it: -it fails without a TTY (non-interactive shells)
+            # and foreground -it never returns, so the URL line below would lie.
+            & docker run -d --rm `
+                -e LLM_MODEL=openai/tier1 `
+                -e LLM_API_KEY `
+                -e LLM_BASE_URL="http://host.docker.internal:20128/v1" `
+                -e LOG_ALL_EVENTS=true `
+                -p 3000:3000 `
+                -v /var/run/docker.sock:/var/run/docker.sock `
+                -v "$env:USERPROFILE\.openhands:/.openhands" `
+                --add-host host.docker.internal:host-gateway `
+                --name openhands-app `
+                docker.openhands.dev/openhands/openhands:latest | Out-Null
+            Remove-Item Env:LLM_API_KEY -ErrorAction SilentlyContinue
+        }
+        # No URL line without a probe behind it (the old script printed the URL
+        # even when -it had failed to start anything).
+        $deadline = (Get-Date).AddSeconds(180)
+        $up = $false
+        while ((Get-Date) -lt $deadline) {
+            try {
+                if ((Invoke-WebRequest -Uri 'http://127.0.0.1:3000/' -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200) { $up = $true; break }
+            } catch { Start-Sleep 5 }
+        }
+        if (-not $up) { Write-Host 'OpenHands did not answer on :3000 - see: docker logs openhands-app'; exit 1 }
         Write-Host 'OpenHands UI: http://localhost:3000'
     }
     'opencode-serve' {

@@ -2227,7 +2227,7 @@ setup_openhands_config() {
     local ollama_url
     ollama_url="$(resolve_ollama_base_url)"
 
-    OLLAMA_BASE_URL="$ollama_url" python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
+    OLLAMA_BASE_URL="$ollama_url" AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
 import os, sys, json
 
 openhands_dir = sys.argv[1]
@@ -2476,6 +2476,35 @@ profiles["ollama-qwen-coder.json"] = _alias_data
 for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), "w", encoding="utf-8") as f:
         json.dump(p_data, f, indent=2)
+omni_key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or secrets.get("omniroute")
+if omni_key:
+    # Gateway-routed tier profiles for the 3-level hierarchy. These are NOT
+    # catalog models (check-vendored covers repo-vendored profiles only), so
+    # costs stay 0 - billing happens at the gateway, not per profile. The
+    # openai/ prefix is the LiteLLM transport selector OpenHands requires;
+    # without it: "LLM Provider NOT provided". Base URL is container-side.
+    _gw = "http://host.docker.internal:20128/v1"
+    for _tn, _tm, _tctx, _tout, _treason in [
+            ("tier1", "openai/tier1", 1048576, 65536, True),
+            ("tier2", "openai/tier2", 131072, 32768, False),
+            ("tier3", "openai/tier3", 131072, 16384, False)]:
+        _gp = {"auth_type": "api_key", "api_mode": "auto", "stream": False,
+               "drop_params": True, "modify_params": True,
+               "disable_stop_word": False, "caching_prompt": True,
+               "log_completions": False, "native_tool_calling": True,
+               "is_subscription": False, "capability_overrides": {},
+               "litellm_extra_body": {}, "model": _tm, "base_url": _gw,
+               "max_input_tokens": _tctx, "max_output_tokens": _tout,
+               "input_cost_per_token": 0, "output_cost_per_token": 0,
+               "api_key": omni_key}
+        if _treason:
+            _gp["reasoning_effort"] = "high"
+        else:
+            _gp["reasoning_effort"] = "none"
+            _gp["enable_encrypted_reasoning"] = False
+            _gp["extended_thinking_budget"] = None
+        with open(os.path.join(profiles_dir, "autoos-%s.json" % _tn), "w", encoding="utf-8") as _ff:
+            json.dump(_gp, _ff, indent=2)
 
 agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are

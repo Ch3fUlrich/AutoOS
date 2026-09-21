@@ -535,6 +535,36 @@ PY
     assert_eq "$out" "http://ollama:11434 ollama_chat/qwen2.5-coder:7b http://ollama:11434 ollama_chat/qwen2.5-coder:7b True False"
 fi
 
+if it "setup_openhands_config writes gateway tier profiles with a key, none without"; then
+    tmp="$(mktemp -d)"
+    out="$(
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
+        unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        curl() { return 6; }
+        OLLAMA_BASE_URL="http://ollama:11434" AUTOOS_OMNIROUTE_KEY="test-omni-key" setup_openhands_config >/dev/null 2>&1
+        python3 - "$tmp/.openhands" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+t1 = json.load(open(os.path.join(d, "profiles", "autoos-tier1.json"), encoding="utf-8"))
+t3 = json.load(open(os.path.join(d, "profiles", "autoos-tier3.json"), encoding="utf-8"))
+print(t1["model"], t1["base_url"], t1["api_key"], t1["reasoning_effort"],
+      t3["model"], t3["reasoning_effort"], t3["enable_encrypted_reasoning"])
+PY
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "openai/tier1 http://host.docker.internal:20128/v1 test-omni-key high openai/tier3 none False"
+    tmp="$(mktemp -d)"
+    out="$(
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
+        unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY AUTOOS_OMNIROUTE_KEY
+        curl() { return 6; }
+        OLLAMA_BASE_URL="http://ollama:11434" setup_openhands_config >/dev/null 2>&1
+        test -e "$tmp/.openhands/profiles/autoos-tier1.json" && echo PRESENT || echo ABSENT
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "ABSENT"
+fi
+
 describe "Serena tool exclusions (serena)"
 
 # tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
@@ -2231,6 +2261,23 @@ if it "start-stack.sh is valid bash and names the client key"; then
     grep -q 'host.docker.internal' configuration/start-stack.sh || ok=0
     grep -q 'opencode-serve' configuration/start-stack.sh || ok=0
     if (( ok )); then pass; else fail "start script is missing wiring"; fi
+fi
+
+if it "openhands launch is detached, probed and stale-settings safe"; then
+    # -it fails without a TTY and foreground never returns; schema_version 6
+    # settings 500 the current image. Both fixed 2026-09-21 - pin the shape.
+    ok=1
+    for f in configuration/start-stack.ps1 configuration/start-stack.sh; do
+        grep -q 'docker run -d ' "$f" || { ok=0; echo "not detached: $f" >&2; }
+        grep -q 'docker run -it' "$f" && { ok=0; echo "still -it: $f" >&2; }
+        grep -q 'schema_version' "$f" || { ok=0; echo "no stale-settings guard: $f" >&2; }
+        grep -q 'autoos-backup' "$f" || { ok=0; echo "no backup: $f" >&2; }
+        grep -q 'docker logs openhands-app' "$f" || { ok=0; echo "no probe: $f" >&2; }
+        # Only versions NEWER than the image (6+) move aside: a live v3 file
+        # serves fine, so a blanket "!= 4" nuke would destroy working configs.
+        grep -qE 'ge 6|>= 6|>=6' "$f" || { ok=0; echo "indiscriminate version nuke: $f" >&2; }
+    done
+    if (( ok )); then pass; else fail "openhands launch shape regressed"; fi
 fi
 
 if it "no committed secrets in router files"; then
