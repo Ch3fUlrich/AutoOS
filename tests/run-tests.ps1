@@ -3525,7 +3525,15 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
     Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
-    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'graphify,playwright,serena'
+    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'context7,graphify,playwright,serena'
+    # Every repo MCP command carries the harness pin: a floating spec changes
+    # under the user (same rule as 'mcp pins: lib/ carries no floating...').
+    $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($p in $oc.mcp.servers.PSObject.Properties) {
+        $pin = $harness.mcp_servers.($p.Name).package
+        Assert-True ($null -ne $pin) "no harness pin for $($p.Name)"
+        Assert-True ((@($p.Value.command) -join ' ') -match [regex]::Escape($pin)) "$($p.Name) does not carry pin $pin"
+    }
 }
 
 Test-Case 'tier depth is mandatory: only tier1 spawns, tier3 spawns nothing' {
