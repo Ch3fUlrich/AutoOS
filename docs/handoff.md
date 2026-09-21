@@ -60,9 +60,8 @@ never exist there — resolve through the main checkout, never copy secrets.
   — Zed ignores `api_key` there and hides keyless providers). Neovim+LazyVim
   + sidekick installed via `setup.ps1 -Only`. OpenHands image pulled;
   container start + profile proof is Open 5.
-- **Suites**: ps1 ~600 / sh ~390, gate re-running 2026-09-21 18:00 for the
-  router batch (tier spec+sync, Zed MCP, key mirror, pin compliance). CI runs
-  both on push.
+- **Suites**: gate green 2026-09-21 18:30 on the router batch (ps1 694/0/1,
+  sh 393/0/0). CI runs both on push — `4e2acf0` pushed, awaiting runner.
 - **Tier profiles single-sourced**: `configuration/openhands/tier-profiles.json`
   (model ids, token windows, reasoning flags, container-side base URL — no
   keys); both embedded installers read it (inline tuples deleted);
