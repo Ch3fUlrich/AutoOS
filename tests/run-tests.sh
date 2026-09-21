@@ -5145,20 +5145,32 @@ for c in d["combos"]:
     if c["name"] == "tier1" and c.get("context") != "1M":
         problems.append("tier1-context")
 by = {c["name"]: c["models"] for c in d["combos"]}
+# Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): the only spark in
+# any tier is the contributor.
+import re as _re2
+if _re2.search(r"muse-spark-1\.3(?!-contributor)", " ".join(m for c in d["combos"] for m in c["models"])):
+    problems.append("plain-spark-blocked")
 # tier1 is spark-only: gemini must never occupy a 1M slot again.
 if any("gemini" in m for m in by["tier1"]):
     problems.append("tier1-gemini")
 # *-clean = paid legs only: no free pool may train on private prompts.
-# Free = contributor-free, -contributor (trains by contract), groq /
-# cerebras / sambanova / gemini hosts, mistral-code + qwen free pools.
+# Free = contributor-free, groq / cerebras / sambanova / gemini hosts,
+# mistral-code + qwen free pools. -contributor (trains by contract) is
+# banned in tier2-clean/tier3-clean; tier1-clean carries it deliberately
+# since the 2026-09-21 contributor-only block (paid-only, trains).
 # Direct-key legs (mistral-small, deepseek, openrouter paid, zen paid)
 # bill past the pool on the same key, so they stay.
 import re
-free = re.compile(r"contributor-free|-contributor$|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen")
+free = re.compile(r"contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen")
+trains = re.compile(r"-contributor$")
 for n in ("tier1-clean", "tier2-clean", "tier3-clean"):
     bad = [m for m in by[n] if free.search(m)]
     if bad:
         problems.append(n + "-free:" + ",".join(bad))
+for n in ("tier2-clean", "tier3-clean"):
+    bad = [m for m in by[n] if trains.search(m)]
+    if bad:
+        problems.append(n + "-trains:" + ",".join(bad))
 print(" ".join(problems))
 PY
 )"

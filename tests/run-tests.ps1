@@ -3784,14 +3784,26 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     Assert-True (($t1.models -join ',') -notmatch 'gemini') 'gemini back in tier1'
     # *-clean = paid legs only: no free pool may train on private prompts.
     # Free legs = contributor-free, groq/cerebras/sambanova hosts, gemini
-    # free tier, -contributor (trains by contract), mistral-code + qwen
-    # free pools. Direct-key legs (mistral-small, deepseek, openrouter
-    # paid, zen paid) bill past the pool on the same key, so they stay.
-    $freeRe = 'contributor-free|-contributor$|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen'
+    # free tier, mistral-code + qwen free pools. -contributor (trains by
+    # contract) is banned in tier2-clean/tier3-clean; tier1-clean carries it
+    # deliberately since the 2026-09-21 contributor-only block (paid-only,
+    # trains — see combos.json). Direct-key legs (mistral-small, deepseek,
+    # openrouter paid, zen paid) bill past the pool on the same key, so
+    # they stay.
+    $freeRe = 'contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen'
+    $noTrainRe = '-contributor$'
     foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
         $free = @($c.models | Where-Object { $_ -match $freeRe })
         Assert-Equal ($free -join ',') '' "$($c.name) carries free legs: $($free -join ',')"
+        if ($c.name -ne 'tier1-clean') {
+            $train = @($c.models | Where-Object { $_ -match $noTrainRe })
+            Assert-Equal ($train -join ',') '' "$($c.name) carries training legs: $($train -join ',')"
+        }
     }
+    # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): the only spark
+    # in any tier is the contributor.
+    $allLegs = @($combos | ForEach-Object { $_.models }) -join ' '
+    Assert-True ($allLegs -notmatch 'muse-spark-1\.3(?!-contributor)') 'plain muse-spark-1.3 leg present'
 }
 
 Test-Case 'apply --dry-run registers nothing and starts nothing' {

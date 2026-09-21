@@ -36,8 +36,8 @@ paid legs from the providers whose credit tiers are sanctioned
 
 | Tier | Context promise | Chain (verified against the live catalogs) |
 |---|---|---|
-| `tier1` orchestrator | **1M only, spark-only** | zen `muse-spark-1.3-contributor-free` → openrouter `meta/muse-spark-1.3-contributor` → zen `muse-spark-1.3`. Callers add xhigh effort via `#high` variant (`omniroute/tier1#high`, ack-proven 2026-09-20). No `gemini-3.1-pro`: it reasons worse than `gemini-3.8-flash` while costing a 1M slot. |
-| `tier1-clean` | 1M, no training, **paid legs only** | openrouter `meta/muse-spark-1.3` (paid, trains nothing) → zen `muse-spark-1.3` (paid). No free legs: any big free model may train on prompts. |
+| `tier1` orchestrator | **1M only, spark-only, contributor-only** | zen `muse-spark-1.3-contributor-free` → openrouter `meta/muse-spark-1.3-contributor` (paid). Plain `muse-spark-1.3` is blocked operator policy 2026-09-21 — no combo may reference it. Callers add xhigh effort via `#high` variant (`omniroute/tier1#high`, ack-proven 2026-09-20). No `gemini-3.1-pro`: it reasons worse than `gemini-3.8-flash` while costing a 1M slot. |
+| `tier1-clean` | 1M, **paid legs only** | openrouter `meta/muse-spark-1.3-contributor` (paid). Privacy note: contributor legs train by contract, so clean now means paid-only, not trains-nothing — the plain paid spark was removed with the contributor-only block. |
 | `tier2` smart | ≤128k | gemini `gemini-3.8-flash` → groq `gpt-oss-120b` → cerebras `gpt-oss-120b` → sambanova `gpt-oss-120b` → cheap-inference `deepseek-v4-flash` / `glm-4.5-air` / `kimi-k3` → openrouter `deepseek/deepseek-v4.1-flash` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
 | `tier2-clean` | ≤128k, no training, **paid legs only** | deepseek `deepseek-flash` (direct) → openrouter `deepseek/deepseek-v4.1-flash` → zen `deepseek-v4.1-flash` → mistral `mistral-small-latest` (direct). No groq/cerebras/sambanova free legs. |
 | `tier3` driver | ≤128k | mistral `mistral-code-latest` → groq `qwen3.8-27b` → cerebras `qwen-3.8-27b` → cheap-inference `glm-4.5-air` / `minimax-m2.7` → mistral `mistral-small-latest` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
@@ -96,12 +96,17 @@ OmniRoute's own free-tier catalog flags the known trainers; we additionally
 curate them out. If in doubt, use `tierN-clean` and check the provider's
 current policy.
 
-**Meta direct:** your Meta Model API key is registered as `muse-code`. The
-installed OmniRoute's `muse-code` catalog ships Llama models only and rejects
-`muse-spark-*` ("not available in the active live catalog"), so Meta-direct
-spark is not in the tiers yet; Zen's paid `muse-spark-1.3` covers that need
-until OmniRoute ships the spark ids. Cloudflare Workers AI needs its Account
-ID in the dashboard before it can serve, so it is registered but unused.
+**Meta direct:** your Meta Model API key is registered as `muse-code`, but the
+installed OmniRoute's `muse-code` catalog ships Llama models only and the
+connection carries an empty outbound URL (`providers test-all`:
+`muse-code: Invalid outbound URL`, red on the dashboard topology) — an
+OmniRoute 3.8.50 defect, open upstream. The connection is therefore kept
+**deactivated** (`omniroute providers edit <id> --inactive`; by-ID, the
+by-name edit echoes success without persisting), and spark routes via
+OpenRouter/Zen contributor legs only. Re-check after an OmniRoute upgrade:
+if `providers test muse-code` passes, a `meta-direct` paid leg may rejoin.
+Cloudflare Workers AI needs its Account ID in the dashboard before it can
+serve, so it is registered but unused.
 
 Guardrails for weak autonomy: slice tasks small, verify after each loop, keep
 a human checkpoint on unattended tier1 runs. Respect quota shapes: GPT-OSS legs
