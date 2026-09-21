@@ -3389,13 +3389,22 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
         Assert-Equal $s.theme 'mine'
         Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_url 'http://127.0.0.1:20128/v1'
-        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_key 'test-omni-key'
+        # Keys never land in settings.json (Zed docs: keychain/UI or env);
+        # the writers must not write api_key even when env carries keys.
+        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-omniroute'.PSObject.Properties['api_key']) 'api_key in omni entry'
+        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-litellm'.PSObject.Properties['api_key']) 'api_key in lit entry'
         $models = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | ForEach-Object { $_.name })
         Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
         Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
-        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_key 'test-lit-key'
         $litModels = @($s.language_models.openai_compatible.'autoos-litellm'.available_models | ForEach-Object { $_.name })
         Assert-Equal ($litModels -join ',') 'tier1,tier1-paid,tier2,tier2-paid,tier3,tier3-paid'
+        $bypass = $s.agent.profiles.bypass
+        Assert-Equal $bypass.name 'bypass'
+        $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })
+        Assert-Equal ($off -join ',') '' "bypass tools off: $($off -join ',')"
+        Assert-Equal $bypass.default_model.provider 'autoos-omniroute'
+        Assert-Equal $bypass.default_model.model 'tier1'
+        Assert-Equal $s.agent.tool_permissions.default 'allow'
         Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
         $raw = Get-Content (Join-Path $cfgDir 'settings.json') -Raw
         Assert-True ($raw -notmatch 'sk-' -and $raw -notmatch 'AUTOOS_OMNIROUTE_KEY|LITELLM_MASTER_KEY|REPLACE') 'secret leaked into settings'
@@ -3408,15 +3417,18 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
     }
 }
 
-Test-Case 'zed routing without keys warns and writes no api_key' {
+Test-Case 'zed routing warns when the Zed key env names are absent' {
+    # Zed derives provider env names from the provider id (upper snake +
+    # _API_KEY): AUTOOS_OMNIROUTE_API_KEY, AUTOOS_LITELLM_API_KEY. The writer
+    # warns when they are missing; settings stay key-free either way.
     $realAppData = $env:APPDATA
-    $realOmni = $env:AUTOOS_OMNIROUTE_KEY
-    $realLit = $env:LITELLM_MASTER_KEY
+    $realOmni = $env:AUTOOS_OMNIROUTE_API_KEY
+    $realLit = $env:AUTOOS_LITELLM_API_KEY
     $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
     try {
         $env:APPDATA = $scratch
-        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
-        Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue
         $cfgDir = Join-Path $scratch 'Zed'
         New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
         '{}' | Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
@@ -3429,10 +3441,10 @@ Test-Case 'zed routing without keys warns and writes no api_key' {
         Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
     } finally {
         $env:APPDATA = $realAppData
-        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
-        else { $env:AUTOOS_OMNIROUTE_KEY = $realOmni }
-        if ($null -eq $realLit) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
-        else { $env:LITELLM_MASTER_KEY = $realLit }
+        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_API_KEY = $realOmni }
+        if ($null -eq $realLit) { Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_LITELLM_API_KEY = $realLit }
     }
 }
 
