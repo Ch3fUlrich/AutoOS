@@ -54,10 +54,13 @@ opened; only model names and env-var *names* are printed.
 - Failure paths exercised: missing `END` → exit 2 with the mismatched-marker
   message; missing file → exit 2.
 - LF stayed LF after a write (no Windows CRLF translation).
-- Both suites: the touched test cases pass — `litellm fallback config is
-  internally consistent` in `run-tests.ps1` and its `run-tests.sh` twin.
-  (The `litellm installer delegates to pipx when present` failure is
-  pre-existing on `main` and unrelated to this track.)
+- Full suites run: `bash tests/run-tests.sh` → **382 passed, 0 failed, 0
+  skipped** (includes `shellcheck is clean`); `powershell -File
+  tests/run-tests.ps1` → **595 passed, 1 failed, 1 skipped**. The single
+  failure is `litellm installer delegates to pipx when present`, which fails
+  identically on `main` (a stub-invocation issue on this host, unrelated to
+  this track). The touched case `litellm fallback config is internally
+  consistent` passes in both suites.
 
 ## 2. Drift `--check` found (the reason this exists)
 
