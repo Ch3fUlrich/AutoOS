@@ -528,11 +528,11 @@ import json, sys, os
 d = sys.argv[1]
 p = json.load(open(os.path.join(d, "profiles", "ollama-qwen2.5-coder.json"), encoding="utf-8"))
 s = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))
-print(p["base_url"], s["agent_settings"]["llm"]["base_url"], "api_key" in p and p["api_key"] is None, any("timeout" in v for v in s["agent_settings"]["mcp_config"].values()))
+print(p["base_url"], p["model"], s["agent_settings"]["llm"]["base_url"], s["agent_settings"]["llm"]["model"], "api_key" in p and p["api_key"] is None, any("timeout" in v for v in s["agent_settings"]["mcp_config"].values()))
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "http://ollama:11434/v1 http://ollama:11434/v1 True False"
+    assert_eq "$out" "http://ollama:11434 ollama_chat/qwen2.5-coder:7b http://ollama:11434 ollama_chat/qwen2.5-coder:7b True False"
 fi
 
 describe "Serena tool exclusions (serena)"

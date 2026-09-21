@@ -2050,6 +2050,14 @@ REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
 # the catalog entry so the profiles and the settings.json fallback agree.
 if os.environ.get("OLLAMA_BASE_URL"):
     REPO_BY_ID["ollama-qwen2.5-coder"]["direct"]["base_url"] = os.environ["OLLAMA_BASE_URL"]
+# OpenHands reaches Ollama through LiteLLM, whose ollama routes append /api/... to the base:
+# the OpenAI-compatible /v1 base (right for OpenCode) gives 404 there (measured 2026-09-19).
+# ollama_chat/ uses /api/chat, which supports tool calls. OpenHands only; OpenCode keeps /v1.
+_ol = REPO_BY_ID["ollama-qwen2.5-coder"]["direct"]
+_ol["model"] = "ollama_chat/" + _ol["model"].split("/", 1)[1]
+_ol["base_url"] = _ol["base_url"].rstrip("/")
+if _ol["base_url"].endswith("/v1"):
+    _ol["base_url"] = _ol["base_url"][:-3]
 
 def _read_secrets_file(path, secrets):
     try:
