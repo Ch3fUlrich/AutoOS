@@ -100,17 +100,44 @@ $ProviderMap = [ordered]@{
 
 # Provider-specific connection data. groq and cerebras sit behind Cloudflare,
 # which answers error 1010 to Node's default User-Agent; a plain client UA is
-# accepted. Keyed by OmniRoute provider id. The backslash-escaped quotes are
-# the Windows PowerShell 5.1 argument-marshalling workaround - without them
-# the inner double quotes are stripped before node sees the JSON.
+# accepted. Keyed by OmniRoute provider id.
 $ProviderData = @{
-    'groq'     = '{\"customUserAgent\":\"curl/8.7.1\"}'
-    'cerebras' = '{\"customUserAgent\":\"curl/8.7.1\"}'
+    'groq'     = '{"customUserAgent":"curl/8.7.1"}'
+    'cerebras' = '{"customUserAgent":"curl/8.7.1"}'
+}
+
+# Build the --provider-specific-data JSON for the running shell. PowerShell
+# 5.1 strips inner double quotes when marshalling to a native exe (the same
+# class of bug as the embedded-python quoting fix in run-tests.ps1), so 5.1
+# needs backslash-escaped quotes while pwsh 7 passes clean JSON through.
+# The $ShellMajor override exists for the suite: it pins the branch under
+# test instead of asserting on the live shell.
+function Get-AutoOSProviderDataJson {
+    param([string]$ProviderId, [int]$ShellMajor = $PSVersionTable.PSVersion.Major)
+    if (-not $ProviderData.ContainsKey($ProviderId)) { return $null }
+    $plain = $ProviderData[$ProviderId]
+    if ($ShellMajor -lt 6) { return $plain -replace '"', '\"' }
+    return $plain
 }
 
 Write-Host 'Providers:'
+# Connections that already exist are left alone: re-adding would either fail
+# or duplicate them, and neither proves the pipeline works.
+$existingIds = @()
+try {
+    $listText = & omniroute providers list 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) {
+        foreach ($line in ($listText -split "`r?`n")) {
+            if ($line -match '^\s*[0-9a-f]{6,}\s+(\S+)') { $existingIds += $Matches[1] }
+        }
+    }
+} catch { $existingIds = @() }
 foreach ($keyName in $ProviderMap.Keys) {
     $providerId = $ProviderMap[$keyName]
+    if ($existingIds -contains $providerId) {
+        Write-Host "  = $providerId already registered"
+        continue
+    }
     if (-not $Keys.ContainsKey($keyName)) {
         Write-Host "  - $providerId : no key in api-keys.yml, skipped"
         continue
@@ -126,8 +153,9 @@ foreach ($keyName in $ProviderMap.Keys) {
     $oldVar = if ($hadVar) { (Get-Item "Env:$varName").Value } else { $null }
     Set-Item -Path "Env:$varName" -Value $Keys[$keyName]
     $addArgs = @('providers', 'add', $providerId, '--credential-env', $varName)
-    if ($ProviderData.ContainsKey($providerId)) {
-        $addArgs += @('--provider-specific-data', $ProviderData[$providerId])
+    $dataJson = Get-AutoOSProviderDataJson $providerId
+    if ($null -ne $dataJson) {
+        $addArgs += @('--provider-specific-data', $dataJson)
     }
     $addArgs += '--yes'
     & omniroute @addArgs *> $null

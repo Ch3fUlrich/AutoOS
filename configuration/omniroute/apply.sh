@@ -125,7 +125,14 @@ register_provider() {
 }
 
 echo "Providers:"
+# Connections that already exist are left alone: re-adding would either fail
+# or duplicate them, and neither proves the pipeline works.
+existing_ids="$(omniroute providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9-]+' | grep -oE '[a-z0-9-]+$' || true)"
 for entry in "${PROVIDER_MAP[@]}"; do
+    if grep -qxF "${entry#*:}" <<<"$existing_ids"; then
+        echo "  = ${entry#*:} already registered"
+        continue
+    fi
     register_provider "${entry%%:*}" "${entry#*:}"
 done
 
