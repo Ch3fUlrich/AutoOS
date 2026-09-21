@@ -8,6 +8,7 @@ vault.yml
 !.env.example
 !*.example.yml
 !*.example.json
+configuration/api-keys.yml
 
 # ─── Downloaded installers and vendor binaries ──────────────────────────────
 installs/
@@ -40,7 +41,12 @@ autoos.config.json.tmp
 # ─── Agent tooling ──────────────────────────────────────────────────────────
 .serena/
 graphify-out/
+.playwright-mcp/
 .claude/settings.local.json
+
+# ─── Python bytecode ────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
 
 # ─── OS / editor noise ──────────────────────────────────────────────────────
 .DS_Store
@@ -49,8 +55,12 @@ desktop.ini
 *.swp
 .idea/
 .vscode/
-__pycache__/
-*.pyc
-
 # ─── Agent worktrees (scratch; never tracked) ────────────────────────────────
 .claude/worktrees/
+
+# ─── Local-only helpers (not wired into setup.ps1/catalog) ───────────────────
+# additional_Features/ holds personal admin scripts (e.g. a Windows cleanup
+# script with uninstall logic) that are not part of the detect→plan→execute
+# pipeline and not reviewed as installers. Keep local until one is promoted
+# into the catalog with tests.
+additional_Features/

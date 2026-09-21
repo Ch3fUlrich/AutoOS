@@ -16,7 +16,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 EXPECTED = {
-    "overview": ["cardProfile", "cardCatalog", "cardOrder"],
+    "overview": ["cardProfile", "cardProviders", "cardTiers", "cardCatalog", "cardOrder"],
     "system": ["cardSystem"],
     "configure": ["questionsCard", "cardConfig", "cardClaudeAutostart"],
 }

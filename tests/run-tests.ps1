@@ -3296,6 +3296,610 @@ Test-Case 'the embedded OpenHands setup script is valid Python' {
         Assert-True ($LASTEXITCODE -eq 0) "embedded python does not parse: $out"
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
+# --- AI routing stack (omniroute / litellm / zed / opencode) ---
+Describe-Group 'ai routing'
+
+function Get-AutoOSWinComponent {
+    param([string]$Id)
+    foreach ($cat in $winCatalog.categories) {
+        foreach ($c in $cat.components) { if ($c.id -eq $Id) { return $c } }
+    }
+    return $null
+}
+
+Test-Case 'ai routing components exist with the right providers' {
+    $zed = Get-AutoOSWinComponent 'zed'
+    $lit = Get-AutoOSWinComponent 'litellm'
+    $oc = Get-AutoOSWinComponent 'opencode-cli'
+    $om = Get-AutoOSWinComponent 'omniroute'
+    $oh = Get-AutoOSWinComponent 'openhands-docker'
+    Assert-True ($null -ne $zed -and $null -ne $lit -and $null -ne $oc -and $null -ne $om -and $null -ne $oh) 'missing component'
+    Assert-Equal "$($zed.provider)|$($lit.provider)|$($oc.provider)|$($om.provider)|$($oh.provider)" 'winget|custom|npm|npm|custom'
+    Assert-Equal "$($zed.package)|$($oc.package)|$($om.package)" 'ZedIndustries.Zed|@opencode/cli|omniroute'
+    Assert-Equal $oh.postInstall 'Install-AutoOSOpenHands'
+    Assert-True ($oh.verify -match 'docker\.openhands\.dev') 'openhands verify does not check the current image'
+}
+
+Test-Case 'zed routes through litellm and both ride ai-coding' {
+    $zed = Get-AutoOSWinComponent 'zed'
+    Assert-Contains $zed.requires 'litellm'
+    Assert-Contains $zed.profiles 'ai-coding'
+    Assert-Contains (Get-AutoOSWinComponent 'litellm').profiles 'ai-coding'
+    Assert-Contains (Get-AutoOSWinComponent 'omniroute').profiles 'ai-coding'
+}
+
+Test-Case 'opencode-cli is the headless fallback on light' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $light = @($a | Where-Object { 'light' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-Contains $light 'opencode-cli'
+}
+
+Test-Case 'ai postInstall hooks are exported' {
+    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSZedProxy')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn missing"
+    }
+    Pass
+}
+
+Test-Case 'litellm installer announces instead of running in dry run' {
+    Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+    # Write-AutoOSLine goes to the console and the module log, not the output
+    # stream: capture it through a scratch log file, the only reliable way.
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-dry-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'would install litellm') 'no dry-run announcement in the log'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    }
+}
+
+Test-Case 'zed routing writes nothing in dry run' {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        Set-AutoOSZedProxy
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Assert-Equal (Test-Path (Join-Path $scratch 'Zed\settings.json')) $false
+    } finally { $env:APPDATA = $realAppData }
+}
+
+Test-Case 'zed routing merges one provider and keeps the rest' {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'Zed'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '{"theme":"mine","language_models":{"openai":{"api_url":"https://x"}}}' |
+            Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Set-AutoOSZedProxy
+        Set-AutoOSZedProxy
+        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $s.theme 'mine'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_url 'http://127.0.0.1:20128/v1'
+        $models = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | ForEach-Object { $_.name })
+        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap'
+        Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
+        $raw = Get-Content (Join-Path $cfgDir 'settings.json') -Raw
+        Assert-True ($raw -notmatch 'sk-' -and $raw -notmatch 'AUTOOS_OMNIROUTE_KEY|api_key') 'secret leaked into settings'
+    } finally { $env:APPDATA = $realAppData }
+}
+
+Test-Case 'opencode repo config pins omniroute with litellm fallback' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $oc = $stripped | ConvertFrom-Json
+    Assert-Equal $oc.model 'omniroute/tier1'
+    Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
+    Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
+    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'graphify,playwright,serena'
+}
+
+Test-Case 'tier depth is mandatory: only tier1 spawns, tier3 spawns nothing' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $agents = ($stripped | ConvertFrom-Json).agents
+    Assert-True ($null -ne $agents.'tier1-orchestrator') 'tier1-orchestrator agent missing'
+    Assert-True ($null -ne $agents.'tier2-worker') 'tier2-worker agent missing'
+    Assert-True ($null -ne $agents.'tier3-reviewer') 'tier3-reviewer agent missing'
+    # tier1 may launch tier2-worker and nothing else (deny-all first, narrow
+    # allow last — last matching rule wins).
+    $t1 = @($agents.'tier1-orchestrator'.permissions)
+    Assert-Equal $t1[0].action 'subagent'; Assert-Equal $t1[0].resource '*'; Assert-Equal $t1[0].effect 'deny'
+    Assert-Equal $t1[-1].resource 'tier2-worker'; Assert-Equal $t1[-1].effect 'allow'
+    # tier2 may launch tier3-reviewer and nothing else.
+    $t2 = @($agents.'tier2-worker'.permissions)
+    Assert-Equal $t2[0].effect 'deny'
+    Assert-Equal $t2[-1].resource 'tier3-reviewer'; Assert-Equal $t2[-1].effect 'allow'
+    # tier3 is a leaf: a lone deny-all, no allow rule.
+    $t3 = @($agents.'tier3-reviewer'.permissions)
+    Assert-Equal $t3.Count 1
+    Assert-Equal $t3[0].action 'subagent'; Assert-Equal $t3[0].resource '*'; Assert-Equal $t3[0].effect 'deny'
+    Assert-Equal $agents.'tier3-reviewer'.mode 'subagent'
+}
+
+Test-Case 'openhands template routes tiers with no secrets' {
+    $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
+    foreach ($section in @('[llm]', '[llm.tier1]', '[llm.tier2]', '[llm.tier3]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
+        Assert-True ($toml -match [regex]::Escape($section)) "missing $section"
+    }
+    Assert-True ($toml -match 'host\.docker\.internal:20128') 'not pointed at the gateway'
+    Assert-True ($toml -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
+    Pass
+}
+
+Test-Case 'litellm fallback config is internally consistent' {
+    $yaml = Get-Content (Join-Path $Root 'configuration\litellm\config.yaml') -Raw -Encoding utf8
+    $groups = @([regex]::Matches($yaml, '(?m)^\s*-\s*model_name:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    foreach ($g in @('tier1', 'tier1-paid', 'tier2', 'tier2-paid', 'tier3', 'tier3-paid')) {
+        Assert-Contains $groups $g
+    }
+    $fb = [regex]::Match($yaml, '(?s)fallbacks:(.*?)(?:\r?\n\S|\z)').Groups[1].Value
+    foreach ($m in [regex]::Matches($fb, '[- ](\S+):\s*\[([^\]]*)\]')) {
+        Assert-Contains $groups $m.Groups[1].Value
+        foreach ($t in ($m.Groups[2].Value -split ',')) { Assert-Contains $groups $t.Trim() }
+    }
+    $models = [regex]::Matches($yaml, '(?m)^\s*model:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value }
+    Assert-True (($models -match 'cerebras').Count -eq 0 -and ($models -match 'llama-3\.3-70b').Count -eq 0) 'retired free legs still routed'
+    Assert-True ($yaml -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
+    Pass
+}
+
+Test-Case 'start scripts exist and name the client key' {
+    Assert-True (Test-Path (Join-Path $Root 'configuration\start-stack.ps1')) 'ps1 missing'
+    Assert-True (Test-Path (Join-Path $Root 'configuration\start-stack.sh')) 'sh missing'
+    $ps1 = Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw
+    $sh = Get-Content (Join-Path $Root 'configuration\start-stack.sh') -Raw
+    Assert-True ($ps1 -match 'AUTOOS_OMNIROUTE_KEY' -and $sh -match 'AUTOOS_OMNIROUTE_KEY') 'key wiring missing'
+    Assert-True ($ps1 -match 'openhands' -and $sh -match 'host\.docker\.internal') 'openhands launch missing'
+    Assert-True ($ps1 -match 'opencode-serve' -and $sh -match 'opencode-serve') 'phone-fallback launch missing'
+    Pass
+}
+
+Test-Case 'start-stack.ps1 parses without syntax errors' {
+    $errors = $null
+    $null = [System.Management.Automation.PSParser]::Tokenize(
+        (Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw), [ref]$errors)
+    Assert-Equal (@($errors)).Count 0
+}
+
+Test-Case 'zed routing creates a fresh config when none exists' {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Set-AutoOSZedProxy
+        $cfgPath = Join-Path $scratch 'Zed\settings.json'
+        Assert-True (Test-Path $cfgPath) 'settings.json not created'
+        $s = Get-Content $cfgPath -Raw | ConvertFrom-Json
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 3
+    } finally { $env:APPDATA = $realAppData }
+}
+
+Test-Case 'component profiles name real profiles and verify is set' {
+    $bad = @()
+    foreach ($file in @('catalog\windows.json', 'catalog\linux.json', 'catalog\macos.json')) {
+        $c = Get-Content (Join-Path $Root $file) -Raw -Encoding utf8 | ConvertFrom-Json
+        $profiles = @($c.profiles.PSObject.Properties.Name)
+        foreach ($cat in $c.categories) {
+            foreach ($comp in $cat.components) {
+                if ($comp.id -notin @('zed', 'litellm', 'opencode-cli', 'omniroute')) { continue }
+                foreach ($p in $comp.profiles) {
+                    if ($p -notin $profiles) { $bad += "$file/$($comp.id):$p" }
+                }
+                if ([string]::IsNullOrWhiteSpace($comp.verify)) { $bad += "$file/$($comp.id):no-verify" }
+            }
+        }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'ai-coding ticks the whole routing stack' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $ticks = @($a | Where-Object { 'ai-coding' -in $_.Profiles } | ForEach-Object { $_.Id })
+    foreach ($id in @('zed', 'litellm', 'opencode-cli', 'omniroute', 'openhands-docker')) {
+        Assert-Contains $ticks $id
+    }
+    Pass
+}
+
+Test-Case 'neovim component exists with winget id and lazyvim postInstall' {
+    $nv = Get-AutoOSWinComponent 'neovim'
+    Assert-True ($null -ne $nv) 'neovim missing from the windows catalog'
+    Assert-Equal "$($nv.provider)|$($nv.package)" 'winget|Neovim.Neovim'
+    Assert-Contains $nv.requires 'git'
+    Assert-Contains $nv.profiles 'ai-coding'
+    Assert-Equal $nv.postInstall 'Install-AutoOSNeovim'
+    Assert-Equal $nv.verify 'nvim --version'
+}
+
+Test-Case 'neovim is offered on arm64 Windows too' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem -Arch 'arm64'))
+    Assert-Contains ($a | ForEach-Object { $_.Id }) 'neovim'
+}
+
+Test-Case 'a dry run plans neovim and its git dependency' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -DryRun -Only neovim -Yes -NoColor 2>&1) -join "`n"
+    Assert-True ($LASTEXITCODE -eq 0) "exit $LASTEXITCODE : $($out | Select-Object -Last 3)"
+    Assert-True ($out -match 'Neovim') 'neovim missing from the dry-run plan'
+}
+
+Test-Case 'PATH is only ever written by Add-AutoOSPathEntry' {
+    # The single code path that may touch PATH. A second writer is how the
+    # repository once wiped a user's entire Path.
+    $src = Get-Content (Join-Path $Lib 'AutoOS.Install.psm1') -Raw
+    $writers = @([regex]::Matches($src, "SetEnvironmentVariable\(\s*'Path'"))
+    Assert-Equal $writers.Count 1
+    $fn = [regex]::Match($src, '(?s)function Install-AutoOSNeovim.*?(?=\r?\nfunction )').Value
+    Assert-True ($fn -match 'Add-AutoOSPathEntry') 'neovim bypasses the PATH code path'
+}
+
+Test-Case 'neovim postInstall hooks are exported' {
+    foreach ($fn in @('Install-AutoOSNeovim', 'Install-AutoOSLazyVim', 'Enable-AutoOSSidekickExtra')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn missing"
+    }
+    Pass
+}
+
+Test-Case 'neovim postInstall writes nothing in dry run' {
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path $env:TEMP "autoos-nvim-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        Install-AutoOSNeovim
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Assert-Equal (Test-Path (Join-Path $scratch 'nvim')) $false
+    } finally { $env:LOCALAPPDATA = $realLocal }
+}
+
+Test-Case 'neovim sidekick leaves a non-object config alone' {
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path $env:TEMP "autoos-nvim-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'nvim'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '["not","an","object"]' | Out-File (Join-Path $cfgDir 'lazyvim.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Enable-AutoOSSidekickExtra
+        $raw = Get-Content (Join-Path $cfgDir 'lazyvim.json') -Raw
+        Assert-True ($raw -match '"not"') 'a non-object config was rewritten'
+        Assert-Equal (@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count 0
+    } finally { $env:LOCALAPPDATA = $realLocal }
+}
+
+Test-Case 'neovim sidekick enabling merges one extra and keeps the rest' {
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path $env:TEMP "autoos-nvim-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'nvim'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '{"extras":["lazyvim.plugins.extras.lang.python"]}' |
+            Out-File (Join-Path $cfgDir 'lazyvim.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Enable-AutoOSSidekickExtra
+        Enable-AutoOSSidekickExtra
+        $j = Get-Content (Join-Path $cfgDir 'lazyvim.json') -Raw | ConvertFrom-Json
+        Assert-Contains $j.extras 'lazyvim.plugins.extras.ai.sidekick'
+        Assert-Contains $j.extras 'lazyvim.plugins.extras.lang.python'
+        Assert-Equal (@($j.extras | Where-Object { $_ -eq 'lazyvim.plugins.extras.ai.sidekick' }).Count) 1
+        Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
+    } finally { $env:LOCALAPPDATA = $realLocal }
+}
+
+# ── OpenHands self-checks (need Docker; they report, never install) ─────────
+# The container takes a while to boot agent-server images, so these wait.
+function Wait-AutoOSHttp {
+    param([string]$Url, [int]$TimeoutSec = 120)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            if ((Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200) { return $true }
+        } catch { Start-Sleep 5 }
+    }
+    return $false
+}
+
+Test-Case 'openhands container answers on :3000' {
+    $names = (& docker ps --format '{{.Names}}' 2>$null) -join "`n"
+    if ($names -notmatch 'openhands') { Skip 'no openhands container running'; return }
+    Assert-True (Wait-AutoOSHttp 'http://localhost:3000/') 'OpenHands UI did not answer on :3000'
+}
+
+Test-Case 'openhands llm profile points at the gateway' {
+    # Retired to a permanent skip: it asserted live ~/.openhands/settings.json,
+    # which fails on any machine whose OpenHands was configured outside AutoOS
+    # (the installer never overwrites existing keys). Gateway shape is covered
+    # by 'openhands template routes tiers with no secrets' and the embedded
+    # setup-script tests instead.
+    Skip 'live user settings are out of scope for the suite'; return
+}
+
+Test-Case 'litellm installer delegates to pipx when present' {
+    $realPath = $env:PATH
+    $stub = Join-Path $env:TEMP "autoos-pipxstub-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-pipx-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        New-Item -ItemType Directory -Path $stub -Force | Out-Null
+        '@echo off' + "`r`n" + 'echo called > "%~dp0called.txt"' |
+            Out-File (Join-Path $stub 'pipx.cmd') -Encoding ascii
+        $env:PATH = "$stub;$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True (Test-Path (Join-Path $stub 'called.txt')) 'pipx stub was not invoked'
+        Assert-True ($text -match 'configuration/litellm') 'no next-steps hint in the log'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'litellm installer falls back to the py launcher' {
+    $realPath = $env:PATH
+    $stub = Join-Path $env:TEMP "autoos-pystub-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-py-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        New-Item -ItemType Directory -Path $stub -Force | Out-Null
+        '@echo off' + "`r`n" + 'echo called > "%~dp0called.txt"' |
+            Out-File (Join-Path $stub 'py.cmd') -Encoding ascii
+        $env:PATH = "$stub;$env:SystemRoot\System32"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        Assert-True (Test-Path (Join-Path $stub 'called.txt')) 'py launcher stub was not invoked'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'litellm installer detects an existing install' {
+    $realPath = $env:PATH
+    $stub = Join-Path $env:TEMP "autoos-litstub-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-lit-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        New-Item -ItemType Directory -Path $stub -Force | Out-Null
+        '@echo off' + "`r`n" + 'exit /b 0' | Out-File (Join-Path $stub 'litellm.cmd') -Encoding ascii
+        $env:PATH = "$stub;$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'already installed') 'no already-installed message in the log'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'litellm installer warns when no python is available' {
+    $realPath = $env:PATH
+    $empty = Join-Path $env:TEMP "autoos-noempty-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-nopy-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        New-Item -ItemType Directory -Path $empty -Force | Out-Null
+        $env:PATH = $empty
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'no Python on PATH') 'no missing-python warning in the log'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'env template carries placeholders only' {
+    $bad = @()
+    $n = 0
+    foreach ($line in (Get-Content (Join-Path $Root 'configuration\litellm\.env.example') -Encoding utf8)) {
+        $n++
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        if ($t -notmatch '^[A-Z_]+=REPLACE_WITH_[A-Z_]+$') { $bad += "line $n" }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'api-keys example carries placeholders only' {
+    $bad = @()
+    $n = 0
+    foreach ($line in (Get-Content (Join-Path $Root 'configuration\api-keys.example.yml') -Encoding utf8)) {
+        $n++
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        $val = ($t -split ':', 2)[1].Trim()
+        if ($val -notmatch '^REPLACE_WITH_[A-Z_]+$') { $bad += "line $n" }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'provider status reads keys but never exposes them' {
+    $scratch = Join-Path $env:TEMP "autoos-keys-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        @(
+            'groq: gsk_SUPERSECRETVALUE123',
+            '# comment',
+            'deepseek:',
+            'mistral: 5xLsSecretValue',
+            'not-a-provider: nope'
+        ) | Out-File (Join-Path $scratch 'configuration\api-keys.yml') -Encoding utf8
+        $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+        $json = $status | ConvertTo-Json
+        Assert-True ($status.Count -eq 14) "expected 14 provider entries, got $($status.Count)"
+        $groq = $status | Where-Object { $_.id -eq 'groq' }
+        $ds = $status | Where-Object { $_.id -eq 'deepseek' }
+        Assert-True ($groq.configured -and -not $ds.configured) 'configured flags are wrong'
+        Assert-True ($json -notmatch 'SUPERSECRET|SecretValue') 'a key value leaked into the payload'
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'combos.json is valid, named and provider/model shaped' {
+    $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
+        ConvertFrom-Json).combos
+    $names = @($combos | ForEach-Object { $_.name })
+    Assert-Equal ($names -join ',') 'tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
+    $contexts = @{
+        'tier1' = '1M'; 'tier1-clean' = '1M'; 'tier2' = '128k'
+        'tier2-clean' = '128k'; 'tier3' = '128k'; 'tier3-clean' = '128k'
+    }
+    foreach ($c in $combos) {
+        Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
+        foreach ($m in $c.models) {
+            Assert-True ($m -match '^[A-Za-z0-9@._/-]+$') "$($c.name): bad ref '$m'"
+        }
+        Assert-Equal $c.context $contexts[$c.name]
+    }
+    # tier1 is spark-only: gemini-3.1-pro reasons worse than 3.8-flash and
+    # must never occupy a 1M orchestrator slot again.
+    $t1 = @($combos | Where-Object { $_.name -eq 'tier1' })[0]
+    Assert-True (($t1.models -join ',') -notmatch 'gemini') 'gemini back in tier1'
+    # *-clean = paid legs only: no free pool may train on private prompts.
+    # Free legs = contributor-free, groq/cerebras/sambanova hosts, gemini
+    # free tier, -contributor (trains by contract), mistral-code + qwen
+    # free pools. Direct-key legs (mistral-small, deepseek, openrouter
+    # paid, zen paid) bill past the pool on the same key, so they stay.
+    $freeRe = 'contributor-free|-contributor$|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen'
+    foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
+        $free = @($c.models | Where-Object { $_ -match $freeRe })
+        Assert-Equal ($free -join ',') '' "$($c.name) carries free legs: $($free -join ',')"
+    }
+}
+
+Test-Case 'apply --dry-run registers nothing and starts nothing' {
+    # The suite runs $ErrorActionPreference = 'Stop', but the omniroute CLI
+    # writes a harmless warning to stderr on every call, which 5.1 promotes
+    # to a terminating error. So the -DryRun call runs in a child powershell:
+    # a stray preference or a non-zero exit can never abort the suite, and
+    # only the captured text counts. combos.json must be byte-identical after.
+    if (-not (Get-Command omniroute -ErrorAction SilentlyContinue)) {
+        Skip 'omniroute CLI not installed — dry-run announcements need it'; return
+    }
+    $combosPath = Join-Path $Root 'configuration\omniroute\combos.json'
+    $before = Get-Content $combosPath -Raw -Encoding utf8
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File `
+        (Join-Path $Root 'configuration\omniroute\apply.ps1') -DryRun 2>&1 | Out-String
+    Assert-True ($out -match 'dry run stops here|would create|would register') 'dry run announced nothing'
+    Assert-Equal (Get-Content $combosPath -Raw -Encoding utf8) $before
+}
+
+Test-Case 'apply scripts carry the Cloudflare User-Agent fix' {
+    $ps1 = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
+    $sh = Get-Content (Join-Path $Root 'configuration\omniroute\apply.sh') -Raw
+    foreach ($text in @($ps1, $sh)) {
+        Assert-True ($text -match 'customUserAgent') 'customUserAgent missing'
+        Assert-True ($text -match 'provider-specific-data') 'provider-specific-data flag missing'
+        Assert-True ($text -match 'muse-code') 'meta -> muse-code mapping missing'
+    }
+    Pass
+}
+
+Test-Case 'opencode tiers declare matching context limits' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $oc = $stripped | ConvertFrom-Json
+    $models = $oc.providers.omniroute.models
+    Assert-Equal $models.tier1.limit.context 1000000
+    Assert-Equal $models.'tier1-clean'.limit.context 1000000
+    Assert-Equal $models.tier2.limit.context 131072
+    Assert-Equal $models.'tier2-clean'.limit.context 131072
+    Assert-Equal $models.tier3.limit.context 131072
+    Assert-Equal $models.'tier3-clean'.limit.context 131072
+    foreach ($name in @('tier1', 'tier1-clean', 'tier2', 'tier2-clean', 'tier3', 'tier3-clean', 'auto', 'auto/cheap', 'auto/smart')) {
+        Assert-True ($null -ne $models.$name) "missing model $name"
+        Assert-Equal $models.$name.modelID $name
+    }
+    Pass
+}
+
+# â”€â”€â”€ Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Phone-remote resilience (autostart + healthcheck).
+Describe-Group 'phone-remote resilience'
+
+Test-Case 'autostart launchers exist and parse' {
+    foreach ($f in @('configuration\autostart\Start-AutoOSStack.ps1',
+                     'configuration\autostart\Register-AutoOSAutostart.ps1',
+                     'configuration\healthcheck.ps1')) {
+        Assert-True (Test-Path (Join-Path $Root $f)) "$f missing"
+        $errors = $null
+        $null = [System.Management.Automation.PSParser]::Tokenize(
+            (Get-Content (Join-Path $Root $f) -Raw), [ref]$errors)
+        Assert-Equal (@($errors)).Count 0
+    }
+}
+
+Test-Case 'autostart is opt-in and double-run safe' {
+    $reg = Get-Content (Join-Path $Root 'configuration\autostart\Register-AutoOSAutostart.ps1') -Raw
+    $start = Get-Content (Join-Path $Root 'configuration\autostart\Start-AutoOSStack.ps1') -Raw
+    Assert-True ($reg -match 'Unregister') 'no -Unregister removal path'
+    Assert-True ($reg -match '-Force') 're-register must replace in place'
+    Assert-True ($start -match 'nothing to do') 'launcher must no-op when already up'
+    Assert-True ($start -notmatch 'Remove-Item|rm -rf|uninstall') 'launcher must never be destructive'
+}
+
+Test-Case 'healthcheck probes four ports and resumes only with -Fix' {
+    $hc = Get-Content (Join-Path $Root 'configuration\healthcheck.ps1') -Raw
+    foreach ($p in @('20128', '3000', '4096', '8777')) {
+        Assert-True ($hc -match $p) "port $p not probed"
+    }
+    Assert-True ($hc -match '401') 'opencode 401-alive nuance missing'
+    # The resume call must sit inside the -Fix branch: log-only by default.
+    # (Matched by count, not by cutting the text: the header comment names the
+    # launcher too, so a cut-and-search would flag its own documentation.)
+    $fixBranch = [regex]::Match($hc, '(?s)if \(\$Fix.*').Value
+    Assert-True ($fixBranch -match '\&\s*\(Join-Path \$RepoRoot') 'the -Fix branch must invoke the launcher'
+    Assert-True (@([regex]::Matches($hc, 'Start-AutoOSStack')).Count -eq 3) `
+        'the launcher must be named exactly 3x (doc comment, log line, -Fix branch)'
+    Assert-True ($hc -notmatch 'Start-Process|docker start') `
+        'healthcheck itself must never start processes'
+}
+
+Test-Case 'phone URLs are documented without secrets' {
+    $doc = Get-Content (Join-Path $Root 'docs\troubleshooting.md') -Raw -Encoding utf8
+    foreach ($frag in @('<tail-ip>:3000', '<tail-ip>:4096', 'healthcheck')) {
+        Assert-True ($doc -match [regex]::Escape($frag)) "missing $frag"
+    }
+    Assert-True ($doc -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
+    Assert-True ($doc -notmatch '100\.70\.|192\.168\.178\.59') 'machine-local IP committed'
+}
+
+Test-Case 'canvas verdict keeps the current docker path' {
+    $ver = Get-Content (Join-Path $Root 'docs\verification.md') -Raw -Encoding utf8
+    $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
+    $ps1 = Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw
+    Assert-True ($ver -match 'Agent Canvas') 'no canvas verdict in verification.md'
+    Assert-True ($toml -match 'agent-canvas') 'config.toml must record the canvas decision'
+    Assert-True ($ps1 -match 'docker\.openhands\.dev/openhands/openhands:latest') 'docker path must stay intact'
+}
+
 
 # ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''

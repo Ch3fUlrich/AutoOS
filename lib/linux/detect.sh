@@ -426,6 +426,7 @@ script_is_installed() {
         herdr)           has_bin herdr ;;
         handy)           has_bin handy ;;
         vscode)          has_bin code ;;
+        zed)             has_bin zed ;;
         agy)             has_bin agy ;;
         gh)              has_bin gh ;;
         uv)              has_bin uv ;;

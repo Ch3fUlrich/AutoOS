@@ -2291,6 +2291,204 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
     Write-AutoOSLine "OpenHands configuration and profiles written to $openhandsDir" -Level ok
 }
 
+function Install-AutoOSLitellm {
+    <#
+      .SYNOPSIS Install the litellm proxy (the tier router in configuration/litellm).
+    #>
+    if ($script:DryRun) {
+        Write-AutoOSLine 'would install litellm[proxy] via pipx or pip' -Level muted
+        return
+    }
+    if (Get-Command litellm -ErrorAction SilentlyContinue) {
+        Write-AutoOSLine 'litellm already installed' -Level muted
+        return
+    }
+    if (Get-Command pipx -ErrorAction SilentlyContinue) {
+        Invoke-AutoOSProcess -FilePath 'pipx' -Arguments @('install', 'litellm[proxy]') | Out-Null
+    } elseif (Get-Command py -ErrorAction SilentlyContinue) {
+        Invoke-AutoOSProcess -FilePath 'py' -Arguments @('-m', 'pip', 'install', '--user', 'litellm[proxy]') | Out-Null
+    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+        Invoke-AutoOSProcess -FilePath 'python' -Arguments @('-m', 'pip', 'install', '--user', 'litellm[proxy]') | Out-Null
+    } else {
+        Write-AutoOSLine "no Python on PATH - install it, then: pip install litellm[proxy]" -Level warn
+        return
+    }
+    Write-AutoOSLine 'next: copy configuration/litellm/.env.example to .env, add keys (docs/api-keys.md)' -Level info
+}
+
+function Set-AutoOSZedProxy {
+    <#
+      .SYNOPSIS Point Zed's agent panel at the local OmniRoute gateway.
+      Only the provider id 'autoos-omniroute' is written; every other Zed
+      setting is kept. The key comes from env AUTOOS_OMNIROUTE_KEY.
+    #>
+    $cfgDir  = Join-Path $env:APPDATA 'Zed'
+    $cfgPath = Join-Path $cfgDir 'settings.json'
+    if ($script:DryRun) {
+        Write-AutoOSLine "would route Zed agents to OmniRoute in $cfgPath" -Level muted
+        return
+    }
+    if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+    if (Test-Path $cfgPath) {
+        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
+    $settings = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw | ConvertFrom-Json } else { New-Object psobject }
+    # StrictMode turns a missing-property read into a throw (even member
+    # enumeration over an empty property set), so probe the collection with
+    # the indexer, which returns $null for a missing name instead of throwing.
+    if ($null -eq $settings.PSObject.Properties['language_models']) {
+        Add-Member -InputObject $settings -NotePropertyName 'language_models' -NotePropertyValue (New-Object psobject)
+    }
+    if ($null -eq $settings.language_models.PSObject.Properties['openai_compatible']) {
+        Add-Member -InputObject $settings.language_models -NotePropertyName 'openai_compatible' -NotePropertyValue (New-Object psobject)
+    }
+    $entry = @{
+        api_url = 'http://127.0.0.1:20128/v1'
+        available_models = @(
+            @{ name = 'auto/smart'; display_name = 'tier1 orchestrator (auto smart)'; max_tokens = 131072; reasoning_effort = 'xhigh' },
+            @{ name = 'auto'; display_name = 'tier2 smart (auto balanced)'; max_tokens = 131072 },
+            @{ name = 'auto/cheap'; display_name = 'tier3 driver (auto cheap)'; max_tokens = 131072 }
+        )
+    }
+    Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-omniroute' -NotePropertyValue $entry -Force
+    $settings | ConvertTo-Json -Depth 8 | Out-File -FilePath $cfgPath -Encoding utf8
+    Write-AutoOSLine 'Zed agents routed to OmniRoute (key via AUTOOS_OMNIROUTE_KEY)' -Level ok
+}
+
+function Install-AutoOSOpenHands {
+    <#
+      .SYNOPSIS Pull the OpenHands image; the container is started on demand.
+      .DESCRIPTION
+        OpenHands runs as a Docker container wired to the OmniRoute gateway by
+        configuration/start-stack.ps1 -App openhands. Installing is "have the
+        image locally"; nothing is started here, so setup stays non-interactive.
+    #>
+    $image = 'docker.openhands.dev/openhands/openhands:latest'
+    if ($script:DryRun) {
+        Write-AutoOSLine "would pull $image (Docker Desktop must be running)" -Level muted
+        return
+    }
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Write-AutoOSLine 'docker CLI not found - install Docker Desktop, then re-run' -Level warn
+        return
+    }
+    $probe = Invoke-AutoOSProcess -FilePath 'docker' -Arguments @('info', '--format', '{{.ServerVersion}}')
+    if (-not $probe.Success) {
+        Write-AutoOSLine 'Docker daemon is not running - start Docker Desktop, then: docker pull ' -Level warn
+        Write-AutoOSLine "    $image" -Level muted
+        return
+    }
+    $pull = Invoke-AutoOSProcess -FilePath 'docker' -Arguments @('pull', $image)
+    if ($pull.Success) {
+        Write-AutoOSLine 'OpenHands image ready' -Level ok
+        Write-AutoOSLine 'start it with: .\configuration\start-stack.ps1 -App openhands' -Level info
+    } else {
+        Write-AutoOSLine "docker pull failed (exit $($pull.ExitCode)) - check Docker Desktop" -Level warn
+    }
+}
+
+function Install-AutoOSNeovim {
+    <#
+      .SYNOPSIS
+        Make nvim reachable and install the LazyVim starter config.
+      .DESCRIPTION
+        PATH is only ever appended to via Add-AutoOSPathEntry (the single PATH
+        code path) — never replaced. The LazyVim + sidekick steps mirror
+        install_lazyvim / enable_sidekick_extra in lib/linux/install.sh.
+        Idempotent: every step is a no-op when already done. Dry-run safe:
+        announces, writes nothing.
+    #>
+    $binDir = Join-Path $env:ProgramFiles 'Neovim\bin'
+    if (Test-Path (Join-Path $binDir 'nvim.exe')) {
+        $onPath = $false
+        foreach ($scope in @('User', 'Machine')) {
+            $scopePath = [Environment]::GetEnvironmentVariable('Path', $scope)
+            if ($scopePath -and (@($scopePath -split ';' |
+                    Where-Object { $_.TrimEnd('\') -ieq $binDir.TrimEnd('\') }).Count -gt 0)) {
+                $onPath = $true
+            }
+        }
+        if ($onPath) {
+            Write-AutoOSLine "Neovim already on PATH ($binDir)" -Level muted
+        } else {
+            Add-AutoOSPathEntry -Directory @($binDir) | Out-Null
+        }
+    } elseif (-not (Get-Command nvim -ErrorAction SilentlyContinue)) {
+        Write-AutoOSLine 'nvim.exe not found - install Neovim, then re-run' -Level warn
+    }
+    Install-AutoOSLazyVim
+}
+
+function Install-AutoOSLazyVim {
+    <#
+      .SYNOPSIS Clone the LazyVim starter config once, then enable sidekick.
+    #>
+    $dest = Join-Path $env:LOCALAPPDATA 'nvim'
+    if (Test-Path $dest) {
+        Write-AutoOSLine 'nvim config already exists - leaving it alone' -Level muted
+    } elseif ($script:DryRun) {
+        Write-AutoOSLine "would install the LazyVim starter into $dest" -Level muted
+    } else {
+        $cloned = Invoke-AutoOSProcess -FilePath 'git' -Arguments @(
+            'clone', '--depth', '1', 'https://github.com/LazyVim/starter', $dest)
+        if (-not $cloned.Success) {
+            Write-AutoOSLine 'LazyVim clone failed - check git, then re-run' -Level warn
+            return
+        }
+        Remove-Item (Join-Path $dest '.git') -Recurse -Force -ErrorAction SilentlyContinue
+        Write-AutoOSLine 'LazyVim starter installed' -Level ok
+    }
+    Enable-AutoOSSidekickExtra
+}
+
+function Enable-AutoOSSidekickExtra {
+    <#
+      .SYNOPSIS Enable Folke's sidekick.nvim extra (opencode in Neovim).
+      .DESCRIPTION
+        sidekick embeds the opencode CLI (<leader>aa), which inherits the repo
+        routing. Enabling = one id in lazyvim.json; every other key is kept,
+        and the file is backed up before the first write. Mirrors
+        enable_sidekick_extra in lib/linux/install.sh.
+    #>
+    $cfgDir = Join-Path $env:LOCALAPPDATA 'nvim'
+    $lj = Join-Path $cfgDir 'lazyvim.json'
+    $extra = 'lazyvim.plugins.extras.ai.sidekick'
+    if ($script:DryRun) {
+        Write-AutoOSLine "would enable the sidekick extra in $lj" -Level muted
+        return
+    }
+    if (-not (Test-Path $cfgDir)) {
+        Write-AutoOSLine 'no nvim config - skipping sidekick' -Level muted
+        return
+    }
+    $cfg = @{}
+    if (Test-Path $lj) {
+        try {
+            $parsed = Get-Content $lj -Raw | ConvertFrom-Json
+            if ($parsed -is [System.Collections.IEnumerable] -and $parsed -isnot [string]) {
+                Write-AutoOSLine "unexpected shape in $lj - leaving it alone" -Level warn
+                return
+            }
+            foreach ($p in $parsed.PSObject.Properties) {
+                $cfg[$p.Name] = $p.Value
+            }
+        } catch {
+            Write-AutoOSLine "could not parse $lj - leaving it alone" -Level warn
+            return
+        }
+        Copy-Item $lj "$lj.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
+    $extras = @()
+    if ($cfg.ContainsKey('extras')) { $extras = @($cfg['extras']) }
+    if ($extras -contains $extra) {
+        Write-AutoOSLine 'sidekick extra already enabled' -Level muted
+        return
+    }
+    $cfg['extras'] = @($extras) + @($extra)
+    $cfg | ConvertTo-Json -Depth 8 | Out-File -FilePath $lj -Encoding utf8
+    Write-AutoOSLine 'sidekick extra enabled (<leader>aa toggles the opencode panel)' -Level ok
+}
+
 function Invoke-AutoOSPostInstall {
     param([Parameter(Mandatory)][psobject]$Component)
     if (-not $Component.PostInstall) { return }
@@ -2317,6 +2515,8 @@ Export-ModuleMember -Function `
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
+    Install-AutoOSLitellm, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
+    Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,
     Install-AutoOSOterm

@@ -131,7 +131,6 @@ catalog_installed_ids() {
     done
     printf '%s' "${ids% }"
 }
-
 # ─── Provider dispatch ──────────────────────────────────────────────────────
 # install_component <provider> <package>
 # Result lands in INSTALL_STATE (installed|skipped|failed) rather than on stdout:
@@ -198,6 +197,7 @@ install_script() {
         claude-autostart) install_claude_autostart ;;
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
+        zed)             install_zed ;;
         *) ui_err "no script installer for '$1'"; return 1 ;;
     esac
 }
@@ -949,11 +949,148 @@ add_user_to_docker_group() {
 
 install_lazyvim() {
     local dest="$SYS_HOME/.config/nvim"
-    if [[ -e "$dest" ]]; then ui_muted "nvim config already exists - leaving it alone"; return 0; fi
-    if (( AUTOOS_DRY_RUN )); then ui_muted "would install the LazyVim starter into $dest"; return 0; fi
-    git clone --depth 1 https://github.com/LazyVim/starter "$dest"
-    rm -rf "$dest/.git"
-    ui_ok "LazyVim starter installed"
+    if [[ -e "$dest" ]]; then
+        ui_muted "nvim config already exists - leaving it alone"
+    else
+        if (( AUTOOS_DRY_RUN )); then ui_muted "would install the LazyVim starter into $dest"; else
+            git clone --depth 1 https://github.com/LazyVim/starter "$dest"
+            rm -rf "$dest/.git"
+            ui_ok "LazyVim starter installed"
+        fi
+    fi
+    enable_sidekick_extra
+}
+
+enable_sidekick_extra() {
+    # Folke's sidekick.nvim embeds the opencode CLI in Neovim (<leader>aa).
+    # LazyVim ships it as an extra; enabling = one id in lazyvim.json.
+    local lj="$SYS_HOME/.config/nvim/lazyvim.json"
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would enable the sidekick extra in $lj"; return 0; fi
+    [[ -d "$SYS_HOME/.config/nvim" ]] || { ui_muted "no nvim config - skipping sidekick"; return 0; }
+    python3 - "$lj" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+extra = "lazyvim.plugins.extras.ai.sidekick"
+cfg = {}
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+extras = cfg.setdefault("extras", [])
+if extra not in extras:
+    extras.append(extra)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2)
+    print("enabled")
+else:
+    print("already")
+PY
+    ui_ok "sidekick extra enabled (<leader>aa toggles the opencode panel)"
+}
+
+install_zed() {
+    # Zed publishes no checksum for this installer, so the minimum bar (same
+    # as install_agy/install_uv/install_ollama, guard A14): download to a
+    # file, verify it is non-empty and actually looks like a script, and only
+    # then execute the FILE - never the pipe.
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would install Zed via https://zed.dev/install.sh"; return 0; fi
+    local url="https://zed.dev/install.sh"
+    ui_muted "downloading Zed installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_err "failed to download Zed installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_err "Zed installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    sh "$tmp" || rc=$?
+    rm -f "$tmp"
+    if (( rc != 0 )); then return $rc; fi
+    ui_ok "Zed installed"
+}
+
+install_openhands() {
+    # Pull the OpenHands image; the container itself is started on demand by
+    # configuration/start-stack.sh openhands, wired to the OmniRoute gateway.
+    local image="docker.openhands.dev/openhands/openhands:latest"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would pull ${image} (Docker daemon must be running)"
+        return 0
+    fi
+    if ! has_cmd docker; then
+        ui_warn "docker CLI not found - install Docker first, then re-run"
+        return 0
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        ui_warn "Docker daemon is not running - start it, then: docker pull ${image}"
+        return 0
+    fi
+    run docker pull "$image"
+    ui_ok "OpenHands image ready"
+    ui_info "start it with: ./configuration/start-stack.sh openhands"
+}
+
+install_litellm_proxy() {
+    if has_cmd litellm; then ui_muted "litellm already installed"; return 0; fi
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would install litellm[proxy] via pipx or pip"; return 0; fi
+    if has_cmd pipx; then
+        pipx install 'litellm[proxy]' || ui_warn "pipx install failed - see docs/models.md for the manual step"
+    elif has_cmd python3; then
+        python3 -m pip install --user 'litellm[proxy]' || ui_warn "pip install failed - see docs/models.md for the manual step"
+    else
+        ui_warn "no python3 on PATH - install Python, then: pip install 'litellm[proxy]'"
+    fi
+    ui_info "next: copy configuration/litellm/.env.example to .env, add keys (docs/api-keys.md)"
+    return 0
+}
+
+route_zed_to_proxy() {
+    # Point Zed's agent panel at the local OmniRoute gateway (:20128).
+    # Only the provider id 'autoos-omniroute' is written; every other
+    # setting is kept. The client key comes from env AUTOOS_OMNIROUTE_KEY
+    # (dashboard -> api-manager), never from this file.
+    local cfg_dir="$SYS_HOME/.config/zed"
+    local cfg="$cfg_dir/settings.json"
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would route Zed agents to OmniRoute in $cfg"; return 0; fi
+    mkdir -p "$cfg_dir"
+    if [[ -f "$cfg" ]]; then
+        cp "$cfg" "$cfg.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    fi
+    python3 - "$cfg" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+cfg = {}
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+lm = cfg.setdefault("language_models", {})
+oc = lm.setdefault("openai_compatible", {})
+oc["autoos-omniroute"] = {
+    "api_url": "http://127.0.0.1:20128/v1",
+    "available_models": [
+        {"name": "auto/smart", "display_name": "tier1 orchestrator (auto smart)",
+         "max_tokens": 131072, "reasoning_effort": "xhigh"},
+        {"name": "auto", "display_name": "tier2 smart (auto balanced)",
+         "max_tokens": 131072},
+        {"name": "auto/cheap", "display_name": "tier3 driver (auto cheap)",
+         "max_tokens": 131072},
+    ],
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(cfg, fh, indent=2)
+PY
+    # A failed merge must not report success: setup.sh runs under set -e,
+    # but sourced/test contexts do not, so check explicitly.
+    if (( PIPESTATUS[0] != 0 )); then
+        ui_warn "could not update $cfg - is python3 working?"
+        return 1
+    fi
+    ui_ok "Zed agents routed to OmniRoute (key via AUTOOS_OMNIROUTE_KEY)"
+    return 0
 }
 
 # ─── MCP wiring ─────────────────────────────────────────────────────────────
