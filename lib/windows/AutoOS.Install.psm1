@@ -2052,7 +2052,7 @@ def _profile_for(mid, key, name=None):
         # reasoning_effort=high + encrypted reasoning + a 200k thinking
         # budget, and any sparse profile is materialized through those
         # defaults. Non-thinking providers (Ollama) hard-fail such requests
-        # with '"model" does not support thinking'.
+        # with 'model does not support thinking'.
         p['reasoning_effort'] = 'none'
         p['enable_encrypted_reasoning'] = False
         p['extended_thinking_budget'] = None
@@ -2100,7 +2100,7 @@ llm = agent_settings.setdefault('llm', {})
 _muse = REPO_BY_ID['muse-spark']['direct']
 _ds = REPO_BY_ID['deepseek-chat']['direct']
 # reasoning_effort must follow the chosen default: only thinking models get
-# "high". The unconditional "high" used to poison the local/Ollama fallback
+# high. The unconditional high used to poison the local/Ollama fallback
 # (and deepseek-chat) with thinking params Ollama rejects outright.
 _default_reasoning = False
 if muse_key:
@@ -2227,6 +2227,35 @@ profiles['ollama-qwen-coder.json'] = _alias_data
 for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), 'w', encoding='utf-8') as f:
         json.dump(p_data, f, indent=2)
+gw_key = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] != 'null' else None
+if gw_key:
+    # Gateway-routed tier profiles for the 3-level hierarchy. These are NOT
+    # catalog models (check-vendored covers repo-vendored profiles only), so
+    # costs stay 0 - billing happens at the gateway, not per profile. The
+    # openai/ prefix is the LiteLLM transport selector OpenHands requires;
+    # without it the provider is rejected as not provided. Base URL is container-side.
+    _gw = 'http://host.docker.internal:20128/v1'
+    for _tn, _tm, _tctx, _tout, _treason in [
+            ('tier1', 'openai/tier1', 1048576, 65536, True),
+            ('tier2', 'openai/tier2', 131072, 32768, False),
+            ('tier3', 'openai/tier3', 131072, 16384, False)]:
+        _gp = {'auth_type': 'api_key', 'api_mode': 'auto', 'stream': False,
+               'drop_params': True, 'modify_params': True,
+               'disable_stop_word': False, 'caching_prompt': True,
+               'log_completions': False, 'native_tool_calling': True,
+               'is_subscription': False, 'capability_overrides': {},
+               'litellm_extra_body': {}, 'model': _tm, 'base_url': _gw,
+               'max_input_tokens': _tctx, 'max_output_tokens': _tout,
+               'input_cost_per_token': 0, 'output_cost_per_token': 0,
+               'api_key': gw_key}
+        if _treason:
+            _gp['reasoning_effort'] = 'high'
+        else:
+            _gp['reasoning_effort'] = 'none'
+            _gp['enable_encrypted_reasoning'] = False
+            _gp['extended_thinking_budget'] = None
+        with open(os.path.join(profiles_dir, 'autoos-%s.json' % _tn), 'w', encoding='utf-8') as _ff:
+            json.dump(_gp, _ff, indent=2)
 
 agent_profiles_dir = os.path.join(openhands_dir, 'agent-profiles')
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
@@ -2252,13 +2281,15 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
         $argDeepseek = if ($deepseekKey) { $deepseekKey } else { 'null' }
         $argOpenrouter = if ($openrouterKey) { $openrouterKey } else { 'null' }
         $argContext7 = if ($context7Key) { $context7Key } else { 'null' }
+        $omniKey = if ($env:AUTOOS_OMNIROUTE_KEY) { $env:AUTOOS_OMNIROUTE_KEY } elseif ($secrets.ContainsKey('omniroute')) { $secrets['omniroute'] } else { $null }
+        $argOmni = if ($omniKey) { $omniKey } else { 'null' }
 
         # The resolved address reaches the child through its environment; the
         # caller's own OLLAMA_BASE_URL is restored afterwards.
         $savedOllama = $env:OLLAMA_BASE_URL
         try {
             $env:OLLAMA_BASE_URL = Resolve-AutoOSOllamaBaseUrl
-            & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot
+            & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot $argOmni
         }
         finally { $env:OLLAMA_BASE_URL = $savedOllama }
 

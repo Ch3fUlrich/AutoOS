@@ -3238,6 +3238,62 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
     }
 }
 
+Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
+    # Tier profiles (autoos-tier1/2/3) route OpenHands through the gateway
+    # for the 3-level hierarchy. Same temp-dir isolation as the Ollama test.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+    $script = [regex]::Match($src, "(?s)\`$setupScript = @'\r?\n(.*?)\r?\n'@").Groups[1].Value
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-tier-$PID"
+    $oh = Join-Path $tmp '.openhands'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $oh 'profiles'), (Join-Path $oh 'agent-profiles')
+    $saved = @{ OLLAMA_BASE_URL = $env:OLLAMA_BASE_URL; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME; LOCALAPPDATA = $env:LOCALAPPDATA }
+    try {
+        $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
+        $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
+        & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-omni-key' *> $null
+        $t1 = Get-Content (Join-Path $oh 'profiles\autoos-tier1.json') -Raw | ConvertFrom-Json
+        $t3 = Get-Content (Join-Path $oh 'profiles\autoos-tier3.json') -Raw | ConvertFrom-Json
+        Assert-Equal $t1.model 'openai/tier1'
+        Assert-Equal $t1.base_url 'http://host.docker.internal:20128/v1'
+        Assert-Equal $t1.api_key 'test-omni-key'
+        Assert-Equal $t1.reasoning_effort 'high'
+        Assert-Equal $t3.model 'openai/tier3'
+        Assert-Equal $t3.reasoning_effort 'none'
+        Assert-True ($t3.enable_encrypted_reasoning -eq $false) 'tier3 thinking not opted out'
+    } finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            else { Set-Item "env:$k" -Value $saved[$k] }
+        }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'the embedded OpenHands setup script writes no tier profiles without a key' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+    $script = [regex]::Match($src, "(?s)\`$setupScript = @'\r?\n(.*?)\r?\n'@").Groups[1].Value
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-notier-$PID"
+    $oh = Join-Path $tmp '.openhands'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $oh 'profiles'), (Join-Path $oh 'agent-profiles')
+    $saved = @{ OLLAMA_BASE_URL = $env:OLLAMA_BASE_URL; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME; LOCALAPPDATA = $env:LOCALAPPDATA }
+    try {
+        $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
+        $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
+        & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'null' *> $null
+        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\autoos-tier1.json'))) 'tier profile written without a key'
+    } finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            else { Set-Item "env:$k" -Value $saved[$k] }
+        }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'agent harness installers: the OpenHands writer calls the generator and skips role profiles' {
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match "agent_harness\.py[\s'\)]*openhands") 'Set-AutoOSOpenHandsConfig does not call agent_harness.py openhands'
@@ -3277,8 +3333,7 @@ Test-Case "agent harness: the generator's unit tests pass" {
     } finally { $ErrorActionPreference = $prevAction; Remove-Item $log -ErrorAction SilentlyContinue }
 }
 
-Test-Case 'the embedded OpenHands setup script is valid Python' {
-    # Set-AutoOSOpenHandsConfig pipes a literal here-string to `python -c`.
+Test-Case 'the embedded OpenHands setup script is valid Python' {    # Set-AutoOSOpenHandsConfig pipes a literal here-string to `python -c`.
     # Nothing else parses it before a real install, so a missing `except`
     # once shipped and silently broke every Windows OpenHands setup.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -3294,8 +3349,16 @@ Test-Case 'the embedded OpenHands setup script is valid Python' {
         # double quotes (NameError: name 'utf' is not defined).
         $out = & $py.Source -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding=''utf-8'').read())' $tmp 2>&1
         Assert-True ($LASTEXITCODE -eq 0) "embedded python does not parse: $out"
+        # No BARE double quote may appear in the embedded script: PowerShell
+        # 5.1 truncates a native argument at the first one it cannot marshal,
+        # silently cutting the script mid-file (measured 2026-09-21: 13677
+        # chars sent, 11107 received, IndentationError at the cut). Backslash-
+        # escaped quotes (\") travel as literal characters and are allowed.
+        $bare = [regex]::Matches($m.Groups[1].Value, '(?<!\\)"')
+        Assert-Equal $bare.Count 0 'bare double quote in embedded python (5.1 truncates there)'
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
+
 # --- AI routing stack (omniroute / litellm / zed / opencode) ---
 Describe-Group 'ai routing'
 
@@ -3545,6 +3608,24 @@ Test-Case 'start-stack.ps1 parses without syntax errors' {
     $null = [System.Management.Automation.PSParser]::Tokenize(
         (Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw), [ref]$errors)
     Assert-Equal (@($errors)).Count 0
+}
+
+Test-Case 'openhands launch is detached, probed and stale-settings safe' {
+    # -it fails without a TTY and foreground never returns (the old script
+    # printed the URL even when nothing started); schema_version 6 settings
+    # 500 the current image. Both fixed 2026-09-21 - pin the shape here.
+    foreach ($f in @('configuration\start-stack.ps1', 'configuration\start-stack.sh')) {
+        $text = Get-Content (Join-Path $Root $f) -Raw
+        Assert-True ($text -match 'docker run -d ') "$f is not detached"
+        Assert-True ($text -notmatch 'docker run -it') "$f still uses -it"
+        Assert-True ($text -match 'schema_version') "$f has no stale-settings guard"
+        Assert-True ($text -match 'autoos-backup') "$f deletes settings without backup"
+        Assert-True ($text -match 'docker logs openhands-app') "$f prints the URL without a probe behind it"
+        # Only versions NEWER than the image (6+) move aside: a live v3 file
+        # serves fine, so a blanket "!= 4" nuke would destroy working configs.
+        Assert-True ($text -match 'ge 6|>= 6|>=6') "$f nukes non-4 versions indiscriminately"
+    }
+    Pass
 }
 
 Test-Case 'zed routing creates a fresh config when none exists' {
