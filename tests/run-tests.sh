@@ -1967,12 +1967,12 @@ describe "AI routing"
 
 if it "zed rides the script provider end to end"; then
     ok=1
-    grep -q 'zed)             has_cmd zed' lib/linux/install.sh || ok=0
     grep -q 'zed)             install_zed' lib/linux/install.sh || ok=0
-    # has_cmd is stubbed so the test never depends on what this machine happens
+    grep -q 'zed)             has_bin zed' lib/linux/detect.sh || ok=0
+    # has_bin is stubbed so the test never depends on what this machine happens
     # to have installed (Zed is present on the dev box via WSL interop).
-    ( has_cmd() { return 1; }; script_is_installed zed ) >/dev/null 2>&1 && ok=0
-    ( has_cmd() { return 0; }; script_is_installed zed ) >/dev/null 2>&1 || ok=0
+    ( has_bin() { return 1; }; script_is_installed zed ) >/dev/null 2>&1 && ok=0
+    ( has_bin() { return 0; }; script_is_installed zed ) >/dev/null 2>&1 || ok=0
     if (( ok )); then pass; else fail "zed dispatch or detection is broken"; fi
 fi
 
