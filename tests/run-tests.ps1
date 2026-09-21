@@ -3449,7 +3449,12 @@ Test-Case 'litellm fallback config is internally consistent' {
         foreach ($t in ($m.Groups[2].Value -split ',')) { Assert-Contains $groups $t.Trim() }
     }
     $models = [regex]::Matches($yaml, '(?m)^\s*model:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value }
-    Assert-True (($models -match 'cerebras').Count -eq 0 -and ($models -match 'llama-3\.3-70b').Count -eq 0) 'retired free legs still routed'
+    # llama-3.3-70b left groq's free tier in 2026-08 and must never come back.
+    # cerebras is NOT stale: combos.json re-admits it as a credit/paid-capable
+    # leg (2026-09-20), so the old "any cerebras routed" check no longer holds.
+    # Its presence in the managed blocks is asserted against combos.json by
+    # tools/sync-router-tiers.py --check.
+    Assert-True (($models -match 'llama-3\.3-70b').Count -eq 0) 'retired free legs still routed'
     Assert-True ($yaml -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
     Pass
 }

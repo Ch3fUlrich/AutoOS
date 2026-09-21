@@ -55,11 +55,15 @@ model_list:
       api_key: os.environ/OPENCODE_ZEN_API_KEY
 
   # ── tier2: smart second level, free quotas ─────────────────────────
+  # Mirror of combos.json tier2 (single source of truth), kept in sync by
+  # tools/sync-router-tiers.py: the markers below delimit a machine-owned
+  # block - legs inside are regenerated, everything outside is untouched.
+  # AUTOOS-MANAGED-START tier2
   - model_name: tier2
     litellm_params:
-      model: mistral/mistral-small-latest
-      api_key: os.environ/MISTRAL_API_KEY
-      rpm: 2 # biggest documented free pool (1B/mo per org); 2 RPM per console
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
   - model_name: tier2
     litellm_params:
       model: groq/openai/gpt-oss-120b
@@ -67,9 +71,41 @@ model_list:
       rpm: 30 # free: per-model 200K tokens/day caps
   - model_name: tier2
     litellm_params:
-      model: gemini/gemini-3.8-flash
-      api_key: os.environ/GEMINI_API_KEY
-      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+      model: cerebras/gpt-oss-120b
+      api_key: os.environ/CEREBRAS_API_KEY
+  - model_name: tier2
+    litellm_params:
+      model: sambanova/gpt-oss-120b
+      api_key: os.environ/SAMBANOVA_API_KEY
+  - model_name: tier2
+    litellm_params:
+      model: openai/deepseek-v4-flash
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  - model_name: tier2
+    litellm_params:
+      model: openai/glm-4.5-air
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  - model_name: tier2
+    litellm_params:
+      model: openai/kimi-k3
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  - model_name: tier2
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v4.1-flash
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: tier2
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  - model_name: tier2
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_base: https://opencode.ai/zen/v1
+      api_key: os.environ/OPENCODE_ZEN_API_KEY
+  # AUTOOS-MANAGED-END tier2
 
   # ── tier2-paid: deepseek flash, nothing else ───────────────────────
   - model_name: tier2-paid
@@ -79,11 +115,30 @@ model_list:
       api_key: os.environ/OPENCODE_ZEN_API_KEY
 
   # ── tier3: daily driver, cheapest capable ──────────────────────────
+  # Mirror of combos.json tier3 (see the tier2 note above).
+  # AUTOOS-MANAGED-START tier3
   - model_name: tier3
     litellm_params:
-      model: mistral/devstral-small-latest
+      model: mistral/mistral-code-latest
       api_key: os.environ/MISTRAL_API_KEY
-      rpm: 2 # La Plateforme free mode is rate-limited
+  - model_name: tier3
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: tier3
+    litellm_params:
+      model: cerebras/qwen-3.8-27b
+      api_key: os.environ/CEREBRAS_API_KEY
+  - model_name: tier3
+    litellm_params:
+      model: openai/glm-4.5-air
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  - model_name: tier3
+    litellm_params:
+      model: openai/minimax-m2.7
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
   - model_name: tier3
     litellm_params:
       model: mistral/mistral-small-latest
@@ -91,9 +146,14 @@ model_list:
       rpm: 2
   - model_name: tier3
     litellm_params:
-      model: gemini/gemini-2.5-flash
-      api_key: os.environ/GEMINI_API_KEY
-      rpm: 10
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  - model_name: tier3
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_base: https://opencode.ai/zen/v1
+      api_key: os.environ/OPENCODE_ZEN_API_KEY
+  # AUTOOS-MANAGED-END tier3
 
   # ── tier3-paid: deepseek flash, then DeepSeek direct ───────────────
   - model_name: tier3-paid

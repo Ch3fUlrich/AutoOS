@@ -287,3 +287,9 @@ flowchart TB
 Tiers in `opencode.jsonc`, combos in the OmniRoute dashboard, static chains
 in `configuration/litellm/config.yaml`. Per-user overrides go in
 `~/.config/opencode/opencode.jsonc` (global merges under project).
+
+Edit tier order in `configuration/omniroute/combos.json` — that file is the
+single source of truth. `configuration/litellm/config.yaml` mirrors it inside
+its `# AUTOOS-MANAGED-START/END` blocks; run
+`python3 tools/sync-router-tiers.py` to re-mirror, or `--check` to see drift
+(exit 1). Hand-editing inside those markers is overwritten.
