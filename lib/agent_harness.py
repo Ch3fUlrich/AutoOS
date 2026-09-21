@@ -294,8 +294,15 @@ def _is_junction(path):
     try:
         if not os.path.isdir(path) or os.path.islink(path):
             return False
-        return os.path.normcase(os.path.realpath(path)) != os.path.normcase(
-            os.path.abspath(path)
+        # Reparse-point flag, not a realpath-vs-abspath comparison: the
+        # latter misfires when TEMP carries 8.3 short names (RUNNER~1 on
+        # CI runners), where realpath returns the long form and every
+        # plain directory looks like a junction.
+        import stat
+
+        return bool(
+            os.lstat(path).st_file_attributes
+            & stat.FILE_ATTRIBUTE_REPARSE_POINT
         )
     except OSError:
         return False
@@ -303,16 +310,24 @@ def _is_junction(path):
 
 def _link_target(path):
     try:
-        return os.readlink(path)
+        target = os.readlink(path)
     except OSError:
         return os.path.realpath(path)
+    # Junction readlink targets carry a device prefix (\\?\ or \??\);
+    # strip it so target comparisons see a plain absolute path.
+    for prefix in ('\\\\?\\', '\\??\\'):
+        if target.startswith(prefix):
+            return target[len(prefix):]
+    return target
 
 
 def _same_target(target, link_path, source):
     if not os.path.isabs(target):
         target = os.path.join(os.path.dirname(link_path), target)
-    return os.path.normcase(os.path.normpath(target)) == os.path.normcase(
-        os.path.normpath(source)
+    # Fully resolve both sides: TEMP may use 8.3 short names, so a raw
+    # normcase comparison sees long-vs-short as different targets.
+    return os.path.normcase(os.path.realpath(target)) == os.path.normcase(
+        os.path.realpath(source)
     )
 
 
