@@ -2230,17 +2230,23 @@ import json, re, io
 text = io.open("opencode.jsonc", encoding="utf-8").read()
 text = re.sub(r"(?m)^\s*//.*$", "", text)
 oc = json.loads(text)
+h = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))
 p = oc["providers"]
-print("%s|%s|%s|%s|%s" % (
+pins = sorted(
+    "pin-ok" if h["mcp_servers"][name]["package"] in " ".join(spec.get("command", []))
+    else "MISSING:" + name
+    for name, spec in oc["mcp"]["servers"].items())
+print("%s|%s|%s|%s|%s|%s" % (
     oc["model"],
     p["omniroute"]["settings"]["baseURL"],
     ",".join(sorted(p["omniroute"]["models"].keys())),
     "litellm" in p,
-    ",".join(sorted(oc["mcp"]["servers"].keys()))))
+    ",".join(sorted(oc["mcp"]["servers"].keys())),
+    ",".join(pins)))
 PY
 )"
     assert_eq "$report" \
-        "omniroute/tier1|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|True|graphify,playwright,serena"
+        "omniroute/tier1|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|True|context7,graphify,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
