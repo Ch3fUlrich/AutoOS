@@ -1052,9 +1052,11 @@ route_zed_to_proxy() {
     # Point Zed's agent panel at the local OmniRoute gateway (:20128) plus
     # the LiteLLM fallback (:4000). Only the provider ids
     # 'autoos-omniroute' / 'autoos-litellm' are written; every other
-    # setting is kept. Keys come from env AUTOOS_OMNIROUTE_KEY /
-    # LITELLM_MASTER_KEY (never from this file); missing keys warn and the
-    # URL/models are still written so a later run with keys fills them in.
+    # setting is kept. Keys NEVER go into settings.json (Zed docs: provider
+    # keys come from the keychain/UI or env). Zed derives the env name from
+    # the provider id, so export AUTOOS_OMNIROUTE_API_KEY and
+    # AUTOOS_LITELLM_API_KEY before starting Zed; missing keys warn here and
+    # the providers stay hidden until a restart picks them up.
     local cfg_dir="$SYS_HOME/.config/zed"
     local cfg="$cfg_dir/settings.json"
     if (( AUTOOS_DRY_RUN )); then ui_muted "would route Zed agents to OmniRoute in $cfg"; return 0; fi
@@ -1097,8 +1099,6 @@ omni = {
     "api_url": "http://127.0.0.1:20128/v1",
     "available_models": auto + tier_models,
 }
-if os.environ.get("AUTOOS_OMNIROUTE_KEY"):
-    omni["api_key"] = os.environ["AUTOOS_OMNIROUTE_KEY"]
 oc["autoos-omniroute"] = omni
 lit_models = [
     {"name": n, "display_name": "%s (litellm fallback)" % n,
@@ -1113,9 +1113,25 @@ lit = {
     "api_url": "http://127.0.0.1:4000/v1",
     "available_models": lit_models,
 }
-if os.environ.get("LITELLM_MASTER_KEY"):
-    lit["api_key"] = os.environ["LITELLM_MASTER_KEY"]
 oc["autoos-litellm"] = lit
+# Bypass profile: every built-in tool on, no confirmations (global
+# tool_permissions.default allow). Existing profiles and per-tool rules stay.
+agent = cfg.setdefault("agent", {})
+profiles = agent.setdefault("profiles", {})
+bypass_tools = {t: True for t in [
+    "ask_user", "create_directory", "copy_path", "delete_path",
+    "diagnostics", "edit_file", "fetch", "find_path", "grep",
+    "list_directory", "move_path", "skill", "read_file", "spawn_agent",
+    "terminal", "search_web", "write_file"]}
+profiles["bypass"] = {
+    "name": "bypass",
+    "tools": bypass_tools,
+    "enable_all_context_servers": False,
+    "context_servers": {},
+    "default_model": {"provider": "autoos-omniroute", "model": "tier1"},
+}
+tp = agent.setdefault("tool_permissions", {})
+tp["default"] = "allow"
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(cfg, fh, indent=2)
 PY
@@ -1125,9 +1141,9 @@ PY
         ui_warn "could not update $cfg - is python3 working?"
         return 1
     fi
-    [[ -n "${AUTOOS_OMNIROUTE_KEY:-}" ]] || ui_warn "AUTOOS_OMNIROUTE_KEY not set - Zed OmniRoute calls will 401 until setup is re-run with keys"
-    [[ -n "${LITELLM_MASTER_KEY:-}" ]] || ui_warn "LITELLM_MASTER_KEY not set - Zed LiteLLM calls will 401 until setup is re-run with keys"
-    ui_ok "Zed agents routed to OmniRoute + LiteLLM (keys from env, never the repo)"
+    [[ -n "${AUTOOS_OMNIROUTE_API_KEY:-}" ]] || ui_warn "AUTOOS_OMNIROUTE_API_KEY not set - export the OmniRoute client key before starting Zed, or the provider stays hidden"
+    [[ -n "${AUTOOS_LITELLM_API_KEY:-}" ]] || ui_warn "AUTOOS_LITELLM_API_KEY not set - export the LiteLLM master key before starting Zed, or the fallback stays hidden"
+    ui_ok "Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)"
     return 0
 }
 

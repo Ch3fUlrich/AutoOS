@@ -2320,9 +2320,12 @@ function Set-AutoOSZedProxy {
     <#
       .SYNOPSIS Point Zed's agent panel at the local OmniRoute gateway + LiteLLM fallback.
       Only the provider ids 'autoos-omniroute' / 'autoos-litellm' are written;
-      every other Zed setting is kept. Keys come from env AUTOOS_OMNIROUTE_KEY
-      and LITELLM_MASTER_KEY (never from the repo); missing keys warn and the
-      URL/models are still written so a later run with keys fills them in.
+      every other Zed setting is kept. Keys NEVER go into settings.json (Zed
+      docs: provider keys come from the keychain/UI or from env). Zed derives
+      the env name from the provider id (upper snake + _API_KEY), so the
+      gateway key must be exported as AUTOOS_OMNIROUTE_API_KEY and the
+      fallback key as AUTOOS_LITELLM_API_KEY before Zed starts; missing keys
+      warn here and the providers stay hidden until a restart picks them up.
     #>
     $cfgDir  = Join-Path $env:APPDATA 'Zed'
     $cfgPath = Join-Path $cfgDir 'settings.json'
@@ -2344,6 +2347,34 @@ function Set-AutoOSZedProxy {
     if ($null -eq $settings.language_models.PSObject.Properties['openai_compatible']) {
         Add-Member -InputObject $settings.language_models -NotePropertyName 'openai_compatible' -NotePropertyValue (New-Object psobject)
     }
+    # Bypass profile: every built-in tool on, no confirmations (global
+    # tool_permissions.default allow). Existing profiles and any per-tool
+    # rules the user already has are kept; only the default flips.
+    if ($null -eq $settings.PSObject.Properties['agent']) {
+        Add-Member -InputObject $settings -NotePropertyName 'agent' -NotePropertyValue (New-Object psobject)
+    }
+    if ($null -eq $settings.agent.PSObject.Properties['profiles']) {
+        Add-Member -InputObject $settings.agent -NotePropertyName 'profiles' -NotePropertyValue (New-Object psobject)
+    }
+    $bypassTools = [ordered]@{}
+    foreach ($t in @('ask_user','create_directory','copy_path','delete_path','diagnostics','edit_file','fetch','find_path','grep','list_directory','move_path','skill','read_file','spawn_agent','terminal','search_web','write_file')) {
+        $bypassTools[$t] = $true
+    }
+    $bypass = [ordered]@{
+        name = 'bypass'
+        tools = $bypassTools
+        enable_all_context_servers = $false
+        context_servers = [ordered]@{}
+        default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 'tier1' }
+    }
+    Add-Member -InputObject $settings.agent.profiles -NotePropertyName 'bypass' -NotePropertyValue $bypass -Force
+    if ($null -eq $settings.agent.PSObject.Properties['tool_permissions']) {
+        Add-Member -InputObject $settings.agent -NotePropertyName 'tool_permissions' -NotePropertyValue ([ordered]@{ default = 'allow' })
+    } elseif ($null -eq $settings.agent.tool_permissions.PSObject.Properties['default']) {
+        Add-Member -InputObject $settings.agent.tool_permissions -NotePropertyName 'default' -NotePropertyValue 'allow'
+    } else {
+        $settings.agent.tool_permissions.default = 'allow'
+    }
     $tierModels = @(
         @{ name = 'tier1'; display_name = 'tier1 orchestrator (contributor)'; max_tokens = 1048576; reasoning_effort = 'xhigh' },
         @{ name = 'tier1-clean'; display_name = 'tier1-clean (paid contributor)'; max_tokens = 1048576 },
@@ -2360,8 +2391,8 @@ function Set-AutoOSZedProxy {
             @{ name = 'auto/cheap'; display_name = 'tier3 driver (auto cheap)'; max_tokens = 131072 }
         ) + $tierModels
     }
-    if ($env:AUTOOS_OMNIROUTE_KEY) { $omniEntry['api_key'] = $env:AUTOOS_OMNIROUTE_KEY }
-    else { Write-AutoOSLine 'AUTOOS_OMNIROUTE_KEY not set - Zed OmniRoute calls will 401 until setup is re-run with keys' -Level warn }
+    if ($env:AUTOOS_OMNIROUTE_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_OMNIROUTE_API_KEY from the environment' -Level muted }
+    else { Write-AutoOSLine 'AUTOOS_OMNIROUTE_API_KEY not set - export the OmniRoute client key before starting Zed, or the provider stays hidden' -Level warn }
     Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-omniroute' -NotePropertyValue $omniEntry -Force
     $litEntry = @{
         api_url = 'http://127.0.0.1:4000/v1'
@@ -2374,11 +2405,11 @@ function Set-AutoOSZedProxy {
             @{ name = 'tier3-paid'; display_name = 'tier3-paid (litellm)'; max_tokens = 131072 }
         )
     }
-    if ($env:LITELLM_MASTER_KEY) { $litEntry['api_key'] = $env:LITELLM_MASTER_KEY }
-    else { Write-AutoOSLine 'LITELLM_MASTER_KEY not set - Zed LiteLLM calls will 401 until setup is re-run with keys' -Level warn }
+    if ($env:AUTOOS_LITELLM_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_LITELLM_API_KEY from the environment' -Level muted }
+    else { Write-AutoOSLine 'AUTOOS_LITELLM_API_KEY not set - export the LiteLLM master key before starting Zed, or the fallback stays hidden' -Level warn }
     Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-litellm' -NotePropertyValue $litEntry -Force
     $settings | ConvertTo-Json -Depth 8 | Out-File -FilePath $cfgPath -Encoding utf8
-    Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys from env, never the repo)' -Level ok
+    Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)' -Level ok
 }
 
 function Install-AutoOSOpenHands {

@@ -2081,9 +2081,9 @@ if it "zed routing merges one provider and keeps the rest"; then
     mkdir -p "$scratch/.config/zed"
     printf '{"theme":"mine"}' >"$scratch/.config/zed/settings.json"
     ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
-      AUTOOS_OMNIROUTE_KEY="test-omni-key" LITELLM_MASTER_KEY="test-lit-key" route_zed_to_proxy >/dev/null 2>&1 )
+      AUTOOS_OMNIROUTE_API_KEY="test-omni-key" AUTOOS_LITELLM_API_KEY="test-lit-key" route_zed_to_proxy >/dev/null 2>&1 )
     ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
-      AUTOOS_OMNIROUTE_KEY="test-omni-key" LITELLM_MASTER_KEY="test-lit-key" route_zed_to_proxy >/dev/null 2>&1 )
+      AUTOOS_OMNIROUTE_API_KEY="test-omni-key" AUTOOS_LITELLM_API_KEY="test-lit-key" route_zed_to_proxy >/dev/null 2>&1 )
     report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -2091,23 +2091,38 @@ oc = cfg.get("language_models", {}).get("openai_compatible", {})
 omni = oc.get("autoos-omniroute", {})
 lit = oc.get("autoos-litellm", {})
 models = [m["name"] for m in omni.get("available_models", [])]
+# Keys never land in settings.json (Zed docs: keychain/UI or env).
 print("%s|%s|%s|%s|%s|%s" % (
     cfg.get("theme"), omni.get("api_url"), ",".join(models),
-    omni.get("api_key"), lit.get("api_url"), lit.get("api_key")))
+    "api_key" in omni, lit.get("api_url"), "api_key" in lit))
+bp = cfg.get("agent", {}).get("profiles", {}).get("bypass", {})
+btools = bp.get("tools", {})
+off = sorted(k for k, v in btools.items() if v is not True)
+print("bypass=%s|off=%s|provider=%s|model=%s|allow=%s" % (
+    bp.get("name"), ",".join(off),
+    bp.get("default_model", {}).get("provider"),
+    bp.get("default_model", {}).get("model"),
+    cfg.get("agent", {}).get("tool_permissions", {}).get("default")))
 PY
 )"
     backups="$(ls "$scratch"/.config/zed/settings.json.autoos-backup-* 2>/dev/null | wc -l)"
-    leaks="$(grep -cE 'sk-[A-Za-z0-9]{10,}|AUTOOS_OMNIROUTE_KEY|LITELLM_MASTER_KEY|REPLACE' "$scratch/.config/zed/settings.json" || true)"
+    leaks="$(grep -cE 'sk-[A-Za-z0-9]{10,}|_API_KEY|REPLACE' "$scratch/.config/zed/settings.json" || true)"
     rm -rf "$scratch"
-    assert_eq "$report|backups=$backups|leaks=$leaks" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|test-omni-key|http://127.0.0.1:4000/v1|test-lit-key|backups=1|leaks=0"
+    # Two prints = one newline inside $report; assert each line separately.
+    line1="$(printf '%s' "$report" | sed -n '1p')"
+    line2="$(printf '%s' "$report" | sed -n '2p')"
+    assert_eq "$line1" \
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|False|http://127.0.0.1:4000/v1|False"
+    assert_eq "$line2" \
+        "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow"
+    assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
 fi
 
-if it "zed routing without keys warns and writes no api_key"; then
+if it "zed routing without key env warns and stays key-free"; then
     scratch="$(mktemp -d)"
     mkdir -p "$scratch/.config/zed"
     printf '{}' >"$scratch/.config/zed/settings.json"
-    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY; route_zed_to_proxy ) 2>&1)"
+    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; unset AUTOOS_OMNIROUTE_API_KEY AUTOOS_LITELLM_API_KEY; route_zed_to_proxy ) 2>&1)"
     report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -2117,7 +2132,7 @@ print("%s|%s" % ("api_key" in oc.get("autoos-omniroute", {}),
 PY
 )"
     rm -rf "$scratch"
-    if [[ "$report" == "False|False" && "$out" == *"401"* ]]; then pass
+    if [[ "$report" == "False|False" && "$out" == *"stays hidden"* ]]; then pass
     else fail "report=$report out=$(printf '%s' "$out" | tail -2)"; fi
 fi
 
