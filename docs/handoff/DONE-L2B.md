@@ -54,13 +54,13 @@ opened; only model names and env-var *names* are printed.
 - Failure paths exercised: missing `END` → exit 2 with the mismatched-marker
   message; missing file → exit 2.
 - LF stayed LF after a write (no Windows CRLF translation).
-- Full suites run: `bash tests/run-tests.sh` → **382 passed, 0 failed, 0
-  skipped** (includes `shellcheck is clean`); `powershell -File
-  tests/run-tests.ps1` → **595 passed, 1 failed, 1 skipped**. The single
-  failure is `litellm installer delegates to pipx when present`, which fails
-  identically on `main` (a stub-invocation issue on this host, unrelated to
-  this track). The touched case `litellm fallback config is internally
-  consistent` passes in both suites.
+- Full suites run on the rebased tree: `bash tests/run-tests.sh` → **382
+  passed, 0 failed, 0 skipped** (includes `shellcheck is clean`);
+  `powershell -File tests/run-tests.ps1` → **596 passed, 1 failed, 1 skipped**.
+  The single failure is `litellm installer delegates to pipx when present`,
+  which fails identically on `main` (a stub-invocation issue on this host,
+  unrelated to this track). The touched case `litellm fallback config is
+  internally consistent` passes in both suites.
 
 ## 2. Drift `--check` found (the reason this exists)
 
@@ -181,6 +181,20 @@ that line. Detached (`docker run -d`), everything works. **Follow-up** (§5).
 
 ## 5. Follow-ups (out of this track's scope — do not read as done)
 
+0. **The `*-clean` combos and tier1 are not mirrored at all, and tier1 drift is
+   pre-existing on main.** `config.yaml` has no `tier1-clean`, `tier2-clean` or
+   `tier3-clean` block, so anyone using the LiteLLM fallback for sensitive-data
+   work has no clean chain to select. Separately, `combos.json` tier1 was
+   changed by `4fd1520` to
+   `opencode-zen/muse-spark-1.3-contributor-free → openrouter/meta/muse-spark-1.3-contributor`
+   (muse-code dropped as broken) while `config.yaml` still lists **three** tier1
+   legs, including the dead `meta/muse-spark-1.3-contributor`.
+   This is the same drift class this tool fixes, one and two tiers over. The
+   tool is built for it: add `"tier1", "tier2-clean", "tier3-clean"` (and
+   `tier1-clean`) to `SYNCED_TIERS` and add a marker pair per block. Deliberately
+   not done here — this track's scope was stated as the existing tier2/tier3
+   `model_list` entries, and tier1 is entangled with the manual `tier1-paid`
+   chain that has no `combos.json` equivalent.
 1. Wire `python3 tools/sync-router-tiers.py --check` into CI (`tests/` or the
    workflow) so future drift fails loudly.
 2. Add `CHEAPINFERENCE_API_KEY` to `configuration/litellm/.env.example` (the
@@ -197,3 +211,15 @@ that line. Detached (`docker run -d`), everything works. **Follow-up** (§5).
    saved-profile conversation so `openai_tier1` is proven, not just the env path.
 
 Nothing in this branch was merged to `main`.
+
+---
+
+## 6. Rebase note
+
+main moved to `4fd1520` ("contributor-only spark, deactivate broken muse-code")
+while this branch was open. That commit touched the same files (combos.json,
+docs/models.md, both suites) but only its tier1/clean-tier curation and test
+contracts — its tier2/tier3 leg lists are byte-identical to what this branch
+syncs. The branch is rebased onto `4fd1520`; the sync tool still reports
+`OK: tier2, tier3 match combos.json`, and its new clean-tier test contracts
+coexist with the narrowed stale-leg assertion above.
