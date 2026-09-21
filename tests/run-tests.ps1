@@ -3535,7 +3535,13 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         Assert-Equal $s.agent.tool_permissions.default 'allow'
         Assert-True ($null -ne $s.context_servers.serena) 'serena context server missing'
         Assert-True ($null -ne $s.context_servers.graphify) 'graphify context server missing'
-        Assert-Equal ($s.context_servers.serena.args -join ' ') '--from serena-agent==1.7.0 serena start-mcp-server'
+        # Pins come from the harness at runtime, never as literals in lib/
+        # (mcp-pins tests forbid both the bare names and the versions there).
+        $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($n in @('serena', 'graphify')) {
+            $pin = $harness.mcp_servers.$n.package
+            Assert-True ((@($s.context_servers.$n.args) -join ' ') -match [regex]::Escape($pin)) "$n context server does not carry harness pin $pin"
+        }
         Assert-True ($s.agent.profiles.bypass.enable_all_context_servers -eq $true) 'bypass does not opt into context servers'
         Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
         $raw = Get-Content (Join-Path $cfgDir 'settings.json') -Raw

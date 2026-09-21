@@ -2150,9 +2150,16 @@ omni = oc.get("autoos-omniroute", {})
 lit = oc.get("autoos-litellm", {})
 models = [m["name"] for m in omni.get("available_models", [])]
 # Keys never land in settings.json (Zed docs: keychain/UI or env).
-print("%s|%s|%s|%s|%s|%s" % (
+# Pins come from the harness at runtime, never as literals in lib/.
+h = json.load(open("catalog/agent-harness.json", encoding="utf-8"))
+ctx = cfg.get("context_servers", {})
+pinok = ",".join(sorted(
+    "pin-ok" if h["mcp_servers"][n]["package"] in " ".join(ctx.get(n, {}).get("args", []))
+    else "MISSING:" + n
+    for n in ("serena", "graphify")))
+print("%s|%s|%s|%s|%s|%s|%s" % (
     cfg.get("theme"), omni.get("api_url"), ",".join(models),
-    "api_key" in omni, lit.get("api_url"), "api_key" in lit))
+    "api_key" in omni, lit.get("api_url"), "api_key" in lit, pinok))
 bp = cfg.get("agent", {}).get("profiles", {}).get("bypass", {})
 btools = bp.get("tools", {})
 off = sorted(k for k, v in btools.items() if v is not True)
@@ -2171,7 +2178,7 @@ PY
     line1="$(printf '%s' "$report" | sed -n '1p')"
     line2="$(printf '%s' "$report" | sed -n '2p')"
     assert_eq "$line1" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|False|http://127.0.0.1:4000/v1|False"
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok"
     assert_eq "$line2" \
         "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow|ctx=graphify,serena"
     assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
@@ -5362,7 +5369,7 @@ if t1[0] != ("subagent", "*", "deny") or t1[-1] != ("subagent", "tier2-worker", 
     problems.append("tier1")
 if t2[0] != ("subagent", "*", "deny") or t2[-1] != ("subagent", "tier3-reviewer", "allow"):
     problems.append("tier2")
-if t3 != [("subagent", "*", "deny")]:
+if t3 != [("subagent", "*", "deny"), ("edit", "*", "deny"), ("write", "*", "deny"), ("read", "*", "allow"), ("grep", "*", "allow"), ("glob", "*", "allow"), ("bash", "*", "allow")]:
     problems.append("tier3-leaf")
 if a["tier3-reviewer"]["mode"] != "subagent":
     problems.append("tier3-mode")

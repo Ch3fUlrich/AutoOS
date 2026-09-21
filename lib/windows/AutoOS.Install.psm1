@@ -2451,12 +2451,12 @@ function Set-AutoOSZedProxy {
     }
     $serenaCtx = [ordered]@{
         command = 'uvx'
-        args = @('--from', 'serena-agent==1.7.0', 'serena', 'start-mcp-server')
+        args = @('--from', (Get-AutoOSMcpPackage -Name 'serena'), 'serena', 'start-mcp-server')
     }
     Add-Member -InputObject $settings.context_servers -NotePropertyName 'serena' -NotePropertyValue $serenaCtx -Force
     $graphifyCtx = [ordered]@{
         command = 'uv'
-        args = @('run', '--with', 'graphifyy[mcp]==0.9.63', 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
+        args = @('run', '--with', (Get-AutoOSMcpPackage -Name 'graphify'), 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
     }
     Add-Member -InputObject $settings.context_servers -NotePropertyName 'graphify' -NotePropertyValue $graphifyCtx -Force
     $settings | ConvertTo-Json -Depth 8 | Out-File -FilePath $cfgPath -Encoding utf8

@@ -1064,13 +1064,15 @@ route_zed_to_proxy() {
     if [[ -f "$cfg" ]]; then
         cp "$cfg" "$cfg.autoos-backup-$(date +%Y%m%d-%H%M%S)"
     fi
-    python3 - "$cfg" <<'PY'
+    python3 - "$cfg" "$AUTOOS_HARNESS" <<'PY'
 import json, os, sys
 path = sys.argv[1]
+harness_file = sys.argv[2]
 cfg = {}
 if os.path.exists(path):
     with open(path, encoding="utf-8") as fh:
         cfg = json.load(fh)
+pins = json.load(open(harness_file, encoding="utf-8"))["mcp_servers"]
 tiers = [
     ("tier1", "tier1 orchestrator (contributor)", 1048576, "xhigh"),
     ("tier1-clean", "tier1-clean (paid contributor)", 1048576, None),
@@ -1121,11 +1123,11 @@ oc["autoos-litellm"] = lit
 ctx = cfg.setdefault("context_servers", {})
 ctx["serena"] = {
     "command": "uvx",
-    "args": ["--from", "serena-agent==1.7.0", "serena", "start-mcp-server"],
+    "args": ["--from", pins["serena"]["package"], "serena", "start-mcp-server"],
 }
 ctx["graphify"] = {
     "command": "uv",
-    "args": ["run", "--with", "graphifyy[mcp]==0.9.63", "python",
+    "args": ["run", "--with", pins["graphify"]["package"], "python",
              "-m", "graphify.serve", "graphify-out/graph.json"],
 }
 # Bypass profile: every built-in tool on, no confirmations (global

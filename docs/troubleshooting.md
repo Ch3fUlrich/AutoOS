@@ -106,6 +106,17 @@ usual cause is a PATH entry this shell predates: open a new terminal (Windows) o
 log out and back in (Linux/macOS) and re-run — a second run is a no-op that
 reports everything as already present.
 
+**Models missing, or 401s, right after setup (opencode / Zed / desktop app)**
+Almost always stale process environment: `setx` (or any installer that persists
+keys) only reaches processes started *afterwards*. A running Zed, opencode TUI
+or desktop app keeps the old, keyless environment until it is fully quit and
+reopened; new terminals inherit the new values immediately. The desktop app
+shares the CLI's config files (`~/.config/opencode/opencode.json` + the repo's
+`opencode.jsonc`), so there is no separate desktop key store — restart the app.
+Zed additionally derives provider env names from the provider id
+(`autoos-omniroute` → `AUTOOS_OMNIROUTE_API_KEY`); `api_key` in settings.json
+is ignored by Zed and stays hidden providers hidden.
+
 **Where are the logs?**
 `logs/autoos-<timestamp>.log`, plain text with the colour stripped.
 
