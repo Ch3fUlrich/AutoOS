@@ -101,10 +101,13 @@ never exist there — resolve through the main checkout, never copy secrets.
    extract with exact quotes, never rephrase decisions; record spend per
    DONE note. See `docs/unattended-orchestration.md`.
 5. **MCP wiring per the tool-strength eval** (2026-09-21, in-session notes):
-   attach serena/graphify/context7 (+omnigraph for writers) to opencode
-   tiers, 3 servers to OpenHands roles, context_servers to Zed; weak-leg
-   rule (MCP work only on TOOL-CALL-proven legs); fix the flat-vs-`servers`
-   question against the live schema before touching the installer.
+   9/12 tier legs proven tool-capable (tier1 MCP work: openrouter
+   contributor only). Measured: opencode loads BOTH flat `mcp.<name>` AND
+   nested `mcp.servers.<name>` (cfgprobe, all connect) — no installer change
+   needed. Landed: repo `opencode.jsonc` pins all four servers
+   (serena/graphify/playwright/context7) to harness pins, asserted by both
+   suites. Left: context_servers for Zed, omnigraph stays in `.mcp.json`
+   (per-repo env).
 6. **Key mirroring script** — `litellm/.env` was filled by an ad-hoc Temp
    script; promote to `tools/` (api-keys.yml → .env + master key gen, never
    prints values) with a test.
