@@ -2318,9 +2318,11 @@ function Install-AutoOSLitellm {
 
 function Set-AutoOSZedProxy {
     <#
-      .SYNOPSIS Point Zed's agent panel at the local OmniRoute gateway.
-      Only the provider id 'autoos-omniroute' is written; every other Zed
-      setting is kept. The key comes from env AUTOOS_OMNIROUTE_KEY.
+      .SYNOPSIS Point Zed's agent panel at the local OmniRoute gateway + LiteLLM fallback.
+      Only the provider ids 'autoos-omniroute' / 'autoos-litellm' are written;
+      every other Zed setting is kept. Keys come from env AUTOOS_OMNIROUTE_KEY
+      and LITELLM_MASTER_KEY (never from the repo); missing keys warn and the
+      URL/models are still written so a later run with keys fills them in.
     #>
     $cfgDir  = Join-Path $env:APPDATA 'Zed'
     $cfgPath = Join-Path $cfgDir 'settings.json'
@@ -2342,17 +2344,41 @@ function Set-AutoOSZedProxy {
     if ($null -eq $settings.language_models.PSObject.Properties['openai_compatible']) {
         Add-Member -InputObject $settings.language_models -NotePropertyName 'openai_compatible' -NotePropertyValue (New-Object psobject)
     }
-    $entry = @{
+    $tierModels = @(
+        @{ name = 'tier1'; display_name = 'tier1 orchestrator (contributor)'; max_tokens = 1048576; reasoning_effort = 'xhigh' },
+        @{ name = 'tier1-clean'; display_name = 'tier1-clean (paid contributor)'; max_tokens = 1048576 },
+        @{ name = 'tier2'; display_name = 'tier2 smart (free-first)'; max_tokens = 131072 },
+        @{ name = 'tier2-clean'; display_name = 'tier2-clean (paid)'; max_tokens = 131072 },
+        @{ name = 'tier3'; display_name = 'tier3 driver (cheapest)'; max_tokens = 131072 },
+        @{ name = 'tier3-clean'; display_name = 'tier3-clean (paid)'; max_tokens = 131072 }
+    )
+    $omniEntry = @{
         api_url = 'http://127.0.0.1:20128/v1'
         available_models = @(
             @{ name = 'auto/smart'; display_name = 'tier1 orchestrator (auto smart)'; max_tokens = 131072; reasoning_effort = 'xhigh' },
             @{ name = 'auto'; display_name = 'tier2 smart (auto balanced)'; max_tokens = 131072 },
             @{ name = 'auto/cheap'; display_name = 'tier3 driver (auto cheap)'; max_tokens = 131072 }
+        ) + $tierModels
+    }
+    if ($env:AUTOOS_OMNIROUTE_KEY) { $omniEntry['api_key'] = $env:AUTOOS_OMNIROUTE_KEY }
+    else { Write-AutoOSLine 'AUTOOS_OMNIROUTE_KEY not set - Zed OmniRoute calls will 401 until setup is re-run with keys' -Level warn }
+    Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-omniroute' -NotePropertyValue $omniEntry -Force
+    $litEntry = @{
+        api_url = 'http://127.0.0.1:4000/v1'
+        available_models = @(
+            @{ name = 'tier1'; display_name = 'tier1 (litellm fallback)'; max_tokens = 1048576 },
+            @{ name = 'tier1-paid'; display_name = 'tier1-paid (litellm)'; max_tokens = 1048576 },
+            @{ name = 'tier2'; display_name = 'tier2 (litellm fallback)'; max_tokens = 131072 },
+            @{ name = 'tier2-paid'; display_name = 'tier2-paid (litellm)'; max_tokens = 131072 },
+            @{ name = 'tier3'; display_name = 'tier3 (litellm fallback)'; max_tokens = 131072 },
+            @{ name = 'tier3-paid'; display_name = 'tier3-paid (litellm)'; max_tokens = 131072 }
         )
     }
-    Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-omniroute' -NotePropertyValue $entry -Force
+    if ($env:LITELLM_MASTER_KEY) { $litEntry['api_key'] = $env:LITELLM_MASTER_KEY }
+    else { Write-AutoOSLine 'LITELLM_MASTER_KEY not set - Zed LiteLLM calls will 401 until setup is re-run with keys' -Level warn }
+    Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-litellm' -NotePropertyValue $litEntry -Force
     $settings | ConvertTo-Json -Depth 8 | Out-File -FilePath $cfgPath -Encoding utf8
-    Write-AutoOSLine 'Zed agents routed to OmniRoute (key via AUTOOS_OMNIROUTE_KEY)' -Level ok
+    Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys from env, never the repo)' -Level ok
 }
 
 function Install-AutoOSOpenHands {

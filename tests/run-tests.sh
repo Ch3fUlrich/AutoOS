@@ -2080,21 +2080,45 @@ if it "zed routing merges one provider and keeps the rest"; then
     scratch="$(mktemp -d)"
     mkdir -p "$scratch/.config/zed"
     printf '{"theme":"mine"}' >"$scratch/.config/zed/settings.json"
-    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; route_zed_to_proxy >/dev/null 2>&1 )
-    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; route_zed_to_proxy >/dev/null 2>&1 )
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" LITELLM_MASTER_KEY="test-lit-key" route_zed_to_proxy >/dev/null 2>&1 )
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" LITELLM_MASTER_KEY="test-lit-key" route_zed_to_proxy >/dev/null 2>&1 )
     report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8"))
-oc = cfg.get("language_models", {}).get("openai_compatible", {}).get("autoos-omniroute", {})
-models = [m["name"] for m in oc.get("available_models", [])]
-print("%s|%s|%s" % (cfg.get("theme"), oc.get("api_url"), ",".join(models)))
+oc = cfg.get("language_models", {}).get("openai_compatible", {})
+omni = oc.get("autoos-omniroute", {})
+lit = oc.get("autoos-litellm", {})
+models = [m["name"] for m in omni.get("available_models", [])]
+print("%s|%s|%s|%s|%s|%s" % (
+    cfg.get("theme"), omni.get("api_url"), ",".join(models),
+    omni.get("api_key"), lit.get("api_url"), lit.get("api_key")))
 PY
 )"
     backups="$(ls "$scratch"/.config/zed/settings.json.autoos-backup-* 2>/dev/null | wc -l)"
-    leaks="$(grep -cE 'sk-[A-Za-z0-9]{10,}' "$scratch/.config/zed/settings.json" || true)"
+    leaks="$(grep -cE 'sk-[A-Za-z0-9]{10,}|AUTOOS_OMNIROUTE_KEY|LITELLM_MASTER_KEY|REPLACE' "$scratch/.config/zed/settings.json" || true)"
     rm -rf "$scratch"
     assert_eq "$report|backups=$backups|leaks=$leaks" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap|backups=1|leaks=0"
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|test-omni-key|http://127.0.0.1:4000/v1|test-lit-key|backups=1|leaks=0"
+fi
+
+if it "zed routing without keys warns and writes no api_key"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/zed"
+    printf '{}' >"$scratch/.config/zed/settings.json"
+    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY; route_zed_to_proxy ) 2>&1)"
+    report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+oc = cfg.get("language_models", {}).get("openai_compatible", {})
+print("%s|%s" % ("api_key" in oc.get("autoos-omniroute", {}),
+                 "api_key" in oc.get("autoos-litellm", {})))
+PY
+)"
+    rm -rf "$scratch"
+    if [[ "$report" == "False|False" && "$out" == *"401"* ]]; then pass
+    else fail "report=$report out=$(printf '%s' "$out" | tail -2)"; fi
 fi
 
 if it "litellm installer announces in dry run and detects presence"; then
