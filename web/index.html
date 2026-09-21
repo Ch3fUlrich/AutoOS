@@ -786,6 +786,8 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
         <button type="button" class="card-pill" data-target-card="cardProfile" aria-pressed="true">Profile</button>
         <button type="button" class="card-pill" data-target-card="cardCatalog" aria-pressed="true">Components</button>
         <button type="button" class="card-pill" data-target-card="cardOrder" aria-pressed="true">Install order</button>
+        <button type="button" class="card-pill" data-target-card="cardProviders" aria-pressed="true">AI providers</button>
+        <button type="button" class="card-pill" data-target-card="cardTiers" aria-pressed="true">Router tiers</button>
       </div>
       <div class="card-presets">
         <span class="card-preset-label">Views:</span>
@@ -1394,7 +1396,7 @@ async function boot() {
 /* ── card chooser & card visibility ───────────────────────────────────── */
 /* The chooser governs the Overview panel only. The settings cards live on the
    Configure tab, where hiding them would just be a second way to lose them. */
-const ALL_CARDS = ["cardProfile", "cardCatalog", "cardOrder"];
+const ALL_CARDS = ["cardProfile", "cardCatalog", "cardOrder", "cardProviders", "cardTiers"];
 const PRESETS = {
   all: ALL_CARDS,
   suggested: ["cardProfile", "cardCatalog"],
@@ -1405,6 +1407,7 @@ const PRESETS = {
    scrolls — otherwise it silently scrolls a panel nobody is looking at. */
 const CARD_TAB = {
   cardProfile: "overview", cardCatalog: "overview", cardOrder: "overview",
+  cardProviders: "overview", cardTiers: "overview",
   cardSystem: "system",
   cardConfig: "configure", cardClaudeAutostart: "configure", questionsCard: "configure"
 };

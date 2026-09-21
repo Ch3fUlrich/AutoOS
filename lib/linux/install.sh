@@ -131,25 +131,6 @@ catalog_installed_ids() {
     done
     printf '%s' "${ids% }"
 }
-script_is_installed() {
-    case "$1" in
-        oh-my-zsh)       [[ -d "$SYS_HOME/.oh-my-zsh" ]] ;;
-        zsh-plugins)     [[ -d "$SYS_HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]] ;;
-        powerlevel10k)   [[ -d "$SYS_HOME/.oh-my-zsh/custom/themes/powerlevel10k" ]] ;;
-        meslo-nerd-font) [[ -f "$SYS_HOME/.local/share/fonts/MesloLGS NF Regular.ttf" ]] ;;
-        nodesource-lts)  has_cmd node ;;
-        docker)          has_cmd docker ;;
-        tailscale)       has_cmd tailscale ;;
-        antigravity)     has_cmd antigravity ;;
-        xpipe)           has_cmd xpipe ;;
-        herdr)           has_cmd herdr ;;
-        handy)           has_cmd handy || [[ -x /usr/bin/handy ]] ;;
-        vscode)          has_cmd code ;;
-        zed)             has_cmd zed ;;
-        *)               return 1 ;;
-    esac
-}
-
 # ─── Provider dispatch ──────────────────────────────────────────────────────
 # install_component <provider> <package>
 # Result lands in INSTALL_STATE (installed|skipped|failed) rather than on stdout:
@@ -1007,8 +988,28 @@ PY
 }
 
 install_zed() {
+    # Zed publishes no checksum for this installer, so the minimum bar (same
+    # as install_agy/install_uv/install_ollama, guard A14): download to a
+    # file, verify it is non-empty and actually looks like a script, and only
+    # then execute the FILE - never the pipe.
     if (( AUTOOS_DRY_RUN )); then ui_muted "would install Zed via https://zed.dev/install.sh"; return 0; fi
-    curl -fsSL https://zed.dev/install.sh | sh
+    local url="https://zed.dev/install.sh"
+    ui_muted "downloading Zed installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_err "failed to download Zed installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_err "Zed installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    sh "$tmp" || rc=$?
+    rm -f "$tmp"
+    if (( rc != 0 )); then return $rc; fi
     ui_ok "Zed installed"
 }
 
