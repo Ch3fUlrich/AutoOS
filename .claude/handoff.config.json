@@ -28,6 +28,7 @@
     "PR85": {
       "name": "pr85-record-line-tests",
       "model": "sonnet",
+      "launcher": "agy",
       "brief": "Land open PR #85 (edge-case tests for serve.py record_line) onto current main. Steps: git fetch origin pull/85/head into your worktree (never the main checkout); rebase/cherry-pick its commits onto your session branch; main already carries the CI-green fixes, so the PR's old red should clear — if anything is still red, fix it minimally. Verify: bash tests/run-tests.sh --filter record_line AND powershell -File tests/run-tests.ps1 -Filter 'record line'. Done means: PR #85's test coverage present on your branch, both filters green, DONE note with commit hashes. Do not merge into main yourself; the runner does that after guards."
     },
     "T1": {
