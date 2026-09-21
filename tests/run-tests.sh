@@ -2140,7 +2140,12 @@ for src, tgts in refs:
         if t not in groups:
             problems.append("tgt:" + t)
 models = re.findall(r"(?m)^\s*model:\s*(\S+)\s*$", text)
-if [m for m in models if "cerebras" in m or "llama-3.3-70b" in m]:
+# llama-3.3-70b left groq's free tier in 2026-08 and must never come back.
+# cerebras is NOT stale: combos.json re-admits it as a credit/paid-capable
+# leg (2026-09-20), so the old "any cerebras routed" check no longer holds.
+# Its presence in the managed blocks is asserted against combos.json by
+# tools/sync-router-tiers.py --check.
+if [m for m in models if "llama-3.3-70b" in m]:
     problems.append("stale")
 if "drop_params" not in text or "os.environ/LITELLM_MASTER_KEY" not in text:
     problems.append("settings")
