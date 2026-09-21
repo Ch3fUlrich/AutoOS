@@ -3372,9 +3372,13 @@ Test-Case 'zed routing writes nothing in dry run' {
 
 Test-Case 'zed routing merges one provider and keeps the rest' {
     $realAppData = $env:APPDATA
+    $realOmni = $env:AUTOOS_OMNIROUTE_KEY
+    $realLit = $env:LITELLM_MASTER_KEY
     $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
     try {
         $env:APPDATA = $scratch
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        $env:LITELLM_MASTER_KEY = 'test-lit-key'
         $cfgDir = Join-Path $scratch 'Zed'
         New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
         '{"theme":"mine","language_models":{"openai":{"api_url":"https://x"}}}' |
@@ -3385,12 +3389,51 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
         Assert-Equal $s.theme 'mine'
         Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_url 'http://127.0.0.1:20128/v1'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_key 'test-omni-key'
         $models = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | ForEach-Object { $_.name })
-        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap'
+        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_key 'test-lit-key'
+        $litModels = @($s.language_models.openai_compatible.'autoos-litellm'.available_models | ForEach-Object { $_.name })
+        Assert-Equal ($litModels -join ',') 'tier1,tier1-paid,tier2,tier2-paid,tier3,tier3-paid'
         Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
         $raw = Get-Content (Join-Path $cfgDir 'settings.json') -Raw
-        Assert-True ($raw -notmatch 'sk-' -and $raw -notmatch 'AUTOOS_OMNIROUTE_KEY|api_key') 'secret leaked into settings'
-    } finally { $env:APPDATA = $realAppData }
+        Assert-True ($raw -notmatch 'sk-' -and $raw -notmatch 'AUTOOS_OMNIROUTE_KEY|LITELLM_MASTER_KEY|REPLACE') 'secret leaked into settings'
+    } finally {
+        $env:APPDATA = $realAppData
+        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_KEY = $realOmni }
+        if ($null -eq $realLit) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
+        else { $env:LITELLM_MASTER_KEY = $realLit }
+    }
+}
+
+Test-Case 'zed routing without keys warns and writes no api_key' {
+    $realAppData = $env:APPDATA
+    $realOmni = $env:AUTOOS_OMNIROUTE_KEY
+    $realLit = $env:LITELLM_MASTER_KEY
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue
+        $cfgDir = Join-Path $scratch 'Zed'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '{}' | Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Set-AutoOSZedProxy
+        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
+        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-omniroute'.PSObject.Properties['api_key']) 'omni key written without env'
+        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-litellm'.PSObject.Properties['api_key']) 'lit key written without env'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_url 'http://127.0.0.1:20128/v1'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
+    } finally {
+        $env:APPDATA = $realAppData
+        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_KEY = $realOmni }
+        if ($null -eq $realLit) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
+        else { $env:LITELLM_MASTER_KEY = $realLit }
+    }
 }
 
 Test-Case 'opencode repo config pins omniroute with litellm fallback' {
@@ -3502,7 +3545,8 @@ Test-Case 'zed routing creates a fresh config when none exists' {
         $cfgPath = Join-Path $scratch 'Zed\settings.json'
         Assert-True (Test-Path $cfgPath) 'settings.json not created'
         $s = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 3
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 9
+        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.available_models.Count 6
     } finally { $env:APPDATA = $realAppData }
 }
 

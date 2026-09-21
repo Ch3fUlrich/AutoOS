@@ -1049,10 +1049,12 @@ install_litellm_proxy() {
 }
 
 route_zed_to_proxy() {
-    # Point Zed's agent panel at the local OmniRoute gateway (:20128).
-    # Only the provider id 'autoos-omniroute' is written; every other
-    # setting is kept. The client key comes from env AUTOOS_OMNIROUTE_KEY
-    # (dashboard -> api-manager), never from this file.
+    # Point Zed's agent panel at the local OmniRoute gateway (:20128) plus
+    # the LiteLLM fallback (:4000). Only the provider ids
+    # 'autoos-omniroute' / 'autoos-litellm' are written; every other
+    # setting is kept. Keys come from env AUTOOS_OMNIROUTE_KEY /
+    # LITELLM_MASTER_KEY (never from this file); missing keys warn and the
+    # URL/models are still written so a later run with keys fills them in.
     local cfg_dir="$SYS_HOME/.config/zed"
     local cfg="$cfg_dir/settings.json"
     if (( AUTOOS_DRY_RUN )); then ui_muted "would route Zed agents to OmniRoute in $cfg"; return 0; fi
@@ -1067,19 +1069,53 @@ cfg = {}
 if os.path.exists(path):
     with open(path, encoding="utf-8") as fh:
         cfg = json.load(fh)
+tiers = [
+    ("tier1", "tier1 orchestrator (contributor)", 1048576, "xhigh"),
+    ("tier1-clean", "tier1-clean (paid contributor)", 1048576, None),
+    ("tier2", "tier2 smart (free-first)", 131072, None),
+    ("tier2-clean", "tier2-clean (paid)", 131072, None),
+    ("tier3", "tier3 driver (cheapest)", 131072, None),
+    ("tier3-clean", "tier3-clean (paid)", 131072, None),
+]
+auto = [
+    {"name": "auto/smart", "display_name": "tier1 orchestrator (auto smart)",
+     "max_tokens": 131072, "reasoning_effort": "xhigh"},
+    {"name": "auto", "display_name": "tier2 smart (auto balanced)",
+     "max_tokens": 131072},
+    {"name": "auto/cheap", "display_name": "tier3 driver (auto cheap)",
+     "max_tokens": 131072},
+]
+tier_models = []
+for name, disp, mx, effort in tiers:
+    m = {"name": name, "display_name": disp, "max_tokens": mx}
+    if effort:
+        m["reasoning_effort"] = effort
+    tier_models.append(m)
 lm = cfg.setdefault("language_models", {})
 oc = lm.setdefault("openai_compatible", {})
-oc["autoos-omniroute"] = {
+omni = {
     "api_url": "http://127.0.0.1:20128/v1",
-    "available_models": [
-        {"name": "auto/smart", "display_name": "tier1 orchestrator (auto smart)",
-         "max_tokens": 131072, "reasoning_effort": "xhigh"},
-        {"name": "auto", "display_name": "tier2 smart (auto balanced)",
-         "max_tokens": 131072},
-        {"name": "auto/cheap", "display_name": "tier3 driver (auto cheap)",
-         "max_tokens": 131072},
-    ],
+    "available_models": auto + tier_models,
 }
+if os.environ.get("AUTOOS_OMNIROUTE_KEY"):
+    omni["api_key"] = os.environ["AUTOOS_OMNIROUTE_KEY"]
+oc["autoos-omniroute"] = omni
+lit_models = [
+    {"name": n, "display_name": "%s (litellm fallback)" % n,
+     "max_tokens": mx}
+    for n, _, mx, _ in [
+        ("tier1", None, 1048576, None), ("tier1-paid", None, 1048576, None),
+        ("tier2", None, 131072, None), ("tier2-paid", None, 131072, None),
+        ("tier3", None, 131072, None), ("tier3-paid", None, 131072, None),
+    ]
+]
+lit = {
+    "api_url": "http://127.0.0.1:4000/v1",
+    "available_models": lit_models,
+}
+if os.environ.get("LITELLM_MASTER_KEY"):
+    lit["api_key"] = os.environ["LITELLM_MASTER_KEY"]
+oc["autoos-litellm"] = lit
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(cfg, fh, indent=2)
 PY
@@ -1089,7 +1125,9 @@ PY
         ui_warn "could not update $cfg - is python3 working?"
         return 1
     fi
-    ui_ok "Zed agents routed to OmniRoute (key via AUTOOS_OMNIROUTE_KEY)"
+    [[ -n "${AUTOOS_OMNIROUTE_KEY:-}" ]] || ui_warn "AUTOOS_OMNIROUTE_KEY not set - Zed OmniRoute calls will 401 until setup is re-run with keys"
+    [[ -n "${LITELLM_MASTER_KEY:-}" ]] || ui_warn "LITELLM_MASTER_KEY not set - Zed LiteLLM calls will 401 until setup is re-run with keys"
+    ui_ok "Zed agents routed to OmniRoute + LiteLLM (keys from env, never the repo)"
     return 0
 }
 
