@@ -3420,11 +3420,26 @@ Test-Case 'tier depth is mandatory: only tier1 spawns, tier3 spawns nothing' {
     $t2 = @($agents.'tier2-worker'.permissions)
     Assert-Equal $t2[0].effect 'deny'
     Assert-Equal $t2[-1].resource 'tier3-reviewer'; Assert-Equal $t2[-1].effect 'allow'
-    # tier3 is a leaf: a lone deny-all, no allow rule.
+    # tier3 is a leaf: subagent deny-all, no allow rule. It reads and runs
+    # checks (read/grep/glob/bash allow) but never edits, writes or spawns
+    # (deny) — a tool-less reviewer refuses the task outright (2026-09-21).
     $t3 = @($agents.'tier3-reviewer'.permissions)
-    Assert-Equal $t3.Count 1
+    Assert-Equal $t3.Count 7
+    # subagent deny
     Assert-Equal $t3[0].action 'subagent'; Assert-Equal $t3[0].resource '*'; Assert-Equal $t3[0].effect 'deny'
+    Assert-Equal $t3[1].action 'edit'; Assert-Equal $t3[1].resource '*'; Assert-Equal $t3[1].effect 'deny'
+    Assert-Equal $t3[2].action 'write'; Assert-Equal $t3[2].resource '*'; Assert-Equal $t3[2].effect 'deny'
+    Assert-Equal $t3[3].action 'read'; Assert-Equal $t3[3].resource '*'; Assert-Equal $t3[3].effect 'allow'
+    Assert-Equal $t3[4].action 'grep'; Assert-Equal $t3[4].resource '*'; Assert-Equal $t3[4].effect 'allow'
+    Assert-Equal $t3[5].action 'glob'; Assert-Equal $t3[5].resource '*'; Assert-Equal $t3[5].effect 'allow'
+    Assert-Equal $t3[6].action 'bash'; Assert-Equal $t3[6].resource '*'; Assert-Equal $t3[6].effect 'allow'
     Assert-Equal $agents.'tier3-reviewer'.mode 'subagent'
+}
+
+Test-Case 'subagent depth config' {
+    $config = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw
+    $json = $config -replace '(?m)^\s*//.*$','' | ConvertFrom-Json
+    Assert-Equal $json.subagent_depth 2
 }
 
 Test-Case 'openhands template routes tiers with no secrets' {

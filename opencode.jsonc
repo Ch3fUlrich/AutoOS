@@ -21,6 +21,7 @@
   // NOTE: this binds inside the opencode runtime (CLI/TUI/serve). Harness or
   // API callers that bypass agents must follow the same depth by convention
   // (see docs/unattended-orchestration.md "Tier enforcement").
+  "subagent_depth": 2,
   "agents": {
     "tier1-orchestrator": {
       "description": "Long-horizon orchestrator: plans, slices, verifies, never codes directly. May launch tier2-worker only.",
@@ -41,11 +42,17 @@
       ]
     },
     "tier3-reviewer": {
-      "description": "Cheap reviewer: one focused question, small budget. May not launch subagents.",
+      "description": "Cheap reviewer: one focused question, small budget. Reads and runs checks only; never edits, commits or spawns. May not launch subagents.",
       "mode": "subagent",
       "model": "omniroute/tier3",
       "permissions": [
-        { "action": "subagent", "resource": "*", "effect": "deny" }
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "write", "resource": "*", "effect": "deny" },
+        { "action": "read", "resource": "*", "effect": "allow" },
+        { "action": "grep", "resource": "*", "effect": "allow" },
+        { "action": "glob", "resource": "*", "effect": "allow" },
+        { "action": "bash", "resource": "*", "effect": "allow" }
       ]
     }
   },
