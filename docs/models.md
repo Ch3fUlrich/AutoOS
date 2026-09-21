@@ -38,10 +38,31 @@ paid legs from the providers whose credit tiers are sanctioned
 |---|---|---|
 | `tier1` orchestrator | **1M only, spark-only, contributor-only** | zen `muse-spark-1.3-contributor-free` → openrouter `meta/muse-spark-1.3-contributor` (paid). Plain `muse-spark-1.3` is blocked operator policy 2026-09-21 — no combo may reference it. Callers add xhigh effort via `#high` variant (`omniroute/tier1#high`, ack-proven 2026-09-20). No `gemini-3.1-pro`: it reasons worse than `gemini-3.8-flash` while costing a 1M slot. |
 | `tier1-clean` | 1M, **paid legs only** | openrouter `meta/muse-spark-1.3-contributor` (paid). Privacy note: contributor legs train by contract, so clean now means paid-only, not trains-nothing — the plain paid spark was removed with the contributor-only block. |
-| `tier2` smart | ≤128k | gemini `gemini-3.8-flash` → groq `gpt-oss-120b` → cerebras `gpt-oss-120b` → sambanova `gpt-oss-120b` → cheap-inference `deepseek-v4-flash` / `glm-4.5-air` / `kimi-k3` → openrouter `deepseek/deepseek-v4.1-flash` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
-| `tier2-clean` | ≤128k, no training, **paid legs only** | deepseek `deepseek-flash` (direct) → openrouter `deepseek/deepseek-v4.1-flash` → zen `deepseek-v4.1-flash` → mistral `mistral-small-latest` (direct). No groq/cerebras/sambanova free legs. |
+| `tier2` smart | **no context gate** — cost/quality decide, any window | gemini `gemini-3.8-flash` → groq `gpt-oss-120b` → cerebras `gpt-oss-120b` → sambanova `gpt-oss-120b` → cheap-inference `deepseek-v4-flash` / `glm-4.5-air` / `kimi-k3` → openrouter `deepseek/deepseek-v4.1-flash` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
+| `tier2-clean` | **no context gate**, no training, **paid legs only** | deepseek `deepseek-flash` (direct) → openrouter `deepseek/deepseek-v4.1-flash` → zen `deepseek-v4.1-flash` → mistral `mistral-small-latest` (direct). No groq/cerebras/sambanova free legs. |
 | `tier3` driver | ≤128k | mistral `mistral-code-latest` → groq `qwen3.8-27b` → cerebras `qwen-3.8-27b` → cheap-inference `glm-4.5-air` / `minimax-m2.7` → mistral `mistral-small-latest` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
 | `tier3-clean` | ≤128k, no training, **paid legs only** | deepseek `deepseek-flash` (direct) → mistral `mistral-small-latest` (direct) → zen `deepseek-v4.1-flash`. No qwen free legs — lightweight paid review duty only. |
+
+**tier2 is not context-capped at 128k.** 128k is a display convention inherited
+from `opencode.jsonc`, not a curation rule: cost and quality decide what enters
+`tier2`, so a `gemini-3.8-flash`-class model is welcome whatever its window.
+The 1M gate applies to `tier1` only, because long-horizon orchestration is the
+one role where window size is the requirement. `combos.json` carries
+`"context": "128k"` on tier2/tier3 purely to keep the picker's compaction
+threshold conservative — do not read it as "models above 128k are excluded".
+
+### Per-model fallback chains (single-model routes, cheapest-first)
+
+A tier combo is a *role*; sometimes a caller pins one model. Each pinned model
+degrades along its own chain, cheapest leg first, exactly:
+
+- `spark-1.3-contributor`: **zen (until rate-limited) → meta (paid until limit
+  lifts)**. The Zen leg rides the rotating contributor promo; when it 429s the
+  chain bills Meta direct on your own credits.
+
+Every other model in a tier already has its paid twin further down the same
+combo (see the mermaid below), so a single-model route for it is the tier
+chain truncated at that model — no separate config is required.
 
 ## Role labels (display names — the `tier1/2/3` ids never change)
 
@@ -54,7 +75,7 @@ label is display only and appears identically in `combos.json` (`$comment`),
 | Tier id | Role label | Capability requirement |
 |---|---|---|
 | `tier1` | **orchestrator-1M** | Long-horizon orchestration: plans, delegates, holds whole-repo context. 1M context required — anything smaller belongs in `tier2`. |
-| `tier2` | **smart-reasoning-128k** | Strong reasoning at mid context: review, second-level planning, hard debugging. Small-context models may sub-orchestrate here, never in `tier1`. |
+| `tier2` | **smart-reasoning-128k** | Strong reasoning, mid context: review, second-level planning, hard debugging. Context size is *not* a boundary here — cost/quality decide; small-context models may sub-orchestrate here, never in `tier1`. |
 | `tier3` | **cheap-driver-128k** | Cheapest capable loop: codegen, edits, test-fix cycles, grinding through a task list. |
 
 ## Client fallback ladder (when the top rung breaks, step down one)
@@ -76,12 +97,14 @@ sits beside rung 2 — it is not in the catalog (downloaded from the vendor,
 never vendored here).
 
 **Context rule (why the user-visible limit is honest):** `tier1` is curated to
-1M-context models only — anything smaller belongs in `tier2`. `opencode.jsonc`
-declares the matching `limit.context` (1M for tier1, 128k for tier2/tier3,
-which is what OmniRoute computes as the minimum across each chain), so
-OpenCode's compaction and the picker's context display agree with what
-actually answers. `auto/*` remains as a zero-setup bootstrap with the same
-conservative limit.
+1M-context models only — anything smaller belongs in `tier2`. `tier2` has **no
+context gate**: 128k is a conservative display/compaction default, not a
+curation rule, so cost and quality decide which models sit there and
+`gemini-3.8-flash`-class models are welcome regardless of window.
+`opencode.jsonc` declares the matching `limit.context` (1M for tier1, 128k for
+tier2/tier3 as the conservative minimum across each chain), so OpenCode's
+compaction and the picker's context display agree with what actually answers.
+`auto/*` remains as a zero-setup bootstrap with the same conservative limit.
 
 **Sensitive data work:** `*-clean` never routes a model or plan with a
 published prompt-training policy — no Zen promo `-free` models, no Gemini free
@@ -151,11 +174,12 @@ The browser UI shows the same state without ever showing a key value:
   (`muse-spark-1.3-contributor-free`) currently answers 500 at peak — the
   priority chain hops past both to OpenRouter, which is why `tier1` still
   works today.
-- **Meta direct (`muse-code`) 502s** in OmniRoute 3.8.50
-  (`Cannot read properties of undefined`), even for its own Llama models. The
-  key is registered and ready; Meta-direct spark enters the tiers when
-  OmniRoute fixes the provider. Use OpenRouter's `meta/muse-spark-*` (plain
-  ID = no training, `-contributor` = trains) meanwhile.
+- **Meta direct (`muse-code`) ships an empty outbound URL** in OmniRoute
+  3.8.50 (`Invalid outbound URL`, red on the dashboard topology), even for
+  its own Llama models. The connection is deactivated (by connection ID —
+  the by-name edit echoes success without persisting) and spark routes via
+  OpenRouter/Zen contributor legs. Re-check after an OmniRoute upgrade.
+  Use OpenRouter's contributor legs meanwhile.
 - **Cloudflare Workers AI needs the Account ID** in the dashboard before it
   can serve, so it is registered but not routed.
 - `/v1/models` returns 401 for a normal client key in this build; `apply`
@@ -247,40 +271,130 @@ Check more any time: `omniroute providers available --search <text>`.
 
 ## Routing map (default settings)
 
+Each tier below is one `priority` combo from
+`configuration/omniroute/combos.json`: the gateway tries legs **top to bottom**
+and hops to the next on 429 / 5xx / `quota_exhausted`. `FREE` and `PAID` are
+per-leg flags; the cost note is what that leg bills when it answers.
+
 ```mermaid
 flowchart TB
     subgraph clients["Agents — one client key (AUTOOS_OMNIROUTE_KEY)"]
-        OC["opencode CLI/TUI\ndefault omniroute/tier1"]
-        ZED["Zed agent panel\nauto/smart xhigh · auto · auto/cheap"]
-        NV["Neovim + sidekick\n<leader>aa → opencode"]
-        OH["OpenHands · Claude Code · scripts\nbase URL → :20128"]
+        OC["opencode CLI/TUI\ndefault omniroute/tier1#high\npins tier1 / tier2 / tier3 agents"]
+        LB["Zed · OpenHands · Neovim · scripts\nbase URL → :20128/v1"]
+        AUTO["auto/smart · auto · auto/cheap\nzero-setup bootstrap, live 16-factor scoring"]
     end
-    subgraph or["OmniRoute :20128 — DEFAULT PATH"]
-        SEL{"Which model?\nauto/* or strict combo"}
-        AUTO["auto/smart · auto · auto/cheap\n16-factor scoring:\nhealth 20 · quota 15 · cost 15\n+ 5-30 min circuit breakers"]
-        PRI["tierN-strict priority combos\ndriver → looper → flash"]
-        SCORE["per-request:\n1 score connections\n2 try best\n3 429/5xx → next\n4 all down → emergency free"]
+
+    subgraph t1["tier1 · orchestrator-1M · spark-only contributor-only, 1M ctx"]
+        direction TB
+        T1A["1 · zen muse-spark-1.3-contributor-free\nFREE promo · 1M · trains by contract"]
+        T1B["2 · openrouter meta/muse-spark-1.3-contributor\nPAID $0.10/$0.20 per 1M · 1M · trains"]
+        T1A --> T1B
     end
-    subgraph roles["Role legs (free first)"]
-        DRV["driver: oc/ GLM · spark-xhigh\nplanner: DeepSeek flash"]
-        EXP["explorer: Gemini 2.5 Flash\n1M ctx · 10 RPM / 250 RPD"]
-        LOOP["looper: GPT-OSS-120B\nGroq 200K TPD · short prompts"]
-        GRIND["grinder: Qwen3.8 · Devstral\nreviewer: Mistral pool 1B/mo"]
+
+    subgraph t1c["tier1-clean · 1M · paid legs only (trains: contributor-only block)"]
+        direction TB
+        T1CA["1 · openrouter meta/muse-spark-1.3-contributor\nPAID · 1M · trains by contract"]
     end
-    subgraph paid["Paid legs (quota exhausted)"]
-        BAL["OmniRoute balance (yours)"]
-        CON["contributor → DeepSeek flash"]
+
+    subgraph t2["tier2 · smart-reasoning · NO context gate (cost + quality decide)"]
+        direction TB
+        T2A["1 · gemini gemini-3.8-flash\nFREE pooled · any window welcome"]
+        T2B["2 · groq gpt-oss-120b\nFREE 200K TPD · short prompts only"]
+        T2C["3 · cerebras gpt-oss-120b\nPAID $10 credit · unlocks free access"]
+        T2D["4 · sambanova gpt-oss-120b\nPAID $10 credit · unlocks free access"]
+        T2E["5 · cheaperinference deepseek-v4-flash / glm-4.5-air / kimi-k3\nPAID $15 partner pool · own key"]
+        T2F["6 · openrouter deepseek/deepseek-v4.1-flash\nPAID"]
+        T2G["7 · deepseek deepseek-flash\nPAID $13 bulk · direct"]
+        T2H["8 · zen deepseek-v4.1-flash\nPAID · last resort"]
+        T2A --> T2B --> T2C --> T2D --> T2E --> T2F --> T2G --> T2H
     end
-    subgraph fb["Fallback: user picks litellm/*"]
+
+    subgraph t2c["tier2-clean · paid legs only, no training"]
+        direction TB
+        T2CA["1 · deepseek deepseek-flash\nPAID $13 bulk · direct"]
+        T2CB["2 · openrouter deepseek/deepseek-v4.1-flash\nPAID"]
+        T2CC["3 · zen deepseek-v4.1-flash\nPAID"]
+        T2CD["4 · mistral mistral-small-latest\nPAID direct"]
+        T2CA --> T2CB --> T2CC --> T2CD
+    end
+
+    subgraph t3["tier3 · cheap-driver · cheapest capable loop"]
+        direction TB
+        T3A["1 · mistral mistral-code-latest\nFREE 1B/mo pool, 2 RPM · same key bills past it"]
+        T3B["2 · groq qwen3.8-27b\nFREE 200K TPD"]
+        T3C["3 · cerebras qwen-3.8-27b\nPAID $10 credit overflow"]
+        T3D["4 · cheaperinference glm-4.5-air / minimax-m2.7\nPAID $15 partner pool · own key"]
+        T3E["5 · mistral mistral-small-latest\nPAID direct"]
+        T3F["6 · deepseek deepseek-flash\nPAID $13 bulk · direct"]
+        T3G["7 · zen deepseek-v4.1-flash\nPAID · last resort"]
+        T3A --> T3B --> T3C --> T3D --> T3E --> T3F --> T3G
+    end
+
+    subgraph t3c["tier3-clean · paid legs only, no training"]
+        direction TB
+        T3CA["1 · deepseek deepseek-flash\nPAID $13 bulk · direct"]
+        T3CB["2 · mistral mistral-small-latest\nPAID direct"]
+        T3CC["3 · zen deepseek-v4.1-flash\nPAID · last resort"]
+        T3CA --> T3CB --> T3CC
+    end
+
+    subgraph single["Pinned single-model route — cheapest-first"]
+        SP["spark-1.3-contributor:\nzen (until rate-limited) → meta (paid until limit lifts)"]
+    end
+
+    subgraph fb["Fallback client path — user picks litellm/*"]
         LT["LiteLLM :4000 static chains\ntier1 spark · tier2 gpt-oss\ntier3 devstral · paid flash"]
     end
-    OC & ZED & NV & OH --> SEL
-    SEL --> AUTO & PRI
-    AUTO & PRI --> SCORE
-    SCORE --> roles
-    SCORE -. "free legs exhausted" .-> paid
+
+    OC --> t1 & t1c & t2 & t2c & t3 & t3c
+    LB --> t1 & t1c & t2 & t2c & t3 & t3c
+    AUTO -. "bootstrap only" .-> t2
     OC -. "model litellm/*" .-> LT
 ```
+
+Reading the diagram: each arrow is the fallback hop — top leg first, next on
+429/5xx/quota, so a weaker leg *below* a stronger one is a defect, not a
+fallback. `*-clean` means paid-only; since the 2026-09-21 contributor-only
+block, tier1-clean trains by contract (its legs are contributor). Leg order
+in this diagram is the leg order `combos.json` must satisfy; see the sync
+contract below.
+
+## OmniRoute ↔ LiteLLM sync contract
+
+Two files can describe the same tiers, so each has exactly one owner and one
+job. **Where they disagree, `combos.json` is right.**
+
+| Surface | Owns | Must not do |
+|---|---|---|
+| `configuration/omniroute/combos.json` | **The truth for tier leg order.** Every `tierN` / `tierN-clean` combo, in `priority` order, free legs before the paid overflow order. This is what `apply.*` pushes to `:20128` and what the agents actually call. | List providers without keys (apply skips them with a warning) or a model ID the live catalog does not know. |
+| `configuration/litellm/config.yaml` | **A static mirror of `tier2` and `tier3`** (plus `tier1` spark), used only when the user deliberately types `litellm/tierN`. LiteLLM resolves its own `model_list` order, so the mirror is a fallback, never a second source of truth. | Introduce a leg that is not in `combos.json` for the same tier, or promise a window/limit `opencode.jsonc` does not declare. |
+| `opencode.jsonc` | Tier **ids**, role labels, `limit.context`, and the agent→tier pinning with spawn fences. | Decide which model answers. |
+
+**The rule a sync script enforces** (the script itself is L2-B's; this is the
+contract it must satisfy):
+
+1. **Order is derived, never authored twice.** Read `combos.json`; for each tier
+   take the ordered model list. The LiteLLM mirror for that tier must be the
+   same models in the same relative order, **minus** the legs LiteLLM cannot
+   address and **plus** nothing. A model present in the LiteLLM mirror but
+   absent from `combos.json` is a hard failure.
+2. **Subset, in order.** LiteLLM may mirror *fewer* legs (e.g. it drops the
+   `cheaperinference/*` reseller pool and the Zen free promo), but the legs it
+   keeps must keep their relative order. Reordering is a failure even when the
+   set matches.
+3. **Cheapest-first across the whole tier.** Walk the merged order against the
+   paid-overflow ranking (free pools → cerebras → sambanova → deepseek →
+   cheapinference → meta → openrouter) and fail on any leg that bills more than
+   a later leg in the same tier.
+4. **Clean tiers stay clean.** No leg of a `*-clean` tier may appear in a
+   `-contributor`, `-free`, or free-tier-pool form anywhere in either file.
+5. **`context` is not cross-checked.** `combos.json`'s `"context"` keys and
+   LiteLLM's `rpm` hints are conservative display values; the script must not
+   fail a tier whose models exceed them (tier2 is deliberately ungated — see
+   above).
+6. **Idempotent and dry-runnable.** Two runs in a row must produce byte-identical
+   output; the script reports the diff it would make and exits non-zero on a
+   violation rather than rewriting silently.
 
 ## Change the defaults
 
@@ -292,4 +406,5 @@ Edit tier order in `configuration/omniroute/combos.json` — that file is the
 single source of truth. `configuration/litellm/config.yaml` mirrors it inside
 its `# AUTOOS-MANAGED-START/END` blocks; run
 `python3 tools/sync-router-tiers.py` to re-mirror, or `--check` to see drift
-(exit 1). Hand-editing inside those markers is overwritten.
+(exit 1). Hand-editing inside those markers is overwritten. Never hand-order
+a LiteLLM chain (see the sync contract above).
