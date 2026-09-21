@@ -66,6 +66,41 @@ def component_platforms() -> dict:
     return out
 
 
+def provider_status() -> list:
+    """Which AI providers have a key in configuration/api-keys.yml.
+
+    Values never leave this function: the payload carries only the provider
+    id, a display label and whether a key is present.
+    """
+    labels = {
+        "groq": "Groq",
+        "google_ai_studio": "Google AI Studio (Gemini)",
+        "mistral": "Mistral",
+        "cloudflare_workers_ai": "Cloudflare Workers AI",
+        "cohere": "Cohere",
+        "hugging_face": "Hugging Face",
+        "cerebras": "Cerebras",
+        "sambanova": "SambaNova",
+        "deepseek": "DeepSeek",
+        "meta": "Meta Model API",
+        "openrouter": "OpenRouter",
+        "zen": "OpenCode Zen",
+        "cheapinference": "Cheaper Inference (paid partner)",
+        "omniroute": "OmniRoute client key",
+    }
+    have = set()
+    path = ROOT / "configuration" / "api-keys.yml"
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            t = line.strip()
+            if not t or t.startswith("#") or ":" not in t:
+                continue
+            key, _, val = t.partition(":")
+            if val.strip().strip("\"'"):
+                have.add(key.strip().lower())
+    return [{"id": k, "name": v, "configured": k in have} for k, v in labels.items()]
+
+
 def build_state() -> dict:
     """System info + catalog, produced by the same shell code the CLI uses."""
     probe = r"""
@@ -147,6 +182,7 @@ PY
         "profiles": catalog.get("profiles", {}),
         "prompts": catalog.get("prompts", {}),
         "components": components,
+        "providers": provider_status(),
     }
 
 

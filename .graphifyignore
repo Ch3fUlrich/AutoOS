@@ -1,0 +1,9 @@
+# graphify ignore rules for AutoOS
+# The Aug-2026 graph was dominated by vendored code (the eduroam installer
+# alone formed the two largest communities). Keep extraction on first-party
+# code so the graph answers about AutoOS, not its vendors.
+graphify-out/
+third_party/
+Linux/Network/eduroam-linux-UniBasel.py
+Linux/Network/eduroam-linux-Universitat_Basel-UniBasel.py
+web/*.woff2

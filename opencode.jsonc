@@ -1,0 +1,171 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Repo default: OmniRoute on :20128 (docs/models.md). tier1/2/3 and their
+  // -clean variants are combos created by configuration/omniroute/apply.*
+  // (priority chains: free legs first, allowed paid legs after). Role labels
+  // (display only — the tier1/2/3 ids are a contract and never change):
+  // tier1 = orchestrator-1M, tier2 = smart-reasoning-128k,
+  // tier3 = cheap-driver-128k. "-clean" excludes every model/plan that
+  // trains on prompts — pick it for sensitive data. auto/* stays as a
+  // zero-setup bootstrap that always resolves.
+  // Limits below must match the combo curations: tier1 is 1M-context only;
+  // anything smaller belongs in tier2. Override per user in
+  // ~/.config/opencode/opencode.jsonc. Client key via env
+  // AUTOOS_OMNIROUTE_KEY (or configuration/api-keys.yml).
+  "model": "omniroute/tier1",
+  // Tier enforcement (hard, runtime-checked): unattended runs select these
+  // agents, and the `subagent` permissions below make the depth mandatory —
+  // tier1-orchestrator may launch tier2-worker only, tier2-worker may launch
+  // tier3-reviewer only, tier3-reviewer may launch nothing. Last matching
+  // rule wins, so the broad deny comes first and the narrow allow after it.
+  // NOTE: this binds inside the opencode runtime (CLI/TUI/serve). Harness or
+  // API callers that bypass agents must follow the same depth by convention
+  // (see docs/unattended-orchestration.md "Tier enforcement").
+  "agents": {
+    "tier1-orchestrator": {
+      "description": "Long-horizon orchestrator: plans, slices, verifies, never codes directly. May launch tier2-worker only.",
+      "mode": "all",
+      "model": "omniroute/tier1#high",
+      "permissions": [
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "tier2-worker", "effect": "allow" }
+      ]
+    },
+    "tier2-worker": {
+      "description": "Smart worker: owns one track, reconciles reviews. May launch tier3-reviewer only.",
+      "mode": "subagent",
+      "model": "omniroute/tier2",
+      "permissions": [
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "tier3-reviewer", "effect": "allow" }
+      ]
+    },
+    "tier3-reviewer": {
+      "description": "Cheap reviewer: one focused question, small budget. May not launch subagents.",
+      "mode": "subagent",
+      "model": "omniroute/tier3",
+      "permissions": [
+        { "action": "subagent", "resource": "*", "effect": "deny" }
+      ]
+    }
+  },
+  "providers": {
+    "omniroute": {
+      "name": "AutoOS OmniRoute gateway",
+      "env": ["AUTOOS_OMNIROUTE_KEY"],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:20128/v1"
+      },
+      "models": {
+        "tier1": {
+          "modelID": "tier1",
+          "name": "tier1 orchestrator-1M — 1M ctx (free-first)",
+          "limit": { "context": 1000000, "output": 32768 }
+        },
+        "tier1-clean": {
+          "modelID": "tier1-clean",
+          "name": "tier1 orchestrator-1M — no training (sensitive data)",
+          "limit": { "context": 1000000, "output": 32768 }
+        },
+        "tier2": {
+          "modelID": "tier2",
+          "name": "tier2 smart-reasoning-128k — ≤128k ctx (free-first)",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "tier2-clean": {
+          "modelID": "tier2-clean",
+          "name": "tier2 smart-reasoning-128k — no training (sensitive data)",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "tier3": {
+          "modelID": "tier3",
+          "name": "tier3 cheap-driver-128k — ≤128k ctx (cheapest)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
+        "tier3-clean": {
+          "modelID": "tier3-clean",
+          "name": "tier3 cheap-driver-128k — no training (sensitive data)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
+        "auto/smart": {
+          "modelID": "auto/smart",
+          "name": "bootstrap: auto smart (no combo needed)",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "auto": {
+          "modelID": "auto",
+          "name": "bootstrap: auto balanced",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "auto/cheap": {
+          "modelID": "auto/cheap",
+          "name": "bootstrap: auto cheapest",
+          "limit": { "context": 131072, "output": 16384 }
+        }
+      }
+    },
+    "litellm": {
+      "name": "AutoOS LiteLLM router (manual fallback)",
+      "env": ["LITELLM_MASTER_KEY"],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:4000/v1"
+      },
+      "models": {
+        "tier1": {
+          "modelID": "tier1",
+          "name": "tier1 orchestrator (free-first)"
+        },
+        "tier2": {
+          "modelID": "tier2",
+          "name": "tier2 muse-spark smart (free-first)"
+        },
+        "tier3": {
+          "modelID": "tier3",
+          "name": "tier3 codegen driver (free-first)"
+        }
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "serena": {
+        "type": "local",
+        "command": [
+          "uvx",
+          "--from",
+          "serena-agent",
+          "serena",
+          "start-mcp-server",
+          "--open-web-dashboard",
+          "false",
+          "--enable-gui-log-window",
+          "false"
+        ]
+      },
+      "graphify": {
+        "type": "local",
+        "command": [
+          "uv",
+          "--quiet",
+          "run",
+          "--with",
+          "graphifyy[mcp]",
+          "python",
+          "-m",
+          "graphify.serve",
+          "graphify-out/graph.json"
+        ]
+      },
+      "playwright": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "@playwright/mcp@latest"
+        ]
+      }
+    }
+  }
+}
