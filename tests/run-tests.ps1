@@ -3356,6 +3356,12 @@ Test-Case 'the embedded OpenHands setup script is valid Python' {    # Set-AutoO
         # escaped quotes (\") travel as literal characters and are allowed.
         $bare = [regex]::Matches($m.Groups[1].Value, '(?<!\\)"')
         Assert-Equal $bare.Count 0 'bare double quote in embedded python (5.1 truncates there)'
+        # No 'enabled' key on OpenHands mcp_config entries: the live MCPServer
+        # schema forbids it (extra_forbidden -> /api/v1/settings 500s).
+        # (The opencode writer's PowerShell 'enabled = $true' is a different,
+        # schema-legal shape and is not matched here.)
+        $enb = [regex]::Matches($m.Groups[1].Value, "'enabled': True")
+        Assert-Equal $enb.Count 0 'enabled key in OpenHands mcp_config (live schema forbids it)'
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
 
