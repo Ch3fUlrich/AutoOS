@@ -95,9 +95,11 @@ never exist there — resolve through the main checkout, never copy secrets.
 3. **Remaining PRs** — #83→#88→#89→#84→#98→#96→#95→#94→#93→#92→#90 rebase+land
    (serve/tests, empty-catch hunks land once, strip scratch artifacts);
    defer #99 (superseded), #97, #87, #86. #85 + #101 closed.
-4. **Chatter tier** — route status/summary/dispatch text to tier3 free-first
-   (local ollama for one-question extractions), reasoning stays tier1/2;
-   record spend per DONE note. See `docs/unattended-orchestration.md`.
+4. **Chatter tier** — route status/summary/dispatch text to tier3 free-first;
+   local ollama is LAST resort only (model startup latency too high for quick
+   extractions). Reasoning stays tier1/2; cheap tiers transport verbatim and
+   extract with exact quotes, never rephrase decisions; record spend per
+   DONE note. See `docs/unattended-orchestration.md`.
 5. **MCP wiring per the tool-strength eval** (2026-09-21, in-session notes):
    attach serena/graphify/context7 (+omnigraph for writers) to opencode
    tiers, 3 servers to OpenHands roles, context_servers to Zed; weak-leg
