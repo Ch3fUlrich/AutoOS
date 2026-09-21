@@ -88,6 +88,22 @@ switch ($App) {
                 Write-Host "Stale OpenHands settings (schema_version $ohVer) moved aside to $backup."
             }
         }
+        # Re-project the tier profiles from the spec on every start: a rotated
+        # key, a re-curated spec, or a hand edit converges back automatically.
+        # Scoped Continue: under Stop, 5.1 turns the child python's stderr
+        # into a terminating error even when captured.
+        $syncPy = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($syncPy) {
+            $prevAction = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $syncOut = & $syncPy.Source (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\sync-openhands-profiles.py') --openhands-dir (Join-Path $env:USERPROFILE '.openhands') 2>&1
+                foreach ($line in $syncOut) { Write-Host $line }
+                if ($LASTEXITCODE -ne 0) { Write-Host 'tier profile sync reported a problem - continuing with existing profiles' }
+            } finally { $ErrorActionPreference = $prevAction }
+        } else {
+            Write-Host 'python not found - tier profile sync skipped (the installer covers it)'
+        }
         $existing = (& docker ps -a --format '{{.Names}}' 2>$null) -join "`n"
         if ($existing -match '(?m)^openhands-app$') {
             $running = (& docker ps --format '{{.Names}}' 2>$null) -join "`n"

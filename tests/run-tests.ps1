@@ -3294,6 +3294,65 @@ Test-Case 'the embedded OpenHands setup script writes no tier profiles without a
     }
 }
 
+Test-Case 'tier profiles come from the spec, installer and tool agree' {
+    # configuration/openhands/tier-profiles.json is the single source; the
+    # embedded installer and tools/sync-openhands-profiles.py must project it
+    # byte-identically for the same key, or install-time and start-time drift.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'tier1,tier2,tier3'
+    Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
+    foreach ($t in $spec.tiers) { Assert-True ($t.model -match '^openai/tier[123]$') "$($t.id) model is not openai/tierN" }
+    $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
+    Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
+    $tmpA = Join-Path ([IO.Path]::GetTempPath()) "autoos-tierspecA-$PID"
+    $tmpB = Join-Path ([IO.Path]::GetTempPath()) "autoos-tierspecB-$PID"
+    $keys = Join-Path $tmpB 'api-keys.yml'
+    # The generator prefers env over the keys file: force the fixture path by
+    # hiding any ambient key (the suite never asserts on live system state).
+    $realOmniKey = $env:AUTOOS_OMNIROUTE_KEY
+    try {
+        $null = New-Item -ItemType Directory -Force -Path $tmpA, $tmpB
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        'omniroute: test-omni-key' | Out-File $keys -Encoding utf8
+        & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys *> $null
+        Assert-Equal $LASTEXITCODE 0 'generator failed'
+        foreach ($t in @('tier1', 'tier2', 'tier3')) {
+            Assert-True (Test-Path (Join-Path $tmpA "profiles\autoos-$t.json")) "autoos-$t.json missing"
+        }
+        $t1 = Get-Content (Join-Path $tmpA 'profiles\autoos-tier1.json') -Raw | ConvertFrom-Json
+        Assert-Equal $t1.model 'openai/tier1'
+        Assert-Equal $t1.api_key 'test-omni-key'
+    } finally {
+        if ($null -eq $realOmniKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_KEY = $realOmniKey }
+        Remove-Item $tmpA, $tmpB -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'mirror-litellm-env projects keys without printing them' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-litenv-$PID"
+    try {
+        $null = New-Item -ItemType Directory -Force -Path $tmp
+        $keys = Join-Path $tmp 'api-keys.yml'
+        $envFile = Join-Path $tmp '.env'
+        "groq: dummy-groq-1`nmeta: dummy-meta-2`nzen: REPLACE_WITH_ZEN_KEY" | Out-File $keys -Encoding utf8
+        $out = & $py.Source (Join-Path $Root 'tools\mirror-litellm-env.py') --keys $keys --env $envFile 2>&1 | Out-String
+        Assert-Equal $LASTEXITCODE 0 "mirror failed: $out"
+        Assert-True ($out -notmatch 'dummy-') 'a key value leaked into output'
+        $got = Get-Content $envFile -Raw -Encoding utf8
+        Assert-True ($got -match 'GROQ_API_KEY=dummy-groq-1') 'groq not mirrored'
+        Assert-True ($got -match 'META_API_KEY=dummy-meta-2') 'meta not mirrored'
+        Assert-True ($got -match 'OPENCODE_ZEN_API_KEY=REPLACE') 'missing key not a placeholder'
+        Assert-True ($got -match 'LITELLM_MASTER_KEY=(?!REPLACE)\S+') 'master key not generated'
+        & $py.Source (Join-Path $Root 'tools\mirror-litellm-env.py') --check --keys $keys --env $envFile *> $null
+        Assert-Equal $LASTEXITCODE 0 'freshly written file fails --check'
+    } finally { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 Test-Case 'agent harness installers: the OpenHands writer calls the generator and skips role profiles' {
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match "agent_harness\.py[\s'\)]*openhands") 'Set-AutoOSOpenHandsConfig does not call agent_harness.py openhands'
@@ -3474,6 +3533,10 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         Assert-Equal $bypass.default_model.provider 'autoos-omniroute'
         Assert-Equal $bypass.default_model.model 'tier1'
         Assert-Equal $s.agent.tool_permissions.default 'allow'
+        Assert-True ($null -ne $s.context_servers.serena) 'serena context server missing'
+        Assert-True ($null -ne $s.context_servers.graphify) 'graphify context server missing'
+        Assert-Equal ($s.context_servers.serena.args -join ' ') '--from serena-agent==1.7.0 serena start-mcp-server'
+        Assert-True ($s.agent.profiles.bypass.enable_all_context_servers -eq $true) 'bypass does not opt into context servers'
         Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
         $raw = Get-Content (Join-Path $cfgDir 'settings.json') -Raw
         Assert-True ($raw -notmatch 'sk-' -and $raw -notmatch 'AUTOOS_OMNIROUTE_KEY|LITELLM_MASTER_KEY|REPLACE') 'secret leaked into settings'
@@ -3635,6 +3698,8 @@ Test-Case 'openhands launch is detached, probed and stale-settings safe' {
         Assert-True ($text -match 'schema_version') "$f has no stale-settings guard"
         Assert-True ($text -match 'autoos-backup') "$f deletes settings without backup"
         Assert-True ($text -match 'docker logs openhands-app') "$f prints the URL without a probe behind it"
+        # Tier profiles re-project from the spec on every start (never stale).
+        Assert-True ($text -match 'sync-openhands-profiles') "$f never syncs tier profiles"
         # Only versions NEWER than the image (6+) move aside: a live v3 file
         # serves fine, so a blanket "!= 4" nuke would destroy working configs.
         Assert-True ($text -match 'ge 6|>= 6|>=6') "$f nukes non-4 versions indiscriminately"
