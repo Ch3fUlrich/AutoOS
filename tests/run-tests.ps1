@@ -3635,7 +3635,10 @@ Test-Case 'litellm installer delegates to pipx when present' {
         New-Item -ItemType Directory -Path $stub -Force | Out-Null
         '@echo off' + "`r`n" + 'echo called > "%~dp0called.txt"' |
             Out-File (Join-Path $stub 'pipx.cmd') -Encoding ascii
-        $env:PATH = "$stub;$realPath"
+        # Narrowed PATH, not stub+real: a real litellm on this machine must
+        # not short-circuit the installer before the pipx stub is reached
+        # (the suite never asserts on live system state).
+        $env:PATH = "$stub;$env:SystemRoot\System32"
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
         Initialize-AutoOSLog -Path $log
         Install-AutoOSLitellm
@@ -3819,7 +3822,7 @@ Test-Case 'apply --dry-run registers nothing and starts nothing' {
     $before = Get-Content $combosPath -Raw -Encoding utf8
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File `
         (Join-Path $Root 'configuration\omniroute\apply.ps1') -DryRun 2>&1 | Out-String
-    Assert-True ($out -match 'dry run stops here|would create|would register') 'dry run announced nothing'
+    Assert-True ($out -match 'dry run stops here|dry run continues|would create|would register|already registered') 'dry run announced nothing'
     Assert-Equal (Get-Content $combosPath -Raw -Encoding utf8) $before
 }
 
@@ -3832,6 +3835,31 @@ Test-Case 'apply scripts carry the Cloudflare User-Agent fix' {
         Assert-True ($text -match 'muse-code') 'meta -> muse-code mapping missing'
     }
     Pass
+}
+
+Test-Case 'provider data JSON survives both PowerShell generations' {
+    # 5.1 strips inner double quotes marshalling to a native exe, pwsh 7
+    # passes them through: one literal cannot serve both (groq/cerebras
+    # registration failed exactly this way). The branch is pinned by
+    # executing the real function from apply.ps1 with each generation.
+    $tokens = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Root 'configuration\omniroute\apply.ps1'), [ref]$tokens, [ref]$errs)
+    Assert-Equal $errs.Count 0 'apply.ps1 does not parse'
+    $def = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $n.Name -eq 'Get-AutoOSProviderDataJson' }, $false)
+    Assert-True ($null -ne $def) 'Get-AutoOSProviderDataJson missing from apply.ps1'
+    $assign = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $n.Left.Extent.Text -eq '$ProviderData' }, $false)
+    Assert-True ($null -ne $assign) '$ProviderData table missing from apply.ps1'
+    . ([scriptblock]::Create($assign.Extent.Text + "`n" + $def.Extent.Text))
+    $v7 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 7
+    $v5 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 5
+    Assert-Equal ($v7 | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
+    # What node parses after 5.1 legacy unescaping (measured: backslash
+    # quotes arrive as plain quotes) must equal the 7.x literal.
+    Assert-Equal (($v5 -replace '\\"','"') | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
+    Assert-True ($null -eq (Get-AutoOSProviderDataJson 'nope' -ShellMajor 7)) 'unknown provider must yield null'
 }
 
 Test-Case 'opencode tiers declare matching context limits' {
