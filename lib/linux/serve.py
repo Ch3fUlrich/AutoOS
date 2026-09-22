@@ -639,63 +639,49 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed(parse_qs(u.query)):
             return self._json(403, {"error": "bad or missing token"})
         if u.path == "/api/claude/snapshot":
-            out = self._claude_engine("snapshot")
-            if out is None:
-                return self._json(500, {"error": "could not run the session snapshot"})
-            payload = self._claude_state()
-            payload["ok"] = True
-            return self._json(200, payload)
+            return self._post_claude_snapshot()
         if u.path == "/api/config":
-            length = int(self.headers.get("Content-Length") or 0)
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}")
-                if not isinstance(body, dict):
-                    return self._json(400, {"error": "payload must be a JSON object"})
-                cfg_file = ROOT / "autoos.config.json"
-                tmp_file = ROOT / "autoos.config.json.tmp"
-                original = cfg_file.read_text(encoding="utf-8-sig") if cfg_file.exists() else None
-                merged = json.loads(original) if original is not None else {}
-                if not isinstance(merged, dict):
-                    raise ValueError("Existing configuration must be an object")
-                for key, value in body.items():
-                    if key == "answers" and isinstance(value, dict) and isinstance(merged.get(key), dict):
-                        merged[key].update(value)
-                    else:
-                        merged[key] = value
-                if original is not None:
-                    cfg_file.with_name(cfg_file.name + f".autoos-backup-{time.time_ns()}").write_text(original, encoding="utf-8")
-                tmp_file.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
-                tmp_file.replace(cfg_file)
-                return self._json(200, {"ok": True, "saved": str(cfg_file)})
-            except Exception as exc:
-                return self._json(500, {"error": f"failed to save config: {exc}"})
+            return self._post_config()
         if u.path == "/api/usb/create":
-            length = int(self.headers.get("Content-Length") or 0)
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}")
-            except ValueError:
-                return self._json(400, {"error": "payload must be JSON"})
+            return self._post_usb_create()
+        if u.path == "/api/install":
+            return self._post_install()
+        return self._json(404, {"error": "not found"})
+
+    def _post_claude_snapshot(self):
+        out = self._claude_engine("snapshot")
+        if out is None:
+            return self._json(500, {"error": "could not run the session snapshot"})
+        payload = self._claude_state()
+        payload["ok"] = True
+        return self._json(200, payload)
+
+    def _post_config(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(body, dict):
                 return self._json(400, {"error": "payload must be a JSON object"})
-            code, payload = usb_create_response(body)
-            if code != 202:
-                return self._json(code, payload)
-            # Reserve before starting the worker, under the SAME lock /api/install
-            # uses - a write must never run alongside an install, or another write.
-            with LOCK:
-                if RUN["running"]:
-                    return self._json(409, {"error": "a run is already in progress"})
-                LOG.clear()
-                RUN.update(running=True, done=0, total=1, summary="", current=None)
-            threading.Thread(
-                target=run_usb_create,
-                args=(payload["image"], payload["kind"], payload["engine"], payload["device"]),
-                daemon=True,
-            ).start()
-            return self._json(202, {"started": True})
+            cfg_file = ROOT / "autoos.config.json"
+            tmp_file = ROOT / "autoos.config.json.tmp"
+            original = cfg_file.read_text(encoding="utf-8-sig") if cfg_file.exists() else None
+            merged = json.loads(original) if original is not None else {}
+            if not isinstance(merged, dict):
+                raise ValueError("Existing configuration must be an object")
+            for key, value in body.items():
+                if key == "answers" and isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key].update(value)
+                else:
+                    merged[key] = value
+            if original is not None:
+                cfg_file.with_name(cfg_file.name + f".autoos-backup-{time.time_ns()}").write_text(original, encoding="utf-8")
+            tmp_file.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+            tmp_file.replace(cfg_file)
+            return self._json(200, {"ok": True, "saved": str(cfg_file)})
+        except Exception as exc:
+            return self._json(500, {"error": f"failed to save config: {exc}"})
 
-        if u.path != "/api/install":
-            return self._json(404, {"error": "not found"})
+    def _post_install(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
         ids = [str(i) for i in body.get("ids", []) if i]
@@ -716,6 +702,32 @@ class Handler(BaseHTTPRequestHandler):
             daemon=True,
         ).start()
         return self._json(202, {"started": True})
+
+    def _post_usb_create(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self._json(400, {"error": "payload must be JSON"})
+        if not isinstance(body, dict):
+            return self._json(400, {"error": "payload must be a JSON object"})
+        code, payload = usb_create_response(body)
+        if code != 202:
+            return self._json(code, payload)
+        # Reserve before starting the worker, under the SAME lock /api/install
+        # uses - a write must never run alongside an install, or another write.
+        with LOCK:
+            if RUN["running"]:
+                return self._json(409, {"error": "a run is already in progress"})
+            LOG.clear()
+            RUN.update(running=True, done=0, total=1, summary="", current=None)
+        threading.Thread(
+            target=run_usb_create,
+            args=(payload["image"], payload["kind"], payload["engine"], payload["device"]),
+            daemon=True,
+        ).start()
+        return self._json(202, {"started": True})
+
 
 
 def main() -> int:
