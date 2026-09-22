@@ -125,6 +125,47 @@ on `:4000`) therefore use `openai/tierN` models against the proxy's
 `(plain) tierN` model_names, the same shape as the proven gateway path.
 No proxy-side alias is needed.
 
+## The "gemini-3.7-flash is cooling down" incident — full chain (2026-09-22)
+
+Symptom: selecting `spark-1.3-contributor` (or `tier1`) in opencode showed
+*"All credentials for model gemini-3.7-flash are cooling down"* — a model no
+combo references.
+
+Chain, each link measured:
+
+1. **`requestQueue.maxWaitMs` was 15000 ms.** Muse Spark is a reasoning model
+   and spends longer than 15 s thinking, so the gateway killed its own request
+   with *"Request exceeded OmniRoute's local rate-limit execution expiration"*
+   → the spark leg looked dead.
+2. The chain then fell through to `opencode-zen/muse-spark-1.3-contributor-free`,
+   which **deterministically 403s through the gateway**: *"OpenCode's free tier
+   can only be used from within OpenCode"*. It was the FIRST leg, so every
+   request paid that failed round-trip.
+3. With both legs exhausted the combo reported the last leg's error, and the
+   gateway's rescue/reporting path surfaced an uncurated model's error text —
+   the gemini free tier's `429 free_tier_input_token_count, limit: 250000`.
+
+Falsified on the way (each checked, none was the cause): the compression
+pipeline (`enabled: false`), gateway model aliases, auto-routing rules
+(`routing_decisions` empty), every client config file, and opencode's session
+store. The request body carried opencode's own tool set, which is why it first
+looked like a hand-picked model.
+
+Fixes, all verified:
+
+| Fix | Evidence |
+|---|---|
+| `requestQueue.maxWaitMs` 15000 → **180000** (`PATCH /api/resilience`) | `tier1`, `spark-1.3-contributor`, `tier1-clean` each **3/3 `ack`** after; 502/504 before |
+| Zen free leg **demoted to last** in `tier1` + `spark-1.3-contributor` | the first leg now answers, so no failed round-trip and no misleading error |
+| `apply.*` sets `maxWaitMs` on every run | fresh machines cannot inherit the 15 s default |
+| `tools/audit-router.py` flags a low `maxWaitMs` and any combo-bypassing ref | both suites run it with `--offline` |
+| LiteLLM `*-paid` groups lead with the OpenRouter leg; `simple-shuffle` | `tier1-paid`/`tier2-paid`/`tier3-paid` answer; before, all three 402'd |
+
+Also worth knowing: a bare `gemini-3.7-flash` resolves to the PAID OpenRouter
+alias (200), but the provider-qualified `gemini/gemini-3.7-flash` binds to the
+free tier and 504s. Provider-qualified refs bypass every combo and have no
+fallback — that is why `FORBIDDEN_DIRECT_REFS` in the audit exists.
+
 ## Full leg probe — every distinct combo leg (2026-09-22)
 
 One direct `:20128` chat per distinct leg in `combos.json` (20 legs). **No

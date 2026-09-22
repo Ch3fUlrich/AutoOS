@@ -180,6 +180,41 @@ if ($LiveIds.Count -eq 0) {
     Write-Host '    omniroute simulate --combo tier1'
 }
 
+# --- Resilience: the local execution deadline must fit a reasoning model ---
+# requestQueue.maxWaitMs ships at 15000 ms, which is below Muse Spark's own
+# thinking time: every spark request died with "Request exceeded OmniRoute's
+# local rate-limit execution expiration", the chain fell through to a dead
+# free leg, and the client saw the last leg's error (measured 2026-09-22 -
+# it surfaced as "gemini-3.7-flash is cooling down" inside opencode).
+# 180000 ms sits under comboCooldownWait.budgetMs (300s) so a genuinely dead
+# leg still hops instead of stalling the run.
+$MaxWaitMs = 180000
+Write-Host 'Resilience:'
+if ($DryRun) {
+    Write-Host "  - would set requestQueue.maxWaitMs = $MaxWaitMs"
+} elseif (-not $Keys.ContainsKey('omniroute')) {
+    Write-Host '  - no client key - cannot set requestQueue.maxWaitMs (PATCH /api/resilience)'
+} else {
+    $auth = @{ Authorization = "Bearer $($Keys['omniroute'])" }
+    $current = $null
+    try {
+        $cfg = Invoke-RestMethod -Uri "$Gateway/api/resilience?include=config" -TimeoutSec 15 -Headers $auth
+        $current = $cfg.requestQueue.maxWaitMs
+    } catch { $current = $null }
+    if ($current -eq $MaxWaitMs) {
+        Write-Host "  = requestQueue.maxWaitMs already $MaxWaitMs"
+    } else {
+        try {
+            $body = @{ requestQueue = @{ maxWaitMs = $MaxWaitMs } } | ConvertTo-Json -Depth 5
+            $null = Invoke-RestMethod -Uri "$Gateway/api/resilience" -Method Patch -TimeoutSec 15 `
+                -ContentType 'application/json' -Headers $auth -Body $body
+            Write-Host "  + requestQueue.maxWaitMs set to $MaxWaitMs (was $current)"
+        } catch {
+            Write-Host "  ! could not set requestQueue.maxWaitMs - set it in the dashboard (Resilience -> request queue)"
+        }
+    }
+}
+
 # --- (Re)create combos --- ---
 Write-Host 'Combos:'
 $combos = (Get-Content $CombosFile -Raw -Encoding utf8 | ConvertFrom-Json).combos

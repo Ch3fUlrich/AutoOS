@@ -624,7 +624,7 @@ print("%s|%s|%s|%s" % (
     ",".join(t["model"] for t in spec["tiers"])))
 PY
 )"
-    assert_eq "$report" "omniroute-tier1,omniroute-tier1-clean,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/tier1,openai/tier1-clean,openai/tier2,openai/tier2-clean,openai/tier3,openai/tier3-clean,openai/rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/tier2-credit,openai/tier3-credit,openai/tier1,openai/tier2,openai/tier3"
+    assert_eq "$report" "omniroute-tier1,omniroute-tier1-clean,omniroute-spark-1.3-contributor,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/tier1,openai/tier1-clean,openai/spark-1.3-contributor,openai/tier2,openai/tier2-clean,openai/tier3,openai/tier3-clean,openai/rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/tier2-credit,openai/tier3-credit,openai/tier1,openai/tier2,openai/tier3"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
     # Generator round-trip with fixture keys (env hidden: the suite never
@@ -633,7 +633,7 @@ PY
     printf 'LITELLM_MASTER_KEY=test-lit-key\n' >"$tmp/.env"
     out="$( ( unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY; python3 tools/sync-openhands-profiles.py --openhands-dir "$tmp" --keys-file "$tmp/api-keys.yml" --litellm-env "$tmp/.env" ) 2>&1)"
     rm -rf "$tmp"
-    assert_eq "$(printf '%s' "$out" | grep -c written)" "14"
+    assert_eq "$(printf '%s' "$out" | grep -c written)" "15"
 fi
 
 if it "start-stack regenerates tier profiles on openhands start"; then
@@ -5476,6 +5476,35 @@ if it "api-keys example carries placeholders only"; then
     assert_eq "$bad" ""
 fi
 
+if it "the router declarations do not drift from each other"; then
+    # tools/audit-router.py --offline compares combos.json against opencode.jsonc,
+    # both Zed writers and the OpenHands tier profiles, and rejects any
+    # combo-bypassing direct ref. Live gateway/proxy probes are the operator
+    # path (no --offline); CI stays deterministic.
+    out="$(python3 tools/audit-router.py --offline 2>&1)"; rc=$?
+    assert_ok "$rc"
+    assert_not_contains "$out" "DRIFT"
+fi
+
+if it "every leg of a combo carries a provider prefix"; then
+    bad="$(python3 - <<'PY'
+import json
+d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
+print(" ".join(f"{c['name']}:{m}" for c in d["combos"] for m in c["models"] if "/" not in m))
+PY
+)"
+    assert_eq "$bad" ""
+fi
+
+if it "apply sets the resilience deadline for reasoning legs"; then
+    ok=1
+    for f in configuration/omniroute/apply.sh configuration/omniroute/apply.ps1; do
+        grep -q 'maxWaitMs' "$f" || { ok=0; echo "$f never sets maxWaitMs" >&2; }
+        grep -q '180000' "$f" || { ok=0; echo "$f does not use the reasoning-safe value" >&2; }
+    done
+    if (( ok )); then pass; else fail "the resilience deadline is not applied"; fi
+fi
+
 if it "combos.json carries no phantom legs (probe-falsified refs stay out)"; then
     # Regression gate for the 2026-09-22 finding: three legs shipped that the
     # gateway 400s on ("not available in the active live catalog"), which only
@@ -5673,6 +5702,23 @@ if it "autostart and healthcheck files exist and parse"; then
         [[ -f "$f" ]] || { ok=0; echo "missing: $f" >&2; }
     done
     if (( ok )); then pass; else fail "autostart/healthcheck files missing or invalid"; fi
+fi
+
+if it "autostart resumes the LiteLLM fallback proxy too"; then
+    # litellm cannot read its own .env: the launcher must export it, and only
+    # start the proxy when down (never bounce a healthy one on every logon).
+    sh_launcher="configuration/autostart/Start-AutoOSStack.sh"
+    ps_launcher="configuration/autostart/Start-AutoOSStack.ps1"
+    starter="configuration/litellm/start-litellm.ps1"
+    ok=1
+    grep -q '4000' "$sh_launcher" || { ok=0; echo "sh: no :4000 probe" >&2; }
+    grep -q 'PYTHONUTF8' "$sh_launcher" || { ok=0; echo "sh: PYTHONUTF8 missing" >&2; }
+    grep -q 'already up on 4000' "$sh_launcher" || { ok=0; echo "sh: no litellm no-op path" >&2; }
+    grep -q 'start-litellm.ps1' "$ps_launcher" || { ok=0; echo "ps1: starter not referenced" >&2; }
+    grep -q 'already up on 4000' "$ps_launcher" || { ok=0; echo "ps1: no litellm no-op path" >&2; }
+    [[ -f "$starter" ]] || { ok=0; echo "missing: $starter" >&2; }
+    grep -q '\.env' "$starter" || { ok=0; echo "starter does not read .env" >&2; }
+    if (( ok )); then pass; else fail "litellm autostart wiring incomplete"; fi
 fi
 
 if it "the systemd unit is installable and opt-in"; then

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Resume the AutoOS AI stack after login: gateway + OpenHands + opencode serve.
+# Resume the AutoOS AI stack after login: gateway + litellm + OpenHands + serve.
 #
 # Opt-in resume helper run by the autoos-stack systemd user unit (or by hand
 # after a reboot). Safe to run twice: every probe below no-ops when already
@@ -30,7 +30,38 @@ else
     fi
 fi
 
-# 2. OpenHands container: restart only when it exists and is not running.
+# 2. LiteLLM fallback proxy on :4000. litellm does not read its own .env, so the
+#    launcher exports the flat KEY=VALUE file into the process before starting.
+litellm_ok() {
+    curl -sf -m 5 -o /dev/null "http://127.0.0.1:4000/" 2>/dev/null
+}
+LITELLM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../litellm" && pwd)"
+if litellm_ok; then
+    echo "LiteLLM proxy already up on 4000 - nothing to do."
+elif ! command -v litellm >/dev/null; then
+    echo "litellm is not installed - run setup.sh --only litellm --yes once, then re-run this."
+elif [[ ! -f "$LITELLM_DIR/.env" ]]; then
+    echo "No litellm .env - run: python3 tools/mirror-litellm-env.py (then re-run this)."
+else
+    echo "Starting the LiteLLM fallback proxy on 4000..."
+    (
+        cd "$LITELLM_DIR" || exit 1
+        set -a
+        # shellcheck disable=SC1091 # generated, git-ignored, present at runtime
+        . ./.env
+        set +a
+        # cp1252 consoles crash litellm's banner at startup.
+        PYTHONUTF8=1 nohup litellm --config config.yaml --port 4000 >/tmp/litellm.log 2>&1 &
+    )
+    for _ in $(seq 1 24); do litellm_ok && break; sleep 5; done
+    if litellm_ok; then
+        echo "LiteLLM proxy OK on 4000."
+    else
+        echo "LiteLLM proxy did not answer - see /tmp/litellm.log"
+    fi
+fi
+
+# 3. OpenHands container: restart only when it exists and is not running.
 if ! command -v docker >/dev/null; then
     echo "docker is not on PATH - skipping the OpenHands container."
 else
@@ -45,7 +76,7 @@ else
     fi
 fi
 
-# 3. opencode serve on :4096: start hidden only when down (401 = alive).
+# 4. opencode serve on :4096: start hidden only when down (401 = alive).
 serve_ok() {
     local code
     code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:4096/" 2>/dev/null || true)"

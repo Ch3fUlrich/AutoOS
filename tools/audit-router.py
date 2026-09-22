@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""Audit the router stack: repo declarations vs the live gateways.
+
+Four surfaces describe the same routing (docs/models.md "sync contract"), and
+2026-09-22 proved each one can drift silently while every suite stays green:
+
+  * a combo leg the gateway 400s on at chat time (`simulate` still resolves it)
+  * a combo present in combos.json but absent from a client's model list
+  * an OpenHands tier profile with no matching combo
+  * a LiteLLM `*-paid` escalation group whose only leg is dead, so the
+    "fallback" cannot fall back
+
+This tool checks all four, plus one footgun that produced a misleading
+"All credentials for model gemini-3.7-flash are cooling down" in a client:
+a PROVIDER-QUALIFIED bare model ref (`gemini/…`) bypasses every combo and has
+no fallback chain, so it binds straight to the throttled free tier.
+
+Usage:
+    python3 tools/audit-router.py [--offline] [--json]
+
+    (default)   probe the live gateway (:20128) and LiteLLM proxy (:4000)
+    --offline   only compare files; skip the network
+    --json      machine-readable report
+
+Exit codes:
+    0   no drift and no phantom refs
+    1   drift or a failing leg found (the report names each)
+    2   unusable input (a file is missing or unparseable)
+
+Never prints or reads a key value: only key *names* and model ids.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# Provider-qualified refs that bypass a combo. Every one of these binds to a
+# provider directly, so a throttled or unfunded connection surfaces as the
+# user-visible error instead of the chain hopping. The free-tier `gemini`
+# connection is the one measured to burn out (250k input-token/min cap).
+FORBIDDEN_DIRECT_REFS = (
+    "gemini/gemini-3.7-flash",   # free tier, tiny cap, no fallback: 429/504
+)
+
+
+def repo_combos() -> list[dict]:
+    path = ROOT / "configuration" / "omniroute" / "combos.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))["combos"]
+    except (OSError, ValueError, KeyError) as exc:
+        raise SystemExit(f"ERROR: cannot read {path}: {exc}")
+
+
+def live_combos() -> dict[str, list] | None:
+    """Combo name -> ordered leg list, straight from the gateway's store."""
+    import sqlite3
+
+    db_path = Path(os.path.expanduser("~")) / ".omniroute" / "storage.sqlite"
+    if not db_path.is_file():
+        return None
+    try:
+        db = sqlite3.connect(str(db_path))
+        out = {}
+        for name, data in db.execute("SELECT name, data FROM combos"):
+            try:
+                out[name] = [m["model"] for m in json.loads(data).get("models", [])]
+            except (ValueError, KeyError, TypeError):
+                out[name] = None
+        db.close()
+        return out
+    except sqlite3.Error:
+        return None
+
+
+def opencode_models() -> set[str]:
+    raw = (ROOT / "opencode.jsonc").read_text(encoding="utf-8")
+    body = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
+    doc = json.loads(body)
+    return set(doc["providers"]["omniroute"]["models"])
+
+
+def opencode_litellm_models() -> set[str]:
+    raw = (ROOT / "opencode.jsonc").read_text(encoding="utf-8")
+    body = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
+    doc = json.loads(body)
+    return set(doc["providers"]["litellm"]["models"])
+
+
+def tier_profile_ids() -> set[str]:
+    doc = json.loads((ROOT / "configuration" / "openhands" / "tier-profiles.json")
+                     .read_text(encoding="utf-8"))
+    return {t["id"] for t in doc["tiers"]}
+
+
+def litellm_declared() -> list[str]:
+    text = (ROOT / "configuration" / "litellm" / "config.yaml").read_text(encoding="utf-8")
+    return sorted({m.group(1) for m in re.finditer(r"^\s*-\s*model_name:\s*(\S+)\s*$",
+                                                   text, re.MULTILINE)})
+
+
+# Probe outcomes split into two kinds, because one is ours to fix and the
+# other is the account's: a 400/404 means the model ref itself is wrong
+# (config drift - the phantom-leg class), while 402/429/5xx/transport errors
+# are provider/balance state that the repo cannot repair. Reporting both as
+# "DRIFT" made the audit cry wolf on nearly-empty paid pools.
+DRIFT_STATUSES = {400, 404, "ERR"}
+
+
+def classify(status) -> str:
+    return "drift" if status in DRIFT_STATUSES else "state"
+
+
+def probe_gateway(model: str, timeout: int = 180) -> tuple[object, str]:
+    key = os.environ.get("AUTOOS_OMNIROUTE_KEY", "")
+    return _chat("http://127.0.0.1:20128", model, key, timeout)
+
+
+# A reasoning model spends its budget thinking before it emits a token. The
+# shipped requestQueue.maxWaitMs is 15000, which kills such a request with
+# "Request exceeded OmniRoute's local rate-limit execution expiration" - the
+# leg then looks dead, the chain falls through, and the client sees the LAST
+# leg's error (measured 2026-09-22: spark -> gemini free-tier "cooling down").
+MIN_REASONING_MAX_WAIT_MS = 120_000
+
+
+def resilience_config() -> dict | None:
+    """The gateway's live resilience config, or None when unreadable."""
+    key = os.environ.get("AUTOOS_OMNIROUTE_KEY", "")
+    if not key:
+        return None
+    req = urllib.request.Request(
+        "http://127.0.0.1:20128/api/resilience?include=config",
+        headers={"Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.load(resp)
+    except Exception:  # noqa: BLE001 - any failure means "cannot check"
+        return None
+
+
+def probe_litellm(model: str, timeout: int = 180) -> tuple[object, str]:
+    key = (os.environ.get("LITELLM_MASTER_KEY", "")
+           or os.environ.get("AUTOOS_LITELLM_API_KEY", ""))
+    return _chat("http://127.0.0.1:4000", model, key, timeout)
+
+
+def _chat(base: str, model: str, key: str, timeout: int,
+          max_tokens: int = 2048) -> tuple[object, str]:
+    # 2048, not a few dozen: reasoning legs (spark, gemini-flash) spend tokens
+    # on hidden thinking before emitting content, and a small budget makes them
+    # answer "empty response" - which reads as a dead leg but is a budget fault
+    # (docs/models.md "Muse Spark needs a real output budget").
+    body = json.dumps({"model": model,
+                       "messages": [{"role": "user", "content": "Reply with exactly: ack"}],
+                       "max_tokens": max_tokens}).encode()
+    req = urllib.request.Request(
+        base + "/v1/chat/completions", data=body,
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            json.load(resp)
+        return resp.status, "ack"
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(160).decode("utf-8", "replace").replace("\n", " ")[:160]
+    except Exception as exc:  # noqa: BLE001 - any transport failure is a finding
+        return "ERR", str(exc)[:160]
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Audit router declarations against the live gateways.")
+    ap.add_argument("--offline", action="store_true", help="skip all network probes")
+    ap.add_argument("--json", action="store_true", help="machine-readable report")
+    args = ap.parse_args(sys.argv[1:] if argv is None else argv)
+
+    combos = repo_combos()
+    names = [c["name"] for c in combos]
+    drift: list[str] = []
+    probes: list[dict] = []
+
+    # 1. repo vs live gateway (a LIVE check - skipped under --offline, where it
+    #    would report "unreadable" from a shell that cannot see the Windows
+    #    path, e.g. the Linux suite running under WSL2)
+    if not args.offline:
+        live = live_combos()
+        if live is None:
+            drift.append("gateway store unreadable - cannot compare live combos")
+        else:
+            missing = sorted(set(names) - set(live))
+            extra = sorted(set(live) - set(names))
+            if missing:
+                drift.append(f"combos in the repo but not live: {missing}")
+            if extra:
+                drift.append(f"combos live but not in the repo: {extra}")
+            for c in combos:
+                if live.get(c["name"]) != c["models"]:
+                    drift.append(f"{c['name']}: live legs {live.get(c['name'])} != repo {c['models']}")
+
+    # 2. repo vs client surfaces
+    oc = opencode_models()
+    for c in names:
+        if c not in oc:
+            drift.append(f"opencode.jsonc lacks model '{c}'")
+    psm = (ROOT / "lib" / "windows" / "AutoOS.Install.psm1").read_text(encoding="utf-8")
+    sh = (ROOT / "lib" / "linux" / "install.sh").read_text(encoding="utf-8")
+    for c in names:
+        if f"'{c}'" not in psm and f'"{c}"' not in psm:
+            drift.append(f"psm1 Zed writer lacks '{c}'")
+        if f"'{c}'" not in sh and f'"{c}"' not in sh:
+            drift.append(f"install.sh Zed writer lacks '{c}'")
+    tp = tier_profile_ids()
+    for c in names:
+        if f"omniroute-{c}" not in tp:
+            drift.append(f"tier-profiles.json lacks 'omniroute-{c}'")
+
+    # 3. forbidden direct refs anywhere in our surfaces
+    surfaces = {
+        "opencode.jsonc": (ROOT / "opencode.jsonc").read_text(encoding="utf-8"),
+        "lib/windows/AutoOS.Install.psm1": psm,
+        "lib/linux/install.sh": sh,
+        "configuration/openhands/tier-profiles.json":
+            (ROOT / "configuration" / "openhands" / "tier-profiles.json").read_text(encoding="utf-8"),
+        "configuration/openhands/config.toml":
+            (ROOT / "configuration" / "openhands" / "config.toml").read_text(encoding="utf-8"),
+        "configuration/litellm/config.yaml":
+            (ROOT / "configuration" / "litellm" / "config.yaml").read_text(encoding="utf-8"),
+    }
+    for ref in FORBIDDEN_DIRECT_REFS:
+        # The phantom-leg test owns combos.json; these are the other surfaces.
+        for label, text in surfaces.items():
+            if ref in text:
+                drift.append(f"{label} references a combo-bypassing ref: {ref}")
+
+    # 4. gateway resilience: the local execution deadline must fit a reasoning
+    #    model. A 15s deadline makes every spark request look like a dead leg.
+    if not args.offline:
+        cfg = resilience_config()
+        if cfg is not None:
+            max_wait = ((cfg.get("requestQueue") or {}).get("maxWaitMs"))
+            probes.append({"surface": "omniroute", "model": "requestQueue.maxWaitMs",
+                           "status": max_wait, "detail": "local execution deadline"})
+            if isinstance(max_wait, (int, float)) and max_wait < MIN_REASONING_MAX_WAIT_MS:
+                drift.append(
+                    f"requestQueue.maxWaitMs={max_wait} is below "
+                    f"{MIN_REASONING_MAX_WAIT_MS}: reasoning legs get killed mid-think "
+                    "(PATCH /api/resilience {\"requestQueue\":{\"maxWaitMs\":180000}})")
+
+    # 5. live probes
+    if not args.offline:
+        for c in combos:
+            status, detail = probe_gateway(c["name"])
+            probes.append({"surface": "omniroute", "model": c["name"], "status": status,
+                           "detail": detail, "kind": classify(status)})
+            if classify(status) == "drift":
+                drift.append(f"gateway combo {c['name']} -> {status} {detail}")
+        for m in litellm_declared():
+            status, detail = probe_litellm(m)
+            probes.append({"surface": "litellm", "model": m, "status": status,
+                           "detail": detail, "kind": classify(status)})
+            if classify(status) == "drift":
+                drift.append(f"litellm group {m} -> {status} {detail}")
+        # A litellm group whose only legs are unfunded cannot escalate.
+        for m in opencode_litellm_models() - set(litellm_declared()):
+            drift.append(f"opencode declares litellm/{m} but the proxy does not serve it")
+
+    if args.json:
+        print(json.dumps({"drift": drift, "probes": probes, "combos": names}, indent=2))
+    else:
+        print(f"combos: {len(names)} ({', '.join(names)})")
+        if probes:
+            for p in probes:
+                if p["surface"] == "omniroute" and p["model"] == "requestQueue.maxWaitMs":
+                    continue
+                if p["status"] == 200:
+                    flag = "ok  "
+                elif p.get("kind") == "drift":
+                    flag = "DRIFT"
+                else:
+                    flag = "state"
+                print(f"  {flag:5s} {p['surface']:9s} {p['model']:24s} {p['status']} {p['detail'][:70]}")
+        if drift:
+            print(f"\nDRIFT ({len(drift)}):")
+            for d in drift:
+                print(f"  ! {d}")
+        else:
+            print("\nno drift (non-200 legs above are provider/balance state, not config)")
+
+    return 1 if drift else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

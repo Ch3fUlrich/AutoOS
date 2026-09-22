@@ -213,6 +213,14 @@ memory, never write project data to the global `memory` graph.**
    gateway bills those legs and not the direct-paid ones).
 6b. **Effort control per call** — use `openrouter/meta/muse-spark-1.3-contributor#<minimal|low|medium|high|xhigh>` when the full ladder matters; gateway combos only resolve `low/medium/high`. `#max` is Zen-native only. Documented in `docs/models.md`.
 
+6c. **Router drift gate** — run `python3 tools/audit-router.py` after ANY
+   combo/client edit (live probes) and `--offline` in CI (already wired into
+   both suites). It compares the repo against the live gateway store, all four
+   client surfaces, the OpenHands tier profiles and the LiteLLM groups, and
+   rejects combo-bypassing refs plus a too-short `maxWaitMs`. **Zen free leg is
+   demoted to last in `tier1`/`spark`** — do not "restore free-first" without
+   re-probing: it 403s through the gateway.
+
 7. **Autostart** — gateway + litellm + OpenHands container resume after
    reboot (`configuration/autostart/`); Tailscale already Automatic. Use
    `configuration/litellm/start-litellm.ps1` as the proxy launch step.
@@ -245,6 +253,18 @@ bash tests/run-tests.sh
 - **A leg that `simulate` resolves can still 400 at chat time** ("not
   available in the active live catalog"). Probe every new leg; the two
   falsified refs are gated by both suites.
+- **A reasoning leg needs an output budget > 100 AND a gateway deadline >
+  its thinking time.** `requestQueue.maxWaitMs` ships at 15000 ms and kills
+  spark mid-think; `apply.*` now sets it to 180000. A tiny `max_tokens` makes
+  the same leg look dead ("empty response"). Both are budget faults, not
+  routing faults.
+- **Probe with `tools/audit-router.py`** (`--offline` for drift, live for the
+  gateways) before blaming a model: it separates config drift (400/404) from
+  provider/balance state (402/429/5xx) and checks the resilience deadline.
+- **Zen's free promo leg cannot serve through OmniRoute** — it 403s with
+  "OpenCode's free tier can only be used from within OpenCode". It is kept
+  LAST in `tier1`/`spark` so a future policy change is still picked up, but it
+  is never the critical path.
 - **Direct (non-combo) models have no fallback and no quota protection** — a
   session with `gemini/gemini-3.7-flash` selected blew the 250k
   free-input-token cap in one 1935-message turn. Read `comboName` in the call

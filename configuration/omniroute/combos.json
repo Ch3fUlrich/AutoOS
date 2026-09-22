@@ -50,6 +50,16 @@
     "The same labels appear as opencode.jsonc model names and in the web UI",
     "router-tiers card, so every surface explains itself the same way.",
     "",
+    "PER-MODEL FALLBACK ORDER, and why the zen free leg is LAST (2026-09-22):",
+    "  The OpenCode Zen free promo refuses proxied traffic — through OmniRoute",
+    "  it answers 403 'OpenCode's free tier can only be used from within",
+    "  OpenCode' on every attempt (measured repeatedly). As the FIRST leg it",
+    "  cost a failed round-trip per request and, when the paid leg was even",
+    "  briefly cooling, the 403 became the user-visible error. It now sits",
+    "  LAST: a future Zen policy change is still picked up with no config",
+    "  edit, but the critical path is the paid contributor leg that answers.",
+    "  Same shape for the pinned spark route.",
+    "",
     "Per-model free→paid chains: each free leg is followed, further down the",
     "same combo, by its paid twin on the same or a sanctioned provider, so a",
     "quota-exhausted free leg degrades to paid instead of failing:",
@@ -127,8 +137,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "opencode-zen/muse-spark-1.3-contributor-free",
-        "openrouter/meta/muse-spark-1.3-contributor"
+        "openrouter/meta/muse-spark-1.3-contributor",
+        "opencode-zen/muse-spark-1.3-contributor-free"
       ]
     },
     {
@@ -136,8 +146,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "opencode-zen/muse-spark-1.3-contributor-free",
-        "openrouter/meta/muse-spark-1.3-contributor"
+        "openrouter/meta/muse-spark-1.3-contributor",
+        "opencode-zen/muse-spark-1.3-contributor-free"
       ]
     },
     {
