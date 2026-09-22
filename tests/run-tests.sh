@@ -535,6 +535,27 @@ PY
     assert_eq "$out" "http://ollama:11434 ollama_chat/qwen2.5-coder:7b http://ollama:11434 ollama_chat/qwen2.5-coder:7b True False"
 fi
 
+if it "setup_openhands_config defaults to the gateway with a key"; then
+    # Same hermetic shape as the Ollama test. Env key wins over the repo's
+    # real api-keys.yml (the suite never asserts on live system state).
+    tmp="$(mktemp -d)"
+    out="$(
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
+        unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        curl() { return 6; }
+        OLLAMA_BASE_URL="http://ollama:11434" AUTOOS_OMNIROUTE_KEY="test-gw-key" setup_openhands_config >/dev/null 2>&1
+        python3 - "$tmp/.openhands" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+s = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))
+llm = s["agent_settings"]["llm"]
+print(llm["model"], llm["base_url"], llm["api_key"], llm["reasoning_effort"])
+PY
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "openai/tier1 http://host.docker.internal:20128/v1 test-gw-key high"
+fi
+
 if it "setup_openhands_config writes gateway tier profiles with a key, none without"; then
     tmp="$(mktemp -d)"
     out="$(

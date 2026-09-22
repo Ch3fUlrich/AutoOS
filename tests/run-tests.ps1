@@ -3353,8 +3353,37 @@ Test-Case 'mirror-litellm-env projects keys without printing them' {
     } finally { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case 'the embedded OpenHands setup script defaults to the gateway with a key' {
+    # Same temp-dir isolation as the Ollama test. With an OmniRoute key the
+    # default LLM must mirror the opencode tier1 setup (openai/tier1 via the
+    # container-side gateway) instead of falling back to local Ollama.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+    $script = [regex]::Match($src, "(?s)\`$setupScript = @'\r?\n(.*?)\r?\n'@").Groups[1].Value
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-gw-$PID"
+    $oh = Join-Path $tmp '.openhands'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $oh 'profiles'), (Join-Path $oh 'agent-profiles')
+    $saved = @{ OLLAMA_BASE_URL = $env:OLLAMA_BASE_URL; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME; LOCALAPPDATA = $env:LOCALAPPDATA }
+    try {
+        $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
+        $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
+        & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-gw-key' *> $null
+        $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $settings.agent_settings.llm.model 'openai/tier1'
+        Assert-Equal $settings.agent_settings.llm.base_url 'http://host.docker.internal:20128/v1'
+        Assert-Equal $settings.agent_settings.llm.api_key 'test-gw-key'
+        Assert-Equal $settings.agent_settings.llm.reasoning_effort 'high'
+    } finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            else { Set-Item "env:$k" -Value $saved[$k] }
+        }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'agent harness installers: the OpenHands writer calls the generator and skips role profiles' {
-    $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match "agent_harness\.py[\s'\)]*openhands") 'Set-AutoOSOpenHandsConfig does not call agent_harness.py openhands'
     Assert-True ($body -match '_role_profiles') 'Set-AutoOSOpenHandsConfig does not skip role profiles'
 }
