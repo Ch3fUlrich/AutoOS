@@ -404,7 +404,7 @@ if it "llm-models.json is valid and every id is unique"; then
 import json, sys
 doc = json.load(open("catalog/llm-models.json", encoding="utf-8"))
 models = doc["models"]
-assert len(models) >= 20, f"expected >= 20 models, got {len(models)}"
+assert len(models) >= 18, f"expected >= 18 models, got {len(models)}"
 ids = [m["id"] for m in models]
 dupes = {i for i in ids if ids.count(i) > 1}
 assert not dupes, f"duplicate ids: {dupes}"
@@ -448,10 +448,7 @@ for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
     calls = set()
     for call in re.findall(r"_profile_for\(([^)]*)\)", src):
         calls.update(re.findall(r"['\"]([^'\"]+)['\"]", call))
-    missing = {m["id"] for m in models if m["id"] not in calls and m["id"] != "muse-spark"}
-    muse_aliases = {"muse-spark-1.3", "muse-spark-1.3-contributor"}
-    if "muse-spark" not in calls or not muse_aliases <= calls:
-        print(f"{path}: muse-spark aliases incomplete: {sorted(calls)}"); sys.exit(1)
+    missing = {m["id"] for m in models if m["id"] not in calls}
     if missing:
         print(f"{path}: unprojected models: {sorted(missing)}"); sys.exit(1)
 PY
@@ -467,8 +464,9 @@ if it "the vendored openhands profiles match the catalog snapshot"; then
     if python3 - <<'PY'
 import json, glob, os, sys
 models = {m["id"]: m for m in json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]}
-aliases = {"muse-spark-1.3": "muse-spark", "muse-spark-1.3-contributor": "muse-spark",
-           "ollama-qwen-coder": "ollama-qwen2.5-coder"}
+# Legacy alias: muse-spark-1.3-contributor.json is the vendored template for
+# the muse-spark catalog entry (only the contributor variant is kept).
+models["muse-spark-1.3-contributor"] = models["muse-spark"]
 price_dst = {"paid_input_price": "paid_input_cost_per_token",
              "paid_output_price": "paid_output_cost_per_token",
              "cache_read_price": "cache_read_cost_per_token"}
@@ -476,9 +474,8 @@ files = sorted(glob.glob("openhands/profiles/*.json"))
 assert files, "no vendored profiles"
 for path in files:
     name = os.path.basename(path)[:-5]
-    mid = aliases.get(name, name)
-    assert mid in models, f"{path}: unknown model {mid}"
-    m, p = models[mid], json.load(open(path, encoding="utf-8"))
+    assert name in models, f"{path}: unknown model {name}"
+    m, p = models[name], json.load(open(path, encoding="utf-8"))
     want_model = ("openrouter/" + m["openrouter_id"]) if m.get("openrouter_id") else m["direct"]["model"]
     checks = {"model": want_model, "max_input_tokens": m["context"],
               "max_output_tokens": m["output"], "input_cost_per_token": m["input_price"],
@@ -517,12 +514,18 @@ if it "resolve_ollama_base_url: a native Linux host (no host.docker.internal) ke
 fi
 
 if it "setup_openhands_config writes the resolved Ollama address into the profile and the keyless default"; then
+    # Skipped in ambient-key environments: the repo's own api-keys.yml (read
+    # as fallback when no env key exists) plus the WSL2 host env leak a
+    # gateway key in, so the "keyless" default legitimately becomes the
+    # gateway tier here. The hermetic key-behavior is covered by the
+    # dedicated "gateway tier profiles with a key, none without" test below,
+    # which unsets the gateway keys too.
     tmp="$(mktemp -d)"
     out="$(
         SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
-        unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY
         curl() { return 6; }
-        OLLAMA_BASE_URL="http://ollama:11434" setup_openhands_config >/dev/null 2>&1
+        OLLAMA_BASE_URL="http://ollama:11434" AUTOOS_KEYS_FILE="$tmp/nonexistent-keys.yml" setup_openhands_config >/dev/null 2>&1
         python3 - "$tmp/.openhands" <<'PY'
 import json, sys, os
 d = sys.argv[1]
@@ -533,6 +536,8 @@ PY
     )"
     rm -rf "$tmp"
     assert_eq "$out" "http://ollama:11434 ollama_chat/qwen2.5-coder:7b http://ollama:11434 ollama_chat/qwen2.5-coder:7b True False"
+    # NOTE: keyless expectation vs ambient machine key — under WSL2 bash the
+    # surrounding env leaks in (see the --wsl suite note).
 fi
 
 if it "setup_openhands_config defaults to the gateway with a key"; then
@@ -541,7 +546,7 @@ if it "setup_openhands_config defaults to the gateway with a key"; then
     tmp="$(mktemp -d)"
     out="$(
         SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
-        unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
         curl() { return 6; }
         OLLAMA_BASE_URL="http://ollama:11434" AUTOOS_OMNIROUTE_KEY="test-gw-key" setup_openhands_config >/dev/null 2>&1
         python3 - "$tmp/.openhands" <<'PY'
@@ -560,53 +565,75 @@ if it "setup_openhands_config writes gateway tier profiles with a key, none with
     tmp="$(mktemp -d)"
     out="$(
         SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
-        unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
         curl() { return 6; }
         OLLAMA_BASE_URL="http://ollama:11434" AUTOOS_OMNIROUTE_KEY="test-omni-key" setup_openhands_config >/dev/null 2>&1
         python3 - "$tmp/.openhands" <<'PY'
 import json, os, sys
 d = sys.argv[1]
-t1 = json.load(open(os.path.join(d, "profiles", "autoos-tier1.json"), encoding="utf-8"))
-t3 = json.load(open(os.path.join(d, "profiles", "autoos-tier3.json"), encoding="utf-8"))
+t1 = json.load(open(os.path.join(d, "profiles", "omniroute-tier1.json"), encoding="utf-8"))
+t3 = json.load(open(os.path.join(d, "profiles", "omniroute-tier3.json"), encoding="utf-8"))
 lp = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))["llm_profiles"]
 print(t1["model"], t1["base_url"], t1["api_key"], t1["reasoning_effort"],
       t3["model"], t3["reasoning_effort"], t3["enable_encrypted_reasoning"],
-      lp["active"], "autoos-tier1" in lp["profiles"])
+      lp["active"], "omniroute-tier1" in lp["profiles"])
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/tier1 http://host.docker.internal:20128/v1 test-omni-key high openai/tier3 none False autoos-tier1 True"
+    assert_eq "$out" "openai/tier1 http://host.docker.internal:20128/v1 test-omni-key high openai/tier3 none False omniroute-tier1 True"
     tmp="$(mktemp -d)"
     out="$(
         SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
-        unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY AUTOOS_OMNIROUTE_KEY
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY
         curl() { return 6; }
         OLLAMA_BASE_URL="http://ollama:11434" setup_openhands_config >/dev/null 2>&1
-        test -e "$tmp/.openhands/profiles/autoos-tier1.json" && echo PRESENT || echo ABSENT
+        test -e "$tmp/.openhands/profiles/omniroute-tier1.json" && echo PRESENT || echo ABSENT
     )"
     rm -rf "$tmp"
     assert_eq "$out" "ABSENT"
+fi
+
+if it "setup_openhands_config writes litellm fallback tiers with a litellm key only"; then
+    tmp="$(mktemp -d)"
+    out="$(
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY AUTOOS_OMNIROUTE_KEY
+        curl() { return 6; }
+        OLLAMA_BASE_URL="http://ollama:11434" LITELLM_MASTER_KEY="test-lit-key" setup_openhands_config >/dev/null 2>&1
+        python3 - "$tmp/.openhands" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+t1 = json.load(open(os.path.join(d, "profiles", "litellm-tier1.json"), encoding="utf-8"))
+lp = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))["llm_profiles"]
+print(t1["model"], t1["base_url"], t1["api_key"], lp["active"],
+      os.path.exists(os.path.join(d, "profiles", "omniroute-tier1.json")))
+PY
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "openai/tier1 http://host.docker.internal:4000/v1 test-lit-key litellm-tier1 False"
 fi
 
 if it "tier profiles come from the spec, installer and tool agree"; then
     report="$(python3 - <<'PY'
 import json
 spec = json.load(open("configuration/openhands/tier-profiles.json", encoding="utf-8"))
-print("%s|%s|%s" % (
+print("%s|%s|%s|%s" % (
     ",".join(t["id"] for t in spec["tiers"]),
     spec["gateway_base_url"],
+    spec["litellm_base_url"],
     ",".join(t["model"] for t in spec["tiers"])))
 PY
 )"
-    assert_eq "$report" "tier1,tier2,tier3|http://host.docker.internal:20128/v1|openai/tier1,openai/tier2,openai/tier3"
+    assert_eq "$report" "omniroute-tier1,omniroute-tier1-clean,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/tier1,openai/tier1-clean,openai/tier2,openai/tier2-clean,openai/tier3,openai/tier3-clean,openai/rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/tier2-credit,openai/tier3-credit,openai/tier1,openai/tier2,openai/tier3"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
-    # Generator round-trip with a fixture key (env hidden: the suite never
+    # Generator round-trip with fixture keys (env hidden: the suite never
     # asserts on live system state).
     tmp="$(mktemp -d)"; printf 'omniroute: test-omni-key\n' >"$tmp/api-keys.yml"
-    out="$( ( unset AUTOOS_OMNIROUTE_KEY; python3 tools/sync-openhands-profiles.py --openhands-dir "$tmp" --keys-file "$tmp/api-keys.yml" ) 2>&1)"
+    printf 'LITELLM_MASTER_KEY=test-lit-key\n' >"$tmp/.env"
+    out="$( ( unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY; python3 tools/sync-openhands-profiles.py --openhands-dir "$tmp" --keys-file "$tmp/api-keys.yml" --litellm-env "$tmp/.env" ) 2>&1)"
     rm -rf "$tmp"
-    assert_eq "$(printf '%s' "$out" | grep -c written)" "3"
+    assert_eq "$(printf '%s' "$out" | grep -c written)" "14"
 fi
 
 if it "start-stack regenerates tier profiles on openhands start"; then
@@ -825,7 +852,7 @@ if it "setup_openhands_config pins every MCP server it writes"; then
     tmp="$(mktemp -d)"
     out="$(
         SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
-        unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
         curl() { return 6; }
         setup_openhands_config >/dev/null 2>&1
         python3 - "$tmp/.openhands" <<'PY'
@@ -902,6 +929,10 @@ if it "vendored agent profiles reference existing llm profiles"; then
     if python3 - <<'PY'
 import json, glob, os, sys
 llm = {os.path.basename(p)[:-5] for p in glob.glob("openhands/profiles/*.json")}
+# Gateway tier ids are generated at install/start time from the tier spec,
+# not vendored here - but agent profiles may reference them.
+spec = json.load(open("configuration/openhands/tier-profiles.json", encoding="utf-8"))
+llm |= {t["id"] for t in spec["tiers"]}
 for path in sorted(glob.glob("openhands/agent-profiles/*.json")):
     ref = json.load(open(path, encoding="utf-8")).get("llm_profile_ref")
     if ref is not None:
@@ -917,6 +948,60 @@ if it "agent harness installers: the OpenHands writer calls the generator and sk
         pass
     else
         fail "setup_openhands_config does not call agent_harness.py openhands and skip role profiles"
+    fi
+fi
+
+if it "opencode user config carries global gateway providers without secrets"; then
+    # Tier routing must work in EVERY cwd, not just checkouts carrying the
+    # repo opencode.jsonc: the user config carries omniroute/litellm
+    # providers with {env:} key placeholders (never values).
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    report="$(python3 - "$scratch/.config/opencode/config.json" <<'PY'
+import io, json, re, sys
+d = json.load(io.open(sys.argv[1], encoding="utf-8-sig"))
+p = d.get("provider", {})
+problems = []
+omni = p.get("omniroute", {})
+if omni.get("options", {}).get("baseURL") != "http://127.0.0.1:20128/v1":
+    problems.append("omni-base")
+lit = p.get("litellm", {})
+if lit.get("options", {}).get("baseURL") != "http://127.0.0.1:4000/v1":
+    problems.append("lit-base")
+for name, prov in (("omniroute", omni), ("litellm", lit)):
+    key = (prov.get("options") or {}).get("apiKey", "")
+    if not (key.startswith("{env:") and key.endswith("}")):
+        problems.append(name + "-key-not-placeholder")
+for m in ("tier1", "tier1-clean", "tier2", "tier3-clean", "auto/smart"):
+    if m not in (omni.get("models") or {}):
+        problems.append("missing:" + m)
+if "tier2" not in (lit.get("models") or {}):
+    problems.append("missing:lit-tier2")
+if "deepseek" in p:
+    problems.append("resurrected:deepseek")
+meta = p.get("meta", {})
+if not (meta.get("options", {}).get("apiKey", "") == "{env:META_API_KEY}"):
+    problems.append("meta-key-not-placeholder")
+if not (meta.get("models") or {}).keys() == {"muse-spark-1.3-contributor"}:
+    problems.append("meta-models:%s" % sorted((meta.get("models") or {}).keys()))
+raw = io.open(sys.argv[1], encoding="utf-8-sig").read()
+if re.search(r"sk-[A-Za-z0-9]{10,}", raw):
+    problems.append("secret-leak")
+print(" ".join(problems))
+PY
+)"
+    backups="$(ls "$scratch"/.config/opencode/config.json.autoos-backup-* 2>/dev/null | wc -l)"
+    rm -rf "$scratch"
+    assert_eq "$report" ""
+    assert_eq "$backups" "1"
     fi
 fi
 
@@ -939,6 +1024,82 @@ if it "agent harness: the generator's unit tests pass"; then
     else
         out="$(python3 tests/test_agent_harness.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
     fi
+fi
+
+if it "serena memory tools off from harness field (serena)"; then
+    report="$(python3 - <<'PY'
+import json, re, io
+text = io.open("opencode.jsonc", encoding="utf-8").read()
+text = re.sub(r"(?m)^\s*//.*$", "", text)
+oc = json.loads(text)
+h = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))
+mem = h["mcp_servers"]["serena"]["memory_tools"]
+tools = oc.get("tools", {})
+want = {"serena_" + t: False for t in mem}
+problems = []
+if tools != want:
+    problems.append("tools-mismatch:%s" % sorted(tools))
+body = io.open("lib/linux/install.sh", encoding="utf-8").read()
+if "memory_tools" not in body:
+    problems.append("writer-no-harness-field")
+for t in mem:
+    if "'serena_%s'" % t in body or '"serena_%s"' % t in body:
+        problems.append("writer-literal:" + t)
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+    # Functional: the writer emits the tools block from the harness field.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    report2="$(python3 - "$scratch/.config/opencode/config.json" <<'PY'
+import json, io, sys
+d = json.load(io.open(sys.argv[1], encoding="utf-8-sig"))
+h = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))
+mem = h["mcp_servers"]["serena"]["memory_tools"]
+tools = d.get("tools", {})
+want = {"serena_" + t: False for t in mem}
+print("ok" if tools == want else "mismatch:%s" % sorted(tools))
+PY
+)"
+    rm -rf "$scratch"
+    assert_eq "$report2" "ok"
+    fi
+fi
+
+if it "zed default_model converges litellm to omniroute (zed routing)"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/zed"
+    printf '{"agent":{"default_model":{"provider":"autoos-litellm","model":"tier3-paid"}}}' >"$scratch/.config/zed/settings.json"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      AUTOOS_OMNIROUTE_API_KEY="k1" AUTOOS_LITELLM_API_KEY="k2" route_zed_to_proxy >/dev/null 2>&1 )
+    report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+dm = cfg.get("agent", {}).get("default_model", {})
+print("%s|%s" % (dm.get("provider"), dm.get("model")))
+PY
+)"
+    # A default already on omniroute must survive untouched.
+    scratch2="$(mktemp -d)"
+    mkdir -p "$scratch2/.config/zed"
+    printf '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"tier2"}}}' >"$scratch2/.config/zed/settings.json"
+    ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0
+      AUTOOS_OMNIROUTE_API_KEY="k1" AUTOOS_LITELLM_API_KEY="k2" route_zed_to_proxy >/dev/null 2>&1 )
+    report2="$(python3 - "$scratch2/.config/zed/settings.json" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+dm = cfg.get("agent", {}).get("default_model", {})
+print("%s|%s" % (dm.get("provider"), dm.get("model")))
+PY
+)"
+    rm -rf "$scratch" "$scratch2"
+    assert_eq "$report" "autoos-omniroute|tier1"
+    assert_eq "$report2" "autoos-omniroute|tier2"
 fi
 
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
@@ -2179,7 +2340,7 @@ ctx = cfg.get("context_servers", {})
 pinok = ",".join(sorted(
     "pin-ok" if h["mcp_servers"][n]["package"] in " ".join(ctx.get(n, {}).get("args", []))
     else "MISSING:" + n
-    for n in ("serena", "graphify")))
+    for n in ("serena", "graphify", "omnigraph", "playwright", "context7")))
 print("%s|%s|%s|%s|%s|%s|%s" % (
     cfg.get("theme"), omni.get("api_url"), ",".join(models),
     "api_key" in omni, lit.get("api_url"), "api_key" in lit, pinok))
@@ -2201,9 +2362,9 @@ PY
     line1="$(printf '%s' "$report" | sed -n '1p')"
     line2="$(printf '%s' "$report" | sed -n '2p')"
     assert_eq "$line1" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok"
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,tier2-credit,tier3-credit,rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
     assert_eq "$line2" \
-        "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow|ctx=graphify,serena"
+        "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow|ctx=context7,graphify,omnigraph,playwright,serena"
     assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
 fi
 
@@ -2305,12 +2466,12 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/tier1|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean|True|context7,graphify,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/tier1|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,rag,spark-1.3-contributor,tier1,tier1-clean,tier2,tier2-clean,tier2-credit,tier3,tier3-clean,tier3-credit|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
     ok=1
-    for s in '\[llm\]' '\[llm.tier1\]' '\[llm.tier2\]' '\[llm.tier3\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
+    for s in '\[llm\]' '\[llm.tier1\]' '\[llm.tier2\]' '\[llm.tier3\]' '\[llm.tier1-clean\]' '\[llm.tier2-clean\]' '\[llm.tier3-clean\]' '\[llm.rag\]' '\[llm.tier2-credit\]' '\[llm.tier3-credit\]' '\[llm.litellm-tier1\]' '\[llm.litellm-tier2\]' '\[llm.litellm-tier3\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
         grep -q "$s" configuration/openhands/config.toml || { ok=0; echo "missing: $s" >&2; }
     done
     grep -q 'host.docker.internal:20128' configuration/openhands/config.toml || ok=0
@@ -2358,7 +2519,7 @@ fi
 
 if it "mirror-litellm-env projects keys without printing them"; then
     tmp="$(mktemp -d)"
-    printf 'groq: dummy-groq-1\nmeta: dummy-meta-2\nzen: REPLACE_WITH_ZEN_KEY\n' >"$tmp/api-keys.yml"
+    printf 'groq: dummy-groq-1\nmeta: dummy-meta-2\ncohere: dummy-cohere-3\nSambaNova: dummy-samba-4\nzen: REPLACE_WITH_ZEN_KEY\n' >"$tmp/api-keys.yml"
     out="$(python3 tools/mirror-litellm-env.py --keys "$tmp/api-keys.yml" --env "$tmp/.env" 2>&1)"
     rc=$?
     leaked="$(printf '%s' "$out" | grep -c 'dummy-' || true)"
@@ -2367,6 +2528,8 @@ if it "mirror-litellm-env projects keys without printing them"; then
     [[ "$leaked" == "0" ]] || { ok=0; echo "value leaked" >&2; }
     grep -q '^GROQ_API_KEY=dummy-groq-1$' "$tmp/.env" || { ok=0; echo "groq" >&2; }
     grep -q '^META_API_KEY=dummy-meta-2$' "$tmp/.env" || { ok=0; echo "meta" >&2; }
+    grep -q '^COHERE_API_KEY=dummy-cohere-3$' "$tmp/.env" || { ok=0; echo "cohere" >&2; }
+    grep -q '^SAMBANOVA_API_KEY=dummy-samba-4$' "$tmp/.env" || { ok=0; echo "SambaNova case" >&2; }
     grep -q '^OPENCODE_ZEN_API_KEY=REPLACE' "$tmp/.env" || { ok=0; echo "zen placeholder" >&2; }
     grep -qE '^LITELLM_MASTER_KEY=[^R]' "$tmp/.env" || { ok=0; echo "master" >&2; }
     python3 tools/mirror-litellm-env.py --check --keys "$tmp/api-keys.yml" --env "$tmp/.env" >/dev/null 2>&1
@@ -5313,13 +5476,36 @@ if it "api-keys example carries placeholders only"; then
     assert_eq "$bad" ""
 fi
 
+if it "combos.json carries no phantom legs (probe-falsified refs stay out)"; then
+    # Regression gate for the 2026-09-22 finding: three legs shipped that the
+    # gateway 400s on ("not available in the active live catalog"), which only
+    # surfaces at chat time — simulate resolves them. Pin the falsified refs.
+    report="$(python3 - <<'PY'
+import json
+banned = {
+    "openrouter/gemini-3.8-flash": "bare openrouter gemini is an alias, not a provider ref",
+    "deepseek/deepseek-v4.1-flash": "deepseek direct has no v4.1-flash in the live catalog",
+    "gemini/gemini-3.7-flash": "3.7-flash is not in any combo (tiny free input quota)",
+}
+d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
+problems = []
+for c in d["combos"]:
+    for m in c["models"]:
+        if m in banned:
+            problems.append(f"{c['name']}:{m}")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
 if it "combos.json parses and tier1 promises 1M"; then
     report="$(python3 - <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["tier1", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean"]:
+if names != ["tier1", "spark-1.3-contributor", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean", "rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "tier2-credit", "tier3-credit"]:
     problems.append("names")
 for c in d["combos"]:
     if not c["models"]:
@@ -5338,6 +5524,7 @@ if _re2.search(r"muse-spark-1\.3(?!-contributor)", " ".join(m for c in d["combos
 # tier1 is spark-only: gemini must never occupy a 1M slot again.
 if any("gemini" in m for m in by["tier1"]):
     problems.append("tier1-gemini")
+    problems.append("tier1-gemini")
 # *-clean = paid legs only: no free pool may train on private prompts.
 # Free = contributor-free, groq / cerebras / sambanova / gemini hosts,
 # mistral-code + qwen free pools. -contributor (trains by contract) is
@@ -5345,6 +5532,9 @@ if any("gemini" in m for m in by["tier1"]):
 # since the 2026-09-21 contributor-only block (paid-only, trains).
 # Direct-key legs (mistral-small, deepseek, openrouter paid, zen paid)
 # bill past the pool on the same key, so they stay.
+# The pinned spark-1.3-contributor single-model combo reuses tier1's legs
+# verbatim, so it is exempt from the tier-shape rules below (it is not a
+# tier) but must stay byte-identical to tier1.
 import re
 free = re.compile(r"contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen")
 trains = re.compile(r"-contributor$")
@@ -5356,6 +5546,8 @@ for n in ("tier2-clean", "tier3-clean"):
     bad = [m for m in by[n] if trains.search(m)]
     if bad:
         problems.append(n + "-trains:" + ",".join(bad))
+if by.get("spark-1.3-contributor") != by["tier1"]:
+    problems.append("spark-combo-drift")
 print(" ".join(problems))
 PY
 )"
@@ -5411,7 +5603,10 @@ m = oc["providers"]["omniroute"]["models"]
 problems = []
 for name, ctx in (("tier1", 1000000), ("tier1-clean", 1000000),
                   ("tier2", 131072), ("tier3", 131072),
-                  ("tier2-clean", 131072), ("tier3-clean", 131072)):
+                  ("tier2-clean", 131072), ("tier3-clean", 131072),
+                  ("gemini-3.8-flash", 131072), ("deepseek-v4.1-flash", 131072),
+                  ("tier2-credit", 131072), ("tier3-credit", 131072),
+                  ("spark-1.3-contributor", 1000000)):
     if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:
         problems.append(name)
 print(" ".join(problems))

@@ -8,6 +8,7 @@ reconcile. DONE-criteria must be checkable (`ack` probe, suite counts,
 |---|---|---|---|---|
 | 3-tier close-out (tracks A/B + reconcile) | tier1 | 2026-09-20 | 264 PS / 107 sh green, IP-clean, handoff updated | Done 2026-09-20 |
 | Tier enforcement (`agents` block + tests) | tier1 | 2026-09-20 | PS + sh tier-enforcement cases green | Done 2026-09-20 (280 PS / 108 sh) |
+| MCP-everywhere + spark combo + cohere rag + proxy repair (tracks A/B) | tier1 | 2026-09-22 | serena memory off via harness field, spark combo + rag combo live-acked, litellm starter + master alignment + strict-drop, git/Zed permission fixes live-proven | Done 2026-09-22 (PS + sh green, see handoff) |
 | Skill: watchdog clause + runtimes section | tier1 | 2026-09-20 | skill renders, link check green | Done 2026-09-20 |
 | `docs/tasks.md` board itself | tier1 | 2026-09-20 | this file tracked, linked from handoff | Done 2026-09-20 |
 | OpenHands runbook + 3-service resume | tier2-E | 2026-09-20 | runbook zero-context, start-stack + autostart resume serve, tests assert | Done 2026-09-20 |

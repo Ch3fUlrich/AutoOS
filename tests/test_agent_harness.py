@@ -114,12 +114,24 @@ class OpencodeMergeTests(unittest.TestCase):
             self.assertEqual(actual, expected)
 
     def test_every_global_fence_pattern_gets_its_verdict(self):
+        # Top level carries deny_all only: the leaf fences live on the leaf
+        # agent blocks (see test_a_leaf_cannot_commit_or_push_and_cannot_spawn).
+        # The top-level session is the interactive user and V2 tier agents
+        # inherit top-level bash, so leaf denies there would break everyday
+        # git inside any agent run. A user's own leaf-pattern value survives
+        # untouched (the fence no longer owns it).
         harness = harness_data()
         with tempfile.TemporaryDirectory() as tmp:
             config, _ = self.merge_fixture(tmp)
             bash = read_ordered(config)["permission"]["bash"]
-            for pattern in harness["fences"]["bash_deny_all"] + harness["fences"]["bash_deny_leaf"]:
+            for pattern in harness["fences"]["bash_deny_all"]:
                 self.assertEqual(bash[pattern], "deny", pattern)
+            for pattern in harness["fences"]["bash_deny_leaf"]:
+                # Leaf fences live on the leaf agent blocks. At top level a
+                # leaf pattern is either absent or carries the user's own
+                # non-deny verdict (e.g. the fixture's push allow) — never a
+                # fence "deny" (stale footprints are dropped on merge).
+                self.assertNotEqual(bash.get(pattern), "deny", pattern)
             for pattern in harness["fences"]["bash_allow_all"]:
                 self.assertEqual(bash[pattern], "allow", pattern)
 
@@ -145,7 +157,32 @@ class OpencodeMergeTests(unittest.TestCase):
                 expected = "allow" if role["spawn"] else "deny"
                 self.assertEqual(doc["agent"][name]["permission"]["task"], expected, name)
 
-    def test_user_keys_survive_but_the_fence_beats_the_user_git_push_allow(self):
+    def test_stale_top_level_leaf_denies_are_removed_but_user_verdicts_survive(self):
+        # A config written by the old generator carries leaf denies at top
+        # level; the fixed generator must drop its own stale "deny" footprint
+        # while keeping a user's explicit non-deny verdict on the same pattern.
+        module = load_module()
+        harness = harness_data()
+        user = {
+            "permission": {
+                "bash": {
+                    "*": "allow",
+                    "git commit*": "deny",
+                    "git stash*": "ask",
+                }
+            }
+        }
+        doc = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
+        bash = doc["permission"]["bash"]
+        self.assertNotIn("git commit*", bash)
+        self.assertEqual(bash["git stash*"], "ask")
+        self.assertNotIn("git push*", bash)
+        self.assertNotIn("*git *push*", bash)
+
+    def test_user_keys_survive_the_fence_beats_merge_but_push_is_per_role(self):
+        # Push moved from the global fence to the leaf fence (operator
+        # 2026-09-22): the fixture user's explicit push allow survives at top
+        # level, while a global-fence pattern still beats the user.
         user = read_ordered(FIXTURES / "opencode.user.json")
         with tempfile.TemporaryDirectory() as tmp:
             config, _ = self.merge_fixture(tmp)
@@ -162,7 +199,8 @@ class OpencodeMergeTests(unittest.TestCase):
             )
             self.assertIn("my-rules.md", doc["instructions"])
             self.assertEqual(doc["permission"]["bash"]["npm *"], "ask")
-            self.assertEqual(doc["permission"]["bash"]["git push*"], "deny")
+            self.assertEqual(doc["permission"]["bash"]["git push*"], "allow")
+            self.assertEqual(doc["permission"]["bash"]["git merge*"], "deny")
 
     def test_second_run_skips_and_makes_no_second_backup(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -16,9 +16,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 models = {m["id"]: m for m in
           json.load(open(os.path.join(ROOT, "catalog", "llm-models.json"),
                          encoding="utf-8"))["models"]}
-aliases = {"muse-spark-1.3": "muse-spark",
-           "muse-spark-1.3-contributor": "muse-spark",
-           "ollama-qwen-coder": "ollama-qwen2.5-coder"}
+# Legacy alias: muse-spark-1.3-contributor.json is the vendored template for
+# the muse-spark catalog entry (same shape as the deleted muse-spark-1.3
+# alias; only the contributor variant is kept).
+models["muse-spark-1.3-contributor"] = models["muse-spark"]
 price_dst = {"paid_input_price": "paid_input_cost_per_token",
              "paid_output_price": "paid_output_cost_per_token",
              "cache_read_price": "cache_read_cost_per_token"}
@@ -29,11 +30,10 @@ if not files:
     failures.append("no vendored profiles")
 for path in files:
     name = os.path.basename(path)[:-5]
-    mid = aliases.get(name, name)
-    if mid not in models:
-        failures.append(f"{path}: unknown model {mid}")
+    if name not in models:
+        failures.append(f"{path}: unknown model {name}")
         continue
-    m = models[mid]
+    m = models[name]
     p = json.load(open(path, encoding="utf-8"))
     want_model = (("openrouter/" + m["openrouter_id"]) if m.get("openrouter_id")
                   else m["direct"]["model"])
@@ -59,8 +59,14 @@ for path in files:
         if p.get("extended_thinking_budget") is not None:
             failures.append(f"{path}: thinking budget not nulled")
 
+# Gateway tier ids (omniroute-tier*, litellm-tier*) are generated at
+# install/start time from configuration/openhands/tier-profiles.json, not
+# vendored here - but agent profiles may reference them.
+spec = json.load(open(os.path.join(ROOT, "configuration", "openhands",
+                                   "tier-profiles.json"), encoding="utf-8"))
 llm = {os.path.basename(p)[:-5]
        for p in glob.glob(os.path.join(ROOT, "openhands", "profiles", "*.json"))}
+llm |= {t["id"] for t in spec["tiers"]}
 for path in sorted(glob.glob(os.path.join(ROOT, "openhands",
                                            "agent-profiles", "*.json"))):
     ref = json.load(open(path, encoding="utf-8")).get("llm_profile_ref")
