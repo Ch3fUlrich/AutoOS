@@ -2,19 +2,23 @@
 """Regenerate OpenHands gateway tier profiles from the spec, with local keys.
 
 configuration/openhands/tier-profiles.json is the single source of truth for
-the tier profile SHAPE (model ids, token windows, reasoning flags). This tool
-projects it into real profiles (autoos-tier1/2/3.json) by injecting the
-OmniRoute client key, which never lives in the repo:
+the tier profile SHAPE (profile ids, model ids, token windows, reasoning
+flags). This tool projects it into real profiles (omniroute-tier*.json +
+litellm-tier*.json) by injecting the client keys, which never live in the repo:
 
     python3 tools/sync-openhands-profiles.py --openhands-dir ~/.openhands [--keys-file configuration/api-keys.yml]
 
 Key resolution: env AUTOOS_OMNIROUTE_KEY first, then the `omniroute:` entry of
-the keys file. With no key the tool reports the skip and exits 0 (profiles
-cannot be completed; the installer covers the keyless path separately).
+the keys file (omniroute tiers); env LITELLM_MASTER_KEY, then
+AUTOOS_LITELLM_API_KEY, then the LITELLM_MASTER_KEY entry of
+configuration/litellm/.env (litellm tiers). A gateway with no key has its
+tiers skipped (the installer covers the keyless path separately); with neither
+key the tool reports the skip and exits 0.
 
 Run by configuration/start-stack.* on every `openhands` start, so a reapplied
 spec, a rotated key, or a hand-edited profile converges back automatically.
 Idempotent: byte-identical output on repeat runs (reports skipped instead).
+Byte-identical with the installer-embedded writer for the same keys.
 
 Never prints a key. Exit 0 = written/skipped cleanly, 2 = unusable input.
 """
@@ -27,23 +31,47 @@ import sys
 from pathlib import Path
 
 
-def read_key(keys_file: Path | None) -> str | None:
-    if os.environ.get("AUTOOS_OMNIROUTE_KEY"):
-        return os.environ["AUTOOS_OMNIROUTE_KEY"]
-    if keys_file and keys_file.is_file():
-        try:
-            # utf-8-sig: PowerShell Out-File -Encoding utf8 writes a BOM,
-            # which would otherwise poison the first key name.
-            for line in keys_file.read_text(encoding="utf-8-sig").splitlines():
-                text = line.strip()
-                if text.startswith("omniroute:") and "REPLACE" not in text:
-                    return text.split(":", 1)[1].strip().strip("\"'")
-        except OSError:
-            pass
+def read_flat_value(path: Path, name: str) -> str | None:
+    """First non-placeholder `name: value` from a flat key file, else None."""
+    try:
+        # utf-8-sig: PowerShell Out-File -Encoding utf8 writes a BOM,
+        # which would otherwise poison the first key name.
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            text = line.strip()
+            if not text or text.startswith("#") or ":" not in text and "=" not in text:
+                continue
+            if "=" in text and ":" not in text.split("=", 1)[0]:
+                key, _, value = text.partition("=")
+            else:
+                key, _, value = text.partition(":")
+            if key.strip() == name:
+                value = value.strip().strip("\"'")
+                if value and "REPLACE" not in value:
+                    return value
+    except OSError:
+        pass
     return None
 
 
-def build_profile(tier: dict, gateway_base_url: str, key: str) -> dict:
+def read_omni_key(keys_file: Path | None) -> str | None:
+    if os.environ.get("AUTOOS_OMNIROUTE_KEY"):
+        return os.environ["AUTOOS_OMNIROUTE_KEY"]
+    if keys_file and keys_file.is_file():
+        return read_flat_value(keys_file, "omniroute")
+    return None
+
+
+def read_litellm_key(env_path: Path | None) -> str | None:
+    if os.environ.get("LITELLM_MASTER_KEY"):
+        return os.environ["LITELLM_MASTER_KEY"]
+    if os.environ.get("AUTOOS_LITELLM_API_KEY"):
+        return os.environ["AUTOOS_LITELLM_API_KEY"]
+    if env_path and env_path.is_file():
+        return read_flat_value(env_path, "LITELLM_MASTER_KEY")
+    return None
+
+
+def build_profile(tier: dict, base_url: str, key: str) -> dict:
     profile = {
         "auth_type": "api_key",
         "api_mode": "auto",
@@ -58,7 +86,7 @@ def build_profile(tier: dict, gateway_base_url: str, key: str) -> dict:
         "capability_overrides": {},
         "litellm_extra_body": {},
         "model": tier["model"],
-        "base_url": gateway_base_url,
+        "base_url": base_url,
         "max_input_tokens": tier["max_input_tokens"],
         "max_output_tokens": tier["max_output_tokens"],
         "input_cost_per_token": 0,
@@ -74,6 +102,12 @@ def build_profile(tier: dict, gateway_base_url: str, key: str) -> dict:
     return profile
 
 
+def tier_base_url(tier: dict, spec: dict) -> str:
+    if tier.get("gateway") == "litellm":
+        return spec.get("litellm_base_url", spec["gateway_base_url"])
+    return spec["gateway_base_url"]
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         description="Regenerate OpenHands gateway tier profiles from the spec.",
@@ -86,7 +120,12 @@ def parse_args(argv):
     parser.add_argument(
         "--keys-file",
         default=None,
-        help="api-keys.yml fallback for the client key (default: configuration/api-keys.yml)",
+        help="api-keys.yml fallback for the OmniRoute client key (default: configuration/api-keys.yml)",
+    )
+    parser.add_argument(
+        "--litellm-env",
+        default=None,
+        help="litellm .env fallback for the master key (default: configuration/litellm/.env)",
     )
     parser.add_argument(
         "--spec",
@@ -101,24 +140,33 @@ def main(argv=None):
     root = Path(__file__).resolve().parent.parent
     spec_path = Path(args.spec) if args.spec else root / "configuration" / "openhands" / "tier-profiles.json"
     keys_path = Path(args.keys_file) if args.keys_file else root / "configuration" / "api-keys.yml"
+    litellm_env = Path(args.litellm_env) if args.litellm_env else root / "configuration" / "litellm" / ".env"
     try:
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
         tiers = spec["tiers"]
-        gateway_base_url = spec["gateway_base_url"]
+        spec["gateway_base_url"]
     except (OSError, ValueError, KeyError) as exc:
         print(f"ERROR: cannot read spec {spec_path}: {exc}", file=sys.stderr)
         return 2
-    key = read_key(keys_path)
-    if not key:
-        print("sync-openhands-profiles: no OmniRoute client key (env/key file) - tier profiles skipped")
+    omni_key = read_omni_key(keys_path)
+    litellm_key = read_litellm_key(litellm_env)
+    if not omni_key and not litellm_key:
+        print("sync-openhands-profiles: no client key (env/key file/.env) - tier profiles skipped")
         return 0
     profiles_dir = Path(args.openhands_dir) / "profiles"
     profiles_dir.mkdir(parents=True, exist_ok=True)
     for tier in tiers:
-        name = "autoos-%s.json" % tier["id"]
+        if tier.get("gateway") == "litellm":
+            key = litellm_key
+        else:
+            key = omni_key
+        name = "%s.json" % tier["id"]
+        if not key:
+            print(f"sync-openhands-profiles: {name} skipped (no key for its gateway)")
+            continue
         # No trailing newline: byte-identical with the installer-embedded
         # writer, so install-time and start-time outputs never flap.
-        text = json.dumps(build_profile(tier, gateway_base_url, key), indent=2)
+        text = json.dumps(build_profile(tier, tier_base_url(tier, spec), key), indent=2)
         target = profiles_dir / name
         if target.is_file() and target.read_text(encoding="utf-8") == text:
             print(f"sync-openhands-profiles: {name} skipped (up to date)")

@@ -10,14 +10,12 @@
   },
   "fences": {
     "bash_deny_all": [
-      "git push*",
       "git merge*",
       "git rebase*",
       "git reset --hard*",
       "git branch -D*",
       "git clean*",
       "git worktree remove*",
-      "*git *push*",
       "*git *merge*",
       "*git *rebase*",
       "*git *reset --hard*",
@@ -43,6 +41,8 @@
       "cat /proc/*"
     ],
     "bash_deny_leaf": [
+      "git push*",
+      "*git *push*",
       "git commit*",
       "*git *commit*",
       "*git *tag*",
@@ -69,6 +69,14 @@
   "mcp_servers": {
     "serena": {
       "package": "serena-agent==1.7.0",
+      "memory_tools": [
+        "write_memory",
+        "read_memory",
+        "list_memories",
+        "edit_memory",
+        "delete_memory",
+        "rename_memory"
+      ],
       "excluded_tools": [
         "create_text_file",
         "read_file",
@@ -111,7 +119,7 @@
       },
       "openhands": {
         "profile": "orchestrator",
-        "llm_profile_ref": "muse-spark-1.3"
+        "llm_profile_ref": "omniroute-tier1"
       },
       "mcp": [
         "serena",
@@ -131,7 +139,7 @@
       },
       "openhands": {
         "profile": "suborchestrator",
-        "llm_profile_ref": "muse-spark-1.3"
+        "llm_profile_ref": "omniroute-tier1"
       },
       "mcp": [
         "serena",
@@ -151,7 +159,7 @@
       },
       "openhands": {
         "profile": "implementer",
-        "llm_profile_ref": "muse-spark-1.3-contributor"
+        "llm_profile_ref": "omniroute-tier1"
       },
       "mcp": [
         "serena",
