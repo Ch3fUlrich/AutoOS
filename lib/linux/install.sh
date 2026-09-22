@@ -2550,6 +2550,38 @@ if omni_key and _spec_file and os.path.isfile(_spec_file):
         pass
 
 agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
+# Publish profiles into settings.json llm_profiles: the app NEVER reads
+# profiles/*.json from disk (no glob in its settings code) - that directory
+# is installer-managed desired state only. Without this merge the UI shows
+# just the fossil Default profile no matter how many sidecars exist.
+# Only installer-managed entries are written (never touch anything else in
+# llm_profiles); active becomes autoos-tier1 only when a gateway key is in
+# play AND the current selection is missing (None or dangling) - a live
+# user selection is never yanked. The fossil Default (ollama fallback this
+# installer wrote before any key existed) is refreshed to mirror the current
+# default llm; anything else stays untouched.
+_lp = settings.setdefault("llm_profiles", {})
+_managed = _lp.setdefault("profiles", {})
+for _fn in sorted(os.listdir(profiles_dir)):
+    if not _fn.endswith(".json"):
+        continue
+    try:
+        with open(os.path.join(profiles_dir, _fn), "r", encoding="utf-8") as _pf:
+            _managed[_fn[:-5]] = json.load(_pf)
+    except Exception:
+        pass
+if omni_key and "autoos-tier1" in _managed:
+    if _lp.get("active") is None or _lp.get("active") not in _managed:
+        _lp["active"] = "autoos-tier1"
+    _default_entry = _managed.get("Default")
+    if isinstance(_default_entry, dict):
+        _dm = _default_entry.get("model", "")
+        if _dm.startswith("ollama/") or _dm.startswith("ollama_chat/"):
+            _default_entry["model"] = llm.get("model")
+            _default_entry["base_url"] = llm.get("base_url")
+            _default_entry["api_key"] = llm.get("api_key")
+with open(settings_file, "w", encoding="utf-8") as f:
+    json.dump(settings, f, indent=2)
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
 # the desired state and are copied verbatim on every setup. Their
 # llm_profile_ref values point at the canonical profile names written above.

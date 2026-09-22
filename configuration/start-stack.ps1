@@ -109,6 +109,10 @@ switch ($App) {
             $running = (& docker ps --format '{{.Names}}' 2>$null) -join "`n"
             if ($running -notmatch '(?m)^openhands-app$') { & docker start openhands-app | Out-Null }
         } else {
+            # Fresh create: the LLM_* env is the container's FIRST impression
+            # (read before settings.json exists), so it must already be the
+            # gateway tier - otherwise the first-run UI shows no usable agent
+            # until a reinstall. Key via inherited env (never argv, never ps).
             $env:LLM_API_KEY = $Key
             # Detached, no -it: -it fails without a TTY (non-interactive shells)
             # and foreground -it never returns, so the URL line below would lie.
