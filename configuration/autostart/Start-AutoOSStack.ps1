@@ -10,9 +10,12 @@
 
     What resumes:
       1. OmniRoute gateway on http://127.0.0.1:20128 (started hidden when down).
-      2. OpenHands container `openhands-app` (docker start when exited;
+      2. LiteLLM fallback proxy on :4000 via configuration/litellm/start-litellm.ps1,
+         which loads configuration/litellm/.env into the proxy process (the
+         proxy cannot read that file itself).
+      3. OpenHands container `openhands-app` (docker start when exited;
          first boot still needs .\configuration\start-stack.ps1 -App openhands).
-      3. opencode serve on :4096 (started hidden when down; 401 = alive).
+      4. opencode serve on :4096 (started hidden when down; 401 = alive).
 
     What does NOT resume: AutoOS --serve. Its token is random per run, so an
     autostarted browser UI would print its URL where nobody reads it. Start it
@@ -48,7 +51,27 @@ if (Test-AutoOSGateway) {
     else { Write-Host 'Gateway did not answer - run `omniroute doctor`.' }
 }
 
-# 2. OpenHands container: restart only when it exists and is not running.
+# 2. LiteLLM fallback proxy on :4000. Only start it when down: start-litellm.ps1
+#    exports configuration/litellm/.env into the process (the proxy cannot read
+#    that file itself) and restarts a stale proxy, so calling it while healthy
+#    would bounce a working service on every logon.
+function Test-AutoOSLitellm {
+    try { (Invoke-WebRequest -Uri 'http://127.0.0.1:4000/' -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 }
+    catch { $false }
+}
+$LitellmStarter = Join-Path $PSScriptRoot '..\litellm\start-litellm.ps1'
+if (Test-AutoOSLitellm) {
+    Write-Host 'LiteLLM proxy already up on 4000 - nothing to do.'
+} elseif (-not (Test-Path $LitellmStarter)) {
+    Write-Host "LiteLLM starter missing: $LitellmStarter"
+} elseif (-not (Test-Path (Join-Path $PSScriptRoot '..\litellm\.env'))) {
+    Write-Host 'No litellm .env - run: python3 tools/mirror-litellm-env.py (then re-run this).'
+} else {
+    Write-Host 'Starting the LiteLLM fallback proxy on 4000...'
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $LitellmStarter
+}
+
+# 3. OpenHands container: restart only when it exists and is not running.
 #    `docker start` on a missing name exits non-zero; that is reported, not fatal.
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Host 'docker is not on PATH - skipping the OpenHands container.'
@@ -68,7 +91,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     }
 }
 
-# 3. opencode serve on :4096: start hidden only when down (401 = alive,
+# 4. opencode serve on :4096: start hidden only when down (401 = alive,
 #    needs pairing — the server is up, the browser just needs credentials).
 function Test-OpencodeServe {
     try { (Invoke-WebRequest -Uri "http://127.0.0.1:4096/" -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }

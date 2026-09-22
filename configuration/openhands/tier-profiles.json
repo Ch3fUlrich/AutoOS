@@ -39,6 +39,13 @@
       "reasoning": true
     },
     {
+      "id": "omniroute-spark-1.3-contributor",
+      "model": "openai/spark-1.3-contributor",
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "reasoning": true
+    },
+    {
       "id": "omniroute-tier2",
       "model": "openai/tier2",
       "max_input_tokens": 131072,

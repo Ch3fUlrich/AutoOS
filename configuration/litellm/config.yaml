@@ -43,7 +43,15 @@ model_list:
   # caller-side control, not a model ID (Zed: reasoning_effort "xhigh";
   # Muse Code: Max level). The aliases above resolve to the 1.3 family.
 
-  # ── tier1-paid: contributor on own credits, else deepseek flash ────
+  # ── tier1-paid: OpenRouter contributor first, then Meta direct, then Zen ──
+  # Funded-first: Meta direct currently answers "Insufficient account funds"
+  # and Zen 402s without balance, so a group led by either one is a dead end
+  # (measured 2026-09-22: tier1-paid 402 "No fallback model group found").
+  # OpenRouter is the leg that actually answers today.
+  - model_name: tier1-paid
+    litellm_params:
+      model: openrouter/meta/muse-spark-1.3-contributor
+      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: tier1-paid
     litellm_params:
       model: meta/muse-spark-1.3-contributor
@@ -107,7 +115,21 @@ model_list:
       api_key: os.environ/OPENCODE_ZEN_API_KEY
   # AUTOOS-MANAGED-END tier2
 
-  # ── tier2-paid: deepseek flash, nothing else ───────────────────────
+  # ── tier2-paid / tier3-paid: the escalation must actually answer ────
+  # Lead with the OpenRouter leg: it is a deployment DISTINCT from the tier
+  # chains, so LiteLLM cooling the shared `deepseek/deepseek-flash`
+  # deployment (cooldown_time below) cannot turn the escalation into a
+  # dead-end. Direct deepseek second, Zen last (cheap at-cost, 402s without
+  # balance). Measured 2026-09-22: a deepseek-first group answered
+  # 200/402/402 as the shared deployment cooled; this ordering is stable.
+  - model_name: tier2-paid
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v4.1-flash
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: tier2-paid
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
   - model_name: tier2-paid
     litellm_params:
       model: openai/deepseek-v4.1-flash
@@ -155,16 +177,20 @@ model_list:
       api_key: os.environ/OPENCODE_ZEN_API_KEY
   # AUTOOS-MANAGED-END tier3
 
-  # ── tier3-paid: deepseek flash, then DeepSeek direct ───────────────
+  # ── tier3-paid: same shape as tier2-paid (see the note above) ──────
+  - model_name: tier3-paid
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v4.1-flash
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: tier3-paid
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
   - model_name: tier3-paid
     litellm_params:
       model: openai/deepseek-v4.1-flash
       api_base: https://opencode.ai/zen/v1
       api_key: os.environ/OPENCODE_ZEN_API_KEY
-  - model_name: tier3-paid
-    litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
 
   # ── rag: cohere RAG standby (hand-curated, NOT sync-managed) ────────
   # Trial keys, 128k. Lives outside the AUTOOS-MANAGED markers on purpose:
@@ -187,13 +213,13 @@ model_list:
       additional_drop_params: ["strict"]
 
 router_settings:
-  # Re-testing usage-based-routing-v2 (2026-09-22): the "No connected db"
-  # outage was a master-key mismatch (proxy served the .env master, clients
-  # sent the machine master), NOT the strategy — falsified by source read
-  # (user_api_key_auth falls through to DB only when the key != master).
-  # If chat works with a valid master under usage-based, it stays (least-used
-  # free deployment first is the right policy for free-tier juggling).
-  routing_strategy: usage-based-routing-v2 # least-used free deployment first
+  # simple-shuffle: deterministic and DB-less. `usage-based-routing-v2` tracks
+  # per-deployment usage in Postgres/Redis, so with no DB the same deployment
+  # is shared by tier2/tier3/*-clean and its cooldown state leaks across
+  # groups - one 402 in one group reappears as a 402 in unrelated groups
+  # (measured 2026-09-22). This proxy is a manual fallback, not a load
+  # balancer: predictability beats least-used scoring here.
+  routing_strategy: simple-shuffle
   num_retries: 3
   timeout: 600 # long-horizon orchestration needs headroom, not the 5-min default
   allowed_fails: 3

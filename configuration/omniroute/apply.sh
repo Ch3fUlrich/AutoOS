@@ -154,6 +154,38 @@ if [[ -z "$live_ids" ]]; then
     echo "    combos will be created without catalog validation - verify with: omniroute simulate --combo tier1"
 fi
 
+echo "Resilience:"
+# requestQueue.maxWaitMs ships at 15000 ms — below Muse Spark's thinking time,
+# so every spark request died with "Request exceeded OmniRoute's local
+# rate-limit execution expiration", the chain fell through to a dead free leg,
+# and the client saw the last leg's error (2026-09-22; it surfaced in opencode
+# as "gemini-3.7-flash is cooling down"). 180000 sits under
+# comboCooldownWait.budgetMs (300s) so a dead leg still hops.
+MAX_WAIT_MS=180000
+CLIENT_KEY="${AUTOOS_OMNIROUTE_KEY:-}"
+if [[ -z "$CLIENT_KEY" && -f "$KEYS_FILE" ]]; then
+    CLIENT_KEY="$(sed -n 's/^omniroute:[[:space:]]*//p' "$KEYS_FILE" | head -n1 | tr -d '"'"'"'')"
+fi
+if [[ $DRY -eq 1 ]]; then
+    echo "  - would set requestQueue.maxWaitMs = $MAX_WAIT_MS"
+elif [[ -z "$CLIENT_KEY" ]]; then
+    echo "  - no client key — cannot set requestQueue.maxWaitMs (PATCH /api/resilience)"
+else
+    current="$(curl -sf -m 15 -H "Authorization: Bearer $CLIENT_KEY" \
+        "$GATEWAY/api/resilience?include=config" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["requestQueue"]["maxWaitMs"])' 2>/dev/null || true)"
+    if [[ "$current" == "$MAX_WAIT_MS" ]]; then
+        echo "  = requestQueue.maxWaitMs already $MAX_WAIT_MS"
+    elif curl -sf -m 15 -X PATCH -H "Authorization: Bearer $CLIENT_KEY" \
+            -H 'content-type: application/json' \
+            -d "{\"requestQueue\":{\"maxWaitMs\":$MAX_WAIT_MS}}" \
+            "$GATEWAY/api/resilience" >/dev/null; then
+        echo "  + requestQueue.maxWaitMs set to $MAX_WAIT_MS (was ${current:-unknown})"
+    else
+        echo "  ! could not set requestQueue.maxWaitMs — set it in the dashboard (Resilience -> request queue)"
+    fi
+fi
+
 echo "Combos:"
 while IFS=$'\t' read -r name strategy models; do
     [[ -z "$name" ]] && continue

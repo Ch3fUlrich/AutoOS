@@ -19,9 +19,7 @@
   Refresh the middle step with: python3 tools/mirror-litellm-env.py
 #>
 [CmdletBinding()]
-param(
-    [switch]$Restart
-)
+param()
 
 $ErrorActionPreference = 'Stop'
 $LitDir = Split-Path -Parent $MyInvocation.MyCommand.Path

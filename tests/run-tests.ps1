@@ -3306,11 +3306,11 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-tier1,omniroute-tier1-clean,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3'
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-tier1,omniroute-tier1-clean,omniroute-spark-1.3-contributor,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3'
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
     Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
     foreach ($t in $spec.tiers) {
-        Assert-True ($t.model -match '^openai/(tier[123](-clean|-credit)?|rag|gemini-3\.8-flash|deepseek-v4\.1-flash)$') "$($t.id) model is not openai/tierN, openai/rag, a pinned route or a credit chain"
+        Assert-True ($t.model -match '^openai/(tier[123](-clean|-credit)?|rag|gemini-3\.8-flash|deepseek-v4\.1-flash|spark-1\.3-contributor)$') "$($t.id) model is not openai/tierN, openai/rag, a pinned route or a credit chain"
     }
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
@@ -4129,6 +4129,27 @@ Test-Case 'provider status reads keys but never exposes them' {
     } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case 'the router declarations do not drift from each other' {
+    # tools/audit-router.py --offline compares combos.json against
+    # opencode.jsonc, both Zed writers and the OpenHands tier profiles, and
+    # rejects any combo-bypassing direct ref. Live probes are the operator
+    # path; CI stays deterministic.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $out = & $py.Source (Join-Path $Root 'tools\audit-router.py') --offline 2>&1 | Out-String
+    Assert-Equal $LASTEXITCODE 0 "audit-router drift: $out"
+}
+
+Test-Case 'apply sets the resilience deadline for reasoning legs' {
+    # A 15s requestQueue.maxWaitMs kills every spark request mid-think and the
+    # chain then reports a different leg's error (see docs/verification.md).
+    foreach ($f in @('configuration\omniroute\apply.ps1')) {
+        $text = Get-Content (Join-Path $Root $f) -Raw
+        Assert-True ($text -match 'maxWaitMs') "$f never sets maxWaitMs"
+        Assert-True ($text -match '180000') "$f does not use the reasoning-safe value"
+    }
+}
+
 Test-Case 'combos.json carries no phantom legs (probe-falsified refs stay out)' {
     # Regression gate for the 2026-09-22 finding: legs that simulate resolves
     # but the gateway 400s on at chat time ("not available in the active live
@@ -4297,6 +4318,24 @@ Test-Case 'autostart is opt-in and double-run safe' {
     Assert-True ($reg -match '-Force') 're-register must replace in place'
     Assert-True ($start -match 'nothing to do') 'launcher must no-op when already up'
     Assert-True ($start -notmatch 'Remove-Item|rm -rf|uninstall') 'launcher must never be destructive'
+}
+
+Test-Case 'autostart resumes the LiteLLM fallback proxy too' {
+    # litellm cannot read its own .env, so the launcher must delegate to the
+    # starter that exports it - starting the proxy bare serves every leg as
+    # "Missing credentials" (measured 2026-09-22).
+    $start = Get-Content (Join-Path $Root 'configuration\autostart\Start-AutoOSStack.ps1') -Raw
+    $sh = Get-Content (Join-Path $Root 'configuration\autostart\Start-AutoOSStack.sh') -Raw
+    Assert-True ($start -match 'start-litellm\.ps1') 'ps1 launcher does not use the litellm starter'
+    Assert-True ($start -match '4000') 'ps1 launcher does not probe :4000'
+    Assert-True ($sh -match '4000') 'sh launcher does not probe :4000'
+    Assert-True ($sh -match 'PYTHONUTF8') 'sh launcher must set PYTHONUTF8 (cp1252 banner crash)'
+    # Idempotent: only start when down, never bounce a healthy proxy.
+    Assert-True ($start -match 'already up on 4000') 'ps1 launcher has no litellm no-op path'
+    Assert-True ($sh -match 'already up on 4000') 'sh launcher has no litellm no-op path'
+    $starter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.ps1') -Raw
+    Assert-True ($starter -match '\.env') 'starter does not read the litellm .env'
+    Assert-True ($starter -notmatch 'REPLACE_WITH_YOUR') 'starter embeds a placeholder key name list, not values'
 }
 
 Test-Case 'healthcheck probes four ports and resumes only with -Fix' {
