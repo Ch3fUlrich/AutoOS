@@ -3262,6 +3262,9 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         Assert-Equal $t3.model 'openai/tier3'
         Assert-Equal $t3.reasoning_effort 'none'
         Assert-True ($t3.enable_encrypted_reasoning -eq $false) 'tier3 thinking not opted out'
+        $lp = (Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json).llm_profiles
+        Assert-True ($null -ne $lp.profiles.'autoos-tier1') 'tier1 not published to llm_profiles'
+        Assert-Equal $lp.active 'autoos-tier1'
     } finally {
         foreach ($k in $saved.Keys) {
             if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }

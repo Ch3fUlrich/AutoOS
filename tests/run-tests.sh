@@ -568,12 +568,14 @@ import json, os, sys
 d = sys.argv[1]
 t1 = json.load(open(os.path.join(d, "profiles", "autoos-tier1.json"), encoding="utf-8"))
 t3 = json.load(open(os.path.join(d, "profiles", "autoos-tier3.json"), encoding="utf-8"))
+lp = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))["llm_profiles"]
 print(t1["model"], t1["base_url"], t1["api_key"], t1["reasoning_effort"],
-      t3["model"], t3["reasoning_effort"], t3["enable_encrypted_reasoning"])
+      t3["model"], t3["reasoning_effort"], t3["enable_encrypted_reasoning"],
+      lp["active"], "autoos-tier1" in lp["profiles"])
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/tier1 http://host.docker.internal:20128/v1 test-omni-key high openai/tier3 none False"
+    assert_eq "$out" "openai/tier1 http://host.docker.internal:20128/v1 test-omni-key high openai/tier3 none False autoos-tier1 True"
     tmp="$(mktemp -d)"
     out="$(
         SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
