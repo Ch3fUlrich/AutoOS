@@ -2103,7 +2103,24 @@ _ds = REPO_BY_ID['deepseek-chat']['direct']
 # high. The unconditional high used to poison the local/Ollama fallback
 # (and deepseek-chat) with thinking params Ollama rejects outright.
 _default_reasoning = False
+# sys.argv[7] is the OmniRoute client key (may be 'null'); gw_key itself is
+# only bound later in the profiles section, so read argv here directly.
+_gw_key = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] != 'null' else None
 if muse_key:
+    llm['model'] = _muse['model']
+    llm['base_url'] = _muse['base_url']
+    llm['api_key'] = muse_key
+    _default_reasoning = bool(REPO_BY_ID['muse-spark'].get('reasoning'))
+elif _gw_key:
+    # Gateway default (mirrors the opencode tier1 setup): the whole
+    # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
+    # must too - otherwise the UI shows no usable agent and every chat
+    # falls back to local Ollama. Container-side base URL.
+    llm['model'] = 'openai/tier1'
+    llm['base_url'] = 'http://host.docker.internal:20128/v1'
+    llm['api_key'] = _gw_key
+    _default_reasoning = True
+elif deepseek_key:
     llm['model'] = _muse['model']
     llm['base_url'] = _muse['base_url']
     llm['api_key'] = muse_key
@@ -2284,6 +2301,16 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
         $argOpenrouter = if ($openrouterKey) { $openrouterKey } else { 'null' }
         $argContext7 = if ($context7Key) { $context7Key } else { 'null' }
         $omniKey = if ($env:AUTOOS_OMNIROUTE_KEY) { $env:AUTOOS_OMNIROUTE_KEY } elseif ($secrets.ContainsKey('omniroute')) { $secrets['omniroute'] } else { $null }
+        if (-not $omniKey) {
+            # Fall back to the repo's single source of truth for keys.
+            $keysYml = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
+            if (Test-Path $keysYml) {
+                foreach ($line in (Get-Content $keysYml -Encoding utf8)) {
+                    $t = $line.Trim()
+                    if ($t -match '^omniroute\s*:\s*(.+)$' -and $t -notmatch 'REPLACE') { $omniKey = $matches[1].Trim().Trim('"').Trim("'"); break }
+                }
+            }
+        }
         $argOmni = if ($omniKey) { $omniKey } else { 'null' }
 
         # The resolved address reaches the child through its environment; the

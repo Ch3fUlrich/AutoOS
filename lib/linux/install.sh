@@ -2369,11 +2369,36 @@ _ds = REPO_BY_ID["deepseek-chat"]["direct"]
 # "high". The unconditional "high" used to poison the local/Ollama fallback
 # (and deepseek-chat) with thinking params Ollama rejects outright.
 _default_reasoning = False
+# OmniRoute client key rides AUTOOS_OMNIROUTE_KEY (same env the tier-profile
+# writer below reads). When present the gateway becomes the default, mirroring
+# the opencode tier1 setup - otherwise the UI shows no usable agent.
+_gw_key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
+if not _gw_key:
+    # Fall back to the repo's single source of truth for keys.
+    _keys_yml = os.path.join(os.path.dirname(os.path.dirname(models_file)), "configuration", "api-keys.yml")
+    try:
+        with open(_keys_yml, "r", encoding="utf-8") as _kf:
+            for _line in _kf:
+                _t = _line.strip()
+                if _t.startswith("omniroute:") and "REPLACE" not in _t:
+                    _gw_key = _t.split(":", 1)[1].strip().strip("\"'")
+                    break
+    except Exception:
+        pass
 if muse_key:
     llm["model"] = _muse["model"]
     llm["base_url"] = _muse["base_url"]
     llm["api_key"] = muse_key
     _default_reasoning = bool(REPO_BY_ID["muse-spark"].get("reasoning"))
+elif _gw_key:
+    # Gateway default (mirrors the opencode tier1 setup): the whole
+    # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
+    # must too - otherwise the UI shows no usable agent and every chat
+    # falls back to local Ollama. Container-side base URL.
+    llm["model"] = "openai/tier1"
+    llm["base_url"] = "http://host.docker.internal:20128/v1"
+    llm["api_key"] = _gw_key
+    _default_reasoning = True
 elif deepseek_key:
     llm["model"] = _ds["model"]
     llm["base_url"] = _ds["base_url"]
