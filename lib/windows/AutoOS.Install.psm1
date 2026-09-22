@@ -1691,8 +1691,8 @@ function Set-AutoOSOpenCodeConfig {
         Configures OpenCode in ~/.config/opencode/opencode.json (and copies to
         %APPDATA%\opencode\config.json for Windows compatibility).
         Works 100% keyless by default against local Ollama (http://127.0.0.1:11434/v1).
-        If API keys are present in env or secrets/api_keys.conf, registers Meta (muse-spark-1.3)
-        and DeepSeek (deepseek-chat).
+        Tier routing (omniroute/tierN + litellm/tierN) comes from the repo
+        opencode.jsonc, which merges over this user config by precedence.
     #>
     $configDir = Join-Path $HOME '.config\opencode'
     $configFile = Join-Path $configDir 'opencode.json'
@@ -1773,50 +1773,62 @@ function Set-AutoOSOpenCodeConfig {
     $secretsPath = Join-Path $HOME 'Documents\Code\agent-skills\secrets\api_keys.conf'
     $secrets = Read-AutoOSApiSecrets -SecretsPath $secretsPath
 
-    $museKey = if ($env:MUSE_API_KEY) { $env:MUSE_API_KEY } elseif ($secrets.ContainsKey('muse')) { $secrets['muse'] } else { $null }
-    if ($museKey) {
-        $muse = $repoById['muse-spark']
-        $museModelId = $muse.direct.model.Split('/', 2)[1]
-        $providers['meta'] = [ordered]@{
-            npm     = $muse.direct.npm
-            name    = 'Meta'
-            options = [ordered]@{
-                baseURL = $muse.direct.base_url
-                apiKey  = $museKey
-            }
-            models  = [ordered]@{
-                $museModelId = [ordered]@{
-                    name      = $muse.name
-                    reasoning = $true
-                    limit     = [ordered]@{ context = $muse.context; output = $muse.output }
-                    options   = [ordered]@{ reasoningEffort = $muse.direct.reasoning_effort }
-                }
+    # NOTE: no direct Meta/DeepSeek/OpenRouter PROVIDER is emitted with a
+    # stored key — tier routing (omniroute/tierN on :20128, litellm/tierN on
+    # :4000) is offered here GLOBALLY so every cwd gets the tiers, not just
+    # checkouts carrying the repo opencode.jsonc. The muse-spark contributor
+    # direct entry below stays because OpenHands' vendored
+    # muse-spark-1.3-contributor.json template needs fresh catalog numbers
+    # projected at setup (catalog wins). Tier ids are the stable contract
+    # (docs/models.md) — same list as the repo config and the Zed writer.
+    # Keys stay out of the file: {env:...} placeholders resolve at runtime.
+    $muse = $repoById['muse-spark']
+    $museModelId = $muse.direct.model.Split('/', 2)[1]
+    $providers['meta'] = [ordered]@{
+        npm     = $muse.direct.npm
+        name    = 'Meta'
+        options = [ordered]@{
+            baseURL = $muse.direct.base_url
+            apiKey  = '{env:META_API_KEY}'
+        }
+        models  = [ordered]@{
+            $museModelId = [ordered]@{
+                name      = $muse.name
+                reasoning = $true
+                limit     = [ordered]@{ context = $muse.context; output = $muse.output }
+                options   = [ordered]@{ reasoningEffort = $muse.direct.reasoning_effort }
             }
         }
     }
-
-    $deepseekKey = if ($env:DEEPSEEK_API_KEY) { $env:DEEPSEEK_API_KEY } elseif ($secrets.ContainsKey('deepseek')) { $secrets['deepseek'] } else { $null }
-    if ($deepseekKey) {
-        $ds = $repoById['deepseek-chat'].direct
-        $dsModels = [ordered]@{}
-        foreach ($mid in @('deepseek-chat', 'deepseek-reasoner')) {
-            $dm = $repoById[$mid]
-            $entry = [ordered]@{
-                name  = $dm.name
-                limit = [ordered]@{ context = $dm.context; output = $dm.output }
-            }
-            if ($dm.PSObject.Properties.Name.Contains('reasoning') -and $dm.reasoning) { $entry['reasoning'] = $true }
-            $dsModels[$mid] = $entry
+    $omniTiers = [ordered]@{}
+    foreach ($t in @('tier1', 'tier1-clean', 'tier2', 'tier2-clean', 'tier3', 'tier3-clean', 'spark-1.3-contributor', 'auto/smart', 'auto', 'auto/cheap', 'rag')) {
+        $ctx = 1048576; $out = 32768
+        if ($t -like 'tier3*' -or $t -eq 'rag') { $ctx = 131072; $out = 16384 }
+        elseif ($t -like 'tier2*' -or $t -like 'auto*') { $ctx = 131072; $out = 32768 }
+        $omniTiers[$t] = [ordered]@{ name = $t; limit = [ordered]@{ context = $ctx; output = $out } }
+    }
+    $providers['omniroute'] = [ordered]@{
+        npm     = '@ai-sdk/openai-compatible'
+        name    = 'AutoOS OmniRoute gateway'
+        options = [ordered]@{
+            baseURL = 'http://127.0.0.1:20128/v1'
+            apiKey  = '{env:AUTOOS_OMNIROUTE_KEY}'
         }
-        $providers['deepseek'] = [ordered]@{
-            npm     = $ds.npm
-            name    = 'DeepSeek'
-            options = [ordered]@{
-                baseURL = $ds.base_url
-                apiKey  = $deepseekKey
-            }
-            models  = $dsModels
+        models  = $omniTiers
+    }
+    $litTiers = [ordered]@{}
+    foreach ($t in @('tier1', 'tier2', 'tier3', 'rag')) {
+        $ctx = 1048576; if ($t -ne 'tier1') { $ctx = 131072 }
+        $litTiers[$t] = [ordered]@{ name = "$t (litellm fallback)"; limit = [ordered]@{ context = $ctx; output = 32768 } }
+    }
+    $providers['litellm'] = [ordered]@{
+        npm     = '@ai-sdk/openai-compatible'
+        name    = 'AutoOS LiteLLM fallback'
+        options = [ordered]@{
+            baseURL = 'http://127.0.0.1:4000/v1'
+            apiKey  = '{env:LITELLM_MASTER_KEY}'
         }
+        models  = $litTiers
     }
 
     # Projected from catalog/llm-models.json (single source of truth):
@@ -1840,14 +1852,21 @@ function Set-AutoOSOpenCodeConfig {
         }
     }
 
+    # Retired 2026-09-22: drop the direct deepseek provider a previous setup
+    # wrote, so a re-run converges instead of preserving it via the merge.
+    # The meta provider (muse-spark contributor) above is intentional and stays.
+    foreach ($dead in @('deepseek')) {
+        if ($providers.Contains($dead)) { $providers.Remove($dead) }
+    }
+
     $existing['provider'] = $providers
 
     if (-not $existing.Contains('model') -or -not $existing['model']) {
-        if ($museKey) {
-            $existing['model'] = 'meta/' + $repoById['muse-spark'].direct.model.Split('/', 2)[1]
-        } else {
-            $existing['model'] = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
-        }
+        $existing['model'] = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
+    } elseif ((($existing['model'] -split '/')[0] -eq 'deepseek') -and -not $providers.Contains('deepseek')) {
+        # The default pointed at a removed direct provider (deepseek):
+        # fall back to keyless local Ollama instead of leaving it dangling.
+        $existing['model'] = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
     }
 
 
@@ -1887,6 +1906,13 @@ function Set-AutoOSOpenCodeConfig {
     }
 
     $existing['mcp'] = $mcpServers
+
+    # Serena memory tools are always off (memory belongs to omnigraph+graphify).
+    # Read the tool list from the harness at runtime, never as a literal list.
+    $serenaMemoryTools = @((Get-AutoOSAgentHarness).mcp_servers.serena.memory_tools)
+    $serenaToolsOff = [ordered]@{}
+    foreach ($t in $serenaMemoryTools) { $serenaToolsOff["serena_$t"] = $false }
+    $existing['tools'] = $serenaToolsOff
 
     $json = $existing | ConvertTo-Json -Depth 10
     $json | Out-File -FilePath $configFile -Encoding utf8
@@ -1930,7 +1956,9 @@ function Set-AutoOSOpenHandsConfig {
 
       .DESCRIPTION
         Configures OpenHands in ~/.openhands/settings.json, creates model profiles in
-        ~/.openhands/profiles/ (with 1M token contexts for DeepSeek and Muse Spark Contributor),
+        ~/.openhands/profiles/ (direct providers plus the gateway-routed
+        omniroute-tier* / litellm-tier* profiles from
+        configuration/openhands/tier-profiles.json),
         wires agent-skills via junction/symlink, creates ACP agent profiles, and
         seeds default configuration.
     #>
@@ -1968,7 +1996,7 @@ function Set-AutoOSOpenHandsConfig {
     $secretsPath = Join-Path $HOME 'Documents\Code\agent-skills\secrets\api_keys.conf'
     $secrets = Read-AutoOSApiSecrets -SecretsPath $secretsPath
 
-    $museKey = if ($env:MUSE_API_KEY) { $env:MUSE_API_KEY } elseif ($secrets.ContainsKey('muse')) { $secrets['muse'] } else { $null }
+    $museKey = if ($env:META_API_KEY) { $env:META_API_KEY } elseif ($env:MUSE_API_KEY) { $env:MUSE_API_KEY } elseif ($secrets.ContainsKey('muse')) { $secrets['muse'] } else { $null }
     $deepseekKey = if ($env:DEEPSEEK_API_KEY) { $env:DEEPSEEK_API_KEY } elseif ($secrets.ContainsKey('deepseek')) { $secrets['deepseek'] } else { $null }
     $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
     $context7Key = if ($env:CONTEXT7_API_KEY) { $env:CONTEXT7_API_KEY } elseif ($secrets.ContainsKey('context7')) { $secrets['context7'] } else { $null }
@@ -2097,21 +2125,14 @@ agent_settings.setdefault('agent_kind', 'openhands')
 agent_settings.setdefault('agent', 'CodeActAgent')
 
 llm = agent_settings.setdefault('llm', {})
-_muse = REPO_BY_ID['muse-spark']['direct']
-_ds = REPO_BY_ID['deepseek-chat']['direct']
 # reasoning_effort must follow the chosen default: only thinking models get
 # high. The unconditional high used to poison the local/Ollama fallback
-# (and deepseek-chat) with thinking params Ollama rejects outright.
+# with thinking params Ollama rejects outright.
 _default_reasoning = False
 # sys.argv[7] is the OmniRoute client key (may be 'null'); gw_key itself is
 # only bound later in the profiles section, so read argv here directly.
 _gw_key = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] != 'null' else None
-if muse_key:
-    llm['model'] = _muse['model']
-    llm['base_url'] = _muse['base_url']
-    llm['api_key'] = muse_key
-    _default_reasoning = bool(REPO_BY_ID['muse-spark'].get('reasoning'))
-elif _gw_key:
+if _gw_key:
     # Gateway default (mirrors the opencode tier1 setup): the whole
     # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
     # must too - otherwise the UI shows no usable agent and every chat
@@ -2120,16 +2141,6 @@ elif _gw_key:
     llm['base_url'] = 'http://host.docker.internal:20128/v1'
     llm['api_key'] = _gw_key
     _default_reasoning = True
-elif deepseek_key:
-    llm['model'] = _muse['model']
-    llm['base_url'] = _muse['base_url']
-    llm['api_key'] = muse_key
-    _default_reasoning = bool(REPO_BY_ID['muse-spark'].get('reasoning'))
-elif deepseek_key:
-    llm['model'] = _ds['model']
-    llm['base_url'] = _ds['base_url']
-    llm['api_key'] = deepseek_key
-    _default_reasoning = bool(REPO_BY_ID['deepseek-chat'].get('reasoning'))
 elif openrouter_key:
     llm['model'] = 'openrouter/openrouter/free'
     llm['base_url'] = 'https://openrouter.ai/api/v1'
@@ -2212,10 +2223,7 @@ profiles_dir = os.path.join(openhands_dir, 'profiles')
 # $0 while under the daily cap; paid_*_cost_per_token applies past it, so
 # spend = in_tokens*in_price + out_tokens*out_price stays auditable.
 profiles = dict([
-    _profile_for('deepseek-chat', deepseek_key),
-    _profile_for('deepseek-reasoner', deepseek_key),
     _profile_for('deepseek-v4-flash', deepseek_key),
-    _profile_for('muse-spark', muse_key, 'muse-spark-1.3'),
     _profile_for('muse-spark', muse_key, 'muse-spark-1.3-contributor'),
     _profile_for('openrouter-free', openrouter_key),
     _profile_for('openrouter-nemotron-ultra', openrouter_key),
@@ -2235,43 +2243,50 @@ profiles = dict([
     _profile_for('openrouter-ling-vl', openrouter_key),
     _profile_for('ollama-qwen2.5-coder', None),
 ])
-# Legacy alias: older setups wrote ollama-qwen-coder.json and existing UI
-# selections point at it. Keep it byte-identical to the canonical profile.
-_alias_src, _alias_data = _profile_for('ollama-qwen2.5-coder', None)
-profiles['ollama-qwen-coder.json'] = _alias_data
 for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), 'w', encoding='utf-8') as f:
         json.dump(p_data, f, indent=2)
 gw_key = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] != 'null' else None
+# LiteLLM master key for the litellm-tier* fallback profiles: env first
+# (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
+_lit_key = os.environ.get('LITELLM_MASTER_KEY') or os.environ.get('AUTOOS_LITELLM_API_KEY')
 _spec_file = os.path.join(repo_root, 'configuration', 'openhands', 'tier-profiles.json') if repo_root else ''
-if gw_key and _spec_file and os.path.isfile(_spec_file):
+if (gw_key or _lit_key) and _spec_file and os.path.isfile(_spec_file):
     # Gateway-routed tier profiles for the 3-level hierarchy, read from the
     # spec (single source - never inline tiers here). These are NOT catalog
     # models (check-vendored covers repo-vendored profiles only). The openai/
-    # prefix is the LiteLLM transport selector OpenHands requires.
+    # prefix is the LiteLLM transport selector OpenHands requires; litellm-*
+    # tiers address the :4000 fallback proxy by its plain model_name.
     try:
         with open(_spec_file, 'r', encoding='utf-8') as _sf:
             _spec = json.load(_sf)
         _gw = _spec['gateway_base_url']
+        _lit_base = _spec.get('litellm_base_url', _gw)
         for _t in _spec['tiers']:
+            if _t.get('gateway') == 'litellm':
+                _t_key, _t_base = _lit_key, _lit_base
+            else:
+                _t_key, _t_base = gw_key, _gw
+            if not _t_key:
+                continue
             _gp = {'auth_type': 'api_key', 'api_mode': 'auto', 'stream': False,
                    'drop_params': True, 'modify_params': True,
                    'disable_stop_word': False, 'caching_prompt': True,
                    'log_completions': False, 'native_tool_calling': True,
                    'is_subscription': False, 'capability_overrides': {},
                    'litellm_extra_body': {}, 'model': _t['model'],
-                   'base_url': _gw,
+                   'base_url': _t_base,
                    'max_input_tokens': _t['max_input_tokens'],
                    'max_output_tokens': _t['max_output_tokens'],
                    'input_cost_per_token': 0, 'output_cost_per_token': 0,
-                   'api_key': gw_key}
+                   'api_key': _t_key}
             if _t.get('reasoning'):
                 _gp['reasoning_effort'] = 'high'
             else:
                 _gp['reasoning_effort'] = 'none'
                 _gp['enable_encrypted_reasoning'] = False
                 _gp['extended_thinking_budget'] = None
-            with open(os.path.join(profiles_dir, 'autoos-%s.json' % _t['id']), 'w', encoding='utf-8') as _ff:
+            with open(os.path.join(profiles_dir, '%s.json' % _t['id']), 'w', encoding='utf-8') as _ff:
                 json.dump(_gp, _ff, indent=2)
     except Exception:
         pass
@@ -2282,11 +2297,11 @@ agent_profiles_dir = os.path.join(openhands_dir, 'agent-profiles')
 # is installer-managed desired state only. Without this merge the UI shows
 # just the fossil Default profile no matter how many sidecars exist.
 # Only installer-managed entries are written (never touch anything else in
-# llm_profiles); active becomes autoos-tier1 only when a gateway key is in
-# play AND the current selection is missing (None or dangling) - a live
-# user selection is never yanked. The fossil Default (ollama fallback this
-# installer wrote before any key existed) is refreshed to mirror the current
-# default llm; anything else stays untouched.
+# llm_profiles); active becomes omniroute-tier1 (or litellm-tier1 when only
+# the fallback key is in play) only when the current selection is missing
+# (None or dangling) - a live user selection is never yanked. The fossil
+# Default (ollama fallback this installer wrote before any key existed) is
+# refreshed to mirror the current default llm; anything else stays untouched.
 _lp = settings.setdefault('llm_profiles', {})
 _managed = _lp.setdefault('profiles', {})
 for _fn in sorted(os.listdir(profiles_dir)):
@@ -2297,9 +2312,10 @@ for _fn in sorted(os.listdir(profiles_dir)):
             _managed[_fn[:-5]] = json.load(_pf)
     except Exception:
         pass
-if gw_key and 'autoos-tier1' in _managed:
+if (gw_key and 'omniroute-tier1' in _managed) or (_lit_key and 'litellm-tier1' in _managed):
+    _want_active = 'omniroute-tier1' if (gw_key and 'omniroute-tier1' in _managed) else 'litellm-tier1'
     if _lp.get('active') is None or _lp.get('active') not in _managed:
-        _lp['active'] = 'autoos-tier1'
+        _lp['active'] = _want_active
     _default_entry = _managed.get('Default')
     if isinstance(_default_entry, dict):
         _dm = _default_entry.get('model', '')
@@ -2467,13 +2483,27 @@ function Set-AutoOSZedProxy {
     } else {
         $settings.agent.tool_permissions.default = 'allow'
     }
+    # omniroute-first: the litellm proxy currently has zero healthy endpoints,
+    # so a default pointing at autoos-litellm/* is broken. Converge it to
+    # {autoos-omniroute, tier1}; never touch a default already on omniroute/*.
+    if ($null -ne $settings.agent.PSObject.Properties['default_model'] -and
+        $null -ne $settings.agent.default_model.PSObject.Properties['provider'] -and
+        $settings.agent.default_model.provider -like 'autoos-litellm*') {
+        $settings.agent.default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 'tier1' }
+    }
     $tierModels = @(
         @{ name = 'tier1'; display_name = 'tier1 orchestrator (contributor)'; max_tokens = 1048576; reasoning_effort = 'xhigh' },
         @{ name = 'tier1-clean'; display_name = 'tier1-clean (paid contributor)'; max_tokens = 1048576 },
         @{ name = 'tier2'; display_name = 'tier2 smart (free-first)'; max_tokens = 131072 },
         @{ name = 'tier2-clean'; display_name = 'tier2-clean (paid)'; max_tokens = 131072 },
         @{ name = 'tier3'; display_name = 'tier3 driver (cheapest)'; max_tokens = 131072 },
-        @{ name = 'tier3-clean'; display_name = 'tier3-clean (paid)'; max_tokens = 131072 }
+        @{ name = 'tier3-clean'; display_name = 'tier3-clean (paid)'; max_tokens = 131072 },
+        @{ name = 'spark-1.3-contributor'; display_name = 'spark pinned (zen free -> openrouter paid)'; max_tokens = 1048576 },
+        @{ name = 'gemini-3.8-flash'; display_name = 'gemini-3.8-flash (gemini free -> paid)'; max_tokens = 131072 },
+        @{ name = 'deepseek-v4.1-flash'; display_name = 'deepseek-v4.1-flash (paid cheapest-first)'; max_tokens = 131072 },
+        @{ name = 'tier2-credit'; display_name = 'tier2-credit smart (credit-burn)'; max_tokens = 131072 },
+        @{ name = 'tier3-credit'; display_name = 'tier3-credit driver (credit-burn)'; max_tokens = 131072 },
+        @{ name = 'rag'; display_name = 'rag cohere RAG (trial keys)'; max_tokens = 131072 }
     )
     $omniEntry = @{
         api_url = 'http://127.0.0.1:20128/v1'
@@ -2503,7 +2533,8 @@ function Set-AutoOSZedProxy {
     # MCP context servers for the agent panel (Settings -> AI -> MCP Servers
     # shows their status dots). Serena resolves its project per workspace at
     # call time (the agent activates by absolute path); graphify serves the
-    # cwd-relative graph. enable_all_context_servers stays false on the auto
+    # cwd-relative graph; omnigraph/playwright/context7 mirror the harness
+    # pins. enable_all_context_servers stays false on the auto
     # profile; the bypass profile below opts in.
     if ($null -eq $settings.PSObject.Properties['context_servers']) {
         Add-Member -InputObject $settings -NotePropertyName 'context_servers' -NotePropertyValue (New-Object psobject)
@@ -2518,7 +2549,29 @@ function Set-AutoOSZedProxy {
         args = @('run', '--with', (Get-AutoOSMcpPackage -Name 'graphify'), 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
     }
     Add-Member -InputObject $settings.context_servers -NotePropertyName 'graphify' -NotePropertyValue $graphifyCtx -Force
-    $settings | ConvertTo-Json -Depth 8 | Out-File -FilePath $cfgPath -Encoding utf8
+    # Full MCP set for the agent panel: omnigraph (project memory; the panel
+    # inherits the repo's OMNIGRAPH_GRAPH_ID via process env), playwright
+    # (browser verification) and context7 (library docs). Pins resolve from
+    # catalog/agent-harness.json at runtime, never as literals.
+    $omnigraphCtx = [ordered]@{
+        command = 'npx'
+        args = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
+    }
+    Add-Member -InputObject $settings.context_servers -NotePropertyName 'omnigraph' -NotePropertyValue $omnigraphCtx -Force
+    $playwrightCtx = [ordered]@{
+        command = 'npx'
+        args = @('-y', (Get-AutoOSMcpPackage -Name 'playwright'))
+    }
+    Add-Member -InputObject $settings.context_servers -NotePropertyName 'playwright' -NotePropertyValue $playwrightCtx -Force
+    $context7Ctx = [ordered]@{
+        command = 'npx'
+        args = @('-y', (Get-AutoOSMcpPackage -Name 'context7'))
+    }
+    Add-Member -InputObject $settings.context_servers -NotePropertyName 'context7' -NotePropertyValue $context7Ctx -Force
+    # BOM-less UTF-8: Zed's parser (serde_json) rejects a leading BOM with
+    # "expected value at line 1 column 1", and PowerShell 5.1 Out-File -Encoding
+    # utf8 always emits one (measured 2026-09-22 — broke the live file).
+    [IO.File]::WriteAllText($cfgPath, ($settings | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
     Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)' -Level ok
 }
 

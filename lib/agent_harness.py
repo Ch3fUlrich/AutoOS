@@ -52,8 +52,13 @@ def validate(harness):
     for key in ("bash_deny_all", "bash_deny_leaf", "bash_allow_all"):
         if key not in fences:
             problems.append("missing key: fences.%s" % key)
-    if "git push*" not in (fences.get("bash_deny_all") or []):
-        problems.append("fences.bash_deny_all must contain 'git push*'")
+    # Push is a leaf fence, not a global one (operator 2026-09-22): leaves
+    # must never push, but the interactive top-level session and spawning
+    # roles may. It must live in exactly one fence list.
+    _push_all = "git push*" in (fences.get("bash_deny_all") or [])
+    _push_leaf = "git push*" in (fences.get("bash_deny_leaf") or [])
+    if _push_all == _push_leaf:
+        problems.append("fences: 'git push*' must be in exactly one of bash_deny_all / bash_deny_leaf")
     if "git commit*" not in (fences.get("bash_deny_leaf") or []):
         problems.append("fences.bash_deny_leaf must contain 'git commit*'")
 
@@ -62,6 +67,23 @@ def validate(harness):
     for name, server in servers.items():
         if not isinstance(server, dict) or not isinstance(server.get("package"), str):
             problems.append("mcp_servers.%s.package must be a string" % name)
+    serena = servers.get("serena")
+    serena = serena if isinstance(serena, dict) else {}
+    memory_tools = serena.get("memory_tools")
+    # Exact set, not just non-empty: the opencode repo config and both
+    # installer writers derive their serena_* tools block from this field,
+    # so a typo here silently disables the wrong tools everywhere.
+    if set(memory_tools or []) != {
+        "write_memory",
+        "read_memory",
+        "list_memories",
+        "edit_memory",
+        "delete_memory",
+        "rename_memory",
+    } or not isinstance(memory_tools, list):
+        problems.append(
+            "mcp_servers.serena.memory_tools must be exactly the 6 memory tools"
+        )
 
     roles = harness.get("roles")
     roles = roles if isinstance(roles, dict) else {}
@@ -210,6 +232,21 @@ def _rebuild_patterns(user_value, deny_all, deny_leaf, allow_all):
     return result
 
 
+def _drop_stale_leaf_denies(user_value, retired):
+    """Remove a previous harness version's leaf-deny footprint.
+
+    deny_leaf patterns are no longer fenced at top level (they live on the
+    leaf agent blocks). A top-level leaf pattern with verdict "deny" can only
+    be this generator's own stale output, so drop it; any other user verdict
+    (ask/allow) survives untouched.
+    """
+    user_map = _pattern_map(user_value)
+    for pattern in retired:
+        if user_map.get(pattern) == "deny":
+            del user_map[pattern]
+    return user_map
+
+
 def _rebuild_read(user_value, deny_all, allow_all):
     return _rebuild_patterns(user_value, deny_all, [], allow_all)
 
@@ -248,8 +285,17 @@ def desired_opencode(user, harness, repo_root, skills_source):
     permission = doc.setdefault("permission", {})
     if "skill" not in permission:
         permission["skill"] = "allow"
+    # Top level gets deny_all ONLY. The leaf fences (commit/checkout/stash/…)
+    # are per-agent (see _role_bash): the top-level session is the interactive
+    # user, and the V2 tier agents inherit top-level bash since they define no
+    # bash rules of their own — denying commit/checkout there breaks everyday
+    # git inside any agent run (measured 2026-09-22). Leaves still deny via
+    # their own blocks; push/merge/destructive stays denied for everyone.
     permission["bash"] = _rebuild_patterns(
-        permission.get("bash"), deny_all, deny_leaf, allow_all
+        _drop_stale_leaf_denies(permission.get("bash"), deny_leaf),
+        deny_all,
+        [],
+        allow_all,
     )
     permission["read"] = _rebuild_read(
         permission.get("read"),

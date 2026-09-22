@@ -12,9 +12,12 @@ during `setup_openhands_config` / `Set-AutoOSOpenHandsConfig`.
   install time from env/secrets and never vendored.
 - `agent-profiles/*.json` — agent profiles referencing LLM profiles by
   `llm_profile_ref`. Copied verbatim.
-- File name (minus `.json`) is the profile id. The canonical local
-  profile is `ollama-qwen2.5-coder.json`. Setup also writes a byte-identical
-  `ollama-qwen-coder.json` alias so older UI selections keep working.
+- File name (minus `.json`) is the profile id. Direct-provider profiles
+  (DeepSeek flash, OpenRouter free pool, local Ollama) are the keyless and
+  paid-direct legs; gateway-routed `omniroute-tier*` / `litellm-tier*`
+  profiles are generated at install/start time from
+  `configuration/openhands/tier-profiles.json` and published into
+  `settings.json` `llm_profiles` alongside these.
 
 ## Why the explicit thinking opt-outs exist
 

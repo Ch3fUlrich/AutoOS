@@ -1080,6 +1080,12 @@ tiers = [
     ("tier2-clean", "tier2-clean (paid)", 131072, None),
     ("tier3", "tier3 driver (cheapest)", 131072, None),
     ("tier3-clean", "tier3-clean (paid)", 131072, None),
+    ("spark-1.3-contributor", "spark pinned (zen free -> openrouter paid)", 1048576, None),
+    ("gemini-3.8-flash", "gemini-3.8-flash (gemini free -> paid)", 131072, None),
+    ("deepseek-v4.1-flash", "deepseek-v4.1-flash (paid cheapest-first)", 131072, None),
+    ("tier2-credit", "tier2-credit smart (credit-burn)", 131072, None),
+    ("tier3-credit", "tier3-credit driver (credit-burn)", 131072, None),
+    ("rag", "rag cohere RAG (trial keys)", 131072, None),
 ]
 auto = [
     {"name": "auto/smart", "display_name": "tier1 orchestrator (auto smart)",
@@ -1119,7 +1125,8 @@ oc["autoos-litellm"] = lit
 # MCP context servers for the agent panel (Settings -> AI -> MCP Servers
 # shows their status dots). Serena resolves its project per workspace at
 # call time (the agent activates by absolute path); graphify serves the
-# cwd-relative graph. Pins match catalog/agent-harness.json.
+# cwd-relative graph; omnigraph/playwright/context7 mirror the harness
+# pins. Pins match catalog/agent-harness.json.
 ctx = cfg.setdefault("context_servers", {})
 ctx["serena"] = {
     "command": "uvx",
@@ -1129,6 +1136,18 @@ ctx["graphify"] = {
     "command": "uv",
     "args": ["run", "--with", pins["graphify"]["package"], "python",
              "-m", "graphify.serve", "graphify-out/graph.json"],
+}
+ctx["omnigraph"] = {
+    "command": "npx",
+    "args": ["-y", pins["omnigraph"]["package"]],
+}
+ctx["playwright"] = {
+    "command": "npx",
+    "args": ["-y", pins["playwright"]["package"]],
+}
+ctx["context7"] = {
+    "command": "npx",
+    "args": ["-y", pins["context7"]["package"]],
 }
 # Bypass profile: every built-in tool on, no confirmations (global
 # tool_permissions.default allow). Existing profiles and per-tool rules stay.
@@ -1148,6 +1167,12 @@ profiles["bypass"] = {
 }
 tp = agent.setdefault("tool_permissions", {})
 tp["default"] = "allow"
+# omniroute-first: the litellm proxy currently has zero healthy endpoints,
+# so a default pointing at autoos-litellm/* is broken. Converge it to
+# {autoos-omniroute, tier1}; never touch a default already on omniroute/*.
+_dm = agent.get("default_model")
+if isinstance(_dm, dict) and str(_dm.get("provider", "")).startswith("autoos-litellm"):
+    agent["default_model"] = {"provider": "autoos-omniroute", "model": "tier1"}
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(cfg, fh, indent=2)
 PY
@@ -2083,47 +2108,74 @@ providers['ollama'] = {
     }
 }
 
-muse_key = os.environ.get('MUSE_API_KEY') or secrets.get('muse')
-if muse_key:
-    _muse = REPO_BY_ID['muse-spark']['direct']
-    providers['meta'] = {
-        'npm': _muse['npm'],
-        'name': 'Meta AI (Muse Spark)',
-        'options': {
-            'baseURL': _muse['base_url'],
-            'apiKey': muse_key
-        },
-        'models': {
-            _muse['model'].split('/', 1)[1]: {
-                'name': REPO_BY_ID['muse-spark']['name'],
-                'reasoning': True,
-                'limit': {'context': REPO_BY_ID['muse-spark']['context'], 'output': REPO_BY_ID['muse-spark']['output']},
-                'options': {'reasoningEffort': _muse['reasoning_effort']}
-            }
+# Direct meta entry (muse-spark contributor) so the model the user asked to
+# keep is selectable in opencode; the key stays out of the file.
+_muse = REPO_BY_ID['muse-spark']['direct']
+_muse_model_id = _muse['model'].split('/', 1)[1]
+providers['meta'] = {
+    'npm': _muse['npm'],
+    'name': 'Meta',
+    'options': {
+        'baseURL': _muse['base_url'],
+        'apiKey': '{env:META_API_KEY}'
+    },
+    'models': {
+        _muse_model_id: {
+            'name': REPO_BY_ID['muse-spark']['name'],
+            'reasoning': True,
+            'limit': {'context': REPO_BY_ID['muse-spark']['context'],
+                      'output': REPO_BY_ID['muse-spark']['output']},
+            'options': {'reasoningEffort': _muse['reasoning_effort']}
         }
     }
+}
 
+muse_key = os.environ.get('META_API_KEY') or os.environ.get('MUSE_API_KEY') or secrets.get('muse')
 deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
-if deepseek_key:
-    def _deepseek_entry(mid):
-        m = REPO_BY_ID[mid]
-        entry = {'name': m['name'], 'limit': {'context': m['context'], 'output': m['output']}}
-        if m.get('reasoning'):
-            entry['reasoning'] = True
-        return entry
-    _ds = REPO_BY_ID['deepseek-chat']['direct']
-    providers['deepseek'] = {
-        'npm': _ds['npm'],
-        'name': 'DeepSeek',
-        'options': {
-            'baseURL': _ds['base_url'],
-            'apiKey': deepseek_key
-        },
-        'models': {
-            'deepseek-chat': _deepseek_entry('deepseek-chat'),
-            'deepseek-reasoner': _deepseek_entry('deepseek-reasoner')
-        }
-    }
+# NOTE: META_API_KEY is the canonical name (same as litellm .env + api-keys.yml
+# `meta:`); MUSE_API_KEY stays as a legacy fallback. The muse key feeds
+# _profile_for (muse-spark contributor below) and the direct meta provider.
+# NOTE: the muse key feeds _profile_for (muse-spark contributor below) and the
+# direct meta provider. No direct DEEPSEEK provider is emitted: tier routing
+# (omniroute on :20128, litellm on :4000) is offered here GLOBALLY so every
+# cwd gets the tiers.
+
+def _gateway_tiers():
+    tiers = {}
+    for _t in ('tier1', 'tier1-clean', 'tier2', 'tier2-clean', 'tier3',
+               'tier3-clean', 'spark-1.3-contributor', 'auto/smart', 'auto', 'auto/cheap', 'rag'):
+        _ctx, _out = 1048576, 32768
+        if _t.startswith('tier3') or _t == 'rag':
+            _ctx, _out = 131072, 16384
+        elif _t.startswith('tier2') or _t.startswith('auto'):
+            _ctx, _out = 131072, 32768
+        tiers[_t] = {'name': _t, 'limit': {'context': _ctx, 'output': _out}}
+    return tiers
+
+providers['omniroute'] = {
+    'npm': '@ai-sdk/openai-compatible',
+    'name': 'AutoOS OmniRoute gateway',
+    'options': {
+        'baseURL': 'http://127.0.0.1:20128/v1',
+        'apiKey': '{env:AUTOOS_OMNIROUTE_KEY}'
+    },
+    'models': _gateway_tiers()
+}
+
+_lit_tiers = {}
+for _t in ('tier1', 'tier2', 'tier3', 'rag'):
+    _ctx = 1048576 if _t == 'tier1' else 131072
+    _lit_tiers[_t] = {'name': _t + ' (litellm fallback)',
+                      'limit': {'context': _ctx, 'output': 32768}}
+providers['litellm'] = {
+    'npm': '@ai-sdk/openai-compatible',
+    'name': 'AutoOS LiteLLM fallback',
+    'options': {
+        'baseURL': 'http://127.0.0.1:4000/v1',
+        'apiKey': '{env:LITELLM_MASTER_KEY}'
+    },
+    'models': _lit_tiers
+}
 
 openrouter_key = os.environ.get('OPENROUTER_API_KEY') or secrets.get('openrouter')
 if openrouter_key:
@@ -2137,13 +2189,19 @@ if openrouter_key:
         'models': _openrouter_models()
     }
 
+# Retired 2026-09-22: drop the direct deepseek provider a previous setup
+# wrote, so a re-run converges instead of preserving it via the merge above.
+# The meta provider (muse-spark contributor) above is intentional and stays.
+for _dead in ('deepseek',):
+    providers.pop(_dead, None)
 data['provider'] = providers
 
 if not data.get('model'):
-    if muse_key:
-        data['model'] = 'meta/' + REPO_BY_ID['muse-spark']['direct']['model'].split('/', 1)[1]
-    else:
-        data['model'] = 'ollama/' + REPO_BY_ID['ollama-qwen2.5-coder']['direct']['model'].split('/', 1)[1]
+    data['model'] = 'ollama/' + REPO_BY_ID['ollama-qwen2.5-coder']['direct']['model'].split('/', 1)[1]
+elif data['model'].split('/', 1)[0] == 'deepseek' and 'deepseek' not in providers:
+    # The default pointed at a removed direct provider (deepseek):
+    # fall back to keyless local Ollama instead of leaving it dangling.
+    data['model'] = 'ollama/' + REPO_BY_ID['ollama-qwen2.5-coder']['direct']['model'].split('/', 1)[1]
 
 mcps = data.get('mcp', {})
 mcps['serena'] = {
@@ -2173,6 +2231,12 @@ mcps['playwright'] = {
     'enabled': True
 }
 data['mcp'] = mcps
+
+# Serena memory tools are always off (memory belongs to omnigraph+graphify).
+# Read the tool list from the harness field at runtime, never as literals.
+with open(_harness_file, 'r', encoding='utf-8') as _hf2:
+    _mem_tools = json.load(_hf2)['mcp_servers']['serena']['memory_tools']
+data['tools'] = {'serena_' + _t: False for _t in _mem_tools}
 
 tmp_file = config_path + '.tmp'
 with open(tmp_file, 'w', encoding='utf-8') as f:
@@ -2338,12 +2402,13 @@ if os.path.isdir(_templates_dir):
 secrets = {}
 if secrets_file and os.path.isfile(secrets_file):
     # Only the real conf. api_keys.conf.example is never read: its placeholder
-    # keys are truthy and would make muse the default LLM with a key the
-    # provider rejects, instead of falling through to the local Ollama model.
+    # keys are truthy and would be written into a profile as if real (401s).
     _read_secrets_file(secrets_file, secrets)
 
-muse_key = os.environ.get("MUSE_API_KEY") or secrets.get("muse")
+muse_key = os.environ.get("META_API_KEY") or os.environ.get("MUSE_API_KEY") or secrets.get("muse")
 deepseek_key = os.environ.get("DEEPSEEK_API_KEY") or secrets.get("deepseek")
+# NOTE: no direct Meta/DeepSeek provider is emitted by the writers; both keys
+# feed _profile_for (muse-spark contributor + deepseek-v4-flash below).
 openrouter_key = os.environ.get("OPENROUTER_API_KEY") or secrets.get("openrouter")
 context7_key = os.environ.get("CONTEXT7_API_KEY") or secrets.get("context7")
 
@@ -2363,19 +2428,17 @@ agent_settings.setdefault("agent_kind", "openhands")
 agent_settings.setdefault("agent", "CodeActAgent")
 
 llm = agent_settings.setdefault("llm", {})
-_muse = REPO_BY_ID["muse-spark"]["direct"]
-_ds = REPO_BY_ID["deepseek-chat"]["direct"]
 # reasoning_effort must follow the chosen default: only thinking models get
 # "high". The unconditional "high" used to poison the local/Ollama fallback
-# (and deepseek-chat) with thinking params Ollama rejects outright.
+# with thinking params Ollama rejects outright.
 _default_reasoning = False
 # OmniRoute client key rides AUTOOS_OMNIROUTE_KEY (same env the tier-profile
-# writer below reads). When present the gateway becomes the default, mirroring
-# the opencode tier1 setup - otherwise the UI shows no usable agent.
+# writer below reads). AUTOOS_KEYS_FILE overrides the fallback keys file
+# (the suite points it at a stub for a hermetic keyless run).
 _gw_key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
 if not _gw_key:
     # Fall back to the repo's single source of truth for keys.
-    _keys_yml = os.path.join(os.path.dirname(os.path.dirname(models_file)), "configuration", "api-keys.yml")
+    _keys_yml = os.environ.get("AUTOOS_KEYS_FILE") or os.path.join(os.path.dirname(os.path.dirname(models_file)), "configuration", "api-keys.yml")
     try:
         with open(_keys_yml, "r", encoding="utf-8") as _kf:
             for _line in _kf:
@@ -2385,12 +2448,7 @@ if not _gw_key:
                     break
     except Exception:
         pass
-if muse_key:
-    llm["model"] = _muse["model"]
-    llm["base_url"] = _muse["base_url"]
-    llm["api_key"] = muse_key
-    _default_reasoning = bool(REPO_BY_ID["muse-spark"].get("reasoning"))
-elif _gw_key:
+if _gw_key:
     # Gateway default (mirrors the opencode tier1 setup): the whole
     # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
     # must too - otherwise the UI shows no usable agent and every chat
@@ -2399,11 +2457,6 @@ elif _gw_key:
     llm["base_url"] = "http://host.docker.internal:20128/v1"
     llm["api_key"] = _gw_key
     _default_reasoning = True
-elif deepseek_key:
-    llm["model"] = _ds["model"]
-    llm["base_url"] = _ds["base_url"]
-    llm["api_key"] = deepseek_key
-    _default_reasoning = bool(REPO_BY_ID["deepseek-chat"].get("reasoning"))
 elif openrouter_key:
     llm["model"] = "openrouter/openrouter/free"
     llm["base_url"] = "https://openrouter.ai/api/v1"
@@ -2485,10 +2538,7 @@ profiles_dir = os.path.join(openhands_dir, "profiles")
 # $0 while under the daily cap; paid_*_cost_per_token applies past it, so
 # spend = in_tokens*in_price + out_tokens*out_price stays auditable.
 profiles = dict([
-    _profile_for("deepseek-chat", deepseek_key),
-    _profile_for("deepseek-reasoner", deepseek_key),
     _profile_for("deepseek-v4-flash", deepseek_key),
-    _profile_for("muse-spark", muse_key, "muse-spark-1.3"),
     _profile_for("muse-spark", muse_key, "muse-spark-1.3-contributor"),
     _profile_for("openrouter-free", openrouter_key),
     _profile_for("openrouter-nemotron-ultra", openrouter_key),
@@ -2508,43 +2558,50 @@ profiles = dict([
     _profile_for("openrouter-ling-vl", openrouter_key),
     _profile_for("ollama-qwen2.5-coder", None),
 ])
-# Legacy alias: older setups wrote ollama-qwen-coder.json and existing UI
-# selections point at it. Keep it byte-identical to the canonical profile.
-_alias_src, _alias_data = _profile_for("ollama-qwen2.5-coder", None)
-profiles["ollama-qwen-coder.json"] = _alias_data
 for name, p_data in profiles.items():
     with open(os.path.join(profiles_dir, name), "w", encoding="utf-8") as f:
         json.dump(p_data, f, indent=2)
 omni_key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or secrets.get("omniroute")
+# LiteLLM master key for the litellm-tier* fallback profiles: env first
+# (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
+_lit_key = os.environ.get("LITELLM_MASTER_KEY") or os.environ.get("AUTOOS_LITELLM_API_KEY")
 _spec_file = os.path.join(REPO_ROOT, "configuration", "openhands", "tier-profiles.json") if REPO_ROOT else ""
-if omni_key and _spec_file and os.path.isfile(_spec_file):
+if (omni_key or _lit_key) and _spec_file and os.path.isfile(_spec_file):
     # Gateway-routed tier profiles for the 3-level hierarchy, read from the
     # spec (single source - never inline tiers here). These are NOT catalog
     # models (check-vendored covers repo-vendored profiles only). The openai/
-    # prefix is the LiteLLM transport selector OpenHands requires.
+    # prefix is the LiteLLM transport selector OpenHands requires; litellm-*
+    # tiers address the :4000 fallback proxy by its plain model_name.
     try:
         with open(_spec_file, "r", encoding="utf-8") as _sf:
             _spec = json.load(_sf)
         _gw = _spec["gateway_base_url"]
+        _lit_base = _spec.get("litellm_base_url", _gw)
         for _t in _spec["tiers"]:
+            if _t.get("gateway") == "litellm":
+                _t_key, _t_base = _lit_key, _lit_base
+            else:
+                _t_key, _t_base = omni_key, _gw
+            if not _t_key:
+                continue
             _gp = {"auth_type": "api_key", "api_mode": "auto", "stream": False,
                    "drop_params": True, "modify_params": True,
                    "disable_stop_word": False, "caching_prompt": True,
                    "log_completions": False, "native_tool_calling": True,
                    "is_subscription": False, "capability_overrides": {},
                    "litellm_extra_body": {}, "model": _t["model"],
-                   "base_url": _gw,
+                   "base_url": _t_base,
                    "max_input_tokens": _t["max_input_tokens"],
                    "max_output_tokens": _t["max_output_tokens"],
                    "input_cost_per_token": 0, "output_cost_per_token": 0,
-                   "api_key": omni_key}
+                   "api_key": _t_key}
             if _t.get("reasoning"):
                 _gp["reasoning_effort"] = "high"
             else:
                 _gp["reasoning_effort"] = "none"
                 _gp["enable_encrypted_reasoning"] = False
                 _gp["extended_thinking_budget"] = None
-            with open(os.path.join(profiles_dir, "autoos-%s.json" % _t["id"]), "w", encoding="utf-8") as _ff:
+            with open(os.path.join(profiles_dir, "%s.json" % _t["id"]), "w", encoding="utf-8") as _ff:
                 json.dump(_gp, _ff, indent=2)
     except Exception:
         pass
@@ -2555,11 +2612,11 @@ agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
 # is installer-managed desired state only. Without this merge the UI shows
 # just the fossil Default profile no matter how many sidecars exist.
 # Only installer-managed entries are written (never touch anything else in
-# llm_profiles); active becomes autoos-tier1 only when a gateway key is in
-# play AND the current selection is missing (None or dangling) - a live
-# user selection is never yanked. The fossil Default (ollama fallback this
-# installer wrote before any key existed) is refreshed to mirror the current
-# default llm; anything else stays untouched.
+# llm_profiles); active becomes omniroute-tier1 (or litellm-tier1 when only
+# the fallback key is in play) only when the current selection is missing
+# (None or dangling) - a live user selection is never yanked. The fossil
+# Default (ollama fallback this installer wrote before any key existed) is
+# refreshed to mirror the current default llm; anything else stays untouched.
 _lp = settings.setdefault("llm_profiles", {})
 _managed = _lp.setdefault("profiles", {})
 for _fn in sorted(os.listdir(profiles_dir)):
@@ -2570,9 +2627,10 @@ for _fn in sorted(os.listdir(profiles_dir)):
             _managed[_fn[:-5]] = json.load(_pf)
     except Exception:
         pass
-if omni_key and "autoos-tier1" in _managed:
+if (omni_key and "omniroute-tier1" in _managed) or (_lit_key and "litellm-tier1" in _managed):
+    _want_active = "omniroute-tier1" if (omni_key and "omniroute-tier1" in _managed) else "litellm-tier1"
     if _lp.get("active") is None or _lp.get("active") not in _managed:
-        _lp["active"] = "autoos-tier1"
+        _lp["active"] = _want_active
     _default_entry = _managed.get("Default")
     if isinstance(_default_entry, dict):
         _dm = _default_entry.get("model", "")
