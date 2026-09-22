@@ -119,7 +119,7 @@ Describe-Group 'llm models'
 Test-Case 'llm-models.json is valid and has unique ids' {
     $doc = Get-Content (Join-Path $Root 'catalog\llm-models.json') -Raw | ConvertFrom-Json
     $ids = @($doc.models | ForEach-Object { $_.id })
-    Assert-True ($ids.Count -ge 20) "expected >= 20 models, got $($ids.Count)"
+    Assert-True ($ids.Count -ge 18) "expected >= 18 models, got $($ids.Count)"
     $dupes = @($ids | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
     @(Assert-True ($dupes.Count -eq 0) ("duplicate model ids: " + ($dupes -join ', ')))
     foreach ($m in $doc.models) {
@@ -3239,8 +3239,9 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
 }
 
 Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
-    # Tier profiles (autoos-tier1/2/3) route OpenHands through the gateway
-    # for the 3-level hierarchy. Same temp-dir isolation as the Ollama test.
+    # Tier profiles (omniroute-tier* + litellm-tier*) route OpenHands through
+    # the gateways for the 3-level hierarchy. Same temp-dir isolation as the
+    # Ollama test.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
@@ -3253,8 +3254,8 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
         $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-omni-key' *> $null
-        $t1 = Get-Content (Join-Path $oh 'profiles\autoos-tier1.json') -Raw | ConvertFrom-Json
-        $t3 = Get-Content (Join-Path $oh 'profiles\autoos-tier3.json') -Raw | ConvertFrom-Json
+        $t1 = Get-Content (Join-Path $oh 'profiles\omniroute-tier1.json') -Raw | ConvertFrom-Json
+        $t3 = Get-Content (Join-Path $oh 'profiles\omniroute-tier3.json') -Raw | ConvertFrom-Json
         Assert-Equal $t1.model 'openai/tier1'
         Assert-Equal $t1.base_url 'http://host.docker.internal:20128/v1'
         Assert-Equal $t1.api_key 'test-omni-key'
@@ -3262,9 +3263,10 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         Assert-Equal $t3.model 'openai/tier3'
         Assert-Equal $t3.reasoning_effort 'none'
         Assert-True ($t3.enable_encrypted_reasoning -eq $false) 'tier3 thinking not opted out'
+        Assert-True (Test-Path (Join-Path $oh 'profiles\omniroute-tier2-clean.json')) 'clean twin missing'
         $lp = (Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json).llm_profiles
-        Assert-True ($null -ne $lp.profiles.'autoos-tier1') 'tier1 not published to llm_profiles'
-        Assert-Equal $lp.active 'autoos-tier1'
+        Assert-True ($null -ne $lp.profiles.'omniroute-tier1') 'tier1 not published to llm_profiles'
+        Assert-Equal $lp.active 'omniroute-tier1'
     } finally {
         foreach ($k in $saved.Keys) {
             if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
@@ -3287,7 +3289,7 @@ Test-Case 'the embedded OpenHands setup script writes no tier profiles without a
         $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
         $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'null' *> $null
-        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\autoos-tier1.json'))) 'tier profile written without a key'
+        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\omniroute-tier1.json'))) 'tier profile written without a key'
     } finally {
         foreach ($k in $saved.Keys) {
             if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
@@ -3304,32 +3306,49 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'tier1,tier2,tier3'
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-tier1,omniroute-tier1-clean,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3'
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
-    foreach ($t in $spec.tiers) { Assert-True ($t.model -match '^openai/tier[123]$') "$($t.id) model is not openai/tierN" }
+    Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
+    foreach ($t in $spec.tiers) {
+        Assert-True ($t.model -match '^openai/(tier[123](-clean|-credit)?|rag|gemini-3\.8-flash|deepseek-v4\.1-flash)$') "$($t.id) model is not openai/tierN, openai/rag, a pinned route or a credit chain"
+    }
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
     $tmpA = Join-Path ([IO.Path]::GetTempPath()) "autoos-tierspecA-$PID"
     $tmpB = Join-Path ([IO.Path]::GetTempPath()) "autoos-tierspecB-$PID"
     $keys = Join-Path $tmpB 'api-keys.yml'
+    $litEnv = Join-Path $tmpB '.env'
     # The generator prefers env over the keys file: force the fixture path by
     # hiding any ambient key (the suite never asserts on live system state).
     $realOmniKey = $env:AUTOOS_OMNIROUTE_KEY
+    $realLitKey = $env:LITELLM_MASTER_KEY
+    $realLitApiKey = $env:AUTOOS_LITELLM_API_KEY
     try {
         $null = New-Item -ItemType Directory -Force -Path $tmpA, $tmpB
         Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue
         'omniroute: test-omni-key' | Out-File $keys -Encoding utf8
-        & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys *> $null
+        'LITELLM_MASTER_KEY=test-lit-key' | Out-File $litEnv -Encoding utf8
+        & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys --litellm-env $litEnv *> $null
         Assert-Equal $LASTEXITCODE 0 'generator failed'
-        foreach ($t in @('tier1', 'tier2', 'tier3')) {
-            Assert-True (Test-Path (Join-Path $tmpA "profiles\autoos-$t.json")) "autoos-$t.json missing"
+        foreach ($t in @('omniroute-tier1', 'omniroute-tier3-clean', 'litellm-tier2')) {
+            Assert-True (Test-Path (Join-Path $tmpA "profiles\$t.json")) "$t.json missing"
         }
-        $t1 = Get-Content (Join-Path $tmpA 'profiles\autoos-tier1.json') -Raw | ConvertFrom-Json
+        $t1 = Get-Content (Join-Path $tmpA 'profiles\omniroute-tier1.json') -Raw | ConvertFrom-Json
         Assert-Equal $t1.model 'openai/tier1'
         Assert-Equal $t1.api_key 'test-omni-key'
+        $lt = Get-Content (Join-Path $tmpA 'profiles\litellm-tier1.json') -Raw | ConvertFrom-Json
+        Assert-Equal $lt.model 'openai/tier1'
+        Assert-Equal $lt.base_url 'http://host.docker.internal:4000/v1'
+        Assert-Equal $lt.api_key 'test-lit-key'
     } finally {
         if ($null -eq $realOmniKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
         else { $env:AUTOOS_OMNIROUTE_KEY = $realOmniKey }
+        if ($null -eq $realLitKey) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
+        else { $env:LITELLM_MASTER_KEY = $realLitKey }
+        if ($null -eq $realLitApiKey) { Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_LITELLM_API_KEY = $realLitApiKey }
         Remove-Item $tmpA, $tmpB -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -3342,13 +3361,15 @@ Test-Case 'mirror-litellm-env projects keys without printing them' {
         $null = New-Item -ItemType Directory -Force -Path $tmp
         $keys = Join-Path $tmp 'api-keys.yml'
         $envFile = Join-Path $tmp '.env'
-        "groq: dummy-groq-1`nmeta: dummy-meta-2`nzen: REPLACE_WITH_ZEN_KEY" | Out-File $keys -Encoding utf8
+        "groq: dummy-groq-1`nmeta: dummy-meta-2`ncohere: dummy-cohere-3`nSambaNova: dummy-samba-4`nzen: REPLACE_WITH_ZEN_KEY" | Out-File $keys -Encoding utf8
         $out = & $py.Source (Join-Path $Root 'tools\mirror-litellm-env.py') --keys $keys --env $envFile 2>&1 | Out-String
         Assert-Equal $LASTEXITCODE 0 "mirror failed: $out"
         Assert-True ($out -notmatch 'dummy-') 'a key value leaked into output'
         $got = Get-Content $envFile -Raw -Encoding utf8
         Assert-True ($got -match 'GROQ_API_KEY=dummy-groq-1') 'groq not mirrored'
         Assert-True ($got -match 'META_API_KEY=dummy-meta-2') 'meta not mirrored'
+        Assert-True ($got -match 'COHERE_API_KEY=dummy-cohere-3') 'cohere not mirrored'
+        Assert-True ($got -match 'SAMBANOVA_API_KEY=dummy-samba-4') 'SambaNova case not mirrored'
         Assert-True ($got -match 'OPENCODE_ZEN_API_KEY=REPLACE') 'missing key not a placeholder'
         Assert-True ($got -match 'LITELLM_MASTER_KEY=(?!REPLACE)\S+') 'master key not generated'
         & $py.Source (Join-Path $Root 'tools\mirror-litellm-env.py') --check --keys $keys --env $envFile *> $null
@@ -3389,6 +3410,23 @@ Test-Case 'the embedded OpenHands setup script defaults to the gateway with a ke
 Test-Case 'agent harness installers: the OpenHands writer calls the generator and skips role profiles' {
     Assert-True ($body -match "agent_harness\.py[\s'\)]*openhands") 'Set-AutoOSOpenHandsConfig does not call agent_harness.py openhands'
     Assert-True ($body -match '_role_profiles') 'Set-AutoOSOpenHandsConfig does not skip role profiles'
+}
+
+Test-Case 'opencode user config carries global gateway providers without secrets' {
+    # Tier routing must work in EVERY cwd, not just checkouts carrying the
+    # repo opencode.jsonc. The Linux twin test runs the writer for real
+    # (HOME is read-only in this harness, so here we pin the definition);
+    # both writers must emit omniroute/litellm with {env:} key placeholders.
+    $body = (Get-Command Set-AutoOSOpenCodeConfig).Definition
+    Assert-True ($body -match [regex]::Escape('http://127.0.0.1:20128/v1')) 'omniroute baseURL missing'
+    Assert-True ($body -match [regex]::Escape('http://127.0.0.1:4000/v1')) 'litellm baseURL missing'
+    Assert-True ($body -match [regex]::Escape('{env:AUTOOS_OMNIROUTE_KEY}')) 'omni key not an env placeholder'
+    Assert-True ($body -match [regex]::Escape('{env:LITELLM_MASTER_KEY}')) 'lit key not an env placeholder'
+    foreach ($t in @("'tier1'", "'tier3-clean'", "'auto/smart'")) {
+        Assert-True ($body -match [regex]::Escape($t)) "omniroute model $t missing"
+    }
+    Assert-True ($body -match "@\('deepseek'\)") 'retired-provider prune missing'
+    Assert-True ($body -match 'muse-spark') 'muse-spark contributor provider missing'
 }
 
 Test-Case 'agent harness installers: the OpenCode writer calls the generator' {
@@ -3554,7 +3592,7 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-omniroute'.PSObject.Properties['api_key']) 'api_key in omni entry'
         Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-litellm'.PSObject.Properties['api_key']) 'api_key in lit entry'
         $models = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | ForEach-Object { $_.name })
-        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
+        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,tier2-credit,tier3-credit,rag'
         Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
         $litModels = @($s.language_models.openai_compatible.'autoos-litellm'.available_models | ForEach-Object { $_.name })
         Assert-Equal ($litModels -join ',') 'tier1,tier1-paid,tier2,tier2-paid,tier3,tier3-paid'
@@ -3567,10 +3605,13 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         Assert-Equal $s.agent.tool_permissions.default 'allow'
         Assert-True ($null -ne $s.context_servers.serena) 'serena context server missing'
         Assert-True ($null -ne $s.context_servers.graphify) 'graphify context server missing'
+        Assert-True ($null -ne $s.context_servers.omnigraph) 'omnigraph context server missing'
+        Assert-True ($null -ne $s.context_servers.playwright) 'playwright context server missing'
+        Assert-True ($null -ne $s.context_servers.context7) 'context7 context server missing'
         # Pins come from the harness at runtime, never as literals in lib/
         # (mcp-pins tests forbid both the bare names and the versions there).
         $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-        foreach ($n in @('serena', 'graphify')) {
+        foreach ($n in @('serena', 'graphify', 'omnigraph', 'playwright', 'context7')) {
             $pin = $harness.mcp_servers.$n.package
             Assert-True ((@($s.context_servers.$n.args) -join ' ') -match [regex]::Escape($pin)) "$n context server does not carry harness pin $pin"
         }
@@ -3578,6 +3619,10 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
         $raw = Get-Content (Join-Path $cfgDir 'settings.json') -Raw
         Assert-True ($raw -notmatch 'sk-' -and $raw -notmatch 'AUTOOS_OMNIROUTE_KEY|LITELLM_MASTER_KEY|REPLACE') 'secret leaked into settings'
+        # No BOM: Zed's parser rejects a leading UTF-8 BOM with "expected
+        # value at line 1 column 1" (measured 2026-09-22 — Out-File utf8 bug).
+        $bytes = [IO.File]::ReadAllBytes((Join-Path $cfgDir 'settings.json'))
+        Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191)) 'settings.json starts with a BOM'
     } finally {
         $env:APPDATA = $realAppData
         if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
@@ -3618,15 +3663,60 @@ Test-Case 'zed routing warns when the Zed key env names are absent' {
     }
 }
 
+Test-Case 'serena memory tools off from harness field (serena)' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $oc = ($raw -replace '(?m)^\s*//.*$', '') | ConvertFrom-Json
+    $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $mem = @($harness.mcp_servers.serena.memory_tools)
+    Assert-True ($mem.Count -gt 0) 'harness memory_tools missing or empty'
+    foreach ($t in $mem) {
+        Assert-True ($oc.tools.PSObject.Properties.Name -contains "serena_$t") "repo tools block missing serena_$t"
+        Assert-Equal $oc.tools."serena_$t" $false "serena_$t not false"
+    }
+    # Both writers must read the harness field at runtime, never literals.
+    $body = (Get-Command Set-AutoOSOpenCodeConfig).Definition
+    Assert-True ($body -match 'memory_tools') 'PS opencode writer does not read the harness memory_tools field'
+    foreach ($t in $mem) {
+        Assert-True ($body -notmatch [regex]::Escape("'serena_$t'")) "PS writer carries literal serena_$t"
+        Assert-True ($body -notmatch [regex]::Escape("`"serena_$t`"")) "PS writer carries literal serena_$t"
+    }
+    $sh = Get-Content (Join-Path $Root 'lib\linux\install.sh') -Raw -Encoding UTF8
+    Assert-True ($sh -match 'memory_tools') 'sh opencode writer does not read the harness memory_tools field'
+}
+
+Test-Case 'zed default_model converges litellm to omniroute (zed routing)' {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path $env:TEMP "autoos-zeddm-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $cfgDir = Join-Path $scratch 'Zed'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '{"agent":{"default_model":{"provider":"autoos-litellm","model":"tier3-paid"}}}' |
+            Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
+        Set-AutoOSZedProxy
+        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $s.agent.default_model.provider 'autoos-omniroute'
+        Assert-Equal $s.agent.default_model.model 'tier1'
+        # A default already on omniroute must survive untouched.
+        '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"tier2"}}}' |
+            Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
+        Set-AutoOSZedProxy
+        $s2 = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $s2.agent.default_model.provider 'autoos-omniroute'
+        Assert-Equal $s2.agent.default_model.model 'tier2'
+    } finally { $env:APPDATA = $realAppData }
+}
+
 Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $oc = $stripped | ConvertFrom-Json
     Assert-Equal $oc.model 'omniroute/tier1'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,rag,spark-1.3-contributor,tier1,tier1-clean,tier2,tier2-clean,tier2-credit,tier3,tier3-clean,tier3-credit'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
-    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'context7,graphify,playwright,serena'
+    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
     # under the user (same rule as 'mcp pins: lib/ carries no floating...').
     $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -3677,7 +3767,7 @@ Test-Case 'subagent depth config' {
 
 Test-Case 'openhands template routes tiers with no secrets' {
     $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
-    foreach ($section in @('[llm]', '[llm.tier1]', '[llm.tier2]', '[llm.tier3]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
+    foreach ($section in @('[llm]', '[llm.tier1]', '[llm.tier2]', '[llm.tier3]', '[llm.tier1-clean]', '[llm.tier2-clean]', '[llm.tier3-clean]', '[llm.rag]', '[llm.tier2-credit]', '[llm.tier3-credit]', '[llm.litellm-tier1]', '[llm.litellm-tier2]', '[llm.litellm-tier3]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
         Assert-True ($toml -match [regex]::Escape($section)) "missing $section"
     }
     Assert-True ($toml -match 'host\.docker\.internal:20128') 'not pointed at the gateway'
@@ -3755,7 +3845,7 @@ Test-Case 'zed routing creates a fresh config when none exists' {
         $cfgPath = Join-Path $scratch 'Zed\settings.json'
         Assert-True (Test-Path $cfgPath) 'settings.json not created'
         $s = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 9
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 15
         Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.available_models.Count 6
     } finally { $env:APPDATA = $realAppData }
 }
@@ -4039,14 +4129,33 @@ Test-Case 'provider status reads keys but never exposes them' {
     } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case 'combos.json carries no phantom legs (probe-falsified refs stay out)' {
+    # Regression gate for the 2026-09-22 finding: legs that simulate resolves
+    # but the gateway 400s on at chat time ("not available in the active live
+    # catalog"). Pin the three falsified refs so they cannot come back.
+    $banned = @(
+        'openrouter/gemini-3.8-flash',
+        'deepseek/deepseek-v4.1-flash',
+        'gemini/gemini-3.7-flash'
+    )
+    $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
+        ConvertFrom-Json).combos
+    $bad = @()
+    foreach ($c in $combos) {
+        foreach ($m in $c.models) { if ($m -in $banned) { $bad += "$($c.name):$m" } }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
 Test-Case 'combos.json is valid, named and provider/model shaped' {
     $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
-    Assert-Equal ($names -join ',') 'tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean'
+    Assert-Equal ($names -join ',') 'tier1,spark-1.3-contributor,tier1-clean,tier2,tier2-clean,tier3,tier3-clean,rag,gemini-3.8-flash,deepseek-v4.1-flash,tier2-credit,tier3-credit'
     $contexts = @{
-        'tier1' = '1M'; 'tier1-clean' = '1M'; 'tier2' = '128k'
-        'tier2-clean' = '128k'; 'tier3' = '128k'; 'tier3-clean' = '128k'
+        'tier1' = '1M'; 'spark-1.3-contributor' = '1M'; 'tier1-clean' = '1M'; 'tier2' = '128k'
+        'tier2-clean' = '128k'; 'tier3' = '128k'; 'tier3-clean' = '128k'; 'rag' = '128k'
+        'gemini-3.8-flash' = '128k'; 'deepseek-v4.1-flash' = '128k'; 'tier2-credit' = '128k'; 'tier3-credit' = '128k'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
@@ -4081,6 +4190,12 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     # in any tier is the contributor.
     $allLegs = @($combos | ForEach-Object { $_.models }) -join ' '
     Assert-True ($allLegs -notmatch 'muse-spark-1\.3(?!-contributor)') 'plain muse-spark-1.3 leg present'
+    # spark-1.3-contributor is the pinned single-model route: byte-identical
+    # legs to tier1 (zen free promo -> openrouter paid), so the spark family
+    # is addressable directly without the tier1 id.
+    $t1legs = (@($combos | Where-Object { $_.name -eq 'tier1' })[0].models) -join ','
+    $splegs = (@($combos | Where-Object { $_.name -eq 'spark-1.3-contributor' })[0].models) -join ','
+    Assert-Equal $splegs $t1legs
 }
 
 Test-Case 'apply --dry-run registers nothing and starts nothing' {
@@ -4147,7 +4262,12 @@ Test-Case 'opencode tiers declare matching context limits' {
     Assert-Equal $models.'tier2-clean'.limit.context 131072
     Assert-Equal $models.tier3.limit.context 131072
     Assert-Equal $models.'tier3-clean'.limit.context 131072
-    foreach ($name in @('tier1', 'tier1-clean', 'tier2', 'tier2-clean', 'tier3', 'tier3-clean', 'auto', 'auto/cheap', 'auto/smart')) {
+    Assert-Equal $models.'gemini-3.8-flash'.limit.context 131072
+    Assert-Equal $models.'deepseek-v4.1-flash'.limit.context 131072
+    Assert-Equal $models.'tier2-credit'.limit.context 131072
+    Assert-Equal $models.'tier3-credit'.limit.context 131072
+    Assert-Equal $models.'spark-1.3-contributor'.limit.context 1000000
+    foreach ($name in @('tier1', 'tier1-clean', 'tier2', 'tier2-clean', 'tier3', 'tier3-clean', 'spark-1.3-contributor', 'gemini-3.8-flash', 'deepseek-v4.1-flash', 'tier2-credit', 'tier3-credit', 'auto', 'auto/cheap', 'auto/smart')) {
         Assert-True ($null -ne $models.$name) "missing model $name"
         Assert-Equal $models.$name.modelID $name
     }

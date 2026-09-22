@@ -17,7 +17,8 @@
     "bash": {
       "*": "ask",
       "npm *": "ask",
-      "git push*": "allow"
+      "git push*": "allow",
+      "git merge*": "allow"
     }
   },
   "instructions": [
