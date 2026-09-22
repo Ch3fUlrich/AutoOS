@@ -10,6 +10,36 @@
     "tier3  = daily driver: cheapest capable codegen/review.",
     "* -clean = same tier without models/plans that train on prompts: the",
     "         choice for sensitive data. See docs/models.md.",
+    "spark-1.3-contributor = pinned single-model route: the tier1 legs as a",
+    "         standalone combo (zen free promo → openrouter paid), so callers",
+    "         can address the spark family directly (incl. effort variants",
+    "         like omniroute/spark-1.3-contributor#high) without pulling the",
+    "         tier1 id's orchestrator semantics. Resolve order = combo order",
+    "rag = cohere RAG standby (trial keys, 128k, not in any tier): Command A → Command R Plus, address omniroute/rag directly.",
+    "gemini-3.8-flash = pinned single-model route: gemini free pooled head →",
+    "         openrouter paid google-scoped payload. Free-first like spark.",
+    "         Probe-falsified 2026-09-22: the BARE openrouter/gemini-3.8-flash",
+    "         leg 400s ('not available in the active live catalog') — the",
+    "         gateway's bare-name alias is not a provider ref, so only the",
+    "         google-scoped twin ships. No 3.7 legs ever (version mixing is a",
+    "         defect; 3.7-flash free input quota is also tiny).",
+    "deepseek-v4.1-flash = pinned single-model route: openrouter paid →",
+    "         zen paid. Probe-falsified 2026-09-22: the deepseek-DIRECT leg",
+    "         400s ('not available in the active live catalog for provider",
+    "         deepseek'), so it was dropped; zen leg is real but 402s until",
+    "         the Zen balance is topped up (chain hops by design). Exact model",
+    "         only: no v4-flash (no suffix 1) or deepseek-flash legs",
+    "tier2-credit / tier3-credit = paid-credit burn chains: NO free heads, NO",
+    "         strong-provider tails. They burn stored cerebras/sambanova/",
+    "         partner credits when free tiers throttle, sparing deepseek-direct",
+    "         / openrouter / zen / meta money. Credit-first, not fallback-last.",
+    "",
+    "A-D combos skip the LiteLLM config.yaml mirror and the global-litellm",
+    "tiers: the :4000 proxy adds nothing there (it cannot address gemini-free",
+    "heads, zen-free legs, or the cheaperinference reseller pool, and the",
+    "credit chains are gateway-native). Pinned single-model routes and",
+    "credit-burn chains live on the gateway only — enforced by the sync",
+    "contract (tools/sync-router-tiers.py ignores them), not by omission.",
     "",
     "Role labels (display names only — tier1/2/3 ids are a contract and",
     "never change: saved selections, --only flags and opencode.jsonc keys",
@@ -102,6 +132,15 @@
       ]
     },
     {
+      "name": "spark-1.3-contributor",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "opencode-zen/muse-spark-1.3-contributor-free",
+        "openrouter/meta/muse-spark-1.3-contributor"
+      ]
+    },
+    {
       "name": "tier1-clean",
       "strategy": "priority",
       "context": "1M",
@@ -160,6 +199,55 @@
         "deepseek/deepseek-flash",
         "mistral/mistral-small-latest",
         "opencode-zen/deepseek-v4.1-flash"
+      ]
+    },
+    {
+      "name": "rag",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "cohere/command-a-03-2025",
+        "cohere/command-r-plus-08-2024"
+      ]
+    },
+    {
+      "name": "gemini-3.8-flash",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "gemini/gemini-3.8-flash",
+        "openrouter/google/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "deepseek-v4.1-flash",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "openrouter/deepseek/deepseek-v4.1-flash",
+        "opencode-zen/deepseek-v4.1-flash"
+      ]
+    },
+    {
+      "name": "tier2-credit",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "cerebras/gpt-oss-120b",
+        "sambanova/gpt-oss-120b",
+        "cheaperinference/deepseek-v4-flash",
+        "cheaperinference/glm-4.5-air",
+        "cheaperinference/kimi-k3"
+      ]
+    },
+    {
+      "name": "tier3-credit",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "cerebras/qwen-3.8-27b",
+        "cheaperinference/glm-4.5-air",
+        "cheaperinference/minimax-m2.7"
       ]
     }
   ]

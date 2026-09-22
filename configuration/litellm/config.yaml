@@ -163,10 +163,36 @@ model_list:
       api_key: os.environ/OPENCODE_ZEN_API_KEY
   - model_name: tier3-paid
     litellm_params:
-      model: deepseek/deepseek-chat
+      model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
 
+  # ── rag: cohere RAG standby (hand-curated, NOT sync-managed) ────────
+  # Trial keys, 128k. Lives outside the AUTOOS-MANAGED markers on purpose:
+  # sync-router-tiers.py only owns tier2/tier3 and must never touch this.
+  # drop_params: opencode sends OpenAI-style `strict`, which cohere rejects
+  # as an unknown field (measured 2026-09-22) — drop it per leg.
+  # additional_drop_params: global/per-model drop_params does NOT cover
+  # `strict`; it must be named explicitly (same session, verified).
+  - model_name: rag
+    litellm_params:
+      model: cohere/command-a-03-2025
+      api_key: os.environ/COHERE_API_KEY
+      drop_params: true
+      additional_drop_params: ["strict"]
+  - model_name: rag
+    litellm_params:
+      model: cohere/command-r-plus-08-2024
+      api_key: os.environ/COHERE_API_KEY
+      drop_params: true
+      additional_drop_params: ["strict"]
+
 router_settings:
+  # Re-testing usage-based-routing-v2 (2026-09-22): the "No connected db"
+  # outage was a master-key mismatch (proxy served the .env master, clients
+  # sent the machine master), NOT the strategy — falsified by source read
+  # (user_api_key_auth falls through to DB only when the key != master).
+  # If chat works with a valid master under usage-based, it stays (least-used
+  # free deployment first is the right policy for free-tier juggling).
   routing_strategy: usage-based-routing-v2 # least-used free deployment first
   num_retries: 3
   timeout: 600 # long-horizon orchestration needs headroom, not the 5-min default
@@ -176,6 +202,7 @@ router_settings:
     - tier1: [tier1-paid]
     - tier2: [tier2-paid]
     - tier3: [tier3-paid]
+    - rag: [tier1-paid] # trial-key RAG fails over to the paid orchestrator
 
 litellm_settings:
   drop_params: true # heterogeneous providers reject unknown params; drop, don't fail

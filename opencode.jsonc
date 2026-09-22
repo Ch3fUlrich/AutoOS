@@ -2,17 +2,49 @@
   "$schema": "https://opencode.ai/config.json",
   // Repo default: OmniRoute on :20128 (docs/models.md). tier1/2/3 and their
   // -clean variants are combos created by configuration/omniroute/apply.*
-  // (priority chains: free legs first, allowed paid legs after). Role labels
-  // (display only — the tier1/2/3 ids are a contract and never change):
+  // (priority chains: free legs first, allowed paid legs after). The paid
+  // overflow legs already cover every provider with money on it: cerebras
+  // + sambanova ($10 credit each) as gpt-oss/qwen overflow in tier2/tier3,
+  // deepseek ($13 bulk) + openrouter ($1, last resort) as flash legs,
+  // cheap-inference ($15 partner pool) between free and paid, meta ($10)
+  // where the spark family bills. No funded provider is missing a leg —
+  // verify with `omniroute simulate --combo tierN --explain`.
+  // spark-1.3-contributor is the same tier1 legs as a standalone pinned
+  // single-model combo (zen free → openrouter paid), for callers that want
+  // the spark family directly. Role labels (display only — the tier1/2/3
+  // ids are a contract and never change):
   // tier1 = orchestrator-1M, tier2 = smart-reasoning-128k,
   // tier3 = cheap-driver-128k. "-clean" excludes every model/plan that
   // trains on prompts — pick it for sensitive data. auto/* stays as a
   // zero-setup bootstrap that always resolves.
+  // Effort/variants note (measured 2026-09-22): opencode builds a model's
+  // variant list from the PROVIDER CATALOG's supportedThinkingEfforts, not
+  // from config — a hand-declared "variants" block does not register and
+  // makes the provider unresolvable. On OmniRoute gateway combos that
+  // metadata is absent, so `omniroute/tier1#xhigh` answers "Variant
+  // unavailable" while `#low/#medium/#high` resolve client-side.
+  // RULE: for the FULL effort ladder use the direct provider model
+  // (`openrouter/meta/muse-spark-1.3-contributor#minimal` … `#xhigh`,
+  // ack-proven) — openrouter advertises minimal/low/medium/high/xhigh for
+  // spark (no `max`; that is Zen-native only). Use the gateway combos for
+  // fallback routing, the direct model for effort control.
   // Limits below must match the combo curations: tier1 is 1M-context only;
   // anything smaller belongs in tier2. Override per user in
   // ~/.config/opencode/opencode.jsonc. Client key via env
   // AUTOOS_OMNIROUTE_KEY (or configuration/api-keys.yml).
   "model": "omniroute/tier1",
+  // Serena memory tools are always off: project memory belongs to
+  // omnigraph+graphify, never serena memory. MCP tools register as
+  // <server>_<tool>, so these six keys disable them globally (an agent-level
+  // `tools` glob would override this block).
+  "tools": {
+    "serena_write_memory": false,
+    "serena_read_memory": false,
+    "serena_list_memories": false,
+    "serena_edit_memory": false,
+    "serena_delete_memory": false,
+    "serena_rename_memory": false
+  },
   // Tier enforcement (hard, runtime-checked): unattended runs select these
   // agents, and the `subagent` permissions below make the depth mandatory —
   // tier1-orchestrator may launch tier2-worker only, tier2-worker may launch
@@ -95,6 +127,36 @@
           "name": "tier3 cheap-driver-128k — no training (sensitive data)",
           "limit": { "context": 131072, "output": 16384 }
         },
+        "spark-1.3-contributor": {
+          "modelID": "spark-1.3-contributor",
+          "name": "spark-1.3-contributor — zen free → openrouter paid (1M)",
+          "limit": { "context": 1000000, "output": 32768 }
+        },
+        "rag": {
+          "modelID": "rag",
+          "name": "rag cohere RAG — 128k ctx (trial keys)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
+        "gemini-3.8-flash": {
+          "modelID": "gemini-3.8-flash",
+          "name": "gemini-3.8-flash — gemini free → paid",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "deepseek-v4.1-flash": {
+          "modelID": "deepseek-v4.1-flash",
+          "name": "deepseek-v4.1-flash — paid cheapest-first",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "tier2-credit": {
+          "modelID": "tier2-credit",
+          "name": "tier2-credit smart (credit-burn)",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "tier3-credit": {
+          "modelID": "tier3-credit",
+          "name": "tier3-credit driver (credit-burn)",
+          "limit": { "context": 131072, "output": 32768 }
+        },
         "auto/smart": {
           "modelID": "auto/smart",
           "name": "bootstrap: auto smart (no combo needed)",
@@ -124,13 +186,29 @@
           "modelID": "tier1",
           "name": "tier1 orchestrator (free-first)"
         },
+        "tier1-paid": {
+          "modelID": "tier1-paid",
+          "name": "tier1-paid orchestrator (meta direct first)"
+        },
         "tier2": {
           "modelID": "tier2",
-          "name": "tier2 muse-spark smart (free-first)"
+          "name": "tier2 smart (free-first)"
+        },
+        "tier2-paid": {
+          "modelID": "tier2-paid",
+          "name": "tier2-paid smart (paid)"
         },
         "tier3": {
           "modelID": "tier3",
           "name": "tier3 codegen driver (free-first)"
+        },
+        "tier3-paid": {
+          "modelID": "tier3-paid",
+          "name": "tier3-paid driver (paid)"
+        },
+        "rag": {
+          "modelID": "rag",
+          "name": "rag cohere RAG (litellm fallback)"
         }
       }
     }
@@ -180,6 +258,18 @@
           "-y",
           "@upstash/context7-mcp@4.1.1"
         ]
+      },
+      "omnigraph": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "@modernrelay/omnigraph-mcp@0.8.0"
+        ],
+        "environment": {
+          "OMNIGRAPH_BASE_URL": "http://localhost:8080",
+          "OMNIGRAPH_GRAPH_ID": "autoos"
+        }
       }
     }
   }

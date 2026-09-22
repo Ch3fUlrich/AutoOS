@@ -35,6 +35,14 @@ KEY_MAP = {
     "meta": "META_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "zen": "OPENCODE_ZEN_API_KEY",
+    "cohere": "COHERE_API_KEY",
+    "cheapinference": "CHEAPINFERENCE_API_KEY",
+    # NOTE: api-keys.yml spells this one 'SambaNova' (capital S/N) - the
+    # lookup is case-sensitive, so the map key must match exactly.
+    "SambaNova": "SAMBANOVA_API_KEY",
+    "cloudflare_workers_ai": "CLOUDFLARE_API_KEY",
+    "hugging_face": "HUGGINGFACE_API_KEY",
+    "omniroute": "AUTOOS_OMNIROUTE_KEY",
 }
 
 HEADER = "# AutoOS LiteLLM keys - generated from api-keys.yml, do not commit."

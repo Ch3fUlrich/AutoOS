@@ -25,6 +25,8 @@ reports what answered. Latest run:
 | `tier2-clean` | `deepseek-flash` | OK 2026-09-21 |
 | `tier3` | `mistral-code-latest` | OK 2026-09-21 |
 | `tier3-clean` | `deepseek-flash` | OK 2026-09-21 |
+| `spark-1.3-contributor` | zen free → openrouter paid (same legs as tier1) | OK 2026-09-22 (`ack`, incl. `#low`/`#medium`/`#high`; `#minimal`/`#xhigh`/`#max` unavailable on this build) |
+| `rag` | `cohere/command-a-03-2025` (trial key) | OK 2026-09-22 (`ack` via gateway and via litellm proxy) |
 
 Notes from the runs:
 
@@ -106,7 +108,54 @@ fails with `ProviderModelNotFoundError`. The catalog now installs
 | OpenHands sandbox sometimes reports "error state" while the first agent-server image is still downloading | Retry after the pull completes; the sandbox itself comes up healthy |
 | Cloudflare Workers AI needs the Account ID before it can serve | Not in any tier until configured in the dashboard |
 | Zen free promo 500 at peak / Zen paid 402 without balance | Chain-hop design absorbs both |
+| `gemini-3.7-flash` cooling-down shown inside opencode | NOT a combo: call-log 2026-09-22 shows `comboName: None`, a real 1.2 MB / 1935-message body, `requestedModel: gemini/gemini-3.7-flash`, and the gemini free-tier 429 (`free_tier_input_token_count, limit: 250000`). A session had that direct model picked, bypassing every combo and its fallbacks. Repo references only `gemini-3.8-flash` in `tier2`; re-select a combo (`omniroute/tier2`) |
 | `omniroute --output json models` truncates at 50 and `--output json` does not lift it (its own hint is wrong) | Documented; do not treat that listing as authoritative |
+
+## Prefix handling (measured 2026-09-22, gateway :20128)
+
+- Bare `tier2` from a plain OpenAI client: answers (combo resolves).
+- `openai/tier2` from the same bare client: **401** (the gateway reads
+  `openai/` as a provider hop, not a combo name).
+- `openai/tier1` from OpenHands: round-trips (proven 2026-09-20, sandbox ok).
+
+Conclusion: the `openai/` prefix OpenHands requires is stripped by the
+OpenHands/litellm client stack before the HTTP call — the wire always
+carries the bare tier name. OpenHands fallback profiles (`litellm-tier*`
+on `:4000`) therefore use `openai/tierN` models against the proxy's
+`(plain) tierN` model_names, the same shape as the proven gateway path.
+No proxy-side alias is needed.
+
+## Full leg probe — every distinct combo leg (2026-09-22)
+
+One direct `:20128` chat per distinct leg in `combos.json` (20 legs). **No
+phantom 400s remain**; every non-OK result is a real upstream state that the
+priority chains hop past by design.
+
+| Result | Legs |
+|---|---|
+| OK | `groq/openai/gpt-oss-120b`, `cerebras/gpt-oss-120b`, `sambanova/gpt-oss-120b`, `cheaperinference/deepseek-v4-flash`, `cheaperinference/glm-4.5-air`, `cheaperinference/minimax-m2.7`, `openrouter/deepseek/deepseek-v4.1-flash`, `deepseek/deepseek-flash`, `mistral/mistral-code-latest`, `groq/qwen/qwen3.8-27b`, `cerebras/qwen-3.8-27b`, `cohere/command-a-03-2025`, `cohere/command-r-plus-08-2024`, `openrouter/google/gemini-3.8-flash` |
+| 403 zen free-tier | `opencode-zen/muse-spark-1.3-contributor-free` (promo gate) |
+| 502 spark empty | `openrouter/meta/muse-spark-1.3-contributor` (needs a real output budget; chain hops) |
+| 503 high demand | `gemini/gemini-3.8-flash` (transient) |
+| 504 local expiry | `cheaperinference/kimi-k3` (gateway execution cap, transient) |
+| 402 zen paid | `opencode-zen/deepseek-v4.1-flash` (Zen balance) |
+| 429 2-RPM | `mistral/mistral-small-latest` (resets in seconds) |
+| **400 phantom** | **none** |
+
+## LiteLLM proxy hard-won notes (2026-09-22)
+
+- The proxy does **not** read `configuration/litellm/.env` by itself: start
+  it via `configuration/litellm/start-litellm.ps1`, which exports the `.env`
+  into the process env first. A hand-started proxy serves every leg as
+  "Missing credentials" with a complete `.env` on disk.
+- The proxy serves the `.env` master key; clients must send the machine
+  `LITELLM_MASTER_KEY`/`AUTOOS_LITELLM_API_KEY` value (one value, aligned
+  2026-09-22). A mismatch fails at `user_api_key_auth` as "No connected db."
+- `usage-based-routing-v2` needs no DB for routing here (exonerated
+  2026-09-22 after the master-key fix; the outage was auth, not strategy).
+- Cohere legs need `additional_drop_params: ["strict"]` — opencode sends
+  OpenAI-style `strict`, which cohere rejects; global/per-model
+  `drop_params` does not cover it (measured 2026-09-22).
 
 ## Re-running this
 
