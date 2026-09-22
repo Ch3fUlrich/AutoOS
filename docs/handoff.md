@@ -112,9 +112,14 @@ never exist there — resolve through the main checkout, never copy secrets.
    `openai/tier1` via `host.docker.internal:20128`, sandbox round-trip.
    (Also fix the two `start-stack.ps1` defects in DONE-L2B: `-it` in
    non-interactive shells, stale `schema_version 6` profile.)
-3. **Remaining PRs** — #83→#88→#89→#84→#98→#96→#95→#94→#93→#92→#90 rebase+land
-   (serve/tests, empty-catch hunks land once, strip scratch artifacts);
-   defer #99 (superseded), #97, #87, #86. #85 + #101 closed.
+3. **Remaining PRs** — DONE #85, #101, #83 (do_GET split), #88 (do_POST
+   split, usb endpoint preserved as `_post_usb_create`). NEXT in order:
+   #89 (append_line_once tests, trivial) → #84 (build_state test) →
+   #98 (detect_system tests) → #96 (O(N²) fix) → #95 (UI color tests) →
+   #94 (O(1) catalog) → #93 (prompt cache) → #92 (broken_links tests) →
+   #90 (os.walk). Shared rules: empty-catch hunks land once (main already
+   carries them — drop from PRs), strip scratch artifacts, serialize
+   #84→#86→#87. DEFER: #99 (superseded), #97, #87, #86.
 4. **Chatter tier** — route status/summary/dispatch text to tier3 free-first;
    local ollama is LAST resort only (model startup latency too high for quick
    extractions). Reasoning stays tier1/2; cheap tiers transport verbatim and
