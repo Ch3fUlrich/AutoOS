@@ -42,6 +42,10 @@ paid legs from the providers whose credit tiers are sanctioned
 | `tier2-clean` | **no context gate**, no training, **paid legs only** | deepseek `deepseek-flash` (direct) → openrouter `deepseek/deepseek-v4.1-flash` → zen `deepseek-v4.1-flash` → mistral `mistral-small-latest` (direct). No groq/cerebras/sambanova free legs. |
 | `tier3` driver | ≤128k | mistral `mistral-code-latest` → groq `qwen3.8-27b` → cerebras `qwen-3.8-27b` → cheap-inference `glm-4.5-air` / `minimax-m2.7` → mistral `mistral-small-latest` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
 | `tier3-clean` | ≤128k, no training, **paid legs only** | deepseek `deepseek-flash` (direct) → mistral `mistral-small-latest` (direct) → zen `deepseek-v4.1-flash`. No qwen free legs — lightweight paid review duty only. |
+| `gemini-3.8-flash` pinned | ≤128k, free-first | gemini `gemini-3.8-flash` (free pooled) → openrouter `google/gemini-3.8-flash` (paid). Probe-falsified 2026-09-22: the bare `openrouter/gemini-3.8-flash` spelling 400s ("not available in the active live catalog"), so only the google-scoped twin ships. No 3.7 legs — version mixing is a defect. |
+| `deepseek-v4.1-flash` pinned | ≤128k, paid cheapest-first | openrouter `deepseek/deepseek-v4.1-flash` → zen `deepseek-v4.1-flash`. Probe-falsified 2026-09-22: the deepseek-*direct* leg 400s (unknown to the live catalog) and was dropped; the zen leg 402s until its balance is topped up (chain hops by design). Exact model only — no `v4-flash` or `deepseek-flash` legs (different snapshots). |
+| `tier2-credit` | ≤128k, **paid-credit burn, no free heads** | cerebras `gpt-oss-120b` → sambanova `gpt-oss-120b` → cheap-inference `deepseek-v4-flash` / `glm-4.5-air` / `kimi-k3`. Burns stored credits when free tiers throttle; spares deepseek-direct/openrouter/zen/meta money. |
+| `tier3-credit` | ≤128k, **paid-credit burn, no free heads** | cerebras `qwen-3.8-27b` → cheap-inference `glm-4.5-air` / `minimax-m2.7`. Same credit-burn role at the driver tier. |
 
 **tier2 is not context-capped at 128k.** 128k is a display convention inherited
 from `opencode.jsonc`, not a curation rule: cost and quality decide what enters
@@ -58,11 +62,78 @@ degrades along its own chain, cheapest leg first, exactly:
 
 - `spark-1.3-contributor`: **zen (until rate-limited) → meta (paid until limit
   lifts)**. The Zen leg rides the rotating contributor promo; when it 429s the
-  chain bills Meta direct on your own credits.
+  chain bills Meta direct on your own credits. Shipped as its own
+  `spark-1.3-contributor` combo (same two legs as `tier1`), so callers address
+  `omniroute/spark-1.3-contributor` directly — ack-proven 2026-09-22 incl. the
+  `#low` / `#medium` / `#high` effort variants.
+- `gemini-3.8-flash`: **gemini free (until throttled) → openrouter paid twins**.
+  The head rides the Google AI Studio free pool; quota-exhausted calls degrade
+  to the `google/`-scoped twin, then the bare twin. Ack-proven 2026-09-22.
+- `deepseek-v4.1-flash`: **deepseek direct → openrouter → zen, cheapest-first**.
+  Three doors, one exact model, ordered by bill. Ack-proven 2026-09-22.
+- `tier2-credit` / `tier3-credit`: **paid-credit burn, no free heads, no
+  strong-provider tails**. For hours when the free tiers are throttled and you
+  would rather spend stored cerebras/sambanova/partner credits than
+  deepseek-direct/openrouter/zen/meta money. Ack-proven 2026-09-22.
+
+**LiteLLM-skip rule:** the four combos above skip the `:4000` proxy mirror and
+the global-litellm tiers entirely — they live on the gateway only. The proxy
+adds nothing there: it cannot address gemini-free heads, the
+cheaperinference reseller pool, or credit-native chains, and pinned
+single-model routes need no static fallback. `tools/sync-router-tiers.py`
+ignores them by design (it mirrors `tier2`/`tier3` only), so `--check` stays
+green without any exclusion list.
 
 Every other model in a tier already has its paid twin further down the same
 combo (see the mermaid below), so a single-model route for it is the tier
 chain truncated at that model — no separate config is required.
+
+### Why tier2 lists deepseek three times (not three versions of worse)
+
+`tier2` carries `cheaperinference/deepseek-v4-flash`, then
+`openrouter/deepseek/deepseek-v4.1-flash`, then `deepseek/deepseek-flash` —
+same family, **three different doors with three different bills**, ordered
+cheapest-first per the sync contract:
+
+| Leg | Door | Billing |
+|---|---|---|
+| `cheaperinference/deepseek-v4-flash` | partner resale (OpenAI-compatible, own `ci_live_…` key) | your cheap-inference balance; sits between free and paid, never in `*-clean` |
+| `openrouter/deepseek/deepseek-v4.1-flash` | OpenRouter resale | your OpenRouter credits (last-resort pool) |
+| `deepseek/deepseek-flash` | DeepSeek API direct | your DeepSeek key (`$13` bulk) |
+
+The `v4-flash` vs `flash` ids are the providers' own snapshot names, not a
+good-vs-bad ranking — the gateway tries them top-down and hops on
+429/5xx/quota, so whichever answers first wins that call. If one door's
+key is missing, `apply` skips its legs with a warning and the chain still
+resolves through the others.
+
+### Effort levels (measured 2026-09-22, gateway 3.8.50, opencode v2.0.12)
+
+Effort is a **caller-side suffix**, not a model id. **How opencode resolves
+it:** it builds a model's variant list from the **provider catalog's**
+`supportedThinkingEfforts` metadata — *not* from config. A hand-written
+`"variants"` block does not register, and is worse than useless: on this
+build any `variants` object on an openai-compatible provider model (docs
+shape `{"low": {"reasoningEffort": "low"}}` included, verified in isolation)
+makes the **whole provider unresolvable** (`Model unavailable`, even bare).
+Tried and reverted 2026-09-22.
+
+That is the whole answer to "why does the gateway combo lack minimal/xhigh
+while Zen has max?": the gateway combo carries no catalog effort metadata,
+so opencode's built-in fallback list (`low/medium/high`) is all that
+resolves; openrouter's own catalog *does* advertise the ladder.
+
+| Suffix ladder | openrouter direct | gateway combo |
+|---|---|---|
+| `#minimal`, `low`, `medium`, `high`, `xhigh` | all resolve; `#minimal`/`#low`/`#xhigh` ack-proven 2026-09-22 | only `#low`/`#medium`/`#high` |
+| `#max` | not offered (Zen-native only) | not offered |
+
+**Rule: the gateway combo is for fallback routing; the direct provider
+model is for effort control.** `#max` stays Zen-native only — nothing routed
+through OmniRoute exposes it. Agents that need max reasoning on a combo pin
+`#high` (`tier1-orchestrator` does). Re-probe after any gateway or opencode
+upgrade: if gateway combos start forwarding effort metadata, the two rows
+collapse.
 
 ## Role labels (display names — the `tier1/2/3` ids never change)
 
@@ -105,6 +176,12 @@ curation rule, so cost and quality decide which models sit there and
 tier2/tier3 as the conservative minimum across each chain), so OpenCode's
 compaction and the picker's context display agree with what actually answers.
 `auto/*` remains as a zero-setup bootstrap with the same conservative limit.
+
+**Direct provider models are also the effort-control surface** (see the
+effort table below): `openrouter/meta/muse-spark-1.3-contributor#minimal`
+through `#xhigh` are ack-proven, while the gateway combos resolve only
+`low/medium/high`. Reach for a direct model when you need the ladder; reach
+for a combo when you need fallback routing.
 
 **Sensitive data work:** `*-clean` never routes a model or plan with a
 published prompt-training policy — no Zen promo `-free` models, no Gemini free
@@ -174,6 +251,25 @@ The browser UI shows the same state without ever showing a key value:
   (`muse-spark-1.3-contributor-free`) currently answers 500 at peak — the
   priority chain hops past both to OpenRouter, which is why `tier1` still
   works today.
+- **"All credentials for model gemini-3.7-flash are cooling down" inside
+  opencode is a HAND-PICKED model, not a combo.** Corrected diagnosis
+  2026-09-22 (the first pass wrongly called these synthetic self-tests — the
+  request body is a real opencode call): the call-log entry has
+  `comboName: None`, `requestedModel: gemini/gemini-3.7-flash`, `model:
+  gemini/gemini-3.7-flash`, **1.2 MB body / 1935 messages**, and the upstream
+  answer is the gemini free-tier 429 (`Quota exceeded for metric
+  generate_content_free_tier_input_token_count, limit: 250000`). So an
+  opencode session had `gemini-3.7-flash` selected directly, bypassed every
+  combo, and blew the per-minute free input quota in one huge turn.
+  Nothing in this repo references `gemini-3.7-flash`: the combos pin
+  `gemini-3.8-flash`, the writers emit only combos, and the gateway keeps a
+  bare `gemini-3.7-flash → openrouter/google/gemini-3.7-flash` alias in its
+  own `modelAliases` table. If opencode's picker offers it, it is a legacy
+  direct entry, not a routing failure. **Fix the session, not the config:**
+  re-select `omniroute/tier2` (its zero-quota gemini leg plus six overflow
+  legs) or any other combo, and remember a direct non-combo model gets no
+  fallback chain and no quota protection. Triage rule stays: read
+  `comboName` first — `None` means a direct model, whatever the surface.
 - **Meta direct (`muse-code`) ships an empty outbound URL** in OmniRoute
   3.8.50 (`Invalid outbound URL`, red on the dashboard topology), even for
   its own Llama models. The connection is deactivated (by connection ID —
@@ -339,14 +435,14 @@ flowchart TB
     end
 
     subgraph single["Pinned single-model route — cheapest-first"]
-        SP["spark-1.3-contributor:\nzen (until rate-limited) → meta (paid until limit lifts)"]
+        SP["spark-1.3-contributor combo:\nzen (until rate-limited) → openrouter paid\nack-proven incl. #low/#medium/#high (2026-09-22)"]
     end
 
     subgraph fb["Fallback client path — user picks litellm/*"]
         LT["LiteLLM :4000 static chains\ntier1 spark · tier2 gpt-oss\ntier3 devstral · paid flash"]
     end
 
-    OC --> t1 & t1c & t2 & t2c & t3 & t3c
+    OC --> t1 & t1c & t2 & t2c & t3 & t3c & single
     LB --> t1 & t1c & t2 & t2c & t3 & t3c
     AUTO -. "bootstrap only" .-> t2
     OC -. "model litellm/*" .-> LT
@@ -358,6 +454,25 @@ fallback. `*-clean` means paid-only; since the 2026-09-21 contributor-only
 block, tier1-clean trains by contract (its legs are contributor). Leg order
 in this diagram is the leg order `combos.json` must satisfy; see the sync
 contract below.
+
+### Paid-overflow coverage (every funded provider has a leg)
+
+All six combos already route every provider with money on it — nothing to
+add, only to verify (`omniroute simulate --combo tierN --explain`):
+
+| Funded provider | Legs it answers through |
+|---|---|
+| cerebras ($10 credit) | `tier2` gpt-oss-120b · `tier3` qwen-3.8-27b (both CLOSED/quota-100% 2026-09-22, hopping correctly) |
+| sambanova ($10 credit) | `tier2` gpt-oss-120b (CLOSED, same) |
+| deepseek ($13 bulk) | `tier2`/`tier3`/`tier3-clean`/`tier2-clean` `deepseek-flash` direct |
+| cheap-inference ($15 partner pool) | `tier2` deepseek-v4-flash/glm-4.5-air/kimi-k3 · `tier3` glm-4.5-air/minimax-m2.7 |
+| meta ($10) | `tier1`/`tier1-clean`/`spark-1.3-contributor` via openrouter contributor; direct `muse-code` leg stays out until OmniRoute ships the spark IDs (502/catalog bug open upstream) |
+| openrouter ($1, last resort) | paid flash + contributor legs at every tier tail |
+| zen (promo + paid) | free contributor leg at `tier1` head · paid `deepseek-v4.1-flash` at every tier tail |
+
+`providers test-all` 2026-09-22: 12/13 OK (muse-code SKIP inactive by
+design; cheaperinference FAIL = its `/v1/models` endpoint timing out at 8s —
+legs still resolve in `simulate --explain`, so routing is unaffected).
 
 ## OmniRoute ↔ LiteLLM sync contract
 
