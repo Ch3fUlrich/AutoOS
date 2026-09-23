@@ -1002,11 +1002,11 @@ for name, prov in (("omniroute", omni), ("litellm", lit)):
     key = (prov.get("options") or {}).get("apiKey", "")
     if not (key.startswith("{env:") and key.endswith("}")):
         problems.append(name + "-key-not-placeholder")
-for m in ("tier1", "tier1-clean", "tier2", "tier3-clean", "auto/smart"):
+for m in ("t1-orchestrator", "t1-orchestrator-clean", "t2-worker", "t3-driver-clean", "auto/smart"):
     if m not in (omni.get("models") or {}):
         problems.append("missing:" + m)
-if "tier2" not in (lit.get("models") or {}):
-    problems.append("missing:lit-tier2")
+if "t2-worker" not in (lit.get("models") or {}):
+    problems.append("missing:lit-t2-worker")
 if "deepseek" in p:
     problems.append("resurrected:deepseek")
 meta = p.get("meta", {})
@@ -1049,7 +1049,7 @@ if it "agent harness: the generator's unit tests pass"; then
 fi
 
 if it "serena memory tools off from harness field (serena)"; then
-    report="$(python3 - <<'PY'
+    report="$(python3 - 2>&1 <<'PY'
 import json, re, io
 text = io.open("opencode.jsonc", encoding="utf-8").read()
 text = re.sub(r"(?m)^\s*//.*$", "", text)
@@ -1858,7 +1858,7 @@ PY
 fi
 
 if it "every component has a homepage link"; then
-    missing="$(python3 - <<'PY'
+    missing="$(python3 - 2>&1 <<'PY'
 import json, glob
 bad = []
 # OS catalogs only: llm-models.json is a model catalogue, not components.
@@ -1949,7 +1949,7 @@ fi
 if it "the dependency graph the UI draws has no orphan requirements"; then
     # The browser resolves dependencies client-side, so every `requires` must
     # name a component that is actually shipped to it.
-    bad="$(python3 - <<'PY'
+    bad="$(python3 - 2>&1 <<'PY'
 import json, glob
 bad = []
 # OS catalogs only: llm-models.json is a model catalogue, not components.
@@ -2001,7 +2001,7 @@ fi
 if it "every colour token is defined on bare :root, not only behind a theme"; then
     # A token defined only inside a media query or [data-theme] block is undefined
     # in the un-stamped "auto" state, which is what renders one theme on another.
-    missing="$(python3 - <<'PY'
+    missing="$(python3 - 2>&1 <<'PY'
 import re, io
 css = io.open("web/index.html", encoding="utf-8").read()
 base = css.split(":root{", 1)[1].split("}", 1)[0]
@@ -2085,7 +2085,7 @@ if it "the core stack is available on all three platforms"; then
     # These carry the same id in every catalog on purpose: a product that exists
     # everywhere but is filed under two different ids reports itself as
     # single-platform, which is exactly what docker-desktop/nerd-fonts did.
-    missing="$(python3 - <<'PY'
+    missing="$(python3 - 2>&1 <<'PY'
 import json, glob, collections
 have = collections.defaultdict(set)
 # OS catalogs only: llm-models.json is keyed by model id, not component id.
@@ -2278,7 +2278,7 @@ if it "provider status never carries key values"; then
     if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' 2>/dev/null; then
         skip "python3 < 3.7 cannot import serve.py"
     else
-        report="$(python3 - <<'PY'
+        report="$(python3 - 2>&1 <<'PY'
 import importlib.util, json, os, pathlib, sys, tempfile
 root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-serve-"))
 (root / "configuration").mkdir()
@@ -2319,11 +2319,11 @@ if it "server profile ticks the headless terminal stack"; then
 fi
 
 if it "zed requires the router on every platform"; then
-    bad="$(python3 - <<'PY'
+    bad="$(python3 - 2>&1 <<'PY'
 import json, glob
 bad = []
 for p in sorted(glob.glob("catalog/*.json")):
-    for g in json.load(open(p, encoding="utf-8"))["categories"]:
+    for g in json.load(open(p, encoding="utf-8")).get("categories", []):
         for c in g["components"]:
             if c["id"] == "zed" and "litellm" not in c.get("requires", []):
                 bad.append(p)
@@ -2458,11 +2458,11 @@ if it "sidekick enabling is a no-op without an nvim config"; then
 fi
 
 if it "litellm fallback config is internally consistent"; then
-    report="$(python3 - <<'PY'
+    report="$(python3 - 2>&1 <<'PY'
 import re, io
 text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
 groups = set(re.findall(r"(?m)^\s*-\s*model_name:\s*(\S+)\s*$", text))
-need = {"tier1", "tier1-paid", "tier2", "tier2-paid", "tier3", "tier3-paid"}
+need = {"t1-orchestrator", "t1-orchestrator-paid", "t2-worker", "t2-worker-paid", "t3-driver", "t3-driver-paid"}
 fb = text.split("fallbacks:", 1)[1]
 refs = set(re.findall(r"[- ](\S+):\s*\[([^\]]*)\]", fb))
 problems = sorted(list(need - groups))
@@ -2510,7 +2510,7 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/tier1|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,rag,spark-1.3-contributor,tier1,tier1-clean,tier2,tier2-clean,tier2-credit,tier3,tier3-clean,tier3-credit|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
@@ -5592,7 +5592,7 @@ if it "the router declarations do not drift from each other"; then
 fi
 
 if it "every leg of a combo carries a provider prefix"; then
-    bad="$(python3 - <<'PY'
+    bad="$(python3 - 2>&1 <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 print(" ".join(f"{c['name']}:{m}" for c in d["combos"] for m in c["models"] if "/" not in m))
@@ -5616,7 +5616,7 @@ if it "apply sets the resilience deadline and the fast-skip breaker"; then
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 by = {c["name"]: c["models"] for c in d["combos"]}
-print(",".join(by[n][0] for n in ("tier1", "spark-1.3-contributor")))
+print(",".join(by[n][0] for n in ("t1-orchestrator", "spark-1.3-contributor")))
 PY
 )"
     assert_eq "$head_leg" "opencode-zen/muse-spark-1.3-contributor-free,opencode-zen/muse-spark-1.3-contributor-free"
@@ -5627,7 +5627,7 @@ if it "combos.json carries no phantom legs (probe-falsified refs stay out)"; the
     # Regression gate for the 2026-09-22 finding: three legs shipped that the
     # gateway 400s on ("not available in the active live catalog"), which only
     # surfaces at chat time — simulate resolves them. Pin the falsified refs.
-    report="$(python3 - <<'PY'
+    report="$(python3 - 2>&1 <<'PY'
 import json
 banned = {
     "openrouter/gemini-3.8-flash": "bare openrouter gemini is an alias, not a provider ref",
@@ -5646,13 +5646,13 @@ PY
     assert_eq "$report" ""
 fi
 
-if it "combos.json parses and tier1 promises 1M"; then
-    report="$(python3 - <<'PY'
+if it "combos.json parses and t1-orchestrator promises 1M"; then
+    report="$(python3 - 2>&1 <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["tier1", "spark-1.3-contributor", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean", "rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "tier2-credit", "tier3-credit"]:
+if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash"]:
     problems.append("names")
 for c in d["combos"]:
     if not c["models"]:
@@ -5660,40 +5660,47 @@ for c in d["combos"]:
     for m in c["models"]:
         if "/" not in m:
             problems.append(c["name"] + ":" + m)
-    if c["name"] == "tier1" and c.get("context") != "1M":
-        problems.append("tier1-context")
+    if c["name"] == "t1-orchestrator" and c.get("context") != "1M":
+        problems.append("t1-context")
 by = {c["name"]: c["models"] for c in d["combos"]}
 # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): the only spark in
 # any tier is the contributor.
 import re as _re2
 if _re2.search(r"muse-spark-1\.3(?!-contributor)", " ".join(m for c in d["combos"] for m in c["models"])):
     problems.append("plain-spark-blocked")
-# tier1 is spark-only: gemini must never occupy a 1M slot again.
-if any("gemini" in m for m in by["tier1"]):
-    problems.append("tier1-gemini")
-    problems.append("tier1-gemini")
+# t1-orchestrator is spark-only: gemini must never occupy a 1M slot again.
+if any("gemini" in m for m in by["t1-orchestrator"]):
+    problems.append("t1-gemini")
+    problems.append("t1-gemini")
 # *-clean = paid legs only: no free pool may train on private prompts.
 # Free = contributor-free, groq / cerebras / sambanova / gemini hosts,
 # mistral-code + qwen free pools. -contributor (trains by contract) is
-# banned in tier2-clean/tier3-clean; tier1-clean carries it deliberately
-# since the 2026-09-21 contributor-only block (paid-only, trains).
+# banned in t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries
+# it deliberately since the 2026-09-21 contributor-only block (paid-only,
+# trains).
 # Direct-key legs (mistral-small, deepseek, openrouter paid, zen paid)
 # bill past the pool on the same key, so they stay.
-# The pinned spark-1.3-contributor single-model combo reuses tier1's legs
-# verbatim, so it is exempt from the tier-shape rules below (it is not a
-# tier) but must stay byte-identical to tier1.
+# The pinned spark-1.3-contributor single-model combo reuses t1-orchestrator's
+# legs verbatim, so it is exempt from the tier-shape rules below (it is not
+# a tier) but must stay byte-identical to t1.
 import re
 free = re.compile(r"contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen")
 trains = re.compile(r"-contributor$")
-for n in ("tier1-clean", "tier2-clean", "tier3-clean"):
+for n in ("t1-orchestrator-clean", "t2-worker-clean", "t3-driver-clean"):
     bad = [m for m in by[n] if free.search(m)]
     if bad:
         problems.append(n + "-free:" + ",".join(bad))
-for n in ("tier2-clean", "tier3-clean"):
+for n in ("t2-worker-clean", "t3-driver-clean"):
     bad = [m for m in by[n] if trains.search(m)]
     if bad:
         problems.append(n + "-trains:" + ",".join(bad))
-if by.get("spark-1.3-contributor") != by["tier1"]:
+# *-free-only = zero paid/keyed legs (zen contributor-free counts as free).
+paid = re.compile(r"cheaperinference|openrouter|^(deepseek|mistral)/|opencode-zen/(?!.*-free)")
+for n in ("t1-orchestrator-free-only", "t2-worker-free-only", "t3-driver-free-only"):
+    bad = [m for m in by[n] if paid.search(m)]
+    if bad:
+        problems.append(n + "-paid:" + ",".join(bad))
+if by.get("spark-1.3-contributor") != by["t1-orchestrator"]:
     problems.append("spark-combo-drift")
 print(" ".join(problems))
 PY
@@ -5736,7 +5743,7 @@ if it "apply --dry-run registers nothing and starts nothing"; then
 fi
 
 if it "tier depth is mandatory in opencode.jsonc agents"; then
-    report="$(python3 - <<'PY'
+    report="$(python3 - 2>&1 <<'PY'
 import json, re, io
 text = re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read())
 a = json.loads(text)["agents"]
@@ -5759,7 +5766,7 @@ PY
 fi
 
 if it "opencode tiers declare matching context limits"; then
-    report="$(python3 - <<'PY'
+    report="$(python3 - 2>&1 <<'PY'
 import json, re, io
 text = re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read())
 oc = json.loads(text)
@@ -5797,7 +5804,7 @@ if it "the providers card is in the web UI"; then
 fi
 
 if it "new components name real profiles and verify commands"; then
-    bad="$(python3 - <<'PY'
+    bad="$(python3 - 2>&1 <<'PY'
 import json, glob
 problems = []
 for p in sorted(glob.glob("catalog/*.json")):

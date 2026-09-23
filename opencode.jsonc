@@ -227,7 +227,7 @@
         },
         "t1-orchestrator-paid": {
           "modelID": "t1-orchestrator-paid",
-          "name": "t1-orchestrator-paid orchestrator (meta direct first)"
+          "name": "t1-orchestrator-paid orchestrator (openrouter first)"
         },
         "t2-worker": {
           "modelID": "t2-worker",
@@ -245,9 +245,9 @@
           "modelID": "t3-driver-paid",
           "name": "t3-driver-paid driver (paid)"
         },
-        "rag": {
-          "modelID": "rag",
-          "name": "rag cohere RAG (litellm fallback)"
+        "t4-rag": {
+          "modelID": "t4-rag",
+          "name": "t4-rag cohere RAG (litellm fallback)"
         }
       }
     }
