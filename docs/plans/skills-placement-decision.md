@@ -29,4 +29,17 @@ in one commit before any other lane merges.
 
 ## Operator: confirm prefix (or propose another) by replying; SUB lane stays
 blocked until this file records the answer.
-**Answer: _pending_**
+**Answer (2026-09-23, evidence-backed): `.agents/skills/` as the single
+content home, Claude Code served via symlinks in `.claude/skills/`.**
+Evidence: Claude Code reads project skills ONLY from `.claude/skills/` but
+explicitly supports symlinked skill folders (deduped); OpenCode reads
+`.opencode/skills/` natively plus compat `.claude/skills` AND
+`.agents/skills` (agents outranks claude in its precedence order); Codex,
+Cursor and VS Code converge on `.agents/skills/`; OpenHands takes any dir
+via `load_skills_from_dir` (our installer configures it). So `.agents/skills/`
+is native-or-compat for every agent except Claude Code, which is covered by
+installer-created symlinks (idempotent, guarded — never committed links,
+so fresh checkouts without symlink rights stay intact).
+`.claude/skills/autoos-install` stays a real dir, untouched.
+`SYNC.md` lives at `.agents/SYNC.md` (NOT inside `skills/`, where a root
+`.md` would register as a flat skill named SYNC).
