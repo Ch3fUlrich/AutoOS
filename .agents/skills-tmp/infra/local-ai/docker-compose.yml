@@ -1,0 +1,113 @@
+version: "3.9"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_API_PORT:-11434}:11434"
+    volumes:
+      - ${APPS_ROOT:-C:/Apps}/ollama:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-4}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-3}
+      - NVIDIA_VISIBLE_DEVICES=all
+    runtime: nvidia
+    tty: true
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: "25m"
+        max-file: "2"
+    healthcheck:
+      test: ["CMD-SHELL", "awk -v p=2CAA -v st=0A -v c=: 'BEGIN{f=0} $4==st{n=split($2,a,c); if(toupper(a[n])==toupper(p)) f=1} END{exit !f}' /proc/net/tcp /proc/net/tcp6 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm-proxy
+    restart: unless-stopped
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+    volumes:
+      - ./litellm_config.yml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-proxy-1234}
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: "25m"
+        max-file: "2"
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    ports:
+      - "${OPENWEBUI_HTTP_PORT:-3131}:8080"
+    volumes:
+      - ${APPS_ROOT:-C:/Apps}/open-webui:/app/backend/data
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-http://litellm-proxy:4000/v1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-sk-proxy-1234}
+      - WEBUI_AUTH=${WEBUI_AUTH:-true}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: "25m"
+        max-file: "2"
+    healthcheck:
+      test: ["CMD-SHELL", "awk -v p=1F90 -v st=0A -v c=: 'BEGIN{f=0} $4==st{n=split($2,a,c); if(toupper(a[n])==toupper(p)) f=1} END{exit !f}' /proc/net/tcp /proc/net/tcp6 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  ollama-agent:
+    image: ollama/ollama:latest
+    container_name: ollama-agent
+    restart: unless-stopped
+    volumes:
+      - ${APPS_ROOT:-C:/Apps}/ollama:/root/.ollama
+    environment:
+      - OLLAMA_HOST=http://host.docker.internal:11434   # connects to main server
+      - NVIDIA_VISIBLE_DEVICES=all
+    runtime: nvidia
+    tty: true
+    stdin_open: true
+    entrypoint: /bin/sh
+    command: -c "tail -f /dev/null"
+    logging:
+      driver: local
+      options:
+        max-size: "25m"
+        max-file: "2"
+
+  # openhands service removed 2026-09-18: never deployed; agent-canvas is the only OpenHands.
+
+networks:
+  default:
+    name: local-ai-network

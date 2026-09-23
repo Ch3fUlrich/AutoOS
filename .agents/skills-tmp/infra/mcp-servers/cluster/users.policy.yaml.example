@@ -1,0 +1,49 @@
+version: 1
+
+# ─── MULTI-USER TEMPLATE ──────────────────────────────────────────────────────
+# How several users each keep their own graphs, isolated from each other.
+#
+# Two layers of identity are already in place:
+#   1. Humans: the web viewer sits behind Authelia (SSO via Caddy) — that IS the
+#      multi-user *login*. Each person authenticates as themselves before they
+#      ever reach the graph UI.
+#   2. Programmatic (agents / MCP / API): Omnigraph identifies callers by their
+#      BEARER TOKEN, mapped to a named actor. One token today (`default`). Give
+#      each user their own token → their own actor → scope actions per graph here.
+#
+# TO ENABLE (admin / cluster-apply step, because minting tokens changes the
+# cluster secret set):
+#   1. Mint a bearer token per user and register it as an actor. Tokens are
+#      cluster credentials (env / secret), never committed. Name actors after the
+#      user (e.g. `alice`, `bob`).
+#   2. Copy this file to users.policy.yaml, fill the groups/rules below.
+#   3. Uncomment `users-access` in cluster.yaml and run scripts/apply-cluster.sh.
+#
+# Model: give every user a personal graph (e.g. `u-alice`) that only they can
+# touch, plus read-only access to the shared `memory` graph. Declare the personal
+# graphs in cluster.yaml `graphs:` the same way project graphs are declared.
+
+groups:
+  # each entry is: <group>: [<actor>, ...]
+  owners-alice: [alice]
+  owners-bob:   [bob]
+  everyone:     [alice, bob, default]
+
+rules:
+  # Alice fully owns her graph; nobody else is listed for it.
+  - id: alice-owns-her-graph
+    allow:
+      actors:  { group: owners-alice }
+      actions: [read, export, change, schema_apply, branch_create, branch_delete, branch_merge, invoke_query]
+      # bind to graph u-alice via cluster.yaml applies_to: [u-alice]
+
+  - id: bob-owns-his-graph
+    allow:
+      actors:  { group: owners-bob }
+      actions: [read, export, change, schema_apply, branch_create, branch_delete, branch_merge, invoke_query]
+
+  # Everyone may read the shared/global memory graph, but not write it.
+  - id: everyone-reads-shared
+    allow:
+      actors:  { group: everyone }
+      actions: [read, export, invoke_query]

@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "When each provider is cheap (kind=price) or lightly loaded (kind=load). All times are UTC, so",
+    "summer/winter time never needs thinking about; provider_windows.py converts to local time.",
+    "Read by provider_windows.py and by the L1/L2 standing orders (references/main-orchestrator.md).",
+    "Re-verify a 'price' entry against its source before relying on a saving; update 'verified'."
+  ],
+  "providers": {
+    "deepseek": {
+      "kind": "price",
+      "peak_utc": [["01:00", "04:00"], ["06:00", "10:00"]],
+      "peak_days": ["mon", "tue", "wed", "thu", "fri"],
+      "offpeak_note": "every other hour, and all weekend, at half price",
+      "source": "https://api-docs.deepseek.com/quick_start/pricing",
+      "verified": "2026-09-18"
+    },
+    "anthropic": {
+      "kind": "load",
+      "busy_utc": [["12:00", "21:00"]],
+      "busy_days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+      "offpeak_note": "quiet 21:00-12:00 UTC; throttling risk while busy",
+      "source": "operator observation, 2026-09-18 (no published schedule): high load 14:00-23:00 CEST",
+      "verified": null
+    },
+    "meta": {
+      "kind": "load",
+      "busy_utc": [["12:00", "21:00"]],
+      "busy_days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+      "offpeak_note": "Muse Spark; same pattern as Claude per the operator",
+      "source": "operator observation, 2026-09-18 (no published schedule): high load 14:00-23:00 CEST",
+      "verified": null
+    }
+  }
+}

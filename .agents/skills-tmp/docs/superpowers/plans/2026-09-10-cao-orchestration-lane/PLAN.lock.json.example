@@ -1,0 +1,31 @@
+{
+  "schema": "cao-plan/1",
+  "goal": "prove the wired launch path provisions, trusts and delegates",
+  "createdBy": "claude-code",
+  "approvedAt": "2026-09-10T19:05:00Z",
+  "depth": 3,
+  "openQuestions": [
+    {
+      "q": "should the launch path provision the worktree itself?",
+      "answer": "yes, in the same shell invocation",
+      "answeredBy": "user"
+    }
+  ],
+  "assumedDefaults": [],
+  "phases": [
+    {
+      "id": "wire",
+      "goal": "create wired.txt containing LAUNCH_PATH_OK",
+      "taskClass": "implement",
+      "acceptance": {
+        "guard": "test -s wired.txt",
+        "expect": "exit0"
+      },
+      "dependsOn": [],
+      "files": [
+        "wired.txt"
+      ]
+    }
+  ],
+  "refusals": []
+}

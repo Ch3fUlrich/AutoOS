@@ -1,0 +1,5 @@
+interface:
+  display_name: "HTML Working Documents"
+  short_description: "Create readable, interactive HTML artifacts"
+  default_prompt: "Use $html-working-documents to turn this planning or review task into a self-contained HTML artifact."
+

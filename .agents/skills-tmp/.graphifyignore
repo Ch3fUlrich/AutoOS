@@ -1,0 +1,84 @@
+﻿# OS/editor noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+
+# Logs and local scratch
+*.log
+tmp/
+temp/
+.cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Archives/generated packages
+*.zip
+*.tar
+*.tar.gz
+
+# Python (virtual environments, bytecode, caches)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+coverage.xml
+htmlcov/
+
+# CodeWhale local session data
+.codewhale/
+
+# Serena per-project data (auto-generated, not tracked)
+.serena/
+!starters/mcp-servers/.serena/
+
+# Graphify data
+graphify-out/
+
+# MCP server data (persistent, machine-local)
+mcp-servers/data/
+
+# Node.js dependencies (generated)
+mcp-servers/superpowers/node_modules/
+mcp-servers/superpowers/package-lock.json
+mcp-servers/superpowers/pnpm-lock.yaml
+mcp-servers/superpowers/.git/
+mcp-servers/superpowers/.github/
+mcp-servers/superpowers/.gitignore
+mcp-servers/superpowers/tsconfig.json
+
+
+# Generated JS source maps (reproducible from TypeScript)
+mcp-servers/superpowers/build/*.map
+
+# Test files (not needed at runtime)
+mcp-servers/superpowers/src/prompts/register.test.ts
+mcp-servers/superpowers/src/resources/register.test.ts
+mcp-servers/superpowers/src/skills/discovery.test.ts
+mcp-servers/superpowers/src/skills/types.test.ts
+mcp-servers/superpowers/src/tools/intelligence.test.ts
+mcp-servers/superpowers/src/tools/register.test.ts
+mcp-servers/superpowers/src/config.test.ts
+mcp-servers/superpowers/src/git.test.ts
+mcp-servers/superpowers/src/integration.test.ts
+mcp-servers/superpowers/src/server.test.ts
+mcp-servers/superpowers/src/update.test.ts
+graphify-out/
+GRAPH_*.html

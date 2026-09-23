@@ -1,0 +1,5 @@
+# mcp 2.0.0 split its type exports into `mcp-types` and dropped names that
+# servers import at build time. Pin below 2.0 — an unconstrained install is
+# exactly what silently broke graphify-mcp (see its Dockerfile).
+mcp<2
+PyYAML>=6

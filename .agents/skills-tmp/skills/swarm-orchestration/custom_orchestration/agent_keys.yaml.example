@@ -1,0 +1,15 @@
+codex:
+  OPENAI_API_KEY: "sk-..."
+  OPENAI_BASE_URL: "https://api.openai.com/v1"
+
+deepseek_tui:
+  DEEPSEEK_API_KEY: "sk-..."
+  DEEPSEEK_BASE_URL: "https://api.deepseek.com"
+
+local_glm:
+  GLM_API_KEY: "..."
+  GLM_BASE_URL: "https://open.bigmodel.cn/api/paas/v4"
+
+ollama:
+  OLLAMA_BASE_URL: "http://localhost:11434"
+  DEFAULT_MODEL: "llama3"

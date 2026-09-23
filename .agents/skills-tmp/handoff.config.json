@@ -1,0 +1,203 @@
+{
+  "$comment_cao": [
+    "The CAO LANE: interactive, hierarchical, multi-provider orchestration through",
+    "the CAO server. The PowerShell batch runner ignores this block entirely; the",
+    "Python lane (cao/) reads ONLY this block. One file, two lanes.",
+    "",
+    "maxDepth is REAL, not advisory. cao/profiles.py generates one profile per",
+    "level and emits the deepest one WITHOUT assign/handoff, so it cannot spawn --",
+    "the tool is absent from the terminal. This matters most for Gemini: `agy` has",
+    "no --no-subagents flag (claude and grok do), so withholding the tool is the",
+    "only leaf control that actually holds. Raise maxDepth and regenerate; never",
+    "hand-edit a generated profile.",
+    "",
+    "worktreeRoot must sit on a NATIVE filesystem. Measured on a Windows host:",
+    "`git status` costs 3.021s against /mnt/c (9p) versus 0.146s in an ext4",
+    "worktree whose .git still lives on /mnt/c -- a 20x difference paid on every",
+    "file operation of a long-horizon run. On Linux this is already native.",
+    "",
+    "routing maps a task CLASS to an ORDERED ladder. The dispatcher takes the first",
+    "candidate whose pool is open, so a ladder is simultaneously a preference order",
+    "and a quota fallback -- there is no second structure for the two to disagree.",
+    "",
+    "pool vs family: pool = which quota bucket pays; family = whose blind spots.",
+    "They differ. claude-opus-4-6-thinking via agy is the anthropic FAMILY from the",
+    "antigravity POOL: good extra capacity, and an invalid reviewer for",
+    "Claude-written code. NEVER decline a pool because its best model is older than",
+    "another pool's -- that shrinks the budget without improving the model."
+  ],
+  "cao": {
+    "maxDepth": 3,
+    "server": "http://localhost:9889",
+    "worktreeRoot": "$HOME/cao-worktrees",
+    "$comment_levels": [
+      "Each level carries its own pool/model, so the hierarchy is genuinely mixed:",
+      "judgement at the top, cheap execution below. A Claude supervisor reviewing a",
+      "DeepSeek worker is ALREADY cross-family, so review costs no extra dispatch.",
+      "A leaf SHOULD sit on a hard-enforcement provider (claude_code, opencode_cli,",
+      "grok_cli, kiro_cli, copilot_cli). On antigravity_cli, CAO documents tool",
+      "restrictions as advisory, so a leaf there is policed only by cao/monitor.py."
+    ],
+    "levels": [
+      {
+        "level": 1,
+        "role": "orchestrator",
+        "runner": "claude-code",
+        "canSpawn": true
+      },
+      {
+        "level": 2,
+        "role": "supervisor",
+        "canSpawn": true,
+        "pool": "anthropic",
+        "family": "anthropic",
+        "model": "opus",
+        "effort": "high"
+      },
+      {
+        "level": 3,
+        "role": "worker",
+        "canSpawn": false,
+        "pool": "deepseek",
+        "family": "deepseek",
+        "model": "deepseek-direct/deepseek-flash"
+      }
+    ],
+    "pools": {
+      "anthropic": {
+        "via": "claude"
+      },
+      "antigravity": {
+        "via": "agy"
+      },
+      "deepseek": {
+        "via": "opencode",
+        "apiKeyEnv": "DEEPSEEK_API_KEY"
+      }
+    },
+    "routing": {
+      "plan": [
+        {
+          "pool": "anthropic",
+          "family": "anthropic",
+          "model": "opus",
+          "effort": "high"
+        },
+        {
+          "pool": "antigravity",
+          "family": "anthropic",
+          "model": "claude-opus-4-6-thinking"
+        },
+        {
+          "pool": "antigravity",
+          "family": "google",
+          "model": "gemini-3.1-pro-high"
+        }
+      ],
+      "decompose": [
+        {
+          "pool": "anthropic",
+          "family": "anthropic",
+          "model": "sonnet",
+          "effort": "high"
+        },
+        {
+          "pool": "antigravity",
+          "family": "anthropic",
+          "model": "claude-sonnet-4-6"
+        }
+      ],
+      "research": [
+        {
+          "pool": "antigravity",
+          "family": "google",
+          "model": "gemini-3.8-flash-high"
+        },
+        {
+          "pool": "deepseek",
+          "family": "deepseek",
+          "model": "deepseek-v4-flash"
+        }
+      ],
+      "implement": [
+        {
+          "pool": "antigravity",
+          "family": "google",
+          "model": "gemini-3.8-flash-high"
+        },
+        {
+          "pool": "anthropic",
+          "family": "anthropic",
+          "model": "sonnet",
+          "effort": "medium"
+        }
+      ],
+      "mechanical": [
+        {
+          "pool": "deepseek",
+          "family": "deepseek",
+          "model": "deepseek-v4-flash"
+        },
+        {
+          "pool": "antigravity",
+          "family": "google",
+          "model": "gemini-3.8-flash-low"
+        }
+      ],
+      "test": [
+        {
+          "pool": "antigravity",
+          "family": "google",
+          "model": "gemini-3.8-flash-medium"
+        },
+        {
+          "pool": "deepseek",
+          "family": "deepseek",
+          "model": "deepseek-v4-flash"
+        }
+      ],
+      "verify": [
+        {
+          "pool": "antigravity",
+          "family": "google",
+          "model": "gemini-3.8-flash-medium"
+        },
+        {
+          "pool": "deepseek",
+          "family": "deepseek",
+          "model": "deepseek-v4-flash"
+        }
+      ],
+      "review": [
+        {
+          "pool": "anthropic",
+          "family": "anthropic",
+          "model": "sonnet",
+          "effort": "high"
+        },
+        {
+          "pool": "antigravity",
+          "family": "google",
+          "model": "gemini-3.8-flash-high"
+        },
+        {
+          "pool": "deepseek",
+          "family": "deepseek",
+          "model": "deepseek-v4-flash"
+        }
+      ]
+    },
+    "reviewPairing": "cross-family",
+    "resume": {
+      "enabled": true,
+      "leaseMinutes": 30,
+      "maxAttempts": 3
+    }
+  },
+  "$comment": [
+    "This repository's own CAO-lane config, so the lane can be run against this",
+    "repo (dogfooding). The batch runner's session/lane fields are deliberately",
+    "absent: this repo adopts the CAO lane only. See",
+    "skills/unattended-orchestration/handoff.config.example.json for every field."
+  ]
+}
