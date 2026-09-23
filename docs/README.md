@@ -20,6 +20,7 @@ Start here. Each page is short and answers one question.
 | [WSL native agent home](wsl-agent-home.md) | Why do agent tools need native ext4 state on WSL? |
 | [Model routing](models.md) | Which AI model answers, and how do free-first fallbacks work? |
 | [Routing map](routing.md) | Which script creates each routing edge? |
+| [Combos evaluation](models-proposed.md) | Which combos stay, go, or merge? (operator decision sheet) |
 | [API keys](api-keys.md) | Where does each key come from, and what does it cost? |
 | [Verification](verification.md) | What was tested and proven, and what is known broken? |
 | [Unattended orchestration](../.agents/skills/unattended-orchestration/unattended-orchestration.md) | How do 3-tier agent runs stay cheap, parallel, and resumable? |

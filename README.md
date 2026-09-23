@@ -100,6 +100,7 @@ Tiers, fallback trees, per-app start commands and provider quirks:
 | [Desktop setup](docs/desktop-setup.md) | Everyday apps, shell design, and useful extra profiles |
 | [Model routing](docs/models.md) | Which AI model answers, and how do free-first fallbacks work? |
 | [Routing map](docs/routing.md) | Which script creates each routing edge? |
+| [Combos evaluation](docs/models-proposed.md) | Which combos stay, go, or merge? (operator decision sheet) |
 | [API keys](docs/api-keys.md) | Where does each key come from, and what does it cost? |
 | [OpenHands Agent Canvas](docs/openhands.md) | How do I install, configure and start the web UI? |
 | [Unattended orchestration](.agents/skills/unattended-orchestration/unattended-orchestration.md) | How do 3-tier agent runs stay cheap, parallel and resumable? |
