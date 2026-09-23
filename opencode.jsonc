@@ -28,6 +28,9 @@
   // ack-proven) — openrouter advertises minimal/low/medium/high/xhigh for
   // spark (no `max`; that is Zen-native only). Use the gateway combos for
   // fallback routing, the direct model for effort control.
+  // NEW: OpenRouter provider added at `openrouter/muse-spark-1.3-contributor`
+  // gives direct access to the full variant ladder (minimal/low/medium/high/xhigh).
+  // Requires OPENROUTER_API_KEY in env or configuration/api-keys.yml.
   // Limits below must match the combo curations: tier1 is 1M-context only;
   // anything smaller belongs in tier2. Override per user in
   // ~/.config/opencode/opencode.jsonc. Client key via env
@@ -171,6 +174,21 @@
           "modelID": "auto/cheap",
           "name": "bootstrap: auto cheapest",
           "limit": { "context": 131072, "output": 16384 }
+        }
+      }
+    },
+    "openrouter": {
+      "name": "OpenRouter (direct — full variant ladder for spark)",
+      "env": ["OPENROUTER_API_KEY"],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "https://openrouter.ai/api/v1"
+      },
+      "models": {
+        "muse-spark-1.3-contributor": {
+          "modelID": "meta/muse-spark-1.3-contributor",
+          "name": "Muse Spark 1.3 Contributor — 1M ctx, full effort ladder",
+          "limit": { "context": 1048576, "output": 131072 }
         }
       }
     },

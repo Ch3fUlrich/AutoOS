@@ -161,28 +161,34 @@ echo "Resilience:"
 # and the client saw the last leg's error (2026-09-22; it surfaced in opencode
 # as "gemini-3.7-flash is cooling down"). 180000 sits under
 # comboCooldownWait.budgetMs (300s) so a dead leg still hops.
+# providerBreaker.apikey.failureThreshold 12 -> 2 (operator 2026-09-23): the
+# zen free promo stays FIRST (free when it works), but a 403 is a permanent
+# error, so at 12 the gateway retried the dead promo on every request. At 2 it
+# is skipped for resetTimeoutMs (30s) after two failures, then retried again.
 MAX_WAIT_MS=180000
+BREAKER_THRESHOLD=2
 CLIENT_KEY="${AUTOOS_OMNIROUTE_KEY:-}"
 if [[ -z "$CLIENT_KEY" && -f "$KEYS_FILE" ]]; then
     CLIENT_KEY="$(sed -n 's/^omniroute:[[:space:]]*//p' "$KEYS_FILE" | head -n1 | tr -d '"'"'"'')"
 fi
 if [[ $DRY -eq 1 ]]; then
     echo "  - would set requestQueue.maxWaitMs = $MAX_WAIT_MS"
+    echo "  - would set providerBreaker.apikey.failureThreshold = $BREAKER_THRESHOLD"
 elif [[ -z "$CLIENT_KEY" ]]; then
-    echo "  - no client key — cannot set requestQueue.maxWaitMs (PATCH /api/resilience)"
+    echo "  - no client key — cannot set the resilience settings (PATCH /api/resilience)"
 else
     current="$(curl -sf -m 15 -H "Authorization: Bearer $CLIENT_KEY" \
         "$GATEWAY/api/resilience?include=config" \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin)["requestQueue"]["maxWaitMs"])' 2>/dev/null || true)"
-    if [[ "$current" == "$MAX_WAIT_MS" ]]; then
-        echo "  = requestQueue.maxWaitMs already $MAX_WAIT_MS"
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["requestQueue"]["maxWaitMs"], d["providerBreaker"]["apikey"]["failureThreshold"])' 2>/dev/null || true)"
+    if [[ "$current" == "$MAX_WAIT_MS $BREAKER_THRESHOLD" ]]; then
+        echo "  = resilience settings already current (maxWaitMs=$MAX_WAIT_MS, breaker=$BREAKER_THRESHOLD)"
     elif curl -sf -m 15 -X PATCH -H "Authorization: Bearer $CLIENT_KEY" \
             -H 'content-type: application/json' \
-            -d "{\"requestQueue\":{\"maxWaitMs\":$MAX_WAIT_MS}}" \
+            -d "{\"requestQueue\":{\"maxWaitMs\":$MAX_WAIT_MS},\"providerBreaker\":{\"apikey\":{\"failureThreshold\":$BREAKER_THRESHOLD,\"degradationThreshold\":1,\"resetTimeoutMs\":30000}}}" \
             "$GATEWAY/api/resilience" >/dev/null; then
-        echo "  + requestQueue.maxWaitMs set to $MAX_WAIT_MS (was ${current:-unknown})"
+        echo "  + resilience settings set (maxWaitMs=$MAX_WAIT_MS, breaker=$BREAKER_THRESHOLD; was ${current:-unknown})"
     else
-        echo "  ! could not set requestQueue.maxWaitMs — set it in the dashboard (Resilience -> request queue)"
+        echo "  ! could not set resilience settings — use the dashboard (Resilience)"
     fi
 fi
 

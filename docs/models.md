@@ -135,6 +135,17 @@ through OmniRoute exposes it. Agents that need max reasoning on a combo pin
 upgrade: if gateway combos start forwarding effort metadata, the two rows
 collapse.
 
+**Where the direct surface lives** (so nobody has to re-derive it):
+
+- repo `opencode.jsonc` → `providers.openrouter` with
+  `muse-spark-1.3-contributor` (`modelID: meta/muse-spark-1.3-contributor`,
+  key via `OPENROUTER_API_KEY`);
+- OpenHands → the `openrouter-muse-spark-1.3-contributor` tier profile. It is
+  the one profile with `"gateway": "openrouter"`: it names its own endpoint and
+  takes the OpenRouter key, not the gateway client key. Both installers and
+  `tools/sync-openhands-profiles.py` resolve keys per `gateway`, and the
+  suites assert the direct profile gets the right key.
+
 ## Role labels (display names — the `tier1/2/3` ids never change)
 
 The ids are a contract: saved selections, `--only` flags, `opencode.jsonc`

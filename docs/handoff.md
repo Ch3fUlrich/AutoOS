@@ -217,9 +217,9 @@ memory, never write project data to the global `memory` graph.**
    combo/client edit (live probes) and `--offline` in CI (already wired into
    both suites). It compares the repo against the live gateway store, all four
    client surfaces, the OpenHands tier profiles and the LiteLLM groups, and
-   rejects combo-bypassing refs plus a too-short `maxWaitMs`. **Zen free leg is
-   demoted to last in `tier1`/`spark`** — do not "restore free-first" without
-   re-probing: it 403s through the gateway.
+   rejects combo-bypassing refs plus a too-short `maxWaitMs` or a too-high
+   breaker threshold. The zen free promo is FIRST by design and fast-skipped by
+   that threshold — if it is ever reordered, re-probe the spark chain first.
 
 7. **Autostart** — gateway + litellm + OpenHands container resume after
    reboot (`configuration/autostart/`); Tailscale already Automatic. Use
@@ -258,13 +258,19 @@ bash tests/run-tests.sh
   spark mid-think; `apply.*` now sets it to 180000. A tiny `max_tokens` makes
   the same leg look dead ("empty response"). Both are budget faults, not
   routing faults.
+- **A permanently-failing promoted leg needs a low breaker threshold.**
+  A 403 is a permanent-class error, so with the shipped
+  `providerBreaker.apikey.failureThreshold` of 12 the dead zen promo was
+  retried on every request. It is 2 now (`apply.*` sets it), which also makes
+  every other failing free leg hop fast.
 - **Probe with `tools/audit-router.py`** (`--offline` for drift, live for the
   gateways) before blaming a model: it separates config drift (400/404) from
   provider/balance state (402/429/5xx) and checks the resilience deadline.
-- **Zen's free promo leg cannot serve through OmniRoute** — it 403s with
-  "OpenCode's free tier can only be used from within OpenCode". It is kept
-  LAST in `tier1`/`spark` so a future policy change is still picked up, but it
-  is never the critical path.
+- **Zen's free promo leg is FIRST by design and fast-skipped.** It 403s
+  through the gateway ("OpenCode's free tier can only be used from within
+  OpenCode"), so `providerBreaker.apikey.failureThreshold` is 2: free when it
+  serves, at most two cheap round-trips when it does not, retried after 30 s.
+  Do not reorder it to last, and do not raise the threshold back to 12.
 - **Direct (non-combo) models have no fallback and no quota protection** — a
   session with `gemini/gemini-3.7-flash` selected blew the 250k
   free-input-token cap in one 1935-message turn. Read `comboName` in the call

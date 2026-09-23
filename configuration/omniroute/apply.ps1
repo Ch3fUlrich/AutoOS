@@ -180,37 +180,49 @@ if ($LiveIds.Count -eq 0) {
     Write-Host '    omniroute simulate --combo tier1'
 }
 
-# --- Resilience: the local execution deadline must fit a reasoning model ---
-# requestQueue.maxWaitMs ships at 15000 ms, which is below Muse Spark's own
-# thinking time: every spark request died with "Request exceeded OmniRoute's
-# local rate-limit execution expiration", the chain fell through to a dead
-# free leg, and the client saw the last leg's error (measured 2026-09-22 -
-# it surfaced as "gemini-3.7-flash is cooling down" inside opencode).
-# 180000 ms sits under comboCooldownWait.budgetMs (300s) so a genuinely dead
-# leg still hops instead of stalling the run.
+# --- Resilience: fit a reasoning model AND fast-skip a dead leg ------------
+# 1. requestQueue.maxWaitMs ships at 15000 ms, which is below Muse Spark's own
+#    thinking time: every spark request died with "Request exceeded OmniRoute's
+#    local rate-limit execution expiration", the chain fell through to a dead
+#    free leg, and the client saw the last leg's error (measured 2026-09-22).
+#    180000 ms sits under comboCooldownWait.budgetMs (300s) so a genuinely dead
+#    leg still hops instead of stalling the run.
+# 2. providerBreaker.apikey.failureThreshold 12 -> 2 (operator 2026-09-23):
+#    the zen free promo stays FIRST (free when it works), but a 403 is a
+#    permanent-class error, so at the shipped threshold the gateway retried the
+#    dead promo on EVERY request. At 2 it is skipped for resetTimeoutMs (30s)
+#    after two failures, then retried - at most two cheap round-trips, and
+#    every other failing free leg hops fast too.
 $MaxWaitMs = 180000
+$Breaker = @{ failureThreshold = 2; degradationThreshold = 1; resetTimeoutMs = 30000 }
 Write-Host 'Resilience:'
 if ($DryRun) {
     Write-Host "  - would set requestQueue.maxWaitMs = $MaxWaitMs"
+    Write-Host "  - would set providerBreaker.apikey.failureThreshold = $($Breaker.failureThreshold)"
 } elseif (-not $Keys.ContainsKey('omniroute')) {
-    Write-Host '  - no client key - cannot set requestQueue.maxWaitMs (PATCH /api/resilience)'
+    Write-Host '  - no client key - cannot set the resilience settings (PATCH /api/resilience)'
 } else {
     $auth = @{ Authorization = "Bearer $($Keys['omniroute'])" }
     $current = $null
+    $currentBreaker = $null
     try {
         $cfg = Invoke-RestMethod -Uri "$Gateway/api/resilience?include=config" -TimeoutSec 15 -Headers $auth
         $current = $cfg.requestQueue.maxWaitMs
-    } catch { $current = $null }
-    if ($current -eq $MaxWaitMs) {
-        Write-Host "  = requestQueue.maxWaitMs already $MaxWaitMs"
+        $currentBreaker = $cfg.providerBreaker.apikey.failureThreshold
+    } catch { $current = $null; $currentBreaker = $null }
+    if ($current -eq $MaxWaitMs -and $currentBreaker -eq $Breaker.failureThreshold) {
+        Write-Host "  = resilience settings already current (maxWaitMs=$MaxWaitMs, breaker=$($Breaker.failureThreshold))"
     } else {
+        $body = @{
+            requestQueue   = @{ maxWaitMs = $MaxWaitMs }
+            providerBreaker = @{ apikey = $Breaker }
+        } | ConvertTo-Json -Depth 5
         try {
-            $body = @{ requestQueue = @{ maxWaitMs = $MaxWaitMs } } | ConvertTo-Json -Depth 5
             $null = Invoke-RestMethod -Uri "$Gateway/api/resilience" -Method Patch -TimeoutSec 15 `
                 -ContentType 'application/json' -Headers $auth -Body $body
-            Write-Host "  + requestQueue.maxWaitMs set to $MaxWaitMs (was $current)"
+            Write-Host "  + maxWaitMs $current -> $MaxWaitMs; breaker $currentBreaker -> $($Breaker.failureThreshold)"
         } catch {
-            Write-Host "  ! could not set requestQueue.maxWaitMs - set it in the dashboard (Resilience -> request queue)"
+            Write-Host '  ! could not set resilience settings - use the dashboard (Resilience)'
         }
     }
 }

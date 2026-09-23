@@ -124,12 +124,13 @@ def probe_gateway(model: str, timeout: int = 180) -> tuple[object, str]:
     return _chat("http://127.0.0.1:20128", model, key, timeout)
 
 
-# A reasoning model spends its budget thinking before it emits a token. The
-# shipped requestQueue.maxWaitMs is 15000, which kills such a request with
-# "Request exceeded OmniRoute's local rate-limit execution expiration" - the
-# leg then looks dead, the chain falls through, and the client sees the LAST
-# leg's error (measured 2026-09-22: spark -> gemini free-tier "cooling down").
 MIN_REASONING_MAX_WAIT_MS = 120_000
+
+# The free promo leg stays FIRST (free when it works), so the breaker must skip
+# it fast: a 403 is a permanent-class error, and at the shipped threshold of 12
+# the gateway retried the dead promo on every single request (operator call
+# 2026-09-23: skip after the first two 429s/403s).
+MAX_FAST_SKIP_THRESHOLD = 4
 
 
 def resilience_config() -> dict | None:
@@ -240,7 +241,7 @@ def main(argv=None) -> int:
                 drift.append(f"{label} references a combo-bypassing ref: {ref}")
 
     # 4. gateway resilience: the local execution deadline must fit a reasoning
-    #    model. A 15s deadline makes every spark request look like a dead leg.
+    #    model, and the breaker must skip a dead promoted leg fast.
     if not args.offline:
         cfg = resilience_config()
         if cfg is not None:
@@ -252,6 +253,16 @@ def main(argv=None) -> int:
                     f"requestQueue.maxWaitMs={max_wait} is below "
                     f"{MIN_REASONING_MAX_WAIT_MS}: reasoning legs get killed mid-think "
                     "(PATCH /api/resilience {\"requestQueue\":{\"maxWaitMs\":180000}})")
+            threshold = (((cfg.get("providerBreaker") or {}).get("apikey") or {})
+                         .get("failureThreshold"))
+            probes.append({"surface": "omniroute",
+                           "model": "providerBreaker.apikey.failureThreshold",
+                           "status": threshold, "detail": "fast-skip threshold"})
+            if isinstance(threshold, (int, float)) and threshold > MAX_FAST_SKIP_THRESHOLD:
+                drift.append(
+                    f"providerBreaker.apikey.failureThreshold={threshold} is above "
+                    f"{MAX_FAST_SKIP_THRESHOLD}: a permanently-failing promoted leg "
+                    "(a 403 free promo) is retried on every request")
 
     # 5. live probes
     if not args.offline:
@@ -277,7 +288,9 @@ def main(argv=None) -> int:
         print(f"combos: {len(names)} ({', '.join(names)})")
         if probes:
             for p in probes:
-                if p["surface"] == "omniroute" and p["model"] == "requestQueue.maxWaitMs":
+                if p["surface"] == "omniroute" and p["model"] in (
+                        "requestQueue.maxWaitMs",
+                        "providerBreaker.apikey.failureThreshold"):
                     continue
                 if p["status"] == 200:
                     flag = "ok  "

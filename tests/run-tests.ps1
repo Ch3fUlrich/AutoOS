@@ -3306,11 +3306,14 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-tier1,omniroute-tier1-clean,omniroute-spark-1.3-contributor,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3'
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-tier1,omniroute-tier1-clean,omniroute-spark-1.3-contributor,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3,openrouter-muse-spark-1.3-contributor'
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
     Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
     foreach ($t in $spec.tiers) {
-        Assert-True ($t.model -match '^openai/(tier[123](-clean|-credit)?|rag|gemini-3\.8-flash|deepseek-v4\.1-flash|spark-1\.3-contributor)$') "$($t.id) model is not openai/tierN, openai/rag, a pinned route or a credit chain"
+        # Gateway tiers carry the openai/ transport prefix; a DIRECT provider
+        # profile (the effort-ladder surface for spark) names the provider
+        # itself, e.g. openrouter/<model>.
+        Assert-True ($t.model -match '^(openai/(tier[123](-clean|-credit)?|rag|gemini-3\.8-flash|deepseek-v4\.1-flash|spark-1\.3-contributor)|openrouter/meta/muse-spark-1\.3-contributor)$') "$($t.id) model is neither a gateway tier nor a known direct route"
     }
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
@@ -3329,10 +3332,11 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
         Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue
         Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue
         'omniroute: test-omni-key' | Out-File $keys -Encoding utf8
+        'openrouter: test-or-key' | Out-File $keys -Append -Encoding utf8
         'LITELLM_MASTER_KEY=test-lit-key' | Out-File $litEnv -Encoding utf8
         & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys --litellm-env $litEnv *> $null
         Assert-Equal $LASTEXITCODE 0 'generator failed'
-        foreach ($t in @('omniroute-tier1', 'omniroute-tier3-clean', 'litellm-tier2')) {
+        foreach ($t in @('omniroute-tier1', 'omniroute-tier3-clean', 'litellm-tier2', 'openrouter-muse-spark-1.3-contributor')) {
             Assert-True (Test-Path (Join-Path $tmpA "profiles\$t.json")) "$t.json missing"
         }
         $t1 = Get-Content (Join-Path $tmpA 'profiles\omniroute-tier1.json') -Raw | ConvertFrom-Json
@@ -3342,6 +3346,11 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
         Assert-Equal $lt.model 'openai/tier1'
         Assert-Equal $lt.base_url 'http://host.docker.internal:4000/v1'
         Assert-Equal $lt.api_key 'test-lit-key'
+        # A direct-provider tier takes its OWN key and endpoint, not the gateway's.
+        $direct = Get-Content (Join-Path $tmpA 'profiles\openrouter-muse-spark-1.3-contributor.json') -Raw | ConvertFrom-Json
+        Assert-Equal $direct.api_key 'test-or-key'
+        Assert-Equal $direct.base_url 'https://openrouter.ai/api/v1'
+        Assert-Equal $direct.model 'openrouter/meta/muse-spark-1.3-contributor'
     } finally {
         if ($null -eq $realOmniKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
         else { $env:AUTOOS_OMNIROUTE_KEY = $realOmniKey }
@@ -3819,18 +3828,30 @@ Test-Case 'openhands launch is detached, probed and stale-settings safe' {
     # -it fails without a TTY and foreground never returns (the old script
     # printed the URL even when nothing started); schema_version 6 settings
     # 500 the current image. Both fixed 2026-09-21 - pin the shape here.
+    # 2026-09-23: the guard repairs in place instead of deleting (old shape
+    # moved the whole file aside and lost the user's profiles/keys). It must
+    # target agent_settings.schema_version (top-level stays 2-3 on broken
+    # files too) and strip the agent-canvas `enabled` MCP keys.
     foreach ($f in @('configuration\start-stack.ps1', 'configuration\start-stack.sh')) {
         $text = Get-Content (Join-Path $Root $f) -Raw
         Assert-True ($text -match 'docker run -d ') "$f is not detached"
         Assert-True ($text -notmatch 'docker run -it') "$f still uses -it"
-        Assert-True ($text -match 'schema_version') "$f has no stale-settings guard"
-        Assert-True ($text -match 'autoos-backup') "$f deletes settings without backup"
+        Assert-True ($text -match 'agent_settings.schema_version|agent_settings.*schema_version') "$f checks the wrong schema_version level"
+        Assert-True ($text -match 'autoos-backup') "$f repairs settings without backup"
         Assert-True ($text -match 'docker logs openhands-app') "$f prints the URL without a probe behind it"
         # Tier profiles re-project from the spec on every start (never stale).
         Assert-True ($text -match 'sync-openhands-profiles') "$f never syncs tier profiles"
-        # Only versions NEWER than the image (6+) move aside: a live v3 file
-        # serves fine, so a blanket "!= 4" nuke would destroy working configs.
-        Assert-True ($text -match 'ge 6|>= 6|>=6') "$f nukes non-4 versions indiscriminately"
+        # Repair, not delete: clamping keeps the user's profiles/keys.
+        # Only versions NEWER than the image (> 4) clamp down: older
+        # payloads keep theirs so the image's own migrations still run.
+        Assert-True ($text -match '> 4|-gt 4') "$f clamps at the wrong version"
+        # The agent-canvas `enabled` MCP key 500s the image (extra_forbidden).
+        Assert-True ($text -match 'enabled') "$f does not strip the enabled MCP key"
+        # Repair, not delete, for parseable files: the version-mismatch path
+        # must clamp in place (the only Remove-Item on settings.json is the
+        # unparseable-file fallback, where there is nothing to preserve).
+        Assert-True ($text -match 'schema_version.?\]? ?= 4') "$f does not clamp the version in place"
+        Assert-True (([regex]::Matches($text, 'Remove-Item \$ohSettings|rm -f "\$oh_settings"')).Count -le 1) "$f deletes parseable user settings"
     }
     Pass
 }
@@ -4129,6 +4150,21 @@ Test-Case 'provider status reads keys but never exposes them' {
     } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case 'opencode.jsonc is valid JSON once comments are stripped' {
+    # Every client loads this file, and one unbalanced brace makes ALL of them
+    # fall back to defaults while the suite's other assertions (which read it as
+    # text) stay green. Measured 2026-09-23: a provider block was added without
+    # its closing brace and nothing failed.
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $parsed = $null
+    $err = $null
+    try { $parsed = $stripped | ConvertFrom-Json } catch { $err = $_.Exception.Message }
+    Assert-True ($null -ne $parsed) "opencode.jsonc does not parse: $err"
+    Assert-True (-not [string]::IsNullOrWhiteSpace($parsed.model)) 'no default model'
+    Assert-True ($null -ne $parsed.providers.omniroute) 'omniroute provider missing'
+}
+
 Test-Case 'the router declarations do not drift from each other' {
     # tools/audit-router.py --offline compares combos.json against
     # opencode.jsonc, both Zed writers and the OpenHands tier profiles, and
@@ -4140,13 +4176,17 @@ Test-Case 'the router declarations do not drift from each other' {
     Assert-Equal $LASTEXITCODE 0 "audit-router drift: $out"
 }
 
-Test-Case 'apply sets the resilience deadline for reasoning legs' {
+Test-Case 'apply sets the resilience deadline and the fast-skip breaker' {
     # A 15s requestQueue.maxWaitMs kills every spark request mid-think and the
     # chain then reports a different leg's error (see docs/verification.md).
+    # The breaker threshold must stay low so the free promo leg is skipped
+    # after two failures instead of being retried on every request.
     foreach ($f in @('configuration\omniroute\apply.ps1')) {
         $text = Get-Content (Join-Path $Root $f) -Raw
         Assert-True ($text -match 'maxWaitMs') "$f never sets maxWaitMs"
         Assert-True ($text -match '180000') "$f does not use the reasoning-safe value"
+        Assert-True ($text -match 'providerBreaker') "$f never sets the fast-skip breaker"
+        Assert-True ($text -match 'failureThreshold\s*=\s*2') "$f does not use the 2-failure threshold"
     }
 }
 
