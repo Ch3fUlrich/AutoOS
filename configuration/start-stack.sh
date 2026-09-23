@@ -45,18 +45,50 @@ case "$APP" in
         # OpenHands itself on first conversation - do not pin it.
         # The client key is exported and inherited with `-e LLM_API_KEY` (no
         # value on the command line, so `ps` never shows it).
-        # Stale user settings break the current image (measured 2026-09-21:
-        # a persisted schema_version 6 while the image supports 4 -> /api
-        # settings 500; meanwhile a live version-3 file serves fine, so only
-        # versions NEWER than the image (6+) and unparseable files move
-        # aside - with a backup, never a delete. OpenHands regenerates.
+        # User settings drift newer than the image (measured 2026-09-23:
+        # agent-canvas 1.20 writes agent_settings.schema_version 6 + an
+        # `enabled` key on every MCP server, while the
+        # docker.openhands.dev/openhands/openhands:latest image supports
+        # version 4 and rejects `enabled` with extra_forbidden -> every
+        # /api settings route 500s. Repair in place (with a backup, never
+        # a delete): clamp the version DOWN to 4 (older payloads keep
+        # theirs so the image's own migrations still run) and strip the
+        # `enabled` keys. Unparseable files still move aside - OpenHands
+        # regenerates. NOTE: the version lives under agent_settings, NOT
+        # top-level schema_version (top stays 2-3 on both good and bad
+        # files, so checking the top level misses the breakage).
         oh_settings="$HOME/.openhands/settings.json"
         if [[ -f "$oh_settings" ]]; then
-            oh_ver="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("schema_version", ""))' "$oh_settings" 2>/dev/null || echo PARSE-FAIL)"
-            if [[ "$oh_ver" == "PARSE-FAIL" ]] || { [[ "$oh_ver" =~ ^[0-9]+$ ]] && (( oh_ver >= 6 )); }; then
+            oh_repair_rc=0
+            python3 - "$oh_settings" <<'PY' || oh_repair_rc=$?
+import json, shutil, sys, datetime
+path = sys.argv[1]
+try:
+    doc = json.load(open(path, encoding="utf-8"))
+except Exception:
+    print("Unparseable OpenHands settings.")
+    sys.exit(2)
+agent = doc.get("agent_settings") if isinstance(doc.get("agent_settings"), dict) else {}
+ver = agent.get("schema_version")
+has_enabled = any(isinstance(s, dict) and "enabled" in s for s in (agent.get("mcp_config") or {}).values())
+if (isinstance(ver, int) and ver > 4) or has_enabled:
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    shutil.copy2(path, path + ".autoos-backup-" + ts)
+    if isinstance(ver, int) and ver > 4:
+        agent["schema_version"] = 4
+    for srv in (agent.get("mcp_config") or {}).values():
+        if isinstance(srv, dict):
+            srv.pop("enabled", None)
+    json.dump(doc, open(path, "w", encoding="utf-8"), indent=2)
+    print("Repaired OpenHands settings (agent_settings.schema_version %s -> 4, stripped enabled keys; backup kept)." % ver)
+sys.exit(0)
+PY
+            if [[ $oh_repair_rc -eq 2 ]]; then
                 cp "$oh_settings" "$oh_settings.autoos-backup-$(date +%Y%m%d-%H%M%S)"
                 rm -f "$oh_settings"
-                echo "Stale OpenHands settings (schema_version $oh_ver) moved aside."
+                echo "Unparseable OpenHands settings moved aside (OpenHands regenerates)."
+            elif [[ $oh_repair_rc -ne 0 ]]; then
+                echo "OpenHands settings repair reported a problem (exit $oh_repair_rc) - continuing anyway."
             fi
         fi
         # Re-project the tier profiles from the spec on every start: a rotated

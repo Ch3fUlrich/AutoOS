@@ -70,22 +70,45 @@ switch ($App) {
         # is chosen by OpenHands itself on first conversation - do not pin it.
         # The client key is exported and inherited with `-e LLM_API_KEY` (no
         # value on the command line, so `ps` never shows it).
-        # Stale user settings break the current image (measured 2026-09-21:
-        # a persisted schema_version 6 while the image supports 4 -> /api
-        # settings 500; meanwhile a live version-3 file serves fine, so only
-        # versions NEWER than the image (6+) and unparseable files move
-        # aside - with a backup, never a delete. OpenHands regenerates.
+        # User settings drift newer than the image (measured 2026-09-23:
+        # agent-canvas 1.20 writes agent_settings.schema_version 6 + an
+        # `enabled` key on every MCP server, while the
+        # docker.openhands.dev/openhands/openhands:latest image supports
+        # version 4 and rejects `enabled` with extra_forbidden -> every
+        # /api settings route 500s. Repair in place (with a backup, never
+        # a delete): clamp the version DOWN to 4 (older payloads keep
+        # theirs so the image's own migrations still run) and strip the
+        # `enabled` keys. Unparseable files still move aside - OpenHands
+        # regenerates. NOTE: the version lives under agent_settings, NOT
+        # top-level schema_version (top stays 2-3 on both good and bad
+        # files, so checking the top level misses the breakage).
         $ohSettings = Join-Path $env:USERPROFILE '.openhands\settings.json'
         if (Test-Path $ohSettings) {
-            try { $ohVer = (Get-Content $ohSettings -Raw -Encoding utf8 | ConvertFrom-Json).schema_version }
-            catch { $ohVer = 'unparseable' }
-            $ohNum = 0
-            if ("$ohVer" -match '^\d+$') { $ohNum = [int]"$ohVer" }
-            if ($ohVer -eq 'unparseable' -or $ohNum -ge 6) {
+            try {
+                $ohJson = Get-Content $ohSettings -Raw -Encoding utf8 | ConvertFrom-Json
+                $ohAgentVer = $ohJson.agent_settings.schema_version
+                $ohHasEnabled = @($ohJson.agent_settings.mcp_config.PSObject.Properties.Value |
+                    Where-Object { $_.PSObject.Properties.Name -contains 'enabled' }).Count -gt 0
+                $ohNum = 0
+                if ("$ohAgentVer" -match '^\d+$') { $ohNum = [int]"$ohAgentVer" }
+                if ($ohNum -gt 4 -or $ohHasEnabled) {
+                    $backup = "$ohSettings.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+                    Copy-Item $ohSettings $backup -Force
+                    if ($ohNum -gt 4) { $ohJson.agent_settings.schema_version = 4 }
+                    foreach ($srv in @($ohJson.agent_settings.mcp_config.PSObject.Properties.Value)) {
+                        if ($null -ne $srv.PSObject.Properties['enabled']) { $srv.PSObject.Properties.Remove('enabled') }
+                    }
+                    # BOM-free on every host: PS 5.1 Set-Content -Encoding
+                    # utf8 emits a BOM, which breaks the container's json
+                    # parse (same reason the Zed writer asserts no BOM).
+                    [IO.File]::WriteAllText($ohSettings, ($ohJson | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+                    Write-Host "Repaired OpenHands settings (agent_settings.schema_version $ohAgentVer -> $($ohJson.agent_settings.schema_version), stripped enabled keys). Backup: $backup."
+                }
+            } catch {
                 $backup = "$ohSettings.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
                 Copy-Item $ohSettings $backup -Force
                 Remove-Item $ohSettings -Force
-                Write-Host "Stale OpenHands settings (schema_version $ohVer) moved aside to $backup."
+                Write-Host "Unparseable OpenHands settings moved aside to $backup."
             }
         }
         # Re-project the tier profiles from the spec on every start: a rotated
