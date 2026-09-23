@@ -114,32 +114,83 @@ Rule: a candidate enters a combo only after an authenticated leg-probe
 (`simulate --explain` then one real chat). Until then it stays in this
 table, not in `combos.json`.
 
-## E. Proposed free-provider additions (researched 2026-09-23, NOT wired)
+## E. Proposed free-provider additions (researched + probed 2026-09-23)
 
-Live gateway state: 13 connections active (cerebras, cheaperinference,
+Live gateway state: 13 configured connections (cerebras, cheaperinference,
 cloudflare-ai, cohere, deepseek, gemini, groq, huggingface, mistral,
-muse-code, opencode-zen, openrouter, sambanova). `muse-code` is registered
-but unreferenced since the openrouter-first removal — delete it with
-`omniroute providers remove muse-code` once no combo needs it (all green
-today). `:20128/v1/models` needs a client key (401 unauthenticated), so leg
-spellings below are CANDIDATES from `agy models` + provider-id convention —
-probe before curating (a wrong guess becomes a phantom leg).
+muse-code, opencode-zen, openrouter, sambanova) + 2 added this session
+(`zcode`, `opencode` — see probe results). `muse-code` is registered
+but unreferenced — delete it with `omniroute providers remove muse-code`
+once no combo needs it (all green today).
 
-| Provider | OmniRoute id / connect | Models behind it (behind login) | Proposed legs | Needs from you |
+### Probed 2026-09-23 (commands + outcomes)
+
+- `omniroute providers add zcode/opencode --no-credential --yes` → both
+  connections created. `providers test` FAILS both ("no API key
+  configured"): `zcode` (GLM Coding Plan) needs a plan credential despite
+  the `noauth` tag; `opencode` (OpenCode Free pool) likewise fails the
+  key check. `omniroute models zcode|qoder|claude` → "No models found"
+  (catalog populates per-connection only after auth).
+- `devin-cli-agentic` / alias `dva` → `providers add` rejects both
+  ("Invalid provider" / "Invalid request"): the Devin bridge onboards via
+  dashboard/OAuth, not CLI add. Unblocked, not installable from here.
+- `omniroute models --search "opus 4"` → Opus 4.5–4.8 rows exist ONLY via
+  `cinf` (CheaperInference resale = paid) and opencode-zen. No
+  qwen3.8-max, no glm-5.3 in the catalog — dashboard free-ranking models
+  appear only after their connections authenticate.
+- `omniroute setup-claude --dry-run` → needs `--api-key` (401 without):
+  run `omniroute setup-claude --dry-run --api-key <AUTOOS_OMNIROUTE_KEY>`
+  yourself (key from `api-keys.yml`, never chat/paste it here).
+- Local `agy models` (your login): gemini-3.8/3.7/3.6-flash
+  (low/med/high), gemini-3.1-pro, claude-sonnet-4.6 (Thinking),
+  claude-opus-4.6-thinking, gpt-oss-120b-medium. NO Opus 4.7 (that's the
+  Devin bridge, separate connection).
+
+### CLI Code vs CLI Agents vs ACP (OmniRoute CLI-TOOLS.md, v3.8.50)
+
+- **CLI Code** (26 tools): coding CLIs pointed AT OmniRoute
+  (`ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` → `:20128`). claude, codex,
+  opencode all `full` base-URL support with `setup-*` recipes
+  (`setup-claude`, `setup-codex`, `setup-opencode`, all `--dry-run`able)
+  plus the zero-write launcher `omniroute run <target>`. Recipe for the
+  Claude subscription: `setup-claude` writes `~/.claude/settings.json`
+  env — automatable in `apply.*` style (dry-run first, backup, idempotent
+  merge). Antigravity is `none`/`mitm`: it CANNOT point at OmniRoute.
+- **CLI Agents** (10 tools: openclaw, goose, open-interpreter, warp...):
+  same flow, broader scope — autonomous (often long-running) agents using
+  OmniRoute as their model backend. Use for unattended lanes that outlive
+  one CLI session.
+- **ACP Agents** (reverse flow): OmniRoute SPAWNS claude/codex/opencode/
+  aider/qwen/goose via stdio/ACP as backend engines
+  (`acpSpawnable: true`). Antigravity is NOT spawnable — so Antigravity's
+  only integration is the `agy` OAuth provider below.
+
+### Connection matrix (what each step needs)
+
+| Provider | OmniRoute id / connect | Models behind it | Proposed legs | Needs from you |
 |---|---|---|---|---|
-| Antigravity CLI | `agy` (oauth, free) — `omniroute providers auth agy`, Google-login popup, then `providers test agy` | Claude Opus 4.6 Thinking, Sonnet 4.6 Thinking, Gemini 3.8-flash-high/med/low, 3.1 Pro, GPT-OSS-120B (per local `agy models`) | t1: `agy/claude-opus-4.6-thinking` after zen-free (free frontier reasoning); t2: `agy/gemini-3.8-flash-high` beside gemini free | run the auth flow (interactive once); your agy CLI login is separate — the gateway needs its own OAuth connection |
-| Qoder | `qoder` (oauth, free) — `providers auth qoder` | Qwen3.8-Max-Preview (per dashboard ranking) | t2/t3 qwen overflow beside groq/cerebras | run the auth flow |
-| Devin CLI Agentic Bridge | `devin-cli-agentic` (noauth!) | Claude Opus 4.7 High (per dashboard ranking) | t1 candidate after zen-free — highest reasoning ceiling if it probes OK | none to connect; needs an authenticated leg-probe (`simulate` then one chat) |
-| ZCode GLM Coding Plan | `zcode` (noauth) | GLM 5.3 Max | t2/t3 GLM overflow beside cheapinference glm | none to connect; needs leg-probe |
-| OpenCode Free | `opencode` (noauth, free pool) | rotating free set | auto/* replacement or t3 tail | none to connect; needs leg-probe |
-| Kilo Code / Codex / Copilot | `kilocode` / `codex` / `github` (oauth) | subscription models | only if you hold those subscriptions | tell me which subscriptions you have |
+| Antigravity CLI | `agy` (oauth, free) — `omniroute providers auth agy` (browser popup) or `omniroute oauth start --provider antigravity`, then `providers test agy` | Opus 4.6 Thinking, Sonnet 4.6 Thinking, Gemini 3.8-flash-high (per local login) | t1: `agy/claude-opus-4.6-thinking` after zen-free; t2: `agy/gemini-3.8-flash-high` | run the auth flow (interactive once); the gateway needs its OWN OAuth connection, your agy CLI login is not reused automatically |
+| Claude Code subscription | `claude`/`cc` (oauth) — `omniroute providers auth claude-code` (browser flow) | subscription models (Opus/Sonnet per plan) | t1 overflow after openrouter paid (subscription = $0 marginal) | run the auth flow; then wire `setup-claude` into the pipeline |
+| Qoder | `qoder` (oauth, free) — `providers auth qoder` | Qwen3.8-Max-Preview (per dashboard ranking) | t2/t3 qwen overflow | run the auth flow |
+| GitHub Copilot | `github`/`copilot` (oauth, device flow) | plan picker: GPT-5.5, GPT-5.3-Codex, Claude Sonnet/Opus 5, Gemini 3.8 Flash, Kimi K3 (docs 2026-09) | t2/t3 overflow per picked model | a GitHub Copilot SEAT (see M365 note) + device flow |
+| Devin CLI Agentic Bridge | `devin-cli-agentic` (noauth) | Opus 4.7 High (per dashboard) | t1 candidate — highest ceiling if it probes OK | CLI add rejected; onboard via dashboard, then I probe legs |
+| ZCode GLM Coding Plan | `zcode` (noauth tag, key needed in practice) | GLM 5.3 Max | t2/t3 GLM overflow | a ZCode/GLM plan credential (connection added, test FAILS without it) |
+| OpenCode Free | `opencode` (noauth pool) | rotating free set | auto/* replacement or t3 tail | connection added, test FAILS key check — needs a live chat probe with client key to prove the pool serves |
+| Kilo/Codex/Cursor | `kilocode`/`codex`/`cursor-cli` | subscription models | only with those subscriptions | tell me which you hold |
 
 Rules for any addition: OAuth/subscription bridges proxy a PERSONAL
 subscription (single-user proxy tolerated, resale is not — same ToS note as
 `api-keys.md`); NEVER into `*-clean` (training/logging terms unknown);
-one authenticated leg-probe per leg before it enters `combos.json`;
-`meta`-style unregistered ids stay out of `apply.*` maps.
+one authenticated leg-probe per leg before it enters `combos.json`.
 
+### M365 vs GitHub Copilot (your question)
+
+No — not the same product. **Microsoft 365 Copilot** (BizChat, ~$30/seat on
+top of M365) is Graph-grounded office work (GPT-5.x + optional Claude picker
+for M365 users, Word/Excel/Teams). **GitHub Copilot** (Pro $10 / Business
+$19) is the dev tool with the multi-model picker above. OmniRoute's
+`github` provider is the latter (device flow). With M365-only and no GitHub
+seat, that row is closed — confirm which seat you hold.
 ## F. How to finish this evaluation
 
 1. `omniroute combos list` (authenticated) → append any live-extra combos to
