@@ -1,0 +1,93 @@
+// Structured-memory schema for the `memory` graph.
+// Typed nodes + edges (see skills/structured-memory/references/schema.md).
+// Vector(768) matches the embedding provider **nomic-embed-text** (768-dim; see
+// cluster/cluster.yaml). NOTE: bge-m3 is 1024-dim and is NOT this graph's
+// embedder — don't swap it in. Verified: the
+// local stack and the production central server both store 768-dim vectors and
+// search_decisions ranks against them. Populate stored vectors with
+// scripts/populate-embeddings.py; with the `mock` provider stored vectors are
+// empty and search falls back to graph traversal + scalar indexes.
+
+// One Project node per graph, slug == the graph id == the repository folder name.
+// `repository` is the canonical clone URL, and it is what makes the mapping
+// INVERTIBLE: graphs_list answers "which names exist", and this answers "is the
+// graph I am connected to actually this repository's". That check is the only
+// cheap detector for the failure CLAUDE.md documents at length -- a same-named
+// user-scope MCP server silently outranking a repo's .mcp.json, so the bridge
+// answers confidently about the wrong graph. Optional, because adding a
+// non-nullable property to an existing node is rejected as unsupported; backfill
+// via mutate, then tighten in a later apply if it is ever worth it.
+node Project {
+  slug: String
+  name: String?
+  path: String?
+  summary: String?
+  repository: String?
+  @key(slug)
+}
+
+node Decision {
+  slug: String
+  title: String
+  rationale: String?
+  status: enum(proposed, accepted, superseded, deprecated)
+  date: String?
+  embedding: Vector(768)? @embed("rationale")
+  @key(slug)
+  @index(status)
+}
+
+node Rule {
+  slug: String
+  statement: String
+  severity: enum(must, should)
+  @key(slug)
+  @index(severity)
+}
+
+node Preference {
+  slug: String
+  statement: String
+  scope: String
+  @key(slug)
+  @index(scope)
+}
+
+node Convention {
+  slug: String
+  name: String
+  example: String?
+  @key(slug)
+}
+
+node Component {
+  slug: String
+  name: String
+  kind: String?
+  location: String?
+  @key(slug)
+}
+
+node Task {
+  slug: String
+  title: String
+  state: String
+  @key(slug)
+}
+
+// ── hub edges: attach a node to its Project (required so it is NOT "global") ──
+edge DecidedIn: Decision -> Project
+edge ConstrainsProject: Rule -> Project
+edge AppliesTo: Convention -> Project
+edge PartOf: Component -> Project
+edge Tracks: Task -> Project
+
+// ── relational edges: connect knowledge nodes TO EACH OTHER, not just the hub.
+//    Populate these so the graph forms real clusters instead of a star — a rule
+//    to the component it governs, a decision to the component it changes, etc.
+edge ConstrainsComponent: Rule -> Component      // a rule governs a specific component
+edge Affects: Decision -> Component              // a decision changes a component
+edge Addresses: Task -> Component                // a task works on a component
+edge Implements: Task -> Decision                // a task realizes a decision
+edge DependsOn: Component -> Component           // component depends on another
+edge Supersedes: Decision -> Decision            // a decision replaces an earlier one

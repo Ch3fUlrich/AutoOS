@@ -1,0 +1,2 @@
+{"type": "Preference", "data": {"slug": "mcp-first-nav", "statement": "Prefer Serena/Graphify/Omnigraph over brute-force file reads.", "scope": "global"}}
+{"type": "Preference", "data": {"slug": "tdd-default", "statement": "Write a failing test before implementation; red-green-refactor.", "scope": "global"}}

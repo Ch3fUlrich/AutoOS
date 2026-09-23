@@ -1,0 +1,147 @@
+# homelab.example.yaml — the ONLY place your site's facts live.
+#
+# Copy to homelab.yaml (gitignored) and describe YOUR homelab. Nothing in the
+# server or the skill names a host, user, product or path — they read this file.
+# If you find yourself wanting to hard-code something, add a field here instead.
+#
+# Point the server at it with HOMELAB_CONFIG=/path/to/homelab.yaml
+version: 1
+
+ssh:
+  # Identity the agent authenticates with. Using the alias (not a raw address)
+  # matters: a bare `ssh user@192.0.2.11` offers the DEFAULT key instead and fails
+  # with "Permission denied (publickey)", which looks like revoked access.
+  identity: ~/.ssh/homelab-agent
+  alias_template: "{host}-{role_alias}"   # how ~/.ssh/config aliases are named
+  batch_mode: true                        # never hang on a password prompt
+  connect_timeout: 8
+
+# ── Roles are CAPABILITIES, not a hierarchy ──────────────────────────────────
+# The most common mistake is assuming "more privileged" is always the right
+# choice. Each role can do things the others cannot; picking wrong produces a
+# MISLEADING error rather than a clear one (see `diagnostics`).
+roles:
+  workstation:
+    user: alice
+    role_alias: vm
+    capabilities: [docker_socket, docker_host_ssh]
+    sudo: {mode: none}
+    notes: "In the docker group, so plain `docker` works. Cannot sudo."
+
+  operator:
+    user: ops-agent
+    role_alias: ops
+    capabilities: [sudo_scoped, service_control]
+    sudo:
+      mode: scoped
+      binaries: ["/usr/bin/docker", "/usr/bin/systemctl"]
+    notes: "NOT in the docker group — a bare `docker` fails; prefix sudo."
+
+  privileged:
+    user: svc-agent
+    role_alias: svc
+    capabilities: [sudo_all, read_host_proc, read_journal, edit_system_files]
+    sudo: {mode: all}
+    recorded:                       # omit if you do not record this role
+      io_log: /var/log/sudo-io/svc-agent/
+      audit_key: svc_agent_exec
+    use_when: "only what the lesser roles cannot do — and say why"
+
+# ── Intent -> capability. The server picks the role from this. ───────────────
+# Add your own intents; the names are yours, only `needs` is meaningful.
+intents:
+  container_list:    {needs: docker_socket,     summary: "list containers"}
+  container_logs:    {needs: docker_socket,     summary: "read container logs"}
+  service_restart:   {needs: service_control,   summary: "restart a service"}
+  read_journal:      {needs: read_journal,      summary: "read the system journal"}
+  inspect_host_proc: {needs: read_host_proc,    summary: "inspect /proc from the host"}
+  edit_system_file:  {needs: edit_system_files, summary: "edit /etc, mounts, packages"}
+
+# ── Inventory ────────────────────────────────────────────────────────────────
+hosts:
+  - name: app1
+    address: 192.0.2.11
+    roles: [workstation, operator, privileged]
+    shell: bash
+    status: ok
+    tags: [linux, docker]
+    notes: "Application host"
+
+  - name: storage
+    address: 192.0.2.21
+    login_user: root          # a host where only one account exists
+    roles: []                 # no role accounts here
+    # A single-account host can still declare what that account may do, so an
+    # intent is not silently ignored. Omit to allow anything (with a warning).
+    login_capabilities: [docker_socket, read_journal]
+    shell: bash
+    status: ok
+    tags: [storage]
+    notes: "Serves storage to other hosts"
+    # ENFORCED, per host. A global safety.deny_pattern for `apt` would stop
+    # updates on every host; this stops them only where a restart takes
+    # dependents down with it. plan() refuses the intents, run() the patterns.
+    forbid:
+      reason: "Serves storage other hosts mount. Updates, service restarts and reboots are never done by agents — a human does them in a maintenance window."
+      intents: [edit_system_file, service_restart]
+      patterns: ["apt", "apt-get", "dpkg", "dist-upgrade", "unattended-upgrade", "reboot", "shutdown", "systemctl restart", "systemctl stop"]
+
+  - name: firewall
+    # Not every host follows ssh.alias_template. Set `alias:` when the ssh_config
+    # entry is named differently; omit both and a role-less host is reached as
+    # login_user@address.
+    alias: fw
+    address: 192.0.2.1
+    login_user: root
+    roles: []
+    login_capabilities: [service_control]
+    shell: csh                # non-bash login shell
+    status: ok
+    quirks: [csh_shell, icmp_blocked]
+    tags: [network]
+
+# ── Named quirks, referenced by hosts ────────────────────────────────────────
+quirks:
+  csh_shell:
+    symptom: "Illegal variable name. / Ambiguous output redirect"
+    means: "A SUCCESSFUL login whose shell cannot parse bash syntax — not an auth failure."
+    workaround: "Wrap it: ssh {alias} \"sh -c '<command>'\""
+  icmp_blocked:
+    symptom: "ping reports unreachable although the host is up"
+    means: "ICMP is filtered here."
+    workaround: "Probe with: ssh {alias} true"
+
+# ── Error decoder. These are SSH/sudo/Docker behaviours, not site facts, ─────
+# ── so the defaults port to any homelab. Extend with your own.
+diagnostics:
+  - match: "permission denied while trying to connect to the docker API"
+    means: "The login user is not in the docker group."
+    fix: "Use a role with the docker_socket capability, or prefix sudo."
+  - match: "sudo: a terminal is required to read the password"
+    means: "The command is OUTSIDE this role's scoped sudo. It is NOT a TTY problem — no -t/-S will help."
+    fix: "Use a role whose sudo mode is `all`."
+  - match: "Permission denied (publickey)"
+    means: "The default key was offered — usually a raw address was used instead of the alias."
+    fix: "Use the configured alias, or pass -i <ssh.identity>."
+  - match: "kex_exchange_identification: Connection reset"
+    means: "sshd MaxStartups throttling from many short-lived connections."
+    fix: "Enable ControlMaster multiplexing for that alias."
+
+# ── Deliberately out of scope ────────────────────────────────────────────────
+unreachable:
+  - name: hypervisor web UI
+    reason: "No agent credentials, by policy — genuinely manual."
+
+# ── Never target these with fleet-wide operations ───────────────────────────
+exclusions:
+  - host: storage
+    from: "fleet inventory group"
+    reason: "Other hosts mount it; a fleet reboot or prune would take dependents down."
+
+# ── Guardrails for homelab_run ───────────────────────────────────────────────
+safety:
+  allow_run: true
+  # Refused before anything is sent. Substring match, case-insensitive.
+  deny_patterns: ["rm -rf /", "mkfs", "dd if=/dev/", ":(){", "shutdown", "reboot"]
+  # Roles that require an explicit `reason` argument before they will run.
+  require_reason_for: [privileged]

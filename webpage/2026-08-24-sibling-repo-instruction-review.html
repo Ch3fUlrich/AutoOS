@@ -1,0 +1,802 @@
+<title>Instruction Repair Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
+
+<style>
+:root {
+  --ground: #F6F7F8; --surface: #FFFFFF; --sunken: #EDEFF1;
+  --ink: #15181C; --ink-soft: #3D454E; --muted: #646E7A;
+  --rule: #DDE1E5; --rule-strong: #C3CAD1;
+  --accent: #0E5A61; --accent-soft: #E1EEEF;
+  --drift: #A63D22; --drift-soft: #F7E7E1;
+  --warn: #8A6A16; --warn-soft: #F6EEDA;
+  --ok: #2F6B45; --ok-soft: #E3F0E8;
+  --measure: 71ch;
+  --step--1: clamp(0.78rem, 0.76rem + 0.1vw, 0.84rem);
+  --step-0: clamp(1rem, 0.97rem + 0.16vw, 1.09rem);
+  --step-1: clamp(1.2rem, 1.13rem + 0.34vw, 1.42rem);
+  --step-2: clamp(1.5rem, 1.36rem + 0.66vw, 1.95rem);
+  --step-3: clamp(2rem, 1.72rem + 1.3vw, 2.9rem);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0F1214; --surface: #171B1E; --sunken: #1F2428;
+    --ink: #E4E8EB; --ink-soft: #C3CAD1; --muted: #96A0AA;
+    --rule: #2A3034; --rule-strong: #3C4449;
+    --accent: #57C4CB; --accent-soft: #143034;
+    --drift: #E28A6B; --drift-soft: #33201A;
+    --warn: #D4B45C; --warn-soft: #2E2718;
+    --ok: #6FBF8E; --ok-soft: #16291E;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0F1214; --surface: #171B1E; --sunken: #1F2428;
+  --ink: #E4E8EB; --ink-soft: #C3CAD1; --muted: #96A0AA;
+  --rule: #2A3034; --rule-strong: #3C4449;
+  --accent: #57C4CB; --accent-soft: #143034;
+  --drift: #E28A6B; --drift-soft: #33201A;
+  --warn: #D4B45C; --warn-soft: #2E2718;
+  --ok: #6FBF8E; --ok-soft: #16291E;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--ground); color: var(--ink);
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-size: var(--step-0); line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: clamp(1.5rem,4vw,3.5rem) clamp(1.1rem,4vw,2.5rem) 5rem; }
+h1,h2,h3,h4,.label,.chip,.stat-n,.fid { font-family: "IBM Plex Sans Condensed","Helvetica Neue",Arial,sans-serif; }
+code,kbd,.mono { font-family: "IBM Plex Mono",ui-monospace,Consolas,monospace; }
+
+.masthead { border-bottom: 2px solid var(--ink); padding-bottom: 1.1rem; display: flex; flex-direction: column; gap: 0.7rem; }
+.eyebrow { display: flex; flex-wrap: wrap; gap: 0.5rem 1.1rem; align-items: baseline;
+  font-family: "IBM Plex Mono",monospace; font-size: var(--step--1); letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted); }
+.eyebrow b { color: var(--accent); font-weight: 600; }
+h1 { font-size: var(--step-3); font-weight: 700; line-height: 1.02; letter-spacing: -0.02em; margin: 0; text-wrap: balance; }
+.standfirst { max-width: var(--measure); font-size: var(--step-1); line-height: 1.45; color: var(--ink-soft); margin: 0; text-wrap: pretty; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 1px;
+  background: var(--rule); border: 1px solid var(--rule); margin: 2.2rem 0 0; }
+.stat { background: var(--surface); padding: 0.95rem 1.1rem 1rem; display: flex; flex-direction: column; gap: 0.15rem; }
+.stat-n { font-size: var(--step-2); font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.stat-l { font-family: "IBM Plex Mono",monospace; font-size: var(--step--1); color: var(--muted); line-height: 1.35; }
+.stat.is-drift .stat-n { color: var(--drift); }
+.stat.is-warn .stat-n { color: var(--warn); }
+.stat.is-ok .stat-n { color: var(--ok); }
+
+section { margin-top: 3.4rem; }
+h2 { font-size: var(--step-2); font-weight: 700; letter-spacing: -0.015em; line-height: 1.1; margin: 0 0 0.2rem; text-wrap: balance; }
+.sec-head { border-bottom: 1px solid var(--rule-strong); padding-bottom: 0.6rem; margin-bottom: 1.6rem; }
+.sec-head p { margin: 0.45rem 0 0; max-width: var(--measure); color: var(--muted);
+  font-size: var(--step--1); font-family: "IBM Plex Mono",monospace; line-height: 1.5; }
+h3 { font-size: var(--step-1); font-weight: 600; letter-spacing: -0.01em; margin: 2.2rem 0 0.5rem; text-wrap: balance; }
+h4 { font-size: 1.02rem; font-weight: 600; margin: 1.5rem 0 0.35rem; }
+p { max-width: var(--measure); }
+p + p { margin-top: 0.85rem; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code { font-size: 0.88em; background: var(--sunken); padding: 0.08em 0.34em; border-radius: 2px; color: var(--ink); }
+
+.errata { border-top: 1px solid var(--rule-strong); }
+.row { display: grid; grid-template-columns: 9rem 1fr; gap: 0 1.6rem; padding: 1.35rem 0;
+  border-bottom: 1px solid var(--rule); align-items: start; }
+@media (max-width: 720px) { .row { grid-template-columns: 1fr; gap: 0.7rem; } }
+.gutter { display: flex; flex-direction: column; gap: 0.4rem; align-items: flex-start; }
+@media (max-width: 720px) { .gutter { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 0.5rem; } }
+.fid { font-size: var(--step-1); font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
+  color: var(--muted); letter-spacing: -0.01em; }
+.chip { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase;
+  padding: 0.2rem 0.44rem; border: 1px solid currentColor; line-height: 1.25; white-space: nowrap; }
+.chip.drift { color: var(--drift); background: var(--drift-soft); }
+.chip.stale { color: var(--warn); background: var(--warn-soft); }
+.chip.gap { color: var(--accent); background: var(--accent-soft); }
+.chip.done { color: var(--ok); background: var(--ok-soft); }
+.chip.park { color: var(--muted); background: var(--sunken); }
+.row-body > :first-child { margin-top: 0; }
+.row-body > :last-child { margin-bottom: 0; }
+.row-title { font-family: "IBM Plex Sans Condensed",sans-serif; font-size: 1.14rem; font-weight: 600;
+  line-height: 1.25; margin: 0 0 0.4rem; max-width: var(--measure); text-wrap: balance; }
+.row-body p { font-size: 0.96rem; }
+.loc { font-family: "IBM Plex Mono",monospace; font-size: var(--step--1); color: var(--muted);
+  margin: 0 0 0.55rem; max-width: none; }
+.loc b { color: var(--ink-soft); font-weight: 500; }
+.fix { margin-top: 0.7rem; padding: 0.6rem 0.85rem; background: var(--sunken);
+  border-left: 3px solid var(--accent); font-size: 0.93rem; max-width: var(--measure); }
+.fix.is-done { border-left-color: var(--ok); }
+.fix strong { font-family: "IBM Plex Sans Condensed",sans-serif; letter-spacing: 0.05em;
+  text-transform: uppercase; font-size: 0.7rem; color: var(--accent); display: block; margin-bottom: 0.15rem; }
+.fix.is-done strong { color: var(--ok); }
+.fix ul { margin: 0.4rem 0 0; }
+.fix li { font-size: 0.93rem; }
+
+.tablewrap { overflow-x: auto; margin: 1.1rem 0; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 0.92rem; }
+th, td { text-align: left; padding: 0.5rem 0.85rem 0.5rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: "IBM Plex Sans Condensed",sans-serif; font-weight: 600; font-size: 0.74rem;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--rule-strong); white-space: nowrap; }
+td.num { font-variant-numeric: tabular-nums; font-family: "IBM Plex Mono",monospace; }
+td.id { font-family: "IBM Plex Mono",monospace; font-weight: 500; white-space: nowrap; }
+td.was { color: var(--drift); }
+td.is { color: var(--ok); }
+
+pre { background: var(--sunken); border: 1px solid var(--rule); padding: 0.9rem 1rem;
+  overflow-x: auto; font-size: 0.85rem; line-height: 1.6; margin: 1rem 0; }
+pre code { background: none; padding: 0; font-size: inherit; }
+.del { color: var(--drift); }
+.ins { color: var(--ok); }
+.cmt { color: var(--muted); font-style: italic; }
+
+ul, ol { max-width: var(--measure); padding-left: 1.15rem; }
+li { margin-bottom: 0.32rem; }
+li::marker { color: var(--muted); }
+
+.callout { border: 1px solid var(--rule-strong); border-top: 3px solid var(--accent);
+  background: var(--surface); padding: 1.1rem 1.25rem; margin: 1.6rem 0; max-width: var(--measure); }
+.callout.is-ok { border-top-color: var(--ok); }
+.callout.is-drift { border-top-color: var(--drift); }
+.callout p:first-of-type { margin-top: 0; }
+.callout p:last-child { margin-bottom: 0; }
+.callout .label { display: block; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 0.4rem; }
+.callout.is-ok .label { color: var(--ok); }
+.callout.is-drift .label { color: var(--drift); }
+
+footer { margin-top: 4rem; padding-top: 1.2rem; border-top: 2px solid var(--ink);
+  font-family: "IBM Plex Mono",monospace; font-size: var(--step--1); color: var(--muted); line-height: 1.6; }
+</style>
+
+<div class="wrap">
+
+<p><em>Case study from a private repository; names removed.</em></p>
+
+<header class="masthead">
+  <div class="eyebrow">
+    <span>Repair plan</span>
+    <span>2026&#8209;08&#8209;24</span>
+    <span><b>sibling-analysis-repo</b> @ 2a43bcc</span>
+    <span><b>agent-skills</b> @ bf2adc1</span>
+  </div>
+  <h1>Instruction Repair Plan</h1>
+  <p class="standfirst">
+    Every instruction file that steers <code>sibling-analysis-repo</code>, audited against the
+    <code>agent-skills</code> skill set and against the live repo, servers and graph.
+    Twenty-nine items. <b>The blocker and all file-level items are applied;</b> what remains is
+    graph writes and four decisions that are yours.
+  </p>
+</header>
+
+<div class="stats">
+  <div class="stat is-ok"><span class="stat-n">24</span><span class="stat-l">items applied<br>on disk</span></div>
+  <div class="stat is-warn"><span class="stat-n">3</span><span class="stat-l">graph writes<br>still open</span></div>
+  <div class="stat"><span class="stat-n">4</span><span class="stat-l">decisions<br>for you</span></div>
+  <div class="stat is-ok"><span class="stat-n">0</span><span class="stat-l">dead links in<br>the rewrite</span></div>
+  <div class="stat is-ok"><span class="stat-n">12</span><span class="stat-l">repo rules<br>(was 10)</span></div>
+</div>
+
+<div class="callout is-ok" style="max-width:none;margin-top:2.2rem">
+  <span class="label">Applied this session &#8212; nothing committed</span>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>File</th><th>Change</th><th>Items</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">AGENTS.md</td><td>rewritten &#8212; 204 &#8594; 313 lines</td><td class="mono">C1&#183;C2&#183;C3&#183;C4&#183;C5&#183;A1&#183;A2&#183;B1&#8211;B4&#183;E3&#183;E4&#183;F1&#183;F3&#183;F4&#183;F8&#183;F9&#183;F10</td></tr>
+        <tr><td class="mono">CLAUDE.md</td><td>+25 lines &#8212; Serena decode section, Rules 1&#8211;12</td><td class="mono">A3</td></tr>
+        <tr><td class="mono">GEMINI.md</td><td><b>new</b>, 33 lines</td><td class="mono">F11</td></tr>
+        <tr><td class="mono">.agents/AGENTS.md</td><td><b>deleted</b> (staged; recoverable from <code>8e3f496</code>)</td><td class="mono">E1&#183;F2</td></tr>
+        <tr><td class="mono">.claude/launch.json</td><td>stale <code>web-verify-corpus-campaign</code> removed (7&#8594;6)</td><td class="mono">B5</td></tr>
+        <tr><td class="mono">.claude/settings.local.json</td><td><code>omnigraph-globals</code> removed</td><td class="mono">B6</td></tr>
+        <tr><td class="mono">.mcp.json &#183; ~/.claude.json</td><td>serena pinned <code>==1.7.0</code>, both scopes</td><td class="mono">A</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    <b>Still open:</b> D1 and B7 (graph writes), D2 (needs your call), and the four questions at
+    the foot of this page. <b>Nothing was committed</b> &#8212; all changes are in the working tree
+    alongside your ~30 pre-existing modified files.
+  </p>
+</div>
+
+<div class="callout is-drift" style="max-width:none">
+  <span class="label">Two corrections found while applying</span>
+  <p>
+    <b>I nearly reintroduced B1.</b> The draft of Rule 11 carried &#8220;<code>MasterHDF5Store</code>,
+    431 edges; runner-up 267&#8221; &#8212; hard counts, in the same file that now says counts must come
+    from <code>graph_stats</code>. Worse, I could not verify them: <code>god_nodes</code> run from
+    this session returned <code>AgentRequest</code>, <code>ProviderExecutor</code>,
+    <code>DecisionEngine</code> &#8212; <b>agent-skills' nodes</b>, because graphify resolves relative
+    to session cwd. The numbers are now gone, replaced by the stable claim plus the tool call, and
+    the Graphify section gained an explicit warning that a wrong-cwd query <em>answers anyway,
+    about the other repo, with no error</em>.
+  </p>
+  <p>
+    <b>The 150-line target was wrong, not missed.</b> That estimate predated C2, C3 and C4. AGENTS.md
+    grew to 313 lines because Rules 11 and 12, the Data tiers block and the Serena fallback are new
+    content. The collapse still happened &#8212; Rules 8&#8211;10 and the <code>.gq</code> block lost
+    ~35 lines of duplication. Growth here is repo-specific fact that exists nowhere else, which is
+    exactly what a delta file is for.
+  </p>
+</div>
+
+<section>
+  <div class="sec-head">
+    <h2>&#167;0 &#183; Blocker A &#8212; fixed</h2>
+    <p>serena-agent pinned to 1.7.0 &#183; health-check passed &#183; restart still required</p>
+  </div>
+
+  <p>
+    Your diagnosis was right that this is a schema mismatch and right that the cure is a version
+    pin. Two details came out the other way once I read the runtimes' source, and both change the
+    fix:
+  </p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th></th><th>Diagnosed</th><th>Verified</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Which key is new</td>
+          <td class="was"><code>language_servers:</code> is Serena 1.5.3's key</td>
+          <td class="is"><code>language_servers:</code> arrived in <b>1.7.0</b>. 1.5.3, 1.6.0 and 1.6.1 all read <code>data["languages"]</code> and contain zero occurrences of <code>language_servers</code></td>
+        </tr>
+        <tr>
+          <td>Where to pin</td>
+          <td class="was"><code>.mcp.json</code>, to <code>==1.5.3</code></td>
+          <td class="is"><b>User scope wins.</b> <code>~/.claude.json</code> also defines <code>serena</code> and silently outranks the project entry &#8212; pinning only <code>.mcp.json</code> would have changed nothing. And <code>1.5.3</code> is the version that <em>cannot</em> read the config</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    So the migrated <code>project.yml</code> is not ahead of a stale config &#8212; it is ahead of a
+    stale <em>runtime</em>. <code>uvx --from serena-agent</code> resolved <b>1.5.3</b> this session
+    while <b>1.7.0 sat in the same cache</b> (which holds everything from 0.1.4 to 1.7.0). Pinning
+    backward would have frozen the break in place; the fix is forward.
+  </p>
+
+  <div class="callout is-ok">
+    <span class="label">Applied and verified</span>
+    <ul>
+      <li><code>~/.claude.json</code> &#8594; <code>--from serena-agent==1.7.0</code> (backed up to <code>.claude.json.bak-2026-08-24-serena-pin</code>; JSON round-trip confirmed byte-identical before writing)</li>
+      <li><code>sibling-analysis-repo/.mcp.json</code> &#8594; same pin, plus a <code>$comment</code> recording the shadowing and why not to edit <code>project.yml</code> backward</li>
+      <li><code>serena project health-check .</code> on 1.7.0 &#8594; <b>Health check passed</b>. All eight language servers started (python 29.8s over 1301 files, typescript, markdown, html, yaml, toml, scss, bash); <code>GetSymbolsOverviewTool</code> and <code>FindSymbolTool</code> both returned matches</li>
+    </ul>
+    <p style="margin-top:0.7rem">
+      <b>Not yet in effect in this session.</b> The running MCP process still holds 1.5.3 &#8212; it
+      caches config and binary at startup, so <code>activate_project</code> keeps failing until
+      Claude Code restarts. <code>.serena/project.yml</code> is tracked and still uncommitted; I
+      have not committed it.
+    </p>
+  </div>
+
+  <p>
+    The two consequences you drew from A are documentation work and remain open &#8212; they are
+    <b>A1</b> and <b>A2</b> in &#167;1 below. The second is the sharper one and I had missed it
+    entirely.
+  </p>
+</section>
+
+<section>
+  <div class="sec-head">
+    <h2>&#167;1 &#183; AGENTS.md</h2>
+    <p>204 lines &#183; 19 items &#183; collapse 4, correct 5, add 10</p>
+  </div>
+
+  <h3>Add &#8212; safety and correctness first</h3>
+
+  <div class="errata">
+
+    <div class="row">
+      <div class="gutter"><span class="fid">C3</span><span class="chip gap">New Rule 11</span></div>
+      <div class="row-body">
+        <p class="row-title">HDF5 concurrency discipline is absent &#8212; the repo's most expensive failure class</p>
+        <p class="loc">4 <b>must</b> rules in the graph &#183; <code>MasterHDF5Store</code> is graphify's #1 god node at <b>431 edges</b> (next is 267)</p>
+        <p>
+          Rule 6 covers symmetric <em>storage</em> and nothing covers <em>locking</em>. The concrete
+          cost on record: one held read-only handle starved 49 healthy video items in four minutes,
+          because a read-only holder still takes the OS lock.
+        </p>
+        <div class="fix"><strong>Rule 11 covers</strong>
+          <ul>
+            <li>serialise on <code>hdf5_lock.hdf5_write_lock(path)</code>;</li>
+            <li>batch results enter via staging + <code>auto_merge</code>, never by writing master directly;</li>
+            <li>never set <code>HDF5_USE_FILE_LOCKING</code>;</li>
+            <li>read via <code>read_snapshot(path, reader)</code> (<code>hdf5_open.py:336</code>) &#8212; a read-only holder still takes the lock.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="gutter"><span class="fid">C5</span><span class="chip drift">Amend Rule 3</span></div>
+      <div class="row-body">
+        <p class="row-title">Rule 3 is itself the vector for a known data-loss bug</p>
+        <p class="loc"><b>AGENTS.md:135</b> &#183; <code>ba-rule-reread-shared-files-before-prepending</code> (<b>must</b>)</p>
+        <p>
+          Rule 3 mandates writing into <code>changelog.md</code> and says nothing about re-reading
+          first. On <b>2026-08-24 between 12:05Z and 12:14Z</b> changelog.md silently lost a 71-line
+          section when a concurrent session wrote from a stale in-memory copy &#8212; recovered only
+          from a sibling worktree's index. A MANDATORY rule that reliably produces the write pattern
+          which destroys data is worse than no rule.
+        </p>
+        <div class="fix"><strong>Amend in place</strong>
+          <ul>
+            <li>re-read immediately before writing;</li>
+            <li>edit in binary &#8212; Windows <code>write_text</code> rewrites whole LF files to CRLF and buries the hunk;</li>
+            <li>multi-agent waves get worktree isolation (<code>ba-rule-isolate-multi-agent-waves-in-a-worktree</code>).</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="gutter"><span class="fid">A1</span><span class="chip gap">Fallback clause</span></div>
+      <div class="row-body">
+        <p class="row-title">&#8220;Code navigation &#8212; MANDATORY&#8221; has no documented fallback</p>
+        <p class="loc"><b>AGENTS.md:92&#8211;103</b></p>
+        <p>
+          When Serena is down, an agent either stalls or silently violates a MANDATORY rule. Neither
+          is acceptable, and today's outage proves it is not hypothetical.
+        </p>
+        <div class="fix"><strong>Fix</strong>
+          Permit <code>Read</code>/<code>Grep</code> when Serena is unavailable, and require the agent
+          to <b>say so in its response</b>, so the degradation is visible rather than reading as
+          rule-skipping.
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="gutter"><span class="fid">A2</span><span class="chip drift">Conditionally false</span></div>
+      <div class="row-body">
+        <p class="row-title">&#8220;Serena's memory tools are DISABLED&#8221; is only true after activation succeeds</p>
+        <p class="loc"><b>AGENTS.md:66</b> &#183; <code>.serena/project.yml</code> <code>excluded_tools</code></p>
+        <p>
+          <code>excluded_tools</code> applies once the project activates. With activation failed,
+          <code>mcp__serena__write_memory</code> and its siblings are <b>live and exposed</b> &#8212; so
+          an agent can write into a store AGENTS.md states does not exist, splitting memory across two
+          backends. That is exactly what <code>ba-dec-memory-omnigraph-not-serena</code> was decided to
+          prevent. Good catch; I had read the exclusion as unconditional.
+        </p>
+        <div class="fix"><strong>Fix</strong>
+          State the condition, and add the standing instruction: <em>never call a
+          <code>mcp__serena__*_memory</code> tool regardless of whether it appears available</em>.
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="gutter"><span class="fid">C2</span><span class="chip gap">Data tiers</span></div>
+      <div class="row-body">
+        <p class="row-title">Postgres and Redis appear nowhere, despite three <code>must</code> rules</p>
+        <p class="loc"><code>ba-rule-redis-never-source-of-truth</code> &#183; <code>ba-rule-tests-never-touch-live-db</code> &#183; <code>ba-rule-pg-backup-alongside-hdf5</code></p>
+        <p>
+          This also compounds P9 / Rule 9: <code>map_munits_to_subsessions</code> consults Postgres
+          <em>first</em>, which is precisely why the fallback-path verification failure happened &#8212;
+          and an agent reading AGENTS.md would not know Postgres is in the picture at all.
+        </p>
+        <div class="fix"><strong>Fix</strong>
+          A short <em>Data tiers</em> block: <b>HDF5 = data, Postgres = metadata, Redis = accelerator.</b>
+          Neither may be hard-required; a missing service WARNs once, returns <code>None</code>, falls
+          through. Tests: conftest disables both, <code>live_pg</code>/<code>live_redis</code> to opt in.
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="gutter"><span class="fid">C4</span><span class="chip gap">New Rule 12</span></div>
+      <div class="row-body">
+        <p class="row-title">Nothing about inert guards, though five are documented in this repo</p>
+        <p class="loc"><code>ba-rule-a-guard-must-be-able-to-fire</code> &#183; <code>ba-rule-guards-must-scan-scripts-too</code></p>
+        <p>
+          Five guards passed their suites while incapable of firing; one static guard missed all four
+          offending writers because <code>SCAN_ROOTS</code> omitted <code>scripts/</code>. You are right
+          that this is the same shape as Rules 8&#8211;10 &#8212; and it is the same shape as
+          <code>coding-principles</code> P9: a check that cannot fail proves nothing, exactly as a
+          check that exercises the fallback proves nothing.
+        </p>
+        <div class="fix"><strong>Rule 12</strong>
+          Every guard ships a test that makes it <b>fire</b>, not only one that makes it pass. A guard
+          that scans paths declares its roots, and the test asserts the roots cover every writer.
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="gutter"><span class="fid">C1</span><span class="chip gap">Scope note</span></div>
+      <div class="row-body">
+        <p class="row-title">The ten rules read as the complete set; the graph holds 62</p>
+        <p class="loc"><b>AGENTS.md:128</b> &#183; session-flow step 2 says to recall <code>Rule</code>, never that an unread one binds</p>
+        <div class="fix"><strong>Fix</strong>
+          Retitle to <em>&#8220;the ten that bite hardest&#8221;</em> and add one sentence: <b>an unread
+          <code>must</code> in the graph is still binding.</b> This is the cheapest item here and
+          probably the highest-leverage.
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="gutter"><span class="fid">F8</span><span class="chip gap">Missing route</span></div>
+      <div class="row-body">
+        <p class="row-title">The NAS banner never links to the skill that owns NAS access</p>
+        <p class="loc"><b>AGENTS.md:3&#8211;16</b> &#183; <code>homelab-access</code> unreferenced repo-wide</p>
+        <p>
+          The skill's upstream trigger is literally <em>&#8220;before any command touching a VM, the
+          firewall, or the NAS&#8221;</em>, and the one repo that touches a NAS is the one not routed to
+          it. Commit <code>8fe257c</code>, pulled today, added decoding for three access failure
+          messages that will not reach the agent that needs them.
+        </p>
+        <div class="fix"><strong>Fix</strong> One line in the banner.</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="gutter"><span class="fid">F9</span><span class="chip gap">Missing route</span></div>
+      <div class="row-body">
+        <p class="row-title">Two approved designs and eight plan directories that nothing routes to</p>
+        <p class="loc"><b>docs/superpowers/specs/</b> (2) &#183; <b>docs/superpowers/plans/</b> (8)</p>
+        <div class="fix"><strong>Fix</strong>
+          Copy upstream's <em>&#8220;two more places to look before you write anything&#8221;</em> table,
+          pointed at this repo's <code>specs/</code> and <code>plans/</code>.
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="gutter"><span class="fid">F10</span><span class="chip gap">Resolve conflict</span></div>
+      <div class="row-body">
+        <p class="row-title">An adopted rigid principle mandates a directory this repo does not have</p>
+        <p class="loc"><code>coding-principles</code> P5 (rigid) &#183; <code>docs/decisions/</code> absent</p>
+        <p>
+          Reasoning lives in Omnigraph <code>Decision</code> nodes here &#8212; defensible, and consistent
+          with C1's point that the graph is the real rule store, but undocumented. An agent obeying P5
+          will create <code>docs/decisions/</code> and split reasoning across two stores.
+        </p>
+        <div class="fix"><strong>Fix</strong>
+          State the substitution: P5's changelog half applies as written (Rule 3); its ADR half is
+          served by <code>Decision</code> nodes &#8212; do not create <code>docs/decisions/</code>.
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="gutter"><span class="fid">E3</span><span class="chip gap">One line</span></div>
+      <div class="row-body">
+        <p class="row-title">Bash edits to code files are neither permitted nor forbidden</p>
+        <p class="loc"><b>AGENTS.md:92&#8211;103</b> &#183; rule covers Serena vs <code>Read</code>/<code>Edit</code> only</p>
+        <p>
+          <code>sed -i</code> and heredocs on a <code>.py</code> file sit outside the rule as written,
+          and bypass-permissions mode actively steers toward them &#8212; as this very session did.
+          Worth one explicit line either way; silence is what makes it a loophole.
+        </p>
+      </div>
+    </div>
+
+  </div>
+
+  <h3>Correct &#8212; facts that are now wrong</h3>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>ID</th><th>Where</th><th>Claims</th><th>Actually</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="id">B1<span style="color:var(--muted)">/F5</span></td>
+          <td class="mono">AGENTS.md:109</td>
+          <td class="was">&#8776;14.8k nodes / 27.7k edges, rebuilt 2026-07-17</td>
+          <td class="is"><b>31,040 / 60,523</b>, 1,272 communities; 41.5&#160;MB, rebuilt 2026-08-24</td>
+        </tr>
+        <tr>
+          <td class="id">B2</td>
+          <td class="mono">AGENTS.md:87</td>
+          <td class="was">&#8220;~135+ nodes&#8221;</td>
+          <td class="is"><b>115</b> &#8212; 62 Rule, 40 Decision, 7 Task, 4 Component, 1 Convention, 1 Project</td>
+        </tr>
+        <tr>
+          <td class="id">B3</td>
+          <td class="mono">AGENTS.md:134</td>
+          <td class="was">modified &#8776;100%; project &gt;90%</td>
+          <td class="is">Graph <code>must</code> says &#8805;95%/changed module; lint says &gt;95%/file. <b>Three numbers, and <code>pyproject.toml:117</code> has no <code>--cov-fail-under</code> &#8212; nothing enforces any</b></td>
+        </tr>
+        <tr>
+          <td class="id">B4</td>
+          <td class="mono">AGENTS.md:147&#8211;156</td>
+          <td class="was">Only <code>_PARAM_MAP</code>; &#8220;a literal row, or <code>register_params</code>&#8221;</td>
+          <td class="is">Two granularities since 2026-07-20 &#8212; <code>_PREFIX_MAP</code> at <code>translate.py:429</code>, populated :485. Graph rule says <b>prefer a prefix</b></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <b>B4 is the one that actively misleads</b>, and it hides a trap Rule 5 never mentions:
+    <em>when a section moves, delete its stale exact rows &#8212; an exact row pointing at the old path
+    silently beats the new prefix.</em> That is a coupled-state failure (P8) wearing a different
+    costume, and it belongs in the rule text.
+  </p>
+
+  <div class="callout">
+    <span class="label">How to correct B1 and B2</span>
+    <p>
+      Not with fresh numbers. The router's own rule is <em>&#8220;a number in a <code>SKILL.md</code>
+      is a bug&#8221;</em>, and B1 has now been wrong twice. Replace both with the call that produces
+      them: <code>graph_stats</code> for graphify, the census query for Omnigraph. For <b>B3</b>, pick
+      one number &#8212; <b>&#8805;95%</b>, matching the <code>must</code> &#8212; and then make it real by
+      adding <code>--cov-fail-under=95</code>, or the three numbers just become four.
+    </p>
+  </div>
+
+  <h3>Collapse &#8212; rules living in two homes</h3>
+
+  <div class="errata">
+    <div class="row">
+      <div class="gutter"><span class="fid">F1</span><span class="chip drift">Two homes</span></div>
+      <div class="row-body">
+        <p class="row-title">Rules 8&#8211;10 duplicate <code>coding-principles</code> P8&#8211;P9</p>
+        <p class="loc"><b>AGENTS.md:174&#8211;204</b> &#183; 31 lines &#183; both written 2026-08-07, already diverged</p>
+        <div class="fix"><strong>Fix</strong>
+          Pointer plus the four instance names (<code>campaign.db</code> <code>src_path</code>,
+          <code>map_munits_to_subsessions</code>, <code>master.h5</code>, <code>reviewed: true</code>) &#8212;
+          upstream anonymises them, so the repo-specific hooks are the part that belongs here.
+          &#8776;31 &#8594; 6 lines.
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="gutter"><span class="fid">F3</span><span class="chip drift">Self-refuting</span></div>
+      <div class="row-body">
+        <p class="row-title">The <code>.gq</code> block re-derives what it says not to re-derive</p>
+        <p class="loc"><b>AGENTS.md:71&#8211;90</b></p>
+        <div class="fix"><strong>Fix</strong> Keep the one-line orientation and the two links; drop the example and the parse-error prose. &#8776;20 &#8594; 6 lines.</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="gutter"><span class="fid">F4</span><span class="chip drift">4&#215; / 5&#215;</span></div>
+      <div class="row-body">
+        <p class="row-title">Scratch hygiene has four homes; the graph-empty warning has five</p>
+        <div class="fix"><strong>Fix</strong>
+          Delete the downstream scratch copies (keep P7) &#8212; but fold in <b>E4</b> first, since Rule 7
+          is not merely duplicated, it is also wrong (below). Keep the graph-empty duplication and
+          <em>label it a deliberate exception</em>, so nobody later collapses a warning that has already
+          paid for itself.
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="gutter"><span class="fid">E4</span><span class="chip stale">Wrong paths</span></div>
+      <div class="row-body">
+        <p class="row-title">Rule 7's scratch paths do not match the repo</p>
+        <p class="loc"><b>AGENTS.md:166</b> &#183; <code>.claude/scratch/</code> (~40 files) and <code>scratch/</code> both live</p>
+        <p>
+          There is also a stray empty <code>scratchpad/</code> the rule never names, and Claude Code's
+          own session scratchpad under <code>%LOCALAPPDATA%\Temp\claude\&#8230;</code> &#8212; the better
+          home for genuinely throwaway files, since it is outside the repo entirely. The
+          <code>scratch/</code> line added to <code>.gitignore</code> is still uncommitted.
+        </p>
+        <div class="fix"><strong>Fix</strong>
+          Name the session scratchpad as the default, <code>scratch/</code> for anything worth keeping,
+          delete or gitignore <code>scratchpad/</code>, and commit the <code>.gitignore</code> line.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head">
+    <h2>&#167;2 &#183; The other files</h2>
+    <p>.agents/AGENTS.md &#183; CLAUDE.md &#183; GEMINI.md &#183; .claude/*</p>
+  </div>
+
+  <div class="errata">
+    <div class="row">
+      <div class="gutter"><span class="fid">E1</span><span class="chip drift">Delete</span></div>
+      <div class="row-body">
+        <p class="row-title"><code>.agents/AGENTS.md</code> is 55 lines on no load path</p>
+        <p class="loc">Claude Code does not read it &#183; Gemini reads <code>GEMINI.md</code></p>
+        <p>
+          It duplicates <code>swarm-orchestration</code> &#8212; which the router marks normative and
+          deliberately number-free &#8212; while adding its own model names and tiers, and it mandates a
+          <code>task.md</code> artifact that does not exist (the repo has <code>todo.md</code> and
+          <code>MANUAL-TODO.md</code>). Your &#8220;no load path&#8221; point settles it: I had proposed
+          reducing it to ~18 lines, but a file nothing reads should be deleted, not shortened.
+        </p>
+        <div class="fix"><strong>Fix</strong> Delete. If Antigravity is used again, its content is recoverable from git and belongs in <code>GEMINI.md</code>.</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="gutter"><span class="fid">F11</span><span class="chip gap">New file</span></div>
+      <div class="row-body">
+        <p class="row-title">Gemini CLI receives no instructions at all</p>
+        <div class="fix"><strong>Fix</strong>
+          A <code>GEMINI.md</code> of ~6 lines: NAS banner, router, pointer to <code>AGENTS.md</code>.
+          With E1 deleted this is the only file Gemini will see.
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="gutter"><span class="fid">A3</span><span class="chip gap">CLAUDE.md</span></div>
+      <div class="row-body">
+        <p class="row-title">Decode the Serena failure where an agent will meet it</p>
+        <div class="fix"><strong>Add</strong>
+          <em>A <code>KeyError: 'languages'</code> (or <code>'language_servers'</code>) from
+          <code>activate_project</code> is a serena&#8596;project.yml schema mismatch. Both scopes are
+          pinned to <code>==1.7.0</code>; restart the session. Do not hand-edit <code>project.yml</code>
+          mid-session, and do not pin backward &#8212; <code>language_servers:</code> requires &#8805;1.7.0.</em>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="gutter"><span class="fid">B5</span><span class="chip stale">Live footgun</span></div>
+      <div class="row-body">
+        <p class="row-title"><code>.claude/launch.json</code> points at a deleted worktree</p>
+        <p class="loc"><code>web-verify-corpus-campaign</code> chdirs to <code>.claude/worktrees/corpus-campaign</code> &#8212; gone</p>
+        <p>Under <code>ba-rule-preview-start-reads-main-repo-launch-json</code> a stale entry is not inert, it misfires.</p>
+        <div class="fix"><strong>Fix</strong> Delete the entry.</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="gutter"><span class="fid">B6</span><span class="chip stale">Dead config</span></div>
+      <div class="row-body">
+        <p class="row-title"><code>settings.local.json</code> enables a server that no longer exists</p>
+        <p class="loc"><code>omnigraph-globals</code> erased from <code>.mcp.json</code> in <code>f951ad6</code>; still in <code>enabledMcpjsonServers</code></p>
+        <p>
+          Confirmed. Note the file also sets <code>enableAllProjectMcpServers: true</code>, which makes
+          the whole list redundant &#8212; worth collapsing while you are in there.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head">
+    <h2>&#167;3 &#183; Graph hygiene</h2>
+    <p>AGENTS.md's own memory rules are not holding &#8212; measured against the live graph</p>
+  </div>
+
+  <div class="errata">
+    <div class="row">
+      <div class="gutter"><span class="fid">D1</span><span class="chip drift">3 &#215; must</span></div>
+      <div class="row-body">
+        <p class="row-title">Three Rules have no <code>constrainsProject</code> edge, so they render as &#8220;global&#8221;</p>
+        <p class="loc"><code>ba-rule-no-uncontained-client-path</code> &#183; <code>ba-rule-index-mesc-like-not-just-mesc</code> &#183; <code>ba-rule-cache-a-measurement-never-a-guess</code></p>
+        <p>
+          This is the exact bug <b>AGENTS.md:57</b> warns about, in the file that warns about it, and a
+          Project-scoped recall misses all three. All three are <code>must</code>. It also compounds
+          <b>C1</b>: rules an agent cannot recall are the ones most in need of C1's &#8220;still
+          binding&#8221; sentence.
+        </p>
+        <div class="fix"><strong>Fix</strong> Add the three edges, then add a census query to the session-end persist step so the count is checked rather than assumed.</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="gutter"><span class="fid">D2</span><span class="chip warn">3%</span></div>
+      <div class="row-body">
+        <p class="row-title">&#8220;Link richly&#8221; is aspirational &#8212; 2 of 62 Rules carry a <code>constrainsComponent</code> edge</p>
+        <p class="loc">4 Component nodes total, against graphify hubs at 431 / 267 / 221 / 198 / 192 edges</p>
+        <div class="fix"><strong>Fix &#8212; pick one</strong>
+          Add ~8 Components for the hubs (<code>MasterHDF5Store</code>, <code>MaxEntConfig</code>,
+          <code>cfg_get</code>, <code>create_app</code>, <code>load_config</code>, &#8230;) and wire the
+          rules that already name their files &#8212; or soften the instruction to what is actually
+          maintained. An instruction at 3% compliance is not a rule, it is a wish, and leaving it
+          overstated teaches agents that this file's rules are optional.
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="gutter"><span class="fid">B7</span><span class="chip stale">Wrong path</span></div>
+      <div class="row-body">
+        <p class="row-title">A graph rule names a guard path that does not exist</p>
+        <p class="loc"><code>ba-rule-never-disable-hdf5-locking</code> &#8594; <code>tests/test_hdf5_locking_not_disabled.py</code>; actual: <code>tests/integration/&#8230;</code></p>
+        <p>Fix the node when adding C3's Rule 11, which cites the same guard.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head">
+    <h2>&#167;4 &#183; Parked &#8212; upstream</h2>
+    <p>Out of scope per &#8220;only the skills inside sibling-analysis-repo&#8221;, recorded so it is not lost</p>
+  </div>
+
+  <div class="callout is-drift">
+    <span class="label">E2 &#8212; retracted after the restart</span>
+    <p>
+      <b>E2 was half right and I made it fully wrong.</b> The router's <code>playwright</code> row is
+      indeed inaccurate for this host, but not because the server is missing. After the restart,
+      <code>mcp__plugin_playwright_playwright__browser_tabs</code> returned a live tab: <b>Playwright
+      is running, plugin-scoped</b>, under a different prefix than the router's
+      <code>mcp__playwright__*</code>.
+    </p>
+    <p>
+      My error was the verification, not the conclusion I inherited. I ran a <code>ToolSearch</code>
+      for browser automation <em>while the server was still connecting</em>, got nothing, and recorded
+      &#8220;no Playwright on this host&#8221; in AGENTS.md as fact. An empty tool listing during
+      startup is a <b>false negative</b> &#8212; the same shape as the memory rule that a successful
+      read-back does not prove a write survived. I had that rule in front of me and applied it to
+      writes only.
+    </p>
+    <p>
+      AGENTS.md is corrected: Playwright and the Browser pane both have Stack rows with their real
+      prefixes, the router's wrong name is called out so searching for it does not read as absence,
+      and a new bullet records the lazy-connect trap with this incident as its evidence. The
+      <code>context7</code> half of the original item was always fine.
+    </p>
+  </div>
+
+  <p>Also parked, unchanged from the earlier pass:</p>
+  <ul>
+    <li><b>S1</b> &#8212; <code>coding-principles</code>: when a lesson is promoted upstream, the origin repo deletes its prose in the same change. This is the missing step that produced F1.</li>
+    <li><b>S3</b> &#8212; <code>check-instruction-drift.py</code>: dead links, magic numbers, cross-repo duplicate rules. Would have caught B1, B2, F1&#8211;F4 on the day.</li>
+    <li><b>S4</b> &#8212; <code>mcp-servers-setup</code>: add the Serena row, now with verified values &#8212; <code>language_servers:</code> requires &#8805;1.7.0; pin both scopes; user scope wins.</li>
+    <li><b>S5</b> &#8212; <code>repository-index</code>: the sibling-checkout contract for downstream repos.</li>
+  </ul>
+</section>
+
+<section>
+  <div class="sec-head">
+    <h2>Sequencing</h2>
+    <p>Dependencies first, then cheap-and-high-leverage, then bulk</p>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>#</th><th>Do</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td>Serena pin, both scopes &#8212; <b>A</b></td><td class="is">done, health-check passed</td></tr>
+        <tr><td class="num">2</td><td>All file-level items &#8212; <b>A1&#8211;A3, B1&#8211;B6, C1&#8211;C5, E1, E3, E4, F1&#8211;F4, F8&#8211;F11</b></td><td class="is">done, 0 dead links</td></tr>
+        <tr><td class="num">3</td><td><b>Restart Claude Code</b>, confirm <code>activate_project</code></td><td class="is">done &#8212; 8 language servers, <code>find_symbol</code> verified</td></tr>
+        <tr><td class="num">4</td><td>D1 &#8212; three missing <code>constrainsProject</code> edges; B7 &#8212; guard path in <code>ba-rule-never-disable-hdf5-locking</code></td><td>graph writes; needs a session in the sibling-analysis-repo root</td></tr>
+        <tr><td class="num">5</td><td>D2 &#8212; Components for the hubs, or soften &#8220;link richly&#8221;</td><td>your call (Q3)</td></tr>
+        <tr><td class="num">6</td><td>B3 &#8212; add <code>--cov-fail-under=95</code></td><td>your call (Q2); will fail the suite until coverage is real</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <span class="label">Why the graph writes were left</span>
+    <p>
+      D1 and B7 both need Graphify and Omnigraph answering about <em>this</em> repo, and this
+      session runs from the <code>agent-skills</code> root &#8212; which is exactly the trap
+      documented above: the tools answer, about the wrong repository, with no error. Doing them
+      from here would have written plausible, unverifiable content into the graph. They want a
+      session launched from <code>sibling-analysis-repo</code>.
+    </p>
+  </div>
+
+  <p>
+    One ordering note that still stands: F1 deleted 31 lines on the strength of an upstream
+    pointer. If <b>S1</b> never lands upstream, the same divergence restarts from zero the next time
+    a lesson is promoted &#8212; collapsing without the replacement mechanism is how this state was
+    reached in the first place.
+  </p>
+</section>
+
+<section>
+  <div class="sec-head">
+    <h2>Open questions</h2>
+    <p>Four calls that are yours</p>
+  </div>
+  <ol>
+    <li><b>Commit <code>.serena/project.yml</code>?</b> It is tracked and its migration is uncommitted, sitting among ~30 other modified files. I have not committed anything. A targeted commit of <code>project.yml</code> + <code>.mcp.json</code> is clean if you want the pin durable.</li>
+    <li><b>B3's coverage number</b> &#8212; &#8805;95% to match the <code>must</code>, and add <code>--cov-fail-under=95</code>? Enforcing it will fail the suite until coverage is actually there.</li>
+    <li><b>D2</b> &#8212; add ~8 Components and wire the rules, or soften &#8220;link richly&#8221; to what is maintained?</li>
+    <li><b>F1's four instance names</b> &#8212; keep in <code>AGENTS.md</code> (always-on, cheap) or move to <code>Rule</code> nodes (principled, but depends on recall firing, which D1 shows is not reliable)?</li>
+  </ol>
+</section>
+
+<footer>
+  Updated 2026-08-24 after the Serena fix &#183; sibling-analysis-repo 2a43bcc &#183; agent-skills bf2adc1<br>
+  IDs preserved across both passes: A&#183;B&#183;C&#183;D&#183;E from your audit, F&#183;S from mine. A1&#8211;A3 are the documentation consequences of blocker A.<br>
+  Verified this session: serena 1.5.3/1.6.0/1.6.1/1.7.0 config sources; <code>health-check</code> pass on 1.7.0; graph.json 31,040 nodes / 60,523 links; absence of <code>mcp__playwright__*</code>; <code>enabledMcpjsonServers</code> contents.<br>
+  Changed on disk: <code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>GEMINI.md</code> (new), <code>.agents/AGENTS.md</code> (deleted, staged), <code>.claude/launch.json</code>, <code>.claude/settings.local.json</code>, <code>.mcp.json</code>, <code>~/.claude.json</code>. <b>No commits made.</b><br>
+  Checks run on the rewrite: 15/15 relative links resolve &#183; stale-number scan returns only dated incident records &#183; 12 repo rules present &#183; diff is content, not line-ending noise (<code>core.autocrlf=true</code>, HEAD blob stores LF, <code>--ignore-cr-at-eol</code> diffstat unchanged).
+</footer>
+
+</div>

@@ -1,0 +1,395 @@
+version: 1
+
+role_provider_routing:
+  architect:
+    provider: claude_code
+    model: opus-class
+    fallback_providers:
+      - antigravity
+      - codex
+      - local_glm
+    fallback_models:
+      - gemini-pro-class
+      - gpt-coder-class
+      - glm-5.2-local
+
+  engineer:
+    provider: antigravity
+    model: sonnet-class
+    fallback_providers:
+      - claude_code
+      - codex
+      - local_glm
+    fallback_models:
+      - opus-class
+      - gpt-coder-class
+      - glm-5.2-local
+
+  reviewer:
+    provider: codex
+    model: gpt-coder-class
+    fallback_providers:
+      - claude_code
+      - antigravity
+      - local_glm
+    fallback_models:
+      - opus-class
+      - gemini-pro-class
+      - glm-5.2-local
+
+framework:
+  name: agent-orchestration-framework
+  mode: provider-agnostic
+  source_of_truth:
+    - task.md
+    - BUG_REGISTER.md
+    - ARCHITECTURE_CONTRACT.md
+    - .agent-state/checkpoints/
+
+paths:
+  state_dir: .agent-state
+  checkpoint_dir: .agent-state/checkpoints
+  locks_dir: .agent-state/locks
+  risk_dir: .agent-state/risk
+  decisions_dir: .agent-state/decisions
+  worktrees_dir: .agent-state/worktrees
+
+execution:
+  max_review_loops: 3
+  use_worktrees: true
+  use_file_locks: true
+  cleanup_after_approval: true
+  prefer_provider_checkpointing: true
+  require_architecture_contract_for_nontrivial_tasks: true
+  require_verification_before_completion: true
+
+risk:
+  thresholds:
+    low: 0.30
+    medium: 0.60
+    high: 0.85
+  signals:
+    touches_more_than_3_files: 0.15
+    modifies_public_api: 0.15
+    ambiguous_acceptance_criteria: 0.20
+    high_churn_module: 0.10
+    architect_confidence_below_threshold: 0.15
+    weak_or_missing_test_coverage: 0.10
+    concurrency_or_async_change: 0.10
+    security_sensitive_code: 0.20
+    prior_review_failure: 0.15
+    cross_module_interface_change: 0.10
+    estimate_variance_above_30pct: 0.10
+
+best_of_n:
+  enabled: true
+  default_candidates:
+    low: 1
+    medium: 1
+    high: 3
+    very_high: 5
+  only_if_objective_arbitration_available: true
+  arbitration_order:
+    - verification_pass_rate
+    - architecture_contract_compliance
+    - scope_compliance
+    - code_quality
+    - maintainability
+    - performance
+    - security
+
+token_budget:
+  enabled: true
+  policy: advisory
+  states:
+    green: 0.60
+    yellow: 0.90
+    red: 1.00
+  red_actions:
+    - split_task
+    - narrow_scope
+    - improve_contract
+    - inject_missing_context
+    - downgrade_to_mechanical_model_if_safe
+    - abort_and_replan
+  never_force_incomplete_output: true
+
+cache_control:
+  enabled: true
+  strategy: stable-prefix
+  explicit_breakpoints_when_supported: true
+  stable_blocks:
+    - tool_definitions
+    - role_instructions
+    - approved_architecture_contract
+    - repository_invariants
+    - stable_workflow_rules
+  volatile_blocks:
+    - raw_terminal_logs
+    - transient_errors
+    - exploratory_notes
+    - temporary_hypotheses
+    - partial_diffs
+    - reviewer_rejection_text
+  invalidate_on:
+    - interface_change
+    - dependency_change
+    - acceptance_criteria_change
+    - tool_inventory_change_affecting_execution
+  avoid_mid_task_tool_changes: true
+
+checkpointing:
+  enabled: true
+  write_before:
+    - multi_file_edit
+    - risky_refactor
+    - long_tool_chain
+    - verification_run
+    - handoff_completion
+    - unfinished_turn_end
+  required_fields:
+    - agent_id
+    - task_id
+    - role
+    - branch
+    - worktree
+    - architecture_contract_hash
+    - files_touched
+    - last_completed_step
+    - next_step
+    - verification_status
+    - tokens_used
+    - risk_level
+    - unresolved_issues
+    - timestamp
+  recovery_order:
+    - checkpoint_file
+    - branch_worktree_state
+    - task_artifacts
+    - conversation_context
+
+verification:
+  python:
+    pytest:
+      command: "pytest --junitxml=.agent-state/verification/pytest-report.xml"
+      enabled: true
+    ruff:
+      command: "ruff check ."
+      enabled: true
+    mypy:
+      command: "mypy ."
+      enabled: true
+  require_independent_review: true
+
+safety_gates:
+  enabled: true
+  fail_closed: true
+  size_ceiling:
+    max_files_changed: 30
+    max_lines_changed: 800
+    exemptions:
+      - "testdata/"
+      - "__snapshots__/"
+      - ".*\\.min\\.js$"
+      - ".*\\.lock$"
+      - ".*\\.md$"
+  deny_list:
+    auth: "(?i)(auth|login|session|jwt|oauth)"
+    crypto: "(?i)(crypto|hash|encrypt|decrypt|cipher)"
+    migrations: "(?i)(db/migrate|alembic|migrations)"
+    infra: "(?i)(terraform|k8s|dockerfile|helm|\\.github/workflows)"
+    billing: "(?i)(stripe|billing|invoice|subscription|payment)"
+    public_api: "(?i)(api/public|openapi|swagger|routes/v1)"
+    dependencies: "(?i)(package\\.json|requirements\\.txt|go\\.mod|Cargo\\.toml)"
+
+triage_policy:
+  human_participation_gate:
+    enabled: true
+    never_autofix_if_human_present: true
+    never_autoresolve_if_human_present: true
+  verdict_matrix:
+    blocked:
+      condition: "has_critical_finding"
+      action: "escalate_to_architect"
+    request_changes:
+      condition: "count(high) >= 2 OR (count(high) >= 1 AND count(medium) >= 2)"
+      action: "return_to_engineer"
+    approve_with_nits:
+      condition: "count(high) >= 1 OR count(medium) >= 3"
+      action: "engineer_autofix_or_ignore"
+    approve:
+      condition: "only_low_or_nit"
+      action: "proceed_to_merge"
+
+swarm_review:
+  enabled: true
+  parallel_execution: true
+  timeout_seconds: 600
+  convergence_strategy: "wait_for_all_or_timeout"
+  perspectives:
+    security_auditor:
+      model_tier: "sonnet-3.5"
+      focus: "vulnerabilities, auth bypass, injection"
+    performance_expert:
+      model_tier: "sonnet-3.5"
+      focus: "n+1 queries, memory leaks, algorithmic complexity"
+    xp_reviewer:
+      model_tier: "haiku-3"
+      focus: "naming, readability, DRY, small methods"
+
+evidence_bundle:
+  enabled: true
+  persist_to: "omnigraph"
+  max_retries_per_failure: 3
+  capture_logs: true
+
+babysit_state:
+  enabled: true
+  track_ci_status: true
+  sleep_on_running_tests: true
+  auto_fix_ci_failures: true
+
+narration:
+  mode: "silent" # options: silent, chatty
+  bluf_required: true
+  attribute_findings: true
+  prefix_autofixable: "[🤖 AUTO-FIXABLE]"
+
+mcp:
+  core:
+    - serena
+    - graphify
+    - omnigraph
+    - superpowers
+    - context7
+    - fetch
+  conditional:
+    playwright:
+      when:
+        - ui_task
+        - browser_validation_required
+    sentry:
+      when:
+        - runtime_error_debugging
+        - production_bug_task
+        - early_error_detection
+    datadog:
+      when:
+        - distributed_system
+        - multi_server_setup
+        - cross_service_debugging
+        - cross_service_observability
+    sequential_thinking:
+      when:
+        - weak_reasoning_model
+        - no_native_extended_thinking
+  prefer_omnigraph_over_generic_memory_mcp: true
+  lazy_loading: true
+
+providers:
+  anthropic:
+    supports_explicit_cache_control: true
+    supports_native_checkpointing: true
+  google:
+    supports_explicit_cache_control: false
+    supports_native_checkpointing: false
+    uses_implicit_caching: true
+  openai:
+    supports_explicit_cache_control: false
+    supports_native_checkpointing: false
+    uses_automatic_prefix_caching: true
+  deepseek:
+    supports_explicit_cache_control: false
+    supports_native_checkpointing: false
+  local_glm:
+    supports_explicit_cache_control: false
+    supports_native_checkpointing: false
+
+roles:
+  architect:
+    can_write_code: false
+    can_spawn_subagents: true
+    allowed_mcps:
+      - graphify
+      - omnigraph
+      - context7
+      - superpowers
+      - fetch
+      - sentry
+      - datadog
+      - playwright
+      - sequential_thinking
+    default_skills:
+      - planning
+      - decomposition
+      - risk-scoring
+      - execution-plans
+      - subagent-driven-development
+
+  engineer:
+    can_write_code: true
+    can_spawn_subagents: false
+    allowed_mcps:
+      - serena
+      - context7
+      - superpowers
+      - sentry
+      - playwright
+    default_skills:
+      - tdd
+      - debugging
+      - implementation
+      - refactor
+
+  reviewer:
+    can_write_code: true
+    can_spawn_subagents: false
+    allowed_mcps:
+      - serena
+      - superpowers
+      - playwright
+      - sentry
+      - datadog
+    default_skills:
+      - review
+      - regression-checking
+      - verification
+      - docs
+
+model_routing:
+  architect:
+    preferred_tier: flagship_reasoning
+    fallback_tiers:
+      - strong_mid_tier
+      - local_glm
+  engineer:
+    preferred_tier: strong_mid_tier_coder
+    fallback_tiers:
+      - flagship_reasoning
+      - local_glm
+  reviewer:
+    preferred_tier: different_family_from_engineer
+    fallback_tiers:
+      - flagship_reasoning
+      - strong_mid_tier
+
+locking:
+  enabled: true
+  default_ttl_seconds: 300
+
+cleanup:
+  remove_temp_worktrees_on_success: true
+  preserve_failed_worktrees: true
+  prune_stale_metadata: true
+
+handoff_policy:
+  allow_reviewer_bypass: true
+  escalate_verification_failures_immediately: true
+  require_human_on_blocked: false
+  allow_low_confidence_text_escalation: false
+
+parser_policy:
+  structured_output_enabled: true
+  strict_schema_validation: false
+  fallback_to_plain_text: true
+  parse_tool_calls: true

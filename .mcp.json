@@ -1,0 +1,64 @@
+{
+  "$comment": [
+    "Project-scoped MCP servers for THIS repo. Pins `omnigraph` to the `agent-skills` graph.",
+    "ONE omnigraph server per repo: a bridge serves exactly one graph, chosen by",
+    "OMNIGRAPH_GRAPH_ID, and no tool takes a graph argument. Never write this repo's data to",
+    "the shared `memory` graph. (OMNIGRAPH_GRAPH is the *viewer's* var \u2014 not this one.)",
+    "",
+    "PRECEDENCE: a same-named server in ~/.claude.json (user scope) SILENTLY WINS over this",
+    "file, serving the wrong graph with no error. Check: there must be no `omnigraph` in",
+    "  python -c \"import json,pathlib;print(sorted((json.loads((pathlib.Path.home()/'.claude.json').read_text()).get('mcpServers') or {})))\"",
+    "",
+    "ENV (never hardcode here \u2014 this file is tracked):",
+    "  OMNIGRAPH_TOKEN unset -> empty bearer -> 'missing bearer token'",
+    "  OMNIGRAPH_NET wrong   -> 'fetch failed' (a network can EXIST but be EMPTY). Differs per",
+    "                           host: mcp-server_mcp-net local, mcp-servers_default central.",
+    "  image not built       -> 'pull access denied' (on no registry):",
+    "                           docker build -t omnigraph-mcp:latest infra/mcp-servers/servers/omnigraph-mcp",
+    "  Fix all four: infra/mcp-servers/omnigraph-setup/setup-agent-memory.ps1 -Check (or .sh --check)",
+    "",
+    "Transport is docker, not npx: node/npx is absent on coding.example.internal.",
+    "Router: skills/repository-index/SKILL.md \u00b7 Memory: skills/structured-memory/SKILL.md",
+    "",
+    "GRAPHIFY is NOT declared here \u2014 it is a SINGLE user-scope entry (~/.claude.json),",
+    "cwd-relative, so one definition serves whichever repo you launch from. Workstation (uv):",
+    "  \"graphify\": { \"command\": \"uv\", \"args\": [\"run\",\"--with\",\"graphifyy[mcp]\",",
+    "                 \"python\",\"-m\",\"graphify.serve\",\"graphify-out/graph.json\"] }",
+    "Server (Docker): a `graphify-mcp` PATH wrapper running",
+    "  docker run -i --rm -v \"$PWD:/repo\" graphify-mcp:latest",
+    "Unlike omnigraph, graphify takes NO per-repo entry: a cwd-relative single definition",
+    "serves each repo its own graph, so there is nothing to pin per project (the old",
+    "per-repo `graphify-docker`, retired 2026-07-20).",
+    "Verify: infra/mcp-servers/scripts/{linux/check-graphify-scope.sh,windows/check-graphify-scope.ps1}.",
+    "Full rules: skills/mcp-servers-setup/SKILL.md -> Graphify."
+  ],
+  "mcpServers": {
+    "omnigraph": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "--network",
+        "${OMNIGRAPH_NET:-mcp-servers_default}",
+        "-e",
+        "OMNIGRAPH_BASE_URL=http://omnigraph-server:8080",
+        "-e",
+        "OMNIGRAPH_GRAPH_ID=agent-skills",
+        "-e",
+        "OMNIGRAPH_TOKEN=${OMNIGRAPH_TOKEN}",
+        "omnigraph-mcp:latest"
+      ]
+    },
+    "cao-ops": {
+      "command": "wsl",
+      "args": [
+        "-d",
+        "Ubuntu",
+        "bash",
+        "-lc",
+        "export CAO_HOME_DIR=\"$HOME/.cao\"; cao-ops-mcp-server"
+      ]
+    }
+  }
+}

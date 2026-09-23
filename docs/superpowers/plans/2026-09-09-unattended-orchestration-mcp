@@ -1,0 +1,133 @@
+# Implementation Plan: Unattended Orchestration Control-Plane MCP Server
+
+Build a dedicated Model Context Protocol (MCP) server (`unattended-orchestration-mcp`) to serve as a structured control plane and observability interface for autonomous unattended runs. This server bridges interactive AI agents (Antigravity/Gemini CLI, Claude Code, Grok, CodeWhale) with the underlying detached runner engine, enforcing strict 3-level subagent hierarchy boundaries and exposing real-time session and subagent progress through standard MCP tools and resources.
+
+## User Review Required
+
+> [!IMPORTANT]
+> **Runtime Stack & Transport Choice**:
+> We propose implementing the server in **Python** using the official `mcp` SDK (`uv run --with mcp ...`), matching `trust_worktree.py` and Serena/Graphify. It will operate over standard **`stdio`** for direct client configuration (`.mcp.json` and Antigravity's global `mcp_config.json`), delegating detached execution loops to background supervisor tasks to avoid the stdio process-termination trap.
+
+> [!WARNING]
+> **Subagent Tool Boundary**:
+> When an orchestrator spawns a subagent, the MCP server must restrict tool access:
+> - **Level 1 (Main Orchestrator)**: Full access to all orchestration tools (`spawn_session`, `resume_session`, `stop_session`, `archive_session`) and resources.
+> - **Level 2 (Phase Orchestrator)**: Restricted to spawning Level 3 tasks within its assigned phase.
+> - **Level 3 (Task Workers / Leaves)**: **Zero orchestration tools**; read-only access to status resources (`handoff://sessions`), preventing recursive delegation cascades.
+
+---
+
+## Open Questions
+
+1. **Repository Location**:
+   - Should the MCP server code live inside the skill itself ([`skills/unattended-orchestration/mcp/`](file:///c:/Users/<you>/Documents/Code/agent-skills/skills/unattended-orchestration/)) so the skill remains self-contained and portable to other repositories, or in [`infra/mcp-servers/servers/unattended/`](file:///c:/Users/<you>/Documents/Code/agent-skills/infra/mcp-servers/) alongside Superpowers?
+   - *(Recommendation: Put it inside `skills/unattended-orchestration/mcp/` with a thin pointer in `infra/mcp-servers/` to maintain the skill's self-contained portability.)*
+
+2. **Runner Invocation Mechanism**:
+   - Should the MCP server spawn `run_handoff_sessions.ps1` via detached background processes (`Start-Process -PassThru` / `subprocess.Popen(..., creationflags=DETACHED_PROCESS)`), or should `HandoffCore` functions be ported/wrapped into a native Python supervisor?
+   - *(Recommendation: Detach via `subprocess.Popen` with detached process flags on Windows, preserving the already battle-tested, 137-assertion PowerShell runner engine as the execution supervisor.)*
+
+---
+
+## Proposed Changes
+
+```
+skills/unattended-orchestration/
+├── mcp/
+│   ├── pyproject.toml              # [NEW] uv package declaration for MCP server
+│   ├── server.py                   # [NEW] FastMCP / MCP Server entrypoint
+│   ├── tools/
+│   │   ├── __init__.py             # [NEW]
+│   │   ├── spawn.py                # [NEW] Tool: spawn_session, start_lane
+│   │   ├── lifecycle.py            # [NEW] Tool: resume_session, stop_session
+│   │   └── archive.py              # [NEW] Tool: archive_session, cleanup_sessions
+│   ├── resources/
+│   │   ├── __init__.py             # [NEW]
+│   │   ├── sessions.py             # [NEW] Resource: handoff://sessions (list & details)
+│   │   ├── tree.py                 # [NEW] Resource: handoff://subagents/tree (hierarchical)
+│   │   ├── diff.py                 # [NEW] Resource: handoff://sessions/{id}/diff
+│   │   └── ledger.py               # [NEW] Resource: handoff://ledger (live NDJSON tail)
+│   ├── policy/
+│   │   ├── __init__.py             # [NEW]
+│   │   └── depth_firewall.py       # [NEW] Hard 3-level depth validator & tool-mask generator
+│   └── tests/
+│       ├── __init__.py             # [NEW]
+│       ├── test_depth_firewall.py  # [NEW] Unit tests for hierarchy enforcement
+│       ├── test_resources.py       # [NEW] Unit tests for session and tree resource formatters
+│       └── test_tools.py           # [NEW] Tool invocation & parameter validation tests
+└── SKILL.md                        # [MODIFY] Document MCP server tools, resources, and configuration
+```
+
+---
+
+### Component: Policy Firewall & Tool Stripping
+
+#### [NEW] [`depth_firewall.py`](file:///c:/Users/<you>/Documents/Code/agent-skills/skills/unattended-orchestration/mcp/policy/depth_firewall.py)
+- Validates delegation depth on every spawn request:
+  - Depth 1 (Root Orchestrator): May spawn depth 2 sessions.
+  - Depth 2 (Phase Orchestrator): May spawn depth 3 sessions.
+  - Depth 3 (Task Worker): Rejects spawn calls with `DelegationDepthExceededError`.
+- Computes `--disallowedTools` or `--no-subagents` flags and strips `Agent` / `Workflow` / `unattended_orchestration_*` tools for leaf subagents.
+
+---
+
+### Component: Queryable MCP Resources
+
+#### [NEW] [`sessions.py`](file:///c:/Users/<you>/Documents/Code/agent-skills/skills/unattended-orchestration/mcp/resources/sessions.py)
+- Exposes `handoff://sessions`:
+  - Returns structured list of sessions: ID, status (`running`, `waiting`, `merged`, `blocked`, `crashed`), model, turn count, elapsed time.
+- Exposes `handoff://sessions/{id}`:
+  - Detailed view including branch name, worktree path, attached PID, active task, and exit code.
+
+#### [NEW] [`tree.py`](file:///c:/Users/<you>/Documents/Code/agent-skills/skills/unattended-orchestration/mcp/resources/tree.py)
+- Exposes `handoff://subagents/tree`:
+  - Renders hierarchical JSON and clean ASCII tree depicting the 3-level topology:
+    - Root Orchestrator $\rightarrow$ Phase Subagents $\rightarrow$ Leaf Task Workers with live statuses.
+
+#### [NEW] [`diff.py`](file:///c:/Users/<you>/Documents/Code/agent-skills/skills/unattended-orchestration/mcp/resources/diff.py)
+- Exposes `handoff://sessions/{id}/diff`:
+  - Runs `git diff <base>...<branch>` against the session worktree, allowing interactive agents to review code changes without reading files one by one.
+
+#### [NEW] [`ledger.py`](file:///c:/Users/<you>/Documents/Code/agent-skills/skills/unattended-orchestration/mcp/resources/ledger.py)
+- Exposes `handoff://ledger`:
+  - Streams recent sanitized events from `.handoff/progress.jsonl` with automatic secret redaction.
+
+---
+
+### Component: Execution Tools
+
+#### [NEW] [`spawn.py`](file:///c:/Users/<you>/Documents/Code/agent-skills/skills/unattended-orchestration/mcp/tools/spawn.py)
+- `spawn_session`: Validates arguments via JSON schema, creates branch/worktree via runner or git, generates session brief, and launches detached agent.
+- `start_lane`: Initiates execution of configured lanes (`handoff.config.json`).
+
+#### [NEW] [`lifecycle.py`](file:///c:/Users/<you>/Documents/Code/agent-skills/skills/unattended-orchestration/mcp/tools/lifecycle.py)
+- `resume_session`: Resumes an existing conversation with structured recovery prompt.
+- `stop_session`: Terminates a running background agent process cleanly.
+
+#### [NEW] [`archive.py`](file:///c:/Users/<you>/Documents/Code/agent-skills/skills/unattended-orchestration/mcp/tools/archive.py)
+- `archive_session`: Triggers transactional archival (`DONE.md`, logs, patch, manifest).
+- `cleanup_sessions`: Idempotently purges merged branches and worktrees.
+
+---
+
+## Verification Plan
+
+### Automated Tests
+1. **Depth Firewall & Policy Tests**:
+   - `pytest skills/unattended-orchestration/mcp/tests/test_depth_firewall.py`
+   - Verify level 1 $\rightarrow$ 2 succeeds, level 2 $\rightarrow$ 3 succeeds, level 3 $\rightarrow$ 4 is blocked with strict error.
+   - Verify leaf tool-stripping flags for Claude, Antigravity, Grok, and CodeWhale.
+2. **Resource Formatter Tests**:
+   - `pytest skills/unattended-orchestration/mcp/tests/test_resources.py`
+   - Mock `.handoff/progress.jsonl` and `state.json` to verify `handoff://sessions`, `handoff://subagents/tree`, and `handoff://diff` render accurately.
+3. **Pester Integration Regression**:
+   - `pwsh -NoProfile -Command "Invoke-Pester skills/unattended-orchestration/tests"`
+   - Ensure all 7 existing Pester test suites continue passing (137/137 green).
+
+### Manual / Live Verification
+1. **MCP Inspector Verification**:
+   - Connect MCP Inspector to `python -m skills.unattended_orchestration.mcp.server`.
+   - Inspect exposed tools and read `handoff://sessions` and `handoff://subagents/tree` resources.
+2. **Interactive Agent Test**:
+   - Configure the new server in `mcp_config.json` / `.mcp.json`.
+   - Use an interactive Antigravity / Claude Code session to query active sessions via standard tool and resource calls.
