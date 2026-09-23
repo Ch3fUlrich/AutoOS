@@ -203,7 +203,7 @@ memory, never write project data to the global `memory` graph.**
   (software on offer), models (fresh-OS → agent stack recipe) and a new
   `docs/openhands.md` (the Agent Canvas section). `docs/README.md` and the
   README table list every page; `tests/check-links.py` + the docs-index test
-  gate it.
+  gate it. Commit `27cb4d1`.
 - **OpenHands settings schema-6 repair** (operator commit `2e1fba7`):
   `start-stack.*` clamps `agent_settings.schema_version` to 4 and strips the
   `enable` keys the image rejects, in place with a timestamped backup.
@@ -212,8 +212,8 @@ memory, never write project data to the global `memory` graph.**
 ## Open (in this order)
 
 0. **Push the docs commit.** `main` == `origin/main` at `2e1fba7` — the
-   2026-09-22/23 router + OpenHands commits are all pushed already. Only this
-   docs batch (README slim, `docs/` moves, CHANGELOG, handoff) is local; push it
+   2026-09-22/23 router + OpenHands commits are all pushed already. The docs
+   batch is committed locally (`27cb4d1`, plus a handoff follow-up); push it
    when the operator is ready. Do NOT `git add -A` blindly: unrelated operator
    work is untracked in the tree (`docs/plans/model-routing-overhaul-DRAFT.md`).
 1. **Zed model picker proof** — restart Zed (tray → Quit; running process
