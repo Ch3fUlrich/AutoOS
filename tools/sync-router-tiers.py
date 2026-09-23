@@ -48,6 +48,8 @@ import re
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+PROVIDERS_FILE = ROOT / "catalog" / "providers.json"
 # Tiers mirrored from combos.json. tier1 / *-paid are deliberately absent:
 # combos.json has no tier1-paid, and docs/models.md keeps tier1 a hand-curated
 # spark-only chain with an explicit xhigh note. tier2-paid / tier3-paid are
@@ -55,38 +57,12 @@ from pathlib import Path
 # of those here would lose information rather than remove drift.
 SYNCED_TIERS = ("tier2", "tier3")
 
-# OmniRoute provider prefix (combos.json) -> LiteLLM provider prefix.
-# Only names that differ need an entry; anything else passes through, because
-# OmniRoute's <provider>/<model> is already LiteLLM's shape. A model id may
-# itself contain slashes (openai/gpt-oss-120b, qwen/qwen3.8-27b): the first
-# segment is the provider and everything after it is the model id.
-PROVIDER_PREFIX = {
-    "opencode-zen": "openai",  # Zen is OpenAI-compatible; needs an api_base
-    "cheaperinference": "openai",  # own OpenAI-compatible gateway; needs api_base
-}
-
-# LiteLLM needs api_base for the OpenAI-compatible transports above. Without
-# it the leg silently points at api.openai.com instead of the gateway. Keyed by
-# the OmniRoute provider, because both of them map to the `openai` prefix.
-API_BASE = {
-    "opencode-zen": "https://opencode.ai/zen/v1",
-    "cheaperinference": "https://api.cheaperinference.com/v1",
-}
-
-# Key source per OmniRoute provider. Native LiteLLM providers read their own
-# conventional env var; the OpenAI-compatible ones (Zen, cheaperinference) do
-# not, so their key has to be named explicitly.
-ENV_KEY = {
-    "mistral": "MISTRAL_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "cerebras": "CEREBRAS_API_KEY",
-    "sambanova": "SAMBANOVA_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "opencode-zen": "OPENCODE_ZEN_API_KEY",
-    "cheaperinference": "CHEAPINFERENCE_API_KEY",
-}
+# Filled from catalog/providers.json by main(); Leg reads them at call time.
+# They are module state because Leg is constructed in several code paths and
+# does not carry a registry around.
+PROVIDER_PREFIX: dict = {}
+API_BASE: dict = {}
+ENV_KEY: dict = {}
 
 START = "# AUTOOS-MANAGED-START"
 END = "# AUTOOS-MANAGED-END"
@@ -98,6 +74,40 @@ _MARKER_RE = re.compile(
 
 class ConfigError(RuntimeError):
     """The config file cannot be safely rewritten."""
+
+
+def provider_maps(path=None):
+    """(prefix, api_base, env_key) keyed by OmniRoute provider id.
+
+    catalog/providers.json is the single source of truth shared with
+    apply.ps1/apply.sh and tools/mirror-litellm-env.py. The OmniRoute provider
+    id is the key because it is the first segment of a combos.json model ref;
+    entries with no omniroute_id (meta, the client key) have no refs and are
+    skipped.
+
+    Only ids whose LiteLLM transport differs from the OmniRoute id appear in
+    the prefix map: OmniRoute's <provider>/<model> is already LiteLLM's shape,
+    so anything else passes through. api_base covers the OpenAI-compatible
+    gateways, which would otherwise silently point at api.openai.com. env_key
+    names the conventional env vars; Leg falls back to <PROVIDER>_API_KEY.
+    """
+    try:
+        doc = json.loads(Path(path or PROVIDERS_FILE).read_text(encoding="utf-8"))
+        providers = doc["providers"]
+    except (OSError, ValueError, KeyError) as exc:
+        raise ConfigError(f"cannot read {path or PROVIDERS_FILE}: {exc}") from exc
+    prefix, api_base, env_key = {}, {}, {}
+    for entry in providers.values():
+        omni = entry.get("omniroute_id")
+        if not omni:
+            continue
+        if entry.get("litellm_prefix"):
+            prefix[omni] = entry["litellm_prefix"]
+        if entry.get("api_base"):
+            api_base[omni] = entry["api_base"]
+        if entry.get("litellm_env"):
+            env_key[omni] = entry["litellm_env"]
+    return prefix, api_base, env_key
 
 
 class Leg:
@@ -330,19 +340,21 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     _utf8_streams()
-    root = Path(__file__).resolve().parent.parent
     combos_path = (
         Path(args.combos)
         if args.combos
-        else root / "configuration" / "omniroute" / "combos.json"
+        else ROOT / "configuration" / "omniroute" / "combos.json"
     )
     config_path = (
         Path(args.config)
         if args.config
-        else root / "configuration" / "litellm" / "config.yaml"
+        else ROOT / "configuration" / "litellm" / "config.yaml"
     )
 
     try:
+        # Populate the module maps Leg reads, from the shared registry.
+        global PROVIDER_PREFIX, API_BASE, ENV_KEY
+        PROVIDER_PREFIX, API_BASE, ENV_KEY = provider_maps()
         combos = combos_refs(combos_path)
         original = config_path.read_text(encoding="utf-8")
         updated, changed = rewrite(original, combos)

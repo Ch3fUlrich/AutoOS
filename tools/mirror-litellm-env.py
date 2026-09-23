@@ -5,7 +5,9 @@ configuration/api-keys.yml is the single source of truth for keys (one
 `name: value` map). configuration/litellm/.env needs the same keys under
 LiteLLM's conventional names (GROQ_API_KEY, ...) plus a random
 LITELLM_MASTER_KEY. This tool regenerates the .env from the yml so the two
-never drift apart by hand-editing.
+never drift apart by hand-editing. The name mapping itself comes from
+catalog/providers.json, the registry shared with apply.ps1/apply.sh and
+tools/sync-router-tiers.py.
 
     python3 tools/mirror-litellm-env.py [--check]
 
@@ -21,29 +23,29 @@ touches a tracked file. Exit 0 = in sync / written, 1 = drifted (--check),
 from __future__ import annotations
 
 import argparse
+import json
 import secrets
 import sys
 from pathlib import Path
 
+# The provider registry shared with apply.ps1/apply.sh and
+# tools/sync-router-tiers.py; this tool used to carry its own copy of the map.
+CATALOG = Path(__file__).resolve().parent.parent / "catalog" / "providers.json"
+
+
+def load_key_map(path=None) -> dict:
+    """api-keys.yml name -> litellm .env name, from the provider registry.
+
+    Keys keep the registry's spelling - api-keys.yml spells SambaNova with a
+    capital S/N and this lookup is case-sensitive. Value order is the order
+    lines are emitted into .env, so it follows the registry exactly.
+    """
+    doc = json.loads(Path(path or CATALOG).read_text(encoding="utf-8"))
+    return {name: entry["litellm_env"] for name, entry in doc["providers"].items()}
+
+
 # api-keys.yml name -> litellm .env name.
-KEY_MAP = {
-    "groq": "GROQ_API_KEY",
-    "google_ai_studio": "GEMINI_API_KEY",
-    "mistral": "MISTRAL_API_KEY",
-    "cerebras": "CEREBRAS_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "meta": "META_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "zen": "OPENCODE_ZEN_API_KEY",
-    "cohere": "COHERE_API_KEY",
-    "cheapinference": "CHEAPINFERENCE_API_KEY",
-    # NOTE: api-keys.yml spells this one 'SambaNova' (capital S/N) - the
-    # lookup is case-sensitive, so the map key must match exactly.
-    "SambaNova": "SAMBANOVA_API_KEY",
-    "cloudflare_workers_ai": "CLOUDFLARE_API_KEY",
-    "hugging_face": "HUGGINGFACE_API_KEY",
-    "omniroute": "AUTOOS_OMNIROUTE_KEY",
-}
+KEY_MAP = load_key_map()
 
 HEADER = "# AutoOS LiteLLM keys - generated from api-keys.yml, do not commit."
 

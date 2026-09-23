@@ -1,0 +1,139 @@
+{
+  "$comment": [
+    "Single source of truth for the provider-name maps that used to be kept",
+    "by hand in five places: configuration/omniroute/apply.ps1 ($ProviderMap),",
+    "configuration/omniroute/apply.sh (PROVIDER_MAP), tools/mirror-litellm-env.py",
+    "(KEY_MAP), tools/sync-router-tiers.py (ENV_KEY / PROVIDER_PREFIX / API_BASE)",
+    "and the table in docs/api-keys.md.",
+    "",
+    "Entries are keyed by the api-keys.yml name, spelled exactly as the file",
+    "spells it. 'SambaNova' keeps its capital S/N on purpose: the mirror tool",
+    "looks the key up case-sensitively, so a lower-cased key there would",
+    "silently drop the SambaNova key from litellm/.env. apply.ps1/apply.sh",
+    "lower-case the api-keys.yml keys as they parse, so they lower-case these",
+    "names again on read.",
+    "",
+    "Field meanings:",
+    "  omniroute_id   the OmniRoute provider id apply registers, or null when",
+    "                 there is nothing to register. 'meta' is null since",
+    "                 2026-09-23: the Meta gateway 502s upstream, no combo leg",
+    "                 references it and routing is openrouter-first; direct",
+    "                 Meta access stays via the opencode meta provider (own",
+    "                 key, own billing). 'omniroute' is null too - it is the",
+    "                 client key apps send, not a provider.",
+    "  litellm_env    the env-var name the LiteLLM .env / config.yaml use.",
+    "  litellm_prefix LiteLLM transport prefix when it differs from the",
+    "                 OmniRoute provider id (the OpenAI-compatible gateways",
+    "                 need 'openai'); null to pass the id through unchanged.",
+    "  api_base       endpoint for the OpenAI-compatible gateways, else null.",
+    "  provider_data  connection quirks applied at registration, else null.",
+    "                 groq and cerebras sit behind Cloudflare, which answers",
+    "                 error 1010 to Node's default User-Agent; a plain client",
+    "                 UA is accepted.",
+    "",
+    "Order is the order tools/mirror-litellm-env.py emits lines into",
+    "litellm/.env. Reordering this file rewrites that file's line order, which",
+    "shows up as --check drift, so change it deliberately (see",
+    "tests/helpers/check-provider-registry.py, which pins the order)."
+  ],
+  "providers": {
+    "groq": {
+      "omniroute_id": "groq",
+      "litellm_env": "GROQ_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": { "customUserAgent": "curl/8.7.1" }
+    },
+    "google_ai_studio": {
+      "omniroute_id": "gemini",
+      "litellm_env": "GEMINI_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null
+    },
+    "mistral": {
+      "omniroute_id": "mistral",
+      "litellm_env": "MISTRAL_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null
+    },
+    "cerebras": {
+      "omniroute_id": "cerebras",
+      "litellm_env": "CEREBRAS_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": { "customUserAgent": "curl/8.7.1" }
+    },
+    "deepseek": {
+      "omniroute_id": "deepseek",
+      "litellm_env": "DEEPSEEK_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null
+    },
+    "meta": {
+      "omniroute_id": null,
+      "litellm_env": "META_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null
+    },
+    "openrouter": {
+      "omniroute_id": "openrouter",
+      "litellm_env": "OPENROUTER_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null
+    },
+    "zen": {
+      "omniroute_id": "opencode-zen",
+      "litellm_env": "OPENCODE_ZEN_API_KEY",
+      "litellm_prefix": "openai",
+      "api_base": "https://opencode.ai/zen/v1",
+      "provider_data": null
+    },
+    "cohere": {
+      "omniroute_id": "cohere",
+      "litellm_env": "COHERE_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null
+    },
+    "cheapinference": {
+      "omniroute_id": "cheaperinference",
+      "litellm_env": "CHEAPINFERENCE_API_KEY",
+      "litellm_prefix": "openai",
+      "api_base": "https://api.cheaperinference.com/v1",
+      "provider_data": null
+    },
+    "SambaNova": {
+      "omniroute_id": "sambanova",
+      "litellm_env": "SAMBANOVA_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null
+    },
+    "cloudflare_workers_ai": {
+      "omniroute_id": "cloudflare-ai",
+      "litellm_env": "CLOUDFLARE_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null
+    },
+    "hugging_face": {
+      "omniroute_id": "huggingface",
+      "litellm_env": "HUGGINGFACE_API_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null
+    },
+    "omniroute": {
+      "omniroute_id": null,
+      "litellm_env": "AUTOOS_OMNIROUTE_KEY",
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null
+    }
+  }
+}

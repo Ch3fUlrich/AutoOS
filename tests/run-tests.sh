@@ -1593,7 +1593,8 @@ if it "--check-catalog validates all five catalogs by type, not just component c
     # rc could go green for the wrong reason (e.g. an empty glob).
     out="$(bash setup.sh --check-catalog 2>&1)"; rc=$?
     if [[ $rc -eq 0 && "$out" == *"engines.json is valid"* && "$out" == *"images.json is valid"* \
-        && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"*         && "$out" == *"agent-harness.json is valid"* ]]; then
+        && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"*         && "$out" == *"agent-harness.json is valid"* \
+        && "$out" == *"providers.json is valid"* ]]; then
         pass
     else
         fail "rc=$rc out=$out"
@@ -5681,10 +5682,22 @@ fi
 
 if it "apply handles the Cloudflare UA and stays openrouter-first"; then
     ok=1
-    grep -q 'customUserAgent' configuration/omniroute/apply.sh || ok=0
+    # The UA quirk now lives once, in the registry; apply.sh only passes
+    # provider_data through.
+    grep -q 'providers\.json' configuration/omniroute/apply.sh || ok=0
     grep -q 'muse-code' configuration/omniroute/apply.sh && ok=0
     grep -q 'provider-specific-data' configuration/omniroute/apply.sh || ok=0
+    ua="$(python3 -c "import json; p=json.load(open('catalog/providers.json', encoding='utf-8'))['providers']; print(' '.join((p[n]['provider_data'] or {}).get('customUserAgent','') for n in ('groq','cerebras')))")"
+    [[ "$ua" == "curl/8.7.1 curl/8.7.1" ]] || { ok=0; echo "registry UA quirk wrong: $ua" >&2; }
     if (( ok )); then pass; else fail "apply.sh is missing the provider quirks"; fi
+fi
+
+if it "provider registry drives apply, mirror and the tier maps"; then
+    # catalog/providers.json is the one map; the helper asserts every
+    # consumer's in-memory map equals it, so a hand-edited copy or a half-done
+    # registry edit fails here instead of routing a provider to a wrong name.
+    out="$(python3 tests/helpers/check-provider-registry.py 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "$out"; fi
 fi
 
 if it "apply --dry-run registers nothing and starts nothing"; then
@@ -5692,6 +5705,11 @@ if it "apply --dry-run registers nothing and starts nothing"; then
     before="$(cat configuration/omniroute/combos.json)"
     out="$(bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     assert_contains "$out" "dry run"
+    # Every registry provider with an omniroute_id is announced (meta and the
+    # client key carry none and are skipped), so the map is proven live.
+    for id in gemini cloudflare-ai huggingface opencode-zen cheaperinference sambanova cohere; do
+        assert_contains "$out" "$id"
+    done
     after="$(cat configuration/omniroute/combos.json)"
     assert_eq "$after" "$before"
 fi

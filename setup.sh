@@ -160,7 +160,7 @@ try:
         data = json.load(fh)
 except Exception:
     print("invalid"); sys.exit(0)
-for key in ("categories", "images", "engines", "models", "roles"):
+for key in ("categories", "images", "engines", "models", "roles", "providers"):
     if key in data:
         print(key); sys.exit(0)
 if "$schema" in data:
@@ -182,6 +182,32 @@ models = json.load(open(sys.argv[1], encoding="utf-8")).get("models")
 ok = isinstance(models, list) and models and all(isinstance(m, dict) and m.get("id") for m in models)
 ids = [m.get("id") for m in models] if ok else []
 sys.exit(0 if ok and len(ids) == len(set(ids)) else 1)
+' "$cat"; then ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            providers)
+                # The provider registry (catalog/providers.json) read by apply.*
+                # and the Python router tools: a map of api-keys.yml name ->
+                # fields. Shape check here; the deeper consumer agreement is
+                # tests/helpers/check-provider-registry.py.
+                if python3 -c '
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+providers = data.get("providers")
+fields = ("omniroute_id", "litellm_env", "litellm_prefix", "api_base", "provider_data")
+ok = isinstance(providers, dict) and bool(providers)
+seen = set()
+if ok:
+    for entry in providers.values():
+        if not isinstance(entry, dict) or any(f not in entry for f in fields):
+            ok = False
+            break
+        oid = entry.get("omniroute_id")
+        if oid:
+            if oid in seen:
+                ok = False
+                break
+            seen.add(oid)
+sys.exit(0 if ok else 1)
 ' "$cat"; then ui_ok "$(basename "$cat") is valid."
                 else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
             roles)

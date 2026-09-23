@@ -33,7 +33,9 @@ to your provider key, not to OpenRouter credit — credit-chain economics in
 ## Provider key → OmniRoute provider id
 
 `apply` maps the names in `api-keys.yml` automatically; this table is for
-registering by hand in the dashboard:
+registering by hand in the dashboard. Source: `catalog/providers.json` — the
+registry that `apply`, `tools/mirror-litellm-env.py` and
+`tools/sync-router-tiers.py` all read; this table is its human-readable view.
 
 | `api-keys.yml` name | OmniRoute provider id | Notes |
 |---|---|---|

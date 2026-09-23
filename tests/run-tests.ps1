@@ -4308,29 +4308,43 @@ Test-Case 'apply scripts carry the Cloudflare User-Agent fix and stay openrouter
     $ps1 = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
     $sh = Get-Content (Join-Path $Root 'configuration\omniroute\apply.sh') -Raw
     foreach ($text in @($ps1, $sh)) {
-        Assert-True ($text -match 'customUserAgent') 'customUserAgent missing'
+        Assert-True ($text -match 'providers\.json') 'does not read catalog/providers.json'
         Assert-True ($text -match 'provider-specific-data') 'provider-specific-data flag missing'
         Assert-True ($text -notmatch "'meta'|`"meta:|meta:muse-code") 'muse-code mapping must stay removed (openrouter-first)'
     }
-    Pass
+    # The Cloudflare UA quirk now has one home: the registry.
+    $reg = (Get-Content (Join-Path $Root 'catalog\providers.json') -Raw | ConvertFrom-Json).providers
+    foreach ($id in @('groq', 'cerebras')) {
+        Assert-Equal $reg.$id.provider_data.customUserAgent 'curl/8.7.1'
+    }
 }
 
 Test-Case 'provider data JSON survives both PowerShell generations' {
     # 5.1 strips inner double quotes marshalling to a native exe, pwsh 7
     # passes them through: one literal cannot serve both (groq/cerebras
-    # registration failed exactly this way). The branch is pinned by
-    # executing the real function from apply.ps1 with each generation.
+    # registration failed exactly this way). The registry holds the UA quirk as
+    # data and Get-AutoOSProviderMap turns it into the plain JSON string the
+    # escaping branch needs; both real functions run here.
     $tokens = $null; $errs = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile(
         (Join-Path $Root 'configuration\omniroute\apply.ps1'), [ref]$tokens, [ref]$errs)
     Assert-Equal $errs.Count 0 'apply.ps1 does not parse'
-    $def = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $mapDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $n.Name -eq 'Get-AutoOSProviderMap' }, $false)
+    $jsonDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
         $n.Name -eq 'Get-AutoOSProviderDataJson' }, $false)
-    Assert-True ($null -ne $def) 'Get-AutoOSProviderDataJson missing from apply.ps1'
-    $assign = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $n.Left.Extent.Text -eq '$ProviderData' }, $false)
-    Assert-True ($null -ne $assign) '$ProviderData table missing from apply.ps1'
-    . ([scriptblock]::Create($assign.Extent.Text + "`n" + $def.Extent.Text))
+    Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
+    Assert-True ($null -ne $jsonDef) 'Get-AutoOSProviderDataJson missing from apply.ps1'
+    . ([scriptblock]::Create($mapDef.Extent.Text + "`n" + $jsonDef.Extent.Text))
+    $registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\providers.json')
+    $ProviderData = $registry.Data
+    Assert-Equal $registry.Map['groq'] 'groq'
+    Assert-Equal $registry.Map['google_ai_studio'] 'gemini'
+    Assert-Equal $registry.Map['zen'] 'opencode-zen'
+    # api-keys.yml spells SambaNova with capitals; apply reads lower-cased keys.
+    Assert-Equal $registry.Map['sambanova'] 'sambanova'
+    Assert-True (-not $registry.Map.Contains('meta')) 'meta must not be registered (2026-09-23)'
+    Assert-True (-not $registry.Map.Contains('omniroute')) 'omniroute is the client key, not a provider'
     $v7 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 7
     $v5 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 5
     Assert-Equal ($v7 | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
@@ -4338,6 +4352,17 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     # quotes arrive as plain quotes) must equal the 7.x literal.
     Assert-Equal (($v5 -replace '\\"','"') | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
     Assert-True ($null -eq (Get-AutoOSProviderDataJson 'nope' -ShellMajor 7)) 'unknown provider must yield null'
+}
+
+Test-Case 'provider registry is the single source for apply, mirror and tier maps' {
+    # catalog/providers.json is the one map; the helper asserts every consumer's
+    # in-memory map equals it, so a hand-edited copy or a half-done registry
+    # edit fails loudly instead of routing a provider to the wrong name.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $out = & $py.Source (Join-Path $Root 'tests\helpers\check-provider-registry.py') 2>&1 | Out-String
+    Assert-Equal $LASTEXITCODE 0 "provider registry drift: $out"
+    Assert-True ($out -match 'ok') 'helper did not confirm'
 }
 
 Test-Case 'opencode tiers declare matching context limits' {

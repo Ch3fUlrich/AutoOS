@@ -81,32 +81,35 @@ if (-not (Test-Gateway)) {
 }
 if (Test-Gateway) { Write-Host "Gateway OK on $Gateway" }
 
-# key name in api-keys.yml (lower-case) -> OmniRoute provider id
-$ProviderMap = [ordered]@{
-    'groq'                 = 'groq'
-    'google_ai_studio'     = 'gemini'
-    'mistral'              = 'mistral'
-    'cloudflare_workers_ai' = 'cloudflare-ai'
-    'cohere'               = 'cohere'
-    'hugging_face'         = 'huggingface'
-    'cerebras'             = 'cerebras'
-    'sambanova'            = 'sambanova'
-    'deepseek'             = 'deepseek'
-    # Meta gateway mapping removed 2026-09-23: 502 upstream, no combo leg
-    # references that provider, routing is openrouter-first. Direct Meta API
-    # stays available via the opencode meta provider (own key, own billing).
-    'openrouter'           = 'openrouter'
-    'zen'                  = 'opencode-zen'
-    'cheapinference'       = 'cheaperinference'
+# Provider registry: catalog\providers.json is the single source of truth for
+# which api-keys.yml name maps to which OmniRoute provider id and for the
+# provider-specific connection data. apply.sh and the two Python tools read the
+# same file, so the copies these maps used to carry cannot drift. Only providers
+# with an omniroute_id are registered: meta (unregistered 2026-09-23,
+# openrouter-first, no combo leg) and the omniroute client key carry none and
+# are skipped, exactly as before.
+function Get-AutoOSProviderMap {
+    param([string]$CatalogPath)
+    $providers = (Get-Content $CatalogPath -Raw -Encoding utf8 | ConvertFrom-Json).providers
+    $map = [ordered]@{}
+    $data = @{}
+    foreach ($prop in $providers.PSObject.Properties) {
+        $entry = $prop.Value
+        if ($null -eq $entry.omniroute_id) { continue }
+        # api-keys.yml keys are lower-cased when read above, so match that.
+        $keyName = $prop.Name.ToLowerInvariant()
+        $map[$keyName] = $entry.omniroute_id
+        if ($null -ne $entry.provider_data) {
+            # Keep the plain JSON string: the 5.1-vs-7.x escaping branch below
+            # needs a string, and ConvertTo-Json -Compress is stable across both.
+            $data[$entry.omniroute_id] = ($entry.provider_data | ConvertTo-Json -Compress)
+        }
+    }
+    [pscustomobject]@{ Map = $map; Data = $data }
 }
-
-# Provider-specific connection data. groq and cerebras sit behind Cloudflare,
-# which answers error 1010 to Node's default User-Agent; a plain client UA is
-# accepted. Keyed by OmniRoute provider id.
-$ProviderData = @{
-    'groq'     = '{"customUserAgent":"curl/8.7.1"}'
-    'cerebras' = '{"customUserAgent":"curl/8.7.1"}'
-}
+$registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\providers.json')
+$ProviderMap = $registry.Map
+$ProviderData = $registry.Data
 
 # Build the --provider-specific-data JSON for the running shell. PowerShell
 # 5.1 strips inner double quotes when marshalling to a native exe (the same

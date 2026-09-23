@@ -60,32 +60,39 @@ if [[ -f "$KEYS_FILE" ]]; then
     done <"$KEYS_FILE"
 fi
 
-# key name in api-keys.yml (lower-case) -> OmniRoute provider id
-PROVIDER_MAP=(
-    "groq:groq"
-    "google_ai_studio:gemini"
-    "mistral:mistral"
-    "cloudflare_workers_ai:cloudflare-ai"
-    "cohere:cohere"
-    "hugging_face:huggingface"
-    "cerebras:cerebras"
-    "sambanova:sambanova"
-    "deepseek:deepseek"
-    # Meta gateway mapping removed 2026-09-23: 502 upstream, no combo leg
-    # references that provider, routing is openrouter-first. Direct Meta API
-    # stays available via the opencode meta provider (own key, own billing).
-    "openrouter:openrouter"
-    "zen:opencode-zen"
-    "cheapinference:cheaperinference"
-)
+# Provider registry: catalog/providers.json is the single source of truth for
+# which api-keys.yml name maps to which OmniRoute provider id and for the
+# provider-specific connection data (the Cloudflare UA quirk on groq/cerebras).
+# apply.ps1 and the two Python tools read the same file, so the copies these
+# maps used to carry cannot drift. Only providers with an omniroute_id are
+# registered: meta (unregistered 2026-09-23, openrouter-first, no combo leg)
+# and the omniroute client key carry none and are skipped, exactly as before.
+PROVIDERS_FILE="$ROOT/catalog/providers.json"
+[[ -f "$PROVIDERS_FILE" ]] || { echo "Missing $PROVIDERS_FILE" >&2; exit 1; }
+provider_rows="$(python3 - "$PROVIDERS_FILE" <<'PY'
+import json, sys
 
-# Provider-specific connection data. groq and cerebras sit behind Cloudflare,
-# which answers error 1010 to Node's default User-Agent; a plain client UA is
-# accepted. Keyed by OmniRoute provider id.
-declare -A PROVIDER_DATA=(
-    [groq]='{"customUserAgent":"curl/8.7.1"}'
-    [cerebras]='{"customUserAgent":"curl/8.7.1"}'
-)
+providers = json.load(open(sys.argv[1], encoding="utf-8"))["providers"]
+for name, entry in providers.items():
+    provider_id = entry.get("omniroute_id")
+    if not provider_id:
+        continue  # meta (unregistered) and the omniroute client key
+    data = entry.get("provider_data")
+    # One compact JSON string per provider: the exact argv value the CLI wants.
+    data_json = json.dumps(data, separators=(",", ":")) if data else ""
+    # api-keys.yml keys are lower-cased when parsed above, so match that.
+    print("%s\t%s\t%s" % (name.lower(), provider_id, data_json))
+PY
+)" || { echo "apply.sh: cannot read $PROVIDERS_FILE" >&2; exit 1; }
+PROVIDER_MAP=()
+declare -A PROVIDER_DATA=()
+while IFS=$'\t' read -r key_name provider_id data_json; do
+    [[ -z "$key_name" ]] && continue
+    PROVIDER_MAP+=("$key_name:$provider_id")
+    if [[ -n "$data_json" ]]; then
+        PROVIDER_DATA["$provider_id"]="$data_json"
+    fi
+done <<<"$provider_rows"
 
 gateway_up() { curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1; }
 if ! gateway_up; then
