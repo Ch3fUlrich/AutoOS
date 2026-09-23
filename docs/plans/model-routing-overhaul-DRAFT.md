@@ -89,11 +89,14 @@ commits 2d0a790 / e176ab4 / 2e1fba7 / 27cb4d1 which landed overnight.
    copies — one home per fact); agent-skills CLAUDE.md trap detail → AutoOS
    CLAUDE.md; new AutoOS GEMINI.md from agent-skills GEMINI.md (repo has none).
    Keep AutoOS hard rules §§1–7 untouched and canonical.
-4. **Remaining router items:** single `fallbackOrder` constant (cheapinference
-   position contradiction); Claude never-API lint test; `catalog/providers.json`
-   consolidating the 5 name maps; `sync-ide-models.py` + static effort aliases;
-   effort-clamp rule for heterogeneous tiers; BYOK verdict (default manual
-   checklist); `docs/models-proposed.md` tables + `docs/routing.md` mermaid.
+4. **Remaining router items:** `catalog/providers.json` (W4 worker in
+   flight); `sync-ide-models.py` + static effort aliases (night lane —
+   touches opencode.jsonc, tier-profiles, both Zed writers); coverage
+   merges per W1 list (dedicated lane — serena fixtures, image_resolve,
+   usb tables, MCP pins, harness generator, web assertions, linter
+   authority). DONE this session: fallbackOrder unification, Claude
+   never-API lint, effort-clamp rule, BYOK section, efforts table,
+   routing.md mermaid.
 
 ## 5. Definition of done (AGENTS.md §7, touched-parts policy per 2026-09-23)
 Touched `--filter`/`-Filter` groups green · shellcheck/PSScriptAnalyzer clean
