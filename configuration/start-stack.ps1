@@ -140,7 +140,7 @@ switch ($App) {
             # Detached, no -it: -it fails without a TTY (non-interactive shells)
             # and foreground -it never returns, so the URL line below would lie.
             & docker run -d --rm `
-                -e LLM_MODEL=openai/tier1 `
+                -e LLM_MODEL=openai/t1-orchestrator `
                 -e LLM_API_KEY `
                 -e LLM_BASE_URL="http://host.docker.internal:20128/v1" `
                 -e LOG_ALL_EVENTS=true `

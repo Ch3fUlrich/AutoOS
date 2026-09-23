@@ -5,8 +5,8 @@ configuration/omniroute/combos.json is the single source of truth for the
 model-list order of each tier (docs/models.md). configuration/litellm/config.yaml
 is the manual fallback and carries a static copy of those legs -- a copy that
 drifts the moment someone re-curates a combo (that already happened once:
-tier2 led with a 2-RPM Mistral leg while OmniRoute led with Gemini, and
-tier3 listed model ids OmniRoute no longer had).
+t2-worker led with a 2-RPM Mistral leg while OmniRoute led with Gemini, and
+t3-driver listed model ids OmniRoute no longer had).
 
 This tool removes the drift by regenerating ONLY the block between the two
 markers in config.yaml:
@@ -15,8 +15,9 @@ markers in config.yaml:
     ...
     # AUTOOS-MANAGED-END <tier>
 
-Everything outside the markers -- the header prose, tier1, tier1-paid,
-tier2-paid, tier3-paid, router_settings, litellm_settings, every comment and
+Everything outside the markers -- the header prose, t1-orchestrator,
+t1-orchestrator-paid, t2-worker-paid, t3-driver-paid, router_settings,
+litellm_settings, every comment and
 the exact whitespace between them -- is left byte-for-byte untouched. Inside a
 managed block the legs are machine-owned, so they are regenerated in full:
 reordering, adding or dropping a leg is exactly the drift this tool exists to
@@ -50,12 +51,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PROVIDERS_FILE = ROOT / "catalog" / "providers.json"
-# Tiers mirrored from combos.json. tier1 / *-paid are deliberately absent:
-# combos.json has no tier1-paid, and docs/models.md keeps tier1 a hand-curated
-# spark-only chain with an explicit xhigh note. tier2-paid / tier3-paid are
-# LiteLLM-only fallback chains with no OmniRoute equivalent. Regenerating any
-# of those here would lose information rather than remove drift.
-SYNCED_TIERS = ("tier2", "tier3")
+# Tiers mirrored from combos.json. t1-orchestrator / *-paid are deliberately
+# absent: combos.json has no t1-orchestrator-paid, and docs/models.md keeps
+# t1-orchestrator a hand-curated spark-only chain with an explicit xhigh note.
+# t2-worker-paid / t3-driver-paid are LiteLLM-only fallback chains with no
+# OmniRoute equivalent. Regenerating any of those here would lose information
+# rather than remove drift.
+SYNCED_TIERS = ("t2-worker", "t3-driver")
 
 # Filled from catalog/providers.json by main(); Leg reads them at call time.
 # They are module state because Leg is constructed in several code paths and

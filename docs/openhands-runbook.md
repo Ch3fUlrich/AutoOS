@@ -1,19 +1,19 @@
 # OpenHands runbook — continue this work from inside OpenHands
 
 You are an agent inside the OpenHands container (`:3000`, profile
-`openai_tier1` → gateway `:20128`). This file is your zero-context entry:
+`openai_t1-orchestrator` → gateway `:20128`). This file is your zero-context entry:
 read it, then continue from `docs/handoff.md` Open item 1.
 
 ## 1. Where you are
 
 - Container started by `.\configuration\start-stack.ps1 -App openhands`
-  (or `start-stack.sh openhands`): `LLM_MODEL=openai/tier1`,
+  (or `start-stack.sh openhands`): `LLM_MODEL=openai/t1-orchestrator`,
   `LLM_BASE_URL=http://host.docker.internal:20128/v1`, key via
   `-e LLM_API_KEY` (inherited, never on a command line).
 - UI: `http://localhost:3000` locally, `http://<tail-ip>:3000` by phone.
   Find `<tail-ip>` with `tailscale ip -4` on the host.
 - You route through the same OmniRoute combos as opencode
-  (`configuration/omniroute/combos.json`): `tier1` = spark-only + xhigh,
+  (`configuration/omniroute/combos.json`): `t1-orchestrator` = spark-only + xhigh,
   `*-clean` = paid legs only (privacy). Full skill:
   `.agents/skills/unattended-orchestration/unattended-orchestration.md`. Live board: `docs/tasks.md`.
 
@@ -34,12 +34,12 @@ ephemeral — commit + push before you stop, see section 5.)
 
 ## 3. Tier discipline (same 2+2+2, OpenHands-flavoured)
 
-- **You = tier1-equivalent orchestrator**: plan, slice into at most 2
+- **You = t1-equivalent orchestrator**: plan, slice into at most 2
   tracks with disjoint file sets, define DONE per track, never code
   directly.
 - Delegate each track to sandbox subagents (at most 2), each spawning at
   most 2 reviewers with different lenses (cheap mistral/qwen + smart
-  gpt-oss/deepseek). Tier3-equivalents spawn nothing.
+  gpt-oss/deepseek). T3-equivalents spawn nothing.
 - Verify, don't trust: every track runs its suite + one live `ack` probe
   per touched tier before reporting up.
 
@@ -54,7 +54,7 @@ bash tests/run-tests.sh                        # full sh suite, must be green
 (Windows host runs `tests/run-tests.ps1` — same bar, other shell.
 `configuration/healthcheck.sh --fix` resumes gateway/container/serve.)
 
-## 5. Finish like a tier1: update, commit, push
+## 5. Finish like a t1: update, commit, push
 
 1. Update `docs/tasks.md` (your rows to Done/Blocked) and
    `docs/handoff.md` (finished items to Done with proof, re-prioritise

@@ -1,15 +1,18 @@
 {
   "$comment": [
     "Single source of truth for the OpenHands gateway tier profiles",
-    "(omniroute-tier*.json + litellm-tier*.json): the selectable models.",
+    "(omniroute-t*-*.json + litellm-t*-*.json): the selectable models.",
+    "IDS RENAMED 2026-09-23: tier1 -> t1-orchestrator, tier2 -> t2-worker,",
+    "tier3 -> t3-driver, rag -> t4-rag. Delete the retired profile files",
+    "from ~/.openhands/profiles on next start (sync only writes).",
     "OmniRoute tiers address combos on :20128 with the openai/ LiteLLM",
     "transport prefix OpenHands requires (without it: provider-not-provided).",
     "LiteLLM tiers address the static fallback on :4000 by its tier",
     "model_names; they ALSO carry the openai/ prefix, which the OpenHands",
     "litellm client stack strips before the HTTP call (measured 2026-09-22:",
-    "bare openai/tier2 to the gateway 401s as an unknown provider, while the",
-    "proven openai/tier1 profile round-trips - so the wire always carries",
-    "the bare tier name the :4000 proxy defines). base_url is",
+    "bare openai/t2-worker to the gateway 401s as an unknown provider, while",
+    "the proven openai/t1-orchestrator profile round-trips - so the wire",
+    "always carries the bare tier name the :4000 proxy defines). base_url is",
     "container-side (host.docker.internal); the installer substitutes the",
     "host-side URL nowhere - these profiles only ever run inside the container.",
     "Costs stay 0: billing happens at the gateway, not per profile.",
@@ -31,15 +34,22 @@
   "litellm_base_url": "http://host.docker.internal:4000/v1",
   "tiers": [
     {
-      "id": "omniroute-tier1",
-      "model": "openai/tier1",
+      "id": "omniroute-t1-orchestrator",
+      "model": "openai/t1-orchestrator",
       "max_input_tokens": 1048576,
       "max_output_tokens": 65536,
       "reasoning": true
     },
     {
-      "id": "omniroute-tier1-clean",
-      "model": "openai/tier1-clean",
+      "id": "omniroute-t1-orchestrator-clean",
+      "model": "openai/t1-orchestrator-clean",
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "reasoning": true
+    },
+    {
+      "id": "omniroute-t1-orchestrator-free-only",
+      "model": "openai/t1-orchestrator-free-only",
       "max_input_tokens": 1048576,
       "max_output_tokens": 65536,
       "reasoning": true
@@ -52,36 +62,50 @@
       "reasoning": true
     },
     {
-      "id": "omniroute-tier2",
-      "model": "openai/tier2",
+      "id": "omniroute-t2-worker",
+      "model": "openai/t2-worker",
       "max_input_tokens": 131072,
       "max_output_tokens": 32768,
       "reasoning": false
     },
     {
-      "id": "omniroute-tier2-clean",
-      "model": "openai/tier2-clean",
+      "id": "omniroute-t2-worker-clean",
+      "model": "openai/t2-worker-clean",
       "max_input_tokens": 131072,
       "max_output_tokens": 32768,
       "reasoning": false
     },
     {
-      "id": "omniroute-tier3",
-      "model": "openai/tier3",
+      "id": "omniroute-t2-worker-free-only",
+      "model": "openai/t2-worker-free-only",
+      "max_input_tokens": 131072,
+      "max_output_tokens": 32768,
+      "reasoning": false
+    },
+    {
+      "id": "omniroute-t3-driver",
+      "model": "openai/t3-driver",
       "max_input_tokens": 131072,
       "max_output_tokens": 16384,
       "reasoning": false
     },
     {
-      "id": "omniroute-tier3-clean",
-      "model": "openai/tier3-clean",
+      "id": "omniroute-t3-driver-clean",
+      "model": "openai/t3-driver-clean",
       "max_input_tokens": 131072,
       "max_output_tokens": 16384,
       "reasoning": false
     },
     {
-      "id": "omniroute-rag",
-      "model": "openai/rag",
+      "id": "omniroute-t3-driver-free-only",
+      "model": "openai/t3-driver-free-only",
+      "max_input_tokens": 131072,
+      "max_output_tokens": 16384,
+      "reasoning": false
+    },
+    {
+      "id": "omniroute-t4-rag",
+      "model": "openai/t4-rag",
       "max_input_tokens": 131072,
       "max_output_tokens": 16384,
       "reasoning": false
@@ -101,39 +125,25 @@
       "reasoning": false
     },
     {
-      "id": "omniroute-tier2-credit",
-      "model": "openai/tier2-credit",
-      "max_input_tokens": 131072,
-      "max_output_tokens": 32768,
-      "reasoning": false
-    },
-    {
-      "id": "omniroute-tier3-credit",
-      "model": "openai/tier3-credit",
-      "max_input_tokens": 131072,
-      "max_output_tokens": 32768,
-      "reasoning": false
-    },
-    {
-      "id": "litellm-tier1",
+      "id": "litellm-t1-orchestrator",
       "gateway": "litellm",
-      "model": "openai/tier1",
+      "model": "openai/t1-orchestrator",
       "max_input_tokens": 1048576,
       "max_output_tokens": 65536,
       "reasoning": true
     },
     {
-      "id": "litellm-tier2",
+      "id": "litellm-t2-worker",
       "gateway": "litellm",
-      "model": "openai/tier2",
+      "model": "openai/t2-worker",
       "max_input_tokens": 131072,
       "max_output_tokens": 32768,
       "reasoning": false
     },
     {
-      "id": "litellm-tier3",
+      "id": "litellm-t3-driver",
       "gateway": "litellm",
-      "model": "openai/tier3",
+      "model": "openai/t3-driver",
       "max_input_tokens": 131072,
       "max_output_tokens": 16384,
       "reasoning": false

@@ -3,9 +3,9 @@
 # you want LiteLLM instead: same tier names, static chains.
 #
 # Cost efficiency is the design goal, hence the 3-level hierarchy:
-#   tier1      orchestration — Muse Spark 1.3 family, xhigh effort.
-#   tier2      smart second level — strong reasoning, free quotas.
-#   tier3      daily driver — codegen, research, review, lint. Cheapest.
+#   t1-orchestrator      orchestration — Muse Spark 1.3 family, xhigh effort.
+#   t2-worker      smart second level — strong reasoning, free quotas.
+#   t3-driver      daily driver — codegen, research, review, lint. Cheapest.
 #   tierN-paid paid escalation for tierN, tried in listed order.
 #
 # Paid rule: orchestrator escalation is muse-spark-1.3-contributor, else
@@ -22,18 +22,18 @@
 # Key guide: docs/api-keys.md
 
 model_list:
-  # ── tier1: orchestration, spark-first ──────────────────────────────
+  # ── t1-orchestrator: orchestration, spark-first ──────────────────────────────
   # 1. Zen promo (free, limited time). 2. OpenRouter contributor
   # ($0.10/$0.20 per 1M — cheapest paid anywhere). Meta direct removed
   # 2026-09-23: deactivated upstream (502) + "Insufficient account funds",
   # and an unset META_API_KEY fails LiteLLM startup validation
-  # (SchemaError) breaking the whole tier1 group — see docs/verification.md.
-  - model_name: tier1
+  # (SchemaError) breaking the whole t1-orchestrator group — see docs/verification.md.
+  - model_name: t1-orchestrator
     litellm_params:
       model: openai/muse-spark-1.3-contributor-free
       api_base: https://opencode.ai/zen/v1
       api_key: os.environ/OPENCODE_ZEN_API_KEY
-  - model_name: tier1
+  - model_name: t1-orchestrator
     litellm_params:
       model: openrouter/meta/muse-spark-1.3-contributor
       api_key: os.environ/OPENROUTER_API_KEY
@@ -41,146 +41,146 @@ model_list:
   # caller-side control, not a model ID (Zed: reasoning_effort "xhigh";
   # Muse Code: Max level). The aliases above resolve to the 1.3 family.
 
-  # ── tier1-paid: OpenRouter contributor first, then Zen ──
+  # ── t1-orchestrator-paid: OpenRouter contributor first, then Zen ──
   # Funded-first: Zen 402s without balance, so a group led by it is a dead
-  # end (measured 2026-09-22: tier1-paid 402 "No fallback model group
+  # end (measured 2026-09-22: t1-orchestrator-paid 402 "No fallback model group
   # found"). OpenRouter is the leg that actually answers today. Meta direct
-  # removed 2026-09-23 (same reason as tier1 above).
-  - model_name: tier1-paid
+  # removed 2026-09-23 (same reason as t1-orchestrator above).
+  - model_name: t1-orchestrator-paid
     litellm_params:
       model: openrouter/meta/muse-spark-1.3-contributor
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: tier1-paid
+  - model_name: t1-orchestrator-paid
     litellm_params:
       model: openai/deepseek-v4.1-flash
       api_base: https://opencode.ai/zen/v1
       api_key: os.environ/OPENCODE_ZEN_API_KEY
 
-  # ── tier2: smart second level, free quotas ─────────────────────────
-  # Mirror of combos.json tier2 (single source of truth), kept in sync by
+  # ── t2-worker: smart second level, free quotas ─────────────────────────
+  # Mirror of combos.json t2-worker (single source of truth), kept in sync by
   # tools/sync-router-tiers.py: the markers below delimit a machine-owned
   # block - legs inside are regenerated, everything outside is untouched.
-  # AUTOOS-MANAGED-START tier2
-  - model_name: tier2
+  # AUTOOS-MANAGED-START t2-worker
+  - model_name: t2-worker
     litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
-  - model_name: tier2
+  - model_name: t2-worker
     litellm_params:
       model: groq/openai/gpt-oss-120b
       api_key: os.environ/GROQ_API_KEY
       rpm: 30 # free: per-model 200K tokens/day caps
-  - model_name: tier2
+  - model_name: t2-worker
     litellm_params:
       model: cerebras/gpt-oss-120b
       api_key: os.environ/CEREBRAS_API_KEY
-  - model_name: tier2
+  - model_name: t2-worker
     litellm_params:
       model: sambanova/gpt-oss-120b
       api_key: os.environ/SAMBANOVA_API_KEY
-  - model_name: tier2
+  - model_name: t2-worker
     litellm_params:
       model: openai/deepseek-v4-flash
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: tier2
+  - model_name: t2-worker
     litellm_params:
       model: openai/glm-4.5-air
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: tier2
+  - model_name: t2-worker
     litellm_params:
       model: openai/kimi-k3
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: tier2
+  - model_name: t2-worker
     litellm_params:
       model: openrouter/deepseek/deepseek-v4.1-flash
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: tier2
+  - model_name: t2-worker
     litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: tier2
+  - model_name: t2-worker
     litellm_params:
       model: openai/deepseek-v4.1-flash
       api_base: https://opencode.ai/zen/v1
       api_key: os.environ/OPENCODE_ZEN_API_KEY
-  # AUTOOS-MANAGED-END tier2
+  # AUTOOS-MANAGED-END t2-worker
 
-  # ── tier2-paid / tier3-paid: the escalation must actually answer ────
+  # ── t2-worker-paid / t3-driver-paid: the escalation must actually answer ────
   # Lead with the OpenRouter leg: it is a deployment DISTINCT from the tier
   # chains, so LiteLLM cooling the shared `deepseek/deepseek-flash`
   # deployment (cooldown_time below) cannot turn the escalation into a
   # dead-end. Direct deepseek second, Zen last (cheap at-cost, 402s without
   # balance). Measured 2026-09-22: a deepseek-first group answered
   # 200/402/402 as the shared deployment cooled; this ordering is stable.
-  - model_name: tier2-paid
+  - model_name: t2-worker-paid
     litellm_params:
       model: openrouter/deepseek/deepseek-v4.1-flash
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: tier2-paid
+  - model_name: t2-worker-paid
     litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: tier2-paid
+  - model_name: t2-worker-paid
     litellm_params:
       model: openai/deepseek-v4.1-flash
       api_base: https://opencode.ai/zen/v1
       api_key: os.environ/OPENCODE_ZEN_API_KEY
 
-  # ── tier3: daily driver, cheapest capable ──────────────────────────
-  # Mirror of combos.json tier3 (see the tier2 note above).
-  # AUTOOS-MANAGED-START tier3
-  - model_name: tier3
+  # ── t3-driver: daily driver, cheapest capable ──────────────────────────
+  # Mirror of combos.json t3-driver (see the t2-worker note above).
+  # AUTOOS-MANAGED-START t3-driver
+  - model_name: t3-driver
     litellm_params:
       model: mistral/mistral-code-latest
       api_key: os.environ/MISTRAL_API_KEY
-  - model_name: tier3
+  - model_name: t3-driver
     litellm_params:
       model: groq/qwen/qwen3.8-27b
       api_key: os.environ/GROQ_API_KEY
-  - model_name: tier3
+  - model_name: t3-driver
     litellm_params:
       model: cerebras/qwen-3.8-27b
       api_key: os.environ/CEREBRAS_API_KEY
-  - model_name: tier3
+  - model_name: t3-driver
     litellm_params:
       model: openai/glm-4.5-air
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: tier3
+  - model_name: t3-driver
     litellm_params:
       model: openai/minimax-m2.7
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: tier3
+  - model_name: t3-driver
     litellm_params:
       model: mistral/mistral-small-latest
       api_key: os.environ/MISTRAL_API_KEY
       rpm: 2
-  - model_name: tier3
+  - model_name: t3-driver
     litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: tier3
+  - model_name: t3-driver
     litellm_params:
       model: openai/deepseek-v4.1-flash
       api_base: https://opencode.ai/zen/v1
       api_key: os.environ/OPENCODE_ZEN_API_KEY
-  # AUTOOS-MANAGED-END tier3
+  # AUTOOS-MANAGED-END t3-driver
 
-  # ── tier3-paid: same shape as tier2-paid (see the note above) ──────
-  - model_name: tier3-paid
+  # ── t3-driver-paid: same shape as t2-worker-paid (see the note above) ──────
+  - model_name: t3-driver-paid
     litellm_params:
       model: openrouter/deepseek/deepseek-v4.1-flash
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: tier3-paid
+  - model_name: t3-driver-paid
     litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: tier3-paid
+  - model_name: t3-driver-paid
     litellm_params:
       model: openai/deepseek-v4.1-flash
       api_base: https://opencode.ai/zen/v1
@@ -188,7 +188,7 @@ model_list:
 
   # ── rag: cohere RAG standby (hand-curated, NOT sync-managed) ────────
   # Trial keys, 128k. Lives outside the AUTOOS-MANAGED markers on purpose:
-  # sync-router-tiers.py only owns tier2/tier3 and must never touch this.
+  # sync-router-tiers.py only owns t2-worker/t3-driver and must never touch this.
   # drop_params: opencode sends OpenAI-style `strict`, which cohere rejects
   # as an unknown field (measured 2026-09-22) — drop it per leg.
   # additional_drop_params: global/per-model drop_params does NOT cover
@@ -209,7 +209,7 @@ model_list:
 router_settings:
   # simple-shuffle: deterministic and DB-less. `usage-based-routing-v2` tracks
   # per-deployment usage in Postgres/Redis, so with no DB the same deployment
-  # is shared by tier2/tier3/*-clean and its cooldown state leaks across
+  # is shared by t2-worker/t3-driver/*-clean and its cooldown state leaks across
   # groups - one 402 in one group reappears as a 402 in unrelated groups
   # (measured 2026-09-22). This proxy is a manual fallback, not a load
   # balancer: predictability beats least-used scoring here.
@@ -219,10 +219,10 @@ router_settings:
   allowed_fails: 3
   cooldown_time: 120 # cool a 429ing deployment for 2 min, serve from the rest
   fallbacks:
-    - tier1: [tier1-paid]
-    - tier2: [tier2-paid]
-    - tier3: [tier3-paid]
-    - rag: [tier1-paid] # trial-key RAG fails over to the paid orchestrator
+    - t1-orchestrator: [t1-orchestrator-paid]
+    - t2-worker: [t2-worker-paid]
+    - t3-driver: [t3-driver-paid]
+    - t4-rag: [t1-orchestrator-paid] # trial-key RAG fails over to the paid orchestrator
 
 litellm_settings:
   drop_params: true # heterogeneous providers reject unknown params; drop, don't fail

@@ -3,14 +3,15 @@
 # V1 (current Web app) configures the LLM in the Settings UI; the docker path
 # gets it from env vars, which configuration/start-stack.* sets for you:
 #
-#   LLM_MODEL=openai/tier1
+#   LLM_MODEL=openai/t1-orchestrator
 #   LLM_API_KEY=<OmniRoute client key>
 #   LLM_BASE_URL=http://host.docker.internal:20128/v1   # container -> host
 #
 # The `openai/` prefix is not decoration: LiteLLM uses it to pick the
 # OpenAI-compatible transport, and everything after the prefix is the model
-# name OmniRoute receives (`tier1` is the combo name). Without it, LiteLLM
-# reports "LLM Provider NOT provided" — the classic model-mismatch error.
+# name OmniRoute receives (`t1-orchestrator` is the combo name). Without it,
+# LiteLLM reports "LLM Provider NOT provided" — the classic model-mismatch
+# error.
 #
 # This file is the V0/dev-path template (main.py / cli.py). Named [llm.*]
 # sections + [agent.*] mapping work there; the docker path ignores it.
@@ -23,108 +24,92 @@
 # docker.openhands.dev/openhands/openhands:latest until Canvas leaves beta
 # or this image is retired. Do not switch this file or start-stack.* to
 # Canvas without a fresh end-to-end LLM-profile proof.
+#
+# IDS RENAMED 2026-09-23: tier1 -> t1-orchestrator, tier2 -> t2-worker,
+# tier3 -> t3-driver, rag -> t4-rag. Credit chains dropped (operator call).
 
 # ── Default: orchestrator tier ──────────────────────────────────────
 [llm]
-model = "openai/tier1"
+model = "openai/t1-orchestrator"
 base_url = "http://127.0.0.1:20128/v1"
 api_key = ""
 temperature = 0.0
 num_retries = 3
-# Conservative ceiling: tier1 routes across 1M-context models (docs/models.md).
+# Conservative ceiling: t1-orchestrator routes across 1M-context models (docs/models.md).
 max_input_tokens = 128000
 max_output_tokens = 32000
 
 # ── Named tiers (dev path: pick per agent below) ────────────────────
-[llm.tier1]
-model = "openai/tier1"
+[llm.t1-orchestrator]
+model = "openai/t1-orchestrator"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.0
 max_input_tokens = 128000
 max_output_tokens = 32000
 
-[llm.tier2]
-model = "openai/tier2"
+[llm.t2-worker]
+model = "openai/t2-worker"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.1
 max_input_tokens = 128000
 max_output_tokens = 16000
 
-[llm.tier3]
-model = "openai/tier3"
+[llm.t3-driver]
+model = "openai/t3-driver"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.2
 max_input_tokens = 64000
 max_output_tokens = 8000
 
 # Sensitive data: swap tier ids for the -clean combos (no prompt training).
-[llm.tier1-clean]
-model = "openai/tier1-clean"
+[llm.t1-orchestrator-clean]
+model = "openai/t1-orchestrator-clean"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.0
 
-[llm.tier2-clean]
-model = "openai/tier2-clean"
+[llm.t2-worker-clean]
+model = "openai/t2-worker-clean"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.1
 
-[llm.tier3-clean]
-model = "openai/tier3-clean"
+[llm.t3-driver-clean]
+model = "openai/t3-driver-clean"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.2
 
 # LiteLLM fallback proxy (:4000; the openai/ prefix is the transport
 # selector OpenHands requires - its litellm stack strips it before the call,
 # so the proxy receives the bare tier model_names below).
-[llm.litellm-tier1]
-model = "openai/tier1"
+[llm.litellm-t1-orchestrator]
+model = "openai/t1-orchestrator"
 base_url = "http://127.0.0.1:4000/v1"
 temperature = 0.0
 
-[llm.litellm-tier2]
-model = "openai/tier2"
+[llm.litellm-t2-worker]
+model = "openai/t2-worker"
 base_url = "http://127.0.0.1:4000/v1"
 temperature = 0.1
 
-[llm.litellm-tier3]
-model = "openai/tier3"
+[llm.litellm-t3-driver]
+model = "openai/t3-driver"
 base_url = "http://127.0.0.1:4000/v1"
 temperature = 0.2
 
 # Reserved: preliminary code-edit drafts go to the cheap tier.
 [llm.draft_editor]
-model = "openai/tier3"
+model = "openai/t3-driver"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.2
 top_p = 0.95
 
 # Standby: cohere RAG combo (trial keys, 128k, not in any tier).
-[llm.rag]
-model = "openai/rag"
+[llm.t4-rag]
+model = "openai/t4-rag"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.1
-max_input_tokens = 128000
-max_output_tokens = 16000
-
-# Credit-burn chains (paid credit legs only, no free heads, no
-# strong-provider tails). Dotted combo names would parse as TOML subtables,
-# so only these hyphenated credit ids appear here; the single-model pinned
-# routes (gemini-3.8-flash, deepseek-v4.1-flash) stay out of this dev-path
-# template and are addressed directly as openai/<combo>.
-[llm.tier2-credit]
-model = "openai/tier2-credit"
-base_url = "http://127.0.0.1:20128/v1"
-temperature = 0.1
-max_input_tokens = 128000
-max_output_tokens = 16000
-
-[llm.tier3-credit]
-model = "openai/tier3-credit"
-base_url = "http://127.0.0.1:20128/v1"
-temperature = 0.2
 max_input_tokens = 128000
 max_output_tokens = 16000
 
 # ── Agent mapping (dev path) ────────────────────────────────────────
 [agent.CodeActAgent]
-llm_config = "tier1"
+llm_config = "t1-orchestrator"

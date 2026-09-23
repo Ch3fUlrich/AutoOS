@@ -1074,25 +1074,26 @@ if os.path.exists(path):
         cfg = json.load(fh)
 pins = json.load(open(harness_file, encoding="utf-8"))["mcp_servers"]
 tiers = [
-    ("tier1", "tier1 orchestrator (contributor)", 1048576, "xhigh"),
-    ("tier1-clean", "tier1-clean (paid contributor)", 1048576, None),
-    ("tier2", "tier2 smart (free-first)", 131072, None),
-    ("tier2-clean", "tier2-clean (paid)", 131072, None),
-    ("tier3", "tier3 driver (cheapest)", 131072, None),
-    ("tier3-clean", "tier3-clean (paid)", 131072, None),
+    ("t1-orchestrator", "t1 orchestrator (contributor)", 1048576, "xhigh"),
+    ("t1-orchestrator-clean", "t1-orchestrator-clean (paid contributor)", 1048576, None),
+    ("t1-orchestrator-free-only", "t1-orchestrator-free-only (free legs only)", 1048576, None),
+    ("t2-worker", "t2 smart (free-first)", 131072, None),
+    ("t2-worker-clean", "t2-worker-clean (paid)", 131072, None),
+    ("t2-worker-free-only", "t2-worker-free-only (free legs only)", 131072, None),
+    ("t3-driver", "t3 driver (cheapest)", 131072, None),
+    ("t3-driver-clean", "t3-driver-clean (paid)", 131072, None),
+    ("t3-driver-free-only", "t3-driver-free-only (free legs only)", 131072, None),
     ("spark-1.3-contributor", "spark pinned (zen free -> openrouter paid)", 1048576, None),
     ("gemini-3.8-flash", "gemini-3.8-flash (gemini free -> paid)", 131072, None),
     ("deepseek-v4.1-flash", "deepseek-v4.1-flash (paid cheapest-first)", 131072, None),
-    ("tier2-credit", "tier2-credit smart (credit-burn)", 131072, None),
-    ("tier3-credit", "tier3-credit driver (credit-burn)", 131072, None),
-    ("rag", "rag cohere RAG (trial keys)", 131072, None),
+    ("t4-rag", "t4-rag cohere RAG (trial keys)", 131072, None),
 ]
 auto = [
-    {"name": "auto/smart", "display_name": "tier1 orchestrator (auto smart)",
+    {"name": "auto/smart", "display_name": "t1 orchestrator (auto smart)",
      "max_tokens": 131072, "reasoning_effort": "xhigh"},
-    {"name": "auto", "display_name": "tier2 smart (auto balanced)",
+    {"name": "auto", "display_name": "t2 smart (auto balanced)",
      "max_tokens": 131072},
-    {"name": "auto/cheap", "display_name": "tier3 driver (auto cheap)",
+    {"name": "auto/cheap", "display_name": "t3 driver (auto cheap)",
      "max_tokens": 131072},
 ]
 tier_models = []
@@ -1112,9 +1113,9 @@ lit_models = [
     {"name": n, "display_name": "%s (litellm fallback)" % n,
      "max_tokens": mx}
     for n, _, mx, _ in [
-        ("tier1", None, 1048576, None), ("tier1-paid", None, 1048576, None),
-        ("tier2", None, 131072, None), ("tier2-paid", None, 131072, None),
-        ("tier3", None, 131072, None), ("tier3-paid", None, 131072, None),
+        ("t1-orchestrator", None, 1048576, None), ("t1-orchestrator-paid", None, 1048576, None),
+        ("t2-worker", None, 131072, None), ("t2-worker-paid", None, 131072, None),
+        ("t3-driver", None, 131072, None), ("t3-driver-paid", None, 131072, None),
     ]
 ]
 lit = {
@@ -1163,16 +1164,16 @@ profiles["bypass"] = {
     "tools": bypass_tools,
     "enable_all_context_servers": True,
     "context_servers": {},
-    "default_model": {"provider": "autoos-omniroute", "model": "tier1"},
+    "default_model": {"provider": "autoos-omniroute", "model": "t1-orchestrator"},
 }
 tp = agent.setdefault("tool_permissions", {})
 tp["default"] = "allow"
 # omniroute-first: the litellm proxy currently has zero healthy endpoints,
 # so a default pointing at autoos-litellm/* is broken. Converge it to
-# {autoos-omniroute, tier1}; never touch a default already on omniroute/*.
+# {autoos-omniroute, t1-orchestrator}; never touch a default already on omniroute/*.
 _dm = agent.get("default_model")
 if isinstance(_dm, dict) and str(_dm.get("provider", "")).startswith("autoos-litellm"):
-    agent["default_model"] = {"provider": "autoos-omniroute", "model": "tier1"}
+    agent["default_model"] = {"provider": "autoos-omniroute", "model": "t1-orchestrator"}
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(cfg, fh, indent=2)
 PY
@@ -2170,12 +2171,12 @@ deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
 
 def _gateway_tiers():
     tiers = {}
-    for _t in ('tier1', 'tier1-clean', 'tier2', 'tier2-clean', 'tier3',
-               'tier3-clean', 'spark-1.3-contributor', 'auto/smart', 'auto', 'auto/cheap', 'rag'):
+    for _t in ('t1-orchestrator', 't1-orchestrator-clean', 't1-orchestrator-free-only', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't3-driver',
+               't3-driver-clean', 't3-driver-free-only', 'spark-1.3-contributor', 'auto/smart', 'auto', 'auto/cheap', 't4-rag'):
         _ctx, _out = 1048576, 32768
-        if _t.startswith('tier3') or _t == 'rag':
+        if _t.startswith('t3-') or _t == 't4-rag':
             _ctx, _out = 131072, 16384
-        elif _t.startswith('tier2') or _t.startswith('auto'):
+        elif _t.startswith('t2-') or _t.startswith('auto'):
             _ctx, _out = 131072, 32768
         tiers[_t] = {'name': _t, 'limit': {'context': _ctx, 'output': _out}}
     return tiers
@@ -2191,8 +2192,8 @@ providers['omniroute'] = {
 }
 
 _lit_tiers = {}
-for _t in ('tier1', 'tier2', 'tier3', 'rag'):
-    _ctx = 1048576 if _t == 'tier1' else 131072
+for _t in ('t1-orchestrator', 't2-worker', 't3-driver', 't4-rag'):
+    _ctx = 1048576 if _t == 't1-orchestrator' else 131072
     _lit_tiers[_t] = {'name': _t + ' (litellm fallback)',
                       'limit': {'context': _ctx, 'output': 32768}}
 providers['litellm'] = {
@@ -2490,11 +2491,11 @@ if not _gw_key:
     except Exception:
         pass
 if _gw_key:
-    # Gateway default (mirrors the opencode tier1 setup): the whole
+    # Gateway default (mirrors the opencode t1 setup): the whole
     # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
     # must too - otherwise the UI shows no usable agent and every chat
     # falls back to local Ollama. Container-side base URL.
-    llm["model"] = "openai/tier1"
+    llm["model"] = "openai/t1-orchestrator"
     llm["base_url"] = "http://host.docker.internal:20128/v1"
     llm["api_key"] = _gw_key
     _default_reasoning = True
@@ -2661,7 +2662,7 @@ agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
 # is installer-managed desired state only. Without this merge the UI shows
 # just the fossil Default profile no matter how many sidecars exist.
 # Only installer-managed entries are written (never touch anything else in
-# llm_profiles); active becomes omniroute-tier1 (or litellm-tier1 when only
+# llm_profiles); active becomes omniroute-t1-orchestrator (or litellm-t1-orchestrator when only
 # the fallback key is in play) only when the current selection is missing
 # (None or dangling) - a live user selection is never yanked. The fossil
 # Default (ollama fallback this installer wrote before any key existed) is
@@ -2676,8 +2677,8 @@ for _fn in sorted(os.listdir(profiles_dir)):
             _managed[_fn[:-5]] = json.load(_pf)
     except Exception:
         pass
-if (omni_key and "omniroute-tier1" in _managed) or (_lit_key and "litellm-tier1" in _managed):
-    _want_active = "omniroute-tier1" if (omni_key and "omniroute-tier1" in _managed) else "litellm-tier1"
+if (omni_key and "omniroute-t1-orchestrator" in _managed) or (_lit_key and "litellm-t1-orchestrator" in _managed):
+    _want_active = "omniroute-t1-orchestrator" if (omni_key and "omniroute-t1-orchestrator" in _managed) else "litellm-t1-orchestrator"
     if _lp.get("active") is None or _lp.get("active") not in _managed:
         _lp["active"] = _want_active
     _default_entry = _managed.get("Default")

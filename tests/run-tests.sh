@@ -566,7 +566,7 @@ print(llm["model"], llm["base_url"], llm["api_key"], llm["reasoning_effort"])
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/tier1 http://host.docker.internal:20128/v1 test-gw-key high"
+    assert_eq "$out" "openai/t1-orchestrator http://host.docker.internal:20128/v1 test-gw-key high"
 fi
 
 if it "setup_openhands_config writes gateway tier profiles with a key, none without"; then
@@ -579,23 +579,23 @@ if it "setup_openhands_config writes gateway tier profiles with a key, none with
         python3 - "$tmp/.openhands" <<'PY'
 import json, os, sys
 d = sys.argv[1]
-t1 = json.load(open(os.path.join(d, "profiles", "omniroute-tier1.json"), encoding="utf-8"))
-t3 = json.load(open(os.path.join(d, "profiles", "omniroute-tier3.json"), encoding="utf-8"))
+t1 = json.load(open(os.path.join(d, "profiles", "omniroute-t1-orchestrator.json"), encoding="utf-8"))
+t3 = json.load(open(os.path.join(d, "profiles", "omniroute-t3-driver.json"), encoding="utf-8"))
 lp = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))["llm_profiles"]
 print(t1["model"], t1["base_url"], t1["api_key"], t1["reasoning_effort"],
       t3["model"], t3["reasoning_effort"], t3["enable_encrypted_reasoning"],
-      lp["active"], "omniroute-tier1" in lp["profiles"])
+      lp["active"], "omniroute-t1-orchestrator" in lp["profiles"])
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/tier1 http://host.docker.internal:20128/v1 test-omni-key high openai/tier3 none False omniroute-tier1 True"
+    assert_eq "$out" "openai/t1-orchestrator http://host.docker.internal:20128/v1 test-omni-key high openai/t3-driver none False omniroute-t1-orchestrator True"
     tmp="$(mktemp -d)"
     out="$(
         SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
         unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY
         curl() { return 6; }
         OLLAMA_BASE_URL="http://ollama:11434" setup_openhands_config >/dev/null 2>&1
-        test -e "$tmp/.openhands/profiles/omniroute-tier1.json" && echo PRESENT || echo ABSENT
+        test -e "$tmp/.openhands/profiles/omniroute-t1-orchestrator.json" && echo PRESENT || echo ABSENT
     )"
     rm -rf "$tmp"
     assert_eq "$out" "ABSENT"
@@ -611,14 +611,14 @@ if it "setup_openhands_config writes litellm fallback tiers with a litellm key o
         python3 - "$tmp/.openhands" <<'PY'
 import json, os, sys
 d = sys.argv[1]
-t1 = json.load(open(os.path.join(d, "profiles", "litellm-tier1.json"), encoding="utf-8"))
+t1 = json.load(open(os.path.join(d, "profiles", "litellm-t1-orchestrator.json"), encoding="utf-8"))
 lp = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))["llm_profiles"]
 print(t1["model"], t1["base_url"], t1["api_key"], lp["active"],
-      os.path.exists(os.path.join(d, "profiles", "omniroute-tier1.json")))
+      os.path.exists(os.path.join(d, "profiles", "omniroute-t1-orchestrator.json")))
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/tier1 http://host.docker.internal:4000/v1 test-lit-key litellm-tier1 False"
+    assert_eq "$out" "openai/t1-orchestrator http://host.docker.internal:4000/v1 test-lit-key litellm-t1-orchestrator False"
 fi
 
 if it "tier profiles come from the spec, installer and tool agree"; then
@@ -632,7 +632,7 @@ print("%s|%s|%s|%s" % (
     ",".join(t["model"] for t in spec["tiers"])))
 PY
 )"
-    assert_eq "$report" "omniroute-tier1,omniroute-tier1-clean,omniroute-spark-1.3-contributor,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3,openrouter-muse-spark-1.3-contributor|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/tier1,openai/tier1-clean,openai/spark-1.3-contributor,openai/tier2,openai/tier2-clean,openai/tier3,openai/tier3-clean,openai/rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/tier2-credit,openai/tier3-credit,openai/tier1,openai/tier2,openai/tier3,openrouter/meta/muse-spark-1.3-contributor"
+    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,openrouter-muse-spark-1.3-contributor|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t1-orchestrator-clean,openai/t1-orchestrator-free-only,openai/spark-1.3-contributor,openai/t2-worker,openai/t2-worker-clean,openai/t2-worker-free-only,openai/t3-driver,openai/t3-driver-clean,openai/t3-driver-free-only,openai/t4-rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openrouter/meta/muse-spark-1.3-contributor"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
     # Generator round-trip with fixture keys (env hidden: the suite never
@@ -654,7 +654,7 @@ else:
 PY
 )"
     rm -rf "$tmp"
-    assert_eq "$written" "16"
+    assert_eq "$written" "17"
     assert_eq "$direct" "test-or-key|https://openrouter.ai/api/v1|openrouter/meta/muse-spark-1.3-contributor"
 fi
 
@@ -1096,7 +1096,7 @@ fi
 if it "zed default_model converges litellm to omniroute (zed routing)"; then
     scratch="$(mktemp -d)"
     mkdir -p "$scratch/.config/zed"
-    printf '{"agent":{"default_model":{"provider":"autoos-litellm","model":"tier3-paid"}}}' >"$scratch/.config/zed/settings.json"
+    printf '{"agent":{"default_model":{"provider":"autoos-litellm","model":"t3-driver-paid"}}}' >"$scratch/.config/zed/settings.json"
     ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
       AUTOOS_OMNIROUTE_API_KEY="k1" AUTOOS_LITELLM_API_KEY="k2" route_zed_to_proxy >/dev/null 2>&1 )
     report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
@@ -1109,7 +1109,7 @@ PY
     # A default already on omniroute must survive untouched.
     scratch2="$(mktemp -d)"
     mkdir -p "$scratch2/.config/zed"
-    printf '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"tier2"}}}' >"$scratch2/.config/zed/settings.json"
+    printf '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"t2-worker"}}}' >"$scratch2/.config/zed/settings.json"
     ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0
       AUTOOS_OMNIROUTE_API_KEY="k1" AUTOOS_LITELLM_API_KEY="k2" route_zed_to_proxy >/dev/null 2>&1 )
     report2="$(python3 - "$scratch2/.config/zed/settings.json" <<'PY'
@@ -1120,8 +1120,8 @@ print("%s|%s" % (dm.get("provider"), dm.get("model")))
 PY
 )"
     rm -rf "$scratch" "$scratch2"
-    assert_eq "$report" "autoos-omniroute|tier1"
-    assert_eq "$report2" "autoos-omniroute|tier2"
+    assert_eq "$report" "autoos-omniroute|t1-orchestrator"
+    assert_eq "$report2" "autoos-omniroute|t2-worker"
 fi
 
 # ─── Catalog loading (the tab-delimiter regression) ─────────────────────────
@@ -2253,7 +2253,7 @@ fi
 if it "openhands wires the LLM through OmniRoute in start-stack"; then
     ok=1
     for f in configuration/start-stack.ps1 configuration/start-stack.sh; do
-        grep -q 'LLM_MODEL=openai/tier1' "$f" || { ok=0; echo "missing model in $f" >&2; }
+        grep -q 'LLM_MODEL=openai/t1-orchestrator' "$f" || { ok=0; echo "missing model in $f" >&2; }
         grep -q 'LLM_BASE_URL' "$f" || ok=0
         grep -q 'docker.openhands.dev/openhands/openhands:latest' "$f" || ok=0
         grep -q '3000:3000' "$f" || ok=0
@@ -2266,9 +2266,9 @@ if it "the OpenHands template carries the LiteLLM provider prefix"; then    # Ev
     bad="$(grep -nE '^[[:space:]]*model[[:space:]]*=' configuration/openhands/config.toml |
         grep -v 'openai/' || true)"
     ok=1
-    grep -q 'model = "openai/tier1"' configuration/openhands/config.toml || ok=0
-    grep -q 'model = "openai/tier3"' configuration/openhands/config.toml || ok=0
-    grep -q 'openai/tier1-clean' configuration/openhands/config.toml || ok=0
+    grep -q 'model = "openai/t1-orchestrator"' configuration/openhands/config.toml || ok=0
+    grep -q 'model = "openai/t3-driver"' configuration/openhands/config.toml || ok=0
+    grep -q 'openai/t1-orchestrator-clean' configuration/openhands/config.toml || ok=0
     if [[ -n "$bad" ]]; then fail "model lines without the openai/ prefix: $bad"
     elif (( ok )); then pass
     else fail "template is missing the expected tier models"; fi
@@ -2385,9 +2385,9 @@ PY
     line1="$(printf '%s' "$report" | sed -n '1p')"
     line2="$(printf '%s' "$report" | sed -n '2p')"
     assert_eq "$line1" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,tier2-credit,tier3-credit,rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
     assert_eq "$line2" \
-        "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow|ctx=context7,graphify,omnigraph,playwright,serena"
+        "bypass=bypass|off=|provider=autoos-omniroute|model=t1-orchestrator|allow=allow|ctx=context7,graphify,omnigraph,playwright,serena"
     assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
 fi
 
@@ -2494,7 +2494,7 @@ fi
 
 if it "openhands template has tiers and no secrets"; then
     ok=1
-    for s in '\[llm\]' '\[llm.tier1\]' '\[llm.tier2\]' '\[llm.tier3\]' '\[llm.tier1-clean\]' '\[llm.tier2-clean\]' '\[llm.tier3-clean\]' '\[llm.rag\]' '\[llm.tier2-credit\]' '\[llm.tier3-credit\]' '\[llm.litellm-tier1\]' '\[llm.litellm-tier2\]' '\[llm.litellm-tier3\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
+    for s in '\[llm\]' '\[llm.t1-orchestrator\]' '\[llm.t2-worker\]' '\[llm.t3-driver\]' '\[llm.t1-orchestrator-clean\]' '\[llm.t2-worker-clean\]' '\[llm.t3-driver-clean\]' '\[llm.t4-rag\]' '\[llm.litellm-t1-orchestrator\]' '\[llm.litellm-t2-worker\]' '\[llm.litellm-t3-driver\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
         grep -q "$s" configuration/openhands/config.toml || { ok=0; echo "missing: $s" >&2; }
     done
     grep -q 'host.docker.internal:20128' configuration/openhands/config.toml || ok=0
@@ -5721,16 +5721,16 @@ text = re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").
 a = json.loads(text)["agents"]
 def perms(n):
     return [(p["action"], p["resource"], p["effect"]) for p in a[n]["permissions"]]
-t1, t2, t3 = perms("tier1-orchestrator"), perms("tier2-worker"), perms("tier3-reviewer")
+t1, t2, t3 = perms("t1-orchestrator"), perms("t2-worker"), perms("t3-reviewer")
 problems = []
-if t1[0] != ("subagent", "*", "deny") or t1[-1] != ("subagent", "tier2-worker", "allow"):
-    problems.append("tier1")
-if t2[0] != ("subagent", "*", "deny") or t2[-1] != ("subagent", "tier3-reviewer", "allow"):
-    problems.append("tier2")
+if t1[0] != ("subagent", "*", "deny") or t1[-1] != ("subagent", "t2-worker", "allow"):
+    problems.append("t1")
+if t2[0] != ("subagent", "*", "deny") or t2[-1] != ("subagent", "t3-reviewer", "allow"):
+    problems.append("t2")
 if t3 != [("subagent", "*", "deny"), ("edit", "*", "deny"), ("write", "*", "deny"), ("read", "*", "allow"), ("grep", "*", "allow"), ("glob", "*", "allow"), ("bash", "*", "allow")]:
-    problems.append("tier3-leaf")
-if a["tier3-reviewer"]["mode"] != "subagent":
-    problems.append("tier3-mode")
+    problems.append("t3-leaf")
+if a["t3-reviewer"]["mode"] != "subagent":
+    problems.append("t3-mode")
 print(" ".join(problems))
 PY
 )"
@@ -5744,11 +5744,12 @@ text = re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").
 oc = json.loads(text)
 m = oc["providers"]["omniroute"]["models"]
 problems = []
-for name, ctx in (("tier1", 1000000), ("tier1-clean", 1000000),
-                  ("tier2", 131072), ("tier3", 131072),
-                  ("tier2-clean", 131072), ("tier3-clean", 131072),
+for name, ctx in (("t1-orchestrator", 1000000), ("t1-orchestrator-clean", 1000000),
+                  ("t1-orchestrator-free-only", 1000000),
+                  ("t2-worker", 131072), ("t3-driver", 131072),
+                  ("t2-worker-clean", 131072), ("t3-driver-clean", 131072),
+                  ("t2-worker-free-only", 131072), ("t3-driver-free-only", 131072),
                   ("gemini-3.8-flash", 131072), ("deepseek-v4.1-flash", 131072),
-                  ("tier2-credit", 131072), ("tier3-credit", 131072),
                   ("spark-1.3-contributor", 1000000)):
     if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:
         problems.append(name)

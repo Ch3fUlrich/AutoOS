@@ -1,10 +1,10 @@
-# Handoff — AutoOS live state (2026-09-23, main @ docs-slim + free-first era)
+# Handoff — AutoOS live state (2026-09-23, main @ docs-slim + free-first era + tier-id rename)
 
 **Start here, new agent.** Zero prior context needed: this file + the repo is
 everything. Read top to bottom, then continue from Open item 1. Concrete
 proof for every claim lives in `docs/verification.md` (dated runs).
 
-Your role: tier1 orchestrator (`omniroute/tier1#high`). Full protocol =
+Your role: t1 orchestrator (`omniroute/t1-orchestrator#high`). Full protocol =
 `.agents/skills/unattended-orchestration/unattended-orchestration.md` (tiers, enforcement, watchdog). Routing
 reference = `docs/models.md` (per-tier mermaid + sync contract). Runbook =
 `.claude/handoff.config.json` (lanes/sessions/guards for unattended runs).
@@ -55,14 +55,16 @@ memory, never write project data to the global `memory` graph.**
   kept as archive until integration is declared stable; all `merge/*` work
   branches deleted after landing. Stale local stub TAG: `archive/tier-stub-pr9`.
 - **Gateway OmniRoute 3.8.50** on `:20128`: 13/13 providers registered
-  (incl. groq/cerebras via fixed `apply.ps1`), **12/12 combos probe-green**
-  (roles + pinned + credit + rag — see the combos bullet below):
-  tier1→`opencode-zen/muse-spark-1.3-contributor-free` (fast-skipped) →
-  `meta/muse-spark-1.3-contributor`, tier1-clean→same contributor,
-  tier2→`gemini-3.8-flash`, tier2-clean→`deepseek-flash`,
-  tier3→`mistral-code-latest`, tier3-clean→`deepseek-flash`.
+  (incl. groq/cerebras via fixed `apply.ps1`), **13/13 combos probe-green**
+  (roles + pinned + free-only + rag — see the combos bullet below):
+  t1-orchestrator→`opencode-zen/muse-spark-1.3-contributor-free` (fast-skipped) →
+  `meta/muse-spark-1.3-contributor`, t1-orchestrator-clean→same contributor,
+  t2-worker→`gemini-3.8-flash`, t2-worker-clean→`deepseek-flash`,
+  t3-driver→`mistral-code-latest`, t3-driver-clean→`deepseek-flash`.
+  Ids renamed 2026-09-23 (`tier1/2/3`→`t1-orchestrator/t2-worker/t3-driver`,
+  `rag`→`t4-rag`); delete retired ids from the gateway store.
 - **Contributor-only block** (operator 2026-09-21): no combo may reference
-  plain `muse-spark-1.3`; enforced by both suites. Consequence: tier1-clean
+  plain `muse-spark-1.3`; enforced by both suites. Consequence: t1-orchestrator-clean
   is paid-only, NO LONGER trains-nothing (documented in combos.json +
   models.md — do not "fix" this back silently).
 - **muse-code (Meta direct)**: connection carries an empty outbound URL
@@ -73,7 +75,7 @@ memory, never write project data to the global `memory` graph.**
   its banner crashes startup under cp1252). Keys mirrored from api-keys.yml
   by hand (no committed script does this yet — see Open 6).
 - **Clients**: opencode CLI 2.0.12 V2 (`@opencode/cli`; never V1 `opencode-ai`),
-  3-tier agents live (`tier1-orchestrator`→`tier2-worker`→`tier3-reviewer`,
+  3-tier agents live (`t1-orchestrator`→`t2-worker`→`t3-reviewer`,
   `subagent_depth: 2`, reviewer = read/grep/glob/bash allow +
   edit/write/subagent deny). Zed: `autoos-omniroute` + `autoos-litellm`
   providers, 15 models, `bypass` profile, keys via
@@ -82,10 +84,10 @@ memory, never write project data to the global `memory` graph.**
   + sidekick installed via `setup.ps1 -Only`. OpenHands image pulled;
   container start + profile proof is Open 5.
 - **Suites**: green 2026-09-23 (ps1 851/0/1, sh 410/0/0). CI runs both on push.
-- **Router combos (12)** on `:20128`, all live-acked 2026-09-22:
-  `tier1`/`tier1-clean`/`tier2`/`tier2-clean`/`tier3`/`tier3-clean` (roles),
+- **Router combos (13)** on `:20128`, all live-acked 2026-09-22 (pre-rename ids):
+  `t1-orchestrator`/`t1-orchestrator-clean`/`t1-orchestrator-free-only`/`t2-worker`/`t2-worker-clean`/`t2-worker-free-only`/`t3-driver`/`t3-driver-clean`/`t3-driver-free-only` (roles),
   `spark-1.3-contributor`, `gemini-3.8-flash`, `deepseek-v4.1-flash`,
-  `tier2-credit`, `tier3-credit` (paid-credit burn), `rag` (cohere trial).
+  `t4-rag` (cohere trial).
   Leg order lives in `configuration/omniroute/combos.json` (single source);
   `tools/sync-router-tiers.py` mirrors only tier2/tier3 into LiteLLM. Every
   new leg needs one direct `:20128` chat probe — `simulate` resolves refs the
@@ -99,12 +101,12 @@ memory, never write project data to the global `memory` graph.**
   base URLs — no keys); both embedded installers read it (inline tuples
   deleted); `tools/sync-openhands-profiles.py` regenerates user profiles
   byte-identical to installer output and runs from `start-stack.*` on every
-  openhands start. Profiles: `omniroute-tier1/2/3` + `-clean` twins on
-  `:20128`, `litellm-tier1/2/3` fallback on `:4000`.
-- **Zed**: `autoos-omniroute` + `autoos-litellm` providers (15+6 models:
-  tiers + clean twins + 4 pinned/credit routes + rag + auto/*, litellm tiers
+  openhands start. Profiles: `omniroute-t1-orchestrator/t2-worker/t3-driver` + `-clean`/`-free-only` twins on
+  `:20128`, `litellm-t1-orchestrator/t2-worker/t3-driver` fallback on `:4000`.
+- **Zed**: `autoos-omniroute` + `autoos-litellm` providers (16+6 models:
+  tiers + clean/free-only twins + 3 pinned routes + t4-rag + auto/*, litellm tiers
   + paid),
-  `bypass` profile (17/17 tools, tier1 default, opts into context servers),
+  `bypass` profile (17/17 tools, t1 default, opts into context servers),
   top-level `context_servers` (all 5 MCP servers, harness pins resolved at
   runtime). Keys NEVER in settings.json (Zed ignores `api_key` there and
   hides keyless providers): `AUTOOS_OMNIROUTE_API_KEY` /
@@ -218,10 +220,10 @@ memory, never write project data to the global `memory` graph.**
    work is untracked in the tree (`docs/plans/model-routing-overhaul-DRAFT.md`).
 1. **Zed model picker proof** — restart Zed (tray → Quit; running process
    predates the env keys), open the agent-panel model picker, confirm the
-   `autoos-omniroute` list (15 entries now) and the litellm fallback, default
-   `tier1`, and send one message on `tier3` + one litellm fallback.
+   `autoos-omniroute` list (16 entries now) and the litellm fallback, default
+   `t1-orchestrator`, and send one message on `t3-driver` + one litellm fallback.
 2. **OpenHands container proof** — `start-stack -App openhands`, profile
-   `omniroute-tier1` via `host.docker.internal:20128`, sandbox round-trip.
+   `omniroute-t1-orchestrator` via `host.docker.internal:20128`, sandbox round-trip.
    (The two `start-stack.ps1` defects from DONE-L2B are already fixed in
    tree; confirm on the current image.)
 3. **Remaining PRs — needs working `gh` (operator prerequisite, 2026-09-23).**
@@ -238,9 +240,9 @@ memory, never write project data to the global `memory` graph.**
    #90 (os.walk). Shared rules: empty-catch hunks land once (main already
    carries them — drop from PRs), strip scratch artifacts, serialize
    #84→#86→#87. DEFER: #99 (superseded), #97, #87, #86.
-4. **Chatter tier** — route status/summary/dispatch text to tier3 free-first;
+4. **Chatter tier** — route status/summary/dispatch text to t3-driver free-first;
    local ollama is LAST resort only (model startup latency too high for quick
-   extractions). Reasoning stays tier1/2; cheap tiers transport verbatim and
+   extractions). Reasoning stays t1/t2; cheap tiers transport verbatim and
    extract with exact quotes, never rephrase decisions; record spend per
    DONE note. See `.agents/skills/unattended-orchestration/unattended-orchestration.md`.
 5. **Leg-probe sweep** — DONE 2026-09-22 for the current 20 legs (no
@@ -248,10 +250,9 @@ memory, never write project data to the global `memory` graph.**
    add/edit: one direct `:20128` chat per leg; `simulate` is not proof. Keep
    the `combos.json carries no phantom legs` test's banned list growing with
    every falsified ref.
-6. **Credit tiers burn-in** — run real work through `tier2-credit` /
-   `tier3-credit` and record actual spend per provider (the point is to spend
-   the stored cerebras/sambanova/cheaperinference balances; confirm the
-   gateway bills those legs and not the direct-paid ones).
+6. **Credit tiers burn-in** — SUPERSEDED 2026-09-23: credit combos dropped
+   (auto-demote covers exhausted balances). Was: run real work through
+   `tier2-credit` / `tier3-credit` and record spend.
 6b. **Effort control per call** — use `openrouter/meta/muse-spark-1.3-contributor#<minimal|low|medium|high|xhigh>` when the full ladder matters; gateway combos only resolve `low/medium/high`. `#max` is Zen-native only. Documented in `docs/models.md`.
 
 6c. **Router drift gate** — run `python3 tools/audit-router.py` after ANY
@@ -305,9 +306,9 @@ memory, never write project data to the global `memory` graph.**
 .\configuration\litellm\start-litellm.ps1    # proxy on :4000 WITH its .env
 $env:AUTOOS_OMNIROUTE_KEY = '<from api-keys.yml>'  # opencode + automation
 # Zed uses AUTOOS_OMNIROUTE_API_KEY / AUTOOS_LITELLM_API_KEY instead
-opencode run --agent tier2-worker --model omniroute/tier2 --auto "<brief>"
-opencode run --agent tier3-reviewer --model omniroute/tier3 --auto "<review>"
-opencode run --model omniroute/tier2-credit --auto "Reply with exactly: ack"
+opencode run --agent t2-worker --model omniroute/t2-worker --auto "<brief>"
+opencode run --agent t3-reviewer --model omniroute/t3-driver --auto "<review>"
+opencode run --model omniroute/t2-worker-free-only --auto "Reply with exactly: ack"
 python tools/sync-router-tiers.py --check
 python tools/audit-router.py                 # live drift gate (--offline for CI)
 powershell -NoProfile -File tests\run-tests.ps1

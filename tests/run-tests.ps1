@@ -3282,19 +3282,19 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
         $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-omni-key' *> $null
-        $t1 = Get-Content (Join-Path $oh 'profiles\omniroute-tier1.json') -Raw | ConvertFrom-Json
-        $t3 = Get-Content (Join-Path $oh 'profiles\omniroute-tier3.json') -Raw | ConvertFrom-Json
-        Assert-Equal $t1.model 'openai/tier1'
+        $t1 = Get-Content (Join-Path $oh 'profiles\omniroute-t1-orchestrator.json') -Raw | ConvertFrom-Json
+        $t3 = Get-Content (Join-Path $oh 'profiles\omniroute-t3-driver.json') -Raw | ConvertFrom-Json
+        Assert-Equal $t1.model 'openai/t1-orchestrator'
         Assert-Equal $t1.base_url 'http://host.docker.internal:20128/v1'
         Assert-Equal $t1.api_key 'test-omni-key'
         Assert-Equal $t1.reasoning_effort 'high'
-        Assert-Equal $t3.model 'openai/tier3'
+        Assert-Equal $t3.model 'openai/t3-driver'
         Assert-Equal $t3.reasoning_effort 'none'
-        Assert-True ($t3.enable_encrypted_reasoning -eq $false) 'tier3 thinking not opted out'
-        Assert-True (Test-Path (Join-Path $oh 'profiles\omniroute-tier2-clean.json')) 'clean twin missing'
+        Assert-True ($t3.enable_encrypted_reasoning -eq $false) 't3 thinking not opted out'
+        Assert-True (Test-Path (Join-Path $oh 'profiles\omniroute-t2-worker-clean.json')) 'clean twin missing'
         $lp = (Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json).llm_profiles
-        Assert-True ($null -ne $lp.profiles.'omniroute-tier1') 'tier1 not published to llm_profiles'
-        Assert-Equal $lp.active 'omniroute-tier1'
+        Assert-True ($null -ne $lp.profiles.'omniroute-t1-orchestrator') 't1 not published to llm_profiles'
+        Assert-Equal $lp.active 'omniroute-t1-orchestrator'
     } finally {
         foreach ($k in $saved.Keys) {
             if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
@@ -3317,7 +3317,7 @@ Test-Case 'the embedded OpenHands setup script writes no tier profiles without a
         $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
         $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'null' *> $null
-        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\omniroute-tier1.json'))) 'tier profile written without a key'
+        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\omniroute-t1-orchestrator.json'))) 'tier profile written without a key'
     } finally {
         foreach ($k in $saved.Keys) {
             if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
@@ -3334,14 +3334,14 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-tier1,omniroute-tier1-clean,omniroute-spark-1.3-contributor,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3,openrouter-muse-spark-1.3-contributor'
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,openrouter-muse-spark-1.3-contributor'
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
     Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
     foreach ($t in $spec.tiers) {
         # Gateway tiers carry the openai/ transport prefix; a DIRECT provider
         # profile (the effort-ladder surface for spark) names the provider
         # itself, e.g. openrouter/<model>.
-        Assert-True ($t.model -match '^(openai/(tier[123](-clean|-credit)?|rag|gemini-3\.8-flash|deepseek-v4\.1-flash|spark-1\.3-contributor)|openrouter/meta/muse-spark-1\.3-contributor)$') "$($t.id) model is neither a gateway tier nor a known direct route"
+        Assert-True ($t.model -match '^(openai/(t1-orchestrator(-clean|-free-only)?|t2-worker(-clean|-free-only)?|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|deepseek-v4\.1-flash|spark-1\.3-contributor)|openrouter/meta/muse-spark-1\.3-contributor)$') "$($t.id) model is neither a gateway tier nor a known direct route"
     }
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
@@ -3364,14 +3364,14 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
         'LITELLM_MASTER_KEY=test-lit-key' | Out-File $litEnv -Encoding utf8
         & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys --litellm-env $litEnv *> $null
         Assert-Equal $LASTEXITCODE 0 'generator failed'
-        foreach ($t in @('omniroute-tier1', 'omniroute-tier3-clean', 'litellm-tier2', 'openrouter-muse-spark-1.3-contributor')) {
+        foreach ($t in @('omniroute-t1-orchestrator', 'omniroute-t3-driver-clean', 'litellm-t2-worker', 'openrouter-muse-spark-1.3-contributor')) {
             Assert-True (Test-Path (Join-Path $tmpA "profiles\$t.json")) "$t.json missing"
         }
-        $t1 = Get-Content (Join-Path $tmpA 'profiles\omniroute-tier1.json') -Raw | ConvertFrom-Json
-        Assert-Equal $t1.model 'openai/tier1'
+        $t1 = Get-Content (Join-Path $tmpA 'profiles\omniroute-t1-orchestrator.json') -Raw | ConvertFrom-Json
+        Assert-Equal $t1.model 'openai/t1-orchestrator'
         Assert-Equal $t1.api_key 'test-omni-key'
-        $lt = Get-Content (Join-Path $tmpA 'profiles\litellm-tier1.json') -Raw | ConvertFrom-Json
-        Assert-Equal $lt.model 'openai/tier1'
+        $lt = Get-Content (Join-Path $tmpA 'profiles\litellm-t1-orchestrator.json') -Raw | ConvertFrom-Json
+        Assert-Equal $lt.model 'openai/t1-orchestrator'
         Assert-Equal $lt.base_url 'http://host.docker.internal:4000/v1'
         Assert-Equal $lt.api_key 'test-lit-key'
         # A direct-provider tier takes its OWN key and endpoint, not the gateway's.
@@ -3416,7 +3416,7 @@ Test-Case 'mirror-litellm-env projects keys without printing them' {
 
 Test-Case 'the embedded OpenHands setup script defaults to the gateway with a key' {
     # Same temp-dir isolation as the Ollama test. With an OmniRoute key the
-    # default LLM must mirror the opencode tier1 setup (openai/tier1 via the
+    # default LLM must mirror the opencode t1 setup (openai/t1-orchestrator via the
     # container-side gateway) instead of falling back to local Ollama.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -3431,7 +3431,7 @@ Test-Case 'the embedded OpenHands setup script defaults to the gateway with a ke
         $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-gw-key' *> $null
         $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
-        Assert-Equal $settings.agent_settings.llm.model 'openai/tier1'
+        Assert-Equal $settings.agent_settings.llm.model 'openai/t1-orchestrator'
         Assert-Equal $settings.agent_settings.llm.base_url 'http://host.docker.internal:20128/v1'
         Assert-Equal $settings.agent_settings.llm.api_key 'test-gw-key'
         Assert-Equal $settings.agent_settings.llm.reasoning_effort 'high'
@@ -3459,7 +3459,7 @@ Test-Case 'opencode user config carries global gateway providers without secrets
     Assert-True ($body -match [regex]::Escape('http://127.0.0.1:4000/v1')) 'litellm baseURL missing'
     Assert-True ($body -match [regex]::Escape('{env:AUTOOS_OMNIROUTE_KEY}')) 'omni key not an env placeholder'
     Assert-True ($body -match [regex]::Escape('{env:LITELLM_MASTER_KEY}')) 'lit key not an env placeholder'
-    foreach ($t in @("'tier1'", "'tier3-clean'", "'auto/smart'")) {
+    foreach ($t in @("'t1-orchestrator'", "'t3-driver-clean'", "'auto/smart'")) {
         Assert-True ($body -match [regex]::Escape($t)) "omniroute model $t missing"
     }
     Assert-True ($body -match "@\('deepseek'\)") 'retired-provider prune missing'
@@ -3629,16 +3629,16 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-omniroute'.PSObject.Properties['api_key']) 'api_key in omni entry'
         Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-litellm'.PSObject.Properties['api_key']) 'api_key in lit entry'
         $models = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | ForEach-Object { $_.name })
-        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,tier2-credit,tier3-credit,rag'
+        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag'
         Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
         $litModels = @($s.language_models.openai_compatible.'autoos-litellm'.available_models | ForEach-Object { $_.name })
-        Assert-Equal ($litModels -join ',') 'tier1,tier1-paid,tier2,tier2-paid,tier3,tier3-paid'
+        Assert-Equal ($litModels -join ',') 't1-orchestrator,t1-orchestrator-paid,t2-worker,t2-worker-paid,t3-driver,t3-driver-paid'
         $bypass = $s.agent.profiles.bypass
         Assert-Equal $bypass.name 'bypass'
         $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })
         Assert-Equal ($off -join ',') '' "bypass tools off: $($off -join ',')"
         Assert-Equal $bypass.default_model.provider 'autoos-omniroute'
-        Assert-Equal $bypass.default_model.model 'tier1'
+        Assert-Equal $bypass.default_model.model 't1-orchestrator'
         Assert-Equal $s.agent.tool_permissions.default 'allow'
         Assert-True ($null -ne $s.context_servers.serena) 'serena context server missing'
         Assert-True ($null -ne $s.context_servers.graphify) 'graphify context server missing'
@@ -3729,19 +3729,19 @@ Test-Case 'zed default_model converges litellm to omniroute (zed routing)' {
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
         $cfgDir = Join-Path $scratch 'Zed'
         New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
-        '{"agent":{"default_model":{"provider":"autoos-litellm","model":"tier3-paid"}}}' |
+        '{"agent":{"default_model":{"provider":"autoos-litellm","model":"t3-driver-paid"}}}' |
             Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
         Set-AutoOSZedProxy
         $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
         Assert-Equal $s.agent.default_model.provider 'autoos-omniroute'
-        Assert-Equal $s.agent.default_model.model 'tier1'
+        Assert-Equal $s.agent.default_model.model 't1-orchestrator'
         # A default already on omniroute must survive untouched.
-        '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"tier2"}}}' |
+        '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"t2-worker"}}}' |
             Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
         Set-AutoOSZedProxy
         $s2 = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
         Assert-Equal $s2.agent.default_model.provider 'autoos-omniroute'
-        Assert-Equal $s2.agent.default_model.model 'tier2'
+        Assert-Equal $s2.agent.default_model.model 't2-worker'
     } finally { $env:APPDATA = $realAppData }
 }
 
@@ -3749,9 +3749,9 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $oc = $stripped | ConvertFrom-Json
-    Assert-Equal $oc.model 'omniroute/tier1'
+    Assert-Equal $oc.model 'omniroute/t1-orchestrator'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,rag,spark-1.3-contributor,tier1,tier1-clean,tier2,tier2-clean,tier2-credit,tier3,tier3-clean,tier3-credit'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -3764,26 +3764,26 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     }
 }
 
-Test-Case 'tier depth is mandatory: only tier1 spawns, tier3 spawns nothing' {
+Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $agents = ($stripped | ConvertFrom-Json).agents
-    Assert-True ($null -ne $agents.'tier1-orchestrator') 'tier1-orchestrator agent missing'
-    Assert-True ($null -ne $agents.'tier2-worker') 'tier2-worker agent missing'
-    Assert-True ($null -ne $agents.'tier3-reviewer') 'tier3-reviewer agent missing'
-    # tier1 may launch tier2-worker and nothing else (deny-all first, narrow
+    Assert-True ($null -ne $agents.'t1-orchestrator') 't1-orchestrator agent missing'
+    Assert-True ($null -ne $agents.'t2-worker') 't2-worker agent missing'
+    Assert-True ($null -ne $agents.'t3-reviewer') 't3-reviewer agent missing'
+    # t1 may launch t2-worker and nothing else (deny-all first, narrow
     # allow last — last matching rule wins).
-    $t1 = @($agents.'tier1-orchestrator'.permissions)
+    $t1 = @($agents.'t1-orchestrator'.permissions)
     Assert-Equal $t1[0].action 'subagent'; Assert-Equal $t1[0].resource '*'; Assert-Equal $t1[0].effect 'deny'
-    Assert-Equal $t1[-1].resource 'tier2-worker'; Assert-Equal $t1[-1].effect 'allow'
-    # tier2 may launch tier3-reviewer and nothing else.
-    $t2 = @($agents.'tier2-worker'.permissions)
+    Assert-Equal $t1[-1].resource 't2-worker'; Assert-Equal $t1[-1].effect 'allow'
+    # t2 may launch t3-reviewer and nothing else.
+    $t2 = @($agents.'t2-worker'.permissions)
     Assert-Equal $t2[0].effect 'deny'
-    Assert-Equal $t2[-1].resource 'tier3-reviewer'; Assert-Equal $t2[-1].effect 'allow'
-    # tier3 is a leaf: subagent deny-all, no allow rule. It reads and runs
+    Assert-Equal $t2[-1].resource 't3-reviewer'; Assert-Equal $t2[-1].effect 'allow'
+    # t3 is a leaf: subagent deny-all, no allow rule. It reads and runs
     # checks (read/grep/glob/bash allow) but never edits, writes or spawns
     # (deny) — a tool-less reviewer refuses the task outright (2026-09-21).
-    $t3 = @($agents.'tier3-reviewer'.permissions)
+    $t3 = @($agents.'t3-reviewer'.permissions)
     Assert-Equal $t3.Count 7
     # subagent deny
     Assert-Equal $t3[0].action 'subagent'; Assert-Equal $t3[0].resource '*'; Assert-Equal $t3[0].effect 'deny'
@@ -3793,7 +3793,7 @@ Test-Case 'tier depth is mandatory: only tier1 spawns, tier3 spawns nothing' {
     Assert-Equal $t3[4].action 'grep'; Assert-Equal $t3[4].resource '*'; Assert-Equal $t3[4].effect 'allow'
     Assert-Equal $t3[5].action 'glob'; Assert-Equal $t3[5].resource '*'; Assert-Equal $t3[5].effect 'allow'
     Assert-Equal $t3[6].action 'bash'; Assert-Equal $t3[6].resource '*'; Assert-Equal $t3[6].effect 'allow'
-    Assert-Equal $agents.'tier3-reviewer'.mode 'subagent'
+    Assert-Equal $agents.'t3-reviewer'.mode 'subagent'
 }
 
 Test-Case 'subagent depth config' {
@@ -3804,7 +3804,7 @@ Test-Case 'subagent depth config' {
 
 Test-Case 'openhands template routes tiers with no secrets' {
     $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
-    foreach ($section in @('[llm]', '[llm.tier1]', '[llm.tier2]', '[llm.tier3]', '[llm.tier1-clean]', '[llm.tier2-clean]', '[llm.tier3-clean]', '[llm.rag]', '[llm.tier2-credit]', '[llm.tier3-credit]', '[llm.litellm-tier1]', '[llm.litellm-tier2]', '[llm.litellm-tier3]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
+    foreach ($section in @('[llm]', '[llm.t1-orchestrator]', '[llm.t2-worker]', '[llm.t3-driver]', '[llm.t1-orchestrator-clean]', '[llm.t2-worker-clean]', '[llm.t3-driver-clean]', '[llm.t4-rag]', '[llm.litellm-t1-orchestrator]', '[llm.litellm-t2-worker]', '[llm.litellm-t3-driver]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
         Assert-True ($toml -match [regex]::Escape($section)) "missing $section"
     }
     Assert-True ($toml -match 'host\.docker\.internal:20128') 'not pointed at the gateway'
@@ -3815,7 +3815,7 @@ Test-Case 'openhands template routes tiers with no secrets' {
 Test-Case 'litellm fallback config is internally consistent' {
     $yaml = Get-Content (Join-Path $Root 'configuration\litellm\config.yaml') -Raw -Encoding utf8
     $groups = @([regex]::Matches($yaml, '(?m)^\s*-\s*model_name:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
-    foreach ($g in @('tier1', 'tier1-paid', 'tier2', 'tier2-paid', 'tier3', 'tier3-paid')) {
+    foreach ($g in @('t1-orchestrator', 't1-orchestrator-paid', 't2-worker', 't2-worker-paid', 't3-driver', 't3-driver-paid')) {
         Assert-Contains $groups $g
     }
     $fb = [regex]::Match($yaml, '(?s)fallbacks:(.*?)(?:\r?\n\S|\z)').Groups[1].Value
@@ -3894,7 +3894,7 @@ Test-Case 'zed routing creates a fresh config when none exists' {
         $cfgPath = Join-Path $scratch 'Zed\settings.json'
         Assert-True (Test-Path $cfgPath) 'settings.json not created'
         $s = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 15
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 16
         Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.available_models.Count 6
     } finally { $env:APPDATA = $realAppData }
 }
@@ -4240,11 +4240,11 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
-    Assert-Equal ($names -join ',') 'tier1,spark-1.3-contributor,tier1-clean,tier2,tier2-clean,tier3,tier3-clean,rag,gemini-3.8-flash,deepseek-v4.1-flash,tier2-credit,tier3-credit'
+    Assert-Equal ($names -join ',') 't1-orchestrator,spark-1.3-contributor,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,deepseek-v4.1-flash'
     $contexts = @{
-        'tier1' = '1M'; 'spark-1.3-contributor' = '1M'; 'tier1-clean' = '1M'; 'tier2' = '128k'
-        'tier2-clean' = '128k'; 'tier3' = '128k'; 'tier3-clean' = '128k'; 'rag' = '128k'
-        'gemini-3.8-flash' = '128k'; 'deepseek-v4.1-flash' = '128k'; 'tier2-credit' = '128k'; 'tier3-credit' = '128k'
+        't1-orchestrator' = '1M'; 'spark-1.3-contributor' = '1M'; 't1-orchestrator-clean' = '1M'; 't1-orchestrator-free-only' = '1M'; 't2-worker' = '128k'
+        't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        'gemini-3.8-flash' = '128k'; 'deepseek-v4.1-flash' = '128k'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
@@ -4253,14 +4253,14 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         }
         Assert-Equal $c.context $contexts[$c.name]
     }
-    # tier1 is spark-only: gemini-3.1-pro reasons worse than 3.8-flash and
+    # t1-orchestrator is spark-only: gemini-3.1-pro reasons worse than 3.8-flash and
     # must never occupy a 1M orchestrator slot again.
-    $t1 = @($combos | Where-Object { $_.name -eq 'tier1' })[0]
-    Assert-True (($t1.models -join ',') -notmatch 'gemini') 'gemini back in tier1'
+    $t1 = @($combos | Where-Object { $_.name -eq 't1-orchestrator' })[0]
+    Assert-True (($t1.models -join ',') -notmatch 'gemini') 'gemini back in t1-orchestrator'
     # *-clean = paid legs only: no free pool may train on private prompts.
     # Free legs = contributor-free, groq/cerebras/sambanova hosts, gemini
     # free tier, mistral-code + qwen free pools. -contributor (trains by
-    # contract) is banned in tier2-clean/tier3-clean; tier1-clean carries it
+    # contract) is banned in t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries it
     # deliberately since the 2026-09-21 contributor-only block (paid-only,
     # trains — see combos.json). Direct-key legs (mistral-small, deepseek,
     # openrouter paid, zen paid) bill past the pool on the same key, so
@@ -4270,19 +4270,26 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
         $free = @($c.models | Where-Object { $_ -match $freeRe })
         Assert-Equal ($free -join ',') '' "$($c.name) carries free legs: $($free -join ',')"
-        if ($c.name -ne 'tier1-clean') {
+        if ($c.name -ne 't1-orchestrator-clean') {
             $train = @($c.models | Where-Object { $_ -match $noTrainRe })
             Assert-Equal ($train -join ',') '' "$($c.name) carries training legs: $($train -join ',')"
         }
+    }
+    # *-free-only = zero paid/keyed legs: only free pools may appear (the
+    # zen contributor-free promo counts as free; other opencode-zen legs bill).
+    $paidRe = 'cheaperinference|openrouter|^(deepseek|mistral)/|opencode-zen/(?!.*-free)'
+    foreach ($c in ($combos | Where-Object { $_.name -like '*-free-only' })) {
+        $paid = @($c.models | Where-Object { $_ -match $paidRe })
+        Assert-Equal ($paid -join ',') '' "$($c.name) carries paid legs: $($paid -join ',')"
     }
     # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): the only spark
     # in any tier is the contributor.
     $allLegs = @($combos | ForEach-Object { $_.models }) -join ' '
     Assert-True ($allLegs -notmatch 'muse-spark-1\.3(?!-contributor)') 'plain muse-spark-1.3 leg present'
     # spark-1.3-contributor is the pinned single-model route: byte-identical
-    # legs to tier1 (zen free promo -> openrouter paid), so the spark family
-    # is addressable directly without the tier1 id.
-    $t1legs = (@($combos | Where-Object { $_.name -eq 'tier1' })[0].models) -join ','
+    # legs to t1-orchestrator (zen free promo -> openrouter paid), so the spark family
+    # is addressable directly without the t1 id.
+    $t1legs = (@($combos | Where-Object { $_.name -eq 't1-orchestrator' })[0].models) -join ','
     $splegs = (@($combos | Where-Object { $_.name -eq 'spark-1.3-contributor' })[0].models) -join ','
     Assert-Equal $splegs $t1legs
 }
@@ -4370,18 +4377,20 @@ Test-Case 'opencode tiers declare matching context limits' {
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $oc = $stripped | ConvertFrom-Json
     $models = $oc.providers.omniroute.models
-    Assert-Equal $models.tier1.limit.context 1000000
-    Assert-Equal $models.'tier1-clean'.limit.context 1000000
-    Assert-Equal $models.tier2.limit.context 131072
-    Assert-Equal $models.'tier2-clean'.limit.context 131072
-    Assert-Equal $models.tier3.limit.context 131072
-    Assert-Equal $models.'tier3-clean'.limit.context 131072
+    Assert-Equal $models.'t1-orchestrator'.limit.context 1000000
+    Assert-Equal $models.'t1-orchestrator-clean'.limit.context 1000000
+    Assert-Equal $models.'t1-orchestrator-free-only'.limit.context 1000000
+    Assert-Equal $models.'t2-worker'.limit.context 131072
+    Assert-Equal $models.'t2-worker-clean'.limit.context 131072
+    Assert-Equal $models.'t2-worker-free-only'.limit.context 131072
+    Assert-Equal $models.'t3-driver'.limit.context 131072
+    Assert-Equal $models.'t3-driver-clean'.limit.context 131072
+    Assert-Equal $models.'t3-driver-free-only'.limit.context 131072
     Assert-Equal $models.'gemini-3.8-flash'.limit.context 131072
     Assert-Equal $models.'deepseek-v4.1-flash'.limit.context 131072
-    Assert-Equal $models.'tier2-credit'.limit.context 131072
-    Assert-Equal $models.'tier3-credit'.limit.context 131072
     Assert-Equal $models.'spark-1.3-contributor'.limit.context 1000000
-    foreach ($name in @('tier1', 'tier1-clean', 'tier2', 'tier2-clean', 'tier3', 'tier3-clean', 'spark-1.3-contributor', 'gemini-3.8-flash', 'deepseek-v4.1-flash', 'tier2-credit', 'tier3-credit', 'auto', 'auto/cheap', 'auto/smart')) {
+    Assert-Equal $models.'t4-rag'.limit.context 131072
+    foreach ($name in @('t1-orchestrator', 't1-orchestrator-clean', 't1-orchestrator-free-only', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't4-rag', 'spark-1.3-contributor', 'gemini-3.8-flash', 'deepseek-v4.1-flash', 'auto', 'auto/cheap', 'auto/smart')) {
         Assert-True ($null -ne $models.$name) "missing model $name"
         Assert-Equal $models.$name.modelID $name
     }

@@ -1,28 +1,28 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  // Repo default: OmniRoute on :20128 (docs/models.md). tier1/2/3 and their
+  // Repo default: OmniRoute on :20128 (docs/models.md). t1-orchestrator/2/3 and their
   // -clean variants are combos created by configuration/omniroute/apply.*
   // (priority chains: free legs first, allowed paid legs after). The paid
   // overflow legs already cover every provider with money on it: cerebras
-  // + sambanova ($10 credit each) as gpt-oss/qwen overflow in tier2/tier3,
+  // + sambanova ($10 credit each) as gpt-oss/qwen overflow in t2-worker/t3-driver,
   // cheap-inference ($15 partner pool) between free and paid, deepseek
   // ($13 bulk) + openrouter ($1, last resort) as flash legs. Meta bills
   // only through the direct opencode `meta` provider, never the gateway.
   // No funded provider is missing a leg —
   // verify with `omniroute simulate --combo tierN --explain`.
-  // spark-1.3-contributor is the same tier1 legs as a standalone pinned
+  // spark-1.3-contributor is the same t1-orchestrator legs as a standalone pinned
   // single-model combo (zen free → openrouter paid), for callers that want
-  // the spark family directly. Role labels (display only — the tier1/2/3
+  // the spark family directly. Role labels (display only — the t1-orchestrator/2/3
   // ids are a contract and never change):
-  // tier1 = orchestrator-1M, tier2 = smart-reasoning-128k,
-  // tier3 = cheap-driver-128k. "-clean" excludes every model/plan that
+  // t1-orchestrator = orchestrator-1M, t2-worker = smart-reasoning-128k,
+  // t3-driver = cheap-driver-128k. "-clean" excludes every model/plan that
   // trains on prompts — pick it for sensitive data. auto/* stays as a
   // zero-setup bootstrap that always resolves.
   // Effort/variants note (measured 2026-09-22): opencode builds a model's
   // variant list from the PROVIDER CATALOG's supportedThinkingEfforts, not
   // from config — a hand-declared "variants" block does not register and
   // makes the provider unresolvable. On OmniRoute gateway combos that
-  // metadata is absent, so `omniroute/tier1#xhigh` answers "Variant
+  // metadata is absent, so `omniroute/t1-orchestrator#xhigh` answers "Variant
   // unavailable" while `#low/#medium/#high` resolve client-side.
   // RULE: for the FULL effort ladder use the direct provider model
   // (`openrouter/meta/muse-spark-1.3-contributor#minimal` … `#xhigh`,
@@ -32,11 +32,11 @@
   // NEW: OpenRouter provider added at `openrouter/muse-spark-1.3-contributor`
   // gives direct access to the full variant ladder (minimal/low/medium/high/xhigh).
   // Requires OPENROUTER_API_KEY in env or configuration/api-keys.yml.
-  // Limits below must match the combo curations: tier1 is 1M-context only;
-  // anything smaller belongs in tier2. Override per user in
+  // Limits below must match the combo curations: t1-orchestrator is 1M-context only;
+  // anything smaller belongs in t2-worker. Override per user in
   // ~/.config/opencode/opencode.jsonc. Client key via env
   // AUTOOS_OMNIROUTE_KEY (or configuration/api-keys.yml).
-  "model": "omniroute/tier1",
+  "model": "omniroute/t1-orchestrator",
   // Serena memory tools are always off: project memory belongs to
   // omnigraph+graphify, never serena memory. MCP tools register as
   // <server>_<tool>, so these six keys disable them globally (an agent-level
@@ -66,36 +66,36 @@
   ],
   // Tier enforcement (hard, runtime-checked): unattended runs select these
   // agents, and the `subagent` permissions below make the depth mandatory —
-  // tier1-orchestrator may launch tier2-worker only, tier2-worker may launch
-  // tier3-reviewer only, tier3-reviewer may launch nothing. Last matching
+  // t1-orchestrator may launch t2-worker only, t2-worker may launch
+  // t3-reviewer only, t3-reviewer may launch nothing. Last matching
   // rule wins, so the broad deny comes first and the narrow allow after it.
   // NOTE: this binds inside the opencode runtime (CLI/TUI/serve). Harness or
   // API callers that bypass agents must follow the same depth by convention
   // (see .agents/skills/unattended-orchestration/unattended-orchestration.md "Tier enforcement").
   "subagent_depth": 2,
   "agents": {
-    "tier1-orchestrator": {
-      "description": "Long-horizon orchestrator: plans, slices, verifies, never codes directly. May launch tier2-worker only.",
+    "t1-orchestrator": {
+      "description": "Long-horizon orchestrator: plans, slices, verifies, never codes directly. May launch t2-worker only.",
       "mode": "all",
-      "model": "omniroute/tier1#high",
+      "model": "omniroute/t1-orchestrator#high",
       "permissions": [
         { "action": "subagent", "resource": "*", "effect": "deny" },
-        { "action": "subagent", "resource": "tier2-worker", "effect": "allow" }
+        { "action": "subagent", "resource": "t2-worker", "effect": "allow" }
       ]
     },
-    "tier2-worker": {
-      "description": "Smart worker: owns one track, reconciles reviews. May launch tier3-reviewer only.",
+    "t2-worker": {
+      "description": "Smart worker: owns one track, reconciles reviews. May launch t3-reviewer only.",
       "mode": "subagent",
-      "model": "omniroute/tier2",
+      "model": "omniroute/t2-worker",
       "permissions": [
         { "action": "subagent", "resource": "*", "effect": "deny" },
-        { "action": "subagent", "resource": "tier3-reviewer", "effect": "allow" }
+        { "action": "subagent", "resource": "t3-reviewer", "effect": "allow" }
       ]
     },
-    "tier3-reviewer": {
+    "t3-reviewer": {
       "description": "Cheap reviewer: one focused question, small budget. Reads and runs checks only; never edits, commits or spawns. May not launch subagents.",
       "mode": "subagent",
-      "model": "omniroute/tier3",
+      "model": "omniroute/t3-driver",
       "permissions": [
         { "action": "subagent", "resource": "*", "effect": "deny" },
         { "action": "edit", "resource": "*", "effect": "deny" },
@@ -116,34 +116,49 @@
         "baseURL": "http://127.0.0.1:20128/v1"
       },
       "models": {
-        "tier1": {
-          "modelID": "tier1",
-          "name": "tier1 orchestrator-1M — 1M ctx (free-first)",
+        "t1-orchestrator": {
+          "modelID": "t1-orchestrator",
+          "name": "t1 orchestrator-1M — 1M ctx (free-first)",
           "limit": { "context": 1000000, "output": 32768 }
         },
-        "tier1-clean": {
-          "modelID": "tier1-clean",
-          "name": "tier1 orchestrator-1M — no training (sensitive data)",
+        "t1-orchestrator-clean": {
+          "modelID": "t1-orchestrator-clean",
+          "name": "t1 orchestrator-1M — no training (sensitive data)",
           "limit": { "context": 1000000, "output": 32768 }
         },
-        "tier2": {
-          "modelID": "tier2",
-          "name": "tier2 smart-reasoning-128k — ≤128k ctx (free-first)",
+        "t1-orchestrator-free-only": {
+          "modelID": "t1-orchestrator-free-only",
+          "name": "t1 orchestrator-1M — zero spend (free legs only)",
+          "limit": { "context": 1000000, "output": 32768 }
+        },
+        "t2-worker": {
+          "modelID": "t2-worker",
+          "name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
           "limit": { "context": 131072, "output": 32768 }
         },
-        "tier2-clean": {
-          "modelID": "tier2-clean",
-          "name": "tier2 smart-reasoning-128k — no training (sensitive data)",
+        "t2-worker-clean": {
+          "modelID": "t2-worker-clean",
+          "name": "t2 smart-reasoning-128k — no training (sensitive data)",
           "limit": { "context": 131072, "output": 32768 }
         },
-        "tier3": {
-          "modelID": "tier3",
-          "name": "tier3 cheap-driver-128k — ≤128k ctx (cheapest)",
+        "t2-worker-free-only": {
+          "modelID": "t2-worker-free-only",
+          "name": "t2 smart-reasoning-128k — zero spend (free legs only)",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "t3-driver": {
+          "modelID": "t3-driver",
+          "name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
           "limit": { "context": 131072, "output": 16384 }
         },
-        "tier3-clean": {
-          "modelID": "tier3-clean",
-          "name": "tier3 cheap-driver-128k — no training (sensitive data)",
+        "t3-driver-clean": {
+          "modelID": "t3-driver-clean",
+          "name": "t3 cheap-driver-128k — no training (sensitive data)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
+        "t3-driver-free-only": {
+          "modelID": "t3-driver-free-only",
+          "name": "t3 cheap-driver-128k — zero spend (free legs only)",
           "limit": { "context": 131072, "output": 16384 }
         },
         "spark-1.3-contributor": {
@@ -151,9 +166,9 @@
           "name": "spark-1.3-contributor — zen free → openrouter paid (1M)",
           "limit": { "context": 1000000, "output": 32768 }
         },
-        "rag": {
-          "modelID": "rag",
-          "name": "rag cohere RAG — 128k ctx (trial keys)",
+        "t4-rag": {
+          "modelID": "t4-rag",
+          "name": "t4-rag cohere RAG — 128k ctx (trial keys)",
           "limit": { "context": 131072, "output": 16384 }
         },
         "gemini-3.8-flash": {
@@ -164,16 +179,6 @@
         "deepseek-v4.1-flash": {
           "modelID": "deepseek-v4.1-flash",
           "name": "deepseek-v4.1-flash — paid cheapest-first",
-          "limit": { "context": 131072, "output": 32768 }
-        },
-        "tier2-credit": {
-          "modelID": "tier2-credit",
-          "name": "tier2-credit smart (credit-burn)",
-          "limit": { "context": 131072, "output": 32768 }
-        },
-        "tier3-credit": {
-          "modelID": "tier3-credit",
-          "name": "tier3-credit driver (credit-burn)",
           "limit": { "context": 131072, "output": 32768 }
         },
         "auto/smart": {
@@ -216,29 +221,29 @@
         "baseURL": "http://127.0.0.1:4000/v1"
       },
       "models": {
-        "tier1": {
-          "modelID": "tier1",
-          "name": "tier1 orchestrator (free-first)"
+        "t1-orchestrator": {
+          "modelID": "t1-orchestrator",
+          "name": "t1-orchestrator orchestrator (free-first)"
         },
-        "tier1-paid": {
-          "modelID": "tier1-paid",
-          "name": "tier1-paid orchestrator (meta direct first)"
+        "t1-orchestrator-paid": {
+          "modelID": "t1-orchestrator-paid",
+          "name": "t1-orchestrator-paid orchestrator (meta direct first)"
         },
-        "tier2": {
-          "modelID": "tier2",
-          "name": "tier2 smart (free-first)"
+        "t2-worker": {
+          "modelID": "t2-worker",
+          "name": "t2-worker smart (free-first)"
         },
-        "tier2-paid": {
-          "modelID": "tier2-paid",
-          "name": "tier2-paid smart (paid)"
+        "t2-worker-paid": {
+          "modelID": "t2-worker-paid",
+          "name": "t2-worker-paid smart (paid)"
         },
-        "tier3": {
-          "modelID": "tier3",
-          "name": "tier3 codegen driver (free-first)"
+        "t3-driver": {
+          "modelID": "t3-driver",
+          "name": "t3-driver codegen driver (free-first)"
         },
-        "tier3-paid": {
-          "modelID": "tier3-paid",
-          "name": "tier3-paid driver (paid)"
+        "t3-driver-paid": {
+          "modelID": "t3-driver-paid",
+          "name": "t3-driver-paid driver (paid)"
         },
         "rag": {
           "modelID": "rag",

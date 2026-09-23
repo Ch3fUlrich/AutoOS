@@ -11,7 +11,7 @@
     "playwright"
   ],
   "agent_kind": "openhands",
-  "llm_profile_ref": "omniroute-tier1",
+  "llm_profile_ref": "omniroute-t1-orchestrator",
   "agent": "CodeActAgent",
   "tools": null,
   "system_message_suffix": "Follow the AGENTS.md of the repository you work in and the coding-principles skill. You may start sub-agents: brief each one as a leaf under the leaf contract at docs/agents/leaf-contract.md, then judge and commit its edits yourself.",

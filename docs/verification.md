@@ -15,7 +15,8 @@ Date      2026-09-20
 
 `configuration/omniroute/apply.ps1 -Probe` sends one tiny request
 (`max_tokens 2048` — reasoning models need a real budget) to every combo and
-reports what answered. Latest run:
+reports what answered. Latest run (ids renamed 2026-09-23 — rows below keep
+their contemporary names; re-probe under the new ids):
 
 | Combo | Served by | Result |
 |---|---|---|
@@ -61,10 +62,10 @@ Notes from the runs:
 opencode **2.0.11** (V2) with the repo's `opencode.jsonc`:
 
 ```
-opencode run --model omniroute/tier1   "Reply with exactly: ack"   -> ack
-opencode run --model omniroute/tier2   "Reply with exactly: ack"   -> ack
-opencode run --model omniroute/tier3   "Reply with exactly: ack"   -> ack
-opencode run --model omniroute/tier3-clean "Reply with exactly: ack" -> ack
+opencode run --model omniroute/t1-orchestrator   "Reply with exactly: ack"   -> ack
+opencode run --model omniroute/t2-worker   "Reply with exactly: ack"   -> ack
+opencode run --model omniroute/t3-driver   "Reply with exactly: ack"   -> ack
+opencode run --model omniroute/t3-driver-clean "Reply with exactly: ack" -> ack
 ```
 
 The legacy V1 CLI (`npm opencode-ai`) silently **omits** the V2 `providers`
@@ -208,7 +209,7 @@ priority chains hop past by design.
 
 ```bash
 ./configuration/omniroute/apply.sh --probe
-opencode run --model omniroute/tier3 "Reply with exactly: ack"
+opencode run --model omniroute/t3-driver "Reply with exactly: ack"
 ```
 
 ```powershell
