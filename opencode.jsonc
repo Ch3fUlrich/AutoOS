@@ -58,7 +58,10 @@
     { "action": "shell", "resource": "git status *", "effect": "allow" },
     { "action": "shell", "resource": "git diff *", "effect": "allow" },
     { "action": "shell", "resource": "git add *", "effect": "allow" },
+    { "action": "shell", "resource": "git rm *", "effect": "allow" },
     { "action": "shell", "resource": "git commit *", "effect": "allow" },
+    { "action": "shell", "resource": "git stash *", "effect": "allow" },
+    { "action": "shell", "resource": "git rebase *", "effect": "allow" },
     { "action": "shell", "resource": "git push *", "effect": "deny" }
   ],
   // Tier enforcement (hard, runtime-checked): unattended runs select these
