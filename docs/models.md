@@ -32,7 +32,8 @@ Free models are rarely autonomous-grade, so tiers map to **roles**, not just
 models — one smart driver + one fast looper + provider-of-last-resort. The
 combos are priority chains: try in order, hop on 429/error, free legs first,
 paid legs from the providers whose credit tiers are sanctioned
-(cerebras, sambanova, deepseek, meta, openrouter, zen) after them.
+(cerebras, sambanova, deepseek, openrouter, zen) after them. Meta bills only
+through the direct opencode `meta` provider, never through the gateway.
 
 | Tier | Context promise | Chain (verified against the live catalogs) |
 |---|---|---|
@@ -533,10 +534,13 @@ contract it must satisfy):
    `cheaperinference/*` reseller pool and the Zen free promo), but the legs it
    keeps must keep their relative order. Reordering is a failure even when the
    set matches.
-3. **Cheapest-first across the whole tier.** Walk the merged order against the
-   paid-overflow ranking (free pools → cerebras → sambanova → deepseek →
-   cheapinference → meta → openrouter) and fail on any leg that bills more than
-   a later leg in the same tier.
+3. **Cheapest-first across the whole tier (curatorial, review-enforced).**
+   Walk the merged order against the paid-overflow ranking (free pools →
+   cerebras → sambanova → cheapinference → deepseek → openrouter, zen tail)
+   and fail on any leg that bills more than a later leg in the same tier.
+   Cheap-inference sits *before* deepseek-direct: resale is ~30% under list.
+   `meta` is out (unregistered 2026-09-23). The script checks rules 1–2;
+   this ranking is checked by review until a price feed exists.
 4. **Clean tiers stay clean.** No leg of a `*-clean` tier may appear in a
    `-contributor`, `-free`, or free-tier-pool form anywhere in either file.
 5. **`context` is not cross-checked.** `combos.json`'s `"context"` keys and

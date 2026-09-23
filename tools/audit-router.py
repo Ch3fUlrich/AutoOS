@@ -240,6 +240,21 @@ def main(argv=None) -> int:
             if ref in text:
                 drift.append(f"{label} references a combo-bypassing ref: {ref}")
 
+    # 3b. Claude never rides the API: a Claude-subscription holder drives those
+    # models through the CLI (OAuth session), so no routing surface may name an
+    # anthropic/claude MODEL. Only model-ref positions count — prose mentions
+    # (autostart docs, CLI wiring) are not legs.
+    claude_surfaces = dict(surfaces)
+    claude_surfaces["configuration/omniroute/combos.json"] = json.dumps(combos)
+    for label, text in claude_surfaces.items():
+        for n, line in enumerate(text.splitlines(), 1):
+            s = line.strip()
+            if s.startswith(("#", "//")):
+                continue
+            m = re.search(r"""(?ix)\bmodel(?:ID)?\s*[:=]\s*["']?([^\s"',}]+)""", s)
+            if m and re.search(r"(?i)(anthropic|claude-)", m.group(1)):
+                drift.append(f"{label}:{n} routes a Claude model via API: {m.group(1)}")
+
     # 4. gateway resilience: the local execution deadline must fit a reasoning
     #    model, and the breaker must skip a dead promoted leg fast.
     if not args.offline:

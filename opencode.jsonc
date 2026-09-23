@@ -5,9 +5,10 @@
   // (priority chains: free legs first, allowed paid legs after). The paid
   // overflow legs already cover every provider with money on it: cerebras
   // + sambanova ($10 credit each) as gpt-oss/qwen overflow in tier2/tier3,
-  // deepseek ($13 bulk) + openrouter ($1, last resort) as flash legs,
-  // cheap-inference ($15 partner pool) between free and paid, meta ($10)
-  // where the spark family bills. No funded provider is missing a leg —
+  // cheap-inference ($15 partner pool) between free and paid, deepseek
+  // ($13 bulk) + openrouter ($1, last resort) as flash legs. Meta bills
+  // only through the direct opencode `meta` provider, never the gateway.
+  // No funded provider is missing a leg —
   // verify with `omniroute simulate --combo tierN --explain`.
   // spark-1.3-contributor is the same tier1 legs as a standalone pinned
   // single-model combo (zen free → openrouter paid), for callers that want
