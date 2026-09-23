@@ -101,7 +101,7 @@ Tiers, fallback trees, per-app start commands and provider quirks:
 | [Model routing](docs/models.md) | Which AI model answers, and how do free-first fallbacks work? |
 | [API keys](docs/api-keys.md) | Where does each key come from, and what does it cost? |
 | [OpenHands Agent Canvas](docs/openhands.md) | How do I install, configure and start the web UI? |
-| [Unattended orchestration](docs/unattended-orchestration.md) | How do 3-tier agent runs stay cheap, parallel and resumable? |
+| [Unattended orchestration](.agents/skills/unattended-orchestration/unattended-orchestration.md) | How do 3-tier agent runs stay cheap, parallel and resumable? |
 | [Omnigraph memory](docs/omnigraph.md) | How do agents recall and persist durable memory? |
 | [Remote provisioning](docs/remote-provisioning.md) | How do I set up a machine that isn't this one? |
 | [Download troubleshooting](docs/downloads.md) | Why is WinGet slow, and how do I pick another downloader? |

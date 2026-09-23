@@ -21,7 +21,7 @@ Start here. Each page is short and answers one question.
 | [Model routing](models.md) | Which AI model answers, and how do free-first fallbacks work? |
 | [API keys](api-keys.md) | Where does each key come from, and what does it cost? |
 | [Verification](verification.md) | What was tested and proven, and what is known broken? |
-| [Unattended orchestration](unattended-orchestration.md) | How do 3-tier agent runs stay cheap, parallel, and resumable? |
+| [Unattended orchestration](../.agents/skills/unattended-orchestration/unattended-orchestration.md) | How do 3-tier agent runs stay cheap, parallel, and resumable? |
 | [Omnigraph memory](omnigraph.md) | How do agents recall and persist durable memory without breaking the graph? |
 | [Task board](tasks.md) | Which tracks are Running / Queued / Done right now? |
 | [OpenHands Agent Canvas](openhands.md) | How do I install, configure and start the OpenHands web UI? |

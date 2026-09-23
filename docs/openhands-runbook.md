@@ -15,7 +15,7 @@ read it, then continue from `docs/handoff.md` Open item 1.
 - You route through the same OmniRoute combos as opencode
   (`configuration/omniroute/combos.json`): `tier1` = spark-only + xhigh,
   `*-clean` = paid legs only (privacy). Full skill:
-  `docs/unattended-orchestration.md`. Live board: `docs/tasks.md`.
+  `.agents/skills/unattended-orchestration/unattended-orchestration.md`. Live board: `docs/tasks.md`.
 
 ## 2. Get the repo in your sandbox
 

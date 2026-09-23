@@ -1040,6 +1040,29 @@ function Install-AutoOSAgentSkills {
         }
     }
 
+    # Repo skills into project .claude/skills (Claude Code reads only that dir).
+    # Junctions, created at install time (never committed - see .gitignore), so a
+    # checkout without symlink rights still works. Guarded: existing entries win.
+    $repoSkills = Join-Path $script:RepoRoot '.agents\skills'
+    $repoClaudeSkills = Join-Path $script:RepoRoot '.claude\skills'
+    if (Test-Path $repoSkills) {
+        if ($script:DryRun) {
+            Write-AutoOSLine "would link repo skills into $repoClaudeSkills" -Level muted
+        } else {
+            if (-not (Test-Path $repoClaudeSkills)) { New-Item -ItemType Directory -Path $repoClaudeSkills -Force | Out-Null }
+            foreach ($s in Get-ChildItem -Path $repoSkills -Directory) {
+                $target = Join-Path $repoClaudeSkills $s.Name
+                if (-not (Test-Path $target)) {
+                    try {
+                        New-Item -ItemType Junction -Path $target -Target $s.FullName | Out-Null
+                    } catch {
+                        Write-AutoOSLine "Could not link repo skill $($s.Name): $_" -Level warn
+                    }
+                }
+            }
+        }
+    }
+
     if ($script:DryRun) {
         Write-AutoOSLine 'would check the omnigraph image, network and token' -Level muted
         return
@@ -1669,12 +1692,15 @@ function Install-AutoOSMcpContext7 {
 
 function Get-AutoOSSkillsSource {
     <#
-      .SYNOPSIS Locate the machine's agent-skills skills directory.
+      .SYNOPSIS Locate the skills directory: repo-vendored first, external clone second.
 
       .DESCRIPTION
-        Returns the first existing of Documents\Code\agent-skills\skills and
-        Documents\code\agent-skills\skills, or $null when neither exists.
+        Returns .agents/skills under the repo root when present (single source
+        of truth, including the native rewrites), else the external
+        Documents\Code\agent-skills\skills clone, or $null when neither exists.
     #>
+    $vendored = Join-Path $script:RepoRoot '.agents\skills'
+    if (Test-Path $vendored) { return $vendored }
     $myDocs = [Environment]::GetFolderPath('MyDocuments')
     foreach ($rel in @('Code\agent-skills\skills', 'code\agent-skills\skills')) {
         $candidate = Join-Path $myDocs $rel

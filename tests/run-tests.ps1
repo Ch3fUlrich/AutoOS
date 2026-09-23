@@ -974,6 +974,23 @@ Test-Case 'Install-AutoOSAgentSkills links skills to Antigravity and Claude Code
     Pass
 }
 
+Test-Case 'vendored .agents/skills wins as skills source' {
+    if ($installSource -notmatch 'Join-Path \$script:RepoRoot ''\.agents\\skills''') {
+        throw 'Get-AutoOSSkillsSource does not prefer the vendored skills dir'
+    }
+    Pass
+}
+
+Test-Case 'repo skills link into project .claude/skills as junctions' {
+    if ($installSource -notmatch 'repoClaudeSkills = Join-Path \$script:RepoRoot ''\.claude\\skills''') {
+        throw 'no repo-local .claude/skills link step'
+    }
+    if ($installSource -notmatch 'New-Item -ItemType Junction -Path \$target -Target \$s\.FullName') {
+        throw 'repo skill links are not guarded junctions'
+    }
+    Pass
+}
+
 Test-Case 'Test-AutoOSInstalled checks both Documents\code and Documents\Code' {
     if ((Get-Content (Join-Path $Root 'lib/windows/AutoOS.Detect.psm1') -Raw) -notmatch 'Code\\agent-skills') {
         throw 'Test-AutoOSInstalled does not check both Code and code paths'

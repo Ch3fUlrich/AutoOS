@@ -2690,6 +2690,7 @@ if it "agent-skills links skills to Antigravity and Claude Code"; then
     (
         SYS_HOME="$tmp"
         AUTOOS_DRY_RUN=0
+        AUTOOS_ROOT="$tmp"
         clone_or_update() { :; }
         install_mcp_graphify() { :; }
         install_mcp_serena() { :; }
@@ -2707,6 +2708,34 @@ if it "agent-skills links skills to Antigravity and Claude Code"; then
     [[ -e "$tmp/.claude/skills/test-skill/SKILL.md" ]] || ok=0
     rm -rf "$tmp"
     if (( ok )); then pass; else fail "skills were not linked to Antigravity or Claude Code"; fi
+fi
+
+if it "repo skills link into project .claude/skills and win as skills source"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.agents/skills/demo-skill"
+    printf -- '---\nname: demo-skill\ndescription: demo\n---\n' >"$tmp/.agents/skills/demo-skill/SKILL.md"
+    mkdir -p "$tmp/Documents/code/agent-skills/skills/old-skill"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        AUTOOS_ROOT="$tmp"
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }
+        install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }
+        install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        enable_project_mcp_server() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        install_agent_skills >/dev/null 2>&1
+    )
+    ok=1
+    [[ -e "$tmp/.claude/skills/demo-skill/SKILL.md" ]] || ok=0
+    [[ "$(AUTOOS_ROOT="$tmp" autoos_skills_source)" == "$tmp/.agents/skills" ]] || ok=0
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "vendored skills did not win or were not linked"; fi
 fi
 
 if it "custom_is_installed detects agent-skills under Documents/code or Documents/Code"; then

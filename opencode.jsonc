@@ -67,7 +67,7 @@
   // rule wins, so the broad deny comes first and the narrow allow after it.
   // NOTE: this binds inside the opencode runtime (CLI/TUI/serve). Harness or
   // API callers that bypass agents must follow the same depth by convention
-  // (see docs/unattended-orchestration.md "Tier enforcement").
+  // (see .agents/skills/unattended-orchestration/unattended-orchestration.md "Tier enforcement").
   "subagent_depth": 2,
   "agents": {
     "tier1-orchestrator": {

@@ -1951,6 +1951,27 @@ print(json.dumps({
         fi
     fi
 
+    # Repo skills into project .claude/skills (Claude Code reads only that
+    # dir). Symlinks, created at install time (never committed - see
+    # .gitignore). Guarded: existing entries win.
+    repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    repo_skills="$repo_root/.agents/skills"
+    repo_claude="$repo_root/.claude/skills"
+    if [[ -d "$repo_skills" ]]; then
+        if (( AUTOOS_DRY_RUN )); then
+            ui_muted "would link repo skills into $repo_claude"
+        else
+            mkdir -p "$repo_claude"
+            for s_dir in "$repo_skills"/*; do
+                [[ -d "$s_dir" ]] || continue
+                s_name="$(basename "$s_dir")"
+                if [[ ! -e "$repo_claude/$s_name" ]]; then
+                    ln -snf "$s_dir" "$repo_claude/$s_name" 2>/dev/null || ui_warn "could not link repo skill $s_name"
+                fi
+            done
+        fi
+    fi
+
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would check the omnigraph image, network and token"
         return 0
@@ -1990,6 +2011,13 @@ resolve_ollama_base_url() {
 
 # Prints the machine's agent-skills skills directory, or nothing when absent.
 autoos_skills_source() {
+    # Repo-vendored .agents/skills first (single source of truth, including
+    # the native rewrites), external agent-skills clone second.
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    if [[ -d "$repo_root/.agents/skills" ]]; then
+        printf '%s\n' "$repo_root/.agents/skills"
+        return 0
+    fi
     local code_root="$SYS_HOME/Documents/Code"
     if [[ -d "$SYS_HOME/Documents/code" ]]; then
         code_root="$SYS_HOME/Documents/code"

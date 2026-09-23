@@ -5,7 +5,7 @@ everything. Read top to bottom, then continue from Open item 1. Concrete
 proof for every claim lives in `docs/verification.md` (dated runs).
 
 Your role: tier1 orchestrator (`omniroute/tier1#high`). Full protocol =
-`docs/unattended-orchestration.md` (tiers, enforcement, watchdog). Routing
+`.agents/skills/unattended-orchestration/unattended-orchestration.md` (tiers, enforcement, watchdog). Routing
 reference = `docs/models.md` (per-tier mermaid + sync contract). Runbook =
 `.claude/handoff.config.json` (lanes/sessions/guards for unattended runs).
 
@@ -242,7 +242,7 @@ memory, never write project data to the global `memory` graph.**
    local ollama is LAST resort only (model startup latency too high for quick
    extractions). Reasoning stays tier1/2; cheap tiers transport verbatim and
    extract with exact quotes, never rephrase decisions; record spend per
-   DONE note. See `docs/unattended-orchestration.md`.
+   DONE note. See `.agents/skills/unattended-orchestration/unattended-orchestration.md`.
 5. **Leg-probe sweep** — DONE 2026-09-22 for the current 20 legs (no
    phantoms; results table in `docs/verification.md`). Repeat after any leg
    add/edit: one direct `:20128` chat per leg; `simulate` is not proof. Keep
@@ -279,15 +279,16 @@ memory, never write project data to the global `memory` graph.**
    - use `git subtree` (provenance + future pulls), **never** a filesystem copy
      — that was the Phase 2 rule and it still holds;
    - **move `docs/unattended-orchestration.md` INTO the
-     `unattended-orchestration` skill** — that page is the skill's prose. After
-     the move, fix every inbound link (the README Documentation table,
-     `docs/README.md`, this handoff, `docs/openhands-runbook.md`,
-     `docs/tasks.md`) and keep `tests/check-links.py` + the docs-index test
-     green;
+     `unattended-orchestration` skill** — DONE 2026-09-23: lives at
+     `.agents/skills/unattended-orchestration/unattended-orchestration.md`,
+     inbound links rewritten (README, `docs/README.md`, this handoff,
+     `docs/openhands-runbook.md`, `opencode.jsonc`); tasks.md never linked it.
+     Keep `tests/check-links.py` + the docs-index test green;
    - **licence check before shipping:** the earlier note flagged
      qa-swarm/review-triage/babysit-prs as unlicensed (rewrite natively). The
-     operator asked for the full folder — if that constraint still holds, raise
-     it with the operator instead of silently dropping a skill;
+     operator chose native rewrite 2026-09-23: qa-swarm/review-triage/babysit-prs
+     landed as original prose; pr-approval-agent (PostHog MIT) and no-mistakes
+     (Kun Chen MIT) subtree as-is per `agent-skills/THIRD_PARTY.md`;
    - fix the swarm-orchestration dangling cross-links from the earlier attempt:
      no orphaned links, no duplicated skill, no half-copied tree;
    - verify with `tests/check-links.py`, both suites, and a real skill-load

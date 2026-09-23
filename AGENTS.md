@@ -198,3 +198,33 @@ Before you claim a change is complete:
 - [ ] `README.md` updated if you changed a flag or an entry point
 
 Do not report work as done because the code looks right. Run it.
+
+## 8. Agent skills (`.agents/skills/`)
+
+Reusable workflows live in `.agents/skills/<name>/SKILL.md` — the skill file
+owns its workflow; this section only routes. One home per fact (§1 of
+`agent-skills` applies here too): never restate a skill's content in docs.
+
+| Skill | Load when |
+|---|---|
+| `coding-principles` | **any** implementation, refactor, bugfix |
+| `structured-memory` | **every** session — recall at start, persist at end |
+| `swarm-orchestration` | multi-file work (drives `qa-swarm`, `review-triage`) |
+| `qa-swarm` / `review-triage` | review phase only (native rewrites; scope: AutoOS) |
+| `unattended-orchestration` | work runs for **hours with nobody watching**, or a CAO hierarchy |
+| `mcp-servers-setup` | wiring or debugging the MCP stack |
+| `no-mistakes` / `babysit-prs` | pre-push validation / async CI sweeps |
+| `repository-index` | lost, or unsure which skill applies |
+| `html-working-documents` | plan / report / diagram that outgrew chat |
+| `homelab-access` / `herdr-orchestration` | homelab commands / supervised persistent agents |
+
+Loading per agent: opencode reads `.agents/skills` as project-compat source
+natively; Claude Code reads `.claude/skills` — the installers link each skill
+there (idempotent step, guarded by existence check); OpenHands profiles point
+`load_skills_from_dir` at `.agents/skills`. A skill that loads nowhere is a
+defect — the suites assert the wiring, not just the files.
+
+Provenance: subtree from `agent-skills` (`git log -- .agents/skills`);
+`qa-swarm`, `review-triage`, `babysit-prs` are native rewrites (unlicensed
+upstreams — see `agent-skills/THIRD_PARTY.md`); sync ledger at
+`.agents/SYNC.md`.
