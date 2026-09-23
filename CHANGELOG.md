@@ -23,6 +23,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed — OpenHands setup
 
+- **OpenHands settings 500 after agent-canvas 1.20 writes schema 6.** `agent-canvas`
+  writes `agent_settings.schema_version: 6` plus an `enabled` key on every MCP server,
+  while the `docker.openhands.dev/openhands/openhands:latest` image supports version 4
+  and rejects `enabled` with `extra_forbidden` — every `/api` settings route 500s with
+  `AgentSettings schema_version 6 is newer than supported version 4`. The old
+  `start-stack` guard checked top-level `schema_version` (3 on broken files too) and
+  never fired. `start-stack.ps1`/`.sh` now repair in place with a timestamped backup:
+  clamp `agent_settings.schema_version` down to 4 (older payloads keep theirs, so the
+  image's own migrations still run) and strip the `enabled` keys; only unparseable files
+  move aside. Both installers also write schema 4 instead of 5 and strip inherited
+  `enabled` keys. Suite pins the repair shape in both harnesses.
+
 - **Windows OpenHands setup failed under `Set-StrictMode`.** The embedded Python was an
   expanding here-string, so every `$` in it was evaluated by PowerShell. It is now a literal
   here-string that reads the catalog from disk. One suite case parses it; another runs it
