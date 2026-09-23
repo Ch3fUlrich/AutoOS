@@ -2120,7 +2120,20 @@ if os.path.isfile(settings_file):
 
 settings.setdefault('schema_version', 2)
 agent_settings = settings.setdefault('agent_settings', {})
-agent_settings.setdefault('schema_version', 5)
+# Target the docker image's supported version (measured: AGENT_SETTINGS_SCHEMA_VERSION=4
+# in docker.openhands.dev/openhands/openhands:latest). Newer writers (agent-canvas 1.20
+# writes 6) migrate forward on load, so 4 is readable by both; 5+ 500s the image's
+# /api settings load. Only clamp DOWN: older payloads must keep their version so the
+# image's own migrations still run.
+agent_settings.setdefault('schema_version', 4)
+if isinstance(agent_settings.get('schema_version'), int) and agent_settings['schema_version'] > 4:
+    agent_settings['schema_version'] = 4
+# No 'enabled' key on any MCP entry: the live MCPServer schema (additionalProperties
+# false) rejects it with extra_forbidden and 500s /api/v1/settings. Presence in
+# mcp_config means active. Strip it from inherited files (agent-canvas writes it).
+for _srv in (agent_settings.get('mcp_config') or {}).values():
+    if isinstance(_srv, dict):
+        _srv.pop('enabled', None)
 agent_settings.setdefault('agent_kind', 'openhands')
 agent_settings.setdefault('agent', 'CodeActAgent')
 
@@ -2250,21 +2263,40 @@ gw_key = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] != 'null' else None
 # LiteLLM master key for the litellm-tier* fallback profiles: env first
 # (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
 _lit_key = os.environ.get('LITELLM_MASTER_KEY') or os.environ.get('AUTOOS_LITELLM_API_KEY')
+# A direct-provider tier (the effort-ladder surface, e.g. OpenRouter spark)
+# carries its own key: it does NOT go through either gateway.
+_or_key = os.environ.get('OPENROUTER_API_KEY')
+if not _or_key:
+    _keys_yml = os.path.join(repo_root, 'configuration', 'api-keys.yml') if repo_root else ''
+    try:
+        with open(_keys_yml, 'r', encoding='utf-8-sig') as _kf:
+            for _line in _kf:
+                _t2 = _line.strip()
+                if _t2.startswith('openrouter:') and 'REPLACE' not in _t2:
+                    _or_key = _t2.split(':', 1)[1].strip().strip('\'' + chr(34))
+                    break
+    except Exception:
+        pass
 _spec_file = os.path.join(repo_root, 'configuration', 'openhands', 'tier-profiles.json') if repo_root else ''
-if (gw_key or _lit_key) and _spec_file and os.path.isfile(_spec_file):
+if (gw_key or _lit_key or _or_key) and _spec_file and os.path.isfile(_spec_file):
     # Gateway-routed tier profiles for the 3-level hierarchy, read from the
     # spec (single source - never inline tiers here). These are NOT catalog
     # models (check-vendored covers repo-vendored profiles only). The openai/
     # prefix is the LiteLLM transport selector OpenHands requires; litellm-*
-    # tiers address the :4000 fallback proxy by its plain model_name.
+    # tiers address the :4000 fallback proxy by its plain model_name; a
+    # `gateway: openrouter` tier names its own endpoint and key.
     try:
         with open(_spec_file, 'r', encoding='utf-8') as _sf:
             _spec = json.load(_sf)
         _gw = _spec['gateway_base_url']
         _lit_base = _spec.get('litellm_base_url', _gw)
+        _gateway_keys = {'litellm': _lit_key, 'openrouter': _or_key}
         for _t in _spec['tiers']:
-            if _t.get('gateway') == 'litellm':
-                _t_key, _t_base = _lit_key, _lit_base
+            _g = _t.get('gateway')
+            if _g in _gateway_keys:
+                _t_key = _gateway_keys[_g]
+                _t_base = _t.get('base_url') if _g == 'openrouter' else _lit_base
+                _t_base = _t_base or _gw
             else:
                 _t_key, _t_base = gw_key, _gw
             if not _t_key:

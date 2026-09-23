@@ -156,10 +156,16 @@ Fixes, all verified:
 | Fix | Evidence |
 |---|---|
 | `requestQueue.maxWaitMs` 15000 → **180000** (`PATCH /api/resilience`) | `tier1`, `spark-1.3-contributor`, `tier1-clean` each **3/3 `ack`** after; 502/504 before |
-| Zen free leg **demoted to last** in `tier1` + `spark-1.3-contributor` | the first leg now answers, so no failed round-trip and no misleading error |
-| `apply.*` sets `maxWaitMs` on every run | fresh machines cannot inherit the 15 s default |
-| `tools/audit-router.py` flags a low `maxWaitMs` and any combo-bypassing ref | both suites run it with `--offline` |
+| **Zen free promo restored FIRST** in `tier1` + `spark-1.3-contributor`, with `providerBreaker.apikey.failureThreshold` 12 → **2** (operator call 2026-09-23) | 5 spark requests → only **3 zen attempts** (2 requests skipped it entirely) and the skipped ones were faster (2.8 s / 4.7 s vs 7.5 s / 8.1 s); all 5 served by the paid leg |
+| `apply.*` sets `maxWaitMs` **and** the breaker threshold on every run | fresh machines cannot inherit the 15 s / 12-failure defaults |
+| `tools/audit-router.py` flags a low `maxWaitMs`, a high breaker threshold, and any combo-bypassing ref | both suites run it with `--offline` |
 | LiteLLM `*-paid` groups lead with the OpenRouter leg; `simple-shuffle` | `tier1-paid`/`tier2-paid`/`tier3-paid` answer; before, all three 402'd |
+
+Design note on the breaker: it is one global threshold for api-key
+connections, which turns out to be the right shape — every failing free leg now
+hops after two attempts instead of being retried ~12 times, so *all* the
+priority chains got faster, not just spark. `resetTimeoutMs` stays 30 s, so a
+promo leg that recovers is picked up again within half a minute.
 
 Also worth knowing: a bare `gemini-3.7-flash` resolves to the PAID OpenRouter
 alias (200), but the provider-qualified `gemini/gemini-3.7-flash` binds to the

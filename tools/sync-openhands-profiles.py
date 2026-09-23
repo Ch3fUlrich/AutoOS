@@ -11,9 +11,11 @@ litellm-tier*.json) by injecting the client keys, which never live in the repo:
 Key resolution: env AUTOOS_OMNIROUTE_KEY first, then the `omniroute:` entry of
 the keys file (omniroute tiers); env LITELLM_MASTER_KEY, then
 AUTOOS_LITELLM_API_KEY, then the LITELLM_MASTER_KEY entry of
-configuration/litellm/.env (litellm tiers). A gateway with no key has its
-tiers skipped (the installer covers the keyless path separately); with neither
-key the tool reports the skip and exits 0.
+configuration/litellm/.env (litellm tiers); env OPENROUTER_API_KEY, then the
+`openrouter:` entry of the keys file (a direct-provider tier, e.g. the
+OpenRouter spark profile used for the full effort ladder). A gateway with no
+key has its tiers skipped (the installer covers the keyless path separately);
+with no key at all the tool reports the skip and exits 0.
 
 Run by configuration/start-stack.* on every `openhands` start, so a reapplied
 spec, a rotated key, or a hand-edited profile converges back automatically.
@@ -71,6 +73,15 @@ def read_litellm_key(env_path: Path | None) -> str | None:
     return None
 
 
+def read_openrouter_key(keys_file: Path | None) -> str | None:
+    """A DIRECT-provider tier (effort-ladder surface) has its own key."""
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return os.environ["OPENROUTER_API_KEY"]
+    if keys_file and keys_file.is_file():
+        return read_flat_value(keys_file, "openrouter")
+    return None
+
+
 def build_profile(tier: dict, base_url: str, key: str) -> dict:
     profile = {
         "auth_type": "api_key",
@@ -103,8 +114,12 @@ def build_profile(tier: dict, base_url: str, key: str) -> dict:
 
 
 def tier_base_url(tier: dict, spec: dict) -> str:
-    if tier.get("gateway") == "litellm":
+    gateway = tier.get("gateway")
+    if gateway == "litellm":
         return spec.get("litellm_base_url", spec["gateway_base_url"])
+    if gateway == "openrouter":
+        # A direct-provider tier names its own endpoint in the spec.
+        return tier.get("base_url", spec["gateway_base_url"])
     return spec["gateway_base_url"]
 
 
@@ -150,16 +165,15 @@ def main(argv=None):
         return 2
     omni_key = read_omni_key(keys_path)
     litellm_key = read_litellm_key(litellm_env)
-    if not omni_key and not litellm_key:
+    openrouter_key = read_openrouter_key(keys_path)
+    if not omni_key and not litellm_key and not openrouter_key:
         print("sync-openhands-profiles: no client key (env/key file/.env) - tier profiles skipped")
         return 0
     profiles_dir = Path(args.openhands_dir) / "profiles"
     profiles_dir.mkdir(parents=True, exist_ok=True)
+    keys = {"litellm": litellm_key, "openrouter": openrouter_key}
     for tier in tiers:
-        if tier.get("gateway") == "litellm":
-            key = litellm_key
-        else:
-            key = omni_key
+        key = keys.get(tier.get("gateway"), omni_key)
         name = "%s.json" % tier["id"]
         if not key:
             print(f"sync-openhands-profiles: {name} skipped (no key for its gateway)")

@@ -624,16 +624,30 @@ print("%s|%s|%s|%s" % (
     ",".join(t["model"] for t in spec["tiers"])))
 PY
 )"
-    assert_eq "$report" "omniroute-tier1,omniroute-tier1-clean,omniroute-spark-1.3-contributor,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/tier1,openai/tier1-clean,openai/spark-1.3-contributor,openai/tier2,openai/tier2-clean,openai/tier3,openai/tier3-clean,openai/rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/tier2-credit,openai/tier3-credit,openai/tier1,openai/tier2,openai/tier3"
+    assert_eq "$report" "omniroute-tier1,omniroute-tier1-clean,omniroute-spark-1.3-contributor,omniroute-tier2,omniroute-tier2-clean,omniroute-tier3,omniroute-tier3-clean,omniroute-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-tier2-credit,omniroute-tier3-credit,litellm-tier1,litellm-tier2,litellm-tier3,openrouter-muse-spark-1.3-contributor|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/tier1,openai/tier1-clean,openai/spark-1.3-contributor,openai/tier2,openai/tier2-clean,openai/tier3,openai/tier3-clean,openai/rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/tier2-credit,openai/tier3-credit,openai/tier1,openai/tier2,openai/tier3,openrouter/meta/muse-spark-1.3-contributor"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
     # Generator round-trip with fixture keys (env hidden: the suite never
     # asserts on live system state).
-    tmp="$(mktemp -d)"; printf 'omniroute: test-omni-key\n' >"$tmp/api-keys.yml"
+    tmp="$(mktemp -d)"; printf 'omniroute: test-omni-key\nopenrouter: test-or-key\n' >"$tmp/api-keys.yml"
     printf 'LITELLM_MASTER_KEY=test-lit-key\n' >"$tmp/.env"
-    out="$( ( unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY; python3 tools/sync-openhands-profiles.py --openhands-dir "$tmp" --keys-file "$tmp/api-keys.yml" --litellm-env "$tmp/.env" ) 2>&1)"
+    out="$( ( unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY OPENROUTER_API_KEY; python3 tools/sync-openhands-profiles.py --openhands-dir "$tmp" --keys-file "$tmp/api-keys.yml" --litellm-env "$tmp/.env" ) 2>&1)"
+    written="$(printf '%s' "$out" | grep -c written)"
+    # A direct-provider tier (gateway: openrouter) must take its OWN key and
+    # endpoint, not the gateway's - that is the effort-ladder surface.
+    direct="$(python3 - "$tmp/profiles/openrouter-muse-spark-1.3-contributor.json" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except OSError:
+    print("missing")
+else:
+    print("%s|%s|%s" % (d.get("api_key"), d.get("base_url"), d.get("model")))
+PY
+)"
     rm -rf "$tmp"
-    assert_eq "$(printf '%s' "$out" | grep -c written)" "15"
+    assert_eq "$written" "16"
+    assert_eq "$direct" "test-or-key|https://openrouter.ai/api/v1|openrouter/meta/muse-spark-1.3-contributor"
 fi
 
 if it "start-stack regenerates tier profiles on openhands start"; then
@@ -2492,18 +2506,29 @@ fi
 if it "openhands launch is detached, probed and stale-settings safe"; then
     # -it fails without a TTY and foreground never returns; schema_version 6
     # settings 500 the current image. Both fixed 2026-09-21 - pin the shape.
+    # 2026-09-23: the guard repairs in place instead of deleting (the old
+    # shape moved the whole file aside and lost the user's profiles/keys).
+    # It must target agent_settings.schema_version (top-level stays 2-3 on
+    # broken files too) and strip the agent-canvas `enabled` MCP keys.
     ok=1
     for f in configuration/start-stack.ps1 configuration/start-stack.sh; do
         grep -q 'docker run -d ' "$f" || { ok=0; echo "not detached: $f" >&2; }
         grep -q 'docker run -it' "$f" && { ok=0; echo "still -it: $f" >&2; }
-        grep -q 'schema_version' "$f" || { ok=0; echo "no stale-settings guard: $f" >&2; }
+        grep -q 'agent_settings.schema_version\|agent_settings.*schema_version' "$f" || { ok=0; echo "wrong schema_version level: $f" >&2; }
         grep -q 'autoos-backup' "$f" || { ok=0; echo "no backup: $f" >&2; }
         grep -q 'docker logs openhands-app' "$f" || { ok=0; echo "no probe: $f" >&2; }
         # Tier profiles re-project from the spec on every start (never stale).
         grep -q 'sync-openhands-profiles' "$f" || { ok=0; echo "never syncs: $f" >&2; }
-        # Only versions NEWER than the image (6+) move aside: a live v3 file
-        # serves fine, so a blanket "!= 4" nuke would destroy working configs.
-        grep -qE 'ge 6|>= 6|>=6' "$f" || { ok=0; echo "indiscriminate version nuke: $f" >&2; }
+        # Repair, not delete: only versions NEWER than the image (> 4) clamp
+        # down; older payloads keep theirs so the image's own migrations run.
+        grep -qE '> 4|-gt 4' "$f" || { ok=0; echo "wrong clamp version: $f" >&2; }
+        # The agent-canvas `enabled` MCP key 500s the image (extra_forbidden).
+        grep -q 'enabled' "$f" || { ok=0; echo "no enabled-key strip: $f" >&2; }
+        # Repair, not delete, for parseable files: the version-mismatch path
+        # must clamp in place (at most one settings.json removal remains: the
+        # unparseable-file fallback, where there is nothing to preserve).
+        grep -qE 'schema_version.?\s?\]?\s?= 4' "$f" || { ok=0; echo "no in-place clamp: $f" >&2; }
+        [[ "$(grep -cE 'Remove-Item \$ohSettings|rm -f "\$oh_settings"' "$f")" -le 1 ]] || { ok=0; echo "deletes parseable user settings: $f" >&2; }
     done
     if (( ok )); then pass; else fail "openhands launch shape regressed"; fi
 fi
@@ -5476,6 +5501,27 @@ if it "api-keys example carries placeholders only"; then
     assert_eq "$bad" ""
 fi
 
+if it "opencode.jsonc is valid JSON once comments are stripped"; then
+    # Every client loads this file, and a single unbalanced brace makes ALL of
+    # them fall back to defaults while the suite's other assertions (which read
+    # it as text) stay green. Measured 2026-09-23: a provider block was added
+    # without its closing brace and nothing failed.
+    out="$(python3 - <<'PY'
+import json, re, sys
+raw = open("opencode.jsonc", encoding="utf-8").read()
+body = re.sub(r"(?m)^\s*//.*$", "", raw)
+try:
+    doc = json.loads(body)
+except Exception as exc:
+    sys.exit(f"parse error: {exc}")
+if not doc.get("model"):
+    sys.exit("no default model")
+print("ok")
+PY
+)"
+    assert_eq "$out" "ok"
+fi
+
 if it "the router declarations do not drift from each other"; then
     # tools/audit-router.py --offline compares combos.json against opencode.jsonc,
     # both Zed writers and the OpenHands tier profiles, and rejects any
@@ -5496,13 +5542,26 @@ PY
     assert_eq "$bad" ""
 fi
 
-if it "apply sets the resilience deadline for reasoning legs"; then
+if it "apply sets the resilience deadline and the fast-skip breaker"; then
     ok=1
     for f in configuration/omniroute/apply.sh configuration/omniroute/apply.ps1; do
         grep -q 'maxWaitMs' "$f" || { ok=0; echo "$f never sets maxWaitMs" >&2; }
         grep -q '180000' "$f" || { ok=0; echo "$f does not use the reasoning-safe value" >&2; }
+        grep -q 'providerBreaker' "$f" || { ok=0; echo "$f never sets the fast-skip breaker" >&2; }
+        grep -qE 'failureThreshold.?[:=].?2|BREAKER_THRESHOLD=2' "$f" \
+            || { ok=0; echo "$f does not use the 2-failure threshold" >&2; }
     done
-    if (( ok )); then pass; else fail "the resilience deadline is not applied"; fi
+    # The free promo leg must stay FIRST in tier1/spark: free when it works,
+    # fast-skipped by the breaker when it does not (operator 2026-09-23).
+    head_leg="$(python3 - <<'PY'
+import json
+d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
+by = {c["name"]: c["models"] for c in d["combos"]}
+print(",".join(by[n][0] for n in ("tier1", "spark-1.3-contributor")))
+PY
+)"
+    assert_eq "$head_leg" "opencode-zen/muse-spark-1.3-contributor-free,opencode-zen/muse-spark-1.3-contributor-free"
+    if (( ok )); then pass; else fail "the resilience settings are not applied"; fi
 fi
 
 if it "combos.json carries no phantom legs (probe-falsified refs stay out)"; then
