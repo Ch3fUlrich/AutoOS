@@ -161,6 +161,25 @@ label is display only and appears identically in `combos.json` (`$comment`),
 | `tier2` | **smart-reasoning-128k** | Strong reasoning, mid context: review, second-level planning, hard debugging. Context size is *not* a boundary here — cost/quality decide; small-context models may sub-orchestrate here, never in `tier1`. |
 | `tier3` | **cheap-driver-128k** | Cheapest capable loop: codegen, edits, test-fix cycles, grinding through a task list. |
 
+## Proven effort ladders & costs (measured 2026-09-23 via provider catalogs)
+
+Gateway combos expose only `low/medium/high` (the gateway strips
+`supportedThinkingEfforts`). The full ladder needs the direct OpenRouter ref.
+Ladders are **non-contiguous** — never assume `medium` exists. Never forward
+an unsupported effort (see the clamp rule in `combos.json`).
+
+| Model | Direct ref | Proven efforts | Marginal cost | Privacy |
+|---|---|---|---|---|
+| `muse-spark-1.3-contributor` | `openrouter/meta/muse-spark-1.3-contributor` | minimal, low, medium, high, xhigh, max (advertised; `max` = heaviest) | $0.10/$0.20 per 1M | **Trains** (contributor contract) |
+| `gemini-3.8-flash` | `openrouter/google/gemini-3.8-flash` | low, medium, high only | paid twin per OpenRouter list | free head **trains** (AI Studio); paid twin per terms |
+| `deepseek-v4.1-flash` | `openrouter/deepseek/deepseek-v4.1-flash` | none, low, high, max only | cheapest paid flash | per terms |
+| Claude family | CLI subscription only | n/a (no API legs anywhere — audit-enforced) | $0 marginal (seat-metered) | subscription terms, never API-logged |
+
+Claude models deliberately have no direct/API row: the subscription session
+must never be exported as an API key, and `audit-router.py` fails any
+anthropic/claude model ref in routing surfaces. ChatGPT/Grok legs ship only
+where funded — none are funded today, so no rows.
+
 ## Client fallback ladder (when the top rung breaks, step down one)
 
 Every client below routes through OmniRoute on `:20128` with the same
