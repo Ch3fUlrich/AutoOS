@@ -7,6 +7,7 @@
 #   bash tests/run-tests.sh            run here
 #   bash tests/run-tests.sh --wsl      re-run inside WSL2 (from Windows)
 #   bash tests/run-tests.sh --filter catalog
+#   bash tests/run-tests.sh --filter usb,catalog   comma = OR (shard union)
 #
 # No test installs anything. Providers are asserted on the PLANNED command,
 # never on system state.
@@ -55,8 +56,15 @@ describe() {
 
 it() {
     CURRENT="$1"
-    if [[ -n "$FILTER" && "$CURRENT" != *"$FILTER"* ]]; then
-        CURRENT=""; return 1
+    if [[ -n "$FILTER" ]]; then
+        # Comma-separated OR: --filter usb,catalog runs the union, so shards
+        # can be disjoint partitions executed in parallel worktrees.
+        local IFS=',' _terms _t _hit=0
+        read -ra _terms <<< "$FILTER"
+        for _t in "${_terms[@]}"; do
+            if [[ -n "$_t" && "$CURRENT" == *"$_t"* ]]; then _hit=1; break; fi
+        done
+        if (( _hit == 0 )); then CURRENT=""; return 1; fi
     fi
     return 0
 }
@@ -5642,10 +5650,10 @@ PY
     assert_eq "$report" ""
 fi
 
-if it "apply handles the Cloudflare UA and meta mapping"; then
+if it "apply handles the Cloudflare UA and stays openrouter-first"; then
     ok=1
     grep -q 'customUserAgent' configuration/omniroute/apply.sh || ok=0
-    grep -q 'muse-code' configuration/omniroute/apply.sh || ok=0
+    grep -q 'muse-code' configuration/omniroute/apply.sh && ok=0
     grep -q 'provider-specific-data' configuration/omniroute/apply.sh || ok=0
     if (( ok )); then pass; else fail "apply.sh is missing the provider quirks"; fi
 fi

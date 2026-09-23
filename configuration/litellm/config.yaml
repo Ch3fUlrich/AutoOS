@@ -24,8 +24,10 @@
 model_list:
   # ── tier1: orchestration, spark-first ──────────────────────────────
   # 1. Zen promo (free, limited time). 2. OpenRouter contributor
-  # ($0.10/$0.20 per 1M — cheapest paid anywhere). 3. Meta direct on
-  # your own credits ($20 starter included).
+  # ($0.10/$0.20 per 1M — cheapest paid anywhere). Meta direct removed
+  # 2026-09-23: deactivated upstream (502) + "Insufficient account funds",
+  # and an unset META_API_KEY fails LiteLLM startup validation
+  # (SchemaError) breaking the whole tier1 group — see docs/verification.md.
   - model_name: tier1
     litellm_params:
       model: openai/muse-spark-1.3-contributor-free
@@ -35,27 +37,19 @@ model_list:
     litellm_params:
       model: openrouter/meta/muse-spark-1.3-contributor
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: tier1
-    litellm_params:
-      model: meta/muse-spark-1.3-contributor
-      api_key: os.environ/META_API_KEY
   # xhigh = highest reasoning-effort tier of the 1.3 family. Effort is a
   # caller-side control, not a model ID (Zed: reasoning_effort "xhigh";
   # Muse Code: Max level). The aliases above resolve to the 1.3 family.
 
-  # ── tier1-paid: OpenRouter contributor first, then Meta direct, then Zen ──
-  # Funded-first: Meta direct currently answers "Insufficient account funds"
-  # and Zen 402s without balance, so a group led by either one is a dead end
-  # (measured 2026-09-22: tier1-paid 402 "No fallback model group found").
-  # OpenRouter is the leg that actually answers today.
+  # ── tier1-paid: OpenRouter contributor first, then Zen ──
+  # Funded-first: Zen 402s without balance, so a group led by it is a dead
+  # end (measured 2026-09-22: tier1-paid 402 "No fallback model group
+  # found"). OpenRouter is the leg that actually answers today. Meta direct
+  # removed 2026-09-23 (same reason as tier1 above).
   - model_name: tier1-paid
     litellm_params:
       model: openrouter/meta/muse-spark-1.3-contributor
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: tier1-paid
-    litellm_params:
-      model: meta/muse-spark-1.3-contributor
-      api_key: os.environ/META_API_KEY
   - model_name: tier1-paid
     litellm_params:
       model: openai/deepseek-v4.1-flash

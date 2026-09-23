@@ -48,6 +48,18 @@
     "serena_delete_memory": false,
     "serena_rename_memory": false
   },
+  // Shell permissions (opencode v2 `permissions`; last match wins): routine
+  // git is always allowed so agent sessions can stage and commit; pushes
+  // stay denied (operator pushes by hand). Without these, unmatched shell
+  // commands resolve to `ask`, which a non-interactive session cannot
+  // answer and the harness reports as permission.rejected.
+  "permissions": [
+    { "action": "shell", "resource": "git status *", "effect": "allow" },
+    { "action": "shell", "resource": "git diff *", "effect": "allow" },
+    { "action": "shell", "resource": "git add *", "effect": "allow" },
+    { "action": "shell", "resource": "git commit *", "effect": "allow" },
+    { "action": "shell", "resource": "git push *", "effect": "deny" }
+  ],
   // Tier enforcement (hard, runtime-checked): unattended runs select these
   // agents, and the `subagent` permissions below make the depth mandatory —
   // tier1-orchestrator may launch tier2-worker only, tier2-worker may launch

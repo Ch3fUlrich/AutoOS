@@ -1,0 +1,69 @@
+{
+  "$comment": [
+    "Phase 2: skills import + openrouter-first docs + test sharding docs.",
+    "Follows Phase 1 config (.claude/handoff.config.json) conventions.",
+    "NO SECRETS HERE - tokens are read from envFrom at preflight.",
+    "SUB stays blocked until docs/plans/skills-placement-decision.md records",
+    "the operator's prefix answer. Touched-parts test policy: lanes run only",
+    "the --filter/-Filter groups covering their files; FINAL runs the",
+    "targeted set + check-links + audit --offline, never full suites."
+  ],
+  "launcher": "claude",
+  "baseBranch": "main",
+  "branchPrefix": "phase2",
+  "stateDir": "logs/handoff-phase2",
+  "doneNote": "docs/handoff/DONE-{{session}}.md",
+  "linkDirs": ["graphify-out"],
+  "postWorktree": "py '{{skillDir}}\\trust_worktree.py' '{{worktree}}' --repo '{{repo}}'",
+  "subagents": {
+    "maxConcurrent": 2,
+    "maxDepth": 3,
+    "tiers": { "mechanical": "sonnet", "judgement": "opus" },
+    "leafRule": true
+  },
+  "controllerBrief": "Orchestrate Phase-2 sessions. Operator-owned (not lanes): skills prefix answer, launching, merging to main. Never edit the main checkout. {{sessionsTable}}",
+  "sessions": {
+    "SUB": {
+      "name": "skills-subtree-import",
+      "model": "sonnet",
+      "brief": "Import agent-skills/skills via git subtree (NEVER a filesystem copy). First read docs/plans/skills-placement-decision.md: if Answer is still pending, write your DONE note as blocked and stop. Otherwise follow its procedure exactly (split -P skills in C:/Users/mauls/Documents/Code/agent-skills, subtree add under the confirmed prefix, full add then replace the 3 unlicensed dirs in a follow-up commit — do NOT delete them in this session). Move docs/unattended-orchestration.md into the unattended-orchestration skill and rewrite the 7 inbound links. Forbidden: secrets, binaries, touching qa-swarm/review-triage/babysit-prs content (RW lane owns them), merging into main yourself. Verify: python tests/check-links.py AND bash tests/run-tests.sh --filter link,docs AND powershell -File tests/run-tests.ps1 -Filter link,docs. Done means: tree present, links green, DONE note with commit hashes."
+    },
+    "RW": {
+      "name": "skills-native-rewrites",
+      "model": "opus",
+      "brief": "Land the native rewrites for qa-swarm, review-triage, babysit-prs (unlicensed upstreams — never copy their text). First read docs/plans/rewrites/*.SKILL.md in your worktree: if absent, DONE-blocked and stop. Place them under the confirmed prefix from docs/plans/skills-placement-decision.md (same blocked rule as SUB). Then merge the instruction files: agent-skills AGENTS.md router/MCP/memory/scratch sections into AutoOS AGENTS.md as a new section of POINTERS (one home per fact, keep AutoOS hard rules canonical); Claude scope-trap into AutoOS CLAUDE.md; create AutoOS GEMINI.md from agent-skills GEMINI.md (repo-relative paths). Verify with a REAL skill-load check from opencode for every added skill (loading, not mere existence) plus the docs/link filters above. Report the opencode skill-dir finding in your DONE note. Forbidden: secrets, copying upstream sentences, merging into main yourself."
+    },
+    "O": {
+      "name": "openrouter-first-docs",
+      "model": "sonnet",
+      "launcher": "agy",
+      "brief": "Docs sweep for the openrouter-first decision. Update muse-code references in docs/models.md (lines ~210-218, 284, 505-509), docs/verification.md (~57, 107), docs/handoff.md (~68) to state: gateway mapping removed 2026-09-23, spark routes zen-free then openrouter-paid, direct meta API remains via opencode meta provider. Add the OpenRouter-BYOK-first section to docs/api-keys.md (all provider keys into OpenRouter first, then gateway; manual checklist + deep links — no API-push claim). Keep combos.json comment block (lines ~100-139) consistent if you touch it — otherwise do NOT touch combos.json, apply.*, or config.yaml. Verify: python tests/check-links.py AND both suites --filter docs,link,api-keys. Done means: no stale muse-code-as-registered statement remains, DONE note with commits."
+    },
+    "T": {
+      "name": "testing-shard-recipe",
+      "model": "sonnet",
+      "launcher": "agy",
+      "brief": "Document the parallel-shard recipe in docs/testing.md: the L1-L4 (sh) / W1-W4 (ps1) shard tokens from docs/plans/model-routing-overhaul-DRAFT.md section 3, one command per shard, separate-worktrees rule, guardsOnly-lane rule, and the touched-parts policy (filters covering edited files; FINAL = targeted set + check-links + audit --offline). Add a shard-completeness guard test to BOTH suites: a filter matching zero tests must fail loudly (extend the existing sh:187 zero-match self-test pattern; ps1 needs the equivalent). Do NOT merge redundant coverage (separate task). Verify: run the two new guard tests plus --filter testing,docs on both suites. Done means: recipe documented, guards green, DONE note with commits."
+    },
+    "FINAL": {
+      "name": "final-targeted-gates",
+      "model": "sonnet",
+      "guardsOnly": true,
+      "dependsOn": ["SUB", "RW", "O", "T"]
+    }
+  },
+  "lanes": [["SUB"], ["RW"], ["O"], ["T"], ["FINAL"]],
+  "machineBudget": {
+    "maxCpuPercent": 75,
+    "maxWorkersPerSession": 8,
+    "note": "Targeted filters only; other projects share this host."
+  },
+  "briefTemplate": "You are session {{session}} ({{sessionName}}). Your working directory is {{worktree}}, a git worktree on branch {{branch}} cut from {{baseBranch}} at launch; the main checkout is {{repo}} and you never edit it. First activate Serena by ABSOLUTE worktree path, then recall Omnigraph project memory, then start. AutoOS hard rules: never commit a secret or a binary; every destructive action needs prior opt-in recorded in your DONE note; read-modify-write for PATH/profile/config; back up user-owned files before touching them. No repo-wide git while other lanes run (no prune/gc/reset --hard/clean/stash/checkout .). You run under the auto-mode permission classifier: on refusal record the exact command, carry on without it, and state plainly what the operator must run by hand.\n\nPROVIDER ROUTING (2026-09-23, openrouter-first): gateway combos route free-first then paid overflow; spark goes zen-free then openrouter-paid; meta gateway mapping removed; direct meta API via opencode meta provider only. Reviewer is never the writer's model family. Record model spend per DONE note.\n\n{{mcpPolicy}}\n\n{{brief}}\n\n{{subagentPolicy}}\n\nCommit small and often on {{branch}}, staging explicit paths only; never merge into {{baseBranch}} yourself. Read {{inbox}} at every decision point. When done (or blocked on operator-only input), write {{doneNote}} with landed commits, remains, refusals, and model spend, commit it, and stop.",
+  "allowedTools": ["Bash", "Edit", "Write", "Read", "Glob", "Grep", "Agent", "ToolSearch", "Skill"],
+  "permissionMode": "auto",
+  "guards": {
+    "command": "pwsh",
+    "args": ["-NoProfile", "-File", "tools/check-merge-guards.ps1", "{{guards}}"],
+    "paths": ["tests/", "lib/", "catalog/", "configuration/", "docs/", ".claude/"]
+  }
+}

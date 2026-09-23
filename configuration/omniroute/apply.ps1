@@ -92,7 +92,9 @@ $ProviderMap = [ordered]@{
     'cerebras'             = 'cerebras'
     'sambanova'            = 'sambanova'
     'deepseek'             = 'deepseek'
-    'meta'                 = 'muse-code'
+    # Meta gateway mapping removed 2026-09-23: 502 upstream, no combo leg
+    # references that provider, routing is openrouter-first. Direct Meta API
+    # stays available via the opencode meta provider (own key, own billing).
     'openrouter'           = 'openrouter'
     'zen'                  = 'opencode-zen'
     'cheapinference'       = 'cheaperinference'

@@ -15,6 +15,9 @@
     pwsh tests\run-tests.ps1
 .EXAMPLE
     powershell -File tests\run-tests.ps1 -Filter catalog
+.EXAMPLE
+    powershell -File tests\run-tests.ps1 -Filter usb,catalog
+    Comma = OR (shard union for parallel worktree runs).
 #>
 [CmdletBinding()]
 param([string]$Filter = '')
@@ -47,7 +50,15 @@ function Describe-Group { param([string]$Name) Write-Host ''; Write-Host (C "-- 
 
 function Test-Case {
     param([string]$Name, [scriptblock]$Body)
-    if ($Filter -and $Name -notlike "*$Filter*") { return }
+    if ($Filter) {
+        # Comma-separated OR: -Filter usb,catalog runs the union, so shards
+        # can be disjoint partitions executed in parallel worktrees.
+        $hit = $false
+        foreach ($term in ($Filter -split ',')) {
+            if ($term -and $Name -like "*$term*") { $hit = $true; break }
+        }
+        if (-not $hit) { return }
+    }
     $script:Current = $Name
     try {
         & $Body
@@ -4276,13 +4287,13 @@ Test-Case 'apply --dry-run registers nothing and starts nothing' {
     Assert-Equal (Get-Content $combosPath -Raw -Encoding utf8) $before
 }
 
-Test-Case 'apply scripts carry the Cloudflare User-Agent fix' {
+Test-Case 'apply scripts carry the Cloudflare User-Agent fix and stay openrouter-first' {
     $ps1 = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
     $sh = Get-Content (Join-Path $Root 'configuration\omniroute\apply.sh') -Raw
     foreach ($text in @($ps1, $sh)) {
         Assert-True ($text -match 'customUserAgent') 'customUserAgent missing'
         Assert-True ($text -match 'provider-specific-data') 'provider-specific-data flag missing'
-        Assert-True ($text -match 'muse-code') 'meta -> muse-code mapping missing'
+        Assert-True ($text -notmatch "'meta'|`"meta:|meta:muse-code") 'muse-code mapping must stay removed (openrouter-first)'
     }
     Pass
 }
