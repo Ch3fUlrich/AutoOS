@@ -54,7 +54,7 @@ Notes from the runs:
 | `opencode-zen/muse-spark-1.3` | 402 — Zen paid balance/key not set up |
 | `opencode-zen/gemini-3.1-pro` | REMOVED from tiers 2026-09-20 (reasons worse than 3.8-flash); 402 anyway |
 | `cheaperinference/deepseek-v4-flash`, `glm-4.5-air`, `kimi-k3`, `minimax-m2.7` | refs resolve in `simulate --combo tier2/tier3 --explain` (all CLOSED, quota 100%); live ack via the tier2/tier3 probes |
-| `muse-code/muse-spark-1.3` | not in the provider's live catalog; connection carries an empty outbound URL (`Invalid outbound URL`, red topology) — OmniRoute 3.8.50 defect, open upstream. Connection deactivated 2026-09-21 (by connection ID; by-name edit does not persist); spark goes via OpenRouter/Zen contributor legs |
+| `muse-code/muse-spark-1.3` | not in the provider's live catalog; connection carries an empty outbound URL (`Invalid outbound URL`, red topology) — OmniRoute 3.8.50 defect, open upstream. Connection deactivated 2026-09-21 (by connection ID; by-name edit does not persist); mapping removed from `apply.*` 2026-09-23 (openrouter-first); spark goes via OpenRouter/Zen contributor legs |
 
 ## opencode CLI
 
@@ -104,7 +104,7 @@ fails with `ProviderModelNotFoundError`. The catalog now installs
 | Groq + Cerebras answer Cloudflare `error 1010` to Node's default UA | **Fixed** by `apply` setting `providerSpecificData.customUserAgent` per connection |
 | OpenHands sandbox "error state" on every conversation | **Fixed 2026-09-20**: stale `AGENT_SERVER_IMAGE_*=1.26.0` pins in the test container env; recreated without pins, sandbox boots healthy, message round-trip proven |
 | `/v1/models` returns 401 for a normal client key in OmniRoute 3.8.50 | Open upstream; `apply` warns and skips catalog filtering, `--probe` is the real check |
-| `muse-code` (Meta direct) 502s in 3.8.50 (`Cannot read properties of undefined`) | Open upstream; connection deactivated 2026-09-21, spark goes via OpenRouter/Zen contributor meanwhile |
+| `muse-code` (Meta direct) 502s in 3.8.50 (`Cannot read properties of undefined`) | Open upstream; connection deactivated 2026-09-21, mapping removed from `apply.*` 2026-09-23 (openrouter-first), spark goes via OpenRouter/Zen contributor meanwhile |
 | OpenHands sandbox sometimes reports "error state" while the first agent-server image is still downloading | Retry after the pull completes; the sandbox itself comes up healthy |
 | Cloudflare Workers AI needs the Account ID before it can serve | Not in any tier until configured in the dashboard |
 | Zen free promo 500 at peak / Zen paid 402 without balance | Chain-hop design absorbs both |

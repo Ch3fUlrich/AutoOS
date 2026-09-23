@@ -198,8 +198,7 @@ for a combo when you need fallback routing.
 published prompt-training policy — no Zen promo `-free` models, no Gemini free
 tier, no Meta/openrouter *contributor* tiers, no Kilo Free. Assumption:
 **any big free model may train on prompts**, so `*-clean` chains use **paid
-legs only** (deepseek/openrouter/zen/mistral direct, Meta-direct paid spark
-when OmniRoute ships the IDs). Cheap-inference is paid (own key, own
+legs only** (deepseek/openrouter/zen/mistral direct). Cheap-inference is paid (own key, own
 billing) but is a third-party reseller pool — `*-clean` stays direct-paid
 only, no reseller legs. Contributor tiers are paid but train by
 contract ($0.10 pricing is the tell) — they stay in `tier1`, never `*-clean`.
@@ -207,15 +206,15 @@ OmniRoute's own free-tier catalog flags the known trainers; we additionally
 curate them out. If in doubt, use `tierN-clean` and check the provider's
 current policy.
 
-**Meta direct:** your Meta Model API key is registered as `muse-code`, but the
-installed OmniRoute's `muse-code` catalog ships Llama models only and the
-connection carries an empty outbound URL (`providers test-all`:
-`muse-code: Invalid outbound URL`, red on the dashboard topology) — an
-OmniRoute 3.8.50 defect, open upstream. The connection is therefore kept
-**deactivated** (`omniroute providers edit <id> --inactive`; by-ID, the
-by-name edit echoes success without persisting), and spark routes via
-OpenRouter/Zen contributor legs only. Re-check after an OmniRoute upgrade:
-if `providers test muse-code` passes, a `meta-direct` paid leg may rejoin.
+**Meta direct:** unregistered since 2026-09-23 (openrouter-first decision):
+`apply.*` no longer maps the Meta key to `muse-code` — the installed
+OmniRoute's `muse-code` catalog ships Llama models only with an empty outbound
+URL (`providers test-all`: `muse-code: Invalid outbound URL`, OmniRoute 3.8.50
+defect open upstream), and no combo leg references it. Spark routes via
+OpenRouter/Zen contributor legs only; the direct Meta API stays available via
+the opencode `meta` provider (own key, own billing). Re-check after an
+OmniRoute upgrade: if `providers test muse-code` passes, a `meta-direct` paid
+leg may rejoin (re-add the mapping + legs + tests together).
 Cloudflare Workers AI needs its Account ID in the dashboard before it can
 serve, so it is registered but unused.
 
@@ -281,10 +280,10 @@ The browser UI shows the same state without ever showing a key value:
   legs) or any other combo, and remember a direct non-combo model gets no
   fallback chain and no quota protection. Triage rule stays: read
   `comboName` first — `None` means a direct model, whatever the surface.
-- **Meta direct (`muse-code`) ships an empty outbound URL** in OmniRoute
-  3.8.50 (`Invalid outbound URL`, red on the dashboard topology), even for
-  its own Llama models. The connection is deactivated (by connection ID —
-  the by-name edit echoes success without persisting) and spark routes via
+- **Meta direct (`muse-code`) is unregistered** since 2026-09-23
+  (openrouter-first): it shipped an empty outbound URL in OmniRoute 3.8.50
+  (`Invalid outbound URL`, red on the dashboard topology), even for its own
+  Llama models, and no combo leg referenced it. Spark routes via
   OpenRouter/Zen contributor legs. Re-check after an OmniRoute upgrade.
   Use OpenRouter's contributor legs meanwhile.
 - **Cloudflare Workers AI needs the Account ID** in the dashboard before it
@@ -502,12 +501,13 @@ add, only to verify (`omniroute simulate --combo tierN --explain`):
 | sambanova ($10 credit) | `tier2` gpt-oss-120b (CLOSED, same) |
 | deepseek ($13 bulk) | `tier2`/`tier3`/`tier3-clean`/`tier2-clean` `deepseek-flash` direct |
 | cheap-inference ($15 partner pool) | `tier2` deepseek-v4-flash/glm-4.5-air/kimi-k3 · `tier3` glm-4.5-air/minimax-m2.7 |
-| meta ($10) | `tier1`/`tier1-clean`/`spark-1.3-contributor` via openrouter contributor; direct `muse-code` leg stays out until OmniRoute ships the spark IDs (502/catalog bug open upstream) |
+| meta ($10) | `tier1`/`tier1-clean`/`spark-1.3-contributor` via openrouter contributor; the `muse-code` gateway mapping is removed (openrouter-first, 2026-09-23) — direct Meta API via the opencode `meta` provider only |
 | openrouter ($1, last resort) | paid flash + contributor legs at every tier tail |
 | zen (promo + paid) | free contributor leg at `tier1` head · paid `deepseek-v4.1-flash` at every tier tail |
 
 `providers test-all` 2026-09-22: 12/13 OK (muse-code SKIP inactive by
-design; cheaperinference FAIL = its `/v1/models` endpoint timing out at 8s —
+design at the time — unregistered since 2026-09-23, openrouter-first;
+cheaperinference FAIL = its `/v1/models` endpoint timing out at 8s —
 legs still resolve in `simulate --explain`, so routing is unaffected).
 
 ## OmniRoute ↔ LiteLLM sync contract

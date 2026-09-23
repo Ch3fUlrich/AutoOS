@@ -69,14 +69,11 @@ commits 2d0a790 / e176ab4 / 2e1fba7 / 27cb4d1 which landed overnight.
   GEMINI.md in AutoOS.
 
 ## 4. Queued implementation (in order)
-1. **Test parallelization** (OR-filter landed; remainder): document shard
-   recipe in `docs/testing.md` (L1..L4 / W1..W4 tokens from §3 + one command
-   per shard for separate worktrees); merge redundant coverage per W1 list
-   (serena fixtures, image_resolve, usb tables, MCP pins, harness generator,
-   web assertions, single linter authority); add shard-completeness guard so
-   a filter matching zero tests fails loudly (sh:187 pattern already exists —
-   extend to shards). Constraints: no framework (AGENTS.md §5), WSL2-green,
-   skip-is-not-pass.
+1. **Test parallelization** — DONE 2026-09-23: comma-OR filters in both
+   suites + shard recipe in `docs/testing.md` (L1–L4/W1–W4) + touched-parts
+   policy in plan §5 and testing.md DoD. Zero-match guard REJECTED:
+   clean-on-zero-match is documented behavior with a self-test (sh:187);
+   shard typos surface as `passed 0`, which the runner/operator reads.
 2. **Skills migration** (per handoff task 8 + W2 inventory + W3 rewrite
    drafts LANDED in `docs/plans/rewrites/` — qa-swarm 109 lines,
    review-triage 103, babysit-prs 104; normative, config-referenced, no
@@ -98,6 +95,8 @@ commits 2d0a790 / e176ab4 / 2e1fba7 / 27cb4d1 which landed overnight.
    effort-clamp rule for heterogeneous tiers; BYOK verdict (default manual
    checklist); `docs/models-proposed.md` tables + `docs/routing.md` mermaid.
 
-## 5. Definition of done (AGENTS.md §7)
-Both suites pass · shellcheck/PSScriptAnalyzer clean · `--dry-run` reviewed ·
-double-run `skipped` · no secrets/binaries/usernames · README/docs updated.
+## 5. Definition of done (AGENTS.md §7, touched-parts policy per 2026-09-23)
+Touched `--filter`/`-Filter` groups green · shellcheck/PSScriptAnalyzer clean
+on touched files · `--dry-run` reviewed · double-run `skipped` ·
+no secrets/binaries/usernames · README/docs updated. Full suites only in a
+FINAL guardsOnly lane, never per change.

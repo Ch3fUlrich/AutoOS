@@ -13,7 +13,34 @@ From Git Bash, start WSL yourself:
 `--filter` / `-Filter` is a substring match on **test names** (`it` /
 `Test-Case`), not on group names. A filter that matches nothing still prints a
 clean run, so read the `passed` count. Name a new test so the filter for its
-area (`usb`, `fetch`, `chooser`, ...) reaches it.
+area (`usb`, `fetch`, `chooser`, ...) reaches it. Comma means OR:
+`--filter usb,catalog` / `-Filter usb,catalog` runs the union, so shards can
+be disjoint partitions executed in parallel (one worktree each — never run a
+shard in the main checkout while merges land; the FINAL lane owns the merged
+HEAD).
+
+## Parallel shards
+
+Suites are process-isolated (mktemp scratch, port-0 fixture servers,
+subshell-scoped env), so shards run concurrently from separate worktrees:
+
+```bash
+bash tests/run-tests.sh --filter usb,cache,fetch,imagecache  # L1: usb + image cache
+bash tests/run-tests.sh --filter catalog,image,engine,llm-models  # L2: catalogs
+bash tests/run-tests.sh --filter openhands,litellm,zed,router,combo,opencode,tier,serena,mcp,gateway,apply,healthcheck  # L3: ai/router
+bash tests/run-tests.sh --filter profile,state,undo,verify,web,menu,template,rescue,docs,shellcheck  # L4: core/web
+```
+
+```powershell
+pwsh tests/run-tests.ps1 -Filter usb  # W1
+pwsh tests/run-tests.ps1 -Filter litellm,zed,router,combo,opencode,tier,openhands,apply,provider,healthcheck  # W2
+pwsh tests/run-tests.ps1 -Filter catalog,detect,serve,payload,menu  # W3
+pwsh tests/run-tests.ps1 -Filter profile,state,verify,serena,mcp  # W4
+```
+
+Policy: run only the filters covering touched files per change; full suites
+run in a FINAL guardsOnly lane, never per change. `sh` matching is
+case-sensitive, `ps1` `-like` is case-insensitive.
 
 ```powershell
 powershell -File tests\run-tests.ps1
@@ -160,7 +187,7 @@ so that's never silently missed.
 
 ## Definition of done
 
-- [ ] Both suites pass
+- [ ] Touched-area filters green on both suites (full suites: FINAL lane only)
 - [ ] `shellcheck` / `Invoke-ScriptAnalyzer` clean on touched files
 - [ ] Ran with `--dry-run` and read the plan
 - [ ] Ran twice; the second run reports `skipped`

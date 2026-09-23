@@ -17,6 +17,19 @@ The LiteLLM `.env` is only for the manual fallback router.
 Keys never belong in tracked files, chat logs, or screenshots. Missing keys
 are fine — routing skips that provider.
 
+## OpenRouter first (BYOK)
+
+Routing is openrouter-first: add every provider key you hold to your
+OpenRouter account (**dashboard → Settings → Provider keys**, manual checklist
+— there is no API that pushes provider credentials into OpenRouter; its
+Management API manages OpenRouter keys only). Benefits: one billed/metered
+surface, the full reasoning-effort ladder per model (gateway combos expose
+only `low/medium/high`), and paid legs that answer when free pools 429.
+Then put the same keys in `configuration/api-keys.yml` so the gateway can
+route free-first with paid overflow. Note the billing shift: a BYOK leg bills
+to your provider key, not to OpenRouter credit — credit-chain economics in
+[models.md](models.md) assume direct keys.
+
 ## Provider key → OmniRoute provider id
 
 `apply` maps the names in `api-keys.yml` automatically; this table is for
@@ -33,7 +46,7 @@ registering by hand in the dashboard:
 | `cerebras` | `cerebras` | Cloudflare-fronted: `customUserAgent` (as groq) |
 | `SambaNova` | `sambanova` | |
 | `deepseek` | `deepseek` | |
-| `meta` | `muse-code` | Meta Model API (`api.meta.ai`); see the known issue in [models.md](models.md) |
+| `meta` | — (unregistered since 2026-09-23) | Meta Model API (`api.meta.ai`); openrouter-first — direct access via the opencode `meta` provider only; see [models.md](models.md) |
 | `openrouter` | `openrouter` | |
 | `zen` | `opencode-zen` | free promo models + paid; paid legs need Zen balance |
 | `cheapinference` | `cheaperinference` | paid partner gateway (`ci_live_…` key); legs sit between free and paid in tier2/tier3, never in `*-clean` |

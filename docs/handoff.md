@@ -66,9 +66,9 @@ memory, never write project data to the global `memory` graph.**
   is paid-only, NO LONGER trains-nothing (documented in combos.json +
   models.md — do not "fix" this back silently).
 - **muse-code (Meta direct)**: connection carries an empty outbound URL
-  (OmniRoute defect, open upstream) → **deactivated by connection ID**
-  (by-name edit echoes success without persisting). Spark routes via
-  OpenRouter/Zen contributor legs.
+  (OmniRoute defect, open upstream) → deactivated by connection ID 2026-09-21,
+  mapping removed from `apply.*` 2026-09-23 (openrouter-first). Spark routes
+  via OpenRouter/Zen contributor legs.
 - **LiteLLM fallback** on `:4000` (uv tool install; `PYTHONUTF8=1` required —
   its banner crashes startup under cp1252). Keys mirrored from api-keys.yml
   by hand (no committed script does this yet — see Open 6).
