@@ -41,6 +41,31 @@ plan, and a confirmation prompt. **Nothing is installed before you confirm.**
 
 Dependencies are added for you. Tick Claude Code and Node.js comes along.
 
+## What it looks like
+
+```
+── Detected system ─────────────────────────────────────────────
+  Operating system       Microsoft Windows 11 Home (build 26200)
+  Architecture           x64
+  CPU                    AMD Ryzen 5 4500U - 6 threads
+  Memory                 7.4 GB
+  Package managers       winget, choco
+  Already present        git, node, docker, wsl
+
+  Choose what to install   14 of 36 selected  [████░░░░░░] 38%
+
+   TERMINAL & SHELL  (2/3 selected)
+  ❯ [✓] Windows Terminal          Tabbed terminal with true-colour support
+    [✓] PowerShell 7              Modern cross-platform PowerShell
+    [ ] Oh My Posh                Prompt theme engine for PowerShell
+
+   CODING & AI  (2/2 selected)
+    [✓] Claude Code CLI           Anthropic's terminal coding agent
+    [✓] Docker Desktop            Containers - backs the local MCP stack
+
+  ↑↓/jk move   SPACE toggle   g group   a all   n none   i invert   ENTER confirm   ESC cancel
+```
+
 ## Flags
 
 Both entry points accept the same ideas; only the spelling differs.

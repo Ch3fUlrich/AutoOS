@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — documentation restructure
+
+- **README.md is a front page again** (391 → 130 lines): the setup commands,
+  usage, ONE screenshot and a Documentation table. The manual moved into `docs/`:
+  [architecture](docs/architecture.md) (why it works this way, the layout table),
+  [getting started](docs/getting-started.md) (the terminal view),
+  [the catalog](docs/catalog.md) (software on offer),
+  [model routing](docs/models.md) (fresh OS → working agent stack) and a new
+  [OpenHands Agent Canvas](docs/openhands.md) page. `docs/README.md` and the
+  README table list every page; `tests/check-links.py` and the docs-index test
+  keep them honest.
+
+### Changed — routing: free-first with a fast-skip
+
+- **The zen free contributor promo is the first leg again** in `tier1` /
+  `spark-1.3-contributor`, backed by `providerBreaker.apikey.failureThreshold`
+  12 → 2 (`apply.*` sets it on both platforms). A 403 is a permanent-class
+  error, so at 12 the dead promo was retried on every request; at 2 the
+  connection is skipped for `resetTimeoutMs` (30 s) after two failures.
+  Measured: 5 spark requests → only 3 zen attempts, the skipped ones faster,
+  all served by the paid contributor leg. The same threshold makes every
+  failing free leg hop fast instead of being retried ~12 times.
+
+### Fixed — clients silently falling back to defaults
+
+- **`opencode.jsonc` was invalid JSON**: a hand-added OpenRouter provider block
+  was missing its closing brace, so every client loaded defaults while the
+  suites' text-based assertions stayed green. Repaired, and both suites now
+  assert the file parses. The added provider is kept — it is the direct
+  effort-ladder surface (`openrouter/muse-spark-1.3-contributor`).
+- **A direct-provider tier takes its own key.** The OpenHands profile
+  `openrouter-muse-spark-1.3-contributor` declares `"gateway": "openrouter"`;
+  both installers and `tools/sync-openhands-profiles.py` resolve a key per
+  gateway, so it receives the OpenRouter key and its own base URL, never the
+  gateway client key. Both suites assert it.
+
 ### Added — OpenHands Agent Canvas
 
 - **Vendored OpenHands profiles** in `openhands/`: 21 LLM profiles projected from
@@ -16,7 +52,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `host.docker.internal` is used when Ollama answers there. Otherwise the catalog's
   `127.0.0.1` is kept. A containerised OpenHands and a host-run `agent-canvas` on native
   Linux both reach Ollama now.
-- README section on installing, configuring and starting `agent-canvas`.
+- [docs/openhands.md](docs/openhands.md) on installing, configuring and starting `agent-canvas`.
 - [ADR 0005](docs/decisions/0005-openai-agents-api-not-the-backbone.md) (accepted) and
   [the survey](docs/research/2026-09-18-openai-agents-api.md) behind it: the OpenAI Agents
   API is not the orchestration backbone, and OpenAI joins as one reviewer pool.

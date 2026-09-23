@@ -310,6 +310,31 @@ Client key: dashboard → api-manager → Create API Key → env
 `AUTOOS_OMNIROUTE_KEY`. Fallback router: `configuration/litellm/` +
 `LITELLM_MASTER_KEY` (`litellm --test` after first start).
 
+### From a fresh OS to a working agent stack
+
+```powershell
+.\setup.ps1 -Profile ai-coding -Yes                  # install the stack
+Copy-Item configuration\api-keys.example.yml configuration\api-keys.yml   # fill in
+.\configuration\omniroute\apply.ps1                  # register keys, build combos
+.\configuration\start-stack.ps1 -App opencode        # gateway + app, wired
+```
+
+Bash equivalents use `./configuration/omniroute/apply.sh` and
+`./configuration/start-stack.sh opencode`.
+
+| App | Start (after keys are in) |
+|---|---|
+| OpenCode CLI / TUI | `.\configuration\start-stack.ps1 -App opencode` (or `opencode`) |
+| Zed | `.\configuration\start-stack.ps1 -App zed` (agent panel pre-routed) |
+| Neovim + sidekick | `.\configuration\start-stack.ps1 -App nvim`, then `<leader>aa` |
+| OpenHands | `.\configuration\start-stack.ps1 -App openhands` (needs Docker Desktop running) |
+| Any CLI, zero config | `omniroute run <tool> --model tier2` (injects env, writes nothing) |
+
+`omniroute run opencode --model tier3` launches opencode with the gateway env
+injected and the model preset — no config file is written, so it is the fastest
+way to test routing. The repo's `opencode.jsonc` does the same thing
+persistently. What lives where: [configuration/](../configuration/README.md).
+
 ## Verify it (probe every combo)
 
 `apply` can prove the result end to end: it sends one tiny request to every

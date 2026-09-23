@@ -13,6 +13,23 @@ Adding software must never require touching `setup.ps1` or `setup.sh`. If you
 find yourself editing an entry point to add a package, the schema is missing
 something — extend the schema instead.
 
+## Software on offer
+
+Run `--list` for the current set. The headline items:
+
+| Area | Includes |
+|---|---|
+| Terminal | Windows Terminal, PowerShell 7, Oh My Posh, zsh + Powerlevel10k, Nerd Fonts |
+| Coding & AI | Claude Code CLI, OpenCode CLI, Claude autostart (reopens your sessions after a reboot), Claude Desktop, Antigravity, Zed, VS Code, Docker, Herdr, Node.js, OmniRoute gateway, LiteLLM fallback router |
+| Input | Handy — offline speech-to-text, so you can dictate prompts instead of typing them |
+| MCP stack | Clones [agent-skills](https://github.com/Ch3fUlrich/agent-skills), registers Graphify with Claude Code and approves Omnigraph per-repo — asking for your Omnigraph URL rather than hardcoding one, and naming what is still missing rather than pretending it is wired |
+| Desktop (Windows) | Windhawk with the Explorer file-size and taskbar-clock mods, PowerToys |
+| Remote | Tailscale, WireGuard, Parsec, OpenSSH |
+| Science | Miniconda plus an isolated `suite2p` environment |
+
+Adding software means adding a catalog entry — no code changes. See
+[Adding software](#adding-software).
+
 ## A component
 
 ```jsonc

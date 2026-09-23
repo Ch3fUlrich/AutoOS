@@ -63,6 +63,8 @@ visible wherever you are.
 Overview is only ever *choose what to install*. The rest of the header carries
 the machine name and one button that toggles light and dark.
 
+![Run & log: the pre-install questions and the live, colour-coded output](assets/webui-runlog.png)
+
 ### Card chooser
 
 At the top of Overview sits the **Choose cards** toolbar: toggle any card off, or

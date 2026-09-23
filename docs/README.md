@@ -24,6 +24,7 @@ Start here. Each page is short and answers one question.
 | [Unattended orchestration](unattended-orchestration.md) | How do 3-tier agent runs stay cheap, parallel, and resumable? |
 | [Omnigraph memory](omnigraph.md) | How do agents recall and persist durable memory without breaking the graph? |
 | [Task board](tasks.md) | Which tracks are Running / Queued / Done right now? |
+| [OpenHands Agent Canvas](openhands.md) | How do I install, configure and start the OpenHands web UI? |
 | [OpenHands runbook](openhands-runbook.md) | How do I continue this work from inside OpenHands? |
 | [Handoff](handoff.md) | Done vs open tasks for the next agent |
 

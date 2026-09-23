@@ -1,4 +1,4 @@
-# Handoff — AutoOS live state (2026-09-22, main @ router-expansion era)
+# Handoff — AutoOS live state (2026-09-23, main @ docs-slim + free-first era)
 
 **Start here, new agent.** Zero prior context needed: this file + the repo is
 everything. Read top to bottom, then continue from Open item 1. Concrete
@@ -49,14 +49,16 @@ memory, never write project data to the global `memory` graph.**
    venvs never exist there — resolve through the main checkout, never copy
    secrets.
 
-## Where things stand (measured 2026-09-21)
+## Where things stand (measured 2026-09-23)
 
 - **Branch**: `main` = `origin/main`, clean. Remote `tier-orchestration-2026-09-20`
   kept as archive until integration is declared stable; all `merge/*` work
   branches deleted after landing. Stale local stub TAG: `archive/tier-stub-pr9`.
 - **Gateway OmniRoute 3.8.50** on `:20128`: 13/13 providers registered
-  (incl. groq/cerebras via fixed `apply.ps1`), 6/6 combos probe-green:
-  tier1→`meta/muse-spark-1.3-contributor`, tier1-clean→same contributor,
+  (incl. groq/cerebras via fixed `apply.ps1`), **12/12 combos probe-green**
+  (roles + pinned + credit + rag — see the combos bullet below):
+  tier1→`opencode-zen/muse-spark-1.3-contributor-free` (fast-skipped) →
+  `meta/muse-spark-1.3-contributor`, tier1-clean→same contributor,
   tier2→`gemini-3.8-flash`, tier2-clean→`deepseek-flash`,
   tier3→`mistral-code-latest`, tier3-clean→`deepseek-flash`.
 - **Contributor-only block** (operator 2026-09-21): no combo may reference
@@ -79,8 +81,7 @@ memory, never write project data to the global `memory` graph.**
   — Zed ignores `api_key` there and hides keyless providers). Neovim+LazyVim
   + sidekick installed via `setup.ps1 -Only`. OpenHands image pulled;
   container start + profile proof is Open 5.
-- **Suites**: green 2026-09-22 on the router-expansion batch
-  (ps1 823/0/1, sh 402/0/0). CI runs both on push.
+- **Suites**: green 2026-09-23 (ps1 851/0/1, sh 410/0/0). CI runs both on push.
 - **Router combos (12)** on `:20128`, all live-acked 2026-09-22:
   `tier1`/`tier1-clean`/`tier2`/`tier2-clean`/`tier3`/`tier3-clean` (roles),
   `spark-1.3-contributor`, `gemini-3.8-flash`, `deepseek-v4.1-flash`,
@@ -174,13 +175,47 @@ memory, never write project data to the global `memory` graph.**
   the falsified refs (`combos.json carries no phantom legs`).
 - **Suites**: sh 402/0/0, ps1 823/0/1.
 
+## Done 2026-09-23 (docs slim + free-first; suites green)
+
+- **Zen free promo is FIRST again, with a fast-skip** (operator call). `tier1`
+  / `spark-1.3-contributor` put `opencode-zen/muse-spark-1.3-contributor-free`
+  first; `providerBreaker.apikey.failureThreshold` 12 → 2 (`apply.*` sets it on
+  both platforms) so the dead 403 promo is skipped for `resetTimeoutMs` (30 s)
+  after two failures instead of being retried on every request. Measured: 5
+  spark requests → only 3 zen attempts, the skipped ones faster (2.8/4.7 s vs
+  7.5/8.1 s), all served by the paid contributor leg. Commit `2d0a790`.
+- **`opencode.jsonc` was invalid JSON** — a hand-added OpenRouter provider block
+  was missing its closing brace, so every client would have silently loaded
+  defaults while the suites' text-based assertions stayed green. Repaired; both
+  suites now assert the file parses. The added provider is kept: it is the
+  direct effort-ladder surface (`openrouter/muse-spark-1.3-contributor`).
+  Commit `2d0a790`.
+- **Direct-provider tiers are declarative.** OpenHands profile
+  `openrouter-muse-spark-1.3-contributor` carries `"gateway": "openrouter"`;
+  both installers and `tools/sync-openhands-profiles.py` resolve a key per
+  gateway, so it receives the OpenRouter key and its own base URL, never the
+  gateway client key. Both suites assert it. Commit `2d0a790`.
+- **`tools/audit-router.py`** gained the breaker-threshold check; both suites
+  run it `--offline`.
+- **README slimmed** (391 → 130 lines) to setup + usage + ONE picture + a
+  Documentation table. Moved prose now lives in `docs/`: architecture (why it
+  works this way + layout table), getting-started (terminal view), catalog
+  (software on offer), models (fresh-OS → agent stack recipe) and a new
+  `docs/openhands.md` (the Agent Canvas section). `docs/README.md` and the
+  README table list every page; `tests/check-links.py` + the docs-index test
+  gate it.
+- **OpenHands settings schema-6 repair** (operator commit `2e1fba7`):
+  `start-stack.*` clamps `agent_settings.schema_version` to 4 and strips the
+  `enable` keys the image rejects, in place with a timestamped backup.
+- **Suites**: sh 410/0/0, ps1 851/0/1.
+
 ## Open (in this order)
 
-0. **Commit the 2026-09-22 working tree** — the whole expansion is uncommitted
-   (config, lib writers, catalog, tests, docs, new `docs/omnigraph.md`,
-   `configuration/litellm/start-litellm.ps1`). Stage explicit paths, run both
-   suites once, commit in coherent chunks; never `git add -A` blindly and
-   watch for a stray `~/` dir some tooling creates from a literal `~`.
+0. **Push the docs commit.** `main` == `origin/main` at `2e1fba7` — the
+   2026-09-22/23 router + OpenHands commits are all pushed already. Only this
+   docs batch (README slim, `docs/` moves, CHANGELOG, handoff) is local; push it
+   when the operator is ready. Do NOT `git add -A` blindly: unrelated operator
+   work is untracked in the tree (`docs/plans/model-routing-overhaul-DRAFT.md`).
 1. **Zed model picker proof** — restart Zed (tray → Quit; running process
    predates the env keys), open the agent-panel model picker, confirm the
    `autoos-omniroute` list (15 entries now) and the litellm fallback, default
@@ -189,7 +224,13 @@ memory, never write project data to the global `memory` graph.**
    `omniroute-tier1` via `host.docker.internal:20128`, sandbox round-trip.
    (The two `start-stack.ps1` defects from DONE-L2B are already fixed in
    tree; confirm on the current image.)
-3. **Remaining PRs** — DONE #85, #101, #83 (do_GET split), #88 (do_POST
+3. **Remaining PRs — needs working `gh` (operator prerequisite, 2026-09-23).**
+   `gh` is installed at `C:\Program Files\GitHub CLI\gh.EXE` with a
+   `github.com` entry in `hosts.yml` (user present, token in secure storage),
+   but **the agent harness blocks invoking `gh`** — an operator must run
+   `gh auth status` and confirm it works, then either run the PR commands or
+   unblock the tool for agents. Until then this item is parked.
+   DONE #85, #101, #83 (do_GET split), #88 (do_POST
    split, usb endpoint preserved as `_post_usb_create`). NEXT in order:
    #89 (append_line_once tests, trivial) → #84 (build_state test) →
    #98 (detect_system tests) → #96 (O(N²) fix) → #95 (UI color tests) →
@@ -224,10 +265,33 @@ memory, never write project data to the global `memory` graph.**
 7. **Autostart** — gateway + litellm + OpenHands container resume after
    reboot (`configuration/autostart/`); Tailscale already Automatic. Use
    `configuration/litellm/start-litellm.ps1` as the proxy launch step.
-8. **Skills import (Phase 2)** — agent-skills repo → AutoOS `skills/` via
-   `git subtree` (never filesystem copy); EXCLUDE unlicensed
-   qa-swarm/review-triage/babysit-prs (rewrite natively instead); fix the
-   swarm-orchestration dangling cross-links in S2b.
+8. **Skills migration — bring the FULL `agent-skills/skills` folder into this
+   repo (operator task 2026-09-23).** Source:
+   `C:\Users\mauls\Documents\Code\agent-skills\skills` — 14 skill folders plus
+   `SYNC.md`: babysit-prs, coding-principles, herdr-orchestration,
+   homelab-access, html-working-documents, mcp-servers-setup, no-mistakes,
+   pr-approval-agent, qa-swarm, repository-index, review-triage,
+   structured-memory, swarm-orchestration, unattended-orchestration. Today the
+   repo tracks only `.claude/skills/autoos-install/SKILL.md`, so the
+   integration is partial and several agents did it badly — do it cleanly:
+   - migrate the **whole** folder (not a hand-picked subset) so every AI agent
+     model in this repo can load and use the skills;
+   - use `git subtree` (provenance + future pulls), **never** a filesystem copy
+     — that was the Phase 2 rule and it still holds;
+   - **move `docs/unattended-orchestration.md` INTO the
+     `unattended-orchestration` skill** — that page is the skill's prose. After
+     the move, fix every inbound link (the README Documentation table,
+     `docs/README.md`, this handoff, `docs/openhands-runbook.md`,
+     `docs/tasks.md`) and keep `tests/check-links.py` + the docs-index test
+     green;
+   - **licence check before shipping:** the earlier note flagged
+     qa-swarm/review-triage/babysit-prs as unlicensed (rewrite natively). The
+     operator asked for the full folder — if that constraint still holds, raise
+     it with the operator instead of silently dropping a skill;
+   - fix the swarm-orchestration dangling cross-links from the earlier attempt:
+     no orphaned links, no duplicated skill, no half-copied tree;
+   - verify with `tests/check-links.py`, both suites, and a real skill-load
+     check from opencode (the skills must load, not merely exist on disk).
 9. **Housekeeping** — delete local `integration/tier-2026-09-20` after CI is
    green; remove `AutoOS-W1`/`AutoOS-W2` dirs (locked by the opencode
    background service — restart it or reboot, then delete); drop remote
@@ -244,6 +308,7 @@ opencode run --agent tier2-worker --model omniroute/tier2 --auto "<brief>"
 opencode run --agent tier3-reviewer --model omniroute/tier3 --auto "<review>"
 opencode run --model omniroute/tier2-credit --auto "Reply with exactly: ack"
 python tools/sync-router-tiers.py --check
+python tools/audit-router.py                 # live drift gate (--offline for CI)
 powershell -NoProfile -File tests\run-tests.ps1
 bash tests/run-tests.sh
 ```
@@ -263,6 +328,11 @@ bash tests/run-tests.sh
   `providerBreaker.apikey.failureThreshold` of 12 the dead zen promo was
   retried on every request. It is 2 now (`apply.*` sets it), which also makes
   every other failing free leg hop fast.
+- **A client config must parse, or the client silently uses defaults.** A
+  hand-added provider block missing one `}` made `opencode.jsonc` invalid JSON
+  (measured 2026-09-23): every client fell back to defaults while the suites'
+  text-based assertions stayed green. Both suites now parse the file; if an
+  agent behaves as if it is unconfigured, parse the config before anything else.
 - **Probe with `tools/audit-router.py`** (`--offline` for drift, live for the
   gateways) before blaming a model: it separates config drift (400/404) from
   provider/balance state (402/429/5xx) and checks the resilience deadline.

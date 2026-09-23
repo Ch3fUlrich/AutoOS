@@ -1,19 +1,31 @@
 # Architecture
 
+## Why it works this way
+
+Post-install automation usually fails in the same three ways. Each design
+decision here is aimed at one of them.
+
+| The usual failure | What AutoOS does instead |
+|---|---|
+| **The tool needs tools.** A setup script that needs WSL, Ansible, Python packages and a TUI library cannot run on the machine it is meant to set up. | **No dependencies.** PowerShell 5.1 and bash are already there. On Linux, `python3` is used only to read JSON. No test framework, no menu library. |
+| **All or nothing.** Rigid blocks — "install the dev bundle" — mean taking software you do not want, or editing the script. | **A checkbox per component.** Profiles are just a starting set of ticks. Dependencies resolve themselves. |
+| **It runs once, then rots.** Re-running reinstalls, half-fails, or overwrites your config. | **Safe to run twice.** A second run reports `skipped`. Every file it edits is backed up first, and `--undo` puts them back. |
+
+The rules further down enforce this, and each is covered by a test.
+
 ## Layout
 
-```
-setup.ps1              Windows entry point   — PowerShell 5.1+, no dependencies
-setup.sh               Linux/macOS entry     — bash 4+, python3 for JSON only
-catalog/*.json         WHAT can be installed (data)
-lib/windows/*.psm1     HOW it happens on Windows
-lib/linux/*.sh         HOW it happens on Linux and macOS
-web/index.html         browser UI, served by --serve
-tests/                 both suites, no framework required
-Windows/ansible/       remote fleet provisioning — NOT used by setup.ps1
-Linux/ubuntu_autoinstall/  unattended Ubuntu install profile
-third_party/           vendored code under its own licence — never edit
-```
+| Directory | Contains |
+|---|---|
+| `setup.ps1` / `setup.sh` | The two entry points. Everything else is called by these. |
+| [`catalog/`](../catalog/) | **What** can be installed — data only. See [the catalog](catalog.md). |
+| `lib/windows/` · `lib/linux/` | **How** it happens: detect, catalog, install, ui, state, serve. |
+| [`web/`](../web/) | The browser UI served by `--serve`. See [Browser UI](web-ui.md). |
+| [`tests/`](../tests/) | Both suites, no framework needed. See [Testing](testing.md). |
+| [`Windows/ansible/`](../Windows/ansible/) | Provisioning *other* machines over the network. See [Remote provisioning](remote-provisioning.md). |
+| [`Linux/ubuntu_autoinstall/`](../Linux/ubuntu_autoinstall/) | Unattended Ubuntu install profile. See [unattended Ubuntu install](remote-provisioning.md#unattended-ubuntu-install). |
+| [`third_party/`](../third_party/) | Vendored code under its own licence. Never edited. |
+| [`docs/`](README.md) | The documentation index. |
 
 ### Modules
 
