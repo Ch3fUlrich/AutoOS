@@ -2341,6 +2341,27 @@ if it "zed routing announces in dry run and writes nothing"; then
     rm -rf "$scratch"
 fi
 
+if it "route_claude_to_gateway points Claude Code at OmniRoute"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '{"theme":"mine"}' >"$scratch/.claude/settings.json"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    report="$(python3 - "$scratch/.claude/settings.json" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+print("%s|%s|%s" % (cfg.get("theme"), cfg.get("env", {}).get("ANTHROPIC_BASE_URL"), cfg.get("env", {}).get("ANTHROPIC_AUTH_TOKEN")))
+PY
+)"
+    backups="$(ls "$scratch"/.claude/settings.json.autoos-backup-* 2>/dev/null | wc -l)"
+    scratch2="$(mktemp -d)"
+    ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0; unset AUTOOS_OMNIROUTE_KEY; route_claude_to_gateway >/dev/null 2>&1 )
+    nokey="no"; [[ -e "$scratch2/.claude/settings.json" ]] || nokey="yes"
+    rm -rf "$scratch" "$scratch2"
+    assert_eq "$report" "mine|http://127.0.0.1:20128|test-omni-key"
+    assert_eq "backups=$backups|nokey=$nokey" "backups=1|nokey=yes"
+fi
+
 if it "zed routing merges one provider and keeps the rest"; then
     scratch="$(mktemp -d)"
     mkdir -p "$scratch/.config/zed"

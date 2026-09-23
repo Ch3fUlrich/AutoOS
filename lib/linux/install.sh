@@ -1048,6 +1048,42 @@ install_litellm_proxy() {
     return 0
 }
 
+route_claude_to_gateway() {
+    # Point Claude Code at the local OmniRoute gateway (:20128) by merging
+    # ANTHROPIC_BASE_URL/AUTH_TOKEN into ~/.claude/settings.json env.
+    # Read-modify-write with timestamped backup; idempotent (skips when the
+    # exact values are already set). Needs AUTOOS_OMNIROUTE_KEY. Subscription
+    # models need the gateway `claude` OAuth connection first - until then
+    # use opus/sonnet via direct login (the backup restores it).
+    local cfg_dir="$SYS_HOME/.claude"
+    local cfg="$cfg_dir/settings.json"
+    if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
+        ui_warn "AUTOOS_OMNIROUTE_KEY not set - export the OmniRoute client key before pointing Claude Code at the gateway"
+        return 0
+    fi
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would point Claude Code at OmniRoute in $cfg"; return 0; fi
+    mkdir -p "$cfg_dir"
+    if [[ -f "$cfg" ]]; then
+        cp "$cfg" "$cfg.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    fi
+    AUTOOS_OMNIROUTE_KEY="$AUTOOS_OMNIROUTE_KEY" python3 - "$cfg" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+key = os.environ["AUTOOS_OMNIROUTE_KEY"]
+url = "http://127.0.0.1:20128"
+cfg = json.load(open(path, encoding="utf-8")) if os.path.isfile(path) else {}
+env = cfg.setdefault("env", {})
+if env.get("ANTHROPIC_BASE_URL") == url and env.get("ANTHROPIC_AUTH_TOKEN") == key:
+    print("SKIPPED")
+else:
+    env["ANTHROPIC_BASE_URL"] = url
+    env["ANTHROPIC_AUTH_TOKEN"] = key
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2)
+    print("WROTE")
+PY
+}
+
 route_zed_to_proxy() {
     # Point Zed's agent panel at the local OmniRoute gateway (:20128) plus
     # the LiteLLM fallback (:4000). Only the provider ids

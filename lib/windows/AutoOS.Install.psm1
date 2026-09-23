@@ -2482,6 +2482,51 @@ function Install-AutoOSLitellm {
     Write-AutoOSLine 'next: copy configuration/litellm/.env.example to .env, add keys (docs/api-keys.md)' -Level info
 }
 
+function Set-AutoOSClaudeGateway {
+    <#
+      .SYNOPSIS Point Claude Code at the local OmniRoute gateway.
+      Routes Claude Code sessions through gateway combos (and, once the
+      `claude` OAuth connection exists, the subscription as a $0-marginal
+      leg) instead of direct API billing. Direct subscription use is
+      unaffected — this only sets the gateway endpoint env vars.
+      Read-modify-write with timestamped backup; idempotent (rewrites only
+      on change, reports skipped otherwise). Needs AUTOOS_OMNIROUTE_KEY.
+    #>
+    $cfgDir  = Join-Path $env:USERPROFILE '.claude'
+    $cfgPath = Join-Path $cfgDir 'settings.json'
+    $key = $env:AUTOOS_OMNIROUTE_KEY
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        Write-AutoOSLine 'AUTOOS_OMNIROUTE_KEY not set - export the OmniRoute client key before pointing Claude Code at the gateway' -Level warn
+        return
+    }
+    if ($script:DryRun) {
+        Write-AutoOSLine "would point Claude Code at OmniRoute in $cfgPath" -Level muted
+        return
+    }
+    if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+    $settings = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw | ConvertFrom-Json } else { New-Object psobject }
+    if ($null -eq $settings.PSObject.Properties['env']) {
+        Add-Member -InputObject $settings -NotePropertyName 'env' -NotePropertyValue (New-Object psobject)
+    }
+    $wantUrl = 'http://127.0.0.1:20128'
+    $envBlock = $settings.env
+    if ($envBlock.PSObject.Properties['ANTHROPIC_BASE_URL'] -and $envBlock.ANTHROPIC_BASE_URL -eq $wantUrl -and
+        $envBlock.PSObject.Properties['ANTHROPIC_AUTH_TOKEN'] -and $envBlock.ANTHROPIC_AUTH_TOKEN -eq $key) {
+        Write-AutoOSLine 'Claude Code already points at OmniRoute - skipped' -Level ok
+        return
+    }
+    if (Test-Path $cfgPath) {
+        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
+    $envBlock | Add-Member -NotePropertyName 'ANTHROPIC_BASE_URL' -NotePropertyValue $wantUrl -Force
+    $envBlock | Add-Member -NotePropertyName 'ANTHROPIC_AUTH_TOKEN' -NotePropertyValue $key -Force
+    $tmp = "$cfgPath.tmp.$([Guid]::NewGuid().ToString('N'))"
+    [System.IO.File]::WriteAllText($tmp, ($settings | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $tmp -Destination $cfgPath -Force
+    Write-AutoOSLine "Claude Code points at OmniRoute ($cfgPath)" -Level ok
+    Write-AutoOSLine 'Subscription models need the gateway claude OAuth connection first (omniroute providers auth claude-code); until then use opus/sonnet via direct login (backup restores it)' -Level warn
+}
+
 function Set-AutoOSZedProxy {
     <#
       .SYNOPSIS Point Zed's agent panel at the local OmniRoute gateway + LiteLLM fallback.
@@ -2794,7 +2839,7 @@ Export-ModuleMember -Function `
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
-    Install-AutoOSLitellm, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
+    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,

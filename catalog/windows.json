@@ -227,7 +227,8 @@
             "rescue"
           ],
           "verify": "claude --version",
-          "homepage": "https://docs.anthropic.com/en/docs/claude-code"
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code",
+          "postInstall": "Set-AutoOSClaudeGateway"
         },
         {
           "id": "claude-autostart",

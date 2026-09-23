@@ -3605,6 +3605,38 @@ Test-Case 'zed routing writes nothing in dry run' {
     } finally { $env:APPDATA = $realAppData }
 }
 
+Test-Case 'Set-AutoOSClaudeGateway points Claude Code at OmniRoute' {
+    $realHome = $env:USERPROFILE
+    $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $scratch = Join-Path $env:TEMP "autoos-claudegw-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path (Join-Path $scratch '.claude') -Force
+        $env:USERPROFILE = $scratch; $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        '{"theme":"mine"}' | Out-File (Join-Path $scratch '.claude\settings.json') -Encoding utf8
+        Set-AutoOSClaudeGateway
+        $s = Get-Content (Join-Path $scratch '.claude\settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $s.theme 'mine'
+        Assert-Equal $s.env.ANTHROPIC_BASE_URL 'http://127.0.0.1:20128'
+        Assert-Equal $s.env.ANTHROPIC_AUTH_TOKEN 'test-omni-key'
+        Assert-True ((@(Get-ChildItem (Join-Path $scratch '.claude') -Filter '*.autoos-backup-*')).Count -eq 1) 'second run must skip without a new backup'
+        Set-AutoOSClaudeGateway
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY
+        $scratch2 = Join-Path $env:TEMP "autoos-claudegw2-$([Guid]::NewGuid().ToString('N'))"
+        $null = New-Item -ItemType Directory -Path $scratch2 -Force
+        $env:USERPROFILE = $scratch2
+        Set-AutoOSClaudeGateway
+        Assert-True (-not (Test-Path (Join-Path $scratch2 '.claude\settings.json'))) 'settings written without a key'
+        Remove-Item $scratch2 -Recurse -Force -ErrorAction SilentlyContinue
+    } finally {
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'zed routing merges one provider and keeps the rest' {
     $realAppData = $env:APPDATA
     $realOmni = $env:AUTOOS_OMNIROUTE_KEY

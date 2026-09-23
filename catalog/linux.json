@@ -326,7 +326,8 @@
             "rescue"
           ],
           "verify": "claude --version",
-          "homepage": "https://docs.anthropic.com/en/docs/claude-code"
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code",
+          "postInstall": "route_claude_to_gateway"
         },
         {
           "id": "claude-autostart",
