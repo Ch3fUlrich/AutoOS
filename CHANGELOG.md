@@ -5,6 +5,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — Qoder as a provisioned client
+
+- **`qoder-cli` and `qoder-desktop` join the catalog** on all three platforms.
+  The CLI rides the `script` provider, because Qoder publishes no winget/apt/snap
+  package on the supported path (the npm `@qoder-ai/qodercli` route is marked "not
+  recommended" by the vendor) and its own installer SHA256-verifies the native
+  binary. Windows pins `arch: ["x64"]` — the vendor does not ship Windows arm64 —
+  so the component is hidden there rather than shown and failing. The desktop IDE
+  is `winget Alibaba.Qoder` on Windows and `manual` on Linux/macOS, where the
+  vendor ships only `.deb`/`.rpm`/`.dmg` and no Homebrew cask exists (checked
+  against the live cask API, not assumed). `verify` is `qodercli --version`: the
+  binary is `qodercli`, not the `qoder` the vendor docs name.
+- **Qoder's MCP servers are wired** by the `Set-AutoOSQoderMcp` /
+  `setup_qoder_mcp` postInstall, through `qodercli mcp add-json` at user scope —
+  never a hand-edit of `~/.qoder/settings.json`, for the same reason Claude Code's
+  registration goes through `claude mcp add`. Pins resolve from
+  `catalog/agent-harness.json` at runtime. `omnigraph` is deliberately absent: its
+  graph is per-repository, so a machine-global entry would pin the wrong graph for
+  every other repo.
+
+### Fixed — Qoder cannot ride the gateway, and the worktree memory pin
+
+- **Qoder is the one client AutoOS wires for tools but not for model routing**, and
+  that is a vendor constraint, not an omission. Its Custom Models accept a curated
+  provider list only (Alibaba Cloud Model Studio, DeepSeek, Z.ai, Kimi, MiniMax,
+  Xiaomi MIMO) with no arbitrary OpenAI-compatible base URL, and
+  `~/.qoder/.models/<uid>/customs` is encrypted — so `:20128` is not addressable
+  and nothing in `lib/` could write a provider even if it were. Recorded in
+  `docs/models.md` and `docs/catalog.md` so the next reader does not re-derive it,
+  and so nobody names a function `route_qoder_to_gateway`.
+- **`trust_worktree.py` pinned the wrong omnigraph graph.** It derived
+  `OMNIGRAPH_GRAPH_ID` from the checkout folder's case (`AutoOS`), but the cluster
+  graph is `autoos` — so every unattended lane wrote its memory to a graph that
+  does not exist, silently, which is the wrong-graph failure `CLAUDE.md` opens
+  with. It now reads the pin the repo already ships in `.mcp.json` and falls back
+  to the folder name only when there is none. A worktree provisioned before this
+  fix keeps its bad pin until the `.env` line is removed: the helper writes the key
+  only when absent, it does not correct one.
+
 ### Changed — documentation restructure
 
 - **README.md is a front page again** (391 → 130 lines): the setup commands,

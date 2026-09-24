@@ -4429,6 +4429,174 @@ Test-Case 'opencode tiers declare matching context limits' {
     Pass
 }
 
+Test-Case 'qoder components exist with the right providers and arch' {
+    $cli = Get-AutoOSWinComponent 'qoder-cli'
+    $ide = Get-AutoOSWinComponent 'qoder-desktop'
+    Assert-True ($null -ne $cli -and $null -ne $ide) 'missing qoder component'
+    Assert-Equal "$($cli.provider)|$($ide.provider)" 'script|winget'
+    Assert-Equal "$($cli.package)|$($ide.package)" 'qoder-cli|Alibaba.Qoder'
+    # The shipped binary is qodercli, NOT qoder - the docs' `qoder --version`
+    # is stale for what the vendor install script actually places.
+    Assert-Equal $cli.verify 'qodercli --version'
+    Assert-Equal (@($cli.arch) -join ',') 'x64'
+    # The desktop app puts no confirmed CLI on PATH; a verify that fails after
+    # a successful install is worse than none, so the entry must omit it.
+    Assert-True (-not $ide.PSObject.Properties.Name.Contains('verify')) 'qoder-desktop grew an unconfirmed verify'
+    Assert-Contains $cli.profiles 'ai-coding'
+    Assert-Contains $ide.profiles 'ai-coding'
+}
+
+Test-Case 'qoder-cli rides ai-coding and is hidden on arm64' {
+    $x64 = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $aiCoding = @($x64 | Where-Object { 'ai-coding' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-Contains $aiCoding 'qoder-cli'
+    Assert-Contains $aiCoding 'qoder-desktop'
+    # Qoder CLI is amd64-only; an arm64 box must never be offered it.
+    $arm = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem -Arch 'arm64') | ForEach-Object { $_.Id })
+    Assert-NotContains $arm 'qoder-cli'
+}
+
+Test-Case 'qoder postInstall is exported and the script provider dispatches it' {
+    # postInstall is NOT schema-validated - a typo only warns at runtime, so
+    # the catalog name must resolve to a real exported command.
+    Assert-Equal (Get-AutoOSWinComponent 'qoder-cli').postInstall 'Set-AutoOSQoderMcp'
+    foreach ($fn in @('Set-AutoOSQoderMcp', 'Install-AutoOSQoderCli')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn is not an exported command"
+    }
+    $dispatch = (Get-Command Invoke-AutoOSScriptProvider).Definition
+    Assert-True ($dispatch -match "'qoder-cli'\s*\{\s*return Install-AutoOSQoderCli\s*\}") 'Invoke-AutoOSScriptProvider has no qoder-cli case'
+    # Guard A14: download-to-temp and execute the FILE - never pipe a remote
+    # script into a shell.
+    $body = (Get-Command Install-AutoOSQoderCli).Definition
+    Assert-True ($body -match 'qoder\.com/install\.ps1') 'vendor install URL missing'
+    Assert-True ($body -notmatch 'Invoke-Expression') 'the vendor script must not reach Invoke-Expression'
+    # context7 key resolution mirrors Install-AutoOSMcpContext7.
+    Assert-True ((Get-Command Set-AutoOSQoderMcp).Definition -match "Get-AutoOSAnswer 'context7_api_key'") 'context7 key resolution missing'
+}
+
+function New-AutoOSQoderCliShim {
+    <#
+      .SYNOPSIS Drop a fake qodercli on PATH that logs every argv it receives.
+      .DESCRIPTION
+        `mcp get` answers "not registered" (exit 1) until the presence-flag
+        file exists, then "registered" (exit 0), so one shim drives both the
+        first-run registration and the idempotent second run. Log and flag
+        paths travel in QODER_SHIM_LOG / QODER_SHIM_PRESENT_FLAG because
+        Invoke-AutoOSProcess launches the shim in a fresh powershell.exe. The
+        shim must be a .ps1, not a .cmd: Invoke-AutoOSProcess passes literal
+        arguments to scripts via -EncodedCommand, the only quoting path that
+        keeps a JSON argv element intact. That path hands the script ONE
+        array argument (`& shim @('mcp','get',...)`), so the shim flattens
+        $args before inspecting it.
+    #>
+    param([Parameter(Mandatory)][string]$Dir)
+    $shim = @'
+$a = @()
+foreach ($x in $args) { $a += $x }
+$line = ($a | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ' '
+Add-Content -LiteralPath $env:QODER_SHIM_LOG -Value $line -Encoding utf8
+if ($a.Count -ge 2 -and $a[0] -eq 'mcp' -and $a[1] -eq 'get') {
+    if (Test-Path -LiteralPath $env:QODER_SHIM_PRESENT_FLAG) { exit 0 }
+    exit 1
+}
+exit 0
+'@
+    Set-Content -LiteralPath (Join-Path $Dir 'qodercli.ps1') -Value $shim -Encoding utf8
+}
+
+Test-Case 'qoder MCP wiring writes nothing in dry run' {
+    $scratch = Join-Path $env:TEMP "autoos-qoder-dry-$([Guid]::NewGuid().ToString('N'))"
+    $shimDir = Join-Path $scratch 'bin'
+    $null = New-Item -ItemType Directory -Path $shimDir -Force
+    New-AutoOSQoderCliShim -Dir $shimDir
+    $shimLog = Join-Path $scratch 'calls.log'
+    $uiLog = Join-Path $scratch 'ui.log'
+    $realPath = $env:PATH
+    try {
+        $env:QODER_SHIM_LOG = $shimLog
+        $env:QODER_SHIM_PRESENT_FLAG = Join-Path $scratch 'present.flag'
+        $env:PATH = "$shimDir;$realPath"
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        Initialize-AutoOSLog -Path $uiLog
+        Set-AutoOSQoderMcp
+        $text = Get-Content $uiLog -Raw -Encoding utf8
+        Assert-True ($text -match 'would register') 'no dry-run announcement in the log'
+        Assert-True (-not (Test-Path $shimLog)) 'dry run invoked qodercli'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item Env:QODER_SHIM_LOG -ErrorAction SilentlyContinue
+        Remove-Item Env:QODER_SHIM_PRESENT_FLAG -ErrorAction SilentlyContinue
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'qoder MCP wiring registers the four harness servers and never omnigraph' {
+    $scratch = Join-Path $env:TEMP "autoos-qoder-mcp-$([Guid]::NewGuid().ToString('N'))"
+    $shimDir = Join-Path $scratch 'bin'
+    $null = New-Item -ItemType Directory -Path $shimDir -Force
+    New-AutoOSQoderCliShim -Dir $shimDir
+    $shimLog = Join-Path $scratch 'calls.log'
+    $flag = Join-Path $scratch 'present.flag'
+    $realPath = $env:PATH
+    $realC7 = $env:CONTEXT7_API_KEY
+    try {
+        $env:QODER_SHIM_LOG = $shimLog
+        $env:QODER_SHIM_PRESENT_FLAG = $flag
+        Remove-Item Env:CONTEXT7_API_KEY -ErrorAction SilentlyContinue
+        $env:PATH = "$shimDir;$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Set-AutoOSQoderMcp
+
+        $calls = @(Get-Content $shimLog -Encoding utf8)
+        $adds = @($calls | Where-Object { $_ -match "^'mcp' 'add-json' " })
+        Assert-Equal $adds.Count 4
+        # The omnigraph graph is per-repository (OMNIGRAPH_GRAPH_ID); a user
+        # scope entry would pin this repo's graph for every other one. This
+        # absence is deliberate - do not "fix" it.
+        Assert-True (-not ($calls -match 'omnigraph')) 'omnigraph must not be registered at user scope'
+
+        $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $seen = @()
+        foreach ($line in $adds) {
+            $m = [regex]::Match($line, "^'mcp' 'add-json' '([^']+)' '(.+)' '-s' 'user'$")
+            Assert-True $m.Success "unrecognised add-json argv: $line"
+            $name = $m.Groups[1].Value
+            $seen += $name
+            $spec = $m.Groups[2].Value | ConvertFrom-Json
+            Assert-True ((@($spec.args) -join ' ') -match [regex]::Escape($harness.mcp_servers.$name.package)) "$name does not carry the harness pin"
+            if ($name -eq 'serena') {
+                Assert-Equal $spec.command 'uvx'
+                Assert-Contains $spec.args 'start-mcp-server'
+            }
+            if ($name -eq 'graphify') { Assert-Equal $spec.command 'uv' }
+            if ($name -in @('playwright', 'context7')) {
+                Assert-Equal $spec.command 'npx'
+                Assert-Contains $spec.args '-y'
+            }
+            if ($name -eq 'context7') {
+                Assert-True (@($spec.args) -notcontains '--api-key') 'context7 registered with a key nobody provided'
+            }
+        }
+        Assert-Equal (($seen | Sort-Object) -join ',') 'context7,graphify,playwright,serena'
+
+        # Idempotency (AGENTS.md section 4): once every server exists, a
+        # second run adds nothing.
+        $null = New-Item -ItemType File -Path $flag -Force
+        Set-AutoOSQoderMcp
+        $calls2 = @(Get-Content $shimLog -Encoding utf8)
+        Assert-Equal @($calls2 | Where-Object { $_ -match "^'mcp' 'add-json' " }).Count 4
+    } finally {
+        $env:PATH = $realPath
+        if ($null -eq $realC7) { Remove-Item Env:CONTEXT7_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:CONTEXT7_API_KEY = $realC7 }
+        Remove-Item Env:QODER_SHIM_LOG -ErrorAction SilentlyContinue
+        Remove-Item Env:QODER_SHIM_PRESENT_FLAG -ErrorAction SilentlyContinue
+        Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # â”€â”€â”€ Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Phone-remote resilience (autostart + healthcheck).
 Describe-Group 'phone-remote resilience'

@@ -203,6 +203,18 @@ OpenCode Desktop, if installed, reads the same `opencode.jsonc` routing and
 sits beside rung 2 — it is not in the catalog (downloaded from the vendor,
 never vendored here).
 
+**Qoder (`qoder-cli`, `qoder-desktop`) is in the catalog but is NOT on this
+ladder, and cannot be.** Its Custom Models accept a curated provider list only
+(Alibaba Cloud Model Studio, DeepSeek, Z.ai, Kimi, MiniMax, Xiaomi MIMO) — there
+is no arbitrary OpenAI-compatible base URL, so `:20128` is not addressable, and
+the store it would be written to (`~/.qoder/.models/<uid>/customs`) is encrypted.
+Qoder runs on its own subscription auth. AutoOS wires its **MCP servers** (the
+four repo-agnostic ones; `omnigraph` stays project-scoped) and stops there. If
+you want Qoder's own models available to the *gateway* rather than the other way
+round, that is the separate `qoder` oauth provider (`omniroute providers
+available --search qoder`: free, alias `if`) — it needs an interactive
+`omniroute oauth` login and is not registered by `apply.*`.
+
 **Context rule (why the user-visible limit is honest):** `t1-orchestrator` is curated to
 1M-context models only — anything smaller belongs in `t2-worker`. `t2-worker` has **no
 context gate**: 128k is a conservative display/compaction default, not a

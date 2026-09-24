@@ -365,6 +365,7 @@ function Invoke-AutoOSScriptProvider {
         'meslo-nerd-font' { return Install-AutoOSNerdFont }
         'herdr'           { return Install-AutoOSHerdr }
         'claude-autostart'{ return Install-AutoOSClaudeAutostart }
+        'qoder-cli'       { return Install-AutoOSQoderCli }
         default           { return @{ ExitCode = 1; Output = "no script for '$($Component.Package)'" } }
     }
 }
@@ -584,6 +585,50 @@ function Install-AutoOSHerdr {
     }
     Write-AutoOSLine "Unrecognised Herdr source '$source' - skipping." -Level warn
     @{ ExitCode = 0; Output = 'skipped' }
+}
+
+function Install-AutoOSQoderCli {
+    <#
+      .SYNOPSIS Install the Qoder CLI from the vendor's own install script.
+      .DESCRIPTION
+        No winget package exists and the npm route (@qoder-ai/qodercli) is
+        marked "not recommended for new installations" by the vendor, so the
+        supported path is https://qoder.com/install.ps1. The script is
+        downloaded to a temp FILE, sanity-checked and only then executed -
+        an unverified remote script piped straight into a shell is guard
+        A14. The vendor script does the
+        OS/arch detection, fetches the channel manifest, downloads the native
+        binary and SHA256-verifies it, then delegates placement, entry-point
+        creation and PATH config to the binary's own install subcommand, so
+        nothing here touches PATH. The installed binary is `qodercli`, NOT
+        `qoder` (the docs' `qoder --version` is stale for the shipped build);
+        upgrades go through `qodercli update`. Windows arm64 is unsupported —
+        the catalog entry carries arch x64 and hides it elsewhere.
+    #>
+    if (Get-Command qodercli -ErrorAction SilentlyContinue) {
+        return @{ ExitCode = $script:ExitCodeAlreadyInstalled; Output = 'qodercli already installed'; Success = $true }
+    }
+    if ($script:DryRun) {
+        Write-AutoOSLine 'would install Qoder CLI from the vendor install script (https://qoder.com/install.ps1, SHA256-verified by the vendor script)' -Level muted
+        return @{ ExitCode = 0; Output = 'dry-run'; Success = $true }
+    }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "qoder-install-$([Guid]::NewGuid().ToString('N')).ps1"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri 'https://qoder.com/install.ps1' -OutFile $tmp -UseBasicParsing
+        # Only a payload that is recognisably the Qoder installer may run: an
+        # empty body or an error/captive-portal page must never reach a shell.
+        $payload = Get-Content -Path $tmp -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($payload)) { throw 'downloaded install script is empty' }
+        if ($payload -notmatch '(?i)qoder') { throw 'downloaded install script does not look like the Qoder installer' }
+        Write-AutoOSLine 'installing Qoder CLI via the vendor install script' -Level step
+        return Invoke-AutoOSProcess -FilePath $tmp
+    } catch {
+        Write-AutoOSLine "Qoder CLI install failed: $($_.Exception.Message)" -Level error
+        return @{ ExitCode = 1; Output = $_.Exception.Message; Success = $false }
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Install-AutoOSClaudeAutostart {
@@ -2679,6 +2724,86 @@ function Set-AutoOSZedProxy {
     Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)' -Level ok
 }
 
+function Set-AutoOSQoderMcp {
+    <#
+      .SYNOPSIS Register the shared MCP servers with Qoder CLI at user scope.
+      .DESCRIPTION
+        Goes through `qodercli mcp add-json` - Qoder's own CLI owns
+        %USERPROFILE%\.qoder\settings.json, and hand-editing that store is
+        exactly the "overwrite a config wholesale" failure
+        Register-AutoOSMcpServer avoids for Claude Code. add-json refuses to
+        clobber an existing entry, and `mcp get <name>` is the idempotency
+        pre-check, so a second run reports every server as left alone.
+
+        MCP servers ONLY, deliberately - Qoder cannot ride the OmniRoute
+        gateway the way Zed and opencode do: its Custom Models accept just a
+        curated provider list (Alibaba Cloud Model Studio, DeepSeek, Z.ai,
+        Kimi, MiniMax, Xiaomi MIMO) with no arbitrary OpenAI-compatible base
+        URL, and the store is encrypted - the customs folder under
+        %USERPROFILE%\.qoder\.models holds ciphertext reachable only through
+        the interactive /model flow. Do not add provider, base-URL or
+        api-key wiring here.
+
+        omnigraph is deliberately absent: its graph is per-repository
+        (OMNIGRAPH_GRAPH_ID=autoos for this repo) and a user-scope entry
+        would pin the wrong graph for every other repo - this repository
+        already ships omnigraph at project scope in .mcp.json.
+
+        Package pins resolve from catalog/agent-harness.json at runtime
+        (Get-AutoOSMcpPackage), never as literals.
+    #>
+    if ($script:DryRun) {
+        Write-AutoOSLine 'would register the serena, graphify, playwright and context7 MCP servers with Qoder CLI (user scope)' -Level muted
+        return
+    }
+    if (-not (Get-Command qodercli -ErrorAction SilentlyContinue)) {
+        # The catalog orders qoder-cli first, but the user may have deselected
+        # it - a postInstall warns, it never hard-fails the run.
+        Write-AutoOSLine 'qodercli is not on PATH - cannot register MCP servers. Install qoder-cli first (a new shell may be needed to see it).' -Level warn
+        return
+    }
+
+    $servers = [ordered]@{
+        serena = [ordered]@{
+            command = 'uvx'
+            args    = @('--from', (Get-AutoOSMcpPackage -Name 'serena'), 'serena', 'start-mcp-server', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false')
+        }
+        graphify = [ordered]@{
+            command = 'uv'
+            args    = @('--quiet', 'run', '--with', (Get-AutoOSMcpPackage -Name 'graphify'), 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
+        }
+        playwright = [ordered]@{
+            command = 'npx'
+            args    = @('-y', (Get-AutoOSMcpPackage -Name 'playwright'))
+        }
+        context7 = [ordered]@{
+            command = 'npx'
+            args    = @('-y', (Get-AutoOSMcpPackage -Name 'context7'))
+        }
+    }
+    # Same key resolution as Install-AutoOSMcpContext7: collected answer
+    # first, env second; keyless registration is fine when neither exists.
+    $context7Key = Get-AutoOSAnswer 'context7_api_key' $env:CONTEXT7_API_KEY
+    if ($context7Key) { $servers['context7']['args'] += @('--api-key', $context7Key) }
+
+    foreach ($name in $servers.Keys) {
+        $probe = Invoke-AutoOSProcess -FilePath 'qodercli' -Arguments @('mcp', 'get', $name)
+        if ($probe.Success) {
+            Write-AutoOSLine "Qoder MCP server '$name' is already registered - left alone." -Level muted
+            continue
+        }
+        # ConvertTo-Json from the ordered spec, passed as ONE argv element:
+        # Invoke-AutoOSProcess does the CommandLineToArgvW quoting.
+        $json = $servers[$name] | ConvertTo-Json -Depth 6 -Compress
+        $r = Invoke-AutoOSProcess -FilePath 'qodercli' -Arguments @('mcp', 'add-json', $name, $json, '-s', 'user')
+        if ($r.Success) {
+            Write-AutoOSLine "registered Qoder MCP server '$name' (user scope)" -Level ok
+        } else {
+            Write-AutoOSLine "could not register Qoder MCP server '$name': $($r.Output.Trim())" -Level warn
+        }
+    }
+}
+
 function Install-AutoOSOpenHands {
     <#
       .SYNOPSIS Pull the OpenHands image; the container is started on demand.
@@ -2833,13 +2958,14 @@ Export-ModuleMember -Function `
     Write-AutoOSOmnigraphReadiness,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
     Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
-    Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,
+    Install-AutoOSHerdr, Install-AutoOSClaudeAutostart, Install-AutoOSQoderCli,
     Write-AutoOSClaudeHostReadiness, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
     Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
+    Set-AutoOSQoderMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,

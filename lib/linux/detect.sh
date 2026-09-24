@@ -427,6 +427,7 @@ script_is_installed() {
         handy)           has_bin handy ;;
         vscode)          has_bin code ;;
         zed)             has_bin zed ;;
+        qoder-cli)       has_bin qodercli ;;
         agy)             has_bin agy ;;
         gh)              has_bin gh ;;
         uv)              has_bin uv ;;

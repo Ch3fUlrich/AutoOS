@@ -20,9 +20,9 @@ Run `--list` for the current set. The headline items:
 | Area | Includes |
 |---|---|
 | Terminal | Windows Terminal, PowerShell 7, Oh My Posh, zsh + Powerlevel10k, Nerd Fonts |
-| Coding & AI | Claude Code CLI, OpenCode CLI, Claude autostart (reopens your sessions after a reboot), Claude Desktop, Antigravity, Zed, VS Code, Docker, Herdr, Node.js, OmniRoute gateway, LiteLLM fallback router |
+| Coding & AI | Claude Code CLI, OpenCode CLI, Qoder CLI, Qoder, Claude autostart (reopens your sessions after a reboot), Claude Desktop, Antigravity, Zed, VS Code, Docker, Herdr, Node.js, OmniRoute gateway, LiteLLM fallback router |
 | Input | Handy — offline speech-to-text, so you can dictate prompts instead of typing them |
-| MCP stack | Clones [agent-skills](https://github.com/Ch3fUlrich/agent-skills), registers Graphify with Claude Code and approves Omnigraph per-repo — asking for your Omnigraph URL rather than hardcoding one, and naming what is still missing rather than pretending it is wired |
+| MCP stack | Clones [agent-skills](https://github.com/Ch3fUlrich/agent-skills), registers Graphify with Claude Code, Antigravity and Qoder CLI, and approves Omnigraph per-repo — asking for your Omnigraph URL rather than hardcoding one, and naming what is still missing rather than pretending it is wired |
 | Desktop (Windows) | Windhawk with the Explorer file-size and taskbar-clock mods, PowerToys |
 | Remote | Tailscale, WireGuard, Parsec, OpenSSH |
 | Science | Miniconda plus an isolated `suite2p` environment |
@@ -156,9 +156,11 @@ winget show --id <the.id> --exact --disable-interactivity
 ## The MCP stack
 
 AutoOS provides first-class support for installing and configuring Model Context
-Protocol (MCP) servers across both **Claude Code** (`~/.claude.json` via CLI) and
+Protocol (MCP) servers across **Claude Code** (`~/.claude.json` via CLI),
 **Antigravity** (`~/.gemini/config/mcp_config.json` on Linux/macOS and
-`%APPDATA%\Antigravity\mcp_config.json` on Windows).
+`%APPDATA%\Antigravity\mcp_config.json` on Windows) and **Qoder CLI**
+(`~/.qoder/settings.json`, written through `qodercli mcp add-json` rather than by
+hand).
 
 Available standalone MCP components in the catalog:
 - `mcp-serena`: Semantic code navigation & symbol search (LSP) via `serena-agent`.
@@ -171,10 +173,10 @@ The `agent-skills` component wires the complete MCP stack above, along with
 
 | Server | Scope | Configuration & Precedence |
 |---|---|---|
-| **graphify** | one **user** entry | Cwd-relative (`graphify-out/graph.json`), serving each repo its own graph. Configured in both Claude Code and Antigravity. |
-| **serena** | one **user** entry | Repo-agnostic symbol lookups via LSP. Path chosen at runtime. Configured in both Claude Code and Antigravity. |
-| **playwright** | one **user** entry | Headless browser execution for coding agents. Configured in both Claude Code and Antigravity. |
-| **context7** | one **user** entry | Real-time framework and library docs. Configured in both Claude Code and Antigravity. |
+| **graphify** | one **user** entry | Cwd-relative (`graphify-out/graph.json`), serving each repo its own graph. Configured in Claude Code, Antigravity and Qoder CLI. |
+| **serena** | one **user** entry | Repo-agnostic symbol lookups via LSP. Path chosen at runtime. Configured in Claude Code, Antigravity and Qoder CLI. |
+| **playwright** | one **user** entry | Headless browser execution for coding agents. Configured in Claude Code, Antigravity and Qoder CLI. |
+| **context7** | one **user** entry | Real-time framework and library docs. Configured in Claude Code, Antigravity and Qoder CLI. |
 | **omnigraph** | **project** only | The graph is chosen per repo by `OMNIGRAPH_GRAPH_ID`. A user-scope `omnigraph` silently overrides the per-repo one and answers from the wrong graph. |
 
 Key wiring invariants AutoOS enforces:
@@ -187,6 +189,11 @@ Key wiring invariants AutoOS enforces:
 - Antigravity configurations are always merged idempotently, backing up existing
   `mcp_config.json` files before editing without dropping other user-configured
   servers.
+- Qoder registration goes through `qodercli mcp add-json … -s user`, for the same
+  reason Claude Code's goes through its own CLI, and skips any server already
+  registered so a second run reports skipped. It registers the four repo-agnostic
+  servers only: `omnigraph` stays project-scoped, because Qoder would otherwise
+  carry one machine-wide graph pin into every repository.
 
 Claude Code registration goes through `claude mcp add`, never through editing
 `~/.claude.json` directly: that file is tens of kilobytes of the user's own
@@ -211,6 +218,16 @@ secret you choose: the server compose file takes it as
 `infra/mcp-servers/.env.shared` and in the client environment. AutoOS never
 invents one — this repository is public, and a plausible-looking secret in it is
 a leak whether or not it happens to work.
+
+Qoder is the one AI client AutoOS wires for MCP but **cannot** route through the
+OmniRoute gateway. Its Custom Models accept a curated provider list only (Alibaba
+Cloud Model Studio, DeepSeek, Z.ai, Kimi, MiniMax, Xiaomi MIMO) — there is no
+arbitrary OpenAI-compatible base URL, so `:20128` is not addressable. Custom models
+are added interactively (`/model` → Custom tab) and stored encrypted under
+`~/.qoder/.models/<uid>/customs`, so nothing in `lib/` could write one even if the
+endpoint existed. Qoder therefore runs on its own subscription auth; `Set-AutoOSQoderMcp`
+/ `setup_qoder_mcp` wire its tools and deliberately stop there. A function named
+`route_qoder_to_gateway` would be a lie.
 
 
 ## Installed status and vendor setup

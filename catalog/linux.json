@@ -584,6 +584,37 @@
           "notes": "Agent panel is pointed at the local OmniRoute gateway."
         },
         {
+          "id": "qoder-cli",
+          "name": "Qoder CLI",
+          "description": "Qoder's terminal coding agent",
+          "provider": "script",
+          "package": "qoder-cli",
+          "requires": [
+            "download-tools"
+          ],
+          "postInstall": "setup_qoder_mcp",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "qodercli --version",
+          "homepage": "https://qoder.com/cli",
+          "notes": "Installed from the vendor's own script (no apt/snap package exists); the script SHA256-verifies the native binary before placing it."
+        },
+        {
+          "id": "qoder-desktop",
+          "name": "Qoder",
+          "description": "Qoder's agent-first desktop IDE",
+          "provider": "manual",
+          "package": "qoder-desktop",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://qoder.com/download",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer. The vendor ships .deb/.rpm packages only."
+        },
+        {
           "id": "litellm",
           "name": "LiteLLM tier router",
           "description": "Local LLM router: free-first tiers for all agents",

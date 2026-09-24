@@ -198,6 +198,7 @@ install_script() {
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
         zed)             install_zed ;;
+        qoder-cli)       install_qoder_cli ;;
         *) ui_err "no script installer for '$1'"; return 1 ;;
     esac
 }
@@ -1011,6 +1012,37 @@ install_zed() {
     rm -f "$tmp"
     if (( rc != 0 )); then return $rc; fi
     ui_ok "Zed installed"
+}
+
+install_qoder_cli() {
+    # Qoder ships no apt/snap package, so the vendor's own install script is the
+    # only route. Same minimum bar as install_zed (guard A14): download to a
+    # file, verify it is non-empty and actually looks like a script, and only
+    # then execute the FILE - never the pipe. The script does its own OS/arch
+    # detection, SHA256-verifies the native binary, places it and configures
+    # PATH, so there is nothing left for AutoOS to do afterwards. Upgrades go
+    # through the binary's own `qodercli update`.
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would install Qoder CLI via https://qoder.com/install"; return 0; fi
+    local url="https://qoder.com/install"
+    ui_muted "downloading Qoder CLI installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_err "failed to download Qoder CLI installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_err "Qoder CLI installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    # The vendor script is bash (#!/usr/bin/env bash, set -uo pipefail), so run
+    # it with bash rather than sh.
+    bash "$tmp" || rc=$?
+    rm -f "$tmp"
+    if (( rc != 0 )); then return $rc; fi
+    ui_ok "Qoder CLI installed"
 }
 
 install_openhands() {
@@ -1833,6 +1865,118 @@ print(json.dumps({"command": "npx", "args": ["-y", sys.argv[1]]}))
 ' "$context7_pkg")"
         register_antigravity_mcp_server context7 "$spec"
     fi
+}
+
+# ─── Qoder MCP wiring ───────────────────────────────────────────────────────
+# Qoder CLI has first-class MCP commands (mcp list / get / add-json / remove,
+# with user|local|project scopes), so - exactly as with Claude Code's
+# `claude mcp add` above - AutoOS drives those and NEVER hand-edits Qoder's own
+# ~/.qoder/settings.json. Rewriting the client's JSON store to change one key is
+# the "overwrite a config wholesale" failure this repository has shipped before.
+#
+# Qoder cannot ride the OmniRoute gateway the way Zed and opencode do: its
+# Custom Models accept only a curated provider list (Alibaba Cloud Model
+# Studio, DeepSeek, Z.ai, Kimi, MiniMax, Xiaomi MIMO) with no arbitrary
+# OpenAI-compatible base URL, and the store is encrypted. There is therefore
+# nothing to route and no provider/base-URL/api-key config is written here -
+# this function wires MCP servers ONLY. (Do not rename it route_qoder_*: that
+# would imply a gateway path that does not exist.)
+
+qoder_mcp_has_server() {
+    # `qodercli mcp list` prints one line per configured server with a
+    # Connected/Disconnected status. Match the name as a whole word so the check
+    # survives format changes; `mcp add-json` refuses to overwrite an existing
+    # entry anyway, so a missed match only re-attempts and warns - it never
+    # clobbers the user's config.
+    local want="$1"
+    has_cmd qodercli || return 1
+    qodercli mcp list 2>/dev/null | grep -qwF -- "$want"
+}
+
+register_qoder_mcp_server() {
+    # register_qoder_mcp_server <name> <json-body>
+    # Adds one server at USER scope through Qoder's own command. Idempotent:
+    # an already-registered server is reported and left alone, so a second run
+    # says "skipped", never "installed" (AGENTS.md section 4).
+    local name="$1" json="$2"
+    if qoder_mcp_has_server "$name"; then
+        ui_muted "Qoder MCP server '${name}' is already registered - left alone."
+        return 0
+    fi
+    ui_muted "run: qodercli mcp add-json ${name} '<json>' -s user"
+    local rc=0
+    qodercli mcp add-json "$name" "$json" -s user || rc=$?
+    if (( rc == 0 )); then
+        ui_ok "registered Qoder MCP server '${name}' (user scope)"
+    else
+        ui_warn "could not register Qoder MCP server '${name}'"
+    fi
+    return 0
+}
+
+setup_qoder_mcp() {
+    # postInstall for the qoder-cli catalog entry. Called with NO arguments by
+    # run_post_install, on both the installed and the skipped path, so it must
+    # be safe to run twice. Pins come from catalog/agent-harness.json via
+    # mcp_package - never as literals here (the mcp-pins test greps lib/ for
+    # them and fails).
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would register Qoder MCP servers (serena, graphify, playwright, context7) at user scope"
+        return 0
+    fi
+    if ! has_cmd qodercli; then
+        ui_warn "qodercli is not on PATH - cannot register Qoder MCP servers. Install qoder-cli first."
+        return 0
+    fi
+    ui_info "Setting up Qoder MCP servers (user scope)"
+
+    # omnigraph is deliberately NOT registered here. Its graph is
+    # per-repository (OMNIGRAPH_GRAPH_ID for this repo) and this repository
+    # already ships it at project scope in .mcp.json; a machine-global
+    # user-scope omnigraph would pin the wrong graph for every other repo. The
+    # four servers below are machine-global and safe at user scope.
+
+    local pkg key spec
+
+    pkg="$(mcp_package serena)"
+    spec="$(python3 -c '
+import json, sys
+print(json.dumps({"command": "uvx", "args": ["--from", sys.argv[1], "serena", "start-mcp-server", "--open-web-dashboard", "false", "--enable-gui-log-window", "false"]}))
+' "$pkg")"
+    register_qoder_mcp_server serena "$spec"
+
+    pkg="$(mcp_package graphify)"
+    spec="$(python3 -c '
+import json, sys
+print(json.dumps({"command": "uv", "args": ["--quiet", "run", "--with", sys.argv[1], "python", "-m", "graphify.serve", "graphify-out/graph.json"]}))
+' "$pkg")"
+    register_qoder_mcp_server graphify "$spec"
+
+    pkg="$(mcp_package playwright)"
+    spec="$(python3 -c '
+import json, sys
+print(json.dumps({"command": "npx", "args": ["-y", sys.argv[1]]}))
+' "$pkg")"
+    register_qoder_mcp_server playwright "$spec"
+
+    # context7 takes an API key only when one is available; without it the
+    # server still runs on the default rate limit, so register it keyless
+    # rather than skipping (mirrors install_mcp_context7).
+    pkg="$(mcp_package context7)"
+    key="$(answer context7_api_key "${CONTEXT7_API_KEY:-}")"
+    if [[ -n "$key" ]]; then
+        spec="$(python3 -c '
+import json, sys
+print(json.dumps({"command": "npx", "args": ["-y", sys.argv[1], "--api-key", sys.argv[2]]}))
+' "$pkg" "$key")"
+    else
+        spec="$(python3 -c '
+import json, sys
+print(json.dumps({"command": "npx", "args": ["-y", sys.argv[1]]}))
+' "$pkg")"
+    fi
+    register_qoder_mcp_server context7 "$spec"
+    return 0
 }
 
 # A tracked .mcp.json cannot approve itself: Claude Code skips a project server

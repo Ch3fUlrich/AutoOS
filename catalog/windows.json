@@ -579,6 +579,37 @@
           "notes": "V2 CLI. The legacy npm package opencode-ai (V1) cannot read the V2 providers config."
         },
         {
+          "id": "qoder-cli",
+          "name": "Qoder CLI",
+          "description": "Qoder's terminal coding agent",
+          "provider": "script",
+          "package": "qoder-cli",
+          "arch": [
+            "x64"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "qodercli --version",
+          "homepage": "https://qoder.com/cli",
+          "postInstall": "Set-AutoOSQoderMcp",
+          "notes": "No winget/npm package on the supported path; the vendor's own install script SHA256-verifies the binary. Upgrades: qodercli update."
+        },
+        {
+          "id": "qoder-desktop",
+          "name": "Qoder",
+          "description": "Qoder's agentic desktop IDE",
+          "provider": "winget",
+          "package": "Alibaba.Qoder",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://qoder.com/download",
+          "notes": "Desktop IDE (Windows 10+). No verify command: the app puts no confirmed CLI on PATH. MCP wiring lives on qoder-cli."
+        },
+        {
           "id": "openhands-docker",
           "name": "OpenHands Docker",
           "description": "Autonomous coding agent — Docker app, OmniRoute-routed",
