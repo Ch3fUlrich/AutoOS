@@ -199,7 +199,20 @@ while IFS= read -r u; do
 done < <(selected_units)
 
 if [[ $DRY -eq 1 ]]; then
-    for u in "${TO_START[@]}"; do echo "  - $u: would enable and start"; done
+    for u in "${TO_START[@]}"; do
+        port="$(unit_port "$u")"
+        pid=""
+        [[ -n "$port" ]] && pid="$(listener_pid "$port")"
+        if "$SYSTEMCTL" --user is-active --quiet "$u.service" 2>/dev/null; then
+            echo "  - $u: would enable (already running)"
+        elif [[ -n "$pid" && $TAKEOVER -eq 0 ]]; then
+            echo "  - $u: would enable; a hand-started process (pid $pid) holds :$port - would not start it (--takeover does)"
+        elif [[ -n "$pid" ]]; then
+            echo "  - $u: would stop the hand-started process on :$port (pid $pid), then enable and start"
+        else
+            echo "  - $u: would enable and start"
+        fi
+    done
 else
     [[ $CHANGED -eq 1 ]] && "$SYSTEMCTL" --user daemon-reload
     for u in "${TO_START[@]}"; do
