@@ -30,35 +30,18 @@ else
     fi
 fi
 
-# 2. LiteLLM fallback proxy on :4000. litellm does not read its own .env, so the
-#    launcher exports the flat KEY=VALUE file into the process before starting.
-litellm_ok() {
-    curl -sf -m 5 -o /dev/null "http://127.0.0.1:4000/" 2>/dev/null
-}
+# 2. LiteLLM fallback proxy on 127.0.0.1:4000. litellm does not read its own
+#    .env; start-litellm.sh exports it literally (never sourced), sets
+#    PYTHONUTF8 and restarts a proxy that runs with stale keys.
 LITELLM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../litellm" && pwd)"
-if litellm_ok; then
-    echo "LiteLLM proxy already up on 4000 - nothing to do."
-elif ! command -v litellm >/dev/null; then
+if ! command -v litellm >/dev/null; then
     echo "litellm is not installed - run setup.sh --only litellm --yes once, then re-run this."
 elif [[ ! -f "$LITELLM_DIR/.env" ]]; then
     echo "No litellm .env - run: python3 tools/mirror-litellm-env.py (then re-run this)."
 else
-    echo "Starting the LiteLLM fallback proxy on 4000..."
-    (
-        cd "$LITELLM_DIR" || exit 1
-        set -a
-        # shellcheck disable=SC1091 # generated, git-ignored, present at runtime
-        . ./.env
-        set +a
-        # cp1252 consoles crash litellm's banner at startup.
-        PYTHONUTF8=1 nohup litellm --config config.yaml --port 4000 >/tmp/litellm.log 2>&1 &
-    )
-    for _ in $(seq 1 24); do litellm_ok && break; sleep 5; done
-    if litellm_ok; then
-        echo "LiteLLM proxy OK on 4000."
-    else
-        echo "LiteLLM proxy did not answer - see /tmp/litellm.log"
-    fi
+    # No-op when up with the current keys; restarts a stale-key proxy.
+    bash "$LITELLM_DIR/start-litellm.sh" \
+        || echo "LiteLLM proxy did not answer - see ~/.local/state/autoos/litellm.log"
 fi
 
 # 3. OpenHands container: restart only when it exists and is not running.

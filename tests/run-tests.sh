@@ -5933,8 +5933,9 @@ if it "autostart resumes the LiteLLM fallback proxy too"; then
     starter="configuration/litellm/start-litellm.ps1"
     ok=1
     grep -q '4000' "$sh_launcher" || { ok=0; echo "sh: no :4000 probe" >&2; }
-    grep -q 'PYTHONUTF8' "$sh_launcher" || { ok=0; echo "sh: PYTHONUTF8 missing" >&2; }
-    grep -q 'already up on 4000' "$sh_launcher" || { ok=0; echo "sh: no litellm no-op path" >&2; }
+    grep -q 'start-litellm.sh' "$sh_launcher" || { ok=0; echo "sh: starter not referenced" >&2; }
+    grep -q 'PYTHONUTF8' configuration/litellm/start-litellm.sh || { ok=0; echo "sh: PYTHONUTF8 missing" >&2; }
+    grep -q 'already up with the current keys' configuration/litellm/start-litellm.sh || { ok=0; echo "sh: no litellm no-op path" >&2; }
     grep -q 'start-litellm.ps1' "$ps_launcher" || { ok=0; echo "ps1: starter not referenced" >&2; }
     grep -q 'already up on 4000' "$ps_launcher" || { ok=0; echo "ps1: no litellm no-op path" >&2; }
     [[ -f "$starter" ]] || { ok=0; echo "missing: $starter" >&2; }
@@ -5974,6 +5975,81 @@ if it "phone URLs are documented without secrets"; then
     # No machine-local IPs may be committed (repo is public).
     if grep -qE '100\.70\.|192\.168\.178\.59' docs/troubleshooting.md; then ok=0; fi
     if (( ok )); then pass; else fail "phone docs missing or leaking"; fi
+fi
+
+# ─── AI services (reboot-safe units, lane A) ────────────────────────────────
+# Every case here asserts on a dry run or a pure decision: nothing is started,
+# stopped, registered or written outside a mktemp directory.
+describe "AI services"
+
+# A fake litellm dir: config.yaml plus a .env that tries shell injection.
+_svc_litellm_fixture() {
+    local d
+    d="$(mktemp -d)"
+    : >"$d/config.yaml"
+    cat >"$d/.env" <<'ENV'
+# comment line
+GROQ_API_KEY=gsk_fake_value_1
+MISTRAL_API_KEY="quoted-fake-2"
+META_API_KEY=REPLACE_WITH_META_KEY
+EVIL_KEY=$(touch INJECTED)
+EMPTY_KEY=
+not a pair
+ENV
+    printf '%s' "$d"
+}
+
+if it "svc: start-litellm.sh loads .env literally, never evaluates it"; then
+    d="$(_svc_litellm_fixture)"
+    out="$(cd "$d" && AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    ok=1
+    [[ -e "$d/INJECTED" ]] && { ok=0; echo "the .env was evaluated" >&2; }
+    [[ "$out" == *"GROQ_API_KEY"* && "$out" == *"MISTRAL_API_KEY"* && "$out" == *"EVIL_KEY"* ]] \
+        || { ok=0; echo "keys not reported: $out" >&2; }
+    [[ "$out" == *"META_API_KEY"* || "$out" == *"EMPTY_KEY"* ]] && { ok=0; echo "placeholder/empty loaded" >&2; }
+    [[ "$out" == *"fake_value"* || "$out" == *"quoted-fake"* ]] && { ok=0; echo "a value was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-litellm.sh .env parsing is unsafe"; fi
+fi
+
+if it "svc: start-litellm.sh binds loopback with PYTHONUTF8 and starts nothing in a dry run"; then
+    d="$(_svc_litellm_fixture)"
+    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    rm -rf "$d"
+    ok=1
+    [[ "$out" == *"PYTHONUTF8=1 litellm --config config.yaml --host 127.0.0.1 --port 1"* ]] \
+        || { ok=0; echo "planned command wrong: $out" >&2; }
+    [[ "$out" == *"would start"* ]] || { ok=0; echo "dry run did not announce" >&2; }
+    if (( ok )); then pass; else fail "start-litellm.sh plan is wrong"; fi
+fi
+
+if it "svc: start-litellm.sh restarts a proxy with stale keys and no-ops a current one"; then
+    d="$(_svc_litellm_fixture)"
+    env_now="$(mktemp)"; env_old="$(mktemp)"
+    printf 'PATH=/usr/bin\0GROQ_API_KEY=gsk_fake_value_1\0MISTRAL_API_KEY=quoted-fake-2\0EVIL_KEY=$(touch INJECTED)\0PYTHONUTF8=1\0' >"$env_now"
+    printf 'PATH=/usr/bin\0GROQ_API_KEY=gsk_old_value\0PYTHONUTF8=1\0' >"$env_old"
+    cur="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_FAKE_LITELLM_ENVIRON="$env_now" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    old="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_FAKE_LITELLM_ENVIRON="$env_old" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    rm -rf "$d" "$env_now" "$env_old"
+    ok=1
+    [[ "$cur" == *"already up with the current keys"* ]] || { ok=0; echo "current: $cur" >&2; }
+    [[ "$old" == *"would restart"* && "$old" == *"GROQ_API_KEY"* && "$old" == *"MISTRAL_API_KEY"* ]] \
+        || { ok=0; echo "stale: $old" >&2; }
+    [[ "$old" == *"gsk_old"* || "$old" == *"fake_value"* ]] && { ok=0; echo "a value was printed" >&2; }
+    if (( ok )); then pass; else fail "stale-key convergence is wrong"; fi
+fi
+
+if it "svc: the stack launcher starts litellm through start-litellm.sh"; then
+    ok=1
+    grep -q 'start-litellm.sh' configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "starter not used" >&2; }
+    grep -qE '^[[:space:]]*\. \./\.env|set -a' configuration/autostart/Start-AutoOSStack.sh \
+        && { ok=0; echo "inline .env sourcing is still there" >&2; }
+    [[ -x configuration/litellm/start-litellm.sh ]] || { ok=0; echo "starter not executable" >&2; }
+    if (( ok )); then pass; else fail "launcher still sources .env inline"; fi
 fi
 
 # ─── shellcheck (optional) ──────────────────────────────────────────────────
