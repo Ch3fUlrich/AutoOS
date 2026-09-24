@@ -6455,6 +6455,83 @@ if it "svc: healthcheck --fix resumes opencode serve and litellm too"; then
     if (( ok )); then pass; else fail "healthcheck --fix leaves a service down"; fi
 fi
 
+# The profiles in ~/.openhands are read by whichever OpenHands runs with that
+# directory: the docker app (host.docker.internal via --add-host) or a native
+# host process such as agent-canvas, which cannot resolve that name on a
+# native Linux host. Like resolve_ollama_base_url: keep it where it resolves.
+if it "svc: profile sync picks the gateway host per consumer"; then
+    d="$(mktemp -d)"
+    # sync_base <resolves 0|1> [--consumer X]: the omniroute-tier2 base_url.
+    sync_base() {
+        local resolves="$1"; shift
+        rm -rf "$d/oh"
+        env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key AUTOOS_FAKE_HDI_RESOLVES="$resolves" \
+            python3 "$ROOT/tools/sync-openhands-profiles.py" --openhands-dir "$d/oh" \
+            --keys-file "$d/none.yml" --litellm-env "$d/none.env" "$@" >/dev/null 2>&1
+        python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_url"])' \
+            "$d/oh/profiles/omniroute-tier2.json" 2>/dev/null
+    }
+    got="$(sync_base 0)|$(sync_base 0 --consumer native)|$(sync_base 1 --consumer native)"
+    rm -rf "$d"
+    assert_eq "$got" \
+        "http://host.docker.internal:20128/v1|http://127.0.0.1:20128/v1|http://host.docker.internal:20128/v1"
+fi
+
+# The image's entrypoint runs everything as root unless SANDBOX_USER_ID names
+# the host user (image default 0): ~/.openhands then fills with root-owned
+# files the host-side profile sync can no longer write. A missing host dir is
+# created by docker as root, so it must exist before `docker run`.
+if it "svc: start-stack openhands runs as the host user, survives reboots and is capped"; then
+    block="$(sed -n '/^    openhands)/,/^        ;;/p' configuration/start-stack.sh)"
+    ok=1
+    [[ "$block" == *'SANDBOX_USER_ID="$(id -u)"'* ]] || { ok=0; echo "no SANDBOX_USER_ID" >&2; }
+    [[ "$block" == *'mkdir -p "$HOME/.openhands"'* ]] || { ok=0; echo "dir not pre-created" >&2; }
+    [[ "$block" == *'--restart unless-stopped'* ]] || { ok=0; echo "not reboot-safe" >&2; }
+    [[ "$block" == *'docker run -d --rm'* ]] && { ok=0; echo "--rm defeats the restart policy" >&2; }
+    [[ "$block" == *'--memory'* ]] || { ok=0; echo "no memory cap" >&2; }
+    [[ "$block" == *'--consumer container'* ]] || { ok=0; echo "profile consumer not named" >&2; }
+    if (( ok )); then pass; else fail "OpenHands launch is not native-Linux safe"; fi
+fi
+
+# SDK-1.36 OpenHands keeps LLM profiles in its own settings store and never
+# reads profiles/*.json (measured 2026-09-24: /api/v1/settings/profiles was
+# empty with 16 files synced). The push saves them through the app's API.
+if it "svc: profile sync pushes the tiers into a running app, idempotently and capped"; then
+    d="$(mktemp -d)"
+    python3 "$ROOT/tests/helpers/fake_openhands_app.py" "$d/port" "$d/req.log" >/dev/null 2>&1 &
+    fake_pid=$!
+    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
+    url="http://127.0.0.1:$(cat "$d/port")"
+    push() { env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key python3 "$ROOT/tools/sync-openhands-profiles.py" \
+        --openhands-dir "$d/oh" --keys-file "$d/none.yml" --litellm-env "$d/none.env" --push-url "$url" 2>&1; }
+    first="$(push)"
+    : >"$d/req.log"
+    second="$(push)"
+    kill "$fake_pid" 2>/dev/null
+    ok=1
+    [[ "$first" == *"app settings seeded with omniroute-tier1"* ]] || { ok=0; echo "not seeded: $first" >&2; }
+    [[ "$first" == *"app profile omniroute-tier1 saved"* && "$first" == *"app profile omniroute-tier2 saved"* ]] \
+        && { ok=0; echo "cap 3 should stop before tier2 (spec order)" >&2; }
+    [[ "$first" == *"app profile omniroute-spark-1.3-contributor saved"* ]] || { ok=0; echo "spec order: $first" >&2; }
+    [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
+    [[ "$first" == *"FAILED"* ]] && { ok=0; echo "a push failed (StrictLLM?): $first" >&2; }
+    grep -q '^POST' "$d/req.log" && grep -q '^POST /api/v1/settings/profiles/omniroute-tier1$' "$d/req.log" \
+        && { ok=0; echo "second run re-posted an unchanged profile" >&2; }
+    [[ "$second" == *"omniroute-tier1 skipped (up to date)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$first$second" == *"sk-fake-profile-key"* ]] && { ok=0; echo "key printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "profile push is wrong"; fi
+fi
+
+if it "svc: profile push skips cleanly when no app answers"; then
+    d="$(mktemp -d)"
+    out="$(env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key python3 "$ROOT/tools/sync-openhands-profiles.py" \
+        --openhands-dir "$d/oh" --keys-file "$d/none.yml" --litellm-env "$d/none.env" \
+        --push-url http://127.0.0.1:1 2>&1)"; rc=$?
+    rm -rf "$d"
+    if [[ $rc -eq 0 && "$out" == *"push skipped"* ]]; then pass; else fail "rc=$rc $out"; fi
+fi
+
 # ─── shellcheck (optional) ──────────────────────────────────────────────────
 describe "static analysis"
 

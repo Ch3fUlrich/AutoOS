@@ -95,10 +95,20 @@ PY
         # key, a re-curated spec, or a hand edit converges back automatically.
         _ss_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
         if command -v python3 >/dev/null; then
-            python3 "$_ss_root/tools/sync-openhands-profiles.py" --openhands-dir "$HOME/.openhands" \
+            # Read by the docker app below: host.docker.internal resolves in
+            # there (--add-host on native Linux, natively on Docker Desktop).
+            python3 "$_ss_root/tools/sync-openhands-profiles.py" --openhands-dir "$HOME/.openhands" --consumer container \
                 || echo "tier profile sync reported a problem - continuing with existing profiles"
         else
             echo "python3 not found - tier profile sync skipped (the installer covers it)"
+        fi
+        # Docker creates a missing bind-mount source as root; create it as
+        # the user first. A root-owned tree from an older run (the image
+        # defaults to SANDBOX_USER_ID=0) cannot be fixed without sudo: say so.
+        mkdir -p "$HOME/.openhands"
+        if [[ -n "$(find "$HOME/.openhands" -maxdepth 2 ! -user "$(id -u)" -print -quit 2>/dev/null)" ]]; then
+            echo "Some files under ~/.openhands are not yours (an older root-run container). Fix once with:"
+            echo "  sudo chown -R $(id -un):$(id -gn) ~/.openhands"
         fi
         if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app'; then
             docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app' \
@@ -108,7 +118,20 @@ PY
             # Detached, no -it: -it fails without a TTY (non-interactive
             # shells) and foreground -it never returns, so the URL line below
             # would lie.
-            docker run -d --rm \
+            # SANDBOX_USER_ID: the entrypoint otherwise runs the app as root
+            # (image default 0) and ~/.openhands fills with root-owned files.
+            # --restart unless-stopped (not --rm): docker itself brings the
+            # UI back after a reboot, and a hand `docker stop` sticks.
+            # --memory: this stack shares a ~10 GB host with the gateway,
+            # litellm and the agents; AUTOOS_OPENHANDS_MEMORY overrides.
+            # Sandboxes (agent-server containers) are started by the app
+            # with --add-host host.docker.internal:host-gateway already.
+            # -p 3000:3000 binds every interface: the LAN reverse proxy is
+            # another host. OpenHands has NO login of its own - restrict
+            # :3000 to the proxy (docs/web-services.md).
+            docker run -d --restart unless-stopped \
+                --memory "${AUTOOS_OPENHANDS_MEMORY:-2g}" \
+                -e SANDBOX_USER_ID="$(id -u)" \
                 -e LLM_MODEL=openai/tier1 \
                 -e LLM_API_KEY \
                 -e LLM_BASE_URL="http://host.docker.internal:20128/v1" \
@@ -128,6 +151,14 @@ PY
         done
         curl -s -m 5 -o /dev/null http://127.0.0.1:3000/ 2>/dev/null \
             || { echo "OpenHands did not answer on :3000 - see: docker logs openhands-app"; exit 1; }
+        # This image keeps LLM profiles in its own settings store and never
+        # reads profiles/*.json: save the tiers through its API (idempotent,
+        # capped by the app at 10 - spec order decides which tiers make it).
+        if command -v python3 >/dev/null; then
+            python3 "$_ss_root/tools/sync-openhands-profiles.py" --openhands-dir "$HOME/.openhands" \
+                --consumer container --push-url http://127.0.0.1:3000 | grep -v ' skipped (up to date)$' \
+                || true
+        fi
         echo "OpenHands UI: http://localhost:3000"
         ;;
     opencode-serve)
