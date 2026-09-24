@@ -6539,7 +6539,7 @@ fi
 # already exist. Payload and action mapping are tested through an injected
 # probe and runner: nothing is probed on this machine, nothing is started.
 _svc_serve_py() {
-    python3 - "$@" <<'PY'
+    python3 - <<'PY'
 import importlib.util, json, pathlib, sys, tempfile
 root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-serve-"))
 spec = importlib.util.spec_from_file_location("autoos_serve", "lib/linux/serve.py")
