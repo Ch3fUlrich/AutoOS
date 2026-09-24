@@ -2043,11 +2043,13 @@ setup_opencode_config() {
         # First V2 run on a V1 machine: opencode.json starts as a copy of the
         # merged config.json, as the old writer's cp did - but never replaces
         # an opencode.json that exists.
+        local seeded=0
         if [[ "$config_file" == */opencode.json && ! -e "$config_file" ]] && (( merged_first )); then
             cp -p "$config_dir/config.json" "$config_file"
+            seeded=1
         fi
         snapshot=""
-        if [[ -f "$config_file" ]]; then
+        if [[ -f "$config_file" ]] && (( ! seeded )); then
             snapshot="$(mktemp)"
             cp -p "$config_file" "$snapshot"
         fi
@@ -2357,6 +2359,9 @@ data['tools'] = {'serena_' + _t: False for _t in _mem_tools}
 tmp_file = config_path + '.tmp'
 with open(tmp_file, 'w', encoding='utf-8') as f:
     json.dump(data, f, indent=2)
+    # Trailing newline, as the harness writes it: otherwise every re-run
+    # differs by one byte and takes a pointless backup.
+    f.write('\\n')
 os.replace(tmp_file, config_path)
 " "$config_file" "$secrets_file" "$models_file"
 }

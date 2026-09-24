@@ -6259,6 +6259,24 @@ PY
     fi
 fi
 
+# Measured live 2026-09-24: the harness rewrote config.json with a trailing
+# newline the writer did not emit, so every re-run took a backup; and the
+# seeded opencode.json was backed up on its very first write.
+if it "svc: the opencode writer takes no backup on a fresh machine or a re-run"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    for _ in 1 2 3; do
+        ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    done
+    n="$(compgen -G "$scratch/.config/opencode/*.autoos-backup-*" | wc -l)"
+    rm -rf "$scratch"
+    assert_eq "$n" "0"
+    fi
+fi
+
 if it "svc: the opencode writer leaves an unparseable config alone"; then
     if ! has_cmd python3; then skip "python3 not found"; else
     scratch="$(mktemp -d)"
