@@ -163,6 +163,21 @@ cosmetic Windows crash-on-exit, not a second failure. Proof pattern per
 connection: `providers list` (account-named row) → `models <provider>` →
 one `ack` chat per leg before it enters `combos.json` (phantom-leg rule).
 
+## Qoder PAT (CLI-only key, not a gateway provider)
+
+`qoder_pat:` in `api-keys.yml` feeds `QODER_PERSONAL_ACCESS_TOKEN`, which the
+Qoder CLI reads at startup for headless/ACP use. There is no gateway
+provider id for it (the gateway `qoder` entry is OAuth/dashboard-only), so it
+never enters `catalog/providers.json` or the LiteLLM `.env`. **Windows:**
+the `qodercli` catalog component appends `~/.qoder/bin` to User PATH (the
+dashboard error was precisely this: the binary lives beside the IDE install,
+not on PATH) and exports the PAT absent-only, same mechanism as
+`OMNIROUTE_API_KEY` above. **Linux/macOS:** install via the component, then
+`export QODER_PERSONAL_ACCESS_TOKEN='<value of qoder_pat:>'` yourself.
+Warning from Qoder docs: an env PAT takes precedence over `/login`
+credentials — clear it before `/logout`, or the next start signs straight
+back in.
+
 ## CLI coding tools via the gateway
 
 - **Claude Code** — pipeline equivalent landed (`Set-AutoOSClaudeGateway` /
@@ -170,18 +185,25 @@ one `ack` chat per leg before it enters `combos.json` (phantom-leg rule).
   merges `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` into
   `~/.claude/settings.json` with backup + idempotent skip. Subscription
   models additionally need the `claude` gateway OAuth connection above.
-- **Qwen Code** — install `npm i -g @qwen-code/qwen-code`, then (backup
-  `~/.qwen/settings.json` first — setup does not):
-  `omniroute setup-qwen --model t2-worker --yes --api-key $env:OMNIROUTE_API_KEY`.
-  Writes the `t2-worker (OmniRoute)` entry plus `~/.qwen/.env`
-  (`OMNIROUTE_API_KEY` only, existing provider credentials untouched).
-  Combo ids work directly as `--model` values. No `qwen` binary on PATH is
-  exactly the dashboard "found but not runnable" state.
+- **Qwen Code** — install `npm i -g @qwen-code/qwen-code` (done live
+  2026-09-24: 0.24.4), backup `~/.qwen/settings.json` first, then
+  `omniroute setup-qwen --model t2-worker --yes --api-key
+  $env:OMNIROUTE_API_KEY`. Writes the `t2-worker (OmniRoute)` entry plus
+  `~/.qwen/.env` (`OMNIROUTE_API_KEY` only, existing provider credentials
+  untouched). Combo ids work directly as `--model` values. No `qwen`
+  binary on PATH is exactly the dashboard "found but not runnable" state.
+  Proven: headless `qwen -p "Reply with exactly: ack"` → ack.
 - **Gemini CLI** — no `setup-*` recipe (launch-only):
   `npm i -g @google/gemini-cli`, then `omniroute run gemini`
   (`GOOGLE_GEMINI_BASE_URL` is read at the process root).
 - **Antigravity CLI** — no CLI recipe either; its only integration is the
-  `agy` gateway OAuth connection above (and it is not ACP-spawnable).
+  `antigravity` gateway OAuth connection above (and it is not ACP-spawnable).
+- **Devin CLI** — catalog component `devin-cli` (winget
+  `CognitionAI.DevinCLI` on Windows, vendor `install.sh` on Linux/macOS).
+  Then interactive `devin auth login` (cannot be automated), then gateway
+  side `omniroute providers add devin-cli --oauth` (`--dry-run` proven) or
+  dashboard. The `devin` API-key provider lists no models (broken upstream,
+  issue #6142) — do not route on it.
 
 ## LiteLLM fallback `.env` (only if you use it)
 

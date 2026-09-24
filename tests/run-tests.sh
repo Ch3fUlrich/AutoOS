@@ -2385,6 +2385,25 @@ PY
     assert_eq "backups=$backups|nokey=$nokey" "backups=1|nokey=yes"
 fi
 
+if it "install_qodercli announces in dry run and writes nothing"; then
+    out="$( ( AUTOOS_DRY_RUN=1; install_qodercli ) 2>&1)"
+    if [[ "$out" == *"would download and run the Qoder CLI installer"* ]]; then pass
+    else fail "dry run wrote or stayed silent"; fi
+fi
+
+if it "install_devin_cli announces in dry run and writes nothing"; then
+    out="$( ( AUTOOS_DRY_RUN=1; install_devin_cli ) 2>&1)"
+    if [[ "$out" == *"would download and run the Devin CLI installer"* ]]; then pass
+    else fail "dry run wrote or stayed silent"; fi
+fi
+
+if it "script dispatch covers qodercli and devin-cli"; then
+    ok=1
+    grep -q 'qodercli) *install_qodercli' lib/linux/install.sh || ok=0
+    grep -q 'devin-cli) *install_devin_cli' lib/linux/install.sh || ok=0
+    if (( ok )); then pass; else fail "dispatch missing"; fi
+fi
+
 if it "zed routing merges one provider and keeps the rest"; then
     scratch="$(mktemp -d)"
     mkdir -p "$scratch/.config/zed"

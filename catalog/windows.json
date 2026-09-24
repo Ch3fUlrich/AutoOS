@@ -267,6 +267,42 @@
           "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
         },
         {
+          "id": "qodercli",
+          "name": "Qoder CLI",
+          "description": "Alibaba terminal coding agent (Qwen-powered)",
+          "provider": "script",
+          "package": "qodercli",
+          "arch": [
+            "x64",
+            "arm64"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "qodercli --version",
+          "homepage": "https://qoder.com/cli",
+          "notes": "Wires ~/.qoder/bin on PATH and QODER_PERSONAL_ACCESS_TOKEN from api-keys.yml. Headless use needs the PAT; interactive /login still works."
+        },
+        {
+          "id": "devin-cli",
+          "name": "Devin CLI",
+          "description": "Cognition terminal coding agent",
+          "provider": "winget",
+          "package": "CognitionAI.DevinCLI",
+          "arch": [
+            "x64",
+            "arm64"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "devin --version",
+          "homepage": "https://cli.devin.ai",
+          "notes": "Needs an interactive `devin auth login` once; the gateway side connects via `omniroute providers add devin-cli --oauth` or the dashboard."
+        },
+        {
           "id": "ollama",
           "name": "Ollama",
           "description": "Local AI model runtime",

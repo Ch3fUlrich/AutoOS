@@ -191,6 +191,8 @@ install_script() {
         handy)           install_handy ;;
         vscode)          install_vscode ;;
         agy)             install_agy ;;
+        qodercli)        install_qodercli ;;
+        devin-cli)       install_devin_cli ;;
         gh)              install_gh ;;
         uv)              install_uv ;;
         ollama)          install_ollama ;;
@@ -424,6 +426,65 @@ install_agy() {
     fi
     if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
         ui_err "Antigravity CLI installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    bash "$tmp" || rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
+install_qodercli() {
+    # Qoder CLI (Alibaba terminal coding agent). Same download-to-file bar
+    # as install_agy(): the vendor publishes no checksum, so verify
+    # non-empty + shebang and execute the FILE, never the pipe.
+    # Headless use needs QODER_PERSONAL_ACCESS_TOKEN (api-keys.yml qoder_pat,
+    # see docs/api-keys.md) - export it yourself; installers never duplicate
+    # secrets into shell rcs.
+    local url="https://qoder.com/install"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would download and run the Qoder CLI installer from $url"
+        return 0
+    fi
+    ui_muted "downloading Qoder CLI installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_warn "failed to download Qoder CLI installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_warn "Qoder CLI installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    bash "$tmp" || rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
+install_devin_cli() {
+    # Devin CLI (Cognition terminal coding agent). Same download-to-file bar
+    # as install_agy(). Needs an interactive `devin auth login` afterwards;
+    # the gateway side connects via `omniroute providers add devin-cli
+    # --oauth` or the dashboard (the `devin` API-key provider lists no
+    # models - broken upstream, see docs/api-keys.md).
+    local url="https://cli.devin.ai/install.sh"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would download and run the Devin CLI installer from $url"
+        return 0
+    fi
+    ui_muted "downloading Devin CLI installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_warn "failed to download Devin CLI installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_warn "Devin CLI installer from $url does not look like a script - aborting"
         rm -f "$tmp"
         return 1
     fi

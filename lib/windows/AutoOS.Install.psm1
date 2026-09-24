@@ -365,6 +365,7 @@ function Invoke-AutoOSScriptProvider {
         'meslo-nerd-font' { return Install-AutoOSNerdFont }
         'herdr'           { return Install-AutoOSHerdr }
         'claude-autostart'{ return Install-AutoOSClaudeAutostart }
+        'qodercli'        { return Install-AutoOSQoderCli }
         default           { return @{ ExitCode = 1; Output = "no script for '$($Component.Package)'" } }
     }
 }
@@ -2527,40 +2528,92 @@ function Set-AutoOSClaudeGateway {
     Write-AutoOSLine 'Subscription models need the gateway claude OAuth connection first (omniroute providers auth claude-code); until then use opus/sonnet via direct login (backup restores it)' -Level warn
 }
 
-function Set-AutoOSOmniRouteCliKey {
+function Set-AutoOSApiKeyEnv {
     <#
-      .SYNOPSIS Export the OmniRoute client key for the omniroute CLI.
-      The oauth/setup/configure management commands need server auth
-      (OMNIROUTE_API_KEY); without it they 401. The value comes from the
-      `omniroute:` key in api-keys.yml and is never printed. Persistent User
-      scope so every new terminal inherits it; an existing value always wins
-      (user-managed, never overwritten). Localhost-only bearer key, same
-      sensitivity as the git-ignored api-keys.yml it is read from.
+      .SYNOPSIS Export one api-keys.yml key as a User env var, once.
+      Generic core behind Set-AutoOSOmniRouteCliKey (and the Qoder PAT
+      below): reads <KeysName> from the keys file, exports <EnvName> at
+      <Scope> only when absent (existing values are user-managed and win),
+      never prints the value. Missing/placeholder keys warn and skip.
     #>
-    param([string]$KeysFile, [string]$Scope = 'User')
+    param([Parameter(Mandatory)][string]$EnvName, [Parameter(Mandatory)][string]$KeysName, [string]$KeysFile, [string]$Scope = 'User')
     if (-not $KeysFile) {
         $KeysFile = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
     }
     $key = $null
     if (Test-Path -LiteralPath $KeysFile) {
-        $line = Select-String -Path $KeysFile -Pattern '^omniroute\s*:' | Select-Object -First 1
+        $line = Select-String -Path $KeysFile -Pattern "^$KeysName\s*:" | Select-Object -First 1
         if ($line) { $key = $line.Line.Split(':', 2)[1].Trim() }
     }
     if ([string]::IsNullOrWhiteSpace($key) -or $key.StartsWith('REPLACE_WITH_')) {
-        Write-AutoOSLine "no OmniRoute client key in $KeysFile - fill omniroute: first (docs/api-keys.md)" -Level warn
+        Write-AutoOSLine "no $KeysName key in $KeysFile - fill it first (docs/api-keys.md)" -Level warn
         return
     }
-    $existing = [Environment]::GetEnvironmentVariable('OMNIROUTE_API_KEY', $Scope)
+    $existing = [Environment]::GetEnvironmentVariable($EnvName, $Scope)
     if (-not [string]::IsNullOrWhiteSpace($existing)) {
-        Write-AutoOSLine "OMNIROUTE_API_KEY already set ($Scope scope) - skipped, user-managed" -Level ok
+        Write-AutoOSLine "$EnvName already set ($Scope scope) - skipped, user-managed" -Level ok
         return
     }
     if ($script:DryRun) {
-        Write-AutoOSLine "would export OMNIROUTE_API_KEY to $Scope scope (value from $KeysFile, never shown)" -Level muted
+        Write-AutoOSLine "would export $EnvName to $Scope scope (value from $KeysFile, never shown)" -Level muted
         return
     }
-    [Environment]::SetEnvironmentVariable('OMNIROUTE_API_KEY', $key, $Scope)
-    Write-AutoOSLine "OMNIROUTE_API_KEY exported to $Scope scope - new terminals inherit it (remove with [Environment]::SetEnvironmentVariable('OMNIROUTE_API_KEY',\$null,'$Scope'))" -Level ok
+    [Environment]::SetEnvironmentVariable($EnvName, $key, $Scope)
+    Write-AutoOSLine "$EnvName exported to $Scope scope - new terminals inherit it (remove with [Environment]::SetEnvironmentVariable('$EnvName',\$null,'$Scope'))" -Level ok
+}
+
+function Set-AutoOSOmniRouteCliKey {
+    <#
+      .SYNOPSIS Export the OmniRoute client key for the omniroute CLI.
+      The oauth/setup/configure management commands need server auth
+      (OMNIROUTE_API_KEY); without it they 401. Persistent User scope so
+      every new terminal inherits it. Localhost-only bearer key, same
+      sensitivity as the git-ignored api-keys.yml it is read from.
+    #>
+    param([string]$KeysFile, [string]$Scope = 'User')
+    Set-AutoOSApiKeyEnv -EnvName 'OMNIROUTE_API_KEY' -KeysName 'omniroute' -KeysFile $KeysFile -Scope $Scope
+}
+
+function Install-AutoOSQoderCli {
+    <#
+      .SYNOPSIS Make the Qoder CLI resolvable and authenticated.
+      The dashboard shells out to `qodercli`, which ships beside the Qoder
+      IDE in ~/.qoder/bin/qodercli — not on PATH, hence "not recognized".
+      Steps, each idempotent and announced in DryRun: install the binary
+      when missing (vendor install.ps1, download-to-file + verified, never
+      a pipe — A14), append its dir to User PATH (the single
+      Add-AutoOSPathEntry path, backed up), export QODER_PERSONAL_ACCESS_TOKEN
+      from api-keys.yml qoder_pat when absent. Interactive /login keeps
+      working; an env PAT takes precedence per Qoder docs.
+    #>
+    param([string]$KeysFile)
+    $binDir = Join-Path $env:USERPROFILE '.qoder\bin\qodercli'
+    $exe = Join-Path $binDir 'qodercli.exe'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        $url = 'https://qoder.com/install.ps1'
+        if ($script:DryRun) {
+            Write-AutoOSLine "would download and run the Qoder CLI installer from $url" -Level muted
+        } else {
+            Write-AutoOSLine "downloading Qoder CLI installer from $url" -Level muted
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-qoder-install-$([Guid]::NewGuid().ToString('N')).ps1"
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+                if (-not (Test-Path -LiteralPath $tmp) -or (Get-Item $tmp).Length -eq 0) { throw 'empty download' }
+                powershell -NoProfile -ExecutionPolicy Bypass -File $tmp
+                if ($LASTEXITCODE -ne 0) { Write-AutoOSLine 'Qoder CLI installer failed' -Level warn; return }
+            } catch {
+                Write-AutoOSLine "Qoder CLI download/install failed: $_" -Level warn
+                return
+            } finally {
+                Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    Add-AutoOSPathEntry -Directory @($binDir) | Out-Null
+    Set-AutoOSApiKeyEnv -EnvName 'QODER_PERSONAL_ACCESS_TOKEN' -KeysName 'qoder_pat' -KeysFile $KeysFile
+    $q = Get-Command qodercli -ErrorAction SilentlyContinue
+    if ($q) { Write-AutoOSLine "Qoder CLI ready: $($q.Source)" -Level ok }
+    else { Write-AutoOSLine 'qodercli still not resolvable - open a new terminal (PATH refresh) or check the install' -Level warn }
 }
 
 function Set-AutoOSZedProxy {
@@ -2875,7 +2928,7 @@ Export-ModuleMember -Function `
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
-    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
+    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,

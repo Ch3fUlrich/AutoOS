@@ -3570,7 +3570,7 @@ Test-Case 'opencode-cli is the headless fallback on light' {
 }
 
 Test-Case 'ai postInstall hooks are exported' {
-    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSClaudeGateway', 'Set-AutoOSOmniRouteCliKey', 'Set-AutoOSZedProxy')) {
+    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSClaudeGateway', 'Set-AutoOSOmniRouteCliKey', 'Set-AutoOSApiKeyEnv', 'Install-AutoOSQoderCli', 'Set-AutoOSZedProxy')) {
         Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn missing"
     }
     Pass
@@ -3655,6 +3655,38 @@ Test-Case 'Set-AutoOSOmniRouteCliKey exports the client key once' {
     } finally {
         if ($null -eq $realVal) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
         else { $env:OMNIROUTE_API_KEY = $realVal }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Install-AutoOSQoderCli announces without writing in dry run' {
+    $realHome = $env:USERPROFILE
+    $realPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $scratch = Join-Path $env:TEMP "autoos-qoder-$([Guid]::NewGuid().ToString('N'))"
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-qoderkey-$PID.yml"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $env:USERPROFILE = $scratch
+        'qoder_pat: dummy-pat' | Out-File $tmp -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-qoder-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            Install-AutoOSQoderCli -KeysFile $tmp
+            $text = Get-Content $log -Raw -Encoding utf8
+            Assert-True ($text -match 'https://qoder\.com/install\.ps1') 'no download announcement'
+            Assert-True ($text -match 'QODER_PERSONAL_ACCESS_TOKEN') 'no PAT announcement'
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item $log -Force -ErrorAction SilentlyContinue
+        }
+        Assert-Equal ([Environment]::GetEnvironmentVariable('Path', 'User')) $realPath
+        Assert-True ([string]::IsNullOrEmpty($env:QODER_PERSONAL_ACCESS_TOKEN)) 'PAT leaked into process env'
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    } finally {
+        $env:USERPROFILE = $realHome
+        Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
     Pass
