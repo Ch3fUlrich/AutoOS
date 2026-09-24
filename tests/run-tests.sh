@@ -5695,7 +5695,8 @@ fi
 if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
     keys="$(mktemp)"
     printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
-    out="$(AUTOOS_KEYS_FILE="$keys" bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
     assert_contains "$out" "groq: no key in api-keys.yml, skipped"
     if grep -q "mistral: would register\|mistral already registered" <<<"$out"; then pass
@@ -6050,6 +6051,146 @@ if it "svc: the stack launcher starts litellm through start-litellm.sh"; then
         && { ok=0; echo "inline .env sourcing is still there" >&2; }
     [[ -x configuration/litellm/start-litellm.sh ]] || { ok=0; echo "starter not executable" >&2; }
     if (( ok )); then pass; else fail "launcher still sources .env inline"; fi
+fi
+
+# The client key cannot PATCH /api/resilience (403 "Invalid management
+# token", measured 2026-09-24); the CLI sends the machine loopback token.
+if it "svc: apply sets resilience through the omniroute CLI, not curl + client key"; then
+    ok=1
+    for f in configuration/omniroute/apply.sh configuration/omniroute/apply.ps1; do
+        grep -q 'patch-api-resilience' "$f" || { ok=0; echo "no CLI patch: $f" >&2; }
+        grep -q 'get-api-resilience' "$f" || { ok=0; echo "no CLI read: $f" >&2; }
+        grep -qE 'X PATCH|Method Patch' "$f" && { ok=0; echo "still PATCHes over HTTP: $f" >&2; }
+    done
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/dev/null \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    [[ "$out" == *"would set requestQueue.maxWaitMs = 180000 (omniroute api system patch-api-resilience)"* ]] \
+        || { ok=0; echo "dry run: $out" >&2; }
+    if (( ok )); then pass; else fail "resilience still goes through the client key"; fi
+fi
+
+# The dry run must not read the live gateway's provider list: with a gateway
+# up, every provider reads "already registered" and the placeholder test
+# above became machine-dependent.
+if it "svc: apply --dry-run against a down gateway plans from the key file alone"; then
+    keys="$(mktemp)"
+    printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -f "$keys"
+    ok=1
+    [[ "$out" == *"groq: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "groq: $out" >&2; }
+    [[ "$out" == *"mistral: would register"* ]] || { ok=0; echo "mistral: $out" >&2; }
+    [[ "$out" == *"already registered"* ]] && { ok=0; echo "read the live gateway" >&2; }
+    if (( ok )); then pass; else fail "apply dry run depends on the live gateway"; fi
+fi
+
+# A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp
+# unit dir, and stubs for systemctl/loginctl that only log their arguments.
+# The stub reports every unit as active, so no port probing reaches the
+# live machine's listeners.
+_svc_reg_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/units"
+    for t in node omniroute opencode litellm; do
+        printf '#!/bin/sh\nexit 0\n' >"$d/bin/$t"; chmod +x "$d/bin/$t"
+    done
+    printf '#!/bin/sh\necho "$*" >>"%s/systemctl.log"\nexit 0\n' "$d" >"$d/bin/fake-systemctl"
+    printf '#!/bin/sh\necho "$*" >>"%s/loginctl.log"\n[ "$1" = show-user ] && echo yes\nexit 0\n' "$d" >"$d/bin/fake-loginctl"
+    chmod +x "$d/bin/fake-systemctl" "$d/bin/fake-loginctl"
+    printf '%s' "$d"
+}
+_svc_reg() {
+    local d="$1"; shift
+    PATH="$d/bin:$PATH" AUTOOS_SYSTEMD_USER_DIR="$d/units" AUTOOS_OMNIROUTE_ENV="$d/omniroute.env" \
+        AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" AUTOOS_LOGINCTL="$d/bin/fake-loginctl" \
+        bash "$ROOT/configuration/autostart/register-autostart.sh" "$@" 2>&1
+}
+
+if it "svc: the omniroute unit requires a client key and gets this machine's PATH"; then
+    d="$(_svc_reg_sandbox)"
+    out="$(_svc_reg "$d" --render autoos-omniroute)"
+    ok=1
+    # The key requirement comes from ~/.omniroute/.env (operator 2026-09-24):
+    # a unit Environment= line would silently override the operator's file.
+    [[ "$out" == *"Environment=REQUIRE_API_KEY"* ]] && { ok=0; echo "unit overrides REQUIRE_API_KEY" >&2; }
+    [[ "$out" == *"ExecStart=$d/bin/omniroute serve --no-open --port 20128"* ]] || { ok=0; echo "ExecStart: $out" >&2; }
+    [[ "$out" == *"Environment=PATH=$d/bin:"* ]] || { ok=0; echo "PATH not filled" >&2; }
+    [[ "$out" == *"@"*"@"* ]] && { ok=0; echo "unfilled placeholder" >&2; }
+    [[ "$out" == *"Managed by AutoOS"* ]] || { ok=0; echo "no marker" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "omniroute unit render is wrong"; fi
+fi
+
+if it "svc: register-autostart --dry-run writes, enables and starts nothing"; then
+    d="$(_svc_reg_sandbox)"
+    out="$(_svc_reg "$d" --dry-run)"
+    ok=1
+    [[ -z "$(ls -A "$d/units")" ]] || { ok=0; echo "wrote a unit" >&2; }
+    [[ -e "$d/systemctl.log" ]] && grep -qE 'enable|start|daemon-reload' "$d/systemctl.log" && { ok=0; echo "called systemctl" >&2; }
+    [[ "$out" == *"would write $d/units/autoos-omniroute.service"* ]] || { ok=0; echo "not announced: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dry run had side effects"; fi
+fi
+
+if it "svc: register-autostart twice: the second run skips, a changed unit is backed up"; then
+    d="$(_svc_reg_sandbox)"
+    first="$(_svc_reg "$d")"
+    second="$(_svc_reg "$d")"
+    echo "# hand edit" >>"$d/units/autoos-omniroute.service"
+    third="$(_svc_reg "$d")"
+    ok=1
+    [[ "$first" == *"+ autoos-omniroute: wrote"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ "$second" == *"unit unchanged (skipped)"* && "$second" == *"running (skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$second" == *"+ autoos-omniroute"* ]] && { ok=0; echo "second run changed something" >&2; }
+    compgen -G "$d/units/autoos-omniroute.service.autoos-backup-*" >/dev/null || { ok=0; echo "no backup" >&2; }
+    grep -q '# hand edit' "$d/units/autoos-omniroute.service" && { ok=0; echo "not converged" >&2; }
+    [[ "$third" == *"replaced"* ]] || { ok=0; echo "third: $third" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart is not idempotent"; fi
+fi
+
+if it "svc: register-autostart appends REQUIRE_API_KEY=true once, with a backup"; then
+    d="$(_svc_reg_sandbox)"
+    printf 'STORAGE_ENCRYPTION_KEY=keep-me\n' >"$d/omniroute.env"
+    _svc_reg "$d" >/dev/null
+    second="$(_svc_reg "$d")"
+    ok=1
+    grep -q '^STORAGE_ENCRYPTION_KEY=keep-me$' "$d/omniroute.env" || { ok=0; echo "existing line lost" >&2; }
+    [[ "$(grep -c '^REQUIRE_API_KEY=true$' "$d/omniroute.env")" == 1 ]] || { ok=0; echo "not exactly one line" >&2; }
+    compgen -G "$d/omniroute.env.autoos-backup-*" >/dev/null || { ok=0; echo "no backup" >&2; }
+    [[ "$second" == *"REQUIRE_API_KEY=true is set"*"(skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    printf 'REQUIRE_API_KEY=false\n' >"$d/omniroute.env"
+    third="$(_svc_reg "$d")"
+    grep -q '^REQUIRE_API_KEY=false$' "$d/omniroute.env" || { ok=0; echo "overrode an explicit operator value" >&2; }
+    [[ "$third" == *"left alone"* ]] || { ok=0; echo "third: $third" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "REQUIRE_API_KEY handling is wrong"; fi
+fi
+
+if it "svc: register-autostart never runs a second gateway next to omniroute autostart"; then
+    d="$(_svc_reg_sandbox)"
+    echo "[Service]" >"$d/units/omniroute.service"
+    out="$(_svc_reg "$d")"
+    ok=1
+    [[ -e "$d/units/autoos-omniroute.service" ]] && { ok=0; echo "wrote a second gateway" >&2; }
+    [[ "$out" == *"omniroute autostart disable"* ]] || { ok=0; echo "no hint: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "two gateways would fight over :20128"; fi
+fi
+
+if it "svc: register-autostart --unregister removes only units AutoOS wrote"; then
+    d="$(_svc_reg_sandbox)"
+    _svc_reg "$d" >/dev/null
+    printf '[Service]\nExecStart=/bin/true\n' >"$d/units/autoos-foreign.service"
+    out="$(_svc_reg "$d" --unregister)"
+    ok=1
+    [[ -e "$d/units/autoos-omniroute.service" ]] && { ok=0; echo "our unit stayed" >&2; }
+    [[ -e "$d/units/autoos-foreign.service" ]] || { ok=0; echo "removed a foreign unit" >&2; }
+    grep -q 'disable --now autoos-omniroute.service' "$d/systemctl.log" || { ok=0; echo "not disabled" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "unregister is wrong"; fi
 fi
 
 # ─── shellcheck (optional) ──────────────────────────────────────────────────

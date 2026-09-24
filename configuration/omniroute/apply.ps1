@@ -32,7 +32,10 @@ $ErrorActionPreference = 'Continue'
 
 $Here      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root      = Split-Path -Parent (Split-Path -Parent $Here)
-$Gateway   = 'http://127.0.0.1:20128'
+# AUTOOS_OMNIROUTE_URL points the run (and the CLI) at another gateway; the
+# tests aim it at a closed port so a dry run never reads the live one.
+$Gateway   = if ($env:AUTOOS_OMNIROUTE_URL) { $env:AUTOOS_OMNIROUTE_URL } else { 'http://127.0.0.1:20128' }
+if ($env:AUTOOS_OMNIROUTE_URL) { $env:OMNIROUTE_BASE_URL = $Gateway }
 $KeysFile  = if ($env:AUTOOS_KEYS_FILE) { $env:AUTOOS_KEYS_FILE } else { Join-Path $Root 'configuration\api-keys.yml' }
 $CombosFile = Join-Path $Here 'combos.json'
 if ($DryRun) { Write-Host 'This is a dry run - nothing is registered, created or started.' }
@@ -128,14 +131,16 @@ Write-Host 'Providers:'
 # Connections that already exist are left alone: re-adding would either fail
 # or duplicate them, and neither proves the pipeline works.
 $existingIds = @()
-try {
+# A down gateway (dry run) has no list to read; the plan then comes from the
+# key file alone instead of from whatever else answers the CLI.
+if (Test-Gateway) { try {
     $listText = & omniroute providers list 2>&1 | Out-String
     if ($LASTEXITCODE -eq 0) {
         foreach ($line in ($listText -split "`r?`n")) {
             if ($line -match '^\s*[0-9a-f]{6,}\s+(\S+)') { $existingIds += $Matches[1] }
         }
     }
-} catch { $existingIds = @() }
+} catch { $existingIds = @() } }
 foreach ($keyName in $ProviderMap.Keys) {
     $providerId = $ProviderMap[$keyName]
     if ($existingIds -contains $providerId) {
@@ -200,34 +205,46 @@ if ($LiveIds.Count -eq 0) {
 $MaxWaitMs = 180000
 $Breaker = @{ failureThreshold = 2; degradationThreshold = 1; resetTimeoutMs = 30000 }
 Write-Host 'Resilience:'
+# Through the CLI, not Invoke-RestMethod + the client key: /api/resilience is
+# a management route and answers the client key with 403 "Invalid management
+# token" (measured 2026-09-24); the local CLI sends the machine loopback token.
+$body = @{
+    requestQueue    = @{ maxWaitMs = $MaxWaitMs }
+    providerBreaker = @{ apikey = $Breaker }
+} | ConvertTo-Json -Depth 5 -Compress
 if ($DryRun) {
-    Write-Host "  - would set requestQueue.maxWaitMs = $MaxWaitMs"
+    Write-Host "  - would set requestQueue.maxWaitMs = $MaxWaitMs (omniroute api system patch-api-resilience)"
     Write-Host "  - would set providerBreaker.apikey.failureThreshold = $($Breaker.failureThreshold)"
-} elseif (-not $Keys.ContainsKey('omniroute')) {
-    Write-Host '  - no client key - cannot set the resilience settings (PATCH /api/resilience)'
+} elseif (-not (Get-Command omniroute -ErrorAction SilentlyContinue)) {
+    Write-Host '  - omniroute CLI missing - cannot set the resilience settings'
 } else {
-    $auth = @{ Authorization = "Bearer $($Keys['omniroute'])" }
     $current = $null
     $currentBreaker = $null
     try {
-        $cfg = Invoke-RestMethod -Uri "$Gateway/api/resilience?include=config" -TimeoutSec 15 -Headers $auth
-        $current = $cfg.requestQueue.maxWaitMs
-        $currentBreaker = $cfg.providerBreaker.apikey.failureThreshold
+        # The CLI prints "Loaded env" banners before the JSON document.
+        $raw = (& omniroute --output json --no-color api system get-api-resilience 2>$null | Out-String)
+        $start = $raw.IndexOf('{')
+        if ($start -ge 0) {
+            $cfg = $raw.Substring($start) | ConvertFrom-Json
+            $current = $cfg.requestQueue.maxWaitMs
+            $currentBreaker = $cfg.providerBreaker.apikey.failureThreshold
+        }
     } catch { $current = $null; $currentBreaker = $null }
     if ($current -eq $MaxWaitMs -and $currentBreaker -eq $Breaker.failureThreshold) {
         Write-Host "  = resilience settings already current (maxWaitMs=$MaxWaitMs, breaker=$($Breaker.failureThreshold))"
     } else {
-        $body = @{
-            requestQueue   = @{ maxWaitMs = $MaxWaitMs }
-            providerBreaker = @{ apikey = $Breaker }
-        } | ConvertTo-Json -Depth 5
+        # A body file, not an argument: PowerShell 5.1 mangles embedded quotes
+        # when passing JSON to a native command.
+        $bodyFile = [System.IO.Path]::GetTempFileName()
         try {
-            $null = Invoke-RestMethod -Uri "$Gateway/api/resilience" -Method Patch -TimeoutSec 15 `
-                -ContentType 'application/json' -Headers $auth -Body $body
-            Write-Host "  + maxWaitMs $current -> $MaxWaitMs; breaker $currentBreaker -> $($Breaker.failureThreshold)"
-        } catch {
-            Write-Host '  ! could not set resilience settings - use the dashboard (Resilience)'
-        }
+            [System.IO.File]::WriteAllText($bodyFile, $body)
+            & omniroute api system patch-api-resilience --body "@$bodyFile" *> $null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  + maxWaitMs $current -> $MaxWaitMs; breaker $currentBreaker -> $($Breaker.failureThreshold)"
+            } else {
+                Write-Host '  ! could not set resilience settings - use the dashboard (Resilience)'
+            }
+        } finally { Remove-Item -LiteralPath $bodyFile -ErrorAction SilentlyContinue }
     }
 }
 
