@@ -2478,7 +2478,11 @@ PY
         "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,opus-4-6,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
     assert_eq "$line2" \
         "bypass=bypass|off=|provider=autoos-omniroute|model=t1-orchestrator|allow=allow|ctx=context7,graphify,omnigraph,playwright,serena"
-    assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
+    assert_eq "leaks=$leaks" "leaks=0"
+    # Two runs share second-precision backup names: same second -> 1 file,
+    # straddling a boundary -> 2. Either proves backup-before-edit; an exact
+    # count would flake on wall-clock timing.
+    if (( backups >= 1 )); then pass; else fail "no backup written"; fi
 fi
 
 if it "zed routing without key env warns and stays key-free"; then

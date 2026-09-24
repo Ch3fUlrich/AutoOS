@@ -231,7 +231,7 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
-        "antigravity/gemini-3.7-flash-medium",
+        "antigravity/gemini-3.7-flash-high",
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b",

@@ -60,7 +60,7 @@ boot, curated combos to work.
 | `spark-1.3-contributor` | same two legs as t1 | pinned single-model route | **keep** (identical legs; purpose-built name) |
 | `t1-orchestrator-clean` | `openrouter/meta/muse-spark-1.3-contributor` | paid-only 1M | **keep** |
 | `t1-orchestrator-free-only` | `opencode-zen/muse-spark-1.3-contributor-free` | zero spend 1M (zen promo only — the agy Opus leg stays out: 200k model in a 1M-declared combo would 400 instead of degrading) | **keep** |
-| `t2-worker` | `gemini/gemini-3.8-flash` → `antigravity/gemini-3.7-flash-medium` → `groq/openai/gpt-oss-120b` → `cerebras/gpt-oss-120b` → `sambanova/gpt-oss-120b` → `cheaperinference/deepseek-v4-flash` → `cheaperinference/glm-4.5-air` → `cheaperinference/kimi-k3` → `openrouter/deepseek/deepseek-v4.1-flash` → `deepseek/deepseek-flash` → `opencode-zen/deepseek-v4.1-flash` | smart-reasoning | **keep** (agy gemini added 2026-09-24, ack 1.6s) |
+| `t2-worker` | `gemini/gemini-3.8-flash` → `antigravity/gemini-3.7-flash-high` → `groq/openai/gpt-oss-120b` → `cerebras/gpt-oss-120b` → `sambanova/gpt-oss-120b` → `cheaperinference/deepseek-v4-flash` → `cheaperinference/glm-4.5-air` → `cheaperinference/kimi-k3` → `openrouter/deepseek/deepseek-v4.1-flash` → `deepseek/deepseek-flash` → `opencode-zen/deepseek-v4.1-flash` | smart-reasoning | **keep** (agy gemini-high added 2026-09-24, ack 3.6s — strongest variant where reasoning matters; medium stays in free-only so both proven variants serve) |
 | `t2-worker-clean` | `deepseek/deepseek-flash` → `openrouter/deepseek/deepseek-v4.1-flash` → `opencode-zen/deepseek-v4.1-flash` → `mistral/mistral-small-latest` | paid-only smart | **keep** |
 | `t2-worker-free-only` | `gemini/gemini-3.8-flash` → `antigravity/gemini-3.7-flash-medium` → `groq/openai/gpt-oss-120b` → `cerebras/gpt-oss-120b` → `sambanova/gpt-oss-120b` | zero spend smart | **keep** |
 | `t2-orchestrator` | `antigravity/claude-opus-4-6-thinking` → `cc/claude-opus-4-6` → `openrouter/deepseek/deepseek-v4.1-flash` | small-scope orchestration (200k) | **keep** (new 2026-09-24; frontier pair + cheap smart tail) |
@@ -130,7 +130,29 @@ Rule: a candidate enters a combo only after an authenticated leg-probe
 (`simulate --explain` then one real chat). Until then it stays in this
 table, not in `combos.json`.
 
-## E. Proposed free-provider additions (researched + probed 2026-09-23)
+## D2. CLI reachability (which CLI can address the combos, 2026-09-24)
+
+Combos live behind `:20128`; a CLI reaches them only if it points at the
+gateway. Verified live this session:
+
+| CLI | Points at gateway? | How | Reaches |
+|---|---|---|---|
+| opencode CLI/TUI | yes (repo `opencode.jsonc`) | native | all combos + `#effort` variants |
+| Qwen Code CLI | yes (`t2-worker` entry + `.env` key, headless ack proven) | `setup-qwen --model t2-worker` | all combos by switching `--model` |
+| Claude Code | yes (`ANTHROPIC_BASE_URL/AUTH_TOKEN` merged live) | `Set-AutoOSClaudeGateway` / `route_claude_to_gateway` | all combos |
+| Antigravity CLI | **no** (upstream `none`/`mitm`: cannot point at OmniRoute) | — | n/a (its models arrive via the `antigravity` gateway connection instead) |
+| Qoder CLI | n/a (needs binary on PATH + PAT; gateway `qoder` entry is dashboard-only) | `qodercli` component + dashboard | pending |
+| Devin CLI | n/a (binary installed 3000.11.3; `devin auth login` + dashboard connection pending) | catalog component | pending |
+| Gemini CLI | not installed (redundant: agy supersedes it, AI Studio key covers API legs) | `omniroute run gemini` if ever wanted | — |
+
+## E. Proposed free-provider additions (researched + probed 2026-09-23/24)
+
+Correction 2026-09-24: the local `agy models` list shows Gemini 3.8-flash,
+but the **gateway** `antigravity` connection exposes ONLY 3.7/3.1/GPT-OSS
+plus Opus/Sonnet 4.6 (17 refs, verified against authenticated
+`/v1/models` — zero `antigravity/*3.8*` refs). There is no
+`antigravity/gemini-3.8-flash-medium`; curation uses 3.7-high (ack 3.6s)
+where reasoning matters and 3.7-medium (ack 1.6s) in free-only.
 
 Live gateway state: 13 configured connections (cerebras, cheaperinference,
 cloudflare-ai, cohere, deepseek, gemini, groq, huggingface, mistral,
