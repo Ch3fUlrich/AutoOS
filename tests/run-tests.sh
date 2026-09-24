@@ -987,7 +987,7 @@ if it "opencode user config carries global gateway providers without secrets"; t
       unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
       curl() { return 6; }
       OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
-    report="$(python3 - "$scratch/.config/opencode/config.json" <<'PY'
+    report="$(python3 - 2>&1 "$scratch/.config/opencode/config.json" <<'PY'
 import io, json, re, sys
 d = json.load(io.open(sys.argv[1], encoding="utf-8-sig"))
 p = d.get("provider", {})
@@ -2316,6 +2316,29 @@ if it "server profile ticks the headless terminal stack"; then
         [[ " $defaults" == *" $c "* ]] || { ok=0; echo "missing: $c" >&2; }
     done
     if (( ok )); then pass; else fail "server profile is missing headless components"; fi
+fi
+
+if it "python heredoc checks capture stderr"; then
+    # Regression gate for the 2026-09-24 finding: a crashing python heredoc
+    # prints to stderr, which $() does not capture, so an empty-expected
+    # assert passed on empty stdout. Every heredoc opener feeding an
+    # assert_eq "" must carry 2>&1 on the command line (this test included).
+    bad="$(python3 - 2>&1 <<'PY'
+import re, io
+lines = io.open("tests/run-tests.sh", encoding="utf-8").read().splitlines()
+bare = []
+for i, l in enumerate(lines):
+    m = re.match(r"""\s*(\w+)="\$\(python3\b(.*)<<'PY'\s*$""", l)
+    if m and "2>&1" not in m.group(2):
+        var = m.group(1)
+        for j in range(i + 1, min(i + 60, len(lines))):
+            if re.match(r"""\s*assert_eq "\$%s" ""$""" % var, lines[j]):
+                bare.append(str(i + 1))
+                break
+print(" ".join(bare))
+PY
+)"
+    assert_eq "$bad" ""
 fi
 
 if it "zed requires the router on every platform"; then
