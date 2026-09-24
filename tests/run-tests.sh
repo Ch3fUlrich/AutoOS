@@ -1374,6 +1374,111 @@ fi
 # ─── Detection ──────────────────────────────────────────────────────────────
 describe "detection"
 
+if it "detects Debian-like distributions"; then
+    tmp="$(mktemp -d)"; mkdir -p "$tmp/etc"
+    cat >"$tmp/etc/os-release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 22.04 LTS"
+VERSION_ID="22.04"
+VERSION_CODENAME="jammy"
+ID_LIKE="debian"
+EOF
+    (
+        SYS_ROOT="$tmp"
+        uname() { echo "Linux"; }
+        detect_system
+        if [[ "$SYS_DISTRO_ID" == "ubuntu" && "$SYS_DISTRO_NAME" == "Ubuntu 22.04 LTS" && "$SYS_IS_DEBIAN_LIKE" -eq 1 ]]; then
+            true
+        else false; fi
+    ) && pass || fail "failed to detect ubuntu as debian-like"
+    rm -rf "$tmp"
+fi
+
+if it "detects WSL2 environment"; then
+    tmp="$(mktemp -d)"; mkdir -p "$tmp/proc/sys/kernel" "$tmp/run"
+    cat >"$tmp/proc/version" <<'EOF'
+Linux version 5.15.90.1-microsoft-standard-WSL2 (oe-user@oe-host) (x86_64-msft-linux-gcc (GCC) 9.3.0, GNU ld (GNU Binutils) 2.34.0.20200220) #1 SMP Fri Jan 27 02:56:13 UTC 2023
+EOF
+    cat >"$tmp/proc/sys/kernel/osrelease" <<'EOF'
+5.15.90.1-microsoft-standard-WSL2
+EOF
+    mkdir -p "$tmp/run/WSL"
+    (
+        SYS_ROOT="$tmp"
+        uname() { echo "Linux"; }
+        detect_system
+        if [[ "$SYS_IS_WSL" -eq 1 && "$SYS_WSL_VERSION" == "2" ]]; then
+            true
+        else false; fi
+    ) && pass || fail "failed to detect WSL2"
+    rm -rf "$tmp"
+fi
+
+if it "detects Raspberry Pi"; then
+    tmp="$(mktemp -d)"; mkdir -p "$tmp/proc/device-tree"
+    echo -n "Raspberry Pi 4 Model B Rev 1.2" > "$tmp/proc/device-tree/model"
+    (
+        SYS_ROOT="$tmp"
+        uname() { echo "Linux"; }
+        detect_system
+        if [[ "$SYS_IS_PI" -eq 1 ]]; then
+            true
+        else false; fi
+    ) && pass || fail "failed to detect Raspberry Pi"
+    rm -rf "$tmp"
+fi
+
+if it "detects Docker container"; then
+    tmp="$(mktemp -d)"
+    touch "$tmp/.dockerenv"
+    (
+        SYS_ROOT="$tmp"
+        uname() { echo "Linux"; }
+        detect_system
+        if [[ "$SYS_IS_CONTAINER" -eq 1 ]]; then
+            true
+        else false; fi
+    ) && pass || fail "failed to detect Docker container"
+    rm -rf "$tmp"
+fi
+
+if it "detects non-Debian distributions"; then
+    tmp="$(mktemp -d)"; mkdir -p "$tmp/etc"
+    cat >"$tmp/etc/os-release" <<'EOF'
+ID=alpine
+PRETTY_NAME="Alpine Linux v3.18"
+VERSION_ID="3.18.2"
+EOF
+    (
+        SYS_ROOT="$tmp"
+        uname() { echo "Linux"; }
+        ID=""
+        NAME=""
+        ID_LIKE=""
+        detect_system
+        if [[ "$SYS_DISTRO_ID" == "alpine" && "$SYS_DISTRO_NAME" == "Alpine Linux v3.18" && "$SYS_IS_DEBIAN_LIKE" -eq 0 ]]; then
+            true
+        else false; fi
+    ) && pass || fail "failed to correctly detect alpine as non-debian-like"
+    rm -rf "$tmp"
+fi
+
+if it "handles missing os-release gracefully"; then
+    tmp="$(mktemp -d)"
+    (
+        SYS_ROOT="$tmp"
+        uname() { echo "Linux"; }
+        ID=""
+        NAME=""
+        ID_LIKE=""
+        detect_system
+        if [[ "$SYS_DISTRO_ID" == "unknown" && "$SYS_DISTRO_NAME" == "unknown" && "$SYS_IS_DEBIAN_LIKE" -eq 0 ]]; then
+            true
+        else false; fi
+    ) && pass || fail "failed to gracefully handle missing os-release"
+    rm -rf "$tmp"
+fi
+
 if it "identifies the architecture"; then
     case "$SYS_ARCH" in x64|arm64|armhf) pass ;; *) fail "odd arch: $SYS_ARCH" ;; esac
 fi
