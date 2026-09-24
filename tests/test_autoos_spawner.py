@@ -12,7 +12,9 @@ import json
 import os
 import subprocess
 import sys
+import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -23,6 +25,7 @@ sys.path.insert(0, str(TOOLS))
 
 import autoos_routing as routing  # noqa: E402
 import autoos_clients as clients  # noqa: E402
+import autoos_agent_mcp as mcp_server  # noqa: E402
 
 
 def load_agent():
@@ -343,6 +346,143 @@ class PromoProbeTests(unittest.TestCase):
             clients.record_probe("qoder", now=1000.0, env=env)
             self.assertFalse(clients.probe_stale("qoder", now=1000.0 + 6 * 86400, env=env))
             self.assertTrue(clients.probe_stale("qoder", now=1000.0 + 8 * 86400, env=env))
+
+
+class McpToolTests(unittest.TestCase):
+    """The MCP tools as plain functions, every spawn a dry run, state in a temp dir."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("XDG_STATE_HOME", "AUTOOS_AGENT_MCP_DRY_RUN",
+                                                   "AUTOOS_AGENT_DEPTH", "AUTOOS_AGENT_MAX_DEPTH")}
+        os.environ.update(XDG_STATE_HOME=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        os.environ.pop("AUTOOS_AGENT_DEPTH", None)
+        os.environ.pop("AUTOOS_AGENT_MAX_DEPTH", None)
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def wait_done(self, run_id):
+        for _ in range(100):
+            st = mcp_server.status(run_id)
+            if st["state"] not in ("running", "starting"):
+                return st
+            time.sleep(0.1)
+        self.fail("run %s never finished" % run_id)
+
+    def test_list_clients_has_the_matrix_and_the_card(self):
+        out = mcp_server.list_clients()
+        self.assertEqual({c["name"] for c in out["clients"]}, set(clients.CLIENTS))
+        self.assertEqual(out["card"]["defaults"], routing.CARD_DEFAULTS)
+        self.assertIn("depth 1 of", out["depth"])
+
+    def test_spawn_returns_a_run_id_at_once_and_routes_through_select_combo(self):
+        out = mcp_server.spawn({"task": "t", "card": {"role": "review"}, "cwd": str(ROOT)})
+        self.assertNotIn("error", out)
+        self.assertEqual(out["route"]["combo"], "tier3")
+        self.assertEqual(out["route"]["routing_version"], routing.ROUTING_VERSION)
+        st = self.wait_done(out["id"])
+        self.assertEqual(st["state"], "done")
+        text = mcp_server.result(out["id"])["text"]
+        self.assertIn("would run: opencode run --standalone --agent tier3-reviewer", text)
+        self.assertIn("lean:", text)  # reviewers default to lean
+
+    def test_state_lives_under_xdg_state_autoos_agents(self):
+        out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+        self.assertEqual(out["dir"], os.path.join(self.tmp, "autoos", "agents", out["id"]))
+        self.wait_done(out["id"])
+        for name in ("job.json", "output.log", "exit.json"):
+            self.assertTrue(os.path.isfile(os.path.join(out["dir"], name)), name)
+
+    def test_refusals_come_back_synchronously(self):
+        self.assertIn("error", mcp_server.spawn({"task": "t", "card": {"privacy": "sensitive", "ctx": "1m"}}))
+        self.assertIn("error", mcp_server.spawn({"task": "t", "card": {"bogus": "x"}}))
+        self.assertIn("error", mcp_server.spawn({"task": "t", "client": "qoder", "card": {"privacy": "sensitive"}}))
+        self.assertIn("error", mcp_server.spawn({"task": ""}))
+        self.assertIn("error", mcp_server.spawn({"task": "t", "client": "nope"}))
+        self.assertEqual(mcp_server.status()["runs"], [])
+
+    def test_spawn_past_the_depth_budget_is_refused(self):
+        os.environ.update(AUTOOS_AGENT_DEPTH="2", AUTOOS_AGENT_MAX_DEPTH="2")
+        self.assertIn("depth", mcp_server.spawn({"task": "t"})["error"])
+
+    def test_status_lists_runs_and_unknown_ids_are_errors(self):
+        out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+        self.wait_done(out["id"])
+        self.assertEqual([r["id"] for r in mcp_server.status()["runs"]], [out["id"]])
+        self.assertIn("error", mcp_server.status("nope"))
+        self.assertIn("error", mcp_server.result("../etc"))
+
+    def test_cancel_of_a_finished_run_is_a_no_op(self):
+        out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+        self.wait_done(out["id"])
+        self.assertEqual(mcp_server.cancel(out["id"])["state"], "done")
+
+
+def uv_mcp_cmd():
+    """The registered server command, offline only: tests never download."""
+    uv = shutil.which("uv")
+    if not uv:
+        return None
+    cmd = [uv, "--quiet", "run", "--offline", "--no-project", "--with", "mcp<2", "python"]
+    probe = subprocess.run(cmd + ["-c", "import mcp"], capture_output=True, stdin=subprocess.DEVNULL)
+    return cmd if probe.returncode == 0 else None
+
+
+class McpStdioTests(unittest.TestCase):
+    """JSON-RPC over stdio against the real server (skipped when mcp is not in uv's cache)."""
+
+    def test_initialize_tools_list_and_a_dry_run_spawn(self):
+        cmd = uv_mcp_cmd()
+        if not cmd:
+            self.skipTest("uv or a cached mcp<2 is not available (offline)")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = clean_env(XDG_STATE_HOME=tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+            msgs = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                    "protocolVersion": "2024-11-05", "capabilities": {},
+                    "clientInfo": {"name": "autoos-test", "version": "0"}}},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+                    "name": "spawn", "arguments": {"task": "t", "card": {"role": "review"},
+                                                   "cwd": str(ROOT)}}},
+            ]
+            proc = subprocess.Popen(cmd + [str(TOOLS / "autoos_agent_mcp.py")], env=env, text=True,
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL)
+            replies = {}
+            try:
+                for m in msgs:
+                    proc.stdin.write(json.dumps(m) + "\n")
+                    proc.stdin.flush()
+                    if "id" in m:  # one request at a time: EOF would cut off a pending reply
+                        while m["id"] not in replies:
+                            line = proc.stdout.readline()
+                            self.assertTrue(line, "server closed stdout early")
+                            reply = json.loads(line)
+                            if "id" in reply:
+                                replies[reply["id"]] = reply
+            finally:
+                proc.stdin.close()
+                proc.wait(timeout=30)
+                proc.stdout.close()
+            self.assertEqual(replies[1]["result"]["serverInfo"]["name"], "autoos-agent")
+            names = {t["name"] for t in replies[2]["result"]["tools"]}
+            self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel"})
+            spawned = json.loads(replies[3]["result"]["content"][0]["text"])
+            self.assertEqual(spawned["route"]["combo"], "tier3")
+            run_dir = os.path.join(tmp, "autoos", "agents", spawned["id"])
+            self.assertTrue(os.path.isdir(run_dir))
+            for _ in range(100):  # let the detached dry run finish before tmp goes away
+                if os.path.exists(os.path.join(run_dir, "exit.json")):
+                    break
+                time.sleep(0.1)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,9 @@ TOP_LEVEL_KEYS = ("version", "rules", "fences", "mcp_servers", "roles")
 MANAGED_AGENT_KEYS = ("description", "mode", "model", "permission", "tools")
 
 
+SPAWNER = "autoos-agent"  # tools/autoos_agent_mcp.py: only spawning roles may list it
+
+
 def load_harness(path):
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
@@ -128,6 +131,8 @@ def validate(harness):
             for server in mcp:
                 if server not in servers:
                     problems.append("roles.%s.mcp references unknown server %s" % (name, server))
+            if role.get("spawn") is not True and SPAWNER in mcp:
+                problems.append("roles.%s cannot spawn but lists the %s MCP server" % (name, SPAWNER))
         if role.get("leaf") is True and role.get("spawn") is not False:
             problems.append("roles.%s is a leaf and must have spawn: false" % name)
         if role.get("spawn") is True:

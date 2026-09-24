@@ -2354,7 +2354,7 @@ ctx = cfg.get("context_servers", {})
 pinok = ",".join(sorted(
     "pin-ok" if h["mcp_servers"][n]["package"] in " ".join(ctx.get(n, {}).get("args", []))
     else "MISSING:" + n
-    for n in ("serena", "graphify", "omnigraph", "playwright", "context7")))
+    for n in ("serena", "graphify", "omnigraph", "playwright", "context7", "autoos-agent")))
 print("%s|%s|%s|%s|%s|%s|%s" % (
     cfg.get("theme"), omni.get("api_url"), ",".join(models),
     "api_key" in omni, lit.get("api_url"), "api_key" in lit, pinok))
@@ -2376,9 +2376,9 @@ PY
     line1="$(printf '%s' "$report" | sed -n '1p')"
     line2="$(printf '%s' "$report" | sed -n '2p')"
     assert_eq "$line1" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,tier2-credit,tier3-credit,rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,tier2-credit,tier3-credit,rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
     assert_eq "$line2" \
-        "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow|ctx=context7,graphify,omnigraph,playwright,serena"
+        "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow|ctx=autoos-agent,context7,graphify,omnigraph,playwright,serena"
     assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
 fi
 
@@ -2480,7 +2480,7 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/tier1|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,rag,spark-1.3-contributor,tier1,tier1-clean,tier2,tier2-clean,tier2-credit,tier3,tier3-clean,tier3-credit|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/tier1|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,rag,spark-1.3-contributor,tier1,tier1-clean,tier2,tier2-clean,tier2-credit,tier3,tier3-clean,tier3-credit|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then

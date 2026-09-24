@@ -1004,6 +1004,10 @@ function Install-AutoOSAgentSkills {
     } else {
         Write-AutoOSLine "no .mcp.json in $dest - nothing to pin omnigraph to." -Level warn
     }
+    # The agent spawner is declared in this repo's own .mcp.json.
+    if (Test-Path (Join-Path $script:RepoRoot '.mcp.json')) {
+        Enable-AutoOSProjectMcpServer -RepoPath $script:RepoRoot -Name 'autoos-agent'
+    }
 
     Set-AutoOSAntigravityMcp
 
@@ -2219,6 +2223,14 @@ mcp_cfg['playwright'] = {
     'args': ['-y', MCP_PACKAGES['playwright']],
     'description': 'Browser automation and end-to-end verification'
 }
+# The agent spawner: spawn/status/result/cancel for every agent client.
+mcp_cfg['autoos-agent'] = {
+    'transport': 'stdio',
+    'command': 'uv',
+    'args': ['--quiet', 'run', '--no-project', '--with', MCP_PACKAGES['autoos-agent'], 'python',
+             os.path.join(_repo_root_arg, 'tools', 'autoos_agent_mcp.py')],
+    'description': 'Spawn AutoOS agents (opencode, claude, qwen, gemini, codex, agy, qoder) by task card'
+}
 mcp_cfg['cao-ops'] = {
     'transport': 'stdio',
     'command': 'wsl',
@@ -2600,6 +2612,13 @@ function Set-AutoOSZedProxy {
         args = @('-y', (Get-AutoOSMcpPackage -Name 'context7'))
     }
     Add-Member -InputObject $settings.context_servers -NotePropertyName 'context7' -NotePropertyValue $context7Ctx -Force
+    # The agent spawner (tools\autoos_agent_mcp.py) from this checkout.
+    $spawnerCtx = [ordered]@{
+        command = 'uv'
+        args = @('--quiet', 'run', '--no-project', '--with', (Get-AutoOSMcpPackage -Name 'autoos-agent'), 'python',
+            (Join-Path $script:RepoRoot 'tools\autoos_agent_mcp.py'))
+    }
+    Add-Member -InputObject $settings.context_servers -NotePropertyName 'autoos-agent' -NotePropertyValue $spawnerCtx -Force
     # BOM-less UTF-8: Zed's parser (serde_json) rejects a leading BOM with
     # "expected value at line 1 column 1", and PowerShell 5.1 Out-File -Encoding
     # utf8 always emits one (measured 2026-09-22 — broke the live file).
