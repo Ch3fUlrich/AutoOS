@@ -48,26 +48,12 @@ if [[ ! -f "$ENV_FILE" ]]; then
     exit 1
 fi
 
-# ─── Parse KEY=VALUE literally ──────────────────────────────────────────────
-NAMES=()
-VALUES=()
-while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%$'\r'}"
-    trimmed="${line#"${line%%[![:space:]]*}"}"
-    [[ -z "$trimmed" || "$trimmed" == \#* || "$trimmed" != *=* ]] && continue
-    name="${trimmed%%=*}"
-    name="${name%"${name##*[![:space:]]}"}"
-    value="${trimmed#*=}"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    if [[ ${#value} -ge 2 ]]; then
-        if [[ "$value" == \"*\" || "$value" == \'*\' ]]; then value="${value:1:${#value}-2}"; fi
-    fi
-    [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    [[ -z "$value" || "$value" == REPLACE_WITH_* ]] && continue
-    NAMES+=("$name")
-    VALUES+=("$value")
-done <"$ENV_FILE"
+# ─── Parse KEY=VALUE literally (never sourced) ──────────────────────────────
+# shellcheck source=../env-file.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/env-file.sh"
+autoos_read_env_file "$ENV_FILE"
+NAMES=("${ENV_NAMES[@]}")
+VALUES=("${ENV_VALUES[@]}")
 if (( ${#NAMES[@]} == 0 )); then
     echo "Keys loaded into proxy env: (none - every entry is empty or a REPLACE_WITH_* placeholder)"
 else

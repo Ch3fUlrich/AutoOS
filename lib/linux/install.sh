@@ -2017,22 +2017,91 @@ autoos_skills_source() {
     return 0
 }
 
+# setup_opencode_config
+# Merges the AutoOS providers (omniroute + litellm tiers, ollama, meta), MCP
+# servers and harness into the user's GLOBAL OpenCode config, so tier routing
+# works in every cwd. Both files are merged in place, never replaced: V2
+# (@opencode/cli) reads opencode.json, V1 also config.json. Each file is read
+# JSONC-tolerantly (comments, trailing commas); one that still does not parse
+# is left untouched. A file is backed up only when this run changes it, so a
+# second run changes nothing. Keys are {env:NAME} references, never values.
 setup_opencode_config() {
     local config_dir="$SYS_HOME/.config/opencode"
-    local config_file="$config_dir/config.json"
 
     if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would configure OpenCode in $config_file"
+        ui_muted "would merge the AutoOS providers into $config_dir/opencode.json and config.json"
         ui_muted "would apply the agent harness (catalog/agent-harness.json)"
         return 0
     fi
 
     mkdir -p "$config_dir"
-    if [[ -f "$config_file" ]]; then
-        local ts
-        ts="$(date +%Y%m%d%H%M%S)"
-        cp "$config_file" "${config_file}.autoos-backup-${ts}"
+    if [[ -f "$config_dir/opencode.jsonc" ]]; then
+        ui_muted "$config_dir/opencode.jsonc is yours and stays as is; AutoOS merges into opencode.json"
     fi
+    local config_file snapshot merge_rc merged_first=0
+    for config_file in "$config_dir/config.json" "$config_dir/opencode.json"; do
+        # First V2 run on a V1 machine: opencode.json starts as a copy of the
+        # merged config.json, as the old writer's cp did - but never replaces
+        # an opencode.json that exists.
+        if [[ "$config_file" == */opencode.json && ! -e "$config_file" ]] && (( merged_first )); then
+            cp -p "$config_dir/config.json" "$config_file"
+        fi
+        snapshot=""
+        if [[ -f "$config_file" ]]; then
+            snapshot="$(mktemp)"
+            cp -p "$config_file" "$snapshot"
+        fi
+        merge_rc=0
+        _opencode_merge_config "$config_file" || merge_rc=$?
+        if (( merge_rc == 3 )); then
+            ui_warn "$config_file is not valid JSON or JSONC - left alone (fix it, then re-run)"
+            [[ -n "$snapshot" ]] && rm -f "$snapshot"
+            continue
+        elif (( merge_rc != 0 )); then
+            ui_warn "OpenCode configuration not written to $config_file (exit $merge_rc)"
+            [[ -n "$snapshot" ]] && rm -f "$snapshot"
+            continue
+        fi
+
+        # Merge the shared agent harness (roles, skills link) after the config
+        # is written. Judge by exit code only; the generator's notes are muted.
+        if has_cmd python3; then
+            local harness_out harness_rc skills_source
+            skills_source="$(autoos_skills_source)"
+            [[ -n "$skills_source" ]] || skills_source="$SYS_HOME/Documents/Code/agent-skills/skills"
+            harness_rc=0
+            harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
+            if (( harness_rc != 0 )); then
+                ui_warn "agent harness not applied to OpenCode (exit $harness_rc)"
+            else
+                while IFS= read -r _harness_line; do
+                    [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
+                done <<< "$harness_out"
+            fi
+        else
+            ui_warn "agent harness not applied: python3 not found"
+        fi
+
+        [[ "$config_file" == */config.json ]] && merged_first=1
+        if [[ -z "$snapshot" ]]; then
+            ui_ok "OpenCode configuration written to $config_file"
+        elif cmp -s "$snapshot" "$config_file"; then
+            rm -f "$snapshot"
+            ui_muted "$config_file already current"
+        else
+            local backup
+            backup="${config_file}.autoos-backup-$(date +%Y%m%d%H%M%S)"
+            mv "$snapshot" "$backup"
+            ui_ok "OpenCode configuration merged into $config_file (backup: $backup)"
+        fi
+    done
+    return 0
+}
+
+# _opencode_merge_config <file>: the provider/MCP merge for one file.
+# Exit 3 = the existing file does not parse (left untouched).
+_opencode_merge_config() {
+    local config_file="$1"
 
     local secrets_file="$SYS_HOME/Documents/Code/agent-skills/secrets/api_keys.conf"
     [[ -f "$secrets_file" ]] || secrets_file="$SYS_HOME/Documents/code/agent-skills/secrets/api_keys.conf"
@@ -2081,13 +2150,42 @@ def _openrouter_models():
         out[m['openrouter_id']] = entry
     return out
 
+def _strip_jsonc(text):
+    # Drop // and /* */ comments outside strings, then trailing commas.
+    out, i, n, in_str = [], 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == '\\\\' and i + 1 < n:
+                out.append(text[i + 1]); i += 2; continue
+            if c == '\"':
+                in_str = False
+            i += 1; continue
+        if c == '\"':
+            in_str = True; out.append(c); i += 1; continue
+        if text.startswith('//', i):
+            j = text.find('\\n', i)
+            i = n if j < 0 else j; continue
+        if text.startswith('/*', i):
+            j = text.find('*/', i + 2)
+            i = n if j < 0 else j + 2; continue
+        out.append(c); i += 1
+    import re as _re
+    return _re.sub(r',(\\s*[}\\]])', r'\\1', ''.join(out))
+
 data = {}
 if os.path.isfile(config_path):
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    except Exception:
-        data = {}
+    with open(config_path, 'r', encoding='utf-8-sig') as f:
+        _raw = f.read()
+    if _raw.strip():
+        try:
+            data = json.loads(_strip_jsonc(_raw))
+        except Exception:
+            # Never start from {}: that would replace the user's whole config.
+            sys.exit(3)
+        if not isinstance(data, dict):
+            sys.exit(3)
 
 def _read_secrets_into(path, secrets):
     try:
@@ -2200,7 +2298,9 @@ if openrouter_key:
         'name': 'OpenRouter',
         'options': {
             'baseURL': 'https://openrouter.ai/api/v1',
-            'apiKey': openrouter_key
+            # A reference, never the value: the key stays in the environment
+            # (configuration/litellm/.env for the served UI).
+            'apiKey': '{env:OPENROUTER_API_KEY}'
         },
         'models': _openrouter_models()
     }
@@ -2259,29 +2359,6 @@ with open(tmp_file, 'w', encoding='utf-8') as f:
     json.dump(data, f, indent=2)
 os.replace(tmp_file, config_path)
 " "$config_file" "$secrets_file" "$models_file"
-
-    ui_ok "OpenCode configuration written to $config_file"
-
-    # Merge the shared agent harness (roles, skills link) after the config is
-    # written. Judge by exit code only; the generator's own notes are muted.
-    if has_cmd python3; then
-        local harness_out harness_rc skills_source
-        skills_source="$(autoos_skills_source)"
-        [[ -n "$skills_source" ]] || skills_source="$SYS_HOME/Documents/Code/agent-skills/skills"
-        harness_rc=0
-        harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
-        if (( harness_rc != 0 )); then
-            ui_warn "agent harness not applied to OpenCode (exit $harness_rc)"
-        else
-            while IFS= read -r _harness_line; do
-                [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
-            done <<< "$harness_out"
-        fi
-    else
-        ui_warn "agent harness not applied: python3 not found"
-    fi
-
-    cp "$config_file" "$config_dir/opencode.json"
 }
 
 setup_openhands_config() {

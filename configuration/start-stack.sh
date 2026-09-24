@@ -132,20 +132,29 @@ PY
         ;;
     opencode-serve)
         # Phone fallback UI (docs/openhands-runbook.md rung 2): resume when
-        # down, no-op when up. 401 without pairing credentials = alive.
+        # down, no-op when up. The wrapper pins the Basic-auth password
+        # (user "opencode", ~/.config/autoos/opencode-serve.password) and
+        # exports the {env:...} keys the global opencode config references.
+        _ss_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
         if curl -s -m 5 -o /dev/null "http://127.0.0.1:4096/" 2>/dev/null; then
             echo "opencode serve already up on :4096 - nothing to do."
         elif ! command -v opencode >/dev/null; then
             echo "opencode is not installed. Run: ./setup.sh --only opencode-cli --yes"
             exit 1
         else
-            echo "Starting opencode serve in the background..."
-            nohup opencode serve --hostname 0.0.0.0 --port 4096 >/tmp/opencode-serve.log 2>&1 &
+            if systemctl --user cat autoos-opencode.service >/dev/null 2>&1; then
+                echo "Starting the autoos-opencode unit..."
+                systemctl --user start autoos-opencode.service
+            else
+                "$_ss_root/configuration/autostart/run-opencode-serve.sh" --detach
+            fi
             for _ in $(seq 1 24); do
                 curl -s -m 5 -o /dev/null "http://127.0.0.1:4096/" 2>/dev/null && break
                 sleep 5
             done
-            echo "opencode serve should answer on http://localhost:4096 (401 = alive, pair via: opencode pair)."
+            curl -s -m 5 -o /dev/null "http://127.0.0.1:4096/" 2>/dev/null \
+                || { echo "opencode serve did not answer on :4096 - see ~/.local/state/autoos/opencode-serve.log"; exit 1; }
+            echo "opencode serve up on http://localhost:4096 (user: opencode, password in ~/.config/autoos/opencode-serve.password)."
         fi
         ;;
 esac

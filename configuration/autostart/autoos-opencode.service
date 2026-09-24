@@ -1,0 +1,23 @@
+# AutoOS: `opencode serve` (V2 web UI + API) as a systemd --user service
+# (template). Rendered and installed by register-autostart.sh, which fills in
+# this checkout's path and the machine's PATH. Opt-in only.
+#
+# Listens on 0.0.0.0:4096 because the LAN reverse proxy is another host. Its
+# own auth: HTTP Basic on /api/* (user "opencode"); the wrapper pins the
+# password in ~/.config/autoos/opencode-serve.password and exports the
+# {env:...} keys the global opencode config references.
+[Unit]
+Description=AutoOS opencode serve (web UI :4096, password protected)
+After=network-online.target autoos-omniroute.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=PATH=@PATH@
+ExecStart=@REPO@/configuration/autostart/run-opencode-serve.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

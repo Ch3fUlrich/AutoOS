@@ -1012,10 +1012,12 @@ if re.search(r"sk-[A-Za-z0-9]{10,}", raw):
 print(" ".join(problems))
 PY
 )"
+    # The second run changes nothing, so it backs up nothing (a backup is
+    # taken only when a run actually changes the file).
     backups="$(ls "$scratch"/.config/opencode/config.json.autoos-backup-* 2>/dev/null | wc -l)"
     rm -rf "$scratch"
     assert_eq "$report" ""
-    assert_eq "$backups" "1"
+    assert_eq "$backups" "0"
     fi
 fi
 
@@ -6191,6 +6193,154 @@ if it "svc: register-autostart --unregister removes only units AutoOS wrote"; th
     grep -q 'disable --now autoos-omniroute.service' "$d/systemctl.log" || { ok=0; echo "not disabled" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "unregister is wrong"; fi
+fi
+
+if it "svc: opencode-cli (V2) writes the global provider config after install"; then
+    report="$(python3 - <<'PY'
+import json, io
+want = {"catalog/linux.json": "setup_opencode_config",
+        "catalog/macos.json": "setup_opencode_config",
+        "catalog/windows.json": "Set-AutoOSOpenCodeConfig"}
+bad = []
+for f, fn in want.items():
+    d = json.load(io.open(f, encoding="utf-8-sig"))
+    comps = [c for cat in d["categories"] for c in cat["components"] if c["id"] == "opencode-cli"]
+    if not comps or comps[0].get("postInstall") != fn:
+        bad.append(f)
+print(" ".join(bad))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
+# The user's own config may be JSONC (comments, trailing commas). json.load
+# used to fail on it and the writer then started from {} - every provider,
+# MCP server and setting the user had was replaced wholesale.
+if it "svc: the opencode writer merges into a JSONC config and never writes a key value"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/opencode"
+    cat >"$scratch/.config/opencode/config.json" <<'JSONC'
+{
+  // the user's own theme and provider
+  "theme": "nord",
+  /* block comment */
+  "provider": {
+    "mine": {"options": {"baseURL": "http://example.invalid/v1"}},
+  },
+}
+JSONC
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY CONTEXT7_API_KEY
+      export OPENROUTER_API_KEY="sk-or-v1-notarealkeyatall0123456789"
+      curl() { return 6; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    report="$(python3 - "$scratch/.config/opencode" <<'PY'
+import io, json, os, sys
+d = sys.argv[1]
+problems = []
+for name in ("config.json", "opencode.json"):
+    p = os.path.join(d, name)
+    if not os.path.isfile(p):
+        problems.append("missing:" + name); continue
+    raw = io.open(p, encoding="utf-8").read()
+    doc = json.loads(raw)
+    if doc.get("theme") != "nord": problems.append(name + ":theme-lost")
+    if "mine" not in doc.get("provider", {}): problems.append(name + ":provider-lost")
+    if "omniroute" not in doc.get("provider", {}): problems.append(name + ":no-omniroute")
+    if "notarealkey" in raw: problems.append(name + ":plaintext-key")
+    orr = doc.get("provider", {}).get("openrouter", {}).get("options", {}).get("apiKey")
+    if orr != "{env:OPENROUTER_API_KEY}": problems.append(name + ":openrouter=%s" % orr)
+print(" ".join(problems))
+PY
+)"
+    rm -rf "$scratch"
+    assert_eq "$report" ""
+    fi
+fi
+
+if it "svc: the opencode writer leaves an unparseable config alone"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/opencode"
+    printf '{ "theme": "nord", BROKEN\n' >"$scratch/.config/opencode/config.json"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; curl() { return 6; }
+      setup_opencode_config >/dev/null 2>&1 )
+    got="$(cat "$scratch/.config/opencode/config.json")"
+    rm -rf "$scratch"
+    assert_eq "$got" '{ "theme": "nord", BROKEN'
+    fi
+fi
+
+if it "svc: opencode.json is backed up before it changes and untouched on a re-run"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/opencode"
+    printf '{"theme": "gruvbox"}\n' >"$scratch/.config/opencode/opencode.json"
+    for _ in 1 2; do
+        ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    done
+    n="$(compgen -G "$scratch/.config/opencode/opencode.json.autoos-backup-*" | wc -l)"
+    rm -rf "$scratch"
+    assert_eq "$n" "1"
+    fi
+fi
+
+# opencode serve (V2) answers the static UI to anyone and guards /api/* with
+# HTTP Basic (user "opencode", password from OPENCODE_PASSWORD; measured on
+# 2.0.16). Without the variable it invents a random password per start, so
+# the phone could never log in twice. The wrapper pins one, in a 0600 file.
+if it "svc: run-opencode-serve binds the LAN port with a pinned password and keys by name"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/lit"
+    printf 'LITELLM_MASTER_KEY=sk-litellm-fake-000\nOPENROUTER_API_KEY=REPLACE_WITH_X\n' >"$d/lit/.env"
+    printf 'omniroute: sk-omni-fake-111\n' >"$d/keys.yml"
+    out="$(env -u AUTOOS_OMNIROUTE_KEY AUTOOS_LITELLM_DIR="$d/lit" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/pw" \
+        bash "$ROOT/configuration/autostart/run-opencode-serve.sh" --dry-run 2>&1)"
+    ok=1
+    [[ "$out" == *"opencode serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "bind: $out" >&2; }
+    [[ "$out" == *"LITELLM_MASTER_KEY"* && "$out" == *"AUTOOS_OMNIROUTE_KEY"* ]] || { ok=0; echo "keys: $out" >&2; }
+    [[ "$out" == *"OPENROUTER_API_KEY"* ]] && { ok=0; echo "placeholder loaded" >&2; }
+    [[ "$out" == *"fake-000"* || "$out" == *"fake-111"* ]] && { ok=0; echo "a value was printed" >&2; }
+    [[ "$out" == *"would generate"*"$d/pw"* ]] || { ok=0; echo "password plan: $out" >&2; }
+    [[ -e "$d/pw" ]] && { ok=0; echo "dry run wrote the password file" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "run-opencode-serve plan is wrong"; fi
+fi
+
+if it "svc: run-opencode-serve generates the password once, private, and reuses it"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin"
+    # A fake opencode that reports whether it received a password.
+    printf '#!/bin/sh\n[ -n "$OPENCODE_PASSWORD" ] && echo "pw-set $*" || echo "pw-missing $*"\n' >"$d/bin/opencode"
+    chmod +x "$d/bin/opencode"
+    run() { PATH="$d/bin:$PATH" AUTOOS_LITELLM_DIR="$d/none" AUTOOS_KEYS_FILE="$d/none.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/cfg/pw" bash "$ROOT/configuration/autostart/run-opencode-serve.sh" 2>&1; }
+    first="$(run)"; pw1="$(cat "$d/cfg/pw" 2>/dev/null)"
+    second="$(run)"; pw2="$(cat "$d/cfg/pw" 2>/dev/null)"
+    mode="$(stat -c %a "$d/cfg/pw" 2>/dev/null)"
+    ok=1
+    [[ "$first" == *"pw-set serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ ${#pw1} -ge 24 && "$pw1" == "$pw2" ]] || { ok=0; echo "password not stable" >&2; }
+    [[ "$mode" == 600 ]] || { ok=0; echo "mode $mode" >&2; }
+    [[ "$first$second" == *"$pw1"* ]] && { ok=0; echo "password printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "password handling is wrong"; fi
+fi
+
+if it "svc: the opencode unit runs the wrapper from this checkout"; then
+    d="$(_svc_reg_sandbox)"
+    out="$(_svc_reg "$d" --render autoos-opencode)"
+    ok=1
+    [[ "$out" == *"ExecStart=$ROOT/configuration/autostart/run-opencode-serve.sh"* ]] || { ok=0; echo "$out" >&2; }
+    [[ "$out" == *"Environment=PATH=$d/bin:"* ]] || { ok=0; echo "PATH" >&2; }
+    [[ "$out" == *"@"*"@"* ]] && { ok=0; echo "unfilled placeholder" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "opencode unit render is wrong"; fi
 fi
 
 # ─── shellcheck (optional) ──────────────────────────────────────────────────
