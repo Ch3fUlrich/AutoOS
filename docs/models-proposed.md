@@ -123,7 +123,7 @@ muse-code, opencode-zen, openrouter, sambanova) + 2 added this session
 but unreferenced — delete it with `omniroute providers remove muse-code`
 once no combo needs it (all green today).
 
-### Probed 2026-09-23 (commands + outcomes)
+### Probed 2026-09-23/24 (commands + outcomes)
 
 - `omniroute providers add zcode/opencode --no-credential --yes` → both
   connections created. `providers test` FAILS both ("no API key
@@ -131,6 +131,17 @@ once no combo needs it (all green today).
   the `noauth` tag; `opencode` (OpenCode Free pool) likewise fails the
   key check. `omniroute models zcode|qoder|claude` → "No models found"
   (catalog populates per-connection only after auth).
+- **Z.AI wired 2026-09-24**: `z_ai` key already in `api-keys.yml` was inert
+  (no registry entry → `apply.*` skipped it, no combo could reference it).
+  Added `z_ai → zai` to `catalog/providers.json` (+ example + docs table —
+  registry-driven, so apply/mirror/sync pick it up with no other edits).
+  `providers add zai --credential-env` → connection created; `providers
+  test zai` → "Provider test not supported" (no test probe for this
+  provider — NOT a credential failure, key was accepted). `models zai` →
+  7 GLM models: 5.3, 5.2, 5.1, 5, 5 Turbo, 4.7 Flash, 4.7. The `models`
+  command shows display names only (verified: gemini shows "Gemini 2.5
+  Flash" too), so exact combo refs + one chat probe per leg still needed
+  before curating (phantom-leg rule).
 - `devin-cli-agentic` / alias `dva` → `providers add` rejects both
   ("Invalid provider" / "Invalid request"): the Devin bridge onboards via
   dashboard/OAuth, not CLI add. Unblocked, not installable from here.
@@ -175,6 +186,7 @@ once no combo needs it (all green today).
 | GitHub Copilot | `github`/`copilot` (oauth, device flow) | plan picker: GPT-5.5, GPT-5.3-Codex, Claude Sonnet/Opus 5, Gemini 3.8 Flash, Kimi K3 (docs 2026-09) | CLOSED 2026-09-23: M365-only, no GitHub seat | — |
 | Devin CLI Agentic Bridge | `devin-cli-agentic` (noauth) | Opus 4.7 High (per dashboard) | t1 candidate — highest ceiling if it probes OK | CLI add rejected; onboard via dashboard, then I probe legs |
 | ZCode GLM Coding Plan | `zcode` (noauth tag, key needed in practice) | GLM 5.3 Max | t2/t3 GLM overflow | a ZCode/GLM plan credential (connection added, test FAILS without it) |
+| Z.AI (API key) | `zai` — wired 2026-09-24 (`z_ai` registry entry; connection added, key accepted) | GLM 5.3, 5.2, 5.1, 5, 5 Turbo, 4.7 Flash, 4.7 (`models zai`) | t2/t3 GLM overflow (replaces the blocked zcode row if legs probe) | exact combo refs + one chat probe per leg (display names ≠ refs); then curate |
 | OpenCode Free | `opencode` (noauth pool) | rotating free set | auto/* replacement or t3 tail | connection added, test FAILS key check — needs a live chat probe with client key to prove the pool serves |
 | Kilo/Codex/Cursor | `kilocode`/`codex`/`cursor-cli` | subscription models | only with those subscriptions | tell me which you hold |
 

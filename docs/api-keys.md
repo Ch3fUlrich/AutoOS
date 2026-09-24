@@ -45,6 +45,7 @@ registry that `apply`, `tools/mirror-litellm-env.py` and
 | `cloudflare_workers_ai` | `cloudflare-ai` | needs your **Account ID** in the dashboard before it can serve |
 | `cohere` | `cohere` | |
 | `hugging_face` | `huggingface` | |
+| `z_ai` | `zai` | Z.AI (GLM family, wired 2026-09-24); legs curated only after a live leg-probe |
 | `cerebras` | `cerebras` | Cloudflare-fronted: `customUserAgent` (as groq) |
 | `SambaNova` | `sambanova` | |
 | `deepseek` | `deepseek` | |
