@@ -195,6 +195,8 @@ def resolve_route(args, cfg: dict, client) -> dict:
     combo, reason = routing.select_combo(card, args.allow_training)
     tier = int(combo[4])
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
+    if override and model:  # an explicit --model wins over the card's combo, and says so
+        combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["role"] == "review"}
 

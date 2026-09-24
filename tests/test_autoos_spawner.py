@@ -279,6 +279,37 @@ class ClientCommandTests(unittest.TestCase):
             self.assertNotIn("never-print-this-key", r.stdout + r.stderr, client)
 
 
+class ReviewFindingTests(unittest.TestCase):
+    """Cross-family review (tier1, 2026-09-24) findings, pinned."""
+
+    def test_joinable_keeps_an_explicit_model(self):
+        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "--model", "opus", "t")
+        self.assertIn("--model opus", r.stdout)
+
+    def test_gateway_client_model_override_wins_over_the_card(self):
+        r = plan_of("--client", "qwen", "--card", "complexity=trivial", "--model", "omniroute/tier1", "t")
+        self.assertIn("omniroute run qwen --model tier1 ", r.stdout)
+
+    def test_mcp_max_depth_as_a_string_is_coerced_not_a_crash(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "max_depth": "2"})
+        self.assertIn("--max-depth", argv)
+        self.assertIn("error", mcp_server.spawn({"task": "t", "max_depth": "two"}))
+
+    def test_exit_record_is_written_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertTrue(mcp_server._write_exit(tmp, {"rc": 0}))
+            self.assertFalse(mcp_server._write_exit(tmp, {"cancelled": True, "rc": None}))
+            with open(os.path.join(tmp, "exit.json"), encoding="utf-8") as fh:
+                self.assertEqual(json.load(fh)["rc"], 0)
+
+    def test_finished_runners_are_reaped_and_forgotten(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        mcp_server._CHILDREN[proc.pid] = proc
+        proc.wait()
+        mcp_server._reap()
+        self.assertNotIn(proc.pid, mcp_server._CHILDREN)
+
+
 class DepthTests(unittest.TestCase):
     def test_child_gets_depth_plus_one_and_the_max(self):
         r = plan_of("--client", "qwen", "t", env=clean_env(AUTOOS_AGENT_DEPTH="1", AUTOOS_AGENT_MAX_DEPTH="3"))

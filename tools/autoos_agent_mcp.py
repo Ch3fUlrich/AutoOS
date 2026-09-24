@@ -115,6 +115,11 @@ def build_argv(req: dict) -> tuple:
         if client in ("opencode", "claude") and req.get("lean") is None and card["role"] == "review":
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
+    if req.get("max_depth") is not None:
+        try:
+            req = dict(req, max_depth=int(req["max_depth"]))  # JSON callers send "2"
+        except (TypeError, ValueError):
+            raise ValueError("max_depth must be an integer, got %r" % req["max_depth"])
     clients.child_depth(os.environ, req.get("max_depth"))  # raises DepthError past the budget
     for flag in ("allow_training", "isolate", "lean", "free", "clean", "joinable"):
         if req.get(flag):
@@ -136,7 +141,26 @@ def preflight(argv: list, cwd: str):
     return None if r.returncode == 0 else (r.stderr.strip() or r.stdout.strip() or "rc=%d" % r.returncode)
 
 
+def _reap() -> None:
+    """Collect finished runners so none lingers as a zombie, and forget them."""
+    for pid, proc in list(_CHILDREN.items()):
+        if proc.poll() is not None:
+            del _CHILDREN[pid]
+
+
+def _write_exit(path: str, data: dict) -> bool:
+    """Write exit.json exactly once: the runner and cancel race for it, first one wins."""
+    try:
+        fd = os.open(os.path.join(path, "exit.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    return True
+
+
 def spawn(req: dict) -> dict:
+    _reap()
     try:
         argv, route = build_argv(req)
     except (ValueError, clients.DepthError) as exc:
@@ -169,8 +193,7 @@ def run_job(path: str) -> int:
     with io.open(os.path.join(path, "output.log"), "ab") as out:
         rc = subprocess.call([sys.executable, AGENT] + job["argv"], cwd=job["cwd"],
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
-    if not os.path.exists(os.path.join(path, "exit.json")):  # cancel wrote it first
-        _write_json(os.path.join(path, "exit.json"), {"rc": rc, "ended": time.time()})
+    _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
     return rc
 
 
@@ -217,6 +240,7 @@ def _state(path: str) -> dict:
 
 
 def status(run_id: str | None = None) -> dict:
+    _reap()
     if run_id:
         try:
             return _state(_run_dir(run_id))
@@ -249,11 +273,13 @@ def cancel(run_id: str) -> dict:
         path = _run_dir(run_id)
     except ValueError as exc:
         return {"error": str(exc)}
+    _reap()
     st = _state(path)
     if st["state"] != "running":
         return dict(st, note="not running; nothing to cancel")
     job = _read_json(os.path.join(path, "job.json"))
-    _write_json(os.path.join(path, "exit.json"), {"cancelled": True, "rc": None, "ended": time.time()})
+    if not _write_exit(path, {"cancelled": True, "rc": None, "ended": time.time()}):
+        return dict(_state(path), note="finished before the cancel landed")
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(job["pid"])], capture_output=True)
     else:

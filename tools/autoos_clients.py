@@ -70,7 +70,8 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
     mode = client.modes.get(level, [])
     if client.name == "claude":
         if joinable:
-            return ["claude", "--bg", "--remote-control", joinable, "--name", joinable] + mode + [task]
+            return (["claude", "--bg", "--remote-control", joinable, "--name", joinable] + mode +
+                    ([] if not model else ["--model", model]) + [task])
         return ["claude", "-p"] + mode + ([] if not model else ["--model", model]) + [task]
     if client.name == "codex":
         inner = ["exec"] + mode + ["--skip-git-repo-check", task]
