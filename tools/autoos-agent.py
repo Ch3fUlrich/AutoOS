@@ -36,6 +36,9 @@ session), qwen / gemini / codex through `omniroute run <target>` on the card's
 combo, agy and qoder on their own account login (no gateway; qoder is a promo
 and takes privacy=public work only).
 
+--lean (opencode, claude): no serena/playwright/context7 for research and
+review agents - about 0.7 GB less per agent (LEAN_DROP).
+
 Depth: each child gets AUTOOS_AGENT_DEPTH (parent + 1) and
 AUTOOS_AGENT_MAX_DEPTH (default 2, only ever lowered by --max-depth); a spawn
 past the max is refused with exit code 4.
@@ -88,6 +91,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "tier1-orchestrator", 2: "tier2-worker", 3: "tier3-reviewer"}
 GATEWAY = "http://127.0.0.1:20128"
 DEFAULT_FREE_MODEL = "opencode/big-pickle"
+# --lean drops these MCP servers. Measured 2026-09-24, one --free opencode run,
+# peak process-tree RSS: 1406 MB with every server, 678 MB with these off
+# (516 MB with graphify off too).
+# The graph lookups stay: research and review agents navigate with them.
+LEAN_DROP = ("serena", "playwright", "context7")
 
 
 def load_jsonc(path: str) -> dict:
@@ -118,6 +126,16 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
 
 def free_overlay(model: str) -> dict:
     return {"model": model, "agents": {a: {"model": model} for a in TIERS.values()}}
+
+
+def lean_overlay(cfg: dict) -> dict:
+    # opencode 2.x disables a server with `disabled: true` on a FULL entry:
+    # `enabled` is not a v2 field (stripped without a warning, the server
+    # still starts), and an entry without type/command is dropped as
+    # malformed. The overlay document is merged last, so it wins per server.
+    servers = (cfg.get("mcp") or {}).get("servers") or {}
+    return {"mcp": {"servers": {n: dict(servers[n], disabled=True)
+                                for n in LEAN_DROP if n in servers}}}
 
 
 def outside_fence(data_dir: str) -> list:
@@ -195,6 +213,8 @@ def build_plan(args, cfg: dict) -> dict:
             overlay.update(free_overlay(model))
         else:
             model = route["model"]
+        if args.lean:
+            overlay.update(lean_overlay(cfg))
         cmd = ["opencode", "run", "--standalone", "--agent", agent, "--model", model,
                "--title", title]
         if args.auto:
@@ -206,6 +226,8 @@ def build_plan(args, cfg: dict) -> dict:
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
+        if args.lean:  # claude only (cmd_run refuses the rest): no MCP servers at all
+            cmd[1:1] = ["--strict-mcp-config"]
         model = model or (route["combo"] if client.gateway else "(client default)")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     sandbox = None
@@ -288,6 +310,9 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse("--clean is for --tier; with a card say privacy=sensitive.")
     if args.free and client.name != "opencode":
         return refuse("--free is opencode's own free model; --client %s cannot use it." % client.name)
+    if args.lean and client.name not in ("opencode", "claude"):
+        return refuse("--lean is implemented for opencode and claude; %s would still start "
+                      "its MCP servers." % client.name)
     if args.joinable and client.name != "claude":
         return refuse("--joinable is a Claude Code --bg --remote-control session; only --client claude.")
     try:
@@ -307,6 +332,8 @@ def cmd_run(args, cfg: dict) -> int:
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
     print("depth: %d/%d" % plan["depth"])
+    if args.lean:
+        print("lean: no %s" % (", ".join(LEAN_DROP) if client.name == "opencode" else "MCP servers"))
     if plan["sandbox"] and client.name != "opencode":
         print("note: --isolate gives %s a private clone as its cwd; the outside-path fence is "
               "opencode-only." % client.name)
@@ -390,6 +417,8 @@ def main(argv=None) -> int:
                      help="run in a private git clone on its own branch; writes outside it are denied")
     run.add_argument("--no-auto", dest="auto", action="store_false",
                      help="ask before tools the config does not explicitly allow (default: --auto)")
+    run.add_argument("--lean", action="store_true",
+                     help="no heavy MCP servers (%s) - for research/review agents" % ", ".join(LEAN_DROP))
     run.add_argument("--title")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")

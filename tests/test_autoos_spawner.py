@@ -300,6 +300,41 @@ class DepthTests(unittest.TestCase):
             clients.child_depth({"AUTOOS_AGENT_DEPTH": "x"})
 
 
+class LeanTests(unittest.TestCase):
+    def test_lean_overlay_disables_heavy_servers_with_the_v2_key(self):
+        agent = load_agent()
+        cfg = agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+        servers = agent.lean_overlay(cfg)["mcp"]["servers"]
+        self.assertEqual(set(servers), set(agent.LEAN_DROP) & set(cfg["mcp"]["servers"]))
+        for name, entry in servers.items():
+            # opencode 2.x: `disabled: true` on a FULL entry. `enabled` is not a v2
+            # field (silently stripped) and a partial entry is dropped as malformed.
+            self.assertIs(entry["disabled"], True, name)
+            self.assertNotIn("enabled", entry, name)
+            self.assertEqual(entry["type"], cfg["mcp"]["servers"][name]["type"], name)
+            self.assertTrue(entry.get("command") or entry.get("url"), name)
+
+    def test_lean_keeps_the_graph_lookups(self):
+        agent = load_agent()
+        self.assertNotIn("omnigraph", agent.LEAN_DROP)
+        self.assertNotIn("graphify", agent.LEAN_DROP)
+        self.assertIn("serena", agent.LEAN_DROP)
+        self.assertIn("playwright", agent.LEAN_DROP)
+
+    def test_lean_opencode_plan_carries_the_overlay(self):
+        r = plan_of("--lean", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("OPENCODE_CONFIG_CONTENT", r.stdout)
+        self.assertIn("lean: no serena, playwright, context7", r.stdout)
+
+    def test_lean_claude_uses_a_strict_empty_mcp_config(self):
+        r = plan_of("--client", "claude", "--lean", "t")
+        self.assertIn("--strict-mcp-config", r.stdout)
+
+    def test_lean_is_refused_where_it_cannot_be_applied(self):
+        self.assertEqual(plan_of("--client", "qwen", "--lean", "t").returncode, 2)
+
+
 class PromoProbeTests(unittest.TestCase):
     def test_probe_is_stale_after_seven_days(self):
         with tempfile.TemporaryDirectory() as tmp:
