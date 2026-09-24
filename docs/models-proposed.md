@@ -63,6 +63,7 @@ boot, curated combos to work.
 | `t2-worker` | `gemini/gemini-3.8-flash` → `antigravity/gemini-3.7-flash-medium` → `groq/openai/gpt-oss-120b` → `cerebras/gpt-oss-120b` → `sambanova/gpt-oss-120b` → `cheaperinference/deepseek-v4-flash` → `cheaperinference/glm-4.5-air` → `cheaperinference/kimi-k3` → `openrouter/deepseek/deepseek-v4.1-flash` → `deepseek/deepseek-flash` → `opencode-zen/deepseek-v4.1-flash` | smart-reasoning | **keep** (agy gemini added 2026-09-24, ack 1.6s) |
 | `t2-worker-clean` | `deepseek/deepseek-flash` → `openrouter/deepseek/deepseek-v4.1-flash` → `opencode-zen/deepseek-v4.1-flash` → `mistral/mistral-small-latest` | paid-only smart | **keep** |
 | `t2-worker-free-only` | `gemini/gemini-3.8-flash` → `antigravity/gemini-3.7-flash-medium` → `groq/openai/gpt-oss-120b` → `cerebras/gpt-oss-120b` → `sambanova/gpt-oss-120b` | zero spend smart | **keep** |
+| `t2-orchestrator` | `antigravity/claude-opus-4-6-thinking` → `cc/claude-opus-4-6` → `openrouter/deepseek/deepseek-v4.1-flash` | small-scope orchestration (200k) | **keep** (new 2026-09-24; frontier pair + cheap smart tail) |
 | `t3-driver` | `mistral/mistral-code-latest` → `groq/qwen/qwen3.8-27b` → `cerebras/qwen-3.8-27b` → `cheaperinference/glm-4.5-air` → `cheaperinference/minimax-m2.7` → `mistral/mistral-small-latest` → `deepseek/deepseek-flash` → `opencode-zen/deepseek-v4.1-flash` | cheap driver (keyed-head: mistral-code first, free qwen 2nd/3rd) | **keep** |
 | `t3-driver-clean` | `deepseek/deepseek-flash` → `mistral/mistral-small-latest` → `opencode-zen/deepseek-v4.1-flash` | paid-only driver | **keep** |
 | `t3-driver-free-only` | `groq/qwen/qwen3.8-27b` → `cerebras/qwen-3.8-27b` | zero spend driver | **keep** |
@@ -81,6 +82,13 @@ only in the gateway's own store — no leg order in this repo, no drift gate:
 | `auto` | gateway built-in (verified 2026-09-24: **ack 1.3s**) | opencode default bootstrap | **keep as-is** (gateway built-in, nothing to curate) |
 | `auto/smart` | gateway built-in (verified 2026-09-24: **ack 4.5s**) | opencode bootstrap | **keep as-is** |
 | `auto/cheap` | gateway built-in (verified 2026-09-24: **ack 4.2s**) | opencode bootstrap | **keep as-is** |
+
+Retired ids (`tier1`, `tier2`, `tier3`, `rag`, `*-paid`, `*-credit`) were
+deleted from the live store 2026-09-24 (verified: store holds only the 13
+new ids + built-ins). `apply.*` only ever creates combos from
+`combos.json`, never deletes or re-adds — and both suites assert the exact
+combo name list plus an explicit retired-ids regression test, so a
+resurrection fails CI before it reaches any gateway.
 
 ## C. LiteLLM-only groups (no gateway combo — manual fallback only)
 
@@ -192,10 +200,10 @@ once no combo needs it (all green today).
 | Claude Code subscription | `claude` (oauth) — `providers auth claude-code --no-browser`, code-paste flow. Ref prefix is `cc/` | LIVE 2026-09-24. Refs: `cc/claude-opus-4-6[-high\|-medium\|-low]`, `cc/claude-opus-4-7`, `cc/claude-opus-5`, `cc/claude-sonnet-4-6`, `cc/claude-fable-5`, `cc/claude-haiku-4-5-20251001`. Probe: opus-4-6 → **429 quota reset 1h** (hops by design; overflow-only, not a head) | overflow leg in pinned `opus-4-6` ($0 marginal) | **done** |
 | Qoder | binary `qodercli` 1.1.62 ships in `~/.qoder/bin/qodercli` (runs) but is NOT on PATH — the dashboard error verbatim. PAT via `QODER_PERSONAL_ACCESS_TOKEN` (api-keys.yml `qoder_pat`; env wins over `/login` per Qoder docs). Gateway `qoder` entry is OAuth/dashboard-only (no CLI flow) | Qoder CLI headless/ACP use now; t2/t3 qwen overflow only after a dashboard gateway connection | PATH+PAT automated 2026-09-24 (`qodercli` catalog component: install-if-missing, PATH append, PAT export). Gateway connection via dashboard; then I list + probe |
 | GitHub Copilot | `github`/`copilot` (oauth, device flow) | plan picker: GPT-5.5, GPT-5.3-Codex, Claude Sonnet/Opus 5, Gemini 3.8 Flash, Kimi K3 (docs 2026-09) | CLOSED 2026-09-23: M365-only, no GitHub seat | — |
-| Devin CLI Agentic Bridge | `devin-cli-agentic` (noauth, alias `dva`) — needs the `devin` binary (`devin acp`); catalog component `devin-cli` added 2026-09-24 (winget `CognitionAI.DevinCLI` on Windows, vendor `install.sh` on Linux/macOS) | `dva/*` already in the live catalog (opus-4-7-max, glm-5-2, kimi-k3, ... — no connection needed to list) | t1 candidate (opus-4-7-max) + GLM overflow | install via catalog, then interactive `devin auth login`, then `providers add devin-cli --oauth` (`--dry-run` proven) or dashboard; then probe |
+| Devin CLI Agentic Bridge | `devin-cli-agentic` (noauth, alias `dva`) — needs the `devin` binary (`devin acp`); catalog component `devin-cli` added 2026-09-24 (winget `CognitionAI.DevinCLI` on Windows, vendor `install.sh` on Linux/macOS) | `dva/*` already in the live catalog (opus-4-7-max, glm-5-2, kimi-k3, ... — no connection needed to list) | t1 candidate (opus-4-7-max) + GLM overflow | install via catalog, then interactive `devin auth login`, then gateway connection via dashboard (`providers add devin-cli --oauth` answers Unknown — CLI OAuth allowlist holds 8 providers; `--dry-run` misleadingly passes) |
 | Devin API key | `devin` (cloud-agent) — wired 2026-09-24 (`devin` registry entry; connection added, key accepted) | NONE (`models devin` empty; broken upstream, issue #6142 — key accepted but no model sync) | — | blocked upstream; use the CLI path above |
 | ZCode GLM Coding Plan | `zcode` (noauth tag, key needed in practice) | GLM 5.3 Max (dashboard only) | t2/t3 GLM overflow | a ZCode/GLM plan credential (connection added, test FAILS without it); likely superseded by Z.AI below |
-| Z.AI (API key) | `zai` — wired 2026-09-24 (`z_ai` registry entry; connection added, key accepted) | Refs: `zai/glm-5.3`, `zai/glm-5.2`, `zai/glm-5.1`, `zai/glm-5`, `zai/glm-5-turbo`, `zai/glm-4.7`, `zai/glm-4.7-flash`. Probe: glm-5.3 → **429 insufficient balance** (key unfunded — no curation until topped up) | t2/t3 GLM overflow once funded | fund the Z.AI key; then re-probe + curate |
+| Z.AI (API key) | DROPPED 2026-09-24: key unfunded (429-insufficient-balance) and GLM needs are covered by cheaperinference + `oc/glm-*` pool legs. Connection removed (`providers remove zai`), registry/example/docs rows reverted — history kept here for re-adding when funded | — | — |
 | OpenCode Free | `opencode` (noauth pool) | Refs incl `oc/gemini-3.8-flash`, `oc/glm-5.3`, `oc/deepseek-v4-flash-free` | auto/* replacement or t3 tail | connection added, test FAILS key check — needs a live chat probe with client key to prove the pool serves |
 | Kilo/Codex/Cursor | `kilocode`/`codex`/`cursor-cli` | subscription models | only with those subscriptions | tell me which you hold |
 

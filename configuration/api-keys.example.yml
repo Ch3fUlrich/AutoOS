@@ -20,7 +20,6 @@ mistral: REPLACE_WITH_MISTRAL_KEY
 cloudflare_workers_ai: REPLACE_WITH_CLOUDFLARE_KEY
 cohere: REPLACE_WITH_COHERE_KEY
 hugging_face: REPLACE_WITH_HUGGINGFACE_KEY
-z_ai: REPLACE_WITH_ZAI_KEY
 
 # ── Paid partner gateway (own key, own billing — sits between free/paid) ──
 cheapinference: REPLACE_WITH_CHEAPINFERENCE_KEY

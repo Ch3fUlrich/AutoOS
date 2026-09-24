@@ -5,6 +5,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — router: t2-orchestrator combo, opus curation, free-only mirrors
+
+- **New `t2-orchestrator` combo** (200k, small-scope orchestration):
+  `antigravity/claude-opus-4-6-thinking` (OAuth free, ack-probed 3.4s) →
+  `cc/claude-opus-4-6` (subscription overflow) →
+  `openrouter/deepseek/deepseek-v4.1-flash` (cheap smart tail). Wired through
+  all four client surfaces (opencode, OpenHands profiles, Zed writers).
+- **New pinned `opus-4-6` combo** (agy thinking → cc opus). `t1-orchestrator`
+  stays spark-only by design; `t2-worker` gained the ack-probed
+  `antigravity/gemini-3.7-flash-medium` leg beside the gemini head.
+- **Free-only LiteLLM groups** (`t1/t2/t3-*-free-only`): hand-curated mirrors
+  minus gateway-only legs, no fallbacks entries (zero spend fails loudly).
+  A new suite test pins mirror-equality and the declared-drop set.
+- **CLI routing automation**: `Install-AutoOSOmniRouteRouting` /
+  `route_detected_clis_to_gateway` (omniroute postInstall) routes
+  pre-installed Claude Code + Qwen Code at the gateway; `Set-AutoOSApiKeyEnv`
+  exports `OMNIROUTE_API_KEY` / `QODER_PERSONAL_ACCESS_TOKEN` absent-only;
+  `Install-AutoOSQoderCli` fixes the "qodercli not recognized" dashboard
+  error (PATH append + PAT); `devin-cli` catalog entries (winget +
+  vendor script). Environment writes broadcast `WM_SETTINGCHANGE` so new
+  terminals see them without sign-out.
+
+### Removed — router: credit combos, retired ids, Z.AI
+
+- **`tier2-credit` / `tier3-credit` combos deleted** (breaker fast-skip +
+  cooldowns demote exhausted balances automatically).
+- **Retired `tier1/2/3`, `rag`, `*-paid`, `*-credit` ids deleted from the
+  live gateway store**; both suites assert the exact combo list plus an
+  explicit retired-ids regression test, and `apply.*` only ever creates.
+- **Z.AI dropped**: key unfunded (429-insufficient-balance), connection
+  removed, registry/example/docs rows reverted.
+
 ### Changed — documentation restructure
 
 - **README.md is a front page again** (391 → 130 lines): the setup commands,

@@ -45,7 +45,6 @@ registry that `apply`, `tools/mirror-litellm-env.py` and
 | `cloudflare_workers_ai` | `cloudflare-ai` | needs your **Account ID** in the dashboard before it can serve |
 | `cohere` | `cohere` | |
 | `hugging_face` | `huggingface` | |
-| `z_ai` | `zai` | Z.AI (GLM family, wired 2026-09-24); legs curated only after a live leg-probe |
 | `devin` | `devin` | Devin API key — connection registers, but the gateway lists no models (broken upstream, issue #6142); the working path is the Devin CLI binary + `devin auth login` → `devin-cli` OAuth connection |
 | `cerebras` | `cerebras` | Cloudflare-fronted: `customUserAgent` (as groq) |
 | `SambaNova` | `sambanova` | |

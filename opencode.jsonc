@@ -146,6 +146,11 @@
           "name": "t2 smart-reasoning-128k — zero spend (free legs only)",
           "limit": { "context": 131072, "output": 32768 }
         },
+        "t2-orchestrator": {
+          "modelID": "t2-orchestrator",
+          "name": "t2 orchestrator-200k — small-scope orchestration",
+          "limit": { "context": 200000, "output": 32768 }
+        },
         "t3-driver": {
           "modelID": "t3-driver",
           "name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",

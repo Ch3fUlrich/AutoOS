@@ -2766,6 +2766,7 @@ function Set-AutoOSZedProxy {
         @{ name = 't2-worker'; display_name = 't2 smart (free-first)'; max_tokens = 131072 },
         @{ name = 't2-worker-clean'; display_name = 't2-worker-clean (paid)'; max_tokens = 131072 },
         @{ name = 't2-worker-free-only'; display_name = 't2-worker-free-only (free legs only)'; max_tokens = 131072 },
+        @{ name = 't2-orchestrator'; display_name = 't2 orchestrator (small-scope)'; max_tokens = 200000 },
         @{ name = 't3-driver'; display_name = 't3 driver (cheapest)'; max_tokens = 131072 },
         @{ name = 't3-driver-clean'; display_name = 't3-driver-clean (paid)'; max_tokens = 131072 },
         @{ name = 't3-driver-free-only'; display_name = 't3-driver-free-only (free legs only)'; max_tokens = 131072 },

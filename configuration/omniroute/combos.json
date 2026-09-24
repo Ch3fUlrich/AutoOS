@@ -57,6 +57,11 @@
     "         design (see above) — Opus is addressable directly, not smuggled",
     "         into the orchestrator chain. Context 200k is the conservative",
     "         standard window; extended-1M unproven, do not claim it.",
+    "t2-orchestrator = small-scope orchestration (2026-09-24): frontier Opus",
+    "         pair first (agy free ack 3.4s, cc subscription overflow),",
+    "         deepseek flash as the cheap smart tail. 200k window (Opus",
+    "         constraint). For small parts; t1-orchestrator stays the 1M",
+    "         owner.",
     "t2-credit / t3-credit REMOVED 2026-09-23 (operator call): deliberate",
     "         credit-burn chains are redundant — breaker=2 fast-skip,",
     "         cooldowns and quota_exhausted-immediate-hop already demote dead",
@@ -259,6 +264,16 @@
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b"
+      ]
+    },
+    {
+      "name": "t2-orchestrator",
+      "strategy": "priority",
+      "context": "200k",
+      "models": [
+        "antigravity/claude-opus-4-6-thinking",
+        "cc/claude-opus-4-6",
+        "openrouter/deepseek/deepseek-v4.1-flash"
       ]
     },
     {

@@ -83,6 +83,13 @@
       "reasoning": false
     },
     {
+      "id": "omniroute-t2-orchestrator",
+      "model": "openai/t2-orchestrator",
+      "max_input_tokens": 200000,
+      "max_output_tokens": 32768,
+      "reasoning": true
+    },
+    {
       "id": "omniroute-t3-driver",
       "model": "openai/t3-driver",
       "max_input_tokens": 131072,

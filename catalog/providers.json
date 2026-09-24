@@ -135,20 +135,6 @@
       "api_base": null,
       "provider_data": null
     },
-    "devin": {
-      "omniroute_id": "devin",
-      "litellm_env": "DEVIN_API_KEY",
-      "litellm_prefix": null,
-      "api_base": null,
-      "provider_data": null
-    },
-    "z_ai": {
-      "omniroute_id": "zai",
-      "litellm_env": "ZAI_API_KEY",
-      "litellm_prefix": null,
-      "api_base": null,
-      "provider_data": null
-    },
     "omniroute": {
       "omniroute_id": null,
       "litellm_env": "AUTOOS_OMNIROUTE_KEY",

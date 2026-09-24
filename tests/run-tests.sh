@@ -632,7 +632,7 @@ print("%s|%s|%s|%s" % (
     ",".join(t["model"] for t in spec["tiers"])))
 PY
 )"
-    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-opus-4-6,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t1-orchestrator-free-only,litellm-t2-worker-free-only,litellm-t3-driver-free-only,openrouter-muse-spark-1.3-contributor|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t1-orchestrator-clean,openai/t1-orchestrator-free-only,openai/spark-1.3-contributor,openai/t2-worker,openai/t2-worker-clean,openai/t2-worker-free-only,openai/t3-driver,openai/t3-driver-clean,openai/t3-driver-free-only,openai/t4-rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/opus-4-6,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t1-orchestrator-free-only,openai/t2-worker-free-only,openai/t3-driver-free-only,openrouter/meta/muse-spark-1.3-contributor"
+    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t2-orchestrator,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-opus-4-6,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t1-orchestrator-free-only,litellm-t2-worker-free-only,litellm-t3-driver-free-only,openrouter-muse-spark-1.3-contributor|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t1-orchestrator-clean,openai/t1-orchestrator-free-only,openai/spark-1.3-contributor,openai/t2-worker,openai/t2-worker-clean,openai/t2-worker-free-only,openai/t2-orchestrator,openai/t3-driver,openai/t3-driver-clean,openai/t3-driver-free-only,openai/t4-rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/opus-4-6,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t1-orchestrator-free-only,openai/t2-worker-free-only,openai/t3-driver-free-only,openrouter/meta/muse-spark-1.3-contributor"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
     # Generator round-trip with fixture keys (env hidden: the suite never
@@ -654,7 +654,7 @@ else:
 PY
 )"
     rm -rf "$tmp"
-    assert_eq "$written" "21"
+    assert_eq "$written" "22"
     assert_eq "$direct" "test-or-key|https://openrouter.ai/api/v1|openrouter/meta/muse-spark-1.3-contributor"
 fi
 
@@ -2475,7 +2475,7 @@ PY
     line1="$(printf '%s' "$report" | sed -n '1p')"
     line2="$(printf '%s' "$report" | sed -n '2p')"
     assert_eq "$line1" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,opus-4-6,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,opus-4-6,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
     assert_eq "$line2" \
         "bypass=bypass|off=|provider=autoos-omniroute|model=t1-orchestrator|allow=allow|ctx=context7,graphify,omnigraph,playwright,serena"
     assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
@@ -2638,7 +2638,7 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
@@ -5780,8 +5780,11 @@ import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
+if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
     problems.append("names")
+for r in ("tier1", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean", "rag", "tier1-paid", "tier2-paid", "tier3-paid", "tier2-credit", "tier3-credit"):
+    if r in names:
+        problems.append("retired:" + r)
 for c in d["combos"]:
     if not c["models"]:
         problems.append(c["name"] + ":empty")

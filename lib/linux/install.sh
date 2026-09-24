@@ -1236,6 +1236,7 @@ tiers = [
     ("t2-worker", "t2 smart (free-first)", 131072, None),
     ("t2-worker-clean", "t2-worker-clean (paid)", 131072, None),
     ("t2-worker-free-only", "t2-worker-free-only (free legs only)", 131072, None),
+    ("t2-orchestrator", "t2 orchestrator (small-scope)", 200000, None),
     ("t3-driver", "t3 driver (cheapest)", 131072, None),
     ("t3-driver-clean", "t3-driver-clean (paid)", 131072, None),
     ("t3-driver-free-only", "t3-driver-free-only (free legs only)", 131072, None),
