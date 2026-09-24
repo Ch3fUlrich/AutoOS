@@ -196,9 +196,27 @@ def copy_local_settings(worktree: Path, repo: Path, *, mcpjson: list[str],
     return f"{dst} already approves the MCP servers"
 
 
+def _repo_graph_id(repo: Path) -> str:
+    """The graph id the repository pins, falling back to its folder name.
+
+    The folder name alone gets the case wrong: this checkout is `AutoOS` but its
+    cluster graph is `autoos`, and an agent pinned to a graph that does not exist
+    writes its memory where nobody will ever read it. `.mcp.json` is the pin the
+    repo ships to every client, so it is the source of truth here too.
+    """
+    try:
+        servers = json.loads((repo / ".mcp.json").read_text(encoding="utf-8")).get("mcpServers") or {}
+        pinned = (servers.get("omnigraph") or {}).get("env", {}).get("OMNIGRAPH_GRAPH_ID")
+        if isinstance(pinned, str) and pinned.strip():
+            return pinned.strip()
+    except (OSError, ValueError, AttributeError):
+        pass
+    return repo.name
+
+
 def configure_omnigraph_env(worktree: Path, repo: Path, check: bool = False) -> str:
-    """Ensure worktree .env defines OMNIGRAPH_GRAPH_ID matching the repository folder name."""
-    repo_folder = repo.name
+    """Ensure worktree .env defines OMNIGRAPH_GRAPH_ID matching the repository's pin."""
+    repo_folder = _repo_graph_id(repo)
     env_file = worktree / ".env"
     repo_env = repo / ".env"
 

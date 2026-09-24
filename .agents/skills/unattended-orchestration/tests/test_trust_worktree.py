@@ -63,3 +63,20 @@ def test_no_env_still_does_the_job_it_exists_for(sandbox):
     assert local["env"]["MCP_TIMEOUT"] == "120000", "the copied settings must carry the timeout"
     trusted = json.loads(Path(os.environ["CLAUDE_CONFIG_PATH"]).read_text(encoding="utf-8"))
     assert trusted["projects"][str(worktree)]["hasTrustDialogAccepted"] is True
+
+
+def test_the_graph_id_comes_from_the_repo_pin_not_the_folder_name(sandbox):
+    """A checkout folder named ``AutoOS`` pins the graph ``autoos``.
+
+    Deriving the id from the folder name wrote ``OMNIGRAPH_GRAPH_ID=AutoOS`` into every
+    worktree ``.env``, and no such graph exists on the cluster — so a lane's memory landed
+    somewhere the main checkout would never read. ``.mcp.json`` is the pin the repo already
+    ships to every client, so it wins over the folder name.
+    """
+    repo, worktree = sandbox
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"omnigraph": {
+        "env": {"OMNIGRAPH_GRAPH_ID": "autoos"}}}}), encoding="utf-8")
+    assert trust_worktree.main([str(worktree), "--repo", str(repo)]) == 0
+    text = (worktree / ".env").read_text(encoding="utf-8")
+    assert "OMNIGRAPH_GRAPH_ID=autoos" in text
+    assert "=repo" not in text, "the folder-name fallback must not win over the repo pin"
