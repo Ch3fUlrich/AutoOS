@@ -3376,8 +3376,12 @@ Test-Case 'autoos-agent plans tier runs without spawning or leaking a key' {
     finally { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
     Assert-True ($out -match 'git clone --local') 'isolation is not a clone'
     Assert-True ($out -notmatch 'worktree add|never-print-this-key') 'plan used a worktree or printed the key'
-    & $py.Source $tool run --tier 2 --free --clean --dry-run t *> $null
-    Assert-Equal $LASTEXITCODE 2
+    # The refusal goes to stderr; under Stop, Windows PowerShell turns native
+    # stderr into a terminating error (it failed CI on the windows runner).
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { & $py.Source $tool run --tier 2 --free --clean --dry-run t 2>&1 | Out-Null; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 2
 }
 
 Test-Case 'mirror-litellm-env projects keys without printing them' {

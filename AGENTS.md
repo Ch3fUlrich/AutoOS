@@ -186,6 +186,11 @@ only skips when neither that nor the binary is available. Install them where you
   `.thing[hidden]{display:none}`. This shipped twice in one afternoon: the section
   menu and the header progress bar.
 
+- **Windows PowerShell 5.1 turns a native command's stderr into a terminating error**
+  under `$ErrorActionPreference = 'Stop'` (`& python ... *> $null` included); PowerShell
+  7 does not. CI runs the Windows suite under 5.1, so a pwsh pass on Linux proves
+  nothing about it. Wrap such calls in a local `$ErrorActionPreference = 'Continue'`.
+
 ## 7. Definition of done
 
 Before you claim a change is complete:
@@ -196,5 +201,7 @@ Before you claim a change is complete:
 - [ ] Ran twice; the second run reports `skipped`, not `installed`
 - [ ] No secret, no binary, no absolute path containing a username in a tracked file
 - [ ] `README.md` updated if you changed a flag or an entry point
+- [ ] CI green on the branch **before** `main` moves: push the branch, run
+      `gh workflow run CI --ref <branch>`, and fast-forward `main` only after it passes
 
 Do not report work as done because the code looks right. Run it.
