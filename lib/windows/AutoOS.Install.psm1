@@ -2527,6 +2527,42 @@ function Set-AutoOSClaudeGateway {
     Write-AutoOSLine 'Subscription models need the gateway claude OAuth connection first (omniroute providers auth claude-code); until then use opus/sonnet via direct login (backup restores it)' -Level warn
 }
 
+function Set-AutoOSOmniRouteCliKey {
+    <#
+      .SYNOPSIS Export the OmniRoute client key for the omniroute CLI.
+      The oauth/setup/configure management commands need server auth
+      (OMNIROUTE_API_KEY); without it they 401. The value comes from the
+      `omniroute:` key in api-keys.yml and is never printed. Persistent User
+      scope so every new terminal inherits it; an existing value always wins
+      (user-managed, never overwritten). Localhost-only bearer key, same
+      sensitivity as the git-ignored api-keys.yml it is read from.
+    #>
+    param([string]$KeysFile, [string]$Scope = 'User')
+    if (-not $KeysFile) {
+        $KeysFile = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
+    }
+    $key = $null
+    if (Test-Path -LiteralPath $KeysFile) {
+        $line = Select-String -Path $KeysFile -Pattern '^omniroute\s*:' | Select-Object -First 1
+        if ($line) { $key = $line.Line.Split(':', 2)[1].Trim() }
+    }
+    if ([string]::IsNullOrWhiteSpace($key) -or $key.StartsWith('REPLACE_WITH_')) {
+        Write-AutoOSLine "no OmniRoute client key in $KeysFile - fill omniroute: first (docs/api-keys.md)" -Level warn
+        return
+    }
+    $existing = [Environment]::GetEnvironmentVariable('OMNIROUTE_API_KEY', $Scope)
+    if (-not [string]::IsNullOrWhiteSpace($existing)) {
+        Write-AutoOSLine "OMNIROUTE_API_KEY already set ($Scope scope) - skipped, user-managed" -Level ok
+        return
+    }
+    if ($script:DryRun) {
+        Write-AutoOSLine "would export OMNIROUTE_API_KEY to $Scope scope (value from $KeysFile, never shown)" -Level muted
+        return
+    }
+    [Environment]::SetEnvironmentVariable('OMNIROUTE_API_KEY', $key, $Scope)
+    Write-AutoOSLine "OMNIROUTE_API_KEY exported to $Scope scope - new terminals inherit it (remove with [Environment]::SetEnvironmentVariable('OMNIROUTE_API_KEY',\$null,'$Scope'))" -Level ok
+}
+
 function Set-AutoOSZedProxy {
     <#
       .SYNOPSIS Point Zed's agent panel at the local OmniRoute gateway + LiteLLM fallback.
@@ -2839,7 +2875,7 @@ Export-ModuleMember -Function `
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
-    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
+    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,

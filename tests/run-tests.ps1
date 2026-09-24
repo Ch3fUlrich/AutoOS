@@ -3570,7 +3570,7 @@ Test-Case 'opencode-cli is the headless fallback on light' {
 }
 
 Test-Case 'ai postInstall hooks are exported' {
-    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSZedProxy')) {
+    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSClaudeGateway', 'Set-AutoOSOmniRouteCliKey', 'Set-AutoOSZedProxy')) {
         Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn missing"
     }
     Pass
@@ -3633,6 +3633,29 @@ Test-Case 'Set-AutoOSClaudeGateway points Claude Code at OmniRoute' {
         if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
         else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
         Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSOmniRouteCliKey exports the client key once' {
+    $realVal = [Environment]::GetEnvironmentVariable('OMNIROUTE_API_KEY', 'Process')
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-omnikey-$PID.yml"
+    try {
+        'omniroute: test-client-key' | Out-File $tmp -Encoding utf8
+        Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue
+        Set-AutoOSOmniRouteCliKey -KeysFile $tmp -Scope Process
+        Assert-Equal $env:OMNIROUTE_API_KEY 'test-client-key'
+        'omniroute: rotated-key' | Out-File $tmp -Encoding utf8
+        Set-AutoOSOmniRouteCliKey -KeysFile $tmp -Scope Process
+        Assert-Equal $env:OMNIROUTE_API_KEY 'test-client-key'
+        Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item $tmp -Force
+        Set-AutoOSOmniRouteCliKey -KeysFile $tmp -Scope Process
+        Assert-True ([string]::IsNullOrEmpty($env:OMNIROUTE_API_KEY)) 'key written without a keys file'
+    } finally {
+        if ($null -eq $realVal) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:OMNIROUTE_API_KEY = $realVal }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
     Pass
 }

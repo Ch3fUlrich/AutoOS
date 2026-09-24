@@ -31,6 +31,10 @@ SambaNova: REPLACE_WITH_SAMBANOVA_KEY
 deepseek: REPLACE_WITH_DEEPSEEK_KEY
 meta: REPLACE_WITH_META_MODEL_API_KEY
 openrouter: REPLACE_WITH_OPENROUTER_KEY
+# Devin API key. Note: the gateway lists no models for the `devin` API-key
+# provider (broken upstream); the working path is the Devin CLI binary +
+# `devin auth login` → `devin-cli` OAuth connection (see docs/api-keys.md).
+devin: REPLACE_WITH_DEVIN_KEY
 
 # ── OpenCode Zen: free promo models + paid at-cost models ───────────────────
 zen: REPLACE_WITH_ZEN_KEY
