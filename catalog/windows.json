@@ -595,7 +595,7 @@
           "verify": "omniroute --version",
           "homepage": "https://github.com/diegosouzapw/OmniRoute",
           "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first.",
-          "postInstall": "Set-AutoOSOmniRouteCliKey"
+          "postInstall": "Install-AutoOSOmniRouteRouting"
         },
         {
           "id": "opencode-cli",

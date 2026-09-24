@@ -1145,6 +1145,65 @@ else:
 PY
 }
 
+route_detected_clis_to_gateway() {
+    # Setup-time routing for pre-installed CLIs (postInstall only fires on
+    # install, so without this step they would never point at the gateway).
+    # Each step skips quietly when its CLI is absent; dry runs announce.
+    # Keys bridge from the repo keys file when the env does not carry them
+    # (same file-first pattern as the openhands writer below; never printed).
+    # Without keys the claude step warns and the qwen step is skipped.
+    if [[ -z "${OMNIROUTE_API_KEY:-}" || -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
+        _keys_yml="${AUTOOS_KEYS_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/configuration/api-keys.yml}"
+        _file_key="$(python3 - "$_keys_yml" 2>/dev/null <<'PY'
+import sys
+try:
+    found = ""
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for line in fh:
+            t = line.strip()
+            if t.startswith("omniroute:") and "REPLACE" not in t:
+                found = t.split(":", 1)[1].strip().strip("\"'")
+                break
+    print(found)
+except Exception:
+    print("")
+PY
+)"
+        if [[ -z "${OMNIROUTE_API_KEY:-}" && -n "$_file_key" ]]; then
+            export OMNIROUTE_API_KEY="$_file_key"
+        fi
+        if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" && -n "$_file_key" ]]; then
+            AUTOOS_OMNIROUTE_KEY="$_file_key"
+        fi
+        unset _file_key
+    fi
+    if has_cmd claude; then
+        route_claude_to_gateway
+    else
+        ui_muted "Claude Code not installed - skipping gateway routing"
+    fi
+    if has_cmd qwen; then
+        if ! has_cmd omniroute; then
+            ui_warn "omniroute CLI not on PATH - cannot route Qwen Code"
+        elif [[ -z "${OMNIROUTE_API_KEY:-}" ]]; then
+            ui_warn "OMNIROUTE_API_KEY not set - export the OmniRoute client key before routing Qwen Code (docs/api-keys.md)"
+        elif (( AUTOOS_DRY_RUN )); then
+            ui_muted "would route Qwen Code at OmniRoute (model t2-worker)"
+        else
+            if [[ -f "$SYS_HOME/.qwen/settings.json" ]]; then
+                cp "$SYS_HOME/.qwen/settings.json" "$SYS_HOME/.qwen/settings.json.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+            fi
+            if ! omniroute setup-qwen --model t2-worker --yes >/dev/null 2>&1; then
+                ui_warn "Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)"
+            else
+                ui_ok "Qwen Code routed at OmniRoute (model t2-worker)"
+            fi
+        fi
+    else
+        ui_muted "Qwen Code not installed - skipping gateway routing"
+    fi
+}
+
 route_zed_to_proxy() {
     # Point Zed's agent panel at the local OmniRoute gateway (:20128) plus
     # the LiteLLM fallback (:4000). Only the provider ids
@@ -1181,6 +1240,7 @@ tiers = [
     ("t3-driver-clean", "t3-driver-clean (paid)", 131072, None),
     ("t3-driver-free-only", "t3-driver-free-only (free legs only)", 131072, None),
     ("spark-1.3-contributor", "spark pinned (zen free -> openrouter paid)", 1048576, None),
+    ("opus-4-6", "opus pinned (agy free -> cc subscription)", 200000, None),
     ("gemini-3.8-flash", "gemini-3.8-flash (gemini free -> paid)", 131072, None),
     ("deepseek-v4.1-flash", "deepseek-v4.1-flash (paid cheapest-first)", 131072, None),
     ("t4-rag", "t4-rag cohere RAG (trial keys)", 131072, None),
@@ -1211,8 +1271,11 @@ lit_models = [
      "max_tokens": mx}
     for n, _, mx, _ in [
         ("t1-orchestrator", None, 1048576, None), ("t1-orchestrator-paid", None, 1048576, None),
+        ("t1-orchestrator-free-only", None, 1048576, None),
         ("t2-worker", None, 131072, None), ("t2-worker-paid", None, 131072, None),
+        ("t2-worker-free-only", None, 131072, None),
         ("t3-driver", None, 131072, None), ("t3-driver-paid", None, 131072, None),
+        ("t3-driver-free-only", None, 131072, None),
     ]
 ]
 lit = {

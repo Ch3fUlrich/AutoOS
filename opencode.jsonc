@@ -166,6 +166,11 @@
           "name": "spark-1.3-contributor — zen free → openrouter paid (1M)",
           "limit": { "context": 1000000, "output": 32768 }
         },
+        "opus-4-6": {
+          "modelID": "opus-4-6",
+          "name": "opus-4-6 — agy free → cc subscription (200k)",
+          "limit": { "context": 200000, "output": 32768 }
+        },
         "t4-rag": {
           "modelID": "t4-rag",
           "name": "t4-rag cohere RAG — 128k ctx (trial keys)",
@@ -229,6 +234,10 @@
           "modelID": "t1-orchestrator-paid",
           "name": "t1-orchestrator-paid orchestrator (openrouter first)"
         },
+        "t1-orchestrator-free-only": {
+          "modelID": "t1-orchestrator-free-only",
+          "name": "t1-orchestrator-free-only orchestrator (zero spend)"
+        },
         "t2-worker": {
           "modelID": "t2-worker",
           "name": "t2-worker smart (free-first)"
@@ -237,6 +246,10 @@
           "modelID": "t2-worker-paid",
           "name": "t2-worker-paid smart (paid)"
         },
+        "t2-worker-free-only": {
+          "modelID": "t2-worker-free-only",
+          "name": "t2-worker-free-only smart (zero spend)"
+        },
         "t3-driver": {
           "modelID": "t3-driver",
           "name": "t3-driver codegen driver (free-first)"
@@ -244,6 +257,10 @@
         "t3-driver-paid": {
           "modelID": "t3-driver-paid",
           "name": "t3-driver-paid driver (paid)"
+        },
+        "t3-driver-free-only": {
+          "modelID": "t3-driver-free-only",
+          "name": "t3-driver-free-only driver (zero spend)"
         },
         "t4-rag": {
           "modelID": "t4-rag",

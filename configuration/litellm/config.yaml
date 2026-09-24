@@ -56,6 +56,17 @@ model_list:
       api_base: https://opencode.ai/zen/v1
       api_key: os.environ/OPENCODE_ZEN_API_KEY
 
+  # ── t1-orchestrator-free-only: zero spend, never degrades to paid ──────
+  # Hand-curated mirror of combos.json t1-orchestrator-free-only MINUS the
+  # antigravity leg (OAuth bridge: no LiteLLM transport, no env key — see
+  # GATEWAY_ONLY in tools/sync-router-tiers.py). No fallbacks entry below:
+  # a failing free-only group must fail loudly, not bill silently.
+  - model_name: t1-orchestrator-free-only
+    litellm_params:
+      model: openai/muse-spark-1.3-contributor-free
+      api_base: https://opencode.ai/zen/v1
+      api_key: os.environ/OPENCODE_ZEN_API_KEY
+
   # ── t2-worker: smart second level, free quotas ─────────────────────────
   # Mirror of combos.json t2-worker (single source of truth), kept in sync by
   # tools/sync-router-tiers.py: the markers below delimit a machine-owned
@@ -130,6 +141,28 @@ model_list:
       api_base: https://opencode.ai/zen/v1
       api_key: os.environ/OPENCODE_ZEN_API_KEY
 
+  # ── t2-worker-free-only: zero spend (hand-curated, NOT sync-managed) ───
+  # Mirror of combos.json t2-worker-free-only MINUS the antigravity leg
+  # (same reason as t1-orchestrator-free-only above). No fallbacks entry.
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      rpm: 30 # free: per-model 200K tokens/day caps
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: cerebras/gpt-oss-120b
+      api_key: os.environ/CEREBRAS_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: sambanova/gpt-oss-120b
+      api_key: os.environ/SAMBANOVA_API_KEY
+
   # ── t3-driver: daily driver, cheapest capable ──────────────────────────
   # Mirror of combos.json t3-driver (see the t2-worker note above).
   # AUTOOS-MANAGED-START t3-driver
@@ -186,7 +219,19 @@ model_list:
       api_base: https://opencode.ai/zen/v1
       api_key: os.environ/OPENCODE_ZEN_API_KEY
 
-  # ── rag: cohere RAG standby (hand-curated, NOT sync-managed) ────────
+  # ── t3-driver-free-only: zero spend (hand-curated, NOT sync-managed) ───
+  # Full mirror of combos.json t3-driver-free-only (no gateway-only legs in
+  # that combo, so nothing to drop). No fallbacks entry.
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: cerebras/qwen-3.8-27b
+      api_key: os.environ/CEREBRAS_API_KEY
+
+  # ── t4-rag: cohere RAG standby (hand-curated, NOT sync-managed) ──────
   # Trial keys, 128k. Lives outside the AUTOOS-MANAGED markers on purpose:
   # sync-router-tiers.py only owns t2-worker/t3-driver and must never touch this.
   # drop_params: opencode sends OpenAI-style `strict`, which cohere rejects

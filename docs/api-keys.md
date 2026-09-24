@@ -205,8 +205,10 @@ back in.
 - **Devin CLI** — catalog component `devin-cli` (winget
   `CognitionAI.DevinCLI` on Windows, vendor `install.sh` on Linux/macOS).
   Then interactive `devin auth login` (cannot be automated), then gateway
-  side `omniroute providers add devin-cli --oauth` (`--dry-run` proven) or
-  dashboard. The `devin` API-key provider lists no models (broken upstream,
+  side via the dashboard Providers page (`providers add devin-cli --oauth`
+  answers "Unknown OAuth provider" — the CLI OAuth allowlist holds 8
+  providers; `--dry-run` misleadingly passes because it never checks the
+  allowlist). The `devin` API-key provider lists no models (broken upstream,
   issue #6142) — do not route on it.
 
 ## LiteLLM fallback `.env` (only if you use it)

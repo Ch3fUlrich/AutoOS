@@ -39,14 +39,24 @@
     "         Probe-falsified 2026-09-22: the BARE openrouter/gemini-3.8-flash",
     "         leg 400s ('not available in the active live catalog') — the",
     "         gateway's bare-name alias is not a provider ref, so only the",
-    "         google-scoped twin ships. No 3.7 legs ever (version mixing is a",
-    "         defect; 3.7-flash free input quota is also tiny).",
+    "         google-scoped twin ships. No 3.7 legs in this pinned combo or",
+    "         the native gemini head ever (version mixing is a defect there;",
+    "         3.7-flash free input quota is also tiny). The antigravity",
+    "         3.7-flash-medium leg in t2-worker is a separate OAuth pool",
+    "         (ack 1.6s) — allowed as t2 overflow.",
     "deepseek-v4.1-flash = pinned single-model route: openrouter paid →",
     "         zen paid. Probe-falsified 2026-09-22: the deepseek-DIRECT leg",
     "         400s ('not available in the active live catalog for provider",
     "         deepseek'), so it was dropped; zen leg is real but 402s until",
     "         the Zen balance is topped up (chain hops by design). Exact model",
     "         only: no v4-flash (no suffix 1) or deepseek-flash legs",
+    "opus-4-6 = pinned single-model route (2026-09-24): antigravity Opus 4.6",
+    "         Thinking (OAuth free, ack 3.4s) → cc Opus 4.6 (subscription,",
+    "         429-quota-1h at probe = overflow-only, never a head). Lives in",
+    "         a pinned combo ON PURPOSE: t1-orchestrator stays spark-only by",
+    "         design (see above) — Opus is addressable directly, not smuggled",
+    "         into the orchestrator chain. Context 200k is the conservative",
+    "         standard window; extended-1M unproven, do not claim it.",
     "t2-credit / t3-credit REMOVED 2026-09-23 (operator call): deliberate",
     "         credit-burn chains are redundant — breaker=2 fast-skip,",
     "         cooldowns and quota_exhausted-immediate-hop already demote dead",
@@ -165,7 +175,9 @@
     "thresholds only — retry counts live in the settings above. Keep the",
     "wait short so a dead leg hops instead of stalling the run.",
     "",
-    "Model IDs verified against the live provider catalogs on 2026-09-20.",
+    "Model IDs verified against the live provider catalogs on 2026-09-20,",
+    "plus 2026-09-24 (antigravity/cc/zai refs from the authenticated",
+    "/v1/models catalog; all 14 pre-existing legs re-verified present).",
     "Cloudflare is registered but its Workers AI needs an Account ID in the",
     "dashboard before it can serve; it is deliberately not in any tier yet.",
     "Meta direct (muse-code) is unregistered since 2026-09-23; spark goes",
@@ -214,6 +226,7 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
+        "antigravity/gemini-3.7-flash-medium",
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b",
@@ -242,6 +255,7 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
+        "antigravity/gemini-3.7-flash-medium",
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b"
@@ -306,6 +320,15 @@
       "models": [
         "openrouter/deepseek/deepseek-v4.1-flash",
         "opencode-zen/deepseek-v4.1-flash"
+      ]
+    },
+    {
+      "name": "opus-4-6",
+      "strategy": "priority",
+      "context": "200k",
+      "models": [
+        "antigravity/claude-opus-4-6-thinking",
+        "cc/claude-opus-4-6"
       ]
     }
   ]

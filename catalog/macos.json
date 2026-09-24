@@ -450,7 +450,8 @@
           ],
           "verify": "omniroute --version",
           "homepage": "https://github.com/diegosouzapw/OmniRoute",
-          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first."
+          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first.",
+          "postInstall": "route_detected_clis_to_gateway"
         },
         {
           "id": "opencode-cli",

@@ -2596,6 +2596,60 @@ function Set-AutoOSOmniRouteCliKey {
     Set-AutoOSApiKeyEnv -EnvName 'OMNIROUTE_API_KEY' -KeysName 'omniroute' -KeysFile $KeysFile -Scope $Scope
 }
 
+function Install-AutoOSOmniRouteRouting {
+    <#
+      .SYNOPSIS Route every detected CLI at the local gateway (setup-time).
+      postInstall only fires when a component installs, so pre-installed
+      CLIs would never get routed — this closes that gap from the omniroute
+      component: persistent client-key env, Claude Code settings, Qwen model
+      entry. Each step skips quietly when its CLI is absent; DryRun announces.
+      Secrets travel Process-scope only and are never printed. NOTE the two
+      key names below are pre-existing repo convention (Zed docs use the
+      _API_KEY form, Set-AutoOSClaudeGateway reads the short form); both
+      carry the same gateway client key.
+    #>
+    Set-AutoOSOmniRouteCliKey
+    $hadShort = -not [string]::IsNullOrWhiteSpace($env:AUTOOS_OMNIROUTE_KEY)
+    $hadCli = -not [string]::IsNullOrWhiteSpace($env:OMNIROUTE_API_KEY)
+    if (-not $hadShort -or -not $hadCli) {
+        $kf = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
+        $kv = $null
+        if (Test-Path -LiteralPath $kf) {
+            $kl = Select-String -Path $kf -Pattern '^omniroute\s*:' | Select-Object -First 1
+            if ($kl) { $kv = $kl.Line.Split(':', 2)[1].Trim() }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($kv) -and -not $kv.StartsWith('REPLACE_WITH_')) {
+            if (-not $hadShort) { $env:AUTOOS_OMNIROUTE_KEY = $kv }
+            if (-not $hadCli) { $env:OMNIROUTE_API_KEY = $kv }
+        }
+    }
+    try {
+        if (Get-Command claude -ErrorAction SilentlyContinue) { Set-AutoOSClaudeGateway }
+        else { Write-AutoOSLine 'Claude Code not installed - skipping gateway routing' -Level muted }
+        if (Get-Command qwen -ErrorAction SilentlyContinue) {
+            if (Get-Command omniroute -ErrorAction SilentlyContinue) {
+                $qcfg = Join-Path $env:USERPROFILE '.qwen\settings.json'
+                if ($script:DryRun) {
+                    Write-AutoOSLine "would route Qwen Code at OmniRoute in $qcfg (model t2-worker)" -Level muted
+                } else {
+                    if (Test-Path $qcfg) {
+                        Copy-Item $qcfg "$qcfg.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+                    }
+                    & omniroute setup-qwen --model t2-worker --yes 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) { Write-AutoOSLine 'Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)' -Level warn }
+                    else { Write-AutoOSLine 'Qwen Code routed at OmniRoute (model t2-worker)' -Level ok }
+                }
+            } else {
+                Write-AutoOSLine 'omniroute CLI not on PATH - cannot route Qwen Code' -Level warn
+            }
+        }
+        else { Write-AutoOSLine 'Qwen Code not installed - skipping gateway routing' -Level muted }
+    } finally {
+        if (-not $hadShort) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        if (-not $hadCli) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
+    }
+}
+
 function Install-AutoOSQoderCli {
     <#
       .SYNOPSIS Make the Qoder CLI resolvable and authenticated.
@@ -2716,6 +2770,7 @@ function Set-AutoOSZedProxy {
         @{ name = 't3-driver-clean'; display_name = 't3-driver-clean (paid)'; max_tokens = 131072 },
         @{ name = 't3-driver-free-only'; display_name = 't3-driver-free-only (free legs only)'; max_tokens = 131072 },
         @{ name = 'spark-1.3-contributor'; display_name = 'spark pinned (zen free -> openrouter paid)'; max_tokens = 1048576 },
+        @{ name = 'opus-4-6'; display_name = 'opus pinned (agy free -> cc subscription)'; max_tokens = 200000 },
         @{ name = 'gemini-3.8-flash'; display_name = 'gemini-3.8-flash (gemini free -> paid)'; max_tokens = 131072 },
         @{ name = 'deepseek-v4.1-flash'; display_name = 'deepseek-v4.1-flash (paid cheapest-first)'; max_tokens = 131072 },
         @{ name = 't4-rag'; display_name = 't4-rag cohere RAG (trial keys)'; max_tokens = 131072 }
@@ -2736,10 +2791,13 @@ function Set-AutoOSZedProxy {
         available_models = @(
             @{ name = 't1-orchestrator'; display_name = 't1-orchestrator (litellm fallback)'; max_tokens = 1048576 },
             @{ name = 't1-orchestrator-paid'; display_name = 't1-orchestrator-paid (litellm)'; max_tokens = 1048576 },
+            @{ name = 't1-orchestrator-free-only'; display_name = 't1-orchestrator-free-only (litellm zero spend)'; max_tokens = 1048576 },
             @{ name = 't2-worker'; display_name = 't2-worker (litellm fallback)'; max_tokens = 131072 },
             @{ name = 't2-worker-paid'; display_name = 't2-worker-paid (litellm)'; max_tokens = 131072 },
+            @{ name = 't2-worker-free-only'; display_name = 't2-worker-free-only (litellm zero spend)'; max_tokens = 131072 },
             @{ name = 't3-driver'; display_name = 't3-driver (litellm fallback)'; max_tokens = 131072 },
-            @{ name = 't3-driver-paid'; display_name = 't3-driver-paid (litellm)'; max_tokens = 131072 }
+            @{ name = 't3-driver-paid'; display_name = 't3-driver-paid (litellm)'; max_tokens = 131072 },
+            @{ name = 't3-driver-free-only'; display_name = 't3-driver-free-only (litellm zero spend)'; max_tokens = 131072 }
         )
     }
     if ($env:AUTOOS_LITELLM_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_LITELLM_API_KEY from the environment' -Level muted }
@@ -2950,7 +3008,7 @@ Export-ModuleMember -Function `
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
-    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
+    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,

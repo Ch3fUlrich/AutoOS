@@ -632,7 +632,7 @@ print("%s|%s|%s|%s" % (
     ",".join(t["model"] for t in spec["tiers"])))
 PY
 )"
-    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,openrouter-muse-spark-1.3-contributor|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t1-orchestrator-clean,openai/t1-orchestrator-free-only,openai/spark-1.3-contributor,openai/t2-worker,openai/t2-worker-clean,openai/t2-worker-free-only,openai/t3-driver,openai/t3-driver-clean,openai/t3-driver-free-only,openai/t4-rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openrouter/meta/muse-spark-1.3-contributor"
+    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-opus-4-6,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t1-orchestrator-free-only,litellm-t2-worker-free-only,litellm-t3-driver-free-only,openrouter-muse-spark-1.3-contributor|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t1-orchestrator-clean,openai/t1-orchestrator-free-only,openai/spark-1.3-contributor,openai/t2-worker,openai/t2-worker-clean,openai/t2-worker-free-only,openai/t3-driver,openai/t3-driver-clean,openai/t3-driver-free-only,openai/t4-rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/opus-4-6,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t1-orchestrator-free-only,openai/t2-worker-free-only,openai/t3-driver-free-only,openrouter/meta/muse-spark-1.3-contributor"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
     # Generator round-trip with fixture keys (env hidden: the suite never
@@ -654,7 +654,7 @@ else:
 PY
 )"
     rm -rf "$tmp"
-    assert_eq "$written" "17"
+    assert_eq "$written" "21"
     assert_eq "$direct" "test-or-key|https://openrouter.ai/api/v1|openrouter/meta/muse-spark-1.3-contributor"
 fi
 
@@ -2356,6 +2356,33 @@ PY
     assert_eq "$bad" ""
 fi
 
+if it "route_detected_clis_to_gateway announces in dry run and writes nothing"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '{"theme":"mine"}' >"$scratch/.claude/settings.json"
+    before="$(cat "$scratch/.claude/settings.json")"
+    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=1; AUTOOS_OMNIROUTE_KEY="k1" OMNIROUTE_API_KEY="k2"; route_detected_clis_to_gateway ) 2>&1)"
+    after="$(cat "$scratch/.claude/settings.json")"
+    backups="$(find "$scratch" -name '*.autoos-backup-*' 2>/dev/null | wc -l)"
+    rm -rf "$scratch"
+    if [[ -n "$out" && "$before" == "$after" && "$backups" == "0" ]]; then pass
+    else fail "dry run wrote or stayed silent"; fi
+fi
+
+if it "route_detected_clis_to_gateway bridges keys from the keys file"; then
+    tmp="$(mktemp -d)"
+    printf 'omniroute: test-file-key\n' >"$tmp/api-keys.yml"
+    out="$(
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=1
+        unset OMNIROUTE_API_KEY AUTOOS_OMNIROUTE_KEY
+        has_cmd() { return 1; }
+        AUTOOS_KEYS_FILE="$tmp/api-keys.yml" route_detected_clis_to_gateway >/dev/null 2>&1
+        printf '%s|%s' "${OMNIROUTE_API_KEY:-empty}" "${AUTOOS_OMNIROUTE_KEY:-empty}"
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "test-file-key|test-file-key"
+fi
+
 if it "zed routing announces in dry run and writes nothing"; then
     scratch="$(mktemp -d)"
     out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=1; route_zed_to_proxy ) 2>&1)"
@@ -2448,7 +2475,7 @@ PY
     line1="$(printf '%s' "$report" | sed -n '1p')"
     line2="$(printf '%s' "$report" | sed -n '2p')"
     assert_eq "$line1" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,opus-4-6,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
     assert_eq "$line2" \
         "bypass=bypass|off=|provider=autoos-omniroute|model=t1-orchestrator|allow=allow|ctx=context7,graphify,omnigraph,playwright,serena"
     assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
@@ -2504,7 +2531,7 @@ if it "litellm fallback config is internally consistent"; then
 import re, io
 text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
 groups = set(re.findall(r"(?m)^\s*-\s*model_name:\s*(\S+)\s*$", text))
-need = {"t1-orchestrator", "t1-orchestrator-paid", "t2-worker", "t2-worker-paid", "t3-driver", "t3-driver-paid"}
+need = {"t1-orchestrator", "t1-orchestrator-paid", "t1-orchestrator-free-only", "t2-worker", "t2-worker-paid", "t2-worker-free-only", "t3-driver", "t3-driver-paid", "t3-driver-free-only"}
 fb = text.split("fallbacks:", 1)[1]
 refs = set(re.findall(r"[- ](\S+):\s*\[([^\]]*)\]", fb))
 problems = sorted(list(need - groups))
@@ -2524,6 +2551,65 @@ if [m for m in models if "llama-3.3-70b" in m]:
     problems.append("stale")
 if "drop_params" not in text or "os.environ/LITELLM_MASTER_KEY" not in text:
     problems.append("settings")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
+if it "free-only litellm groups mirror combos minus gateway-only legs"; then
+    # The *-free-only groups are hand-curated (not sync-managed), so this
+    # pins them to combos.json with hardcoded expectations: same legs in the
+    # same order, and the ONLY permitted drops are the known OAuth-bridge
+    # legs LiteLLM has no transport or key for. Anything else missing - or
+    # any silently added leg - is drift. Free-only groups must also stay out
+    # of fallbacks (zero spend means fail loudly, never bill silently).
+    report="$(python3 - 2>&1 <<'PY'
+import io, json, re
+combos = {c["name"]: c["models"]
+          for c in json.load(open("configuration/omniroute/combos.json",
+                                   encoding="utf-8"))["combos"]}
+# LiteLLM model strings: OmniRoute provider/model passes through except the
+# OpenAI-compatible gateways (zen, cheaperinference -> openai/ + api_base).
+# Only pre-existing, proven mappings appear here - no new inference.
+# known_drops is deliberately hardcoded, NOT derived from GATEWAY_ONLY in
+# tools/sync-router-tiers.py: the test must stay an independent second
+# opinion - deriving it would make tool and test agree by construction.
+transport = {"opencode-zen": "openai", "cheaperinference": "openai"}
+def litellm_model(ref):
+    prov, model = ref.split("/", 1)
+    return "%s/%s" % (transport.get(prov, prov), model)
+known_drops = {"antigravity/gemini-3.7-flash-medium",
+               "antigravity/claude-opus-4-6-thinking"}
+text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
+problems = []
+for tier in ("t1-orchestrator-free-only", "t2-worker-free-only",
+             "t3-driver-free-only"):
+    want = [litellm_model(r) for r in combos[tier] if r not in known_drops]
+    got = []
+    cur = None
+    for line in text.splitlines():
+        m = re.match(r"^[ \t]*-[ \t]*model_name:[ \t]*(\S+)[ \t]*$", line)
+        if m:
+            cur = m.group(1)
+            continue
+        m = re.match(r"^[ \t]*model:[ \t]*(\S+)[ \t]*$", line)
+        if m and cur == tier:
+            got.append(m.group(1))
+    if got != want:
+        problems.append(tier + "-drift")
+    # Every combos leg must be mirrored or declared-dropped: a new leg that
+    # is neither fails here until known_drops explicitly acknowledges it.
+    # (Checked against got, the parsed file - not against want above, which
+    # would make this tautological.)
+    unmirrored = [r for r in combos[tier] if litellm_model(r) not in got]
+    if set(unmirrored) - known_drops:
+        problems.append(tier + "-unpinned-drop")
+fb = text.split("fallbacks:", 1)[1]
+for tier in ("t1-orchestrator-free-only", "t2-worker-free-only",
+             "t3-driver-free-only"):
+    if re.search(r"(?m)^\s*-\s*" + tier + r"\s*:", fb):
+        problems.append(tier + "-in-fallbacks")
 print(" ".join(problems))
 PY
 )"
@@ -2552,7 +2638,7 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
@@ -5694,7 +5780,7 @@ import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash"]:
+if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
     problems.append("names")
 for c in d["combos"]:
     if not c["models"]:

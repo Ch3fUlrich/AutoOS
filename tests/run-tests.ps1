@@ -3334,14 +3334,14 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,openrouter-muse-spark-1.3-contributor'
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-opus-4-6,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t1-orchestrator-free-only,litellm-t2-worker-free-only,litellm-t3-driver-free-only,openrouter-muse-spark-1.3-contributor'
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
     Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
     foreach ($t in $spec.tiers) {
         # Gateway tiers carry the openai/ transport prefix; a DIRECT provider
         # profile (the effort-ladder surface for spark) names the provider
         # itself, e.g. openrouter/<model>.
-        Assert-True ($t.model -match '^(openai/(t1-orchestrator(-clean|-free-only)?|t2-worker(-clean|-free-only)?|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|deepseek-v4\.1-flash|spark-1\.3-contributor)|openrouter/meta/muse-spark-1\.3-contributor)$') "$($t.id) model is neither a gateway tier nor a known direct route"
+        Assert-True ($t.model -match '^(openai/(t1-orchestrator(-clean|-free-only)?|t2-worker(-clean|-free-only)?|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|deepseek-v4\.1-flash|spark-1\.3-contributor|opus-4-6)|openrouter/meta/muse-spark-1\.3-contributor)$') "$($t.id) model is neither a gateway tier nor a known direct route"
     }
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
@@ -3570,7 +3570,7 @@ Test-Case 'opencode-cli is the headless fallback on light' {
 }
 
 Test-Case 'ai postInstall hooks are exported' {
-    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSClaudeGateway', 'Set-AutoOSOmniRouteCliKey', 'Set-AutoOSApiKeyEnv', 'Install-AutoOSQoderCli', 'Set-AutoOSZedProxy')) {
+    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSClaudeGateway', 'Set-AutoOSOmniRouteCliKey', 'Set-AutoOSApiKeyEnv', 'Install-AutoOSQoderCli', 'Install-AutoOSOmniRouteRouting', 'Set-AutoOSZedProxy')) {
         Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn missing"
     }
     Pass
@@ -3692,6 +3692,35 @@ Test-Case 'Install-AutoOSQoderCli announces without writing in dry run' {
     Pass
 }
 
+Test-Case 'Install-AutoOSOmniRouteRouting announces without writing in dry run' {
+    $realShort = $env:AUTOOS_OMNIROUTE_KEY
+    $realCli = $env:OMNIROUTE_API_KEY
+    try {
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        $env:OMNIROUTE_API_KEY = 'test-omni-key'
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-routing-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            Install-AutoOSOmniRouteRouting
+            $text = Get-Content $log -Raw -Encoding utf8
+            Assert-True ($text -match 'user-managed|would export') 'no client-key step announced'
+            Assert-True ($text -match 'Claude Code') 'no claude step announced'
+            Assert-True ($text -match 'Qwen Code') 'no qwen step announced'
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item $log -Force -ErrorAction SilentlyContinue
+        }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    } finally {
+        if ($null -eq $realShort) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_KEY = $realShort }
+        if ($null -eq $realCli) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:OMNIROUTE_API_KEY = $realCli }
+    }
+    Pass
+}
+
 Test-Case 'zed routing merges one provider and keeps the rest' {
     $realAppData = $env:APPDATA
     $realOmni = $env:AUTOOS_OMNIROUTE_KEY
@@ -3716,10 +3745,10 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-omniroute'.PSObject.Properties['api_key']) 'api_key in omni entry'
         Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-litellm'.PSObject.Properties['api_key']) 'api_key in lit entry'
         $models = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | ForEach-Object { $_.name })
-        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag'
+        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,opus-4-6,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag'
         Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
         $litModels = @($s.language_models.openai_compatible.'autoos-litellm'.available_models | ForEach-Object { $_.name })
-        Assert-Equal ($litModels -join ',') 't1-orchestrator,t1-orchestrator-paid,t2-worker,t2-worker-paid,t3-driver,t3-driver-paid'
+        Assert-Equal ($litModels -join ',') 't1-orchestrator,t1-orchestrator-paid,t1-orchestrator-free-only,t2-worker,t2-worker-paid,t2-worker-free-only,t3-driver,t3-driver-paid,t3-driver-free-only'
         $bypass = $s.agent.profiles.bypass
         Assert-Equal $bypass.name 'bypass'
         $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })
@@ -3838,7 +3867,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $oc = $stripped | ConvertFrom-Json
     Assert-Equal $oc.model 'omniroute/t1-orchestrator'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -3902,7 +3931,7 @@ Test-Case 'openhands template routes tiers with no secrets' {
 Test-Case 'litellm fallback config is internally consistent' {
     $yaml = Get-Content (Join-Path $Root 'configuration\litellm\config.yaml') -Raw -Encoding utf8
     $groups = @([regex]::Matches($yaml, '(?m)^\s*-\s*model_name:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
-    foreach ($g in @('t1-orchestrator', 't1-orchestrator-paid', 't2-worker', 't2-worker-paid', 't3-driver', 't3-driver-paid')) {
+    foreach ($g in @('t1-orchestrator', 't1-orchestrator-paid', 't1-orchestrator-free-only', 't2-worker', 't2-worker-paid', 't2-worker-free-only', 't3-driver', 't3-driver-paid', 't3-driver-free-only', 't4-rag')) {
         Assert-Contains $groups $g
     }
     $fb = [regex]::Match($yaml, '(?s)fallbacks:(.*?)(?:\r?\n\S|\z)').Groups[1].Value
@@ -3981,8 +4010,8 @@ Test-Case 'zed routing creates a fresh config when none exists' {
         $cfgPath = Join-Path $scratch 'Zed\settings.json'
         Assert-True (Test-Path $cfgPath) 'settings.json not created'
         $s = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 16
-        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.available_models.Count 6
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 17
+        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.available_models.Count 9
     } finally { $env:APPDATA = $realAppData }
 }
 
@@ -4327,11 +4356,11 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
-    Assert-Equal ($names -join ',') 't1-orchestrator,spark-1.3-contributor,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,deepseek-v4.1-flash'
+    Assert-Equal ($names -join ',') 't1-orchestrator,spark-1.3-contributor,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,deepseek-v4.1-flash,opus-4-6'
     $contexts = @{
         't1-orchestrator' = '1M'; 'spark-1.3-contributor' = '1M'; 't1-orchestrator-clean' = '1M'; 't1-orchestrator-free-only' = '1M'; 't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
-        'gemini-3.8-flash' = '128k'; 'deepseek-v4.1-flash' = '128k'
+        'gemini-3.8-flash' = '128k'; 'deepseek-v4.1-flash' = '128k'; 'opus-4-6' = '200k'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
@@ -4475,9 +4504,10 @@ Test-Case 'opencode tiers declare matching context limits' {
     Assert-Equal $models.'t3-driver-free-only'.limit.context 131072
     Assert-Equal $models.'gemini-3.8-flash'.limit.context 131072
     Assert-Equal $models.'deepseek-v4.1-flash'.limit.context 131072
+    Assert-Equal $models.'opus-4-6'.limit.context 200000
     Assert-Equal $models.'spark-1.3-contributor'.limit.context 1000000
     Assert-Equal $models.'t4-rag'.limit.context 131072
-    foreach ($name in @('t1-orchestrator', 't1-orchestrator-clean', 't1-orchestrator-free-only', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't4-rag', 'spark-1.3-contributor', 'gemini-3.8-flash', 'deepseek-v4.1-flash', 'auto', 'auto/cheap', 'auto/smart')) {
+    foreach ($name in @('t1-orchestrator', 't1-orchestrator-clean', 't1-orchestrator-free-only', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't4-rag', 'spark-1.3-contributor', 'opus-4-6', 'gemini-3.8-flash', 'deepseek-v4.1-flash', 'auto', 'auto/cheap', 'auto/smart')) {
         Assert-True ($null -ne $models.$name) "missing model $name"
         Assert-Equal $models.$name.modelID $name
     }
