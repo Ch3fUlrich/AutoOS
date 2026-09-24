@@ -6207,10 +6207,10 @@ for f, fn in want.items():
     comps = [c for cat in d["categories"] for c in cat["components"] if c["id"] == "opencode-cli"]
     if not comps or comps[0].get("postInstall") != fn:
         bad.append(f)
-print(" ".join(bad))
+print(" ".join(bad) or "ok")
 PY
 )"
-    assert_eq "$report" ""
+    assert_eq "$report" "ok"
 fi
 
 # The user's own config may be JSONC (comments, trailing commas). json.load
@@ -6251,11 +6251,11 @@ for name in ("config.json", "opencode.json"):
     if "notarealkey" in raw: problems.append(name + ":plaintext-key")
     orr = doc.get("provider", {}).get("openrouter", {}).get("options", {}).get("apiKey")
     if orr != "{env:OPENROUTER_API_KEY}": problems.append(name + ":openrouter=%s" % orr)
-print(" ".join(problems))
+print(" ".join(problems) or "ok")
 PY
 )"
     rm -rf "$scratch"
-    assert_eq "$report" ""
+    assert_eq "$report" "ok"
     fi
 fi
 
@@ -6305,11 +6305,11 @@ if "providers" in v1:
     problems.append("v1-file-got-v2-block")
 if oc.get("model") != repo["model"]:
     problems.append("model=%s" % oc.get("model"))
-print(" ".join(problems))
+print(" ".join(problems) or "ok")
 PY2
 )"
     rm -rf "$scratch"
-    assert_eq "$report" ""
+    assert_eq "$report" "ok"
     fi
 fi
 
