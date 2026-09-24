@@ -2053,8 +2053,14 @@ setup_opencode_config() {
             snapshot="$(mktemp)"
             cp -p "$config_file" "$snapshot"
         fi
+        # V2 reads opencode.json's `providers` block; V1 reads config.json.
+        local v2_source=""
+        if [[ "$config_file" == */opencode.json ]] && opencode_is_v2; then
+            # Anchored off this file, like models_file: never the caller's cwd.
+            v2_source="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/opencode.jsonc"
+        fi
         merge_rc=0
-        _opencode_merge_config "$config_file" || merge_rc=$?
+        AUTOOS_OPENCODE_V2_SOURCE="$v2_source" _opencode_merge_config "$config_file" || merge_rc=$?
         if (( merge_rc == 3 )); then
             ui_warn "$config_file is not valid JSON or JSONC - left alone (fix it, then re-run)"
             [[ -n "$snapshot" ]] && rm -f "$snapshot"
@@ -2098,6 +2104,12 @@ setup_opencode_config() {
         fi
     done
     return 0
+}
+
+# opencode_is_v2: the installed `opencode` is the V2 CLI (@opencode/cli).
+opencode_is_v2() {
+    has_cmd opencode || return 1
+    [[ "$(opencode --version 2>/dev/null)" =~ (^|[^0-9.])v?2\. ]]
 }
 
 # _opencode_merge_config <file>: the provider/MCP merge for one file.
@@ -2249,7 +2261,7 @@ providers['meta'] = {
 muse_key = os.environ.get('META_API_KEY') or os.environ.get('MUSE_API_KEY') or secrets.get('muse')
 deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
 # NOTE: META_API_KEY is the canonical name (same as litellm .env + api-keys.yml
-# `meta:`); MUSE_API_KEY stays as a legacy fallback. The muse key feeds
+# meta:); MUSE_API_KEY stays as a legacy fallback. The muse key feeds
 # _profile_for (muse-spark contributor below) and the direct meta provider.
 # NOTE: the muse key feeds _profile_for (muse-spark contributor below) and the
 # direct meta provider. No direct DEEPSEEK provider is emitted: tier routing
@@ -2355,6 +2367,24 @@ data['mcp'] = mcps
 with open(_harness_file, 'r', encoding='utf-8') as _hf2:
     _mem_tools = json.load(_hf2)['mcp_servers']['serena']['memory_tools']
 data['tools'] = {'serena_' + _t: False for _t in _mem_tools}
+
+# V2 (@opencode/cli) ignores the V1 provider block above and reads
+# providers (package/env/settings). Project the gateway entries from the
+# repo's opencode.jsonc - the single source - so every cwd gets the tiers.
+_v2_source = os.environ.get('AUTOOS_OPENCODE_V2_SOURCE')
+if _v2_source and os.path.isfile(_v2_source):
+    with open(_v2_source, 'r', encoding='utf-8-sig') as _vf:
+        _repo = json.loads(_strip_jsonc(_vf.read()))
+    _v2 = data.get('providers') if isinstance(data.get('providers'), dict) else {}
+    for _name in ('omniroute', 'litellm'):
+        if _name in _repo.get('providers', {}):
+            _v2[_name] = _repo['providers'][_name]
+    data['providers'] = _v2
+    # The V1 default (local Ollama) has no V2 provider entry: point V2 at the
+    # repo default instead, but only when it is still the AutoOS default.
+    _ollama_default = 'ollama/' + REPO_BY_ID['ollama-qwen2.5-coder']['direct']['model'].split('/', 1)[1]
+    if data.get('model') in (None, '', _ollama_default) and _repo.get('model'):
+        data['model'] = _repo['model']
 
 tmp_file = config_path + '.tmp'
 with open(tmp_file, 'w', encoding='utf-8') as f:

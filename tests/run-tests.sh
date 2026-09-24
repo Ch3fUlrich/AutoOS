@@ -6277,6 +6277,42 @@ if it "svc: the opencode writer takes no backup on a fresh machine or a re-run";
     fi
 fi
 
+# V2 (@opencode/cli) reads `providers` (package/env/settings), not V1's
+# `provider`: measured 2026-09-24, serve from $HOME listed no provider at all
+# with only the V1 block written. The V2 block is projected from the repo's
+# opencode.jsonc (single source) into opencode.json, never into config.json
+# (V1's file).
+if it "svc: the opencode writer adds the V2 providers block when the CLI is V2"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      opencode_is_v2() { return 0; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    report="$(python3 - "$scratch/.config/opencode" <<'PY2'
+import io, json, os, re, sys
+d = sys.argv[1]
+problems = []
+oc = json.load(io.open(os.path.join(d, "opencode.json"), encoding="utf-8"))
+v1 = json.load(io.open(os.path.join(d, "config.json"), encoding="utf-8"))
+repo = json.loads(re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read()))
+for name in ("omniroute", "litellm"):
+    got = (oc.get("providers") or {}).get(name)
+    if got != repo["providers"][name]:
+        problems.append("v2-" + name + "-differs")
+if "providers" in v1:
+    problems.append("v1-file-got-v2-block")
+if oc.get("model") != repo["model"]:
+    problems.append("model=%s" % oc.get("model"))
+print(" ".join(problems))
+PY2
+)"
+    rm -rf "$scratch"
+    assert_eq "$report" ""
+    fi
+fi
+
 if it "svc: the opencode writer leaves an unparseable config alone"; then
     if ! has_cmd python3; then skip "python3 not found"; else
     scratch="$(mktemp -d)"

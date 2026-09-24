@@ -95,6 +95,9 @@ command -v opencode >/dev/null || { echo "opencode is not installed. Run: ./setu
 OPENCODE_PASSWORD="$(cat "$PW_FILE")"
 export OPENCODE_PASSWORD
 
+# From $HOME, as the unit does: the serve process's cwd becomes its default
+# project, and the caller's checkout is not the phone's project.
+cd "$HOME"
 if [[ $DETACH -eq 1 ]]; then
     mkdir -p "$(dirname "$LOG")"
     nohup opencode serve --hostname "$HOST" --port "$PORT" >>"$LOG" 2>&1 &
