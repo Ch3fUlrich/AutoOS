@@ -266,6 +266,70 @@
           "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
         },
         {
+          "id": "qwen-code",
+          "name": "Qwen Code CLI",
+          "description": "Qwen's terminal coding agent (routable through OmniRoute)",
+          "provider": "npm",
+          "package": "@qwen-code/qwen-code",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "qwen --version",
+          "homepage": "https://github.com/QwenLM/qwen-code",
+          "notes": "Headless: qwen -p. tools/autoos-agent.py --client qwen routes it through OmniRoute."
+        },
+        {
+          "id": "gemini-cli",
+          "name": "Gemini CLI",
+          "description": "Google's open-source terminal agent (OmniRoute-routable)",
+          "provider": "npm",
+          "package": "@google/gemini-cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "gemini --version",
+          "homepage": "https://github.com/google-gemini/gemini-cli",
+          "notes": "Headless: gemini -p. agy succeeds it, but only this one can route through OmniRoute."
+        },
+        {
+          "id": "codex",
+          "name": "OpenAI Codex CLI",
+          "description": "OpenAI's terminal coding agent (OmniRoute-routable)",
+          "provider": "npm",
+          "package": "@openai/codex",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "codex --version",
+          "homepage": "https://github.com/openai/codex",
+          "notes": "Headless: codex exec. Spawned through omniroute run, so no OpenAI login is needed."
+        },
+        {
+          "id": "qodercli",
+          "name": "Qoder CLI",
+          "description": "Qoder's terminal coding agent (own account, not the gateway)",
+          "provider": "npm",
+          "package": "@qoder-ai/qodercli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "qodercli --version",
+          "homepage": "https://qoder.com/cli",
+          "notes": "Headless: qodercli -p. Auth: QODER_PERSONAL_ACCESS_TOKEN or one interactive qodercli login."
+        },
+        {
           "id": "ollama",
           "name": "Ollama",
           "description": "Local AI model runtime",
