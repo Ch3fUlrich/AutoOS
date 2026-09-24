@@ -54,21 +54,23 @@ in the gateway store (e.g. `auto/*`): zero-setup bootstrap, no repo
 curation, no drift gate, legs can change under you. Use gateway combos to
 boot, curated combos to work.
 
-| Combo | Legs (priority order) | Role | Recommendation |
+| Combo | Legs, exact refs in priority order | Role | Recommendation |
 |---|---|---|---|
-| `t1-orchestrator` | zen spark-free → openrouter spark-contributor | orchestrator-1M | **keep** |
-| `spark-1.3-contributor` | same as t1 | pinned single-model route | **keep** (identical legs; purpose-built name) |
-| `t1-orchestrator-clean` | openrouter spark-contributor | paid-only 1M | **keep** |
-| `t1-orchestrator-free-only` | zen spark-free alone | zero spend 1M | **keep** (new 2026-09-23) |
-| `t2-worker` | gemini-3.8-flash → groq gpt-oss → cerebras → sambanova → cheapinference ×3 → openrouter deepseek → deepseek-direct → zen flash | smart-reasoning | **keep** |
-| `t2-worker-clean` | deepseek-direct → openrouter deepseek → zen flash → mistral-small | paid-only smart | **keep** |
-| `t2-worker-free-only` | gemini → groq → cerebras → sambanova | zero spend smart | **keep** (new 2026-09-23) |
-| `t3-driver` | mistral-code → groq qwen → cerebras qwen → cheapinference ×2 → mistral-small → deepseek-direct → zen flash | cheap driver | **keep** |
-| `t3-driver-clean` | deepseek-direct → mistral-small → zen flash | paid-only driver | **keep** |
-| `t3-driver-free-only` | groq qwen → cerebras qwen | zero spend driver | **keep** (new 2026-09-23) |
-| `t4-rag` | cohere command-a → command-r-plus | RAG specialist | **keep** (only non-reasoning route) |
-| `gemini-3.8-flash` | gemini free → openrouter google twin (paid) | pinned, intra-family fallback | **keep** |
-| `deepseek-v4.1-flash` | openrouter deepseek (paid) → zen flash | pinned, cheapest-first paid | **keep** |
+| `t1-orchestrator` | `opencode-zen/muse-spark-1.3-contributor-free` → `openrouter/meta/muse-spark-1.3-contributor` | orchestrator-1M, spark-only | **keep** |
+| `spark-1.3-contributor` | same two legs as t1 | pinned single-model route | **keep** (identical legs; purpose-built name) |
+| `t1-orchestrator-clean` | `openrouter/meta/muse-spark-1.3-contributor` | paid-only 1M | **keep** |
+| `t1-orchestrator-free-only` | `opencode-zen/muse-spark-1.3-contributor-free` | zero spend 1M (zen promo only — the agy Opus leg stays out: 200k model in a 1M-declared combo would 400 instead of degrading) | **keep** |
+| `t2-worker` | `gemini/gemini-3.8-flash` → `antigravity/gemini-3.7-flash-high` → `groq/openai/gpt-oss-120b` → `cerebras/gpt-oss-120b` → `sambanova/gpt-oss-120b` → `cheaperinference/deepseek-v4-flash` → `cheaperinference/glm-4.5-air` → `cheaperinference/kimi-k3` → `openrouter/deepseek/deepseek-v4.1-flash` → `deepseek/deepseek-flash` → `opencode-zen/deepseek-v4.1-flash` | smart-reasoning | **keep** (agy gemini-high added 2026-09-24, ack 3.6s — strongest variant where reasoning matters; medium stays in free-only so both proven variants serve) |
+| `t2-worker-clean` | `deepseek/deepseek-flash` → `openrouter/deepseek/deepseek-v4.1-flash` → `opencode-zen/deepseek-v4.1-flash` → `mistral/mistral-small-latest` | paid-only smart | **keep** |
+| `t2-worker-free-only` | `gemini/gemini-3.8-flash` → `antigravity/gemini-3.7-flash-medium` → `groq/openai/gpt-oss-120b` → `cerebras/gpt-oss-120b` → `sambanova/gpt-oss-120b` | zero spend smart | **keep** |
+| `t2-orchestrator` | `antigravity/claude-opus-4-6-thinking` → `cc/claude-opus-4-6` → `openrouter/deepseek/deepseek-v4.1-flash` | small-scope orchestration (200k) | **keep** (new 2026-09-24; frontier pair + cheap smart tail) |
+| `t3-driver` | `mistral/mistral-code-latest` → `groq/qwen/qwen3.8-27b` → `cerebras/qwen-3.8-27b` → `cheaperinference/glm-4.5-air` → `cheaperinference/minimax-m2.7` → `mistral/mistral-small-latest` → `deepseek/deepseek-flash` → `opencode-zen/deepseek-v4.1-flash` | cheap driver (keyed-head: mistral-code first, free qwen 2nd/3rd) | **keep** |
+| `t3-driver-clean` | `deepseek/deepseek-flash` → `mistral/mistral-small-latest` → `opencode-zen/deepseek-v4.1-flash` | paid-only driver | **keep** |
+| `t3-driver-free-only` | `groq/qwen/qwen3.8-27b` → `cerebras/qwen-3.8-27b` | zero spend driver | **keep** |
+| `t4-rag` | `cohere/command-a-03-2025` → `cohere/command-r-plus-08-2024` | RAG grounded QA (trial keys) | **keep** (only non-reasoning route) |
+| `gemini-3.8-flash` | `gemini/gemini-3.8-flash` → `openrouter/google/gemini-3.8-flash` | pinned, intra-family fallback | **keep** |
+| `deepseek-v4.1-flash` | `openrouter/deepseek/deepseek-v4.1-flash` → `opencode-zen/deepseek-v4.1-flash` | pinned, cheapest-first paid | **keep** |
+| `opus-4-6` | `antigravity/claude-opus-4-6-thinking` → `cc/claude-opus-4-6` | pinned frontier reasoning (200k) | **keep** (new 2026-09-24; t1 stays spark-only, Opus lives here) |
 
 ## B. Gateway-only combos (referenced, NOT curated)
 
@@ -77,20 +79,36 @@ only in the gateway's own store — no leg order in this repo, no drift gate:
 
 | Combo | Known legs | Used by | Recommendation |
 |---|---|---|---|
-| `auto` | gateway built-in (unverified) | opencode default bootstrap | **decide**: pin legs into `combos.json`, or drop the refs and default to `t2-worker` |
-| `auto/smart` | gateway built-in (unverified) | opencode bootstrap | **decide**: same as `auto` |
-| `auto/cheap` | gateway built-in (unverified) | opencode bootstrap | **decide**: same as `auto` |
+| `auto` | gateway built-in (verified 2026-09-24: **ack 1.3s**) | opencode default bootstrap | **keep as-is** (gateway built-in, nothing to curate) |
+| `auto/smart` | gateway built-in (verified 2026-09-24: **ack 4.5s**) | opencode bootstrap | **keep as-is** |
+| `auto/cheap` | gateway built-in (verified 2026-09-24: **ack 4.2s**) | opencode bootstrap | **keep as-is** |
+
+Retired old-scheme ids (`tier1`, `tier1-clean`, `tier2`, `tier2-clean`,
+`tier3`, `tier3-clean`, `rag`, `tier1-paid`, `tier2-paid`, `tier3-paid`,
+`tier2-credit`, `tier3-credit` — not the new `t*-orchestrator-paid` groups,
+which are live) were deleted from the live store 2026-09-24 (verified:
+store holds only the new ids + built-ins). `apply.*` only ever creates
+combos from `combos.json`, never deletes or re-adds — and both suites assert
+the exact combo name list plus an explicit retired-ids regression test, so a
+resurrection fails CI before it reaches any gateway.
 
 ## C. LiteLLM-only groups (no gateway combo — manual fallback only)
 
 Present in `configuration/litellm/config.yaml` AND `opencode.jsonc`
-`providers.litellm.models`, deliberately outside `combos.json`:
+`providers.litellm.models`. Two kinds: `*-paid` groups have no gateway
+combo (manual fallback only, deliberately outside `combos.json`); the
+`*-free-only` groups are hand-curated mirrors of the gateway combos of the
+same name (minus legs LiteLLM cannot address — see the free-only mirror
+test in `tests/run-tests.sh`):
 
 | Group | Role | Recommendation |
 |---|---|---|
-| `t1-orchestrator-paid` | openrouter spark first, then zen flash | **keep** (fallback when free promo dies) |
+| `t1-orchestrator-paid` | openrouter spark first, then deepseek via zen | **keep** (fallback when free promo dies) |
 | `t2-worker-paid` | paid smart legs | **keep** |
 | `t3-driver-paid` | paid driver legs | **keep** |
+| `t1-orchestrator-free-only` | zen spark-free only (no paid fallback, no fallbacks entry — fails loudly) | **keep** (new 2026-09-24) |
+| `t2-worker-free-only` | gemini → groq → cerebras → sambanova (agy leg dropped: no LiteLLM transport) | **keep** (new 2026-09-24) |
+| `t3-driver-free-only` | groq qwen → cerebras qwen (full mirror) | **keep** (new 2026-09-24) |
 
 ## D. Free-model bench (measured 2026-09-23, OpenRouter `:free` catalog)
 
@@ -107,14 +125,36 @@ names for future legs (no more bare provider labels):
 | `poolside/laguna-s-2.1:free` | 262k | codegen overflow (Poolside trains code) | unproven in loop |
 | `nex-agi/nex-n2.5-pro:free` | 262k | smart overflow | unproven |
 | `google/gemma-4-31b-it:free`, `gemma-4-26b-a4b-it:free` | 262k | light t3 overflow | small instruction models |
-| `z-ai/glm-5.2:free` | 32k | small jobs only | 32k window rules out 128k-class work |
+| `z-ai/glm-5.2:free` | 32k | small jobs only | 32k window rules out 128k-class work. NOTE: OpenRouter free `z-ai/*` is a separate door from the dropped direct Z.AI connection (unfunded key) — same model family, different billing and availability |
 | `cohere/north-mini-code:free` | 256k | codegen overflow | unproven |
 
 Rule: a candidate enters a combo only after an authenticated leg-probe
 (`simulate --explain` then one real chat). Until then it stays in this
 table, not in `combos.json`.
 
-## E. Proposed free-provider additions (researched + probed 2026-09-23)
+## D2. CLI reachability (which CLI can address the combos, 2026-09-24)
+
+Combos live behind `:20128`; a CLI reaches them only if it points at the
+gateway. Verified live this session:
+
+| CLI | Points at gateway? | How | Reaches |
+|---|---|---|---|
+| opencode CLI/TUI | yes (repo `opencode.jsonc`) | native | all combos + `#effort` variants |
+| Qwen Code CLI | yes (`t2-worker` entry + `.env` key, headless ack proven) | `setup-qwen --model t2-worker` | all combos by switching `--model` |
+| Claude Code | yes (`ANTHROPIC_BASE_URL/AUTH_TOKEN` merged live) | `Set-AutoOSClaudeGateway` / `route_claude_to_gateway` | all combos |
+| Antigravity CLI | **no** (upstream `none`/`mitm`: cannot point at OmniRoute) | — | n/a (its models arrive via the `antigravity` gateway connection instead) |
+| Qoder CLI | n/a (needs binary on PATH + PAT; gateway `qoder` entry is dashboard-only) | `qodercli` component + dashboard | pending |
+| Devin CLI | n/a (binary installed 3000.11.3; `devin auth login` + dashboard connection pending) | catalog component | pending |
+| Gemini CLI | not installed (redundant: agy supersedes it, AI Studio key covers API legs) | `omniroute run gemini` if ever wanted | — |
+
+## E. Proposed free-provider additions (researched + probed 2026-09-23/24)
+
+Correction 2026-09-24: the local `agy models` list shows Gemini 3.8-flash,
+but the **gateway** `antigravity` connection exposes ONLY 3.7/3.1/GPT-OSS
+plus Opus/Sonnet 4.6 (17 refs, verified against authenticated
+`/v1/models` — zero `antigravity/*3.8*` refs). There is no
+`antigravity/gemini-3.8-flash-medium`; curation uses 3.7-high (ack 3.6s)
+where reasoning matters and 3.7-medium (ack 1.6s) in free-only.
 
 Live gateway state: 13 configured connections (cerebras, cheaperinference,
 cloudflare-ai, cohere, deepseek, gemini, groq, huggingface, mistral,
@@ -180,38 +220,18 @@ once no combo needs it (all green today).
 
 | Provider | OmniRoute id / connect | Models behind it | Proposed legs | Needs from you |
 |---|---|---|---|---|
-| Antigravity CLI | `agy` (oauth, free) — `omniroute providers auth agy` (browser popup) or `omniroute oauth start --provider antigravity`, then `providers test agy` | Opus 4.6 Thinking, Sonnet 4.6 Thinking, Gemini 3.8-flash-high (per local login) | t1: `agy/claude-opus-4.6-thinking` after zen-free; t2: `agy/gemini-3.8-flash-high` | BLOCKED 2026-09-23: CLI login ≠ gateway connection (`providers test agy` → "not found", `oauth status` empty). `--import-from-system` answers 401 without server admin context. Run `omniroute oauth start --provider antigravity --import-from-system` in YOUR terminal (reuses the agy login, no second browser flow), or the browser flow; then I test + probe + curate |
-| Claude Code subscription | `claude`/`cc` (oauth) — `omniroute providers auth claude-code` (browser flow) | subscription models (Opus/Sonnet per plan) | t1 overflow after openrouter paid (subscription = $0 marginal) | OPERATOR AUTH PENDING 2026-09-23 (same CLI-login≠gateway-connection gap as agy); `setup-claude` pipeline wiring landed in AutoOS (`Set-AutoOSClaudeGateway`/`route_claude_to_gateway`, catalog postInstall) |
-| Qoder | `qoder` (oauth, free) — `providers auth qoder` | Qwen3.8-Max-Preview (per dashboard ranking) | t2/t3 qwen overflow | OPERATOR AUTH PENDING 2026-09-23 (`providers test qoder` → "not found") |
+| Antigravity CLI | `antigravity` (oauth, free) — canonical id (`agy` is alias-only; `providers auth agy` → Unknown). `oauth start --provider antigravity --import-from-system --no-browser`, code-paste flow | LIVE 2026-09-24 (account-named connection, `oauth status` active). Refs: `antigravity/claude-opus-4-6-thinking[-high\|-medium\|-low]`, `antigravity/claude-sonnet-4-6[-high\|-medium\|-low]`, `antigravity/gemini-3.7-flash-{high,medium,low,tiered}`, `antigravity/gemini-3.1-pro-low`, `antigravity/gpt-oss-120b-medium`. Probes: opus-4-6-thinking → **ack 3.4s**; gemini-3.7-flash-medium → **ack 1.6s**; gemini-3.7-flash-high → **ack 3.6s** | t1: opus dropped (200k leg in a 1M combo would 400); t2: gemini-high curated, free-only keeps medium; Opus in pinned `opus-4-6` | **done** |
+| Claude Code subscription | `claude` (oauth) — `providers auth claude-code --no-browser`, code-paste flow. Ref prefix is `cc/` | LIVE 2026-09-24. Refs: `cc/claude-opus-4-6[-high\|-medium\|-low]`, `cc/claude-opus-4-7`, `cc/claude-opus-5`, `cc/claude-sonnet-4-6`, `cc/claude-fable-5`, `cc/claude-haiku-4-5-20251001`. Probe: opus-4-6 → **429 quota reset 1h** (hops by design; overflow-only, not a head) | overflow leg in pinned `opus-4-6` ($0 marginal) | **done** |
+| Qoder | binary `qodercli` 1.1.62 ships in `~/.qoder/bin/qodercli` (runs) but is NOT on PATH — the dashboard error verbatim. PAT via `QODER_PERSONAL_ACCESS_TOKEN` (api-keys.yml `qoder_pat`; env wins over `/login` per Qoder docs). Gateway `qoder` entry is OAuth/dashboard-only (no CLI flow) | Qoder CLI headless/ACP use now; t2/t3 qwen overflow only after a dashboard gateway connection | PATH+PAT automated 2026-09-24 (`qodercli` catalog component: install-if-missing, PATH append, PAT export). Gateway connection via dashboard; then I list + probe |
 | GitHub Copilot | `github`/`copilot` (oauth, device flow) | plan picker: GPT-5.5, GPT-5.3-Codex, Claude Sonnet/Opus 5, Gemini 3.8 Flash, Kimi K3 (docs 2026-09) | CLOSED 2026-09-23: M365-only, no GitHub seat | — |
-| Devin CLI Agentic Bridge | `devin-cli-agentic` (noauth) | Opus 4.7 High (per dashboard) | t1 candidate — highest ceiling if it probes OK | CLI add rejected; onboard via dashboard, then I probe legs |
-| ZCode GLM Coding Plan | `zcode` (noauth tag, key needed in practice) | GLM 5.3 Max | t2/t3 GLM overflow | a ZCode/GLM plan credential (connection added, test FAILS without it) |
-| Z.AI (API key) | `zai` — wired 2026-09-24 (`z_ai` registry entry; connection added, key accepted) | GLM 5.3, 5.2, 5.1, 5, 5 Turbo, 4.7 Flash, 4.7 (`models zai`) | t2/t3 GLM overflow (replaces the blocked zcode row if legs probe) | exact combo refs + one chat probe per leg (display names ≠ refs); then curate |
-| OpenCode Free | `opencode` (noauth pool) | rotating free set | auto/* replacement or t3 tail | connection added, test FAILS key check — needs a live chat probe with client key to prove the pool serves |
+| Devin CLI Agentic Bridge | `devin-cli-agentic` (noauth, alias `dva`) — needs the `devin` binary (`devin acp`); catalog component `devin-cli` added 2026-09-24 (winget `CognitionAI.DevinCLI` on Windows, vendor `install.sh` on Linux/macOS) | `dva/*` already in the live catalog (opus-4-7-max, glm-5-2, kimi-k3, ... — no connection needed to list) | t1 candidate (opus-4-7-max) + GLM overflow | install via catalog, then interactive `devin auth login`, then gateway connection via dashboard (`providers add devin-cli --oauth` answers Unknown — CLI OAuth allowlist holds 8 providers; `--dry-run` misleadingly passes) |
+| Devin API key | `devin` (cloud-agent) — wired 2026-09-24 (`devin` registry entry; connection added, key accepted) | NONE (`models devin` empty; broken upstream, issue #6142 — key accepted but no model sync) | — | blocked upstream; use the CLI path above |
+| ZCode GLM Coding Plan | `zcode` (noauth tag, key needed in practice) | GLM 5.3 Max (dashboard only) | t2/t3 GLM overflow | a ZCode/GLM plan credential (connection added, test FAILS without it); likely superseded by Z.AI below |
+| Z.AI (API key) | DROPPED 2026-09-24: key unfunded (429-insufficient-balance) and GLM needs are covered by cheaperinference + `oc/glm-*` pool legs. Connection removed (`providers remove zai`), registry/example/docs rows reverted — history kept here for re-adding when funded | — | — |
+| OpenCode Free | `opencode` (noauth pool) | Refs incl `oc/gemini-3.8-flash`, `oc/glm-5.3`, `oc/deepseek-v4-flash-free` | auto/* replacement or t3 tail | connection added, test FAILS key check — needs a live chat probe with client key to prove the pool serves |
 | Kilo/Codex/Cursor | `kilocode`/`codex`/`cursor-cli` | subscription models | only with those subscriptions | tell me which you hold |
 
 Rules for any addition: OAuth/subscription bridges proxy a PERSONAL
 subscription (single-user proxy tolerated, resale is not — same ToS note as
 `api-keys.md`); NEVER into `*-clean` (training/logging terms unknown);
 one authenticated leg-probe per leg before it enters `combos.json`.
-
-### M365 vs GitHub Copilot (your question)
-
-No — not the same product. **Microsoft 365 Copilot** (BizChat, ~$30/seat on
-top of M365) is Graph-grounded office work (GPT-5.x + optional Claude picker
-for M365 users, Word/Excel/Teams). **GitHub Copilot** (Pro $10 / Business
-$19) is the dev tool with the multi-model picker above. OmniRoute's
-`github` provider is the latter (device flow). With M365-only and no GitHub
-seat, that row is closed — confirm which seat you hold.
-## F. How to finish this evaluation
-
-1. `omniroute combos list` (authenticated) → append any live-extra combos to
-   section B with the same columns.
-2. `python tools/audit-router.py` (live) → it diffs repo vs gateway store
-   (missing/extra/leg-drift) — treat its output as the working list.
-3. For each **review/decide** row: keep, drop (remove refs from
-   `opencode.jsonc` + tier-profiles + Zed writers together — the audit fails
-   partial removals), or merge (fold legs into a kept combo).
-4. Re-run `sync-router-tiers.py --check` + `audit-router.py --offline` after
-   every change; leg add/edit needs a live leg-probe (one direct `:20128`
-   chat per leg — `simulate` is not proof).

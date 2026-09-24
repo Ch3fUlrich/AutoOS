@@ -45,7 +45,7 @@ registry that `apply`, `tools/mirror-litellm-env.py` and
 | `cloudflare_workers_ai` | `cloudflare-ai` | needs your **Account ID** in the dashboard before it can serve |
 | `cohere` | `cohere` | |
 | `hugging_face` | `huggingface` | |
-| `z_ai` | `zai` | Z.AI (GLM family, wired 2026-09-24); legs curated only after a live leg-probe |
+| `devin` | `devin` | Devin API key — connection registers, but the gateway lists no models (broken upstream, issue #6142); the working path is the Devin CLI binary + `devin auth login` → `devin-cli` OAuth connection |
 | `cerebras` | `cerebras` | Cloudflare-fronted: `customUserAgent` (as groq) |
 | `SambaNova` | `sambanova` | |
 | `deepseek` | `deepseek` | |
@@ -102,6 +102,113 @@ ToS caution (single-user personal proxy is generally tolerated; resale is
 not): `opencode` ToS restricts Zen to internal use (flagged avoid for
 proxying), `muse-spark-web`/scraped-web routes flagged avoid, Groq/Mistral/
 Cerebras prohibit reselling keys. When in doubt, paid legs only.
+
+## OmniRoute CLI auth (`OMNIROUTE_API_KEY`)
+
+Read/write CLI commands (`providers add/test`, `models`, `setup-*`) work
+unauthenticated, but the **management endpoints** (`oauth start`,
+`providers auth`, `setup-claude` catalog fetch) answer `401 Unauthorized`
+without a server key. The key is the `omniroute:` client key from
+`api-keys.yml` — the same bearer apps send to `:20128`.
+
+**Automated (Windows):** the `omniroute` catalog component exports it as a
+persistent User-scope `OMNIROUTE_API_KEY` (`Set-AutoOSOmniRouteCliKey`,
+postInstall) the first time setup runs. Existing values always win
+(user-managed, never overwritten); missing/placeholder keys warn and skip.
+Every new terminal inherits it. Remove with:
+`[Environment]::SetEnvironmentVariable('OMNIROUTE_API_KEY',$null,'User')`.
+Security: localhost-only bearer key, same sensitivity as the git-ignored
+`api-keys.yml` it is read from — user-scoped, never committed, never logged.
+
+**Manual (any shell):**
+
+```powershell
+$env:OMNIROUTE_API_KEY = '<value of omniroute: in configuration/api-keys.yml>'
+```
+
+```bash
+export OMNIROUTE_API_KEY='<value of omniroute: in configuration/api-keys.yml>'
+```
+
+(Linux/macOS have no automated export yet — use the snippet above.)
+
+## OAuth connections (subscriptions, free bridges)
+
+CLI logins and gateway connections are separate stores: logging into
+`agy`/`claude`/`qoder` on your machine creates **no** gateway connection.
+Each needs one interactive flow; afterwards `providers list` shows an
+account-named connection and `oauth status` shows it active.
+
+Prerequisite: `OMNIROUTE_API_KEY` set (previous section) — otherwise every
+flow below 401s before showing a URL.
+
+```powershell
+omniroute oauth start --provider antigravity --import-from-system --no-browser
+# reuses the local agy login, prints the authorization URL only, no browser.
+# Open it, complete the Google login, copy the code from the redirect URL,
+# paste it at the terminal prompt.
+omniroute providers auth claude-code --no-browser   # same code-paste flow
+omniroute providers test antigravity                # "No API-key probe for
+omniroute providers test claude                     # oauth connections" is
+                                                    # expected — proof is a chat (see below)
+```
+
+Rules that bit us (2026-09-24): the OAuth allowlist uses canonical ids —
+`antigravity`, not the `agy` alias (`providers auth agy` → "Unknown OAuth
+provider"); **`qoder` has no CLI OAuth flow at all** (not in `oauth
+providers`) — connect it in the dashboard → Providers page instead. The
+trailing `Assertion failed ... UV_HANDLE_CLOSING` after any CLI error is a
+cosmetic Windows crash-on-exit, not a second failure. Proof pattern per
+connection: `providers list` (account-named row) → `models <provider>` →
+one `ack` chat per leg before it enters `combos.json` (phantom-leg rule).
+
+## Qoder PAT (CLI-only key, not a gateway provider)
+
+`qoder_pat:` in `api-keys.yml` feeds `QODER_PERSONAL_ACCESS_TOKEN`, which the
+Qoder CLI reads at startup for headless/ACP use. There is no gateway
+provider id for it (the gateway `qoder` entry is OAuth/dashboard-only), so it
+never enters `catalog/providers.json` or the LiteLLM `.env`. **Windows:**
+the `qodercli` catalog component appends `~/.qoder/bin` to User PATH (the
+dashboard error was precisely this: the binary lives beside the IDE install,
+not on PATH) and exports the PAT absent-only, same mechanism as
+`OMNIROUTE_API_KEY` above. Both writes broadcast `WM_SETTINGCHANGE`, so new
+terminals see them without sign-out — but long-running processes (including
+the OmniRoute server itself) keep their stale environment until restarted;
+if the dashboard still fails after setup, restart the gateway. **Linux/macOS:**
+install via the component, then
+`export QODER_PERSONAL_ACCESS_TOKEN='<value of qoder_pat:>'` yourself.
+Warning from Qoder docs: an env PAT takes precedence over `/login`
+credentials — clear it before `/logout`, or the next start signs straight
+back in.
+
+## CLI coding tools via the gateway
+
+- **Claude Code** — pipeline equivalent landed (`Set-AutoOSClaudeGateway` /
+  `route_claude_to_gateway`, `claude-code` postInstall on all platforms):
+  merges `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` into
+  `~/.claude/settings.json` with backup + idempotent skip. Subscription
+  models additionally need the `claude` gateway OAuth connection above.
+- **Qwen Code** — install `npm i -g @qwen-code/qwen-code` (done live
+  2026-09-24: 0.24.4), backup `~/.qwen/settings.json` first, then
+  `omniroute setup-qwen --model t2-worker --yes --api-key
+  $env:OMNIROUTE_API_KEY`. Writes the `t2-worker (OmniRoute)` entry plus
+  `~/.qwen/.env` (`OMNIROUTE_API_KEY` only, existing provider credentials
+  untouched). Combo ids work directly as `--model` values. No `qwen`
+  binary on PATH is exactly the dashboard "found but not runnable" state.
+  Proven: headless `qwen -p "Reply with exactly: ack"` → ack.
+- **Gemini CLI** — no `setup-*` recipe (launch-only):
+  `npm i -g @google/gemini-cli`, then `omniroute run gemini`
+  (`GOOGLE_GEMINI_BASE_URL` is read at the process root).
+- **Antigravity CLI** — no CLI recipe either; its only integration is the
+  `antigravity` gateway OAuth connection above (and it is not ACP-spawnable).
+- **Devin CLI** — catalog component `devin-cli` (winget
+  `CognitionAI.DevinCLI` on Windows, vendor `install.sh` on Linux/macOS).
+  Then interactive `devin auth login` (cannot be automated), then gateway
+  side via the dashboard Providers page (`providers add devin-cli --oauth`
+  answers "Unknown OAuth provider" — the CLI OAuth allowlist holds 8
+  providers; `--dry-run` misleadingly passes because it never checks the
+  allowlist). The `devin` API-key provider lists no models (broken upstream,
+  issue #6142) — do not route on it.
 
 ## LiteLLM fallback `.env` (only if you use it)
 

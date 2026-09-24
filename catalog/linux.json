@@ -367,6 +367,41 @@
           "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
         },
         {
+          "id": "qodercli",
+          "name": "Qoder CLI",
+          "description": "Alibaba terminal coding agent (Qwen-powered)",
+          "provider": "script",
+          "package": "qodercli",
+          "requires": [
+            "download-tools"
+          ],
+          "postInstall": "setup_qoder_mcp",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "qodercli --version",
+          "homepage": "https://qoder.com/cli",
+          "notes": "Headless use needs QODER_PERSONAL_ACCESS_TOKEN exported (see docs/api-keys.md); interactive /login still works."
+        },
+        {
+          "id": "devin-cli",
+          "name": "Devin CLI",
+          "description": "Cognition terminal coding agent",
+          "provider": "script",
+          "package": "devin-cli",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "devin --version",
+          "homepage": "https://cli.devin.ai",
+          "notes": "Needs an interactive `devin auth login` once; the gateway side connects via `omniroute providers add devin-cli --oauth` or the dashboard."
+        },
+        {
           "id": "opencode",
           "name": "OpenCode CLI",
           "description": "AI coding agent with local-model support",
@@ -584,24 +619,6 @@
           "notes": "Agent panel is pointed at the local OmniRoute gateway."
         },
         {
-          "id": "qoder-cli",
-          "name": "Qoder CLI",
-          "description": "Qoder's terminal coding agent",
-          "provider": "script",
-          "package": "qoder-cli",
-          "requires": [
-            "download-tools"
-          ],
-          "postInstall": "setup_qoder_mcp",
-          "profiles": [
-            "workstation",
-            "ai-coding"
-          ],
-          "verify": "qodercli --version",
-          "homepage": "https://qoder.com/cli",
-          "notes": "Installed from the vendor's own script (no apt/snap package exists); the script SHA256-verifies the native binary before placing it."
-        },
-        {
           "id": "qoder-desktop",
           "name": "Qoder",
           "description": "Qoder's agent-first desktop IDE",
@@ -646,7 +663,8 @@
           ],
           "verify": "omniroute --version",
           "homepage": "https://github.com/diegosouzapw/OmniRoute",
-          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first."
+          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first.",
+          "postInstall": "route_detected_clis_to_gateway"
         },
         {
           "id": "opencode-cli",

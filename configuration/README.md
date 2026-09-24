@@ -8,7 +8,7 @@ git-ignored, only the template is tracked.
 |---|---|---|
 | `api-keys.yml` | **The key file.** Flat `provider: key`. Git-ignored. | `omniroute/apply.*`, `start-stack.*`, the browser UI (status only) |
 | `api-keys.example.yml` | Tracked template — copy to `api-keys.yml` | you |
-| `omniroute/combos.json` | Tier definitions (tier1/2/3 + `-clean` variants) | `omniroute/apply.*` |
+| `omniroute/combos.json` | Tier definitions (t1-orchestrator/t2-worker/t3-driver/t4-rag + `-clean`/`-free-only` variants) | `omniroute/apply.*` |
 | `omniroute/apply.sh` / `apply.ps1` | Registers providers + (re)creates combos | you, once after keys are in |
 | `start-stack.sh` / `start-stack.ps1` | Starts OmniRoute if needed, then an app wired to it | you |
 | `autostart/` | Opt-in resume after reboot (scheduled task / systemd unit + launcher) | you, once |

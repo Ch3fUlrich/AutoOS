@@ -5,36 +5,74 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added — Qoder as a provisioned client
+### Added — router: t2-orchestrator combo, opus curation, free-only mirrors
 
-- **`qoder-cli` and `qoder-desktop` join the catalog** on all three platforms.
-  The CLI rides the `script` provider, because Qoder publishes no winget/apt/snap
-  package on the supported path (the npm `@qoder-ai/qodercli` route is marked "not
-  recommended" by the vendor) and its own installer SHA256-verifies the native
-  binary. Windows pins `arch: ["x64"]` — the vendor does not ship Windows arm64 —
-  so the component is hidden there rather than shown and failing. The desktop IDE
-  is `winget Alibaba.Qoder` on Windows and `manual` on Linux/macOS, where the
-  vendor ships only `.deb`/`.rpm`/`.dmg` and no Homebrew cask exists (checked
-  against the live cask API, not assumed). `verify` is `qodercli --version`: the
-  binary is `qodercli`, not the `qoder` the vendor docs name.
+- **New `t2-orchestrator` combo** (200k, small-scope orchestration):
+  `antigravity/claude-opus-4-6-thinking` (OAuth free, ack-probed 3.4s) →
+  `cc/claude-opus-4-6` (subscription overflow) →
+  `openrouter/deepseek/deepseek-v4.1-flash` (cheap smart tail). Wired through
+  all four client surfaces (opencode, OpenHands profiles, Zed writers).
+- **New pinned `opus-4-6` combo** (agy thinking → cc opus). `t1-orchestrator`
+  stays spark-only by design; `t2-worker` gained the ack-probed
+  `antigravity/gemini-3.7-flash-medium` leg beside the gemini head.
+- **Free-only LiteLLM groups** (`t1/t2/t3-*-free-only`): hand-curated mirrors
+  minus gateway-only legs, no fallbacks entries (zero spend fails loudly).
+  A new suite test pins mirror-equality and the declared-drop set.
+- **CLI routing automation**: `Install-AutoOSOmniRouteRouting` /
+  `route_detected_clis_to_gateway` (omniroute postInstall) routes
+  pre-installed Claude Code + Qwen Code at the gateway; `Set-AutoOSApiKeyEnv`
+  exports `OMNIROUTE_API_KEY` / `QODER_PERSONAL_ACCESS_TOKEN` absent-only;
+  `Install-AutoOSQoderCli` fixes the "qodercli not recognized" dashboard
+  error (PATH append + PAT); `devin-cli` catalog entries (winget +
+  vendor script). Environment writes broadcast `WM_SETTINGCHANGE` so new
+  terminals see them without sign-out.
+
+### Removed — router: credit combos, retired ids, Z.AI
+
+- **`tier2-credit` / `tier3-credit` combos deleted** (breaker fast-skip +
+  cooldowns demote exhausted balances automatically).
+- **Retired `tier1/2/3`, `rag`, `*-paid`, `*-credit` ids deleted from the
+  live gateway store**; both suites assert the exact combo list plus an
+  explicit retired-ids regression test, and `apply.*` only ever creates.
+- **Z.AI dropped**: key unfunded (429-insufficient-balance), connection
+  removed, registry/example/docs rows reverted.
+
+### Added — Qoder desktop, and Qoder's MCP servers
+
+- **`qoder-desktop` joins the catalog** on all three platforms: `winget
+  Alibaba.Qoder` on Windows and `manual` on Linux/macOS, where the vendor ships
+  only `.deb`/`.rpm`/`.dmg` and no Homebrew cask exists (checked against the
+  live cask API, not assumed). The entry carries no `verify`: the app puts no
+  confirmed CLI on PATH, and a verify that fails after a successful install is
+  worse than none.
 - **Qoder's MCP servers are wired** by the `Set-AutoOSQoderMcp` /
-  `setup_qoder_mcp` postInstall, through `qodercli mcp add-json` at user scope —
-  never a hand-edit of `~/.qoder/settings.json`, for the same reason Claude Code's
-  registration goes through `claude mcp add`. Pins resolve from
-  `catalog/agent-harness.json` at runtime. `omnigraph` is deliberately absent: its
-  graph is per-repository, so a machine-global entry would pin the wrong graph for
-  every other repo.
+  `setup_qoder_mcp` postInstall, attached to the existing `qodercli` component
+  (whose installer is the `Install-AutoOSQoderCli` entry above). Registration
+  goes through `qodercli mcp add-json` at user scope — never a hand-edit of
+  `~/.qoder/settings.json`, for the same reason Claude Code's registration goes
+  through `claude mcp add`. Pins resolve from `catalog/agent-harness.json` at
+  runtime. `omnigraph` is deliberately absent: its graph is per-repository, so
+  a machine-global entry would pin the wrong graph for every other repo.
 
-### Fixed — Qoder cannot ride the gateway, and the worktree memory pin
+### Fixed — Qoder detection, Qoder on Windows arm64, and the worktree memory pin
 
-- **Qoder is the one client AutoOS wires for tools but not for model routing**, and
-  that is a vendor constraint, not an omission. Its Custom Models accept a curated
-  provider list only (Alibaba Cloud Model Studio, DeepSeek, Z.ai, Kimi, MiniMax,
-  Xiaomi MIMO) with no arbitrary OpenAI-compatible base URL, and
+- **`detect.sh` had no `qodercli` case.** A `script`-provider component with no
+  detection heuristic is never recognised as present, so an already-installed
+  Qoder was reinstalled on every run instead of reported `skipped`
+  (AGENTS.md §4). It now tests `has_bin qodercli`.
+- **`catalog/windows.json` offered the Qoder CLI on arm64.** The vendor's own
+  installation docs state Windows arm64 is not currently supported, so `arch`
+  is `["x64"]` and the component is hidden there rather than shown and failing
+  (AGENTS.md §3). The vendor manifest does ship linux/darwin arm64 builds, so
+  those two catalogs are untouched.
+- **Qoder is the one client AutoOS wires for tools but not for model routing**,
+  and that is a vendor constraint, not an omission. Its Custom Models accept a
+  curated provider list only (Alibaba Cloud Model Studio, DeepSeek, Z.ai, Kimi,
+  MiniMax, Xiaomi MIMO) with no arbitrary OpenAI-compatible base URL, and
   `~/.qoder/.models/<uid>/customs` is encrypted — so `:20128` is not addressable
   and nothing in `lib/` could write a provider even if it were. Recorded in
-  `docs/models.md` and `docs/catalog.md` so the next reader does not re-derive it,
-  and so nobody names a function `route_qoder_to_gateway`.
+  `docs/models.md` and `docs/catalog.md` so the next reader does not re-derive
+  it, and so nobody names a function `route_qoder_to_gateway`.
 - **`trust_worktree.py` pinned the wrong omnigraph graph.** It derived
   `OMNIGRAPH_GRAPH_ID` from the checkout folder's case (`AutoOS`), but the cluster
   graph is `autoos` — so every unattended lane wrote its memory to a graph that

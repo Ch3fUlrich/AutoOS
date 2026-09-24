@@ -59,6 +59,10 @@ PROVIDERS_FILE = ROOT / "catalog" / "providers.json"
 # rather than remove drift.
 SYNCED_TIERS = ("t2-worker", "t3-driver")
 
+# Providers LiteLLM has no transport or key for (OAuth/subscription bridges).
+# Their legs never enter a managed mirror block — see combos_refs().
+GATEWAY_ONLY = frozenset({"antigravity", "cc"})
+
 # Filled from catalog/providers.json by main(); Leg reads them at call time.
 # They are module state because Leg is constructed in several code paths and
 # does not carry a registry around.
@@ -186,7 +190,15 @@ def locate_blocks(lines):
 
 
 def combos_refs(combos_path, tiers=SYNCED_TIERS):
-    """Ordered model refs per tier, read from combos.json."""
+    """Ordered model refs per tier, read from combos.json.
+
+    Legs whose provider is gateway-only (OAuth/subscription bridges with no
+    LiteLLM transport and no env key) are dropped: mirroring them would emit
+    unset os.environ/* vars and break whole-group validation at startup —
+    the META_API_KEY lesson. Docs rule 1 calls this set out ("minus the
+    legs LiteLLM cannot address"); the suite test pins the dropped set so
+    nothing else ever goes missing silently.
+    """
     try:
         data = json.loads(Path(combos_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -195,7 +207,10 @@ def combos_refs(combos_path, tiers=SYNCED_TIERS):
     for combo in data.get("combos", []):
         name = combo.get("name")
         if name:
-            by_name[name] = list(combo.get("models", []))
+            by_name[name] = [
+                m for m in combo.get("models", [])
+                if m.split("/", 1)[0] not in GATEWAY_ONLY
+            ]
     missing = [t for t in tiers if t not in by_name]
     if missing:
         raise ConfigError(f"{combos_path} has no combo(s): {', '.join(missing)}")
@@ -373,7 +388,10 @@ def main(argv=None):
             )
             return 1
         if not args.quiet:
-            print(f"OK: {', '.join(combos)} match {combos_path.name}")
+            print(
+                f"OK: {', '.join(combos)} match {combos_path.name} "
+                f"(gateway-only excluded: {', '.join(sorted(GATEWAY_ONLY))})"
+            )
         return 0
 
     if changed:

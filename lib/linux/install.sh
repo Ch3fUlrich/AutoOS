@@ -191,6 +191,8 @@ install_script() {
         handy)           install_handy ;;
         vscode)          install_vscode ;;
         agy)             install_agy ;;
+        qodercli)        install_qodercli ;;
+        devin-cli)       install_devin_cli ;;
         gh)              install_gh ;;
         uv)              install_uv ;;
         ollama)          install_ollama ;;
@@ -198,7 +200,6 @@ install_script() {
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
         zed)             install_zed ;;
-        qoder-cli)       install_qoder_cli ;;
         *) ui_err "no script installer for '$1'"; return 1 ;;
     esac
 }
@@ -425,6 +426,65 @@ install_agy() {
     fi
     if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
         ui_err "Antigravity CLI installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    bash "$tmp" || rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
+install_qodercli() {
+    # Qoder CLI (Alibaba terminal coding agent). Same download-to-file bar
+    # as install_agy(): the vendor publishes no checksum, so verify
+    # non-empty + shebang and execute the FILE, never the pipe.
+    # Headless use needs QODER_PERSONAL_ACCESS_TOKEN (api-keys.yml qoder_pat,
+    # see docs/api-keys.md) - export it yourself; installers never duplicate
+    # secrets into shell rcs.
+    local url="https://qoder.com/install"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would download and run the Qoder CLI installer from $url"
+        return 0
+    fi
+    ui_muted "downloading Qoder CLI installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_warn "failed to download Qoder CLI installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_warn "Qoder CLI installer from $url does not look like a script - aborting"
+        rm -f "$tmp"
+        return 1
+    fi
+    local rc=0
+    bash "$tmp" || rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
+install_devin_cli() {
+    # Devin CLI (Cognition terminal coding agent). Same download-to-file bar
+    # as install_agy(). Needs an interactive `devin auth login` afterwards;
+    # the gateway side connects via `omniroute providers add devin-cli
+    # --oauth` or the dashboard (the `devin` API-key provider lists no
+    # models - broken upstream, see docs/api-keys.md).
+    local url="https://cli.devin.ai/install.sh"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would download and run the Devin CLI installer from $url"
+        return 0
+    fi
+    ui_muted "downloading Devin CLI installer from $url"
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL -o "$tmp" "$url"; then
+        ui_warn "failed to download Devin CLI installer from $url"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
+        ui_warn "Devin CLI installer from $url does not look like a script - aborting"
         rm -f "$tmp"
         return 1
     fi
@@ -1014,37 +1074,6 @@ install_zed() {
     ui_ok "Zed installed"
 }
 
-install_qoder_cli() {
-    # Qoder ships no apt/snap package, so the vendor's own install script is the
-    # only route. Same minimum bar as install_zed (guard A14): download to a
-    # file, verify it is non-empty and actually looks like a script, and only
-    # then execute the FILE - never the pipe. The script does its own OS/arch
-    # detection, SHA256-verifies the native binary, places it and configures
-    # PATH, so there is nothing left for AutoOS to do afterwards. Upgrades go
-    # through the binary's own `qodercli update`.
-    if (( AUTOOS_DRY_RUN )); then ui_muted "would install Qoder CLI via https://qoder.com/install"; return 0; fi
-    local url="https://qoder.com/install"
-    ui_muted "downloading Qoder CLI installer from $url"
-    local tmp; tmp="$(mktemp)"
-    if ! curl -fsSL -o "$tmp" "$url"; then
-        ui_err "failed to download Qoder CLI installer from $url"
-        rm -f "$tmp"
-        return 1
-    fi
-    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
-        ui_err "Qoder CLI installer from $url does not look like a script - aborting"
-        rm -f "$tmp"
-        return 1
-    fi
-    local rc=0
-    # The vendor script is bash (#!/usr/bin/env bash, set -uo pipefail), so run
-    # it with bash rather than sh.
-    bash "$tmp" || rc=$?
-    rm -f "$tmp"
-    if (( rc != 0 )); then return $rc; fi
-    ui_ok "Qoder CLI installed"
-}
-
 install_openhands() {
     # Pull the OpenHands image; the container itself is started on demand by
     # configuration/start-stack.sh openhands, wired to the OmniRoute gateway.
@@ -1116,6 +1145,65 @@ else:
 PY
 }
 
+route_detected_clis_to_gateway() {
+    # Setup-time routing for pre-installed CLIs (postInstall only fires on
+    # install, so without this step they would never point at the gateway).
+    # Each step skips quietly when its CLI is absent; dry runs announce.
+    # Keys bridge from the repo keys file when the env does not carry them
+    # (same file-first pattern as the openhands writer below; never printed).
+    # Without keys the claude step warns and the qwen step is skipped.
+    if [[ -z "${OMNIROUTE_API_KEY:-}" || -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
+        _keys_yml="${AUTOOS_KEYS_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/configuration/api-keys.yml}"
+        _file_key="$(python3 - "$_keys_yml" 2>/dev/null <<'PY'
+import sys
+try:
+    found = ""
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for line in fh:
+            t = line.strip()
+            if t.startswith("omniroute:") and "REPLACE" not in t:
+                found = t.split(":", 1)[1].strip().strip("\"'")
+                break
+    print(found)
+except Exception:
+    print("")
+PY
+)"
+        if [[ -z "${OMNIROUTE_API_KEY:-}" && -n "$_file_key" ]]; then
+            export OMNIROUTE_API_KEY="$_file_key"
+        fi
+        if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" && -n "$_file_key" ]]; then
+            AUTOOS_OMNIROUTE_KEY="$_file_key"
+        fi
+        unset _file_key
+    fi
+    if has_cmd claude; then
+        route_claude_to_gateway
+    else
+        ui_muted "Claude Code not installed - skipping gateway routing"
+    fi
+    if has_cmd qwen; then
+        if ! has_cmd omniroute; then
+            ui_warn "omniroute CLI not on PATH - cannot route Qwen Code"
+        elif [[ -z "${OMNIROUTE_API_KEY:-}" ]]; then
+            ui_warn "OMNIROUTE_API_KEY not set - export the OmniRoute client key before routing Qwen Code (docs/api-keys.md)"
+        elif (( AUTOOS_DRY_RUN )); then
+            ui_muted "would route Qwen Code at OmniRoute (model t2-worker)"
+        else
+            if [[ -f "$SYS_HOME/.qwen/settings.json" ]]; then
+                cp "$SYS_HOME/.qwen/settings.json" "$SYS_HOME/.qwen/settings.json.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+            fi
+            if ! omniroute setup-qwen --model t2-worker --yes >/dev/null 2>&1; then
+                ui_warn "Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)"
+            else
+                ui_ok "Qwen Code routed at OmniRoute (model t2-worker)"
+            fi
+        fi
+    else
+        ui_muted "Qwen Code not installed - skipping gateway routing"
+    fi
+}
+
 route_zed_to_proxy() {
     # Point Zed's agent panel at the local OmniRoute gateway (:20128) plus
     # the LiteLLM fallback (:4000). Only the provider ids
@@ -1148,10 +1236,12 @@ tiers = [
     ("t2-worker", "t2 smart (free-first)", 131072, None),
     ("t2-worker-clean", "t2-worker-clean (paid)", 131072, None),
     ("t2-worker-free-only", "t2-worker-free-only (free legs only)", 131072, None),
+    ("t2-orchestrator", "t2 orchestrator (small-scope)", 200000, None),
     ("t3-driver", "t3 driver (cheapest)", 131072, None),
     ("t3-driver-clean", "t3-driver-clean (paid)", 131072, None),
     ("t3-driver-free-only", "t3-driver-free-only (free legs only)", 131072, None),
     ("spark-1.3-contributor", "spark pinned (zen free -> openrouter paid)", 1048576, None),
+    ("opus-4-6", "opus pinned (agy free -> cc subscription)", 200000, None),
     ("gemini-3.8-flash", "gemini-3.8-flash (gemini free -> paid)", 131072, None),
     ("deepseek-v4.1-flash", "deepseek-v4.1-flash (paid cheapest-first)", 131072, None),
     ("t4-rag", "t4-rag cohere RAG (trial keys)", 131072, None),
@@ -1182,8 +1272,11 @@ lit_models = [
      "max_tokens": mx}
     for n, _, mx, _ in [
         ("t1-orchestrator", None, 1048576, None), ("t1-orchestrator-paid", None, 1048576, None),
+        ("t1-orchestrator-free-only", None, 1048576, None),
         ("t2-worker", None, 131072, None), ("t2-worker-paid", None, 131072, None),
+        ("t2-worker-free-only", None, 131072, None),
         ("t3-driver", None, 131072, None), ("t3-driver-paid", None, 131072, None),
+        ("t3-driver-free-only", None, 131072, None),
     ]
 ]
 lit = {
@@ -1915,7 +2008,7 @@ register_qoder_mcp_server() {
 }
 
 setup_qoder_mcp() {
-    # postInstall for the qoder-cli catalog entry. Called with NO arguments by
+    # postInstall for the qodercli catalog entry. Called with NO arguments by
     # run_post_install, on both the installed and the skipped path, so it must
     # be safe to run twice. Pins come from catalog/agent-harness.json via
     # mcp_package - never as literals here (the mcp-pins test greps lib/ for
@@ -1925,7 +2018,7 @@ setup_qoder_mcp() {
         return 0
     fi
     if ! has_cmd qodercli; then
-        ui_warn "qodercli is not on PATH - cannot register Qoder MCP servers. Install qoder-cli first."
+        ui_warn "qodercli is not on PATH - cannot register Qoder MCP servers. Install qodercli first."
         return 0
     fi
     ui_info "Setting up Qoder MCP servers (user scope)"

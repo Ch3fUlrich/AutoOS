@@ -239,6 +239,26 @@ function Invoke-AutoOSProcess {
 }
 
 # ─── PATH handling ──────────────────────────────────────────────────────────
+function Send-AutoOSEnvironmentChange {
+    # Tell Explorer (and future ShellExecute children) that the environment
+    # block changed, so new terminals see PATH/env edits without a
+    # sign-out. Registry writes alone only reach processes that re-read
+    # them; without this broadcast even a correct PATH edit looks broken
+    # (measured 2026-09-24: qodercli resolvable by full path, invisible on
+    # PATH until broadcast). Fire-and-forget; DryRun callers never reach it.
+    if (-not ([System.Management.Automation.PSTypeName]'AutoOSEnvNotify').Type) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AutoOSEnvNotify {
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lResult);
+}
+'@
+    }
+    $done = [UIntPtr]::Zero
+    [void][AutoOSEnvNotify]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$done)
+}
 function Add-AutoOSPathEntry {
     <#
       .SYNOPSIS
@@ -277,6 +297,7 @@ function Add-AutoOSPathEntry {
     $current | Out-File -FilePath $backup -Encoding utf8
     [Environment]::SetEnvironmentVariable('Path', $new, $Scope)
     $env:Path = "$env:Path;$($added -join ';')"
+    Send-AutoOSEnvironmentChange
     Write-AutoOSLine "appended to $Scope PATH: $($added -join ', ')" -Level ok
     Write-AutoOSLine "previous value saved to $backup" -Level muted
     $true
@@ -365,7 +386,7 @@ function Invoke-AutoOSScriptProvider {
         'meslo-nerd-font' { return Install-AutoOSNerdFont }
         'herdr'           { return Install-AutoOSHerdr }
         'claude-autostart'{ return Install-AutoOSClaudeAutostart }
-        'qoder-cli'       { return Install-AutoOSQoderCli }
+        'qodercli'        { return Install-AutoOSQoderCli }
         default           { return @{ ExitCode = 1; Output = "no script for '$($Component.Package)'" } }
     }
 }
@@ -585,50 +606,6 @@ function Install-AutoOSHerdr {
     }
     Write-AutoOSLine "Unrecognised Herdr source '$source' - skipping." -Level warn
     @{ ExitCode = 0; Output = 'skipped' }
-}
-
-function Install-AutoOSQoderCli {
-    <#
-      .SYNOPSIS Install the Qoder CLI from the vendor's own install script.
-      .DESCRIPTION
-        No winget package exists and the npm route (@qoder-ai/qodercli) is
-        marked "not recommended for new installations" by the vendor, so the
-        supported path is https://qoder.com/install.ps1. The script is
-        downloaded to a temp FILE, sanity-checked and only then executed -
-        an unverified remote script piped straight into a shell is guard
-        A14. The vendor script does the
-        OS/arch detection, fetches the channel manifest, downloads the native
-        binary and SHA256-verifies it, then delegates placement, entry-point
-        creation and PATH config to the binary's own install subcommand, so
-        nothing here touches PATH. The installed binary is `qodercli`, NOT
-        `qoder` (the docs' `qoder --version` is stale for the shipped build);
-        upgrades go through `qodercli update`. Windows arm64 is unsupported —
-        the catalog entry carries arch x64 and hides it elsewhere.
-    #>
-    if (Get-Command qodercli -ErrorAction SilentlyContinue) {
-        return @{ ExitCode = $script:ExitCodeAlreadyInstalled; Output = 'qodercli already installed'; Success = $true }
-    }
-    if ($script:DryRun) {
-        Write-AutoOSLine 'would install Qoder CLI from the vendor install script (https://qoder.com/install.ps1, SHA256-verified by the vendor script)' -Level muted
-        return @{ ExitCode = 0; Output = 'dry-run'; Success = $true }
-    }
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) "qoder-install-$([Guid]::NewGuid().ToString('N')).ps1"
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri 'https://qoder.com/install.ps1' -OutFile $tmp -UseBasicParsing
-        # Only a payload that is recognisably the Qoder installer may run: an
-        # empty body or an error/captive-portal page must never reach a shell.
-        $payload = Get-Content -Path $tmp -Raw -Encoding UTF8
-        if ([string]::IsNullOrWhiteSpace($payload)) { throw 'downloaded install script is empty' }
-        if ($payload -notmatch '(?i)qoder') { throw 'downloaded install script does not look like the Qoder installer' }
-        Write-AutoOSLine 'installing Qoder CLI via the vendor install script' -Level step
-        return Invoke-AutoOSProcess -FilePath $tmp
-    } catch {
-        Write-AutoOSLine "Qoder CLI install failed: $($_.Exception.Message)" -Level error
-        return @{ ExitCode = 1; Output = $_.Exception.Message; Success = $false }
-    } finally {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-    }
 }
 
 function Install-AutoOSClaudeAutostart {
@@ -2572,6 +2549,149 @@ function Set-AutoOSClaudeGateway {
     Write-AutoOSLine 'Subscription models need the gateway claude OAuth connection first (omniroute providers auth claude-code); until then use opus/sonnet via direct login (backup restores it)' -Level warn
 }
 
+function Set-AutoOSApiKeyEnv {
+    <#
+      .SYNOPSIS Export one api-keys.yml key as a User env var, once.
+      Generic core behind Set-AutoOSOmniRouteCliKey (and the Qoder PAT
+      below): reads <KeysName> from the keys file, exports <EnvName> at
+      <Scope> only when absent (existing values are user-managed and win),
+      never prints the value. Missing/placeholder keys warn and skip.
+    #>
+    param([Parameter(Mandatory)][string]$EnvName, [Parameter(Mandatory)][string]$KeysName, [string]$KeysFile, [string]$Scope = 'User')
+    if (-not $KeysFile) {
+        $KeysFile = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
+    }
+    $key = $null
+    if (Test-Path -LiteralPath $KeysFile) {
+        $line = Select-String -Path $KeysFile -Pattern "^$KeysName\s*:" | Select-Object -First 1
+        if ($line) { $key = $line.Line.Split(':', 2)[1].Trim() }
+    }
+    if ([string]::IsNullOrWhiteSpace($key) -or $key.StartsWith('REPLACE_WITH_')) {
+        Write-AutoOSLine "no $KeysName key in $KeysFile - fill it first (docs/api-keys.md)" -Level warn
+        return
+    }
+    $existing = [Environment]::GetEnvironmentVariable($EnvName, $Scope)
+    if (-not [string]::IsNullOrWhiteSpace($existing)) {
+        Write-AutoOSLine "$EnvName already set ($Scope scope) - skipped, user-managed" -Level ok
+        return
+    }
+    if ($script:DryRun) {
+        Write-AutoOSLine "would export $EnvName to $Scope scope (value from $KeysFile, never shown)" -Level muted
+        return
+    }
+    [Environment]::SetEnvironmentVariable($EnvName, $key, $Scope)
+    Send-AutoOSEnvironmentChange
+    Write-AutoOSLine "$EnvName exported to $Scope scope - new terminals inherit it (remove with [Environment]::SetEnvironmentVariable('$EnvName',\$null,'$Scope'))" -Level ok
+}
+
+function Set-AutoOSOmniRouteCliKey {
+    <#
+      .SYNOPSIS Export the OmniRoute client key for the omniroute CLI.
+      The oauth/setup/configure management commands need server auth
+      (OMNIROUTE_API_KEY); without it they 401. Persistent User scope so
+      every new terminal inherits it. Localhost-only bearer key, same
+      sensitivity as the git-ignored api-keys.yml it is read from.
+    #>
+    param([string]$KeysFile, [string]$Scope = 'User')
+    Set-AutoOSApiKeyEnv -EnvName 'OMNIROUTE_API_KEY' -KeysName 'omniroute' -KeysFile $KeysFile -Scope $Scope
+}
+
+function Install-AutoOSOmniRouteRouting {
+    <#
+      .SYNOPSIS Route every detected CLI at the local gateway (setup-time).
+      postInstall only fires when a component installs, so pre-installed
+      CLIs would never get routed — this closes that gap from the omniroute
+      component: persistent client-key env, Claude Code settings, Qwen model
+      entry. Each step skips quietly when its CLI is absent; DryRun announces.
+      Secrets travel Process-scope only and are never printed. NOTE the two
+      key names below are pre-existing repo convention (Zed docs use the
+      _API_KEY form, Set-AutoOSClaudeGateway reads the short form); both
+      carry the same gateway client key.
+    #>
+    Set-AutoOSOmniRouteCliKey
+    $hadShort = -not [string]::IsNullOrWhiteSpace($env:AUTOOS_OMNIROUTE_KEY)
+    $hadCli = -not [string]::IsNullOrWhiteSpace($env:OMNIROUTE_API_KEY)
+    if (-not $hadShort -or -not $hadCli) {
+        $kf = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
+        $kv = $null
+        if (Test-Path -LiteralPath $kf) {
+            $kl = Select-String -Path $kf -Pattern '^omniroute\s*:' | Select-Object -First 1
+            if ($kl) { $kv = $kl.Line.Split(':', 2)[1].Trim() }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($kv) -and -not $kv.StartsWith('REPLACE_WITH_')) {
+            if (-not $hadShort) { $env:AUTOOS_OMNIROUTE_KEY = $kv }
+            if (-not $hadCli) { $env:OMNIROUTE_API_KEY = $kv }
+        }
+    }
+    try {
+        if (Get-Command claude -ErrorAction SilentlyContinue) { Set-AutoOSClaudeGateway }
+        else { Write-AutoOSLine 'Claude Code not installed - skipping gateway routing' -Level muted }
+        if (Get-Command qwen -ErrorAction SilentlyContinue) {
+            if (Get-Command omniroute -ErrorAction SilentlyContinue) {
+                $qcfg = Join-Path $env:USERPROFILE '.qwen\settings.json'
+                if ($script:DryRun) {
+                    Write-AutoOSLine "would route Qwen Code at OmniRoute in $qcfg (model t2-worker)" -Level muted
+                } else {
+                    if (Test-Path $qcfg) {
+                        Copy-Item $qcfg "$qcfg.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+                    }
+                    & omniroute setup-qwen --model t2-worker --yes 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) { Write-AutoOSLine 'Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)' -Level warn }
+                    else { Write-AutoOSLine 'Qwen Code routed at OmniRoute (model t2-worker)' -Level ok }
+                }
+            } else {
+                Write-AutoOSLine 'omniroute CLI not on PATH - cannot route Qwen Code' -Level warn
+            }
+        }
+        else { Write-AutoOSLine 'Qwen Code not installed - skipping gateway routing' -Level muted }
+    } finally {
+        if (-not $hadShort) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        if (-not $hadCli) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
+    }
+}
+
+function Install-AutoOSQoderCli {
+    <#
+      .SYNOPSIS Make the Qoder CLI resolvable and authenticated.
+      The dashboard shells out to `qodercli`, which ships beside the Qoder
+      IDE in ~/.qoder/bin/qodercli — not on PATH, hence "not recognized".
+      Steps, each idempotent and announced in DryRun: install the binary
+      when missing (vendor install.ps1, download-to-file + verified, never
+      a pipe — A14), append its dir to User PATH (the single
+      Add-AutoOSPathEntry path, backed up), export QODER_PERSONAL_ACCESS_TOKEN
+      from api-keys.yml qoder_pat when absent. Interactive /login keeps
+      working; an env PAT takes precedence per Qoder docs.
+    #>
+    param([string]$KeysFile)
+    $binDir = Join-Path $env:USERPROFILE '.qoder\bin\qodercli'
+    $exe = Join-Path $binDir 'qodercli.exe'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        $url = 'https://qoder.com/install.ps1'
+        if ($script:DryRun) {
+            Write-AutoOSLine "would download and run the Qoder CLI installer from $url" -Level muted
+        } else {
+            Write-AutoOSLine "downloading Qoder CLI installer from $url" -Level muted
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-qoder-install-$([Guid]::NewGuid().ToString('N')).ps1"
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+                if (-not (Test-Path -LiteralPath $tmp) -or (Get-Item $tmp).Length -eq 0) { throw 'empty download' }
+                powershell -NoProfile -ExecutionPolicy Bypass -File $tmp
+                if ($LASTEXITCODE -ne 0) { Write-AutoOSLine 'Qoder CLI installer failed' -Level warn; return }
+            } catch {
+                Write-AutoOSLine "Qoder CLI download/install failed: $_" -Level warn
+                return
+            } finally {
+                Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    Add-AutoOSPathEntry -Directory @($binDir) | Out-Null
+    Set-AutoOSApiKeyEnv -EnvName 'QODER_PERSONAL_ACCESS_TOKEN' -KeysName 'qoder_pat' -KeysFile $KeysFile
+    $q = Get-Command qodercli -ErrorAction SilentlyContinue
+    if ($q) { Write-AutoOSLine "Qoder CLI ready: $($q.Source)" -Level ok }
+    else { Write-AutoOSLine 'qodercli still not resolvable - open a new terminal (PATH refresh) or check the install' -Level warn }
+}
+
 function Set-AutoOSZedProxy {
     <#
       .SYNOPSIS Point Zed's agent panel at the local OmniRoute gateway + LiteLLM fallback.
@@ -2646,10 +2766,12 @@ function Set-AutoOSZedProxy {
         @{ name = 't2-worker'; display_name = 't2 smart (free-first)'; max_tokens = 131072 },
         @{ name = 't2-worker-clean'; display_name = 't2-worker-clean (paid)'; max_tokens = 131072 },
         @{ name = 't2-worker-free-only'; display_name = 't2-worker-free-only (free legs only)'; max_tokens = 131072 },
+        @{ name = 't2-orchestrator'; display_name = 't2 orchestrator (small-scope)'; max_tokens = 200000 },
         @{ name = 't3-driver'; display_name = 't3 driver (cheapest)'; max_tokens = 131072 },
         @{ name = 't3-driver-clean'; display_name = 't3-driver-clean (paid)'; max_tokens = 131072 },
         @{ name = 't3-driver-free-only'; display_name = 't3-driver-free-only (free legs only)'; max_tokens = 131072 },
         @{ name = 'spark-1.3-contributor'; display_name = 'spark pinned (zen free -> openrouter paid)'; max_tokens = 1048576 },
+        @{ name = 'opus-4-6'; display_name = 'opus pinned (agy free -> cc subscription)'; max_tokens = 200000 },
         @{ name = 'gemini-3.8-flash'; display_name = 'gemini-3.8-flash (gemini free -> paid)'; max_tokens = 131072 },
         @{ name = 'deepseek-v4.1-flash'; display_name = 'deepseek-v4.1-flash (paid cheapest-first)'; max_tokens = 131072 },
         @{ name = 't4-rag'; display_name = 't4-rag cohere RAG (trial keys)'; max_tokens = 131072 }
@@ -2670,10 +2792,13 @@ function Set-AutoOSZedProxy {
         available_models = @(
             @{ name = 't1-orchestrator'; display_name = 't1-orchestrator (litellm fallback)'; max_tokens = 1048576 },
             @{ name = 't1-orchestrator-paid'; display_name = 't1-orchestrator-paid (litellm)'; max_tokens = 1048576 },
+            @{ name = 't1-orchestrator-free-only'; display_name = 't1-orchestrator-free-only (litellm zero spend)'; max_tokens = 1048576 },
             @{ name = 't2-worker'; display_name = 't2-worker (litellm fallback)'; max_tokens = 131072 },
             @{ name = 't2-worker-paid'; display_name = 't2-worker-paid (litellm)'; max_tokens = 131072 },
+            @{ name = 't2-worker-free-only'; display_name = 't2-worker-free-only (litellm zero spend)'; max_tokens = 131072 },
             @{ name = 't3-driver'; display_name = 't3-driver (litellm fallback)'; max_tokens = 131072 },
-            @{ name = 't3-driver-paid'; display_name = 't3-driver-paid (litellm)'; max_tokens = 131072 }
+            @{ name = 't3-driver-paid'; display_name = 't3-driver-paid (litellm)'; max_tokens = 131072 },
+            @{ name = 't3-driver-free-only'; display_name = 't3-driver-free-only (litellm zero spend)'; max_tokens = 131072 }
         )
     }
     if ($env:AUTOOS_LITELLM_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_LITELLM_API_KEY from the environment' -Level muted }
@@ -2757,9 +2882,9 @@ function Set-AutoOSQoderMcp {
         return
     }
     if (-not (Get-Command qodercli -ErrorAction SilentlyContinue)) {
-        # The catalog orders qoder-cli first, but the user may have deselected
+        # The catalog orders qodercli first, but the user may have deselected
         # it - a postInstall warns, it never hard-fails the run.
-        Write-AutoOSLine 'qodercli is not on PATH - cannot register MCP servers. Install qoder-cli first (a new shell may be needed to see it).' -Level warn
+        Write-AutoOSLine 'qodercli is not on PATH - cannot register MCP servers. Install qodercli first (a new shell may be needed to see it).' -Level warn
         return
     }
 
@@ -2958,13 +3083,13 @@ Export-ModuleMember -Function `
     Write-AutoOSOmnigraphReadiness,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
     Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
-    Install-AutoOSHerdr, Install-AutoOSClaudeAutostart, Install-AutoOSQoderCli,
+    Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,
     Write-AutoOSClaudeHostReadiness, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
-    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
+    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Set-AutoOSQoderMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,

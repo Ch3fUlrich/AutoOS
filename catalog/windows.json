@@ -267,6 +267,42 @@
           "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
         },
         {
+          "id": "qodercli",
+          "name": "Qoder CLI",
+          "description": "Alibaba terminal coding agent (Qwen-powered)",
+          "provider": "script",
+          "package": "qodercli",
+          "arch": [
+            "x64"
+          ],
+          "postInstall": "Set-AutoOSQoderMcp",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "qodercli --version",
+          "homepage": "https://qoder.com/cli",
+          "notes": "Wires ~/.qoder/bin on PATH and QODER_PERSONAL_ACCESS_TOKEN from api-keys.yml. Headless use needs the PAT; interactive /login still works. Windows arm64 is not supported per the vendor's own installation docs, so the component is hidden there rather than shown and failing."
+        },
+        {
+          "id": "devin-cli",
+          "name": "Devin CLI",
+          "description": "Cognition terminal coding agent",
+          "provider": "winget",
+          "package": "CognitionAI.DevinCLI",
+          "arch": [
+            "x64",
+            "arm64"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "devin --version",
+          "homepage": "https://cli.devin.ai",
+          "notes": "Needs an interactive `devin auth login` once; the gateway side connects via `omniroute providers add devin-cli --oauth` or the dashboard."
+        },
+        {
           "id": "ollama",
           "name": "Ollama",
           "description": "Local AI model runtime",
@@ -558,7 +594,8 @@
           ],
           "verify": "omniroute --version",
           "homepage": "https://github.com/diegosouzapw/OmniRoute",
-          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first."
+          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first.",
+          "postInstall": "Install-AutoOSOmniRouteRouting"
         },
         {
           "id": "opencode-cli",
@@ -579,24 +616,6 @@
           "notes": "V2 CLI. The legacy npm package opencode-ai (V1) cannot read the V2 providers config."
         },
         {
-          "id": "qoder-cli",
-          "name": "Qoder CLI",
-          "description": "Qoder's terminal coding agent",
-          "provider": "script",
-          "package": "qoder-cli",
-          "arch": [
-            "x64"
-          ],
-          "profiles": [
-            "workstation",
-            "ai-coding"
-          ],
-          "verify": "qodercli --version",
-          "homepage": "https://qoder.com/cli",
-          "postInstall": "Set-AutoOSQoderMcp",
-          "notes": "No winget/npm package on the supported path; the vendor's own install script SHA256-verifies the binary. Upgrades: qodercli update."
-        },
-        {
           "id": "qoder-desktop",
           "name": "Qoder",
           "description": "Qoder's agentic desktop IDE",
@@ -607,7 +626,7 @@
             "ai-coding"
           ],
           "homepage": "https://qoder.com/download",
-          "notes": "Desktop IDE (Windows 10+). No verify command: the app puts no confirmed CLI on PATH. MCP wiring lives on qoder-cli."
+          "notes": "Desktop IDE (Windows 10+). No verify command: the app puts no confirmed CLI on PATH. MCP wiring lives on qodercli."
         },
         {
           "id": "openhands-docker",

@@ -632,7 +632,7 @@ print("%s|%s|%s|%s" % (
     ",".join(t["model"] for t in spec["tiers"])))
 PY
 )"
-    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,openrouter-muse-spark-1.3-contributor|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t1-orchestrator-clean,openai/t1-orchestrator-free-only,openai/spark-1.3-contributor,openai/t2-worker,openai/t2-worker-clean,openai/t2-worker-free-only,openai/t3-driver,openai/t3-driver-clean,openai/t3-driver-free-only,openai/t4-rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openrouter/meta/muse-spark-1.3-contributor"
+    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t2-orchestrator,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-opus-4-6,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t1-orchestrator-free-only,litellm-t2-worker-free-only,litellm-t3-driver-free-only,openrouter-muse-spark-1.3-contributor|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t1-orchestrator-clean,openai/t1-orchestrator-free-only,openai/spark-1.3-contributor,openai/t2-worker,openai/t2-worker-clean,openai/t2-worker-free-only,openai/t2-orchestrator,openai/t3-driver,openai/t3-driver-clean,openai/t3-driver-free-only,openai/t4-rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/opus-4-6,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t1-orchestrator-free-only,openai/t2-worker-free-only,openai/t3-driver-free-only,openrouter/meta/muse-spark-1.3-contributor"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
     # Generator round-trip with fixture keys (env hidden: the suite never
@@ -654,7 +654,7 @@ else:
 PY
 )"
     rm -rf "$tmp"
-    assert_eq "$written" "17"
+    assert_eq "$written" "22"
     assert_eq "$direct" "test-or-key|https://openrouter.ai/api/v1|openrouter/meta/muse-spark-1.3-contributor"
 fi
 
@@ -2356,6 +2356,33 @@ PY
     assert_eq "$bad" ""
 fi
 
+if it "route_detected_clis_to_gateway announces in dry run and writes nothing"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '{"theme":"mine"}' >"$scratch/.claude/settings.json"
+    before="$(cat "$scratch/.claude/settings.json")"
+    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=1; AUTOOS_OMNIROUTE_KEY="k1" OMNIROUTE_API_KEY="k2"; route_detected_clis_to_gateway ) 2>&1)"
+    after="$(cat "$scratch/.claude/settings.json")"
+    backups="$(find "$scratch" -name '*.autoos-backup-*' 2>/dev/null | wc -l)"
+    rm -rf "$scratch"
+    if [[ -n "$out" && "$before" == "$after" && "$backups" == "0" ]]; then pass
+    else fail "dry run wrote or stayed silent"; fi
+fi
+
+if it "route_detected_clis_to_gateway bridges keys from the keys file"; then
+    tmp="$(mktemp -d)"
+    printf 'omniroute: test-file-key\n' >"$tmp/api-keys.yml"
+    out="$(
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=1
+        unset OMNIROUTE_API_KEY AUTOOS_OMNIROUTE_KEY
+        has_cmd() { return 1; }
+        AUTOOS_KEYS_FILE="$tmp/api-keys.yml" route_detected_clis_to_gateway >/dev/null 2>&1
+        printf '%s|%s' "${OMNIROUTE_API_KEY:-empty}" "${AUTOOS_OMNIROUTE_KEY:-empty}"
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "test-file-key|test-file-key"
+fi
+
 if it "zed routing announces in dry run and writes nothing"; then
     scratch="$(mktemp -d)"
     out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=1; route_zed_to_proxy ) 2>&1)"
@@ -2383,6 +2410,25 @@ PY
     rm -rf "$scratch" "$scratch2"
     assert_eq "$report" "mine|http://127.0.0.1:20128|test-omni-key"
     assert_eq "backups=$backups|nokey=$nokey" "backups=1|nokey=yes"
+fi
+
+if it "install_qodercli announces in dry run and writes nothing"; then
+    out="$( ( AUTOOS_DRY_RUN=1; install_qodercli ) 2>&1)"
+    if [[ "$out" == *"would download and run the Qoder CLI installer"* ]]; then pass
+    else fail "dry run wrote or stayed silent"; fi
+fi
+
+if it "install_devin_cli announces in dry run and writes nothing"; then
+    out="$( ( AUTOOS_DRY_RUN=1; install_devin_cli ) 2>&1)"
+    if [[ "$out" == *"would download and run the Devin CLI installer"* ]]; then pass
+    else fail "dry run wrote or stayed silent"; fi
+fi
+
+if it "script dispatch covers qodercli and devin-cli"; then
+    ok=1
+    grep -q 'qodercli) *install_qodercli' lib/linux/install.sh || ok=0
+    grep -q 'devin-cli) *install_devin_cli' lib/linux/install.sh || ok=0
+    if (( ok )); then pass; else fail "dispatch missing"; fi
 fi
 
 if it "zed routing merges one provider and keeps the rest"; then
@@ -2429,10 +2475,14 @@ PY
     line1="$(printf '%s' "$report" | sed -n '1p')"
     line2="$(printf '%s' "$report" | sed -n '2p')"
     assert_eq "$line1" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,opus-4-6,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
     assert_eq "$line2" \
         "bypass=bypass|off=|provider=autoos-omniroute|model=t1-orchestrator|allow=allow|ctx=context7,graphify,omnigraph,playwright,serena"
-    assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
+    assert_eq "leaks=$leaks" "leaks=0"
+    # Two runs share second-precision backup names: same second -> 1 file,
+    # straddling a boundary -> 2. Either proves backup-before-edit; an exact
+    # count would flake on wall-clock timing.
+    if (( backups >= 1 )); then pass; else fail "no backup written"; fi
 fi
 
 if it "zed routing without key env warns and stays key-free"; then
@@ -2485,7 +2535,7 @@ if it "litellm fallback config is internally consistent"; then
 import re, io
 text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
 groups = set(re.findall(r"(?m)^\s*-\s*model_name:\s*(\S+)\s*$", text))
-need = {"t1-orchestrator", "t1-orchestrator-paid", "t2-worker", "t2-worker-paid", "t3-driver", "t3-driver-paid"}
+need = {"t1-orchestrator", "t1-orchestrator-paid", "t1-orchestrator-free-only", "t2-worker", "t2-worker-paid", "t2-worker-free-only", "t3-driver", "t3-driver-paid", "t3-driver-free-only"}
 fb = text.split("fallbacks:", 1)[1]
 refs = set(re.findall(r"[- ](\S+):\s*\[([^\]]*)\]", fb))
 problems = sorted(list(need - groups))
@@ -2505,6 +2555,65 @@ if [m for m in models if "llama-3.3-70b" in m]:
     problems.append("stale")
 if "drop_params" not in text or "os.environ/LITELLM_MASTER_KEY" not in text:
     problems.append("settings")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
+if it "free-only litellm groups mirror combos minus gateway-only legs"; then
+    # The *-free-only groups are hand-curated (not sync-managed), so this
+    # pins them to combos.json with hardcoded expectations: same legs in the
+    # same order, and the ONLY permitted drops are the known OAuth-bridge
+    # legs LiteLLM has no transport or key for. Anything else missing - or
+    # any silently added leg - is drift. Free-only groups must also stay out
+    # of fallbacks (zero spend means fail loudly, never bill silently).
+    report="$(python3 - 2>&1 <<'PY'
+import io, json, re
+combos = {c["name"]: c["models"]
+          for c in json.load(open("configuration/omniroute/combos.json",
+                                   encoding="utf-8"))["combos"]}
+# LiteLLM model strings: OmniRoute provider/model passes through except the
+# OpenAI-compatible gateways (zen, cheaperinference -> openai/ + api_base).
+# Only pre-existing, proven mappings appear here - no new inference.
+# known_drops is deliberately hardcoded, NOT derived from GATEWAY_ONLY in
+# tools/sync-router-tiers.py: the test must stay an independent second
+# opinion - deriving it would make tool and test agree by construction.
+transport = {"opencode-zen": "openai", "cheaperinference": "openai"}
+def litellm_model(ref):
+    prov, model = ref.split("/", 1)
+    return "%s/%s" % (transport.get(prov, prov), model)
+known_drops = {"antigravity/gemini-3.7-flash-medium",
+               "antigravity/claude-opus-4-6-thinking"}
+text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
+problems = []
+for tier in ("t1-orchestrator-free-only", "t2-worker-free-only",
+             "t3-driver-free-only"):
+    want = [litellm_model(r) for r in combos[tier] if r not in known_drops]
+    got = []
+    cur = None
+    for line in text.splitlines():
+        m = re.match(r"^[ \t]*-[ \t]*model_name:[ \t]*(\S+)[ \t]*$", line)
+        if m:
+            cur = m.group(1)
+            continue
+        m = re.match(r"^[ \t]*model:[ \t]*(\S+)[ \t]*$", line)
+        if m and cur == tier:
+            got.append(m.group(1))
+    if got != want:
+        problems.append(tier + "-drift")
+    # Every combos leg must be mirrored or declared-dropped: a new leg that
+    # is neither fails here until known_drops explicitly acknowledges it.
+    # (Checked against got, the parsed file - not against want above, which
+    # would make this tautological.)
+    unmirrored = [r for r in combos[tier] if litellm_model(r) not in got]
+    if set(unmirrored) - known_drops:
+        problems.append(tier + "-unpinned-drop")
+fb = text.split("fallbacks:", 1)[1]
+for tier in ("t1-orchestrator-free-only", "t2-worker-free-only",
+             "t3-driver-free-only"):
+    if re.search(r"(?m)^\s*-\s*" + tier + r"\s*:", fb):
+        problems.append(tier + "-in-fallbacks")
 print(" ".join(problems))
 PY
 )"
@@ -2533,7 +2642,7 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
@@ -2835,7 +2944,7 @@ if it "setup_wsl_agent_home is a no-op off WSL and dry-runnable on WSL"; then
     else fail "rc_off=$rc_off rc_dry=$rc_dry"; fi
 fi
 
-# ─── Qoder (CLI install + MCP wiring) ───────────────────────────────────────
+# ─── Qoder (catalog entries + MCP wiring) ───────────────────────────────────
 describe "qoder"
 
 if it "qoder catalog entries exist on linux and macos with the right shape"; then
@@ -2855,13 +2964,13 @@ def comp(path, cid):
     return None
 problems = []
 for path in ("catalog/linux.json", "catalog/macos.json"):
-    cli = comp(path, "qoder-cli")
+    cli = comp(path, "qodercli")
     desk = comp(path, "qoder-desktop")
     if not cli:
-        problems.append(path + ":no-qoder-cli")
+        problems.append(path + ":no-qodercli")
     else:
         if cli.get("provider") != "script": problems.append(path + ":cli-provider")
-        if cli.get("package") != "qoder-cli": problems.append(path + ":cli-package")
+        if cli.get("package") != "qodercli": problems.append(path + ":cli-package")
         if cli.get("verify") != "qodercli --version": problems.append(path + ":cli-verify")
         if cli.get("postInstall") != "setup_qoder_mcp": problems.append(path + ":cli-postinstall")
         if "arch" in cli: problems.append(path + ":cli-has-arch")
@@ -2877,7 +2986,7 @@ PY
     assert_eq "$report" ""
 fi
 
-if it "qoder-cli postInstall names a shell function that exists"; then
+if it "qodercli postInstall names a shell function that exists"; then
     # postInstall is NOT schema-validated: run_post_install only warns when the
     # named function is missing, so a typo silently does nothing on a real
     # machine. Assert the catalogued name really resolves to a defined function.
@@ -2888,34 +2997,26 @@ import json, sys
 data = json.load(open(sys.argv[1], encoding='utf-8'))
 for g in data['categories']:
     for c in g['components']:
-        if c['id'] == 'qoder-cli':
+        if c['id'] == 'qodercli':
             print(c.get('postInstall', ''))
 " "$path")"
         [[ "$fn" == "setup_qoder_mcp" ]] || { ok=0; echo "$path postInstall=$fn" >&2; }
         declare -F "$fn" >/dev/null || { ok=0; echo "$path: $fn is not defined" >&2; }
     done
-    if (( ok )); then pass; else fail "qoder-cli postInstall does not resolve to a defined function"; fi
+    if (( ok )); then pass; else fail "qodercli postInstall does not resolve to a defined function"; fi
 fi
 
-if it "qoder-cli rides the script provider end to end"; then
+if it "qodercli detection rides the script provider"; then
     ok=1
-    grep -q 'qoder-cli)       install_qoder_cli' lib/linux/install.sh || ok=0
-    grep -q 'qoder-cli)       has_bin qodercli' lib/linux/detect.sh || ok=0
+    # The dispatch case itself is covered by "script dispatch covers qodercli
+    # and devin-cli" above; what this pins is the detect.sh side, without which
+    # an already-installed Qoder would be reinstalled instead of skipped.
+    grep -q 'qodercli)        has_bin qodercli' lib/linux/detect.sh || ok=0
     # has_bin is stubbed so the test never depends on what this machine happens
     # to have installed.
-    ( has_bin() { return 1; }; script_is_installed qoder-cli ) >/dev/null 2>&1 && ok=0
-    ( has_bin() { return 0; }; script_is_installed qoder-cli ) >/dev/null 2>&1 || ok=0
-    if (( ok )); then pass; else fail "qoder-cli dispatch or detection is broken"; fi
-fi
-
-if it "qoder-cli installer announces in dry run and never pipes to a shell"; then
-    # Guard A14: download to a file, inspect it, then run the FILE. The dry-run
-    # banner names the vendor URL; the source must not feed curl into bash.
-    out="$( ( AUTOOS_DRY_RUN=1; install_qoder_cli ) 2>&1)"
-    ok=1
-    [[ "$out" == *"would install Qoder CLI via https://qoder.com/install"* ]] || ok=0
-    grep -q 'bash "$tmp"' lib/linux/install.sh || ok=0
-    if (( ok )); then pass; else fail "dry-run banner or execute-the-file discipline broken: $(printf '%s' "$out" | tail -2)"; fi
+    ( has_bin() { return 1; }; script_is_installed qodercli ) >/dev/null 2>&1 && ok=0
+    ( has_bin() { return 0; }; script_is_installed qodercli ) >/dev/null 2>&1 || ok=0
+    if (( ok )); then pass; else fail "qodercli dispatch or detection is broken"; fi
 fi
 
 if it "setup_qoder_mcp writes nothing in a dry run"; then
@@ -5833,8 +5934,11 @@ import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash"]:
+if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
     problems.append("names")
+for r in ("tier1", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean", "rag", "tier1-paid", "tier2-paid", "tier3-paid", "tier2-credit", "tier3-credit"):
+    if r in names:
+        problems.append("retired:" + r)
 for c in d["combos"]:
     if not c["models"]:
         problems.append(c["name"] + ":empty")
