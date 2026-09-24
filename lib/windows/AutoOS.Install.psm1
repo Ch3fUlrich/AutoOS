@@ -1020,7 +1020,7 @@ function Set-AutoOSOmnigraphEnv {
         return
     }
     if ($NoUserVariable) { return }
-    $token = $fileToken.Substring('OMNIGRAPH_TOKEN='.Length)
+    $token = $fileToken.Substring($fileToken.IndexOf('=') + 1)
     if ([Environment]::GetEnvironmentVariable('OMNIGRAPH_TOKEN', 'User') -cne $token) {
         [Environment]::SetEnvironmentVariable('OMNIGRAPH_TOKEN', $token, 'User')
         Write-AutoOSLine 'OMNIGRAPH_TOKEN user variable set (new processes see it)' -Level ok
@@ -2284,7 +2284,7 @@ if not omni_token:
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(openhands_dir)), '.autoos-omnigraph.env'), encoding='utf-8') as _of:
             for _line in _of:
-                if _line.startswith('OMNIGRAPH_TOKEN='):
+                if _line.split('=', 1)[0] == 'OMNIGRAPH_TOKEN':
                     omni_token = _line.split('=', 1)[1].strip()
     except OSError:
         pass
