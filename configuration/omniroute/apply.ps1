@@ -33,8 +33,9 @@ $ErrorActionPreference = 'Continue'
 $Here      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root      = Split-Path -Parent (Split-Path -Parent $Here)
 $Gateway   = 'http://127.0.0.1:20128'
-$KeysFile  = Join-Path $Root 'configuration\api-keys.yml'
+$KeysFile  = if ($env:AUTOOS_KEYS_FILE) { $env:AUTOOS_KEYS_FILE } else { Join-Path $Root 'configuration\api-keys.yml' }
 $CombosFile = Join-Path $Here 'combos.json'
+if ($DryRun) { Write-Host 'This is a dry run - nothing is registered, created or started.' }
 
 # No api-keys.yml, no keys to apply. Say how to create it (bash prints the
 # same), but stay green under -DryRun so a preview never demands secrets.
@@ -50,6 +51,9 @@ if (-not (Test-Path $KeysFile)) {
         if ($t -eq '' -or $t.StartsWith('#') -or -not $t.Contains(':')) { continue }
         $key = ($t -split ':', 2)[0].Trim().ToLowerInvariant()
         $val = ($t -split ':', 2)[1].Trim().Trim('"').Trim("'")
+        # A copied template keeps REPLACE_WITH_* for keys you do not have;
+        # registering one would also block the real key later.
+        if ($val -like 'REPLACE_WITH_*') { continue }
         if ($key -and $val) { $Keys[$key] = $val }
     }
 }

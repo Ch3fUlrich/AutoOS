@@ -588,6 +588,9 @@
           "description": "Local LLM router: free-first tiers for all agents",
           "provider": "custom",
           "package": "litellm",
+          "requires": [
+            "uv"
+          ],
           "postInstall": "install_litellm_proxy",
           "profiles": [
             "workstation",

@@ -5,6 +5,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — tier orchestration on opencode v2 (measured live 2026-09-24)
+
+- **Nested tiers could not run.** `opencode.jsonc` set a top-level `subagent_depth`,
+  which opencode 2.0.16 drops as an unsupported legacy setting; the depth stayed 1 and
+  tier2 answered "Subagent depth limit reached (1)". It is `experimental.subagent_depth`
+  now, and both suites gate it.
+- **The read-only reviewer could write and commit.** Its `bash` rule matched nothing (v2
+  calls it `shell`) and serena's write tools bypassed the `edit` deny. tier3-reviewer now
+  denies `serena_*` except a read-only list, the omnigraph write tools and browser code,
+  and carries every `agent-harness.json` shell fence (no commit, push, checkout, reset).
+- **LiteLLM did not install on Ubuntu 24.04.** `pip install --user` fails under PEP 668
+  and the step still reported success. The installer uses `uv tool install` (then pipx),
+  returns failure when both fail, the catalog entry requires `uv`, and a present
+  `litellm` is detected so a second run skips.
+- **`apply.*` registered `REPLACE_WITH_*` placeholders as provider keys**, which then
+  shadowed the real key as "already registered". Placeholders now count as no key.
+- **`start-stack.sh openhands` never ran the tier-profile sync**: the repo root resolved
+  one directory too high.
+
+### Added — one-command tier agents
+
+- `tools/autoos-agent.py` spawns one tier agent with its own model (a bare
+  `opencode run --agent` uses the default model), standalone (so the current key is
+  used), with stdin closed (a piped stdin hangs `opencode run`). `--isolate` runs it in a
+  private clone with writes outside denied; `--free` runs every tier on opencode's free
+  model with no key; `--dry-run` prints the plan.
+
 ### Added — OpenHands Agent Canvas
 
 - **Vendored OpenHands profiles** in `openhands/`: 21 LLM profiles projected from

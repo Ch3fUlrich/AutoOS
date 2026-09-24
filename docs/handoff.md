@@ -72,8 +72,10 @@ memory, never write project data to the global `memory` graph.**
   by hand (no committed script does this yet — see Open 6).
 - **Clients**: opencode CLI 2.0.12 V2 (`@opencode/cli`; never V1 `opencode-ai`),
   3-tier agents live (`tier1-orchestrator`→`tier2-worker`→`tier3-reviewer`,
-  `subagent_depth: 2`, reviewer = read/grep/glob/bash allow +
-  edit/write/subagent deny). Zed: `autoos-omniroute` + `autoos-litellm`
+  `experimental.subagent_depth: 2` (a top-level key is ignored by v2 -
+  fixed 2026-09-24), reviewer = read/grep/glob/shell allow +
+  edit/write/subagent/serena-write/commit/push deny). Spawn one agent with
+  `tools/autoos-agent.py` (`--isolate`, `--free`; docs/unattended-orchestration.md). Zed: `autoos-omniroute` + `autoos-litellm`
   providers, 15 models, `bypass` profile, keys via
   `AUTOOS_OMNIROUTE_API_KEY`/`AUTOOS_LITELLM_API_KEY` env (NEVER settings.json
   — Zed ignores `api_key` there and hides keyless providers). Neovim+LazyVim

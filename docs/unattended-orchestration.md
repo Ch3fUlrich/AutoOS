@@ -25,17 +25,61 @@ exactly one child per level:
 Effect: a tier2 that tries to spawn another tier2 (or a tier3 that
 tries to spawn anything) is **denied by the runtime before it runs**.
 The suite asserts all three agents exist with exactly this shape
-(`tests/run-tests.*`: tier-enforcement case). Two limits to know:
+(`tests/run-tests.*`: tier-enforcement case). What the runtime needs,
+measured live against opencode 2.0.16 (2026-09-24):
 
-1. The `agents` block binds inside the opencode runtime (CLI/TUI/
-   `serve`). Harness or API callers that address `omniroute/tierN`
-   models directly bypass agents and must follow the same depth by
-   convention — the skill prompt states the spawn budget explicitly.
-2. A subagent uses its configured model, so depth and model stay
-   paired: tier1-orchestrator always runs on `omniroute/tier1`,
-   tier2-worker on `omniroute/tier2`, tier3-reviewer on
-   `omniroute/tier3`. Ask for a `-clean` twin when the task is
-   sensitive (same depth, no-training legs).
+1. **Depth is `experimental.subagent_depth`.** A top-level
+   `subagent_depth` is dropped as an "unsupported legacy setting" and the
+   depth defaults to 1 - tier2 then answers "Subagent depth limit reached
+   (1)". Both suites gate the key.
+2. **The reviewer is fenced by `shell` rules and MCP denies**, not by
+   `edit`/`write` alone. v2 calls the shell action `shell` (a `bash` rule
+   matches nothing), and serena's `create_text_file`/`replace_content`
+   write files past an `edit` deny. tier3-reviewer therefore denies
+   `serena_*` except a read-only allow list, the omnigraph write tools and
+   `playwright_browser_run_code_unsafe`, and carries every
+   `catalog/agent-harness.json` fence (`bash_deny_all` + `bash_deny_leaf`:
+   no commit, push, checkout, reset, env dumps) as a `shell` deny.
+3. **Children keep their model; the entry agent does not.** A child
+   spawned through the subagent tool runs on its own agent's model. But
+   `opencode run --agent tier2-worker` runs on the top-level default
+   (`omniroute/tier1`) unless `--model` is passed too - use
+   `tools/autoos-agent.py` (below), which always pairs them.
+4. **The subagent tool accepts a `model` override**, so a model can still
+   pick another model at spawn time; the agent prompt, not the runtime,
+   keeps it on its tier.
+5. **Harness or API callers that address `omniroute/tierN` directly**
+   bypass the agents and follow the same depth by convention only.
+
+## Spawning a tier agent - one command
+
+```bash
+python3 tools/autoos-agent.py list                          # tiers, models, who spawns whom
+python3 tools/autoos-agent.py run --tier 3 "Review lib/linux/ui.sh"
+python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"
+python3 tools/autoos-agent.py run --tier 3 --clean "..."    # -clean twin
+python3 tools/autoos-agent.py run --tier 2 --model omniroute/tier2-credit "..."
+python3 tools/autoos-agent.py run --tier 1 --free "..."     # no key, no gateway, no spend
+python3 tools/autoos-agent.py run --tier 2 --dry-run "..."  # print the plan only
+```
+
+It passes the agent's own model, runs `--standalone` (the background
+opencode service keeps the environment it started with, so a key exported
+later is ignored), closes the child's stdin (with an open pipe `opencode
+run` waits for more prompt text and never starts), reads the client key
+from `AUTOOS_OMNIROUTE_KEY` or `configuration/api-keys.yml` without printing
+it, and logs one line per run to `logs/orch-<date>.log`.
+
+- `--isolate` runs the agent in a private `git clone --local` on its own
+  branch, with its own opencode data dir and a deny on every path outside
+  the clone. **Not a git worktree:** opencode resolves a worktree to the
+  main checkout, and a worker's writes from inside one landed in the main
+  repo. Take results with `git fetch <clone> <branch>`; nothing is merged or
+  deleted for you. The clone starts from `HEAD` - commit first.
+- `--free` maps every tier to opencode's own free model (default
+  `opencode/big-pickle`) through `OPENCODE_CONFIG_CONTENT`: the way to
+  exercise the chain and the fences before any provider key exists. Free
+  promo models may train on prompts, so `--free --clean` is refused.
 
 ## Stuck-agent watchdog (tier1 probes, never waits forever)
 
