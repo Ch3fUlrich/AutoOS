@@ -239,6 +239,26 @@ function Invoke-AutoOSProcess {
 }
 
 # ─── PATH handling ──────────────────────────────────────────────────────────
+function Send-AutoOSEnvironmentChange {
+    # Tell Explorer (and future ShellExecute children) that the environment
+    # block changed, so new terminals see PATH/env edits without a
+    # sign-out. Registry writes alone only reach processes that re-read
+    # them; without this broadcast even a correct PATH edit looks broken
+    # (measured 2026-09-24: qodercli resolvable by full path, invisible on
+    # PATH until broadcast). Fire-and-forget; DryRun callers never reach it.
+    if (-not ([System.Management.Automation.PSTypeName]'AutoOSEnvNotify').Type) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AutoOSEnvNotify {
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lResult);
+}
+'@
+    }
+    $done = [UIntPtr]::Zero
+    [void][AutoOSEnvNotify]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$done)
+}
 function Add-AutoOSPathEntry {
     <#
       .SYNOPSIS
@@ -277,6 +297,7 @@ function Add-AutoOSPathEntry {
     $current | Out-File -FilePath $backup -Encoding utf8
     [Environment]::SetEnvironmentVariable('Path', $new, $Scope)
     $env:Path = "$env:Path;$($added -join ';')"
+    Send-AutoOSEnvironmentChange
     Write-AutoOSLine "appended to $Scope PATH: $($added -join ', ')" -Level ok
     Write-AutoOSLine "previous value saved to $backup" -Level muted
     $true
@@ -2559,6 +2580,7 @@ function Set-AutoOSApiKeyEnv {
         return
     }
     [Environment]::SetEnvironmentVariable($EnvName, $key, $Scope)
+    Send-AutoOSEnvironmentChange
     Write-AutoOSLine "$EnvName exported to $Scope scope - new terminals inherit it (remove with [Environment]::SetEnvironmentVariable('$EnvName',\$null,'$Scope'))" -Level ok
 }
 

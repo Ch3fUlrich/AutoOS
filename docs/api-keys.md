@@ -172,7 +172,11 @@ never enters `catalog/providers.json` or the LiteLLM `.env`. **Windows:**
 the `qodercli` catalog component appends `~/.qoder/bin` to User PATH (the
 dashboard error was precisely this: the binary lives beside the IDE install,
 not on PATH) and exports the PAT absent-only, same mechanism as
-`OMNIROUTE_API_KEY` above. **Linux/macOS:** install via the component, then
+`OMNIROUTE_API_KEY` above. Both writes broadcast `WM_SETTINGCHANGE`, so new
+terminals see them without sign-out — but long-running processes (including
+the OmniRoute server itself) keep their stale environment until restarted;
+if the dashboard still fails after setup, restart the gateway. **Linux/macOS:**
+install via the component, then
 `export QODER_PERSONAL_ACCESS_TOKEN='<value of qoder_pat:>'` yourself.
 Warning from Qoder docs: an env PAT takes precedence over `/login`
 credentials — clear it before `/logout`, or the next start signs straight
