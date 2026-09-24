@@ -208,9 +208,15 @@ def push_profiles(push_url: str, profiles: list) -> int:
         status, _ = _http("POST", base + "/api/v1/settings", {"agent_settings_diff": {"llm": first}})
         print("sync-openhands-profiles: app settings seeded with %s%s"
               % (profiles[0][0], "" if status == 200 else " FAILED (HTTP %s)" % status))
+    capped = []
     for name, profile in profiles:
         want = strict(profile)
         status, have = _http("GET", f"{base}/api/v1/settings/profiles/{name}")
+        if capped and status != 200:
+            # Past the app's cap every further NEW profile is refused too;
+            # ones it already holds are still compared and updated.
+            capped.append(name)
+            continue
         if status == 200 and isinstance(have, dict) and have.get("api_key_set"):
             current = dict(have.get("config") or {})
             current.pop("api_key", None)
@@ -222,10 +228,13 @@ def push_profiles(push_url: str, profiles: list) -> int:
         if status in (200, 201):
             print(f"sync-openhands-profiles: app profile {name} saved")
         elif status == 409:
-            print(f"sync-openhands-profiles: app profile {name} not saved (the app's profile cap is reached)")
+            capped.append(name)
         else:
             detail = json.dumps(reply)[:160] if reply is not None else ""
             print(f"sync-openhands-profiles: app profile {name} FAILED (HTTP {status}) {detail}")
+    if capped:
+        print("sync-openhands-profiles: the app's profile cap is reached - not in the app: %s"
+              % ", ".join(capped))
     return 0
 
 
