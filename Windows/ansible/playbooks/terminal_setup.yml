@@ -6,7 +6,7 @@
   vars:
     repo_url: https://github.com/Ch3fUlrich/AutoOS.git
     # Every path derives from the target's own environment. The old version
-    # hardcoded C:\Users\donat\... in one task while using {{ ansible_user }}
+    # hardcoded one user's profile path in one task while using {{ ansible_user }}
     # everywhere else, so the theme copy failed for every other user.
     checkout_dir: '{{ ansible_env.USERPROFILE }}\Downloads\AutoOS'
     theme_dir: '{{ ansible_env.LOCALAPPDATA }}\AutoOS\themes'
