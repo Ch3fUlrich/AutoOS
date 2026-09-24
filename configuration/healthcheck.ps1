@@ -69,6 +69,21 @@ Write-AutoOSHealth "opencode :4096 -> $oc $(if ($ocUp) { 'up (401 = alive, needs
 if ($uiUp) { Write-AutoOSHealth "autoos-ui :8777 -> $ui up" }
 else { Write-AutoOSHealth 'autoos-ui :8777 -> down (expected unless setup.ps1 -Serve is running)' }
 
+# Omnigraph memory: clients show it "connected" even when every read fails
+# (no token, stale token, missing graph), so probe it like the bridge does:
+# health, an authenticated schema read, the Project hub. Report only.
+$py = Get-Command python3, python -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -eq $py) {
+    Write-AutoOSHealth 'omnigraph -> not probed (python not found)'
+} else {
+    $ogOut = & $py.Source (Join-Path $RepoRoot 'tools\check-omnigraph.py') 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) { Write-AutoOSHealth 'omnigraph -> up' }
+    else {
+        Write-AutoOSHealth 'omnigraph -> FAIL'
+        foreach ($l in ($ogOut -split "`r?`n" | Where-Object { $_ -like 'FAIL*' })) { Write-AutoOSHealth "  $l" }
+    }
+}
+
 if ($Fix -and ((-not $gwUp) -or (-not $ohUp))) {
     Write-AutoOSHealth '--fix: resuming via Start-AutoOSStack.ps1 ...'
     & (Join-Path $RepoRoot 'configuration\autostart\Start-AutoOSStack.ps1')

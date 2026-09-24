@@ -1153,9 +1153,13 @@ ctx["graphify"] = {
     "args": ["run", "--with", pins["graphify"]["package"], "python",
              "-m", "graphify.serve", "graphify-out/graph.json"],
 }
+# The bridge exits at start-up without a base URL and a graph id ("Connection
+# closed" in the panel). The token is never written here: Zed inherits it from
+# the session env (~/.config/environment.d, see write_omnigraph_env).
 ctx["omnigraph"] = {
     "command": "npx",
     "args": ["-y", pins["omnigraph"]["package"]],
+    "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
 }
 ctx["playwright"] = {
     "command": "npx",
@@ -1851,7 +1855,8 @@ PY
     return 0
 }
 
-# The omnigraph MCP server is a container talking to a graph server over a Docker
+# AutoOS's own repo runs the bridge through npx (.mcp.json); the agent-skills
+# checkout and sibling repos run it as a container on the graph server's Docker
 # network. Miss the image, the network or the token and MCP start-up fails with
 # "pull access denied", "fetch failed" or "missing bearer token" respectively —
 # none of which say which of the three it was. AutoOS does not build or start
@@ -1872,17 +1877,121 @@ omnigraph_readiness() {
         ui_muted "    docker compose -f ${dir}/infra/mcp-servers/docker-compose.client.yml up -d"
         ready=0
     fi
-    if [[ -z "${OMNIGRAPH_TOKEN:-}" ]]; then
+    if [[ -z "${OMNIGRAPH_TOKEN:-}" ]] && ! grep -qE '^OMNIGRAPH_TOKEN=.' "$SYS_HOME/.autoos-omnigraph.env" 2>/dev/null; then
         # Never invent one. An empty bearer fails as "missing bearer token",
         # which at least names itself; a made-up value fails as a 401 nobody can
         # explain — and this repository is public, so a real-looking secret in it
         # is a leak whether or not it happens to work.
         ui_warn "OMNIGRAPH_TOKEN is not set — the server will reject every call."
-        ui_muted "    it is issued by the graph server, not by AutoOS. Copy"
-        ui_muted "    ${dir}/infra/mcp-servers/.env.client.example to .env.client and fill it in."
+        ui_muted "    it is issued by the graph server, not by AutoOS. Add"
+        ui_muted "    OMNIGRAPH_TOKEN=<token> to ${SYS_HOME}/.autoos-omnigraph.env (mode 600)."
         ready=0
     fi
     (( ready ))
+}
+
+# write_omnigraph_env <base-url>
+# The per-user omnigraph env file, ~/.autoos-omnigraph.env, mode 600: the ONE
+# place the bearer token lives on this machine. Tracked configs name the token
+# (${OMNIGRAPH_TOKEN} in .mcp.json; opencode, Zed and OpenHands inherit it), so
+# something must put the value into the env of whatever launches a client. A
+# token exported only from an interactive ~/.zshrc reaches terminals and
+# nothing else: systemd user services, a desktop-launched Zed and `bash -c`
+# agents got none, still showed omnigraph "connected" (the bridge answers
+# health without a token) and failed every read (measured 2026-09-24). So the
+# file is
+#   * linked as ~/.config/environment.d/60-autoos-omnigraph.conf, which the
+#     systemd user manager and desktop sessions load at login, and
+#   * sourced from ~/.bashrc / ~/.zshrc when OMNIGRAPH_TOKEN is not set yet.
+# The token comes from $OMNIGRAPH_TOKEN, else from the local omnigraph-server
+# container, else stays whatever the file already had. Never invented, never
+# printed. Read-modify-write: other keys in the file are kept.
+write_omnigraph_env() {
+    local base="$1" file="$SYS_HOME/.autoos-omnigraph.env"
+    local link="$SYS_HOME/.config/environment.d/60-autoos-omnigraph.conf"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would write ${file} (mode 600) and link it into ${link%/*}"
+        return 0
+    fi
+    local token="${OMNIGRAPH_TOKEN:-}"
+    if [[ -z "$token" ]] && has_cmd docker; then
+        token="$(docker inspect omnigraph-server --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+            | sed -n 's/^OMNIGRAPH_SERVER_BEARER_TOKEN=//p' | head -n 1)" || token=""
+    fi
+
+    local status rc=0
+    status="$(OMNI_BASE="$base" OMNI_TOKEN="$token" python3 - "$file" <<'PY'
+import os, shutil, sys, time
+path = sys.argv[1]
+want = {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"]}
+if os.environ.get("OMNI_TOKEN"):
+    want["OMNIGRAPH_TOKEN"] = os.environ["OMNI_TOKEN"]
+old = ""
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as f:
+        old = f.read()
+lines, seen = [], set()
+for line in old.splitlines():
+    key = line.split("=", 1)[0].strip()
+    if key in want:
+        if key in seen:
+            continue
+        line = "%s=%s" % (key, want[key])
+        seen.add(key)
+    lines.append(line)
+lines += ["%s=%s" % (k, v) for k, v in want.items() if k not in seen]
+new = "\n".join(lines) + "\n"
+has_token = any(l.startswith("OMNIGRAPH_TOKEN=") and l.strip() != "OMNIGRAPH_TOKEN=" for l in lines)
+if new == old:
+    os.chmod(path, 0o600)
+    print("unchanged", "token" if has_token else "no-token")
+    sys.exit(0)
+if old:
+    backup = "%s.autoos-backup-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
+    shutil.copy2(path, backup)
+    os.chmod(backup, 0o600)
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write(new)
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+print("written", "token" if has_token else "no-token")
+PY
+)" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "could not write ${file} (exit ${rc})"
+        return 0
+    fi
+    if [[ "$status" == unchanged* ]]; then
+        ui_muted "omnigraph env file unchanged (${file})"
+    else
+        ui_ok "omnigraph env written to ${file} (mode 600)"
+    fi
+    if [[ "$status" == *no-token ]]; then
+        ui_warn "OMNIGRAPH_TOKEN is not set and no local omnigraph-server holds one."
+        ui_muted "    add OMNIGRAPH_TOKEN=<token issued by the graph server> to ${file}"
+    fi
+
+    mkdir -p "${link%/*}"
+    if [[ -L "$link" && "$(readlink "$link")" == "$file" ]]; then
+        :
+    elif [[ -e "$link" || -L "$link" ]]; then
+        ui_warn "${link} exists and is not AutoOS's link — left alone."
+    else
+        ln -s "$file" "$link"
+        ui_ok "linked ${link} (systemd user services and desktop apps)"
+    fi
+
+    # Literal $HOME/${...}: this line is written into the rc file and expands
+    # there, at shell start-up, not here.
+    # shellcheck disable=SC2016
+    local rc_line='[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env'
+    local shell_rc
+    for shell_rc in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
+        [[ -f "$shell_rc" ]] || continue
+        append_line_once "$shell_rc" "AutoOS:omnigraph-env" "$rc_line"
+    done
 }
 
 install_agent_skills() {
@@ -1899,12 +2008,7 @@ install_agent_skills() {
     if [[ -z "$omni" ]]; then base="http://localhost:8080"; else base="${omni%/}"; fi
     ui_info "Omnigraph base URL: ${base}"
 
-    if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would write ${SYS_HOME}/.autoos-omnigraph.env"
-    else
-        printf 'OMNIGRAPH_BASE_URL=%s\n' "$base" >"$SYS_HOME/.autoos-omnigraph.env"
-        ui_ok "Omnigraph URL saved to ${SYS_HOME}/.autoos-omnigraph.env"
-    fi
+    write_omnigraph_env "$base"
 
     # Wire user-scope MCP servers across Claude Code and Antigravity
     install_mcp_graphify
@@ -1931,9 +2035,10 @@ install_agent_skills() {
     omni_pkg="$(mcp_package omnigraph)"
     omni_spec="$(python3 -c "
 import json, os
-env_vars = {'OMNIGRAPH_BASE_URL': '$base'}
-if os.environ.get('OMNIGRAPH_GRAPH_ID'):
-    env_vars['OMNIGRAPH_GRAPH_ID'] = os.environ['OMNIGRAPH_GRAPH_ID']
+# bridge 0.8 refuses to start without a graph id (there is no fallback graph
+# any more), so an unset one pins this repo's graph like the other clients.
+env_vars = {'OMNIGRAPH_BASE_URL': '$base',
+            'OMNIGRAPH_GRAPH_ID': os.environ.get('OMNIGRAPH_GRAPH_ID') or 'autoos'}
 if os.environ.get('OMNIGRAPH_TOKEN'):
     env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
 print(json.dumps({
@@ -2528,11 +2633,28 @@ mcp_cfg["graphify"] = {
     "args": ["--from", MCP_PACKAGES["graphify"], "python", "-m", "graphify.serve", "graphify-out/graph.json"],
     "description": "Codebase knowledge graph and dependency intelligence",
 }
+# The agent-server may run in a container or under systemd; neither sees a
+# token exported from an interactive shell rc. Take it from the env, else the
+# per-user 0600 file write_omnigraph_env keeps (this settings file already
+# holds the LLM keys and is never tracked).
+omni_env = {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"}
+omni_token = os.environ.get("OMNIGRAPH_TOKEN", "")
+if not omni_token:
+    _omni_file = os.path.join(os.path.dirname(os.path.abspath(openhands_dir)), ".autoos-omnigraph.env")
+    try:
+        with open(_omni_file, encoding="utf-8") as _of:
+            for _line in _of:
+                if _line.startswith("OMNIGRAPH_TOKEN="):
+                    omni_token = _line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+if omni_token:
+    omni_env["OMNIGRAPH_TOKEN"] = omni_token
 mcp_cfg["omnigraph"] = {
     "transport": "stdio",
     "command": "npx",
     "args": ["-y", MCP_PACKAGES["omnigraph"]],
-    "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
+    "env": omni_env,
     "description": "Project memory graph for this repository (repo-scoped, not global)",
 }
 ctx7_args = ["-y", MCP_PACKAGES["context7"]]

@@ -930,17 +930,101 @@ function Write-AutoOSOmnigraphReadiness {
         Write-AutoOSLine "    docker compose -f $AgentSkillsDir\infra\mcp-servers\docker-compose.client.yml up -d" -Level muted
         $ready = $false
     }
-    if (-not $env:OMNIGRAPH_TOKEN) {
+    $envFileToken = Select-String -Path (Join-Path $env:USERPROFILE '.autoos-omnigraph.env') -Pattern '^OMNIGRAPH_TOKEN=.' -Quiet -ErrorAction SilentlyContinue
+    if (-not $env:OMNIGRAPH_TOKEN -and -not $envFileToken -and
+        -not [Environment]::GetEnvironmentVariable('OMNIGRAPH_TOKEN', 'User')) {
         # Never invent one. An empty bearer fails as "missing bearer token",
         # which at least names itself; a made-up value fails as a 401 nobody can
         # explain - and this repository is public, so a real-looking secret in it
         # is a leak whether or not it happens to work.
         Write-AutoOSLine 'OMNIGRAPH_TOKEN is not set - the server will reject every call.' -Level warn
-        Write-AutoOSLine '    it is issued by the graph server, not by AutoOS. Copy' -Level muted
-        Write-AutoOSLine "    $AgentSkillsDir\infra\mcp-servers\.env.client.example to .env.client and fill it in." -Level muted
+        Write-AutoOSLine '    it is issued by the graph server, not by AutoOS. Add' -Level muted
+        Write-AutoOSLine "    OMNIGRAPH_TOKEN=<token> to $env:USERPROFILE\.autoos-omnigraph.env" -Level muted
         $ready = $false
     }
     $ready
+}
+
+function Set-AutoOSOmnigraphEnv {
+    <#
+      .SYNOPSIS
+        Keep the per-user omnigraph env file and the OMNIGRAPH_TOKEN user variable.
+
+      .DESCRIPTION
+        Tracked configs name the token (${OMNIGRAPH_TOKEN} in .mcp.json;
+        opencode, Zed and OpenHands inherit it), so something has to put the
+        value into the environment of whatever launches a client. A token that
+        only one shell profile exports reaches that shell and nothing else, and
+        the bridge still shows "connected" (it answers health without a token)
+        while every read fails (measured 2026-09-24).
+
+        %USERPROFILE%\.autoos-omnigraph.env holds OMNIGRAPH_BASE_URL and the
+        token, read-modify-write (other keys are kept, a changed file is backed
+        up). The token is also set as the OMNIGRAPH_TOKEN *user* variable - one
+        named variable, read first and written only when it differs - so every
+        newly started process sees it. The value comes from $env:OMNIGRAPH_TOKEN,
+        else from a local omnigraph-server container, else whatever the file
+        already had. Never invented, never printed.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$BaseUrl,
+        [string]$EnvFile = (Join-Path $env:USERPROFILE '.autoos-omnigraph.env'),
+        # Tests: never touch the real user environment.
+        [switch]$NoUserVariable
+    )
+    if ($script:DryRun) {
+        Write-AutoOSLine "would write $EnvFile and the OMNIGRAPH_TOKEN user variable" -Level muted
+        return
+    }
+    $token = $env:OMNIGRAPH_TOKEN
+    if (-not $token -and (Get-Command docker -ErrorAction SilentlyContinue)) {
+        try {
+            $lines = & docker inspect omnigraph-server --format '{{range .Config.Env}}{{println .}}{{end}}' 2>$null
+            foreach ($l in @($lines)) {
+                if ("$l" -like 'OMNIGRAPH_SERVER_BEARER_TOKEN=*') { $token = "$l".Substring(30); break }
+            }
+        } catch { $token = $null }
+    }
+
+    $old = ''
+    if (Test-Path $EnvFile) { $old = [IO.File]::ReadAllText($EnvFile) }
+    $want = [ordered]@{ OMNIGRAPH_BASE_URL = $BaseUrl }
+    if ($token) { $want['OMNIGRAPH_TOKEN'] = $token }
+    $seen = @{}
+    $out = New-Object Collections.Generic.List[string]
+    foreach ($line in ($old -split "`r?`n")) {
+        if ($line -eq '') { continue }
+        $key = ($line -split '=', 2)[0].Trim()
+        if ($want.Contains($key)) {
+            if ($seen.ContainsKey($key)) { continue }
+            $line = "$key=$($want[$key])"
+            $seen[$key] = $true
+        }
+        $out.Add($line)
+    }
+    foreach ($k in $want.Keys) { if (-not $seen.ContainsKey($k)) { $out.Add("$k=$($want[$k])") } }
+    $new = ($out -join "`n") + "`n"
+    $fileToken = ($out | Where-Object { $_ -like 'OMNIGRAPH_TOKEN=?*' } | Select-Object -First 1)
+
+    if ($new -ceq $old) {
+        Write-AutoOSLine "omnigraph env file unchanged ($EnvFile)" -Level muted
+    } else {
+        if ($old) { Copy-Item $EnvFile "$EnvFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force }
+        # No BOM: the file is also read as KEY=VALUE by non-PowerShell tools.
+        [IO.File]::WriteAllText($EnvFile, $new, (New-Object Text.UTF8Encoding($false)))
+        Write-AutoOSLine "omnigraph env written to $EnvFile" -Level ok
+    }
+    if (-not $fileToken) {
+        Write-AutoOSLine 'OMNIGRAPH_TOKEN is not set and no local omnigraph-server holds one.' -Level warn
+        Write-AutoOSLine "    add OMNIGRAPH_TOKEN=<token issued by the graph server> to $EnvFile" -Level muted
+        return
+    }
+    if ($NoUserVariable) { return }
+    $token = $fileToken.Substring('OMNIGRAPH_TOKEN='.Length)
+    if ([Environment]::GetEnvironmentVariable('OMNIGRAPH_TOKEN', 'User') -cne $token) {
+        [Environment]::SetEnvironmentVariable('OMNIGRAPH_TOKEN', $token, 'User')
+        Write-AutoOSLine 'OMNIGRAPH_TOKEN user variable set (new processes see it)' -Level ok
+    }
 }
 
 function Install-AutoOSAgentSkills {
@@ -979,11 +1063,7 @@ function Install-AutoOSAgentSkills {
     $omniUrl = Get-AutoOSAnswer 'omnigraph_url' ''
     $baseUrl = if ([string]::IsNullOrWhiteSpace($omniUrl)) { 'http://localhost:8080' } else { $omniUrl.TrimEnd('/') }
     Write-AutoOSLine "Omnigraph base URL: $baseUrl" -Level info
-    if (-not $script:DryRun) {
-        $envFile = Join-Path $env:USERPROFILE '.autoos-omnigraph.env'
-        "OMNIGRAPH_BASE_URL=$baseUrl" | Out-File -FilePath $envFile -Encoding utf8
-        Write-AutoOSLine "Omnigraph URL saved to $envFile" -Level ok
-    }
+    Set-AutoOSOmnigraphEnv -BaseUrl $baseUrl
 
     # ── MCP stack: wire user-scope servers across Claude Code and Antigravity ──
     Install-AutoOSMcpGraphify
@@ -1059,12 +1139,12 @@ function Set-AutoOSAntigravityMcp {
         from scratch, which silently deleted every other MCP server the user had
         configured there - a backup makes that recoverable, not acceptable.
 
-        The token and graph id are read from the environment and only written
-        when they are actually set. AutoOS has no business inventing either: an
-        absent OMNIGRAPH_TOKEN fails as "missing bearer token", which says what
-        is wrong, and an absent OMNIGRAPH_GRAPH_ID is better than a guessed one,
-        because the fallback graph is the shared `memory` graph that this repo's
-        data must never be written to.
+        The token is read from the environment and only written when it is
+        actually set: AutoOS has no business inventing one, and an absent
+        OMNIGRAPH_TOKEN fails as "missing bearer token", which says what is
+        wrong. The graph id defaults to this repo's `autoos`: bridge 0.8 has no
+        fallback graph any more and exits at start-up without one (measured
+        2026-09-24), which the client only reports as "Connection closed".
     #>
     $omniUrl = Get-AutoOSAnswer 'omnigraph_url' ''
     $baseUrl = if ([string]::IsNullOrWhiteSpace($omniUrl)) { 'http://localhost:8080' } else { $omniUrl.TrimEnd('/') }
@@ -1072,7 +1152,7 @@ function Set-AutoOSAntigravityMcp {
     $cfgPath = Join-Path $cfgDir 'mcp_config.json'
 
     $envBlock = [ordered]@{ OMNIGRAPH_BASE_URL = $baseUrl }
-    if ($env:OMNIGRAPH_GRAPH_ID) { $envBlock['OMNIGRAPH_GRAPH_ID'] = $env:OMNIGRAPH_GRAPH_ID }
+    $envBlock['OMNIGRAPH_GRAPH_ID'] = if ($env:OMNIGRAPH_GRAPH_ID) { $env:OMNIGRAPH_GRAPH_ID } else { 'autoos' }
     if ($env:OMNIGRAPH_TOKEN)    { $envBlock['OMNIGRAPH_TOKEN']    = $env:OMNIGRAPH_TOKEN }
 
     if ($script:DryRun) {
@@ -2196,11 +2276,25 @@ mcp_cfg['graphify'] = {
     'args': ['--quiet', 'run', '--with', MCP_PACKAGES['graphify'], 'python', '-m', 'graphify.serve', 'graphify-out/graph.json'],
     'description': 'Codebase dependency knowledge graph'
 }
+# The agent-server may run in a container; it never sees a token from a shell
+# profile. Take it from the env, else the per-user omnigraph env file.
+omni_env = {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'}
+omni_token = os.environ.get('OMNIGRAPH_TOKEN', '')
+if not omni_token:
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(openhands_dir)), '.autoos-omnigraph.env'), encoding='utf-8') as _of:
+            for _line in _of:
+                if _line.startswith('OMNIGRAPH_TOKEN='):
+                    omni_token = _line.split('=', 1)[1].strip()
+    except OSError:
+        pass
+if omni_token:
+    omni_env['OMNIGRAPH_TOKEN'] = omni_token
 mcp_cfg['omnigraph'] = {
     'transport': 'stdio',
     'command': 'npx',
     'args': ['-y', MCP_PACKAGES['omnigraph']],
-    'env': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'},
+    'env': omni_env,
     'description': 'Project memory graph for this repository (repo-scoped, not global)'
 }
 ctx7_args = ['-y', MCP_PACKAGES['context7']]
@@ -2581,13 +2675,16 @@ function Set-AutoOSZedProxy {
         args = @('run', '--with', (Get-AutoOSMcpPackage -Name 'graphify'), 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
     }
     Add-Member -InputObject $settings.context_servers -NotePropertyName 'graphify' -NotePropertyValue $graphifyCtx -Force
-    # Full MCP set for the agent panel: omnigraph (project memory; the panel
-    # inherits the repo's OMNIGRAPH_GRAPH_ID via process env), playwright
+    # Full MCP set for the agent panel: omnigraph (project memory; the bridge
+    # exits at start-up without a base URL and a graph id, so both are set
+    # here - the token never is, Zed inherits OMNIGRAPH_TOKEN from the user
+    # environment Set-AutoOSOmnigraphEnv keeps), playwright
     # (browser verification) and context7 (library docs). Pins resolve from
     # catalog/agent-harness.json at runtime, never as literals.
     $omnigraphCtx = [ordered]@{
         command = 'npx'
         args = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
+        env = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://localhost:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
     }
     Add-Member -InputObject $settings.context_servers -NotePropertyName 'omnigraph' -NotePropertyValue $omnigraphCtx -Force
     $playwrightCtx = [ordered]@{
@@ -2758,7 +2855,7 @@ Export-ModuleMember -Function `
     Read-AutoOSSecretsFile, Read-AutoOSApiSecrets, Resolve-AutoOSOllamaBaseUrl,
     Get-AutoOSMcpPackage, Get-AutoOSSerenaExcludedTools,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
-    Write-AutoOSOmnigraphReadiness,
+    Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
     Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
     Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,

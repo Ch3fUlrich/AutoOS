@@ -2929,6 +2929,77 @@ function Get-AutoOSConsoleCapture {
     $sw.ToString()
 }
 
+# Omnigraph reachability (measured 2026-09-24): the bridge refuses to start
+# without OMNIGRAPH_BASE_URL and OMNIGRAPH_GRAPH_ID (the client only says
+# "Connection closed"), and answers health without a token, so clients show
+# "connected" while every read fails.
+Test-Case 'the omnigraph env file is merged, carries the token, and is stable on a re-run' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-og-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    $realToken = $env:OMNIGRAPH_TOKEN
+    try {
+        $envFile = Join-Path $scratch '.autoos-omnigraph.env'
+        [IO.File]::WriteAllText($envFile, "KEEP_ME=1`nOMNIGRAPH_BASE_URL=http://old.invalid`n")
+        $env:OMNIGRAPH_TOKEN = 'test-token-value'
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        $first = Get-AutoOSConsoleCapture { Set-AutoOSOmnigraphEnv -BaseUrl 'http://localhost:8080' -EnvFile $envFile -NoUserVariable 6>&1 }
+        $second = Get-AutoOSConsoleCapture { Set-AutoOSOmnigraphEnv -BaseUrl 'http://localhost:8080' -EnvFile $envFile -NoUserVariable 6>&1 }
+        $lines = @([IO.File]::ReadAllLines($envFile) | Sort-Object)
+        Assert-Equal ($lines -join ' ') 'KEEP_ME=1 OMNIGRAPH_BASE_URL=http://localhost:8080 OMNIGRAPH_TOKEN=test-token-value'
+        Assert-Equal @(Get-ChildItem $scratch -Force -Filter '*.autoos-backup-*').Count 1 'one backup, from the first change only'
+        Assert-True ("$second" -match 'unchanged') "second run was not reported unchanged: $second"
+        Assert-True ("$first$second" -notmatch 'test-token-value') 'the token was printed'
+    } finally {
+        $env:OMNIGRAPH_TOKEN = $realToken
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'the omnigraph user variable is set by name only, never PATH-style wholesale' {
+    $fn = [regex]::Match($installSource, '(?s)function Set-AutoOSOmnigraphEnv \{.*?\n\}').Value
+    Assert-True ($fn -match "GetEnvironmentVariable\('OMNIGRAPH_TOKEN', 'User'\)") 'the user variable is not read first'
+    Assert-True ($fn -match "SetEnvironmentVariable\('OMNIGRAPH_TOKEN', \`$token, 'User'\)") 'the user variable is not written by name'
+    Assert-True ($installSource -match 'Set-AutoOSOmnigraphEnv -BaseUrl \$baseUrl\r?\n') 'the installer does not call it for real'
+}
+
+Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)" {
+    $realAppData = $env:APPDATA
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-agy-" + [Guid]::NewGuid().ToString('N'))
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSAntigravityMcp 6>$null | Out-Null
+        $cfg = Get-Content (Join-Path $scratch 'Antigravity\mcp_config.json') -Raw | ConvertFrom-Json
+        Assert-Equal $cfg.mcpServers.omnigraph.env.OMNIGRAPH_GRAPH_ID 'autoos'
+    } finally {
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSZedProxy 6>$null | Out-Null
+        $s = Get-Content (Join-Path $scratch 'Zed\settings.json') -Raw | ConvertFrom-Json
+        $e = $s.context_servers.omnigraph.env
+        Assert-True ($null -ne $e) 'omnigraph context server has no env'
+        Assert-Equal $e.OMNIGRAPH_GRAPH_ID 'autoos'
+        Assert-True ([bool]$e.OMNIGRAPH_BASE_URL) 'no base URL'
+        Assert-True ($null -eq $e.PSObject.Properties['OMNIGRAPH_TOKEN']) 'a token landed in Zed settings'
+    } finally {
+        $env:APPDATA = $realAppData
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+
 # tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
 # YAML shapes both Set-AutoOSSerenaExclusions (here) and ensure_serena_exclusions
 # (tests/run-tests.sh) are graded against, so the two implementations cannot

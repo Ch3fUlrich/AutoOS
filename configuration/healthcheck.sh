@@ -42,6 +42,17 @@ if [[ $OH_UP -eq 1 ]]; then say "openhands :3000 -> $OH up"; else say "openhands
 if [[ $OC_UP -eq 1 ]]; then say "opencode :4096 -> $OC up"; else say "opencode :4096 -> $OC DOWN"; fi
 if [[ $UI_UP -eq 1 ]]; then say "autoos-ui :8777 -> $UI up"; else say "autoos-ui :8777 -> down (expected unless setup.sh --serve runs)"; fi
 
+# Omnigraph memory: clients show it "connected" even when every read fails
+# (no token, stale token, missing graph), so probe it like the bridge does:
+# health, an authenticated schema read, the Project hub. Report only.
+if OG_OUT="$(python3 "$ROOT/tools/check-omnigraph.py" 2>&1)"; then
+    say "omnigraph -> up ($(printf '%s' "$OG_OUT" | sed -n 's/^  //p' | tr '\n' ';' | sed 's/;$//'))"
+else
+    say "omnigraph -> FAIL"
+    printf '%s\n' "$OG_OUT" | grep '^FAIL' | while IFS= read -r line; do say "  $line"; done
+fi
+printf '%s\n' "$OG_OUT" | { grep '^WARN' || true; } | while IFS= read -r line; do say "  $line"; done
+
 if [[ $FIX -eq 1 && ($GW_UP -eq 0 || $OH_UP -eq 0) ]]; then
     say "--fix: resuming via Start-AutoOSStack.sh ..."
     bash "$ROOT/configuration/autostart/Start-AutoOSStack.sh" 2>&1 | tee -a "$LOG"
@@ -55,3 +66,4 @@ echo "  omniroute --no-open --port 20128   # gateway"
 echo "  ./configuration/start-stack.sh openhands   # container"
 echo "  opencode serve --hostname 0.0.0.0 --port 4096    # phone fallback"
 echo "  ./setup.sh --serve --bind 0.0.0.0   # browser UI (shows a token)"
+echo "  python3 tools/check-omnigraph.py    # omnigraph wiring, token and graph"

@@ -881,6 +881,26 @@ PY
     assert_eq "$out" "all-pinned"
 fi
 
+if it "setup_openhands_config hands omnigraph the token from the per-user env file"; then
+    # The agent-server may run in a container or under systemd, neither of
+    # which sees a token exported from an interactive shell rc.
+    tmp="$(mktemp -d)"
+    printf 'OMNIGRAPH_BASE_URL=http://localhost:8080\nOMNIGRAPH_TOKEN=file-token\n' >"$tmp/.autoos-omnigraph.env"
+    out="$(
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY OMNIGRAPH_TOKEN
+        curl() { return 6; }
+        setup_openhands_config >/dev/null 2>&1
+        python3 - "$tmp/.openhands" <<'PY'
+import json, sys, os
+e = json.load(open(os.path.join(sys.argv[1], "settings.json"), encoding="utf-8"))["agent_settings"]["mcp_config"]["omnigraph"]["env"]
+print(e.get("OMNIGRAPH_TOKEN"), e.get("OMNIGRAPH_GRAPH_ID"))
+PY
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "file-token autoos"
+fi
+
 describe "mcp pins"
 
 if it "mcp pins: lib/ carries no floating package spec"; then
@@ -2634,6 +2654,187 @@ if it "no bearer token is ever invented"; then
         fail "a token literal is present"
     elif grep -q "OMNIGRAPH_TOKEN is not set" lib/linux/install.sh; then pass
     else fail "a missing token is never reported"; fi
+fi
+
+# ─── Omnigraph reachability (measured 2026-09-24) ──────────────────────────
+# The bridge refuses to start without OMNIGRAPH_BASE_URL and OMNIGRAPH_GRAPH_ID
+# (the client only says "Connection closed"), and answers health/tools-list
+# without a token, so clients show "connected" while every read fails.
+
+if it "omnigraph config shape passes the offline probe"; then
+    out="$(python3 tools/check-omnigraph.py --offline 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "exit $rc: $out"; fi
+fi
+
+if it "omnigraph probe rejects a token value and a missing graph id"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/catalog"
+    cp catalog/agent-harness.json "$tmp/catalog/"
+    pin="$(python3 -c 'import json;print(json.load(open("catalog/agent-harness.json"))["mcp_servers"]["omnigraph"]["package"])')"
+    printf '{"mcpServers":{"omnigraph":{"command":"npx","args":["-y","%s"],"env":{"OMNIGRAPH_BASE_URL":"http://localhost:8080","OMNIGRAPH_TOKEN":"not-a-reference"}}}}' "$pin" >"$tmp/.mcp.json"
+    printf '{"mcp":{"servers":{"omnigraph":{"type":"local","command":["npx","-y","%s"],"environment":{"OMNIGRAPH_BASE_URL":"http://localhost:8080","OMNIGRAPH_TOKEN":"x"}}}}}' "$pin" >"$tmp/opencode.jsonc"
+    out="$(python3 tools/check-omnigraph.py --offline --root "$tmp" 2>&1)"; rc=$?
+    rm -rf "$tmp"
+    ok=1
+    [[ $rc -eq 1 ]] || ok=0
+    for frag in "OMNIGRAPH_GRAPH_ID is empty" "never a value" "not the file"; do
+        [[ "$out" == *"$frag"* ]] || { ok=0; echo "missing: $frag" >&2; }
+    done
+    [[ "$out" != *"not-a-reference"* ]] || ok=0
+    if (( ok )); then pass; else fail "rc=$rc out=$out"; fi
+fi
+
+if it "omnigraph probe warns when a local .env names a different graph id"; then
+    # agent-skills' trust_worktree.py writes OMNIGRAPH_GRAPH_ID=<folder name>
+    # (here "AutoOS") into worktree .env files; graph ids are case-sensitive and
+    # the server only has "autoos". Nothing in this repo reads that .env, so it
+    # warns instead of failing, but it must never go unnoticed.
+    tmp="$(mktemp -d)"
+    cp -r catalog "$tmp/" && cp .mcp.json opencode.jsonc "$tmp/"
+    printf 'OMNIGRAPH_GRAPH_ID=AutoOS\n' >"$tmp/.env"
+    out="$(python3 tools/check-omnigraph.py --offline --root "$tmp" 2>&1)"; rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$out" == *"WARN"*"'AutoOS'"*"'autoos'"* ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+fi
+
+if it "omnigraph live probe names a missing token, a rejected token and a missing graph"; then
+    # A stub server on a random port stands in for omnigraph-server; nothing
+    # leaves the machine and nothing is installed.
+    stub="$(mktemp -d)"
+    cat >"$stub/stub.py" <<'PY'
+import http.server, json, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, code, body):
+        data = json.dumps(body).encode()
+        self.send_response(code); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+    def _auth(self):
+        return self.headers.get("Authorization") == "Bearer good-token"
+    def do_GET(self):
+        if self.path == "/healthz": return self._send(200, {"status": "ok", "version": "stub"})
+        if not self._auth(): return self._send(401, {"error": "invalid bearer token"})
+        if self.path == "/graphs/autoos/schema": return self._send(200, {"source": "node Project {}"})
+        return self._send(404, {"error": "graph not found"})
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if not self._auth(): return self._send(401, {"error": "invalid bearer token"})
+        # /query takes `query` (server 0.8.1); `query_source` is /read's field.
+        if self.path != "/graphs/autoos/query" or "query" not in body:
+            return self._send(422, {"error": "missing field `query`"})
+        return self._send(200, {"rows": [{"p.slug": "autoos"}]})
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(srv.server_address[1]))
+srv.serve_forever()
+PY
+    python3 "$stub/stub.py" "$stub/port" & stub_pid=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s "$stub/port" ]] && break; sleep 0.2; done
+    base="http://127.0.0.1:$(cat "$stub/port" 2>/dev/null)"
+    probe() { env -u OMNIGRAPH_TOKEN AUTOOS_OMNIGRAPH_ENV_FILE="$stub/none.env" "$@" python3 tools/check-omnigraph.py --base-url "$base" 2>&1; }
+    good="$(probe OMNIGRAPH_TOKEN=good-token)"; good_rc=$?
+    none="$(probe)"; none_rc=$?
+    bad="$(probe OMNIGRAPH_TOKEN=wrong)"; bad_rc=$?
+    nograph="$(env -u OMNIGRAPH_TOKEN OMNIGRAPH_TOKEN=good-token python3 tools/check-omnigraph.py --base-url "$base" --graph nope 2>&1)"; nograph_rc=$?
+    printf 'OMNIGRAPH_TOKEN=good-token\n' >"$stub/file.env"
+    fromfile="$(env -u OMNIGRAPH_TOKEN AUTOOS_OMNIGRAPH_ENV_FILE="$stub/file.env" python3 tools/check-omnigraph.py --base-url "$base" 2>&1)"; file_rc=$?
+    kill "$stub_pid" 2>/dev/null; wait "$stub_pid" 2>/dev/null
+    rm -rf "$stub"
+    unset -f probe
+    got="$good_rc$none_rc$bad_rc$nograph_rc$file_rc"
+    ok=1
+    [[ "$got" == "01110" ]] || ok=0
+    [[ "$good" == *"project autoos"* ]] || ok=0
+    [[ "$none" == *"OMNIGRAPH_TOKEN is not set"* ]] || ok=0
+    [[ "$bad" == *"401"* ]] || ok=0
+    [[ "$nograph" == *"'nope' does not exist"* ]] || ok=0
+    [[ "$fromfile" == *"token from"* ]] || ok=0
+    [[ "$good$bad$fromfile" != *"good-token"* ]] || ok=0
+    if (( ok )); then pass; else fail "rc=$got good=[$good] none=[$none] bad=[$bad] nograph=[$nograph] file=[$fromfile]"; fi
+fi
+
+if it "both healthchecks probe omnigraph through the live probe"; then
+    ok=1
+    for f in configuration/healthcheck.sh configuration/healthcheck.ps1; do
+        grep -q 'check-omnigraph.py' "$f" || { ok=0; echo "$f does not run the probe" >&2; }
+    done
+    if (( ok )); then pass; else fail "an omnigraph probe is missing"; fi
+fi
+
+if it "zed's omnigraph context server carries the base URL and graph id the bridge requires"; then
+    scratch="$(mktemp -d)"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 route_zed_to_proxy >/dev/null 2>&1 )
+    got="$(python3 -c "
+import json,sys
+e=json.load(open(sys.argv[1],encoding='utf-8'))['context_servers']['omnigraph'].get('env',{})
+print(bool(e.get('OMNIGRAPH_BASE_URL')), e.get('OMNIGRAPH_GRAPH_ID'), 'OMNIGRAPH_TOKEN' in e)
+" "$scratch/.config/zed/settings.json" 2>&1)"
+    rm -rf "$scratch"
+    assert_eq "$got" "True autoos False"
+fi
+
+if it "the omnigraph env file is private, merged, linked for systemd, and stable on a re-run"; then
+    tmp="$(mktemp -d)"
+    printf 'KEEP_ME=1\nOMNIGRAPH_BASE_URL=http://old.invalid\n' >"$tmp/.autoos-omnigraph.env"
+    touch "$tmp/.bashrc"
+    run_env() { ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 OMNIGRAPH_TOKEN="test-token-value"; docker() { return 1; }; write_omnigraph_env "http://localhost:8080" ) 2>&1; }
+    first="$(run_env)"; second="$(run_env)"
+    mode="$(stat -c '%a' "$tmp/.autoos-omnigraph.env")"
+    body="$(sort "$tmp/.autoos-omnigraph.env" | tr '\n' ' ')"
+    link="$(readlink "$tmp/.config/environment.d/60-autoos-omnigraph.conf")"
+    backups="$(ls "$tmp"/.autoos-omnigraph.env.autoos-backup-* 2>/dev/null | wc -l)"
+    bmode="$(stat -c '%a' "$tmp"/.autoos-omnigraph.env.autoos-backup-* 2>/dev/null | head -1)"
+    rc_blocks="$(grep -c 'AutoOS:omnigraph-env' "$tmp/.bashrc")"
+    rm -rf "$tmp"
+    unset -f run_env
+    assert_eq "$mode|$body|${link##*/}|$backups|$bmode|$rc_blocks|$([[ "$second" == *unchanged* ]] && echo stable)|$([[ "$first$second" == *test-token-value* ]] && echo LEAK)" \
+        "600|KEEP_ME=1 OMNIGRAPH_BASE_URL=http://localhost:8080 OMNIGRAPH_TOKEN=test-token-value |.autoos-omnigraph.env|1|600|1|stable|"
+fi
+
+if it "the omnigraph token falls back to the local server container, else is reported missing"; then
+    tmp="$(mktemp -d)"
+    ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0
+      unset OMNIGRAPH_TOKEN
+      has_cmd() { [[ "$1" == docker ]] || command -v "$1" >/dev/null 2>&1; }
+      docker() { printf 'PATH=/bin\nOMNIGRAPH_SERVER_BEARER_TOKEN=from-container\n'; }
+      write_omnigraph_env "http://localhost:8080" >/dev/null 2>&1 )
+    from_container="$(grep -c '^OMNIGRAPH_TOKEN=from-container$' "$tmp/.autoos-omnigraph.env")"
+    rm -rf "$tmp"; tmp="$(mktemp -d)"
+    out="$( ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0
+      unset OMNIGRAPH_TOKEN
+      docker() { return 1; }
+      write_omnigraph_env "http://localhost:8080" ) 2>&1)"
+    no_token_line="$(grep -c '^OMNIGRAPH_TOKEN=' "$tmp/.autoos-omnigraph.env")"
+    rm -rf "$tmp"
+    assert_eq "$from_container|$no_token_line|$([[ "$out" == *"OMNIGRAPH_TOKEN is not set"* ]] && echo warned)" "1|0|warned"
+fi
+
+if it "the omnigraph env file is announced, not written, in a dry run"; then
+    tmp="$(mktemp -d)"
+    out="$( ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=1; write_omnigraph_env "http://localhost:8080" ) 2>&1)"
+    left="$(find "$tmp" -mindepth 1 | wc -l)"
+    rm -rf "$tmp"
+    assert_eq "$left|$([[ "$out" == *"would write"* ]] && echo announced)" "0|announced"
+fi
+
+if it "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Documents/code/agent-skills"
+    spec="$( (
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
+        unset OMNIGRAPH_GRAPH_ID OMNIGRAPH_TOKEN
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }; install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }; install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }; enable_project_mcp_server() { :; }
+        write_omnigraph_env() { :; }
+        register_antigravity_mcp_server() { [[ "$1" == omnigraph ]] && printf '%s\n' "$2" >&3; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        install_agent_skills >/dev/null 2>&1
+    ) 3>&1 )"
+    rm -rf "$tmp"
+    got="$(printf '%s' "$spec" | python3 -c "import json,sys;e=json.load(sys.stdin)['env'];print(e.get('OMNIGRAPH_GRAPH_ID'),'OMNIGRAPH_TOKEN' in e)" 2>&1)"
+    assert_eq "$got" "autoos False"
 fi
 
 if it "Antigravity MCP config is merged, not replaced"; then
