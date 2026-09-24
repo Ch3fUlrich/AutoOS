@@ -6532,6 +6532,85 @@ if it "svc: profile push skips cleanly when no app answers"; then
     if [[ $rc -eq 0 && "$out" == *"push skipped"* ]]; then pass; else fail "rc=$rc $out"; fi
 fi
 
+# The browser UI shows the AI services live and offers the setup actions that
+# already exist. Payload and action mapping are tested through an injected
+# probe and runner: nothing is probed on this machine, nothing is started.
+_svc_serve_py() {
+    python3 - "$@" <<'PY'
+import importlib.util, json, pathlib, sys, tempfile
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-serve-"))
+spec = importlib.util.spec_from_file_location("autoos_serve", "lib/linux/serve.py")
+mod = importlib.util.module_from_spec(spec)
+sys.argv = ["serve.py", str(root), "0", "127.0.0.1", "0"]
+spec.loader.exec_module(mod)
+codes = {20128: 200, 4000: 0, 4096: 401, 3000: 200}
+status = mod.service_status(probe=lambda port, path: codes[port])
+by = {s["id"]: s for s in status}
+problems = []
+for sid in ("omniroute", "litellm", "opencode", "openhands"):
+    s = by.get(sid)
+    if not s:
+        problems.append("missing:" + sid); continue
+    for k in ("name", "port", "bind", "auth", "health", "up", "actions"):
+        if k not in s: problems.append(sid + ":no-" + k)
+up = {k: v["up"] for k, v in by.items()}
+if up != {"omniroute": True, "litellm": False, "opencode": True, "openhands": True}:
+    problems.append("up=%s" % up)
+if by["litellm"]["bind"] != "127.0.0.1": problems.append("litellm-bind")
+if by["opencode"]["bind"] != "0.0.0.0": problems.append("opencode-bind")
+if "apply-dry-run" not in by["omniroute"]["actions"]: problems.append("no-apply-dry-run")
+if "start-openhands" not in by["openhands"]["actions"]: problems.append("no-start-openhands")
+if "start-opencode-serve" not in by["opencode"]["actions"]: problems.append("no-start-serve")
+# every advertised action is in the allowlist, with a repo script behind it
+for s in status:
+    for a in s["actions"]:
+        if a not in mod.SERVICE_ACTIONS: problems.append("unlisted:" + a)
+for key, act in mod.SERVICE_ACTIONS.items():
+    argv = act["argv"]
+    if argv[0] != "bash" or not (pathlib.Path("lib/linux/serve.py").resolve().parents[2] / argv[1]).is_file():
+        problems.append("not-a-repo-script:" + key)
+if mod.SERVICE_ACTIONS["apply-dry-run"]["live"] or "--dry-run" not in mod.SERVICE_ACTIONS["apply-dry-run"]["argv"]:
+    problems.append("dry-run-action-is-live")
+# the request side: unknown refused, live refused under --dry-run serving
+ran = []
+mod.start_service_action = lambda key: ran.append(key)
+code, _ = mod.service_action_response({"action": "rm -rf /"})
+if code != 400: problems.append("unknown-action=%s" % code)
+code, _ = mod.service_action_response({"action": "apply-dry-run"})
+if code != 202 or ran != ["apply-dry-run"]: problems.append("dry-run-not-started:%s" % code)
+mod.FORCE_DRY = True
+code, _ = mod.service_action_response({"action": "start-openhands"})
+if code != 409 or ran != ["apply-dry-run"]: problems.append("live-action-under-dry-serve:%s" % code)
+print(" ".join(problems) or "ok")
+PY
+}
+
+if it "svc: the web server reports every AI service and maps actions to an allowlist"; then
+    assert_eq "$(_svc_serve_py 2>&1 | tail -n 1)" "ok"
+fi
+
+if it "svc: the web UI shows service status and confirms every live action"; then
+    ok=1
+    grep -q 'api("/api/services")' web/index.html || { ok=0; echo "no status fetch" >&2; }
+    grep -q '/api/services/action' web/index.html || { ok=0; echo "no action call" >&2; }
+    body="$(sed -n '/^async function runServiceAction/,/^}/p' web/index.html)"
+    [[ "$body" == *"confirm("* ]] || { ok=0; echo "live action without confirm" >&2; }
+    grep -q 'id="services"' web/index.html || { ok=0; echo "no services list" >&2; }
+    grep -q 'backend apply/switch not yet wired' web/index.html && { ok=0; echo "stale subtitle" >&2; }
+    if (( ok )); then pass; else fail "service status/actions not wired in the page"; fi
+fi
+
+# The page is shared: the Windows server must answer the same routes.
+if it "svc: the Windows server answers the same service routes"; then
+    ok=1
+    grep -q "'/api/services'" lib/windows/AutoOS.Serve.psm1 || { ok=0; echo "no GET route" >&2; }
+    grep -q "'/api/services/action'" lib/windows/AutoOS.Serve.psm1 || { ok=0; echo "no POST route" >&2; }
+    for a in apply-dry-run apply start-openhands start-opencode-serve resume-stack; do
+        grep -q "'$a'" lib/windows/AutoOS.Serve.psm1 || { ok=0; echo "missing action $a" >&2; }
+    done
+    if (( ok )); then pass; else fail "Windows server lacks the service routes"; fi
+fi
+
 # ─── shellcheck (optional) ──────────────────────────────────────────────────
 describe "static analysis"
 

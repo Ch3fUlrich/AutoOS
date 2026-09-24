@@ -101,6 +101,128 @@ def provider_status() -> list:
     return [{"id": k, "name": v, "configured": k in have} for k, v in labels.items()]
 
 
+# ── AI services: live status + the setup actions that already exist ────────
+# One row per HTTP service of the AI stack. `bind` and `auth` are what the
+# service is configured for (docs/web-services.md), `up` is probed live on
+# loopback. No key value is read here: the payload is safe to show.
+SERVICES = [
+    {"id": "omniroute", "name": "OmniRoute gateway", "port": 20128, "path": "/api/health",
+     "bind": "0.0.0.0", "auth": "client key on /v1 (REQUIRE_API_KEY); dashboard password",
+     "unit": "autoos-omniroute", "actions": ["apply-dry-run", "apply", "resume-stack"]},
+    {"id": "litellm", "name": "LiteLLM fallback", "port": 4000, "path": "/",
+     "bind": "127.0.0.1", "auth": "LITELLM_MASTER_KEY",
+     "unit": "autoos-litellm", "actions": ["resume-stack"]},
+    {"id": "opencode", "name": "opencode serve (web UI)", "port": 4096, "path": "/",
+     "bind": "0.0.0.0", "auth": "HTTP Basic on /api/* (user opencode)",
+     "unit": "autoos-opencode", "actions": ["start-opencode-serve"]},
+    {"id": "openhands", "name": "OpenHands", "port": 3000, "path": "/",
+     "bind": "0.0.0.0", "auth": "none - reach it only through the proxy",
+     "unit": None, "actions": ["start-openhands"]},
+]
+
+# The only commands the page can run. `live: False` is safe without a
+# confirmation (a dry run); everything else is confirmed in the browser and
+# refused outright when the server itself runs with --dry-run.
+SERVICE_ACTIONS = {
+    "apply-dry-run": {"label": "Apply router (dry run)", "live": False,
+                      "argv": ["bash", "configuration/omniroute/apply.sh", "--dry-run"]},
+    "apply": {"label": "Apply router", "live": True,
+              "argv": ["bash", "configuration/omniroute/apply.sh"]},
+    "start-openhands": {"label": "Start OpenHands", "live": True,
+                        "argv": ["bash", "configuration/start-stack.sh", "openhands"]},
+    "start-opencode-serve": {"label": "Start opencode serve", "live": True,
+                             "argv": ["bash", "configuration/start-stack.sh", "opencode-serve"]},
+    "resume-stack": {"label": "Resume the stack", "live": True,
+                     "argv": ["bash", "configuration/autostart/Start-AutoOSStack.sh"]},
+}
+
+
+def _probe_http(port: int, path: str) -> int:
+    """HTTP status of http://127.0.0.1:<port><path>, 0 when nothing answers."""
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d%s" % (port, path), timeout=2) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except (OSError, ValueError):
+        return 0
+
+
+def service_status(probe=None) -> list:
+    """Live status of every AI service. `probe(port, path) -> code` is
+    injectable so tests never touch this machine's ports."""
+    probe = probe or _probe_http
+    out = []
+    for svc in SERVICES:
+        code = probe(svc["port"], svc["path"])
+        if svc["id"] == "omniroute":
+            up = code == 200
+        elif svc["id"] == "opencode":
+            # V2 answers its UI with 200; /api/* is what needs the password.
+            up = code in (200, 401)
+        elif svc["id"] == "litellm":
+            up = code == 200
+        else:
+            up = code not in (0, None)
+        row = {k: v for k, v in svc.items() if k != "path"}
+        row.update(code=code, up=up, health="http://127.0.0.1:%d%s" % (svc["port"], svc["path"]),
+                   actionLabels={a: SERVICE_ACTIONS[a]["label"] for a in svc["actions"]},
+                   liveActions=[a for a in svc["actions"] if SERVICE_ACTIONS[a]["live"]])
+        out.append(row)
+    return out
+
+
+def run_service_action(key: str) -> None:
+    """Worker: run one allowlisted action, streaming into the shared log."""
+    act = SERVICE_ACTIONS[key]
+    cmd = act["argv"]
+    env = dict(os.environ, AUTOOS_NO_COLOR="1")
+    with LOCK:
+        LOG.append({"level": "step", "text": "$ " + " ".join(cmd)})
+    try:
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            record_line(raw.rstrip("\r\n"))
+        proc.wait()
+        with LOCK:
+            RUN.update(done=1, summary="%s finished (exit %d)" % (act["label"], proc.returncode))
+            LOG.append({"level": "ok" if proc.returncode == 0 else "err",
+                        "text": "--- exit code %d ---" % proc.returncode})
+    except Exception as exc:
+        with LOCK:
+            RUN["summary"] = "%s failed: %s" % (act["label"], exc)
+            LOG.append({"level": "err", "text": RUN["summary"]})
+    finally:
+        with LOCK:
+            RUN["running"] = False
+
+
+def start_service_action(key: str) -> None:
+    threading.Thread(target=run_service_action, args=(key,), daemon=True).start()
+
+
+def service_action_response(body) -> tuple:
+    """Validate a POST /api/services/action body and start the worker.
+    Returns (http code, payload)."""
+    key = body.get("action") if isinstance(body, dict) else None
+    act = SERVICE_ACTIONS.get(key) if isinstance(key, str) else None
+    if act is None:
+        return 400, {"error": "unknown action", "allowed": sorted(SERVICE_ACTIONS)}
+    if act["live"] and FORCE_DRY:
+        return 409, {"error": "this server runs with --dry-run: only dry-run actions are allowed"}
+    with LOCK:
+        if RUN["running"]:
+            return 409, {"error": "a run is already in progress"}
+        LOG.clear()
+        RUN.update(running=True, done=0, total=1, summary="", current=None)
+    start_service_action(key)
+    return 202, {"started": True, "action": key}
+
+
 def build_state() -> dict:
     """System info + catalog, produced by the same shell code the CLI uses."""
     probe = r"""
@@ -612,6 +734,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/ping": self._handle_get_ping,
             "/api/config": self._handle_get_config,
             "/api/claude/sessions": self._handle_get_claude_sessions,
+            "/api/services": lambda: self._json(200, {"services": service_status()}),
         }
 
         if u.path == "/api/log":
@@ -646,6 +769,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_usb_create()
         if u.path == "/api/install":
             return self._post_install()
+        if u.path == "/api/services/action":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return self._json(400, {"error": "payload must be JSON"})
+            code, payload = service_action_response(body)
+            return self._json(code, payload)
         return self._json(404, {"error": "not found"})
 
     def _post_claude_snapshot(self):
