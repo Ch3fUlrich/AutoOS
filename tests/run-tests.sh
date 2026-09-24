@@ -6490,6 +6490,9 @@ if it "svc: start-stack openhands runs as the host user, survives reboots and is
     [[ "$block" == *'docker run -d --rm'* ]] && { ok=0; echo "--rm defeats the restart policy" >&2; }
     [[ "$block" == *'--memory'* ]] || { ok=0; echo "no memory cap" >&2; }
     [[ "$block" == *'--consumer container'* ]] || { ok=0; echo "profile consumer not named" >&2; }
+    # Remote browsers need the sandbox URL pattern; opt-in, never a default.
+    [[ "$block" == *'OH_SANDBOX_CONTAINER_URL_PATTERN="$AUTOOS_OPENHANDS_SANDBOX_URL"'* ]] || { ok=0; echo "no sandbox URL passthrough" >&2; }
+    [[ "$block" == *'if [[ -n "${AUTOOS_OPENHANDS_SANDBOX_URL:-}" ]]'* ]] || { ok=0; echo "sandbox URL not opt-in" >&2; }
     if (( ok )); then pass; else fail "OpenHands launch is not native-Linux safe"; fi
 fi
 
@@ -6609,6 +6612,18 @@ if it "svc: the Windows server answers the same service routes"; then
         grep -q "'$a'" lib/windows/AutoOS.Serve.psm1 || { ok=0; echo "missing action $a" >&2; }
     done
     if (( ok )); then pass; else fail "Windows server lacks the service routes"; fi
+fi
+
+if it "svc: docs/web-services.md lists every service port and no real host"; then
+    ok=1
+    for p in 20128 4096 3000 4000 8777 8080 8090 9000 9001 9121 24282 8199; do
+        grep -q "| $p |" docs/web-services.md || { ok=0; echo "port $p missing" >&2; }
+    done
+    if grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' docs/web-services.md | grep -qvE '^(0\.0\.0\.0|127\.0\.0\.1)$'; then
+        ok=0; echo "a real IP in the doc" >&2
+    fi
+    grep -qE '[a-z0-9-]\.(com|net|org|de)\b' docs/web-services.md && { ok=0; echo "a real domain in the doc" >&2; }
+    if (( ok )); then pass; else fail "web-services.md incomplete or leaking"; fi
 fi
 
 # ─── shellcheck (optional) ──────────────────────────────────────────────────

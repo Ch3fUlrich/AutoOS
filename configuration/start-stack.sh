@@ -114,6 +114,21 @@ PY
             docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app' \
                 || docker start openhands-app >/dev/null
         else
+            # Remote browsers (the phone through the LAN proxy): the UI hands
+            # the browser each sandbox's URL, http://localhost:<random port>
+            # by default - unreachable from anywhere but this host. With
+            # AUTOOS_OPENHANDS_SANDBOX_URL (a pattern with {port}, e.g. a
+            # proxy path that maps back to <this-host>:{port}) and
+            # AUTOOS_OPENHANDS_WEB_HOST (the public name, for CORS) set, the
+            # container gets them; unset, nothing changes. Recreate the
+            # container (docker rm -f openhands-app) after changing either.
+            oh_remote=()
+            if [[ -n "${AUTOOS_OPENHANDS_SANDBOX_URL:-}" ]]; then
+                oh_remote+=(-e OH_SANDBOX_CONTAINER_URL_PATTERN="$AUTOOS_OPENHANDS_SANDBOX_URL")
+            fi
+            if [[ -n "${AUTOOS_OPENHANDS_WEB_HOST:-}" ]]; then
+                oh_remote+=(-e WEB_HOST="$AUTOOS_OPENHANDS_WEB_HOST")
+            fi
             export LLM_API_KEY="$AUTOOS_OMNIROUTE_KEY"
             # Detached, no -it: -it fails without a TTY (non-interactive
             # shells) and foreground -it never returns, so the URL line below
@@ -136,6 +151,7 @@ PY
                 -e LLM_API_KEY \
                 -e LLM_BASE_URL="http://host.docker.internal:20128/v1" \
                 -e LOG_ALL_EVENTS=true \
+                "${oh_remote[@]}" \
                 -p 3000:3000 \
                 -v /var/run/docker.sock:/var/run/docker.sock \
                 -v "$HOME/.openhands:/.openhands" \
