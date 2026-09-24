@@ -6397,6 +6397,64 @@ if it "svc: the opencode unit runs the wrapper from this checkout"; then
     if (( ok )); then pass; else fail "opencode unit render is wrong"; fi
 fi
 
+# systemd runs ExecStart directly: a 100644 launcher fails with 203/EXEC.
+if it "svc: every script a unit or the healthcheck runs is executable in git"; then
+    bad=""
+    for f in configuration/autostart/Start-AutoOSStack.sh configuration/autostart/register-autostart.sh \
+             configuration/autostart/run-opencode-serve.sh configuration/litellm/start-litellm.sh \
+             configuration/healthcheck.sh configuration/start-stack.sh; do
+        mode="$(git ls-files -s -- "$f" | cut -d' ' -f1)"
+        [[ "$mode" == 100755 ]] || bad+="$f=$mode "
+    done
+    assert_eq "$bad" ""
+fi
+
+if it "svc: every unit template renders with this checkout and no placeholder left"; then
+    d="$(_svc_reg_sandbox)"
+    ok=1
+    for u in autoos-omniroute autoos-litellm autoos-opencode autoos-stack; do
+        out="$(_svc_reg "$d" --render "$u")" || { ok=0; echo "$u: render failed: $out" >&2; continue; }
+        [[ "$out" =~ @[A-Z]+@ ]] && { ok=0; echo "$u: unfilled placeholder" >&2; }
+        [[ "$out" == *"%h/AutoOS"* ]] && { ok=0; echo "$u: hard-coded ~/AutoOS" >&2; }
+        [[ "$out" == *"WantedBy=default.target"* ]] || { ok=0; echo "$u: not boot-wanted" >&2; }
+    done
+    stack="$(_svc_reg "$d" --render autoos-stack)"
+    [[ "$stack" == *"ExecStart=$ROOT/configuration/autostart/Start-AutoOSStack.sh"* ]] || { ok=0; echo "stack ExecStart" >&2; }
+    [[ "$stack" == *"Type=oneshot"* ]] || { ok=0; echo "stack not oneshot" >&2; }
+    lit="$(_svc_reg "$d" --render autoos-litellm)"
+    [[ "$lit" == *"start-litellm.sh --foreground"* ]] || { ok=0; echo "litellm ExecStart" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "unit templates do not render cleanly"; fi
+fi
+
+if it "svc: register-autostart registers the four units in dependency order"; then
+    d="$(_svc_reg_sandbox)"
+    _svc_reg "$d" >/dev/null
+    order="$(grep -oE '^--user enable autoos-[a-z]+' "$d/systemctl.log" | awk '{print $3}' | tr '\n' ' ')"
+    rm -rf "$d"
+    assert_eq "$order" "autoos-omniroute autoos-litellm autoos-opencode autoos-stack "
+fi
+
+if it "svc: the stack launcher starts each service through its unit when one is installed"; then
+    ok=1
+    for u in autoos-omniroute autoos-litellm autoos-opencode; do
+        grep -q "unit_installed $u" configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "no unit path: $u" >&2; }
+        grep -q "systemctl --user start $u.service" configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "not started via unit: $u" >&2; }
+    done
+    grep -q 'run-opencode-serve.sh' configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "serve fallback bypasses the password wrapper" >&2; }
+    grep -q '/tmp/' configuration/autostart/Start-AutoOSStack.sh && { ok=0; echo "logs to /tmp" >&2; }
+    if (( ok )); then pass; else fail "launcher bypasses the units"; fi
+fi
+
+if it "svc: healthcheck --fix resumes opencode serve and litellm too"; then
+    ok=1
+    grep -qE 'ANY_DOWN=1' configuration/healthcheck.sh || { ok=0; echo "no combined down flag" >&2; }
+    grep -qE 'OC_UP -eq 0' configuration/healthcheck.sh || { ok=0; echo "serve not in the fix condition" >&2; }
+    grep -qE 'LT_UP -eq 0' configuration/healthcheck.sh || { ok=0; echo "litellm not in the fix condition" >&2; }
+    grep -q '4000' configuration/healthcheck.sh || { ok=0; echo "no :4000 probe" >&2; }
+    if (( ok )); then pass; else fail "healthcheck --fix leaves a service down"; fi
+fi
+
 # ─── shellcheck (optional) ──────────────────────────────────────────────────
 describe "static analysis"
 

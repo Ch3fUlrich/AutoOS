@@ -30,7 +30,7 @@ LOGINCTL="${AUTOOS_LOGINCTL:-loginctl}"
 MARKER="# Managed by AutoOS configuration/autostart/register-autostart.sh"
 
 # Order matters: the gateway first, the oneshot resume unit last.
-ALL_UNITS=(autoos-omniroute autoos-opencode)
+ALL_UNITS=(autoos-omniroute autoos-litellm autoos-opencode autoos-stack)
 
 DRY=0
 UNREGISTER=0
@@ -56,6 +56,7 @@ done
 unit_port() {
     case "$1" in
         autoos-omniroute) echo 20128 ;;
+        autoos-litellm)   echo 4000 ;;
         autoos-opencode)  echo 4096 ;;
         *) echo "" ;;
     esac
@@ -63,6 +64,7 @@ unit_port() {
 unit_binary() {
     case "$1" in
         autoos-omniroute) echo omniroute ;;
+        autoos-litellm)   echo litellm ;;
         autoos-opencode)  echo opencode ;;
         *) echo "" ;;
     esac
