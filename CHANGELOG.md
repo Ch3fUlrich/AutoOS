@@ -24,6 +24,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`start-stack.sh openhands` never ran the tier-profile sync**: the repo root resolved
   one directory too high.
 
+### Added — one spawner for every agent client
+
+- `tools/autoos-agent.py --client opencode|claude|qwen|gemini|codex|agy|qoder`: one
+  command for every agent CLI. qwen, gemini and codex go through `omniroute run`. claude,
+  agy and qoder run on their own login, and `list` prints the matrix.
+- **Task cards** (ADR 0006): without `--tier`, `--card role=…,privacy=…` resolves to a
+  combo through one tested `select_combo`. `privacy=sensitive` with `ctx=1m` is refused
+  unless `--allow-training`, and the qoder promo takes public work only.
+- **Depth budget** for every client (`AUTOOS_AGENT_DEPTH`/`MAX_DEPTH`, exit 4 past it).
+- **`--lean`**: no serena, playwright or context7 (1406 → 678 MB peak per opencode run).
+  The overlay needs opencode 2.x's `disabled: true`; `enabled: false` is dropped.
+- **`tools/autoos_agent_mcp.py`**: the spawner as an MCP server (spawn, status, result,
+  cancel), registered for Claude Code, opencode, OpenHands and Zed.
+- Catalog: `qwen-code`, `gemini-cli`, `codex`, `qodercli`.
+
 ### Added — one-command tier agents
 
 - `tools/autoos-agent.py` spawns one tier agent with its own model (a bare
