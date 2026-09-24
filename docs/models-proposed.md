@@ -83,11 +83,13 @@ only in the gateway's own store — no leg order in this repo, no drift gate:
 | `auto/smart` | gateway built-in (verified 2026-09-24: **ack 4.5s**) | opencode bootstrap | **keep as-is** |
 | `auto/cheap` | gateway built-in (verified 2026-09-24: **ack 4.2s**) | opencode bootstrap | **keep as-is** |
 
-Retired ids (`tier1`, `tier2`, `tier3`, `rag`, `*-paid`, `*-credit`) were
-deleted from the live store 2026-09-24 (verified: store holds only the 13
-new ids + built-ins). `apply.*` only ever creates combos from
-`combos.json`, never deletes or re-adds — and both suites assert the exact
-combo name list plus an explicit retired-ids regression test, so a
+Retired old-scheme ids (`tier1`, `tier1-clean`, `tier2`, `tier2-clean`,
+`tier3`, `tier3-clean`, `rag`, `tier1-paid`, `tier2-paid`, `tier3-paid`,
+`tier2-credit`, `tier3-credit` — not the new `t*-orchestrator-paid` groups,
+which are live) were deleted from the live store 2026-09-24 (verified:
+store holds only the new ids + built-ins). `apply.*` only ever creates
+combos from `combos.json`, never deletes or re-adds — and both suites assert
+the exact combo name list plus an explicit retired-ids regression test, so a
 resurrection fails CI before it reaches any gateway.
 
 ## C. LiteLLM-only groups (no gateway combo — manual fallback only)
@@ -101,7 +103,7 @@ test in `tests/run-tests.sh`):
 
 | Group | Role | Recommendation |
 |---|---|---|
-| `t1-orchestrator-paid` | openrouter spark first, then zen flash | **keep** (fallback when free promo dies) |
+| `t1-orchestrator-paid` | openrouter spark first, then deepseek via zen | **keep** (fallback when free promo dies) |
 | `t2-worker-paid` | paid smart legs | **keep** |
 | `t3-driver-paid` | paid driver legs | **keep** |
 | `t1-orchestrator-free-only` | zen spark-free only (no paid fallback, no fallbacks entry — fails loudly) | **keep** (new 2026-09-24) |
@@ -123,7 +125,7 @@ names for future legs (no more bare provider labels):
 | `poolside/laguna-s-2.1:free` | 262k | codegen overflow (Poolside trains code) | unproven in loop |
 | `nex-agi/nex-n2.5-pro:free` | 262k | smart overflow | unproven |
 | `google/gemma-4-31b-it:free`, `gemma-4-26b-a4b-it:free` | 262k | light t3 overflow | small instruction models |
-| `z-ai/glm-5.2:free` | 32k | small jobs only | 32k window rules out 128k-class work |
+| `z-ai/glm-5.2:free` | 32k | small jobs only | 32k window rules out 128k-class work. NOTE: OpenRouter free `z-ai/*` is a separate door from the dropped direct Z.AI connection (unfunded key) — same model family, different billing and availability |
 | `cohere/north-mini-code:free` | 256k | codegen overflow | unproven |
 
 Rule: a candidate enters a combo only after an authenticated leg-probe
@@ -218,7 +220,7 @@ once no combo needs it (all green today).
 
 | Provider | OmniRoute id / connect | Models behind it | Proposed legs | Needs from you |
 |---|---|---|---|---|
-| Antigravity CLI | `antigravity` (oauth, free) — canonical id (`agy` is alias-only; `providers auth agy` → Unknown). `oauth start --provider antigravity --import-from-system --no-browser`, code-paste flow | LIVE 2026-09-24 (account-named connection, `oauth status` active). Refs: `antigravity/claude-opus-4-6-thinking[-high\|-medium\|-low]`, `antigravity/claude-sonnet-4-6[-high\|-medium\|-low]`, `antigravity/gemini-3.7-flash-{high,medium,low,tiered}`, `antigravity/gemini-3.1-pro-low`, `antigravity/gpt-oss-120b-medium`. Probes: opus-4-6-thinking → **ack 3.4s**; gemini-3.7-flash-medium → **ack 1.6s** | t1: opus dropped (200k leg in a 1M combo would 400); t2 + t2-free-only: gemini leg curated; Opus in pinned `opus-4-6` | **done** |
+| Antigravity CLI | `antigravity` (oauth, free) — canonical id (`agy` is alias-only; `providers auth agy` → Unknown). `oauth start --provider antigravity --import-from-system --no-browser`, code-paste flow | LIVE 2026-09-24 (account-named connection, `oauth status` active). Refs: `antigravity/claude-opus-4-6-thinking[-high\|-medium\|-low]`, `antigravity/claude-sonnet-4-6[-high\|-medium\|-low]`, `antigravity/gemini-3.7-flash-{high,medium,low,tiered}`, `antigravity/gemini-3.1-pro-low`, `antigravity/gpt-oss-120b-medium`. Probes: opus-4-6-thinking → **ack 3.4s**; gemini-3.7-flash-medium → **ack 1.6s**; gemini-3.7-flash-high → **ack 3.6s** | t1: opus dropped (200k leg in a 1M combo would 400); t2: gemini-high curated, free-only keeps medium; Opus in pinned `opus-4-6` | **done** |
 | Claude Code subscription | `claude` (oauth) — `providers auth claude-code --no-browser`, code-paste flow. Ref prefix is `cc/` | LIVE 2026-09-24. Refs: `cc/claude-opus-4-6[-high\|-medium\|-low]`, `cc/claude-opus-4-7`, `cc/claude-opus-5`, `cc/claude-sonnet-4-6`, `cc/claude-fable-5`, `cc/claude-haiku-4-5-20251001`. Probe: opus-4-6 → **429 quota reset 1h** (hops by design; overflow-only, not a head) | overflow leg in pinned `opus-4-6` ($0 marginal) | **done** |
 | Qoder | binary `qodercli` 1.1.62 ships in `~/.qoder/bin/qodercli` (runs) but is NOT on PATH — the dashboard error verbatim. PAT via `QODER_PERSONAL_ACCESS_TOKEN` (api-keys.yml `qoder_pat`; env wins over `/login` per Qoder docs). Gateway `qoder` entry is OAuth/dashboard-only (no CLI flow) | Qoder CLI headless/ACP use now; t2/t3 qwen overflow only after a dashboard gateway connection | PATH+PAT automated 2026-09-24 (`qodercli` catalog component: install-if-missing, PATH append, PAT export). Gateway connection via dashboard; then I list + probe |
 | GitHub Copilot | `github`/`copilot` (oauth, device flow) | plan picker: GPT-5.5, GPT-5.3-Codex, Claude Sonnet/Opus 5, Gemini 3.8 Flash, Kimi K3 (docs 2026-09) | CLOSED 2026-09-23: M365-only, no GitHub seat | — |

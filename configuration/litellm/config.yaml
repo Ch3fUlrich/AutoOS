@@ -57,9 +57,9 @@ model_list:
       api_key: os.environ/OPENCODE_ZEN_API_KEY
 
   # ── t1-orchestrator-free-only: zero spend, never degrades to paid ──────
-  # Hand-curated mirror of combos.json t1-orchestrator-free-only MINUS the
-  # antigravity leg (OAuth bridge: no LiteLLM transport, no env key — see
-  # GATEWAY_ONLY in tools/sync-router-tiers.py). No fallbacks entry below:
+  # Hand-curated mirror of combos.json t1-orchestrator-free-only (complete:
+  # that combo holds only the zen leg — the Opus leg stays out so a 200k
+  # model never sits in a 1M-declared combo). No fallbacks entry below:
   # a failing free-only group must fail loudly, not bill silently.
   - model_name: t1-orchestrator-free-only
     litellm_params:
