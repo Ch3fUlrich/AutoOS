@@ -6264,12 +6264,14 @@ ENV
 # never run, and the old message blamed "another user". Say what is true.
 if it "svc: start-litellm.sh says stale-key restart is Linux-only where /proc is missing"; then
     d="$(mktemp -d)"
+    # Hermetic: a dummy .env in a temp dir, never the machine's own (CI has none).
+    printf 'LITELLM_MASTER_KEY=sk-test-dummy\n' >"$d/.env"
     python3 -c 'import http.server,socketserver,sys
 s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
 open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" >/dev/null 2>&1 &
     srv=$!
     for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
-    out="$(AUTOOS_LITELLM_PORT="$(cat "$d/port")" AUTOOS_PROC_ROOT="$d/no-proc" \
+    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" AUTOOS_PROC_ROOT="$d/no-proc" \
         bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"; rc=$?
     kill "$srv" 2>/dev/null
     rm -rf "$d"
@@ -6281,12 +6283,14 @@ fi
 # process held the port, litellm or not (AGENTS.md rule 3). It must refuse.
 if it "svc: start-litellm.sh never kills a program on its port that is not litellm"; then
     d="$(mktemp -d)"
+    # Hermetic: a dummy .env in a temp dir, never the machine's own (CI has none).
+    printf 'LITELLM_MASTER_KEY=sk-test-dummy\n' >"$d/.env"
     python3 -c 'import http.server,socketserver,sys
 s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
 open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" >/dev/null 2>&1 &
     srv=$!
     for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
-    out="$(AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
+    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
     alive=0; kill -0 "$srv" 2>/dev/null && alive=1
     kill "$srv" 2>/dev/null
     rm -rf "$d"
@@ -6298,13 +6302,15 @@ fi
 # only the program name (argv[0] or the script in argv[1]) counts.
 if it "svc: start-litellm.sh leaves a program alone that merely mentions litellm in its arguments"; then
     d="$(mktemp -d)"
+    # Hermetic: a dummy .env in a temp dir, never the machine's own (CI has none).
+    printf 'LITELLM_MASTER_KEY=sk-test-dummy\n' >"$d/.env"
     mkdir -p "$d/my-litellm-docs"
     python3 -c 'import http.server,socketserver,sys
 s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
 open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" "$d/my-litellm-docs" >/dev/null 2>&1 &
     srv=$!
     for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
-    out="$(AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
+    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
     alive=0; kill -0 "$srv" 2>/dev/null && alive=1
     kill "$srv" 2>/dev/null
     rm -rf "$d"
