@@ -49,3 +49,9 @@ def test_render_embeds_state_and_says_none_when_clean():
     text = h.render(snap(), "## Next\n- task one")
     assert "## Operator state (hand-written)" in text and "- task one" in text
     assert "## Cleanup candidates (check, then run)\n\n- none" in text
+
+
+def test_a_stopped_session_is_not_suggested_again():
+    s = snap(sessions=[{"id": "d4", "name": "autoos-R", "cwd": REPO + "-lanes/R", "live": False,
+                        "status": "not running (last state: working)"}])
+    assert h.stale(s) == []

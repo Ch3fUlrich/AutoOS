@@ -65,8 +65,11 @@ def sessions(repo: pathlib.Path) -> list[dict]:
         return []
     items = data if isinstance(data, list) else data.get("sessions", [])
     mine = (str(repo), str(repo) + "-lanes")
+    # A live session carries "status" (idle/busy); a stopped one keeps only its
+    # last "state" in the listing (measured 2026-09-25: "working" after claude stop).
     return [{"id": s.get("id", ""), "name": s.get("name", ""), "cwd": s.get("cwd", ""),
-             "status": s.get("status") or s.get("state", "")}
+             "live": bool(s.get("status")),
+             "status": s.get("status") or "not running (last state: %s)" % s.get("state", "?")}
             for s in items if str(s.get("cwd", "")).startswith(mine)]
 
 
@@ -98,10 +101,10 @@ def stale(snap: dict) -> list[str]:
     lane_by_path = {l["path"]: l for l in snap["lanes"]}
     for s in snap["sessions"]:
         lane = lane_by_path.get(s["cwd"])
-        if s["cwd"] != snap["repo"] and (lane is None or lane["merged"]):
+        if s.get("live", True) and s["cwd"] != snap["repo"] and (lane is None or lane["merged"]):
             why = "worktree gone" if lane is None else "branch merged into main"
             notes.append("session %s (%s) - %s: claude stop %s" % (s["name"], s["status"], why, s["id"] or s["name"]))
-    live = {s["cwd"] for s in snap["sessions"]}
+    live = {s["cwd"] for s in snap["sessions"] if s.get("live", True)}
     for h in snap["helpers"]:
         if "-lanes" in h["cwd"] or "/sandboxes/" in h["cwd"]:
             if not any(h["cwd"].startswith(c) for c in live):
