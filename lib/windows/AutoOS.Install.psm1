@@ -942,7 +942,6 @@ function Enable-AutoOSProjectMcpServer {
             Write-AutoOSLine "$path is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $path "$path.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     } elseif (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
@@ -950,10 +949,14 @@ function Enable-AutoOSProjectMcpServer {
     $enabled = @()
     if ($settings.Contains('enabledMcpjsonServers')) { $enabled = @($settings['enabledMcpjsonServers']) }
     if ($Name -in $enabled) {
-        Write-AutoOSLine "project MCP server '$Name' was already approved" -Level muted
+        Write-AutoOSLine "project MCP server '$Name' was already approved - skipped" -Level muted
         return
     }
     $settings['enabledMcpjsonServers'] = @($enabled + $Name)
+    # Back up only a run that changes the file, so a second run leaves no copy.
+    if (Test-Path $path) {
+        Copy-Item $path "$path.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
     $settings | ConvertTo-Json -Depth 12 | Out-File -FilePath $path -Encoding utf8
     Write-AutoOSLine "approved project MCP server '$Name' in $path" -Level ok
 }

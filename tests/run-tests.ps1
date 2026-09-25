@@ -971,6 +971,49 @@ Test-Case 'approving twice adds nothing the second time' {
     }
 }
 
+Test-Case 'backup-once: Enable-AutoOSProjectMcpServer does not back up again when nothing changed' {
+    # settings.local.json is the user's own file. The first run that changes it
+    # takes ONE backup; an identical second run must not back up again, must
+    # leave the file byte-identical and must say skipped. The pause keeps a
+    # second-run backup from reusing the first one's per-second timestamp,
+    # which would make an extra backup overwrite (and hide behind) the first.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $claudeDir = Join-Path $scratch '.claude'
+    $file = Join-Path $claudeDir 'settings.local.json'
+    $log1 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $log2 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $claudeDir -Force
+    [IO.File]::WriteAllText($file, '{"permissions":{"allow":["Bash(ls:*)"]}}')
+    $run = {
+        param($LogPath)
+        Initialize-AutoOSLog -Path $LogPath
+        Enable-AutoOSProjectMcpServer -RepoPath $scratch -Name 'omnigraph'
+        Get-Content -LiteralPath $LogPath -Raw -Encoding utf8
+    }
+    try {
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        $null = & $run $log1
+        $backups1 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*').Count
+        $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        Start-Sleep -Milliseconds 1100
+        $out2 = & $run $log2
+        $backups2 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*').Count
+        $hash2 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (@($s.enabledMcpjsonServers) -notcontains 'omnigraph') { throw 'run 1 did not approve the server' }
+        if (@($s.permissions.allow) -notcontains 'Bash(ls:*)') { throw 'run 1 dropped the existing permissions' }
+        if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
+        if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log1, $log2 -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'the Antigravity config is merged, not replaced' {
     # It used to be written from scratch, which silently deleted every other MCP
     # server the user had configured there.
