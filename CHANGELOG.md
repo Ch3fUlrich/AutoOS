@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — OpenHands reaches omnigraph from inside its container
+
+- **The OpenHands profile pointed its omnigraph bridge at `http://localhost:8080`**, which
+  inside the app container (and its sandbox containers) is the container itself: the
+  connection was refused. `setup_openhands_config` now writes
+  `http://host.docker.internal:8080`, the container-side form the same file already uses
+  for the gateway. Measured on the live stack: both containers resolve
+  `host.docker.internal` (compose `extra_hosts: host-gateway`) and get 200 from
+  `/healthz`; omnigraph-server is already published on the host's `0.0.0.0:8080`, so no
+  binding or firewall change was needed. A profile written earlier keeps the old URL
+  until the installer's OpenHands step runs again.
+
 ### Fixed — the omnigraph token reaches services started by systemd
 
 - **`autoos-opencode` and `autoos-stack` never saw `OMNIGRAPH_TOKEN`**: a systemd user

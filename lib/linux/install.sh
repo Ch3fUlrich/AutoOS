@@ -3293,7 +3293,11 @@ mcp_cfg["graphify"] = {
 # token exported from an interactive shell rc. Take it from the env, else the
 # per-user 0600 file write_omnigraph_env keeps (this settings file already
 # holds the LLM keys and is never tracked).
-omni_env = {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"}
+# Container-side URL, like llm.base_url above: this file is read by the
+# OpenHands app and its sandbox containers, where localhost is the container
+# itself. omnigraph-server is published on the host's :8080 and both
+# containers resolve host.docker.internal (compose extra_hosts host-gateway).
+omni_env = {"OMNIGRAPH_BASE_URL": "http://host.docker.internal:8080", "OMNIGRAPH_GRAPH_ID": "autoos"}
 omni_token = os.environ.get("OMNIGRAPH_TOKEN", "")
 if not omni_token:
     _omni_file = os.path.join(os.path.dirname(os.path.abspath(openhands_dir)), ".autoos-omnigraph.env")

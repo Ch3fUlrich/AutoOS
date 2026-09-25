@@ -69,7 +69,7 @@ read fail while the client still shows it connected:
 | Claude Code (this repo) | `.mcp.json`, project scope, approved via `.claude/settings.local.json` `enabledMcpjsonServers` | `autoos`, `${OMNIGRAPH_BASE_URL:-http://localhost:8080}` | `${OMNIGRAPH_TOKEN}` expanded from Claude's env |
 | opencode | `opencode.jsonc` `mcp.servers.omnigraph` | `autoos`, `http://localhost:8080` | inherited from the process that started the opencode service |
 | Zed | installer → `context_servers.omnigraph` in Zed settings | `autoos`, `http://localhost:8080` | inherited from the desktop session env |
-| OpenHands | installer → `agent_settings.mcp_config.omnigraph` | `autoos`, `http://localhost:8080` | written into that (untracked) settings file from env or the env file |
+| OpenHands | installer → `agent_settings.mcp_config.omnigraph` | `autoos`, `http://host.docker.internal:8080` (the app and its sandboxes run in Docker, where `localhost` is the container; the published server is reached through the host alias) | written into that (untracked) settings file from env or the env file |
 | Antigravity | installer → its `mcp_config.json` | `$OMNIGRAPH_GRAPH_ID` or `autoos` | written from env when set |
 | Neovim + sidekick | through the opencode CLI | as opencode | as opencode |
 

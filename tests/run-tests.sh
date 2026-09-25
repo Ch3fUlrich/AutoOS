@@ -911,6 +911,27 @@ PY
     assert_eq "$out" "file-token autoos"
 fi
 
+if it "setup_openhands_config points the omnigraph bridge at the host, not at the container itself"; then
+    # OpenHands runs in a container (compose: extra_hosts host.docker.internal:host-gateway),
+    # so localhost:8080 there is the container and nothing listens on it. The
+    # published omnigraph-server is reached through the host alias, like the
+    # gateway URL the same file already carries (llm.base_url).
+    tmp="$(mktemp -d)"
+    out="$(
+        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY OMNIGRAPH_TOKEN
+        curl() { return 6; }
+        setup_openhands_config >/dev/null 2>&1
+        python3 - "$tmp/.openhands" <<'PY'
+import json, sys, os
+e = json.load(open(os.path.join(sys.argv[1], "settings.json"), encoding="utf-8"))["agent_settings"]["mcp_config"]["omnigraph"]["env"]
+print(e.get("OMNIGRAPH_BASE_URL"))
+PY
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "http://host.docker.internal:8080"
+fi
+
 describe "mcp pins"
 
 if it "mcp pins: lib/ carries no floating package spec"; then
