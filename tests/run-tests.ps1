@@ -4584,6 +4584,47 @@ Test-Case 'neovim sidekick enabling merges one extra and keeps the rest' {
     } finally { $env:LOCALAPPDATA = $realLocal }
 }
 
+Test-Case 'backup-once: Enable-AutoOSSidekickExtra does not back up again when nothing changed' {
+    # Only the run that changes lazyvim.json backs it up. The backup name carries a
+    # second-resolution timestamp, so two quick runs would collide on one name and a
+    # bare count proves nothing: the surviving backup must still be the ORIGINAL file.
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'nvim'
+        $lj = Join-Path $cfgDir 'lazyvim.json'
+        $null = New-Item -ItemType Directory -Path $cfgDir -Force
+        $seed = '{"extras":["lazyvim.plugins.extras.lang.python"],"news":{"NEWS.md":"11866"},"version":8}'
+        [IO.File]::WriteAllText($lj, $seed)
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Enable-AutoOSSidekickExtra
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'lazyvim.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        $hash1 = (Get-FileHash -LiteralPath $lj -Algorithm SHA256).Hash
+        Initialize-AutoOSLog -Path $log
+        Enable-AutoOSSidekickExtra
+        $out2 = Get-Content -LiteralPath $log -Raw -Encoding utf8
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'lazyvim.json.autoos-backup-*')
+        if ($backups2.Count -ne 1) { throw "run 2: backups=$($backups2.Count) (want 1: nothing changed, so no new backup)" }
+        if ([IO.File]::ReadAllText($backups2[0].FullName) -ne $seed) { throw 'run 2 overwrote the run 1 backup: it is no longer the original file' }
+        $hash2 = (Get-FileHash -LiteralPath $lj -Algorithm SHA256).Hash
+        if ($hash2 -ne $hash1) { throw 'run 2 changed lazyvim.json although the extra was already enabled' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        $j = Get-Content -LiteralPath $lj -Raw | ConvertFrom-Json
+        if (@($j.extras) -notcontains 'lazyvim.plugins.extras.ai.sidekick') { throw 'sidekick extra missing after run 1' }
+        if (@($j.extras) -notcontains 'lazyvim.plugins.extras.lang.python') { throw 'existing extra lost' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:LOCALAPPDATA = $realLocal
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 # ── OpenHands self-checks ───────────────────────────────────────────────────
 # Both retired to permanent skips: they asked a live docker daemon and a live HTTP
 # port, so their verdict described whatever the machine was running (AGENTS.md §5).

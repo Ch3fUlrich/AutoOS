@@ -3328,15 +3328,19 @@ function Enable-AutoOSSidekickExtra {
             Write-AutoOSLine "could not parse $lj - leaving it alone" -Level warn
             return
         }
-        Copy-Item $lj "$lj.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
     $extras = @()
     if ($cfg.ContainsKey('extras')) { $extras = @($cfg['extras']) }
     if ($extras -contains $extra) {
-        Write-AutoOSLine 'sidekick extra already enabled' -Level muted
+        Write-AutoOSLine 'sidekick extra already enabled - skipped' -Level muted
         return
     }
     $cfg['extras'] = @($extras) + @($extra)
+    # Backup only now that a write is certain: a run that changes nothing must not
+    # leave a backup behind (or, within the same second, overwrite an earlier one).
+    if (Test-Path $lj) {
+        Copy-Item $lj "$lj.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
     $cfg | ConvertTo-Json -Depth 8 | Out-File -FilePath $lj -Encoding utf8
     Write-AutoOSLine 'sidekick extra enabled (<leader>aa toggles the opencode panel)' -Level ok
 }
