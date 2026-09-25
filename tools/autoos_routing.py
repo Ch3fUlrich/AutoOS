@@ -22,6 +22,7 @@ and t2-worker / t3-driver already overflow to their paid legs.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import re
 
@@ -38,6 +39,32 @@ CARD_DEFAULTS = {"role": "implement", "complexity": "standard", "ctx": "128k",
                  "privacy": "public", "spend": "free-ok"}
 ALL_COMBOS = ("t1-orchestrator", "t2-worker", "t3-driver",
               "t2-worker-clean", "t3-driver-clean", "t1-orchestrator-clean")
+
+# Card v2 (spec docs/plans/2026-09-25-routing-v2-spec.md §4). v1 stays valid:
+# role/complexity/ctx/spend map onto kind/bucket_hint/min_context, and privacy
+# is shared by both versions. normalize_v2 is additive - normalize/select_combo
+# and their results do not change.
+CARD_V2_VALUES = {
+    "kind": ("implement", "debug", "review", "plan", "bulk", "research"),
+    "risk": ("normal", "high"),
+    "spec": ("exact", "partial", "vague"),
+    "privacy": ("public", "sensitive"),
+    "mode": ("cost-first", "balanced", "quality-first"),
+}
+CARD_V2_DEFAULTS = {"kind": "implement", "risk": "normal", "spec": "partial",
+                    "privacy": "public", "mode": "balanced", "deferrable": False,
+                    "deadline": None, "paths": [], "override": {}}
+CARD_V1_ONLY = frozenset({"role", "complexity", "ctx", "spend"})
+CARD_V2_ONLY = frozenset({"kind", "risk", "spec", "mode", "deferrable",
+                          "deadline", "paths", "override"})
+CARD_SHARED = frozenset({"privacy"})
+CARD_V2_KNOWN = CARD_V1_ONLY | CARD_V2_ONLY | CARD_SHARED
+OVERRIDE_FIELDS = ("route", "client", "effort")
+
+_V1_ROLE_TO_KIND = {"orchestrate": "plan", "implement": "implement", "review": "review"}
+_V1_COMPLEXITY_TO_BUCKET = {"trivial": "S0", "standard": "S2", "hard": "S3"}
+_V1_CTX_TO_MIN = {"128k": 128000, "1m": 1000000}
+_DEADLINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?Z$")
 
 
 class CardError(ValueError):
@@ -82,6 +109,150 @@ def normalize(card: dict) -> dict:
         if val not in CARD_VALUES[key]:
             raise CardError("card %s=%r: expected one of %s" % (key, val, ", ".join(CARD_VALUES[key])))
         out[key] = val
+    return out
+
+
+def _v2_defaults() -> dict:
+    """A fresh copy of CARD_V2_DEFAULTS - the list/dict values must not alias."""
+    return {k: (list(v) if isinstance(v, list) else
+                dict(v) if isinstance(v, dict) else v)
+            for k, v in CARD_V2_DEFAULTS.items()}
+
+
+def _check_choice(field: str, value, allowed: tuple) -> str:
+    if value not in allowed:
+        raise CardError("card %s=%r: expected one of %s"
+                        % (field, value, ", ".join(allowed)))
+    return value
+
+
+def _check_deferrable(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    raise CardError("card deferrable=%r: expected true or false" % (value,))
+
+
+def _check_deadline(value: str) -> str:
+    if not isinstance(value, str) or not _DEADLINE_RE.match(value):
+        raise CardError("card deadline=%r: expected ISO-8601 UTC like 2026-09-26T06:00Z"
+                        % (value,))
+    core = value[:-1]  # drop the trailing Z
+    fmt = "%Y-%m-%dT%H:%M:%S" if core.count(":") == 2 else "%Y-%m-%dT%H:%M"
+    try:
+        datetime.datetime.strptime(core, fmt)
+    except ValueError as exc:
+        raise CardError("card deadline=%r: not a real UTC date: %s" % (value, exc))
+    return value
+
+
+def _normalize_paths(value) -> list:
+    if isinstance(value, str):
+        parts = value.split("|")  # key=value form: one string, "|"-separated
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        raise CardError("card paths=%r: expected a list of relative paths" % (value,))
+    out = []
+    for path in parts:
+        if not isinstance(path, str) or not path:
+            raise CardError("card paths=%r: expected non-empty string paths" % (path,))
+        if path.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", path):
+            raise CardError("card paths=%r: absolute paths are not allowed" % (path,))
+        if any(seg == ".." for seg in re.split(r"[\\/]+", path)):
+            raise CardError("card paths=%r: '..' segments are not allowed" % (path,))
+        out.append(path)
+    return out
+
+
+def _normalize_override(value) -> dict:
+    if not isinstance(value, dict):
+        raise CardError("card override=%r: expected an object, or override.route=, "
+                        "override.client=, override.effort= in key=value form"
+                        % (value,))
+    out = {}
+    for key, val in value.items():
+        if key not in OVERRIDE_FIELDS:
+            raise CardError("card override key %r: expected one of %s"
+                            % (key, ", ".join(OVERRIDE_FIELDS)))
+        if not isinstance(val, str):
+            raise CardError("card override.%s=%r: expected a string" % (key, val))
+        out[key] = val
+    return out
+
+
+def normalize_v2(card: dict) -> dict:
+    """Validate a v1 or v2 task card and return a v2 dict (spec §4).
+
+    A card is v1 when it carries any v1-only field (role/complexity/ctx/spend)
+    and v2 otherwise - an empty card is v2 with defaults. v1 fields map to kind,
+    bucket_hint and min_context (spend is kept for compatibility); v2 fields are
+    validated against CARD_V2_VALUES. Mixing the two families is a CardError
+    (privacy belongs to both). The result holds exactly the CARD_V2_DEFAULTS
+    keys plus ``version`` - and, for v1 input, bucket_hint/min_context/spend.
+    """
+    if not isinstance(card, dict):
+        raise CardError("card must be an object, got %s" % type(card).__name__)
+
+    # key=value form spells the override as override.route= etc.
+    flat, dotted_override = {}, {}
+    for key, val in card.items():
+        if isinstance(key, str) and key.startswith("override."):
+            sub = key[len("override."):]
+            if sub not in OVERRIDE_FIELDS:
+                raise CardError("card override field %r: expected one of %s"
+                                % (sub, ", ".join(OVERRIDE_FIELDS)))
+            dotted_override[sub] = val
+        else:
+            flat[key] = val
+
+    unknown = sorted(set(flat) - CARD_V2_KNOWN)
+    if unknown:
+        raise CardError("unknown card field(s): %s (v2 knows: %s)"
+                        % (", ".join(unknown), ", ".join(sorted(CARD_V2_KNOWN))))
+
+    present = set(flat)
+    if dotted_override:
+        present.add("override")
+    v1_fields = present & CARD_V1_ONLY
+    v2_fields = present & CARD_V2_ONLY
+    if v1_fields and v2_fields:
+        raise CardError("mixes v1 and v2 fields: v1=%s, v2=%s"
+                        % (", ".join(sorted(v1_fields)), ", ".join(sorted(v2_fields))))
+
+    out = _v2_defaults()
+    if v1_fields:  # v1: validate, map, and add the compat extras
+        v1 = dict(CARD_DEFAULTS)
+        v1.update({k: v for k, v in flat.items()
+                   if k in CARD_V1_ONLY or k in CARD_SHARED})
+        for key in ("role", "complexity", "ctx", "privacy", "spend"):
+            _check_choice(key, v1[key], CARD_VALUES[key])
+        out["kind"] = _V1_ROLE_TO_KIND[v1["role"]]
+        out["privacy"] = v1["privacy"]
+        out["version"] = "1"
+        out["bucket_hint"] = _V1_COMPLEXITY_TO_BUCKET[v1["complexity"]]
+        out["min_context"] = _V1_CTX_TO_MIN[v1["ctx"]]
+        out["spend"] = v1["spend"]
+        return out
+
+    for key in ("kind", "risk", "spec", "privacy", "mode"):
+        if key in flat:
+            out[key] = _check_choice(key, flat[key], CARD_V2_VALUES[key])
+    if "deferrable" in flat:
+        out["deferrable"] = _check_deferrable(flat["deferrable"])
+    if "deadline" in flat and flat["deadline"] is not None:
+        if not out["deferrable"]:
+            raise CardError("card deadline=%r: only allowed with deferrable=true"
+                            % (flat["deadline"],))
+        out["deadline"] = _check_deadline(flat["deadline"])
+    if "paths" in flat:
+        out["paths"] = _normalize_paths(flat["paths"])
+    if "override" in flat:
+        out["override"] = _normalize_override(flat["override"])
+    if dotted_override:
+        out["override"].update(_normalize_override(dotted_override))
+    out["version"] = "2"
     return out
 
 
