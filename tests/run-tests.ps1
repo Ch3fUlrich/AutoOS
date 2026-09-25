@@ -984,6 +984,7 @@ Test-Case 'backup-once: Enable-AutoOSProjectMcpServer does not back up again whe
     $log2 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
     $null = New-Item -ItemType Directory -Path $claudeDir -Force
     [IO.File]::WriteAllText($file, '{"permissions":{"allow":["Bash(ls:*)"]}}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
     $run = {
         param($LogPath)
         Initialize-AutoOSLog -Path $LogPath
@@ -994,6 +995,8 @@ Test-Case 'backup-once: Enable-AutoOSProjectMcpServer does not back up again whe
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         $null = & $run $log1
         $backups1 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*').Count
+        $backup1B64 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
         $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
         Start-Sleep -Milliseconds 1100
         $out2 = & $run $log2
@@ -1003,6 +1006,7 @@ Test-Case 'backup-once: Enable-AutoOSProjectMcpServer does not back up again whe
         if (@($s.enabledMcpjsonServers) -notcontains 'omnigraph') { throw 'run 1 did not approve the server' }
         if (@($s.permissions.allow) -notcontains 'Bash(ls:*)') { throw 'run 1 dropped the existing permissions' }
         if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
         if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
         if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
         if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
@@ -3092,6 +3096,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
     $log2 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
     $null = New-Item -ItemType Directory -Path $cfgDir -Force
     [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
     $run = {
         param($LogPath)
         Initialize-AutoOSLog -Path $LogPath
@@ -3105,6 +3110,8 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         $null = & $run $log1
         $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
+        $backup1B64 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
         $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
         Start-Sleep -Milliseconds 1100
         $out2 = & $run $log2
@@ -3115,6 +3122,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
         if (($s.mcpServers.PSObject.Properties.Name -join ',') -ne 'other,omnigraph') { throw "servers reordered or lost: [$($s.mcpServers.PSObject.Properties.Name -join ',')]" }
         if ($s.mcpServers.other.command -ne 'node') { throw 'the existing server was not kept' }
         if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
         if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
         if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
         if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
@@ -3144,6 +3152,7 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up aga
     $logs = @(1..3 | ForEach-Object { Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log') })
     $null = New-Item -ItemType Directory -Path $cfgDir -Force
     [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
     $run = {
         param($LogPath)
         Initialize-AutoOSLog -Path $LogPath
@@ -3162,6 +3171,8 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up aga
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         $null = & $run $logs[0]
         $backups1 = & $countBackups
+        $backup1B64 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
         $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
         Start-Sleep -Milliseconds 1100
         $out2 = & $run $logs[1]
@@ -3173,6 +3184,7 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up aga
         if ($s.mcpServers.other.command -ne 'node') { throw 'the existing server was not kept' }
         if ($s.mcpServers.example.command -ne 'npx') { throw 'the new server was not written' }
         if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
         if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
         if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
         if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
@@ -3202,6 +3214,168 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up aga
         $env:APPDATA = $realAppData
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $logs -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Copy-AutoOSBackup never overwrites a same-second backup' {
+    # Every writer names its backup to the second. Two changes inside one second
+    # used to share a name, and Copy-Item -Force made the later copy overwrite the
+    # earlier one, so the user's ORIGINAL was lost. -Stamp forces that clash
+    # without touching the clock.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $file = Join-Path $scratch 'config.json'
+    $stamp = '20260101-000000'
+    $null = New-Item -ItemType Directory -Path $scratch -Force
+    try {
+        $paths = @()
+        foreach ($content in 'A', 'B', 'C') {
+            [IO.File]::WriteAllText($file, $content)
+            $paths += @(Copy-AutoOSBackup -Path $file -Stamp $stamp)
+        }
+        if ($paths.Count -ne 3) { throw "expected 3 returned paths, got $($paths.Count): [$($paths -join ', ')]" }
+        if (@($paths | Select-Object -Unique).Count -ne 3) { throw "backup paths are not distinct: [$($paths -join ', ')]" }
+        $want = @("$file.autoos-backup-$stamp", "$file.autoos-backup-$stamp-1", "$file.autoos-backup-$stamp-2")
+        for ($i = 0; $i -lt 3; $i++) {
+            if ($paths[$i] -cne $want[$i]) { throw "backup $($i + 1) is named [$($paths[$i])] (want [$($want[$i])])" }
+        }
+        $wantText = @('A', 'B', 'C')
+        for ($i = 0; $i -lt 3; $i++) {
+            if (-not (Test-Path -LiteralPath $paths[$i])) { throw "backup $($i + 1) does not exist: $($paths[$i])" }
+            $got = [Convert]::ToBase64String([IO.File]::ReadAllBytes($paths[$i]))
+            $exp = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wantText[$i]))
+            if ($got -cne $exp) { throw "backup $($i + 1) does not hold '$($wantText[$i])' (an earlier backup was overwritten)" }
+        }
+        if (@(Get-ChildItem -LiteralPath $scratch -Filter '*.autoos-backup-*').Count -ne 3) { throw 'expected exactly 3 backup files on disk' }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case "backup-once: five Antigravity MCP writes in one second keep the user's original" {
+    # One setup pass writes mcp_config.json five times (Set-AutoOSAntigravityMcp,
+    # then Register-AutoOSAntigravityMcpServer for serena, graphify, playwright
+    # and context7), and each one changes the file. Backups named to the second
+    # used to overwrite each other, so the user's own file survived nowhere. The
+    # wait starts the writes early in a second, so all five share one timestamp
+    # without any mocking of the clock.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        while ((Get-Date).Millisecond -gt 250) { Start-Sleep -Milliseconds 20 }
+        Set-AutoOSAntigravityMcp
+        foreach ($n in 'serena', 'graphify', 'playwright', 'context7') {
+            Register-AutoOSAntigravityMcpServer -Name $n -Spec ([ordered]@{ command = 'npx'; args = @('-y', "$n-mcp-server") })
+        }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        $holdsOriginal = $false
+        foreach ($b in $backups) {
+            if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($b.FullName)) -ceq $seedB64) { $holdsOriginal = $true }
+        }
+        if (-not $holdsOriginal) { throw "none of the $($backups.Count) backup(s) holds the user's original file byte for byte (an earlier backup was overwritten)" }
+        if ($backups.Count -ne 5) { throw "$($backups.Count) backup(s) after 5 writes that each changed the file (want 5)" }
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $names = ($s.mcpServers.PSObject.Properties.Name -join ',')
+        if ($names -ne 'other,omnigraph,serena,graphify,playwright,context7') { throw "servers lost or reordered: [$names]" }
+        if ($s.mcpServers.other.command -ne 'node') { throw 'the foreign server was not kept' }
+        if ($s.theme -ne 'mine') { throw 'the foreign top-level key was not kept' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs only in case' {
+    # JSON is case-sensitive and PowerShell's -eq on strings is not: a file whose
+    # omnigraph entry says "NPX" compared equal to the entry the writer produces
+    # ("npx"), so the writer reported skipped and left the wrong command behind.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        # The entry the writer produces, except that the command is in capitals.
+        $seedEntry = [ordered]@{
+            command = 'NPX'
+            args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
+            env     = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://localhost:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
+        }
+        [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ omnigraph = $seedEntry } } | ConvertTo-Json -Depth 12))
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+        Set-AutoOSAntigravityMcp
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $cmd = $s.mcpServers.omnigraph.command
+        if ($cmd -cne 'npx') { throw "the file still says [$cmd] (want npx): an entry that differs only in case was treated as unchanged" }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "$($backups.Count) backup(s) after the rewrite (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName)) -cne $seedB64) { throw 'the backup does not hold the seeded file byte for byte' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer rewrites an entry that differs only in case' {
+    # Same trap as above, in the comparison of the canonical strings of the
+    # entry in the file and the spec being registered.
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        $seedEntry = [ordered]@{ command = 'NPX'; args = @('-y', 'example-mcp-server') }
+        [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ example = $seedEntry } } | ConvertTo-Json -Depth 12))
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+        Register-AutoOSAntigravityMcpServer -Name 'example' -Spec ([ordered]@{ command = 'npx'; args = @('-y', 'example-mcp-server') })
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $cmd = $s.mcpServers.example.command
+        if ($cmd -cne 'npx') { throw "the file still says [$cmd] (want npx): an entry that differs only in case was treated as unchanged" }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "$($backups.Count) backup(s) after the rewrite (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName)) -cne $seedB64) { throw 'the backup does not hold the seeded file byte for byte' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     }
     Pass
 }

@@ -46,6 +46,35 @@ function ConvertTo-AutoOSProcessArgument {
     '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
 }
 
+function Copy-AutoOSBackup {
+    <#
+      .SYNOPSIS
+        Copy a user's file to <file>.autoos-backup-<stamp> and return that path.
+        Never overwrites an earlier backup.
+      .DESCRIPTION
+        The stamp has one-second resolution. Two writes that both change a file
+        inside one second used to share a backup name, and Copy-Item -Force let
+        the later copy replace the earlier one: the user's ORIGINAL was gone and
+        only an intermediate file survived. On a name clash this appends -1, -2,
+        ... so every backup is its own file. -Stamp exists so a test can force
+        the clash without touching the clock. Callers that do not need the path
+        discard it ($null = ...), or it leaks into their output.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
+    )
+    $base = "$Path.autoos-backup-$Stamp"
+    $backup = $base
+    $n = 0
+    while (Test-Path -LiteralPath $backup) {
+        $n++
+        $backup = "$base-$n"
+    }
+    Copy-Item -LiteralPath $Path -Destination $backup
+    $backup
+}
+
 function Get-AutoOSNativePercent {
     param([string]$Line)
     if ($Line -match '(?<!\d)(100|\d{1,2})(?:\.\d+)?\s*%') { return [int]$Matches[1] }
@@ -695,7 +724,7 @@ function Add-AutoOSProfileLine {
             Write-AutoOSLine "profile already configured ($Marker)" -Level muted
             return
         }
-        Copy-Item $ProfilePath "$ProfilePath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        $null = Copy-AutoOSBackup -Path $ProfilePath
     } else {
         New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
     }
@@ -955,7 +984,7 @@ function Enable-AutoOSProjectMcpServer {
     $settings['enabledMcpjsonServers'] = @($enabled + $Name)
     # Back up only a run that changes the file, so a second run leaves no copy.
     if (Test-Path $path) {
-        Copy-Item $path "$path.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        $null = Copy-AutoOSBackup -Path $path
     }
     $settings | ConvertTo-Json -Depth 12 | Out-File -FilePath $path -Encoding utf8
     Write-AutoOSLine "approved project MCP server '$Name' in $path" -Level ok
@@ -1105,8 +1134,7 @@ function Set-AutoOSOmnigraphEnv {
         Write-AutoOSLine "omnigraph env file unchanged ($EnvFile)" -Level muted
     } else {
         if ($old) {
-            $backup = "$EnvFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-            Copy-Item $EnvFile $backup -Force
+            $backup = Copy-AutoOSBackup -Path $EnvFile
             if ((Protect-AutoOSUserFile -Path $backup) -eq 'failed') {
                 Write-AutoOSLine "could not restrict $backup to your account (icacls)" -Level warn
             }
@@ -1317,8 +1345,9 @@ function Set-AutoOSAntigravityMcp {
     }
     # Compare the entry as data (a parsed file and a fresh entry serialise the
     # same way), so a hand-formatted file that already holds it is left alone.
+    # -ceq: JSON is case-sensitive ("NPX" is not "npx"), PowerShell's -eq is not.
     $unchanged = $servers.Contains('omnigraph') -and
-        ((ConvertTo-Json -InputObject $servers['omnigraph'] -Depth 12 -Compress) -eq (ConvertTo-Json -InputObject $entry -Depth 12 -Compress))
+        ((ConvertTo-Json -InputObject $servers['omnigraph'] -Depth 12 -Compress) -ceq (ConvertTo-Json -InputObject $entry -Depth 12 -Compress))
     if ($unchanged) {
         Write-AutoOSLine "omnigraph already configured in $cfgPath - skipped" -Level ok
     } else {
@@ -1326,7 +1355,7 @@ function Set-AutoOSAntigravityMcp {
         $cfg['mcpServers'] = $servers
         # Back up only a run that changes the file, so a second run leaves no copy.
         if (Test-Path $cfgPath) {
-            Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+            $null = Copy-AutoOSBackup -Path $cfgPath
         }
         $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
         $kept = @($servers.Keys | Where-Object { $_ -ne 'omnigraph' })
@@ -1389,7 +1418,8 @@ function Register-AutoOSAntigravityMcpServer {
             ConvertTo-Json -InputObject $v -Compress
         }
     }
-    if ($servers.Contains($Name) -and ((& $canon $servers[$Name]) -eq (& $canon $Spec))) {
+    # -ceq: JSON is case-sensitive ("NPX" is not "npx"), PowerShell's -eq is not.
+    if ($servers.Contains($Name) -and ((& $canon $servers[$Name]) -ceq (& $canon $Spec))) {
         Write-AutoOSLine "Antigravity MCP server '$Name' already configured in $cfgPath - skipped" -Level ok
         return
     }
@@ -1398,7 +1428,7 @@ function Register-AutoOSAntigravityMcpServer {
 
     # Back up only a run that changes the file, so a second run leaves no copy.
     if (Test-Path $cfgPath) {
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        $null = Copy-AutoOSBackup -Path $cfgPath
     }
     $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
     Write-AutoOSLine "Antigravity MCP server '$Name' configured in $cfgPath" -Level ok
@@ -1840,7 +1870,7 @@ function Set-AutoOSSerenaExclusions {
 
     if ($existed) {
         try {
-            Copy-Item $ConfigPath "$ConfigPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+            $null = Copy-AutoOSBackup -Path $ConfigPath
         } catch {
             Write-AutoOSLine "could not update Serena's excluded_tools in $ConfigPath - could not back it up: $($_.Exception.Message)" -Level warn
             return
@@ -2183,7 +2213,7 @@ function Set-AutoOSOpenCodeConfig {
         Write-AutoOSLine "OpenCode configuration already up to date in $configFile - skipped" -Level ok
     } else {
         if (Test-Path $configFile) {
-            Copy-Item $configFile "$configFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+            $null = Copy-AutoOSBackup -Path $configFile
         }
         $json | Out-File -FilePath $configFile -Encoding utf8
         Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
@@ -2882,7 +2912,7 @@ function Set-AutoOSClaudeGateway {
 
     if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
     if ($existed) {
-        Copy-Item -LiteralPath $cfgPath -Destination "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        $null = Copy-AutoOSBackup -Path $cfgPath
     }
     # -Depth 100: at the default (or 10) anything nested deeper in the user's
     # settings would come back as a "@{...}" string. The temp file can hold
@@ -2988,16 +3018,14 @@ function Install-AutoOSOmniRouteRouting {
                 } else {
                     # The omniroute CLI edits the file itself, so the backup is taken first
                     # and kept only when the CLI changed something. An identical result
-                    # deletes AutoOS's own fresh copy and reports skipped. A copy that
-                    # already exists under this second's name belongs to an earlier run:
-                    # it is neither overwritten nor deleted.
+                    # deletes AutoOS's own fresh copy and reports skipped. The helper never
+                    # reuses a name, so that copy is always this run's own new file: an
+                    # earlier run's backup is neither overwritten nor deleted.
                     $qbefore = $null
                     $qbak = $null
                     if (Test-Path $qcfg) {
                         $qbefore = [IO.File]::ReadAllBytes($qcfg)
-                        $qbak = "$qcfg.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-                        if (Test-Path $qbak) { $qbak = $null }
-                        else { Copy-Item $qcfg $qbak -Force }
+                        $qbak = Copy-AutoOSBackup -Path $qcfg
                     }
                     & omniroute setup-qwen --model t2-worker --yes 2>&1 | Out-Null
                     $qrc = $LASTEXITCODE
@@ -3228,7 +3256,7 @@ function Set-AutoOSZedProxy {
             Write-AutoOSLine "Zed agents already routed to OmniRoute + LiteLLM ($cfgPath) - skipped" -Level ok
             return
         }
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        $null = Copy-AutoOSBackup -Path $cfgPath
     }
     [IO.File]::WriteAllText($cfgPath, $json, $utf8)
     Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)' -Level ok
@@ -3446,7 +3474,7 @@ function Enable-AutoOSSidekickExtra {
     # Backup only now that a write is certain: a run that changes nothing must not
     # leave a backup behind (or, within the same second, overwrite an earlier one).
     if (Test-Path $lj) {
-        Copy-Item $lj "$lj.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        $null = Copy-AutoOSBackup -Path $lj
     }
     $cfg | ConvertTo-Json -Depth 8 | Out-File -FilePath $lj -Encoding utf8
     Write-AutoOSLine 'sidekick extra enabled (<leader>aa toggles the opencode panel)' -Level ok
@@ -3469,7 +3497,7 @@ Export-ModuleMember -Function `
     Read-AutoOSSecretsFile, Read-AutoOSApiSecrets, Resolve-AutoOSOllamaBaseUrl,
     Get-AutoOSMcpPackage, Get-AutoOSSerenaExcludedTools, Get-AutoOSIdeModel,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
-    Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv, Protect-AutoOSUserFile,
+    Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv, Protect-AutoOSUserFile, Copy-AutoOSBackup,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
     Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
     Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,
