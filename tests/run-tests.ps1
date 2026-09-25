@@ -4260,6 +4260,26 @@ Test-Case 'provider status reads keys but never exposes them' {
     } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case 'svc: the Windows server reports the AI services and allowlists actions' {
+    # Same payload as serve.py's service_status(): the browser page is shared.
+    # The probe is injected, so no port on this machine is touched.
+    $codes = @{ 20128 = 200; 4000 = 0; 4096 = 401; 3000 = 200 }
+    $status = @(Get-AutoOSServiceStatus -Probe { param($port, $path) $codes[$port] })
+    $by = @{}; foreach ($s in $status) { $by[$s.id] = $s }
+    foreach ($id in 'omniroute', 'litellm', 'opencode', 'openhands') {
+        Assert-True ($by.ContainsKey($id)) "missing service $id"
+    }
+    Assert-True ($by.omniroute.up -and -not $by.litellm.up -and $by.opencode.up -and $by.openhands.up) 'up flags are wrong'
+    Assert-True ($by.litellm.bind -eq '127.0.0.1') 'litellm must be loopback'
+    Assert-True (@($by.omniroute.actions) -contains 'apply-dry-run') 'no apply dry run'
+    $bad = Get-AutoOSServiceActionResult -Body ([pscustomobject]@{ action = 'rm -rf /' }) -ForceDryRun $false
+    Assert-True ($bad.Code -eq 400) "unknown action answered $($bad.Code)"
+    $dry = Get-AutoOSServiceActionResult -Body ([pscustomobject]@{ action = 'apply-dry-run' }) -ForceDryRun $true
+    Assert-True ($dry.Code -eq 202) "dry-run action refused under -DryRun: $($dry.Code)"
+    $live = Get-AutoOSServiceActionResult -Body ([pscustomobject]@{ action = 'start-openhands' }) -ForceDryRun $true
+    Assert-True ($live.Code -eq 409) "live action allowed under -DryRun: $($live.Code)"
+}
+
 Test-Case 'opencode.jsonc is valid JSON once comments are stripped' {
     # Every client loads this file, and one unbalanced brace makes ALL of them
     # fall back to defaults while the suite's other assertions (which read it as

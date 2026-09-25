@@ -1926,7 +1926,8 @@ function Set-AutoOSOpenCodeConfig {
             name    = 'OpenRouter'
             options = [ordered]@{
                 baseURL = 'https://openrouter.ai/api/v1'
-                apiKey  = $openrouterKey
+                # A reference, never the value: the key stays in the environment.
+                apiKey  = '{env:OPENROUTER_API_KEY}'
             }
             models  = $orModels
         }

@@ -636,6 +636,7 @@
           ],
           "verify": "opencode --version",
           "homepage": "https://opencode.ai/",
+          "postInstall": "setup_opencode_config",
           "notes": "V2 CLI. The legacy npm package opencode-ai (V1) cannot read the V2 providers config."
         },
         {

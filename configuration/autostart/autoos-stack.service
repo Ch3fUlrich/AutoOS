@@ -1,27 +1,28 @@
-# AutoOS AI stack resume (Linux systemd user unit, opt-in).
+# AutoOS AI stack resume (systemd --user oneshot, template).
 #
-# Install (opt-in only, never automatic):
-#   mkdir -p ~/.config/systemd/user
-#   cp configuration/autostart/autoos-stack.service ~/.config/systemd/user/
-#   systemctl --user daemon-reload
+# Rendered and installed by configuration/autostart/register-autostart.sh,
+# which fills in this checkout's path and the PATH this machine needs (nvm
+# node, ~/.local/bin, docker). Opt-in only, never automatic:
+#   ./configuration/autostart/register-autostart.sh            # all units
+#   ./configuration/autostart/register-autostart.sh --unregister
+# By hand instead (then edit the paths yourself):
 #   systemctl --user enable --now autoos-stack.service
 #
-# Remove:
-#   systemctl --user disable --now autoos-stack.service
-#
-# The unit is Type=oneshot with RemainAfterExit=yes so a second start is a
-# no-op report, not a second gateway. The launcher itself is also double-run
-# safe (probes before starting anything).
+# Runs after the long-running units (gateway, litellm, opencode serve) and
+# resumes what they do not cover: the OpenHands container. Type=oneshot with
+# RemainAfterExit=yes so a second start is a no-op report, not a second
+# gateway; the launcher itself probes before starting anything.
 [Unit]
-Description=Resume the AutoOS AI stack (OmniRoute gateway + OpenHands container)
-After=network-online.target docker.service
+Description=Resume the AutoOS AI stack (OpenHands container + anything down)
+After=network-online.target docker.service autoos-omniroute.service autoos-litellm.service autoos-opencode.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Adjust ExecStart to your checkout: %h is $HOME, so this assumes ~/AutoOS.
-ExecStart=%h/AutoOS/configuration/autostart/Start-AutoOSStack.sh
+Environment=PATH=@PATH@
+ExecStart=@REPO@/configuration/autostart/Start-AutoOSStack.sh
+TimeoutStartSec=600
 
 [Install]
 WantedBy=default.target

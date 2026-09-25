@@ -1032,10 +1032,12 @@ if re.search(r"sk-[A-Za-z0-9]{10,}", raw):
 print(" ".join(problems))
 PY
 )"
+    # The second run changes nothing, so it backs up nothing (a backup is
+    # taken only when a run actually changes the file).
     backups="$(ls "$scratch"/.config/opencode/config.json.autoos-backup-* 2>/dev/null | wc -l)"
     rm -rf "$scratch"
     assert_eq "$report" ""
-    assert_eq "$backups" "1"
+    assert_eq "$backups" "0"
     fi
 fi
 
@@ -5896,7 +5898,8 @@ fi
 if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
     keys="$(mktemp)"
     printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
-    out="$(AUTOOS_KEYS_FILE="$keys" bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
     assert_contains "$out" "groq: no key in api-keys.yml, skipped"
     if grep -q "mistral: would register\|mistral already registered" <<<"$out"; then pass
@@ -6134,8 +6137,9 @@ if it "autostart resumes the LiteLLM fallback proxy too"; then
     starter="configuration/litellm/start-litellm.ps1"
     ok=1
     grep -q '4000' "$sh_launcher" || { ok=0; echo "sh: no :4000 probe" >&2; }
-    grep -q 'PYTHONUTF8' "$sh_launcher" || { ok=0; echo "sh: PYTHONUTF8 missing" >&2; }
-    grep -q 'already up on 4000' "$sh_launcher" || { ok=0; echo "sh: no litellm no-op path" >&2; }
+    grep -q 'start-litellm.sh' "$sh_launcher" || { ok=0; echo "sh: starter not referenced" >&2; }
+    grep -q 'PYTHONUTF8' configuration/litellm/start-litellm.sh || { ok=0; echo "sh: PYTHONUTF8 missing" >&2; }
+    grep -q 'already up with the current keys' configuration/litellm/start-litellm.sh || { ok=0; echo "sh: no litellm no-op path" >&2; }
     grep -q 'start-litellm.ps1' "$ps_launcher" || { ok=0; echo "ps1: starter not referenced" >&2; }
     grep -q 'already up on 4000' "$ps_launcher" || { ok=0; echo "ps1: no litellm no-op path" >&2; }
     [[ -f "$starter" ]] || { ok=0; echo "missing: $starter" >&2; }
@@ -6175,6 +6179,652 @@ if it "phone URLs are documented without secrets"; then
     # No machine-local IPs may be committed (repo is public).
     if grep -qE '100\.70\.|192\.168\.178\.59' docs/troubleshooting.md; then ok=0; fi
     if (( ok )); then pass; else fail "phone docs missing or leaking"; fi
+fi
+
+# ─── AI services (reboot-safe units, lane A) ────────────────────────────────
+# Every case here asserts on a dry run or a pure decision: nothing is started,
+# stopped, registered or written outside a mktemp directory.
+describe "AI services"
+
+# A fake litellm dir: config.yaml plus a .env that tries shell injection.
+_svc_litellm_fixture() {
+    local d
+    d="$(mktemp -d)"
+    : >"$d/config.yaml"
+    cat >"$d/.env" <<'ENV'
+# comment line
+GROQ_API_KEY=gsk_fake_value_1
+MISTRAL_API_KEY="quoted-fake-2"
+META_API_KEY=REPLACE_WITH_META_KEY
+EVIL_KEY=$(touch INJECTED)
+EMPTY_KEY=
+not a pair
+ENV
+    printf '%s' "$d"
+}
+
+if it "svc: start-litellm.sh loads .env literally, never evaluates it"; then
+    d="$(_svc_litellm_fixture)"
+    out="$(cd "$d" && AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    ok=1
+    [[ -e "$d/INJECTED" ]] && { ok=0; echo "the .env was evaluated" >&2; }
+    [[ "$out" == *"GROQ_API_KEY"* && "$out" == *"MISTRAL_API_KEY"* && "$out" == *"EVIL_KEY"* ]] \
+        || { ok=0; echo "keys not reported: $out" >&2; }
+    [[ "$out" == *"META_API_KEY"* || "$out" == *"EMPTY_KEY"* ]] && { ok=0; echo "placeholder/empty loaded" >&2; }
+    [[ "$out" == *"fake_value"* || "$out" == *"quoted-fake"* ]] && { ok=0; echo "a value was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-litellm.sh .env parsing is unsafe"; fi
+fi
+
+if it "svc: start-litellm.sh binds loopback with PYTHONUTF8 and starts nothing in a dry run"; then
+    d="$(_svc_litellm_fixture)"
+    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    rm -rf "$d"
+    ok=1
+    [[ "$out" == *"PYTHONUTF8=1 litellm --config config.yaml --host 127.0.0.1 --port 1"* ]] \
+        || { ok=0; echo "planned command wrong: $out" >&2; }
+    [[ "$out" == *"would start"* ]] || { ok=0; echo "dry run did not announce" >&2; }
+    if (( ok )); then pass; else fail "start-litellm.sh plan is wrong"; fi
+fi
+
+if it "svc: start-litellm.sh restarts a proxy with stale keys and no-ops a current one"; then
+    d="$(_svc_litellm_fixture)"
+    env_now="$(mktemp)"; env_old="$(mktemp)"
+    printf 'PATH=/usr/bin\0GROQ_API_KEY=gsk_fake_value_1\0MISTRAL_API_KEY=quoted-fake-2\0EVIL_KEY=$(touch INJECTED)\0PYTHONUTF8=1\0' >"$env_now"
+    printf 'PATH=/usr/bin\0GROQ_API_KEY=gsk_old_value\0PYTHONUTF8=1\0' >"$env_old"
+    cur="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_FAKE_LITELLM_ENVIRON="$env_now" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    old="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_FAKE_LITELLM_ENVIRON="$env_old" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    rm -rf "$d" "$env_now" "$env_old"
+    ok=1
+    [[ "$cur" == *"already up with the current keys"* ]] || { ok=0; echo "current: $cur" >&2; }
+    [[ "$old" == *"would restart"* && "$old" == *"GROQ_API_KEY"* && "$old" == *"MISTRAL_API_KEY"* ]] \
+        || { ok=0; echo "stale: $old" >&2; }
+    [[ "$old" == *"gsk_old"* || "$old" == *"fake_value"* ]] && { ok=0; echo "a value was printed" >&2; }
+    if (( ok )); then pass; else fail "stale-key convergence is wrong"; fi
+fi
+
+if it "svc: the stack launcher starts litellm through start-litellm.sh"; then
+    ok=1
+    grep -q 'start-litellm.sh' configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "starter not used" >&2; }
+    grep -qE '^[[:space:]]*\. \./\.env|set -a' configuration/autostart/Start-AutoOSStack.sh \
+        && { ok=0; echo "inline .env sourcing is still there" >&2; }
+    [[ -x configuration/litellm/start-litellm.sh ]] || { ok=0; echo "starter not executable" >&2; }
+    if (( ok )); then pass; else fail "launcher still sources .env inline"; fi
+fi
+
+# The client key cannot PATCH /api/resilience (403 "Invalid management
+# token", measured 2026-09-24); the CLI sends the machine loopback token.
+if it "svc: apply sets resilience through the omniroute CLI, not curl + client key"; then
+    ok=1
+    for f in configuration/omniroute/apply.sh configuration/omniroute/apply.ps1; do
+        grep -q 'patch-api-resilience' "$f" || { ok=0; echo "no CLI patch: $f" >&2; }
+        grep -q 'get-api-resilience' "$f" || { ok=0; echo "no CLI read: $f" >&2; }
+        grep -qE 'X PATCH|Method Patch' "$f" && { ok=0; echo "still PATCHes over HTTP: $f" >&2; }
+    done
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/dev/null \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    [[ "$out" == *"would set requestQueue.maxWaitMs = 180000 (omniroute api system patch-api-resilience)"* ]] \
+        || { ok=0; echo "dry run: $out" >&2; }
+    if (( ok )); then pass; else fail "resilience still goes through the client key"; fi
+fi
+
+# The dry run must not read the live gateway's provider list: with a gateway
+# up, every provider reads "already registered" and the placeholder test
+# above became machine-dependent.
+if it "svc: apply --dry-run against a down gateway plans from the key file alone"; then
+    keys="$(mktemp)"
+    printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -f "$keys"
+    ok=1
+    [[ "$out" == *"groq: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "groq: $out" >&2; }
+    [[ "$out" == *"mistral: would register"* ]] || { ok=0; echo "mistral: $out" >&2; }
+    [[ "$out" == *"already registered"* ]] && { ok=0; echo "read the live gateway" >&2; }
+    if (( ok )); then pass; else fail "apply dry run depends on the live gateway"; fi
+fi
+
+# A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp
+# unit dir, and stubs for systemctl/loginctl that only log their arguments.
+# The stub reports every unit as active, so no port probing reaches the
+# live machine's listeners.
+_svc_reg_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/units"
+    for t in node omniroute opencode litellm; do
+        printf '#!/bin/sh\nexit 0\n' >"$d/bin/$t"; chmod +x "$d/bin/$t"
+    done
+    printf '#!/bin/sh\necho "$*" >>"%s/systemctl.log"\nexit 0\n' "$d" >"$d/bin/fake-systemctl"
+    printf '#!/bin/sh\necho "$*" >>"%s/loginctl.log"\n[ "$1" = show-user ] && echo yes\nexit 0\n' "$d" >"$d/bin/fake-loginctl"
+    chmod +x "$d/bin/fake-systemctl" "$d/bin/fake-loginctl"
+    printf '%s' "$d"
+}
+_svc_reg() {
+    local d="$1"; shift
+    PATH="$d/bin:$PATH" AUTOOS_SYSTEMD_USER_DIR="$d/units" AUTOOS_OMNIROUTE_ENV="$d/omniroute.env" \
+        AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" AUTOOS_LOGINCTL="$d/bin/fake-loginctl" \
+        bash "$ROOT/configuration/autostart/register-autostart.sh" "$@" 2>&1
+}
+
+if it "svc: the omniroute unit requires a client key and gets this machine's PATH"; then
+    d="$(_svc_reg_sandbox)"
+    out="$(_svc_reg "$d" --render autoos-omniroute)"
+    ok=1
+    # The key requirement comes from ~/.omniroute/.env (operator 2026-09-24):
+    # a unit Environment= line would silently override the operator's file.
+    [[ "$out" == *"Environment=REQUIRE_API_KEY"* ]] && { ok=0; echo "unit overrides REQUIRE_API_KEY" >&2; }
+    [[ "$out" == *"ExecStart=$d/bin/omniroute serve --no-open --port 20128"* ]] || { ok=0; echo "ExecStart: $out" >&2; }
+    [[ "$out" == *"Environment=PATH=$d/bin:"* ]] || { ok=0; echo "PATH not filled" >&2; }
+    [[ "$out" == *"@"*"@"* ]] && { ok=0; echo "unfilled placeholder" >&2; }
+    [[ "$out" == *"Managed by AutoOS"* ]] || { ok=0; echo "no marker" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "omniroute unit render is wrong"; fi
+fi
+
+if it "svc: register-autostart --dry-run writes, enables and starts nothing"; then
+    d="$(_svc_reg_sandbox)"
+    out="$(_svc_reg "$d" --dry-run)"
+    ok=1
+    [[ -z "$(ls -A "$d/units")" ]] || { ok=0; echo "wrote a unit" >&2; }
+    [[ -e "$d/systemctl.log" ]] && grep -qE 'enable|start|daemon-reload' "$d/systemctl.log" && { ok=0; echo "called systemctl" >&2; }
+    [[ "$out" == *"would write $d/units/autoos-omniroute.service"* ]] || { ok=0; echo "not announced: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dry run had side effects"; fi
+fi
+
+if it "svc: register-autostart twice: the second run skips, a changed unit is backed up"; then
+    d="$(_svc_reg_sandbox)"
+    first="$(_svc_reg "$d")"
+    second="$(_svc_reg "$d")"
+    echo "# hand edit" >>"$d/units/autoos-omniroute.service"
+    third="$(_svc_reg "$d")"
+    ok=1
+    [[ "$first" == *"+ autoos-omniroute: wrote"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ "$second" == *"unit unchanged (skipped)"* && "$second" == *"running (skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$second" == *"+ autoos-omniroute"* ]] && { ok=0; echo "second run changed something" >&2; }
+    compgen -G "$d/units/autoos-omniroute.service.autoos-backup-*" >/dev/null || { ok=0; echo "no backup" >&2; }
+    grep -q '# hand edit' "$d/units/autoos-omniroute.service" && { ok=0; echo "not converged" >&2; }
+    [[ "$third" == *"replaced"* ]] || { ok=0; echo "third: $third" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart is not idempotent"; fi
+fi
+
+if it "svc: register-autostart appends REQUIRE_API_KEY=true once, with a backup"; then
+    d="$(_svc_reg_sandbox)"
+    printf 'STORAGE_ENCRYPTION_KEY=keep-me\n' >"$d/omniroute.env"
+    _svc_reg "$d" >/dev/null
+    second="$(_svc_reg "$d")"
+    ok=1
+    grep -q '^STORAGE_ENCRYPTION_KEY=keep-me$' "$d/omniroute.env" || { ok=0; echo "existing line lost" >&2; }
+    [[ "$(grep -c '^REQUIRE_API_KEY=true$' "$d/omniroute.env")" == 1 ]] || { ok=0; echo "not exactly one line" >&2; }
+    compgen -G "$d/omniroute.env.autoos-backup-*" >/dev/null || { ok=0; echo "no backup" >&2; }
+    [[ "$second" == *"REQUIRE_API_KEY=true is set"*"(skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    printf 'REQUIRE_API_KEY=false\n' >"$d/omniroute.env"
+    third="$(_svc_reg "$d")"
+    grep -q '^REQUIRE_API_KEY=false$' "$d/omniroute.env" || { ok=0; echo "overrode an explicit operator value" >&2; }
+    [[ "$third" == *"left alone"* ]] || { ok=0; echo "third: $third" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "REQUIRE_API_KEY handling is wrong"; fi
+fi
+
+if it "svc: register-autostart never runs a second gateway next to omniroute autostart"; then
+    d="$(_svc_reg_sandbox)"
+    echo "[Service]" >"$d/units/omniroute.service"
+    out="$(_svc_reg "$d")"
+    ok=1
+    [[ -e "$d/units/autoos-omniroute.service" ]] && { ok=0; echo "wrote a second gateway" >&2; }
+    [[ "$out" == *"omniroute autostart disable"* ]] || { ok=0; echo "no hint: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "two gateways would fight over :20128"; fi
+fi
+
+if it "svc: register-autostart --unregister removes only units AutoOS wrote"; then
+    d="$(_svc_reg_sandbox)"
+    _svc_reg "$d" >/dev/null
+    printf '[Service]\nExecStart=/bin/true\n' >"$d/units/autoos-foreign.service"
+    out="$(_svc_reg "$d" --unregister)"
+    ok=1
+    [[ -e "$d/units/autoos-omniroute.service" ]] && { ok=0; echo "our unit stayed" >&2; }
+    [[ -e "$d/units/autoos-foreign.service" ]] || { ok=0; echo "removed a foreign unit" >&2; }
+    grep -q 'disable --now autoos-omniroute.service' "$d/systemctl.log" || { ok=0; echo "not disabled" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "unregister is wrong"; fi
+fi
+
+if it "svc: opencode-cli (V2) writes the global provider config after install"; then
+    report="$(python3 - <<'PY'
+import json, io
+want = {"catalog/linux.json": "setup_opencode_config",
+        "catalog/macos.json": "setup_opencode_config",
+        "catalog/windows.json": "Set-AutoOSOpenCodeConfig"}
+bad = []
+for f, fn in want.items():
+    d = json.load(io.open(f, encoding="utf-8-sig"))
+    comps = [c for cat in d["categories"] for c in cat["components"] if c["id"] == "opencode-cli"]
+    if not comps or comps[0].get("postInstall") != fn:
+        bad.append(f)
+print(" ".join(bad) or "ok")
+PY
+)"
+    assert_eq "$report" "ok"
+fi
+
+# The user's own config may be JSONC (comments, trailing commas). json.load
+# used to fail on it and the writer then started from {} - every provider,
+# MCP server and setting the user had was replaced wholesale.
+if it "svc: the opencode writer merges into a JSONC config and never writes a key value"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/opencode"
+    cat >"$scratch/.config/opencode/config.json" <<'JSONC'
+{
+  // the user's own theme and provider
+  "theme": "nord",
+  /* block comment */
+  "provider": {
+    "mine": {"options": {"baseURL": "http://example.invalid/v1"}},
+  },
+}
+JSONC
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY CONTEXT7_API_KEY
+      export OPENROUTER_API_KEY="sk-or-v1-notarealkeyatall0123456789"
+      curl() { return 6; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    report="$(python3 - "$scratch/.config/opencode" <<'PY'
+import io, json, os, sys
+d = sys.argv[1]
+problems = []
+for name in ("config.json", "opencode.json"):
+    p = os.path.join(d, name)
+    if not os.path.isfile(p):
+        problems.append("missing:" + name); continue
+    raw = io.open(p, encoding="utf-8").read()
+    doc = json.loads(raw)
+    if doc.get("theme") != "nord": problems.append(name + ":theme-lost")
+    if "mine" not in doc.get("provider", {}): problems.append(name + ":provider-lost")
+    if "omniroute" not in doc.get("provider", {}): problems.append(name + ":no-omniroute")
+    if "notarealkey" in raw: problems.append(name + ":plaintext-key")
+    orr = doc.get("provider", {}).get("openrouter", {}).get("options", {}).get("apiKey")
+    if orr != "{env:OPENROUTER_API_KEY}": problems.append(name + ":openrouter=%s" % orr)
+print(" ".join(problems) or "ok")
+PY
+)"
+    rm -rf "$scratch"
+    assert_eq "$report" "ok"
+    fi
+fi
+
+# Measured live 2026-09-24: the harness rewrote config.json with a trailing
+# newline the writer did not emit, so every re-run took a backup; and the
+# seeded opencode.json was backed up on its very first write.
+if it "svc: the opencode writer takes no backup on a fresh machine or a re-run"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    for _ in 1 2 3; do
+        ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    done
+    n="$(compgen -G "$scratch/.config/opencode/*.autoos-backup-*" | wc -l)"
+    rm -rf "$scratch"
+    assert_eq "$n" "0"
+    fi
+fi
+
+# V2 (@opencode/cli) reads `providers` (package/env/settings), not V1's
+# `provider`: measured 2026-09-24, serve from $HOME listed no provider at all
+# with only the V1 block written. The V2 block is projected from the repo's
+# opencode.jsonc (single source) into opencode.json, never into config.json
+# (V1's file).
+if it "svc: the opencode writer adds the V2 providers block when the CLI is V2"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      opencode_is_v2() { return 0; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    report="$(python3 - "$scratch/.config/opencode" <<'PY2'
+import io, json, os, re, sys
+d = sys.argv[1]
+problems = []
+oc = json.load(io.open(os.path.join(d, "opencode.json"), encoding="utf-8"))
+v1 = json.load(io.open(os.path.join(d, "config.json"), encoding="utf-8"))
+repo = json.loads(re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read()))
+for name in ("omniroute", "litellm"):
+    got = (oc.get("providers") or {}).get(name)
+    if got != repo["providers"][name]:
+        problems.append("v2-" + name + "-differs")
+if "providers" in v1:
+    problems.append("v1-file-got-v2-block")
+if oc.get("model") != repo["model"]:
+    problems.append("model=%s" % oc.get("model"))
+print(" ".join(problems) or "ok")
+PY2
+)"
+    rm -rf "$scratch"
+    assert_eq "$report" "ok"
+    fi
+fi
+
+if it "svc: the opencode writer leaves an unparseable config alone"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/opencode"
+    printf '{ "theme": "nord", BROKEN\n' >"$scratch/.config/opencode/config.json"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; curl() { return 6; }
+      setup_opencode_config >/dev/null 2>&1 )
+    got="$(cat "$scratch/.config/opencode/config.json")"
+    rm -rf "$scratch"
+    assert_eq "$got" '{ "theme": "nord", BROKEN'
+    fi
+fi
+
+if it "svc: opencode.json is backed up before it changes and untouched on a re-run"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/opencode"
+    printf '{"theme": "gruvbox"}\n' >"$scratch/.config/opencode/opencode.json"
+    for _ in 1 2; do
+        ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    done
+    n="$(compgen -G "$scratch/.config/opencode/opencode.json.autoos-backup-*" | wc -l)"
+    rm -rf "$scratch"
+    assert_eq "$n" "1"
+    fi
+fi
+
+# opencode serve (V2) answers the static UI to anyone and guards /api/* with
+# HTTP Basic (user "opencode", password from OPENCODE_PASSWORD; measured on
+# 2.0.16). Without the variable it invents a random password per start, so
+# the phone could never log in twice. The wrapper pins one, in a 0600 file.
+if it "svc: run-opencode-serve binds the LAN port with a pinned password and keys by name"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/lit"
+    printf 'LITELLM_MASTER_KEY=sk-litellm-fake-000\nOPENROUTER_API_KEY=REPLACE_WITH_X\n' >"$d/lit/.env"
+    printf 'omniroute: sk-omni-fake-111\n' >"$d/keys.yml"
+    out="$(env -u AUTOOS_OMNIROUTE_KEY AUTOOS_LITELLM_DIR="$d/lit" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/pw" \
+        bash "$ROOT/configuration/autostart/run-opencode-serve.sh" --dry-run 2>&1)"
+    ok=1
+    [[ "$out" == *"opencode serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "bind: $out" >&2; }
+    [[ "$out" == *"LITELLM_MASTER_KEY"* && "$out" == *"AUTOOS_OMNIROUTE_KEY"* ]] || { ok=0; echo "keys: $out" >&2; }
+    [[ "$out" == *"OPENROUTER_API_KEY"* ]] && { ok=0; echo "placeholder loaded" >&2; }
+    [[ "$out" == *"fake-000"* || "$out" == *"fake-111"* ]] && { ok=0; echo "a value was printed" >&2; }
+    [[ "$out" == *"would generate"*"$d/pw"* ]] || { ok=0; echo "password plan: $out" >&2; }
+    [[ -e "$d/pw" ]] && { ok=0; echo "dry run wrote the password file" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "run-opencode-serve plan is wrong"; fi
+fi
+
+if it "svc: run-opencode-serve generates the password once, private, and reuses it"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin"
+    # A fake opencode that reports whether it received a password.
+    printf '#!/bin/sh\n[ -n "$OPENCODE_PASSWORD" ] && echo "pw-set $*" || echo "pw-missing $*"\n' >"$d/bin/opencode"
+    chmod +x "$d/bin/opencode"
+    run() { PATH="$d/bin:$PATH" AUTOOS_LITELLM_DIR="$d/none" AUTOOS_KEYS_FILE="$d/none.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/cfg/pw" bash "$ROOT/configuration/autostart/run-opencode-serve.sh" 2>&1; }
+    first="$(run)"; pw1="$(cat "$d/cfg/pw" 2>/dev/null)"
+    second="$(run)"; pw2="$(cat "$d/cfg/pw" 2>/dev/null)"
+    mode="$(stat -c %a "$d/cfg/pw" 2>/dev/null)"
+    ok=1
+    [[ "$first" == *"pw-set serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ ${#pw1} -ge 24 && "$pw1" == "$pw2" ]] || { ok=0; echo "password not stable" >&2; }
+    [[ "$mode" == 600 ]] || { ok=0; echo "mode $mode" >&2; }
+    [[ "$first$second" == *"$pw1"* ]] && { ok=0; echo "password printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "password handling is wrong"; fi
+fi
+
+if it "svc: the opencode unit runs the wrapper from this checkout"; then
+    d="$(_svc_reg_sandbox)"
+    out="$(_svc_reg "$d" --render autoos-opencode)"
+    ok=1
+    [[ "$out" == *"ExecStart=$ROOT/configuration/autostart/run-opencode-serve.sh"* ]] || { ok=0; echo "$out" >&2; }
+    [[ "$out" == *"Environment=PATH=$d/bin:"* ]] || { ok=0; echo "PATH" >&2; }
+    [[ "$out" == *"@"*"@"* ]] && { ok=0; echo "unfilled placeholder" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "opencode unit render is wrong"; fi
+fi
+
+# systemd runs ExecStart directly: a 100644 launcher fails with 203/EXEC.
+if it "svc: every script a unit or the healthcheck runs is executable in git"; then
+    bad=""
+    for f in configuration/autostart/Start-AutoOSStack.sh configuration/autostart/register-autostart.sh \
+             configuration/autostart/run-opencode-serve.sh configuration/litellm/start-litellm.sh \
+             configuration/healthcheck.sh configuration/start-stack.sh; do
+        mode="$(git ls-files -s -- "$f" | cut -d' ' -f1)"
+        [[ "$mode" == 100755 ]] || bad+="$f=$mode "
+    done
+    assert_eq "$bad" ""
+fi
+
+if it "svc: every unit template renders with this checkout and no placeholder left"; then
+    d="$(_svc_reg_sandbox)"
+    ok=1
+    for u in autoos-omniroute autoos-litellm autoos-opencode autoos-stack; do
+        out="$(_svc_reg "$d" --render "$u")" || { ok=0; echo "$u: render failed: $out" >&2; continue; }
+        [[ "$out" =~ @[A-Z]+@ ]] && { ok=0; echo "$u: unfilled placeholder" >&2; }
+        [[ "$out" == *"%h/AutoOS"* ]] && { ok=0; echo "$u: hard-coded ~/AutoOS" >&2; }
+        [[ "$out" == *"WantedBy=default.target"* ]] || { ok=0; echo "$u: not boot-wanted" >&2; }
+    done
+    stack="$(_svc_reg "$d" --render autoos-stack)"
+    [[ "$stack" == *"ExecStart=$ROOT/configuration/autostart/Start-AutoOSStack.sh"* ]] || { ok=0; echo "stack ExecStart" >&2; }
+    [[ "$stack" == *"Type=oneshot"* ]] || { ok=0; echo "stack not oneshot" >&2; }
+    lit="$(_svc_reg "$d" --render autoos-litellm)"
+    [[ "$lit" == *"start-litellm.sh --foreground"* ]] || { ok=0; echo "litellm ExecStart" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "unit templates do not render cleanly"; fi
+fi
+
+if it "svc: register-autostart registers the four units in dependency order"; then
+    d="$(_svc_reg_sandbox)"
+    _svc_reg "$d" >/dev/null
+    order="$(grep -oE '^--user enable autoos-[a-z]+' "$d/systemctl.log" | awk '{print $3}' | tr '\n' ' ')"
+    rm -rf "$d"
+    assert_eq "$order" "autoos-omniroute autoos-litellm autoos-opencode autoos-stack "
+fi
+
+if it "svc: the stack launcher starts each service through its unit when one is installed"; then
+    ok=1
+    for u in autoos-omniroute autoos-litellm autoos-opencode; do
+        grep -q "unit_installed $u" configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "no unit path: $u" >&2; }
+        grep -q "systemctl --user start $u.service" configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "not started via unit: $u" >&2; }
+    done
+    grep -q 'run-opencode-serve.sh' configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "serve fallback bypasses the password wrapper" >&2; }
+    grep -q '/tmp/' configuration/autostart/Start-AutoOSStack.sh && { ok=0; echo "logs to /tmp" >&2; }
+    if (( ok )); then pass; else fail "launcher bypasses the units"; fi
+fi
+
+if it "svc: healthcheck --fix resumes opencode serve and litellm too"; then
+    ok=1
+    grep -qE 'ANY_DOWN=1' configuration/healthcheck.sh || { ok=0; echo "no combined down flag" >&2; }
+    grep -qE 'OC_UP -eq 0' configuration/healthcheck.sh || { ok=0; echo "serve not in the fix condition" >&2; }
+    grep -qE 'LT_UP -eq 0' configuration/healthcheck.sh || { ok=0; echo "litellm not in the fix condition" >&2; }
+    grep -q '4000' configuration/healthcheck.sh || { ok=0; echo "no :4000 probe" >&2; }
+    if (( ok )); then pass; else fail "healthcheck --fix leaves a service down"; fi
+fi
+
+# The profiles in ~/.openhands are read by whichever OpenHands runs with that
+# directory: the docker app (host.docker.internal via --add-host) or a native
+# host process such as agent-canvas, which cannot resolve that name on a
+# native Linux host. Like resolve_ollama_base_url: keep it where it resolves.
+if it "svc: profile sync picks the gateway host per consumer"; then
+    d="$(mktemp -d)"
+    # sync_base <resolves 0|1> [--consumer X]: the omniroute-tier2 base_url.
+    sync_base() {
+        local resolves="$1"; shift
+        rm -rf "$d/oh"
+        env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key AUTOOS_FAKE_HDI_RESOLVES="$resolves" \
+            python3 "$ROOT/tools/sync-openhands-profiles.py" --openhands-dir "$d/oh" \
+            --keys-file "$d/none.yml" --litellm-env "$d/none.env" "$@" >/dev/null 2>&1
+        python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_url"])' \
+            "$d/oh/profiles/omniroute-tier2.json" 2>/dev/null
+    }
+    got="$(sync_base 0)|$(sync_base 0 --consumer native)|$(sync_base 1 --consumer native)"
+    rm -rf "$d"
+    assert_eq "$got" \
+        "http://host.docker.internal:20128/v1|http://127.0.0.1:20128/v1|http://host.docker.internal:20128/v1"
+fi
+
+# The image's entrypoint runs everything as root unless SANDBOX_USER_ID names
+# the host user (image default 0): ~/.openhands then fills with root-owned
+# files the host-side profile sync can no longer write. A missing host dir is
+# created by docker as root, so it must exist before `docker run`.
+if it "svc: start-stack openhands runs as the host user, survives reboots and is capped"; then
+    block="$(sed -n '/^    openhands)/,/^        ;;/p' configuration/start-stack.sh)"
+    ok=1
+    [[ "$block" == *'SANDBOX_USER_ID="$(id -u)"'* ]] || { ok=0; echo "no SANDBOX_USER_ID" >&2; }
+    [[ "$block" == *'mkdir -p "$HOME/.openhands"'* ]] || { ok=0; echo "dir not pre-created" >&2; }
+    [[ "$block" == *'--restart unless-stopped'* ]] || { ok=0; echo "not reboot-safe" >&2; }
+    [[ "$block" == *'docker run -d --rm'* ]] && { ok=0; echo "--rm defeats the restart policy" >&2; }
+    [[ "$block" == *'--memory'* ]] || { ok=0; echo "no memory cap" >&2; }
+    [[ "$block" == *'--consumer container'* ]] || { ok=0; echo "profile consumer not named" >&2; }
+    # Remote browsers need the sandbox URL pattern; opt-in, never a default.
+    [[ "$block" == *'OH_SANDBOX_CONTAINER_URL_PATTERN="$AUTOOS_OPENHANDS_SANDBOX_URL"'* ]] || { ok=0; echo "no sandbox URL passthrough" >&2; }
+    [[ "$block" == *'if [[ -n "${AUTOOS_OPENHANDS_SANDBOX_URL:-}" ]]'* ]] || { ok=0; echo "sandbox URL not opt-in" >&2; }
+    if (( ok )); then pass; else fail "OpenHands launch is not native-Linux safe"; fi
+fi
+
+# SDK-1.36 OpenHands keeps LLM profiles in its own settings store and never
+# reads profiles/*.json (measured 2026-09-24: /api/v1/settings/profiles was
+# empty with 16 files synced). The push saves them through the app's API.
+if it "svc: profile sync pushes the tiers into a running app, idempotently and capped"; then
+    d="$(mktemp -d)"
+    python3 "$ROOT/tests/helpers/fake_openhands_app.py" "$d/port" "$d/req.log" >/dev/null 2>&1 &
+    fake_pid=$!
+    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
+    url="http://127.0.0.1:$(cat "$d/port")"
+    push() { env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key python3 "$ROOT/tools/sync-openhands-profiles.py" \
+        --openhands-dir "$d/oh" --keys-file "$d/none.yml" --litellm-env "$d/none.env" --push-url "$url" 2>&1; }
+    first="$(push)"
+    : >"$d/req.log"
+    second="$(push)"
+    kill "$fake_pid" 2>/dev/null
+    ok=1
+    [[ "$first" == *"app settings seeded with omniroute-tier1"* ]] || { ok=0; echo "not seeded: $first" >&2; }
+    [[ "$first" == *"app profile omniroute-tier1 saved"* && "$first" == *"app profile omniroute-tier2 saved"* ]] \
+        && { ok=0; echo "cap 3 should stop before tier2 (spec order)" >&2; }
+    [[ "$first" == *"app profile omniroute-spark-1.3-contributor saved"* ]] || { ok=0; echo "spec order: $first" >&2; }
+    [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
+    [[ "$first" == *"FAILED"* ]] && { ok=0; echo "a push failed (StrictLLM?): $first" >&2; }
+    grep -q '^POST' "$d/req.log" && grep -q '^POST /api/v1/settings/profiles/omniroute-tier1$' "$d/req.log" \
+        && { ok=0; echo "second run re-posted an unchanged profile" >&2; }
+    [[ "$second" == *"omniroute-tier1 skipped (up to date)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$first$second" == *"sk-fake-profile-key"* ]] && { ok=0; echo "key printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "profile push is wrong"; fi
+fi
+
+if it "svc: profile push skips cleanly when no app answers"; then
+    d="$(mktemp -d)"
+    out="$(env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key python3 "$ROOT/tools/sync-openhands-profiles.py" \
+        --openhands-dir "$d/oh" --keys-file "$d/none.yml" --litellm-env "$d/none.env" \
+        --push-url http://127.0.0.1:1 2>&1)"; rc=$?
+    rm -rf "$d"
+    if [[ $rc -eq 0 && "$out" == *"push skipped"* ]]; then pass; else fail "rc=$rc $out"; fi
+fi
+
+# The browser UI shows the AI services live and offers the setup actions that
+# already exist. Payload and action mapping are tested through an injected
+# probe and runner: nothing is probed on this machine, nothing is started.
+_svc_serve_py() {
+    python3 - <<'PY'
+import importlib.util, json, pathlib, sys, tempfile
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-serve-"))
+spec = importlib.util.spec_from_file_location("autoos_serve", "lib/linux/serve.py")
+mod = importlib.util.module_from_spec(spec)
+sys.argv = ["serve.py", str(root), "0", "127.0.0.1", "0"]
+spec.loader.exec_module(mod)
+codes = {20128: 200, 4000: 0, 4096: 401, 3000: 200}
+status = mod.service_status(probe=lambda port, path: codes[port])
+by = {s["id"]: s for s in status}
+problems = []
+for sid in ("omniroute", "litellm", "opencode", "openhands"):
+    s = by.get(sid)
+    if not s:
+        problems.append("missing:" + sid); continue
+    for k in ("name", "port", "bind", "auth", "health", "up", "actions"):
+        if k not in s: problems.append(sid + ":no-" + k)
+up = {k: v["up"] for k, v in by.items()}
+if up != {"omniroute": True, "litellm": False, "opencode": True, "openhands": True}:
+    problems.append("up=%s" % up)
+if by["litellm"]["bind"] != "127.0.0.1": problems.append("litellm-bind")
+if by["opencode"]["bind"] != "0.0.0.0": problems.append("opencode-bind")
+if "apply-dry-run" not in by["omniroute"]["actions"]: problems.append("no-apply-dry-run")
+if "start-openhands" not in by["openhands"]["actions"]: problems.append("no-start-openhands")
+if "start-opencode-serve" not in by["opencode"]["actions"]: problems.append("no-start-serve")
+# every advertised action is in the allowlist, with a repo script behind it
+for s in status:
+    for a in s["actions"]:
+        if a not in mod.SERVICE_ACTIONS: problems.append("unlisted:" + a)
+for key, act in mod.SERVICE_ACTIONS.items():
+    argv = act["argv"]
+    if argv[0] != "bash" or not (pathlib.Path("lib/linux/serve.py").resolve().parents[2] / argv[1]).is_file():
+        problems.append("not-a-repo-script:" + key)
+if mod.SERVICE_ACTIONS["apply-dry-run"]["live"] or "--dry-run" not in mod.SERVICE_ACTIONS["apply-dry-run"]["argv"]:
+    problems.append("dry-run-action-is-live")
+# the request side: unknown refused, live refused under --dry-run serving
+ran = []
+mod.start_service_action = lambda key: ran.append(key)
+code, _ = mod.service_action_response({"action": "rm -rf /"})
+if code != 400: problems.append("unknown-action=%s" % code)
+code, _ = mod.service_action_response({"action": "apply-dry-run"})
+if code != 202 or ran != ["apply-dry-run"]: problems.append("dry-run-not-started:%s" % code)
+mod.FORCE_DRY = True
+code, _ = mod.service_action_response({"action": "start-openhands"})
+if code != 409 or ran != ["apply-dry-run"]: problems.append("live-action-under-dry-serve:%s" % code)
+print(" ".join(problems) or "ok")
+PY
+}
+
+if it "svc: the web server reports every AI service and maps actions to an allowlist"; then
+    assert_eq "$(_svc_serve_py 2>&1 | tail -n 1)" "ok"
+fi
+
+if it "svc: the web UI shows service status and confirms every live action"; then
+    ok=1
+    grep -q 'api("/api/services")' web/index.html || { ok=0; echo "no status fetch" >&2; }
+    grep -q '/api/services/action' web/index.html || { ok=0; echo "no action call" >&2; }
+    body="$(sed -n '/^async function runServiceAction/,/^}/p' web/index.html)"
+    [[ "$body" == *"confirm("* ]] || { ok=0; echo "live action without confirm" >&2; }
+    grep -q 'id="services"' web/index.html || { ok=0; echo "no services list" >&2; }
+    grep -q 'backend apply/switch not yet wired' web/index.html && { ok=0; echo "stale subtitle" >&2; }
+    if (( ok )); then pass; else fail "service status/actions not wired in the page"; fi
+fi
+
+# The page is shared: the Windows server must answer the same routes.
+if it "svc: the Windows server answers the same service routes"; then
+    ok=1
+    grep -q "'/api/services'" lib/windows/AutoOS.Serve.psm1 || { ok=0; echo "no GET route" >&2; }
+    grep -q "'/api/services/action'" lib/windows/AutoOS.Serve.psm1 || { ok=0; echo "no POST route" >&2; }
+    for a in apply-dry-run apply start-openhands start-opencode-serve resume-stack; do
+        grep -q "'$a'" lib/windows/AutoOS.Serve.psm1 || { ok=0; echo "missing action $a" >&2; }
+    done
+    if (( ok )); then pass; else fail "Windows server lacks the service routes"; fi
+fi
+
+if it "svc: docs/web-services.md lists every service port and no real host"; then
+    ok=1
+    for p in 20128 4096 3000 4000 8777 8080 8090 9000 9001 9121 24282 8199; do
+        grep -q "| $p |" docs/web-services.md || { ok=0; echo "port $p missing" >&2; }
+    done
+    if grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' docs/web-services.md | grep -qvE '^(0\.0\.0\.0|127\.0\.0\.1)$'; then
+        ok=0; echo "a real IP in the doc" >&2
+    fi
+    grep -qE '[a-z0-9-]\.(com|net|org|de)\b' docs/web-services.md && { ok=0; echo "a real domain in the doc" >&2; }
+    if (( ok )); then pass; else fail "web-services.md incomplete or leaking"; fi
 fi
 
 # ─── shellcheck (optional) ──────────────────────────────────────────────────
