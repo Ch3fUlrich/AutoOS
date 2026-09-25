@@ -85,7 +85,11 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
         return ["qodercli", "-p"] + mode + ([] if not model else ["--model", model]) + [task]
     elif client.name == "agy":
         return ["agy", "-p"] + ([] if not model else ["--model", model]) + [task]
-    else:  # qwen, gemini
+    elif client.name == "gemini":
+        # Headless gemini exits 55 in a folder it does not trust (live
+        # 2026-09-25); --skip-trust trusts the spawn cwd for this session only.
+        inner = ["--skip-trust"] + mode + ["-p", task]
+    else:  # qwen
         inner = mode + ["-p", task]
     return ["omniroute", "run", client.name, "--model", model or combo,
             "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--"] + inner

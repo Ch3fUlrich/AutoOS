@@ -15,6 +15,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `.deb` URL returned 0. It is `failed` now, with the download page as the next step.
 - **agy's vendor installer edits shell profiles** (`agy install` appends a PATH line to
   `~/.zshrc`, `~/.zprofile`, `~/.profile`); `install_agy` backs them up first.
+- **`--client gemini` exited 55 in any folder gemini had not been told to trust.** The
+  spawner passes `--skip-trust` (this session only), so the approval mode is kept too.
 
 ### Fixed — tier orchestration on opencode v2 (measured live 2026-09-24)
 

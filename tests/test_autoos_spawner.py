@@ -232,6 +232,13 @@ class ClientCommandTests(unittest.TestCase):
         self.assertIn("omniroute run gemini --model t2-worker ", r.stdout)
         self.assertIn("--approval-mode auto_edit -p t", r.stdout)
 
+    def test_gemini_trusts_the_spawn_cwd_for_this_session_only(self):
+        # Live 2026-09-25: headless gemini in an untrusted folder exits 55
+        # ("not running in a trusted directory") and downgrades the approval
+        # mode. --skip-trust trusts it for this one session, nothing persists.
+        r = plan_of("--client", "gemini", "t")
+        self.assertIn("-- --skip-trust --approval-mode auto_edit -p t", r.stdout)
+
     def test_codex_runs_exec_through_omniroute(self):
         r = plan_of("--client", "codex", "t")
         self.assertIn("omniroute run codex --model t2-worker --api-key-env AUTOOS_OMNIROUTE_KEY -- exec --sandbox workspace-write --skip-git-repo-check t", r.stdout)
