@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `ai-stack.sh verify`: the post-migrate checklist as one read-only command
+
+- **`configuration/docker/ai-stack/ai-stack.sh verify`** replaces the by-hand checks run
+  after `migrate --yes`: every compose service running (and healthy), the gateway and
+  opencode refusing a keyless request with 401, the three router combos answering 200 with
+  the gateway key, the code directory visible in the opencode container and in the OpenHands
+  sandbox volumes, and the public URLs redirecting (302). One `ok` / `FAIL - reason` /
+  `skip - why` line per check, then `verify: N ok, M failed, K skipped`; exit 0 only when
+  nothing failed.
+- **Read-only, and the key never leaves stdin.** Docker is only asked `inspect` and
+  `exec ... test -d`; the key (`AUTOOS_OMNIROUTE_KEY`, never read from a file) reaches curl
+  as `-H @-`, not on argv. `AUTOOS_VERIFY_COMBOS` overrides the combo list and
+  `AUTOOS_VERIFY_PUBLIC_URLS` supplies the public URLs (none are kept in the repo).
+  `configuration/healthcheck.sh` is reported as `skip`: it writes a log file on every run and
+  always exits 0. `docs/web-services.md` describes the checks.
+- Ten `aistack: verify ...` tests run it against the docker stub and a curl stand-in
+  (`AUTOOS_CURL`) that logs the argv it received.
+
 ### Fixed — the router audit no longer reads a load-shed 503 as a dead leg
 
 - **`tools/audit-router.py` reported OmniRoute's HTTP 503 "resource pressure" (host short of
