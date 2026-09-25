@@ -3398,6 +3398,28 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     }
 }
 
+Test-Case 'autoos-agent plans tier runs without spawning or leaking a key' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $tool = Join-Path $Root 'tools\autoos-agent.py'
+    $out = & $py.Source $tool run --tier 2 --dry-run t 2>&1 | Out-String
+    Assert-Equal $LASTEXITCODE 0 "dry run failed: $out"
+    Assert-True ($out -match '--standalone --agent t2-worker --model omniroute/t2-worker ') 't2-worker not paired with its model'
+    $out = & $py.Source $tool run --tier 3 --clean --dry-run t 2>&1 | Out-String
+    Assert-True ($out -match '--model omniroute/t3-driver-clean ') 'clean twin not chosen'
+    $env:AUTOOS_OMNIROUTE_KEY = 'never-print-this-key'
+    try { $out = & $py.Source $tool run --tier 2 --free --isolate --dry-run t 2>&1 | Out-String }
+    finally { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+    Assert-True ($out -match 'git clone --local') 'isolation is not a clone'
+    Assert-True ($out -notmatch 'worktree add|never-print-this-key') 'plan used a worktree or printed the key'
+    # The refusal goes to stderr; under Stop, Windows PowerShell turns native
+    # stderr into a terminating error (it failed CI on the windows runner).
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { & $py.Source $tool run --tier 2 --free --clean --dry-run t 2>&1 | Out-Null; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 2
+}
+
 Test-Case 'mirror-litellm-env projects keys without printing them' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -3905,10 +3927,12 @@ Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
     Assert-Equal $t2[0].effect 'deny'
     Assert-Equal $t2[-1].resource 't3-reviewer'; Assert-Equal $t2[-1].effect 'allow'
     # t3 is a leaf: subagent deny-all, no allow rule. It reads and runs
-    # checks (read/grep/glob/bash allow) but never edits, writes or spawns
+    # checks (read/grep/glob/shell allow) but never edits, writes or spawns
     # (deny) — a tool-less reviewer refuses the task outright (2026-09-21).
     $t3 = @($agents.'t3-reviewer'.permissions)
-    Assert-Equal $t3.Count 7
+    # More than the original seven: the harness fences and the MCP write
+    # tools are denies now (2026-09-24).
+    Assert-True ($t3.Count -gt 7) 't3-reviewer lost its fences'
     # subagent deny
     Assert-Equal $t3[0].action 'subagent'; Assert-Equal $t3[0].resource '*'; Assert-Equal $t3[0].effect 'deny'
     Assert-Equal $t3[1].action 'edit'; Assert-Equal $t3[1].resource '*'; Assert-Equal $t3[1].effect 'deny'
@@ -3916,14 +3940,32 @@ Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
     Assert-Equal $t3[3].action 'read'; Assert-Equal $t3[3].resource '*'; Assert-Equal $t3[3].effect 'allow'
     Assert-Equal $t3[4].action 'grep'; Assert-Equal $t3[4].resource '*'; Assert-Equal $t3[4].effect 'allow'
     Assert-Equal $t3[5].action 'glob'; Assert-Equal $t3[5].resource '*'; Assert-Equal $t3[5].effect 'allow'
-    Assert-Equal $t3[6].action 'bash'; Assert-Equal $t3[6].resource '*'; Assert-Equal $t3[6].effect 'allow'
+    # v2 names the action `shell`; a `bash` rule matches nothing (2026-09-24).
+    Assert-Equal $t3[6].action 'shell'; Assert-Equal $t3[6].resource '*'; Assert-Equal $t3[6].effect 'allow'
+    Assert-True (@($t3 | Where-Object { $_.action -eq 'bash' }).Count -eq 0) 'bash rule is dead in opencode v2'
+    # Every harness fence is a shell deny on the leaf, and MCP writers are off.
+    $fences = (Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding utf8 | ConvertFrom-Json).fences
+    foreach ($pat in @($fences.bash_deny_all) + @($fences.bash_deny_leaf)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'shell' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer shell fence missing: $pat"
+    }
+    foreach ($tool in @('serena_*', 'omnigraph_mutate', 'omnigraph_load', 'omnigraph_branches_merge', 'omnigraph_branches_delete', 'playwright_browser_run_code_unsafe')) {
+        $hit = @($t3 | Where-Object { $_.action -eq $tool })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer MCP writer open: $tool"
+    }
+    foreach ($rule in @($t3 | Where-Object { $_.action -like 'serena_*' -and $_.effect -eq 'allow' })) {
+        Assert-True ($rule.action -notmatch 'create|replace|insert|rename|delete|edit|write|execute') "t3-reviewer allows serena writer $($rule.action)"
+    }
     Assert-Equal $agents.'t3-reviewer'.mode 'subagent'
 }
 
 Test-Case 'subagent depth config' {
     $config = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw
     $json = $config -replace '(?m)^\s*//.*$','' | ConvertFrom-Json
-    Assert-Equal $json.subagent_depth 2
+    # opencode v2 drops a top-level subagent_depth ("unsupported legacy
+    # setting") and defaults to 1; it reads experimental.subagent_depth.
+    Assert-True ($null -eq $json.PSObject.Properties['subagent_depth']) 'top-level subagent_depth is ignored by opencode v2'
+    Assert-Equal $json.experimental.subagent_depth 2
 }
 
 Test-Case 'openhands template routes tiers with no secrets' {

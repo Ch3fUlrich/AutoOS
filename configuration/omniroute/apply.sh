@@ -17,7 +17,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 GATEWAY="http://127.0.0.1:20128"
-KEYS_FILE="$ROOT/configuration/api-keys.yml"
+KEYS_FILE="${AUTOOS_KEYS_FILE:-$ROOT/configuration/api-keys.yml}"
 COMBOS_FILE="$HERE/combos.json"
 DRY=0
 PROBE=0
@@ -28,6 +28,9 @@ for arg in "$@"; do
     esac
 done
 PROBE_COMBOS=()
+# Always say so up front: with a live gateway and a key file no later line
+# mentions the dry run, and the plan then reads like a real run.
+[[ $DRY -eq 1 ]] && echo "This is a dry run - nothing is registered, created or started."
 
 command -v python3 >/dev/null || {
     echo "apply.sh needs python3 (JSON parsing + probe HTTP calls)."
@@ -56,6 +59,10 @@ if [[ -f "$KEYS_FILE" ]]; then
         key="$(printf '%s' "${line%%:*}" | tr -d '[:space:]')"
         val="$(printf '%s' "${line#*:}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
         val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
+        # A copied template keeps REPLACE_WITH_* for keys you do not have;
+        # registering one would also block the real key later ("already
+        # registered"), so a placeholder counts as no key at all.
+        [[ "$val" == REPLACE_WITH_* ]] && continue
         [[ -n "$key" && -n "$val" ]] && KEYS["${key,,}"]="$val"
     done <"$KEYS_FILE"
 fi

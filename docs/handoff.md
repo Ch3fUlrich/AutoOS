@@ -88,6 +88,8 @@ suites on push.
 .\configuration\litellm\start-litellm.ps1    # proxy on :4000 WITH its .env
 python tools/sync-router-tiers.py --check
 python tools/audit-router.py                 # live drift gate (--offline for CI)
+python tools/autoos-agent.py list            # tiers, models, who spawns whom
+python tools/autoos-agent.py run --tier 2 --isolate "..."   # one tier agent on its own model (--dry-run plans only)
 powershell -NoProfile -File tests\run-tests.ps1
 bash tests/run-tests.sh
 ```
@@ -108,6 +110,16 @@ bash tests/run-tests.sh
 - **Free-model reviewer endpoints may lack tool support** (measured:
   `z-ai/glm-5.2:free`). Verify the exact model id serves tools before
   spawning review subagents on it.
+- **opencode v2 reads `experimental.subagent_depth`, not a top-level one**
+  (measured 2026-09-24): the top-level key is dropped as an "unsupported
+  legacy setting", the depth stays 1, and `t2-worker` answers "Subagent depth
+  limit reached (1)". Fixed in `opencode.jsonc`; both suites gate the key.
+- **v2 names the shell permission action `shell`** — a `bash` rule matches
+  nothing, so the reviewer's fence was inert (it could commit through the
+  shell and overwrite files through serena's `create_text_file`, which bypass
+  an `edit` deny). `t3-reviewer` now denies the harness fences and every MCP
+  write tool by name; `tools/autoos-agent.py` is the one-command way to spawn
+  a tier agent on its own model.
 - Serena memory tools are off by design; Omnigraph + graphify are the
   memory/graph layers. Zen free 500s at peak / Zen paid 402s without balance
   (chain hops). `/v1/models` 401s for client keys (use `--probe` / authed

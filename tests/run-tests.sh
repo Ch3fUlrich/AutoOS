@@ -5960,12 +5960,42 @@ if it "sidekick enabling announces in dry run and writes nothing"; then
     rm -rf "$scratch"
 fi
 
-if it "litellm installer uses pipx without installing anything"; then
+# The stubs sit on a PATH of only "$stub:/usr/bin:/bin" and SYS_HOME is a
+# temp dir, so a real uv/pipx/litellm on the machine running the suite can
+# neither satisfy nor short-circuit these cases.
+if it "litellm installer prefers uv tool install (PEP 668 safe)"; then
+    stub="$(mktemp -d)"
+    printf '#!/bin/sh\necho "$@" >"$0.called"\n' >"$stub/uv"; chmod +x "$stub/uv"
+    printf '#!/bin/sh\ntouch "$0.called"\n' >"$stub/pipx"; chmod +x "$stub/pipx"
+    ( PATH="$stub:/usr/bin:/bin" SYS_HOME="$stub" AUTOOS_DRY_RUN=0; install_litellm_proxy >/dev/null 2>&1 )
+    if [[ "$(cat "$stub/uv.called" 2>/dev/null)" == "tool install litellm[proxy]" && ! -f "$stub/pipx.called" ]]; then
+        rm -rf "$stub"; pass
+    else rm -rf "$stub"; fail "uv tool install was not the chosen path"; fi
+fi
+
+if it "litellm installer falls back to pipx without uv"; then
     stub="$(mktemp -d)"
     printf '#!/bin/sh\ntouch "$0.called"\n' >"$stub/pipx"; chmod +x "$stub/pipx"
-    ( PATH="$stub:$PATH" AUTOOS_DRY_RUN=0; install_litellm_proxy >/dev/null 2>&1 )
+    ( PATH="$stub:/usr/bin:/bin" SYS_HOME="$stub" AUTOOS_DRY_RUN=0; install_litellm_proxy >/dev/null 2>&1 )
     if [[ -f "$stub/pipx.called" ]]; then rm -rf "$stub"; pass
     else rm -rf "$stub"; fail "pipx stub was not invoked"; fi
+fi
+
+if it "litellm installer reports a failed install instead of success"; then
+    stub="$(mktemp -d)"
+    printf '#!/bin/sh\nexit 1\n' >"$stub/uv"; chmod +x "$stub/uv"
+    rc=0
+    ( PATH="$stub:/usr/bin:/bin" SYS_HOME="$stub" AUTOOS_DRY_RUN=0; install_litellm_proxy >/dev/null 2>&1 ) || rc=$?
+    rm -rf "$stub"
+    [[ $rc -ne 0 ]] && pass || fail "a failed install returned 0"
+fi
+
+if it "a present litellm is detected, so a second run skips"; then
+    stub="$(mktemp -d)"
+    printf '#!/bin/sh\nexit 0\n' >"$stub/litellm"; chmod +x "$stub/litellm"
+    ( PATH="$stub:/usr/bin:/bin" SYS_HOME="$stub"; custom_is_installed litellm ) && ok=1 || ok=0
+    rm -rf "$stub"
+    [[ $ok -eq 1 ]] && pass || fail "custom_is_installed litellm said missing"
 fi
 
 if it "env template carries placeholders only"; then
@@ -6164,6 +6194,85 @@ if it "apply --dry-run registers nothing and starts nothing"; then
     assert_eq "$after" "$before"
 fi
 
+# api-keys.example.yml says "fill in what you have", so a copied file keeps
+# REPLACE_WITH_* for the rest. Those must never be registered as keys: once
+# registered, "already registered" would also shadow the real key forever.
+if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
+    keys="$(mktemp)"
+    printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    out="$(AUTOOS_KEYS_FILE="$keys" bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -f "$keys"
+    assert_contains "$out" "groq: no key in api-keys.yml, skipped"
+    if grep -q "mistral: would register\|mistral already registered" <<<"$out"; then pass
+    else fail "the real mistral key was not planned"; fi
+fi
+
+# start-stack.sh sits in configuration/, one level below the repo root. A
+# `/../..` root pointed at the repo's parent, so the OpenHands tier-profile
+# sync was never found and every start printed "reported a problem".
+if it "start-stack.sh resolves the repo root for the profile sync"; then
+    expr="$(grep -m1 '_ss_root=' configuration/start-stack.sh | sed -e 's/^[^=]*=//' -e 's/\${BASH_SOURCE\[0\]}/configuration\/start-stack.sh/')"
+    got="$(eval "printf '%s' $expr")"
+    if [[ -f "$got/tools/sync-openhands-profiles.py" ]]; then pass
+    else fail "_ss_root resolved to '$got'"; fi
+fi
+
+# tools/autoos-agent.py - dry runs only: nothing is spawned or fetched.
+if it "autoos-agent pairs each tier with its own model, standalone"; then
+    report="$(python3 - 2>&1 <<'PY'
+import json, re, io, shlex, subprocess
+oc = json.loads(re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read()))
+problems = []
+for tier, agent in ((1, "t1-orchestrator"), (2, "t2-worker"), (3, "t3-reviewer")):
+    out = subprocess.run(["python3", "tools/autoos-agent.py", "run", "--tier", str(tier), "--dry-run", "t"],
+                         capture_output=True, text=True).stdout
+    want = "--standalone --agent %s --model %s " % (agent, shlex.quote(oc["agents"][agent]["model"]))
+    if want not in out:
+        problems.append(agent)
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
+if it "autoos-agent: --clean picks the twin, undeclared models and --free --clean are refused"; then
+    out="$(python3 tools/autoos-agent.py run --tier 3 --clean --dry-run t)"
+    assert_contains "$out" "--model omniroute/t3-driver-clean "
+    rc=0; python3 tools/autoos-agent.py run --tier 2 --model omniroute/not-a-combo --dry-run t >/dev/null 2>&1 || rc=$?
+    assert_eq "$rc" "2"
+    rc=0; python3 tools/autoos-agent.py run --tier 2 --free --clean --dry-run t >/dev/null 2>&1 || rc=$?
+    assert_eq "$rc" "2"
+fi
+
+if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
+    out="$(AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
+    assert_contains "$out" "git clone --local"
+    assert_contains "$out" "env: OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
+    if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then
+        fail "free/isolated plan mentions a worktree or the gateway key"
+    else pass; fi
+fi
+
+if it "autoos-agent outside-path fence denies first and re-allows only opencode scratch"; then
+    report="$(python3 - 2>&1 <<'PY'
+import importlib.util
+spec = importlib.util.spec_from_file_location("agent", "tools/autoos-agent.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+rules = m.outside_fence("/x/data")
+problems = []
+if rules[0] != {"action": "external_directory", "resource": "*", "effect": "deny"}:
+    problems.append("first-rule")
+for r in rules[1:]:
+    if r["effect"] != "allow" or "opencode" not in r["resource"] or r["resource"] == "*":
+        problems.append(r["resource"])
+if not any(r["resource"] == "/x/data/opencode/*" for r in rules):
+    problems.append("private-data-dir")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
 if it "tier depth is mandatory in opencode.jsonc agents"; then
     report="$(python3 - 2>&1 <<'PY'
 import json, re, io
@@ -6177,10 +6286,66 @@ if t1[0] != ("subagent", "*", "deny") or t1[-1] != ("subagent", "t2-worker", "al
     problems.append("t1")
 if t2[0] != ("subagent", "*", "deny") or t2[-1] != ("subagent", "t3-reviewer", "allow"):
     problems.append("t2")
-if t3 != [("subagent", "*", "deny"), ("edit", "*", "deny"), ("write", "*", "deny"), ("read", "*", "allow"), ("grep", "*", "allow"), ("glob", "*", "allow"), ("bash", "*", "allow")]:
+# The leaf's fences run past these seven, but the first seven are the shape
+# both sides agreed on; v2 names the shell action `shell` (a `bash` rule
+# matches nothing) and the full fence set is asserted below.
+if t3[:7] != [("subagent", "*", "deny"), ("edit", "*", "deny"), ("write", "*", "deny"), ("read", "*", "allow"), ("grep", "*", "allow"), ("glob", "*", "allow"), ("shell", "*", "allow")]:
     problems.append("t3-leaf")
 if a["t3-reviewer"]["mode"] != "subagent":
     problems.append("t3-mode")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
+# opencode v2 drops a top-level subagent_depth as an "unsupported legacy
+# setting" and defaults to 1, so t2-worker answered "Subagent depth limit reached
+# (1)" when t1-orchestrator had launched it (live, 2026-09-24).
+if it "subagent depth lives under experimental, where opencode v2 reads it"; then
+    report="$(python3 - 2>&1 <<'PY'
+import json, re, io
+oc = json.loads(re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read()))
+problems = []
+if "subagent_depth" in oc:
+    problems.append("top-level-key-is-ignored")
+if (oc.get("experimental") or {}).get("subagent_depth") != 2:
+    problems.append("experimental.subagent_depth!=2")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
+fi
+
+# The reviewer is a leaf: v2 names the shell action `shell` (a `bash` rule
+# matches nothing), MCP write tools bypass the edit/write deny, and a leaf
+# never commits or pushes. Live 2026-09-24 the old stanza let t3-reviewer commit
+# through the shell and overwrite a file through serena's create_text_file.
+if it "t3-reviewer fences the shell, serena and omnigraph writes"; then
+    report="$(python3 - 2>&1 <<'PY'
+import json, re, io
+oc = json.loads(re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read()))
+fences = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))["fences"]
+t3 = [(p["action"], p["resource"], p["effect"]) for p in oc["agents"]["t3-reviewer"]["permissions"]]
+problems = []
+if any(act == "bash" for act, _, _ in t3):
+    problems.append("bash-rule-matches-nothing-in-v2")
+def last(action, resource):
+    hits = [e for a, r, e in t3 if a == action and r == resource]
+    return hits[-1] if hits else None
+for pat in fences["bash_deny_all"] + fences["bash_deny_leaf"]:
+    if last("shell", pat) != "deny":
+        problems.append("shell:" + pat)
+if last("serena_*", "*") != "deny":
+    problems.append("serena-writes-open")
+for tool in ("omnigraph_mutate", "omnigraph_load", "omnigraph_branches_merge", "omnigraph_branches_delete", "playwright_browser_run_code_unsafe"):
+    if last(tool, "*") != "deny":
+        problems.append(tool)
+allowed = [a for a, r, e in t3 if a.startswith("serena_") and e == "allow"]
+writers = ("create", "replace", "insert", "rename", "delete", "edit", "write", "execute")
+problems += ["serena-writer-allowed:" + a for a in allowed if any(w in a for w in writers)]
+if not allowed:
+    problems.append("serena-read-tools-missing")
 print(" ".join(problems))
 PY
 )"

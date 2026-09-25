@@ -94,6 +94,9 @@ custom_is_installed() {
         oterm)
             has_cmd oterm
             ;;
+        litellm)
+            has_cmd litellm || [[ -x "$SYS_HOME/.local/bin/litellm" ]]
+            ;;
         *) return 1 ;;
     esac
 }
@@ -1097,15 +1100,28 @@ install_openhands() {
 
 install_litellm_proxy() {
     if has_cmd litellm; then ui_muted "litellm already installed"; return 0; fi
-    if (( AUTOOS_DRY_RUN )); then ui_muted "would install litellm[proxy] via pipx or pip"; return 0; fi
-    if has_cmd pipx; then
-        pipx install 'litellm[proxy]' || ui_warn "pipx install failed - see docs/models.md for the manual step"
-    elif has_cmd python3; then
-        python3 -m pip install --user 'litellm[proxy]' || ui_warn "pip install failed - see docs/models.md for the manual step"
-    else
-        ui_warn "no python3 on PATH - install Python, then: pip install 'litellm[proxy]'"
+    if (( AUTOOS_DRY_RUN )); then ui_muted "would install litellm[proxy] via uv tool (or pipx)"; return 0; fi
+    # uv first: Ubuntu 24.04 / Debian 12 mark the system python as externally
+    # managed (PEP 668), so `pip install --user` fails there by design. uv may
+    # have been installed earlier in this same run, before PATH picked it up.
+    local uv_bin=""
+    if has_cmd uv; then uv_bin="uv"
+    elif [[ -x "$SYS_HOME/.local/bin/uv" ]]; then uv_bin="$SYS_HOME/.local/bin/uv"
     fi
-    ui_info "next: copy configuration/litellm/.env.example to .env, add keys (docs/api-keys.md)"
+    local rc=1
+    if [[ -n "$uv_bin" ]]; then
+        "$uv_bin" tool install 'litellm[proxy]' && rc=0
+    elif has_cmd pipx; then
+        pipx install 'litellm[proxy]' && rc=0
+    else
+        ui_warn "neither uv nor pipx found - run: ./setup.sh --only uv,litellm --yes"
+        return 1
+    fi
+    if (( rc != 0 )); then
+        ui_warn "litellm install failed - manual step: uv tool install 'litellm[proxy]' (docs/models.md)"
+        return 1
+    fi
+    ui_info "next: python3 tools/mirror-litellm-env.py (writes configuration/litellm/.env from api-keys.yml)"
     return 0
 }
 

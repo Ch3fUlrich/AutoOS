@@ -72,7 +72,10 @@
   // NOTE: this binds inside the opencode runtime (CLI/TUI/serve). Harness or
   // API callers that bypass agents must follow the same depth by convention
   // (see .agents/skills/unattended-orchestration/unattended-orchestration.md "Tier enforcement").
-  "subagent_depth": 2,
+  // Depth lives under `experimental`: opencode v2 drops a top-level
+  // subagent_depth as an "unsupported legacy setting" and defaults to 1,
+  // which made t2-worker answer "Subagent depth limit reached (1)" (2026-09-24).
+  "experimental": { "subagent_depth": 2 },
   "agents": {
     "t1-orchestrator": {
       "description": "Long-horizon orchestrator: plans, slices, verifies, never codes directly. May launch t2-worker only.",
@@ -103,7 +106,72 @@
         { "action": "read", "resource": "*", "effect": "allow" },
         { "action": "grep", "resource": "*", "effect": "allow" },
         { "action": "glob", "resource": "*", "effect": "allow" },
-        { "action": "bash", "resource": "*", "effect": "allow" }
+        // v2 calls the shell action `shell`; a `bash` rule matches nothing.
+        // The denies below are catalog/agent-harness.json fences
+        // (bash_deny_all + bash_deny_leaf), asserted by both suites.
+        { "action": "shell", "resource": "*", "effect": "allow" },
+        { "action": "shell", "resource": "git merge*", "effect": "deny" },
+        { "action": "shell", "resource": "git rebase*", "effect": "deny" },
+        { "action": "shell", "resource": "git reset --hard*", "effect": "deny" },
+        { "action": "shell", "resource": "git branch -D*", "effect": "deny" },
+        { "action": "shell", "resource": "git clean*", "effect": "deny" },
+        { "action": "shell", "resource": "git worktree remove*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *merge*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *rebase*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *reset --hard*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *branch -D*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *clean*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *worktree remove*", "effect": "deny" },
+        { "action": "shell", "resource": "gh *", "effect": "deny" },
+        { "action": "shell", "resource": "rm -rf /*", "effect": "deny" },
+        { "action": "shell", "resource": "rm -rf ~*", "effect": "deny" },
+        { "action": "shell", "resource": "sudo *", "effect": "deny" },
+        { "action": "shell", "resource": "docker compose *", "effect": "deny" },
+        { "action": "shell", "resource": "docker rm*", "effect": "deny" },
+        { "action": "shell", "resource": "*auth.json*", "effect": "deny" },
+        { "action": "shell", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "shell", "resource": "*.env*", "effect": "deny" },
+        { "action": "shell", "resource": "env", "effect": "deny" },
+        { "action": "shell", "resource": "env *", "effect": "deny" },
+        { "action": "shell", "resource": "printenv*", "effect": "deny" },
+        { "action": "shell", "resource": "*.claude.json*", "effect": "deny" },
+        { "action": "shell", "resource": "*.config/opencode*", "effect": "deny" },
+        { "action": "shell", "resource": "*.local/share/opencode*", "effect": "deny" },
+        { "action": "shell", "resource": "set", "effect": "deny" },
+        { "action": "shell", "resource": "cat /proc/*", "effect": "deny" },
+        { "action": "shell", "resource": "git push*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *push*", "effect": "deny" },
+        { "action": "shell", "resource": "git commit*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *commit*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *tag*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *update-ref*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *stash*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *checkout*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *switch*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *restore*", "effect": "deny" },
+        { "action": "shell", "resource": "*.env.example*", "effect": "allow" },
+        // MCP write tools bypass the edit/write deny: serena is deny-by-default
+        // with a read-only allow list; memory-graph and browser-code writes off.
+        { "action": "serena_*", "resource": "*", "effect": "deny" },
+        { "action": "serena_activate_project", "resource": "*", "effect": "allow" },
+        { "action": "serena_initial_instructions", "resource": "*", "effect": "allow" },
+        { "action": "serena_check_onboarding_performed", "resource": "*", "effect": "allow" },
+        { "action": "serena_get_symbols_overview", "resource": "*", "effect": "allow" },
+        { "action": "serena_find_symbol", "resource": "*", "effect": "allow" },
+        { "action": "serena_find_declaration", "resource": "*", "effect": "allow" },
+        { "action": "serena_find_implementations", "resource": "*", "effect": "allow" },
+        { "action": "serena_find_referencing_symbols", "resource": "*", "effect": "allow" },
+        { "action": "serena_get_diagnostics_for_file", "resource": "*", "effect": "allow" },
+        { "action": "serena_search_for_pattern", "resource": "*", "effect": "allow" },
+        { "action": "serena_list_dir", "resource": "*", "effect": "allow" },
+        { "action": "serena_find_file", "resource": "*", "effect": "allow" },
+        { "action": "serena_read_file", "resource": "*", "effect": "allow" },
+        { "action": "omnigraph_mutate", "resource": "*", "effect": "deny" },
+        { "action": "omnigraph_load", "resource": "*", "effect": "deny" },
+        { "action": "omnigraph_branches_create", "resource": "*", "effect": "deny" },
+        { "action": "omnigraph_branches_merge", "resource": "*", "effect": "deny" },
+        { "action": "omnigraph_branches_delete", "resource": "*", "effect": "deny" },
+        { "action": "playwright_browser_run_code_unsafe", "resource": "*", "effect": "deny" }
       ]
     }
   },
