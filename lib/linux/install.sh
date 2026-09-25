@@ -1119,7 +1119,7 @@ install_openhands() {
 
 install_ai_stack() {
     # The server profile's AI services as hardened containers (compose.yml
-    # next to ai-stack.sh; docs/ai-stack-docker.md). init only adds missing
+    # next to ai-stack.sh; docs/web-services.md, Server profile). init only adds missing
     # env keys; `up` starts nothing on a port a native service holds - that
     # host moves with the opt-in `ai-stack.sh migrate --yes` instead.
     local stack line rc=0

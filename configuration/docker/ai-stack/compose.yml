@@ -1,7 +1,7 @@
 # AutoOS AI stack in Docker: OmniRoute gateway + opencode serve + OpenHands.
 #
 # The `server` profile's way to run the three LAN-facing AI services. Design,
-# RAM budget and the reason for every flag: docs/ai-stack-docker.md.
+# RAM budget and the reason for every flag: docs/web-services.md (Server profile section).
 # Do not run this file by hand - configuration/docker/ai-stack/ai-stack.sh
 # passes the env files it needs (--env-file ~/.config/autoos/ai-stack/stack.env)
 # and keeps every secret out of this public template:

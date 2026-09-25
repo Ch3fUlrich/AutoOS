@@ -769,7 +769,7 @@
             "server"
           ],
           "verify": "test -f ~/.config/autoos/ai-stack/stack.env",
-          "homepage": "https://github.com/Ch3fUlrich/AutoOS/blob/main/docs/ai-stack-docker.md",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/blob/main/docs/web-services.md#server-profile-the-ai-stack-in-docker",
           "notes": "Replaces the native gateway + opencode units. A running host moves with configuration/docker/ai-stack/ai-stack.sh migrate."
         },
         {

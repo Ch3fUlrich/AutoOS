@@ -18,7 +18,7 @@
 #   ~/.config/autoos/ai-stack/manage.key     manage-scoped gateway key, host only
 #   ~/.local/share/autoos/ai-stack/          omniroute/ data, opencode-home/
 # init only ADDS missing keys (backup first); a value you edit stays yours.
-# Design, RAM budget, rollback: docs/ai-stack-docker.md.
+# Design, RAM budget, rollback: docs/web-services.md (Server profile section).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -128,7 +128,7 @@ ensure_env_file() {
     (
         umask 077
         [[ -s "$file" && -n "$(tail -c1 "$file")" ]] && printf '\n' >>"$file"
-        [[ -z "$backup" ]] && printf '# AutoOS docker AI stack - see docs/ai-stack-docker.md. Edit freely;\n# ai-stack.sh init only appends keys that are missing.\n' >>"$file"
+        [[ -z "$backup" ]] && printf '# AutoOS docker AI stack - see docs/web-services.md (Server profile section). Edit freely;\n# ai-stack.sh init only appends keys that are missing.\n' >>"$file"
         printf '%s\n' "${lines[@]}" >>"$file"
     )
     chmod 600 "$file"
