@@ -91,7 +91,13 @@ elif proxy_ok || [[ -n "$(listener_pid)" ]]; then
     elif [[ -n "$PID" ]]; then
         # Never stop a program we did not start: only a litellm listener may
         # be restarted (AGENTS.md rule 3; found in review 2026-09-25).
-        tr '\0' ' ' <"$PROC_ROOT/$PID/cmdline" 2>/dev/null | grep -q litellm || FOREIGN=1
+        # The program NAME must be litellm - argv[0], or the script in argv[1]
+        # when a venv python runs it - not "litellm" anywhere in the arguments.
+        is_litellm=0
+        while IFS= read -r arg; do
+            [[ "${arg##*/}" == litellm ]] && is_litellm=1
+        done < <(tr '\0' '\n' <"$PROC_ROOT/$PID/cmdline" 2>/dev/null | head -n 2)
+        (( is_litellm )) || FOREIGN=1
         [[ -r "$PROC_ROOT/$PID/environ" ]] && ENVIRON_FILE="$PROC_ROOT/$PID/environ"
     fi
 fi

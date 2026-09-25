@@ -896,6 +896,11 @@ Test-Case 'omnigraph env file and its backup keep only the user''s access (icacl
     Assert-True ($null -ne $helper) 'Protect-AutoOSUserFile missing'
     $body = $helper.ScriptBlock.ToString()
     Assert-True ($body -match '/inheritance:r') 'inheritance not removed'
+    # Re-review 2026-09-25: a domain or AzureAD account needs DOMAIN\user, and
+    # the owner keeps full control so later writes and backups still work.
+    Assert-True ($body -match 'USERDOMAIN') 'principal is not domain-qualified'
+    Assert-True ($body -match ':\(F\)') 'owner must keep full control'
+    Assert-True ($src -match "Protect-AutoOSUserFile[^\n]*\) -eq 'failed'") 'a failed icacls is not reported'
     Assert-True ($body -match "ErrorActionPreference = 'Continue'") 'icacls stderr would be terminating under Stop (5.1)'
 }
 

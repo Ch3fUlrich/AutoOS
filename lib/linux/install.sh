@@ -1993,14 +1993,24 @@ PY
     # there, at shell start-up, not here. It READS the three keys literally
     # (export "$k=$v" never evaluates $v); the v1 line sourced the file, so a
     # value holding $(...) ran in every new shell (review finding 2026-09-25).
-    # Works in bash and zsh.
+    # Works in bash and zsh; drops a trailing CR and reads a last line that has
+    # no newline.
     # shellcheck disable=SC2016
-    local rc_line='[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && while IFS="=" read -r _ag_k _ag_v; do case "$_ag_k" in OMNIGRAPH_TOKEN|OMNIGRAPH_BASE_URL|OMNIGRAPH_GRAPH_ID) export "$_ag_k=$_ag_v" ;; esac; done < "$HOME/.autoos-omnigraph.env"; unset _ag_k _ag_v  # AutoOS:omnigraph-env-v2'
+    local rc_line
+    rc_line="$(omnigraph_rc_line)"
     local shell_rc
     for shell_rc in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
         [[ -f "$shell_rc" ]] || continue
         replace_or_append_marked_line "$shell_rc" "AutoOS:omnigraph-env" "AutoOS:omnigraph-env-v2" "$rc_line"
     done
+}
+
+omnigraph_rc_line() {
+    # The rc-file line write_omnigraph_env installs (one place, so the suite
+    # tests the exact text). Literal $HOME/${...}: it expands in the rc file at
+    # shell start-up, not here.
+    # shellcheck disable=SC2016
+    printf '%s\n' '[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && while IFS= read -r _ag_l || [ -n "$_ag_l" ]; do _ag_l=${_ag_l%$'"'"'\r'"'"'}; case "$_ag_l" in OMNIGRAPH_TOKEN=*|OMNIGRAPH_BASE_URL=*|OMNIGRAPH_GRAPH_ID=*) export "${_ag_l%%=*}=${_ag_l#*=}" ;; esac; done < "$HOME/.autoos-omnigraph.env"; unset _ag_l  # AutoOS:omnigraph-env-v2'
 }
 
 replace_or_append_marked_line() {
@@ -2009,6 +2019,26 @@ replace_or_append_marked_line() {
     # new one) -> replaced in place, after a backup. Otherwise appended once.
     local file="$1" old_marker="$2" new_marker="$3" line="$4"
     if grep -qF -- "$new_marker" "$file" 2>/dev/null; then
+        # A stale old line next to the current one still runs first: purge it.
+        if grep -F -- "$old_marker" "$file" | grep -qvF -- "$new_marker"; then
+            if (( AUTOOS_DRY_RUN )); then
+                ui_muted "would remove the stale '${old_marker}' line from ${file}"
+                return 0
+            fi
+            cp "$file" "${file}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+            AUTOOS_OLD="$old_marker" AUTOOS_NEW="$new_marker" python3 - "$file" <<'PY'
+import os, sys
+path = sys.argv[1]
+old, new = os.environ["AUTOOS_OLD"], os.environ["AUTOOS_NEW"]
+with open(path, encoding="utf-8") as f:
+    lines = f.read().split("\n")
+lines = [l for l in lines if not (old in l and new not in l)]
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines))
+PY
+            ui_ok "removed the stale '${old_marker}' line from ${file}"
+            return 0
+        fi
         ui_muted "already configured (${new_marker}) in ${file}"
         return 0
     fi

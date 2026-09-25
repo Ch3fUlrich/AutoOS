@@ -205,10 +205,15 @@ def _load_marks(path: Path | None) -> dict:
 def _save_marks(path: Path | None, marks: dict) -> None:
     if path is None:
         return
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(marks, fh, indent=2, sort_keys=True)
-    os.chmod(str(path), 0o600)
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(marks, fh, indent=2, sort_keys=True)
+        os.chmod(str(path), 0o600)
+    except OSError as exc:
+        # The push already happened; a lost record only means one extra
+        # re-push next time, never a skipped rotation.
+        print(f"sync-openhands-profiles: could not record pushed keys ({exc})")
 
 
 def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None) -> int:

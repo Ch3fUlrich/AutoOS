@@ -2822,6 +2822,27 @@ if it "the omnigraph rc line loads values literally and replaces the old sourcin
     if (( ok )); then pass; else fail "the omnigraph rc line is not a literal reader"; fi
 fi
 
+# Re-review 2026-09-25: CRLF values, a last line without a newline, and a file
+# that carries BOTH the v1 sourcing line and the v2 reader (v1 must go).
+if it "the omnigraph rc reader copes with CRLF and a missing last newline, and purges v1 next to v2"; then
+    tmp="$(mktemp -d)"
+    printf 'OMNIGRAPH_BASE_URL=http://crlf\r\nOMNIGRAPH_TOKEN=last-line-no-newline' >"$tmp/.autoos-omnigraph.env"
+    v1='[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env'
+    printf '%s\n' "$v1" >"$tmp/.bashrc"
+    # First write_omnigraph_env run adds v2 by replacing v1; then plant v1 again
+    # next to v2 (a stale copy) and run once more: v1 must be purged.
+    ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 OMNIGRAPH_TOKEN=""; docker() { return 1; }
+      replace_or_append_marked_line "$tmp/.bashrc" "AutoOS:omnigraph-env" "AutoOS:omnigraph-env-v2" "$(omnigraph_rc_line)" ) >/dev/null 2>&1
+    printf '%s\n' "$v1" >>"$tmp/.bashrc"
+    ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0
+      replace_or_append_marked_line "$tmp/.bashrc" "AutoOS:omnigraph-env" "AutoOS:omnigraph-env-v2" "unused" ) >/dev/null 2>&1
+    got="$(env -i HOME="$tmp" bash -c ". \"$tmp/.bashrc\"; printf '%s|%s' \"\$OMNIGRAPH_BASE_URL\" \"\$OMNIGRAPH_TOKEN\"" 2>&1)"
+    v1n="$(grep -c 'set -a; \.' "$tmp/.bashrc" || true)"
+    v2n="$(grep -c 'AutoOS:omnigraph-env-v2' "$tmp/.bashrc" || true)"
+    rm -rf "$tmp"
+    assert_eq "$got|$v1n|$v2n" "http://crlf|last-line-no-newline|0|1"
+fi
+
 if it "the omnigraph token falls back to the local server container, else is reported missing"; then
     tmp="$(mktemp -d)"
     ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0
@@ -6263,6 +6284,24 @@ if it "svc: start-litellm.sh never kills a program on its port that is not litel
     python3 -c 'import http.server,socketserver,sys
 s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
 open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" >/dev/null 2>&1 &
+    srv=$!
+    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
+    out="$(AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
+    alive=0; kill -0 "$srv" 2>/dev/null && alive=1
+    kill "$srv" 2>/dev/null
+    rm -rf "$d"
+    if [[ $rc -ne 0 && $alive -eq 1 && "$out" == *"not litellm"* ]]; then pass
+    else fail "rc=$rc alive=$alive: $out"; fi
+fi
+
+# Re-review 2026-09-25: "litellm" anywhere in the command line is not proof;
+# only the program name (argv[0] or the script in argv[1]) counts.
+if it "svc: start-litellm.sh leaves a program alone that merely mentions litellm in its arguments"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/my-litellm-docs"
+    python3 -c 'import http.server,socketserver,sys
+s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
+open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" "$d/my-litellm-docs" >/dev/null 2>&1 &
     srv=$!
     for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
     out="$(AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?

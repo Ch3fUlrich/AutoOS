@@ -952,20 +952,23 @@ function Protect-AutoOSUserFile {
       .DESCRIPTION
         A file under %USERPROFILE% inherits the profile's ACLs, which on a
         shared or backed-up machine can be broad (review finding 2026-09-25).
-        icacls drops inheritance and grants the user read/write. A no-op off
-        Windows. Returns $true when icacls succeeded.
+        icacls drops inheritance and gives the owner full control (later writes
+        and backups keep working). The principal is DOMAIN\user, so domain and
+        AzureAD accounts resolve. Returns 'ok', 'failed' or 'skipped' (off
+        Windows, or no such file).
     #>
     param([Parameter(Mandatory)][string]$Path)
     $onWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or
         ((Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) -and $IsWindows)
-    if (-not $onWindows -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    if (-not $onWindows -or -not (Test-Path -LiteralPath $Path)) { return 'skipped' }
+    $who = if ($env:USERDOMAIN) { "$($env:USERDOMAIN)\$($env:USERNAME)" } else { $env:USERNAME }
     # Windows PowerShell 5.1 turns native stderr into a terminating error
     # under Stop (AGENTS.md section 6).
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $null = & icacls.exe $Path /inheritance:r /grant:r "$($env:USERNAME):(R,W)" 2>&1
-        return ($LASTEXITCODE -eq 0)
+        $null = & icacls.exe $Path /inheritance:r /grant:r "$($who):(F)" 2>&1
+        if ($LASTEXITCODE -eq 0) { return 'ok' } else { return 'failed' }
     } finally {
         $ErrorActionPreference = $prev
     }
@@ -1033,17 +1036,23 @@ function Set-AutoOSOmnigraphEnv {
     $fileToken = ($out | Where-Object { $_ -like 'OMNIGRAPH_TOKEN=?*' } | Select-Object -First 1)
 
     if ($new -ceq $old) {
-        $null = Protect-AutoOSUserFile -Path $EnvFile
+        if ((Protect-AutoOSUserFile -Path $EnvFile) -eq 'failed') {
+            Write-AutoOSLine "could not restrict $EnvFile to your account (icacls) - check its permissions" -Level warn
+        }
         Write-AutoOSLine "omnigraph env file unchanged ($EnvFile)" -Level muted
     } else {
         if ($old) {
             $backup = "$EnvFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
             Copy-Item $EnvFile $backup -Force
-            $null = Protect-AutoOSUserFile -Path $backup
+            if ((Protect-AutoOSUserFile -Path $backup) -eq 'failed') {
+                Write-AutoOSLine "could not restrict $backup to your account (icacls)" -Level warn
+            }
         }
         # No BOM: the file is also read as KEY=VALUE by non-PowerShell tools.
         [IO.File]::WriteAllText($EnvFile, $new, (New-Object Text.UTF8Encoding($false)))
-        $null = Protect-AutoOSUserFile -Path $EnvFile
+        if ((Protect-AutoOSUserFile -Path $EnvFile) -eq 'failed') {
+            Write-AutoOSLine "could not restrict $EnvFile to your account (icacls) - check its permissions" -Level warn
+        }
         Write-AutoOSLine "omnigraph env written to $EnvFile" -Level ok
     }
     if (-not $fileToken) {
