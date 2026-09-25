@@ -37,9 +37,9 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

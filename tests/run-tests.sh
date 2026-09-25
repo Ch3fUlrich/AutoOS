@@ -7048,6 +7048,10 @@ if it "audit-router reads the LiteLLM master key from .env (unit tests)"; then
     out="$(python3 tests/test_audit_router_litellm_key.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "audit-router live probes retry a 503 with backoff and never a drift status (unit tests)"; then
+    out="$(python3 tests/test_audit_router_probe_retry.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "autoos-agent outside-path fence denies first and re-allows only opencode scratch"; then
     report="$(python3 - 2>&1 <<'PY'
 import importlib.util

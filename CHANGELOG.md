@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the router audit no longer reads a load-shed 503 as a dead leg
+
+- **`tools/audit-router.py` reported OmniRoute's HTTP 503 "resource pressure" (host short of
+  memory) as a probe result on the first answer.** A live probe now retries a 503 with a
+  backoff of 5 s, 15 s and 45 s before reporting it; 400, 404 and transport errors are
+  drift and are never retried. `docs/routing.md` says so. A leg that still answers 503
+  after the last retry is reported as state, as before, and does not fail the audit.
+
 ### Fixed — Windows config writers back up only when the content changes
 
 - **Eight Windows writers took a backup on every run, so a second run was not `skipped`**
