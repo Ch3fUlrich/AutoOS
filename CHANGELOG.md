@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — Windows config writers back up only when the content changes
+
+- **Eight Windows writers took a backup on every run, so a second run was not `skipped`**
+  and the backup folder grew by one file per run (AGENTS.md §4, the twice-safe rule).
+  `Enable-AutoOSProjectMcpServer`, `Set-AutoOSAntigravityMcp`,
+  `Register-AutoOSAntigravityMcpServer`, `Set-AutoOSOpenCodeConfig`,
+  `Set-AutoOSOpenHandsConfig`, `Install-AutoOSOmniRouteRouting` (the Qwen settings),
+  `Set-AutoOSZedProxy` and `Enable-AutoOSSidekickExtra` now compare first and back up once,
+  before the first change only, as the Linux writers do.
+  `Set-AutoOSSerenaExclusions` and `Set-AutoOSClaudeGateway` were measured and already
+  complied. One `backup-once:` test per writer runs it twice and asserts that the surviving
+  backup is the user's original, not just that there is one (the backup name has one-second
+  resolution, so a bare count cannot tell a skipped second run from an overwritten backup).
+- The OpenHands settings script now writes `settings.json` only on a real difference.
+
 ### Fixed — OpenHands reaches omnigraph from inside its container
 
 - **The OpenHands profile pointed its omnigraph bridge at `http://localhost:8080`**, which
