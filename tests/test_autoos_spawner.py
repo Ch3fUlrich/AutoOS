@@ -389,6 +389,93 @@ class PromoProbeTests(unittest.TestCase):
             self.assertTrue(clients.probe_stale("qoder", now=1000.0 + 8 * 86400, env=env))
 
 
+class SignInProbeTests(unittest.TestCase):
+    """Operator 2026-09-25: agy that cannot run here must be an error, not a
+    silent or misleading result. A signed-out agy used to pass `list` as
+    installed and then block a headless run for 60 s on an OAuth prompt."""
+
+    SIGNED_OUT = ("#!/bin/sh\n"
+                  "echo \"$*\" >>\"$(dirname \"$0\")/calls\"\n"
+                  "echo 'Fetching available models...'\n"
+                  "echo 'Error: Please sign in to view available models. "
+                  "Launch the CLI without arguments to sign in.'\n"
+                  "exit 1\n")
+    SIGNED_IN = ("#!/bin/sh\n"
+                 "echo \"$*\" >>\"$(dirname \"$0\")/calls\"\n"
+                 "echo 'gemini-3.8-flash'\n"
+                 "exit 0\n")
+
+    def stub(self, body):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "agy")
+        with open(path, "w") as fh:
+            fh.write(body)
+        os.chmod(path, 0o755)
+        return d, clean_env(PATH=d + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+                            AUTOOS_STATE_DIR=d)
+
+    def calls(self, d):
+        try:
+            with open(os.path.join(d, "calls")) as fh:
+                return fh.read().splitlines()
+        except OSError:
+            return []
+
+    def test_signed_out_agy_is_reported_with_its_own_reason(self):
+        d, env = self.stub(self.SIGNED_OUT)
+        ok, reason = clients.signin_state(clients.CLIENTS["agy"], env)
+        self.assertIs(ok, False)
+        self.assertIn("Please sign in", reason)
+
+    def test_signed_in_agy_is_usable(self):
+        d, env = self.stub(self.SIGNED_IN)
+        self.assertEqual(clients.signin_state(clients.CLIENTS["agy"], env), (True, ""))
+
+    def test_missing_agy_is_not_probed(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.assertEqual(clients.signin_state(clients.CLIENTS["agy"], {"PATH": d}), (None, ""))
+
+    def test_a_client_without_a_probe_is_unknown(self):
+        self.assertEqual(clients.signin_state(clients.CLIENTS["opencode"], os.environ), (None, ""))
+
+    def test_list_shows_a_signed_out_agy_as_not_usable(self):
+        d, env = self.stub(self.SIGNED_OUT)
+        out = run_agent("list", env=env).stdout
+        line = next(l for l in out.splitlines() if l.startswith("agy "))
+        self.assertIn("signed-out", line)
+        self.assertIn("run `agy` once", line)
+
+    def test_run_refuses_a_signed_out_agy_fast_and_never_starts_the_task(self):
+        d, env = self.stub(self.SIGNED_OUT)
+        start = time.time()
+        r = run_agent("run", "--client", "agy", "Reply with exactly: ack", env=env)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("agy is installed but not signed in", r.stderr)
+        self.assertIn("Please sign in", r.stderr)
+        self.assertLess(time.time() - start, 20)
+        self.assertEqual(self.calls(d), ["models"])
+
+    def test_run_goes_ahead_when_agy_is_signed_in(self):
+        d, env = self.stub(self.SIGNED_IN)
+        r = run_agent("run", "--client", "agy", "t", env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.calls(d), ["models", "-p t"])
+
+    def test_mcp_list_clients_carries_usability(self):
+        d, env = self.stub(self.SIGNED_OUT)
+        old = os.environ.get("PATH")
+        os.environ["PATH"] = env["PATH"]
+        try:
+            agy = next(c for c in mcp_server.list_clients()["clients"] if c["name"] == "agy")
+        finally:
+            os.environ["PATH"] = old
+        self.assertTrue(agy["installed"])
+        self.assertIs(agy["usable"], False)
+        self.assertIn("Please sign in", agy["reason"])
+
+
 class McpToolTests(unittest.TestCase):
     """The MCP tools as plain functions, every spawn a dry run, state in a temp dir."""
 

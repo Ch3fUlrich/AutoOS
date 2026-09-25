@@ -1619,9 +1619,9 @@
       "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in apt, so AutoOS needs to be told where it lives."
     },
     "antigravity_url": {
-      "question": "Antigravity .deb download URL (blank to skip)",
+      "question": "Antigravity .deb download URL (required to install the app)",
       "default": "",
-      "help": "Antigravity has no apt repository, so AutoOS needs the URL of the .deb from the official download page."
+      "help": "Copy the .deb link from https://antigravity.google/download/linux. Left blank, the Antigravity app is reported as failed, not installed."
     },
     "git_user_name": {
       "question": "Git commit author name (e.g. Jane Doe)",

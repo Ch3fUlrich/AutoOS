@@ -23,11 +23,15 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 
 DEFAULT_MAX_DEPTH = 2  # = opencode.jsonc experimental.subagent_depth
 PROBE_STALE_DAYS = 7   # ADR 0006 Q1
+SIGNIN_TIMEOUT = 15    # seconds; `agy models` answers in < 1 s either way
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,7 @@ class Client:
     notes: str = ""
     promo: bool = False
     modes: dict = field(default_factory=dict)
+    signin_probe: tuple = ()  # args that fail fast when the own-account login is missing
 
 
 CLIENTS = {c.name: c for c in (
@@ -57,7 +62,8 @@ CLIENTS = {c.name: c for c in (
            "codex exec",
            modes={"read": ["--sandbox", "read-only"], "edit": ["--sandbox", "workspace-write"]}),
     Client("agy", "agy", True, False, False, "agy login (own Google account)",
-           "own auth, not the gateway; headless only after one interactive login"),
+           "own auth, not the gateway; headless only after one interactive login",
+           signin_probe=("models",)),
     Client("qoder", "qodercli", True, False, True, "qodercli login (own account)",
            "own auth, not the gateway; promo - privacy=public only", promo=True,
            modes={"read": ["--permission-mode", "dont_ask"], "edit": ["--permission-mode", "accept_edits"]}),
@@ -83,6 +89,41 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
         inner = mode + ["-p", task]
     return ["omniroute", "run", client.name, "--model", model or combo,
             "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--"] + inner
+
+
+def signin_state(client: Client, env: dict | None = None) -> tuple:
+    """(True, "") signed in, (False, reason) not usable, (None, "") not installed or no probe.
+
+    agy keeps its token in the OS keyring, so no file tells whether it is signed
+    in; only the CLI can. Measured 2026-09-25: signed out, `agy models` exits 1
+    in 0.6 s with "Please sign in ...", while a headless `agy -p` prints an
+    OAuth URL, waits 60 s for a code and only then fails.
+    """
+    env = os.environ if env is None else env
+    if not client.signin_probe:
+        return None, ""
+    exe = shutil.which(client.binary, path=env.get("PATH"))
+    if not exe:
+        return None, ""
+    argv = [exe, *client.signin_probe]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, env=dict(env),
+                           stdin=subprocess.DEVNULL, timeout=SIGNIN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, "`%s %s` did not answer within %d s" % (
+            client.binary, " ".join(client.signin_probe), SIGNIN_TIMEOUT)
+    except OSError as exc:
+        return False, str(exc)
+    if r.returncode == 0:
+        return True, ""
+    lines = [ln.strip() for ln in (r.stdout + "\n" + r.stderr).splitlines() if ln.strip()]
+    return False, (lines[-1] if lines else "`%s %s` exited %d" % (
+        client.binary, " ".join(client.signin_probe), r.returncode))[:240]
+
+
+def signed_out(reason: str) -> bool:
+    """Whether a failed probe's reason is a missing login (vs. a network or CLI error)."""
+    return re.search(r"sign.?in|log.?in|authenticat", reason, re.I) is not None
 
 
 class DepthError(RuntimeError):

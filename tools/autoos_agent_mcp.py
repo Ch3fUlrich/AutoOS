@@ -77,11 +77,17 @@ def list_clients() -> dict:
         depth = "a spawn from here runs at depth %d of %d" % clients.child_depth(os.environ)
     except clients.DepthError as exc:
         depth = str(exc)
-    return {
-        "clients": [{"name": c.name, "headless": c.headless, "gateway": c.gateway,
+    rows = []
+    for c in clients.CLIENTS.values():
+        installed = shutil.which(c.binary) is not None
+        ok, reason = clients.signin_state(c)
+        rows.append({"name": c.name, "headless": c.headless, "gateway": c.gateway,
                      "native_subagents": c.subagents, "auth": c.auth, "promo": c.promo,
-                     "installed": shutil.which(c.binary) is not None, "notes": c.notes}
-                    for c in clients.CLIENTS.values()],
+                     "installed": installed, "usable": installed and ok is not False,
+                     "reason": reason if ok is False else ("" if installed else "not installed"),
+                     "notes": c.notes})
+    return {
+        "clients": rows,
         "card": {"fields": {k: list(v) for k, v in routing.CARD_VALUES.items()},
                  "defaults": routing.CARD_DEFAULTS, "routing_version": routing.ROUTING_VERSION},
         "depth": depth,

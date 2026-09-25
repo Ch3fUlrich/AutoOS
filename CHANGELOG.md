@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — agy and the Antigravity app no longer read as available when they are not
+
+- **A signed-out `agy` passed `list` as installed** and a headless run then waited 60 s on
+  an OAuth prompt before failing. The spawner probes `agy models` (under a second either
+  way): `list` shows `signed-out` with the reason, `run --client agy` refuses with exit 3,
+  and the MCP `list_clients` carries `usable` + `reason`.
+- **The Antigravity app on Linux counted as installed when it was skipped**: a blank
+  `.deb` URL returned 0. It is `failed` now, with the download page as the next step.
+- **agy's vendor installer edits shell profiles** (`agy install` appends a PATH line to
+  `~/.zshrc`, `~/.zprofile`, `~/.profile`); `install_agy` backs them up first.
+
 ### Fixed — tier orchestration on opencode v2 (measured live 2026-09-24)
 
 - **Nested tiers could not run.** `opencode.jsonc` set a top-level `subagent_depth`,

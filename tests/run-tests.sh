@@ -2583,6 +2583,49 @@ if it "install_devin_cli announces in dry run and writes nothing"; then
     else fail "dry run wrote or stayed silent"; fi
 fi
 
+# Operator 2026-09-25: the Antigravity app "was not available" on Linux, yet
+# the run said installed - a blank .deb URL returned 0, so install_package
+# counted it installed. The app does run on Linux x64 (not a hide case,
+# AGENTS.md), so the missing input is a failure with its reason.
+if it "install_antigravity without a .deb URL fails with the reason, never installed"; then
+    out="$( ( AUTOOS_DRY_RUN=1; unset 'AUTOOS_ANSWERS[antigravity_url]'; install_antigravity ) 2>&1)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "rc=0 counts a skipped app as installed" >&2; }
+    [[ "$out" == *"no .deb download URL"* ]] || { ok=0; echo "no reason: $out" >&2; }
+    [[ "$out" == *"antigravity.google/download/linux"* ]] || { ok=0; echo "no next step: $out" >&2; }
+    with="$( ( AUTOOS_DRY_RUN=1; AUTOOS_ANSWERS[antigravity_url]=https://example.invalid/a.deb; install_antigravity ) 2>&1)"; rc2=$?
+    (( rc2 == 0 )) && [[ "$with" == *"would download and install Antigravity"* ]] \
+        || { ok=0; echo "with a URL: rc=$rc2 $with" >&2; }
+    if (( ok )); then pass; else fail "a skipped Antigravity app reads as installed"; fi
+fi
+
+# Measured 2026-09-25: the vendor agy installer ends with `agy install`, which
+# appends a PATH line to ~/.zshrc, ~/.zprofile and ~/.profile. AutoOS runs it,
+# so AutoOS keeps the originals (AGENTS.md: back up user-owned files).
+if it "install_agy backs up the shell profiles its vendor installer edits"; then
+    home="$(mktemp -d)"
+    printf 'original zshrc\n' >"$home/.zshrc"
+    printf 'original profile\n' >"$home/.profile"
+    out="$( (
+        HOME="$home"; AUTOOS_DRY_RUN=0
+        curl() {
+            local o="" p=""
+            for a in "$@"; do [[ "$p" == "-o" ]] && o="$a"; p="$a"; done
+            printf '#!/usr/bin/env bash\necho "export PATH=x" >>"$HOME/.zshrc"\necho "export PATH=x" >>"$HOME/.profile"\n' >"$o"
+        }
+        install_agy
+    ) 2>&1)"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc $out" >&2; }
+    zb="$(cat "$home"/.zshrc.autoos-backup-* 2>/dev/null)"
+    pb="$(cat "$home"/.profile.autoos-backup-* 2>/dev/null)"
+    [[ "$zb" == "original zshrc" ]] || { ok=0; echo "zshrc backup: '$zb'" >&2; }
+    [[ "$pb" == "original profile" ]] || { ok=0; echo "profile backup: '$pb'" >&2; }
+    compgen -G "$home/.zprofile*" >/dev/null && { ok=0; echo "backed up a file that did not exist" >&2; }
+    rm -rf "$home"
+    if (( ok )); then pass; else fail "agy's vendor installer edits profiles without a backup"; fi
+fi
+
 if it "script dispatch covers qodercli and devin-cli"; then
     ok=1
     grep -q 'qodercli) *install_qodercli' lib/linux/install.sh || ok=0

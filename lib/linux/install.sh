@@ -309,9 +309,12 @@ install_tailscale() {
 install_antigravity() {
     local url; url="$(answer antigravity_url '')"
     if [[ -z "$url" ]]; then
-        ui_warn "No Antigravity download URL given - skipping."
-        ui_muted "    Re-run and answer the Antigravity question, or use --only to skip it."
-        return 0
+        # A failure, not a quiet skip: returning 0 here was counted as
+        # "installed" although nothing was (operator, 2026-09-25).
+        ui_err "Antigravity not installed: no .deb download URL given (question antigravity_url)."
+        ui_muted "    Copy the .deb link from https://antigravity.google/download/linux and re-run,"
+        ui_muted "    or leave Antigravity out of the selection."
+        return 1
     fi
     if (( AUTOOS_DRY_RUN )); then ui_muted "would download and install Antigravity from $url"; return 0; fi
     local tmp; tmp="$(mktemp --suffix=.deb)"
@@ -432,7 +435,12 @@ install_agy() {
         rm -f "$tmp"
         return 1
     fi
-    local rc=0
+    # The vendor script ends with `agy install`, which appends a PATH line to
+    # these profiles (measured 2026-09-25) - keep the originals.
+    local rc=0 f stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
+        [[ -f "$f" ]] && cp "$f" "$f.autoos-backup-$stamp"
+    done
     bash "$tmp" || rc=$?
     rm -f "$tmp"
     return $rc

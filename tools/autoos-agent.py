@@ -274,9 +274,13 @@ def cmd_list(cfg: dict) -> int:
             age = clients.probe_age_days(c.name)
             notes += "; last probe: %s" % ("never" if age is None else "%.0f d ago%s" % (
                 age, " (stale)" if age > clients.PROBE_STALE_DAYS else ""))
+        installed = yn[shutil.which(c.binary) is not None]
+        ok, reason = clients.signin_state(c)
+        if ok is False:  # installed, but it cannot run a task here
+            installed = "signed-out" if clients.signed_out(reason) else "broken"
+            notes += "; NOT USABLE: %s - run `%s` once to sign in" % (reason, c.binary)
         print("%-9s %-9s %-8s %-8s %-10s %-38s %s" % (
-            c.name, yn[c.headless], yn[c.gateway], yn[c.subagents],
-            yn[shutil.which(c.binary) is not None], c.auth, notes))
+            c.name, yn[c.headless], yn[c.gateway], yn[c.subagents], installed, c.auth, notes))
     try:
         print("\ndepth budget: a child of this shell runs at depth %d of %d" % clients.child_depth(os.environ))
     except clients.DepthError as exc:
@@ -363,6 +367,11 @@ def cmd_run(args, cfg: dict) -> int:
         return 0
     if not shutil.which(plan["cmd"][0]):
         return refuse("%s is not installed (catalog: ./setup.sh --only <id> -y); see: list" % plan["cmd"][0], 3)
+    ok, reason = clients.signin_state(client)
+    if ok is False:
+        what = "installed but not signed in" if clients.signed_out(reason) else "installed but not usable"
+        return refuse("%s is %s: %s. Run `%s` once interactively to sign in (own account, "
+                      "not the gateway); see: list" % (client.binary, what, reason.rstrip("."), client.binary), 3)
     # PWD too, not just cwd=: opencode takes the project directory from $PWD,
     # so an inherited PWD sent an isolated worker's writes to the caller's
     # checkout (live 2026-09-24).
