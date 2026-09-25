@@ -6569,6 +6569,10 @@ if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
     out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "render-opencode-container-config survives a malformed port (unit tests)"; then
+    out="$(python3 tests/test_render_opencode_config.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "autoos-agent outside-path fence denies first and re-allows only opencode scratch"; then
     report="$(python3 - 2>&1 <<'PY'
 import importlib.util

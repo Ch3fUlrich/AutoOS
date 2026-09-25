@@ -40,7 +40,13 @@ def is_loopback(url):
 
 def with_host(url, host, port=None):
     parts = urlsplit(url)
-    netloc = host + (":%d" % (port if port is not None else parts.port) if (port or parts.port) else "")
+    # Guard against malformed ports that cause ValueError
+    try:
+        orig_port = parts.port
+    except ValueError:
+        # If the URL has an invalid port, leave it unchanged
+        return url
+    netloc = host + (":%d" % (port if port is not None else orig_port) if (port or orig_port) else "")
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
@@ -59,7 +65,14 @@ def rewrite_providers(block, gateway, notes, label):
     for name, prov in block.items():
         where, url = base_url_of(prov) if isinstance(prov, dict) else (None, None)
         if url and is_loopback(url):
-            if urlsplit(url).port == 20128:
+            # Guard against malformed ports that raise ValueError
+            try:
+                port = urlsplit(url).port
+            except ValueError:
+                notes.append("ignored malformed URL for %s provider %s: %s" % (label, name, url))
+                out[name] = prov
+                continue
+            if port == 20128:
                 gw = urlsplit(gateway)
                 prov = json.loads(json.dumps(prov))
                 prov[where]["baseURL"] = urlunsplit((gw.scheme, gw.netloc, urlsplit(url).path, "", ""))
