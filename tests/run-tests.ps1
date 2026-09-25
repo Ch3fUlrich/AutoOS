@@ -3667,6 +3667,107 @@ Test-Case 'the embedded OpenHands setup script is valid Python' {    # Set-AutoO
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
 
+Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when nothing changed' {
+    # The real writer with its real embedded setup script and agent generator,
+    # against a scratch home: HOME, USERPROFILE and LOCALAPPDATA point into a temp
+    # dir, the skills target already exists (no junction is made), Ollama's
+    # address is pinned (no probe), and every key the writer reads is a dummy or
+    # unset (so the repo's git-ignored api-keys.yml is never consulted).
+    # The one thing no variable redirects is the PowerShell profile under the real
+    # Documents folder, which the writer edits when one exists: skip on such a host.
+    $pyCmd = @(Get-Command python, py -ErrorAction SilentlyContinue)
+    $py3 = $null
+    if ($pyCmd.Count -eq 0) {
+        # A host that only has python3 (most Linux): the writer looks for `python`.
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { $py3 = Get-Command python3 -ErrorAction SilentlyContinue }
+        if (-not $py3) { Skip 'no python on PATH'; return }
+    }
+    # (Empty on a Linux home without a Documents folder: nothing to protect there.)
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    if ($docs) {
+        foreach ($rel in @('PowerShell\Microsoft.PowerShell_profile.ps1', 'PowerShell\profile.ps1', 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1', 'WindowsPowerShell\profile.ps1')) {
+            if (Test-Path -LiteralPath (Join-Path $docs $rel)) { Skip 'a real PowerShell profile exists and the writer would edit it'; return }
+        }
+    }
+    $envNames = @('USERPROFILE', 'HOME', 'LOCALAPPDATA', 'PATH', 'OLLAMA_BASE_URL', 'AUTOOS_OMNIROUTE_KEY', 'OPENROUTER_API_KEY', 'LITELLM_MASTER_KEY',
+                  'AUTOOS_LITELLM_API_KEY', 'META_API_KEY', 'MUSE_API_KEY', 'DEEPSEEK_API_KEY', 'CONTEXT7_API_KEY', 'OMNIGRAPH_TOKEN')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohbackup-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $ohDir = Join-Path $scratch '.openhands'
+    $settingsFile = Join-Path $ohDir 'settings.json'
+    # What an earlier AutoOS run leaves, plus a key and an MCP server of the user's own.
+    # enable_sub_agents is already there so the agent generator, which would add it,
+    # has nothing to rewrite: the only backup of run 1 is the writer's own.
+    $seed = '{"schema_version":2,"theme":"mine","agent_settings":{"schema_version":4,"enable_sub_agents":true,"llm":{"model":"ollama_chat/qwen2.5-coder:7b","base_url":"http://127.0.0.1:11434"},"mcp_config":{"mine":{"transport":"stdio","command":"mine-mcp","args":[]}}}}'
+    $runLogged = {
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohbackup-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            $null = Set-AutoOSOpenHandsConfig
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
+    }
+    try {
+        # skills: the junction target exists. Documents: on Linux .NET only resolves
+        # the Documents folder when it exists, and the writer joins paths onto it.
+        $null = New-Item -ItemType Directory -Path $bin, (Join-Path $ohDir 'skills'), (Join-Path $scratch 'Documents') -Force
+        if ($py3) {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexec '$($py3.Source)' `"`$@`"`n")
+            & chmod +x $fake
+        }
+        [IO.File]::WriteAllText($settingsFile, $seed)
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch; $env:LOCALAPPDATA = $scratch
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'; $env:OPENROUTER_API_KEY = 'test-or-key'; $env:LITELLM_MASTER_KEY = 'test-lit-key'
+        foreach ($n in @('AUTOOS_LITELLM_API_KEY', 'META_API_KEY', 'MUSE_API_KEY', 'DEEPSEEK_API_KEY', 'CONTEXT7_API_KEY', 'OMNIGRAPH_TOKEN')) {
+            Remove-Item "env:$n" -ErrorAction SilentlyContinue
+        }
+        # The writer reads $HOME, which the environment does not set on every
+        # host: prove the module sees the scratch home before it writes anything.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+
+        $out1 = & $runLogged
+        $sha1 = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash
+        $backups1 = @(Get-ChildItem -LiteralPath $ohDir -Filter 'settings.json.autoos-backup-*')
+        $all1 = @(Get-ChildItem -LiteralPath $ohDir -Recurse -Filter '*.autoos-backup-*').Count
+        if ([IO.File]::ReadAllText($settingsFile) -eq $seed) { throw 'the first run left settings.json unchanged' }
+        if ($backups1.Count -ne 1) { throw "settings.json backups after run 1 = $($backups1.Count) (want 1)" }
+        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'the backup is not the original file' }
+        $written = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($written.theme -ne 'mine' -or $null -eq $written.agent_settings.mcp_config.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
+        if ($null -eq $written.agent_settings.mcp_config.PSObject.Properties['serena']) { throw 'run 1 did not write the MCP servers' }
+
+        # Backup names carry whole seconds: without this pause a wrongly repeated
+        # backup would overwrite the first one and the count could not tell.
+        Start-Sleep -Milliseconds 1200
+        $out2 = & $runLogged
+        $sha2 = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash
+        $backups2 = @(Get-ChildItem -LiteralPath $ohDir -Filter 'settings.json.autoos-backup-*')
+        $all2 = @(Get-ChildItem -LiteralPath $ohDir -Recurse -Filter '*.autoos-backup-*').Count
+        if ($backups2.Count -ne $backups1.Count) { throw "settings.json backups after run 2 = $($backups2.Count), after run 1 = $($backups1.Count) (an unchanged run must not back up again)" }
+        if ($all2 -ne $all1) { throw "backups under ~/.openhands after run 2 = $all2, after run 1 = $all1" }
+        if ($sha2 -ne $sha1) { throw 'run 2 rewrote settings.json (SHA256 differs from run 1)' }
+        # The generator also prints 'skipped' for settings.json: name the writer's own lines.
+        if ($out1 -notmatch 'openhands settings: updated') { throw "run 1 did not report the settings.json update: [$out1]" }
+        if ($out2 -notmatch 'openhands settings: skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 # --- AI routing stack (omniroute / litellm / zed / opencode) ---
 Describe-Group 'ai routing'
 
