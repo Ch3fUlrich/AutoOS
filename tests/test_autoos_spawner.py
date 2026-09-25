@@ -816,5 +816,33 @@ class ProcessGroupTests(unittest.TestCase):
             self.assertTrue(self.gone(pid), "a failed joinable start left %d running" % pid)
 
 
+class KeyFileTests(unittest.TestCase):
+    """A lane worktree has no git-ignored api-keys.yml (measured 2026-09-25: exit 3,
+    and linking it in was refused); the spawner falls back to the main checkout."""
+
+    def test_a_worktree_reads_the_main_checkouts_key_file(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            main = os.path.join(tmp, "main")
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+            subprocess.run(git + ["init", "-q", main], check=True)
+            subprocess.run(git + ["-C", main, "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+            wt = os.path.join(tmp, "lane")
+            subprocess.run(git + ["-C", main, "worktree", "add", "-q", wt], check=True)
+            os.makedirs(os.path.join(main, "configuration"))
+            with open(os.path.join(main, "configuration", "api-keys.yml"), "w", encoding="utf-8") as fh:
+                fh.write("omniroute: sk-test-not-a-key\n")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("AUTOOS_OMNIROUTE_KEY", None)
+                self.assertEqual(agent.client_key(wt), "sk-test-not-a-key")
+                self.assertEqual(agent.client_key(main), "sk-test-not-a-key")
+
+    def test_no_key_file_anywhere_is_none(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTOOS_OMNIROUTE_KEY", None)
+            self.assertIsNone(agent.client_key(tmp))
+
+
 if __name__ == "__main__":
     unittest.main()

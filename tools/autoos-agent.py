@@ -154,18 +154,34 @@ def outside_fence(data_dir: str) -> list:
             [{"action": "external_directory", "resource": p, "effect": "allow"} for p in allow])
 
 
+def key_files(root: str) -> list:
+    """This checkout's api-keys.yml, then the main checkout's.
+
+    The file is git-ignored, so a lane worktree has none (measured 2026-09-25:
+    exit 3 "No OmniRoute client key", and linking it in was refused).
+    """
+    roots = [root]
+    r = subprocess.run(["git", "-C", root, "rev-parse", "--path-format=absolute",
+                        "--git-common-dir"], capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip():
+        main = os.path.dirname(r.stdout.strip())
+        if os.path.realpath(main) != os.path.realpath(root):
+            roots.append(main)
+    return [os.path.join(r_, "configuration", "api-keys.yml") for r_ in roots]
+
+
 def client_key(root: str) -> str | None:
     key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
     if key:
         return key
-    path = os.path.join(root, "configuration", "api-keys.yml")
-    if not os.path.isfile(path):
-        return None
-    for line in io.open(path, encoding="utf-8"):
-        m = re.match(r"^omniroute\s*:\s*(.+?)\s*$", line)
-        if m:
-            val = m.group(1).strip("\"'")
-            return None if val.startswith("REPLACE_WITH_") else val
+    for path in key_files(root):
+        if not os.path.isfile(path):
+            continue
+        for line in io.open(path, encoding="utf-8"):
+            m = re.match(r"^omniroute\s*:\s*(.+?)\s*$", line)
+            if m:
+                val = m.group(1).strip("\"'")
+                return None if val.startswith("REPLACE_WITH_") else val
     return None
 
 
