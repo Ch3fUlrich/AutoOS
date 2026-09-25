@@ -3076,6 +3076,59 @@ Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to 
     }
 }
 
+Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when nothing changed' {
+    # mcp_config.json is the user's own file. The first run that changes it takes
+    # ONE backup; an identical second run must not back up again, must leave the
+    # file byte-identical and must say skipped. The pause keeps a second-run
+    # backup from reusing the first one's per-second timestamp, which would make
+    # an extra backup overwrite (and hide behind) the first.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log1 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $log2 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $run = {
+        param($LogPath)
+        Initialize-AutoOSLog -Path $LogPath
+        Set-AutoOSAntigravityMcp
+        Get-Content -LiteralPath $LogPath -Raw -Encoding utf8
+    }
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        $null = & $run $log1
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
+        $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        Start-Sleep -Milliseconds 1100
+        $out2 = & $run $log2
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
+        $hash2 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (($s.PSObject.Properties.Name -join ',') -ne 'mcpServers,theme') { throw "top-level keys reordered or lost: [$($s.PSObject.Properties.Name -join ',')]" }
+        if (($s.mcpServers.PSObject.Properties.Name -join ',') -ne 'other,omnigraph') { throw "servers reordered or lost: [$($s.mcpServers.PSObject.Properties.Name -join ',')]" }
+        if ($s.mcpServers.other.command -ne 'node') { throw 'the existing server was not kept' }
+        if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
+        if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log1, $log2 -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
     $realAppData = $env:APPDATA
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))

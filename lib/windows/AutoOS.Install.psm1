@@ -1304,26 +1304,37 @@ function Set-AutoOSAntigravityMcp {
             Write-AutoOSLine "$cfgPath is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
 
     $servers = [ordered]@{}
     if ($cfg.Contains('mcpServers') -and $cfg['mcpServers']) {
         foreach ($p in $cfg['mcpServers'].PSObject.Properties) { $servers[$p.Name] = $p.Value }
     }
-    $servers['omnigraph'] = [ordered]@{
+    $entry = [ordered]@{
         command = 'npx'
         args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
         env     = $envBlock
     }
-    $cfg['mcpServers'] = $servers
-
-    $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
-    $kept = @($servers.Keys | Where-Object { $_ -ne 'omnigraph' })
-    if ($kept.Count) {
-        Write-AutoOSLine "omnigraph merged into $cfgPath (kept: $($kept -join ', '))" -Level ok
+    # Compare the entry as data (a parsed file and a fresh entry serialise the
+    # same way), so a hand-formatted file that already holds it is left alone.
+    $unchanged = $servers.Contains('omnigraph') -and
+        ((ConvertTo-Json -InputObject $servers['omnigraph'] -Depth 12 -Compress) -eq (ConvertTo-Json -InputObject $entry -Depth 12 -Compress))
+    if ($unchanged) {
+        Write-AutoOSLine "omnigraph already configured in $cfgPath - skipped" -Level ok
     } else {
-        Write-AutoOSLine "Antigravity MCP config written to $cfgPath" -Level ok
+        $servers['omnigraph'] = $entry
+        $cfg['mcpServers'] = $servers
+        # Back up only a run that changes the file, so a second run leaves no copy.
+        if (Test-Path $cfgPath) {
+            Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        }
+        $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
+        $kept = @($servers.Keys | Where-Object { $_ -ne 'omnigraph' })
+        if ($kept.Count) {
+            Write-AutoOSLine "omnigraph merged into $cfgPath (kept: $($kept -join ', '))" -Level ok
+        } else {
+            Write-AutoOSLine "Antigravity MCP config written to $cfgPath" -Level ok
+        }
     }
     if (-not $env:OMNIGRAPH_TOKEN) {
         Write-AutoOSLine 'OMNIGRAPH_TOKEN was not set, so no bearer token was written.' -Level warn
