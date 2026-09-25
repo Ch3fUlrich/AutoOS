@@ -6609,9 +6609,17 @@ names = [c["name"] for c in d["combos"]]
 problems = []
 if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
     problems.append("names")
-for r in ("tier1", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean", "rag", "tier1-paid", "tier2-paid", "tier3-paid", "tier2-credit", "tier3-credit"):
-    if r in names:
-        problems.append("retired:" + r)
+# "retired" is the one home of the ids a rename left behind: apply prunes
+# them from the store, so a retired id must never also be a current combo.
+retired = d.get("retired")
+if not isinstance(retired, list) or not retired:
+    problems.append("retired-empty")
+else:
+    for r in retired:
+        if not isinstance(r, str) or not r:
+            problems.append("retired-bad:" + repr(r))
+        elif r in names:
+            problems.append("retired:" + r)
 for c in d["combos"]:
     if not c["models"]:
         problems.append(c["name"] + ":empty")
@@ -7170,6 +7178,113 @@ if it "svc: apply --dry-run against a down gateway plans from the key file alone
     [[ "$out" == *"mistral: would register"* ]] || { ok=0; echo "mistral: $out" >&2; }
     [[ "$out" == *"already registered"* ]] && { ok=0; echo "read the live gateway" >&2; }
     if (( ok )); then pass; else fail "apply dry run depends on the live gateway"; fi
+fi
+
+# combos.json "retired" is the one list of ids a rename or removal left in the
+# gateway store (9 orphans were deleted by hand on 2026-09-25); apply prunes
+# those and nothing else. The sandbox: a stand-in omniroute first on PATH that
+# answers `combo list` from list.txt (rendered like the real CLI: ANSI icon,
+# padded name, [strategy], status) and logs every other call to calls.log,
+# plus a loopback stand-in gateway serving a static /api/health. Nothing here
+# reaches the live gateway or its store.
+_prune_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/gw/api"
+    printf 'ok\n' >"$d/gw/api/health"
+    printf '# no keys: every provider is skipped\n' >"$d/keys.yml"
+    : >"$d/calls.log"
+    cat >"$d/bin/omniroute" <<'SH'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ "${1:-} ${2:-}" == "combo list" ]]; then
+    printf '%s\n' "$*" >>"$d/listed"
+    cat "$d/list.txt"
+    exit 0
+fi
+printf '%s\n' "$*" >>"$d/calls.log"
+exit 0
+SH
+    chmod +x "$d/bin/omniroute"
+    printf '%s\n' "$d"
+}
+# _prune_list <dir> <name>... - the store as `omniroute combo list` prints it.
+_prune_list() {
+    local d="$1" n
+    shift
+    printf '\n\033[1mCombos\033[0m\n' >"$d/list.txt"
+    for n in "$@"; do
+        printf '  \033[2m○\033[0m %-25s [%-12s] \033[32menabled\033[0m\n' "$n" priority >>"$d/list.txt"
+    done
+}
+# _prune_apply <dir> [apply args] - apply.sh against the two stand-ins.
+_prune_apply() {
+    local d="$1" pid port
+    shift
+    read -r pid port < <(_start_test_http_server "$d/gw")
+    if [[ -z "$port" ]]; then
+        kill "$pid" 2>/dev/null
+        echo "no stand-in gateway"
+        return 1
+    fi
+    PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1
+    kill "$pid" 2>/dev/null
+}
+
+if it "apply prune: deletes only the retired combos the store holds, never a user-made one"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2 t2-worker my-own-combo
+    out="$(_prune_apply "$d")"
+    ok=1
+    deletes="$(grep '^combo delete' "$d/calls.log")"
+    [[ "$deletes" == "combo delete tier2 --yes" ]] || { ok=0; echo "deleted: [$deletes]" >&2; }
+    grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    [[ "$out" == *"  - tier2: retired, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "prune deleted something other than the retired combo"; fi
+fi
+
+if it "apply prune: --dry-run names the retired combo and deletes nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2 t2-worker my-own-combo
+    out="$(_prune_apply "$d" --dry-run)"
+    ok=1
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"  - tier2: retired, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"retired, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the prune dry run is not a dry run"; fi
+fi
+
+if it "apply prune: a second run finds no retired combos and deletes nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" t2-worker my-own-combo
+    out="$(_prune_apply "$d")"
+    ok=1
+    grep -q '^combo delete' "$d/calls.log" && { ok=0; echo "deleted: $(grep '^combo delete' "$d/calls.log")" >&2; }
+    [[ "$out" == *"  = no retired combos in the store"* ]] || { ok=0; echo "out: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a clean store is not reported as clean"; fi
+fi
+
+# A down gateway must not be listed: the real CLI then falls back to reading
+# the store file directly, which is how a test would reach the live store.
+if it "apply prune: a down gateway is never listed and nothing is pruned"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    ok=1
+    [[ -e "$d/listed" ]] && { ok=0; echo "a down gateway was listed" >&2; }
+    grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"Prune:"*"gateway down - the store is not read, nothing pruned"* ]] || { ok=0; echo "out: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "prune read the store behind a down gateway"; fi
 fi
 
 # A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp

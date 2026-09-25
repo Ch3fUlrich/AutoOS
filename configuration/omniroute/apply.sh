@@ -2,8 +2,10 @@
 # Apply the AutoOS router configuration to OmniRoute:
 #   1. registers every provider key found in configuration/api-keys.yml
 #   2. (re)creates the tier combos from configuration/omniroute/combos.json
+#   3. prunes the combos listed there as "retired" from the store (only those)
 #
-# Safe to re-run: providers are add-or-update, combos are replaced in place.
+# Safe to re-run: providers are add-or-update, combos are replaced in place,
+# and a retired combo that is already gone is simply not found again.
 # Model refs the live catalog does not know are skipped with a warning, so a
 # renamed upstream model degrades one tier leg instead of breaking the run.
 #
@@ -298,6 +300,53 @@ for c in data.get("combos", []):
     print("%s\t%s\t%s" % (c["name"], c.get("strategy", "priority"), ",".join(c["models"])))
 PY
 )
+
+# ─── Prune: delete the retired combos, and only those ───────────────────────
+# combos.json "retired" lists the ids a rename or removal left behind. The loop
+# above only creates and replaces by name, so they used to stay in the store
+# forever (9 orphans deleted by hand on 2026-09-25). A name is deleted only when
+# it is retired AND live (and not a current combo): a store combo that is not
+# in "retired" may be one the user made and is never touched.
+# A down gateway is not listed at all: the CLI would fall back to reading the
+# store file directly, and a dry run must not depend on that.
+echo "Prune:"
+list_out=""
+if ! command -v omniroute >/dev/null; then
+    echo "  - omniroute CLI missing - the store is not read, nothing pruned"
+elif ! gateway_up; then
+    echo "  - gateway down - the store is not read, nothing pruned"
+elif ! list_out="$(omni combo list 2>/dev/null)"; then
+    echo "  ! could not list the store's combos - nothing pruned"
+elif ! prune_names="$(printf '%s\n' "$list_out" | python3 -c '
+import json, re, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+current = {c["name"] for c in data.get("combos", [])}
+live = set()
+# "combo list" prints "  <icon> <name padded> [<strategy>] <status>" with ANSI
+# colour on the icon and the status: strip it, take the name before [.
+for line in sys.stdin.read().splitlines():
+    m = re.match(r"\s*\S+\s+(\S+)\s+\[[^\]]*\]", re.sub(r"\x1b\[[0-9;]*m", "", line))
+    if m:
+        live.add(m.group(1))
+for name in data.get("retired", []):
+    if name in live and name not in current:
+        print(name)
+' "$COMBOS_FILE")"; then
+    echo "  ! cannot read the retired list from $COMBOS_FILE - nothing pruned"
+elif [[ -z "$prune_names" ]]; then
+    echo "  = no retired combos in the store"
+else
+    while IFS= read -r retired_name; do
+        [[ -z "$retired_name" ]] && continue
+        if [[ $DRY -eq 1 ]]; then
+            echo "  - $retired_name: retired, would delete"
+        elif omni combo delete "$retired_name" --yes </dev/null >/dev/null 2>&1; then
+            echo "  - $retired_name: retired, deleted"
+        else
+            echo "  ! $retired_name: retired, delete failed - run: omniroute combo delete $retired_name --yes"
+        fi
+    done <<<"$prune_names"
+fi
 
 # ─── Probe: prove the combos answer, end to end ─────────────────────────────
 if [[ $PROBE -eq 1 ]]; then

@@ -4765,8 +4765,16 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
     Assert-Equal ($names -join ',') 't1-orchestrator,spark-1.3-contributor,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,deepseek-v4.1-flash,opus-4-6'
-    $retired = @('tier1', 'tier1-clean', 'tier2', 'tier2-clean', 'tier3', 'tier3-clean', 'rag', 'tier1-paid', 'tier2-paid', 'tier3-paid', 'tier2-credit', 'tier3-credit')
-    foreach ($r in $retired) { Assert-True ($names -notcontains $r) "retired combo id back: $r" }
+    # "retired" is the one home of the ids a rename left behind: apply prunes
+    # them from the store, so a retired id must never also be a current combo.
+    $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    Assert-True ($null -ne $doc.PSObject.Properties['retired']) 'combos.json has no "retired" list'
+    $retired = @($doc.retired)
+    Assert-True ($retired.Count -gt 0) 'combos.json "retired" is empty'
+    foreach ($r in $retired) {
+        Assert-True (($r -is [string]) -and $r) "bad retired id: [$r]"
+        Assert-True ($names -notcontains $r) "retired combo id back: $r"
+    }
     $contexts = @{
         't1-orchestrator' = '1M'; 'spark-1.3-contributor' = '1M'; 't1-orchestrator-clean' = '1M'; 't1-orchestrator-free-only' = '1M'; 't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
@@ -4835,6 +4843,179 @@ Test-Case 'apply --dry-run registers nothing and starts nothing' {
         (Join-Path $Root 'configuration\omniroute\apply.ps1') -DryRun 2>&1 | Out-String
     Assert-True ($out -match 'dry run stops here|dry run continues|would create|would register|already registered') 'dry run announced nothing'
     Assert-Equal (Get-Content $combosPath -Raw -Encoding utf8) $before
+}
+
+# combos.json "retired" is the one list of ids a rename or removal left in the
+# gateway store (9 orphans were deleted by hand on 2026-09-25); apply prunes
+# those and nothing else. Mirror of the bash suite's _prune_sandbox: a
+# stand-in omniroute first on PATH (omniroute.cmd on Windows, a sh script
+# elsewhere) that answers `combo list` from list.txt and logs every other call
+# to calls.log, plus a loopback stand-in gateway serving a static /api/health.
+# Nothing here reaches the live gateway or its store.
+function New-AutoOSPruneSandbox {
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_prune_' + [Guid]::NewGuid().ToString('N'))
+    $bin = Join-Path $d 'bin'
+    $api = Join-Path (Join-Path $d 'gw') 'api'
+    $null = New-Item -ItemType Directory -Path $bin
+    $null = New-Item -ItemType Directory -Path $api
+    [IO.File]::WriteAllText((Join-Path $api 'health'), "ok`n")
+    [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "# no keys: every provider is skipped`n")
+    [IO.File]::WriteAllText((Join-Path $d 'calls.log'), '')
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $cmd = @'
+@echo off
+if "%~1 %~2"=="combo list" goto list
+>>"%~dp0..\calls.log" echo %*
+exit /b 0
+:list
+>>"%~dp0..\listed" echo %*
+type "%~dp0..\list.txt"
+exit /b 0
+'@
+        [IO.File]::WriteAllText((Join-Path $bin 'omniroute.cmd'), (($cmd -replace "`r", '') -replace "`n", "`r`n"))
+    } else {
+        $sh = @'
+#!/bin/sh
+d="$(dirname "$0")/.."
+if [ "$1 $2" = "combo list" ]; then
+    echo "$*" >>"$d/listed"
+    cat "$d/list.txt"
+    exit 0
+fi
+echo "$*" >>"$d/calls.log"
+exit 0
+'@
+        $fake = Join-Path $bin 'omniroute'
+        [IO.File]::WriteAllText($fake, ($sh -replace "`r", ''))
+        & chmod +x $fake
+    }
+    $d
+}
+
+# The store as `omniroute combo list` prints it: ANSI-coloured icon and
+# status, the name padded to 25, the strategy column in brackets.
+function Set-AutoOSPruneList {
+    param([string]$Dir, [string[]]$Names)
+    $esc = [char]27
+    $lines = @('', ('{0}[1mCombos{0}[0m' -f $esc))
+    foreach ($n in $Names) {
+        $lines += ('  {0}[2m{1}{0}[0m {2} [{3}] {0}[32menabled{0}[0m' -f $esc, [char]0x25CB, $n.PadRight(25), 'priority'.PadRight(12))
+    }
+    [IO.File]::WriteAllText((Join-Path $Dir 'list.txt'), (($lines -join "`n") + "`n"))
+}
+
+# apply.ps1 in a child of the shell running the suite, with the stand-ins
+# first on PATH. A child, because the suite runs under Stop and 5.1 promotes
+# any native stderr to a terminating error; only the captured text counts.
+function Invoke-AutoOSPruneApply {
+    param([string]$Dir, [string]$Gateway, [switch]$DryRun)
+    $ErrorActionPreference = 'Continue'
+    $saved = @{}
+    foreach ($k in @('PATH', 'AUTOOS_OMNIROUTE_URL', 'AUTOOS_KEYS_FILE')) {
+        $saved[$k] = [Environment]::GetEnvironmentVariable($k)
+    }
+    try {
+        $path = (Join-Path $Dir 'bin') + [IO.Path]::PathSeparator + $saved['PATH']
+        [Environment]::SetEnvironmentVariable('PATH', $path)
+        [Environment]::SetEnvironmentVariable('AUTOOS_OMNIROUTE_URL', $Gateway)
+        [Environment]::SetEnvironmentVariable('AUTOOS_KEYS_FILE', (Join-Path $Dir 'keys.yml'))
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            [IO.Path]::Combine($Root, 'configuration', 'omniroute', 'apply.ps1'))
+        if ($DryRun) { $argList += '-DryRun' }
+        & (Get-Process -Id $PID).Path @argList 2>&1 | Out-String
+    } finally {
+        foreach ($k in @($saved.Keys)) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    }
+}
+
+function Get-AutoOSPruneCalls {
+    param([string]$Dir)
+    @(Get-Content -LiteralPath (Join-Path $Dir 'calls.log') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+# The stand-in gateway, proven to answer before apply runs: a gateway that
+# looked down would make a real run wait two minutes for a start instead.
+function Start-AutoOSPruneGateway {
+    param([string]$Dir)
+    $srv = Start-AutoOSTestHttpServer -Directory (Join-Path $Dir 'gw')
+    $ok = $false
+    try {
+        $ok = (Invoke-WebRequest -Uri "http://127.0.0.1:$($srv.Port)/api/health" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200
+    } catch { $ok = $false }
+    if (-not $ok) {
+        Stop-AutoOSTestHttpServer $srv
+        throw 'the stand-in gateway does not answer /api/health'
+    }
+    $srv
+}
+
+Test-Case 'apply prune: deletes only the retired combos the store holds, never a user-made one' {
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        $srv = Start-AutoOSPruneGateway $d
+        Set-AutoOSPruneList $d @('tier2', 't2-worker', 'my-own-combo')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete tier2 --yes'
+        Assert-True (@($calls | Where-Object { $_ -like '*my-own-combo*' }).Count -eq 0) 'the user-made combo was touched'
+        Assert-True ($out -like '*  - tier2: retired, deleted*') "no deletion line in: $out"
+        Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply prune: --dry-run names the retired combo and deletes nothing' {
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        $srv = Start-AutoOSPruneGateway $d
+        Set-AutoOSPruneList $d @('tier2', 't2-worker', 'my-own-combo')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
+        Assert-True ($out -like '*  - tier2: retired, would delete*') "no would-delete line in: $out"
+        Assert-True ($out -notlike '*retired, deleted*') 'the dry run claims a deletion'
+        Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply prune: a second run finds no retired combos and deletes nothing' {
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        $srv = Start-AutoOSPruneGateway $d
+        Set-AutoOSPruneList $d @('t2-worker', 'my-own-combo')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') ''
+        Assert-True ($out -like '*  = no retired combos in the store*') "no clean-store line in: $out"
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# A down gateway must not be listed: the real CLI then falls back to reading
+# the store file directly, which is how a test would reach the live store.
+Test-Case 'apply prune: a down gateway is never listed and nothing is pruned' {
+    $d = New-AutoOSPruneSandbox
+    try {
+        Set-AutoOSPruneList $d @('tier2')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway 'http://127.0.0.1:1' -DryRun
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $d 'listed'))) 'a down gateway was listed'
+        Assert-Equal (@(Get-AutoOSPruneCalls $d | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
+        Assert-True ($out -like '*Prune:*gateway down - the store is not read, nothing pruned*') "out: $out"
+    } finally {
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Case 'apply scripts carry the Cloudflare User-Agent fix and stay openrouter-first' {

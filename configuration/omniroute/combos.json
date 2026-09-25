@@ -7,9 +7,9 @@
     "tier2 -> t2-worker, tier3 -> t3-driver, rag -> t4-rag, with -clean /",
     "-paid / -free-only suffixes following the new base. Saved selections,",
     "--only flags and client configs addressing the old ids break once;",
-    "see docs/models-proposed.md. After applying, DELETE the retired ids",
-    "from the gateway store (apply only creates; the audit live check",
-    "reports store names missing from this file as deletion candidates).",
+    "see docs/models-proposed.md. apply prunes the ids listed in \"retired\"",
+    "from the gateway store, and only those: a store combo in neither list",
+    "is left alone (the audit live check reports it as live but not in the repo).",
     "",
     "t1-orchestrator = orchestrator: 1M-context, long-horizon. Models below",
     "         1M belong in t2-worker — the user-facing limit in opencode.jsonc",
@@ -189,6 +189,20 @@
     "through OpenRouter (contributor = trains, plain = clean).",
     "groq and cerebras sit behind Cloudflare, which answers error-1010 to",
     "Node's default UA - apply sets providerSpecificData.customUserAgent."
+  ],
+  "retired": [
+    "tier1",
+    "tier1-clean",
+    "tier2",
+    "tier2-clean",
+    "tier3",
+    "tier3-clean",
+    "rag",
+    "tier1-paid",
+    "tier2-paid",
+    "tier3-paid",
+    "tier2-credit",
+    "tier3-credit"
   ],
   "combos": [
     {
