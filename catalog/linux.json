@@ -751,12 +751,28 @@
           "postInstall": "install_openhands",
           "profiles": [
             "workstation",
-            "ai-coding",
-            "server"
+            "ai-coding"
           ],
           "verify": "docker image inspect docker.openhands.dev/openhands/openhands:latest",
           "homepage": "https://www.all-hands.dev/",
           "notes": "Start with ./configuration/start-stack.sh openhands; LLM profiles: configuration/openhands/config.toml."
+        },
+        {
+          "id": "ai-stack-docker",
+          "name": "AI stack (Docker)",
+          "description": "OmniRoute, opencode serve and OpenHands as hardened containers",
+          "provider": "custom",
+          "package": "ai-stack-docker",
+          "requires": [
+            "docker"
+          ],
+          "postInstall": "install_ai_stack",
+          "profiles": [
+            "server"
+          ],
+          "verify": "test -f ~/.config/autoos/ai-stack/stack.env",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/blob/main/docs/web-services.md#server-profile-the-ai-stack-in-docker",
+          "notes": "Replaces the native gateway + opencode units. A running host moves with configuration/docker/ai-stack/ai-stack.sh migrate."
         },
         {
           "id": "bw",

@@ -6731,9 +6731,17 @@ names = [c["name"] for c in d["combos"]]
 problems = []
 if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
     problems.append("names")
-for r in ("tier1", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean", "rag", "tier1-paid", "tier2-paid", "tier3-paid", "tier2-credit", "tier3-credit"):
-    if r in names:
-        problems.append("retired:" + r)
+# "retired" is the one home of the ids a rename left behind: apply prunes
+# them from the store, so a retired id must never also be a current combo.
+retired = d.get("retired")
+if not isinstance(retired, list) or not retired:
+    problems.append("retired-empty")
+else:
+    for r in retired:
+        if not isinstance(r, str) or not r:
+            problems.append("retired-bad:" + repr(r))
+        elif r in names:
+            problems.append("retired:" + r)
 for c in d["combos"]:
     if not c["models"]:
         problems.append(c["name"] + ":empty")
@@ -6886,6 +6894,14 @@ fi
 # unittest per routing-table row, all dry runs.
 if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
     out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "render-opencode-container-config survives a malformed port (unit tests)"; then
+    out="$(python3 tests/test_render_opencode_config.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "audit-router reads the LiteLLM master key from .env (unit tests)"; then
+    out="$(python3 tests/test_audit_router_litellm_key.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "autoos-agent outside-path fence denies first and re-allows only opencode scratch"; then
@@ -7286,6 +7302,113 @@ if it "svc: apply --dry-run against a down gateway plans from the key file alone
     if (( ok )); then pass; else fail "apply dry run depends on the live gateway"; fi
 fi
 
+# combos.json "retired" is the one list of ids a rename or removal left in the
+# gateway store (9 orphans were deleted by hand on 2026-09-25); apply prunes
+# those and nothing else. The sandbox: a stand-in omniroute first on PATH that
+# answers `combo list` from list.txt (rendered like the real CLI: ANSI icon,
+# padded name, [strategy], status) and logs every other call to calls.log,
+# plus a loopback stand-in gateway serving a static /api/health. Nothing here
+# reaches the live gateway or its store.
+_prune_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/gw/api"
+    printf 'ok\n' >"$d/gw/api/health"
+    printf '# no keys: every provider is skipped\n' >"$d/keys.yml"
+    : >"$d/calls.log"
+    cat >"$d/bin/omniroute" <<'SH'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ "${1:-} ${2:-}" == "combo list" ]]; then
+    printf '%s\n' "$*" >>"$d/listed"
+    cat "$d/list.txt"
+    exit 0
+fi
+printf '%s\n' "$*" >>"$d/calls.log"
+exit 0
+SH
+    chmod +x "$d/bin/omniroute"
+    printf '%s\n' "$d"
+}
+# _prune_list <dir> <name>... - the store as `omniroute combo list` prints it.
+_prune_list() {
+    local d="$1" n
+    shift
+    printf '\n\033[1mCombos\033[0m\n' >"$d/list.txt"
+    for n in "$@"; do
+        printf '  \033[2m○\033[0m %-25s [%-12s] \033[32menabled\033[0m\n' "$n" priority >>"$d/list.txt"
+    done
+}
+# _prune_apply <dir> [apply args] - apply.sh against the two stand-ins.
+_prune_apply() {
+    local d="$1" pid port
+    shift
+    read -r pid port < <(_start_test_http_server "$d/gw")
+    if [[ -z "$port" ]]; then
+        kill "$pid" 2>/dev/null
+        echo "no stand-in gateway"
+        return 1
+    fi
+    PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1
+    kill "$pid" 2>/dev/null
+}
+
+if it "apply prune: deletes only the retired combos the store holds, never a user-made one"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2 t2-worker my-own-combo
+    out="$(_prune_apply "$d")"
+    ok=1
+    deletes="$(grep '^combo delete' "$d/calls.log")"
+    [[ "$deletes" == "combo delete tier2 --yes" ]] || { ok=0; echo "deleted: [$deletes]" >&2; }
+    grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    [[ "$out" == *"  - tier2: retired, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "prune deleted something other than the retired combo"; fi
+fi
+
+if it "apply prune: --dry-run names the retired combo and deletes nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2 t2-worker my-own-combo
+    out="$(_prune_apply "$d" --dry-run)"
+    ok=1
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"  - tier2: retired, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"retired, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the prune dry run is not a dry run"; fi
+fi
+
+if it "apply prune: a second run finds no retired combos and deletes nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" t2-worker my-own-combo
+    out="$(_prune_apply "$d")"
+    ok=1
+    grep -q '^combo delete' "$d/calls.log" && { ok=0; echo "deleted: $(grep '^combo delete' "$d/calls.log")" >&2; }
+    [[ "$out" == *"  = no retired combos in the store"* ]] || { ok=0; echo "out: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a clean store is not reported as clean"; fi
+fi
+
+# A down gateway must not be listed: the real CLI then falls back to reading
+# the store file directly, which is how a test would reach the live store.
+if it "apply prune: a down gateway is never listed and nothing is pruned"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    ok=1
+    [[ -e "$d/listed" ]] && { ok=0; echo "a down gateway was listed" >&2; }
+    grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"Prune:"*"gateway down - the store is not read, nothing pruned"* ]] || { ok=0; echo "out: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "prune read the store behind a down gateway"; fi
+fi
+
 # A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp
 # unit dir, and stubs for systemctl/loginctl that only log their arguments.
 # The stub reports every unit as active, so no port probing reaches the
@@ -7304,6 +7427,9 @@ _svc_reg_sandbox() {
 }
 _svc_reg() {
     local d="$1"; shift
+    # The docker AI stack's ownership marker lives in the operator's config:
+    # point is-active at the sandbox so a migrated host cannot change these tests.
+    AUTOOS_AI_STACK_CONFIG="${AUTOOS_AI_STACK_CONFIG:-$d/ai-stack}" \
     PATH="$d/bin:$PATH" AUTOOS_SYSTEMD_USER_DIR="$d/units" AUTOOS_OMNIROUTE_ENV="$d/omniroute.env" \
         AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" AUTOOS_LOGINCTL="$d/bin/fake-loginctl" \
         bash "$ROOT/configuration/autostart/register-autostart.sh" "$@" 2>&1
@@ -8067,6 +8193,669 @@ if it "svc: docs/web-services.md lists every service port and no real host"; the
     fi
     grep -qE '[a-z0-9-]\.(com|net|org|de)\b' docs/web-services.md && { ok=0; echo "a real domain in the doc" >&2; }
     if (( ok )); then pass; else fail "web-services.md incomplete or leaking"; fi
+fi
+
+# ─── Docker AI stack (server profile, lane S) ──────────────────────────────
+# Every test name carries "aistack" so `--filter aistack` reaches all of them.
+# Nothing here starts a container: docker and systemctl are stubs that log.
+AISTACK="$ROOT/configuration/docker/ai-stack"
+
+_aistack_sandbox() {
+    local d t
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/home/.config/opencode" "$d/repo" "$d/code"
+    # Stateful stand-ins (tests/helpers/aistack_fake.sh): docker, systemctl,
+    # ss, curl, sleep, the omniroute CLI, register-autostart.sh and
+    # start-stack.sh answer from files in $d and log their arguments. Nothing
+    # reaches the daemon, the user manager or the network.
+    for t in docker systemctl ss curl sleep omniroute register start-stack; do
+        printf '#!/bin/sh\nexec bash "%s/tests/helpers/aistack_fake.sh" "%s" %s "$@"\n' "$ROOT" "$d" "$t" >"$d/bin/$t"
+        chmod +x "$d/bin/$t"
+    done
+    mv "$d/bin/systemctl" "$d/bin/fake-systemctl"
+    mv "$d/bin/register" "$d/bin/fake-register"
+    mv "$d/bin/start-stack" "$d/bin/fake-start-stack"
+    printf 'omniroute: sk-test-client-key\n' >"$d/repo/api-keys.yml"
+    printf '%s' "$d"
+}
+# _aistack <sandbox> [NAME=value...] <ai-stack.sh args...>
+_aistack() {
+    local d="$1" extra=()
+    shift
+    while (( $# )) && [[ "$1" == [A-Z]*=* ]]; do extra+=("$1"); shift; done
+    env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
+        -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
+        HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
+        AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
+        AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
+        AUTOOS_OPENHANDS_DIR="$d/home/.openhands" XDG_CONFIG_HOME="$d/home/.config" \
+        AUTOOS_REGISTER_AUTOSTART="$d/bin/fake-register" AUTOOS_START_STACK="$d/bin/fake-start-stack" \
+        "${extra[@]}" bash "${_AISTACK_SH:-$AISTACK/ai-stack.sh}" "$@" 2>&1
+}
+# _aistack_native <sandbox>: a host before the move - both units registered
+# and active, a gateway state dir, the firewall unit up, images present.
+_aistack_native() {
+    local d="$1" u
+    for u in autoos-omniroute autoos-opencode coding-agents-fw; do : >"$d/unit-$u"; : >"$d/active-$u"; done
+    mkdir -p "$d/home/.omniroute"
+    printf 'STORAGE_ENCRYPTION_KEY=test\n' >"$d/home/.omniroute/.env"
+    printf 'native-db\n' >"$d/home/.omniroute/storage.sqlite"
+    : >"$d/image-exists"
+}
+# _aistack_migrated <sandbox>: a host after a completed migrate.
+_aistack_migrated() {
+    local d="$1" c
+    mkdir -p "$d/cfg" "$d/data/omniroute"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\n" >"$d/cfg/stack.env"
+    printf 'owner=docker by=migrate\n' >"$d/cfg/stack.active"
+    for c in autoos-omniroute autoos-opencode openhands-app; do : >"$d/run-$c"; : >"$d/compose-$c"; done
+    : >"$d/unit-coding-agents-fw"; : >"$d/active-coding-agents-fw"
+    printf 'container-db\n' >"$d/data/omniroute/storage.sqlite"
+}
+# _aistack_seq <log> <needle...>: every needle appears, in this order.
+_aistack_seq() {
+    python3 - "$@" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read() if sys.argv[1] != "-" else sys.stdin.read()
+at = 0
+for needle in sys.argv[2:]:
+    i = text.find(needle, at)
+    if i < 0:
+        print("missing (in order): %r after offset %d" % (needle, at), file=sys.stderr)
+        sys.exit(1)
+    at = i + len(needle)
+PY
+}
+
+if it "aistack: compose template keeps the hardening contract"; then
+    out="$(python3 "$ROOT/tests/helpers/check_compose.py" "$AISTACK/compose.yml" 2>&1)" && rc=0 || rc=$?
+    if (( rc == 0 )); then pass; else fail "$out"; fi
+fi
+
+if it "aistack: the opencode layer builds on a digest-pinned V2 image, never V1"; then
+    ok=1
+    f="$AISTACK/opencode.Dockerfile"
+    grep -qE '^FROM ghcr\.io/anomalyco/opencode:2\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$' "$f" || { ok=0; echo "FROM not pinned V2" >&2; }
+    grep -q 'opencode-ai' "$f" && { ok=0; echo "V1 package referenced" >&2; }
+    grep -qE '^RUN apk add --no-cache .*\bgit\b.*\bbash\b.*\bnodejs\b' "$f" || { ok=0; echo "agent tools missing" >&2; }
+    if (( ok )); then pass; else fail "opencode layer is not pinned V2"; fi
+fi
+
+if it "aistack: the env example carries no real value"; then
+    ok=1
+    [[ -f "$AISTACK/stack.env.example" ]] || { ok=0; echo "missing" >&2; }
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        v="${line#*=}"
+        [[ -z "$v" || "$v" == REPLACE_WITH_* || "$v" =~ ^[0-9]+[mg]?$ || "$v" == 0.0.0.0 || "$v" == /* ]] \
+            || { ok=0; echo "suspicious: $line" >&2; }
+        [[ "$v" == /home/* ]] && { ok=0; echo "home path: $line" >&2; }
+    done <"$AISTACK/stack.env.example"
+    if (( ok )); then pass; else fail "stack.env.example must stay generic"; fi
+fi
+
+if it "aistack: --dry-run init prints the plan and writes nothing"; then
+    d="$(_aistack_sandbox)"
+    out="$(_aistack "$d" --dry-run init)"
+    ok=1
+    [[ -e "$d/cfg" || -e "$d/data" ]] && { ok=0; echo "created a directory" >&2; }
+    [[ "$out" == *"dry run"* ]] || { ok=0; echo "no dry-run banner" >&2; }
+    [[ "$out" == *"would write $d/cfg/stack.env"* ]] || { ok=0; echo "stack.env not announced: $out" >&2; }
+    [[ "$out" == *"would write $d/cfg/opencode.env"* ]] || { ok=0; echo "opencode.env not announced" >&2; }
+    [[ "$out" == *"sk-test-client-key"* ]] && { ok=0; echo "printed a key" >&2; }
+    grep -qE 'compose|run|pull|build' "$d/docker.log" 2>/dev/null && { ok=0; echo "called docker" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dry run had side effects"; fi
+fi
+
+if it "aistack: init twice: 0600 env files, the second run skips, user values survive"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf '# mine\nOPENCODE_PASSWORD=operator-chosen\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
+    first="$(_aistack "$d" init)"
+    second="$(_aistack "$d" init)"
+    ok=1
+    for f in stack.env opencode.env openhands.env; do
+        [[ "$(stat -c %a "$d/cfg/$f")" == 600 ]] || { ok=0; echo "$f not 600" >&2; }
+    done
+    grep -q '^OPENCODE_PASSWORD=operator-chosen$' "$d/cfg/opencode.env" || { ok=0; echo "password overwritten" >&2; }
+    grep -q '^MY_EXTRA=keep$' "$d/cfg/opencode.env" || { ok=0; echo "extra line lost" >&2; }
+    grep -q '^# mine$' "$d/cfg/opencode.env" || { ok=0; echo "comment lost" >&2; }
+    grep -q "^AUTOOS_OMNIROUTE_KEY='sk-test-client-key'$" "$d/cfg/opencode.env" || { ok=0; echo "client key not added" >&2; }
+    grep -q "^LLM_API_KEY='sk-test-client-key'$" "$d/cfg/openhands.env" || { ok=0; echo "openhands key missing" >&2; }
+    compgen -G "$d/cfg/opencode.env.autoos-backup-*" >/dev/null || { ok=0; echo "no backup of the user's file" >&2; }
+    grep -q "^AUTOOS_CODE_DIR='$d/code'$" "$d/cfg/stack.env" || { ok=0; echo "code dir not recorded" >&2; }
+    [[ -d "$d/data/omniroute" && -d "$d/data/opencode-home" ]] || { ok=0; echo "data dirs missing" >&2; }
+    [[ "$second" == *"(skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$second" == *"+ "* ]] && { ok=0; echo "second run changed something: $second" >&2; }
+    [[ "$first$second" == *"sk-test-client-key"* ]] && { ok=0; echo "printed a key" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "init is not idempotent read-modify-write"; fi
+fi
+
+if it "aistack: init reuses the pinned opencode-serve password so phone logins survive"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/home/.config/autoos"
+    printf 'phone-pass\n' >"$d/home/.config/autoos/opencode-serve.password"
+    _aistack "$d" init >/dev/null
+    if grep -q "^OPENCODE_PASSWORD='phone-pass'$" "$d/cfg/opencode.env"; then pass; else fail "password not carried over"; fi
+    rm -rf "$d"
+fi
+
+if it "aistack: the container opencode config reaches the gateway by name"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/code/repo"
+    cat >"$d/src.json" <<JSON
+{"model":"omniroute/t1-orchestrator",
+ "provider":{"omniroute":{"options":{"baseURL":"http://127.0.0.1:20128/v1","apiKey":"{env:AUTOOS_OMNIROUTE_KEY}"}},
+             "litellm":{"options":{"baseURL":"http://127.0.0.1:4000/v1"}},
+             "ollama":{"options":{"baseURL":"http://127.0.0.1:11434/v1"}},
+             "meta":{"options":{"baseURL":"https://api.example.invalid/v1","apiKey":"{env:META_API_KEY}"}}},
+ "providers":{"omniroute":{"settings":{"baseURL":"http://localhost:20128/v1"}},"litellm":{"settings":{"baseURL":"http://127.0.0.1:4000/v1"}}},
+ "mcp":{"serena":{"type":"local","command":["uvx","serena"],"enabled":true},
+        "omnigraph":{"type":"local","command":["npx","-y","x"],"enabled":true,"environment":{"OMNIGRAPH_BASE_URL":"http://localhost:8080"}},
+        "playwright":{"type":"local","command":["npx","-y","@playwright/mcp"],"enabled":true},
+        "graphify":{"type":"local","command":["uvx","graphify"],"enabled":true}},
+ "instructions":["$d/code/repo/AGENTS.md","/elsewhere/SKILL.md"]}
+JSON
+    out1="$(python3 "$ROOT/tools/render-opencode-container-config.py" --source "$d/src.json" --out "$d/out.json" --code-dir "$d/code" 2>&1)"
+    out2="$(python3 "$ROOT/tools/render-opencode-container-config.py" --source "$d/src.json" --out "$d/out.json" --code-dir "$d/code" 2>&1)"
+    got="$(python3 - "$d/out.json" "$d/code" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+p, v2, m = c["provider"], c["providers"], c["mcp"]
+print(p["omniroute"]["options"]["baseURL"], v2["omniroute"]["settings"]["baseURL"],
+      sorted(p), sorted(v2), m["serena"].get("type"), m["serena"].get("url"),
+      m["omnigraph"]["environment"]["OMNIGRAPH_BASE_URL"], m["playwright"]["enabled"],
+      m["graphify"]["enabled"], [i.replace(sys.argv[2], "CODE") for i in c["instructions"]],
+      p["omniroute"]["options"]["apiKey"])
+PY
+)"
+    assert_eq "$got|$([[ "$out1" == *"litellm"* && "$out2" == *"unchanged"* ]] && echo reported)" \
+        "http://omniroute:20128/v1 http://omniroute:20128/v1 ['meta', 'omniroute'] ['omniroute'] remote http://serena-mcp:9121/sse http://host.docker.internal:8080 False True ['CODE/repo/AGENTS.md'] {env:AUTOOS_OMNIROUTE_KEY}|reported"
+    rm -rf "$d"
+fi
+
+if it "aistack: server profile runs the docker stack, workstation keeps the native installs"; then
+    got="$(python3 - <<'PY'
+import json
+comps = {c["id"]: c for g in json.load(open("catalog/linux.json", encoding="utf-8"))["categories"] for c in g["components"]}
+s = comps.get("ai-stack-docker", {})
+out = [
+    "server" in s.get("profiles", []),
+    "workstation" not in s.get("profiles", []),
+    "docker" in s.get("requires", []),
+    s.get("provider") == "custom" and s.get("postInstall") == "install_ai_stack",
+    # The host CLI stays: apply.sh manages the container through it. The
+    # docker run OpenHands (a :latest pull) is replaced by the compose one.
+    "server" in comps["omniroute"]["profiles"],
+    "server" not in comps["openhands-docker"]["profiles"],
+    "workstation" in comps["omniroute"]["profiles"],
+    "workstation" in comps["openhands-docker"]["profiles"],
+]
+print(" ".join(str(x) for x in out))
+PY
+)"
+    assert_eq "$got" "True True True True True True True True"
+fi
+
+if it "aistack: installer announces the plan in dry run and detects the running stack"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    out="$( ( AUTOOS_DRY_RUN=1; AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; AUTOOS_AI_STACK_DATA="$d/data"
+              HOME="$d/home"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG AUTOOS_AI_STACK_DATA HOME; install_ai_stack ) 2>&1)"
+    [[ "$out" == *"would write"*"stack.env"* ]] || { ok=0; echo "plan not shown: $out" >&2; }
+    [[ -e "$d/cfg" ]] && { ok=0; echo "dry run wrote config" >&2; }
+    ( AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG
+      custom_is_installed ai-stack-docker ) && { ok=0; echo "detected without a container" >&2; }
+    # A leftover gateway container (a failed migrate) is not an installed stack.
+    mkdir -p "$d/cfg"; : >"$d/cfg/stack.env"; : >"$d/container-exists"; : >"$d/compose-autoos-omniroute"
+    ( AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG
+      custom_is_installed ai-stack-docker ) && { ok=0; echo "a stopped leftover container read as installed" >&2; }
+    printf 'owner=docker by=migrate\n' >"$d/cfg/stack.active"
+    ( AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG
+      custom_is_installed ai-stack-docker ) || { ok=0; echo "running stack not detected" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "installer dry run / detection is wrong"; fi
+fi
+
+if it "aistack: migrate without --yes is the announced plan and touches nothing"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/home/.omniroute"; printf 'STORAGE_ENCRYPTION_KEY=x\n' >"$d/home/.omniroute/.env"
+    out="$(_aistack "$d" migrate)"
+    ok=1
+    # Order is the contract: refuse early, stop (quiescent DB), back up, copy,
+    # start, prove - every service - then claim (marker) and only then
+    # disable the native units.
+    python3 - "$out" <<'PY' || ok=0
+import sys
+out = sys.argv[1]
+steps = ["refuses", "stop the autoos-omniroute unit", "back up", "copy", "start the omniroute container",
+         "answers", "autoos-opencode", "openhands", "stack.active", "unregister autoos-omniroute"]
+pos = [out.find(s) for s in steps]
+if -1 in pos or pos != sorted(pos):
+    print("plan order wrong:", list(zip(steps, pos)), file=sys.stderr)
+    sys.exit(1)
+PY
+    [[ "$out" == *"--yes"* ]] || { ok=0; echo "no hint how to run it" >&2; }
+    [[ -e "$d/data" || -e "$d/cfg" ]] && { ok=0; echo "created state" >&2; }
+    [[ -e "$d/systemctl.log" ]] && { ok=0; echo "called systemctl" >&2; }
+    grep -qE 'compose|rm|stop' "$d/docker.log" 2>/dev/null && { ok=0; echo "called docker" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "migrate plan is wrong or had side effects"; fi
+fi
+
+if it "aistack: rollback without --yes is the announced plan and touches nothing"; then
+    d="$(_aistack_sandbox)"
+    out="$(_aistack "$d" rollback)"
+    ok=1
+    [[ "$out" == *"register-autostart.sh"* && "$out" == *"--yes"* ]] || { ok=0; echo "plan: $out" >&2; }
+    [[ -e "$d/systemctl.log" ]] && { ok=0; echo "called systemctl" >&2; }
+    grep -qE 'compose' "$d/docker.log" 2>/dev/null && { ok=0; echo "called docker compose" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rollback plan is wrong or had side effects"; fi
+fi
+
+if it "aistack: register-autostart leaves the gateway and opencode units alone once docker owns them"; then
+    d="$(_svc_reg_sandbox)"
+    s="$(_aistack_sandbox)"
+    _aistack_migrated "$s"
+    out="$(AUTOOS_DOCKER="$s/bin/docker" AUTOOS_AI_STACK_CONFIG="$s/cfg" _svc_reg "$d")"
+    ok=1
+    [[ -e "$d/units/autoos-omniroute.service" || -e "$d/units/autoos-opencode.service" ]] && { ok=0; echo "wrote a native unit" >&2; }
+    [[ -e "$d/units/autoos-litellm.service" ]] || { ok=0; echo "litellm unit should still be written" >&2; }
+    [[ "$out" == *"docker AI stack"* ]] || { ok=0; echo "not explained: $out" >&2; }
+    rm -rf "$d" "$s"
+    if (( ok )); then pass; else fail "register-autostart would start a second gateway"; fi
+fi
+
+if it "aistack: the resume script brings up the compose stack instead of the native units"; then
+    ok=1
+    f="$ROOT/configuration/autostart/Start-AutoOSStack.sh"
+    grep -q 'configuration/docker/ai-stack/ai-stack.sh' "$f" || { ok=0; echo "stack script not referenced" >&2; }
+    grep -q '"$AI_STACK" is-active' "$f" || { ok=0; echo "no is-active branch" >&2; }
+    grep -q '"$AI_STACK" up' "$f" || { ok=0; echo "no compose resume" >&2; }
+    if (( ok )); then pass; else fail "Start-AutoOSStack.sh ignores the docker stack"; fi
+fi
+
+if it "aistack: apply.sh manages a containerised gateway with the manage key, never a host restart"; then
+    ok=1
+    f="$ROOT/configuration/omniroute/apply.sh"
+    grep -q 'manage.key' "$f" || { ok=0; echo "manage key not used" >&2; }
+    grep -q '"$AI_STACK" is-active' "$f" || { ok=0; echo "no stack detection" >&2; }
+    grep -q '"$AI_STACK" up omniroute' "$f" || { ok=0; echo "a down container gateway is not resumed" >&2; }
+    if (( ok )); then pass; else fail "apply.sh cannot manage the container"; fi
+fi
+
+# ─── Review findings 2026-09-25 (gemini-3.8-flash + deepseek-v4.1-flash) ────
+# migrate/rollback/up run for real here, against the stateful fakes above.
+
+if it "aistack: is-active needs the completed-migration marker, not a leftover container"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    : >"$d/compose-autoos-omniroute"; : >"$d/container-exists"
+    ok=1
+    _aistack "$d" is-active >/dev/null && { ok=0; echo "a stopped leftover container reads as active" >&2; }
+    : >"$d/run-autoos-omniroute"
+    _aistack "$d" is-active >/dev/null && { ok=0; echo "a running container without the marker reads as active" >&2; }
+    printf 'owner=docker by=migrate\n' >"$d/cfg/stack.active"
+    _aistack "$d" is-active >/dev/null || { ok=0; echo "the marker does not make the stack active" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "is-active trusts a container instead of the marker"; fi
+fi
+
+if it "aistack: a failed gateway move removes the container and hands :20128 back"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/unhealthy-omniroute"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    grep -q 'rm -s -f omniroute' "$d/docker.log" || { ok=0; echo "failed container not removed: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/compose-autoos-omniroute" || -e "$d/run-autoos-omniroute" ]] && { ok=0; echo "container left behind" >&2; }
+    [[ -e "$d/active-autoos-omniroute" && -e "$d/unit-autoos-omniroute" ]] || { ok=0; echo "native gateway not back" >&2; }
+    [[ -e "$d/active-autoos-opencode" ]] || { ok=0; echo "opencode was touched" >&2; }
+    grep -q 'up -d --no-deps opencode' "$d/docker.log" && { ok=0; echo "went on to opencode" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker written" >&2; }
+    _aistack "$d" is-active >/dev/null && { ok=0; echo "reads as active afterwards" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed migrate leaves a container that reads as active"; fi
+fi
+
+if it "aistack: rollback replaces ~/.omniroute with the container state, no stale WAL survives"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    mkdir -p "$d/home/.omniroute"
+    printf 'old-db\n' >"$d/home/.omniroute/storage.sqlite"
+    printf 'stale-wal\n' >"$d/home/.omniroute/storage.sqlite-wal"
+    printf 'stale-shm\n' >"$d/home/.omniroute/storage.sqlite-shm"
+    out="$(_aistack "$d" rollback --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rollback failed: $out" >&2; }
+    [[ "$(cat "$d/home/.omniroute/storage.sqlite" 2>/dev/null)" == container-db ]] || { ok=0; echo "DB not restored" >&2; }
+    [[ -e "$d/home/.omniroute/storage.sqlite-wal" || -e "$d/home/.omniroute/storage.sqlite-shm" ]] \
+        && { ok=0; echo "stale WAL/SHM kept next to the restored DB" >&2; }
+    backup="$(compgen -G "$d/data/backups/omniroute-native-*.tar.gz" | head -n1)"
+    [[ -n "$backup" ]] && tar -tzf "$backup" | grep -q 'storage.sqlite-wal' || { ok=0; echo "no full backup" >&2; }
+    aside="$(compgen -G "$d/home/.omniroute.autoos-backup-*" | head -n1)"
+    [[ -n "$aside" && -e "$aside/storage.sqlite-wal" ]] || { ok=0; echo "previous dir not kept aside" >&2; }
+    compgen -G "$d/home/.omniroute.autoos-staging-*" >/dev/null && { ok=0; echo "staging dir left" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker kept after rollback" >&2; }
+    grep -q -- '--only autoos-omniroute,autoos-opencode' "$d/register.log" || { ok=0; echo "units not re-registered" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rollback overlays the old gateway dir"; fi
+fi
+
+if it "aistack: migrate stops nothing when the manage key cannot be created"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/omni-key-fails"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "migrate went on without a manage key" >&2; }
+    [[ "$out" == *"manage.key"* ]] || { ok=0; echo "no hint: $out" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "stopped a unit" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "started a container" >&2; }
+    [[ -e "$d/active-autoos-omniroute" && -e "$d/active-autoos-opencode" ]] || { ok=0; echo "native service down" >&2; }
+    [[ -e "$d/cfg/manage.key" ]] && { ok=0; echo "empty key file written" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "migrate without a manage key"; fi
+fi
+
+if it "aistack: migrate refuses a second run once migrated and points at rollback"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    mkdir -p "$d/home/.omniroute"; printf 'stale-host-db\n' >"$d/home/.omniroute/storage.sqlite"
+    printf 'sk-manage\n' >"$d/cfg/manage.key"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    plan="$(_aistack "$d" migrate)"
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "second migrate ran" >&2; }
+    [[ "$out" == *"rollback --yes"* ]] || { ok=0; echo "no rollback hint: $out" >&2; }
+    [[ "$plan" == *"already migrated"* ]] || { ok=0; echo "plan does not say so" >&2; }
+    [[ "$(cat "$d/data/omniroute/storage.sqlite")" == container-db ]] || { ok=0; echo "container state overwritten" >&2; }
+    grep -qE 'compose .*(up|stop|rm)' "$d/docker.log" 2>/dev/null && { ok=0; echo "touched containers" >&2; }
+    [[ -e "$d/systemctl.log" ]] && grep -qE 'stop|start' "$d/systemctl.log" && { ok=0; echo "touched units" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "migrate would overwrite newer container state"; fi
+fi
+
+if it "aistack: migrate disables the native units only after all three services answered"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/exists-openhands-app"; : >"$d/run-openhands-app"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "migrate failed: $out" >&2; }
+    _aistack_seq "$d/events.log" "systemctl: --user stop autoos-omniroute.service" "docker: compose" "up -d --no-deps omniroute" \
+        "systemctl: --user stop autoos-opencode.service" "up -d --no-deps opencode" "docker: rm -f openhands-app" \
+        "start-stack: openhands" "register: --unregister --only autoos-omniroute,autoos-opencode" || ok=0
+    [[ "$(cat "$d/start-stack.log")" == *"migrating=1"* ]] || { ok=0; echo "openhands not started as the compose service" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] || { ok=0; echo "no marker after a completed migrate" >&2; }
+    [[ "$(cat "$d/data/omniroute/storage.sqlite")" == native-db ]] || { ok=0; echo "state not copied" >&2; }
+    [[ "$(stat -c %a "$(compgen -G "$d/data/backups/omniroute-*.tar.gz" | head -n1)")" == 600 ]] || { ok=0; echo "backup not 0600" >&2; }
+    _aistack "$d" is-active >/dev/null || { ok=0; echo "not active after migrate" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "migrate order is wrong"; fi
+fi
+
+if it "aistack: an opencode failure during migrate hands the gateway back too"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/fail-up-opencode"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    grep -q 'rm -s -f omniroute' "$d/docker.log" || { ok=0; echo "gateway container kept" >&2; }
+    grep -q 'rm -s -f opencode' "$d/docker.log" || { ok=0; echo "opencode container kept" >&2; }
+    for u in autoos-omniroute autoos-opencode; do
+        [[ -e "$d/active-$u" && -e "$d/unit-$u" ]] || { ok=0; echo "$u not handed back" >&2; }
+    done
+    grep -q -- '--unregister' "$d/register.log" 2>/dev/null && { ok=0; echo "a unit was unregistered" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker written" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a late failure leaves the gateway in docker"; fi
+fi
+
+if it "aistack: an openhands failure during migrate rolls the whole stack back to native"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/exists-openhands-app"; : >"$d/run-openhands-app"
+    : >"$d/fail-up-openhands"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    for s in omniroute opencode openhands; do
+        grep -q "rm -s -f $s" "$d/docker.log" || { ok=0; echo "$s container kept" >&2; }
+    done
+    for u in autoos-omniroute autoos-opencode; do
+        [[ -e "$d/active-$u" && -e "$d/unit-$u" ]] || { ok=0; echo "$u not handed back" >&2; }
+    done
+    # The docker run OpenHands it replaced is recreated (start-stack.sh, native mode).
+    _aistack_seq "$d/start-stack.log" "migrating=1" "migrating=0" || ok=0
+    [[ -e "$d/exists-openhands-app" ]] || { ok=0; echo "docker run openhands not recreated" >&2; }
+    grep -q -- '--unregister' "$d/register.log" 2>/dev/null && { ok=0; echo "a unit was unregistered" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker written" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an openhands failure leaves a half-migrated host"; fi
+fi
+
+if it "aistack: up and migrate refuse a LAN bind unless the firewall unit runs or LAN is allowed"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    _aistack_reset() { rm -f "$d"/run-* "$d"/compose-* "$d/docker.log" "$d/cfg/stack.active"; }
+    ok=1
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "LAN bind without firewall started" >&2; }
+    [[ "$out" == *"coding-agents-fw.service"* && "$out" == *"AUTOOS_STACK_ALLOW_LAN=1"* ]] || { ok=0; echo "refusal unexplained: $out" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "started containers" >&2; }
+    grep -q 'is-active coding-agents-fw.service' "$d/systemctl.log" || { ok=0; echo "firewall unit not checked" >&2; }
+    _aistack_reset
+    : >"$d/active-coding-agents-fw"
+    _aistack "$d" up >/dev/null || { ok=0; echo "refused although the firewall unit is active" >&2; }
+    grep -q 'up -d --no-deps omniroute opencode openhands' "$d/docker.log" || { ok=0; echo "not started with the firewall" >&2; }
+    _aistack_reset; rm -f "$d/active-coding-agents-fw"
+    printf 'AUTOOS_STACK_ALLOW_LAN=1\n' >>"$d/cfg/stack.env"
+    _aistack "$d" up >/dev/null || { ok=0; echo "explicit AUTOOS_STACK_ALLOW_LAN=1 refused" >&2; }
+    _aistack_reset
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    _aistack "$d" up >/dev/null || { ok=0; echo "loopback bind refused" >&2; }
+    rm -rf "$d"
+    # migrate: refused before anything stops.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    rm -f "$d/active-coding-agents-fw"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "migrate ran with an open LAN bind" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "migrate stopped a unit first" >&2; }
+    rm -rf "$d"
+    unset -f _aistack_reset
+    if (( ok )); then pass; else fail "the LAN bind is not guarded"; fi
+fi
+
+if it "aistack: the opencode image is rebuilt when its Dockerfile or base image changes"; then
+    d="$(_aistack_sandbox)"
+    t="$d/tree/configuration"
+    mkdir -p "$t/docker/ai-stack"
+    cp "$AISTACK/ai-stack.sh" "$AISTACK/compose.yml" "$AISTACK/opencode.Dockerfile" "$t/docker/ai-stack/"
+    cp "$ROOT/configuration/env-file.sh" "$t/"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    : >"$d/image-exists"; printf 'stale\n' >"$d/opencode-label"
+    ok=1
+    _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up opencode >/dev/null
+    first="$(cat "$d/opencode-label")"
+    grep -qE "^build --label org\.autoos\.opencode\.source=[0-9a-f]{64} -t autoos/opencode:" "$d/docker.log" \
+        || { ok=0; echo "stale image not rebuilt: $(cat "$d/docker.log")" >&2; }
+    rm -f "$d/docker.log" "$d/run-autoos-opencode"
+    _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up opencode >/dev/null
+    grep -q '^build' "$d/docker.log" && { ok=0; echo "rebuilt an up-to-date image" >&2; }
+    rm -f "$d/docker.log" "$d/run-autoos-opencode"
+    printf '# a changed layer\n' >>"$t/docker/ai-stack/opencode.Dockerfile"
+    _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up opencode >/dev/null
+    grep -q '^build' "$d/docker.log" || { ok=0; echo "a changed Dockerfile was not rebuilt" >&2; }
+    [[ "$(cat "$d/opencode-label")" != "$first" ]] || { ok=0; echo "label did not change" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the opencode image never rebuilds"; fi
+fi
+
+if it "aistack: init never writes a value with a line break into an env file"; then
+    d="$(_aistack_sandbox)"
+    out="$(_aistack "$d" AUTOOS_OMNIROUTE_KEY=$'sk-leak\nINJECTED=1' OMNIGRAPH_TOKEN=$'tok\rEVIL=1' init)"
+    ok=1
+    grep -qsE '^(INJECTED|EVIL)=' "$d/cfg/opencode.env" "$d/cfg/openhands.env" && { ok=0; echo "a line break injected a key" >&2; }
+    grep -qE '^(AUTOOS_OMNIROUTE_KEY|OMNIGRAPH_TOKEN)=' "$d/cfg/opencode.env" && { ok=0; echo "unsafe value written" >&2; }
+    grep -q '^LLM_API_KEY=' "$d/cfg/openhands.env" 2>/dev/null && { ok=0; echo "unsafe value written for openhands" >&2; }
+    grep -q $'\r' "$d/cfg/opencode.env" && { ok=0; echo "carriage return written" >&2; }
+    [[ "$out" == *"AUTOOS_OMNIROUTE_KEY"*"line break"* && "$out" == *"OMNIGRAPH_TOKEN"* ]] || { ok=0; echo "not warned: $out" >&2; }
+    [[ "$out" == *"sk-leak"* || "$out" == *"tok"$'\r'* ]] && { ok=0; echo "printed the value" >&2; }
+    grep -q '^OPENCODE_PASSWORD=' "$d/cfg/opencode.env" || { ok=0; echo "the safe keys were not written" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an env value with a line break reaches the file"; fi
+fi
+
+if it "aistack: apply.sh hands the manage key to the omniroute CLI only"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'sk-manage-secret\n' >"$d/cfg/manage.key"
+    out="$(env -u OMNIROUTE_API_KEY -u AUTOOS_OMNIROUTE_URL HOME="$d/home" PATH="$d/bin:$PATH" \
+        AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" --dry-run 2>&1)"
+    ok=1
+    [[ "$out" == *"manage-scoped key"* ]] || { ok=0; echo "docker mode not detected: $out" >&2; }
+    grep -qx omniroute "$d/saw-manage-key" 2>/dev/null || { ok=0; echo "the CLI did not get the key" >&2; }
+    grep -qx curl "$d/saw-manage-key" 2>/dev/null && { ok=0; echo "curl inherited the manage key" >&2; }
+    [[ "$out" == *"sk-manage-secret"* ]] && { ok=0; echo "printed the key" >&2; }
+    grep -qE '^[[:space:]]*export OMNIROUTE_API_KEY' "$ROOT/configuration/omniroute/apply.sh" && { ok=0; echo "exported script-wide" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the manage key leaks into every child process"; fi
+fi
+
+if it "aistack: init keeps the data dir and the opencode home private (0700)"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/data/opencode-home"; chmod 755 "$d/data" "$d/data/opencode-home"
+    _aistack "$d" init >/dev/null
+    got="$(stat -c %a "$d/data" "$d/data/opencode-home" "$d/data/omniroute" | tr '\n' ' ')"
+    rm -rf "$d"
+    assert_eq "$got" "700 700 700 "
+fi
+
+# Re-review 2026-09-25 (cross-company): marker order, recreate guard, the
+# effective bind, the pinned FROM the rebuild hash relies on.
+if it "aistack: migrate writes the marker before unregistering and drops it on a later failure"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    _aistack "$d" migrate --yes >/dev/null || { ok=0; echo "migrate failed" >&2; }
+    # The stand-in logs the call, then the marker state it saw during it.
+    grep -A1 -- '--unregister --only autoos-omniroute,autoos-opencode' "$d/register.log" | grep -qx 'marker=yes' \
+        || { ok=0; echo "unregistered before the marker existed (rollback would refuse): $(cat "$d/register.log")" >&2; }
+    rm -rf "$d"
+    # The unregister fails: marker removed again, everything back to native.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/fail-register"
+    _aistack "$d" migrate --yes >/dev/null && { ok=0; echo "migrate reported success" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker left after the abort" >&2; }
+    for u in autoos-omniroute autoos-opencode; do
+        [[ -e "$d/active-$u" && -e "$d/unit-$u" ]] || { ok=0; echo "$u not handed back" >&2; }
+    done
+    for s in omniroute opencode openhands; do
+        grep -q "rm -s -f $s" "$d/docker.log" || { ok=0; echo "$s container kept" >&2; }
+    done
+    rm -rf "$d"
+    # The marker cannot be written: nothing is unregistered, all back to native.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    mkdir -p "$d/cfg/stack.active"
+    _aistack "$d" migrate --yes >/dev/null && { ok=0; echo "migrate reported success" >&2; }
+    grep -q -- '--unregister' "$d/register.log" 2>/dev/null && { ok=0; echo "unregistered without a marker" >&2; }
+    [[ -e "$d/active-autoos-omniroute" && -e "$d/active-autoos-opencode" ]] || { ok=0; echo "not handed back" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a marker failure can orphan the host"; fi
+fi
+
+if it "aistack: up guards the bind before recreating containers that already run"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/active-coding-agents-fw"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" up)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "up ran compose up on a LAN bind without the firewall" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up reached: $(grep 'up -d' "$d/docker.log")" >&2; }
+    [[ "$out" == *"coding-agents-fw.service"* ]] || { ok=0; echo "refusal unexplained: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a running container can be recreated on an unguarded bind"; fi
+fi
+
+if it "aistack: the guard and compose agree on the bind when the shell exports AUTOOS_STACK_BIND"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    # compose would publish on the exported 0.0.0.0, not the file's loopback.
+    _aistack "$d" AUTOOS_STACK_BIND=0.0.0.0 up >/dev/null && { ok=0; echo "exported LAN bind not guarded" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "started containers" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\n" >"$d/cfg/stack.env"
+    _aistack "$d" AUTOOS_STACK_BIND=127.0.0.1 up >/dev/null || { ok=0; echo "exported loopback refused" >&2; }
+    [[ "$(sort -u "$d/compose-bind.log")" == "bind=127.0.0.1" ]] \
+        || { ok=0; echo "compose saw another bind: $(sort -u "$d/compose-bind.log" | tr '\n' ' ')" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    _aistack "$d" up >/dev/null || { ok=0; echo "file loopback refused" >&2; }
+    [[ "$(sort -u "$d/compose-bind.log")" == "bind=127.0.0.1" ]] || { ok=0; echo "compose not given the file's bind" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the guarded bind and the published bind can differ"; fi
+fi
+
+if it "aistack: every FROM in opencode.Dockerfile is digest-pinned, or the rebuild hash is blind"; then
+    # The rebuild label hashes the Dockerfile text: a tag-only FROM could move
+    # underneath an unchanged text and the stale layer would never rebuild.
+    f="$AISTACK/opencode.Dockerfile"
+    froms="$(grep -ciE '^[[:space:]]*FROM[[:space:]]' "$f")"
+    pinned="$(grep -cE '^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]{64}([[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+)?[[:space:]]*$' "$f")"
+    if (( froms >= 1 && froms == pinned )); then pass; else fail "$pinned of $froms FROM lines are @sha256:-pinned in $f"; fi
+fi
+
+if it "aistack: a failed backup leaves no partial archive and hands the service back"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    # tar that writes half an archive, then fails (disk full).
+    cat >"$d/bin/tar" <<'STUB'
+#!/bin/sh
+prev=""
+for a in "$@"; do
+    case "$prev" in -czf|-f) printf 'partial' >"$a" ;; esac
+    prev="$a"
+done
+exit 2
+STUB
+    chmod +x "$d/bin/tar"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    compgen -G "$d/data/backups/*.tar.gz" >/dev/null && { ok=0; echo "partial archive kept: $(ls "$d/data/backups")" >&2; }
+    [[ -e "$d/active-autoos-omniroute" ]] || { ok=0; echo "gateway not handed back" >&2; }
+    # rollback: the host dir is backed up before anything stops, so the same
+    # failure leaves the running stack alone.
+    d2="$(_aistack_sandbox)"
+    _aistack_migrated "$d2"
+    mkdir -p "$d2/home/.omniroute"; printf 'old-db\n' >"$d2/home/.omniroute/storage.sqlite"
+    cp "$d/bin/tar" "$d2/bin/tar"
+    out="$(_aistack "$d2" rollback --yes)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "rollback reported success" >&2; }
+    compgen -G "$d2/data/backups/*.tar.gz" >/dev/null && { ok=0; echo "partial rollback archive kept" >&2; }
+    [[ "$(cat "$d2/home/.omniroute/storage.sqlite")" == old-db ]] || { ok=0; echo "host state changed without a backup" >&2; }
+    grep -qE 'compose .*(down|stop|rm)' "$d2/docker.log" 2>/dev/null && { ok=0; echo "stopped the stack before the backup" >&2; }
+    [[ -e "$d2/run-autoos-omniroute" && -e "$d2/cfg/stack.active" ]] || { ok=0; echo "stack or marker gone" >&2; }
+    rm -rf "$d" "$d2"
+    if (( ok )); then pass; else fail "a failed backup leaves a partial archive"; fi
 fi
 
 # ─── shellcheck (optional) ──────────────────────────────────────────────────

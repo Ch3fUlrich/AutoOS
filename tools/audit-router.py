@@ -43,6 +43,45 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+
+def litellm_key(env_path=None):
+    """Return the LiteLLM master key from the environment or the .env file.
+
+    Priority:
+      1. LITELLM_MASTER_KEY env var (non-empty)
+      2. AUTOOS_LITELLM_API_KEY env var (non-empty)
+      3. The value of LITELLM_MASTER_KEY from *env_path* (default:
+         ROOT/configuration/litellm/.env), ignoring comments, blank lines, and
+         placeholder values whose content starts with ``REPLACE_WITH_``.
+
+    Never prints or logs the value.
+    """
+    for var in ("LITELLM_MASTER_KEY", "AUTOOS_LITELLM_API_KEY"):
+        val = os.environ.get(var, "")
+        if val:
+            return val
+    if env_path is None:
+        env_path = ROOT / "configuration" / "litellm" / ".env"
+    try:
+        text = Path(env_path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if key == "LITELLM_MASTER_KEY":
+            if value and not value.startswith("REPLACE_WITH_"):
+                return value
+            return ""
+    return ""
+
+
 # Provider-qualified refs that bypass a combo. Every one of these binds to a
 # provider directly, so a throttled or unfunded connection surfaces as the
 # user-visible error instead of the chain hopping. The free-tier `gemini`
@@ -155,8 +194,7 @@ def resilience_config() -> dict | None:
 
 
 def probe_litellm(model: str, timeout: int = 180) -> tuple[object, str]:
-    key = (os.environ.get("LITELLM_MASTER_KEY", "")
-           or os.environ.get("AUTOOS_LITELLM_API_KEY", ""))
+    key = litellm_key()
     return _chat("http://127.0.0.1:4000", model, key, timeout)
 
 

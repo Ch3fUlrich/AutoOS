@@ -87,9 +87,10 @@ Retired old-scheme ids (`tier1`, `tier1-clean`, `tier2`, `tier2-clean`,
 `tier3`, `tier3-clean`, `rag`, `tier1-paid`, `tier2-paid`, `tier3-paid`,
 `tier2-credit`, `tier3-credit` — not the new `t*-orchestrator-paid` groups,
 which are live) were deleted from the live store 2026-09-24 (verified:
-store holds only the new ids + built-ins). `apply.*` only ever creates
-combos from `combos.json`, never deletes or re-adds — and both suites assert
-the exact combo name list plus an explicit retired-ids regression test, so a
+store holds only the new ids + built-ins). `apply.*` creates combos from
+`combos.json` and prunes exactly the ids listed in its `"retired"` array,
+never any other store combo — and both suites assert the exact combo name
+list plus a retired-ids regression test (read from that array), so a
 resurrection fails CI before it reaches any gateway.
 
 ## C. LiteLLM-only groups (no gateway combo — manual fallback only)

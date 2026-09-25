@@ -39,8 +39,21 @@ serve_ok() {
 
 mkdir -p "$STATE_DIR"
 
+# 0. The docker AI stack (server profile, ai-stack.sh migrate) owns the
+#    gateway, opencode serve and OpenHands: resume it (a no-op for running
+#    containers) and skip the native branches for those three.
+AI_STACK="$ROOT/configuration/docker/ai-stack/ai-stack.sh"
+IN_DOCKER=0
+if bash "$AI_STACK" is-active >/dev/null 2>&1; then
+    IN_DOCKER=1
+    echo "Docker AI stack owns the gateway, opencode serve and OpenHands - resuming it."
+    bash "$AI_STACK" up || echo "Docker AI stack did not fully come up - see: $AI_STACK status"
+fi
+
 # 1. Gateway first: everything else routes through it.
-if gateway_ok; then
+if [[ $IN_DOCKER -eq 1 ]]; then
+    :
+elif gateway_ok; then
     echo "Gateway already up on 20128 - nothing to do."
 elif unit_installed autoos-omniroute; then
     echo "Starting the autoos-omniroute unit..."
@@ -78,7 +91,9 @@ fi
 # 3. OpenHands container: restart only when it exists and is not running.
 #    (Created with --restart unless-stopped, so docker itself resumes it at
 #    boot; this covers a container stopped by hand or an older --rm one.)
-if ! command -v docker >/dev/null; then
+if [[ $IN_DOCKER -eq 1 ]]; then
+    :
+elif ! command -v docker >/dev/null; then
     echo "docker is not on PATH - skipping the OpenHands container."
 else
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app'; then
@@ -93,7 +108,9 @@ else
 fi
 
 # 4. opencode serve on :4096 (password-protected web UI for the phone).
-if serve_ok; then
+if [[ $IN_DOCKER -eq 1 ]]; then
+    :
+elif serve_ok; then
     echo "opencode serve already up on :4096 - nothing to do."
 elif unit_installed autoos-opencode; then
     echo "Starting the autoos-opencode unit..."

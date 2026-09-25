@@ -2,8 +2,10 @@
 # Apply the AutoOS router configuration to OmniRoute:
 #   1. registers every provider key found in configuration/api-keys.yml
 #   2. (re)creates the tier combos from configuration/omniroute/combos.json
+#   3. prunes the combos listed there as "retired" from the store (only those)
 #
-# Safe to re-run: providers are add-or-update, combos are replaced in place.
+# Safe to re-run: providers are add-or-update, combos are replaced in place,
+# and a retired combo that is already gone is simply not found again.
 # Model refs the live catalog does not know are skipped with a warning, so a
 # renamed upstream model degrades one tier leg instead of breaking the run.
 #
@@ -104,10 +106,44 @@ while IFS=$'\t' read -r key_name provider_id data_json; do
     fi
 done <<<"$provider_rows"
 
+# Docker AI stack (server profile): the gateway is the autoos-omniroute
+# container. The CLI's machine token is accepted from loopback peers only and
+# a published port sees the docker gateway as the peer, so management goes
+# through the manage-scoped key ai-stack.sh migrate created (host-only file).
+# The key goes to the omniroute CLI only (omni below), never into this
+# script's environment: curl, python and the probe must not inherit it.
+AI_STACK="$ROOT/configuration/docker/ai-stack/ai-stack.sh"
+IN_DOCKER=0
+MANAGE_KEY=""
+if [[ -z "${AUTOOS_OMNIROUTE_URL:-}" ]] && bash "$AI_STACK" is-active >/dev/null 2>&1; then
+    IN_DOCKER=1
+    MANAGE_KEY_FILE="${AUTOOS_AI_STACK_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/autoos/ai-stack}/manage.key"
+    if [[ -z "${OMNIROUTE_API_KEY:-}" && -s "$MANAGE_KEY_FILE" ]]; then
+        MANAGE_KEY="$(tr -d '\r\n' <"$MANAGE_KEY_FILE")"
+        echo "Gateway runs in docker - the CLI manages it with the manage-scoped key ($MANAGE_KEY_FILE)."
+    elif [[ -z "${OMNIROUTE_API_KEY:-}" ]]; then
+        echo "Gateway runs in docker but $MANAGE_KEY_FILE is missing - provider and combo changes will be refused."
+        echo "  Create a key with scope 'manage' in the dashboard and save it there (mode 600)."
+    fi
+fi
+# omni: the omniroute CLI, with the manage key in ITS environment only (an
+# assignment prefix, never argv - `ps` would show argv).
+omni() {
+    if [[ -n "$MANAGE_KEY" ]]; then
+        OMNIROUTE_API_KEY="$MANAGE_KEY" command omniroute "$@"
+    else
+        command omniroute "$@"
+    fi
+}
+
 gateway_up() { curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1; }
 if ! gateway_up; then
     if [[ $DRY -eq 1 ]]; then
         echo "Gateway is down; dry run continues with the static plan (would start it with: omniroute --no-open --port 20128)."
+    elif [[ $IN_DOCKER -eq 1 ]]; then
+        echo "Starting the gateway container…"
+        bash "$AI_STACK" up omniroute
+        gateway_up || { echo "Gateway did not start — run: $AI_STACK status"; exit 1; }
     else
         echo "Starting OmniRoute (background)…"
         nohup omniroute --no-open --port 20128 >/tmp/omniroute-apply.log 2>&1 &
@@ -135,7 +171,7 @@ register_provider() {
     fi
     # Subshell export, not `env VAR=value`: env would put the key in argv,
     # where `ps` can read it for the lifetime of the call.
-    if ( export "$var=$value"; omniroute providers add "$provider_id" \
+    if ( export "$var=$value"; omni providers add "$provider_id" \
             --credential-env "$var" "${data_args[@]}" --yes ) >/dev/null 2>&1; then
         echo "  + $provider_id registered"
     else
@@ -150,7 +186,7 @@ echo "Providers:"
 # key file alone instead of from whatever else answers the CLI.
 existing_ids=""
 if gateway_up; then
-    existing_ids="$(omniroute providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9-]+' | grep -oE '[a-z0-9-]+$' || true)"
+    existing_ids="$(omni providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9-]+' | grep -oE '[a-z0-9-]+$' || true)"
 fi
 for entry in "${PROVIDER_MAP[@]}"; do
     if grep -qxF "${entry#*:}" <<<"$existing_ids"; then
@@ -197,7 +233,7 @@ MAX_WAIT_MS=180000
 BREAKER_THRESHOLD=2
 omni_json() {
     # The CLI prints "Loaded env" banners on stdout before the JSON document.
-    (cd "$HOME" && omniroute --output json --no-color "$@" 2>/dev/null) | sed -n '/^[[:space:]]*[{[]/,$p'
+    (cd "$HOME" && omni --output json --no-color "$@" 2>/dev/null) | sed -n '/^[[:space:]]*[{[]/,$p'
 }
 if [[ $DRY -eq 1 ]]; then
     echo "  - would set requestQueue.maxWaitMs = $MAX_WAIT_MS (omniroute api system patch-api-resilience)"
@@ -210,7 +246,7 @@ else
     body="{\"requestQueue\":{\"maxWaitMs\":$MAX_WAIT_MS},\"providerBreaker\":{\"apikey\":{\"failureThreshold\":$BREAKER_THRESHOLD,\"degradationThreshold\":1,\"resetTimeoutMs\":30000}}}"
     if [[ "$current" == "$MAX_WAIT_MS $BREAKER_THRESHOLD" ]]; then
         echo "  = resilience settings already current (maxWaitMs=$MAX_WAIT_MS, breaker=$BREAKER_THRESHOLD)"
-    elif (cd "$HOME" && omniroute api system patch-api-resilience --body "$body") >/dev/null 2>&1; then
+    elif (cd "$HOME" && omni api system patch-api-resilience --body "$body") >/dev/null 2>&1; then
         echo "  + resilience settings set (maxWaitMs=$MAX_WAIT_MS, breaker=$BREAKER_THRESHOLD; was ${current:-unknown})"
     else
         echo "  ! could not set resilience settings - run: omniroute api system patch-api-resilience --body '$body'"
@@ -245,12 +281,12 @@ while IFS=$'\t' read -r name strategy models; do
     # Create first, delete only what it replaces: if the create fails the old
     # tier survives instead of leaving a hole. Delete-then-create can only run
     # when create reports "already exists" AND a retry still fails.
-    if omniroute combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
+    if omni combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
         echo "  + $name created ($strategy)"
         PROBE_COMBOS+=("$name")
     else
-        omniroute combo delete "$name" --yes >/dev/null 2>&1 || true
-        if omniroute combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
+        omni combo delete "$name" --yes >/dev/null 2>&1 || true
+        if omni combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
             echo "  + $name replaced ($strategy)"
             PROBE_COMBOS+=("$name")
         else
@@ -264,6 +300,53 @@ for c in data.get("combos", []):
     print("%s\t%s\t%s" % (c["name"], c.get("strategy", "priority"), ",".join(c["models"])))
 PY
 )
+
+# ─── Prune: delete the retired combos, and only those ───────────────────────
+# combos.json "retired" lists the ids a rename or removal left behind. The loop
+# above only creates and replaces by name, so they used to stay in the store
+# forever (9 orphans deleted by hand on 2026-09-25). A name is deleted only when
+# it is retired AND live (and not a current combo): a store combo that is not
+# in "retired" may be one the user made and is never touched.
+# A down gateway is not listed at all: the CLI would fall back to reading the
+# store file directly, and a dry run must not depend on that.
+echo "Prune:"
+list_out=""
+if ! command -v omniroute >/dev/null; then
+    echo "  - omniroute CLI missing - the store is not read, nothing pruned"
+elif ! gateway_up; then
+    echo "  - gateway down - the store is not read, nothing pruned"
+elif ! list_out="$(omni combo list 2>/dev/null)"; then
+    echo "  ! could not list the store's combos - nothing pruned"
+elif ! prune_names="$(printf '%s\n' "$list_out" | python3 -c '
+import json, re, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+current = {c["name"] for c in data.get("combos", [])}
+live = set()
+# "combo list" prints "  <icon> <name padded> [<strategy>] <status>" with ANSI
+# colour on the icon and the status: strip it, take the name before [.
+for line in sys.stdin.read().splitlines():
+    m = re.match(r"\s*\S+\s+(\S+)\s+\[[^\]]*\]", re.sub(r"\x1b\[[0-9;]*m", "", line))
+    if m:
+        live.add(m.group(1))
+for name in data.get("retired", []):
+    if name in live and name not in current:
+        print(name)
+' "$COMBOS_FILE")"; then
+    echo "  ! cannot read the retired list from $COMBOS_FILE - nothing pruned"
+elif [[ -z "$prune_names" ]]; then
+    echo "  = no retired combos in the store"
+else
+    while IFS= read -r retired_name; do
+        [[ -z "$retired_name" ]] && continue
+        if [[ $DRY -eq 1 ]]; then
+            echo "  - $retired_name: retired, would delete"
+        elif omni combo delete "$retired_name" --yes </dev/null >/dev/null 2>&1; then
+            echo "  - $retired_name: retired, deleted"
+        else
+            echo "  ! $retired_name: retired, delete failed - run: omniroute combo delete $retired_name --yes"
+        fi
+    done <<<"$prune_names"
+fi
 
 # ─── Probe: prove the combos answer, end to end ─────────────────────────────
 if [[ $PROBE -eq 1 ]]; then

@@ -5,8 +5,10 @@
 .DESCRIPTION
   1. Registers every provider key found in configuration/api-keys.yml.
   2. (Re)creates the tier combos from configuration/omniroute/combos.json.
+  3. Prunes the combos listed there as "retired" from the store (only those).
 
-  Safe to re-run: providers are add-or-update, combos are replaced in place.
+  Safe to re-run: providers are add-or-update, combos are replaced in place,
+  and a retired combo that is already gone is simply not found again.
   Model refs the live catalog does not know are skipped with a warning, so a
   renamed upstream model degrades one tier leg instead of breaking the run.
 
@@ -255,7 +257,8 @@ if ($DryRun) {
 
 # --- (Re)create combos --- ---
 Write-Host 'Combos:'
-$combos = (Get-Content $CombosFile -Raw -Encoding utf8 | ConvertFrom-Json).combos
+$comboDoc = Get-Content $CombosFile -Raw -Encoding utf8 | ConvertFrom-Json
+$combos = $comboDoc.combos
 $created = @()
 foreach ($combo in $combos) {
     $keep = @()
@@ -289,6 +292,55 @@ foreach ($combo in $combos) {
             $created += $combo.name
         }
         else { Write-Host "  ! $($combo.name) creation failed (previous version, if any, is untouched)" }
+    }
+}
+
+# --- Prune: delete the retired combos, and only those ---
+# combos.json "retired" lists the ids a rename or removal left behind. The loop
+# above only creates and replaces by name, so they used to stay in the store
+# forever (9 orphans deleted by hand on 2026-09-25). A name is deleted only when
+# it is retired AND live (and not a current combo): a store combo that is not
+# in "retired" may be one the user made and is never touched.
+# A down gateway is not listed at all: the CLI would fall back to reading the
+# store file directly, and a dry run must not depend on that.
+Write-Host 'Prune:'
+$currentNames = @($combos | ForEach-Object { $_.name })
+$retiredNames = @()
+if ($comboDoc.PSObject.Properties['retired']) {
+    $retiredNames = @($comboDoc.retired | Where-Object { $currentNames -cnotcontains $_ })
+}
+if (-not (Get-Command omniroute -ErrorAction SilentlyContinue)) {
+    Write-Host '  - omniroute CLI missing - the store is not read, nothing pruned'
+} elseif (-not (Test-Gateway)) {
+    Write-Host '  - gateway down - the store is not read, nothing pruned'
+} else {
+    $liveNames = @()
+    $listed = $false
+    try {
+        $listText = & omniroute combo list 2>$null | Out-String
+        $listed = ($LASTEXITCODE -eq 0)
+        # `combo list` prints "  <icon> <name padded> [<strategy>] <status>"
+        # with ANSI colour on the icon and the status: strip it, take the name
+        # before [.
+        foreach ($line in ($listText -split "`r?`n")) {
+            $plain = $line -replace "$([char]27)\[[0-9;]*m", ''
+            if ($plain -match '^\s*\S+\s+(\S+)\s+\[[^\]]*\]') { $liveNames += $Matches[1] }
+        }
+    } catch { $listed = $false }
+    if (-not $listed) {
+        Write-Host "  ! could not list the store's combos - nothing pruned"
+    } else {
+        $pruneNames = @($retiredNames | Where-Object { $liveNames -ccontains $_ })
+        if ($pruneNames.Count -eq 0) { Write-Host '  = no retired combos in the store' }
+        foreach ($retiredName in $pruneNames) {
+            if ($DryRun) {
+                Write-Host "  - ${retiredName}: retired, would delete"
+                continue
+            }
+            & omniroute combo delete $retiredName --yes *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Host "  - ${retiredName}: retired, deleted" }
+            else { Write-Host "  ! ${retiredName}: retired, delete failed - run: omniroute combo delete $retiredName --yes" }
+        }
     }
 }
 

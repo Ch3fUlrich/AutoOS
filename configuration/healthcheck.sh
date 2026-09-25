@@ -47,6 +47,15 @@ if [[ $OH_UP -eq 1 ]]; then say "openhands :3000 -> $OH up"; else say "openhands
 if [[ $OC_UP -eq 1 ]]; then say "opencode :4096 -> $OC up"; else say "opencode :4096 -> $OC DOWN"; fi
 if [[ $UI_UP -eq 1 ]]; then say "autoos-ui :8777 -> $UI up"; else say "autoos-ui :8777 -> down (expected unless setup.sh --serve runs)"; fi
 
+# Docker AI stack (server profile): name which containers serve the ports
+# above, with docker's own health verdict. Report only.
+AI_STACK="$ROOT/configuration/docker/ai-stack/ai-stack.sh"
+if bash "$AI_STACK" is-active >/dev/null 2>&1; then
+    for c in autoos-omniroute autoos-opencode openhands-app; do
+        say "docker $c -> $(docker inspect -f '{{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}}' "$c" 2>/dev/null || echo 'no container')"
+    done
+fi
+
 # Omnigraph memory: clients show it "connected" even when every read fails
 # (no token, stale token, missing graph), so probe it like the bridge does:
 # health, an authenticated schema read, the Project hub. Report only.
@@ -76,5 +85,6 @@ echo "  ./configuration/start-stack.sh openhands   # container"
 echo "  ./configuration/litellm/start-litellm.sh   # litellm fallback proxy"
 echo "  ./configuration/autostart/run-opencode-serve.sh --detach   # phone fallback (password)"
 echo "  ./configuration/autostart/register-autostart.sh   # all of it as systemd --user units"
+echo "  ./configuration/docker/ai-stack/ai-stack.sh up   # docker AI stack (server profile)"
 echo "  ./setup.sh --serve --bind 0.0.0.0   # browser UI (shows a token)"
 echo "  python3 tools/check-omnigraph.py    # omnigraph wiring, token and graph"
