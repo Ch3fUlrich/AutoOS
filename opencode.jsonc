@@ -186,7 +186,12 @@
       "settings": {
         "baseURL": "http://127.0.0.1:20128/v1"
       },
+      // Model ids, display names and limits come from catalog/ide-models.json
+      // (single source): edit the catalog, then run
+      // `python3 tools/sync-ide-models.py`. Lines between the markers are
+      // regenerated; hand entries above START / below END are kept.
       "models": {
+        // AUTOOS-MANAGED-START omniroute
         "t1-orchestrator": {
           "modelID": "t1-orchestrator",
           "name": "t1 orchestrator-1M — 1M ctx (free-first)",
@@ -194,7 +199,7 @@
         },
         "t1-orchestrator-clean": {
           "modelID": "t1-orchestrator-clean",
-          "name": "t1 orchestrator-1M — no training (sensitive data)",
+          "name": "t1 orchestrator-1M — paid legs only (contributor: trains)",
           "limit": { "context": 1000000, "output": 32768 }
         },
         "t1-orchestrator-free-only": {
@@ -277,6 +282,7 @@
           "name": "bootstrap: auto cheapest",
           "limit": { "context": 131072, "output": 16384 }
         }
+        // AUTOOS-MANAGED-END omniroute
       }
     },
     "openrouter": {
@@ -301,47 +307,60 @@
       "settings": {
         "baseURL": "http://127.0.0.1:4000/v1"
       },
+      // Generated from catalog/ide-models.json, like the omniroute models.
       "models": {
+        // AUTOOS-MANAGED-START litellm
         "t1-orchestrator": {
           "modelID": "t1-orchestrator",
-          "name": "t1-orchestrator orchestrator (free-first)"
+          "name": "t1 orchestrator-1M — 1M ctx (free-first)",
+          "limit": { "context": 1000000, "output": 32768 }
         },
         "t1-orchestrator-paid": {
           "modelID": "t1-orchestrator-paid",
-          "name": "t1-orchestrator-paid orchestrator (openrouter first)"
+          "name": "t1 orchestrator-1M — openrouter first (paid)",
+          "limit": { "context": 1000000, "output": 32768 }
         },
         "t1-orchestrator-free-only": {
           "modelID": "t1-orchestrator-free-only",
-          "name": "t1-orchestrator-free-only orchestrator (zero spend)"
+          "name": "t1 orchestrator-1M — zero spend (free legs only)",
+          "limit": { "context": 1000000, "output": 32768 }
         },
         "t2-worker": {
           "modelID": "t2-worker",
-          "name": "t2-worker smart (free-first)"
+          "name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
+          "limit": { "context": 131072, "output": 32768 }
         },
         "t2-worker-paid": {
           "modelID": "t2-worker-paid",
-          "name": "t2-worker-paid smart (paid)"
+          "name": "t2 smart-reasoning-128k — paid legs (escalation)",
+          "limit": { "context": 131072, "output": 32768 }
         },
         "t2-worker-free-only": {
           "modelID": "t2-worker-free-only",
-          "name": "t2-worker-free-only smart (zero spend)"
+          "name": "t2 smart-reasoning-128k — zero spend (free legs only)",
+          "limit": { "context": 131072, "output": 32768 }
         },
         "t3-driver": {
           "modelID": "t3-driver",
-          "name": "t3-driver codegen driver (free-first)"
+          "name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
+          "limit": { "context": 131072, "output": 16384 }
         },
         "t3-driver-paid": {
           "modelID": "t3-driver-paid",
-          "name": "t3-driver-paid driver (paid)"
+          "name": "t3 cheap-driver-128k — paid legs (escalation)",
+          "limit": { "context": 131072, "output": 16384 }
         },
         "t3-driver-free-only": {
           "modelID": "t3-driver-free-only",
-          "name": "t3-driver-free-only driver (zero spend)"
+          "name": "t3 cheap-driver-128k — zero spend (free legs only)",
+          "limit": { "context": 131072, "output": 16384 }
         },
         "t4-rag": {
           "modelID": "t4-rag",
-          "name": "t4-rag cohere RAG (litellm fallback)"
+          "name": "t4-rag cohere RAG — 128k ctx (trial keys)",
+          "limit": { "context": 131072, "output": 16384 }
         }
+        // AUTOOS-MANAGED-END litellm
       }
     }
   },

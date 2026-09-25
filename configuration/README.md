@@ -14,7 +14,8 @@ git-ignored, only the template is tracked.
 | `autostart/` | Opt-in resume after reboot (scheduled task / systemd unit + launcher) | you, once |
 | `healthcheck.sh` / `healthcheck.ps1` | Probe `:20128` `:3000` `:4096` `:8777`; log-only, `--fix`/`-Fix` resumes | you |
 | `litellm/` | The manual fallback router (off by default) | `setup.*` when LiteLLM is ticked |
-| `openhands/config.toml` | OpenHands LLM profiles (dev path); docker path uses env | OpenHands |
+| `openhands/config.toml` | OpenHands LLM profiles (dev path); docker path uses env. Token windows are synced from `catalog/ide-models.json` | OpenHands |
+| `openhands/tier-profiles.json` | OpenHands tier profile spec; its ORDER is the push priority (the app keeps 10). Token windows synced from `catalog/ide-models.json` | `start-stack.*`, the installers |
 
 ## First run
 

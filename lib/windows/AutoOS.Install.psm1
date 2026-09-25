@@ -825,6 +825,30 @@ function Get-AutoOSSerenaExcludedTools {
     @((Get-AutoOSAgentHarness).mcp_servers.serena.excluded_tools)
 }
 
+function Get-AutoOSIdeModel {
+    <#
+      .SYNOPSIS The gateway models one client surface lists, in picker order.
+      .DESCRIPTION
+        catalog/ide-models.json is the single source for the gateway model
+        list (ids, display names, token windows, per-surface membership).
+        The Zed and OpenCode writers project it at run time instead of
+        carrying a copy; tools/sync-ide-models.py keeps the static copies
+        (opencode.jsonc, the OpenHands tier spec) in step.
+    #>
+    param(
+        [Parameter(Mandatory)][ValidateSet('omniroute', 'litellm')][string]$Gateway,
+        [Parameter(Mandatory)][ValidateSet('opencode', 'zed', 'openhands')][string]$Surface
+    )
+    $path = Join-Path $script:RepoRoot 'catalog\ide-models.json'
+    $doc = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($m in @($doc.models)) {
+        # Indexer, not dot access: StrictMode throws on a gateway the model
+        # does not list (t1-orchestrator-clean has no litellm key).
+        $members = $m.surfaces.PSObject.Properties[$Gateway]
+        if ($null -ne $members -and @($members.Value) -contains $Surface) { $m }
+    }
+}
+
 function Register-AutoOSMcpServer {
     <#
       .SYNOPSIS
@@ -1973,13 +1997,17 @@ function Set-AutoOSOpenCodeConfig {
             }
         }
     }
-    $omniTiers = [ordered]@{}
-    foreach ($t in @('t1-orchestrator', 't1-orchestrator-clean', 't1-orchestrator-free-only', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 'spark-1.3-contributor', 'auto/smart', 'auto', 'auto/cheap', 't4-rag')) {
-        $ctx = 1048576; $out = 32768
-        if ($t -like 't3-*' -or $t -eq 't4-rag') { $ctx = 131072; $out = 16384 }
-        elseif ($t -like 't2-*' -or $t -like 'auto*') { $ctx = 131072; $out = 32768 }
-        $omniTiers[$t] = [ordered]@{ name = $t; limit = [ordered]@{ context = $ctx; output = $out } }
+    # Gateway tiers from catalog/ide-models.json (single source; the same
+    # list tools/sync-ide-models.py writes into the repo opencode.jsonc).
+    $gatewayTiers = {
+        param([string]$Gateway)
+        $tiers = [ordered]@{}
+        foreach ($m in @(Get-AutoOSIdeModel -Gateway $Gateway -Surface 'opencode')) {
+            $tiers[$m.id] = [ordered]@{ name = $m.name; limit = [ordered]@{ context = $m.context; output = $m.output } }
+        }
+        $tiers
     }
+    $omniTiers = & $gatewayTiers 'omniroute'
     $providers['omniroute'] = [ordered]@{
         npm     = '@ai-sdk/openai-compatible'
         name    = 'AutoOS OmniRoute gateway'
@@ -1989,11 +2017,7 @@ function Set-AutoOSOpenCodeConfig {
         }
         models  = $omniTiers
     }
-    $litTiers = [ordered]@{}
-    foreach ($t in @('t1-orchestrator', 't2-worker', 't3-driver', 't4-rag')) {
-        $ctx = 1048576; if ($t -ne 't1-orchestrator') { $ctx = 131072 }
-        $litTiers[$t] = [ordered]@{ name = "$t (litellm fallback)"; limit = [ordered]@{ context = $ctx; output = 32768 } }
-    }
+    $litTiers = & $gatewayTiers 'litellm'
     $providers['litellm'] = [ordered]@{
         npm     = '@ai-sdk/openai-compatible'
         name    = 'AutoOS LiteLLM fallback'
@@ -2328,19 +2352,27 @@ if _gw_key:
     llm['base_url'] = 'http://host.docker.internal:20128/v1'
     llm['api_key'] = _gw_key
     _default_reasoning = True
+    # The gateway default IS the t1 tier: its windows come from
+    # catalog/ide-models.json, like every other surface's.
+    with open(os.path.join(_repo_root_arg, 'catalog', 'ide-models.json'), 'r', encoding='utf-8') as _imf:
+        _default_window = next(m for m in json.load(_imf)['models'] if m['id'] == 't1-orchestrator')
 elif openrouter_key:
     llm['model'] = 'openrouter/openrouter/free'
     llm['base_url'] = 'https://openrouter.ai/api/v1'
     llm['api_key'] = openrouter_key
     _default_reasoning = bool(REPO_BY_ID['openrouter-free'].get('reasoning'))
+    _default_window = REPO_BY_ID['openrouter-free']
 else:
     _local = REPO_BY_ID['ollama-qwen2.5-coder']['direct']
     llm['model'] = _local['model']
     llm['base_url'] = _local['base_url']
     _default_reasoning = bool(REPO_BY_ID['ollama-qwen2.5-coder'].get('reasoning'))
+    _default_window = REPO_BY_ID['ollama-qwen2.5-coder']
 
-llm['max_input_tokens'] = 1048576
-llm['max_output_tokens'] = 65536
+# The chosen default's own windows (catalog context/output), never one
+# literal for all three: a 1M ceiling on the local 32k model overflowed it.
+llm['max_input_tokens'] = _default_window['context']
+llm['max_output_tokens'] = _default_window['output']
 if _default_reasoning:
     llm['reasoning_effort'] = 'high'
 else:
@@ -2917,7 +2949,10 @@ function Set-AutoOSZedProxy {
     if (Test-Path $cfgPath) {
         Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
-    $settings = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw | ConvertFrom-Json } else { New-Object psobject }
+    # -Encoding UTF8: this writer saves BOM-less UTF-8 (below), and Windows
+    # PowerShell 5.1 reads a BOM-less file as ANSI - the catalog's em-dash
+    # names and any non-ASCII user setting would come back as mojibake.
+    $settings = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json } else { New-Object psobject }
     # StrictMode turns a missing-property read into a throw (even member
     # enumeration over an empty property set), so probe the collection with
     # the indexer, which returns $null for a missing name instead of throwing.
@@ -2963,47 +2998,30 @@ function Set-AutoOSZedProxy {
         $settings.agent.default_model.provider -like 'autoos-litellm*') {
         $settings.agent.default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 't1-orchestrator' }
     }
-    $tierModels = @(
-        @{ name = 't1-orchestrator'; display_name = 't1 orchestrator (contributor)'; max_tokens = 1048576; reasoning_effort = 'xhigh' },
-        @{ name = 't1-orchestrator-clean'; display_name = 't1-orchestrator-clean (paid contributor)'; max_tokens = 1048576 },
-        @{ name = 't1-orchestrator-free-only'; display_name = 't1-orchestrator-free-only (free legs only)'; max_tokens = 1048576 },
-        @{ name = 't2-worker'; display_name = 't2 smart (free-first)'; max_tokens = 131072 },
-        @{ name = 't2-worker-clean'; display_name = 't2-worker-clean (paid)'; max_tokens = 131072 },
-        @{ name = 't2-worker-free-only'; display_name = 't2-worker-free-only (free legs only)'; max_tokens = 131072 },
-        @{ name = 't2-orchestrator'; display_name = 't2 orchestrator (small-scope)'; max_tokens = 200000 },
-        @{ name = 't3-driver'; display_name = 't3 driver (cheapest)'; max_tokens = 131072 },
-        @{ name = 't3-driver-clean'; display_name = 't3-driver-clean (paid)'; max_tokens = 131072 },
-        @{ name = 't3-driver-free-only'; display_name = 't3-driver-free-only (free legs only)'; max_tokens = 131072 },
-        @{ name = 'spark-1.3-contributor'; display_name = 'spark pinned (zen free -> openrouter paid)'; max_tokens = 1048576 },
-        @{ name = 'opus-4-6'; display_name = 'opus pinned (agy free -> cc subscription)'; max_tokens = 200000 },
-        @{ name = 'gemini-3.8-flash'; display_name = 'gemini-3.8-flash (gemini free -> paid)'; max_tokens = 131072 },
-        @{ name = 'deepseek-v4.1-flash'; display_name = 'deepseek-v4.1-flash (paid cheapest-first)'; max_tokens = 131072 },
-        @{ name = 't4-rag'; display_name = 't4-rag cohere RAG (trial keys)'; max_tokens = 131072 }
-    )
-    $omniEntry = @{
+    # Model ids, display names, context windows and membership come from
+    # catalog/ide-models.json at run time (single source) - never inline
+    # tiers here: the two Zed writers once drifted from every other surface.
+    # max_tokens is Zed's context window; reasoning_effort only where the
+    # catalog sets one.
+    $zedModels = {
+        param([string]$Gateway)
+        foreach ($m in @(Get-AutoOSIdeModel -Gateway $Gateway -Surface 'zed')) {
+            $entry = [ordered]@{ name = $m.id; display_name = $m.name; max_tokens = $m.context }
+            $effort = $m.PSObject.Properties['reasoning_effort']
+            if ($null -ne $effort -and $effort.Value) { $entry['reasoning_effort'] = $effort.Value }
+            $entry
+        }
+    }
+    $omniEntry = [ordered]@{
         api_url = 'http://127.0.0.1:20128/v1'
-        available_models = @(
-            @{ name = 'auto/smart'; display_name = 't1 orchestrator (auto smart)'; max_tokens = 131072; reasoning_effort = 'xhigh' },
-            @{ name = 'auto'; display_name = 't2 smart (auto balanced)'; max_tokens = 131072 },
-            @{ name = 'auto/cheap'; display_name = 't3 driver (auto cheap)'; max_tokens = 131072 }
-        ) + $tierModels
+        available_models = @(& $zedModels 'omniroute')
     }
     if ($env:AUTOOS_OMNIROUTE_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_OMNIROUTE_API_KEY from the environment' -Level muted }
     else { Write-AutoOSLine 'AUTOOS_OMNIROUTE_API_KEY not set - export the OmniRoute client key before starting Zed, or the provider stays hidden' -Level warn }
     Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-omniroute' -NotePropertyValue $omniEntry -Force
-    $litEntry = @{
+    $litEntry = [ordered]@{
         api_url = 'http://127.0.0.1:4000/v1'
-        available_models = @(
-            @{ name = 't1-orchestrator'; display_name = 't1-orchestrator (litellm fallback)'; max_tokens = 1048576 },
-            @{ name = 't1-orchestrator-paid'; display_name = 't1-orchestrator-paid (litellm)'; max_tokens = 1048576 },
-            @{ name = 't1-orchestrator-free-only'; display_name = 't1-orchestrator-free-only (litellm zero spend)'; max_tokens = 1048576 },
-            @{ name = 't2-worker'; display_name = 't2-worker (litellm fallback)'; max_tokens = 131072 },
-            @{ name = 't2-worker-paid'; display_name = 't2-worker-paid (litellm)'; max_tokens = 131072 },
-            @{ name = 't2-worker-free-only'; display_name = 't2-worker-free-only (litellm zero spend)'; max_tokens = 131072 },
-            @{ name = 't3-driver'; display_name = 't3-driver (litellm fallback)'; max_tokens = 131072 },
-            @{ name = 't3-driver-paid'; display_name = 't3-driver-paid (litellm)'; max_tokens = 131072 },
-            @{ name = 't3-driver-free-only'; display_name = 't3-driver-free-only (litellm zero spend)'; max_tokens = 131072 }
-        )
+        available_models = @(& $zedModels 'litellm')
     }
     if ($env:AUTOOS_LITELLM_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_LITELLM_API_KEY from the environment' -Level muted }
     else { Write-AutoOSLine 'AUTOOS_LITELLM_API_KEY not set - export the LiteLLM master key before starting Zed, or the fallback stays hidden' -Level warn }
@@ -3292,7 +3310,7 @@ function Invoke-AutoOSPostInstall {
 Export-ModuleMember -Function `
     Initialize-AutoOSInstaller, Get-AutoOSAnswer, Invoke-AutoOSProcess, Add-AutoOSPathEntry,
     Read-AutoOSSecretsFile, Read-AutoOSApiSecrets, Resolve-AutoOSOllamaBaseUrl,
-    Get-AutoOSMcpPackage, Get-AutoOSSerenaExcludedTools,
+    Get-AutoOSMcpPackage, Get-AutoOSSerenaExcludedTools, Get-AutoOSIdeModel,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
     Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv, Protect-AutoOSUserFile,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,

@@ -222,9 +222,11 @@ available --search qoder`: free, alias `if`) — it needs an interactive
 context gate**: 128k is a conservative display/compaction default, not a
 curation rule, so cost and quality decide which models sit there and
 `gemini-3.8-flash`-class models are welcome regardless of window.
-`opencode.jsonc` declares the matching `limit.context` (1M for t1-orchestrator, 128k for
-t2-worker/t3-driver as the conservative minimum across each chain), so OpenCode's
-compaction and the picker's context display agree with what actually answers.
+`catalog/ide-models.json` declares the matching context (`1000000` for the 1M tier,
+`131072` for t2-worker/t3-driver as the conservative minimum across each chain) and
+every client surface projects it — `opencode.jsonc` `limit.context`, Zed
+`max_tokens`, OpenHands `max_input_tokens` — so compaction and the picker's context
+display agree with what actually answers, in every client alike.
 `auto/*` remains as a zero-setup bootstrap with the same conservative limit.
 
 **Direct provider models are also the effort-control surface** (see the
@@ -580,7 +582,8 @@ job. **Where they disagree, `combos.json` is right.**
 |---|---|---|
 | `configuration/omniroute/combos.json` | **The truth for tier leg order.** Every `tierN` / `tierN-clean` combo, in `priority` order, free legs before the paid overflow order. This is what `apply.*` pushes to `:20128` and what the agents actually call. | List providers without keys (apply skips them with a warning) or a model ID the live catalog does not know. |
 | `configuration/litellm/config.yaml` | **A static mirror of `t2-worker` and `t3-driver`** (plus `t1-orchestrator` spark), used only when the user deliberately types `litellm/tierN`. LiteLLM resolves its own `model_list` order, so the mirror is a fallback, never a second source of truth. | Introduce a leg that is not in `combos.json` for the same tier, or promise a window/limit `opencode.jsonc` does not declare. |
-| `opencode.jsonc` | Tier **ids**, role labels, `limit.context`, and the agent→tier pinning with spawn fences. | Decide which model answers. |
+| `catalog/ide-models.json` | **The client-facing model list**: which gateway model ids every surface offers (opencode, Zed, OpenHands), their display names and token windows. The 1M tier is `1000000` everywhere. | Decide which model answers, or carry leg order. |
+| `opencode.jsonc` | The agent→tier pinning with spawn fences. Its `providers.omniroute/litellm.models` are a **generated copy** of the catalog between `// AUTOOS-MANAGED` markers. | Hand-edit inside the markers, or decide which model answers. |
 
 **The rule a sync script enforces** (the script itself is L2-B's; this is the
 contract it must satisfy):
@@ -613,9 +616,18 @@ contract it must satisfy):
 
 ## Change the defaults
 
-Tiers in `opencode.jsonc`, combos in the OmniRoute dashboard, static chains
-in `configuration/litellm/config.yaml`. Per-user overrides go in
-`~/.config/opencode/opencode.jsonc` (global merges under project).
+Tier ids, display names and windows in `catalog/ide-models.json`, combos in
+the OmniRoute dashboard, static chains in `configuration/litellm/config.yaml`.
+Per-user overrides go in `~/.config/opencode/opencode.jsonc` (global merges
+under project).
+
+Add, rename or resize a client-facing model in `catalog/ide-models.json`
+only, then run `python3 tools/sync-ide-models.py`: it regenerates the
+`opencode.jsonc` model blocks and the token windows in
+`configuration/openhands/tier-profiles.json` and `config.toml`
+(`--check` shows drift, exit 1). The Zed writers and the OpenCode user-config
+writers read the catalog at install time. The OpenHands spec keeps its own
+profile **order** — the app holds at most 10 profiles, pushed in that order.
 
 Edit tier order in `configuration/omniroute/combos.json` — that file is the
 single source of truth. `configuration/litellm/config.yaml` mirrors it inside

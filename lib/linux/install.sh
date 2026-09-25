@@ -1339,61 +1339,38 @@ if os.path.exists(path):
     with open(path, encoding="utf-8") as fh:
         cfg = json.load(fh)
 pins = json.load(open(harness_file, encoding="utf-8"))["mcp_servers"]
-tiers = [
-    ("t1-orchestrator", "t1 orchestrator (contributor)", 1048576, "xhigh"),
-    ("t1-orchestrator-clean", "t1-orchestrator-clean (paid contributor)", 1048576, None),
-    ("t1-orchestrator-free-only", "t1-orchestrator-free-only (free legs only)", 1048576, None),
-    ("t2-worker", "t2 smart (free-first)", 131072, None),
-    ("t2-worker-clean", "t2-worker-clean (paid)", 131072, None),
-    ("t2-worker-free-only", "t2-worker-free-only (free legs only)", 131072, None),
-    ("t2-orchestrator", "t2 orchestrator (small-scope)", 200000, None),
-    ("t3-driver", "t3 driver (cheapest)", 131072, None),
-    ("t3-driver-clean", "t3-driver-clean (paid)", 131072, None),
-    ("t3-driver-free-only", "t3-driver-free-only (free legs only)", 131072, None),
-    ("spark-1.3-contributor", "spark pinned (zen free -> openrouter paid)", 1048576, None),
-    ("opus-4-6", "opus pinned (agy free -> cc subscription)", 200000, None),
-    ("gemini-3.8-flash", "gemini-3.8-flash (gemini free -> paid)", 131072, None),
-    ("deepseek-v4.1-flash", "deepseek-v4.1-flash (paid cheapest-first)", 131072, None),
-    ("t4-rag", "t4-rag cohere RAG (trial keys)", 131072, None),
-]
-auto = [
-    {"name": "auto/smart", "display_name": "t1 orchestrator (auto smart)",
-     "max_tokens": 131072, "reasoning_effort": "xhigh"},
-    {"name": "auto", "display_name": "t2 smart (auto balanced)",
-     "max_tokens": 131072},
-    {"name": "auto/cheap", "display_name": "t3 driver (auto cheap)",
-     "max_tokens": 131072},
-]
-tier_models = []
-for name, disp, mx, effort in tiers:
-    m = {"name": name, "display_name": disp, "max_tokens": mx}
-    if effort:
-        m["reasoning_effort"] = effort
-    tier_models.append(m)
+# Model ids, display names, context windows and membership come from
+# catalog/ide-models.json at run time (single source) - never inline tiers
+# here: the two Zed writers once drifted from every other surface.
+# max_tokens is Zed's context window; reasoning_effort only where the
+# catalog sets one.
+with open(os.path.join(os.path.dirname(os.path.abspath(harness_file)), "ide-models.json"),
+          encoding="utf-8") as fh:
+    ide_models = json.load(fh)["models"]
+
+
+def zed_models(gateway):
+    out = []
+    for m in ide_models:
+        if "zed" not in m["surfaces"].get(gateway, []):
+            continue
+        entry = {"name": m["id"], "display_name": m["name"], "max_tokens": m["context"]}
+        if m.get("reasoning_effort"):
+            entry["reasoning_effort"] = m["reasoning_effort"]
+        out.append(entry)
+    return out
+
+
 lm = cfg.setdefault("language_models", {})
 oc = lm.setdefault("openai_compatible", {})
-omni = {
+oc["autoos-omniroute"] = {
     "api_url": "http://127.0.0.1:20128/v1",
-    "available_models": auto + tier_models,
+    "available_models": zed_models("omniroute"),
 }
-oc["autoos-omniroute"] = omni
-lit_models = [
-    {"name": n, "display_name": "%s (litellm fallback)" % n,
-     "max_tokens": mx}
-    for n, _, mx, _ in [
-        ("t1-orchestrator", None, 1048576, None), ("t1-orchestrator-paid", None, 1048576, None),
-        ("t1-orchestrator-free-only", None, 1048576, None),
-        ("t2-worker", None, 131072, None), ("t2-worker-paid", None, 131072, None),
-        ("t2-worker-free-only", None, 131072, None),
-        ("t3-driver", None, 131072, None), ("t3-driver-paid", None, 131072, None),
-        ("t3-driver-free-only", None, 131072, None),
-    ]
-]
-lit = {
+oc["autoos-litellm"] = {
     "api_url": "http://127.0.0.1:4000/v1",
-    "available_models": lit_models,
+    "available_models": zed_models("litellm"),
 }
-oc["autoos-litellm"] = lit
 # MCP context servers for the agent panel (Settings -> AI -> MCP Servers
 # shows their status dots). Serena resolves its project per workspace at
 # call time (the agent activates by absolute path); graphify serves the
@@ -2847,17 +2824,15 @@ deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
 # (omniroute on :20128, litellm on :4000) is offered here GLOBALLY so every
 # cwd gets the tiers.
 
-def _gateway_tiers():
-    tiers = {}
-    for _t in ('t1-orchestrator', 't1-orchestrator-clean', 't1-orchestrator-free-only', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't3-driver',
-               't3-driver-clean', 't3-driver-free-only', 'spark-1.3-contributor', 'auto/smart', 'auto', 'auto/cheap', 't4-rag'):
-        _ctx, _out = 1048576, 32768
-        if _t.startswith('t3-') or _t == 't4-rag':
-            _ctx, _out = 131072, 16384
-        elif _t.startswith('t2-') or _t.startswith('auto'):
-            _ctx, _out = 131072, 32768
-        tiers[_t] = {'name': _t, 'limit': {'context': _ctx, 'output': _out}}
-    return tiers
+# Gateway tiers from catalog/ide-models.json (single source; the same list
+# tools/sync-ide-models.py writes into the repo opencode.jsonc). Never inline
+# tier ids or windows here.
+with open(os.path.join(os.path.dirname(os.path.abspath(models_file)), 'ide-models.json'), 'r', encoding='utf-8') as _imf:
+    IDE_MODELS = json.load(_imf)['models']
+
+def _gateway_tiers(gateway):
+    return {m['id']: {'name': m['name'], 'limit': {'context': m['context'], 'output': m['output']}}
+            for m in IDE_MODELS if 'opencode' in m['surfaces'].get(gateway, [])}
 
 providers['omniroute'] = {
     'npm': '@ai-sdk/openai-compatible',
@@ -2866,14 +2841,9 @@ providers['omniroute'] = {
         'baseURL': 'http://127.0.0.1:20128/v1',
         'apiKey': '{env:AUTOOS_OMNIROUTE_KEY}'
     },
-    'models': _gateway_tiers()
+    'models': _gateway_tiers('omniroute')
 }
 
-_lit_tiers = {}
-for _t in ('t1-orchestrator', 't2-worker', 't3-driver', 't4-rag'):
-    _ctx = 1048576 if _t == 't1-orchestrator' else 131072
-    _lit_tiers[_t] = {'name': _t + ' (litellm fallback)',
-                      'limit': {'context': _ctx, 'output': 32768}}
 providers['litellm'] = {
     'npm': '@ai-sdk/openai-compatible',
     'name': 'AutoOS LiteLLM fallback',
@@ -2881,7 +2851,7 @@ providers['litellm'] = {
         'baseURL': 'http://127.0.0.1:4000/v1',
         'apiKey': '{env:LITELLM_MASTER_KEY}'
     },
-    'models': _lit_tiers
+    'models': _gateway_tiers('litellm')
 }
 
 openrouter_key = os.environ.get('OPENROUTER_API_KEY') or secrets.get('openrouter')
@@ -3182,19 +3152,27 @@ if _gw_key:
     llm["base_url"] = "http://host.docker.internal:20128/v1"
     llm["api_key"] = _gw_key
     _default_reasoning = True
+    # The gateway default IS the t1 tier: its windows come from
+    # catalog/ide-models.json, like every other surface's.
+    with open(os.path.join(os.path.dirname(models_file), "ide-models.json"), "r", encoding="utf-8") as _imf:
+        _default_window = next(m for m in json.load(_imf)["models"] if m["id"] == "t1-orchestrator")
 elif openrouter_key:
     llm["model"] = "openrouter/openrouter/free"
     llm["base_url"] = "https://openrouter.ai/api/v1"
     llm["api_key"] = openrouter_key
     _default_reasoning = bool(REPO_BY_ID["openrouter-free"].get("reasoning"))
+    _default_window = REPO_BY_ID["openrouter-free"]
 else:
     _local = REPO_BY_ID["ollama-qwen2.5-coder"]["direct"]
     llm["model"] = _local["model"]
     llm["base_url"] = _local["base_url"]
     _default_reasoning = bool(REPO_BY_ID["ollama-qwen2.5-coder"].get("reasoning"))
+    _default_window = REPO_BY_ID["ollama-qwen2.5-coder"]
 
-llm["max_input_tokens"] = 1048576
-llm["max_output_tokens"] = 65536
+# The chosen default's own windows (catalog context/output), never one
+# literal for all three: a 1M ceiling on the local 32k model overflowed it.
+llm["max_input_tokens"] = _default_window["context"]
+llm["max_output_tokens"] = _default_window["output"]
 if _default_reasoning:
     llm["reasoning_effort"] = "high"
 else:

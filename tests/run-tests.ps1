@@ -3587,8 +3587,14 @@ Test-Case 'opencode user config carries global gateway providers without secrets
     Assert-True ($body -match [regex]::Escape('http://127.0.0.1:4000/v1')) 'litellm baseURL missing'
     Assert-True ($body -match [regex]::Escape('{env:AUTOOS_OMNIROUTE_KEY}')) 'omni key not an env placeholder'
     Assert-True ($body -match [regex]::Escape('{env:LITELLM_MASTER_KEY}')) 'lit key not an env placeholder'
-    foreach ($t in @("'t1-orchestrator'", "'t3-driver-clean'", "'auto/smart'")) {
-        Assert-True ($body -match [regex]::Escape($t)) "omniroute model $t missing"
+    # Tier ids, names and windows come from catalog/ide-models.json at run
+    # time (Get-AutoOSIdeModel), never as literals in the writer.
+    Assert-True ($body -match "Get-AutoOSIdeModel\b.*-Surface 'opencode'") 'writer does not read catalog/ide-models.json'
+    Assert-True ($body -notmatch "'t3-driver-clean'") 'writer carries a literal tier list again'
+    $cat = @((Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models)
+    $ids = @($cat | Where-Object { $null -ne $_.surfaces.PSObject.Properties['omniroute'] -and @($_.surfaces.omniroute) -contains 'opencode' } | ForEach-Object { $_.id })
+    foreach ($t in @('t1-orchestrator', 't3-driver-clean', 'auto/smart')) {
+        Assert-Contains $ids $t
     }
     Assert-True ($body -match "@\('deepseek'\)") 'retired-provider prune missing'
     Assert-True ($body -match 'muse-spark') 'muse-spark contributor provider missing'
@@ -4111,18 +4117,30 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
         Set-AutoOSZedProxy
         Set-AutoOSZedProxy
-        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
+        # -Encoding UTF8: the file is BOM-less UTF-8 and the catalog names carry
+        # em-dashes, which Windows PowerShell 5.1 would read as ANSI otherwise.
+        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         Assert-Equal $s.theme 'mine'
         Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_url 'http://127.0.0.1:20128/v1'
         # Keys never land in settings.json (Zed docs: keychain/UI or env);
         # the writers must not write api_key even when env carries keys.
         Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-omniroute'.PSObject.Properties['api_key']) 'api_key in omni entry'
         Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-litellm'.PSObject.Properties['api_key']) 'api_key in lit entry'
-        $models = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | ForEach-Object { $_.name })
-        Assert-Equal ($models -join ',') 'auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,opus-4-6,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag'
         Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
-        $litModels = @($s.language_models.openai_compatible.'autoos-litellm'.available_models | ForEach-Object { $_.name })
-        Assert-Equal ($litModels -join ',') 't1-orchestrator,t1-orchestrator-paid,t1-orchestrator-free-only,t2-worker,t2-worker-paid,t2-worker-free-only,t3-driver,t3-driver-paid,t3-driver-free-only'
+        # The model lists are catalog/ide-models.json projected at run time
+        # (ids, display names, windows, membership, order).
+        $cat = @((Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models)
+        foreach ($gw in @('omniroute', 'litellm')) {
+            $want = @($cat | Where-Object { $null -ne $_.surfaces.PSObject.Properties[$gw] -and @($_.surfaces.PSObject.Properties[$gw].Value) -contains 'zed' })
+            $got = @($s.language_models.openai_compatible."autoos-$gw".available_models)
+            Assert-Equal (($got | ForEach-Object { $_.name }) -join ',') (($want | ForEach-Object { $_.id }) -join ',')
+            Assert-Equal (($got | ForEach-Object { "$($_.display_name)|$($_.max_tokens)" }) -join ',') (($want | ForEach-Object { "$($_.name)|$($_.context)" }) -join ',')
+        }
+        # The 1M tier is 1000000 on every surface (operator ruling 2026-09-25).
+        $t1 = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | Where-Object { $_.name -eq 't1-orchestrator' })
+        Assert-Equal $t1.Count 1
+        Assert-Equal $t1[0].max_tokens 1000000
+        Assert-Equal $t1[0].reasoning_effort 'xhigh'
         $bypass = $s.agent.profiles.bypass
         Assert-Equal $bypass.name 'bypass'
         $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })
@@ -4403,9 +4421,14 @@ Test-Case 'zed routing creates a fresh config when none exists' {
         Set-AutoOSZedProxy
         $cfgPath = Join-Path $scratch 'Zed\settings.json'
         Assert-True (Test-Path $cfgPath) 'settings.json not created'
-        $s = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.available_models.Count 18
-        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.available_models.Count 9
+        $s = Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        # One entry per catalog/ide-models.json model Zed lists through each gateway.
+        $cat = @((Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models)
+        foreach ($gw in @('omniroute', 'litellm')) {
+            $want = @($cat | Where-Object { $null -ne $_.surfaces.PSObject.Properties[$gw] -and @($_.surfaces.PSObject.Properties[$gw].Value) -contains 'zed' }).Count
+            Assert-True ($want -gt 0) "catalog lists no zed model for $gw"
+            Assert-Equal (@($s.language_models.openai_compatible."autoos-$gw".available_models).Count) $want
+        }
     } finally { $env:APPDATA = $realAppData }
 }
 
@@ -4726,6 +4749,31 @@ Test-Case 'the router declarations do not drift from each other' {
     if (-not $py) { Skip 'no python on PATH'; return }
     $out = & $py.Source (Join-Path $Root 'tools\audit-router.py') --offline 2>&1 | Out-String
     Assert-Equal $LASTEXITCODE 0 "audit-router drift: $out"
+}
+
+Test-Case 'the IDE model lists match catalog/ide-models.json (sync-ide-models --check)' {
+    # catalog/ide-models.json is the single source for the gateway model list
+    # (ids, names, windows, membership). opencode.jsonc and the OpenHands
+    # tier spec + config.toml carry generated copies; --check exits 1 with a
+    # diff when one drifted (fix: python tools/sync-ide-models.py).
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # A drift report goes to stderr; keep Windows PowerShell 5.1 from turning
+    # it into a terminating error and judge by the exit code instead.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tools\sync-ide-models.py') --check 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "sync-ide-models drift: $out"
+}
+
+Test-Case "the IDE model sync tool's unit tests pass (sync-ide-models)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr (PS 5.1 + Stop would throw on it).
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_sync_ide_models.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "sync-ide-models unit tests failed: $out"
 }
 
 Test-Case 'apply sets the resilience deadline and the fast-skip breaker' {

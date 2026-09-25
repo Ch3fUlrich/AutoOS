@@ -2904,7 +2904,22 @@ cfg = json.load(open(sys.argv[1], encoding="utf-8"))
 oc = cfg.get("language_models", {}).get("openai_compatible", {})
 omni = oc.get("autoos-omniroute", {})
 lit = oc.get("autoos-litellm", {})
-models = [m["name"] for m in omni.get("available_models", [])]
+# The model lists are catalog/ide-models.json projected at run time (ids,
+# display names, windows, membership, order); the 1M tier is 1000000.
+cat = json.load(open("catalog/ide-models.json", encoding="utf-8"))["models"]
+def want(gateway):
+    out = []
+    for m in cat:
+        if "zed" in m["surfaces"].get(gateway, []):
+            e = {"name": m["id"], "display_name": m["name"], "max_tokens": m["context"]}
+            if m.get("reasoning_effort"):
+                e["reasoning_effort"] = m["reasoning_effort"]
+            out.append(e)
+    return out
+got_models = {g: oc.get("autoos-" + g, {}).get("available_models") for g in ("omniroute", "litellm")}
+bad = [g for g in got_models if got_models[g] != want(g)]
+t1 = [m.get("max_tokens") for m in (got_models["omniroute"] or []) if m.get("name") == "t1-orchestrator"]
+models = "catalog-ok" if not bad and t1 == [1000000] else "MISMATCH:%s t1=%s" % (",".join(bad), t1)
 # Keys never land in settings.json (Zed docs: keychain/UI or env).
 # Pins come from the harness at runtime, never as literals in lib/.
 h = json.load(open("catalog/agent-harness.json", encoding="utf-8"))
@@ -2914,7 +2929,7 @@ pinok = ",".join(sorted(
     else "MISSING:" + n
     for n in ("serena", "graphify", "omnigraph", "playwright", "context7", "autoos-agent")))
 print("%s|%s|%s|%s|%s|%s|%s" % (
-    cfg.get("theme"), omni.get("api_url"), ",".join(models),
+    cfg.get("theme"), omni.get("api_url"), models,
     "api_key" in omni, lit.get("api_url"), "api_key" in lit, pinok))
 bp = cfg.get("agent", {}).get("profiles", {}).get("bypass", {})
 btools = bp.get("tools", {})
@@ -2934,7 +2949,7 @@ PY
     line1="$(printf '%s' "$report" | sed -n '1p')"
     line2="$(printf '%s' "$report" | sed -n '2p')"
     assert_eq "$line1" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,spark-1.3-contributor,opus-4-6,gemini-3.8-flash,deepseek-v4.1-flash,t4-rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "mine|http://127.0.0.1:20128/v1|catalog-ok|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
     assert_eq "$line2" \
         "bypass=bypass|off=|provider=autoos-omniroute|model=t1-orchestrator|allow=allow|ctx=autoos-agent,context7,graphify,omnigraph,playwright,serena"
     assert_eq "leaks=$leaks" "leaks=0"
@@ -6592,6 +6607,19 @@ if it "the router declarations do not drift from each other"; then
     out="$(python3 tools/audit-router.py --offline 2>&1)"; rc=$?
     assert_ok "$rc"
     assert_not_contains "$out" "DRIFT"
+fi
+
+if it "the IDE model lists match catalog/ide-models.json (sync-ide-models --check)"; then
+    # catalog/ide-models.json is the single source for the gateway model list
+    # (ids, names, windows, membership). opencode.jsonc and the OpenHands
+    # tier spec + config.toml carry generated copies; --check exits 1 with a
+    # diff when one drifted (fix: python3 tools/sync-ide-models.py).
+    out="$(python3 tools/sync-ide-models.py --check 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "rc=$rc $(printf '%s\n' "$out" | tail -n 20)"; fi
+fi
+
+if it "the IDE model sync tool's unit tests pass (sync-ide-models)"; then
+    out="$(python3 tests/test_sync_ide_models.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "every leg of a combo carries a provider prefix"; then

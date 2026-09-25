@@ -35,31 +35,32 @@ base_url = "http://127.0.0.1:20128/v1"
 api_key = ""
 temperature = 0.0
 num_retries = 3
-# Conservative ceiling: t1-orchestrator routes across 1M-context models (docs/models.md).
-max_input_tokens = 128000
-max_output_tokens = 32000
+# Token windows in every [llm*] table come from catalog/ide-models.json
+# (python3 tools/sync-ide-models.py rewrites them; edit the catalog).
+max_input_tokens = 1000000
+max_output_tokens = 32768
 
 # ── Named tiers (dev path: pick per agent below) ────────────────────
 [llm.t1-orchestrator]
 model = "openai/t1-orchestrator"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.0
-max_input_tokens = 128000
-max_output_tokens = 32000
+max_input_tokens = 1000000
+max_output_tokens = 32768
 
 [llm.t2-worker]
 model = "openai/t2-worker"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.1
-max_input_tokens = 128000
-max_output_tokens = 16000
+max_input_tokens = 131072
+max_output_tokens = 32768
 
 [llm.t3-driver]
 model = "openai/t3-driver"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.2
-max_input_tokens = 64000
-max_output_tokens = 8000
+max_input_tokens = 131072
+max_output_tokens = 16384
 
 # Sensitive data: swap tier ids for the -clean combos (no prompt training).
 [llm.t1-orchestrator-clean]
@@ -107,8 +108,8 @@ top_p = 0.95
 model = "openai/t4-rag"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.1
-max_input_tokens = 128000
-max_output_tokens = 16000
+max_input_tokens = 131072
+max_output_tokens = 16384
 
 # ── Agent mapping (dev path) ────────────────────────────────────────
 [agent.CodeActAgent]

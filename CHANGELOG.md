@@ -5,6 +5,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — one source for the gateway model list (`catalog/ide-models.json`)
+
+- **The tier/model list was hand-kept in about eight places and had drifted**: the 1M
+  tier was `1000000` in `opencode.jsonc`, `1048576` in the Zed writers, the OpenHands
+  tier profiles and the installers, `128000` in `configuration/openhands/config.toml`,
+  with three different output budgets. `catalog/ide-models.json` now owns ids, display
+  names, windows and per-surface membership (opencode, Zed, OpenHands); leg order stays
+  in `combos.json`. The 1M tier is `1000000` everywhere.
+- **Both Zed writers and both OpenCode user-config writers read the catalog at run time**
+  instead of carrying literals. Zed's litellm list gains `t4-rag`, the V1 OpenCode config
+  gains the four combos it had missed, and every surface shows the same names (the old
+  "no training" label on `t1-orchestrator-clean` was wrong: its only leg trains).
+- **`tools/sync-ide-models.py`** regenerates the static copies — the `opencode.jsonc`
+  model blocks (between `// AUTOOS-MANAGED` markers) and the token windows in the
+  OpenHands tier spec and `config.toml` — and checks OpenHands membership both ways.
+  `--check` exits 1 with a diff; both suites run it.
+- **The OpenHands default LLM uses its own model's windows** (t1 from the catalog, or the
+  keyless fallback's from `llm-models.json`) instead of one `1048576` for all three —
+  the local 32k Ollama model was told it had a 1M window.
+
+### Fixed — the OpenCode user config converges in one run
+
+- **`setup_opencode_config` needed two runs**: the providers merge wrote `—` escapes
+  where the agent harness wrote UTF-8, so the second run always "merged" again and took
+  a fresh backup. The merge now writes only when the document changes, in UTF-8.
+
 ### Fixed — agy and the Antigravity app no longer read as available when they are not
 
 - **A signed-out `agy` passed `list` as installed** and a headless run then waited 60 s on

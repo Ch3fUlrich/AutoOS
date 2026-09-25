@@ -95,6 +95,12 @@ def opencode_litellm_models() -> set[str]:
     return set(doc["providers"]["litellm"]["models"])
 
 
+def ide_models(gateway: str, surface: str) -> list[str]:
+    """Ids catalog/ide-models.json offers to `surface` through `gateway`."""
+    doc = json.loads((ROOT / "catalog" / "ide-models.json").read_text(encoding="utf-8"))
+    return [m["id"] for m in doc["models"] if surface in m["surfaces"].get(gateway, [])]
+
+
 def tier_profile_ids() -> set[str]:
     doc = json.loads((ROOT / "configuration" / "openhands" / "tier-profiles.json")
                      .read_text(encoding="utf-8"))
@@ -212,11 +218,21 @@ def main(argv=None) -> int:
             drift.append(f"opencode.jsonc lacks model '{c}'")
     psm = (ROOT / "lib" / "windows" / "AutoOS.Install.psm1").read_text(encoding="utf-8")
     sh = (ROOT / "lib" / "linux" / "install.sh").read_text(encoding="utf-8")
+    # Both Zed writers project catalog/ide-models.json at run time, so the
+    # catalog's zed membership IS what they write (tools/sync-ide-models.py
+    # --check covers the static copies).
+    zed = ide_models("omniroute", "zed")
     for c in names:
-        if f"'{c}'" not in psm and f'"{c}"' not in psm:
-            drift.append(f"psm1 Zed writer lacks '{c}'")
-        if f"'{c}'" not in sh and f'"{c}"' not in sh:
-            drift.append(f"install.sh Zed writer lacks '{c}'")
+        if c not in zed:
+            drift.append(f"catalog/ide-models.json does not offer '{c}' to zed")
+    for label, text in (("psm1", psm), ("install.sh", sh)):
+        if "ide-models.json" not in text:
+            drift.append(f"{label} Zed writer does not read catalog/ide-models.json")
+    # auto/* are OmniRoute's built-in bootstraps; anything else a client
+    # offers through the gateway must be a combo, or it cannot resolve.
+    for m in ide_models("omniroute", "opencode") + zed:
+        if m not in names and not m.startswith("auto"):
+            drift.append(f"catalog/ide-models.json offers '{m}' through omniroute but no combo has that name")
     tp = tier_profile_ids()
     for c in names:
         if f"omniroute-{c}" not in tp:
@@ -225,6 +241,8 @@ def main(argv=None) -> int:
     # 3. forbidden direct refs anywhere in our surfaces
     surfaces = {
         "opencode.jsonc": (ROOT / "opencode.jsonc").read_text(encoding="utf-8"),
+        "catalog/ide-models.json":
+            (ROOT / "catalog" / "ide-models.json").read_text(encoding="utf-8"),
         "lib/windows/AutoOS.Install.psm1": psm,
         "lib/linux/install.sh": sh,
         "configuration/openhands/tier-profiles.json":
