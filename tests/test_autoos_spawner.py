@@ -786,6 +786,23 @@ class ProcessGroupTests(unittest.TestCase):
             finally:
                 os.kill(pid, 9)
 
+    def test_a_failed_joinable_start_is_reaped(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "child.pid")
+            code = ("from subprocess import Popen\n"
+                    "p = Popen(['sleep', '30'])\n"
+                    "open(%r, 'w').write(str(p.pid))\n"
+                    "raise SystemExit(1)\n" % pidfile)
+            rc = agent.run_client([sys.executable, "-c", code], tmp, dict(os.environ), reap=False)
+            with open(pidfile, encoding="utf-8") as fh:
+                pid = int(fh.read())
+            deadline = time.time() + 6
+            while time.time() < deadline and not self.gone(pid):
+                time.sleep(0.1)
+            self.assertEqual(rc, 1)
+            self.assertTrue(self.gone(pid), "a failed joinable start left %d running" % pid)
+
 
 if __name__ == "__main__":
     unittest.main()

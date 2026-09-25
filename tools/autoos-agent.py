@@ -349,8 +349,8 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
 
     Returns the client's exit code; KeyboardInterrupt is re-raised after cleanup.
-    reap=False (a --joinable `claude --bg` session) leaves the group alone after a
-    normal exit: that session is meant to outlive this spawner.
+    reap=False (a --joinable `claude --bg` session) leaves the group alone after exit
+    code 0: that session is meant to outlive this spawner. A failed start is reaped.
     """
     # stdin closed: when it is an open pipe (cron, CI, an agent's shell)
     # `opencode run` waits to read it as extra prompt text and never starts
@@ -369,7 +369,7 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True) -> int:
     except BaseException:  # KeyboardInterrupt included: clean up, then re-raise
         _terminate_group(proc, pgid)
         raise
-    if reap:
+    if reap or rc != 0:
         _terminate_group(proc, pgid)
     return rc
 

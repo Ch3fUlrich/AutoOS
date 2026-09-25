@@ -29,6 +29,25 @@ class SkillRulesTests(unittest.TestCase):
             result = self.run_script(['check', str(path)])
         self.assertEqual(result.stdout.count('near-duplicate'), 3)
 
+    def check_text(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'rules.md'
+            path.write_text(text, encoding='utf-8')
+            return self.run_script(['check', str(path)])
+
+    def test_a_source_inside_the_why_does_not_hide_a_long_why(self):
+        why = ' '.join(['w'] * 13)
+        result = self.check_text("R-a-01: act (why: %s; source: old; source: new)\n" % why)
+        self.assertIn('why too long', result.stdout)
+
+    def test_empty_imperative(self):
+        result = self.check_text("R-a-01: (why: ok; source: t)\n")
+        self.assertIn('empty imperative', result.stdout)
+
+    def test_malformed_ids_are_reported_not_skipped(self):
+        result = self.check_text("R-a-01: act (why: ok; source: t)\nR-skill-rules-01: act two (why: ok; source: t)\n- R-x-001: other thing (why: ok; source: t)\n")
+        self.assertEqual(result.stdout.count('malformed id'), 2)
+
     def test_good_file(self):
         with tempfile.NamedTemporaryFile('w+', delete=False) as tf:
             tf.write("R-test-01: do something (why: because it works; source: test)\n")

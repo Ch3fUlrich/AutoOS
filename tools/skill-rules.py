@@ -17,7 +17,9 @@ import difflib
 from pathlib import Path
 
 RULE_REGEX = re.compile(r"^(?:-\s+)?(R-[a-z]+-\d{2}):\s+(.+)$")
-TAIL_REGEX = re.compile(r"\s*\(why:\s*(.+?)\s*;\s*source:\s*(.*?)\s*\)\s*$")
+# Greedy why, source without ";": the split is at the LAST "; source:".
+TAIL_REGEX = re.compile(r"\s*\(why:\s*(.+)\s*;\s*source:\s*([^;]*?)\s*\)\s*$")
+MALFORMED_REGEX = re.compile(r"^(?:-\s+)?(R-\S*?):")
 
 def parse_rule(line):
     m = RULE_REGEX.match(line)
@@ -49,6 +51,9 @@ def check_files(files):
         for idx, line in enumerate(lines, start=1):
             parsed = parse_rule(line)
             if not parsed:
+                bad = MALFORMED_REGEX.match(line)
+                if bad:
+                    problems.append((f, idx, bad.group(1), "malformed id (want R-<topic>-<nn>)"))
                 continue
             rule_id, imp, why, source = parsed
             file_rule_count += 1
@@ -63,6 +68,8 @@ def check_files(files):
             if why is None or source is None:
                 problems.append((f, idx, rule_id, "missing tail"))
                 continue
+            if not imp.strip():
+                problems.append((f, idx, rule_id, "empty imperative"))
             # empty source
             if source.strip() == "":
                 problems.append((f, idx, rule_id, "empty source"))
