@@ -2891,6 +2891,7 @@ antigravity_run() {
             mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
         }
         tee() { printf 'tee %s\n' "$*" >>"$log"; command tee "$@"; }
+        # shellcheck disable=SC2120  # stub: install_antigravity (sourced, not visible here) calls it with arguments
         run() { printf 'run %s\n' "$*" >>"$log"; }
         install_antigravity
     ) 2>&1
