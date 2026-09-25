@@ -45,6 +45,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   backup is the user's original, not just that there is one (the backup name has one-second
   resolution, so a bare count cannot tell a skipped second run from an overwritten backup).
 - The OpenHands settings script now writes `settings.json` only on a real difference.
+- **A backup no longer overwrites an earlier one.** The backup name has one-second resolution, and one
+  setup pass changes `mcp_config.json` five times (`Set-AutoOSAntigravityMcp`, then serena, graphify,
+  playwright and context7): the later `Copy-Item -Force` replaced the earlier copy, so the user's original
+  was lost and only an intermediate file survived. Every Windows writer now copies through
+  `Copy-AutoOSBackup`, which appends `-1`, `-2`, ... on a name clash. The two Antigravity writers also
+  compare an entry case-sensitively (`"NPX"` is not `npx`; PowerShell's `-eq` ignores case).
 
 ### Fixed — OpenHands reaches omnigraph from inside its container
 
