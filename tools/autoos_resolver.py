@@ -72,6 +72,8 @@ _CARD_FIELDS = ("spec", "kind")
 
 def _points_from_bands(value, bands, feature):
     """The points of the first band whose inclusive max covers `value`."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("%s=%r: expected a non-negative integer" % (feature, value))
     for band in bands:
         if band["max"] is None or value <= band["max"]:
             return band["points"]

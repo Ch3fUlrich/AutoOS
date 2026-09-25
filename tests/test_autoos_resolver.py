@@ -274,5 +274,14 @@ class MaxTokensTests(unittest.TestCase):
         self.assertEqual(r.max_tokens("medium", True, 48000), 48000)
 
 
+
+class InvalidFeatureTests(unittest.TestCase):
+    def test_negative_or_non_integer_features_fail_closed(self):
+        base = {"files": 1, "modules": 1, "fanout": 0, "lines": 10, "tests": True}
+        card = {"spec": "exact", "kind": "implement"}
+        for key, bad in (("files", -1), ("lines", "10"), ("fanout", 1.5), ("modules", True)):
+            with self.assertRaises(ValueError, msg=key):
+                r.points(dict(base, **{key: bad}), card)
+
 if __name__ == "__main__":
     unittest.main()

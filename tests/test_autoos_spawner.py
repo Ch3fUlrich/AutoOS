@@ -855,6 +855,11 @@ class CardV2Tests(unittest.TestCase):
     def norm(self, card):
         return routing.normalize_v2(card)
 
+    def test_rooted_and_drive_paths_are_refused(self):
+        for bad in ("\\\\server\\share", "\\x", "C:x", "~/x"):
+            with self.assertRaises(routing.CardError, msg=bad):
+                routing.normalize_v2({"paths": [bad]})
+
     def test_the_v2_tables_are_the_documented_ones(self):
         self.assertEqual(routing.CARD_V2_VALUES, {
             "kind": ("implement", "debug", "review", "plan", "bulk", "research"),

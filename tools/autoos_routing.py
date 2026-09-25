@@ -158,7 +158,9 @@ def _normalize_paths(value) -> list:
     for path in parts:
         if not isinstance(path, str) or not path:
             raise CardError("card paths=%r: expected non-empty string paths" % (path,))
-        if path.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", path):
+        # Rooted (/x, \\x, \\\\server\\share), drive (C:x) and home (~) paths all
+        # leave the repo; only plain relative paths are declared scope.
+        if path[0] in "/\\~" or re.match(r"^[A-Za-z]:", path):
             raise CardError("card paths=%r: absolute paths are not allowed" % (path,))
         if any(seg == ".." for seg in re.split(r"[\\/]+", path)):
             raise CardError("card paths=%r: '..' segments are not allowed" % (path,))
