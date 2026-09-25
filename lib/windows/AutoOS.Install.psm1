@@ -3006,9 +3006,6 @@ function Set-AutoOSZedProxy {
         return
     }
     if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
-    if (Test-Path $cfgPath) {
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
-    }
     # -Encoding UTF8: this writer saves BOM-less UTF-8 (below), and Windows
     # PowerShell 5.1 reads a BOM-less file as ANSI - the catalog's em-dash
     # names and any non-ASCII user setting would come back as mojibake.
@@ -3123,7 +3120,20 @@ function Set-AutoOSZedProxy {
     # BOM-less UTF-8: Zed's parser (serde_json) rejects a leading BOM with
     # "expected value at line 1 column 1", and PowerShell 5.1 Out-File -Encoding
     # utf8 always emits one (measured 2026-09-22 — broke the live file).
-    [IO.File]::WriteAllText($cfgPath, ($settings | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    $json = $settings | ConvertTo-Json -Depth 8
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    if (Test-Path $cfgPath) {
+        # Bytes, not parsed data: a file that already has the right content but a BOM
+        # (which Zed rejects) still differs and gets rewritten. Only a run that
+        # changes the file backs it up.
+        $same = [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfgPath)) -ceq [Convert]::ToBase64String($utf8.GetBytes($json))
+        if ($same) {
+            Write-AutoOSLine "Zed agents already routed to OmniRoute + LiteLLM ($cfgPath) - skipped" -Level ok
+            return
+        }
+        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
+    [IO.File]::WriteAllText($cfgPath, $json, $utf8)
     Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)' -Level ok
 }
 

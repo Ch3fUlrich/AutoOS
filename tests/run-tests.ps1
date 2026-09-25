@@ -4471,6 +4471,54 @@ Test-Case 'a missing or malformed catalog/ide-models.json stops the IDE writers 
     }
 }
 
+Test-Case 'backup-once: Set-AutoOSZedProxy does not back up again when nothing changed' {
+    # Only the run that changes settings.json backs it up. The backup name carries a
+    # second-resolution timestamp, so two quick runs would collide on one name and a
+    # bare count proves nothing: the surviving backup must still be the ORIGINAL file.
+    $realAppData = $env:APPDATA
+    $realOmni = $env:AUTOOS_OMNIROUTE_API_KEY
+    $realLit = $env:AUTOOS_LITELLM_API_KEY
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        $env:APPDATA = $scratch
+        $env:AUTOOS_OMNIROUTE_API_KEY = 'test-omni-key'
+        $env:AUTOOS_LITELLM_API_KEY = 'test-lit-key'
+        $cfgDir = Join-Path $scratch 'Zed'
+        $cfgPath = Join-Path $cfgDir 'settings.json'
+        $null = New-Item -ItemType Directory -Path $cfgDir -Force
+        $seed = '{"theme":"mine","vim_mode":true,"language_models":{"openai":{"api_url":"https://example.invalid"}},"agent":{"default_model":{"provider":"anthropic","model":"claude"}}}'
+        [IO.File]::WriteAllText($cfgPath, $seed)
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSZedProxy
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'settings.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        $hash1 = (Get-FileHash -LiteralPath $cfgPath -Algorithm SHA256).Hash
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSZedProxy
+        $out2 = Get-Content -LiteralPath $log -Raw -Encoding utf8
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'settings.json.autoos-backup-*')
+        if ($backups2.Count -ne 1) { throw "run 2: backups=$($backups2.Count) (want 1: nothing changed, so no new backup)" }
+        if ([IO.File]::ReadAllText($backups2[0].FullName) -ne $seed) { throw 'run 2 overwrote the run 1 backup: it is no longer the original file' }
+        $hash2 = (Get-FileHash -LiteralPath $cfgPath -Algorithm SHA256).Hash
+        if ($hash2 -ne $hash1) { throw 'run 2 changed settings.json although nothing needed changing' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        $s = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($s.theme -ne 'mine' -or $s.vim_mode -ne $true) { throw 'user settings lost' }
+        if ($s.language_models.openai.api_url -ne 'https://example.invalid') { throw 'user provider lost' }
+        if ($s.language_models.openai_compatible.'autoos-omniroute'.api_url -ne 'http://127.0.0.1:20128/v1') { throw 'omniroute provider not written' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_API_KEY = $realOmni }
+        if ($null -eq $realLit) { Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_LITELLM_API_KEY = $realLit }
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'component profiles name real profiles and verify is set' {
     $bad = @()
     foreach ($file in @('catalog\windows.json', 'catalog\linux.json', 'catalog\macos.json')) {
