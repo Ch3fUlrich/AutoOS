@@ -6917,6 +6917,11 @@ if it "autoos-agent context: fill from the session transcript (unit tests)"; the
     out="$(python3 tests/test_autoos_context.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# catalog/ai-registry.json (routing v2 spec section 3): converter, schema keys, idempotence.
+if it "ai-registry converter: schema keys, legs resolve, idempotent (unit tests)"; then
+    out="$(python3 tests/test_registry_convert.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/skill-rules.py: the linter for one-line skill rules (routing v2 spec 8.1).
 if it "skill-rules check: ids, length, source, near-duplicates (unit tests)"; then
     out="$(python3 tests/test_skill_rules.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
