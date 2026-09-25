@@ -55,6 +55,8 @@ Usage:
     python3 tools/autoos-agent.py run --tier 2 --model omniroute/t2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
     python3 tools/autoos-agent.py run --tier 3 --dry-run "..."     # print the plan only
+    python3 tools/autoos-agent.py context                          # this session's fill
+    python3 tools/autoos-agent.py context --transcript s.jsonl --json
 
 --free maps every tier agent to one of opencode's own free models (default
 opencode/big-pickle) through OPENCODE_CONFIG_CONTENT: no gateway, no key, no
@@ -87,6 +89,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
+import autoos_context as ctx  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -305,6 +308,51 @@ def cmd_list(cfg: dict) -> int:
     return 0
 
 
+def cmd_context(args) -> int:
+    """Print the calling session's context fill (spec 6.1, caps 8.3).
+
+    The fill comes from the Claude Code transcript's latest assistant usage
+    record. `--model` overrides only the model the cap is looked up for; the
+    tokens still come from the transcript. `--json` prints the same numbers as
+    an object (its `source` is the cap's provenance, `default` until a probe
+    measures one).
+    """
+    if args.transcript:
+        path = args.transcript
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError as exc:
+            print("context: unknown (cannot read %s: %s)"
+                  % (path, exc.strerror or exc), file=sys.stderr)
+            return 2
+    else:
+        path = ctx.discover_transcript(os.getcwd())
+        if path is None:
+            print("context: unknown (no transcript)")
+            return 0
+        with io.open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+
+    fill = ctx.fill_from_transcript(lines)
+    if fill is None:
+        print("context: unknown (no usage)")
+        return 0
+
+    model = args.model or fill.get("model") or "unknown"
+    cap = ctx.cap_for(model)
+    tokens = fill["tokens"]
+    pct = int(round(100 * tokens / cap)) if cap else 0
+    if args.json:
+        print(json.dumps({"tokens": tokens, "cap": cap, "pct": pct,
+                          "model": model, "transcript": path,
+                          "source": "default"}))
+    else:
+        print("context: %d / %d (%d%%) model=%s transcript=%s"
+              % (tokens, cap, pct, model, path))
+    return 0
+
+
 def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:
     logs = os.path.join(ROOT, "logs")
     os.makedirs(logs, exist_ok=True)
@@ -518,7 +566,13 @@ def main(argv=None) -> int:
     run.add_argument("--title")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")
+    context = sub.add_parser("context", help="print this session's context fill")
+    context.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
+    context.add_argument("--model", help="override the model the cap is looked up for")
+    context.add_argument("--json", action="store_true", help="print the fill as JSON")
     args = ap.parse_args(argv)
+    if args.cmd == "context":
+        return cmd_context(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
     return cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)
 
