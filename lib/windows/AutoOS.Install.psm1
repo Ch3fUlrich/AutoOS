@@ -1367,16 +1367,39 @@ function Register-AutoOSAntigravityMcpServer {
             Write-AutoOSLine "$cfgPath is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
 
     $servers = [ordered]@{}
     if ($cfg.Contains('mcpServers') -and $cfg['mcpServers']) {
         foreach ($p in $cfg['mcpServers'].PSObject.Properties) { $servers[$p.Name] = $p.Value }
     }
+    # Compare the entry as data, key order aside: a [hashtable] parameter keeps
+    # no order (and PowerShell 7 hashes differently per process), and a
+    # hand-formatted file that already holds the entry must be left alone.
+    $canon = $null
+    $canon = {
+        param($v)
+        if ($v -is [System.Collections.IDictionary]) {
+            '{' + ((@($v.Keys) | Sort-Object | ForEach-Object { "$_=" + (& $canon $v[$_]) }) -join ',') + '}'
+        } elseif ($v -is [System.Management.Automation.PSCustomObject]) {
+            '{' + ((@($v.PSObject.Properties.Name) | Sort-Object | ForEach-Object { "$_=" + (& $canon $v.PSObject.Properties[$_].Value) }) -join ',') + '}'
+        } elseif ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) {
+            '[' + ((@($v) | ForEach-Object { & $canon $_ }) -join ',') + ']'
+        } else {
+            ConvertTo-Json -InputObject $v -Compress
+        }
+    }
+    if ($servers.Contains($Name) -and ((& $canon $servers[$Name]) -eq (& $canon $Spec))) {
+        Write-AutoOSLine "Antigravity MCP server '$Name' already configured in $cfgPath - skipped" -Level ok
+        return
+    }
     $servers[$Name] = $Spec
     $cfg['mcpServers'] = $servers
 
+    # Back up only a run that changes the file, so a second run leaves no copy.
+    if (Test-Path $cfgPath) {
+        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
     $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
     Write-AutoOSLine "Antigravity MCP server '$Name' configured in $cfgPath" -Level ok
 }
