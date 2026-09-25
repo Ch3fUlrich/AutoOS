@@ -942,7 +942,6 @@ function Enable-AutoOSProjectMcpServer {
             Write-AutoOSLine "$path is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $path "$path.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     } elseif (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
@@ -950,10 +949,14 @@ function Enable-AutoOSProjectMcpServer {
     $enabled = @()
     if ($settings.Contains('enabledMcpjsonServers')) { $enabled = @($settings['enabledMcpjsonServers']) }
     if ($Name -in $enabled) {
-        Write-AutoOSLine "project MCP server '$Name' was already approved" -Level muted
+        Write-AutoOSLine "project MCP server '$Name' was already approved - skipped" -Level muted
         return
     }
     $settings['enabledMcpjsonServers'] = @($enabled + $Name)
+    # Back up only a run that changes the file, so a second run leaves no copy.
+    if (Test-Path $path) {
+        Copy-Item $path "$path.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
     $settings | ConvertTo-Json -Depth 12 | Out-File -FilePath $path -Encoding utf8
     Write-AutoOSLine "approved project MCP server '$Name' in $path" -Level ok
 }
@@ -1301,26 +1304,37 @@ function Set-AutoOSAntigravityMcp {
             Write-AutoOSLine "$cfgPath is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
 
     $servers = [ordered]@{}
     if ($cfg.Contains('mcpServers') -and $cfg['mcpServers']) {
         foreach ($p in $cfg['mcpServers'].PSObject.Properties) { $servers[$p.Name] = $p.Value }
     }
-    $servers['omnigraph'] = [ordered]@{
+    $entry = [ordered]@{
         command = 'npx'
         args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
         env     = $envBlock
     }
-    $cfg['mcpServers'] = $servers
-
-    $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
-    $kept = @($servers.Keys | Where-Object { $_ -ne 'omnigraph' })
-    if ($kept.Count) {
-        Write-AutoOSLine "omnigraph merged into $cfgPath (kept: $($kept -join ', '))" -Level ok
+    # Compare the entry as data (a parsed file and a fresh entry serialise the
+    # same way), so a hand-formatted file that already holds it is left alone.
+    $unchanged = $servers.Contains('omnigraph') -and
+        ((ConvertTo-Json -InputObject $servers['omnigraph'] -Depth 12 -Compress) -eq (ConvertTo-Json -InputObject $entry -Depth 12 -Compress))
+    if ($unchanged) {
+        Write-AutoOSLine "omnigraph already configured in $cfgPath - skipped" -Level ok
     } else {
-        Write-AutoOSLine "Antigravity MCP config written to $cfgPath" -Level ok
+        $servers['omnigraph'] = $entry
+        $cfg['mcpServers'] = $servers
+        # Back up only a run that changes the file, so a second run leaves no copy.
+        if (Test-Path $cfgPath) {
+            Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        }
+        $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
+        $kept = @($servers.Keys | Where-Object { $_ -ne 'omnigraph' })
+        if ($kept.Count) {
+            Write-AutoOSLine "omnigraph merged into $cfgPath (kept: $($kept -join ', '))" -Level ok
+        } else {
+            Write-AutoOSLine "Antigravity MCP config written to $cfgPath" -Level ok
+        }
     }
     if (-not $env:OMNIGRAPH_TOKEN) {
         Write-AutoOSLine 'OMNIGRAPH_TOKEN was not set, so no bearer token was written.' -Level warn
@@ -1353,16 +1367,39 @@ function Register-AutoOSAntigravityMcpServer {
             Write-AutoOSLine "$cfgPath is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
 
     $servers = [ordered]@{}
     if ($cfg.Contains('mcpServers') -and $cfg['mcpServers']) {
         foreach ($p in $cfg['mcpServers'].PSObject.Properties) { $servers[$p.Name] = $p.Value }
     }
+    # Compare the entry as data, key order aside: a [hashtable] parameter keeps
+    # no order (and PowerShell 7 hashes differently per process), and a
+    # hand-formatted file that already holds the entry must be left alone.
+    $canon = $null
+    $canon = {
+        param($v)
+        if ($v -is [System.Collections.IDictionary]) {
+            '{' + ((@($v.Keys) | Sort-Object | ForEach-Object { "$_=" + (& $canon $v[$_]) }) -join ',') + '}'
+        } elseif ($v -is [System.Management.Automation.PSCustomObject]) {
+            '{' + ((@($v.PSObject.Properties.Name) | Sort-Object | ForEach-Object { "$_=" + (& $canon $v.PSObject.Properties[$_].Value) }) -join ',') + '}'
+        } elseif ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) {
+            '[' + ((@($v) | ForEach-Object { & $canon $_ }) -join ',') + ']'
+        } else {
+            ConvertTo-Json -InputObject $v -Compress
+        }
+    }
+    if ($servers.Contains($Name) -and ((& $canon $servers[$Name]) -eq (& $canon $Spec))) {
+        Write-AutoOSLine "Antigravity MCP server '$Name' already configured in $cfgPath - skipped" -Level ok
+        return
+    }
     $servers[$Name] = $Spec
     $cfg['mcpServers'] = $servers
 
+    # Back up only a run that changes the file, so a second run leaves no copy.
+    if (Test-Path $cfgPath) {
+        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
     $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
     Write-AutoOSLine "Antigravity MCP server '$Name' configured in $cfgPath" -Level ok
 }
