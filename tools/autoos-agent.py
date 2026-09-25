@@ -431,9 +431,9 @@ def record_run(path: str, entry: dict) -> bool:
     try:
         track.record(path, entry)
         return True
-    except OSError as exc:
+    except (OSError, ValueError) as exc:  # a bad entry must not fail a finished run either
         print("autoos-agent: track record not written (%s): %s"
-              % (path, exc.strerror or exc), file=sys.stderr)
+              % (path, getattr(exc, "strerror", None) or exc), file=sys.stderr)
         return False
 
 
