@@ -246,7 +246,7 @@ Spec-silent decisions made while building the converter, one line each:
     old file's own `"version"` convention (`catalog/llm-models.json` had `"2026-09-14"`;
     `catalog/ide-models.json`/`configuration/omniroute/combos.json`/
     `configuration/openhands/tier-profiles.json` had none) — spec 3.1 does not define this field's
-    format beyond "registry content date", so this converter always writes today's date on a run.
+    format beyond "registry content date", so the converter pins `REGISTRY_VERSION` (the migration date) and renders are byte-identical across runs and days.
 
 ## 8. `catalog/ai-registry.schema.json` — additive fields not in spec 3.1
 

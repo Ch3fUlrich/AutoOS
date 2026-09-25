@@ -1412,7 +1412,7 @@
             "sun"
           ],
           "kind": "load",
-          "note": "operator observation, 2026-09-18 (no published schedule): high load 14:00-23:00 CEST",
+          "note": "quiet 21:00-12:00 UTC; throttling risk while busy",
           "price_factor": 1.0,
           "source": "operator observation, 2026-09-18 (no published schedule): high load 14:00-23:00 CEST",
           "utc_from": "12:00",

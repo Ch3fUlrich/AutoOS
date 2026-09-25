@@ -262,8 +262,7 @@ PROVIDER_WINDOWS = {
         "windows": [
             {"days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
              "utc_from": "12:00", "utc_to": "21:00", "price_factor": 1.0, "kind": "load",
-             "note": "operator observation, 2026-09-18 (no published schedule): "
-                     "high load 14:00-23:00 CEST",
+             "note": "quiet 21:00-12:00 UTC; throttling risk while busy",
              "source": "operator observation, 2026-09-18 (no published schedule): "
                        "high load 14:00-23:00 CEST",
              "verified": None},
