@@ -177,9 +177,22 @@ file for opencode, OpenHands, the serena container and the host CLIs.
 `AUTOOS_STACK_BIND` defaults to `0.0.0.0`, deliberately: host CLIs (Claude
 Code, `autoos-agent.py`, `apply.sh`) talk to `127.0.0.1:20128`, OpenHands
 sandboxes reach the gateway through the docker gateway address
-(`host.docker.internal`), and the proxy uses the LAN address. Narrowing the
-bind would break one of them; the LAN exposure is instead limited by the
-`DOCKER-USER` firewall rule to the proxy.
+(`host.docker.internal`), and the proxy - on another host - uses the LAN
+address. Narrowing the bind would break one of them; the LAN exposure is
+instead limited by the `DOCKER-USER` firewall rule to the proxy.
+
+A comment in `stack.env` is not a control, so `ai-stack.sh up` and `migrate`
+**refuse** to (re)create a container on a non-loopback address unless one of
+these holds, and say which is missing:
+
+| Condition | Checked as | Why it is enough |
+|---|---|---|
+| the firewall is in place | `systemctl is-active coding-agents-fw.service` (the oneshot system unit that loads the `DOCKER-USER` rule) | its `DOCKER-USER` rule drops LAN connections to the published ports except from the proxy |
+| the operator accepted the exposure | `AUTOOS_STACK_ALLOW_LAN=1` in `stack.env` | an explicit, persistent decision in the operator's own file (a host with another firewall, or none needed) |
+| the stack is host-only | `AUTOOS_STACK_BIND=127.0.0.1` (any `127.*`, `::1`, `localhost`) | nothing is published to the LAN; the proxy then cannot reach it either |
+
+Resuming containers that already run is not blocked: the guard applies when a
+container is created or started, which is when a port is newly published.
 
 #### The docker socket (OpenHands)
 
@@ -212,9 +225,18 @@ data directory's `.env`, as it does natively.
 with a machine token that the gateway accepts from **loopback peers only**. A
 published container port sees the docker gateway address as the peer, so the
 CLI would be refused. `ai-stack.sh migrate` creates a key with scope `manage`
-while the native gateway still answers; `apply.sh` exports it as
-`OMNIROUTE_API_KEY` whenever the stack is active. The CLI inside the image
-cannot replace this: it fails to start (`tsx` is not in the image).
+while the native gateway still answers, and refuses to start the move when it
+cannot (no CLI, native gateway down): without the key `apply.sh` could never
+manage the container gateway. `apply.sh` hands it to the `omniroute` CLI only,
+as `OMNIROUTE_API_KEY` in that command's environment - never exported to the
+script, so `curl`, `python3` and the probe do not inherit it. The CLI inside
+the image cannot replace this: it fails to start (`tsx` is not in the image).
+
+`init` never writes a value that holds a line break (`\n`, `\r`): an env file
+is one `KEY=value` per line and docker's format has no escape for it, so the
+rest of the value would become a key of its own. Such a key is skipped with a
+warning that names the key, never the value. The data directory, its
+`omniroute/` and `opencode-home/` are mode `700`.
 
 ### opencode in the container
 
@@ -257,38 +279,64 @@ Total ceilings 6 GB; typical use ~1.5 GB, about what the native processes used.
 Opt-in and announced; `ai-stack.sh migrate` without `--yes` only prints the
 plan:
 
+0. Refuse - before anything stops - when the stack already owns the services
+   (a second run would copy the older host state over the containers' newer
+   one; use `rollback`), when the publish address is on the LAN without the
+   firewall (above), or when no manage key exists and none can be created.
 1. `init`, then build/pull the images.
 2. Create the manage key while the native gateway still answers.
 3. Stop the `autoos-omniroute` unit (a hand-started gateway: `omniroute stop`). The gateway is down from here; the SQLite files are quiescent.
-4. Back up `~/.omniroute` to `~/.local/share/autoos/ai-stack/backups/omniroute-<ts>.tar.gz` (0600).
+4. Back up `~/.omniroute` to `~/.local/share/autoos/ai-stack/backups/omniroute-<ts>.tar.gz` (0600; a failed `tar` leaves no partial archive).
 5. **Copy** `~/.omniroute` (DB + `.env` with `STORAGE_ENCRYPTION_KEY` - without
    it the stored provider credentials are unreadable) into the data dir. The
    original stays untouched.
 6. Start the container; it must answer `/api/health` **and** refuse a keyless
-   `/v1` call with 401. If not - or if any step from 3 on fails - the
-   container stops and the unit starts again.
-7. Only then `register-autostart.sh --unregister --only autoos-omniroute`.
-8. The same for `autoos-opencode`: stop, start the container, prove it
-   answers, then unregister.
-9. Remove the `docker run` `openhands-app` (state stays in `~/.openhands`;
+   `/v1` call with 401.
+7. The same for `autoos-opencode`: stop the unit, start the container, prove
+   it answers.
+8. Remove the `docker run` `openhands-app` (state stays in `~/.openhands`;
    running sandboxes keep running) and start the compose one through
    `start-stack.sh openhands`, which still repairs the settings and pushes the
-   tier profiles.
+   tier profiles; it must answer on `:3000`.
+9. Only when **all three** answered: `register-autostart.sh --unregister --only
+   autoos-omniroute,autoos-opencode`, then write the ownership marker
+   `~/.config/autoos/ai-stack/stack.active`.
 
-Afterwards `register-autostart.sh` skips the gateway and opencode units while
-the stack is active, and `Start-AutoOSStack.sh`, `start-stack.sh`,
-`healthcheck.sh` and `apply.sh` resume/manage the containers instead.
+A native unit has to *stop* before its container can take the port; it is
+*unregistered* only in step 9. Any failure from step 3 on hands **every**
+service moved so far back: the containers are removed
+(`docker compose rm -s -f`; their data stays), the units start again
+(re-registered if needed), and a replaced `openhands-app` is recreated by
+`start-stack.sh openhands`. No marker is written.
+
+**Who owns the services** is that marker, not a container: `ai-stack.sh
+is-active` is true only while it exists, so a container a failed migrate left
+behind never switches `register-autostart.sh`, `Start-AutoOSStack.sh`,
+`start-stack.sh`, `healthcheck.sh` or `apply.sh` to docker mode. With the
+marker they skip the native gateway and opencode units and resume/manage the
+containers - a stopped-but-owned stack included (`up` resumes it rather than a
+stale native copy starting). On a fresh server with nothing native to move,
+the first `up` that gets the gateway and opencode answering from their
+containers writes the marker instead; `up` never starts a service next to a
+registered native unit.
 
 #### Rollback
 
 `ai-stack.sh rollback --yes` (run it from the checkout the units should point
 at):
 
-1. `docker compose down` - containers removed, bind-mounted data kept.
-2. Back up `~/.omniroute`, then copy the container's data back into it (the
-   container's state is the newest: keys, combos, usage).
-3. `register-autostart.sh --only autoos-omniroute,autoos-opencode`.
-4. `start-stack.sh openhands` (the `docker run` container, as before).
+1. Refuse unless the marker says the stack owns the services.
+2. Back up `~/.omniroute` (0600 `tar.gz`) while the stack still runs - a
+   failed backup changes nothing.
+3. `docker compose down` - containers removed, bind-mounted data kept.
+4. **Replace** `~/.omniroute` with the container's data (the newest state:
+   keys, combos, usage): copied into a fresh sibling directory, then swapped
+   in, never copied over the old one - an overlay would keep a stale
+   `storage.sqlite-wal`/`-shm` that SQLite replays onto the restored database.
+   The previous directory stays as `~/.omniroute.autoos-backup-<ts>`.
+5. Remove the marker, then `register-autostart.sh --only
+   autoos-omniroute,autoos-opencode`.
+6. `start-stack.sh openhands` (the `docker run` container, as before).
 
 ### Bumping an image
 
@@ -296,3 +344,9 @@ Resolve the new digest (`docker buildx imagetools inspect <image>:<tag>`),
 change the `image:` line (or the `FROM` line and the local tag for opencode),
 run `ai-stack.sh up`. For OmniRoute keep a backup of the data dir first; for
 OpenHands check the settings schema note in `start-stack.sh`.
+
+The local opencode image carries the label `org.autoos.opencode.source`: a
+hash of `opencode.Dockerfile` plus the base image digest in its `FROM` line.
+`up` and `migrate` rebuild it whenever that no longer matches, so an edited
+Dockerfile or a bumped base never keeps serving the old layer under the
+unchanged local tag.
