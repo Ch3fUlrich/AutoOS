@@ -26,7 +26,7 @@ cheaper than asking an L2.
 
    Then read the repository's `AGENTS.md` and its index (`INDEX.md`, or the `repository-index`
    skill). Open only the files they route you to.
-2. Read the plan. Read the DONE notes of earlier sessions (SKILL.md §4, "successor brief").
+2. Read the plan. Read the DONE notes of earlier sessions (`layers.md`, "successor brief").
    Read `<stateDir>/state.json` if a run exists.
 3. Check the machine (§5) before launching anything.
 
@@ -35,7 +35,7 @@ cheaper than asking an L2.
 - **How.** One runner session per chunk, with `"model": "opus"`, in its own worktree, launched
   by this skill's runner (`run_handoff_sessions.ps1`; `-Validate`, then `-DryRun`, then run).
   - Each session stays joinable: `claude attach <rcName>`, `claude logs <rcName>`.
-  - Your only channel into a running session is its `{{inbox}}` file (SKILL.md §4).
+  - Your only channel into a running session is its `{{inbox}}` file (layers.md).
   - Chunks that write the same files are **one lane**. Declare `resources` so two lanes never
     hold the same files.
 - **Where.** All worktrees of a repo go in **one folder beside it**, `<parent>/<repo>-worktrees/`,
@@ -66,7 +66,7 @@ it. That rule belongs in every L2 brief.
 |---|---|---|
 | Claude Haiku / Sonnet | anthropic | Stable. Runner launcher `claude` with `"model": "haiku"`/`"sonnet"`, or the Agent tool inside an L2 |
 | Gemini 3.8 Flash | google | Stable. Runner launcher `agy` |
-| DeepSeek | deepseek | Reviews are **measured**: `deepseek_review.sh`, or `deepseek_chunked_review.sh` for diffs over ~900 lines (SKILL.md §9.7). Implementation: per-session `"launcher": "codewhale"`, which is **experimental** (named explicitly = allowed); or OpenCode with `deepseek/deepseek-chat` |
+| DeepSeek | deepseek | Reviews are **measured**: `deepseek_review.sh`, or `deepseek_chunked_review.sh` for diffs over ~900 lines (cao-runbook.md §9.7). Implementation: per-session `"launcher": "codewhale"`, which is **experimental** (named explicitly = allowed); or OpenCode with `deepseek/deepseek-chat` |
 | Muse Spark 1.3-contributor | meta | **Not yet measured as a batch executor.** The route to test first is OpenCode (AutoOS configures provider `meta`, model `muse-spark-1.3-contributor`): `opencode run -m meta/muse-spark-1.3-contributor`. CAO pool `muse → mcode` is unverified. In OpenHands it's the `orchestrator`/`suborchestrator` profile (a human-watched canvas, not headless) |
 | OpenRouter (free and cheap paid) | per model (nvidia, google, poolside, cohere, moonshot, z-ai, …) | OpenCode (`openrouter/<id>`) or the OpenHands `openrouter-*` profiles. Free `:free` ids are capped at 20 requests/min and 50/day, or 1,000/day after $10 of lifetime credits. Models, prices and limits: [`l3-routing.md`](l3-routing.md) |
 | Local Ollama | oss | OpenCode (`ollama/<tag>`) or the OpenHands `ollama-*` profiles. RTX 3060 12 GB + 128 GB RAM: a 7B coder runs at 41.9 tok/s; the 30B class at ~5 tok/s with offload. Ollama's default context is 4,096 tokens, so set `num_ctx` per request. One GPU model at a time |
@@ -172,7 +172,7 @@ L2 alike.
 - **Fewer lanes beat a thrashing host.** Only add a parallel heavy lane when CPU, RAM and disk
   all have headroom. Run one local GPU model at a time, and unload it (`keep_alive: 0`) when
   done.
-- Never run the full suite in the main checkout while lanes merge (SKILL.md §7, Rule 7). Never reboot the
+- Never run the full suite in the main checkout while lanes merge (SKILL.md R-tests-02). Never reboot the
   host.
 - Check free disk before anything that downloads or builds. Clean up worktrees you merged
   (`-Cleanup`).
@@ -189,7 +189,7 @@ L2 alike.
   you already summarised.
 - Subagents return a short structured result: verdict, evidence paths, numbers. Tell them that
   in the brief, and tell them the same token rules.
-- Use the cheapest model that can verify its own output (SKILL.md §5); save Opus for
+- Use the cheapest model that can verify its own output (lanes.md); save Opus for
   judgement.
 
 ## 7. Research grade: evidence over assertion
@@ -207,7 +207,7 @@ L2 alike.
 - **Label every statement:** measured (command and date), sourced (link), or inferred. Never
   present an inference as a measurement.
 - **Refusals:** record them verbatim and route them to the operator; never work around them
-  (SKILL.md §7, Rule 4).
+  (SKILL.md R-safety-02).
 
 ## 8. End of session
 

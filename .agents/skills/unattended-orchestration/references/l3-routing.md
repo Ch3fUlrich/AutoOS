@@ -23,7 +23,7 @@ enforces family separation. **Nothing downstream changes; only where the ladder 
 
 | Parameter | On the card as | Why it matters |
 |---|---|---|
-| Complexity | `trivial` / `mechanical` / `standard` / `hard` | Sets the minimum **tier**. The shape of the work decides it, not its importance (SKILL.md §5) |
+| Complexity | `trivial` / `mechanical` / `standard` / `hard` | Sets the minimum **tier**. The shape of the work decides it, not its importance (lanes.md) |
 | Importance | `low` / `normal` / `critical` | Critical raises the tier floor by one and weights failure risk up: prefer smarter, bigger models |
 | Urgency | `batch` / `normal` / `blocking` | Blocking weights **time**. It prefers fast paid endpoints over rate-limited free ones and over slow local offload. Never delayed for an off-peak window |
 | Cost | the price table | Estimated `in_tokens × $in + out_tokens × $out`. Free and local cost $0 but spend quota or the GPU |
