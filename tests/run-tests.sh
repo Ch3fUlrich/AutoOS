@@ -2691,6 +2691,66 @@ if it "route_claude_to_gateway leaves an unreadable settings file untouched in e
     else fail "changed=$([[ "$before" == "$after" ]] && echo no || echo yes) backups=$backups rc=$rc1$rc2 login_out=[$login_out] gw_out=[$gw_out]"; fi
 fi
 
+_file_mode() {  # _file_mode <path> -> permission bits in octal, e.g. 600
+    python3 -c 'import os, sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o777))' "$1" 2>&1
+}
+_file_inode() {  # _file_inode <path>
+    python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "$1" 2>&1
+}
+
+if it "route_claude_to_gateway replaces settings.json atomically with mode 600, backups 600"; then
+    # The file holds ANTHROPIC_AUTH_TOKEN, and an in-place rewrite that dies
+    # mid-write (crash, ENOSPC) leaves it empty: temp file + os.replace, 0600.
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '%s' '{"theme":"mine"}' >"$scratch/.claude/settings.json"
+    chmod 644 "$scratch/.claude/settings.json"
+    inode_before="$(_file_inode "$scratch/.claude/settings.json")"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=gateway
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    inode_after="$(_file_inode "$scratch/.claude/settings.json")"
+    gw_mode="$(_file_mode "$scratch/.claude/settings.json")"
+    gw_backup_mode="$(_file_mode "$(find "$scratch/.claude" -name 'settings.json.autoos-backup-*' | head -1)")"
+    leftovers="$(find "$scratch/.claude" -name '*autoos-tmp*' | wc -l | tr -d ' ')"
+    # A settings file created from nothing is 600 as well.
+    scratch2="$(mktemp -d)"
+    ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=gateway
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    new_mode="$(_file_mode "$scratch2/.claude/settings.json")"
+    # The login-mode rewrite goes the same way, and its backup still holds the token.
+    scratch3="$(mktemp -d)"
+    mkdir -p "$scratch3/.claude"
+    printf '%s' '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}' >"$scratch3/.claude/settings.json"
+    chmod 644 "$scratch3/.claude/settings.json"
+    ( SYS_HOME="$scratch3" AUTOOS_DRY_RUN=0; unset 'AUTOOS_ANSWERS[claude_gateway_routing]'; route_claude_to_gateway >/dev/null 2>&1 )
+    login_mode="$(_file_mode "$scratch3/.claude/settings.json")"
+    login_backup_mode="$(_file_mode "$(find "$scratch3/.claude" -name 'settings.json.autoos-backup-*' | head -1)")"
+    rm -rf "$scratch" "$scratch2" "$scratch3"
+    got="$gw_mode|$gw_backup_mode|$new_mode|$login_mode|$login_backup_mode|$leftovers"
+    if [[ "$got" == "600|600|600|600|600|0" && "$inode_before" != "$inode_after" ]]; then pass
+    else fail "modes|leftovers=[$got] (want 600|600|600|600|600|0) inode $inode_before -> $inode_after (must change: replaced, not rewritten in place)"; fi
+fi
+
+if it "route_claude_to_gateway trims and lower-cases the answer, like the PowerShell side"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '%s' '{"theme":"mine"}' >"$scratch/.claude/settings.json"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=" Gateway "
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    padded="$(_claude_settings_report "$scratch/.claude/settings.json")"
+    # Inner whitespace is not stripped: "gate way" is not gateway, so it means login.
+    scratch2="$(mktemp -d)"
+    mkdir -p "$scratch2/.claude"
+    printf '%s' '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}' >"$scratch2/.claude/settings.json"
+    ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]="gate way"
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    split="$(_claude_settings_report "$scratch2/.claude/settings.json")"
+    rm -rf "$scratch" "$scratch2"
+    if [[ "$padded" == 'mine|null|{"ANTHROPIC_AUTH_TOKEN": "test-omni-key", "ANTHROPIC_BASE_URL": "http://127.0.0.1:20128"}' \
+          && "$split" == "mine|null|no-env" ]]; then pass
+    else fail "padded=[$padded] split=[$split]"; fi
+fi
+
 if it "claude_gateway_routing is asked by claude-code and omniroute on every platform, default login"; then
     bad="$(python3 - "$ROOT/catalog" 2>&1 <<'PY'
 import json, pathlib, sys

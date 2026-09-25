@@ -1151,11 +1151,17 @@ route_claude_to_gateway() {
     #            Needs no key.
     # Read-modify-write; a timestamped backup is taken only by a run that
     # changes the file, so a second run reports skipped and writes nothing.
+    # The file (and every backup of it) can hold the token, so both are
+    # mode 0600, and the new content lands via a fsynced temp file plus
+    # os.replace - a crash mid-write must never leave an empty settings.json.
     # A dry run reads the file to say what it would do, and writes nothing.
     local cfg="$SYS_HOME/.claude/settings.json"
     local mode
     mode="$(answer claude_gateway_routing login)"
-    mode="${mode//[[:space:]]/}"; mode="${mode,,}"
+    # Trim the ends and lower-case, exactly like the PowerShell side:
+    # " Gateway " is gateway, "gate way" is not (so it means login).
+    mode="${mode#"${mode%%[![:space:]]*}"}"; mode="${mode%"${mode##*[![:space:]]}"}"
+    mode="${mode,,}"
     [[ "$mode" == gateway ]] || mode=login
     if [[ "$mode" == gateway && -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
         ui_warn "AUTOOS_OMNIROUTE_KEY not set - export the OmniRoute client key before pointing Claude Code at the gateway"
@@ -1165,7 +1171,7 @@ route_claude_to_gateway() {
     # The key travels in the environment only, never on a command line.
     status="$(AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" \
         python3 - "$cfg" "$mode" "$AUTOOS_DRY_RUN" <<'PY'
-import json, os, shutil, sys, time
+import json, os, shutil, sys, tempfile, time
 path, mode, dry = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 keys = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
 url = "http://127.0.0.1:20128"
@@ -1203,11 +1209,30 @@ else:
 if dry:
     print("WOULD_" + status)
     sys.exit(0)
-os.makedirs(os.path.dirname(path), exist_ok=True)
+folder = os.path.dirname(path)
+os.makedirs(folder, exist_ok=True)
 if existed:
-    shutil.copy2(path, "%s.autoos-backup-%s" % (path, time.strftime("%Y%m%d-%H%M%S")))
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(cfg, fh, indent=2)
+    # Created 0600 from the start (shutil.copy2 would carry a 0644 over); the
+    # chmod covers a same-second backup that already exists with another mode.
+    backup = "%s.autoos-backup-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
+    with open(path, "rb") as src, \
+         os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    os.chmod(backup, 0o600)
+# mkstemp: same directory (so os.replace is atomic), O_EXCL, mode 0600.
+fd, tmp = tempfile.mkstemp(dir=folder, prefix="settings.json.autoos-tmp-")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    raise
 print(status)
 PY
 )" || rc=$?

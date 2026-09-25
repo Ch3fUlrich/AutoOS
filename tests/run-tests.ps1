@@ -3941,6 +3941,55 @@ Test-Case 'Set-AutoOSClaudeGateway leaves an unreadable settings file untouched 
     Pass
 }
 
+Test-Case 'Set-AutoOSClaudeGateway trims and lower-cases the answer, like the bash side' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $scratch = New-ClaudeGatewayScratch -Json '{"theme":"mine"}'
+    $scratch2 = New-ClaudeGatewayScratch -Json '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}'
+    try {
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        $env:USERPROFILE = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ claude_gateway_routing = ' Gateway ' } -RepoRoot $Root
+        $null = Invoke-ClaudeGatewayLogged
+        $s = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch) -Raw | ConvertFrom-Json
+        if ($null -eq $s.PSObject.Properties['env'] -or $s.env.ANTHROPIC_AUTH_TOKEN -ne 'test-omni-key') { throw "' Gateway ' did not mean gateway" }
+        # Inner whitespace is not stripped: "gate way" is not gateway, so it means login.
+        $env:USERPROFILE = $scratch2
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ claude_gateway_routing = 'gate way' } -RepoRoot $Root
+        $null = Invoke-ClaudeGatewayLogged
+        $s2 = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch2) -Raw | ConvertFrom-Json
+        if ($null -ne $s2.PSObject.Properties['env']) { throw "'gate way' did not mean login" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch, $scratch2 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway keeps deeply nested settings intact and leaves no temp file' {
+    # ConvertTo-Json -Depth 10 turned anything deeper into a "@{...}" string.
+    $realHome = $env:USERPROFILE
+    $deep = '{"k":"leaf"}'
+    foreach ($n in @('l', 'k2', 'j', 'i', 'h', 'g', 'f', 'e', 'd', 'c', 'b', 'a')) { $deep = "{""$n"":$deep}" }
+    $scratch = New-ClaudeGatewayScratch -Json ('{"theme":"mine","deep":' + $deep + ',"env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}')
+    try {
+        $env:USERPROFILE = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $null = Invoke-ClaudeGatewayLogged
+        $s = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch) -Raw | ConvertFrom-Json
+        $leaf = $s.deep.a.b.c.d.e.f.g.h.i.j.k2.l
+        if ($leaf -isnot [System.Management.Automation.PSCustomObject] -or $leaf.k -ne 'leaf') { throw "nested settings were flattened: [$leaf]" }
+        if ($null -ne $s.PSObject.Properties['env']) { throw 'gateway keys not removed' }
+        $left = @(Get-ChildItem -LiteralPath (Join-Path $scratch '.claude') -Filter 'settings.json.tmp.*')
+        if ($left.Count -ne 0) { throw "temp file left behind: $($left.Name -join ', ')" }
+    } finally {
+        $env:USERPROFILE = $realHome
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'claude_gateway_routing is asked by claude-code and omniroute, default login' {
     $spec = $winCatalog.prompts.PSObject.Properties['claude_gateway_routing']
     if ($null -eq $spec) { throw 'windows catalog never asks claude_gateway_routing' }

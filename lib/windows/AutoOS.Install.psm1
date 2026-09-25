@@ -2734,9 +2734,16 @@ function Set-AutoOSClaudeGateway {
     if ($existed) {
         Copy-Item -LiteralPath $cfgPath -Destination "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
+    # -Depth 100: at the default (or 10) anything nested deeper in the user's
+    # settings would come back as a "@{...}" string. The temp file can hold
+    # the token, so it never outlives a failed write or move.
     $tmp = "$cfgPath.tmp.$([Guid]::NewGuid().ToString('N'))"
-    [System.IO.File]::WriteAllText($tmp, ($settings | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
-    Move-Item -LiteralPath $tmp -Destination $cfgPath -Force
+    try {
+        [System.IO.File]::WriteAllText($tmp, ($settings | ConvertTo-Json -Depth 100), (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmp -Destination $cfgPath -Force
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    }
     if ($mode -eq 'gateway') {
         Write-AutoOSLine "Claude Code points at OmniRoute ($cfgPath)" -Level ok
         Write-AutoOSLine 'claude.ai connectors stay disabled while Claude Code routes through the gateway - answer claude_gateway_routing=login to undo. Subscription models need the gateway claude OAuth connection first (omniroute providers auth claude-code)' -Level warn
