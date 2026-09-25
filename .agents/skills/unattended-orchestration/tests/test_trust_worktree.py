@@ -168,3 +168,23 @@ def test_lane_mcp_without_mcp_json_has_only_serena(sandbox):
                                 "--lane-mcp", "--no-env"]) == 0
     servers = json.loads((worktree / LANE_MCP).read_text(encoding="utf-8"))["mcpServers"]
     assert set(servers) == {"serena"}
+
+
+def test_lane_mcp_refuses_a_malformed_mcp_json(sandbox, capsys):
+    # Review 2026-09-25: a swallowed parse error wrote a strict config without
+    # the project's servers, and the unchanged-bytes check kept it that way.
+    repo, worktree = sandbox
+    (worktree / ".mcp.json").write_text("{not json", encoding="utf-8")
+    assert trust_worktree.main([str(worktree), "--repo", str(repo),
+                                "--lane-mcp", "--no-env"]) == 2
+    assert not (worktree / LANE_MCP).exists()
+    assert ".mcp.json" in capsys.readouterr().err
+
+
+def test_lane_mcp_check_reports_unchanged_when_current(sandbox, capsys):
+    repo, worktree = sandbox
+    args = [str(worktree), "--repo", str(repo), "--lane-mcp", "--no-env"]
+    assert trust_worktree.main(args) == 0
+    capsys.readouterr()
+    assert trust_worktree.main(args + ["--check"]) == 0
+    assert "unchanged:" in capsys.readouterr().out
