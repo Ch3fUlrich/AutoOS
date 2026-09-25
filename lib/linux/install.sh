@@ -1990,14 +1990,48 @@ PY
     fi
 
     # Literal $HOME/${...}: this line is written into the rc file and expands
-    # there, at shell start-up, not here.
+    # there, at shell start-up, not here. It READS the three keys literally
+    # (export "$k=$v" never evaluates $v); the v1 line sourced the file, so a
+    # value holding $(...) ran in every new shell (review finding 2026-09-25).
+    # Works in bash and zsh.
     # shellcheck disable=SC2016
-    local rc_line='[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env'
+    local rc_line='[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && while IFS="=" read -r _ag_k _ag_v; do case "$_ag_k" in OMNIGRAPH_TOKEN|OMNIGRAPH_BASE_URL|OMNIGRAPH_GRAPH_ID) export "$_ag_k=$_ag_v" ;; esac; done < "$HOME/.autoos-omnigraph.env"; unset _ag_k _ag_v  # AutoOS:omnigraph-env-v2'
     local shell_rc
     for shell_rc in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
         [[ -f "$shell_rc" ]] || continue
-        append_line_once "$shell_rc" "AutoOS:omnigraph-env" "$rc_line"
+        replace_or_append_marked_line "$shell_rc" "AutoOS:omnigraph-env" "AutoOS:omnigraph-env-v2" "$rc_line"
     done
+}
+
+replace_or_append_marked_line() {
+    # replace_or_append_marked_line <file> <old marker> <new marker> <line>
+    # Current line present -> nothing. A line with the OLD marker (and not the
+    # new one) -> replaced in place, after a backup. Otherwise appended once.
+    local file="$1" old_marker="$2" new_marker="$3" line="$4"
+    if grep -qF -- "$new_marker" "$file" 2>/dev/null; then
+        ui_muted "already configured (${new_marker}) in ${file}"
+        return 0
+    fi
+    if ! grep -F -- "$old_marker" "$file" 2>/dev/null | grep -qvF -- "$new_marker"; then
+        append_line_once "$file" "$new_marker" "$line"
+        return 0
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would replace the '${old_marker}' line in ${file}"
+        return 0
+    fi
+    cp "$file" "${file}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    AUTOOS_OLD="$old_marker" AUTOOS_LINE="$line" python3 - "$file" <<'PY'
+import os, sys
+path = sys.argv[1]
+old, new = os.environ["AUTOOS_OLD"], os.environ["AUTOOS_LINE"]
+with open(path, encoding="utf-8") as f:
+    lines = f.read().split("\n")
+lines = [new if (old in l) else l for l in lines]
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines))
+PY
+    ui_ok "replaced the '${old_marker}' line in ${file}"
 }
 
 install_agent_skills() {

@@ -65,7 +65,7 @@ or the `omniroute:` line of configuration/api-keys.yml and is handed to the
 child through its environment only. One line per run is appended to
 logs/orch-<date>.log (git-ignored), which the watchdog protocol reads.
 
-Exit codes: the child's exit code; 2 bad arguments, card or route refused;
+Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); the child's exit code; 2 bad arguments, card or route refused;
 3 gateway, key or client binary missing; 4 depth budget exhausted.
 """
 from __future__ import annotations
@@ -303,6 +303,19 @@ def refuse(msg: str, rc: int = 2) -> int:
     return rc
 
 
+def sandbox_verdict(route: dict, changed: str, ahead: str):
+    """(rc override or None, message) for an --isolate run.
+
+    Measured 2026-09-25: tier2 workers answered "all fixed" with placeholder
+    commit hashes and changed nothing. A run whose job is to implement must
+    leave a commit or a change; an agent's report is not evidence.
+    """
+    if route.get("review") or changed or ahead:
+        return None, ""
+    return 5, ("NO-OP: the agent changed nothing in its sandbox - treat its report as "
+               "unverified and the run as failed (exit 5)")
+
+
 def cmd_run(args, cfg: dict) -> int:
     client = clients.CLIENTS[args.client]
     if args.free and args.clean:
@@ -395,6 +408,10 @@ def cmd_run(args, cfg: dict) -> int:
         print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
+        override, message = sandbox_verdict(plan["route"], changed, ahead)
+        if override is not None and rc == 0:
+            print(message)
+            rc = override
     return rc
 
 

@@ -887,6 +887,18 @@ Test-Case 'graphify is registered once, at user scope' {
     Pass
 }
 
+Test-Case 'omnigraph env file and its backup keep only the user''s access (icacls)' {
+    # Review finding 2026-09-25: the token file inherited the profile's ACLs.
+    $src = (Get-Command Set-AutoOSOmnigraphEnv).ScriptBlock.ToString()
+    $n = ([regex]::Matches($src, 'Protect-AutoOSUserFile')).Count
+    Assert-True ($n -ge 3) "Set-AutoOSOmnigraphEnv protects the file after writes, backup and unchanged path ($n calls)"
+    $helper = (Get-Command Protect-AutoOSUserFile -ErrorAction SilentlyContinue)
+    Assert-True ($null -ne $helper) 'Protect-AutoOSUserFile missing'
+    $body = $helper.ScriptBlock.ToString()
+    Assert-True ($body -match '/inheritance:r') 'inheritance not removed'
+    Assert-True ($body -match "ErrorActionPreference = 'Continue'") 'icacls stderr would be terminating under Stop (5.1)'
+}
+
 Test-Case 'omnigraph is never registered at user scope' {
     # A user-scope omnigraph silently wins over the per-repo one and answers
     # from the wrong graph, which looks identical to it working.
@@ -4509,10 +4521,14 @@ Test-Case 'autostart resumes the LiteLLM fallback proxy too' {
     Assert-True ($start -match 'start-litellm\.ps1') 'ps1 launcher does not use the litellm starter'
     Assert-True ($start -match '4000') 'ps1 launcher does not probe :4000'
     Assert-True ($sh -match '4000') 'sh launcher does not probe :4000'
-    Assert-True ($sh -match 'PYTHONUTF8') 'sh launcher must set PYTHONUTF8 (cp1252 banner crash)'
+    # The Linux launcher delegates to configuration/litellm/start-litellm.sh
+    # (literal .env parsing, stale-key restart), like the ps1 one does.
+    $shStarter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.sh') -Raw
+    Assert-True ($sh -match 'start-litellm\.sh') 'sh launcher does not use the litellm starter'
+    Assert-True ($shStarter -match 'PYTHONUTF8') 'sh starter must set PYTHONUTF8 (cp1252 banner crash)'
     # Idempotent: only start when down, never bounce a healthy proxy.
     Assert-True ($start -match 'already up on 4000') 'ps1 launcher has no litellm no-op path'
-    Assert-True ($sh -match 'already up on 4000') 'sh launcher has no litellm no-op path'
+    Assert-True ($shStarter -match 'already up with the current keys') 'sh starter has no litellm no-op path'
     $starter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.ps1') -Raw
     Assert-True ($starter -match '\.env') 'starter does not read the litellm .env'
     Assert-True ($starter -notmatch 'REPLACE_WITH_YOUR') 'starter embeds a placeholder key name list, not values'

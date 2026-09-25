@@ -2792,6 +2792,36 @@ if it "the omnigraph env file is private, merged, linked for systemd, and stable
         "600|KEEP_ME=1 OMNIGRAPH_BASE_URL=http://localhost:8080 OMNIGRAPH_TOKEN=test-token-value |.autoos-omnigraph.env|1|600|1|stable|"
 fi
 
+# Review finding 2026-09-25: the rc line used to `set -a; . file`, so a value
+# holding $(...) executed in every new shell. It must read the three keys
+# literally, in bash AND zsh, and replace an older AutoOS line in place.
+if it "the omnigraph rc line loads values literally and replaces the old sourcing line"; then
+    tmp="$(mktemp -d)"
+    printf 'OMNIGRAPH_BASE_URL=http://x$(touch %s/pwned)\nOMNIGRAPH_TOKEN=tok=with=equals\nOTHER=$(touch %s/pwned2)\n' "$tmp" "$tmp" >"$tmp/.autoos-omnigraph.env"
+    # An rc file that already carries the v1 sourcing line, as an older run wrote it.
+    printf '# mine\n[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env\n' >"$tmp/.bashrc"
+    cp "$tmp/.bashrc" "$tmp/.zshrc"
+    # Keep the env file as crafted: only the rc handling is under test here.
+    ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 OMNIGRAPH_TOKEN="tok=with=equals"; docker() { return 1; }
+      write_omnigraph_env 'http://x$(touch '"$tmp"'/pwned)' ) >/dev/null 2>&1
+    got_b="$(env -i HOME="$tmp" bash -c ". \"$tmp/.bashrc\"; printf '%s|%s' \"\$OMNIGRAPH_BASE_URL\" \"\$OMNIGRAPH_TOKEN\"" 2>&1)"
+    got_z=""
+    if command -v zsh >/dev/null; then
+        got_z="$(env -i HOME="$tmp" zsh -f -c ". \"$tmp/.zshrc\"; printf '%s|%s' \"\$OMNIGRAPH_BASE_URL\" \"\$OMNIGRAPH_TOKEN\"" 2>&1)"
+    fi
+    v1="$(grep -c 'set -a; \.' "$tmp/.bashrc" || true)"
+    v2="$(grep -c 'AutoOS:omnigraph-env-v2' "$tmp/.bashrc" || true)"
+    pwned="$(ls "$tmp"/pwned* 2>/dev/null | wc -l)"
+    rm -rf "$tmp"
+    want='http://x$(touch '"${tmp}"'/pwned)|tok=with=equals'
+    ok=1
+    [[ "$pwned" == 0 ]] || { ok=0; echo "a value was executed" >&2; }
+    [[ "$got_b" == "$want" ]] || { ok=0; echo "bash got: $got_b" >&2; }
+    [[ -z "$got_z" || "$got_z" == "$want" ]] || { ok=0; echo "zsh got: $got_z" >&2; }
+    [[ "$v1" == 0 && "$v2" == 1 ]] || { ok=0; echo "v1=$v1 v2=$v2 (old line not replaced)" >&2; }
+    if (( ok )); then pass; else fail "the omnigraph rc line is not a literal reader"; fi
+fi
+
 if it "the omnigraph token falls back to the local server container, else is reported missing"; then
     tmp="$(mktemp -d)"
     ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0
@@ -6209,6 +6239,40 @@ ENV
     printf '%s' "$d"
 }
 
+# Review finding 2026-09-25: without /proc (macOS) the stale-key check can
+# never run, and the old message blamed "another user". Say what is true.
+if it "svc: start-litellm.sh says stale-key restart is Linux-only where /proc is missing"; then
+    d="$(mktemp -d)"
+    python3 -c 'import http.server,socketserver,sys
+s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
+open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" >/dev/null 2>&1 &
+    srv=$!
+    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
+    out="$(AUTOOS_LITELLM_PORT="$(cat "$d/port")" AUTOOS_PROC_ROOT="$d/no-proc" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"; rc=$?
+    kill "$srv" 2>/dev/null
+    rm -rf "$d"
+    if [[ $rc -eq 0 && "$out" == *"Linux-only"* && "$out" != *"another user"* ]]; then pass
+    else fail "rc=$rc: $out"; fi
+fi
+
+# Found in review 2026-09-25: the restart path killed whatever same-user
+# process held the port, litellm or not (AGENTS.md rule 3). It must refuse.
+if it "svc: start-litellm.sh never kills a program on its port that is not litellm"; then
+    d="$(mktemp -d)"
+    python3 -c 'import http.server,socketserver,sys
+s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
+open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" >/dev/null 2>&1 &
+    srv=$!
+    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
+    out="$(AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
+    alive=0; kill -0 "$srv" 2>/dev/null && alive=1
+    kill "$srv" 2>/dev/null
+    rm -rf "$d"
+    if [[ $rc -ne 0 && $alive -eq 1 && "$out" == *"not litellm"* ]]; then pass
+    else fail "rc=$rc alive=$alive: $out"; fi
+fi
+
 if it "svc: start-litellm.sh loads .env literally, never evaluates it"; then
     d="$(_svc_litellm_fixture)"
     out="$(cd "$d" && AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 \
@@ -6330,6 +6394,24 @@ if it "svc: the omniroute unit requires a client key and gets this machine's PAT
     [[ "$out" == *"Managed by AutoOS"* ]] || { ok=0; echo "no marker" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "omniroute unit render is wrong"; fi
+fi
+
+# Review finding 2026-09-25: sed's replacement treats & as "the match", so a
+# path holding & rendered @OMNIROUTE@ back into the unit.
+if it "svc: a unit renders a tool path that contains an ampersand intact"; then
+    d="$(_svc_reg_sandbox)"
+    mkdir -p "$d/r&d"
+    printf '#!/bin/sh\nexit 0\n' >"$d/r&d/omniroute"; chmod +x "$d/r&d/omniroute"
+    out="$(PATH="$d/r&d:$d/bin:$PATH" AUTOOS_SYSTEMD_USER_DIR="$d/units" AUTOOS_OMNIROUTE_ENV="$d/omniroute.env" \
+        AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" AUTOOS_LOGINCTL="$d/bin/fake-loginctl" \
+        bash "$ROOT/configuration/autostart/register-autostart.sh" --render autoos-omniroute 2>&1)"
+    ok=1
+    [[ "$out" == *"ExecStart=$d/r&d/omniroute serve"* ]] || { ok=0; echo "ExecStart: $(grep ExecStart <<<"$out")" >&2; }
+    [[ "$(grep '^Environment=PATH=' <<<"$out")" == *":$d/r&d:"* || "$(grep '^Environment=PATH=' <<<"$out")" == *"=$d/r&d:"* ]] \
+        || { ok=0; echo "PATH: $(grep 'PATH=' <<<"$out")" >&2; }
+    [[ "$out" == *"@"*"@"* ]] && { ok=0; echo "placeholder leaked back" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an & in a path corrupts the unit"; fi
 fi
 
 if it "svc: register-autostart --dry-run writes, enables and starts nothing"; then

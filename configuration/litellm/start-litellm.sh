@@ -74,6 +74,9 @@ listener_pid() {
 RUNNING=0
 PID=""
 ENVIRON_FILE=""
+NO_PROC=0   # macOS & co: no /proc, so the live proxy's keys cannot be read
+FOREIGN=0   # the port is held by a program that is not litellm
+PROC_ROOT="${AUTOOS_PROC_ROOT:-/proc}"
 if [[ -n "${AUTOOS_FAKE_LITELLM_ENVIRON:-}" ]]; then
     # Tests only: a synthetic NUL-separated environ stands in for the live
     # proxy (AGENTS.md §5 - never the machine's own processes).
@@ -82,7 +85,20 @@ if [[ -n "${AUTOOS_FAKE_LITELLM_ENVIRON:-}" ]]; then
 elif proxy_ok || [[ -n "$(listener_pid)" ]]; then
     RUNNING=1
     PID="$(listener_pid)"
-    [[ -n "$PID" && -r "/proc/$PID/environ" ]] && ENVIRON_FILE="/proc/$PID/environ"
+    if [[ ! -d "$PROC_ROOT" ]]; then
+        NO_PROC=1
+        PID=""
+    elif [[ -n "$PID" ]]; then
+        # Never stop a program we did not start: only a litellm listener may
+        # be restarted (AGENTS.md rule 3; found in review 2026-09-25).
+        tr '\0' ' ' <"$PROC_ROOT/$PID/cmdline" 2>/dev/null | grep -q litellm || FOREIGN=1
+        [[ -r "$PROC_ROOT/$PID/environ" ]] && ENVIRON_FILE="$PROC_ROOT/$PID/environ"
+    fi
+fi
+if [[ $FOREIGN -eq 1 ]]; then
+    echo "Port $PORT is held by another program (pid $PID), not litellm - leaving it alone."
+    echo "Free the port or set AUTOOS_LITELLM_PORT, then run this again."
+    exit 1
 fi
 
 STALE=()
@@ -106,6 +122,10 @@ PLANNED="PYTHONUTF8=1 litellm --config config.yaml --host 127.0.0.1 --port $PORT
 
 # ─── Decide ─────────────────────────────────────────────────────────────────
 if [[ $RUNNING -eq 1 && $FOREGROUND -eq 0 ]]; then
+    if [[ $NO_PROC -eq 1 ]]; then
+        echo "LiteLLM proxy is up on $PORT. Stale-key restart is Linux-only (no /proc here) - restart it by hand to load new keys."
+        exit 0
+    fi
     if [[ -z "$ENVIRON_FILE" ]]; then
         echo "LiteLLM proxy is up on $PORT but its environment is not readable (another user?) - leaving it alone."
         exit 0

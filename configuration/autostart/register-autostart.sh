@@ -107,9 +107,16 @@ render() {
     local path
     path="$(unit_path)"
     printf '%s\n' "$MARKER"
-    # Template comments stay: they say why each line is there.
-    sed -e "s|@REPO@|$REPO|g" -e "s|@PATH@|$path|g" \
-        -e "s|@OMNIROUTE@|$bin|g" -e "s|@OPENCODE@|$bin|g" "$tpl"
+    # Template comments stay: they say why each line is there. Every value is
+    # escaped for sed's replacement text: an & there means "the whole match",
+    # so a path holding & rendered the placeholder back (review 2026-09-25).
+    sed -e "s|@REPO@|$(sed_repl "$REPO")|g" -e "s|@PATH@|$(sed_repl "$path")|g" \
+        -e "s|@OMNIROUTE@|$(sed_repl "$bin")|g" -e "s|@OPENCODE@|$(sed_repl "$bin")|g" "$tpl"
+}
+
+sed_repl() {
+    # Escape \, & and the | delimiter for a sed replacement.
+    printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
 }
 
 if [[ -n "$RENDER" ]]; then

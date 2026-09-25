@@ -945,6 +945,32 @@ function Write-AutoOSOmnigraphReadiness {
     $ready
 }
 
+function Protect-AutoOSUserFile {
+    <#
+      .SYNOPSIS
+        Leave a secret-bearing file readable by the current user only.
+      .DESCRIPTION
+        A file under %USERPROFILE% inherits the profile's ACLs, which on a
+        shared or backed-up machine can be broad (review finding 2026-09-25).
+        icacls drops inheritance and grants the user read/write. A no-op off
+        Windows. Returns $true when icacls succeeded.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $onWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or
+        ((Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) -and $IsWindows)
+    if (-not $onWindows -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    # Windows PowerShell 5.1 turns native stderr into a terminating error
+    # under Stop (AGENTS.md section 6).
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $null = & icacls.exe $Path /inheritance:r /grant:r "$($env:USERNAME):(R,W)" 2>&1
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
 function Set-AutoOSOmnigraphEnv {
     <#
       .SYNOPSIS
@@ -1007,11 +1033,17 @@ function Set-AutoOSOmnigraphEnv {
     $fileToken = ($out | Where-Object { $_ -like 'OMNIGRAPH_TOKEN=?*' } | Select-Object -First 1)
 
     if ($new -ceq $old) {
+        $null = Protect-AutoOSUserFile -Path $EnvFile
         Write-AutoOSLine "omnigraph env file unchanged ($EnvFile)" -Level muted
     } else {
-        if ($old) { Copy-Item $EnvFile "$EnvFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force }
+        if ($old) {
+            $backup = "$EnvFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+            Copy-Item $EnvFile $backup -Force
+            $null = Protect-AutoOSUserFile -Path $backup
+        }
         # No BOM: the file is also read as KEY=VALUE by non-PowerShell tools.
         [IO.File]::WriteAllText($EnvFile, $new, (New-Object Text.UTF8Encoding($false)))
+        $null = Protect-AutoOSUserFile -Path $EnvFile
         Write-AutoOSLine "omnigraph env written to $EnvFile" -Level ok
     }
     if (-not $fileToken) {
@@ -2875,7 +2907,7 @@ Export-ModuleMember -Function `
     Read-AutoOSSecretsFile, Read-AutoOSApiSecrets, Resolve-AutoOSOllamaBaseUrl,
     Get-AutoOSMcpPackage, Get-AutoOSSerenaExcludedTools,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
-    Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv,
+    Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv, Protect-AutoOSUserFile,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
     Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
     Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,

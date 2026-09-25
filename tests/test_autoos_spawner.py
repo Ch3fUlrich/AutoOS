@@ -578,5 +578,29 @@ class RunDirCollisionTests(unittest.TestCase):
             mcp_server.os.makedirs = real
         self.assertIn("error", out)
 
+
+class NoOpGuardTests(unittest.TestCase):
+    """Measured 2026-09-25: two tier2 workers reported "all fixed" with
+    placeholder commit hashes and changed nothing. An isolated run whose job
+    is to implement must leave commits or changes, or it failed."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("autoos_agent_cli", str(TOOLS / "autoos-agent.py"))
+        cls.cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.cli)
+
+    def test_implement_run_without_changes_is_a_failure(self):
+        rc, msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="")
+        self.assertEqual(rc, 5)
+        self.assertIn("NO-OP", msg)
+
+    def test_implement_run_with_a_commit_or_a_change_is_fine(self):
+        self.assertEqual(self.cli.sandbox_verdict({"review": False}, changed="", ahead="abc fix")[0], None)
+        self.assertEqual(self.cli.sandbox_verdict({"review": False}, changed=" M a.py", ahead="")[0], None)
+
+    def test_a_review_run_may_change_nothing(self):
+        self.assertEqual(self.cli.sandbox_verdict({"review": True}, changed="", ahead="")[0], None)
+
 if __name__ == "__main__":
     unittest.main()
