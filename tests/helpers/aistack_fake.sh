@@ -18,7 +18,9 @@
 #   fail-up-<service>    `compose up` of that service fails
 #   unhealthy-<service>  the container runs but its HTTP probe fails
 #   omni-key-fails       the omniroute CLI cannot create the manage key
-#   fail-register        register-autostart.sh fails
+#   fail-register        register-autostart.sh fails (register.log also
+#                        records marker=yes|no: ai-stack.sh's marker at the call)
+#   compose-bind.log     AUTOOS_STACK_BIND as every `docker compose` call saw it
 # Every call is appended to <tool>.log and, as "<tool>: <args>", to events.log
 # (the cross-tool order). Arguments only - the environment is never logged;
 # saw-manage-key only records WHICH tool had OMNIROUTE_API_KEY set.
@@ -28,6 +30,10 @@ S="$1"; TOOL="$2"; shift 2
 printf '%s\n' "$*" >>"$S/$TOOL.log"
 printf '%s: %s\n' "$TOOL" "$*" >>"$S/events.log"
 if [[ -n "${OMNIROUTE_API_KEY:-}" ]]; then printf '%s\n' "$TOOL" >>"$S/saw-manage-key"; fi
+# The publish address compose would interpolate (shell env beats --env-file).
+if [[ "$TOOL" == docker && "${1:-}" == compose ]]; then
+    printf 'bind=%s\n' "${AUTOOS_STACK_BIND-<unset>}" >>"$S/compose-bind.log"
+fi
 
 container_of() {
     case "$1" in
@@ -177,6 +183,9 @@ fake_omniroute() {
 # register-autostart.sh: --unregister --only a,b removes those units;
 # --only a,b registers and starts them.
 fake_register() {
+    # Whether ai-stack.sh's ownership marker existed at this call (the sandbox
+    # keeps its config in <state-dir>/cfg).
+    if [[ -f "$S/cfg/stack.active" ]]; then echo "marker=yes" >>"$S/register.log"; else echo "marker=no" >>"$S/register.log"; fi
     [[ -e "$S/fail-register" ]] && return 1
     local unreg=0 only="" u
     while (( $# )); do

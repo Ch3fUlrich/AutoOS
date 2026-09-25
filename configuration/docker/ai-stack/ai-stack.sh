@@ -180,8 +180,19 @@ running_container_env() {
         | sed -n "s/^$2=//p" | head -n1 || true
 }
 
+# The publish address compose will really use: an exported AUTOOS_STACK_BIND
+# beats --env-file in compose's interpolation, so it wins here too - and dc
+# hands compose exactly this value, so the guard and the published ports can
+# never disagree.
+effective_bind() {
+    local b="${AUTOOS_STACK_BIND:-}"
+    [[ -n "$b" ]] || b="$(env_value "$STACK_ENV" AUTOOS_STACK_BIND)"
+    printf '%s' "${b:-0.0.0.0}"
+}
+
 dc() {
-    "$DOCKER" compose --project-name autoos-ai --env-file "$STACK_ENV" -f "$HERE/compose.yml" "$@"
+    AUTOOS_STACK_BIND="$(effective_bind)" \
+        "$DOCKER" compose --project-name autoos-ai --env-file "$STACK_ENV" -f "$HERE/compose.yml" "$@"
 }
 
 container_running() {
@@ -255,26 +266,40 @@ is_loopback() {
     esac
 }
 
+# Runs before every `compose up -d` (dc_up): that creates a container, or
+# recreates a running one whose published bind changed. Passes once per run.
+BIND_OK=0
 bind_guard() {
     local bind allow
-    bind="$(env_value "$STACK_ENV" AUTOOS_STACK_BIND)"
-    bind="${bind:-0.0.0.0}"
-    is_loopback "$bind" && return 0
+    (( BIND_OK )) && return 0
+    bind="$(effective_bind)"
+    if is_loopback "$bind"; then BIND_OK=1; return 0; fi
+    # Only the operator's own file can accept the exposure, never an
+    # inherited environment variable.
     allow="$(env_value "$STACK_ENV" AUTOOS_STACK_ALLOW_LAN)"
     if [[ "$allow" == 1 ]]; then
         echo "  = publishing on $bind: AUTOOS_STACK_ALLOW_LAN=1 in $STACK_ENV (firewall not checked)"
+        BIND_OK=1
         return 0
     fi
     if "$SYSTEMCTL" is-active coding-agents-fw.service >/dev/null 2>&1; then
         echo "  = publishing on $bind: coding-agents-fw.service is active (LAN limited to the proxy)"
+        BIND_OK=1
         return 0
     fi
     echo "  ! refusing to publish :20128, :4096 and :3000 on $bind: coding-agents-fw.service is not"
     echo "    active, so nothing limits LAN clients to the reverse proxy (OpenHands has no login and"
     echo "    holds the docker socket). Start that firewall unit, or set AUTOOS_STACK_BIND=127.0.0.1"
-    echo "    (host only), or accept the exposure with AUTOOS_STACK_ALLOW_LAN=1 - both in $STACK_ENV."
+    echo "    (host only), or accept the exposure with AUTOOS_STACK_ALLOW_LAN=1 - both in $STACK_ENV"
+    [[ -n "${AUTOOS_STACK_BIND:-}" ]] && echo "    (this shell exports AUTOOS_STACK_BIND=$bind, which wins over the file)"
     if [[ $DRY -eq 1 ]]; then echo "    (dry run: a real run stops here)"; return 0; fi
     return 1
+}
+
+# dc_up [args...]: `docker compose up -d`, never past a refusing bind guard.
+dc_up() {
+    bind_guard || return 1
+    dc up -d "$@"
 }
 
 # ─── init ───────────────────────────────────────────────────────────────────
@@ -416,7 +441,7 @@ claim_fresh_host() {
 }
 
 cmd_up() {
-    local svcs=("${SERVICES[@]}") start=() fresh=() svc c port unit
+    local svcs=("${SERVICES[@]}") start=() svc c port unit
     (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands)
     if [[ ! -f "$STACK_ENV" ]]; then
         if [[ $DRY -eq 1 ]]; then echo "  - would run init first"; else cmd_init || return 1; fi
@@ -445,19 +470,19 @@ cmd_up() {
             echo "  ! $svc: a stopped openhands-app from start-stack.sh exists - replace it with: ai-stack.sh migrate --yes"
             continue
         fi
-        start+=("$svc"); fresh+=("$svc")
+        start+=("$svc")
     done
     (( ${#start[@]} )) || return 0
-    # Only a container that is (re)created publishes anew: the guard does not
-    # stand in the way of resuming what already runs.
-    if (( ${#fresh[@]} )); then bind_guard || return 1; fi
+    # Before the images: compose up below may create these containers or
+    # recreate running ones (a changed bind, a rebuilt image).
+    bind_guard || return 1
     ensure_images "${start[@]}" || return 1
     if [[ $DRY -eq 1 ]]; then
         echo "  - would run: docker compose -p autoos-ai up -d --no-deps ${start[*]}"
         attach_shared_mcp
         return 0
     fi
-    dc up -d --no-deps "${start[@]}" || { echo "  ! docker compose up failed - see: $0 status"; return 1; }
+    dc_up --no-deps "${start[@]}" || { echo "  ! docker compose up failed - see: $0 status"; return 1; }
     attach_shared_mcp
     for svc in "${start[@]}"; do
         case "$svc" in
@@ -606,9 +631,9 @@ Migration plan (native units -> docker AI stack):
   8. replace the openhands container from start-stack.sh with the compose one
      (state stays in $OH_DIR; running sandboxes keep running), wait until it
      answers
-  9. only when all three answered: unregister autoos-omniroute and
-     autoos-opencode (register-autostart.sh --unregister --only), then write
-     $MARKER - from then on is-active is true
+  9. only when all three answered: write $MARKER (from then on is-active is
+     true), then unregister autoos-omniroute and autoos-opencode
+     (register-autostart.sh --unregister --only)
   Any failure from step 3 on hands EVERY service moved so far back: the
   containers are removed (their data stays), the units start again, and a
   replaced openhands-app is recreated by start-stack.sh.
@@ -673,6 +698,10 @@ moved() { [[ " ${MOVED[*]} " == *" $1 "* ]]; }
 # in dependency order (the gateway first: start-stack.sh needs it).
 migrate_abort() {
     echo "  ! migration failed - every service this run moved goes back to its native owner"
+    # Before anything is re-registered: register-autostart skips the units
+    # while the marker says docker owns them. (migrate refused to start with
+    # one, so any marker here is this run's.)
+    rm -f "$MARKER" 2>/dev/null || true
     if moved openhands; then dc rm -s -f openhands >/dev/null 2>&1 || true; fi
     if moved omniroute && restore_native autoos-omniroute omniroute; then
         wait_for gateway_ok || echo "  ! the native gateway does not answer yet - journalctl --user -u autoos-omniroute"
@@ -682,7 +711,7 @@ migrate_abort() {
         echo "  - recreating the start-stack.sh openhands-app container"
         bash "$START_STACK" openhands || echo "  ! openhands did not come back - run: configuration/start-stack.sh openhands"
     fi
-    echo "  = the docker stack does not own the services ($MARKER not written); backups stay in $DATA_DIR/backups"
+    echo "  = the docker stack does not own the services (no $MARKER); backups stay in $DATA_DIR/backups"
 }
 
 cmd_migrate() {
@@ -724,7 +753,7 @@ cmd_migrate() {
             migrate_abort
             return 1
         fi
-        if ! dc up -d --no-deps omniroute || ! wait_for gateway_ok || ! gateway_keyed; then
+        if ! dc_up --no-deps omniroute || ! wait_for gateway_ok || ! gateway_keyed; then
             echo "  ! the omniroute container did not answer /api/health, or served /v1 without a key - docker logs autoos-omniroute"
             migrate_abort
             return 1
@@ -741,7 +770,7 @@ cmd_migrate() {
             migrate_abort
             return 1
         fi
-        if ! dc up -d --no-deps opencode || ! wait_for opencode_ok; then
+        if ! dc_up --no-deps opencode || ! wait_for opencode_ok; then
             echo "  ! the opencode container did not answer on :4096 - docker logs autoos-opencode"
             migrate_abort
             return 1
@@ -765,7 +794,15 @@ cmd_migrate() {
         return 1
     fi
 
-    # 4. All three answered: only now the native units go, then the marker.
+    # 4. All three answered: claim, then let the native units go. The marker
+    #    comes FIRST - it is what rollback needs - so no state exists in which
+    #    the units are gone but nothing owns the services. A failure in either
+    #    step aborts, and the abort removes the marker again.
+    if ! write_marker migrate; then
+        echo "  ! could not write $MARKER - nothing was unregistered"
+        migrate_abort
+        return 1
+    fi
     if (( ${#UNITS_BEFORE[@]} )); then
         if ! bash "$REGISTER" --unregister --only "$(IFS=,; printf '%s' "${UNITS_BEFORE[*]}")"; then
             echo "  ! could not unregister ${UNITS_BEFORE[*]}"
@@ -773,7 +810,6 @@ cmd_migrate() {
             return 1
         fi
     fi
-    write_marker migrate || { echo "  ! could not write $MARKER - is-active stays false; fix and re-run migrate"; return 1; }
     cmd_status
 }
 
@@ -814,7 +850,7 @@ cmd_rollback() {
     "$DOCKER" network disconnect autoos-ai serena-mcp >/dev/null 2>&1 || true
     if ! dc down; then
         echo "  ! docker compose down failed - starting the docker stack again"
-        dc up -d || true
+        dc_up || echo "  ! the docker stack stays down - fix the above, then: $0 up"
         return 1
     fi
     echo "  - compose containers removed"
@@ -823,7 +859,7 @@ cmd_rollback() {
             # Nothing native is registered yet: bring the containers back rather
             # than leave the host without a gateway.
             echo "  ! could not restore $OMNI_HOME - starting the docker stack again"
-            dc up -d || true
+            dc_up || echo "  ! the docker stack stays down - fix the above, then: $0 up"
             return 1
         fi
         # The container's pid files would read as "already running" natively.

@@ -191,8 +191,14 @@ these holds, and say which is missing:
 | the operator accepted the exposure | `AUTOOS_STACK_ALLOW_LAN=1` in `stack.env` | an explicit, persistent decision in the operator's own file (a host with another firewall, or none needed) |
 | the stack is host-only | `AUTOOS_STACK_BIND=127.0.0.1` (any `127.*`, `::1`, `localhost`) | nothing is published to the LAN; the proxy then cannot reach it either |
 
-Resuming containers that already run is not blocked: the guard applies when a
-container is created or started, which is when a port is newly published.
+The guard runs before **every** `docker compose up -d` - `up`, `migrate` and
+rollback's recovery - because that call creates containers or recreates running
+ones (a changed bind, a rebuilt image). It checks the **effective** address:
+an exported `AUTOOS_STACK_BIND` wins over `stack.env`, exactly as it does in
+compose's interpolation, and `ai-stack.sh` passes that same value to compose,
+so the checked and the published address cannot differ. Only `stack.env` can
+accept the exposure (`AUTOOS_STACK_ALLOW_LAN`), never an inherited variable.
+Containers docker already restarted keep running when the guard refuses.
 
 #### The docker socket (OpenHands)
 
@@ -298,16 +304,19 @@ plan:
    running sandboxes keep running) and start the compose one through
    `start-stack.sh openhands`, which still repairs the settings and pushes the
    tier profiles; it must answer on `:3000`.
-9. Only when **all three** answered: `register-autostart.sh --unregister --only
-   autoos-omniroute,autoos-opencode`, then write the ownership marker
-   `~/.config/autoos/ai-stack/stack.active`.
+9. Only when **all three** answered: write the ownership marker
+   `~/.config/autoos/ai-stack/stack.active`, then `register-autostart.sh
+   --unregister --only autoos-omniroute,autoos-opencode`. Marker first: no
+   moment exists in which the units are gone but nothing owns the services
+   (rollback needs the marker). If either step fails, the abort below removes
+   the marker again.
 
 A native unit has to *stop* before its container can take the port; it is
 *unregistered* only in step 9. Any failure from step 3 on hands **every**
 service moved so far back: the containers are removed
 (`docker compose rm -s -f`; their data stays), the units start again
 (re-registered if needed), and a replaced `openhands-app` is recreated by
-`start-stack.sh openhands`. No marker is written.
+`start-stack.sh openhands`. No marker remains.
 
 **Who owns the services** is that marker, not a container: `ai-stack.sh
 is-active` is true only while it exists, so a container a failed migrate left

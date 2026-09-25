@@ -7800,7 +7800,7 @@ _aistack() {
     shift
     while (( $# )) && [[ "$1" == [A-Z]*=* ]]; do extra+=("$1"); shift; done
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
-        -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY \
+        -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
         AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
         AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
@@ -8001,12 +8001,13 @@ if it "aistack: migrate without --yes is the announced plan and touches nothing"
     out="$(_aistack "$d" migrate)"
     ok=1
     # Order is the contract: refuse early, stop (quiescent DB), back up, copy,
-    # start, prove - every service - and only then disable the native units.
+    # start, prove - every service - then claim (marker) and only then
+    # disable the native units.
     python3 - "$out" <<'PY' || ok=0
 import sys
 out = sys.argv[1]
 steps = ["refuses", "stop the autoos-omniroute unit", "back up", "copy", "start the omniroute container",
-         "answers", "autoos-opencode", "openhands", "unregister autoos-omniroute", "stack.active"]
+         "answers", "autoos-opencode", "openhands", "stack.active", "unregister autoos-omniroute"]
 pos = [out.find(s) for s in steps]
 if -1 in pos or pos != sorted(pos):
     print("plan order wrong:", list(zip(steps, pos)), file=sys.stderr)
@@ -8313,6 +8314,89 @@ if it "aistack: init keeps the data dir and the opencode home private (0700)"; t
     got="$(stat -c %a "$d/data" "$d/data/opencode-home" "$d/data/omniroute" | tr '\n' ' ')"
     rm -rf "$d"
     assert_eq "$got" "700 700 700 "
+fi
+
+# Re-review 2026-09-25 (cross-company): marker order, recreate guard, the
+# effective bind, the pinned FROM the rebuild hash relies on.
+if it "aistack: migrate writes the marker before unregistering and drops it on a later failure"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    _aistack "$d" migrate --yes >/dev/null || { ok=0; echo "migrate failed" >&2; }
+    # The stand-in logs the call, then the marker state it saw during it.
+    grep -A1 -- '--unregister --only autoos-omniroute,autoos-opencode' "$d/register.log" | grep -qx 'marker=yes' \
+        || { ok=0; echo "unregistered before the marker existed (rollback would refuse): $(cat "$d/register.log")" >&2; }
+    rm -rf "$d"
+    # The unregister fails: marker removed again, everything back to native.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/fail-register"
+    _aistack "$d" migrate --yes >/dev/null && { ok=0; echo "migrate reported success" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker left after the abort" >&2; }
+    for u in autoos-omniroute autoos-opencode; do
+        [[ -e "$d/active-$u" && -e "$d/unit-$u" ]] || { ok=0; echo "$u not handed back" >&2; }
+    done
+    for s in omniroute opencode openhands; do
+        grep -q "rm -s -f $s" "$d/docker.log" || { ok=0; echo "$s container kept" >&2; }
+    done
+    rm -rf "$d"
+    # The marker cannot be written: nothing is unregistered, all back to native.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    mkdir -p "$d/cfg/stack.active"
+    _aistack "$d" migrate --yes >/dev/null && { ok=0; echo "migrate reported success" >&2; }
+    grep -q -- '--unregister' "$d/register.log" 2>/dev/null && { ok=0; echo "unregistered without a marker" >&2; }
+    [[ -e "$d/active-autoos-omniroute" && -e "$d/active-autoos-opencode" ]] || { ok=0; echo "not handed back" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a marker failure can orphan the host"; fi
+fi
+
+if it "aistack: up guards the bind before recreating containers that already run"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/active-coding-agents-fw"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" up)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "up ran compose up on a LAN bind without the firewall" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up reached: $(grep 'up -d' "$d/docker.log")" >&2; }
+    [[ "$out" == *"coding-agents-fw.service"* ]] || { ok=0; echo "refusal unexplained: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a running container can be recreated on an unguarded bind"; fi
+fi
+
+if it "aistack: the guard and compose agree on the bind when the shell exports AUTOOS_STACK_BIND"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    # compose would publish on the exported 0.0.0.0, not the file's loopback.
+    _aistack "$d" AUTOOS_STACK_BIND=0.0.0.0 up >/dev/null && { ok=0; echo "exported LAN bind not guarded" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "started containers" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\n" >"$d/cfg/stack.env"
+    _aistack "$d" AUTOOS_STACK_BIND=127.0.0.1 up >/dev/null || { ok=0; echo "exported loopback refused" >&2; }
+    [[ "$(sort -u "$d/compose-bind.log")" == "bind=127.0.0.1" ]] \
+        || { ok=0; echo "compose saw another bind: $(sort -u "$d/compose-bind.log" | tr '\n' ' ')" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    _aistack "$d" up >/dev/null || { ok=0; echo "file loopback refused" >&2; }
+    [[ "$(sort -u "$d/compose-bind.log")" == "bind=127.0.0.1" ]] || { ok=0; echo "compose not given the file's bind" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the guarded bind and the published bind can differ"; fi
+fi
+
+if it "aistack: every FROM in opencode.Dockerfile is digest-pinned, or the rebuild hash is blind"; then
+    # The rebuild label hashes the Dockerfile text: a tag-only FROM could move
+    # underneath an unchanged text and the stale layer would never rebuild.
+    f="$AISTACK/opencode.Dockerfile"
+    froms="$(grep -ciE '^[[:space:]]*FROM[[:space:]]' "$f")"
+    pinned="$(grep -cE '^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]{64}([[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+)?[[:space:]]*$' "$f")"
+    if (( froms >= 1 && froms == pinned )); then pass; else fail "$pinned of $froms FROM lines are @sha256:-pinned in $f"; fi
 fi
 
 if it "aistack: a failed backup leaves no partial archive and hands the service back"; then
