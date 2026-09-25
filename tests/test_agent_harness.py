@@ -63,6 +63,17 @@ class CheckTests(unittest.TestCase):
             self.assertIn("leaf-reviewer", result.stdout)
             self.assertNotIn("agent-harness: ok", result.stdout)
 
+    def test_check_fails_when_a_non_spawning_role_gets_the_spawner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = harness_data()
+            data["roles"]["leaf-reviewer"]["mcp"].append("autoos-agent")
+            path = Path(tmp) / "harness.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            result = run_cli("check", "--harness", str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("leaf-reviewer", result.stdout)
+            self.assertIn("autoos-agent", result.stdout)
+
     def test_check_requires_the_bash_allow_all_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = harness_data()

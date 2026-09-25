@@ -106,6 +106,10 @@
     },
     "omnigraph": {
       "package": "@modernrelay/omnigraph-mcp@0.8.0"
+    },
+    "autoos-agent": {
+      "package": "mcp<2",
+      "script": "tools/autoos_agent_mcp.py"
     }
   },
   "roles": {
@@ -126,7 +130,8 @@
         "graphify",
         "context7",
         "omnigraph",
-        "playwright"
+        "playwright",
+        "autoos-agent"
       ]
     },
     "suborchestrator": {
@@ -146,7 +151,8 @@
         "graphify",
         "context7",
         "omnigraph",
-        "playwright"
+        "playwright",
+        "autoos-agent"
       ]
     },
     "leaf-implementer": {

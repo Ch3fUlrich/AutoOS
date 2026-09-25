@@ -51,35 +51,125 @@ measured live against opencode 2.0.16 (2026-09-24):
 5. **Harness or API callers that address `omniroute/tierN` directly**
    bypass the agents and follow the same depth by convention only.
 
-## Spawning a tier agent - one command
+## Spawning - one command, any client
 
 ```bash
-python3 tools/autoos-agent.py list                          # tiers, models, who spawns whom
-python3 tools/autoos-agent.py run --tier 3 "Review lib/linux/ui.sh"
-python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"
-python3 tools/autoos-agent.py run --tier 3 --clean "..."    # -clean twin
-python3 tools/autoos-agent.py run --tier 2 --model omniroute/tier2-credit "..."
-python3 tools/autoos-agent.py run --tier 1 --free "..."     # no key, no gateway, no spend
-python3 tools/autoos-agent.py run --tier 2 --dry-run "..."  # print the plan only
+python3 tools/autoos-agent.py list                            # tiers, card fields, client matrix, depth
+python3 tools/autoos-agent.py run "Add a test for X"          # empty card -> tier2
+python3 tools/autoos-agent.py run --card role=review --lean "Review lib/linux/ui.sh"
+python3 tools/autoos-agent.py run --card privacy=sensitive "..."   # -> tier2-clean
+python3 tools/autoos-agent.py run --client qwen --card complexity=trivial "..."
+python3 tools/autoos-agent.py run --client claude --joinable --title d1 "..."
+python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"   # tier by hand
+python3 tools/autoos-agent.py run --tier 1 --free "..."       # no key, no gateway, no spend
+python3 tools/autoos-agent.py run --card role=review --dry-run "..."   # print the plan only
 ```
 
-It passes the agent's own model, runs `--standalone` (the background
-opencode service keeps the environment it started with, so a key exported
-later is ignored), closes the child's stdin (with an open pipe `opencode
-run` waits for more prompt text and never starts), reads the client key
-from `AUTOOS_OMNIROUTE_KEY` or `configuration/api-keys.yml` without printing
-it, and logs one line per run to `logs/orch-<date>.log`.
+For opencode it passes the agent's own model, runs `--standalone` (the
+background opencode service keeps the environment it started with, so a key
+exported later is ignored), closes the child's stdin (with an open pipe
+`opencode run` waits for more prompt text and never starts), reads the client
+key from `AUTOOS_OMNIROUTE_KEY` or `configuration/api-keys.yml` without
+printing it, and logs one line per run to `logs/orch-<date>.log`: client,
+card, combo, reason, routing version, depth.
 
-- `--isolate` runs the agent in a private `git clone --local` on its own
-  branch, with its own opencode data dir and a deny on every path outside
-  the clone. **Not a git worktree:** opencode resolves a worktree to the
-  main checkout, and a worker's writes from inside one landed in the main
+### The task card (routing v1, [ADR 0006](decisions/0006-launch-time-routing-resolver.md))
+
+Without `--tier`, `autoos_routing.select_combo` picks the combo. The CLI and
+the MCP server both call it, so there is only one routing decision. Unknown
+fields or values are an error. The steps are filters first (privacy, ctx,
+spend), then a preference by role and complexity.
+
+| Field | Values | Default |
+|---|---|---|
+| `role` | orchestrate, implement, review | implement |
+| `complexity` | trivial, standard, hard | standard |
+| `ctx` | 128k, 1m | 128k |
+| `privacy` | public, sensitive | public |
+| `spend` | free-ok, credit | free-ok |
+
+| privacy | ctx | role / complexity | spend | combo |
+|---|---|---|---|---|
+| public | 1m | any | any | `tier1` |
+| public | 128k | orchestrate, or hard | any | `tier1` |
+| public | 128k | implement / standard | free-ok / credit | `tier2` / `tier2-credit` |
+| public | 128k | review, or trivial | free-ok / credit | `tier3` / `tier3-credit` |
+| sensitive | 128k | review, or trivial | any | `tier3-clean` |
+| sensitive | 128k | anything else | any | `tier2-clean` |
+| sensitive | 1m | any | any | refused - split to 128k, or `--allow-training` (logged) |
+
+The combo's tier picks the opencode agent (`tier3-clean` runs `tier3-reviewer`).
+
+### Clients
+
+| Client | Headless | Gateway | Native sub-agents | Auth | Command |
+|---|---|---|---|---|---|
+| opencode | yes | yes | yes | `AUTOOS_OMNIROUTE_KEY` | `opencode run --standalone --agent … --model omniroute/<combo>` |
+| claude | yes | no | yes | `claude` login (subscription) | `claude -p`; `--joinable`: `claude --bg --remote-control <title>` |
+| qwen | yes | yes | yes | `AUTOOS_OMNIROUTE_KEY` | `omniroute run qwen --model <combo> -- -p …` |
+| gemini | yes | yes | no | `AUTOOS_OMNIROUTE_KEY` | `omniroute run gemini --model <combo> -- -p …` |
+| codex | yes | yes | no | `AUTOOS_OMNIROUTE_KEY` | `omniroute run codex --model <combo> -- exec …` |
+| agy | yes | **no** | no | `agy` login (own Google account) | `agy -p …` |
+| qoder | yes | **no** | yes | `qodercli login` (own account) | `qodercli -p …` - promo, `privacy=public` only |
+
+agy and qoder cannot use the gateway: they bill their own accounts, and each
+needs one interactive login on the machine first. `list` shows which clients
+are installed and when qoder last worked (stale after 7 days). Permissions
+map onto each CLI's own modes. `role=review` runs read-only (plan mode or a
+read-only sandbox). Otherwise file edits are approved and anything else asks.
+`--no-auto` keeps the CLI's own prompting.
+
+### Depth, lean, isolation
+
+- **Depth budget.** Every child gets `AUTOOS_AGENT_DEPTH` (parent + 1) and
+  `AUTOOS_AGENT_MAX_DEPTH` (default 2, the same as opencode's
+  `experimental.subagent_depth`). A spawn past the max exits with code 4.
+  `--max-depth` can only lower the inherited max. This budget is the only
+  depth control qwen, gemini, codex, agy and qoder have. Inside one opencode
+  process, nesting is still `experimental.subagent_depth`.
+- **`--lean`** (opencode, claude) starts no serena, playwright or context7,
+  which is right for research and review agents. For opencode it overlays
+  each full server entry with `disabled: true`. `enabled: false` is not an
+  opencode 2.x field: it is dropped without a warning and the server starts
+  anyway. Measured peak process-tree RSS of one run: 1406 MB → 678 MB.
+  claude uses `--strict-mcp-config`.
+- **`--isolate`** runs the agent in a private `git clone --local` on its own
+  branch. For opencode it also gets its own data dir and a deny on every path
+  outside the clone. **Not a git worktree:** opencode resolves a worktree to
+  the main checkout, and a worker's writes from inside one landed in the main
   repo. Take results with `git fetch <clone> <branch>`; nothing is merged or
-  deleted for you. The clone starts from `HEAD` - commit first.
-- `--free` maps every tier to opencode's own free model (default
-  `opencode/big-pickle`) through `OPENCODE_CONFIG_CONTENT`: the way to
+  deleted for you. The clone starts from `HEAD`, so commit first.
+- **`--free`** maps every tier to opencode's own free model (default
+  `opencode/big-pickle`) through `OPENCODE_CONFIG_CONTENT`. Use it to
   exercise the chain and the fences before any provider key exists. Free
   promo models may train on prompts, so `--free --clean` is refused.
+
+### Over MCP (OpenHands, Claude Code, opencode, Zed)
+
+`tools/autoos_agent_mcp.py` is a stdio MCP server
+(`uv --quiet run --no-project --with 'mcp<2' python tools/autoos_agent_mcp.py`).
+It has five tools:
+
+- `list_clients`
+- `spawn(task, client, card | tier, isolate, lean, …)`: returns a run id at
+  once. Refusals come back synchronously from the CLI's own dry run.
+  `lean` defaults on for `role=review`.
+- `status(run_id?)`
+- `result(run_id)`: the output tail.
+- `cancel(run_id)`
+
+Each run keeps `job.json`, `output.log` and `exit.json` under
+`~/.local/state/autoos/agents/<id>/`. The installers register the server,
+using the pin in `catalog/agent-harness.json`, in these places:
+
+- `.mcp.json` (the project server, approved in `.claude/settings.local.json`)
+- the `mcp` servers of `opencode.jsonc`
+- OpenHands `mcp_config`
+- Zed `context_servers`
+
+Only spawning roles list the server (orchestrator, suborchestrator).
+`agent_harness.py check` refuses a leaf role that does, and leaf agents get
+`autoos-agent*` switched off.
 
 ## Stuck-agent watchdog (tier1 probes, never waits forever)
 

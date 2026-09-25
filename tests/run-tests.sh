@@ -2376,7 +2376,7 @@ ctx = cfg.get("context_servers", {})
 pinok = ",".join(sorted(
     "pin-ok" if h["mcp_servers"][n]["package"] in " ".join(ctx.get(n, {}).get("args", []))
     else "MISSING:" + n
-    for n in ("serena", "graphify", "omnigraph", "playwright", "context7")))
+    for n in ("serena", "graphify", "omnigraph", "playwright", "context7", "autoos-agent")))
 print("%s|%s|%s|%s|%s|%s|%s" % (
     cfg.get("theme"), omni.get("api_url"), ",".join(models),
     "api_key" in omni, lit.get("api_url"), "api_key" in lit, pinok))
@@ -2398,9 +2398,9 @@ PY
     line1="$(printf '%s' "$report" | sed -n '1p')"
     line2="$(printf '%s' "$report" | sed -n '2p')"
     assert_eq "$line1" \
-        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,tier2-credit,tier3-credit,rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "mine|http://127.0.0.1:20128/v1|auto/smart,auto,auto/cheap,tier1,tier1-clean,tier2,tier2-clean,tier3,tier3-clean,spark-1.3-contributor,gemini-3.8-flash,deepseek-v4.1-flash,tier2-credit,tier3-credit,rag|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
     assert_eq "$line2" \
-        "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow|ctx=context7,graphify,omnigraph,playwright,serena"
+        "bypass=bypass|off=|provider=autoos-omniroute|model=tier1|allow=allow|ctx=autoos-agent,context7,graphify,omnigraph,playwright,serena"
     assert_eq "backups=$backups|leaks=$leaks" "backups=1|leaks=0"
 fi
 
@@ -2502,7 +2502,7 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/tier1|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,rag,spark-1.3-contributor,tier1,tier1-clean,tier2,tier2-clean,tier2-credit,tier3,tier3-clean,tier3-credit|True|context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/tier1|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,rag,spark-1.3-contributor,tier1,tier1-clean,tier2,tier2-clean,tier2-credit,tier3,tier3-clean,tier3-credit|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
@@ -5946,10 +5946,16 @@ fi
 if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
     out="$(AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
     assert_contains "$out" "git clone --local"
-    assert_contains "$out" "env: OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
+    assert_contains "$out" "env: AUTOOS_AGENT_DEPTH, AUTOOS_AGENT_MAX_DEPTH, OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
     if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then
         fail "free/isolated plan mentions a worktree or the gateway key"
     else pass; fi
+fi
+
+# ADR 0006 card resolver, the client adapters and the depth budget: one
+# unittest per routing-table row, all dry runs.
+if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
+    out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "autoos-agent outside-path fence denies first and re-allows only opencode scratch"; then

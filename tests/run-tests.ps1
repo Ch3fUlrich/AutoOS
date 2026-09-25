@@ -3455,6 +3455,16 @@ Test-Case 'autoos-agent plans tier runs without spawning or leaking a key' {
     Assert-Equal $rc 2
 }
 
+Test-Case 'autoos-agent spawner unit tests: card routing, clients, depth' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_spawner.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "spawner unit tests failed: $out"
+}
+
 Test-Case 'mirror-litellm-env projects keys without printing them' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -3713,7 +3723,7 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         # Pins come from the harness at runtime, never as literals in lib/
         # (mcp-pins tests forbid both the bare names and the versions there).
         $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-        foreach ($n in @('serena', 'graphify', 'omnigraph', 'playwright', 'context7')) {
+        foreach ($n in @('serena', 'graphify', 'omnigraph', 'playwright', 'context7', 'autoos-agent')) {
             $pin = $harness.mcp_servers.$n.package
             Assert-True ((@($s.context_servers.$n.args) -join ' ') -match [regex]::Escape($pin)) "$n context server does not carry harness pin $pin"
         }
@@ -3818,7 +3828,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
     Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,rag,spark-1.3-contributor,tier1,tier1-clean,tier2,tier2-clean,tier2-credit,tier3,tier3-clean,tier3-credit'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
-    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'context7,graphify,omnigraph,playwright,serena'
+    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
     # under the user (same rule as 'mcp pins: lib/ carries no floating...').
     $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json

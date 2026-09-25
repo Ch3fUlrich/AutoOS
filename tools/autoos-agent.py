@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spawn one tier agent with the right model, key and isolation - one command.
+"""Spawn one agent - any client, the right model, key, isolation and depth - one command.
 
 The 3-tier agents live in opencode.jsonc (tier1-orchestrator -> tier2-worker ->
 tier3-reviewer, docs/unattended-orchestration.md). Driving them by hand has
@@ -24,8 +24,30 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
      checkout's root, and a relative write from inside one landed in the main
      repo (live, 2026-09-24). Nothing is merged or deleted for you.
 
+Routing: without --tier the model comes from a task card through
+autoos_routing.select_combo (ADR 0006) - the one decision point, shared with
+the MCP server. An empty card is tier2; `--card privacy=sensitive,ctx=1m`
+fails closed unless --allow-training. The combo's tier picks the opencode
+agent. Every run logs card -> combo, reason and the routing version.
+
+Clients (autoos_clients.py; `list` prints the matrix): opencode (default),
+claude (`claude -p` on its own login; --joinable = a `--bg --remote-control`
+session), qwen / gemini / codex through `omniroute run <target>` on the card's
+combo, agy and qoder on their own account login (no gateway; qoder is a promo
+and takes privacy=public work only).
+
+--lean (opencode, claude): no serena/playwright/context7 for research and
+review agents - about 0.7 GB less per agent (LEAN_DROP).
+
+Depth: each child gets AUTOOS_AGENT_DEPTH (parent + 1) and
+AUTOOS_AGENT_MAX_DEPTH (default 2, only ever lowered by --max-depth); a spawn
+past the max is refused with exit code 4.
+
 Usage:
     python3 tools/autoos-agent.py list
+    python3 tools/autoos-agent.py run --card role=review "Review lib/linux/ui.sh"
+    python3 tools/autoos-agent.py run --client qwen --card complexity=trivial "..."
+    python3 tools/autoos-agent.py run --client claude --joinable --title d1 "..."
     python3 tools/autoos-agent.py run --tier 3 "Review lib/linux/ui.sh for quoting bugs"
     python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"
     python3 tools/autoos-agent.py run --tier 3 --clean "..."       # no-training twin
@@ -43,7 +65,8 @@ or the `omniroute:` line of configuration/api-keys.yml and is handed to the
 child through its environment only. One line per run is appended to
 logs/orch-<date>.log (git-ignored), which the watchdog protocol reads.
 
-Exit codes: the child's exit code; 2 bad arguments; 3 gateway or key missing.
+Exit codes: the child's exit code; 2 bad arguments, card or route refused;
+3 gateway, key or client binary missing; 4 depth budget exhausted.
 """
 from __future__ import annotations
 
@@ -54,20 +77,31 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import autoos_clients as clients  # noqa: E402
+import autoos_routing as routing  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "tier1-orchestrator", 2: "tier2-worker", 3: "tier3-reviewer"}
 GATEWAY = "http://127.0.0.1:20128"
 DEFAULT_FREE_MODEL = "opencode/big-pickle"
+# --lean drops these MCP servers. Measured 2026-09-24, one --free opencode run,
+# peak process-tree RSS: 1406 MB with every server, 678 MB with these off
+# (516 MB with graphify off too).
+# The graph lookups stay: research and review agents navigate with them.
+LEAN_DROP = ("serena", "playwright", "context7")
 
 
 def load_jsonc(path: str) -> dict:
     # Same comment strip as both suites: whole-line // comments only.
-    text = io.open(path, encoding="utf-8").read()
+    with io.open(path, encoding="utf-8") as fh:
+        text = fh.read()
     return json.loads(re.sub(r"(?m)^\s*//.*$", "", text))
 
 
@@ -92,6 +126,16 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
 
 def free_overlay(model: str) -> dict:
     return {"model": model, "agents": {a: {"model": model} for a in TIERS.values()}}
+
+
+def lean_overlay(cfg: dict) -> dict:
+    # opencode 2.x disables a server with `disabled: true` on a FULL entry:
+    # `enabled` is not a v2 field (stripped without a warning, the server
+    # still starts), and an entry without type/command is dropped as
+    # malformed. The overlay document is merged last, so it wins per server.
+    servers = (cfg.get("mcp") or {}).get("servers") or {}
+    return {"mcp": {"servers": {n: dict(servers[n], disabled=True)
+                                for n in LEAN_DROP if n in servers}}}
 
 
 def outside_fence(data_dir: str) -> list:
@@ -136,21 +180,57 @@ def slugify(text: str) -> str:
     return slug or "task"
 
 
+def resolve_route(args, cfg: dict, client) -> dict:
+    """Tier/model/combo for this run: an explicit --tier, or the card through select_combo."""
+    # --model names a gateway combo for opencode and the gateway clients; for
+    # agy/claude/qoder it is the client's own model id and is not checked here.
+    override = args.model if client.gateway else None
+    if args.tier is not None:
+        model = None if args.free else resolve_model(cfg, args.tier, args.clean, override)
+        combo = (model or "").partition("#")[0].replace("omniroute/", "", 1) or None
+        return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
+                "card": None, "privacy": "sensitive" if args.clean else "public",
+                "review": args.tier == 3}
+    card = routing.normalize(routing.parse_card(args.card or ""))
+    combo, reason = routing.select_combo(card, args.allow_training)
+    tier = int(combo[4])
+    model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
+    if override and model:  # an explicit --model wins over the card's combo, and says so
+        combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
+    return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
+            "privacy": card["privacy"], "review": card["role"] == "review"}
+
+
 def build_plan(args, cfg: dict) -> dict:
-    agent = TIERS[args.tier]
-    env = {}
+    client = clients.CLIENTS[args.client]
+    route = resolve_route(args, cfg, client)
+    depth, max_depth = clients.child_depth(os.environ, args.max_depth)
+    env = {"AUTOOS_AGENT_DEPTH": str(depth), "AUTOOS_AGENT_MAX_DEPTH": str(max_depth)}
     overlay = {}
-    if args.free:
-        model = args.free_model
-        overlay.update(free_overlay(model))
+    title = args.title or ("t%d %s" % (route["tier"], args.task[:50]))
+    if client.name == "opencode":
+        agent = TIERS[route["tier"]]
+        if args.free:
+            model = args.free_model
+            overlay.update(free_overlay(model))
+        else:
+            model = route["model"]
+        if args.lean:
+            overlay.update(lean_overlay(cfg))
+        cmd = ["opencode", "run", "--standalone", "--agent", agent, "--model", model,
+               "--title", title]
+        if args.auto:
+            cmd.append("--auto")
+        cmd.append(args.task)
     else:
-        model = resolve_model(cfg, args.tier, args.clean, args.model)
-    title = args.title or ("t%d %s" % (args.tier, args.task[:50]))
-    cmd = ["opencode", "run", "--standalone", "--agent", agent, "--model", model,
-           "--title", title]
-    if args.auto:
-        cmd.append("--auto")
-    cmd.append(args.task)
+        agent = client.name
+        level = "ask" if not args.auto else ("read" if route["review"] else "edit")
+        model = args.model if not client.gateway else None
+        joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
+        cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
+        if args.lean:  # claude only (cmd_run refuses the rest): no MCP servers at all
+            cmd[1:1] = ["--strict-mcp-config"]
+        model = model or (route["combo"] if client.gateway else "(client default)")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     sandbox = None
     if args.isolate:
@@ -158,14 +238,16 @@ def build_plan(args, cfg: dict) -> dict:
         state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
         sandbox = {"path": os.path.join(state, "autoos", "sandboxes", name),
                    "branch": "agent/%s-%s" % (stamp, slugify(args.task))}
-        # opencode keys a project by its root commit and remembers the root it
-        # saw first; a private data dir keeps the clone from inheriting the
-        # main checkout's recorded root.
-        env["XDG_DATA_HOME"] = sandbox["path"] + ".opencode-data"
-        overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"])
+        if client.name == "opencode":
+            # opencode keys a project by its root commit and remembers the root it
+            # saw first; a private data dir keeps the clone from inheriting the
+            # main checkout's recorded root.
+            env["XDG_DATA_HOME"] = sandbox["path"] + ".opencode-data"
+            overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"])
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
-    return {"agent": agent, "model": model, "cmd": cmd, "env": env,
+    return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
+            "route": route, "depth": (depth, max_depth),
             "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd()}
 
 
@@ -178,29 +260,85 @@ def cmd_list(cfg: dict) -> int:
     omni = sorted(m for m in declared_models(cfg) if m.startswith("omniroute/"))
     print("\n--model accepts any declared model, e.g.: " + ", ".join(omni))
     print("--free runs every tier on %s (no key, no gateway)" % DEFAULT_FREE_MODEL)
+    print("--card routes by task card (routing v%s): %s" % (routing.ROUTING_VERSION, ", ".join(
+        "%s=%s" % (k, "|".join(v)) for k, v in routing.CARD_VALUES.items())))
+    print("\nclients (--client):")
+    print("%-9s %-9s %-8s %-8s %-10s %-38s %s" % ("client", "headless", "gateway", "subagts",
+                                                  "installed", "auth", "notes"))
+    yn = {True: "yes", False: "no"}
+    for c in clients.CLIENTS.values():
+        notes = c.notes
+        if c.promo:
+            age = clients.probe_age_days(c.name)
+            notes += "; last probe: %s" % ("never" if age is None else "%.0f d ago%s" % (
+                age, " (stale)" if age > clients.PROBE_STALE_DAYS else ""))
+        print("%-9s %-9s %-8s %-8s %-10s %-38s %s" % (
+            c.name, yn[c.headless], yn[c.gateway], yn[c.subagents],
+            yn[shutil.which(c.binary) is not None], c.auth, notes))
+    try:
+        print("\ndepth budget: a child of this shell runs at depth %d of %d" % clients.child_depth(os.environ))
+    except clients.DepthError as exc:
+        print("\ndepth budget: %s" % exc)
     return 0
 
 
 def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:
     logs = os.path.join(ROOT, "logs")
     os.makedirs(logs, exist_ok=True)
-    line = "%s agent=%s model=%s free=%d sandbox=%s rc=%d secs=%.0f\n" % (
-        datetime.datetime.now().isoformat(timespec="seconds"), plan["agent"], plan["model"],
-        int(free), (plan["sandbox"] or {}).get("path", "-"), rc, secs)
+    route = plan["route"]
+    card = ",".join("%s=%s" % kv for kv in sorted((route["card"] or {}).items())) or "-"
+    line = ("%s client=%s agent=%s model=%s combo=%s reason=%s routing=%s card=%s depth=%d/%d "
+            "free=%d sandbox=%s rc=%d secs=%.0f\n") % (
+        datetime.datetime.now().isoformat(timespec="seconds"), plan["client"], plan["agent"],
+        plan["model"], route["combo"] or "-", route["reason"], routing.ROUTING_VERSION, card,
+        plan["depth"][0], plan["depth"][1], int(free),
+        (plan["sandbox"] or {}).get("path", "-"), rc, secs)
     with io.open(os.path.join(logs, "orch-%s.log" % datetime.date.today().isoformat()), "a", encoding="utf-8") as fh:
         fh.write(line)
 
 
+def refuse(msg: str, rc: int = 2) -> int:
+    print("autoos-agent: %s" % msg, file=sys.stderr)
+    return rc
+
+
 def cmd_run(args, cfg: dict) -> int:
+    client = clients.CLIENTS[args.client]
     if args.free and args.clean:
-        print("--free uses promo models that may train on prompts; it cannot be --clean.", file=sys.stderr)
-        return 2
+        return refuse("--free uses promo models that may train on prompts; it cannot be --clean.")
+    if args.tier is not None and args.card is not None:
+        return refuse("--tier and --card both pick the model; pass one of them.")
+    if args.card is not None and args.clean:
+        return refuse("--clean is for --tier; with a card say privacy=sensitive.")
+    if args.free and client.name != "opencode":
+        return refuse("--free is opencode's own free model; --client %s cannot use it." % client.name)
+    if args.lean and client.name not in ("opencode", "claude"):
+        return refuse("--lean is implemented for opencode and claude; %s would still start "
+                      "its MCP servers." % client.name)
+    if args.joinable and client.name != "claude":
+        return refuse("--joinable is a Claude Code --bg --remote-control session; only --client claude.")
     try:
         plan = build_plan(args, cfg)
-    except ValueError as exc:
-        print("autoos-agent: %s (see: tools/autoos-agent.py list)" % exc, file=sys.stderr)
-        return 2
-    env_names = sorted(plan["env"]) + ([] if args.free else ["AUTOOS_OMNIROUTE_KEY"])
+    except clients.DepthError as exc:
+        return refuse(str(exc), 4)
+    except ValueError as exc:  # CardError, NoRoute, an undeclared model
+        return refuse("%s (see: tools/autoos-agent.py list)" % exc)
+    route = plan["route"]
+    if client.promo and route["privacy"] != "public":
+        return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
+    if route["reason"].endswith("allow-training"):
+        print("autoos-agent: --allow-training: sensitive work goes to %s, whose leg trains on "
+              "prompts (logged)." % route["combo"], file=sys.stderr)
+    uses_key = client.gateway and not args.free
+    env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
+    print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
+                                              routing.ROUTING_VERSION))
+    print("depth: %d/%d" % plan["depth"])
+    if args.lean:
+        print("lean: no %s" % (", ".join(LEAN_DROP) if client.name == "opencode" else "MCP servers"))
+    if plan["sandbox"] and client.name != "opencode":
+        print("note: --isolate gives %s a private clone as its cwd; the outside-path fence is "
+              "opencode-only." % client.name)
     if args.dry_run:
         if plan["sandbox"]:
             print("would run: git clone --local %s %s && git switch -c %s" % (ROOT, plan["sandbox"]["path"], plan["sandbox"]["branch"]))
@@ -208,11 +346,14 @@ def cmd_run(args, cfg: dict) -> int:
         print("cwd: %s" % plan["cwd"])
         print("env: %s" % (", ".join(env_names) or "-"))
         return 0
+    if not shutil.which(plan["cmd"][0]):
+        return refuse("%s is not installed (catalog: ./setup.sh --only <id> -y); see: list" % plan["cmd"][0], 3)
     # PWD too, not just cwd=: opencode takes the project directory from $PWD,
     # so an inherited PWD sent an isolated worker's writes to the caller's
     # checkout (live 2026-09-24).
     env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
-    if not args.free:
+    env.pop("AUTOOS_OMNIROUTE_KEY", None)
+    if uses_key:
         key = client_key(ROOT)
         if not key:
             print("No OmniRoute client key: export AUTOOS_OMNIROUTE_KEY or add 'omniroute:' to "
@@ -237,6 +378,8 @@ def cmd_run(args, cfg: dict) -> int:
     # (measured 2026-09-24: 150 s hang vs 6 s with /dev/null).
     rc = subprocess.call(plan["cmd"], cwd=plan["cwd"], env=env, stdin=subprocess.DEVNULL)
     log_run(plan, rc, time.time() - start, args.free)
+    if rc == 0 and client.promo:
+        clients.record_probe(client.name)
     if plan["sandbox"]:
         sb = plan["sandbox"]
         changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
@@ -249,7 +392,8 @@ def cmd_run(args, cfg: dict) -> int:
         q = shlex.quote(sb["path"])
         print("review:  git -C %s diff" % q)
         print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
-        print("discard: rm -rf %s %s" % (q, shlex.quote(sb["path"] + ".opencode-data")))
+        extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
+        print("discard: rm -rf %s%s" % (q, extra))
     return rc
 
 
@@ -258,7 +402,15 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="show the tiers, their models and who may spawn whom")
     run = sub.add_parser("run", help="run one task on one tier")
-    run.add_argument("--tier", type=int, choices=sorted(TIERS), required=True)
+    run.add_argument("--tier", type=int, choices=sorted(TIERS),
+                     help="pick the tier by hand (default: resolve --card, an empty card is tier2)")
+    run.add_argument("--card", help="task card, e.g. role=review,privacy=sensitive (or JSON)")
+    run.add_argument("--allow-training", action="store_true",
+                     help="let privacy=sensitive,ctx=1m use tier1-clean, whose leg trains on prompts (logged)")
+    run.add_argument("--client", choices=sorted(clients.CLIENTS), default="opencode")
+    run.add_argument("--joinable", action="store_true",
+                     help="claude only: a background session you can join through Remote Control")
+    run.add_argument("--max-depth", type=int, help="lower the depth budget for this child's subtree")
     run.add_argument("--clean", action="store_true", help="use the -clean (paid, no free legs) twin")
     run.add_argument("--model", help="a model declared in opencode.jsonc, e.g. omniroute/tier2-credit")
     run.add_argument("--free", action="store_true", help="keyless: every tier on opencode's free model")
@@ -267,6 +419,8 @@ def main(argv=None) -> int:
                      help="run in a private git clone on its own branch; writes outside it are denied")
     run.add_argument("--no-auto", dest="auto", action="store_false",
                      help="ask before tools the config does not explicitly allow (default: --auto)")
+    run.add_argument("--lean", action="store_true",
+                     help="no heavy MCP servers (%s) - for research/review agents" % ", ".join(LEAN_DROP))
     run.add_argument("--title")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")

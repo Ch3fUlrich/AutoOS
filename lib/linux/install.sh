@@ -1169,6 +1169,12 @@ ctx["context7"] = {
     "command": "npx",
     "args": ["-y", pins["context7"]["package"]],
 }
+_repo = os.path.dirname(os.path.dirname(os.path.abspath(harness_file)))
+ctx["autoos-agent"] = {
+    "command": "uv",
+    "args": ["--quiet", "run", "--no-project", "--with", pins["autoos-agent"]["package"], "python",
+             os.path.join(_repo, pins["autoos-agent"]["script"])],
+}
 # Bypass profile: every built-in tool on, no confirmations (global
 # tool_permissions.default allow). Existing profiles and per-tool rules stay.
 agent = cfg.setdefault("agent", {})
@@ -2030,6 +2036,10 @@ install_agent_skills() {
     else
         ui_warn "no .mcp.json in ${dest} — nothing to pin omnigraph to."
     fi
+    # The agent spawner is declared in this repo's own .mcp.json.
+    if [[ -n "${AUTOOS_ROOT:-}" && -f "$AUTOOS_ROOT/.mcp.json" ]]; then
+        enable_project_mcp_server "$AUTOOS_ROOT" autoos-agent
+    fi
 
     local omni_pkg omni_spec
     omni_pkg="$(mcp_package omnigraph)"
@@ -2768,6 +2778,14 @@ mcp_cfg["omnigraph"] = {
     "args": ["-y", MCP_PACKAGES["omnigraph"]],
     "env": omni_env,
     "description": "Project memory graph for this repository (repo-scoped, not global)",
+}
+# The agent spawner: spawn/status/result/cancel for every agent client.
+mcp_cfg["autoos-agent"] = {
+    "transport": "stdio",
+    "command": "uv",
+    "args": ["--quiet", "run", "--no-project", "--with", MCP_PACKAGES["autoos-agent"], "python",
+             os.path.join(REPO_ROOT, "tools", "autoos_agent_mcp.py")],
+    "description": "Spawn AutoOS agents (opencode, claude, qwen, gemini, codex, agy, qoder) by task card",
 }
 ctx7_args = ["-y", MCP_PACKAGES["context7"]]
 if context7_key:

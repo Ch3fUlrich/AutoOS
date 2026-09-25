@@ -226,7 +226,8 @@
       },
       "tools": {
         "playwright*": false,
-        "omnigraph*": false
+        "omnigraph*": false,
+        "autoos-agent*": false
       }
     },
     "leaf-reviewer": {
@@ -281,7 +282,8 @@
       },
       "tools": {
         "playwright*": false,
-        "omnigraph*": false
+        "omnigraph*": false,
+        "autoos-agent*": false
       }
     }
   },
