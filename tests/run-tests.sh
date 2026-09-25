@@ -6819,7 +6819,11 @@ fi
 if it "apply --dry-run registers nothing and starts nothing"; then
     # combos.json must be byte-identical afterwards; the dry run must announce.
     before="$(cat configuration/omniroute/combos.json)"
-    out="$(bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    # Hermetic: a dead gateway port and no key file - the dry run must never
+    # read the live gateway or the machine's keys (it now also lists the store
+    # for the retired-combo prune).
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     assert_contains "$out" "dry run"
     # Every registry provider with an omniroute_id is announced (meta and the
     # client key carry none and are skipped), so the map is proven live.

@@ -4926,8 +4926,17 @@ Test-Case 'apply --dry-run registers nothing and starts nothing' {
     }
     $combosPath = Join-Path $Root 'configuration\omniroute\combos.json'
     $before = Get-Content $combosPath -Raw -Encoding utf8
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File `
-        (Join-Path $Root 'configuration\omniroute\apply.ps1') -DryRun 2>&1 | Out-String
+    # Hermetic: a dead gateway port and no key file - the dry run must never
+    # read the live gateway or the machine's keys (the child inherits both).
+    $oldUrl = $env:AUTOOS_OMNIROUTE_URL; $oldKeys = $env:AUTOOS_KEYS_FILE
+    $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:1'
+    $env:AUTOOS_KEYS_FILE = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-api-keys.yml'
+    try {
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $Root 'configuration\omniroute\apply.ps1') -DryRun 2>&1 | Out-String
+    } finally {
+        $env:AUTOOS_OMNIROUTE_URL = $oldUrl; $env:AUTOOS_KEYS_FILE = $oldKeys
+    }
     Assert-True ($out -match 'dry run stops here|dry run continues|would create|would register|already registered') 'dry run announced nothing'
     Assert-Equal (Get-Content $combosPath -Raw -Encoding utf8) $before
 }
