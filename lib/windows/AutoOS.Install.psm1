@@ -1345,8 +1345,9 @@ function Set-AutoOSAntigravityMcp {
     }
     # Compare the entry as data (a parsed file and a fresh entry serialise the
     # same way), so a hand-formatted file that already holds it is left alone.
+    # -ceq: JSON is case-sensitive ("NPX" is not "npx"), PowerShell's -eq is not.
     $unchanged = $servers.Contains('omnigraph') -and
-        ((ConvertTo-Json -InputObject $servers['omnigraph'] -Depth 12 -Compress) -eq (ConvertTo-Json -InputObject $entry -Depth 12 -Compress))
+        ((ConvertTo-Json -InputObject $servers['omnigraph'] -Depth 12 -Compress) -ceq (ConvertTo-Json -InputObject $entry -Depth 12 -Compress))
     if ($unchanged) {
         Write-AutoOSLine "omnigraph already configured in $cfgPath - skipped" -Level ok
     } else {
@@ -1417,7 +1418,8 @@ function Register-AutoOSAntigravityMcpServer {
             ConvertTo-Json -InputObject $v -Compress
         }
     }
-    if ($servers.Contains($Name) -and ((& $canon $servers[$Name]) -eq (& $canon $Spec))) {
+    # -ceq: JSON is case-sensitive ("NPX" is not "npx"), PowerShell's -eq is not.
+    if ($servers.Contains($Name) -and ((& $canon $servers[$Name]) -ceq (& $canon $Spec))) {
         Write-AutoOSLine "Antigravity MCP server '$Name' already configured in $cfgPath - skipped" -Level ok
         return
     }

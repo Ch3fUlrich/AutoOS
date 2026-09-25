@@ -3292,6 +3292,82 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
     Pass
 }
 
+Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs only in case' {
+    # JSON is case-sensitive and PowerShell's -eq on strings is not: a file whose
+    # omnigraph entry says "NPX" compared equal to the entry the writer produces
+    # ("npx"), so the writer reported skipped and left the wrong command behind.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        # The entry the writer produces, except that the command is in capitals.
+        $seedEntry = [ordered]@{
+            command = 'NPX'
+            args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
+            env     = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://localhost:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
+        }
+        [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ omnigraph = $seedEntry } } | ConvertTo-Json -Depth 12))
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+        Set-AutoOSAntigravityMcp
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $cmd = $s.mcpServers.omnigraph.command
+        if ($cmd -cne 'npx') { throw "the file still says [$cmd] (want npx): an entry that differs only in case was treated as unchanged" }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "$($backups.Count) backup(s) after the rewrite (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName)) -cne $seedB64) { throw 'the backup does not hold the seeded file byte for byte' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer rewrites an entry that differs only in case' {
+    # Same trap as above, in the comparison of the canonical strings of the
+    # entry in the file and the spec being registered.
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        $seedEntry = [ordered]@{ command = 'NPX'; args = @('-y', 'example-mcp-server') }
+        [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ example = $seedEntry } } | ConvertTo-Json -Depth 12))
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+        Register-AutoOSAntigravityMcpServer -Name 'example' -Spec ([ordered]@{ command = 'npx'; args = @('-y', 'example-mcp-server') })
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $cmd = $s.mcpServers.example.command
+        if ($cmd -cne 'npx') { throw "the file still says [$cmd] (want npx): an entry that differs only in case was treated as unchanged" }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "$($backups.Count) backup(s) after the rewrite (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName)) -cne $seedB64) { throw 'the backup does not hold the seeded file byte for byte' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
     $realAppData = $env:APPDATA
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))
