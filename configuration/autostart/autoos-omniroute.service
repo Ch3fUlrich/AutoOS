@@ -1,0 +1,36 @@
+# AutoOS: OmniRoute gateway as a systemd --user service (template).
+#
+# Rendered and installed by configuration/autostart/register-autostart.sh,
+# which fills in the PATH and binary placeholders from the machine it runs on (nvm puts
+# node under a versioned directory, so a fixed path would break). Opt-in only;
+# re-run the registration after a node upgrade.
+#
+# Own unit instead of `omniroute autostart`: upstream writes a login-only
+# desktop entry whenever DISPLAY/XDG_CURRENT_DESKTOP is set (not reboot-safe on
+# a headless boot) and starts in whatever cwd the CLI was called from (it
+# loads that directory's .env too). The notify + watchdog settings below are
+# upstream's own.
+#
+# Listens on 0.0.0.0:20128 because the LAN reverse proxy is another host.
+# REQUIRE_API_KEY=true lives in ~/.omniroute/.env (OmniRoute reads it itself;
+# register-autostart.sh appends it there, with a backup, when missing). It is
+# deliberately NOT set here: a unit Environment= line would override the file
+# and hide an operator's edit of it.
+[Unit]
+Description=AutoOS OmniRoute AI gateway (:20128, client key required)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+WatchdogSec=180
+TimeoutStartSec=300
+WorkingDirectory=-%h/.omniroute
+Environment=PATH=@PATH@
+ExecStart=@OMNIROUTE@ serve --no-open --port 20128
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

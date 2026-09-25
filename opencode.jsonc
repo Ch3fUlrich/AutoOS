@@ -171,7 +171,10 @@
         { "action": "omnigraph_branches_create", "resource": "*", "effect": "deny" },
         { "action": "omnigraph_branches_merge", "resource": "*", "effect": "deny" },
         { "action": "omnigraph_branches_delete", "resource": "*", "effect": "deny" },
-        { "action": "playwright_browser_run_code_unsafe", "resource": "*", "effect": "deny" }
+        { "action": "playwright_browser_run_code_unsafe", "resource": "*", "effect": "deny" },
+        // A leaf never spawns: the spawner's MCP tools (autoos-agent_spawn and
+        // friends, registered for every agent) are off here too.
+        { "action": "autoos-agent_*", "resource": "*", "effect": "deny" }
       ]
     }
   },
@@ -399,6 +402,21 @@
           "OMNIGRAPH_BASE_URL": "http://localhost:8080",
           "OMNIGRAPH_GRAPH_ID": "autoos"
         }
+      },
+      // The agent spawner (tools/autoos_agent_mcp.py): spawn/status/result/cancel
+      // for every client; depth-policed through AUTOOS_AGENT_DEPTH.
+      "autoos-agent": {
+        "type": "local",
+        "command": [
+          "uv",
+          "--quiet",
+          "run",
+          "--no-project",
+          "--with",
+          "mcp<2",
+          "python",
+          "tools/autoos_agent_mcp.py"
+        ]
       }
     }
   }

@@ -95,24 +95,63 @@ PY
         # key, a re-curated spec, or a hand edit converges back automatically.
         _ss_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
         if command -v python3 >/dev/null; then
-            python3 "$_ss_root/tools/sync-openhands-profiles.py" --openhands-dir "$HOME/.openhands" \
+            # Read by the docker app below: host.docker.internal resolves in
+            # there (--add-host on native Linux, natively on Docker Desktop).
+            python3 "$_ss_root/tools/sync-openhands-profiles.py" --openhands-dir "$HOME/.openhands" --consumer container \
                 || echo "tier profile sync reported a problem - continuing with existing profiles"
         else
             echo "python3 not found - tier profile sync skipped (the installer covers it)"
+        fi
+        # Docker creates a missing bind-mount source as root; create it as
+        # the user first. A root-owned tree from an older run (the image
+        # defaults to SANDBOX_USER_ID=0) cannot be fixed without sudo: say so.
+        mkdir -p "$HOME/.openhands"
+        if [[ -n "$(find "$HOME/.openhands" -maxdepth 2 ! -user "$(id -u)" -print -quit 2>/dev/null)" ]]; then
+            echo "Some files under ~/.openhands are not yours (an older root-run container). Fix once with:"
+            echo "  sudo chown -R $(id -un):$(id -gn) ~/.openhands"
         fi
         if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app'; then
             docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app' \
                 || docker start openhands-app >/dev/null
         else
+            # Remote browsers (the phone through the LAN proxy): the UI hands
+            # the browser each sandbox's URL, http://localhost:<random port>
+            # by default - unreachable from anywhere but this host. With
+            # AUTOOS_OPENHANDS_SANDBOX_URL (a pattern with {port}, e.g. a
+            # proxy path that maps back to <this-host>:{port}) and
+            # AUTOOS_OPENHANDS_WEB_HOST (the public name, for CORS) set, the
+            # container gets them; unset, nothing changes. Recreate the
+            # container (docker rm -f openhands-app) after changing either.
+            oh_remote=()
+            if [[ -n "${AUTOOS_OPENHANDS_SANDBOX_URL:-}" ]]; then
+                oh_remote+=(-e OH_SANDBOX_CONTAINER_URL_PATTERN="$AUTOOS_OPENHANDS_SANDBOX_URL")
+            fi
+            if [[ -n "${AUTOOS_OPENHANDS_WEB_HOST:-}" ]]; then
+                oh_remote+=(-e WEB_HOST="$AUTOOS_OPENHANDS_WEB_HOST")
+            fi
             export LLM_API_KEY="$AUTOOS_OMNIROUTE_KEY"
             # Detached, no -it: -it fails without a TTY (non-interactive
             # shells) and foreground -it never returns, so the URL line below
             # would lie.
-            docker run -d --rm \
+            # SANDBOX_USER_ID: the entrypoint otherwise runs the app as root
+            # (image default 0) and ~/.openhands fills with root-owned files.
+            # --restart unless-stopped (not --rm): docker itself brings the
+            # UI back after a reboot, and a hand `docker stop` sticks.
+            # --memory: this stack shares a ~10 GB host with the gateway,
+            # litellm and the agents; AUTOOS_OPENHANDS_MEMORY overrides.
+            # Sandboxes (agent-server containers) are started by the app
+            # with --add-host host.docker.internal:host-gateway already.
+            # -p 3000:3000 binds every interface: the LAN reverse proxy is
+            # another host. OpenHands has NO login of its own - restrict
+            # :3000 to the proxy (docs/web-services.md).
+            docker run -d --restart unless-stopped \
+                --memory "${AUTOOS_OPENHANDS_MEMORY:-2g}" \
+                -e SANDBOX_USER_ID="$(id -u)" \
                 -e LLM_MODEL=openai/t1-orchestrator \
                 -e LLM_API_KEY \
                 -e LLM_BASE_URL="http://host.docker.internal:20128/v1" \
                 -e LOG_ALL_EVENTS=true \
+                "${oh_remote[@]}" \
                 -p 3000:3000 \
                 -v /var/run/docker.sock:/var/run/docker.sock \
                 -v "$HOME/.openhands:/.openhands" \
@@ -128,24 +167,46 @@ PY
         done
         curl -s -m 5 -o /dev/null http://127.0.0.1:3000/ 2>/dev/null \
             || { echo "OpenHands did not answer on :3000 - see: docker logs openhands-app"; exit 1; }
+        # This image keeps LLM profiles in its own settings store and never
+        # reads profiles/*.json: save the tiers through its API (idempotent,
+        # capped by the app at 10 - spec order decides which tiers make it).
+        if command -v python3 >/dev/null; then
+            # Keep the exit code: a failing sync (exit 2) must be reported, not
+            # swallowed by the filter under pipefail, and must not abort the start.
+            push_out="$(python3 "$_ss_root/tools/sync-openhands-profiles.py" --openhands-dir "$HOME/.openhands" \
+                --consumer container --push-url http://127.0.0.1:3000 2>&1)" && push_rc=0 || push_rc=$?
+            printf '%s\n' "$push_out" | grep -v ' skipped (up to date)$' || true
+            if [[ $push_rc -ne 0 ]]; then
+                echo "OpenHands tier-profile push failed (exit $push_rc) - the app keeps its old profiles"
+            fi
+        fi
         echo "OpenHands UI: http://localhost:3000"
         ;;
     opencode-serve)
         # Phone fallback UI (docs/openhands-runbook.md rung 2): resume when
-        # down, no-op when up. 401 without pairing credentials = alive.
+        # down, no-op when up. The wrapper pins the Basic-auth password
+        # (user "opencode", ~/.config/autoos/opencode-serve.password) and
+        # exports the {env:...} keys the global opencode config references.
+        _ss_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
         if curl -s -m 5 -o /dev/null "http://127.0.0.1:4096/" 2>/dev/null; then
             echo "opencode serve already up on :4096 - nothing to do."
         elif ! command -v opencode >/dev/null; then
             echo "opencode is not installed. Run: ./setup.sh --only opencode-cli --yes"
             exit 1
         else
-            echo "Starting opencode serve in the background..."
-            nohup opencode serve --hostname 0.0.0.0 --port 4096 >/tmp/opencode-serve.log 2>&1 &
+            if systemctl --user cat autoos-opencode.service >/dev/null 2>&1; then
+                echo "Starting the autoos-opencode unit..."
+                systemctl --user start autoos-opencode.service
+            else
+                "$_ss_root/configuration/autostart/run-opencode-serve.sh" --detach
+            fi
             for _ in $(seq 1 24); do
                 curl -s -m 5 -o /dev/null "http://127.0.0.1:4096/" 2>/dev/null && break
                 sleep 5
             done
-            echo "opencode serve should answer on http://localhost:4096 (401 = alive, pair via: opencode pair)."
+            curl -s -m 5 -o /dev/null "http://127.0.0.1:4096/" 2>/dev/null \
+                || { echo "opencode serve did not answer on :4096 - see ~/.local/state/autoos/opencode-serve.log"; exit 1; }
+            echo "opencode serve up on http://localhost:4096 (user: opencode, password in ~/.config/autoos/opencode-serve.password)."
         fi
         ;;
 esac

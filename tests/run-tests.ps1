@@ -905,6 +905,23 @@ Test-Case 'graphify is registered once, at user scope' {
     Pass
 }
 
+Test-Case 'omnigraph env file and its backup keep only the user''s access (icacls)' {
+    # Review finding 2026-09-25: the token file inherited the profile's ACLs.
+    $src = (Get-Command Set-AutoOSOmnigraphEnv).ScriptBlock.ToString()
+    $n = ([regex]::Matches($src, 'Protect-AutoOSUserFile')).Count
+    Assert-True ($n -ge 3) "Set-AutoOSOmnigraphEnv protects the file after writes, backup and unchanged path ($n calls)"
+    $helper = (Get-Command Protect-AutoOSUserFile -ErrorAction SilentlyContinue)
+    Assert-True ($null -ne $helper) 'Protect-AutoOSUserFile missing'
+    $body = $helper.ScriptBlock.ToString()
+    Assert-True ($body -match '/inheritance:r') 'inheritance not removed'
+    # Re-review 2026-09-25: a domain or AzureAD account needs DOMAIN\user, and
+    # the owner keeps full control so later writes and backups still work.
+    Assert-True ($body -match 'USERDOMAIN') 'principal is not domain-qualified'
+    Assert-True ($body -match ':\(F\)') 'owner must keep full control'
+    Assert-True ($src -match "Protect-AutoOSUserFile[^\n]*\) -eq 'failed'") 'a failed icacls is not reported'
+    Assert-True ($body -match "ErrorActionPreference = 'Continue'") 'icacls stderr would be terminating under Stop (5.1)'
+}
+
 Test-Case 'omnigraph is never registered at user scope' {
     # A user-scope omnigraph silently wins over the per-repo one and answers
     # from the wrong graph, which looks identical to it working.
@@ -2965,6 +2982,77 @@ function Get-AutoOSConsoleCapture {
     $sw.ToString()
 }
 
+# Omnigraph reachability (measured 2026-09-24): the bridge refuses to start
+# without OMNIGRAPH_BASE_URL and OMNIGRAPH_GRAPH_ID (the client only says
+# "Connection closed"), and answers health without a token, so clients show
+# "connected" while every read fails.
+Test-Case 'the omnigraph env file is merged, carries the token, and is stable on a re-run' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-og-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    $realToken = $env:OMNIGRAPH_TOKEN
+    try {
+        $envFile = Join-Path $scratch '.autoos-omnigraph.env'
+        [IO.File]::WriteAllText($envFile, "KEEP_ME=1`nOMNIGRAPH_BASE_URL=http://old.invalid`n")
+        $env:OMNIGRAPH_TOKEN = 'test-token-value'
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        $first = Get-AutoOSConsoleCapture { Set-AutoOSOmnigraphEnv -BaseUrl 'http://localhost:8080' -EnvFile $envFile -NoUserVariable 6>&1 }
+        $second = Get-AutoOSConsoleCapture { Set-AutoOSOmnigraphEnv -BaseUrl 'http://localhost:8080' -EnvFile $envFile -NoUserVariable 6>&1 }
+        $lines = @([IO.File]::ReadAllLines($envFile) | Sort-Object)
+        Assert-Equal ($lines -join ' ') 'KEEP_ME=1 OMNIGRAPH_BASE_URL=http://localhost:8080 OMNIGRAPH_TOKEN=test-token-value'
+        Assert-Equal @(Get-ChildItem $scratch -Force -Filter '*.autoos-backup-*').Count 1 'one backup, from the first change only'
+        Assert-True ("$second" -match 'unchanged') "second run was not reported unchanged: $second"
+        Assert-True ("$first$second" -notmatch 'test-token-value') 'the token was printed'
+    } finally {
+        $env:OMNIGRAPH_TOKEN = $realToken
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'the omnigraph user variable is set by name only, never PATH-style wholesale' {
+    $fn = [regex]::Match($installSource, '(?s)function Set-AutoOSOmnigraphEnv \{.*?\n\}').Value
+    Assert-True ($fn -match "GetEnvironmentVariable\('OMNIGRAPH_TOKEN', 'User'\)") 'the user variable is not read first'
+    Assert-True ($fn -match "SetEnvironmentVariable\('OMNIGRAPH_TOKEN', \`$token, 'User'\)") 'the user variable is not written by name'
+    Assert-True ($installSource -match 'Set-AutoOSOmnigraphEnv -BaseUrl \$baseUrl\r?\n') 'the installer does not call it for real'
+}
+
+Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)" {
+    $realAppData = $env:APPDATA
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-agy-" + [Guid]::NewGuid().ToString('N'))
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSAntigravityMcp 6>$null | Out-Null
+        $cfg = Get-Content (Join-Path $scratch 'Antigravity\mcp_config.json') -Raw | ConvertFrom-Json
+        Assert-Equal $cfg.mcpServers.omnigraph.env.OMNIGRAPH_GRAPH_ID 'autoos'
+    } finally {
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSZedProxy 6>$null | Out-Null
+        $s = Get-Content (Join-Path $scratch 'Zed\settings.json') -Raw | ConvertFrom-Json
+        $e = $s.context_servers.omnigraph.env
+        Assert-True ($null -ne $e) 'omnigraph context server has no env'
+        Assert-Equal $e.OMNIGRAPH_GRAPH_ID 'autoos'
+        Assert-True ([bool]$e.OMNIGRAPH_BASE_URL) 'no base URL'
+        Assert-True ($null -eq $e.PSObject.Properties['OMNIGRAPH_TOKEN']) 'a token landed in Zed settings'
+    } finally {
+        $env:APPDATA = $realAppData
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+
 # tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
 # YAML shapes both Set-AutoOSSerenaExclusions (here) and ensure_serena_exclusions
 # (tests/run-tests.sh) are graded against, so the two implementations cannot
@@ -3420,6 +3508,16 @@ Test-Case 'autoos-agent plans tier runs without spawning or leaking a key' {
     Assert-Equal $rc 2
 }
 
+Test-Case 'autoos-agent spawner unit tests: card routing, clients, depth' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_spawner.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "spawner unit tests failed: $out"
+}
+
 Test-Case 'mirror-litellm-env projects keys without printing them' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -3794,7 +3892,7 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         # Pins come from the harness at runtime, never as literals in lib/
         # (mcp-pins tests forbid both the bare names and the versions there).
         $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-        foreach ($n in @('serena', 'graphify', 'omnigraph', 'playwright', 'context7')) {
+        foreach ($n in @('serena', 'graphify', 'omnigraph', 'playwright', 'context7', 'autoos-agent')) {
             $pin = $harness.mcp_servers.$n.package
             Assert-True ((@($s.context_servers.$n.args) -join ' ') -match [regex]::Escape($pin)) "$n context server does not carry harness pin $pin"
         }
@@ -3899,7 +3997,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
     Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
-    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'context7,graphify,omnigraph,playwright,serena'
+    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
     # under the user (same rule as 'mcp pins: lib/ carries no floating...').
     $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -3949,7 +4047,7 @@ Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
         $hit = @($t3 | Where-Object { $_.action -eq 'shell' -and $_.resource -eq $pat })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer shell fence missing: $pat"
     }
-    foreach ($tool in @('serena_*', 'omnigraph_mutate', 'omnigraph_load', 'omnigraph_branches_merge', 'omnigraph_branches_delete', 'playwright_browser_run_code_unsafe')) {
+    foreach ($tool in @('serena_*', 'omnigraph_mutate', 'omnigraph_load', 'omnigraph_branches_merge', 'omnigraph_branches_delete', 'playwright_browser_run_code_unsafe', 'autoos-agent_*')) {
         $hit = @($t3 | Where-Object { $_.action -eq $tool })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer MCP writer open: $tool"
     }
@@ -4342,6 +4440,26 @@ Test-Case 'provider status reads keys but never exposes them' {
         Assert-True ($groq.configured -and -not $ds.configured) 'configured flags are wrong'
         Assert-True ($json -notmatch 'SUPERSECRET|SecretValue') 'a key value leaked into the payload'
     } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'svc: the Windows server reports the AI services and allowlists actions' {
+    # Same payload as serve.py's service_status(): the browser page is shared.
+    # The probe is injected, so no port on this machine is touched.
+    $codes = @{ 20128 = 200; 4000 = 0; 4096 = 401; 3000 = 200 }
+    $status = @(Get-AutoOSServiceStatus -Probe { param($port, $path) $codes[$port] })
+    $by = @{}; foreach ($s in $status) { $by[$s.id] = $s }
+    foreach ($id in 'omniroute', 'litellm', 'opencode', 'openhands') {
+        Assert-True ($by.ContainsKey($id)) "missing service $id"
+    }
+    Assert-True ($by.omniroute.up -and -not $by.litellm.up -and $by.opencode.up -and $by.openhands.up) 'up flags are wrong'
+    Assert-True ($by.litellm.bind -eq '127.0.0.1') 'litellm must be loopback'
+    Assert-True (@($by.omniroute.actions) -contains 'apply-dry-run') 'no apply dry run'
+    $bad = Get-AutoOSServiceActionResult -Body ([pscustomobject]@{ action = 'rm -rf /' }) -ForceDryRun $false
+    Assert-True ($bad.Code -eq 400) "unknown action answered $($bad.Code)"
+    $dry = Get-AutoOSServiceActionResult -Body ([pscustomobject]@{ action = 'apply-dry-run' }) -ForceDryRun $true
+    Assert-True ($dry.Code -eq 202) "dry-run action refused under -DryRun: $($dry.Code)"
+    $live = Get-AutoOSServiceActionResult -Body ([pscustomobject]@{ action = 'start-openhands' }) -ForceDryRun $true
+    Assert-True ($live.Code -eq 409) "live action allowed under -DryRun: $($live.Code)"
 }
 
 Test-Case 'opencode.jsonc is valid JSON once comments are stripped' {
@@ -4765,10 +4883,14 @@ Test-Case 'autostart resumes the LiteLLM fallback proxy too' {
     Assert-True ($start -match 'start-litellm\.ps1') 'ps1 launcher does not use the litellm starter'
     Assert-True ($start -match '4000') 'ps1 launcher does not probe :4000'
     Assert-True ($sh -match '4000') 'sh launcher does not probe :4000'
-    Assert-True ($sh -match 'PYTHONUTF8') 'sh launcher must set PYTHONUTF8 (cp1252 banner crash)'
+    # The Linux launcher delegates to configuration/litellm/start-litellm.sh
+    # (literal .env parsing, stale-key restart), like the ps1 one does.
+    $shStarter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.sh') -Raw
+    Assert-True ($sh -match 'start-litellm\.sh') 'sh launcher does not use the litellm starter'
+    Assert-True ($shStarter -match 'PYTHONUTF8') 'sh starter must set PYTHONUTF8 (cp1252 banner crash)'
     # Idempotent: only start when down, never bounce a healthy proxy.
     Assert-True ($start -match 'already up on 4000') 'ps1 launcher has no litellm no-op path'
-    Assert-True ($sh -match 'already up on 4000') 'sh launcher has no litellm no-op path'
+    Assert-True ($shStarter -match 'already up with the current keys') 'sh starter has no litellm no-op path'
     $starter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.ps1') -Raw
     Assert-True ($starter -match '\.env') 'starter does not read the litellm .env'
     Assert-True ($starter -notmatch 'REPLACE_WITH_YOUR') 'starter embeds a placeholder key name list, not values'

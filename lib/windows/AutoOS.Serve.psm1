@@ -75,6 +75,137 @@ function Get-AutoOSProviderStatus {
     return $result
 }
 
+# -- AI services: live status + the setup actions that already exist ------
+# Same payload as serve.py's service_status(): the browser page is shared.
+# `bind` and `auth` are what each service is configured for
+# (docs/web-services.md); `up` is probed live on loopback. No key is read.
+$script:Services = @(
+    [ordered]@{ id = 'omniroute'; name = 'OmniRoute gateway'; port = 20128; path = '/api/health'
+        bind = '0.0.0.0'; auth = 'client key on /v1 (REQUIRE_API_KEY); dashboard password'
+        unit = 'autoos-omniroute'; actions = @('apply-dry-run', 'apply', 'resume-stack') },
+    [ordered]@{ id = 'litellm'; name = 'LiteLLM fallback'; port = 4000; path = '/'
+        bind = '127.0.0.1'; auth = 'LITELLM_MASTER_KEY'
+        unit = 'autoos-litellm'; actions = @('resume-stack') },
+    [ordered]@{ id = 'opencode'; name = 'opencode serve (web UI)'; port = 4096; path = '/'
+        bind = '0.0.0.0'; auth = 'HTTP Basic on /api/* (user opencode)'
+        unit = 'autoos-opencode'; actions = @('start-opencode-serve') },
+    [ordered]@{ id = 'openhands'; name = 'OpenHands'; port = 3000; path = '/'
+        bind = '0.0.0.0'; auth = 'none - reach it only through the proxy'
+        unit = $null; actions = @('start-openhands') }
+)
+
+# The only commands the page can run. live = $false is a dry run (no
+# confirmation needed); everything else is confirmed in the browser and
+# refused when the server itself runs with -DryRun.
+$script:ServiceActions = [ordered]@{
+    'apply-dry-run'        = @{ label = 'Apply router (dry run)'; live = $false; script = 'configuration\omniroute\apply.ps1'; args = @('-DryRun') }
+    'apply'                = @{ label = 'Apply router'; live = $true; script = 'configuration\omniroute\apply.ps1'; args = @() }
+    'start-openhands'      = @{ label = 'Start OpenHands'; live = $true; script = 'configuration\start-stack.ps1'; args = @('-App', 'openhands') }
+    'start-opencode-serve' = @{ label = 'Start opencode serve'; live = $true; script = 'configuration\start-stack.ps1'; args = @('-App', 'opencode-serve') }
+    'resume-stack'         = @{ label = 'Resume the stack'; live = $true; script = 'configuration\autostart\Start-AutoOSStack.ps1'; args = @() }
+}
+
+function Get-AutoOSServiceStatus {
+    <#
+      .SYNOPSIS
+        Live status of every AI service (gateway, litellm, opencode serve,
+        OpenHands). -Probe { param($port, $path) <http code> } is injectable
+        so tests never touch this machine's ports; 0 means nothing answered.
+    #>
+    param([scriptblock]$Probe)
+    if (-not $Probe) {
+        $Probe = {
+            param($port, $path)
+            try {
+                (Invoke-WebRequest -Uri "http://127.0.0.1:$port$path" -UseBasicParsing -TimeoutSec 2).StatusCode
+            } catch {
+                $resp = $_.Exception.Response
+                if ($resp) { [int]$resp.StatusCode } else { 0 }
+            }
+        }
+    }
+    $out = foreach ($svc in $script:Services) {
+        $code = [int](& $Probe $svc.port $svc.path)
+        $up = switch ($svc.id) {
+            'omniroute' { $code -eq 200 }
+            'litellm'   { $code -eq 200 }
+            'opencode'  { $code -eq 200 -or $code -eq 401 }
+            default     { $code -ne 0 }
+        }
+        $labels = [ordered]@{}
+        foreach ($a in $svc.actions) { $labels[$a] = $script:ServiceActions[$a].label }
+        [ordered]@{
+            id = $svc.id; name = $svc.name; port = $svc.port; bind = $svc.bind; auth = $svc.auth
+            unit = $svc.unit; code = $code; up = [bool]$up
+            health = "http://127.0.0.1:$($svc.port)$($svc.path)"
+            actions = @($svc.actions); actionLabels = $labels
+            liveActions = @($svc.actions | Where-Object { $script:ServiceActions[$_].live })
+        }
+    }
+    $result = @($out)
+    return $result
+}
+
+function Get-AutoOSServiceActionResult {
+    <#
+      .SYNOPSIS
+        Validate a POST /api/services/action body. Returns @{ Code; Payload;
+        Action } - Action is set only when the caller may start the job.
+    #>
+    param($Body, [bool]$ForceDryRun)
+    $key = $null
+    if ($Body -and $Body.PSObject.Properties.Name -contains 'action') { $key = [string]$Body.action }
+    if (-not $key -or -not $script:ServiceActions.Contains($key)) {
+        return @{ Code = 400; Payload = @{ error = 'unknown action'; allowed = @($script:ServiceActions.Keys) }; Action = $null }
+    }
+    if ($script:ServiceActions[$key].live -and $ForceDryRun) {
+        return @{ Code = 409; Payload = @{ error = 'this server runs with -DryRun: only dry-run actions are allowed' }; Action = $null }
+    }
+    return @{ Code = 202; Payload = @{ started = $true; action = $key }; Action = $key }
+}
+
+function Start-AutoOSServiceActionJob {
+    <#
+      .SYNOPSIS
+        Run one allowlisted service action as a child PowerShell, streaming
+        into the same log/progress the install job uses.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$Action
+    )
+    $act = $script:ServiceActions[$Action]
+    $script:Log.Clear()
+    $script:RunInfo.Running = $true
+    $script:RunInfo.Done    = 0
+    $script:RunInfo.Total   = 1
+    $script:RunInfo.Summary = ''
+    $script:RunInfo.Current = $null
+
+    $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $RepoRoot $act.script)) + @($act.args)
+    [void]$script:Log.Add(@{ level = 'step'; text = '$ powershell ' + ($psArgs -join ' ') })
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName  = (Get-Command powershell).Source
+    $psi.Arguments = ($psArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+    $psi.WorkingDirectory      = $RepoRoot
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+    $psi.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
+    $psi.UseShellExecute        = $false
+    $psi.CreateNoWindow         = $true
+    $psi.EnvironmentVariables['AUTOOS_NO_COLOR'] = '1'
+    try { $script:Proc = [System.Diagnostics.Process]::Start($psi) }
+    catch {
+        $script:RunInfo.Running = $false
+        $script:RunInfo.Summary = "could not start: $($act.label)"
+        throw
+    }
+    $script:OutTask = $script:Proc.StandardOutput.ReadLineAsync()
+    $script:ErrTask = $script:Proc.StandardError.ReadLineAsync()
+}
+
 function Get-AutoOSLineLevel {
     param([string]$Line)
     $t = $Line.TrimStart()
@@ -798,6 +929,23 @@ function Start-AutoOSServer {
                     }
                 }
             }
+            elseif ($path -eq '/api/services' -and $req.HttpMethod -eq 'GET') {
+                & $json 200 @{ services = @(Get-AutoOSServiceStatus) }
+            }
+            elseif ($path -eq '/api/services/action' -and $req.HttpMethod -eq 'POST') {
+                $body = (New-Object IO.StreamReader($req.InputStream, $req.ContentEncoding)).ReadToEnd()
+                $payload = $null
+                try { $payload = $body | ConvertFrom-Json } catch { $payload = $null }
+                $result = Get-AutoOSServiceActionResult -Body $payload -ForceDryRun $forceDryRun
+                if ($result.Code -eq 202 -and $script:RunInfo.Running) {
+                    & $json 409 @{ error = 'a run is already in progress' }
+                } elseif ($result.Code -eq 202) {
+                    Start-AutoOSServiceActionJob -RepoRoot $RepoRoot -Action $result.Action
+                    & $json 202 $result.Payload
+                } else {
+                    & $json $result.Code $result.Payload
+                }
+            }
             elseif ($path -eq '/api/install' -and $req.HttpMethod -eq 'POST') {
                 if ($script:RunInfo.Running) {
                     & $json 409 @{ error = 'a run is already in progress' }
@@ -846,4 +994,5 @@ function Start-AutoOSServer {
 }
 
 Export-ModuleMember -Function Start-AutoOSServer, Get-AutoOSServeState, Get-AutoOSLineLevel, Start-AutoOSInstallJob, Update-AutoOSInstallLog, `
-    Start-AutoOSUsbCreateJob, Get-AutoOSServeUsbCatalog, Get-AutoOSServeUsbDevices, Get-AutoOSServeUsbCreateResult, Get-AutoOSProviderStatus
+    Start-AutoOSUsbCreateJob, Get-AutoOSServeUsbCatalog, Get-AutoOSServeUsbDevices, Get-AutoOSServeUsbCreateResult, Get-AutoOSProviderStatus, `
+    Get-AutoOSServiceStatus, Get-AutoOSServiceActionResult, Start-AutoOSServiceActionJob

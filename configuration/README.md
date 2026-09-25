@@ -37,15 +37,18 @@ training-data rules: [docs/models.md](../docs/models.md). Phone reachability:
 ## opencode serve (phone fallback web UI)
 
 ```bash
-opencode serve --hostname 0.0.0.0 --port 4096   # then open http://<this-host>:4096
-opencode pair                                    # QR + username/password for the phone
-opencode pair --url https://<public-host>        # advertise an external URL instead
+./configuration/autostart/run-opencode-serve.sh --detach   # 0.0.0.0:4096, background
+./configuration/start-stack.sh opencode-serve              # same, no-op when up
 ```
 
-Unauthenticated requests get `401` — that is the server proving it is alive,
-not an error. Pairing credentials print once in the terminal; keep them out
-of tracked files. No config change is needed: the repo `opencode.jsonc`
-routing (OmniRoute `:20128`) applies to the served sessions too.
+opencode V2 serves its UI to anyone and guards `/api/*` with HTTP Basic auth:
+user **`opencode`**, password from `OPENCODE_PASSWORD`. Without that variable
+it invents a new password on every start, so the wrapper pins one in
+`~/.config/autoos/opencode-serve.password` (mode 600, generated on first use,
+never printed) and exports the `{env:...}` keys the global opencode config
+references (read literally from `configuration/litellm/.env` and
+`api-keys.yml`). A client on another machine connects with
+`OPENCODE_PASSWORD=... opencode --server http://<this-host>:4096`.
 
 ## Autostart after reboot (opt-in)
 
@@ -55,15 +58,36 @@ routing (OmniRoute `:20128`) applies to the served sessions too.
 ```
 
 ```bash
-cp configuration/autostart/autoos-stack.service ~/.config/systemd/user/  # adjust ExecStart to your checkout
-systemctl --user enable --now autoos-stack.service
+./configuration/autostart/register-autostart.sh --dry-run    # what it would write
+./configuration/autostart/register-autostart.sh              # write, enable, start
+./configuration/autostart/register-autostart.sh --takeover   # also replace hand-started copies
+./configuration/autostart/register-autostart.sh --unregister # remove them again
 ```
 
-Resumes the gateway, the `openhands-app` container, **and** `opencode serve` on :4096. AutoOS `--serve`
-never autostarts (its token is random per run). Registration is idempotent:
-re-running replaces the same task / unit. Health: `healthcheck.sh` /
-`healthcheck.ps1` (log-only; `--fix` / `-Fix` resumes). Windows: prefer the
-`.ps1` — Git Bash `curl` cannot reach IPv4-only loopback listeners on some
+Linux registers four systemd `--user` units, rendered with this checkout's
+path and the PATH this machine needs (nvm's node, `~/.local/bin`), so re-run
+it after moving the checkout or upgrading node:
+
+| Unit | Runs | Listens |
+|---|---|---|
+| `autoos-omniroute` | `omniroute serve` (notify + watchdog) | `0.0.0.0:20128` |
+| `autoos-litellm` | `configuration/litellm/start-litellm.sh --foreground` | `127.0.0.1:4000` |
+| `autoos-opencode` | `configuration/autostart/run-opencode-serve.sh` | `0.0.0.0:4096` |
+| `autoos-stack` | `Start-AutoOSStack.sh` (oneshot: OpenHands container, anything down) | - |
+
+A service somebody started by hand keeps running: its unit is enabled (it
+takes over at the next boot) but not started, unless `--takeover`. The
+gateway keeps `REQUIRE_API_KEY=true` in `~/.omniroute/.env`; registration
+appends it there (after a backup) only when the line is missing. The units
+start at boot only with lingering on (`loginctl enable-linger`); the script
+says when that needs sudo. By hand instead: copy a unit, fill in the paths,
+then `systemctl --user enable --now autoos-stack.service`.
+
+AutoOS `--serve` never autostarts (its token is random per run). Registration
+is idempotent: re-running reports unchanged units as skipped. Health:
+`healthcheck.sh` / `healthcheck.ps1` (log-only; `--fix` / `-Fix` resumes the
+gateway, litellm, OpenHands and opencode serve). Windows: prefer the
+`.ps1` - Git Bash `curl` cannot reach IPv4-only loopback listeners on some
 boxes and would report them down.
 
 ## Rules

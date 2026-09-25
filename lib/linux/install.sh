@@ -1315,9 +1315,13 @@ ctx["graphify"] = {
     "args": ["run", "--with", pins["graphify"]["package"], "python",
              "-m", "graphify.serve", "graphify-out/graph.json"],
 }
+# The bridge exits at start-up without a base URL and a graph id ("Connection
+# closed" in the panel). The token is never written here: Zed inherits it from
+# the session env (~/.config/environment.d, see write_omnigraph_env).
 ctx["omnigraph"] = {
     "command": "npx",
     "args": ["-y", pins["omnigraph"]["package"]],
+    "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
 }
 ctx["playwright"] = {
     "command": "npx",
@@ -1326,6 +1330,12 @@ ctx["playwright"] = {
 ctx["context7"] = {
     "command": "npx",
     "args": ["-y", pins["context7"]["package"]],
+}
+_repo = os.path.dirname(os.path.dirname(os.path.abspath(harness_file)))
+ctx["autoos-agent"] = {
+    "command": "uv",
+    "args": ["--quiet", "run", "--no-project", "--with", pins["autoos-agent"]["package"], "python",
+             os.path.join(_repo, pins["autoos-agent"]["script"])],
 }
 # Bypass profile: every built-in tool on, no confirmations (global
 # tool_permissions.default allow). Existing profiles and per-tool rules stay.
@@ -2125,7 +2135,8 @@ PY
     return 0
 }
 
-# The omnigraph MCP server is a container talking to a graph server over a Docker
+# AutoOS's own repo runs the bridge through npx (.mcp.json); the agent-skills
+# checkout and sibling repos run it as a container on the graph server's Docker
 # network. Miss the image, the network or the token and MCP start-up fails with
 # "pull access denied", "fetch failed" or "missing bearer token" respectively —
 # none of which say which of the three it was. AutoOS does not build or start
@@ -2146,17 +2157,185 @@ omnigraph_readiness() {
         ui_muted "    docker compose -f ${dir}/infra/mcp-servers/docker-compose.client.yml up -d"
         ready=0
     fi
-    if [[ -z "${OMNIGRAPH_TOKEN:-}" ]]; then
+    if [[ -z "${OMNIGRAPH_TOKEN:-}" ]] && ! grep -qE '^OMNIGRAPH_TOKEN=.' "$SYS_HOME/.autoos-omnigraph.env" 2>/dev/null; then
         # Never invent one. An empty bearer fails as "missing bearer token",
         # which at least names itself; a made-up value fails as a 401 nobody can
         # explain — and this repository is public, so a real-looking secret in it
         # is a leak whether or not it happens to work.
         ui_warn "OMNIGRAPH_TOKEN is not set — the server will reject every call."
-        ui_muted "    it is issued by the graph server, not by AutoOS. Copy"
-        ui_muted "    ${dir}/infra/mcp-servers/.env.client.example to .env.client and fill it in."
+        ui_muted "    it is issued by the graph server, not by AutoOS. Add"
+        ui_muted "    OMNIGRAPH_TOKEN=<token> to ${SYS_HOME}/.autoos-omnigraph.env (mode 600)."
         ready=0
     fi
     (( ready ))
+}
+
+# write_omnigraph_env <base-url>
+# The per-user omnigraph env file, ~/.autoos-omnigraph.env, mode 600: the ONE
+# place the bearer token lives on this machine. Tracked configs name the token
+# (${OMNIGRAPH_TOKEN} in .mcp.json; opencode, Zed and OpenHands inherit it), so
+# something must put the value into the env of whatever launches a client. A
+# token exported only from an interactive ~/.zshrc reaches terminals and
+# nothing else: systemd user services, a desktop-launched Zed and `bash -c`
+# agents got none, still showed omnigraph "connected" (the bridge answers
+# health without a token) and failed every read (measured 2026-09-24). So the
+# file is
+#   * linked as ~/.config/environment.d/60-autoos-omnigraph.conf, which the
+#     systemd user manager and desktop sessions load at login, and
+#   * sourced from ~/.bashrc / ~/.zshrc when OMNIGRAPH_TOKEN is not set yet.
+# The token comes from $OMNIGRAPH_TOKEN, else from the local omnigraph-server
+# container, else stays whatever the file already had. Never invented, never
+# printed. Read-modify-write: other keys in the file are kept.
+write_omnigraph_env() {
+    local base="$1" file="$SYS_HOME/.autoos-omnigraph.env"
+    local link="$SYS_HOME/.config/environment.d/60-autoos-omnigraph.conf"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would write ${file} (mode 600) and link it into ${link%/*}"
+        return 0
+    fi
+    local token="${OMNIGRAPH_TOKEN:-}"
+    if [[ -z "$token" ]] && has_cmd docker; then
+        token="$(docker inspect omnigraph-server --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+            | sed -n 's/^OMNIGRAPH_SERVER_BEARER_TOKEN=//p' | head -n 1)" || token=""
+    fi
+
+    local status rc=0
+    status="$(OMNI_BASE="$base" OMNI_TOKEN="$token" python3 - "$file" <<'PY'
+import os, shutil, sys, time
+path = sys.argv[1]
+want = {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"]}
+if os.environ.get("OMNI_TOKEN"):
+    want["OMNIGRAPH_TOKEN"] = os.environ["OMNI_TOKEN"]
+old = ""
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as f:
+        old = f.read()
+lines, seen = [], set()
+for line in old.splitlines():
+    key = line.split("=", 1)[0].strip()
+    if key in want:
+        if key in seen:
+            continue
+        line = "%s=%s" % (key, want[key])
+        seen.add(key)
+    lines.append(line)
+lines += ["%s=%s" % (k, v) for k, v in want.items() if k not in seen]
+new = "\n".join(lines) + "\n"
+has_token = any(l.startswith("OMNIGRAPH_TOKEN=") and l.strip() != "OMNIGRAPH_TOKEN=" for l in lines)
+if new == old:
+    os.chmod(path, 0o600)
+    print("unchanged", "token" if has_token else "no-token")
+    sys.exit(0)
+if old:
+    backup = "%s.autoos-backup-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
+    shutil.copy2(path, backup)
+    os.chmod(backup, 0o600)
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write(new)
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+print("written", "token" if has_token else "no-token")
+PY
+)" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "could not write ${file} (exit ${rc})"
+        return 0
+    fi
+    if [[ "$status" == unchanged* ]]; then
+        ui_muted "omnigraph env file unchanged (${file})"
+    else
+        ui_ok "omnigraph env written to ${file} (mode 600)"
+    fi
+    if [[ "$status" == *no-token ]]; then
+        ui_warn "OMNIGRAPH_TOKEN is not set and no local omnigraph-server holds one."
+        ui_muted "    add OMNIGRAPH_TOKEN=<token issued by the graph server> to ${file}"
+    fi
+
+    mkdir -p "${link%/*}"
+    if [[ -L "$link" && "$(readlink "$link")" == "$file" ]]; then
+        :
+    elif [[ -e "$link" || -L "$link" ]]; then
+        ui_warn "${link} exists and is not AutoOS's link — left alone."
+    else
+        ln -s "$file" "$link"
+        ui_ok "linked ${link} (systemd user services and desktop apps)"
+    fi
+
+    # Literal $HOME/${...}: this line is written into the rc file and expands
+    # there, at shell start-up, not here. It READS the three keys literally
+    # (export "$k=$v" never evaluates $v); the v1 line sourced the file, so a
+    # value holding $(...) ran in every new shell (review finding 2026-09-25).
+    # Works in bash and zsh; drops a trailing CR and reads a last line that has
+    # no newline.
+    # shellcheck disable=SC2016
+    local rc_line
+    rc_line="$(omnigraph_rc_line)"
+    local shell_rc
+    for shell_rc in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
+        [[ -f "$shell_rc" ]] || continue
+        replace_or_append_marked_line "$shell_rc" "AutoOS:omnigraph-env" "AutoOS:omnigraph-env-v2" "$rc_line"
+    done
+}
+
+omnigraph_rc_line() {
+    # The rc-file line write_omnigraph_env installs (one place, so the suite
+    # tests the exact text). Literal $HOME/${...}: it expands in the rc file at
+    # shell start-up, not here.
+    # shellcheck disable=SC2016
+    printf '%s\n' '[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && while IFS= read -r _ag_l || [ -n "$_ag_l" ]; do _ag_l=${_ag_l%$'"'"'\r'"'"'}; case "$_ag_l" in OMNIGRAPH_TOKEN=*|OMNIGRAPH_BASE_URL=*|OMNIGRAPH_GRAPH_ID=*) export "${_ag_l%%=*}=${_ag_l#*=}" ;; esac; done < "$HOME/.autoos-omnigraph.env"; unset _ag_l  # AutoOS:omnigraph-env-v2'
+}
+
+replace_or_append_marked_line() {
+    # replace_or_append_marked_line <file> <old marker> <new marker> <line>
+    # Current line present -> nothing. A line with the OLD marker (and not the
+    # new one) -> replaced in place, after a backup. Otherwise appended once.
+    local file="$1" old_marker="$2" new_marker="$3" line="$4"
+    if grep -qF -- "$new_marker" "$file" 2>/dev/null; then
+        # A stale old line next to the current one still runs first: purge it.
+        if grep -F -- "$old_marker" "$file" | grep -qvF -- "$new_marker"; then
+            if (( AUTOOS_DRY_RUN )); then
+                ui_muted "would remove the stale '${old_marker}' line from ${file}"
+                return 0
+            fi
+            cp "$file" "${file}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+            AUTOOS_OLD="$old_marker" AUTOOS_NEW="$new_marker" python3 - "$file" <<'PY'
+import os, sys
+path = sys.argv[1]
+old, new = os.environ["AUTOOS_OLD"], os.environ["AUTOOS_NEW"]
+with open(path, encoding="utf-8") as f:
+    lines = f.read().split("\n")
+lines = [l for l in lines if not (old in l and new not in l)]
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines))
+PY
+            ui_ok "removed the stale '${old_marker}' line from ${file}"
+            return 0
+        fi
+        ui_muted "already configured (${new_marker}) in ${file}"
+        return 0
+    fi
+    if ! grep -F -- "$old_marker" "$file" 2>/dev/null | grep -qvF -- "$new_marker"; then
+        append_line_once "$file" "$new_marker" "$line"
+        return 0
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would replace the '${old_marker}' line in ${file}"
+        return 0
+    fi
+    cp "$file" "${file}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    AUTOOS_OLD="$old_marker" AUTOOS_LINE="$line" python3 - "$file" <<'PY'
+import os, sys
+path = sys.argv[1]
+old, new = os.environ["AUTOOS_OLD"], os.environ["AUTOOS_LINE"]
+with open(path, encoding="utf-8") as f:
+    lines = f.read().split("\n")
+lines = [new if (old in l) else l for l in lines]
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines))
+PY
+    ui_ok "replaced the '${old_marker}' line in ${file}"
 }
 
 install_agent_skills() {
@@ -2173,12 +2352,7 @@ install_agent_skills() {
     if [[ -z "$omni" ]]; then base="http://localhost:8080"; else base="${omni%/}"; fi
     ui_info "Omnigraph base URL: ${base}"
 
-    if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would write ${SYS_HOME}/.autoos-omnigraph.env"
-    else
-        printf 'OMNIGRAPH_BASE_URL=%s\n' "$base" >"$SYS_HOME/.autoos-omnigraph.env"
-        ui_ok "Omnigraph URL saved to ${SYS_HOME}/.autoos-omnigraph.env"
-    fi
+    write_omnigraph_env "$base"
 
     # Wire user-scope MCP servers across Claude Code and Antigravity
     install_mcp_graphify
@@ -2200,14 +2374,19 @@ install_agent_skills() {
     else
         ui_warn "no .mcp.json in ${dest} — nothing to pin omnigraph to."
     fi
+    # The agent spawner is declared in this repo's own .mcp.json.
+    if [[ -n "${AUTOOS_ROOT:-}" && -f "$AUTOOS_ROOT/.mcp.json" ]]; then
+        enable_project_mcp_server "$AUTOOS_ROOT" autoos-agent
+    fi
 
     local omni_pkg omni_spec
     omni_pkg="$(mcp_package omnigraph)"
     omni_spec="$(python3 -c "
 import json, os
-env_vars = {'OMNIGRAPH_BASE_URL': '$base'}
-if os.environ.get('OMNIGRAPH_GRAPH_ID'):
-    env_vars['OMNIGRAPH_GRAPH_ID'] = os.environ['OMNIGRAPH_GRAPH_ID']
+# bridge 0.8 refuses to start without a graph id (there is no fallback graph
+# any more), so an unset one pins this repo's graph like the other clients.
+env_vars = {'OMNIGRAPH_BASE_URL': '$base',
+            'OMNIGRAPH_GRAPH_ID': os.environ.get('OMNIGRAPH_GRAPH_ID') or 'autoos'}
 if os.environ.get('OMNIGRAPH_TOKEN'):
     env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
 print(json.dumps({
@@ -2319,22 +2498,105 @@ autoos_skills_source() {
     return 0
 }
 
+# setup_opencode_config
+# Merges the AutoOS providers (omniroute + litellm tiers, ollama, meta), MCP
+# servers and harness into the user's GLOBAL OpenCode config, so tier routing
+# works in every cwd. Both files are merged in place, never replaced: V2
+# (@opencode/cli) reads opencode.json, V1 also config.json. Each file is read
+# JSONC-tolerantly (comments, trailing commas); one that still does not parse
+# is left untouched. A file is backed up only when this run changes it, so a
+# second run changes nothing. Keys are {env:NAME} references, never values.
 setup_opencode_config() {
     local config_dir="$SYS_HOME/.config/opencode"
-    local config_file="$config_dir/config.json"
 
     if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would configure OpenCode in $config_file"
+        ui_muted "would merge the AutoOS providers into $config_dir/opencode.json and config.json"
         ui_muted "would apply the agent harness (catalog/agent-harness.json)"
         return 0
     fi
 
     mkdir -p "$config_dir"
-    if [[ -f "$config_file" ]]; then
-        local ts
-        ts="$(date +%Y%m%d%H%M%S)"
-        cp "$config_file" "${config_file}.autoos-backup-${ts}"
+    if [[ -f "$config_dir/opencode.jsonc" ]]; then
+        ui_muted "$config_dir/opencode.jsonc is yours and stays as is; AutoOS merges into opencode.json"
     fi
+    local config_file snapshot merge_rc merged_first=0
+    for config_file in "$config_dir/config.json" "$config_dir/opencode.json"; do
+        # First V2 run on a V1 machine: opencode.json starts as a copy of the
+        # merged config.json, as the old writer's cp did - but never replaces
+        # an opencode.json that exists.
+        local seeded=0
+        if [[ "$config_file" == */opencode.json && ! -e "$config_file" ]] && (( merged_first )); then
+            cp -p "$config_dir/config.json" "$config_file"
+            seeded=1
+        fi
+        snapshot=""
+        if [[ -f "$config_file" ]] && (( ! seeded )); then
+            snapshot="$(mktemp)"
+            cp -p "$config_file" "$snapshot"
+        fi
+        # V2 reads opencode.json's `providers` block; V1 reads config.json.
+        local v2_source=""
+        if [[ "$config_file" == */opencode.json ]] && opencode_is_v2; then
+            # Anchored off this file, like models_file: never the caller's cwd.
+            v2_source="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/opencode.jsonc"
+        fi
+        merge_rc=0
+        AUTOOS_OPENCODE_V2_SOURCE="$v2_source" _opencode_merge_config "$config_file" || merge_rc=$?
+        if (( merge_rc == 3 )); then
+            ui_warn "$config_file is not valid JSON or JSONC - left alone (fix it, then re-run)"
+            [[ -n "$snapshot" ]] && rm -f "$snapshot"
+            continue
+        elif (( merge_rc != 0 )); then
+            ui_warn "OpenCode configuration not written to $config_file (exit $merge_rc)"
+            [[ -n "$snapshot" ]] && rm -f "$snapshot"
+            continue
+        fi
+
+        # Merge the shared agent harness (roles, skills link) after the config
+        # is written. Judge by exit code only; the generator's notes are muted.
+        if has_cmd python3; then
+            local harness_out harness_rc skills_source
+            skills_source="$(autoos_skills_source)"
+            [[ -n "$skills_source" ]] || skills_source="$SYS_HOME/Documents/Code/agent-skills/skills"
+            harness_rc=0
+            harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
+            if (( harness_rc != 0 )); then
+                ui_warn "agent harness not applied to OpenCode (exit $harness_rc)"
+            else
+                while IFS= read -r _harness_line; do
+                    [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
+                done <<< "$harness_out"
+            fi
+        else
+            ui_warn "agent harness not applied: python3 not found"
+        fi
+
+        [[ "$config_file" == */config.json ]] && merged_first=1
+        if [[ -z "$snapshot" ]]; then
+            ui_ok "OpenCode configuration written to $config_file"
+        elif cmp -s "$snapshot" "$config_file"; then
+            rm -f "$snapshot"
+            ui_muted "$config_file already current"
+        else
+            local backup
+            backup="${config_file}.autoos-backup-$(date +%Y%m%d%H%M%S)"
+            mv "$snapshot" "$backup"
+            ui_ok "OpenCode configuration merged into $config_file (backup: $backup)"
+        fi
+    done
+    return 0
+}
+
+# opencode_is_v2: the installed `opencode` is the V2 CLI (@opencode/cli).
+opencode_is_v2() {
+    has_cmd opencode || return 1
+    [[ "$(opencode --version 2>/dev/null)" =~ (^|[^0-9.])v?2\. ]]
+}
+
+# _opencode_merge_config <file>: the provider/MCP merge for one file.
+# Exit 3 = the existing file does not parse (left untouched).
+_opencode_merge_config() {
+    local config_file="$1"
 
     local secrets_file="$SYS_HOME/Documents/Code/agent-skills/secrets/api_keys.conf"
     [[ -f "$secrets_file" ]] || secrets_file="$SYS_HOME/Documents/code/agent-skills/secrets/api_keys.conf"
@@ -2383,13 +2645,42 @@ def _openrouter_models():
         out[m['openrouter_id']] = entry
     return out
 
+def _strip_jsonc(text):
+    # Drop // and /* */ comments outside strings, then trailing commas.
+    out, i, n, in_str = [], 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == '\\\\' and i + 1 < n:
+                out.append(text[i + 1]); i += 2; continue
+            if c == '\"':
+                in_str = False
+            i += 1; continue
+        if c == '\"':
+            in_str = True; out.append(c); i += 1; continue
+        if text.startswith('//', i):
+            j = text.find('\\n', i)
+            i = n if j < 0 else j; continue
+        if text.startswith('/*', i):
+            j = text.find('*/', i + 2)
+            i = n if j < 0 else j + 2; continue
+        out.append(c); i += 1
+    import re as _re
+    return _re.sub(r',(\\s*[}\\]])', r'\\1', ''.join(out))
+
 data = {}
 if os.path.isfile(config_path):
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    except Exception:
-        data = {}
+    with open(config_path, 'r', encoding='utf-8-sig') as f:
+        _raw = f.read()
+    if _raw.strip():
+        try:
+            data = json.loads(_strip_jsonc(_raw))
+        except Exception:
+            # Never start from {}: that would replace the user's whole config.
+            sys.exit(3)
+        if not isinstance(data, dict):
+            sys.exit(3)
 
 def _read_secrets_into(path, secrets):
     try:
@@ -2451,7 +2742,7 @@ providers['meta'] = {
 muse_key = os.environ.get('META_API_KEY') or os.environ.get('MUSE_API_KEY') or secrets.get('muse')
 deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
 # NOTE: META_API_KEY is the canonical name (same as litellm .env + api-keys.yml
-# `meta:`); MUSE_API_KEY stays as a legacy fallback. The muse key feeds
+# meta:); MUSE_API_KEY stays as a legacy fallback. The muse key feeds
 # _profile_for (muse-spark contributor below) and the direct meta provider.
 # NOTE: the muse key feeds _profile_for (muse-spark contributor below) and the
 # direct meta provider. No direct DEEPSEEK provider is emitted: tier routing
@@ -2502,7 +2793,9 @@ if openrouter_key:
         'name': 'OpenRouter',
         'options': {
             'baseURL': 'https://openrouter.ai/api/v1',
-            'apiKey': openrouter_key
+            # A reference, never the value: the key stays in the environment
+            # (configuration/litellm/.env for the served UI).
+            'apiKey': '{env:OPENROUTER_API_KEY}'
         },
         'models': _openrouter_models()
     }
@@ -2556,34 +2849,32 @@ with open(_harness_file, 'r', encoding='utf-8') as _hf2:
     _mem_tools = json.load(_hf2)['mcp_servers']['serena']['memory_tools']
 data['tools'] = {'serena_' + _t: False for _t in _mem_tools}
 
+# V2 (@opencode/cli) ignores the V1 provider block above and reads
+# providers (package/env/settings). Project the gateway entries from the
+# repo's opencode.jsonc - the single source - so every cwd gets the tiers.
+_v2_source = os.environ.get('AUTOOS_OPENCODE_V2_SOURCE')
+if _v2_source and os.path.isfile(_v2_source):
+    with open(_v2_source, 'r', encoding='utf-8-sig') as _vf:
+        _repo = json.loads(_strip_jsonc(_vf.read()))
+    _v2 = data.get('providers') if isinstance(data.get('providers'), dict) else {}
+    for _name in ('omniroute', 'litellm'):
+        if _name in _repo.get('providers', {}):
+            _v2[_name] = _repo['providers'][_name]
+    data['providers'] = _v2
+    # The V1 default (local Ollama) has no V2 provider entry: point V2 at the
+    # repo default instead, but only when it is still the AutoOS default.
+    _ollama_default = 'ollama/' + REPO_BY_ID['ollama-qwen2.5-coder']['direct']['model'].split('/', 1)[1]
+    if data.get('model') in (None, '', _ollama_default) and _repo.get('model'):
+        data['model'] = _repo['model']
+
 tmp_file = config_path + '.tmp'
 with open(tmp_file, 'w', encoding='utf-8') as f:
     json.dump(data, f, indent=2)
+    # Trailing newline, as the harness writes it: otherwise every re-run
+    # differs by one byte and takes a pointless backup.
+    f.write('\\n')
 os.replace(tmp_file, config_path)
 " "$config_file" "$secrets_file" "$models_file"
-
-    ui_ok "OpenCode configuration written to $config_file"
-
-    # Merge the shared agent harness (roles, skills link) after the config is
-    # written. Judge by exit code only; the generator's own notes are muted.
-    if has_cmd python3; then
-        local harness_out harness_rc skills_source
-        skills_source="$(autoos_skills_source)"
-        [[ -n "$skills_source" ]] || skills_source="$SYS_HOME/Documents/Code/agent-skills/skills"
-        harness_rc=0
-        harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
-        if (( harness_rc != 0 )); then
-            ui_warn "agent harness not applied to OpenCode (exit $harness_rc)"
-        else
-            while IFS= read -r _harness_line; do
-                [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
-            done <<< "$harness_out"
-        fi
-    else
-        ui_warn "agent harness not applied: python3 not found"
-    fi
-
-    cp "$config_file" "$config_dir/opencode.json"
 }
 
 setup_openhands_config() {
@@ -2830,12 +3121,37 @@ mcp_cfg["graphify"] = {
     "args": ["--from", MCP_PACKAGES["graphify"], "python", "-m", "graphify.serve", "graphify-out/graph.json"],
     "description": "Codebase knowledge graph and dependency intelligence",
 }
+# The agent-server may run in a container or under systemd; neither sees a
+# token exported from an interactive shell rc. Take it from the env, else the
+# per-user 0600 file write_omnigraph_env keeps (this settings file already
+# holds the LLM keys and is never tracked).
+omni_env = {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"}
+omni_token = os.environ.get("OMNIGRAPH_TOKEN", "")
+if not omni_token:
+    _omni_file = os.path.join(os.path.dirname(os.path.abspath(openhands_dir)), ".autoos-omnigraph.env")
+    try:
+        with open(_omni_file, encoding="utf-8") as _of:
+            for _line in _of:
+                if _line.startswith("OMNIGRAPH_TOKEN="):
+                    omni_token = _line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+if omni_token:
+    omni_env["OMNIGRAPH_TOKEN"] = omni_token
 mcp_cfg["omnigraph"] = {
     "transport": "stdio",
     "command": "npx",
     "args": ["-y", MCP_PACKAGES["omnigraph"]],
-    "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
+    "env": omni_env,
     "description": "Project memory graph for this repository (repo-scoped, not global)",
+}
+# The agent spawner: spawn/status/result/cancel for every agent client.
+mcp_cfg["autoos-agent"] = {
+    "transport": "stdio",
+    "command": "uv",
+    "args": ["--quiet", "run", "--no-project", "--with", MCP_PACKAGES["autoos-agent"], "python",
+             os.path.join(REPO_ROOT, "tools", "autoos_agent_mcp.py")],
+    "description": "Spawn AutoOS agents (opencode, claude, qwen, gemini, codex, agy, qoder) by task card",
 }
 ctx7_args = ["-y", MCP_PACKAGES["context7"]]
 if context7_key:

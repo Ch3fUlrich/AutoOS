@@ -16,7 +16,10 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-GATEWAY="http://127.0.0.1:20128"
+# AUTOOS_OMNIROUTE_URL points the run (and the CLI) at another gateway; the
+# tests aim it at a closed port so a dry run never reads the live one.
+GATEWAY="${AUTOOS_OMNIROUTE_URL:-http://127.0.0.1:20128}"
+if [[ -n "${AUTOOS_OMNIROUTE_URL:-}" ]]; then export OMNIROUTE_BASE_URL="$GATEWAY"; fi
 KEYS_FILE="${AUTOOS_KEYS_FILE:-$ROOT/configuration/api-keys.yml}"
 COMBOS_FILE="$HERE/combos.json"
 DRY=0
@@ -143,7 +146,12 @@ register_provider() {
 echo "Providers:"
 # Connections that already exist are left alone: re-adding would either fail
 # or duplicate them, and neither proves the pipeline works.
-existing_ids="$(omniroute providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9-]+' | grep -oE '[a-z0-9-]+$' || true)"
+# A down gateway (dry run) has no list to read; the plan then comes from the
+# key file alone instead of from whatever else answers the CLI.
+existing_ids=""
+if gateway_up; then
+    existing_ids="$(omniroute providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9-]+' | grep -oE '[a-z0-9-]+$' || true)"
+fi
 for entry in "${PROVIDER_MAP[@]}"; do
     if grep -qxF "${entry#*:}" <<<"$existing_ids"; then
         echo "  = ${entry#*:} already registered"
@@ -181,30 +189,31 @@ echo "Resilience:"
 # zen free promo stays FIRST (free when it works), but a 403 is a permanent
 # error, so at 12 the gateway retried the dead promo on every request. At 2 it
 # is skipped for resetTimeoutMs (30s) after two failures, then retried again.
+# Through the CLI, not curl + the client key: /api/resilience is a management
+# route and answers the client key with 403 "Invalid management token"
+# (measured 2026-09-24); the local CLI sends the machine loopback token.
+# It runs from $HOME so it never picks up a .env in the caller's cwd.
 MAX_WAIT_MS=180000
 BREAKER_THRESHOLD=2
-CLIENT_KEY="${AUTOOS_OMNIROUTE_KEY:-}"
-if [[ -z "$CLIENT_KEY" && -f "$KEYS_FILE" ]]; then
-    CLIENT_KEY="$(sed -n 's/^omniroute:[[:space:]]*//p' "$KEYS_FILE" | head -n1 | tr -d '"'"'"'')"
-fi
+omni_json() {
+    # The CLI prints "Loaded env" banners on stdout before the JSON document.
+    (cd "$HOME" && omniroute --output json --no-color "$@" 2>/dev/null) | sed -n '/^[[:space:]]*[{[]/,$p'
+}
 if [[ $DRY -eq 1 ]]; then
-    echo "  - would set requestQueue.maxWaitMs = $MAX_WAIT_MS"
+    echo "  - would set requestQueue.maxWaitMs = $MAX_WAIT_MS (omniroute api system patch-api-resilience)"
     echo "  - would set providerBreaker.apikey.failureThreshold = $BREAKER_THRESHOLD"
-elif [[ -z "$CLIENT_KEY" ]]; then
-    echo "  - no client key — cannot set the resilience settings (PATCH /api/resilience)"
+elif ! command -v omniroute >/dev/null; then
+    echo "  - omniroute CLI missing - cannot set the resilience settings"
 else
-    current="$(curl -sf -m 15 -H "Authorization: Bearer $CLIENT_KEY" \
-        "$GATEWAY/api/resilience?include=config" \
+    current="$(omni_json api system get-api-resilience \
         | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["requestQueue"]["maxWaitMs"], d["providerBreaker"]["apikey"]["failureThreshold"])' 2>/dev/null || true)"
+    body="{\"requestQueue\":{\"maxWaitMs\":$MAX_WAIT_MS},\"providerBreaker\":{\"apikey\":{\"failureThreshold\":$BREAKER_THRESHOLD,\"degradationThreshold\":1,\"resetTimeoutMs\":30000}}}"
     if [[ "$current" == "$MAX_WAIT_MS $BREAKER_THRESHOLD" ]]; then
         echo "  = resilience settings already current (maxWaitMs=$MAX_WAIT_MS, breaker=$BREAKER_THRESHOLD)"
-    elif curl -sf -m 15 -X PATCH -H "Authorization: Bearer $CLIENT_KEY" \
-            -H 'content-type: application/json' \
-            -d "{\"requestQueue\":{\"maxWaitMs\":$MAX_WAIT_MS},\"providerBreaker\":{\"apikey\":{\"failureThreshold\":$BREAKER_THRESHOLD,\"degradationThreshold\":1,\"resetTimeoutMs\":30000}}}" \
-            "$GATEWAY/api/resilience" >/dev/null; then
+    elif (cd "$HOME" && omniroute api system patch-api-resilience --body "$body") >/dev/null 2>&1; then
         echo "  + resilience settings set (maxWaitMs=$MAX_WAIT_MS, breaker=$BREAKER_THRESHOLD; was ${current:-unknown})"
     else
-        echo "  ! could not set resilience settings — use the dashboard (Resilience)"
+        echo "  ! could not set resilience settings - run: omniroute api system patch-api-resilience --body '$body'"
     fi
 fi
 

@@ -394,6 +394,15 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
 }
 .provider .pname{font-weight:600;font-size:.84rem}
 .provider.off{opacity:.62}
+.services{display:grid;gap:8px;margin-bottom:12px}
+.svc{
+  display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;
+  padding:8px 11px;border:1px solid var(--rule);border-radius:9px;background:var(--surface-2);
+}
+.svc .pname{font-weight:600;font-size:.84rem;min-width:11rem}
+.svc .svc-meta{font-size:.74rem;color:var(--ink-muted);flex:1 1 16rem}
+.svc .svc-actions{display:flex;gap:6px;flex-wrap:wrap}
+.svc.off{opacity:.8}
 .prov{font-family:var(--mono);font-size:.67rem;font-weight:700;text-transform:lowercase}
 .prov-winget{background:#DCE9F8;color:#1B4D80}
 .prov-choco{background:#DCE4F8;color:#2A3F80}
@@ -824,7 +833,7 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
     <details class="card" id="cardTiers" open>
       <summary>
         <span class="card-title">Router tiers</span>
-        <span class="card-sub">OmniRoute :20128 · free-first, paid overflow after · status via providers card · backend apply/switch not yet wired</span>
+        <span class="card-sub" id="servicesSub">OmniRoute :20128 · free-first, paid overflow after · live service status below</span>
       </summary>
       <div class="card-body">
         <div class="legend">
@@ -832,6 +841,12 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
           <span><span class="chip chip-by">-clean</span> same tier, nothing that trains on prompts</span>
           <span><span class="chip chip-by">-free-only</span> same tier, zero paid legs</span>
         </div>
+        <div class="legend">
+          <span><span class="chip chip-ok">up</span> answers on this machine</span>
+          <span><span class="chip chip-missing">down</span> not answering - the button next to it starts it</span>
+          <span>Every action except a dry run asks first, then streams into the Run tab.</span>
+        </div>
+        <div class="services" id="services"><div class="svc">checking services…</div></div>
         <dl class="grid" id="routerTiers">
           <div class="kv"><dt>t1-orchestrator · orchestrator-1M</dt><dd>1M ctx · spark-only + #high (xhigh) · sensitive: t1-orchestrator-clean (paid legs only) · zero spend: t1-orchestrator-free-only</dd></div>
           <div class="kv"><dt>t2-worker · smart-reasoning-128k</dt><dd>≤128k ctx · gemini flash → gpt-oss → cheap-inference → deepseek → zen · sensitive: t2-worker-clean (paid only) · zero spend: t2-worker-free-only</dd></div>
@@ -1340,6 +1355,7 @@ async function boot() {
 
   renderProfiles();
   renderProviders();
+  loadServices();
   renderCatalog();
   applyProfile(STATE.suggested);
 
@@ -1921,6 +1937,70 @@ function renderProviders() {
       '<span class="chip ' + (p.configured ? "chip-ok" : "chip-missing") + '">' +
         (p.configured ? "configured" : "missing") + "</span>" +
     "</div>").join("");
+}
+
+/* ── AI services: live status + the existing setup actions ─────────────── */
+/* GET /api/services probes gateway, litellm, opencode serve and OpenHands on
+   the server's loopback; POST /api/services/action runs one allowlisted
+   script (apply.sh, start-stack.sh, Start-AutoOSStack.sh) into the Run tab. */
+let servicesTimer = null;
+async function loadServices() {
+  let r;
+  try { r = await fetch(api("/api/services")); } catch (e) { return; }
+  if (!r.ok) {
+    el("services").innerHTML = '<div class="svc">Service status needs a newer AutoOS server (HTTP ' +
+      esc(r.status) + ").</div>";
+    return;
+  }
+  const d = await r.json();
+  renderServices(d.services || []);
+  clearTimeout(servicesTimer);
+  servicesTimer = setTimeout(loadServices, 15000);
+}
+
+function renderServices(list) {
+  const up = list.filter(s => s.up).length;
+  el("servicesSub").textContent = up + " of " + list.length +
+    " services up · OmniRoute :20128 · free-first, paid overflow after";
+  el("services").innerHTML = list.map(s =>
+    '<div class="svc' + (s.up ? "" : " off") + '">' +
+      '<span class="pname">' + esc(s.name) + "</span>" +
+      '<span class="chip ' + (s.up ? "chip-ok" : "chip-missing") + '">' + (s.up ? "up" : "down") + "</span>" +
+      '<span class="svc-meta">' + esc(s.bind) + ":" + esc(s.port) + " · auth: " + esc(s.auth) +
+        (s.unit ? " · unit " + esc(s.unit) : "") + "</span>" +
+      '<span class="svc-actions">' + (s.actions || []).map(a =>
+        '<button type="button" data-svc-action="' + esc(a) + '" data-svc-live="' +
+          ((s.liveActions || []).includes(a) ? "1" : "0") + '">' +
+          esc((s.actionLabels || {})[a] || a) + "</button>").join("") +
+      "</span>" +
+    "</div>").join("");
+  el("services").querySelectorAll("[data-svc-action]").forEach(b =>
+    b.addEventListener("click", () =>
+      runServiceAction(b.dataset.svcAction, b.textContent, b.dataset.svcLive === "1")));
+}
+
+async function runServiceAction(action, label, live) {
+  if (running) return;
+  if (live && !confirm(label + " on " + (STATE.system.host || "this machine") + "?\n\n" +
+      "This starts or changes services on that machine (the Run tab shows every line).")) return;
+  running = true;
+  el("log").textContent = "";
+  logOffset = 0;
+  renderProgress({running:true,total:1,done:0,current:null});
+  el("runStatus").textContent = label + "…";
+  showTab("run");
+  const r = await fetch(api("/api/services/action"), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action })
+  });
+  if (!r.ok) {
+    let why = "HTTP " + r.status;
+    try { why = (await r.json()).error || why; } catch (e) { /* keep the status */ }
+    appendLog([{ level: "err", text: "Server refused the action: " + why }]);
+    running = false; sync(); return;
+  }
+  poll();
+  setTimeout(loadServices, 5000);
 }
 
 /* ── profiles, with the selected one expanded into a summary ───────────── */

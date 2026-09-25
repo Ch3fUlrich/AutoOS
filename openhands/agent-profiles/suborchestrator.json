@@ -8,7 +8,8 @@
     "graphify",
     "context7",
     "omnigraph",
-    "playwright"
+    "playwright",
+    "autoos-agent"
   ],
   "agent_kind": "openhands",
   "llm_profile_ref": "omniroute-t1-orchestrator",

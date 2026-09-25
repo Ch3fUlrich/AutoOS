@@ -22,11 +22,20 @@ spec, a rotated key, or a hand-edited profile converges back automatically.
 Idempotent: byte-identical output on repeat runs (reports skipped instead).
 Byte-identical with the installer-embedded writer for the same keys.
 
+With --push-url the profiles are also saved into a running OpenHands app
+(its own settings store, /api/v1/settings/profiles): the docker app of
+2026-09 (SDK 1.36) does not read profiles/*.json at all, so without the push
+its UI offers no tier profile. The push is idempotent too (an unchanged
+profile is skipped), sends only the fields the app's StrictLLM schema allows,
+seeds the app's settings with the first tier when it has none, and stops at
+the app's per-user profile cap (spec order decides which tiers make it).
+
 Never prints a key. Exit 0 = written/skipped cleanly, 2 = unusable input.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -123,6 +132,151 @@ def tier_base_url(tier: dict, spec: dict) -> str:
     return spec["gateway_base_url"]
 
 
+CONTAINER_HOST = "host.docker.internal"
+
+
+def container_host_resolves() -> bool:
+    """True when host.docker.internal resolves on THIS host (Docker Desktop).
+
+    AUTOOS_FAKE_HDI_RESOLVES=0/1 stands in for the lookup in tests.
+    """
+    fake = os.environ.get("AUTOOS_FAKE_HDI_RESOLVES")
+    if fake is not None:
+        return fake == "1"
+    import socket
+    try:
+        socket.getaddrinfo(CONTAINER_HOST, None)
+        return True
+    except OSError:
+        return False
+
+
+def for_consumer(url: str, consumer: str) -> str:
+    """The spec's container-side URL, adjusted for who reads the profile.
+
+    container: unchanged - the docker app resolves host.docker.internal
+    (Docker Desktop natively, native Linux via --add-host host-gateway).
+    native: a host process (agent-canvas). It keeps the name where it
+    resolves (Docker Desktop) and gets 127.0.0.1 where it does not (native
+    Linux) - the same rule as resolve_ollama_base_url.
+    """
+    if consumer == "native" and CONTAINER_HOST in url and not container_host_resolves():
+        return url.replace(CONTAINER_HOST, "127.0.0.1")
+    return url
+
+
+def _http(method: str, url: str, body=None, timeout: float = 20.0):
+    """(status, parsed JSON or None). Never raises for HTTP or socket errors."""
+    import urllib.error
+    import urllib.request
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        status = exc.code
+    except (OSError, ValueError):
+        return 0, None
+    try:
+        return status, json.loads(raw) if raw else None
+    except ValueError:
+        return status, None
+
+
+def _key_mark(profile: dict) -> str:
+    """Short, non-reversible fingerprint of a profile's key - never the key."""
+    return hashlib.sha256(str(profile.get("api_key") or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _load_marks(path: Path | None) -> dict:
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_marks(path: Path | None, marks: dict) -> None:
+    if path is None:
+        return
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(marks, fh, indent=2, sort_keys=True)
+        os.chmod(str(path), 0o600)
+    except OSError as exc:
+        # The push already happened; a lost record only means one extra
+        # re-push next time, never a skipped rotation.
+        print(f"sync-openhands-profiles: could not record pushed keys ({exc})")
+
+
+def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None) -> int:
+    """Save (name, profile) pairs into a running OpenHands app. Returns 0.
+
+    The app never returns a profile's key (only api_key_set), so a rotated key
+    cannot be seen by comparing fields. marks_path records a short hash of the
+    key last pushed per profile; a different hash forces the POST.
+    """
+    marks = _load_marks(marks_path)
+    base = push_url.rstrip("/")
+    status, spec = _http("GET", base + "/openapi.json")
+    if status != 200 or not isinstance(spec, dict):
+        print(f"sync-openhands-profiles: push skipped ({base} is not answering)")
+        return 0
+    schemas = spec.get("components", {}).get("schemas", {})
+    allowed = set((schemas.get("StrictLLM") or {}).get("properties", {}))
+    if not allowed:
+        print("sync-openhands-profiles: push skipped (the app has no StrictLLM schema)")
+        return 0
+
+    def strict(profile: dict) -> dict:
+        return {k: v for k, v in profile.items() if k in allowed}
+
+    status, _ = _http("GET", base + "/api/v1/settings")
+    if status == 404 and profiles:
+        first = strict(profiles[0][1])
+        status, _ = _http("POST", base + "/api/v1/settings", {"agent_settings_diff": {"llm": first}})
+        print("sync-openhands-profiles: app settings seeded with %s%s"
+              % (profiles[0][0], "" if status == 200 else " FAILED (HTTP %s)" % status))
+    capped = []
+    for name, profile in profiles:
+        want = strict(profile)
+        status, have = _http("GET", f"{base}/api/v1/settings/profiles/{name}")
+        if capped and status != 200:
+            # Past the app's cap every further NEW profile is refused too;
+            # ones it already holds are still compared and updated.
+            capped.append(name)
+            continue
+        if status == 200 and isinstance(have, dict) and have.get("api_key_set"):
+            current = dict(have.get("config") or {})
+            current.pop("api_key", None)
+            compare = {k: v for k, v in want.items() if k != "api_key"}
+            same_key = marks.get(name) == _key_mark(want)
+            if all(current.get(k) == v for k, v in compare.items()) and same_key:
+                print(f"sync-openhands-profiles: app profile {name} skipped (up to date)")
+                continue
+        status, reply = _http("POST", f"{base}/api/v1/settings/profiles/{name}", {"llm": want})
+        if status in (200, 201):
+            marks[name] = _key_mark(want)
+            print(f"sync-openhands-profiles: app profile {name} saved")
+        elif status == 409:
+            capped.append(name)
+        else:
+            detail = json.dumps(reply)[:160] if reply is not None else ""
+            print(f"sync-openhands-profiles: app profile {name} FAILED (HTTP {status}) {detail}")
+    if capped:
+        print("sync-openhands-profiles: the app's profile cap is reached - not in the app: %s"
+              % ", ".join(capped))
+    _save_marks(marks_path, marks)
+    return 0
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         description="Regenerate OpenHands gateway tier profiles from the spec.",
@@ -141,6 +295,17 @@ def parse_args(argv):
         "--litellm-env",
         default=None,
         help="litellm .env fallback for the master key (default: configuration/litellm/.env)",
+    )
+    parser.add_argument(
+        "--consumer",
+        choices=("container", "native"),
+        default="container",
+        help="who reads the profiles: the docker app (default) or a host process such as agent-canvas",
+    )
+    parser.add_argument(
+        "--push-url",
+        default=None,
+        help="also save the profiles into this running OpenHands app (e.g. http://127.0.0.1:3000)",
     )
     parser.add_argument(
         "--spec",
@@ -172,6 +337,7 @@ def main(argv=None):
     profiles_dir = Path(args.openhands_dir) / "profiles"
     profiles_dir.mkdir(parents=True, exist_ok=True)
     keys = {"litellm": litellm_key, "openrouter": openrouter_key}
+    built = []
     for tier in tiers:
         key = keys.get(tier.get("gateway"), omni_key)
         name = "%s.json" % tier["id"]
@@ -180,13 +346,18 @@ def main(argv=None):
             continue
         # No trailing newline: byte-identical with the installer-embedded
         # writer, so install-time and start-time outputs never flap.
-        text = json.dumps(build_profile(tier, tier_base_url(tier, spec), key), indent=2)
+        base_url = for_consumer(tier_base_url(tier, spec), args.consumer)
+        profile = build_profile(tier, base_url, key)
+        built.append((tier["id"], profile))
+        text = json.dumps(profile, indent=2)
         target = profiles_dir / name
         if target.is_file() and target.read_text(encoding="utf-8") == text:
             print(f"sync-openhands-profiles: {name} skipped (up to date)")
         else:
             target.write_text(text, encoding="utf-8")
             print(f"sync-openhands-profiles: {name} written")
+    if args.push_url:
+        return push_profiles(args.push_url, built, profiles_dir / ".autoos-pushed.json")
     return 0
 
 
