@@ -4231,6 +4231,80 @@ Test-Case 'serena memory tools off from harness field (serena)' {
     Assert-True ($sh -match 'memory_tools') 'sh opencode writer does not read the harness memory_tools field'
 }
 
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when nothing changed' {
+    # The real writer against a scratch home. HOME, USERPROFILE and APPDATA point
+    # into a temp dir; a stand-in `python` first on PATH keeps the agent generator
+    # (it links skills and rewrites the file in its own formatting) out of it;
+    # Ollama's address is pinned so nothing probes the network; no key comes from
+    # the caller's environment. Nothing outside the temp dir is read or written.
+    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocbackup-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $cfgDir = Join-Path $scratch '.config\opencode'
+    $cfgFile = Join-Path $cfgDir 'opencode.json'
+    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"mine","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"mcp":{"mine":{"type":"local","command":["mine-mcp"],"enabled":true}}}'
+    $runLogged = {
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocbackup-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            $null = Set-AutoOSOpenCodeConfig
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
+    }
+    try {
+        $null = New-Item -ItemType Directory -Path $bin, $cfgDir -Force
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [IO.File]::WriteAllText((Join-Path $bin 'python.cmd'), "@echo off`r`nexit /b 0`r`n")
+        } else {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexit 0`n")
+            & chmod +x $fake
+        }
+        [IO.File]::WriteAllText($cfgFile, $seed)
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch
+        $env:APPDATA = Join-Path $scratch 'AppData'
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+        # The writer reads $HOME, which the environment does not set on every
+        # host: prove the module sees the scratch home before it writes anything.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+
+        $null = & $runLogged
+        $sha1 = (Get-FileHash -LiteralPath $cfgFile -Algorithm SHA256).Hash
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'opencode.json.autoos-backup-*')
+        if ([IO.File]::ReadAllText($cfgFile) -eq $seed) { throw 'the first run left the file unchanged' }
+        if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1)" }
+        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'the backup is not the original file' }
+        $written = Get-Content -LiteralPath $cfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($written.theme -ne 'mine' -or $null -eq $written.provider.PSObject.Properties['custom'] -or $null -eq $written.mcp.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
+        if ($null -eq $written.provider.PSObject.Properties['omniroute']) { throw 'run 1 did not write the gateway provider' }
+
+        # Backup names carry whole seconds: without this pause a wrongly repeated
+        # backup would overwrite the first one and the count could not tell.
+        Start-Sleep -Milliseconds 1200
+        $out2 = & $runLogged
+        $sha2 = (Get-FileHash -LiteralPath $cfgFile -Algorithm SHA256).Hash
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'opencode.json.autoos-backup-*')
+        if ($backups2.Count -ne $backups1.Count) { throw "backups after run 2 = $($backups2.Count), after run 1 = $($backups1.Count) (an unchanged run must not back up again)" }
+        if ($sha2 -ne $sha1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'zed default_model converges litellm to omniroute (zed routing)' {
     $realAppData = $env:APPDATA
     $scratch = Join-Path $env:TEMP "autoos-zeddm-$([Guid]::NewGuid().ToString('N'))"

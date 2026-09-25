@@ -1938,18 +1938,21 @@ function Set-AutoOSOpenCodeConfig {
     }
 
     $existing = [ordered]@{}
+    $existingCanon = $null
     if (Test-Path $configFile) {
         try {
             $raw = Get-Content -Path $configFile -Raw -Encoding UTF8
             if ($raw.Trim()) {
                 $parsed = $raw | ConvertFrom-Json
                 foreach ($p in $parsed.PSObject.Properties) { $existing[$p.Name] = $p.Value }
+                # What is on disk, as parsed JSON: compared with the result below,
+                # so a run that changes nothing neither backs up nor rewrites.
+                $existingCanon = $parsed | ConvertTo-Json -Depth 100 -Compress
             }
         } catch {
             Write-AutoOSLine "$configFile is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $configFile "$configFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
 
     if (-not $existing.Contains('$schema')) {
@@ -2134,8 +2137,20 @@ function Set-AutoOSOpenCodeConfig {
     $existing['tools'] = $serenaToolsOff
 
     $json = $existing | ConvertTo-Json -Depth 10
-    $json | Out-File -FilePath $configFile -Encoding utf8
-    Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
+    # Parsed JSON, not bytes: the agent generator below rewrites this file in its
+    # own formatting, and a formatting difference alone must cost neither a
+    # backup nor a write (hard rule 5: the first run that changes the file backs
+    # it up once).
+    $resultCanon = $json | ConvertFrom-Json | ConvertTo-Json -Depth 100 -Compress
+    if ($null -ne $existingCanon -and $resultCanon -ceq $existingCanon) {
+        Write-AutoOSLine "OpenCode configuration already up to date in $configFile - skipped" -Level ok
+    } else {
+        if (Test-Path $configFile) {
+            Copy-Item $configFile "$configFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        }
+        $json | Out-File -FilePath $configFile -Encoding utf8
+        Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
+    }
 
     # Merge the shared agent harness (roles, skills link) after the config is
     # written. Judge by exit code only; no 2>&1, since under 'Stop' Windows
