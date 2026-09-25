@@ -4103,6 +4103,82 @@ Test-Case 'Install-AutoOSOmniRouteRouting announces without writing in dry run' 
     Pass
 }
 
+Test-Case 'backup-once: Install-AutoOSOmniRouteRouting does not back up again when nothing changed' {
+    # AutoOS does not write .qwen\settings.json itself: the external `omniroute
+    # setup-qwen` does, so stub `qwen` and `omniroute` on a PATH that is put back in
+    # finally. The keys file names no key, so Set-AutoOSOmniRouteCliKey exports nothing
+    # to the User environment. The stub always writes the same fixture, like the real
+    # CLI does once a file is routed. The backup name carries a second-resolution
+    # timestamp, so run 2 (same second) and run 3 (a later second) both must leave the
+    # ORIGINAL file as the only backup.
+    $realHome = $env:USERPROFILE
+    $realPath = $env:PATH
+    $realShort = $env:AUTOOS_OMNIROUTE_KEY
+    $realCli = $env:OMNIROUTE_API_KEY
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $stub = Join-Path $scratch 'bin'
+        $fakeHome = Join-Path $scratch 'home'
+        $qdir = Join-Path $fakeHome '.qwen'
+        $qcfg = Join-Path $qdir 'settings.json'
+        $noKeys = Join-Path $scratch 'no-keys.yml'
+        $null = New-Item -ItemType Directory -Path $stub, $qdir -Force
+        $seed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}}}'
+        $routed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}},"model":{"name":"t2-worker"}}'
+        [IO.File]::WriteAllText($qcfg, $seed)
+        [IO.File]::WriteAllText((Join-Path $stub 'qwen-settings.json'), $routed)
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [IO.File]::WriteAllText((Join-Path $stub 'qwen.cmd'), (@('@echo off', 'exit /b 0') -join "`r`n"))
+            [IO.File]::WriteAllText((Join-Path $stub 'omniroute.cmd'), (@(
+                '@echo off',
+                'if not exist "%USERPROFILE%\.qwen" mkdir "%USERPROFILE%\.qwen"',
+                'copy /y "%~dp0qwen-settings.json" "%USERPROFILE%\.qwen\settings.json" >nul',
+                'exit /b 0') -join "`r`n"))
+        } else {
+            [IO.File]::WriteAllText((Join-Path $stub 'qwen'), (@('#!/bin/sh', 'exit 0') -join "`n") + "`n")
+            [IO.File]::WriteAllText((Join-Path $stub 'omniroute'), (@(
+                '#!/bin/sh',
+                'mkdir -p "$USERPROFILE/.qwen"',
+                'cp "$(dirname "$0")/qwen-settings.json" "$USERPROFILE/.qwen/settings.json"',
+                'exit 0') -join "`n") + "`n")
+            & chmod +x (Join-Path $stub 'qwen') (Join-Path $stub 'omniroute')
+        }
+        $env:USERPROFILE = $fakeHome
+        $env:PATH = "$stub$([IO.Path]::PathSeparator)$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $log = Join-Path $scratch 'run.log'
+        $run = {
+            Initialize-AutoOSLog -Path $log
+            Install-AutoOSOmniRouteRouting -KeysFile $noKeys | Out-Null
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        }
+        $out1 = & $run
+        $backups1 = @(Get-ChildItem -LiteralPath $qdir -Filter 'settings.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'run 1 backup is not the original file' }
+        if ([IO.File]::ReadAllText($qcfg) -ne $routed) { throw 'the omniroute stub was not run (settings.json is not the routed fixture)' }
+        if ($out1 -notmatch 'Qwen Code routed') { throw "run 1 did not report the routing: [$out1]" }
+        $hash1 = (Get-FileHash -LiteralPath $qcfg -Algorithm SHA256).Hash
+        foreach ($n in 2, 3) {
+            if ($n -eq 3) { Start-Sleep -Milliseconds 1100 }
+            $out = & $run
+            $backups = @(Get-ChildItem -LiteralPath $qdir -Filter 'settings.json.autoos-backup-*')
+            if ($backups.Count -ne 1) { throw "run ${n}: backups=$($backups.Count) (want 1: nothing changed, so no new backup)" }
+            if ([IO.File]::ReadAllText($backups[0].FullName) -ne $seed) { throw "run ${n} replaced the run 1 backup: it is no longer the original file" }
+            if ((Get-FileHash -LiteralPath $qcfg -Algorithm SHA256).Hash -ne $hash1) { throw "run ${n} changed settings.json although nothing needed changing" }
+            if ($out -notmatch 'Qwen Code[^\r\n]*skipped') { throw "run ${n} did not report the Qwen step as skipped: [$out]" }
+        }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realShort) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realShort }
+        if ($null -eq $realCli) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue } else { $env:OMNIROUTE_API_KEY = $realCli }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'zed routing merges one provider and keeps the rest' {
     $realAppData = $env:APPDATA
     $realOmni = $env:AUTOOS_OMNIROUTE_KEY

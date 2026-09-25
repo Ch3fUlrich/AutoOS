@@ -2906,11 +2906,28 @@ function Install-AutoOSOmniRouteRouting {
                 if ($script:DryRun) {
                     Write-AutoOSLine "would route Qwen Code at OmniRoute in $qcfg (model t2-worker)" -Level muted
                 } else {
+                    # The omniroute CLI edits the file itself, so the backup is taken first
+                    # and kept only when the CLI changed something. An identical result
+                    # deletes AutoOS's own fresh copy and reports skipped. A copy that
+                    # already exists under this second's name belongs to an earlier run:
+                    # it is neither overwritten nor deleted.
+                    $qbefore = $null
+                    $qbak = $null
                     if (Test-Path $qcfg) {
-                        Copy-Item $qcfg "$qcfg.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+                        $qbefore = [IO.File]::ReadAllBytes($qcfg)
+                        $qbak = "$qcfg.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+                        if (Test-Path $qbak) { $qbak = $null }
+                        else { Copy-Item $qcfg $qbak -Force }
                     }
                     & omniroute setup-qwen --model t2-worker --yes 2>&1 | Out-Null
-                    if ($LASTEXITCODE -ne 0) { Write-AutoOSLine 'Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)' -Level warn }
+                    $qrc = $LASTEXITCODE
+                    $qsame = $false
+                    if ($null -ne $qbefore -and (Test-Path $qcfg)) {
+                        $qsame = [Convert]::ToBase64String([IO.File]::ReadAllBytes($qcfg)) -ceq [Convert]::ToBase64String($qbefore)
+                    }
+                    if ($qsame -and $qbak) { Remove-Item $qbak -Force -ErrorAction SilentlyContinue }
+                    if ($qrc -ne 0) { Write-AutoOSLine 'Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)' -Level warn }
+                    elseif ($qsame) { Write-AutoOSLine 'Qwen Code already routed at OmniRoute (model t2-worker) - skipped' -Level ok }
                     else { Write-AutoOSLine 'Qwen Code routed at OmniRoute (model t2-worker)' -Level ok }
                 }
             } else {
