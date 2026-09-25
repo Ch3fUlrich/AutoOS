@@ -726,5 +726,50 @@ class NoOpGuardTests(unittest.TestCase):
     def test_a_review_run_may_change_nothing(self):
         self.assertEqual(self.cli.sandbox_verdict({"review": True}, changed="", ahead="")[0], None)
 
+
+@unittest.skipIf(os.name == "nt", "POSIX process groups; Windows reaps with taskkill /T")
+class ProcessGroupTests(unittest.TestCase):
+    """Measured 2026-09-25: leftovers (private Serena, language servers) survived
+    a cancelled worker. run_client reaps the client's whole process group."""
+
+    def gone(self, pid):
+        """True once pid is reaped or a zombie (it is no longer running)."""
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            with open("/proc/%d/status" % pid, encoding="utf-8") as fh:
+                state = next(l for l in fh if l.startswith("State:")).split()[1]
+        except (OSError, StopIteration):
+            return True
+        return state.startswith("Z")
+
+    def test_a_leftover_child_of_the_client_is_reaped(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "child.pid")
+            # The fake client starts `sleep 60` in the same group and exits 0;
+            # only the group cleanup can stop the sleep.
+            code = ("from subprocess import Popen\n"
+                    "p = Popen(['sleep', '60'])\n"
+                    "open(%r, 'w').write(str(p.pid))\n" % pidfile)
+            rc = agent.run_client([sys.executable, "-c", code], tmp, dict(os.environ))
+            self.assertEqual(rc, 0)
+            with open(pidfile, encoding="utf-8") as fh:
+                pid = int(fh.read())
+            deadline = time.time() + 6
+            while time.time() < deadline and not self.gone(pid):
+                time.sleep(0.1)
+            self.assertTrue(self.gone(pid), "leftover child %d survived run_client" % pid)
+
+    def test_the_clients_exit_code_is_returned_unchanged(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = agent.run_client([sys.executable, "-c", "raise SystemExit(3)"],
+                                  tmp, dict(os.environ))
+        self.assertEqual(rc, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

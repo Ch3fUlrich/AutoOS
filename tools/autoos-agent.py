@@ -79,6 +79,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -321,6 +322,55 @@ def sandbox_verdict(route: dict, changed: str, ahead: str):
                "unverified and the run as failed (exit 5)")
 
 
+def _terminate_group(proc, pgid) -> None:
+    """Stop whatever is left of the client's process group (best effort)."""
+    if os.name == "nt":
+        subprocess.call(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def run_client(cmd, cwd: str, env: dict) -> int:
+    """Run one client in its own process group; reap whatever it leaves behind.
+
+    Returns the client's exit code; KeyboardInterrupt is re-raised after cleanup.
+    """
+    # stdin closed: when it is an open pipe (cron, CI, an agent's shell)
+    # `opencode run` waits to read it as extra prompt text and never starts
+    # (measured 2026-09-24: 150 s hang vs 6 s with /dev/null).
+    # leftovers (private Serena, language servers) survived a cancelled worker, measured 2026-09-25.
+    if os.name == "nt":
+        proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+        pgid = None
+    else:
+        proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+        pgid = proc.pid  # start_new_session makes the client its own group leader
+    try:
+        rc = proc.wait()
+    except BaseException:  # KeyboardInterrupt included: clean up, then re-raise
+        _terminate_group(proc, pgid)
+        raise
+    _terminate_group(proc, pgid)
+    return rc
+
+
 def cmd_run(args, cfg: dict) -> int:
     client = clients.CLIENTS[args.client]
     if args.free and args.clean:
@@ -397,10 +447,7 @@ def cmd_run(args, cfg: dict) -> int:
                                     capture_output=True, text=True, check=True).stdout.strip()
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
     start = time.time()
-    # stdin closed: when it is an open pipe (cron, CI, an agent's shell)
-    # `opencode run` waits to read it as extra prompt text and never starts
-    # (measured 2026-09-24: 150 s hang vs 6 s with /dev/null).
-    rc = subprocess.call(plan["cmd"], cwd=plan["cwd"], env=env, stdin=subprocess.DEVNULL)
+    rc = run_client(plan["cmd"], plan["cwd"], env)
     log_run(plan, rc, time.time() - start, args.free)
     if rc == 0 and client.promo:
         clients.record_probe(client.name)
