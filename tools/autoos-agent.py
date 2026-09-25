@@ -230,7 +230,7 @@ def build_plan(args, cfg: dict) -> dict:
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
-        if args.lean:  # claude only (cmd_run refuses the rest): no MCP servers at all
+        if args.lean and "--strict-mcp-config" not in cmd:  # claude only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
         model = model or (route["combo"] if client.gateway else "(client default)")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")

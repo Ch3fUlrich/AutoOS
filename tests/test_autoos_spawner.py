@@ -265,7 +265,19 @@ class ClientCommandTests(unittest.TestCase):
 
     def test_claude_joinable_is_a_background_remote_control_session(self):
         r = plan_of("--client", "claude", "--joinable", "--title", "d1", "t")
-        self.assertIn("claude --bg --remote-control d1 --name d1", r.stdout)
+        self.assertIn("claude --bg --remote-control d1 --strict-mcp-config --mcp-config "
+                      "'{\"mcpServers\":{}}' --name d1", r.stdout)
+
+    def test_a_joinable_session_starts_no_user_scope_mcp_server(self):
+        # Measured 2026-09-25: user-scope graphify (docker run -i --rm -v $PWD)
+        # started one container per lane worktree. --mcp-config is variadic:
+        # a non-variadic option must follow it, or it eats the prompt.
+        cmd = clients.build_command(clients.CLIENTS["claude"], "task", None, "edit", None, "d1")
+        self.assertIn("--strict-mcp-config", cmd)
+        i = cmd.index("--mcp-config")
+        self.assertEqual(json.loads(cmd[i + 1]), {"mcpServers": {}})
+        self.assertTrue(cmd[i + 2].startswith("--"), cmd)
+        self.assertEqual(cmd[-1], "task")
 
     def test_joinable_is_refused_for_other_clients(self):
         self.assertEqual(plan_of("--client", "qwen", "--joinable", "t").returncode, 2)
