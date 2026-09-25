@@ -3430,7 +3430,9 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t2-orchestrator,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-opus-4-6,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t1-orchestrator-free-only,litellm-t2-worker-free-only,litellm-t3-driver-free-only,openrouter-muse-spark-1.3-contributor'
+    # Pinned on purpose: the order is the OpenHands push priority (the app
+    # keeps 10 profiles), so a reorder must be a deliberate, reviewed edit.
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-deepseek-v4.1-flash,omniroute-t3-driver-free-only,omniroute-t1-orchestrator-clean,omniroute-spark-1.3-contributor,openrouter-muse-spark-1.3-contributor,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only,litellm-t1-orchestrator-free-only,omniroute-t1-orchestrator-free-only'
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
     Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
     foreach ($t in $spec.tiers) {

@@ -25,6 +25,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   keyless fallback's from `llm-models.json`) instead of one `1048576` for all three —
   the local 32k Ollama model was told it had a 1M window.
 
+### Fixed — the OpenHands app gets the ten most useful tier profiles
+
+- **The app keeps at most 10 profiles and the push kept whatever came first**: the spec
+  spent a slot on `t1-orchestrator-free-only` (red by design outside OpenCode) while
+  `t3-driver` and `t4-rag` never fit, and a live app filled under an older order kept
+  that order. `tier-profiles.json` is reordered (t1 → t2 → t3, t2-orchestrator, the
+  `-clean` worker and driver, t4-rag, opus-4-6, gemini-3.8-flash, t2-worker-free-only
+  first; the free-only t1 profiles last), and the push now deletes AutoOS-owned
+  profiles (`omniroute-` / `litellm-` / `openrouter-`) the spec no longer lists and
+  makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one. A
+  profile with any other name, and the active profile, is never deleted.
+
 ### Fixed — the OpenCode user config converges in one run
 
 - **`setup_opencode_config` needed two runs**: the providers merge wrote `—` escapes

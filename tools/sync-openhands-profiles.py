@@ -27,8 +27,12 @@ With --push-url the profiles are also saved into a running OpenHands app
 2026-09 (SDK 1.36) does not read profiles/*.json at all, so without the push
 its UI offers no tier profile. The push is idempotent too (an unchanged
 profile is skipped), sends only the fields the app's StrictLLM schema allows,
-seeds the app's settings with the first tier when it has none, and stops at
-the app's per-user profile cap (spec order decides which tiers make it).
+seeds the app's settings with the first tier when it has none, and fills the
+app's per-user profile cap (10 on the 2026-09 app) in spec order: before it
+pushes it deletes AutoOS-owned app profiles (omniroute-/litellm-/openrouter-)
+the spec no longer lists, and when the cap refuses a tier it removes the
+lowest-ranked AutoOS profile below it to make room. A profile AutoOS does
+not own, and the active profile, are never deleted.
 
 Never prints a key. Exit 0 = written/skipped cleanly, 2 = unusable input.
 """
@@ -216,12 +220,42 @@ def _save_marks(path: Path | None, marks: dict) -> None:
         print(f"sync-openhands-profiles: could not record pushed keys ({exc})")
 
 
-def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None) -> int:
+# Profile-name prefixes AutoOS writes (tier-profiles.json ids). Only a profile
+# named like this is ever deleted from the app; anything else is the user's.
+OWNED_PREFIXES = ("omniroute-", "litellm-", "openrouter-")
+
+
+def owned(name: str) -> bool:
+    return isinstance(name, str) and name.startswith(OWNED_PREFIXES)
+
+
+def _app_profiles(base: str):
+    """(names the app holds, active profile) or (None, None) when unlistable."""
+    status, listing = _http("GET", base + "/api/v1/settings/profiles")
+    if status != 200 or not isinstance(listing, dict) or not isinstance(listing.get("profiles"), list):
+        return None, None
+    names = [p.get("name") for p in listing["profiles"] if isinstance(p, dict) and p.get("name")]
+    return names, listing.get("active_profile")
+
+
+def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None,
+                  spec_ids: set | None = None) -> int:
     """Save (name, profile) pairs into a running OpenHands app. Returns 0.
 
     The app never returns a profile's key (only api_key_set), so a rotated key
     cannot be seen by comparing fields. marks_path records a short hash of the
     key last pushed per profile; a different hash forces the POST.
+
+    The app keeps at most ~10 profiles and forgets none, so the push also
+    keeps the AutoOS-owned ones (OWNED_PREFIXES) converged on the spec:
+      * retired: an owned profile whose id is not in spec_ids is deleted
+        before anything is pushed (the 2026-09-23 tier rename left
+        omniroute-tier1 & co. holding slots);
+      * cap: when a tier is refused for the cap, the lowest-ranked owned
+        profile the app holds BELOW it in push order is removed and the tier
+        retried - so an app filled under an older spec order converges on
+        the spec's top tiers instead of keeping whatever came first.
+    Never deleted: a profile AutoOS does not own, and the active profile.
     """
     marks = _load_marks(marks_path)
     base = push_url.rstrip("/")
@@ -244,13 +278,52 @@ def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None)
         status, _ = _http("POST", base + "/api/v1/settings", {"agent_settings_diff": {"llm": first}})
         print("sync-openhands-profiles: app settings seeded with %s%s"
               % (profiles[0][0], "" if status == 200 else " FAILED (HTTP %s)" % status))
+
+    held, active = _app_profiles(base)
+    if held is None:
+        print("sync-openhands-profiles: cannot list the app's profiles - retired ones left in place")
+        held = []
+    held = set(held)
+
+    def delete(name: str, why: str) -> bool:
+        if not owned(name) or name == active:
+            return False  # belt and braces: callers already filter these
+        status, _ = _http("DELETE", f"{base}/api/v1/settings/profiles/{name}")
+        if status != 200:
+            print(f"sync-openhands-profiles: app profile {name} delete FAILED (HTTP {status})")
+            return False
+        held.discard(name)
+        marks.pop(name, None)
+        print(f"sync-openhands-profiles: app profile {name} {why}")
+        return True
+
+    if spec_ids is not None:
+        for name in sorted(held):
+            if not owned(name) or name in spec_ids:
+                continue
+            if name == active:
+                print(f"sync-openhands-profiles: app profile {name} is retired but active - "
+                      "left in place (activate another profile, then re-run)")
+                continue
+            delete(name, "deleted (retired: not in the tier spec)")
+
+    rank = {name: n for n, (name, _) in enumerate(profiles)}
+
+    def make_room(name: str) -> bool:
+        below = [h for h in held if owned(h) and h != active and rank.get(h, -1) > rank[name]]
+        if not below:
+            return False
+        victim = max(below, key=rank.get)
+        return delete(victim, f"removed to make room for {name} (the app's profile cap; spec order decides)")
+
     capped = []
     for name, profile in profiles:
         want = strict(profile)
         status, have = _http("GET", f"{base}/api/v1/settings/profiles/{name}")
         if capped and status != 200:
-            # Past the app's cap every further NEW profile is refused too;
-            # ones it already holds are still compared and updated.
+            # Past the app's cap every further NEW profile is refused too:
+            # make_room found nothing ranked lower for an earlier tier, so it
+            # finds nothing for a later one. Held ones are still updated.
             capped.append(name)
             continue
         if status == 200 and isinstance(have, dict) and have.get("api_key_set"):
@@ -262,7 +335,10 @@ def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None)
                 print(f"sync-openhands-profiles: app profile {name} skipped (up to date)")
                 continue
         status, reply = _http("POST", f"{base}/api/v1/settings/profiles/{name}", {"llm": want})
+        if status == 409 and make_room(name):
+            status, reply = _http("POST", f"{base}/api/v1/settings/profiles/{name}", {"llm": want})
         if status in (200, 201):
+            held.add(name)
             marks[name] = _key_mark(want)
             print(f"sync-openhands-profiles: app profile {name} saved")
         elif status == 409:
@@ -357,7 +433,10 @@ def main(argv=None):
             target.write_text(text, encoding="utf-8")
             print(f"sync-openhands-profiles: {name} written")
     if args.push_url:
-        return push_profiles(args.push_url, built, profiles_dir / ".autoos-pushed.json")
+        # Every spec id counts as current, pushed this run or not (a tier
+        # skipped for a missing key is not retired).
+        return push_profiles(args.push_url, built, profiles_dir / ".autoos-pushed.json",
+                             spec_ids={t["id"] for t in tiers})
     return 0
 
 

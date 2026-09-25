@@ -632,7 +632,9 @@ print("%s|%s|%s|%s" % (
     ",".join(t["model"] for t in spec["tiers"])))
 PY
 )"
-    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t1-orchestrator-clean,omniroute-t1-orchestrator-free-only,omniroute-spark-1.3-contributor,omniroute-t2-worker,omniroute-t2-worker-clean,omniroute-t2-worker-free-only,omniroute-t2-orchestrator,omniroute-t3-driver,omniroute-t3-driver-clean,omniroute-t3-driver-free-only,omniroute-t4-rag,omniroute-gemini-3.8-flash,omniroute-deepseek-v4.1-flash,omniroute-opus-4-6,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t1-orchestrator-free-only,litellm-t2-worker-free-only,litellm-t3-driver-free-only,openrouter-muse-spark-1.3-contributor|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t1-orchestrator-clean,openai/t1-orchestrator-free-only,openai/spark-1.3-contributor,openai/t2-worker,openai/t2-worker-clean,openai/t2-worker-free-only,openai/t2-orchestrator,openai/t3-driver,openai/t3-driver-clean,openai/t3-driver-free-only,openai/t4-rag,openai/gemini-3.8-flash,openai/deepseek-v4.1-flash,openai/opus-4-6,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t1-orchestrator-free-only,openai/t2-worker-free-only,openai/t3-driver-free-only,openrouter/meta/muse-spark-1.3-contributor"
+    # Pinned on purpose: the order is the OpenHands push priority (the app
+    # keeps 10 profiles), so a reorder must be a deliberate, reviewed edit.
+    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-deepseek-v4.1-flash,omniroute-t3-driver-free-only,omniroute-t1-orchestrator-clean,omniroute-spark-1.3-contributor,openrouter-muse-spark-1.3-contributor,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only,litellm-t1-orchestrator-free-only,omniroute-t1-orchestrator-free-only|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-orchestrator,openai/t2-worker-clean,openai/t3-driver-clean,openai/t4-rag,openai/opus-4-6,openai/gemini-3.8-flash,openai/t2-worker-free-only,openai/deepseek-v4.1-flash,openai/t3-driver-free-only,openai/t1-orchestrator-clean,openai/spark-1.3-contributor,openrouter/meta/muse-spark-1.3-contributor,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-worker-free-only,openai/t3-driver-free-only,openai/t1-orchestrator-free-only,openai/t1-orchestrator-free-only"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
     # Generator round-trip with fixture keys (env hidden: the suite never
@@ -7684,11 +7686,14 @@ if it "svc: profile sync pushes the tiers into a running app, idempotently and c
     kill "$fake_pid" 2>/dev/null
     ok=1
     [[ "$first" == *"app settings seeded with omniroute-t1-orchestrator"* ]] || { ok=0; echo "not seeded: $first" >&2; }
-    [[ "$first" == *"app profile omniroute-t1-orchestrator saved"* && "$first" == *"app profile omniroute-t2-worker saved"* ]] \
-        && { ok=0; echo "cap 3 should stop before t2-worker (spec order)" >&2; }
-    # Spec order = configuration/openhands/tier-profiles.json: the three t1
-    # variants fill the fake's cap of 3, spark (4th) is past it.
-    [[ "$first" == *"app profile omniroute-t1-orchestrator-free-only saved"* ]] || { ok=0; echo "spec order: $first" >&2; }
+    # Spec order = configuration/openhands/tier-profiles.json: the three
+    # hierarchy tiers (t1 -> t2 -> t3) fill the fake's cap of 3; the red-by-
+    # design t1-orchestrator-free-only is last and never takes a slot.
+    for _t in omniroute-t1-orchestrator omniroute-t2-worker omniroute-t3-driver; do
+        [[ "$first" == *"app profile $_t saved"* ]] || { ok=0; echo "spec order ($_t): $first" >&2; }
+    done
+    [[ "$first" == *"app profile omniroute-t2-orchestrator saved"* ]] && { ok=0; echo "cap 3 should stop before t2-orchestrator" >&2; }
+    [[ "$first" == *"app profile omniroute-t1-orchestrator-free-only saved"* ]] && { ok=0; echo "free-only took a slot" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$first" == *"FAILED"* ]] && { ok=0; echo "a push failed (StrictLLM?): $first" >&2; }
     grep -q '^POST' "$d/req.log" && grep -q '^POST /api/v1/settings/profiles/omniroute-t1-orchestrator$' "$d/req.log" \
@@ -7697,6 +7702,116 @@ if it "svc: profile sync pushes the tiers into a running app, idempotently and c
     [[ "$first$second" == *"sk-fake-profile-key"* ]] && { ok=0; echo "key printed" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "profile push is wrong"; fi
+fi
+
+# The app keeps at most 10 profiles and never forgets one, so a renamed or
+# dropped tier (the 2026-09-23 rename left omniroute-tier1 & co.) kept its
+# slot forever. The push deletes profiles AutoOS owns (omniroute-/litellm-/
+# openrouter-) that the spec no longer lists - never anyone else's, never the
+# active one - before it pushes.
+# _fake_app <dir> [<seed.json>]: starts the fake and sets fake_pid + url.
+# Never call it inside $(...): the pid would be set in that subshell only,
+# the caller's kill would miss, and the fake would outlive the test.
+_fake_app() {
+    python3 "$ROOT/tests/helpers/fake_openhands_app.py" "$1/port" "$1/req.log" ${2:+"$2"} >/dev/null 2>&1 &
+    fake_pid=$!
+    for _ in $(seq 1 50); do [[ -s "$1/port" ]] && break; sleep 0.1; done
+    url="http://127.0.0.1:$(cat "$1/port")"
+}
+_fake_profiles() {  # _fake_profiles <url>: the app's profile names, one per line
+    python3 -c 'import json,sys,urllib.request; print("\n".join(p["name"] for p in json.load(urllib.request.urlopen(sys.argv[1] + "/api/v1/settings/profiles"))["profiles"]))' "$1"
+}
+_push_to() {  # _push_to <dir> <url>
+    env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key python3 "$ROOT/tools/sync-openhands-profiles.py" \
+        --openhands-dir "$1/oh" --keys-file "$1/none.yml" --litellm-env "$1/none.env" --push-url "$2" 2>&1
+}
+
+if it "svc: profile push deletes retired AutoOS profiles, never a foreign one"; then
+    d="$(mktemp -d)"
+    cat >"$d/seed.json" <<'JSON'
+{"cap": 10, "settings": {"agent_settings_diff": {}},
+ "profiles": {"omniroute-tier1": {"model": "openai/tier1"},
+              "litellm-tier2": {"model": "openai/tier2"},
+              "openrouter-gone": {"model": "openrouter/x"},
+              "my-own-profile": {"model": "openai/mine", "api_key": "k"},
+              "omniroute": {"model": "openai/prefix-without-dash"}}}
+JSON
+    _fake_app "$d" "$d/seed.json"
+    first="$(_push_to "$d" "$url")"
+    after="$(_fake_profiles "$url")"
+    : >"$d/req.log"
+    second="$(_push_to "$d" "$url")"
+    second_deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
+    kill "$fake_pid" 2>/dev/null
+    ok=1
+    for _r in omniroute-tier1 litellm-tier2 openrouter-gone; do
+        [[ "$first" == *"app profile $_r deleted (retired"* ]] || { ok=0; echo "not deleted: $_r: $first" >&2; }
+        grep -qx "$_r" <<<"$after" && { ok=0; echo "still in the app: $_r" >&2; }
+    done
+    for _k in my-own-profile omniroute; do
+        grep -qx "$_k" <<<"$after" || { ok=0; echo "a foreign profile was deleted: $_k" >&2; }
+    done
+    grep -qx omniroute-t1-orchestrator <<<"$after" || { ok=0; echo "t1 not pushed: $after" >&2; }
+    [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run deleted again ($second_deletes)" >&2; }
+    [[ "$second" == *"deleted"* ]] && { ok=0; echo "second run reports a delete: $second" >&2; }
+    [[ "$first$second" == *"sk-fake-profile-key"* ]] && { ok=0; echo "key printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "retired profiles are not cleaned up safely"; fi
+fi
+
+if it "svc: profile push deletes retired profiles before it saves any"; then
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-tier1": {"model": "openai/tier1"}, "omniroute-tier2": {"model": "openai/tier2"}, "omniroute-tier3": {"model": "openai/tier3"}}}' >"$d/seed.json"
+    _fake_app "$d" "$d/seed.json"
+    out="$(_push_to "$d" "$url")"
+    kill "$fake_pid" 2>/dev/null
+    last_delete="$(grep -n '^DELETE' "$d/req.log" | tail -1 | cut -d: -f1)"
+    first_save="$(grep -n '^POST /api/v1/settings/profiles/' "$d/req.log" | head -1 | cut -d: -f1)"
+    rm -rf "$d"
+    ok=1
+    [[ -n "$last_delete" && -n "$first_save" && "$last_delete" -lt "$first_save" ]] || { ok=0; echo "delete line $last_delete, first save line $first_save" >&2; }
+    [[ "$out" == *"app profile omniroute-t3-driver saved"* ]] || { ok=0; echo "freed slots unused: $out" >&2; }
+    if (( ok )); then pass; else fail "retired profiles still hold slots during the push"; fi
+fi
+
+if it "svc: profile push never deletes the active profile, even a retired one"; then
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 10, "settings": {"agent_settings_diff": {}}, "active": "omniroute-tier1", "profiles": {"omniroute-tier1": {"model": "openai/tier1"}}}' >"$d/seed.json"
+    _fake_app "$d" "$d/seed.json"
+    out="$(_push_to "$d" "$url")"
+    after="$(_fake_profiles "$url")"
+    kill "$fake_pid" 2>/dev/null
+    deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
+    rm -rf "$d"
+    ok=1
+    [[ "$deletes" == 0 ]] || { ok=0; echo "DELETE sent ($deletes)" >&2; }
+    grep -qx omniroute-tier1 <<<"$after" || { ok=0; echo "active profile gone" >&2; }
+    [[ "$out" == *"omniroute-tier1 is retired but active"* ]] || { ok=0; echo "not announced: $out" >&2; }
+    if (( ok )); then pass; else fail "the active profile was not protected"; fi
+fi
+
+# Spec order decides which tiers make the cap - also in an app that already
+# holds lower-ranked AutoOS profiles from an older order (measured 2026-09-25:
+# the live app held 10 in-spec profiles, 0 retired, so deleting retired ids
+# alone freed nothing and t3-driver/t4-rag still never fit).
+if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-t1-orchestrator-free-only": {"model": "openai/t1-orchestrator-free-only"}, "omniroute-spark-1.3-contributor": {"model": "openai/spark-1.3-contributor"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
+    _fake_app "$d" "$d/seed.json"
+    first="$(_push_to "$d" "$url")"
+    after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
+    : >"$d/req.log"
+    second="$(_push_to "$d" "$url")"
+    second_deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
+    kill "$fake_pid" 2>/dev/null
+    rm -rf "$d"
+    ok=1
+    # One slot is the user's; the two AutoOS slots go to the spec's top two.
+    [[ "$after" == "my-own-profile omniroute-t1-orchestrator omniroute-t2-worker " ]] || { ok=0; echo "app holds: $after" >&2; }
+    [[ "$first" == *"omniroute-t1-orchestrator-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "eviction not announced: $first" >&2; }
+    [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
+    [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run evicted again ($second_deletes)" >&2; }
+    if (( ok )); then pass; else fail "the cap is not filled in spec order"; fi
 fi
 
 # The app never returns a profile's key (only api_key_set), so "every other

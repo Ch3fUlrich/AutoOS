@@ -33,7 +33,24 @@
     "reasoning effort variant ladder (minimal/low/medium/high/xhigh) because",
     "the metadata (supportedThinkingEfforts) is absent from the gateway.",
     "Use the direct OpenRouter profile (openrouter-muse-spark-1.3-contributor)",
-    "for full effort control. Requires OPENROUTER_API_KEY."
+    "for full effort control. Requires OPENROUTER_API_KEY.",
+    "",
+    "ORDER IS THE PUSH PRIORITY (reordered 2026-09-25): the OpenHands app keeps",
+    "at most 10 profiles and tools/sync-openhands-profiles.py --push-url fills",
+    "them in this order, removing lower-ranked AutoOS profiles to make room",
+    "and deleting retired ones. The top 10: the t1 -> t2 -> t3 hierarchy",
+    "(t1 first: it seeds the app settings and every agent profile's",
+    "llm_profile_ref), t2-orchestrator (small-scope orchestration), the",
+    "no-training -clean worker and driver (t1-clean's leg trains, so these two",
+    "are the privacy picks), t4-rag (grounded QA - nothing else does it),",
+    "opus-4-6 (frontier reasoning), gemini-3.8-flash (fast, free-first) and",
+    "t2-worker-free-only (zero spend). Below the line: deepseek (already a",
+    "t2 leg), t3-free-only, t1-clean and spark (the same spark legs as t1 -",
+    "in OpenHands the zen promo 403s, so all three answer alike), the direct",
+    "OpenRouter spark (needs its own key; OpenHands pins one effort, so the",
+    "ladder buys nothing), the LiteLLM fallbacks, and last the two",
+    "t1-free-only profiles: red by design outside OpenCode (their only leg is",
+    "the zen free promo, which answers 403 there)."
   ],
   "gateway_base_url": "http://host.docker.internal:20128/v1",
   "litellm_base_url": "http://host.docker.internal:4000/v1",
@@ -46,27 +63,6 @@
       "reasoning": true
     },
     {
-      "id": "omniroute-t1-orchestrator-clean",
-      "model": "openai/t1-orchestrator-clean",
-      "max_input_tokens": 1000000,
-      "max_output_tokens": 32768,
-      "reasoning": true
-    },
-    {
-      "id": "omniroute-t1-orchestrator-free-only",
-      "model": "openai/t1-orchestrator-free-only",
-      "max_input_tokens": 1000000,
-      "max_output_tokens": 32768,
-      "reasoning": true
-    },
-    {
-      "id": "omniroute-spark-1.3-contributor",
-      "model": "openai/spark-1.3-contributor",
-      "max_input_tokens": 1000000,
-      "max_output_tokens": 32768,
-      "reasoning": true
-    },
-    {
       "id": "omniroute-t2-worker",
       "model": "openai/t2-worker",
       "max_input_tokens": 131072,
@@ -74,17 +70,10 @@
       "reasoning": false
     },
     {
-      "id": "omniroute-t2-worker-clean",
-      "model": "openai/t2-worker-clean",
+      "id": "omniroute-t3-driver",
+      "model": "openai/t3-driver",
       "max_input_tokens": 131072,
-      "max_output_tokens": 32768,
-      "reasoning": false
-    },
-    {
-      "id": "omniroute-t2-worker-free-only",
-      "model": "openai/t2-worker-free-only",
-      "max_input_tokens": 131072,
-      "max_output_tokens": 32768,
+      "max_output_tokens": 16384,
       "reasoning": false
     },
     {
@@ -95,22 +84,15 @@
       "reasoning": true
     },
     {
-      "id": "omniroute-t3-driver",
-      "model": "openai/t3-driver",
+      "id": "omniroute-t2-worker-clean",
+      "model": "openai/t2-worker-clean",
       "max_input_tokens": 131072,
-      "max_output_tokens": 16384,
+      "max_output_tokens": 32768,
       "reasoning": false
     },
     {
       "id": "omniroute-t3-driver-clean",
       "model": "openai/t3-driver-clean",
-      "max_input_tokens": 131072,
-      "max_output_tokens": 16384,
-      "reasoning": false
-    },
-    {
-      "id": "omniroute-t3-driver-free-only",
-      "model": "openai/t3-driver-free-only",
       "max_input_tokens": 131072,
       "max_output_tokens": 16384,
       "reasoning": false
@@ -123,8 +105,22 @@
       "reasoning": false
     },
     {
+      "id": "omniroute-opus-4-6",
+      "model": "openai/opus-4-6",
+      "max_input_tokens": 200000,
+      "max_output_tokens": 32768,
+      "reasoning": true
+    },
+    {
       "id": "omniroute-gemini-3.8-flash",
       "model": "openai/gemini-3.8-flash",
+      "max_input_tokens": 131072,
+      "max_output_tokens": 32768,
+      "reasoning": false
+    },
+    {
+      "id": "omniroute-t2-worker-free-only",
+      "model": "openai/t2-worker-free-only",
       "max_input_tokens": 131072,
       "max_output_tokens": 32768,
       "reasoning": false
@@ -137,10 +133,33 @@
       "reasoning": false
     },
     {
-      "id": "omniroute-opus-4-6",
-      "model": "openai/opus-4-6",
-      "max_input_tokens": 200000,
+      "id": "omniroute-t3-driver-free-only",
+      "model": "openai/t3-driver-free-only",
+      "max_input_tokens": 131072,
+      "max_output_tokens": 16384,
+      "reasoning": false
+    },
+    {
+      "id": "omniroute-t1-orchestrator-clean",
+      "model": "openai/t1-orchestrator-clean",
+      "max_input_tokens": 1000000,
       "max_output_tokens": 32768,
+      "reasoning": true
+    },
+    {
+      "id": "omniroute-spark-1.3-contributor",
+      "model": "openai/spark-1.3-contributor",
+      "max_input_tokens": 1000000,
+      "max_output_tokens": 32768,
+      "reasoning": true
+    },
+    {
+      "id": "openrouter-muse-spark-1.3-contributor",
+      "gateway": "openrouter",
+      "model": "openrouter/meta/muse-spark-1.3-contributor",
+      "base_url": "https://openrouter.ai/api/v1",
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 131072,
       "reasoning": true
     },
     {
@@ -168,14 +187,6 @@
       "reasoning": false
     },
     {
-      "id": "litellm-t1-orchestrator-free-only",
-      "gateway": "litellm",
-      "model": "openai/t1-orchestrator-free-only",
-      "max_input_tokens": 1000000,
-      "max_output_tokens": 32768,
-      "reasoning": true
-    },
-    {
       "id": "litellm-t2-worker-free-only",
       "gateway": "litellm",
       "model": "openai/t2-worker-free-only",
@@ -192,12 +203,18 @@
       "reasoning": false
     },
     {
-      "id": "openrouter-muse-spark-1.3-contributor",
-      "gateway": "openrouter",
-      "model": "openrouter/meta/muse-spark-1.3-contributor",
-      "base_url": "https://openrouter.ai/api/v1",
-      "max_input_tokens": 1048576,
-      "max_output_tokens": 131072,
+      "id": "litellm-t1-orchestrator-free-only",
+      "gateway": "litellm",
+      "model": "openai/t1-orchestrator-free-only",
+      "max_input_tokens": 1000000,
+      "max_output_tokens": 32768,
+      "reasoning": true
+    },
+    {
+      "id": "omniroute-t1-orchestrator-free-only",
+      "model": "openai/t1-orchestrator-free-only",
+      "max_input_tokens": 1000000,
+      "max_output_tokens": 32768,
       "reasoning": true
     }
   ]
