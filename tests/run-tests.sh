@@ -7567,6 +7567,257 @@ if it "svc: docs/web-services.md lists every service port and no real host"; the
     if (( ok )); then pass; else fail "web-services.md incomplete or leaking"; fi
 fi
 
+# ─── Docker AI stack (server profile, lane S) ──────────────────────────────
+# Every test name carries "aistack" so `--filter aistack` reaches all of them.
+# Nothing here starts a container: docker and systemctl are stubs that log.
+AISTACK="$ROOT/configuration/docker/ai-stack"
+
+_aistack_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/home/.config/opencode" "$d/repo" "$d/code"
+    # docker stub: `inspect`/`image inspect` answer from files, everything
+    # else is logged and succeeds.
+    cat >"$d/bin/docker" <<STUB
+#!/bin/sh
+echo "\$*" >>"$d/docker.log"
+case "\$1 \$2" in
+    "inspect autoos-omniroute"|"inspect -f"*) [ -e "$d/container-exists" ] ;;
+    "image inspect") [ -e "$d/image-exists" ] ;;
+    "info "*) exit 0 ;;
+    "compose version") echo "Docker Compose version v2.99.0" ;;
+    *) exit 0 ;;
+esac
+STUB
+    printf '#!/bin/sh\necho "$*" >>"%s/systemctl.log"\nexit 0\n' "$d" >"$d/bin/fake-systemctl"
+    chmod +x "$d/bin/docker" "$d/bin/fake-systemctl"
+    printf 'omniroute: sk-test-client-key\n' >"$d/repo/api-keys.yml"
+    printf '%s' "$d"
+}
+_aistack() {
+    local d="$1"; shift
+    env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
+        HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
+        AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
+        AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
+        AUTOOS_OPENHANDS_DIR="$d/home/.openhands" XDG_CONFIG_HOME="$d/home/.config" \
+        bash "$AISTACK/ai-stack.sh" "$@" 2>&1
+}
+
+if it "aistack: compose template keeps the hardening contract"; then
+    out="$(python3 "$ROOT/tests/helpers/check_compose.py" "$AISTACK/compose.yml" 2>&1)" && rc=0 || rc=$?
+    if (( rc == 0 )); then pass; else fail "$out"; fi
+fi
+
+if it "aistack: the opencode layer builds on a digest-pinned V2 image, never V1"; then
+    ok=1
+    f="$AISTACK/opencode.Dockerfile"
+    grep -qE '^FROM ghcr\.io/anomalyco/opencode:2\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$' "$f" || { ok=0; echo "FROM not pinned V2" >&2; }
+    grep -q 'opencode-ai' "$f" && { ok=0; echo "V1 package referenced" >&2; }
+    grep -qE '^RUN apk add --no-cache .*\bgit\b.*\bbash\b.*\bnodejs\b' "$f" || { ok=0; echo "agent tools missing" >&2; }
+    if (( ok )); then pass; else fail "opencode layer is not pinned V2"; fi
+fi
+
+if it "aistack: the env example carries no real value"; then
+    ok=1
+    [[ -f "$AISTACK/stack.env.example" ]] || { ok=0; echo "missing" >&2; }
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        v="${line#*=}"
+        [[ -z "$v" || "$v" == REPLACE_WITH_* || "$v" =~ ^[0-9]+[mg]?$ || "$v" == 0.0.0.0 || "$v" == /* ]] \
+            || { ok=0; echo "suspicious: $line" >&2; }
+        [[ "$v" == /home/* ]] && { ok=0; echo "home path: $line" >&2; }
+    done <"$AISTACK/stack.env.example"
+    if (( ok )); then pass; else fail "stack.env.example must stay generic"; fi
+fi
+
+if it "aistack: --dry-run init prints the plan and writes nothing"; then
+    d="$(_aistack_sandbox)"
+    out="$(_aistack "$d" --dry-run init)"
+    ok=1
+    [[ -e "$d/cfg" || -e "$d/data" ]] && { ok=0; echo "created a directory" >&2; }
+    [[ "$out" == *"dry run"* ]] || { ok=0; echo "no dry-run banner" >&2; }
+    [[ "$out" == *"would write $d/cfg/stack.env"* ]] || { ok=0; echo "stack.env not announced: $out" >&2; }
+    [[ "$out" == *"would write $d/cfg/opencode.env"* ]] || { ok=0; echo "opencode.env not announced" >&2; }
+    [[ "$out" == *"sk-test-client-key"* ]] && { ok=0; echo "printed a key" >&2; }
+    grep -qE 'compose|run|pull|build' "$d/docker.log" 2>/dev/null && { ok=0; echo "called docker" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dry run had side effects"; fi
+fi
+
+if it "aistack: init twice: 0600 env files, the second run skips, user values survive"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf '# mine\nOPENCODE_PASSWORD=operator-chosen\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
+    first="$(_aistack "$d" init)"
+    second="$(_aistack "$d" init)"
+    ok=1
+    for f in stack.env opencode.env openhands.env; do
+        [[ "$(stat -c %a "$d/cfg/$f")" == 600 ]] || { ok=0; echo "$f not 600" >&2; }
+    done
+    grep -q '^OPENCODE_PASSWORD=operator-chosen$' "$d/cfg/opencode.env" || { ok=0; echo "password overwritten" >&2; }
+    grep -q '^MY_EXTRA=keep$' "$d/cfg/opencode.env" || { ok=0; echo "extra line lost" >&2; }
+    grep -q '^# mine$' "$d/cfg/opencode.env" || { ok=0; echo "comment lost" >&2; }
+    grep -q "^AUTOOS_OMNIROUTE_KEY='sk-test-client-key'$" "$d/cfg/opencode.env" || { ok=0; echo "client key not added" >&2; }
+    grep -q "^LLM_API_KEY='sk-test-client-key'$" "$d/cfg/openhands.env" || { ok=0; echo "openhands key missing" >&2; }
+    compgen -G "$d/cfg/opencode.env.autoos-backup-*" >/dev/null || { ok=0; echo "no backup of the user's file" >&2; }
+    grep -q "^AUTOOS_CODE_DIR='$d/code'$" "$d/cfg/stack.env" || { ok=0; echo "code dir not recorded" >&2; }
+    [[ -d "$d/data/omniroute" && -d "$d/data/opencode-home" ]] || { ok=0; echo "data dirs missing" >&2; }
+    [[ "$second" == *"(skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$second" == *"+ "* ]] && { ok=0; echo "second run changed something: $second" >&2; }
+    [[ "$first$second" == *"sk-test-client-key"* ]] && { ok=0; echo "printed a key" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "init is not idempotent read-modify-write"; fi
+fi
+
+if it "aistack: init reuses the pinned opencode-serve password so phone logins survive"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/home/.config/autoos"
+    printf 'phone-pass\n' >"$d/home/.config/autoos/opencode-serve.password"
+    _aistack "$d" init >/dev/null
+    if grep -q "^OPENCODE_PASSWORD='phone-pass'$" "$d/cfg/opencode.env"; then pass; else fail "password not carried over"; fi
+    rm -rf "$d"
+fi
+
+if it "aistack: the container opencode config reaches the gateway by name"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/code/repo"
+    cat >"$d/src.json" <<JSON
+{"model":"omniroute/t1-orchestrator",
+ "provider":{"omniroute":{"options":{"baseURL":"http://127.0.0.1:20128/v1","apiKey":"{env:AUTOOS_OMNIROUTE_KEY}"}},
+             "litellm":{"options":{"baseURL":"http://127.0.0.1:4000/v1"}},
+             "ollama":{"options":{"baseURL":"http://127.0.0.1:11434/v1"}},
+             "meta":{"options":{"baseURL":"https://api.example.invalid/v1","apiKey":"{env:META_API_KEY}"}}},
+ "providers":{"omniroute":{"settings":{"baseURL":"http://localhost:20128/v1"}},"litellm":{"settings":{"baseURL":"http://127.0.0.1:4000/v1"}}},
+ "mcp":{"serena":{"type":"local","command":["uvx","serena"],"enabled":true},
+        "omnigraph":{"type":"local","command":["npx","-y","x"],"enabled":true,"environment":{"OMNIGRAPH_BASE_URL":"http://localhost:8080"}},
+        "playwright":{"type":"local","command":["npx","-y","@playwright/mcp"],"enabled":true},
+        "graphify":{"type":"local","command":["uvx","graphify"],"enabled":true}},
+ "instructions":["$d/code/repo/AGENTS.md","/elsewhere/SKILL.md"]}
+JSON
+    out1="$(python3 "$ROOT/tools/render-opencode-container-config.py" --source "$d/src.json" --out "$d/out.json" --code-dir "$d/code" 2>&1)"
+    out2="$(python3 "$ROOT/tools/render-opencode-container-config.py" --source "$d/src.json" --out "$d/out.json" --code-dir "$d/code" 2>&1)"
+    got="$(python3 - "$d/out.json" "$d/code" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+p, v2, m = c["provider"], c["providers"], c["mcp"]
+print(p["omniroute"]["options"]["baseURL"], v2["omniroute"]["settings"]["baseURL"],
+      sorted(p), sorted(v2), m["serena"].get("type"), m["serena"].get("url"),
+      m["omnigraph"]["environment"]["OMNIGRAPH_BASE_URL"], m["playwright"]["enabled"],
+      m["graphify"]["enabled"], [i.replace(sys.argv[2], "CODE") for i in c["instructions"]],
+      p["omniroute"]["options"]["apiKey"])
+PY
+)"
+    assert_eq "$got|$([[ "$out1" == *"litellm"* && "$out2" == *"unchanged"* ]] && echo reported)" \
+        "http://omniroute:20128/v1 http://omniroute:20128/v1 ['meta', 'omniroute'] ['omniroute'] remote http://serena-mcp:9121/sse http://host.docker.internal:8080 False True ['CODE/repo/AGENTS.md'] {env:AUTOOS_OMNIROUTE_KEY}|reported"
+    rm -rf "$d"
+fi
+
+if it "aistack: server profile runs the docker stack, workstation keeps the native installs"; then
+    got="$(python3 - <<'PY'
+import json
+comps = {c["id"]: c for g in json.load(open("catalog/linux.json", encoding="utf-8"))["categories"] for c in g["components"]}
+s = comps.get("ai-stack-docker", {})
+out = [
+    "server" in s.get("profiles", []),
+    "workstation" not in s.get("profiles", []),
+    "docker" in s.get("requires", []),
+    s.get("provider") == "custom" and s.get("postInstall") == "install_ai_stack",
+    # The host CLI stays: apply.sh manages the container through it. The
+    # docker run OpenHands (a :latest pull) is replaced by the compose one.
+    "server" in comps["omniroute"]["profiles"],
+    "server" not in comps["openhands-docker"]["profiles"],
+    "workstation" in comps["omniroute"]["profiles"],
+    "workstation" in comps["openhands-docker"]["profiles"],
+]
+print(" ".join(str(x) for x in out))
+PY
+)"
+    assert_eq "$got" "True True True True True True True True"
+fi
+
+if it "aistack: installer announces the plan in dry run and detects the running stack"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    out="$( ( AUTOOS_DRY_RUN=1; AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; AUTOOS_AI_STACK_DATA="$d/data"
+              HOME="$d/home"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG AUTOOS_AI_STACK_DATA HOME; install_ai_stack ) 2>&1)"
+    [[ "$out" == *"would write"*"stack.env"* ]] || { ok=0; echo "plan not shown: $out" >&2; }
+    [[ -e "$d/cfg" ]] && { ok=0; echo "dry run wrote config" >&2; }
+    ( AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG
+      custom_is_installed ai-stack-docker ) && { ok=0; echo "detected without a container" >&2; }
+    mkdir -p "$d/cfg"; : >"$d/cfg/stack.env"; : >"$d/container-exists"
+    ( AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG
+      custom_is_installed ai-stack-docker ) || { ok=0; echo "running stack not detected" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "installer dry run / detection is wrong"; fi
+fi
+
+if it "aistack: migrate without --yes is the announced plan and touches nothing"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/home/.omniroute"; printf 'STORAGE_ENCRYPTION_KEY=x\n' >"$d/home/.omniroute/.env"
+    out="$(_aistack "$d" migrate)"
+    ok=1
+    # Order is the contract: back up, stop, copy, start, prove, only then disable.
+    python3 - "$out" <<'PY' || ok=0
+import sys
+out = sys.argv[1]
+steps = ["back up", "stop the autoos-omniroute unit", "copy", "start the omniroute container",
+         "answers", "unregister autoos-omniroute", "autoos-opencode", "openhands"]
+pos = [out.find(s) for s in steps]
+if -1 in pos or pos != sorted(pos):
+    print("plan order wrong:", list(zip(steps, pos)), file=sys.stderr)
+    sys.exit(1)
+PY
+    [[ "$out" == *"--yes"* ]] || { ok=0; echo "no hint how to run it" >&2; }
+    [[ -e "$d/data" || -e "$d/cfg" ]] && { ok=0; echo "created state" >&2; }
+    [[ -e "$d/systemctl.log" ]] && { ok=0; echo "called systemctl" >&2; }
+    grep -qE 'compose|rm|stop' "$d/docker.log" 2>/dev/null && { ok=0; echo "called docker" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "migrate plan is wrong or had side effects"; fi
+fi
+
+if it "aistack: rollback without --yes is the announced plan and touches nothing"; then
+    d="$(_aistack_sandbox)"
+    out="$(_aistack "$d" rollback)"
+    ok=1
+    [[ "$out" == *"register-autostart.sh"* && "$out" == *"--yes"* ]] || { ok=0; echo "plan: $out" >&2; }
+    [[ -e "$d/systemctl.log" ]] && { ok=0; echo "called systemctl" >&2; }
+    grep -qE 'compose' "$d/docker.log" 2>/dev/null && { ok=0; echo "called docker compose" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rollback plan is wrong or had side effects"; fi
+fi
+
+if it "aistack: register-autostart leaves the gateway and opencode units alone once docker owns them"; then
+    d="$(_svc_reg_sandbox)"
+    s="$(_aistack_sandbox)"
+    mkdir -p "$s/cfg"; : >"$s/cfg/stack.env"; : >"$s/container-exists"
+    out="$(AUTOOS_DOCKER="$s/bin/docker" AUTOOS_AI_STACK_CONFIG="$s/cfg" _svc_reg "$d")"
+    ok=1
+    [[ -e "$d/units/autoos-omniroute.service" || -e "$d/units/autoos-opencode.service" ]] && { ok=0; echo "wrote a native unit" >&2; }
+    [[ -e "$d/units/autoos-litellm.service" ]] || { ok=0; echo "litellm unit should still be written" >&2; }
+    [[ "$out" == *"docker AI stack"* ]] || { ok=0; echo "not explained: $out" >&2; }
+    rm -rf "$d" "$s"
+    if (( ok )); then pass; else fail "register-autostart would start a second gateway"; fi
+fi
+
+if it "aistack: the resume script brings up the compose stack instead of the native units"; then
+    ok=1
+    f="$ROOT/configuration/autostart/Start-AutoOSStack.sh"
+    grep -q 'configuration/docker/ai-stack/ai-stack.sh' "$f" || { ok=0; echo "stack script not referenced" >&2; }
+    grep -q '"$AI_STACK" is-active' "$f" || { ok=0; echo "no is-active branch" >&2; }
+    grep -q '"$AI_STACK" up' "$f" || { ok=0; echo "no compose resume" >&2; }
+    if (( ok )); then pass; else fail "Start-AutoOSStack.sh ignores the docker stack"; fi
+fi
+
+if it "aistack: apply.sh manages a containerised gateway with the manage key, never a host restart"; then
+    ok=1
+    f="$ROOT/configuration/omniroute/apply.sh"
+    grep -q 'manage.key' "$f" || { ok=0; echo "manage key not used" >&2; }
+    grep -q '"$AI_STACK" is-active' "$f" || { ok=0; echo "no stack detection" >&2; }
+    grep -q '"$AI_STACK" up omniroute' "$f" || { ok=0; echo "a down container gateway is not resumed" >&2; }
+    if (( ok )); then pass; else fail "apply.sh cannot manage the container"; fi
+fi
+
 # ─── shellcheck (optional) ──────────────────────────────────────────────────
 describe "static analysis"
 

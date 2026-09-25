@@ -25,7 +25,17 @@ gateway_ok() {
     curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1
 }
 
-if ! gateway_ok; then
+# Docker AI stack (server profile, configuration/docker/ai-stack): the
+# gateway, opencode serve and OpenHands are compose services there.
+AI_STACK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker/ai-stack/ai-stack.sh"
+IN_DOCKER=0
+if bash "$AI_STACK" is-active >/dev/null 2>&1; then IN_DOCKER=1; fi
+
+if ! gateway_ok && [[ $IN_DOCKER -eq 1 ]]; then
+    echo "Starting the gateway container..."
+    bash "$AI_STACK" up omniroute
+    gateway_ok || { echo "Gateway did not answer. Run: $AI_STACK status"; exit 1; }
+elif ! gateway_ok; then
     command -v omniroute >/dev/null || { echo "omniroute is not installed. Run: ./setup.sh --only omniroute --yes"; exit 1; }
     echo "Starting OmniRoute in the background..."
     nohup omniroute --no-open --port 20128 >/tmp/omniroute.log 2>&1 &
@@ -110,7 +120,10 @@ PY
             echo "Some files under ~/.openhands are not yours (an older root-run container). Fix once with:"
             echo "  sudo chown -R $(id -un):$(id -gn) ~/.openhands"
         fi
-        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app'; then
+        if [[ $IN_DOCKER -eq 1 ]]; then
+            # The compose service: pinned image, hardening, SANDBOX_VOLUMES.
+            bash "$AI_STACK" up openhands
+        elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app'; then
             docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'openhands-app' \
                 || docker start openhands-app >/dev/null
         else
@@ -188,7 +201,9 @@ PY
         # (user "opencode", ~/.config/autoos/opencode-serve.password) and
         # exports the {env:...} keys the global opencode config references.
         _ss_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-        if curl -s -m 5 -o /dev/null "http://127.0.0.1:4096/" 2>/dev/null; then
+        if [[ $IN_DOCKER -eq 1 ]]; then
+            bash "$AI_STACK" up opencode
+        elif curl -s -m 5 -o /dev/null "http://127.0.0.1:4096/" 2>/dev/null; then
             echo "opencode serve already up on :4096 - nothing to do."
         elif ! command -v opencode >/dev/null; then
             echo "opencode is not installed. Run: ./setup.sh --only opencode-cli --yes"

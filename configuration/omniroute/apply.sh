@@ -104,10 +104,33 @@ while IFS=$'\t' read -r key_name provider_id data_json; do
     fi
 done <<<"$provider_rows"
 
+# Docker AI stack (server profile): the gateway is the autoos-omniroute
+# container. The CLI's machine token is accepted from loopback peers only and
+# a published port sees the docker gateway as the peer, so management goes
+# through the manage-scoped key ai-stack.sh migrate created (host-only file).
+AI_STACK="$ROOT/configuration/docker/ai-stack/ai-stack.sh"
+IN_DOCKER=0
+if [[ -z "${AUTOOS_OMNIROUTE_URL:-}" ]] && bash "$AI_STACK" is-active >/dev/null 2>&1; then
+    IN_DOCKER=1
+    MANAGE_KEY_FILE="${AUTOOS_AI_STACK_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/autoos/ai-stack}/manage.key"
+    if [[ -z "${OMNIROUTE_API_KEY:-}" && -s "$MANAGE_KEY_FILE" ]]; then
+        OMNIROUTE_API_KEY="$(tr -d '\r\n' <"$MANAGE_KEY_FILE")"
+        export OMNIROUTE_API_KEY
+        echo "Gateway runs in docker - the CLI manages it with the manage-scoped key ($MANAGE_KEY_FILE)."
+    elif [[ -z "${OMNIROUTE_API_KEY:-}" ]]; then
+        echo "Gateway runs in docker but $MANAGE_KEY_FILE is missing - provider and combo changes will be refused."
+        echo "  Create a key with scope 'manage' in the dashboard and save it there (mode 600)."
+    fi
+fi
+
 gateway_up() { curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1; }
 if ! gateway_up; then
     if [[ $DRY -eq 1 ]]; then
         echo "Gateway is down; dry run continues with the static plan (would start it with: omniroute --no-open --port 20128)."
+    elif [[ $IN_DOCKER -eq 1 ]]; then
+        echo "Starting the gateway container…"
+        bash "$AI_STACK" up omniroute
+        gateway_up || { echo "Gateway did not start — run: $AI_STACK status"; exit 1; }
     else
         echo "Starting OmniRoute (background)…"
         nohup omniroute --no-open --port 20128 >/tmp/omniroute-apply.log 2>&1 &

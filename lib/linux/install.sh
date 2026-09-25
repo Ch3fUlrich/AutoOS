@@ -97,6 +97,11 @@ custom_is_installed() {
         litellm)
             has_cmd litellm || [[ -x "$SYS_HOME/.local/bin/litellm" ]]
             ;;
+        ai-stack-docker)
+            # Installed = the compose stack owns the services (its config
+            # exists and the gateway container was created), not merely pulled.
+            bash "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/configuration/docker/ai-stack/ai-stack.sh" is-active >/dev/null 2>&1
+            ;;
         *) return 1 ;;
     esac
 }
@@ -1110,6 +1115,37 @@ install_openhands() {
     run docker pull "$image"
     ui_ok "OpenHands image ready"
     ui_info "start it with: ./configuration/start-stack.sh openhands"
+}
+
+install_ai_stack() {
+    # The server profile's AI services as hardened containers (compose.yml
+    # next to ai-stack.sh; docs/ai-stack-docker.md). init only adds missing
+    # env keys; `up` starts nothing on a port a native service holds - that
+    # host moves with the opt-in `ai-stack.sh migrate --yes` instead.
+    local stack line rc=0
+    stack="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/configuration/docker/ai-stack/ai-stack.sh"
+    if (( AUTOOS_DRY_RUN )); then
+        while IFS= read -r line; do ui_muted "$line"; done < <(bash "$stack" --dry-run init 2>&1 || true)
+        ui_muted "would build/pull the stack images and start them (ports held by native services are left alone)"
+        return 0
+    fi
+    if ! has_cmd docker; then
+        ui_warn "docker CLI not found - install Docker first, then re-run"
+        return 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        ui_warn "Docker daemon not reachable (not running, or log in again for the docker group) - then: $stack up"
+        return 1
+    fi
+    local step
+    for step in init up; do
+        while IFS= read -r line; do
+            [[ "$line" == rc=* ]] && { rc="${line#rc=}"; continue; }
+            ui_muted "$line"
+        done < <(bash "$stack" "$step" 2>&1; echo "rc=$?")
+        if (( rc != 0 )); then ui_warn "ai-stack.sh $step failed - see: $stack status"; return 1; fi
+    done
+    ui_ok "AI stack ready - status: $stack status"
 }
 
 install_litellm_proxy() {

@@ -171,10 +171,20 @@ fi
 
 # ─── Register ───────────────────────────────────────────────────────────────
 echo "Units go to $UNIT_DIR (repo: $REPO)"
+# Once the docker AI stack owns the gateway and opencode serve (ai-stack.sh
+# migrate), a native unit would fight its container for :20128 / :4096.
+AI_STACK_ACTIVE=0
+if bash "$REPO/configuration/docker/ai-stack/ai-stack.sh" is-active >/dev/null 2>&1; then
+    AI_STACK_ACTIVE=1
+fi
 CHANGED=0
 TO_START=()
 while IFS= read -r u; do
     f="$UNIT_DIR/$u.service"
+    if [[ $AI_STACK_ACTIVE -eq 1 && ( "$u" == autoos-omniroute || "$u" == autoos-opencode ) ]]; then
+        echo "  = $u: runs in the docker AI stack (ai-stack.sh status) - no native unit (skipped)"
+        continue
+    fi
     if [[ "$u" == autoos-omniroute && -f "$UNIT_DIR/omniroute.service" ]]; then
         # Two gateways would fight over :20128.
         echo "  ! $u: 'omniroute autostart' already installed omniroute.service - skipped."
