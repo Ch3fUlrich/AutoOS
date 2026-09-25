@@ -2546,7 +2546,13 @@ PY
     nokey="no"; [[ -e "$scratch2/.claude/settings.json" ]] || nokey="yes"
     rm -rf "$scratch" "$scratch2"
     assert_eq "$report" "mine|http://127.0.0.1:20128|test-omni-key"
-    assert_eq "backups=$backups|nokey=$nokey" "backups=1|nokey=yes"
+    # The backup name carries a timestamp, so two runs inside the same second collide
+    # on one filename and only one backup survives — the exact count was never the
+    # contract, and asserting 1 made this fail on any runner slow enough to straddle a
+    # second. What must hold: the file was backed up before being edited, no more than
+    # one backup per modifying run, and nothing written when the key is absent.
+    if [[ "$backups" -ge 1 && "$backups" -le 2 && "$nokey" == "yes" ]]; then pass
+    else fail "backups=$backups (want 1..2) nokey=$nokey"; fi
 fi
 
 if it "install_qodercli announces in dry run and writes nothing"; then
