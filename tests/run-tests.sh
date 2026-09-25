@@ -6922,6 +6922,10 @@ if it "ai-registry converter: schema keys, legs resolve, idempotent (unit tests)
     out="$(python3 tests/test_registry_convert.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "registry.py: check rules (unit tests) and the committed registry has no drift"; then
+    out="$(python3 tests/test_registry.py 2>&1 && python3 tools/registry.py validate 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/skill-rules.py: the linter for one-line skill rules (routing v2 spec 8.1).
 if it "skill-rules check: ids, length, source, near-duplicates (unit tests)"; then
     out="$(python3 tests/test_skill_rules.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
