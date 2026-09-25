@@ -1049,6 +1049,54 @@ PY
     fi
 fi
 
+# AGENTS.md §4 on an EXISTING user config with the harness really applied
+# (AUTOOS_ROOT set, V2 projection on). Measured 2026-09-25: run 1 merged,
+# run 2 "merged" again with a fresh backup, run 3 was current - the merge
+# wrote non-ASCII names as \uXXXX escapes while the harness wrote them as
+# UTF-8, so the second run's byte compare always saw a change.
+if it "opencode user config: the second run over an existing config writes nothing (double run)"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/opencode"
+    printf '{"model": "anthropic/mine"}\n' >"$scratch/.config/opencode/opencode.json"
+    printf '{"model": "anthropic/mine"}\n' >"$scratch/.config/opencode/config.json"
+    _oc_run() {
+        ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 AUTOOS_ROOT="$ROOT"
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          opencode_is_v2() { return 0; }
+          OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config 2>&1 )
+    }
+    # name, size, mtime_ns and sha256 of every entry: "writes nothing" means
+    # not even a byte-identical rewrite, and no new backup file.
+    _oc_snapshot() {
+        python3 - "$scratch/.config/opencode" <<'PY'
+import hashlib, os, sys
+root = sys.argv[1]
+for name in sorted(os.listdir(root)):
+    path = os.path.join(root, name)
+    st = os.lstat(path)
+    digest = ""
+    if os.path.isfile(path) and not os.path.islink(path):
+        digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+    print(name, st.st_size, st.st_mtime_ns, digest)
+PY
+    }
+    first="$(_oc_run)"
+    before="$(_oc_snapshot)"
+    sleep 1
+    second="$(_oc_run)"
+    after="$(_oc_snapshot)"
+    rm -rf "$scratch"
+    ok=1
+    [[ "$first" == *"agent-harness opencode: updated"* ]] || { ok=0; echo "harness never ran (the precondition): $first" >&2; }
+    [[ "$before" == "$after" ]] || { ok=0; printf 'second run changed files:\n%s\n' "$(diff <(printf '%s\n' "$before") <(printf '%s\n' "$after"))" >&2; }
+    [[ "$second" == *"merged"* || "$second" == *"written"* ]] && { ok=0; echo "second run reports a write: $second" >&2; }
+    [[ "$(grep -c 'already current' <<<"$second")" == 2 ]] || { ok=0; echo "second run not current for both files: $second" >&2; }
+    if (( ok )); then pass; else fail "setup_opencode_config needs two runs to converge"; fi
+    fi
+fi
+
 if it "agent harness installers: the OpenCode writer calls the generator"; then
     body="$(declare -f setup_opencode_config)"
     hands="$(declare -f setup_openhands_config)"

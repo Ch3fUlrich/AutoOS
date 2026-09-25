@@ -2775,6 +2775,10 @@ if os.path.isfile(config_path):
             sys.exit(3)
         if not isinstance(data, dict):
             sys.exit(3)
+# The parsed original, serialised: a run that changes nothing must not
+# rewrite the file at all. A byte compare alone cannot see that - the harness
+# step writes the same document in its own formatting (AGENTS.md section 4).
+_before = json.dumps(data) if os.path.isfile(config_path) else None
 
 def _read_secrets_into(path, secrets):
     try:
@@ -2961,9 +2965,14 @@ if _v2_source and os.path.isfile(_v2_source):
     if data.get('model') in (None, '', _ollama_default) and _repo.get('model'):
         data['model'] = _repo['model']
 
+if _before is not None and json.dumps(data) == _before:
+    sys.exit(0)
 tmp_file = config_path + '.tmp'
 with open(tmp_file, 'w', encoding='utf-8') as f:
-    json.dump(data, f, indent=2)
+    # ensure_ascii=False, as lib/agent_harness.py writes: the two writers
+    # share this file, and an escaped-vs-literal em-dash in the tier names
+    # made every second run a spurious merge with a fresh backup.
+    json.dump(data, f, indent=2, ensure_ascii=False)
     # Trailing newline, as the harness writes it: otherwise every re-run
     # differs by one byte and takes a pointless backup.
     f.write('\\n')
