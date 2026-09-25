@@ -2469,7 +2469,11 @@ mcp_cfg['graphify'] = {
 }
 # The agent-server may run in a container; it never sees a token from a shell
 # profile. Take it from the env, else the per-user omnigraph env file.
-omni_env = {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'}
+# Container-side URL, like llm['base_url'] above: this file is read by the
+# OpenHands app and its sandbox containers, where localhost is the container
+# itself. omnigraph-server is published on the host's :8080 and Docker Desktop
+# resolves host.docker.internal.
+omni_env = {'OMNIGRAPH_BASE_URL': 'http://host.docker.internal:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'}
 omni_token = os.environ.get('OMNIGRAPH_TOKEN', '')
 if not omni_token:
     try:
