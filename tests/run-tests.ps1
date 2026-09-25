@@ -3809,28 +3809,36 @@ Test-Case 'Install-AutoOSQoderCli announces without writing in dry run' {
             Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
             Remove-Item $log -Force -ErrorAction SilentlyContinue
         }
-        Assert-Equal ([Environment]::GetEnvironmentVariable('Path', 'User')) $realPath
         Assert-True ([string]::IsNullOrEmpty($env:QODER_PERSONAL_ACCESS_TOKEN)) 'PAT leaked into process env'
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
     } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
         $env:USERPROFILE = $realHome
         Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
+    # HKCU\Environment\Path is REG_EXPAND_SZ and [Environment] re-resolves its
+    # %USERPROFILE% tokens against the *current* env, so this comparison only means
+    # anything once USERPROFILE is back to the real home — otherwise a runner whose
+    # PATH is stored as %USERPROFILE%\… fails while nothing was written.
+    Assert-Equal ([Environment]::GetEnvironmentVariable('Path', 'User')) $realPath
     Pass
 }
 
 Test-Case 'Install-AutoOSOmniRouteRouting announces without writing in dry run' {
     $realShort = $env:AUTOOS_OMNIROUTE_KEY
     $realCli = $env:OMNIROUTE_API_KEY
+    # The keys file is git-ignored, so the real one exists on a dev box and not on
+    # CI; without it the export step warns out before announcing anything. Name it.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-routingkey-$PID.yml"
     try {
+        'omniroute: test-client-key' | Out-File $tmp -Encoding utf8
         $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
         $env:OMNIROUTE_API_KEY = 'test-omni-key'
         Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
         $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-routing-$([Guid]::NewGuid().ToString('N')).log"
         try {
             Initialize-AutoOSLog -Path $log
-            Install-AutoOSOmniRouteRouting
+            Install-AutoOSOmniRouteRouting -KeysFile $tmp
             $text = Get-Content $log -Raw -Encoding utf8
             Assert-True ($text -match 'user-managed|would export') 'no client-key step announced'
             Assert-True ($text -match 'Claude Code') 'no claude step announced'
@@ -3845,6 +3853,7 @@ Test-Case 'Install-AutoOSOmniRouteRouting announces without writing in dry run' 
         else { $env:AUTOOS_OMNIROUTE_KEY = $realShort }
         if ($null -eq $realCli) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
         else { $env:OMNIROUTE_API_KEY = $realCli }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
     Pass
 }
