@@ -345,10 +345,12 @@ def _terminate_group(proc, pgid) -> None:
         pass
 
 
-def run_client(cmd, cwd: str, env: dict) -> int:
+def run_client(cmd, cwd: str, env: dict, reap: bool = True) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
 
     Returns the client's exit code; KeyboardInterrupt is re-raised after cleanup.
+    reap=False (a --joinable `claude --bg` session) leaves the group alone after a
+    normal exit: that session is meant to outlive this spawner.
     """
     # stdin closed: when it is an open pipe (cron, CI, an agent's shell)
     # `opencode run` waits to read it as extra prompt text and never starts
@@ -367,7 +369,8 @@ def run_client(cmd, cwd: str, env: dict) -> int:
     except BaseException:  # KeyboardInterrupt included: clean up, then re-raise
         _terminate_group(proc, pgid)
         raise
-    _terminate_group(proc, pgid)
+    if reap:
+        _terminate_group(proc, pgid)
     return rc
 
 
@@ -447,7 +450,7 @@ def cmd_run(args, cfg: dict) -> int:
                                     capture_output=True, text=True, check=True).stdout.strip()
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
     start = time.time()
-    rc = run_client(plan["cmd"], plan["cwd"], env)
+    rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable)
     log_run(plan, rc, time.time() - start, args.free)
     if rc == 0 and client.promo:
         clients.record_probe(client.name)

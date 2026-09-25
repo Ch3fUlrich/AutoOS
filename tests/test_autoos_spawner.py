@@ -770,6 +770,22 @@ class ProcessGroupTests(unittest.TestCase):
                                   tmp, dict(os.environ))
         self.assertEqual(rc, 3)
 
+    def test_a_joinable_session_is_not_reaped_after_a_normal_exit(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "child.pid")
+            code = ("from subprocess import Popen\n"
+                    "p = Popen(['sleep', '30'])\n"
+                    "open(%r, 'w').write(str(p.pid))\n" % pidfile)
+            rc = agent.run_client([sys.executable, "-c", code], tmp, dict(os.environ), reap=False)
+            with open(pidfile, encoding="utf-8") as fh:
+                pid = int(fh.read())
+            try:
+                self.assertEqual(rc, 0)
+                self.assertFalse(self.gone(pid), "reap=False stopped the session's child")
+            finally:
+                os.kill(pid, 9)
+
 
 if __name__ == "__main__":
     unittest.main()
