@@ -170,9 +170,17 @@ def spawn(req: dict) -> dict:
     refused = preflight(argv, cwd)
     if refused:
         return {"error": refused}
-    run_id = "%s-%s" % (datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), secrets.token_hex(3))
-    path = os.path.join(state_root(), run_id)
-    os.makedirs(path)
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        run_id = "%s-%s" % (datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), secrets.token_hex(3))
+        path = os.path.join(state_root(), run_id)
+        try:
+            os.makedirs(path)
+            break
+        except FileExistsError:
+            if attempt == max_attempts - 1:
+                return {"error": "Failed to create run directory after %d attempts" % max_attempts}
+            continue
     job = {"id": run_id, "request": {k: v for k, v in req.items() if k != "task"},
            "task": req.get("task"), "argv": argv, "cwd": cwd, "route": route,
            "started": time.time()}

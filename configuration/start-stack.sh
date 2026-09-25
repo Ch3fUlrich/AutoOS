@@ -171,9 +171,14 @@ PY
         # reads profiles/*.json: save the tiers through its API (idempotent,
         # capped by the app at 10 - spec order decides which tiers make it).
         if command -v python3 >/dev/null; then
-            python3 "$_ss_root/tools/sync-openhands-profiles.py" --openhands-dir "$HOME/.openhands" \
-                --consumer container --push-url http://127.0.0.1:3000 | grep -v ' skipped (up to date)$' \
-                || true
+            # Keep the exit code: a failing sync (exit 2) must be reported, not
+            # swallowed by the filter under pipefail, and must not abort the start.
+            push_out="$(python3 "$_ss_root/tools/sync-openhands-profiles.py" --openhands-dir "$HOME/.openhands" \
+                --consumer container --push-url http://127.0.0.1:3000 2>&1)" && push_rc=0 || push_rc=$?
+            printf '%s\n' "$push_out" | grep -v ' skipped (up to date)$' || true
+            if [[ $push_rc -ne 0 ]]; then
+                echo "OpenHands tier-profile push failed (exit $push_rc) - the app keeps its old profiles"
+            fi
         fi
         echo "OpenHands UI: http://localhost:3000"
         ;;

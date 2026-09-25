@@ -35,6 +35,7 @@ Never prints a key. Exit 0 = written/skipped cleanly, 2 = unusable input.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -186,8 +187,38 @@ def _http(method: str, url: str, body=None, timeout: float = 20.0):
         return status, None
 
 
-def push_profiles(push_url: str, profiles: list) -> int:
-    """Save (name, profile) pairs into a running OpenHands app. Returns 0."""
+def _key_mark(profile: dict) -> str:
+    """Short, non-reversible fingerprint of a profile's key - never the key."""
+    return hashlib.sha256(str(profile.get("api_key") or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _load_marks(path: Path | None) -> dict:
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_marks(path: Path | None, marks: dict) -> None:
+    if path is None:
+        return
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(marks, fh, indent=2, sort_keys=True)
+    os.chmod(str(path), 0o600)
+
+
+def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None) -> int:
+    """Save (name, profile) pairs into a running OpenHands app. Returns 0.
+
+    The app never returns a profile's key (only api_key_set), so a rotated key
+    cannot be seen by comparing fields. marks_path records a short hash of the
+    key last pushed per profile; a different hash forces the POST.
+    """
+    marks = _load_marks(marks_path)
     base = push_url.rstrip("/")
     status, spec = _http("GET", base + "/openapi.json")
     if status != 200 or not isinstance(spec, dict):
@@ -221,11 +252,13 @@ def push_profiles(push_url: str, profiles: list) -> int:
             current = dict(have.get("config") or {})
             current.pop("api_key", None)
             compare = {k: v for k, v in want.items() if k != "api_key"}
-            if all(current.get(k) == v for k, v in compare.items()):
+            same_key = marks.get(name) == _key_mark(want)
+            if all(current.get(k) == v for k, v in compare.items()) and same_key:
                 print(f"sync-openhands-profiles: app profile {name} skipped (up to date)")
                 continue
         status, reply = _http("POST", f"{base}/api/v1/settings/profiles/{name}", {"llm": want})
         if status in (200, 201):
+            marks[name] = _key_mark(want)
             print(f"sync-openhands-profiles: app profile {name} saved")
         elif status == 409:
             capped.append(name)
@@ -235,6 +268,7 @@ def push_profiles(push_url: str, profiles: list) -> int:
     if capped:
         print("sync-openhands-profiles: the app's profile cap is reached - not in the app: %s"
               % ", ".join(capped))
+    _save_marks(marks_path, marks)
     return 0
 
 
@@ -318,7 +352,7 @@ def main(argv=None):
             target.write_text(text, encoding="utf-8")
             print(f"sync-openhands-profiles: {name} written")
     if args.push_url:
-        return push_profiles(args.push_url, built)
+        return push_profiles(args.push_url, built, profiles_dir / ".autoos-pushed.json")
     return 0
 
 

@@ -516,9 +516,6 @@ class McpStdioTests(unittest.TestCase):
                 time.sleep(0.1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class StatePlacementTests(unittest.TestCase):
     """Operator order 2026-09-25: run state (job/output/exit files, probes,
@@ -548,3 +545,38 @@ class StatePlacementTests(unittest.TestCase):
                     os.environ.pop("AUTOOS_STATE_DIR", None)
                 else:
                     os.environ["AUTOOS_STATE_DIR"] = old
+
+
+class RunDirCollisionTests(unittest.TestCase):
+    """Review finding 2026-09-25: a run-id collision raised FileExistsError out
+    of the MCP tool call; it must retry, then fail as a JSON error."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR", "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_persistent_collision_returns_an_error_not_an_exception(self):
+        real = mcp_server.os.makedirs
+
+        def always_exists(path, *a, **kw):
+            if os.path.dirname(path) == mcp_server.state_root():
+                raise FileExistsError(path)
+            return real(path, *a, **kw)
+        mcp_server.os.makedirs = always_exists
+        try:
+            out = mcp_server.spawn({"task": "t", "tier": 3})
+        finally:
+            mcp_server.os.makedirs = real
+        self.assertIn("error", out)
+
+if __name__ == "__main__":
+    unittest.main()

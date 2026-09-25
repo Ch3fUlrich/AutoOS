@@ -6733,6 +6733,47 @@ if it "svc: profile sync pushes the tiers into a running app, idempotently and c
     if (( ok )); then pass; else fail "profile push is wrong"; fi
 fi
 
+# The app never returns a profile's key (only api_key_set), so "every other
+# field matches" cannot see a rotated key - it was skipped forever (review
+# finding 2026-09-25). The sync records a short hash of the last pushed key.
+if it "svc: profile push re-sends a profile whose key was rotated"; then
+    d="$(mktemp -d)"
+    python3 "$ROOT/tests/helpers/fake_openhands_app.py" "$d/port" "$d/req.log" >/dev/null 2>&1 &
+    fake_pid=$!
+    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
+    url="http://127.0.0.1:$(cat "$d/port")"
+    push() { env AUTOOS_OMNIROUTE_KEY="$1" python3 "$ROOT/tools/sync-openhands-profiles.py" \
+        --openhands-dir "$d/oh" --keys-file "$d/none.yml" --litellm-env "$d/none.env" --push-url "$url" 2>&1; }
+    push sk-fake-key-one >/dev/null
+    : >"$d/req.log"
+    same="$(push sk-fake-key-one)"
+    same_posts="$(grep -c '^POST /api/v1/settings/profiles/omniroute-tier1$' "$d/req.log" || true)"
+    : >"$d/req.log"
+    rotated="$(push sk-fake-key-two)"
+    rotated_posts="$(grep -c '^POST /api/v1/settings/profiles/omniroute-tier1$' "$d/req.log" || true)"
+    kill "$fake_pid" 2>/dev/null
+    state_mode="$(stat -c %a "$d/oh/profiles/.autoos-pushed.json" 2>/dev/null)"
+    leaked="$(grep -c 'sk-fake-key' "$d/oh/profiles/.autoos-pushed.json" 2>/dev/null || true)"
+    rm -rf "$d"
+    ok=1
+    [[ "$same_posts" == 0 ]] || { ok=0; echo "unchanged key re-posted ($same_posts)" >&2; }
+    [[ "$rotated_posts" == 1 ]] || { ok=0; echo "rotated key not pushed ($rotated_posts): $rotated" >&2; }
+    [[ "$state_mode" == 600 ]] || { ok=0; echo "state file mode $state_mode" >&2; }
+    [[ "$leaked" == 0 ]] || { ok=0; echo "raw key in the state file" >&2; }
+    if (( ok )); then pass; else fail "a rotated key never reaches the app"; fi
+fi
+
+# The push used to run as `... | grep -v skipped || true`, which swallowed a
+# failing sync (exit 2) under pipefail (review finding 2026-09-25).
+if it "svc: start-stack reports a failing profile push instead of hiding it"; then
+    block="$(sed -n '/^    openhands)/,/^        ;;/p' configuration/start-stack.sh)"
+    ok=1
+    [[ "$block" == *"skipped (up to date)\$' || true"* ]] && [[ "$block" != *"push_rc"* ]] && { ok=0; echo "push failure still swallowed" >&2; }
+    [[ "$block" == *'push_rc=$?'* ]] || { ok=0; echo "push exit code not kept" >&2; }
+    [[ "$block" == *'tier-profile push failed'* ]] || { ok=0; echo "no warning on a failed push" >&2; }
+    if (( ok )); then pass; else fail "a failed profile push is hidden"; fi
+fi
+
 if it "svc: profile push skips cleanly when no app answers"; then
     d="$(mktemp -d)"
     out="$(env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key python3 "$ROOT/tools/sync-openhands-profiles.py" \
