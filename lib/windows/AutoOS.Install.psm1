@@ -2608,11 +2608,12 @@ function Install-AutoOSOmniRouteRouting {
       _API_KEY form, Set-AutoOSClaudeGateway reads the short form); both
       carry the same gateway client key.
     #>
-    Set-AutoOSOmniRouteCliKey
+    param([string]$KeysFile)
+    Set-AutoOSOmniRouteCliKey -KeysFile $KeysFile
     $hadShort = -not [string]::IsNullOrWhiteSpace($env:AUTOOS_OMNIROUTE_KEY)
     $hadCli = -not [string]::IsNullOrWhiteSpace($env:OMNIROUTE_API_KEY)
     if (-not $hadShort -or -not $hadCli) {
-        $kf = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
+        $kf = if ($KeysFile) { $KeysFile } else { Join-Path $script:RepoRoot 'configuration\api-keys.yml' }
         $kv = $null
         if (Test-Path -LiteralPath $kf) {
             $kl = Select-String -Path $kf -Pattern '^omniroute\s*:' | Select-Object -First 1
