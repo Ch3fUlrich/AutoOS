@@ -27,6 +27,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   it. `register-autostart.sh` backs an installed unit up before it gains the line and
   skips it on the next run.
 
+### Changed — Antigravity installs from Google's apt repo, no pasted URL
+
+- **The Antigravity app no longer asks for a `.deb` link.** The installer adds Google's
+  signed apt repository (`us-central1-apt.pkg.dev`, the one antigravity.google/download/linux
+  prescribes) and installs `antigravity` from it. The `antigravity_url` question, the
+  catalog entry's `prompt` and the web form's field are gone; an old `antigravity_url`
+  answer in a saved config is ignored.
+- **The repo is frozen at 1.23.2** (Release dated 2026-04-16; the current 2.x apps are
+  tarball-only), and the installer says so with a warning. The signing key is fetched
+  over https and dearmored but not fingerprint-pinned: Google publishes no fingerprint.
+- A second run finds the key and the source line and writes nothing; a failed key fetch
+  leaves no key and no source list behind (`failed`, never `installed`).
+
 ### Changed — one source for the gateway model list (`catalog/ide-models.json`)
 
 - **The tier/model list was hand-kept in about eight places and had drifted**: the 1M
@@ -78,7 +91,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   way): `list` shows `signed-out` with the reason, `run --client agy` refuses with exit 3,
   and the MCP `list_clients` carries `usable` + `reason`.
 - **The Antigravity app on Linux counted as installed when it was skipped**: a blank
-  `.deb` URL returned 0. It is `failed` now, with the download page as the next step.
+  `.deb` URL returned 0. (The URL is gone altogether now: see the apt-repo entry above.)
 - **agy's vendor installer edits shell profiles** (`agy install` appends a PATH line to
   `~/.zshrc`, `~/.zprofile`, `~/.profile`); `install_agy` backs them up first.
 - **`--client gemini` exited 55 in any folder gemini had not been told to trust.** The

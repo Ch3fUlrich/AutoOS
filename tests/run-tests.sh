@@ -2859,24 +2859,127 @@ if it "install_devin_cli announces in dry run and writes nothing"; then
 fi
 
 # Operator 2026-09-25: the Antigravity app "was not available" on Linux, yet
-# the run said installed - a blank .deb URL returned 0, so install_package
-# counted it installed. The app does run on Linux x64 (not a hide case,
-# AGENTS.md), so the missing input is a failure with its reason.
-# A dry run never asks the question, so there it only warns (review
-# 2026-09-25: failing it turned every workstation dry run into exit 1).
-if it "install_antigravity without a .deb URL fails with the reason, never installed"; then
-    out="$( ( AUTOOS_DRY_RUN=0; unset 'AUTOOS_ANSWERS[antigravity_url]'; install_antigravity ) 2>&1)"; rc=$?
+# the run said installed - a blank pasted .deb URL returned 0, so
+# install_package counted it installed. F7 removed the cause: Google publishes
+# a signed apt repo (antigravity.google/download/linux), so there is no URL
+# to ask for and nothing to leave blank. The repo is frozen at 1.23.2 (the 2.x
+# apps are tarball-only) and the installer says so.
+#
+# antigravity_run <scratch> <dry 0|1> [fail-curl] [stale-answer]
+# One install_antigravity run in its own subshell (a fresh APT_UPDATED, like a
+# fresh process) against a scratch apt tree via the AUTOOS_APT_PREFIX test
+# seam. Everything that could touch the machine is a recording stub in
+# <scratch>/calls.log, so this can neither install, write to /etc nor reach
+# the network (AGENTS.md section 5).
+antigravity_run() {
+    local sb="$1" dry="$2" mode="${3:-}" stale="${4:-}"
+    (
+        AUTOOS_DRY_RUN="$dry"; AUTOOS_SUDO=""; AUTOOS_APT_PREFIX="$sb"; APT_UPDATED=0
+        [[ -n "$stale" ]] && AUTOOS_ANSWERS['antigravity_url']=https://example.invalid/stale.deb
+        log="$sb/calls.log"
+        curl() {
+            printf 'curl %s\n' "$*" >>"$log"
+            [[ "$mode" == fail-curl ]] && return 22
+            local o="" p="" a
+            for a in "$@"; do [[ "$p" == "-o" ]] && o="$a"; p="$a"; done
+            if [[ -n "$o" ]]; then printf 'ARMORED-KEY\n' >"$o"; else printf 'ARMORED-KEY\n'; fi
+        }
+        gpg() { printf 'gpg %s\n' "$*" >>"$log"; sed 's/^/DEARMORED:/'; }
+        install() {
+            printf 'install %s\n' "$*" >>"$log"
+            local src="${*: -2:1}" dst="${*: -1}"
+            mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
+        }
+        tee() { printf 'tee %s\n' "$*" >>"$log"; command tee "$@"; }
+        run() { printf 'run %s\n' "$*" >>"$log"; }
+        install_antigravity
+    ) 2>&1
+}
+
+AG_KEY_URL="https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg"
+AG_LIST_LINE="deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main"
+
+if it "install_antigravity dry run names Google's apt repo and package, asks for no URL, writes nothing"; then
+    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
+    out="$(antigravity_run "$sb" 1 "" stale)"; rc=$?
     ok=1
-    (( rc != 0 )) || { ok=0; echo "rc=0 counts a skipped app as installed" >&2; }
-    [[ "$out" == *"no .deb download URL"* ]] || { ok=0; echo "no reason: $out" >&2; }
-    [[ "$out" == *"antigravity.google/download/linux"* ]] || { ok=0; echo "no next step: $out" >&2; }
-    dry="$( ( AUTOOS_DRY_RUN=1; unset 'AUTOOS_ANSWERS[antigravity_url]'; install_antigravity ) 2>&1)"; rc3=$?
-    (( rc3 == 0 )) && [[ "$dry" == *"no .deb download URL"* && "$dry" == *"real run reports it failed"* ]] \
-        || { ok=0; echo "dry run: rc=$rc3 $dry" >&2; }
-    with="$( ( AUTOOS_DRY_RUN=1; AUTOOS_ANSWERS[antigravity_url]=https://example.invalid/a.deb; install_antigravity ) 2>&1)"; rc2=$?
-    (( rc2 == 0 )) && [[ "$with" == *"would download and install Antigravity"* ]] \
-        || { ok=0; echo "with a URL: rc=$rc2 $with" >&2; }
-    if (( ok )); then pass; else fail "a skipped Antigravity app reads as installed"; fi
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"us-central1-apt.pkg.dev"* && "$out" == *"antigravity"* ]] \
+        || { ok=0; echo "does not name the apt repo and package: $out" >&2; }
+    for bad in ".deb" "download URL" "antigravity_url" "example.invalid"; do
+        [[ "$out" != *"$bad"* ]] || { ok=0; echo "mentions '$bad': $out" >&2; }
+    done
+    [[ ! -s "$sb/calls.log" ]] || { ok=0; echo "a dry run ran commands: $(cat "$sb/calls.log")" >&2; }
+    [[ -z "$(find "$sb/etc" -type f)" ]] || { ok=0; echo "a dry run wrote files" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the Antigravity dry run still asks for a .deb URL or touches the machine"; fi
+fi
+
+if it "install_antigravity real run adds Google's signed apt repo, installs the package, warns the repo is frozen"; then
+    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
+    out="$(antigravity_run "$sb" 0 "" stale)"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    grep -qF -- "$AG_KEY_URL" "$sb/calls.log" || { ok=0; echo "key not fetched from $AG_KEY_URL" >&2; }
+    grep -q '^gpg .*--dearmor' "$sb/calls.log" || { ok=0; echo "key not dearmored" >&2; }
+    [[ "$(cat "$sb/etc/apt/keyrings/antigravity-repo-key.gpg" 2>/dev/null)" == "DEARMORED:ARMORED-KEY" ]] \
+        || { ok=0; echo "dearmored key not installed at the keyring path" >&2; }
+    [[ "$(cat "$sb/etc/apt/sources.list.d/antigravity.list" 2>/dev/null)" == "$AG_LIST_LINE" ]] \
+        || { ok=0; echo "source line differs from Google's: $(cat "$sb/etc/apt/sources.list.d/antigravity.list" 2>&1)" >&2; }
+    [[ "$(grep '^run ' "$sb/calls.log")" == $'run apt-get update -y\nrun apt-get install -y antigravity' ]] \
+        || { ok=0; echo "apt commands: $(grep '^run ' "$sb/calls.log" | tr '\n' '|')" >&2; }
+    [[ "$out" == *"frozen"* && "$out" == *"1.23.2"* ]] || { ok=0; echo "no frozen-repo warning: $out" >&2; }
+    ! grep -q 'example.invalid' "$sb/calls.log" || { ok=0; echo "a stale antigravity_url answer was used" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the Antigravity apt repo route is not what Google's download page prescribes"; fi
+fi
+
+if it "install_antigravity is idempotent: a second run with key and source present writes nothing"; then
+    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
+    antigravity_run "$sb" 0 >/dev/null
+    before="$(cksum "$sb/etc/apt/sources.list.d/antigravity.list" "$sb/etc/apt/keyrings/antigravity-repo-key.gpg")"
+    : >"$sb/calls.log"
+    out="$(antigravity_run "$sb" 0)"; rc=$?
+    after="$(cksum "$sb/etc/apt/sources.list.d/antigravity.list" "$sb/etc/apt/keyrings/antigravity-repo-key.gpg")"
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    writes="$(grep -E '^(curl|gpg|install|tee) ' "$sb/calls.log" || true)"
+    [[ -z "$writes" ]] || { ok=0; echo "the second run wrote again: $writes" >&2; }
+    [[ "$before" == "$after" ]] || { ok=0; echo "key or source list changed on the second run" >&2; }
+    [[ "$(wc -l <"$sb/etc/apt/sources.list.d/antigravity.list")" == 1 ]] || { ok=0; echo "source list grew" >&2; }
+    grep -qx 'run apt-get install -y antigravity' "$sb/calls.log" \
+        || { ok=0; echo "apt's own no-op install was skipped: $(cat "$sb/calls.log")" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a second Antigravity run is not a no-op"; fi
+fi
+
+if it "install_antigravity writes no key and no source list when the key fetch fails"; then
+    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
+    out="$(antigravity_run "$sb" 0 fail-curl)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "rc=0 counts a failed key fetch as installed" >&2; }
+    [[ -z "$(find "$sb/etc" -type f)" ]] || { ok=0; echo "left files behind: $(find "$sb/etc" -type f | tr '\n' ' ')" >&2; }
+    grep -qF -- "$AG_KEY_URL" "$sb/calls.log" 2>/dev/null || { ok=0; echo "the key fetch was never attempted" >&2; }
+    ! grep -q 'apt-get install' "$sb/calls.log" 2>/dev/null || { ok=0; echo "went on to apt-get install" >&2; }
+    [[ "$out" == *"Antigravity not installed"* ]] || { ok=0; echo "no reason given: $out" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a failed Antigravity key fetch leaves a half-configured apt"; fi
+fi
+
+if it "the antigravity catalog entry needs no download URL: no prompt, and no catalog asks antigravity_url"; then
+    problems="$(python3 - 2>&1 <<'PY'
+import json
+for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
+    doc = json.load(open(p, encoding="utf-8"))
+    if "antigravity_url" in doc.get("prompts", {}):
+        print(p + ": still asks antigravity_url")
+    for g in doc["categories"]:
+        for c in g["components"]:
+            if c["id"] == "antigravity" and c.get("prompt"):
+                print(p + ": antigravity still carries prompt " + str(c["prompt"]))
+PY
+)"
+    assert_eq "$problems" ""
 fi
 
 # Measured 2026-09-25: the vendor agy installer ends with `agy install`, which
@@ -4066,8 +4169,9 @@ fi
 
 if it "every key the configuration form groups is a real catalog prompt"; then
     # The form used to hardcode six fields. Three of them (git_user_name,
-    # ollama_models, antigravity_url) are Linux-only prompts, so on Windows it
-    # rendered boxes whose answers no installer would ever read.
+    # ollama_models, antigravity_url - the last since removed) were Linux-only
+    # prompts, so on Windows it rendered boxes whose answers no installer
+    # would ever read.
     if python3 "$ROOT/tests/helpers/check_config_sections.py"; then
         pass
     else
