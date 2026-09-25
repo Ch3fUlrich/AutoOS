@@ -984,6 +984,7 @@ Test-Case 'backup-once: Enable-AutoOSProjectMcpServer does not back up again whe
     $log2 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
     $null = New-Item -ItemType Directory -Path $claudeDir -Force
     [IO.File]::WriteAllText($file, '{"permissions":{"allow":["Bash(ls:*)"]}}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
     $run = {
         param($LogPath)
         Initialize-AutoOSLog -Path $LogPath
@@ -994,6 +995,8 @@ Test-Case 'backup-once: Enable-AutoOSProjectMcpServer does not back up again whe
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         $null = & $run $log1
         $backups1 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*').Count
+        $backup1B64 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
         $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
         Start-Sleep -Milliseconds 1100
         $out2 = & $run $log2
@@ -1003,6 +1006,7 @@ Test-Case 'backup-once: Enable-AutoOSProjectMcpServer does not back up again whe
         if (@($s.enabledMcpjsonServers) -notcontains 'omnigraph') { throw 'run 1 did not approve the server' }
         if (@($s.permissions.allow) -notcontains 'Bash(ls:*)') { throw 'run 1 dropped the existing permissions' }
         if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
         if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
         if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
         if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
@@ -3092,6 +3096,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
     $log2 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
     $null = New-Item -ItemType Directory -Path $cfgDir -Force
     [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
     $run = {
         param($LogPath)
         Initialize-AutoOSLog -Path $LogPath
@@ -3105,6 +3110,8 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         $null = & $run $log1
         $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
+        $backup1B64 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
         $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
         Start-Sleep -Milliseconds 1100
         $out2 = & $run $log2
@@ -3115,6 +3122,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
         if (($s.mcpServers.PSObject.Properties.Name -join ',') -ne 'other,omnigraph') { throw "servers reordered or lost: [$($s.mcpServers.PSObject.Properties.Name -join ',')]" }
         if ($s.mcpServers.other.command -ne 'node') { throw 'the existing server was not kept' }
         if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
         if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
         if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
         if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
@@ -3144,6 +3152,7 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up aga
     $logs = @(1..3 | ForEach-Object { Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log') })
     $null = New-Item -ItemType Directory -Path $cfgDir -Force
     [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
     $run = {
         param($LogPath)
         Initialize-AutoOSLog -Path $LogPath
@@ -3162,6 +3171,8 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up aga
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         $null = & $run $logs[0]
         $backups1 = & $countBackups
+        $backup1B64 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
         $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
         Start-Sleep -Milliseconds 1100
         $out2 = & $run $logs[1]
@@ -3173,6 +3184,7 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up aga
         if ($s.mcpServers.other.command -ne 'node') { throw 'the existing server was not kept' }
         if ($s.mcpServers.example.command -ne 'npx') { throw 'the new server was not written' }
         if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
         if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
         if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
         if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
