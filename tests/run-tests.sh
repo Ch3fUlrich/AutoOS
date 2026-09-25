@@ -6040,7 +6040,7 @@ for pat in fences["bash_deny_all"] + fences["bash_deny_leaf"]:
         problems.append("shell:" + pat)
 if last("serena_*", "*") != "deny":
     problems.append("serena-writes-open")
-for tool in ("omnigraph_mutate", "omnigraph_load", "omnigraph_branches_merge", "omnigraph_branches_delete", "playwright_browser_run_code_unsafe"):
+for tool in ("omnigraph_mutate", "omnigraph_load", "omnigraph_branches_merge", "omnigraph_branches_delete", "playwright_browser_run_code_unsafe", "autoos-agent_*"):
     if last(tool, "*") != "deny":
         problems.append(tool)
 allowed = [a for a, r, e in t3 if a.startswith("serena_") and e == "allow"]

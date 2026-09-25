@@ -5,7 +5,7 @@ Tools: list_clients, spawn, status, result, cancel. spawn is asynchronous: it
 validates the request (card -> combo through autoos_routing.select_combo, the
 same function the CLI uses; the depth budget; client rules), starts a
 detached runner and returns a run id at once. Each run lives in
-$XDG_STATE_HOME/autoos/agents/<id>/ (default ~/.local/state):
+<repo>/logs/agents/<id>/ (git-ignored; AUTOOS_STATE_DIR overrides <repo>/logs):
 
     job.json     the request, the autoos-agent.py argv, pid, route, start time
     output.log   the child's stdout + stderr (never contains a key)
@@ -43,8 +43,7 @@ _CHILDREN = {}  # pid -> Popen of runners this server started; poll() reaps them
 
 
 def state_root() -> str:
-    base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
-    return os.path.join(base, "autoos", "agents")
+    return os.path.join(clients.state_dir(), "agents")
 
 
 def _read_json(path: str):

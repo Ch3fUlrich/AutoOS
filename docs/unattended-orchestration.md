@@ -159,7 +159,7 @@ It has five tools:
 - `cancel(run_id)`
 
 Each run keeps `job.json`, `output.log` and `exit.json` under
-`~/.local/state/autoos/agents/<id>/`. The installers register the server,
+`<repo>/logs/agents/<id>/` (git-ignored; `AUTOOS_STATE_DIR` overrides `<repo>/logs`, isolated clones go to `logs/sandboxes/`). The installers register the server,
 using the pin in `catalog/agent-harness.json`, in these places:
 
 - `.mcp.json` (the project server, approved in `.claude/settings.local.json`)

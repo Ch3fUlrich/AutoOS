@@ -235,8 +235,9 @@ def build_plan(args, cfg: dict) -> dict:
     sandbox = None
     if args.isolate:
         name = "%s-%s-%s" % (os.path.basename(ROOT), stamp, slugify(args.task))
-        state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
-        sandbox = {"path": os.path.join(state, "autoos", "sandboxes", name),
+        # Inside the repo's git-ignored logs/ (clients.state_dir). The clone has
+        # its own .git, so opencode resolves it as its own project root.
+        sandbox = {"path": os.path.join(clients.state_dir(), "sandboxes", name),
                    "branch": "agent/%s-%s" % (stamp, slugify(args.task))}
         if client.name == "opencode":
             # opencode keys a project by its root commit and remembers the root it

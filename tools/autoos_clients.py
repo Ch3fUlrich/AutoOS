@@ -106,10 +106,20 @@ def child_depth(env: dict, max_flag: int | None = None) -> tuple:
     return cur + 1, cap
 
 
-def _probe_file(env: dict | None = None) -> str:
+def state_dir(env: dict | None = None) -> str:
+    """Where run state lives: the repository's git-ignored logs/ folder.
+
+    Operator order 2026-09-25: job/output/exit files, probe dates and sandbox
+    clones stay inside the repository, git-ignored - never scattered under
+    ~/.local/state. AUTOOS_STATE_DIR overrides it (the tests use a temp dir).
+    """
     env = os.environ if env is None else env
-    state = env.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
-    return os.path.join(state, "autoos", "agents", "probes.json")
+    return env.get("AUTOOS_STATE_DIR") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+
+
+def _probe_file(env: dict | None = None) -> str:
+    return os.path.join(state_dir(env), "agents", "probes.json")
 
 
 def _probes(env=None) -> dict:

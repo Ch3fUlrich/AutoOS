@@ -3875,7 +3875,7 @@ Test-Case 'tier depth is mandatory: only tier1 spawns, tier3 spawns nothing' {
         $hit = @($t3 | Where-Object { $_.action -eq 'shell' -and $_.resource -eq $pat })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "tier3 shell fence missing: $pat"
     }
-    foreach ($tool in @('serena_*', 'omnigraph_mutate', 'omnigraph_load', 'omnigraph_branches_merge', 'omnigraph_branches_delete', 'playwright_browser_run_code_unsafe')) {
+    foreach ($tool in @('serena_*', 'omnigraph_mutate', 'omnigraph_load', 'omnigraph_branches_merge', 'omnigraph_branches_delete', 'playwright_browser_run_code_unsafe', 'autoos-agent_*')) {
         $hit = @($t3 | Where-Object { $_.action -eq $tool })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "tier3 MCP writer open: $tool"
     }

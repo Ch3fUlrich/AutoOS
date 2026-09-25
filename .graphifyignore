@@ -7,3 +7,4 @@ third_party/
 Linux/Network/eduroam-linux-UniBasel.py
 Linux/Network/eduroam-linux-Universitat_Basel-UniBasel.py
 web/*.woff2
+logs/

@@ -9,7 +9,7 @@
   "baseBranch": "main",
   "branchPrefix": "merge",
   "stateDir": "logs/handoff-sessions",
-  "doneNote": "docs/handoff/DONE-{{session}}.md",
+  "doneNote": "logs/handoff-sessions/DONE-{{session}}.md",
   "linkDirs": [
     "graphify-out"
   ],

@@ -372,7 +372,7 @@ class LeanTests(unittest.TestCase):
 class PromoProbeTests(unittest.TestCase):
     def test_probe_is_stale_after_seven_days(self):
         with tempfile.TemporaryDirectory() as tmp:
-            env = {"XDG_STATE_HOME": tmp}
+            env = {"AUTOOS_STATE_DIR": tmp}
             self.assertEqual(clients.probe_age_days("qoder", env=env), None)
             clients.record_probe("qoder", now=1000.0, env=env)
             self.assertFalse(clients.probe_stale("qoder", now=1000.0 + 6 * 86400, env=env))
@@ -384,9 +384,9 @@ class McpToolTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        self.old = {k: os.environ.get(k) for k in ("XDG_STATE_HOME", "AUTOOS_AGENT_MCP_DRY_RUN",
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR", "AUTOOS_AGENT_MCP_DRY_RUN",
                                                    "AUTOOS_AGENT_DEPTH", "AUTOOS_AGENT_MAX_DEPTH")}
-        os.environ.update(XDG_STATE_HOME=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
         os.environ.pop("AUTOOS_AGENT_DEPTH", None)
         os.environ.pop("AUTOOS_AGENT_MAX_DEPTH", None)
 
@@ -423,9 +423,9 @@ class McpToolTests(unittest.TestCase):
         self.assertIn("would run: opencode run --standalone --agent tier3-reviewer", text)
         self.assertIn("lean:", text)  # reviewers default to lean
 
-    def test_state_lives_under_xdg_state_autoos_agents(self):
+    def test_state_lives_under_the_state_dir_agents(self):
         out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
-        self.assertEqual(out["dir"], os.path.join(self.tmp, "autoos", "agents", out["id"]))
+        self.assertEqual(out["dir"], os.path.join(self.tmp, "agents", out["id"]))
         self.wait_done(out["id"])
         for name in ("job.json", "output.log", "exit.json"):
             self.assertTrue(os.path.isfile(os.path.join(out["dir"], name)), name)
@@ -473,7 +473,7 @@ class McpStdioTests(unittest.TestCase):
         if not cmd:
             self.skipTest("uv or a cached mcp<2 is not available (offline)")
         with tempfile.TemporaryDirectory() as tmp:
-            env = clean_env(XDG_STATE_HOME=tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+            env = clean_env(AUTOOS_STATE_DIR=tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
             msgs = [
                 {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
                     "protocolVersion": "2024-11-05", "capabilities": {},
@@ -508,7 +508,7 @@ class McpStdioTests(unittest.TestCase):
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "tier3")
-            run_dir = os.path.join(tmp, "autoos", "agents", spawned["id"])
+            run_dir = os.path.join(tmp, "agents", spawned["id"])
             self.assertTrue(os.path.isdir(run_dir))
             for _ in range(100):  # let the detached dry run finish before tmp goes away
                 if os.path.exists(os.path.join(run_dir, "exit.json")):
@@ -518,3 +518,33 @@ class McpStdioTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatePlacementTests(unittest.TestCase):
+    """Operator order 2026-09-25: run state (job/output/exit files, probes,
+    sandbox clones) lives inside the repository, in a git-ignored folder -
+    never scattered under ~/.local/state."""
+
+    def _ignored(self, path):
+        rel = os.path.relpath(path, ROOT)
+        return subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-q", rel]).returncode == 0
+
+    def test_default_state_dir_is_inside_the_repo_and_git_ignored(self):
+        env = {k: v for k, v in os.environ.items() if k != "AUTOOS_STATE_DIR"}
+        base = clients.state_dir(env)
+        self.assertTrue(os.path.realpath(base).startswith(os.path.realpath(str(ROOT)) + os.sep), base)
+        for sub in (os.path.join(base, "agents", "x"), os.path.join(base, "sandboxes", "x")):
+            self.assertTrue(self._ignored(sub), sub + " is not git-ignored")
+
+    def test_mcp_runs_and_probes_follow_the_state_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("AUTOOS_STATE_DIR")
+            os.environ["AUTOOS_STATE_DIR"] = tmp
+            try:
+                self.assertEqual(mcp_server.state_root(), os.path.join(tmp, "agents"))
+                self.assertTrue(clients._probe_file().startswith(tmp))
+            finally:
+                if old is None:
+                    os.environ.pop("AUTOOS_STATE_DIR", None)
+                else:
+                    os.environ["AUTOOS_STATE_DIR"] = old
