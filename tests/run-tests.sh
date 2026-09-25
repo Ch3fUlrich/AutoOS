@@ -1696,11 +1696,12 @@ if it "a dry run executes no commands at all"; then
     # Asserts the property directly rather than sampling mtimes, which slid with
     # the clock and made this flaky: every action must be announced as "would
     # run:", and none may appear as an executed "run:".
-    out="$(bash setup.sh --profile workstation --dry-run --yes --no-color 2>&1)"
+    out="$(bash setup.sh --profile workstation --dry-run --yes --no-color 2>&1)"; rc=$?
     executed="$(printf '%s' "$out" | grep -c '^run:' || true)"
     planned="$(printf '%s' "$out" | grep -c 'would ' || true)"
-    if [[ "$executed" -eq 0 && "$planned" -gt 0 ]]; then pass
-    else fail "executed=$executed planned=$planned (expected 0 executed, >0 planned)"; fi
+    # rc too: a prompt the dry run never asks must not fail it (review 2026-09-25).
+    if [[ "$rc" -eq 0 && "$executed" -eq 0 && "$planned" -gt 0 ]]; then pass
+    else fail "rc=$rc executed=$executed planned=$planned (expected rc 0, 0 executed, >0 planned)"; fi
 fi
 
 if it "a dry run creates none of the files its installers would"; then
@@ -2587,12 +2588,17 @@ fi
 # the run said installed - a blank .deb URL returned 0, so install_package
 # counted it installed. The app does run on Linux x64 (not a hide case,
 # AGENTS.md), so the missing input is a failure with its reason.
+# A dry run never asks the question, so there it only warns (review
+# 2026-09-25: failing it turned every workstation dry run into exit 1).
 if it "install_antigravity without a .deb URL fails with the reason, never installed"; then
-    out="$( ( AUTOOS_DRY_RUN=1; unset 'AUTOOS_ANSWERS[antigravity_url]'; install_antigravity ) 2>&1)"; rc=$?
+    out="$( ( AUTOOS_DRY_RUN=0; unset 'AUTOOS_ANSWERS[antigravity_url]'; install_antigravity ) 2>&1)"; rc=$?
     ok=1
     (( rc != 0 )) || { ok=0; echo "rc=0 counts a skipped app as installed" >&2; }
     [[ "$out" == *"no .deb download URL"* ]] || { ok=0; echo "no reason: $out" >&2; }
     [[ "$out" == *"antigravity.google/download/linux"* ]] || { ok=0; echo "no next step: $out" >&2; }
+    dry="$( ( AUTOOS_DRY_RUN=1; unset 'AUTOOS_ANSWERS[antigravity_url]'; install_antigravity ) 2>&1)"; rc3=$?
+    (( rc3 == 0 )) && [[ "$dry" == *"no .deb download URL"* && "$dry" == *"real run reports it failed"* ]] \
+        || { ok=0; echo "dry run: rc=$rc3 $dry" >&2; }
     with="$( ( AUTOOS_DRY_RUN=1; AUTOOS_ANSWERS[antigravity_url]=https://example.invalid/a.deb; install_antigravity ) 2>&1)"; rc2=$?
     (( rc2 == 0 )) && [[ "$with" == *"would download and install Antigravity"* ]] \
         || { ok=0; echo "with a URL: rc=$rc2 $with" >&2; }

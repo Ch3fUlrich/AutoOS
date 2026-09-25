@@ -16,6 +16,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -91,6 +92,16 @@ class RoutingTableTests(unittest.TestCase):
             live = {c["name"] for c in json.load(fh)["combos"]}
         self.assertFalse(retired & set(routing.ALL_COMBOS))
         self.assertLessEqual(set(routing.ALL_COMBOS), live)
+        # Every card the resolver accepts, not just the hand-kept tuple.
+        import itertools
+        fields = list(routing.CARD_VALUES)
+        for values in itertools.product(*(routing.CARD_VALUES[f] for f in fields)):
+            for allow in (False, True):
+                try:
+                    combo = routing.select_combo(dict(zip(fields, values)), allow)[0]
+                except routing.NoRoute:
+                    continue
+                self.assertIn(combo, routing.ALL_COMBOS, (values, allow))
 
     def test_sensitive_implement_is_t2_worker_clean(self):
         self.assertEqual(self.pick(privacy="sensitive"), "t2-worker-clean")
@@ -207,7 +218,11 @@ class ClientMatrixTests(unittest.TestCase):
         self.assertEqual({n for n, c in clients.CLIENTS.items() if c.promo}, {"qoder"})
 
     def test_list_prints_the_matrix_and_says_agy_and_qoder_skip_the_gateway(self):
-        out = run_agent("list").stdout
+        # An empty PATH: `list` probes agy's sign-in, and a test never runs
+        # the host's real agy (review 2026-09-25).
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, True)
+        out = run_agent("list", env=clean_env(PATH=empty)).stdout
         for name in clients.CLIENTS:
             self.assertIn(name, out)
         for line in out.splitlines():
@@ -396,6 +411,7 @@ class PromoProbeTests(unittest.TestCase):
             self.assertTrue(clients.probe_stale("qoder", now=1000.0 + 8 * 86400, env=env))
 
 
+@unittest.skipIf(os.name == "nt", "sh stubs; tests/run-tests.sh runs these on Linux")
 class SignInProbeTests(unittest.TestCase):
     """Operator 2026-09-25: agy that cannot run here must be an error, not a
     silent or misleading result. A signed-out agy used to pass `list` as
@@ -444,6 +460,11 @@ class SignInProbeTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         self.assertEqual(clients.signin_state(clients.CLIENTS["agy"], {"PATH": d}), (None, ""))
 
+    def test_an_env_without_path_never_finds_the_hosts_binary(self):
+        d, env = self.stub(self.SIGNED_OUT)
+        with mock.patch.dict(os.environ, {"PATH": env["PATH"]}):
+            self.assertEqual(clients.signin_state(clients.CLIENTS["agy"], {"HOME": d}), (None, ""))
+
     def test_a_client_without_a_probe_is_unknown(self):
         self.assertEqual(clients.signin_state(clients.CLIENTS["opencode"], os.environ), (None, ""))
 
@@ -472,12 +493,8 @@ class SignInProbeTests(unittest.TestCase):
 
     def test_mcp_list_clients_carries_usability(self):
         d, env = self.stub(self.SIGNED_OUT)
-        old = os.environ.get("PATH")
-        os.environ["PATH"] = env["PATH"]
-        try:
+        with mock.patch.dict(os.environ, {"PATH": env["PATH"]}):
             agy = next(c for c in mcp_server.list_clients()["clients"] if c["name"] == "agy")
-        finally:
-            os.environ["PATH"] = old
         self.assertTrue(agy["installed"])
         self.assertIs(agy["usable"], False)
         self.assertIn("Please sign in", agy["reason"])
@@ -511,7 +528,10 @@ class McpToolTests(unittest.TestCase):
         self.fail("run %s never finished" % run_id)
 
     def test_list_clients_has_the_matrix_and_the_card(self):
-        out = mcp_server.list_clients()
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, True)
+        with mock.patch.dict(os.environ, {"PATH": empty}):  # never probe the host's agy
+            out = mcp_server.list_clients()
         self.assertEqual({c["name"] for c in out["clients"]}, set(clients.CLIENTS))
         self.assertEqual(out["card"]["defaults"], routing.CARD_DEFAULTS)
         self.assertIn("depth 1 of", out["depth"])

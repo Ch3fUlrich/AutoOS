@@ -106,7 +106,8 @@ def signin_state(client: Client, env: dict | None = None) -> tuple:
     env = os.environ if env is None else env
     if not client.signin_probe:
         return None, ""
-    exe = shutil.which(client.binary, path=env.get("PATH"))
+    # No PATH in env means os.defpath, as exec would - never the caller's PATH.
+    exe = shutil.which(client.binary, path=env.get("PATH", os.defpath))
     if not exe:
         return None, ""
     argv = [exe, *client.signin_probe]

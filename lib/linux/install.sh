@@ -308,6 +308,12 @@ install_tailscale() {
 
 install_antigravity() {
     local url; url="$(answer antigravity_url '')"
+    if [[ -z "$url" ]] && (( AUTOOS_DRY_RUN )); then
+        # A dry run never asks the question: say what the real run will do.
+        ui_warn "Antigravity: no .deb download URL given - the real run reports it failed."
+        ui_muted "    Copy the .deb link from https://antigravity.google/download/linux."
+        return 0
+    fi
     if [[ -z "$url" ]]; then
         # A failure, not a quiet skip: returning 0 here was counted as
         # "installed" although nothing was (operator, 2026-09-25).

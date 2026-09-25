@@ -4290,7 +4290,12 @@ function Wait-AutoOSHttp {
 }
 
 Test-Case 'openhands container answers on :3000' {
-    $names = (& docker ps --format '{{.Names}}' 2>$null) -join "`n"
+    # A docker CLI without a reachable daemon writes to stderr, which Windows
+    # PowerShell 5.1 turns into a terminating error under Stop: skip instead.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $names = (& docker ps --format '{{.Names}}' 2>$null) -join "`n" }
+    catch { $names = '' }
+    finally { $ErrorActionPreference = $prev }
     if ($names -notmatch 'openhands') { Skip 'no openhands container running'; return }
     Assert-True (Wait-AutoOSHttp 'http://localhost:3000/') 'OpenHands UI did not answer on :3000'
 }
