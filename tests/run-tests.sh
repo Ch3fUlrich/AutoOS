@@ -8425,6 +8425,7 @@ _aistack() {
     while (( $# )) && [[ "$1" == [A-Z]*=* ]]; do extra+=("$1"); shift; done
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
+        -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
         AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
         AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
@@ -9056,6 +9057,324 @@ STUB
     [[ -e "$d2/run-autoos-omniroute" && -e "$d2/cfg/stack.active" ]] || { ok=0; echo "stack or marker gone" >&2; }
     rm -rf "$d" "$d2"
     if (( ok )); then pass; else fail "a failed backup leaves a partial archive"; fi
+fi
+
+# ─── ai-stack.sh verify ─────────────────────────────────────────────────────
+# The read-only end-to-end check. Docker is the usual stub; curl is a second
+# stand-in wired through AUTOOS_CURL that answers from a table and logs the
+# argv it received, so a test can prove what did (and did not) reach a curl
+# command line.
+_AISTACK_VERIFY_KEY="sk-verify-secret-0123456789abcdef"
+
+# _aistack_verify_sandbox <sandbox>: a migrated host (three healthy
+# containers, firewall unit up) plus what verify reads beyond the docker
+# stub: the OpenHands container's SANDBOX_VOLUMES and the curl stand-in with
+# an all-green route table.
+_aistack_verify_sandbox() {
+    local d="$1"
+    _aistack_migrated "$d"
+    printf 'SANDBOX_VOLUMES=%s:%s:rw\n' "$d/code" "$d/code" >"$d/env-openhands-app"
+    printf '%s' "$_AISTACK_VERIFY_KEY" >"$d/curl-key"
+    cat >"$d/bin/verify-curl" <<'STUB'
+#!/usr/bin/env bash
+# curl stand-in for `ai-stack.sh verify` (AUTOOS_CURL). Answers from
+# <state>/curl-table, one "URL AUTH BODY CODE" line per route: AUTH is none |
+# key | bad | any, BODY is - or a substring of the -d payload, the first match
+# wins and no match means nothing answered. Logs its argv to curl-argv.log.
+# The Authorization header is read from `-H @-` (stdin) or an inline -H and
+# compared with <state>/curl-key; it is never logged, only the verdict is.
+S="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+printf '%s\n' "$*" >>"$S/curl-argv.log"
+args=("$@"); url=""; body=""; hdrs=""; want_code=0
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[i]}" in
+        -w) want_code=1 ;;
+        -d) body="${args[i+1]:-}" ;;
+        -H) h="${args[i+1]:-}"
+            if [[ "$h" == "@-" ]]; then h="$(cat)"; fi
+            hdrs+="$h"$'\n' ;;
+        http://*|https://*) url="${args[i]}" ;;
+    esac
+done
+auth=none
+want="Authorization: Bearer $(cat "$S/curl-key" 2>/dev/null)"
+while IFS= read -r h; do
+    case "$h" in
+        "$want") auth=key ;;
+        Authorization:*) auth=bad ;;
+    esac
+done <<<"$hdrs"
+code=000
+while read -r t_url t_auth t_body t_code; do
+    [[ "$t_url" == "$url" ]] || continue
+    [[ "$t_auth" == any || "$t_auth" == "$auth" ]] || continue
+    [[ "$t_body" == - || "$body" == *"$t_body"* ]] || continue
+    code="$t_code"; break
+done <"$S/curl-table"
+printf 'url=%s auth=%s code=%s\n' "$url" "$auth" "$code" >>"$S/curl-seen.log"
+if (( want_code )); then printf '%s' "$code"; fi
+if [[ "$code" == 000 ]]; then exit 7; fi
+exit 0
+STUB
+    chmod +x "$d/bin/verify-curl"
+    printf '%s\n' \
+        'http://127.0.0.1:20128/v1/models none - 401' \
+        'http://127.0.0.1:20128/v1/models key - 200' \
+        'http://127.0.0.1:20128/v1/chat/completions bad - 401' \
+        'http://127.0.0.1:20128/v1/chat/completions key t2-worker-free-only 200' \
+        'http://127.0.0.1:20128/v1/chat/completions key t3-driver-free-only 200' \
+        'http://127.0.0.1:20128/v1/chat/completions key t2-worker-clean 200' \
+        'http://127.0.0.1:4096/api/session none - 401' >"$d/curl-table"
+}
+# _aistack_verify_route <sandbox> <url> <auth> <body> <code>: one more route,
+# ahead of the table (the first match wins).
+_aistack_verify_route() {
+    local d="$1"; shift
+    { printf '%s %s %s %s\n' "$@"; cat "$d/curl-table"; } >"$d/curl-table.new" && mv "$d/curl-table.new" "$d/curl-table"
+}
+# _aistack_verify <sandbox> [NAME=value...] verify: the curl stand-in wired in.
+_aistack_verify() {
+    local d="$1"
+    shift
+    _aistack "$d" AUTOOS_CURL="$d/bin/verify-curl" "$@"
+}
+# _aistack_snapshot <sandbox>: a checksum of every file the run could have
+# touched (the stubs' own logs and bin/ excluded).
+_aistack_snapshot() {
+    find "$1" \( -name bin -o -name '*.log' \) -prune -o -type f -print | sort | xargs -r cksum
+}
+
+if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '%s\n' 'http://127.0.0.1:18081/ none - 302' 'http://127.0.0.1:18082/ none - 302' >>"$d/curl-table"
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" \
+        AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0" >&2; }
+    grep -qx 'verify: 12 ok, 0 failed, 1 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
+    grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
+    for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
+                'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
+                'combo t2-worker-free-only' 'combo t3-driver-free-only' 'combo t2-worker-clean' \
+                'public URL http://127.0.0.1:18081/' 'public URL http://127.0.0.1:18082/'; do
+        grep -qx "  ok    $name" <<<"$out" || { ok=0; echo "no ok line for: $name" >&2; }
+    done
+    grep -qE '^  ok    code dir .* visible in autoos-opencode$' <<<"$out" || { ok=0; echo "no ok for the opencode code dir" >&2; }
+    grep -qE '^  ok    code dir .* in openhands-app SANDBOX_VOLUMES$' <<<"$out" || { ok=0; echo "no ok for the sandbox volumes" >&2; }
+    grep -q '^  skip  healthcheck - ' <<<"$out" || { ok=0; echo "the healthcheck skip is not reported" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify is not green on a healthy stack"; fi
+fi
+
+if it "aistack: verify FAILs a keyless request that is answered 200"; then
+    ok=1
+    for probe in "20128 /v1/models" "4096 /api/session"; do
+        d="$(_aistack_sandbox)"
+        _aistack_verify_sandbox "$d"
+        _aistack_verify_route "$d" "http://127.0.0.1:${probe%% *}${probe#* }" none - 200
+        out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "$probe: exit $rc, not 1" >&2; }
+        grep -qE "^  FAIL  keyless ${probe#* } refused on :${probe%% *} - HTTP 200" <<<"$out" || { ok=0; echo "$probe: no FAIL line" >&2; }
+        [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "$probe: not exactly one FAIL" >&2; }
+        grep -q '^verify: .* 1 failed' <<<"$out" || { ok=0; echo "$probe: summary does not say 1 failed" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "a keyless 200 is not a FAIL"; fi
+fi
+
+if it "aistack: verify FAILs a container that is not running or not healthy"; then
+    ok=1
+    for mode in stopped unhealthy missing; do
+        d="$(_aistack_sandbox)"
+        _aistack_verify_sandbox "$d"
+        case "$mode" in
+            stopped)   rm -f "$d/run-autoos-opencode"; want='container autoos-opencode - exited' ;;
+            unhealthy) : >"$d/unhealthy-omniroute"; want='container autoos-omniroute - running \(unhealthy\)' ;;
+            missing)   rm -f "$d/run-openhands-app" "$d/compose-openhands-app"; want='container openhands-app - no container' ;;
+        esac
+        out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "$mode: exit $rc, not 1" >&2; }
+        # Check 1 runs first, so its FAIL leads. Later checks of a container that
+        # is down may FAIL too (a stopped opencode cannot show its code dir).
+        grep -E '^  FAIL' <<<"$out" | head -n1 | grep -qE "^  FAIL  $want\$" || { ok=0; echo "$mode: the first FAIL is not the container: $(grep '^  FAIL' <<<"$out" | head -n1)" >&2; }
+        grep -qE '^verify: [0-9]+ ok, [1-9][0-9]* failed' <<<"$out" || { ok=0; echo "$mode: summary does not count a failure" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "a stopped, unhealthy or missing container is not a FAIL"; fi
+fi
+
+if it "aistack: verify skips the keyed combos without a key, and the key never reaches argv or the output"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    ok=1
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "no key: exit $rc, not 0" >&2; }
+    grep -q '^  skip  keyed combos - AUTOOS_OMNIROUTE_KEY is not set' <<<"$out" || { ok=0; echo "no key: no skip line" >&2; }
+    [[ "$(grep -c 'chat/completions' "$d/curl-argv.log")" == 0 ]] || { ok=0; echo "no key: a chat request was sent" >&2; }
+    rm -f "$d/curl-argv.log" "$d/curl-seen.log"
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "key set: exit $rc, not 0" >&2; }
+    [[ "$(grep -c 'chat/completions' "$d/curl-argv.log")" == 3 ]] || { ok=0; echo "key set: not three chat requests" >&2; }
+    # The stub compared the header it read from stdin: the key did arrive.
+    [[ "$(grep -c 'chat/completions auth=key code=200' "$d/curl-seen.log")" == 3 ]] || { ok=0; echo "key set: the key did not reach curl" >&2; }
+    [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "the key is on curl's command line" >&2; }
+    [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/docker.log" || true)" == 0 ]] || { ok=0; echo "the key reached docker" >&2; }
+    [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" <<<"$out" || true)" == 0 ]] || { ok=0; echo "the key is in the output" >&2; }
+    grep -q '^  ok    combo t2-worker-clean$' <<<"$out" || { ok=0; echo "key set: no ok for a combo" >&2; }
+    # A key the gateway rejects: FAIL for every combo, and still no key printed.
+    rm -f "$d/curl-argv.log" "$d/curl-seen.log"
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY=sk-verify-wrong-key-987654321 verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "wrong key: exit $rc, not 1" >&2; }
+    [[ "$(grep -c '^  FAIL  combo .* - HTTP 401' <<<"$out")" == 3 ]] || { ok=0; echo "wrong key: not three FAIL lines" >&2; }
+    [[ "$(grep -c -F -e 'sk-verify-wrong-key-987654321' "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "the wrong key is on curl's command line" >&2; }
+    [[ "$(grep -c -F -e 'sk-verify-wrong-key-987654321' <<<"$out" || true)" == 0 ]] || { ok=0; echo "the wrong key is in the output" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the gateway key leaks, or the keyless run is not a skip"; fi
+fi
+
+if it "aistack: verify AUTOOS_VERIFY_COMBOS replaces the combo list"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key alpha-combo 200
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key beta-combo 404
+    ok=1
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_COMBOS="alpha-combo beta-combo" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1" >&2; }
+    grep -qx '  ok    combo alpha-combo' <<<"$out" || { ok=0; echo "alpha-combo not ok" >&2; }
+    grep -qE '^  FAIL  combo beta-combo - HTTP 404' <<<"$out" || { ok=0; echo "beta-combo not FAIL" >&2; }
+    [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "not exactly one FAIL" >&2; }
+    grep -q 't2-worker-free-only' "$d/curl-argv.log" && { ok=0; echo "a default combo was still requested" >&2; }
+    grep -q '"max_tokens":16' "$d/curl-argv.log" || { ok=0; echo "max_tokens 16 not sent" >&2; }
+    # A name that could break out of the JSON body is refused, not sent.
+    rm -f "$d/curl-argv.log"
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_COMBOS='bad"name' verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "bad name: exit $rc, not 1" >&2; }
+    grep -q '^  FAIL  combo (invalid name)' <<<"$out" || { ok=0; echo "bad name: no FAIL" >&2; }
+    [[ "$(grep -c 'chat/completions' "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "bad name: a request was sent" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "AUTOOS_VERIFY_COMBOS is not honoured"; fi
+fi
+
+if it "aistack: verify public URLs: skipped when unset, FAIL only for the one that is not a 302"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    ok=1
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "unset: exit $rc, not 0" >&2; }
+    grep -q '^  skip  public URLs - AUTOOS_VERIFY_PUBLIC_URLS is not set' <<<"$out" || { ok=0; echo "unset: no skip line" >&2; }
+    printf '%s\n' 'http://127.0.0.1:18081/ none - 302' 'http://127.0.0.1:18082/ none - 200' >>"$d/curl-table"
+    out="$(_aistack_verify "$d" AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "one 200: exit $rc, not 1" >&2; }
+    grep -qx '  ok    public URL http://127.0.0.1:18081/' <<<"$out" || { ok=0; echo "the 302 URL is not ok" >&2; }
+    grep -qE '^  FAIL  public URL http://127.0.0.1:18082/ - HTTP 200' <<<"$out" || { ok=0; echo "the 200 URL is not FAIL" >&2; }
+    [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "not exactly one FAIL" >&2; }
+    # No credentials go out with a public probe, and none in the URL are echoed.
+    grep -qE '(^| )(-H|-u|--user|--header)( |$)' "$d/curl-argv.log" && { ok=0; echo "a public probe carried credentials" >&2; }
+    out="$(_aistack_verify "$d" AUTOOS_VERIFY_PUBLIC_URLS="http://probe-user:probe-pass@127.0.0.1:18081/" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "userinfo: exit $rc, not 1" >&2; }
+    grep -q '^  FAIL  public URL (rejected)' <<<"$out" || { ok=0; echo "userinfo: no FAIL" >&2; }
+    grep -q 'probe-pass' <<<"$out" && { ok=0; echo "userinfo: the password is echoed" >&2; }
+    grep -q 'probe-pass' "$d/curl-argv.log" && { ok=0; echo "userinfo: the URL was requested" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "public URL checks misbehave"; fi
+fi
+
+if it "aistack: verify checks the code dir in opencode and in the OpenHands sandbox volumes"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    : >"$d/nocode-autoos-opencode"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "opencode without the tree: exit $rc, not 1" >&2; }
+    grep -qE '^  FAIL  code dir .* visible in autoos-opencode - ' <<<"$out" || { ok=0; echo "opencode: no FAIL" >&2; }
+    grep -qE '^  ok    code dir .* in openhands-app SANDBOX_VOLUMES$' <<<"$out" || { ok=0; echo "opencode case: openhands should stay ok" >&2; }
+    rm -f "$d/nocode-autoos-opencode"
+    # A volume list where the tree is one of several entries passes ...
+    printf 'SANDBOX_VOLUMES=/elsewhere:/elsewhere:ro,%s:%s:rw\n' "$d/code" "$d/code" >"$d/env-openhands-app"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "several volumes: exit $rc, not 0" >&2; }
+    # ... one without it, or an unset value, does not.
+    for vols in 'SANDBOX_VOLUMES=/elsewhere:/elsewhere:rw' 'SANDBOX_VOLUMES=' 'LLM_MODEL=x'; do
+        printf '%s\n' "$vols" >"$d/env-openhands-app"
+        out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "$vols: exit $rc, not 1" >&2; }
+        grep -qE '^  FAIL  code dir .* in openhands-app SANDBOX_VOLUMES - ' <<<"$out" || { ok=0; echo "$vols: no FAIL" >&2; }
+    done
+    # The directory is AUTOOS_CODE_DIR - the variable compose reads - from the
+    # environment first, stack.env next; nothing is hard-coded.
+    printf 'SANDBOX_VOLUMES=%s:%s:rw\n' "$d/other" "$d/other" >"$d/env-openhands-app"
+    out="$(_aistack_verify "$d" AUTOOS_CODE_DIR="$d/other" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "env AUTOOS_CODE_DIR: exit $rc, not 0" >&2; }
+    grep -qF "exec autoos-opencode test -d $d/other" "$d/docker.log" || { ok=0; echo "env: the exec did not use AUTOOS_CODE_DIR" >&2; }
+    printf 'SANDBOX_VOLUMES=%s:%s:rw\n' "$d/fromfile" "$d/fromfile" >"$d/env-openhands-app"
+    printf "AUTOOS_CODE_DIR='%s'\n" "$d/fromfile" >>"$d/cfg/stack.env"
+    out="$(_aistack_verify "$d" AUTOOS_CODE_DIR= verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "stack.env AUTOOS_CODE_DIR: exit $rc, not 0" >&2; }
+    grep -qF "exec autoos-opencode test -d $d/fromfile" "$d/docker.log" || { ok=0; echo "stack.env: the exec did not use its AUTOOS_CODE_DIR" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the code dir check misbehaves"; fi
+fi
+
+if it "aistack: verify follows the compose profiles: a disabled openhands is skipped, an enabled one is checked"; then
+    ok=1
+    for style in inline block; do
+        d="$(_aistack_sandbox)"
+        _aistack_verify_sandbox "$d"
+        t="$d/tree/configuration"
+        mkdir -p "$t/docker/ai-stack"
+        cp "$AISTACK/ai-stack.sh" "$AISTACK/opencode.Dockerfile" "$t/docker/ai-stack/"
+        cp "$ROOT/configuration/env-file.sh" "$t/"
+        if [[ "$style" == inline ]]; then
+            sed 's/^    container_name: openhands-app$/&\n    profiles: ["extras", "openhands"]/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
+        else
+            sed 's/^    container_name: openhands-app$/&\n    profiles:\n      - extras\n      - openhands/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
+        fi
+        grep -q 'profiles:' "$t/docker/ai-stack/compose.yml" || { ok=0; echo "$style: the fixture has no profiles" >&2; }
+        out="$(_AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack_verify "$d" verify)" && rc=0 || rc=$?
+        (( rc == 0 )) || { ok=0; echo "$style, profile off: exit $rc, not 0" >&2; }
+        grep -q 'container openhands-app' <<<"$out" && { ok=0; echo "$style, profile off: openhands-app is still checked" >&2; }
+        grep -q '^  skip  code dir .*openhands' <<<"$out" || { ok=0; echo "$style, profile off: no skip for the sandbox volumes" >&2; }
+        grep -q 'openhands-app' "$d/docker.log" && { ok=0; echo "$style, profile off: docker was asked about openhands-app" >&2; }
+        out="$(_AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack_verify "$d" COMPOSE_PROFILES=openhands verify)" && rc=0 || rc=$?
+        (( rc == 0 )) || { ok=0; echo "$style, profile on: exit $rc, not 0" >&2; }
+        grep -qx '  ok    container openhands-app' <<<"$out" || { ok=0; echo "$style, profile on: openhands-app not checked" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "compose profiles are not honoured"; fi
+fi
+
+if it "aistack: verify is read-only: only inspect and exec reach docker, nothing on disk changes"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '%s\n' 'http://127.0.0.1:18081/ none - 302' >>"$d/curl-table"
+    ok=1
+    before="$(_aistack_snapshot "$d")"
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    after="$(_aistack_snapshot "$d")"
+    [[ "$before" == "$after" ]] || { ok=0; echo "a file changed: $(diff <(printf '%s' "$before") <(printf '%s' "$after") | head -5)" >&2; }
+    [[ -s "$d/docker.log" ]] || { ok=0; echo "docker was never asked anything (a vacuous run)" >&2; }
+    [[ "$(grep -cE '^(start|stop|restart|rm|up|down|run|create|compose|build|pull|network|kill|pause|unpause|cp|update)( |$)' "$d/docker.log" || true)" == 0 ]] \
+        || { ok=0; echo "a mutating docker verb: $(grep -E '^(start|stop|restart|rm|up|down|run|create|compose)' "$d/docker.log" | head -3)" >&2; }
+    grep -vE '^(inspect|exec) ' "$d/docker.log" | grep -q . && { ok=0; echo "docker verbs beyond inspect/exec: $(grep -vE '^(inspect|exec) ' "$d/docker.log" | head -3)" >&2; }
+    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ test -d ' | grep -q . && { ok=0; echo "an exec that is not test -d" >&2; }
+    # Nothing but docker inspect/exec: not systemctl, not ss, not the plain curl on PATH.
+    grep -vE '^docker: (inspect|exec) ' "$d/events.log" | grep -q . && { ok=0; echo "another tool was called: $(grep -vE '^docker: (inspect|exec) ' "$d/events.log" | head -3)" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify changed something or ran a docker verb it must not"; fi
+fi
+
+if it "aistack: verify is listed in the unknown-command message and in --help"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    out="$(_aistack "$d" bogus)" && rc=0 || rc=$?
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2" >&2; }
+    grep -qE '^Unknown command: bogus \(.*\bverify\b.*\)' <<<"$out" || { ok=0; echo "not in the message: $out" >&2; }
+    out="$(_aistack "$d" --help)"
+    grep -q 'ai-stack.sh verify' <<<"$out" || { ok=0; echo "not in --help" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify is not advertised"; fi
 fi
 
 # ─── shellcheck (optional) ──────────────────────────────────────────────────

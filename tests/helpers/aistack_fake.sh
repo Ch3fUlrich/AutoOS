@@ -16,7 +16,12 @@
 #   image-exists         every `image inspect` succeeds
 #   opencode-label       the org.autoos.opencode.source label of the built image
 #   fail-up-<service>    `compose up` of that service fails
-#   unhealthy-<service>  the container runs but its HTTP probe fails
+#   unhealthy-<service>  the container runs but its HTTP probe fails (docker
+#                        inspect then reports "running (unhealthy)")
+#   env-<container>      what `docker inspect -f '{{range .Config.Env}}...'` prints
+#                        (one NAME=value per line; nothing when the file is absent)
+#   nocode-<container>   `docker exec <container> test -d <dir>` fails: the code
+#                        tree is not mounted in that container
 #   omni-key-fails       the omniroute CLI cannot create the manage key
 #   fail-register        register-autostart.sh fails (register.log also
 #                        records marker=yes|no: ai-stack.sh's marker at the call)
@@ -43,10 +48,23 @@ container_of() {
     esac
 }
 
+service_of() {
+    case "$1" in
+        autoos-omniroute) echo omniroute ;;
+        autoos-opencode)  echo opencode ;;
+        openhands-app)    echo openhands ;;
+    esac
+}
+
 fake_docker() {
     local fmt="" c svc sub
     case "$1" in
         info|network|pull) return 0 ;;
+        exec)
+            # exec <container> test -d <dir>: the only exec ai-stack.sh makes.
+            # True while the container runs and mounts the tree.
+            [[ -e "$S/run-$2" && ! -e "$S/nocode-$2" ]]
+            return ;;
         build)
             local prev=""
             for a in "$@"; do
@@ -75,7 +93,12 @@ fake_docker() {
             case "$fmt" in
                 *State.Running*) if [[ -e "$S/run-$c" ]]; then echo true; else echo false; fi ;;
                 *compose.project*) if [[ -e "$S/compose-$c" ]]; then echo autoos-ai; else echo '<no value>'; fi ;;
-                *State.Status*) if [[ -e "$S/run-$c" ]]; then echo running; else echo exited; fi ;;
+                *State.Status*)
+                    if [[ ! -e "$S/run-$c" ]]; then echo exited
+                    elif [[ "$fmt" != *State.Health* ]]; then echo running
+                    elif [[ -e "$S/unhealthy-$(service_of "$c")" ]]; then echo 'running (unhealthy)'
+                    else echo 'running (healthy)'; fi ;;
+                *Config.Env*) [[ -s "$S/env-$c" ]] && cat "$S/env-$c" ;;
                 *Networks*) echo '{}' ;;
             esac
             return 0 ;;
