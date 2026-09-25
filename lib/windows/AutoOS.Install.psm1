@@ -2654,47 +2654,95 @@ function Install-AutoOSLitellm {
 
 function Set-AutoOSClaudeGateway {
     <#
-      .SYNOPSIS Point Claude Code at the local OmniRoute gateway.
-      Routes Claude Code sessions through gateway combos (and, once the
-      `claude` OAuth connection exists, the subscription as a $0-marginal
-      leg) instead of direct API billing. Direct subscription use is
-      unaffected — this only sets the gateway endpoint env vars.
-      Read-modify-write with timestamped backup; idempotent (rewrites only
-      on change, reports skipped otherwise). Needs AUTOOS_OMNIROUTE_KEY.
+      .SYNOPSIS Point Claude Code at the local OmniRoute gateway - or back at its claude.ai login.
+      Opt-in and reversible: catalog prompt claude_gateway_routing, default
+      'login'. ANTHROPIC_BASE_URL/AUTH_TOKEN in ~/.claude/settings.json "env"
+      disable the claude.ai connectors, so
+        gateway  merges both keys: Claude Code sessions go through gateway
+                 combos (and, once the `claude` OAuth connection exists, the
+                 subscription as a $0-marginal leg). Needs AUTOOS_OMNIROUTE_KEY.
+        login    (any other answer) removes exactly those two keys again;
+                 every other key stays, "env" goes only if it ends up empty.
+                 Needs no key.
+      Read-modify-write; a timestamped backup is taken only by a run that
+      changes the file, so a second run reports skipped and writes nothing.
+      DryRun reads the file to say what it would do, and writes nothing.
     #>
     $cfgDir  = Join-Path $env:USERPROFILE '.claude'
     $cfgPath = Join-Path $cfgDir 'settings.json'
+    $gatewayKeys = @('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN')
+    $wantUrl = 'http://127.0.0.1:20128'
+    $mode = ([string](Get-AutoOSAnswer 'claude_gateway_routing' 'login')).Trim().ToLowerInvariant()
+    if ($mode -ne 'gateway') { $mode = 'login' }
     $key = $env:AUTOOS_OMNIROUTE_KEY
-    if ([string]::IsNullOrWhiteSpace($key)) {
+    if ($mode -eq 'gateway' -and [string]::IsNullOrWhiteSpace($key)) {
         Write-AutoOSLine 'AUTOOS_OMNIROUTE_KEY not set - export the OmniRoute client key before pointing Claude Code at the gateway' -Level warn
         return
     }
-    if ($script:DryRun) {
-        Write-AutoOSLine "would point Claude Code at OmniRoute in $cfgPath" -Level muted
+    $existed = Test-Path -LiteralPath $cfgPath -PathType Leaf
+    $settings = New-Object psobject
+    $valid = $true
+    if ($existed) {
+        # -Encoding UTF8: Claude Code writes the file without a BOM, which 5.1
+        # would otherwise decode as ANSI and corrupt on the rewrite below.
+        try { $settings = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $settings = $null }
+        $valid = $settings -is [System.Management.Automation.PSCustomObject]
+    }
+    $envBlock = $null
+    if ($valid -and $null -ne $settings.PSObject.Properties['env']) {
+        $envBlock = $settings.env
+        if ($null -ne $envBlock -and $envBlock -isnot [System.Management.Automation.PSCustomObject]) { $valid = $false }
+    }
+    if (-not $valid) {
+        # Never rewrite a file that cannot be read back faithfully.
+        Write-AutoOSLine "$cfgPath is not a JSON object - Claude Code settings left untouched, fix the file by hand" -Level warn
         return
     }
+
+    if ($mode -eq 'gateway') {
+        if ($null -ne $envBlock -and
+            $envBlock.PSObject.Properties['ANTHROPIC_BASE_URL'] -and $envBlock.ANTHROPIC_BASE_URL -eq $wantUrl -and
+            $envBlock.PSObject.Properties['ANTHROPIC_AUTH_TOKEN'] -and $envBlock.ANTHROPIC_AUTH_TOKEN -eq $key) {
+            Write-AutoOSLine 'Claude Code already points at OmniRoute - skipped' -Level ok
+            return
+        }
+        if ($script:DryRun) {
+            Write-AutoOSLine "would point Claude Code at OmniRoute in $cfgPath" -Level muted
+            return
+        }
+        if ($null -eq $envBlock) {
+            $settings | Add-Member -NotePropertyName 'env' -NotePropertyValue (New-Object psobject) -Force
+            $envBlock = $settings.env
+        }
+        $envBlock | Add-Member -NotePropertyName 'ANTHROPIC_BASE_URL' -NotePropertyValue $wantUrl -Force
+        $envBlock | Add-Member -NotePropertyName 'ANTHROPIC_AUTH_TOKEN' -NotePropertyValue $key -Force
+    } else {
+        $present = @($gatewayKeys | Where-Object { $null -ne $envBlock -and $null -ne $envBlock.PSObject.Properties[$_] })
+        if ($present.Count -eq 0) {
+            Write-AutoOSLine "Claude Code already uses its claude.ai login (no gateway keys in $cfgPath) - skipped" -Level ok
+            return
+        }
+        if ($script:DryRun) {
+            Write-AutoOSLine "would remove $($present -join '/') from $cfgPath (Claude Code back on its claude.ai login)" -Level muted
+            return
+        }
+        foreach ($k in $present) { $envBlock.PSObject.Properties.Remove($k) }
+        if (@($envBlock.PSObject.Properties).Count -eq 0) { $settings.PSObject.Properties.Remove('env') }
+    }
+
     if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
-    $settings = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw | ConvertFrom-Json } else { New-Object psobject }
-    if ($null -eq $settings.PSObject.Properties['env']) {
-        Add-Member -InputObject $settings -NotePropertyName 'env' -NotePropertyValue (New-Object psobject)
+    if ($existed) {
+        Copy-Item -LiteralPath $cfgPath -Destination "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
-    $wantUrl = 'http://127.0.0.1:20128'
-    $envBlock = $settings.env
-    if ($envBlock.PSObject.Properties['ANTHROPIC_BASE_URL'] -and $envBlock.ANTHROPIC_BASE_URL -eq $wantUrl -and
-        $envBlock.PSObject.Properties['ANTHROPIC_AUTH_TOKEN'] -and $envBlock.ANTHROPIC_AUTH_TOKEN -eq $key) {
-        Write-AutoOSLine 'Claude Code already points at OmniRoute - skipped' -Level ok
-        return
-    }
-    if (Test-Path $cfgPath) {
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
-    }
-    $envBlock | Add-Member -NotePropertyName 'ANTHROPIC_BASE_URL' -NotePropertyValue $wantUrl -Force
-    $envBlock | Add-Member -NotePropertyName 'ANTHROPIC_AUTH_TOKEN' -NotePropertyValue $key -Force
     $tmp = "$cfgPath.tmp.$([Guid]::NewGuid().ToString('N'))"
     [System.IO.File]::WriteAllText($tmp, ($settings | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $tmp -Destination $cfgPath -Force
-    Write-AutoOSLine "Claude Code points at OmniRoute ($cfgPath)" -Level ok
-    Write-AutoOSLine 'Subscription models need the gateway claude OAuth connection first (omniroute providers auth claude-code); until then use opus/sonnet via direct login (backup restores it)' -Level warn
+    if ($mode -eq 'gateway') {
+        Write-AutoOSLine "Claude Code points at OmniRoute ($cfgPath)" -Level ok
+        Write-AutoOSLine 'claude.ai connectors stay disabled while Claude Code routes through the gateway - answer claude_gateway_routing=login to undo. Subscription models need the gateway claude OAuth connection first (omniroute providers auth claude-code)' -Level warn
+    } else {
+        Write-AutoOSLine "Claude Code gateway keys removed from $cfgPath - claude.ai login and connectors are back (backup kept)" -Level ok
+    }
 }
 
 function Set-AutoOSApiKeyEnv {

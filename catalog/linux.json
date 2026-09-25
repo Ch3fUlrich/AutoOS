@@ -327,6 +327,7 @@
           ],
           "verify": "claude --version",
           "homepage": "https://docs.anthropic.com/en/docs/claude-code",
+          "prompt": "claude_gateway_routing",
           "postInstall": "route_claude_to_gateway"
         },
         {
@@ -715,6 +716,7 @@
           "verify": "omniroute --version",
           "homepage": "https://github.com/diegosouzapw/OmniRoute",
           "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first.",
+          "prompt": "claude_gateway_routing",
           "postInstall": "route_detected_clis_to_gateway"
         },
         {
@@ -1642,6 +1644,11 @@
       "question": "Upstash Context7 API key (blank to use default rate limit)",
       "default": "",
       "help": "Optional API key for Upstash Context7 live documentation lookups."
+    },
+    "claude_gateway_routing": {
+      "question": "Claude Code routing: 'login' (claude.ai sign-in) or 'gateway' (local OmniRoute)",
+      "default": "login",
+      "help": "gateway writes ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN into ~/.claude/settings.json so Claude Code talks to OmniRoute - this disables the claude.ai connectors, and needs the OmniRoute client key. login (the default) keeps the claude.ai sign-in and removes those two keys again if an earlier run set them."
     }
   }
 }

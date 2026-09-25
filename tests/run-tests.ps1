@@ -3733,34 +3733,222 @@ Test-Case 'zed routing writes nothing in dry run' {
     } finally { $env:APPDATA = $realAppData }
 }
 
-Test-Case 'Set-AutoOSClaudeGateway points Claude Code at OmniRoute' {
-    $realHome = $env:USERPROFILE
-    $realKey = $env:AUTOOS_OMNIROUTE_KEY
-    $scratch = Join-Path $env:TEMP "autoos-claudegw-$([Guid]::NewGuid().ToString('N'))"
+# Claude Code gateway routing is opt-in and reversible (catalog prompt
+# claude_gateway_routing, default 'login'). ANTHROPIC_BASE_URL/AUTH_TOKEN in
+# ~/.claude/settings.json "env" disable the claude.ai connectors, so every answer
+# other than 'gateway' takes exactly those two keys out again. A backup is taken
+# only by a run that changes the file, so each fixture below sees at most ONE
+# modifying run and the exact backup count is safe from the per-second timestamp
+# collision fixed in 0bb5952. Scratch homes only - never the real profile.
+function New-ClaudeGatewayScratch {
+    param([string]$Json, [switch]$NoClaudeDir)
+    $dir = Join-Path ([IO.Path]::GetTempPath()) "autoos-claudegw-$([Guid]::NewGuid().ToString('N'))"
+    if ($NoClaudeDir) { $null = New-Item -ItemType Directory -Path $dir -Force; return $dir }
+    $null = New-Item -ItemType Directory -Path (Join-Path $dir '.claude') -Force
+    if ($Json) { [IO.File]::WriteAllText((Join-Path (Join-Path $dir '.claude') 'settings.json'), $Json) }
+    $dir
+}
+function Get-ClaudeGatewaySettingsPath { param([string]$Dir) Join-Path (Join-Path $Dir '.claude') 'settings.json' }
+function Get-ClaudeGatewayBackupCount {
+    param([string]$Dir)
+    $claudeDir = Join-Path $Dir '.claude'
+    if (-not (Test-Path -LiteralPath $claudeDir)) { return 0 }
+    @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.json.autoos-backup-*').Count
+}
+function Invoke-ClaudeGatewayLogged {
+    <# Runs Set-AutoOSClaudeGateway against $env:USERPROFILE; returns what it logged. #>
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-claudegw-$([Guid]::NewGuid().ToString('N')).log"
     try {
-        $null = New-Item -ItemType Directory -Path (Join-Path $scratch '.claude') -Force
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSClaudeGateway
+        Get-Content -LiteralPath $log -Raw -Encoding utf8
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Set-AutoOSClaudeGateway (default login answer) strips only the two gateway keys' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $scratch = New-ClaudeGatewayScratch -Json '{"theme":"mine","permissions":{"allow":["Bash(ls)"]},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:20128","ANTHROPIC_AUTH_TOKEN":"test-omni-key","KEEP_ME":"1"}}'
+    $scratch2 = New-ClaudeGatewayScratch -Json '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}'
+    try {
+        # A key in the environment must not matter any more: no answer means login.
         $env:USERPROFILE = $scratch; $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
-        '{"theme":"mine"}' | Out-File (Join-Path $scratch '.claude\settings.json') -Encoding utf8
-        Set-AutoOSClaudeGateway
-        $s = Get-Content (Join-Path $scratch '.claude\settings.json') -Raw | ConvertFrom-Json
-        Assert-Equal $s.theme 'mine'
-        Assert-Equal $s.env.ANTHROPIC_BASE_URL 'http://127.0.0.1:20128'
-        Assert-Equal $s.env.ANTHROPIC_AUTH_TOKEN 'test-omni-key'
-        Assert-True ((@(Get-ChildItem (Join-Path $scratch '.claude') -Filter '*.autoos-backup-*')).Count -eq 1) 'second run must skip without a new backup'
-        Set-AutoOSClaudeGateway
-        Remove-Item Env:AUTOOS_OMNIROUTE_KEY
-        $scratch2 = Join-Path $env:TEMP "autoos-claudegw2-$([Guid]::NewGuid().ToString('N'))"
-        $null = New-Item -ItemType Directory -Path $scratch2 -Force
+        $out1 = Invoke-ClaudeGatewayLogged
+        $out2 = Invoke-ClaudeGatewayLogged
+        $s = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch) -Raw | ConvertFrom-Json
+        if ($s.theme -ne 'mine') { throw "theme lost: [$($s.theme)]" }
+        if (@($s.permissions.allow) -notcontains 'Bash(ls)') { throw 'permissions lost' }
+        if ($s.env.KEEP_ME -ne '1') { throw 'unrelated env key lost' }
+        foreach ($k in @('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN')) {
+            if ($null -ne $s.env.PSObject.Properties[$k]) { throw "$k still present" }
+        }
+        $backups = Get-ClaudeGatewayBackupCount $scratch
+        if ($backups -ne 1) { throw "backups=$backups (want 1: the second run must not back up)" }
+        $backupText = Get-Content -LiteralPath (Get-ChildItem -LiteralPath (Join-Path $scratch '.claude') -Filter 'settings.json.autoos-backup-*' | Select-Object -First 1).FullName -Raw
+        if ($backupText -notmatch 'ANTHROPIC_AUTH_TOKEN') { throw 'backup is not the original file' }
+        if ($out1 -notmatch 'removed') { throw "first run did not report the removal: [$out1]" }
+        if ($out2 -notmatch 'skipped' -or $out2 -match 'removed') { throw "second run did not report skipped: [$out2]" }
+        # "env" holding nothing but the two keys disappears entirely.
         $env:USERPROFILE = $scratch2
-        Set-AutoOSClaudeGateway
-        Assert-True (-not (Test-Path (Join-Path $scratch2 '.claude\settings.json'))) 'settings written without a key'
-        Remove-Item $scratch2 -Recurse -Force -ErrorAction SilentlyContinue
+        $null = Invoke-ClaudeGatewayLogged
+        $s2 = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch2) -Raw | ConvertFrom-Json
+        if ($null -ne $s2.PSObject.Properties['env']) { throw 'empty env block was left behind' }
+        if ($s2.theme -ne 'mine') { throw 'theme lost when env was dropped' }
     } finally {
         $env:USERPROFILE = $realHome
-        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
-        else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
-        Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch, $scratch2 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway (default login answer) leaves a file without the keys untouched' {
+    $realHome = $env:USERPROFILE
+    $json = '{"theme":"mine","env":{"KEEP_ME":"1"}}'
+    $scratch = New-ClaudeGatewayScratch -Json $json
+    $scratch2 = New-ClaudeGatewayScratch -NoClaudeDir
+    try {
+        $env:USERPROFILE = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $out = Invoke-ClaudeGatewayLogged
+        $after = [IO.File]::ReadAllText((Get-ClaudeGatewaySettingsPath $scratch))
+        if ($after -ne $json) { throw "file was rewritten: [$after]" }
+        $backups = Get-ClaudeGatewayBackupCount $scratch
+        if ($backups -ne 0) { throw "backups=$backups (want 0)" }
+        if ($out -notmatch 'skipped') { throw "did not report skipped: [$out]" }
+        # No settings file at all: nothing is created, not even ~/.claude.
+        $env:USERPROFILE = $scratch2
+        $null = Invoke-ClaudeGatewayLogged
+        if (Test-Path -LiteralPath (Join-Path $scratch2 '.claude')) { throw 'created ~/.claude for nothing' }
+    } finally {
+        $env:USERPROFILE = $realHome
+        Remove-Item -LiteralPath $scratch, $scratch2 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway (gateway answer) points Claude Code at OmniRoute, second run skipped' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $scratch = New-ClaudeGatewayScratch -Json '{"theme":"mine","env":{"KEEP_ME":"1"}}'
+    $scratch2 = New-ClaudeGatewayScratch -NoClaudeDir
+    try {
+        $env:USERPROFILE = $scratch; $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ claude_gateway_routing = 'gateway' } -RepoRoot $Root
+        $null = Invoke-ClaudeGatewayLogged
+        $out2 = Invoke-ClaudeGatewayLogged
+        $s = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch) -Raw | ConvertFrom-Json
+        if ($s.theme -ne 'mine') { throw 'theme lost' }
+        if ($s.env.KEEP_ME -ne '1') { throw 'unrelated env key lost' }
+        if ($s.env.ANTHROPIC_BASE_URL -ne 'http://127.0.0.1:20128') { throw "base url: [$($s.env.ANTHROPIC_BASE_URL)]" }
+        if ($s.env.ANTHROPIC_AUTH_TOKEN -ne 'test-omni-key') { throw 'auth token not written' }
+        $backups = Get-ClaudeGatewayBackupCount $scratch
+        if ($backups -ne 1) { throw "backups=$backups (want 1: the second run must not back up)" }
+        if ($out2 -notmatch 'skipped') { throw "second run did not report skipped: [$out2]" }
+        # Gateway mode still needs the key: without it nothing is written.
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY
+        $env:USERPROFILE = $scratch2
+        $nokey = Invoke-ClaudeGatewayLogged
+        if (Test-Path -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch2)) { throw 'settings written without a key' }
+        if ($nokey -notmatch 'AUTOOS_OMNIROUTE_KEY not set') { throw "no missing-key warning: [$nokey]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch, $scratch2 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway dry run announces and writes nothing in either mode' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $loginJson = '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}'
+    $gwJson = '{"theme":"mine"}'
+    $scratch = New-ClaudeGatewayScratch -Json $loginJson
+    $scratch2 = New-ClaudeGatewayScratch -Json $gwJson
+    $scratch3 = New-ClaudeGatewayScratch -NoClaudeDir
+    try {
+        $env:USERPROFILE = $scratch
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $loginOut = Invoke-ClaudeGatewayLogged
+        $env:USERPROFILE = $scratch2; $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        Initialize-AutoOSInstaller -DryRun $true -Answers @{ claude_gateway_routing = 'gateway' } -RepoRoot $Root
+        $gwOut = Invoke-ClaudeGatewayLogged
+        $env:USERPROFILE = $scratch3
+        $null = Invoke-ClaudeGatewayLogged
+        if ([IO.File]::ReadAllText((Get-ClaudeGatewaySettingsPath $scratch)) -ne $loginJson) { throw 'login dry run rewrote the file' }
+        if ([IO.File]::ReadAllText((Get-ClaudeGatewaySettingsPath $scratch2)) -ne $gwJson) { throw 'gateway dry run rewrote the file' }
+        $backups = (Get-ClaudeGatewayBackupCount $scratch) + (Get-ClaudeGatewayBackupCount $scratch2)
+        if ($backups -ne 0) { throw "dry run made $backups backup(s)" }
+        if (Test-Path -LiteralPath (Join-Path $scratch3 '.claude')) { throw 'dry run created ~/.claude' }
+        if ($loginOut -notmatch 'would remove') { throw "login dry run did not announce: [$loginOut]" }
+        if ($gwOut -notmatch 'would point') { throw "gateway dry run did not announce: [$gwOut]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch, $scratch2, $scratch3 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway login mode works without AUTOOS_OMNIROUTE_KEY' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $scratch = New-ClaudeGatewayScratch -Json '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y","KEEP_ME":"1"}}'
+    try {
+        $env:USERPROFILE = $scratch
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ claude_gateway_routing = 'login' } -RepoRoot $Root
+        $out = Invoke-ClaudeGatewayLogged
+        $s = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch) -Raw | ConvertFrom-Json
+        if ($s.env.KEEP_ME -ne '1') { throw 'unrelated env key lost' }
+        foreach ($k in @('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN')) {
+            if ($null -ne $s.env.PSObject.Properties[$k]) { throw "$k still present" }
+        }
+        if ($out -match 'AUTOOS_OMNIROUTE_KEY') { throw "login mode asked for the key: [$out]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway leaves an unreadable settings file untouched in either mode' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $broken = '{"theme": "mine", "env": {"ANTHROPIC_BASE_URL": '
+    $scratch = New-ClaudeGatewayScratch -Json $broken
+    try {
+        $env:USERPROFILE = $scratch; $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $loginOut = Invoke-ClaudeGatewayLogged
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ claude_gateway_routing = 'gateway' } -RepoRoot $Root
+        $gwOut = Invoke-ClaudeGatewayLogged
+        if ([IO.File]::ReadAllText((Get-ClaudeGatewaySettingsPath $scratch)) -ne $broken) { throw 'broken file was rewritten' }
+        $backups = Get-ClaudeGatewayBackupCount $scratch
+        if ($backups -ne 0) { throw "backups=$backups (want 0)" }
+        if ($loginOut -notmatch 'left untouched') { throw "login mode did not warn: [$loginOut]" }
+        if ($gwOut -notmatch 'left untouched') { throw "gateway mode did not warn: [$gwOut]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'claude_gateway_routing is asked by claude-code and omniroute, default login' {
+    $spec = $winCatalog.prompts.PSObject.Properties['claude_gateway_routing']
+    if ($null -eq $spec) { throw 'windows catalog never asks claude_gateway_routing' }
+    if ($spec.Value.default -ne 'login') { throw "default is [$($spec.Value.default)], not login" }
+    foreach ($id in @('claude-code', 'omniroute')) {
+        $c = $winCatalog.categories | ForEach-Object { $_.components } | Where-Object { $_.id -eq $id }
+        $keys = @([string](Get-AutoOSComponentProperty $c 'prompt' '') -split '[, ]+')
+        if ($keys -notcontains 'claude_gateway_routing') { throw "$id does not ask claude_gateway_routing" }
     }
     Pass
 }
