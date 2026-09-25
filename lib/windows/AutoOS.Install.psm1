@@ -1938,18 +1938,21 @@ function Set-AutoOSOpenCodeConfig {
     }
 
     $existing = [ordered]@{}
+    $existingCanon = $null
     if (Test-Path $configFile) {
         try {
             $raw = Get-Content -Path $configFile -Raw -Encoding UTF8
             if ($raw.Trim()) {
                 $parsed = $raw | ConvertFrom-Json
                 foreach ($p in $parsed.PSObject.Properties) { $existing[$p.Name] = $p.Value }
+                # What is on disk, as parsed JSON: compared with the result below,
+                # so a run that changes nothing neither backs up nor rewrites.
+                $existingCanon = $parsed | ConvertTo-Json -Depth 100 -Compress
             }
         } catch {
             Write-AutoOSLine "$configFile is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $configFile "$configFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
 
     if (-not $existing.Contains('$schema')) {
@@ -2134,8 +2137,20 @@ function Set-AutoOSOpenCodeConfig {
     $existing['tools'] = $serenaToolsOff
 
     $json = $existing | ConvertTo-Json -Depth 10
-    $json | Out-File -FilePath $configFile -Encoding utf8
-    Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
+    # Parsed JSON, not bytes: the agent generator below rewrites this file in its
+    # own formatting, and a formatting difference alone must cost neither a
+    # backup nor a write (hard rule 5: the first run that changes the file backs
+    # it up once).
+    $resultCanon = $json | ConvertFrom-Json | ConvertTo-Json -Depth 100 -Compress
+    if ($null -ne $existingCanon -and $resultCanon -ceq $existingCanon) {
+        Write-AutoOSLine "OpenCode configuration already up to date in $configFile - skipped" -Level ok
+    } else {
+        if (Test-Path $configFile) {
+            Copy-Item $configFile "$configFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        }
+        $json | Out-File -FilePath $configFile -Encoding utf8
+        Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
+    }
 
     # Merge the shared agent harness (roles, skills link) after the config is
     # written. Judge by exit code only; no 2>&1, since under 'Stop' Windows
@@ -2182,7 +2197,6 @@ function Set-AutoOSOpenHandsConfig {
         seeds default configuration.
     #>
     $openhandsDir = Join-Path $HOME '.openhands'
-    $settingsFile = Join-Path $openhandsDir 'settings.json'
 
     if ($script:DryRun) {
         Write-AutoOSLine "would configure OpenHands in $openhandsDir" -Level muted
@@ -2208,9 +2222,8 @@ function Set-AutoOSOpenHandsConfig {
         New-Item -ItemType Directory -Path $autoDir -Force | Out-Null
     }
 
-    if (Test-Path $settingsFile) {
-        Copy-Item $settingsFile "$settingsFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
-    }
+    # settings.json is backed up by the setup script below - once, right before
+    # the first change of a run, and not at all when the run changes nothing.
 
     $secretsPath = Join-Path $HOME 'Documents\Code\agent-skills\secrets\api_keys.conf'
     $secrets = Read-AutoOSApiSecrets -SecretsPath $secretsPath
@@ -2244,7 +2257,8 @@ function Set-AutoOSOpenHandsConfig {
         # automatic OpenHands setup entirely. The catalog is read from disk
         # via the repo-root argument, never inlined into a string literal.
         $setupScript = @'
-import os, sys, json
+import os, sys, json, shutil
+from datetime import datetime
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -2336,6 +2350,30 @@ if os.path.isfile(settings_file):
             settings = json.load(f)
     except Exception:
         settings = {}
+
+# settings.json is written only when its JSON differs from what is on disk (same
+# key order; the agent generator formats the file differently from this script,
+# so bytes do not count), and the original is copied aside once, right before
+# the first change of a run. A run that changes nothing leaves no backup.
+_settings_existed = os.path.isfile(settings_file)
+_settings_backed_up = False
+_settings_written = False
+
+def _save_settings():
+    global _settings_backed_up, _settings_written
+    if os.path.isfile(settings_file):
+        try:
+            with open(settings_file, 'r', encoding='utf-8-sig') as _cf:
+                if json.dumps(json.load(_cf)) == json.dumps(settings):
+                    return
+        except (OSError, ValueError):
+            pass
+        if not _settings_backed_up:
+            shutil.copyfile(settings_file, '%s.autoos-backup-%s' % (settings_file, datetime.now().strftime('%Y%m%d-%H%M%S')))
+            _settings_backed_up = True
+    with open(settings_file, 'w', encoding='utf-8') as f:
+        json.dump(settings, f, indent=2)
+    _settings_written = True
 
 settings.setdefault('schema_version', 2)
 agent_settings = settings.setdefault('agent_settings', {})
@@ -2483,8 +2521,7 @@ mcp_cfg['cao-ops'] = {
 if 'github' in mcp_cfg:
     del mcp_cfg['github']
 
-with open(settings_file, 'w', encoding='utf-8') as f:
-    json.dump(settings, f, indent=2)
+_save_settings()
 
 profiles_dir = os.path.join(openhands_dir, 'profiles')
 # Prices are USD per token from catalog/llm-models.json. Free variants bill
@@ -2610,8 +2647,7 @@ if (gw_key and 'omniroute-t1-orchestrator' in _managed) or (_lit_key and 'litell
             _default_entry['model'] = llm.get('model')
             _default_entry['base_url'] = llm.get('base_url')
             _default_entry['api_key'] = llm.get('api_key')
-with open(settings_file, 'w', encoding='utf-8') as f:
-    json.dump(settings, f, indent=2)
+_save_settings()
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
 # the desired state and are copied verbatim on every setup. Their
 # llm_profile_ref values point at the canonical profile names written above.
@@ -2630,6 +2666,7 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
                 json.dump(_a_data, _of, indent=2)
         except Exception:
             pass
+print('openhands settings: %s %s' % (('updated' if _settings_existed else 'installed') if _settings_written else 'skipped', settings_file))
 '@
         $argMuse = if ($museKey) { $museKey } else { 'null' }
         $argDeepseek = if ($deepseekKey) { $deepseekKey } else { 'null' }
@@ -2661,12 +2698,14 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
         # its environment; the caller's own values are restored afterwards.
         $savedOllama = $env:OLLAMA_BASE_URL
         $savedIde = $env:AUTOOS_IDE_MODELS
+        $setupOut = @()
         try {
             $env:OLLAMA_BASE_URL = Resolve-AutoOSOllamaBaseUrl
             $env:AUTOOS_IDE_MODELS = $ideModels
-            & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot $argOmni
+            $setupOut = & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot $argOmni
         }
         finally { $env:OLLAMA_BASE_URL = $savedOllama; $env:AUTOOS_IDE_MODELS = $savedIde }
+        foreach ($line in $setupOut) { Write-AutoOSLine "$line" -Level muted }
 
         # The role agent profiles are the generator's job: it merges the
         # harness into whatever the embedded script left, so the roles stay in
