@@ -76,7 +76,11 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
     mode = client.modes.get(level, [])
     if client.name == "claude":
         if joinable:
-            return (["claude", "--bg", "--remote-control", joinable, "--name", joinable] + mode +
+            # No user-scope MCP servers: user-scope graphify started one docker
+            # container per lane worktree (measured 2026-09-25). --mcp-config is
+            # variadic - --name after it keeps the prompt from being read as a path.
+            return (["claude", "--bg", "--remote-control", joinable, "--strict-mcp-config",
+                     "--mcp-config", '{"mcpServers":{}}', "--name", joinable] + mode +
                     ([] if not model else ["--model", model]) + [task])
         return ["claude", "-p"] + mode + ([] if not model else ["--model", model]) + [task]
     if client.name == "codex":

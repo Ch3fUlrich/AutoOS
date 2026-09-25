@@ -265,7 +265,19 @@ class ClientCommandTests(unittest.TestCase):
 
     def test_claude_joinable_is_a_background_remote_control_session(self):
         r = plan_of("--client", "claude", "--joinable", "--title", "d1", "t")
-        self.assertIn("claude --bg --remote-control d1 --name d1", r.stdout)
+        self.assertIn("claude --bg --remote-control d1 --strict-mcp-config --mcp-config "
+                      "'{\"mcpServers\":{}}' --name d1", r.stdout)
+
+    def test_a_joinable_session_starts_no_user_scope_mcp_server(self):
+        # Measured 2026-09-25: user-scope graphify (docker run -i --rm -v $PWD)
+        # started one container per lane worktree. --mcp-config is variadic:
+        # a non-variadic option must follow it, or it eats the prompt.
+        cmd = clients.build_command(clients.CLIENTS["claude"], "task", None, "edit", None, "d1")
+        self.assertIn("--strict-mcp-config", cmd)
+        i = cmd.index("--mcp-config")
+        self.assertEqual(json.loads(cmd[i + 1]), {"mcpServers": {}})
+        self.assertTrue(cmd[i + 2].startswith("--"), cmd)
+        self.assertEqual(cmd[-1], "task")
 
     def test_joinable_is_refused_for_other_clients(self):
         self.assertEqual(plan_of("--client", "qwen", "--joinable", "t").returncode, 2)
@@ -725,6 +737,350 @@ class NoOpGuardTests(unittest.TestCase):
 
     def test_a_review_run_may_change_nothing(self):
         self.assertEqual(self.cli.sandbox_verdict({"review": True}, changed="", ahead="")[0], None)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX process groups; Windows reaps with taskkill /T")
+class ProcessGroupTests(unittest.TestCase):
+    """Measured 2026-09-25: leftovers (private Serena, language servers) survived
+    a cancelled worker. run_client reaps the client's whole process group."""
+
+    def gone(self, pid):
+        """True once pid is reaped or a zombie (it is no longer running)."""
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            with open("/proc/%d/status" % pid, encoding="utf-8") as fh:
+                state = next(l for l in fh if l.startswith("State:")).split()[1]
+        except (OSError, StopIteration):
+            return True
+        return state.startswith("Z")
+
+    def test_a_leftover_child_of_the_client_is_reaped(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "child.pid")
+            # The fake client starts `sleep 60` in the same group and exits 0;
+            # only the group cleanup can stop the sleep.
+            code = ("from subprocess import Popen\n"
+                    "p = Popen(['sleep', '60'])\n"
+                    "open(%r, 'w').write(str(p.pid))\n" % pidfile)
+            rc = agent.run_client([sys.executable, "-c", code], tmp, dict(os.environ))
+            self.assertEqual(rc, 0)
+            with open(pidfile, encoding="utf-8") as fh:
+                pid = int(fh.read())
+            deadline = time.time() + 6
+            while time.time() < deadline and not self.gone(pid):
+                time.sleep(0.1)
+            self.assertTrue(self.gone(pid), "leftover child %d survived run_client" % pid)
+
+    def test_the_clients_exit_code_is_returned_unchanged(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = agent.run_client([sys.executable, "-c", "raise SystemExit(3)"],
+                                  tmp, dict(os.environ))
+        self.assertEqual(rc, 3)
+
+    def test_a_joinable_session_is_not_reaped_after_a_normal_exit(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "child.pid")
+            code = ("from subprocess import Popen\n"
+                    "p = Popen(['sleep', '30'])\n"
+                    "open(%r, 'w').write(str(p.pid))\n" % pidfile)
+            rc = agent.run_client([sys.executable, "-c", code], tmp, dict(os.environ), reap=False)
+            with open(pidfile, encoding="utf-8") as fh:
+                pid = int(fh.read())
+            try:
+                self.assertEqual(rc, 0)
+                self.assertFalse(self.gone(pid), "reap=False stopped the session's child")
+            finally:
+                os.kill(pid, 9)
+
+    def test_a_failed_joinable_start_is_reaped(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "child.pid")
+            code = ("from subprocess import Popen\n"
+                    "p = Popen(['sleep', '30'])\n"
+                    "open(%r, 'w').write(str(p.pid))\n"
+                    "raise SystemExit(1)\n" % pidfile)
+            rc = agent.run_client([sys.executable, "-c", code], tmp, dict(os.environ), reap=False)
+            with open(pidfile, encoding="utf-8") as fh:
+                pid = int(fh.read())
+            deadline = time.time() + 6
+            while time.time() < deadline and not self.gone(pid):
+                time.sleep(0.1)
+            self.assertEqual(rc, 1)
+            self.assertTrue(self.gone(pid), "a failed joinable start left %d running" % pid)
+
+
+class KeyFileTests(unittest.TestCase):
+    """A lane worktree has no git-ignored api-keys.yml (measured 2026-09-25: exit 3,
+    and linking it in was refused); the spawner falls back to the main checkout."""
+
+    def test_a_worktree_reads_the_main_checkouts_key_file(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            main = os.path.join(tmp, "main")
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+            subprocess.run(git + ["init", "-q", main], check=True)
+            subprocess.run(git + ["-C", main, "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+            wt = os.path.join(tmp, "lane")
+            subprocess.run(git + ["-C", main, "worktree", "add", "-q", wt], check=True)
+            os.makedirs(os.path.join(main, "configuration"))
+            with open(os.path.join(main, "configuration", "api-keys.yml"), "w", encoding="utf-8") as fh:
+                fh.write("omniroute: sk-test-not-a-key\n")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("AUTOOS_OMNIROUTE_KEY", None)
+                self.assertEqual(agent.client_key(wt), "sk-test-not-a-key")
+                self.assertEqual(agent.client_key(main), "sk-test-not-a-key")
+
+    def test_no_key_file_anywhere_is_none(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTOOS_OMNIROUTE_KEY", None)
+            self.assertIsNone(agent.client_key(tmp))
+
+
+class CardV2Tests(unittest.TestCase):
+    """Task card v2 (spec docs/plans/2026-09-25-routing-v2-spec.md §4).
+
+    normalize_v2 accepts a v1 or a v2 card and returns a v2 dict; every v1
+    behaviour (parse_card/normalize/select_combo) stays byte-for-byte. Written
+    before the implementation (coding-principles 2).
+    """
+
+    def norm(self, card):
+        return routing.normalize_v2(card)
+
+    def test_rooted_and_drive_paths_are_refused(self):
+        for bad in ("\\\\server\\share", "\\x", "C:x", "~/x"):
+            with self.assertRaises(routing.CardError, msg=bad):
+                routing.normalize_v2({"paths": [bad]})
+
+    def test_the_v2_tables_are_the_documented_ones(self):
+        self.assertEqual(routing.CARD_V2_VALUES, {
+            "kind": ("implement", "debug", "review", "plan", "bulk", "research"),
+            "risk": ("normal", "high"),
+            "spec": ("exact", "partial", "vague"),
+            "privacy": ("public", "sensitive"),
+            "mode": ("cost-first", "balanced", "quality-first"),
+        })
+        self.assertEqual(routing.CARD_V2_DEFAULTS, {
+            "kind": "implement", "risk": "normal", "spec": "partial",
+            "privacy": "public", "mode": "balanced", "deferrable": False,
+            "deadline": None, "paths": [], "override": {},
+        })
+
+    def test_an_empty_card_is_v2_with_defaults(self):
+        out = self.norm({})
+        self.assertEqual(out, dict(routing.CARD_V2_DEFAULTS, version="2"))
+        self.assertEqual(set(out), set(routing.CARD_V2_DEFAULTS) | {"version"})
+        self.assertNotIn("bucket_hint", out)
+        self.assertNotIn("min_context", out)
+        self.assertNotIn("spend", out)
+
+    def test_v2_keys_are_exactly_the_defaults_plus_version(self):
+        out = self.norm({"kind": "review"})
+        self.assertEqual(set(out), set(routing.CARD_V2_DEFAULTS) | {"version"})
+
+    def test_v2_defaults_fill_missing_fields(self):
+        out = self.norm({"kind": "plan"})
+        self.assertEqual(out["risk"], "normal")
+        self.assertEqual(out["spec"], "partial")
+        self.assertEqual(out["privacy"], "public")
+        self.assertEqual(out["mode"], "balanced")
+        self.assertIs(out["deferrable"], False)
+        self.assertIsNone(out["deadline"])
+        self.assertEqual(out["paths"], [])
+        self.assertEqual(out["override"], {})
+        self.assertEqual(out["version"], "2")
+
+    def test_a_full_v2_card_round_trips(self):
+        out = self.norm({
+            "kind": "debug", "risk": "high", "spec": "vague",
+            "privacy": "sensitive", "mode": "quality-first",
+            "deferrable": True, "deadline": "2026-09-26T06:00Z",
+            "paths": ["tools/a.py", "tests/b.py"],
+            "override": {"route": "t1-orchestrator", "effort": "high"},
+        })
+        self.assertEqual(out["kind"], "debug")
+        self.assertEqual(out["risk"], "high")
+        self.assertEqual(out["spec"], "vague")
+        self.assertEqual(out["privacy"], "sensitive")
+        self.assertEqual(out["mode"], "quality-first")
+        self.assertIs(out["deferrable"], True)
+        self.assertEqual(out["deadline"], "2026-09-26T06:00Z")
+        self.assertEqual(out["paths"], ["tools/a.py", "tests/b.py"])
+        self.assertEqual(out["override"], {"route": "t1-orchestrator", "effort": "high"})
+        self.assertEqual(out["version"], "2")
+
+    def test_a_v2_card_does_not_alias_the_default_containers(self):
+        first = self.norm({"kind": "implement"})
+        first["paths"].append("a")
+        first["override"]["route"] = "x"
+        self.assertEqual(routing.normalize_v2({})["paths"], [])
+        self.assertEqual(routing.normalize_v2({})["override"], {})
+
+    def test_deferrable_accepts_the_string_and_bool_forms(self):
+        self.assertIs(self.norm({"deferrable": True})["deferrable"], True)
+        self.assertIs(self.norm({"deferrable": "true"})["deferrable"], True)
+        self.assertIs(self.norm({"deferrable": False})["deferrable"], False)
+        self.assertIs(self.norm({"deferrable": "false"})["deferrable"], False)
+
+    def test_v1_role_maps_to_kind(self):
+        self.assertEqual(self.norm({"role": "orchestrate"})["kind"], "plan")
+        self.assertEqual(self.norm({"role": "implement"})["kind"], "implement")
+        self.assertEqual(self.norm({"role": "review"})["kind"], "review")
+
+    def test_v1_complexity_maps_to_bucket_hint(self):
+        self.assertEqual(self.norm({"complexity": "trivial"})["bucket_hint"], "S0")
+        self.assertEqual(self.norm({"complexity": "standard"})["bucket_hint"], "S2")
+        self.assertEqual(self.norm({"complexity": "hard"})["bucket_hint"], "S3")
+
+    def test_v1_ctx_maps_to_min_context(self):
+        self.assertEqual(self.norm({"ctx": "128k"})["min_context"], 128000)
+        self.assertEqual(self.norm({"ctx": "1m"})["min_context"], 1000000)
+
+    def test_v1_defaults_fill_missing_v1_fields(self):
+        out = self.norm({"role": "review"})
+        self.assertEqual(out["version"], "1")
+        self.assertEqual(out["kind"], "review")
+        self.assertEqual(out["bucket_hint"], "S2")
+        self.assertEqual(out["min_context"], 128000)
+        self.assertEqual(out["spend"], "free-ok")
+
+    def test_v1_output_carries_bucket_min_context_and_spend(self):
+        out = self.norm({"role": "implement", "complexity": "hard",
+                         "ctx": "1m", "privacy": "sensitive", "spend": "credit"})
+        self.assertEqual(out["version"], "1")
+        self.assertEqual(out["kind"], "implement")
+        self.assertEqual(out["bucket_hint"], "S3")
+        self.assertEqual(out["min_context"], 1000000)
+        self.assertEqual(out["spend"], "credit")
+        self.assertEqual(out["privacy"], "sensitive")
+        self.assertEqual(set(out), set(routing.CARD_V2_DEFAULTS)
+                         | {"version", "bucket_hint", "min_context", "spend"})
+
+    def test_parse_card_keeps_its_v1_results(self):
+        self.assertEqual(routing.parse_card("role=review, privacy=sensitive"),
+                         {"role": "review", "privacy": "sensitive"})
+        self.assertEqual(routing.parse_card('{"ctx": "1m"}'), {"ctx": "1m"})
+
+    def test_parse_card_keeps_the_dotted_override_keys(self):
+        self.assertEqual(
+            routing.parse_card("override.route=t1-orchestrator,override.effort=high"),
+            {"override.route": "t1-orchestrator", "override.effort": "high"})
+
+    def test_parse_card_keeps_the_pipe_delimited_paths(self):
+        self.assertEqual(routing.parse_card("paths=a/b|c/d"), {"paths": "a/b|c/d"})
+
+    def test_key_value_paths_and_override_become_typed(self):
+        out = self.norm(routing.parse_card("paths=a/b|c,override.route=t1-orchestrator"))
+        self.assertEqual(out["paths"], ["a/b", "c"])
+        self.assertEqual(out["override"], {"route": "t1-orchestrator"})
+
+    def test_json_and_key_value_forms_normalize_the_same(self):
+        json_out = self.norm(routing.parse_card(
+            '{"kind": "debug", "risk": "high", "paths": ["a/b", "c/d"], '
+            '"override": {"route": "t1-orchestrator"}}'))
+        kv_out = self.norm(routing.parse_card(
+            "kind=debug,risk=high,paths=a/b|c/d,override.route=t1-orchestrator"))
+        self.assertEqual(json_out, kv_out)
+
+    def test_unknown_v2_field_is_an_error(self):
+        with self.assertRaises(routing.CardError) as ctx:
+            self.norm({"kind": "implement", "bogus": "x"})
+        self.assertIn("bogus", str(ctx.exception))
+
+    def test_unknown_v1_field_is_an_error(self):
+        with self.assertRaises(routing.CardError) as ctx:
+            self.norm({"role": "implement", "bogus": "x"})
+        self.assertIn("bogus", str(ctx.exception))
+
+    def test_bad_v2_value_is_an_error(self):
+        for card in ({"kind": "nope"}, {"risk": "medium"}, {"spec": "close"},
+                     {"privacy": "secret"}, {"mode": "cheap"}):
+            with self.assertRaises(routing.CardError):
+                self.norm(card)
+
+    def test_bad_v1_value_is_an_error(self):
+        with self.assertRaises(routing.CardError):
+            self.norm({"complexity": "enormous"})
+
+    def test_mixing_v1_and_v2_fields_is_an_error(self):
+        for card in ({"role": "implement", "kind": "debug"},
+                     {"complexity": "hard", "spec": "exact"},
+                     {"ctx": "1m", "mode": "quality-first"},
+                     {"spend": "credit", "paths": ["a"]},
+                     {"role": "implement", "override.route": "t1-orchestrator"}):
+            with self.assertRaises(routing.CardError) as ctx:
+                self.norm(card)
+            self.assertIn("mixes v1 and v2 fields", str(ctx.exception))
+
+    def test_privacy_is_shared_and_never_a_mix(self):
+        # The only field both versions know: alone it is a valid (v2) card.
+        out = self.norm({"privacy": "sensitive"})
+        self.assertEqual(out["privacy"], "sensitive")
+        self.assertEqual(out["version"], "2")
+
+    def test_absolute_path_is_an_error(self):
+        with self.assertRaises(routing.CardError):
+            self.norm({"paths": ["/etc/passwd"]})
+        with self.assertRaises(routing.CardError):
+            self.norm(routing.parse_card("paths=/etc/passwd|a"))
+
+    def test_parent_segment_is_an_error(self):
+        with self.assertRaises(routing.CardError):
+            self.norm({"paths": ["a/../b"]})
+        with self.assertRaises(routing.CardError):
+            self.norm({"paths": [".."]})
+        with self.assertRaises(routing.CardError):
+            self.norm(routing.parse_card("paths=a|../b"))
+
+    def test_deadline_without_deferrable_is_an_error(self):
+        with self.assertRaises(routing.CardError):
+            self.norm({"deadline": "2026-09-26T06:00Z"})
+        with self.assertRaises(routing.CardError):
+            self.norm({"deferrable": False, "deadline": "2026-09-26T06:00Z"})
+        with self.assertRaises(routing.CardError):
+            self.norm({"deferrable": "false", "deadline": "2026-09-26T06:00Z"})
+
+    def test_bad_deadline_is_an_error(self):
+        for bad in ("next tuesday", "2026-09-26 06:00", "2026-09-26T06:00",
+                    "not-a-date"):
+            with self.assertRaises(routing.CardError):
+                self.norm({"deferrable": True, "deadline": bad})
+
+    def test_bad_deferrable_is_an_error(self):
+        with self.assertRaises(routing.CardError):
+            self.norm({"deferrable": "maybe"})
+        with self.assertRaises(routing.CardError):
+            self.norm({"deferrable": 1})
+
+    def test_override_unknown_key_is_an_error(self):
+        with self.assertRaises(routing.CardError):
+            self.norm({"override": {"tier": "2"}})
+        with self.assertRaises(routing.CardError):
+            self.norm({"override.tier": "2"})
+
+    def test_override_non_string_value_is_an_error(self):
+        with self.assertRaises(routing.CardError):
+            self.norm({"override": {"effort": 5}})
+
+    def test_select_combo_v1_results_are_unchanged(self):
+        cases = [
+            ({}, ("t2-worker", "public-default")),
+            ({"role": "review"}, ("t3-driver", "public-light")),
+            ({"privacy": "sensitive"}, ("t2-worker-clean", "sensitive")),
+            ({"complexity": "hard"}, ("t1-orchestrator", "public-strong")),
+            ({"ctx": "1m", "role": "orchestrate"}, ("t1-orchestrator", "public-1m")),
+        ]
+        for card, expected in cases:
+            self.assertEqual(routing.select_combo(card), expected, card)
+
 
 if __name__ == "__main__":
     unittest.main()

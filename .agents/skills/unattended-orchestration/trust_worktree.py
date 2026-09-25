@@ -29,6 +29,17 @@ blocked in three seconds). The worktree's ``.claude/settings.local.json`` with
 copied from the main checkout when it has one, minimal otherwise. Keep that
 file gitignored in the adopting repository.
 
+``--lane-mcp`` closes one more scope trap. Measured 2026-09-25: the shared Serena
+on ``localhost:9121`` holds a single active project, so a worktree session that
+connected to it got the *main checkout's* answers - the wrong files, and silently
+so. A private Serena per session costs roughly 160-200 MB and about 2 s to start,
+and answered for the worktree. The file it writes is loaded with
+``claude --strict-mcp-config --mcp-config <file>``, so no user-scope server with
+the same name can override it (the ``CLAUDE.md`` scope trap). Servers declared in
+the worktree's own ``.mcp.json`` are copied unchanged; a ``serena`` already
+defined there is kept as-is rather than duplicated. The copy carries their ``env``
+blocks, so keep ``.claude/lane-mcp.local.json`` gitignored like settings.local.json.
+
 This file is part of the ``unattended-orchestration`` skill and carries no
 repository-specific knowledge; reference it from ``postWorktree`` as
 ``'{{skillDir}}/trust_worktree.py'``.
@@ -36,6 +47,7 @@ repository-specific knowledge; reference it from ``postWorktree`` as
 Usage::
 
     python trust_worktree.py <worktree> [--repo <main checkout>] [--mcpjson NAME ...]
+    python trust_worktree.py <worktree> --lane-mcp [--no-private-serena]
     python trust_worktree.py <worktree> --check      # report, change nothing
 """
 
@@ -59,6 +71,16 @@ TRUST_FLAGS = {
 #: Copied into the worktree when the main checkout has it. Gitignored in most
 #: repositories, so a worktree never has it by construction.
 LOCAL_SETTINGS = Path(".claude") / "settings.local.json"
+
+#: Written by ``--lane-mcp``; consumed as
+#: ``claude --strict-mcp-config --mcp-config <file>``.
+LANE_MCP = Path(".claude") / "lane-mcp.local.json"
+
+#: The private Serena's pin. The shared instance serves one project at a time, so
+#: each lane runs its own; the version is pinned so lanes start within a minute of
+#: each other.
+SERENA_SERVER_ID = "serena"
+SERENA_FROM = "serena-agent==1.7.0"
 
 #: Per-session bookkeeping that must not be inherited by a new entry.
 VOLATILE_KEYS = ("history", "lastCost", "lastAPIDuration", "lastSessionId",
@@ -196,6 +218,59 @@ def copy_local_settings(worktree: Path, repo: Path, *, mcpjson: list[str],
     return f"{dst} already approves the MCP servers"
 
 
+def _project_servers(worktree: Path) -> dict:
+    """The worktree's own ``.mcp.json`` servers, or ``{}`` when it has none."""
+    mcp_json = worktree / ".mcp.json"
+    if not mcp_json.is_file():
+        return {}
+    # A parse error raises: a strict config silently missing the project's
+    # servers would stay wrong, because an unchanged file is never rewritten.
+    data = json.loads(mcp_json.read_text(encoding="utf-8"))
+    return dict(data.get("mcpServers") or {})
+
+
+def lane_mcp_content(worktree: Path, *, private_serena: bool = True) -> dict:
+    """The ``--strict-mcp-config`` document a lane session loads.
+
+    Every server the worktree's ``.mcp.json`` declares is copied unchanged, then -
+    unless the project already defines ``serena`` - a private Serena bound to this
+    worktree is added. One definition per name, so a project ``serena`` always wins.
+    """
+    servers = _project_servers(worktree)
+    if private_serena and SERENA_SERVER_ID not in servers:
+        servers[SERENA_SERVER_ID] = {
+            "command": "uvx",
+            "args": [
+                "--from", SERENA_FROM, "serena", "start-mcp-server",
+                "--context", "claude-code",
+                "--project", str(worktree.resolve()),
+                "--open-web-dashboard", "false",
+                "--enable-gui-log-window", "false",
+            ],
+        }
+    return {"mcpServers": servers}
+
+
+def write_lane_mcp(worktree: Path, *, private_serena: bool = True,
+                   check: bool = False) -> str:
+    """Write the strict per-worktree MCP config; ``(changed, message)`` style.
+
+    Loaded with ``claude --strict-mcp-config --mcp-config <path>``, so a user-scope
+    server of the same name cannot override the private Serena. Written only when
+    the content differs, so a second run reports ``unchanged``.
+    """
+    dst = worktree / LANE_MCP
+    text = json.dumps(lane_mcp_content(worktree, private_serena=private_serena),
+                      indent=2) + "\n"
+    if dst.is_file() and dst.read_text(encoding="utf-8") == text:
+        return f"unchanged: {dst}"
+    if check:
+        return f"WOULD write {dst}"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(text, encoding="utf-8", newline="\n")
+    return f"wrote {dst}"
+
+
 def _repo_graph_id(repo: Path) -> str:
     """The graph id the repository pins, falling back to its folder name.
 
@@ -312,6 +387,11 @@ def main(argv: list[str] | None = None) -> int:
                          "only OMNIGRAPH_GRAPH_ID pre-empts that resolution and every service "
                          "degrades in silence (measured 2026-09-11, downstream project A).")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--lane-mcp", action="store_true",
+                    help="write <worktree>/.claude/lane-mcp.local.json for "
+                         "`claude --strict-mcp-config --mcp-config <file>`")
+    ap.add_argument("--no-private-serena", action="store_true",
+                    help="with --lane-mcp, omit the per-worktree Serena server")
     ap.add_argument("--check", action="store_true", help="report, change nothing")
     args = ap.parse_args(argv)
 
@@ -338,6 +418,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if agent in ("all", "codewhale"):
         print(trust_codewhale(worktree, repo, check=args.check))
+
+    if args.lane_mcp:
+        try:
+            print(write_lane_mcp(worktree, private_serena=not args.no_private_serena,
+                                 check=args.check))
+        except (OSError, ValueError) as exc:
+            print(f"cannot read {worktree / '.mcp.json'}: {exc}", file=sys.stderr)
+            return 2
 
     if not args.no_env:
         print(configure_omnigraph_env(worktree, repo, check=args.check))

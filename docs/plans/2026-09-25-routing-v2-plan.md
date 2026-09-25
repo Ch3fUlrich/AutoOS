@@ -3,16 +3,18 @@
 Executes [2026-09-25-routing-v2-spec.md](2026-09-25-routing-v2-spec.md). Order per D14. Every task
 lists its bucket (spec §5.2, scored by hand until the resolver exists), the writer route, and the
 review set (D2). Routes measured serving on 2026-09-25: `t2-worker-clean` (native DeepSeek),
-`t2-worker-free-only` (GPT-OSS), `t3-driver` (Mistral Code), `t3-driver-free-only` (Qwen). Every
-OpenRouter paid leg is down (credits exhausted) until topped up.
+`t2-worker-free-only` (GPT-OSS), `t3-driver` (Mistral Code), `t3-driver-free-only` (Qwen). Operator decision 2026-09-25 20:07Z: OpenRouter is **not** topped
+up — every openrouter paid leg is permanently unavailable and leaves the routes. Free pools
+(GPT-OSS, Qwen, Gemini free, Zen free Spark via opencode) first; smarter work on the `qoder` and
+`agy` clients (own accounts) before paid DeepSeek; paid DeepSeek and Claude only as fallback.
 
 ## Working rules for every lane
 
 - One lane = one branch + one sandbox clone (`autoos-agent --isolate`); briefs use the §8.2 BRIEF
   fields, name the skills to load, and pass `git -c user.name=… -c user.email=…` for commits.
-- Writer route by bucket: S0–S1 → `t2-worker-free-only`, fallback `t2-worker-clean`; S2 →
-  `t2-worker-clean` (DeepSeek); S3+ → decompose first; only undecomposable judgment work → Sonnet.
-  Opus only for S4.
+- Writer route by bucket: S0–S1 → `t2-worker-free-only`, fallback `--client qoder|agy`; S2 →
+  `--client qoder` or `agy`, fallback `t2-worker-clean` (DeepSeek); S3+ → decompose first; only
+  undecomposable judgment work → Sonnet. Opus only for S4.
 - Gate before review: NO-OP guard, diff inside the declared paths, report files == `git diff
   --name-only`, touched-part test filters green.
 - Review: 1 cross-family API review (normal) or 2 + Sonnet closes (high). DeepSeek writer → Qwen or
@@ -89,13 +91,13 @@ kept a Graphify container on their worktree (stopped by hand).
 
 ## Operator steps (not agent work)
 
-1. Top up OpenRouter (or accept that paid Spark/Gemini/DeepSeek-via-OpenRouter legs stay down).
+1. ~~Top up OpenRouter~~ — declined 2026-09-25; paid openrouter legs leave the routes.
 2. Approve the `autoos-agent` MCP server in Claude Code (`claude mcp list` shows it pending).
 3. Run `bash configuration/docker/ai-stack/ai-stack.sh migrate` (plan), then `--yes`; I run the
    end-to-end checks after.
 4. After the migration: Semaphore template 61 for ports 4096 and 20128.
 5. OmniRoute dashboard: connect Qoder and Antigravity (D13) and the Claude Code account.
-6. Approve submission of A8 upstream.
+6. A8 upstream PR: on hold until the operator decides; not prepared.
 
 ## Done when
 

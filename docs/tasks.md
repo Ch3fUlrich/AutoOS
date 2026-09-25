@@ -17,6 +17,10 @@ their contemporary names.
 | Tier reshape (spark-only t1, paid-only clean, #high) | tier1 | 2026-09-20 | spark-only + paid-only tests green, dual-lens APPROVE | Done 2026-09-20 (281 PS / 108 sh) |
 | Cheap-inference legs + retry trim (≈3) | tier1 | 2026-09-20 | cinf legs in simulate, 286 PS green, config.toml 5→3 | Done 2026-09-20 |
 | Push to main | tier1 | 2026-09-20 | BLOCKED: remote main is 64 commits ahead (USB/rescue + llm-models work since 2026-09-17); pushed feature branch instead | Done 2026-09-20 → `tier-orchestration-2026-09-20`, needs PR + rebase onto main |
+| Run 20260925 coordination (autoos-L1-main) | L1-main | 2026-09-25 | both orchestrators merged to main, sessions stopped, worktrees removed | Running |
+| Routing v2 (`docs/plans/2026-09-25-routing-v2-plan.md`, phases 0, A–E) | autoos-L1-routing | 2026-09-25 | each phase merged to main with branch CI green | Running — phase 0 + C1 + client_key fallback merged `a4eac1a` |
+| Backlog of run 1 (F5, F7, writer backups on Windows, OpenHands microagents, …) | autoos-L1-backlog | 2026-09-25 | list in `RUN/status/L1-backlog.md`, each item merged with CI green | Running |
+| MCP for every agent (Serena per worktree, Graphify, Omnigraph, autoos-agent; helpers die with their session) | L1-routing + L1-backlog | 2026-09-25 | sessions relaunched with MCP instead of `--strict-mcp-config`, no orphan containers | Queued (assigned 20:19Z) |
 | `apply -Probe` re-date verification table | — | — | 6 combos ack NEW legs, verification.md re-dated | Queued |
 | Web Router-tiers backend (apply/switch) | — | — | endpoints + tests, card no longer display-only | Queued |
 | Agent Canvas re-evaluation | — | — | LLM-profile proof on current image | Queued |

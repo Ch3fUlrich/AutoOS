@@ -6921,6 +6921,20 @@ if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
     out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# Resolver v2 (routing v2 spec section 5): pure bucket/effort tables and measure().
+if it "resolver v2: bucket boundaries, effort rows, clamp (unit tests)"; then
+    out="$(python3 tests/test_autoos_resolver.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "resolver v2: measure() features and client_state (unit tests)"; then
+    out="$(python3 tests/test_autoos_measure.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# tools/skill-rules.py: the linter for one-line skill rules (routing v2 spec 8.1).
+if it "skill-rules check: ids, length, source, near-duplicates (unit tests)"; then
+    out="$(python3 tests/test_skill_rules.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "render-opencode-container-config survives a malformed port (unit tests)"; then
     out="$(python3 tests/test_render_opencode_config.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
