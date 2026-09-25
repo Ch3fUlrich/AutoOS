@@ -108,20 +108,31 @@ done <<<"$provider_rows"
 # container. The CLI's machine token is accepted from loopback peers only and
 # a published port sees the docker gateway as the peer, so management goes
 # through the manage-scoped key ai-stack.sh migrate created (host-only file).
+# The key goes to the omniroute CLI only (omni below), never into this
+# script's environment: curl, python and the probe must not inherit it.
 AI_STACK="$ROOT/configuration/docker/ai-stack/ai-stack.sh"
 IN_DOCKER=0
+MANAGE_KEY=""
 if [[ -z "${AUTOOS_OMNIROUTE_URL:-}" ]] && bash "$AI_STACK" is-active >/dev/null 2>&1; then
     IN_DOCKER=1
     MANAGE_KEY_FILE="${AUTOOS_AI_STACK_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/autoos/ai-stack}/manage.key"
     if [[ -z "${OMNIROUTE_API_KEY:-}" && -s "$MANAGE_KEY_FILE" ]]; then
-        OMNIROUTE_API_KEY="$(tr -d '\r\n' <"$MANAGE_KEY_FILE")"
-        export OMNIROUTE_API_KEY
+        MANAGE_KEY="$(tr -d '\r\n' <"$MANAGE_KEY_FILE")"
         echo "Gateway runs in docker - the CLI manages it with the manage-scoped key ($MANAGE_KEY_FILE)."
     elif [[ -z "${OMNIROUTE_API_KEY:-}" ]]; then
         echo "Gateway runs in docker but $MANAGE_KEY_FILE is missing - provider and combo changes will be refused."
         echo "  Create a key with scope 'manage' in the dashboard and save it there (mode 600)."
     fi
 fi
+# omni: the omniroute CLI, with the manage key in ITS environment only (an
+# assignment prefix, never argv - `ps` would show argv).
+omni() {
+    if [[ -n "$MANAGE_KEY" ]]; then
+        OMNIROUTE_API_KEY="$MANAGE_KEY" command omniroute "$@"
+    else
+        command omniroute "$@"
+    fi
+}
 
 gateway_up() { curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1; }
 if ! gateway_up; then
@@ -158,7 +169,7 @@ register_provider() {
     fi
     # Subshell export, not `env VAR=value`: env would put the key in argv,
     # where `ps` can read it for the lifetime of the call.
-    if ( export "$var=$value"; omniroute providers add "$provider_id" \
+    if ( export "$var=$value"; omni providers add "$provider_id" \
             --credential-env "$var" "${data_args[@]}" --yes ) >/dev/null 2>&1; then
         echo "  + $provider_id registered"
     else
@@ -173,7 +184,7 @@ echo "Providers:"
 # key file alone instead of from whatever else answers the CLI.
 existing_ids=""
 if gateway_up; then
-    existing_ids="$(omniroute providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9-]+' | grep -oE '[a-z0-9-]+$' || true)"
+    existing_ids="$(omni providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9-]+' | grep -oE '[a-z0-9-]+$' || true)"
 fi
 for entry in "${PROVIDER_MAP[@]}"; do
     if grep -qxF "${entry#*:}" <<<"$existing_ids"; then
@@ -220,7 +231,7 @@ MAX_WAIT_MS=180000
 BREAKER_THRESHOLD=2
 omni_json() {
     # The CLI prints "Loaded env" banners on stdout before the JSON document.
-    (cd "$HOME" && omniroute --output json --no-color "$@" 2>/dev/null) | sed -n '/^[[:space:]]*[{[]/,$p'
+    (cd "$HOME" && omni --output json --no-color "$@" 2>/dev/null) | sed -n '/^[[:space:]]*[{[]/,$p'
 }
 if [[ $DRY -eq 1 ]]; then
     echo "  - would set requestQueue.maxWaitMs = $MAX_WAIT_MS (omniroute api system patch-api-resilience)"
@@ -233,7 +244,7 @@ else
     body="{\"requestQueue\":{\"maxWaitMs\":$MAX_WAIT_MS},\"providerBreaker\":{\"apikey\":{\"failureThreshold\":$BREAKER_THRESHOLD,\"degradationThreshold\":1,\"resetTimeoutMs\":30000}}}"
     if [[ "$current" == "$MAX_WAIT_MS $BREAKER_THRESHOLD" ]]; then
         echo "  = resilience settings already current (maxWaitMs=$MAX_WAIT_MS, breaker=$BREAKER_THRESHOLD)"
-    elif (cd "$HOME" && omniroute api system patch-api-resilience --body "$body") >/dev/null 2>&1; then
+    elif (cd "$HOME" && omni api system patch-api-resilience --body "$body") >/dev/null 2>&1; then
         echo "  + resilience settings set (maxWaitMs=$MAX_WAIT_MS, breaker=$BREAKER_THRESHOLD; was ${current:-unknown})"
     else
         echo "  ! could not set resilience settings - run: omniroute api system patch-api-resilience --body '$body'"
@@ -268,12 +279,12 @@ while IFS=$'\t' read -r name strategy models; do
     # Create first, delete only what it replaces: if the create fails the old
     # tier survives instead of leaving a hole. Delete-then-create can only run
     # when create reports "already exists" AND a retry still fails.
-    if omniroute combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
+    if omni combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
         echo "  + $name created ($strategy)"
         PROBE_COMBOS+=("$name")
     else
-        omniroute combo delete "$name" --yes >/dev/null 2>&1 || true
-        if omniroute combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
+        omni combo delete "$name" --yes >/dev/null 2>&1 || true
+        if omni combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
             echo "  + $name replaced ($strategy)"
             PROBE_COMBOS+=("$name")
         else

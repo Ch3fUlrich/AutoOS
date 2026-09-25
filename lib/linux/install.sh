@@ -98,8 +98,9 @@ custom_is_installed() {
             has_cmd litellm || [[ -x "$SYS_HOME/.local/bin/litellm" ]]
             ;;
         ai-stack-docker)
-            # Installed = the compose stack owns the services (its config
-            # exists and the gateway container was created), not merely pulled.
+            # Installed = the compose stack owns the services (ai-stack.sh
+            # wrote its stack.active marker after every service answered),
+            # not merely pulled, and not a container a failed migrate left.
             bash "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/configuration/docker/ai-stack/ai-stack.sh" is-active >/dev/null 2>&1
             ;;
         *) return 1 ;;

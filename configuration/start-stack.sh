@@ -29,7 +29,10 @@ gateway_ok() {
 # gateway, opencode serve and OpenHands are compose services there.
 AI_STACK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker/ai-stack/ai-stack.sh"
 IN_DOCKER=0
-if bash "$AI_STACK" is-active >/dev/null 2>&1; then IN_DOCKER=1; fi
+# AUTOOS_AI_STACK_MIGRATING=1 is set by `ai-stack.sh migrate` for its OpenHands
+# step only: the stack owns nothing yet (its marker is written once every
+# service answered), but this run must start the compose service.
+if [[ "${AUTOOS_AI_STACK_MIGRATING:-}" == 1 ]] || bash "$AI_STACK" is-active >/dev/null 2>&1; then IN_DOCKER=1; fi
 
 if ! gateway_ok && [[ $IN_DOCKER -eq 1 ]]; then
     echo "Starting the gateway container..."
