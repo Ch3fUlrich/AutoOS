@@ -43,6 +43,7 @@ autoos.config.json.tmp
 graphify-out/
 .playwright-mcp/
 .claude/settings.local.json
+.claude/lane-mcp.local.json
 # Installer-created junctions into .agents/skills (one per skill, guarded by
 # existence check) — only autoos-install is tracked.
 .claude/skills/*

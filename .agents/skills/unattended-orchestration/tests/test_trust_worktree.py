@@ -80,3 +80,91 @@ def test_the_graph_id_comes_from_the_repo_pin_not_the_folder_name(sandbox):
     text = (worktree / ".env").read_text(encoding="utf-8")
     assert "OMNIGRAPH_GRAPH_ID=autoos" in text
     assert "=repo" not in text, "the folder-name fallback must not win over the repo pin"
+
+
+LANE_MCP = Path(".claude") / "lane-mcp.local.json"
+
+
+def _write_mcp_json(worktree, servers):
+    (worktree / ".mcp.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+def test_lane_mcp_copies_project_servers_and_adds_a_private_serena(sandbox, capsys):
+    """The config carries the worktree's own servers plus a Serena pinned to the worktree.
+
+    Measured 2026-09-25: the shared Serena (``:9121``) holds one active project, so a
+    worktree session asked it about the main checkout's files and got the main checkout's
+    answers. The private ``--project`` argument is the whole point of this entry.
+    """
+    repo, worktree = sandbox
+    _write_mcp_json(worktree, {"omnigraph": {"command": "omnigraph-mcp", "args": ["serve"]}})
+    assert trust_worktree.main([str(worktree), "--repo", str(repo),
+                                "--lane-mcp", "--no-env"]) == 0
+    dst = worktree / LANE_MCP
+    assert dst.is_file()
+    data = json.loads(dst.read_text(encoding="utf-8"))
+    servers = data["mcpServers"]
+    assert servers["omnigraph"] == {"command": "omnigraph-mcp", "args": ["serve"]}, (
+        "a project server must be copied unchanged")
+    serena = servers["serena"]
+    assert serena["command"] == "uvx"
+    assert serena["args"][:4] == ["--from", "serena-agent==1.7.0", "serena",
+                                  "start-mcp-server"]
+    assert serena["args"][serena["args"].index("--project") + 1] == str(worktree.resolve())
+    assert serena["args"][serena["args"].index("--context") + 1] == "claude-code"
+    assert serena["args"][serena["args"].index("--open-web-dashboard") + 1] == "false"
+    assert serena["args"][serena["args"].index("--enable-gui-log-window") + 1] == "false"
+    assert str(dst) in capsys.readouterr().out
+
+
+def test_lane_mcp_keeps_an_existing_serena_definition(sandbox):
+    repo, worktree = sandbox
+    pinned = {"command": "serena", "args": ["start-mcp-server", "--project", "/elsewhere"]}
+    _write_mcp_json(worktree, {"serena": pinned, "omnigraph": {"command": "omnigraph-mcp"}})
+    assert trust_worktree.main([str(worktree), "--repo", str(repo),
+                                "--lane-mcp", "--no-env"]) == 0
+    servers = json.loads((worktree / LANE_MCP).read_text(encoding="utf-8"))["mcpServers"]
+    assert servers["serena"] == pinned, "one definition per name: the project's wins"
+    assert servers["omnigraph"] == {"command": "omnigraph-mcp"}
+
+
+def test_no_private_serena_omits_it(sandbox):
+    repo, worktree = sandbox
+    _write_mcp_json(worktree, {"omnigraph": {"command": "omnigraph-mcp"}})
+    assert trust_worktree.main([str(worktree), "--repo", str(repo),
+                                "--lane-mcp", "--no-private-serena", "--no-env"]) == 0
+    servers = json.loads((worktree / LANE_MCP).read_text(encoding="utf-8"))["mcpServers"]
+    assert "serena" not in servers
+    assert servers["omnigraph"] == {"command": "omnigraph-mcp"}
+
+
+def test_lane_mcp_second_run_reports_unchanged(sandbox, capsys):
+    repo, worktree = sandbox
+    _write_mcp_json(worktree, {"omnigraph": {"command": "omnigraph-mcp"}})
+    assert trust_worktree.main([str(worktree), "--repo", str(repo),
+                                "--lane-mcp", "--no-env"]) == 0
+    before = (worktree / LANE_MCP).read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert trust_worktree.main([str(worktree), "--repo", str(repo),
+                                "--lane-mcp", "--no-env"]) == 0
+    out = capsys.readouterr().out
+    assert "unchanged:" in out and str(worktree / LANE_MCP) in out
+    assert (worktree / LANE_MCP).read_text(encoding="utf-8") == before
+
+
+def test_lane_mcp_check_writes_nothing(sandbox, capsys):
+    repo, worktree = sandbox
+    _write_mcp_json(worktree, {"omnigraph": {"command": "omnigraph-mcp"}})
+    assert trust_worktree.main([str(worktree), "--repo", str(repo),
+                                "--lane-mcp", "--check", "--no-env"]) == 0
+    out = capsys.readouterr().out
+    assert not (worktree / LANE_MCP).exists()
+    assert "WOULD write" in out and str(worktree / LANE_MCP) in out
+
+
+def test_lane_mcp_without_mcp_json_has_only_serena(sandbox):
+    repo, worktree = sandbox
+    assert trust_worktree.main([str(worktree), "--repo", str(repo),
+                                "--lane-mcp", "--no-env"]) == 0
+    servers = json.loads((worktree / LANE_MCP).read_text(encoding="utf-8"))["mcpServers"]
+    assert set(servers) == {"serena"}
