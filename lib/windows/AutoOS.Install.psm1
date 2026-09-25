@@ -840,8 +840,22 @@ function Get-AutoOSIdeModel {
         [Parameter(Mandatory)][ValidateSet('opencode', 'zed', 'openhands')][string]$Surface
     )
     $path = Join-Path $script:RepoRoot 'catalog\ide-models.json'
-    $doc = Get-Content -Path $path -Raw -Encoding UTF8 | ConvertFrom-Json
-    foreach ($m in @($doc.models)) {
+    # One clear message naming the file - never a bare parser error or a
+    # silent empty list: every writer calls this before it touches anything.
+    if (-not (Test-Path -LiteralPath $path)) { throw "cannot use the gateway model list $path (missing)" }
+    try { $doc = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { throw "cannot use the gateway model list $path (not valid JSON: $($_.Exception.Message))" }
+    $models = @()
+    if ($null -ne $doc -and $null -ne $doc.PSObject.Properties['models']) { $models = @($doc.models) }
+    if ($models.Count -eq 0) { throw "cannot use the gateway model list $path (no models list)" }
+    foreach ($m in $models) {
+        foreach ($field in @('id', 'name', 'context', 'output', 'surfaces')) {
+            if ($null -eq $m -or $null -eq $m.PSObject.Properties[$field]) {
+                throw "cannot use the gateway model list $path (an entry has no $field)"
+            }
+        }
+    }
+    foreach ($m in $models) {
         # Indexer, not dot access: StrictMode throws on a gateway the model
         # does not list (t1-orchestrator-clean has no litellm key).
         $members = $m.surfaces.PSObject.Properties[$Gateway]
@@ -1900,6 +1914,25 @@ function Set-AutoOSOpenCodeConfig {
         return
     }
 
+    # Gateway tiers from catalog/ide-models.json (single source; the same
+    # list tools/sync-ide-models.py writes into the repo opencode.jsonc),
+    # read first: a missing or broken catalog stops here, before any backup.
+    $gatewayTiers = {
+        param([string]$Gateway)
+        $tiers = [ordered]@{}
+        foreach ($m in @(Get-AutoOSIdeModel -Gateway $Gateway -Surface 'opencode')) {
+            $tiers[$m.id] = [ordered]@{ name = $m.name; limit = [ordered]@{ context = $m.context; output = $m.output } }
+        }
+        $tiers
+    }
+    try {
+        $omniTiers = & $gatewayTiers 'omniroute'
+        $litTiers = & $gatewayTiers 'litellm'
+    } catch {
+        Write-AutoOSLine "$($_.Exception.Message) - OpenCode configuration left unchanged" -Level error
+        return
+    }
+
     if (-not (Test-Path $configDir)) {
         New-Item -ItemType Directory -Path $configDir -Force | Out-Null
     }
@@ -1997,17 +2030,6 @@ function Set-AutoOSOpenCodeConfig {
             }
         }
     }
-    # Gateway tiers from catalog/ide-models.json (single source; the same
-    # list tools/sync-ide-models.py writes into the repo opencode.jsonc).
-    $gatewayTiers = {
-        param([string]$Gateway)
-        $tiers = [ordered]@{}
-        foreach ($m in @(Get-AutoOSIdeModel -Gateway $Gateway -Surface 'opencode')) {
-            $tiers[$m.id] = [ordered]@{ name = $m.name; limit = [ordered]@{ context = $m.context; output = $m.output } }
-        }
-        $tiers
-    }
-    $omniTiers = & $gatewayTiers 'omniroute'
     $providers['omniroute'] = [ordered]@{
         npm     = '@ai-sdk/openai-compatible'
         name    = 'AutoOS OmniRoute gateway'
@@ -2017,7 +2039,6 @@ function Set-AutoOSOpenCodeConfig {
         }
         models  = $omniTiers
     }
-    $litTiers = & $gatewayTiers 'litellm'
     $providers['litellm'] = [ordered]@{
         npm     = '@ai-sdk/openai-compatible'
         name    = 'AutoOS LiteLLM fallback'
@@ -2353,9 +2374,14 @@ if _gw_key:
     llm['api_key'] = _gw_key
     _default_reasoning = True
     # The gateway default IS the t1 tier: its windows come from
-    # catalog/ide-models.json, like every other surface's.
-    with open(os.path.join(_repo_root_arg, 'catalog', 'ide-models.json'), 'r', encoding='utf-8') as _imf:
-        _default_window = next(m for m in json.load(_imf)['models'] if m['id'] == 't1-orchestrator')
+    # catalog/ide-models.json, like every other surface's. The installer
+    # passes the path only when the file checked out (it reported otherwise).
+    _default_window = None
+    try:
+        with open(os.environ.get('AUTOOS_IDE_MODELS') or '', 'r', encoding='utf-8') as _imf:
+            _default_window = next(m for m in json.load(_imf)['models'] if m['id'] == 't1-orchestrator')
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        pass
 elif openrouter_key:
     llm['model'] = 'openrouter/openrouter/free'
     llm['base_url'] = 'https://openrouter.ai/api/v1'
@@ -2371,8 +2397,9 @@ else:
 
 # The chosen default's own windows (catalog context/output), never one
 # literal for all three: a 1M ceiling on the local 32k model overflowed it.
-llm['max_input_tokens'] = _default_window['context']
-llm['max_output_tokens'] = _default_window['output']
+if _default_window:
+    llm['max_input_tokens'] = _default_window['context']
+    llm['max_output_tokens'] = _default_window['output']
 if _default_reasoning:
     llm['reasoning_effort'] = 'high'
 else:
@@ -2621,14 +2648,25 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
         }
         $argOmni = if ($omniKey) { $omniKey } else { 'null' }
 
-        # The resolved address reaches the child through its environment; the
-        # caller's own OLLAMA_BASE_URL is restored afterwards.
+        # The gateway default takes its windows from the model catalog; a
+        # broken one is reported here and only costs the default its windows.
+        $ideModels = Join-Path $script:RepoRoot 'catalog\ide-models.json'
+        try { $null = @(Get-AutoOSIdeModel -Gateway 'omniroute' -Surface 'openhands') }
+        catch {
+            Write-AutoOSLine "$($_.Exception.Message) - the OpenHands default LLM gets no token windows" -Level error
+            $ideModels = ''
+        }
+
+        # The resolved address and the catalog path reach the child through
+        # its environment; the caller's own values are restored afterwards.
         $savedOllama = $env:OLLAMA_BASE_URL
+        $savedIde = $env:AUTOOS_IDE_MODELS
         try {
             $env:OLLAMA_BASE_URL = Resolve-AutoOSOllamaBaseUrl
+            $env:AUTOOS_IDE_MODELS = $ideModels
             & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot $argOmni
         }
-        finally { $env:OLLAMA_BASE_URL = $savedOllama }
+        finally { $env:OLLAMA_BASE_URL = $savedOllama; $env:AUTOOS_IDE_MODELS = $savedIde }
 
         # The role agent profiles are the generator's job: it merges the
         # harness into whatever the embedded script left, so the roles stay in
@@ -2945,6 +2983,28 @@ function Set-AutoOSZedProxy {
         Write-AutoOSLine "would route Zed agents to OmniRoute in $cfgPath" -Level muted
         return
     }
+    # Model ids, display names, context windows and membership come from
+    # catalog/ide-models.json at run time (single source) - never inline
+    # tiers here: the two Zed writers once drifted from every other surface.
+    # Read first: a missing or broken catalog stops the writer here, in one
+    # line naming the file, before any backup or write. max_tokens is Zed's
+    # context window; reasoning_effort only where the catalog sets one.
+    $zedModels = {
+        param([string]$Gateway)
+        foreach ($m in @(Get-AutoOSIdeModel -Gateway $Gateway -Surface 'zed')) {
+            $entry = [ordered]@{ name = $m.id; display_name = $m.name; max_tokens = $m.context }
+            $effort = $m.PSObject.Properties['reasoning_effort']
+            if ($null -ne $effort -and $effort.Value) { $entry['reasoning_effort'] = $effort.Value }
+            $entry
+        }
+    }
+    try {
+        $omniModels = @(& $zedModels 'omniroute')
+        $litModels = @(& $zedModels 'litellm')
+    } catch {
+        Write-AutoOSLine "$($_.Exception.Message) - Zed settings left unchanged" -Level error
+        return
+    }
     if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
     if (Test-Path $cfgPath) {
         Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
@@ -2998,30 +3058,16 @@ function Set-AutoOSZedProxy {
         $settings.agent.default_model.provider -like 'autoos-litellm*') {
         $settings.agent.default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 't1-orchestrator' }
     }
-    # Model ids, display names, context windows and membership come from
-    # catalog/ide-models.json at run time (single source) - never inline
-    # tiers here: the two Zed writers once drifted from every other surface.
-    # max_tokens is Zed's context window; reasoning_effort only where the
-    # catalog sets one.
-    $zedModels = {
-        param([string]$Gateway)
-        foreach ($m in @(Get-AutoOSIdeModel -Gateway $Gateway -Surface 'zed')) {
-            $entry = [ordered]@{ name = $m.id; display_name = $m.name; max_tokens = $m.context }
-            $effort = $m.PSObject.Properties['reasoning_effort']
-            if ($null -ne $effort -and $effort.Value) { $entry['reasoning_effort'] = $effort.Value }
-            $entry
-        }
-    }
     $omniEntry = [ordered]@{
         api_url = 'http://127.0.0.1:20128/v1'
-        available_models = @(& $zedModels 'omniroute')
+        available_models = $omniModels
     }
     if ($env:AUTOOS_OMNIROUTE_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_OMNIROUTE_API_KEY from the environment' -Level muted }
     else { Write-AutoOSLine 'AUTOOS_OMNIROUTE_API_KEY not set - export the OmniRoute client key before starting Zed, or the provider stays hidden' -Level warn }
     Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-omniroute' -NotePropertyValue $omniEntry -Force
     $litEntry = [ordered]@{
         api_url = 'http://127.0.0.1:4000/v1'
-        available_models = @(& $zedModels 'litellm')
+        available_models = $litModels
     }
     if ($env:AUTOOS_LITELLM_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_LITELLM_API_KEY from the environment' -Level muted }
     else { Write-AutoOSLine 'AUTOOS_LITELLM_API_KEY not set - export the LiteLLM master key before starting Zed, or the fallback stays hidden' -Level warn }

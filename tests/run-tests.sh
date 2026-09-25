@@ -6502,6 +6502,50 @@ if it "install_zed announces in dry run"; then
     else fail "no dry-run announcement"; fi
 fi
 
+# catalog/ide-models.json is read at install time by the Zed, OpenCode and
+# OpenHands writers. Missing or malformed, each must say so in ONE line that
+# names the file - no traceback, no half-written config, no stray backup.
+if it "a missing or malformed catalog/ide-models.json stops the IDE writers with one clear line (ide-models)"; then
+    d="$(mktemp -d)"
+    printf '{ "models": [ ' >"$d/truncated.json"
+    printf '{"models": [{"id": "t1-orchestrator"}]}' >"$d/no-fields.json"
+    ok=1
+    for catfile in "$d/missing.json" "$d/truncated.json" "$d/no-fields.json"; do
+        home="$d/home-$(basename "$catfile" .json)"
+        mkdir -p "$home/.config/zed" "$home/.config/opencode"
+        printf '{"theme":"mine"}' >"$home/.config/zed/settings.json"
+        printf '{"model": "anthropic/mine"}\n' >"$home/.config/opencode/opencode.json"
+        out="$( ( SYS_HOME="$home" AUTOOS_DRY_RUN=0 AUTOOS_ROOT="$ROOT" AUTOOS_IDE_MODELS_FILE="$catfile"
+                  unset OPENROUTER_API_KEY META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY
+                  curl() { return 6; }
+                  opencode_is_v2() { return 0; }
+                  route_zed_to_proxy; echo "zed_rc=$?"
+                  setup_opencode_config; echo "oc_rc=$?" ) 2>&1)"
+        [[ "$out" == *"zed_rc=1"* ]] || { ok=0; echo "$catfile: zed writer did not fail: $out" >&2; }
+        [[ "$(grep -c "$catfile" <<<"$out")" -ge 2 ]] || { ok=0; echo "$catfile: path not named by both writers: $out" >&2; }
+        [[ "$out" == *Traceback* ]] && { ok=0; echo "$catfile: traceback: $out" >&2; }
+        [[ "$(cat "$home/.config/zed/settings.json")" == '{"theme":"mine"}' ]] || { ok=0; echo "$catfile: zed settings changed" >&2; }
+        [[ "$(cat "$home/.config/opencode/opencode.json")" == '{"model": "anthropic/mine"}' ]] || { ok=0; echo "$catfile: opencode config changed" >&2; }
+        [[ -e "$home/.config/opencode/config.json" ]] && { ok=0; echo "$catfile: config.json written" >&2; }
+        n="$(find "$home" -name '*.autoos-backup-*' | wc -l)"
+        [[ "$n" == 0 ]] || { ok=0; echo "$catfile: $n stray backups" >&2; }
+    done
+    # OpenHands: the default LLM just gets no windows; the rest still runs.
+    home="$d/home-openhands"; mkdir -p "$home"
+    printf 'omniroute: REPLACE_ME\n' >"$d/keys.yml"
+    out="$( ( SYS_HOME="$home" AUTOOS_DRY_RUN=0 AUTOOS_KEYS_FILE="$d/keys.yml" AUTOOS_OMNIROUTE_KEY=sk-fake-gw \
+              AUTOOS_IDE_MODELS_FILE="$d/truncated.json"
+              unset OPENROUTER_API_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY META_API_KEY
+              curl() { return 6; }
+              setup_openhands_config ) 2>&1)"
+    llm="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); l=d.get("agent_settings", d).get("llm", {}); print(l.get("model"), l.get("max_input_tokens"))' "$home/.openhands/settings.json" 2>&1)"
+    [[ "$out" == *"$d/truncated.json"* ]] || { ok=0; echo "openhands: path not named: $out" >&2; }
+    [[ "$out" == *Traceback* ]] && { ok=0; echo "openhands: traceback: $out" >&2; }
+    [[ "$llm" == "openai/t1-orchestrator None" ]] || { ok=0; echo "openhands default: $llm" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a broken model catalog is not reported cleanly"; fi
+fi
+
 if it "zed routing reports a failed merge instead of success"; then
     scratch="$(mktemp -d)"
     mkdir -p "$scratch/.config/zed"
@@ -7705,10 +7749,13 @@ if it "svc: profile sync pushes the tiers into a running app, idempotently and c
 fi
 
 # The app keeps at most 10 profiles and never forgets one, so a renamed or
-# dropped tier (the 2026-09-23 rename left omniroute-tier1 & co.) kept its
-# slot forever. The push deletes profiles AutoOS owns (omniroute-/litellm-/
-# openrouter-) that the spec no longer lists - never anyone else's, never the
-# active one - before it pushes.
+# dropped tier kept its slot forever. The push deletes the profiles AutoOS
+# owns that the spec no longer lists, before it pushes. Ownership is a RECORD,
+# never a name prefix (review 2026-09-25: a user's `omniroute-personal` must
+# survive): the names this sync pushed (.autoos-pushed.json next to the
+# profiles) plus the spec's retired_ids (the ids from before that record).
+# The active profile is never deleted, and nothing is when the app does not
+# say which one is active.
 # _fake_app <dir> [<seed.json>]: starts the fake and sets fake_pid + url.
 # Never call it inside $(...): the pid would be set in that subshell only,
 # the caller's kill would miss, and the fake would outlive the test.
@@ -7725,6 +7772,12 @@ _push_to() {  # _push_to <dir> <url>
     env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key python3 "$ROOT/tools/sync-openhands-profiles.py" \
         --openhands-dir "$1/oh" --keys-file "$1/none.yml" --litellm-env "$1/none.env" --push-url "$2" 2>&1
 }
+_seed_pushed() {  # _seed_pushed <dir> <name>...: records <name>s as pushed by an earlier sync
+    local dir="$1"; shift
+    mkdir -p "$dir/oh/profiles"
+    python3 -c 'import json,sys; json.dump({n: "seeded" for n in sys.argv[2:]}, open(sys.argv[1], "w"))' \
+        "$dir/oh/profiles/.autoos-pushed.json" "$@"
+}
 
 if it "svc: profile push deletes retired AutoOS profiles, never a foreign one"; then
     d="$(mktemp -d)"
@@ -7733,23 +7786,29 @@ if it "svc: profile push deletes retired AutoOS profiles, never a foreign one"; 
  "profiles": {"omniroute-tier1": {"model": "openai/tier1"},
               "litellm-tier2": {"model": "openai/tier2"},
               "openrouter-gone": {"model": "openrouter/x"},
+              "omniroute-personal": {"model": "openai/mine", "api_key": "k"},
               "my-own-profile": {"model": "openai/mine", "api_key": "k"},
               "omniroute": {"model": "openai/prefix-without-dash"}}}
 JSON
+    _seed_pushed "$d" openrouter-gone
     _fake_app "$d" "$d/seed.json"
     first="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url")"
+    first_log="$(cat "$d/req.log")"
     : >"$d/req.log"
     second="$(_push_to "$d" "$url")"
     second_deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
     kill "$fake_pid" 2>/dev/null
     ok=1
+    # legacy retired_ids (tier1, litellm-tier2) and a recorded push (gone) go
     for _r in omniroute-tier1 litellm-tier2 openrouter-gone; do
         [[ "$first" == *"app profile $_r deleted (retired"* ]] || { ok=0; echo "not deleted: $_r: $first" >&2; }
         grep -qx "$_r" <<<"$after" && { ok=0; echo "still in the app: $_r" >&2; }
     done
-    for _k in my-own-profile omniroute; do
+    # an AutoOS-looking prefix is not ownership
+    for _k in omniroute-personal my-own-profile omniroute; do
         grep -qx "$_k" <<<"$after" || { ok=0; echo "a foreign profile was deleted: $_k" >&2; }
+        grep -q "^DELETE .*/$_k\$" <<<"$first_log" && { ok=0; echo "DELETE sent for $_k" >&2; }
     done
     grep -qx omniroute-t1-orchestrator <<<"$after" || { ok=0; echo "t1 not pushed: $after" >&2; }
     [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run deleted again ($second_deletes)" >&2; }
@@ -7790,6 +7849,40 @@ if it "svc: profile push never deletes the active profile, even a retired one"; 
     if (( ok )); then pass; else fail "the active profile was not protected"; fi
 fi
 
+if it "svc: profile push deletes nothing when the app does not name its active profile"; then
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 10, "omit_active_key": true, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-tier1": {"model": "openai/tier1"}}}' >"$d/seed.json"
+    _fake_app "$d" "$d/seed.json"
+    out="$(_push_to "$d" "$url")"
+    kill "$fake_pid" 2>/dev/null
+    deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
+    saves="$(grep -c '^POST /api/v1/settings/profiles/' "$d/req.log" || true)"
+    rm -rf "$d"
+    ok=1
+    [[ "$deletes" == 0 ]] || { ok=0; echo "DELETE sent ($deletes)" >&2; }
+    [[ "$out" == *"does not say which profile is active - deleting nothing"* ]] || { ok=0; echo "not warned: $out" >&2; }
+    (( saves > 0 )) || { ok=0; echo "the push itself stopped" >&2; }
+    if (( ok )); then pass; else fail "a delete ran without knowing the active profile"; fi
+fi
+
+if it "svc: profile push re-checks the active profile right before each delete"; then
+    # The fake makes omniroute-tier1 active on its 2nd profile listing - a
+    # UI switch between the push's first look and its delete.
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 10, "activate_on_list": {"call": 2, "name": "omniroute-tier1"}, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-tier1": {"model": "openai/tier1"}}}' >"$d/seed.json"
+    _fake_app "$d" "$d/seed.json"
+    out="$(_push_to "$d" "$url")"
+    after="$(_fake_profiles "$url")"
+    kill "$fake_pid" 2>/dev/null
+    deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
+    rm -rf "$d"
+    ok=1
+    [[ "$deletes" == 0 ]] || { ok=0; echo "DELETE sent ($deletes)" >&2; }
+    grep -qx omniroute-tier1 <<<"$after" || { ok=0; echo "the newly active profile was deleted" >&2; }
+    [[ "$out" == *"omniroute-tier1 became the active profile - left in place"* ]] || { ok=0; echo "not announced: $out" >&2; }
+    if (( ok )); then pass; else fail "a profile made active mid-run was deleted"; fi
+fi
+
 # Spec order decides which tiers make the cap - also in an app that already
 # holds lower-ranked AutoOS profiles from an older order (measured 2026-09-25:
 # the live app held 10 in-spec profiles, 0 retired, so deleting retired ids
@@ -7797,6 +7890,7 @@ fi
 if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
     d="$(mktemp -d)"
     printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-t1-orchestrator-free-only": {"model": "openai/t1-orchestrator-free-only"}, "omniroute-spark-1.3-contributor": {"model": "openai/spark-1.3-contributor"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
+    _seed_pushed "$d" omniroute-t1-orchestrator-free-only omniroute-spark-1.3-contributor
     _fake_app "$d" "$d/seed.json"
     first="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
@@ -7812,6 +7906,26 @@ if it "svc: profile push makes room for a higher-ranked tier by removing the low
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run evicted again ($second_deletes)" >&2; }
     if (( ok )); then pass; else fail "the cap is not filled in spec order"; fi
+fi
+
+# Rank comes from the FULL spec order: an AutoOS tier the app holds but this
+# run could not build (no key for its gateway) still ranks, so it can make
+# room for a higher tier. A prefix-named profile nobody recorded never does.
+if it "svc: profile push evicts an unbuilt AutoOS tier below the refused one, never a foreign profile"; then
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-personal": {"model": "openai/mine"}, "litellm-t2-worker": {"model": "openai/t2-worker"}, "omniroute-t1-orchestrator-free-only": {"model": "openai/t1-orchestrator-free-only"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-t2-worker omniroute-t1-orchestrator-free-only
+    _fake_app "$d" "$d/seed.json"
+    out="$(_push_to "$d" "$url")"
+    after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
+    kill "$fake_pid" 2>/dev/null
+    personal_deletes="$(grep -c '^DELETE .*/omniroute-personal$' "$d/req.log" || true)"
+    rm -rf "$d"
+    ok=1
+    [[ "$after" == "omniroute-personal omniroute-t1-orchestrator omniroute-t2-worker " ]] || { ok=0; echo "app holds: $after" >&2; }
+    [[ "$out" == *"litellm-t2-worker removed to make room for omniroute-t2-worker"* ]] || { ok=0; echo "unbuilt tier not ranked: $out" >&2; }
+    [[ "$personal_deletes" == 0 ]] || { ok=0; echo "omniroute-personal DELETEd" >&2; }
+    if (( ok )); then pass; else fail "eviction ranks or ownership are wrong"; fi
 fi
 
 # The app never returns a profile's key (only api_key_set), so "every other

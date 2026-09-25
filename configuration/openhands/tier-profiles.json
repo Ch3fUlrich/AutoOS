@@ -50,10 +50,30 @@
     "OpenRouter spark (needs its own key; OpenHands pins one effort, so the",
     "ladder buys nothing), the LiteLLM fallbacks, and last the two",
     "t1-free-only profiles: red by design outside OpenCode (their only leg is",
-    "the zen free promo, which answers 403 there)."
+    "the zen free promo, which answers 403 there).",
+    "",
+    "retired_ids: profile ids this spec listed before the 2026-09-23 rename",
+    "(git log of this file), pushed before the sync kept a record of the",
+    "names it pushed. The push deletes an app profile only when it is in",
+    "that record (profiles/.autoos-pushed.json) or in retired_ids - never",
+    "because its name merely starts with omniroute-/litellm-/openrouter-."
   ],
   "gateway_base_url": "http://host.docker.internal:20128/v1",
   "litellm_base_url": "http://host.docker.internal:4000/v1",
+  "retired_ids": [
+    "omniroute-tier1",
+    "omniroute-tier1-clean",
+    "omniroute-tier2",
+    "omniroute-tier2-clean",
+    "omniroute-tier2-credit",
+    "omniroute-tier3",
+    "omniroute-tier3-clean",
+    "omniroute-tier3-credit",
+    "omniroute-rag",
+    "litellm-tier1",
+    "litellm-tier2",
+    "litellm-tier3"
+  ],
   "tiers": [
     {
       "id": "omniroute-t1-orchestrator",

@@ -88,11 +88,12 @@ login where it has one: the SSO layer is the second lock, not the only one.
   through `/api/v1/settings/profiles` (`tools/sync-openhands-profiles.py
   --push-url`). The app keeps at most 10, filled in
   `configuration/openhands/tier-profiles.json` order: the push deletes the
-  `omniroute-*` / `litellm-*` / `openrouter-*` profiles the spec no longer
-  lists and removes the lowest-ranked of them to make room for a
-  higher-ranked tier. AutoOS owns every profile with those prefixes, so
-  name your own profiles differently: any other name, and the active
-  profile, is never deleted.
+  profiles it owns that the spec no longer lists, and removes the
+  lowest-ranked of them to make room for a higher-ranked tier. It owns only
+  what it recorded pushing (`~/.openhands/profiles/.autoos-pushed.json`)
+  plus the spec's `retired_ids` - a profile you made is never deleted,
+  whatever its name (`omniroute-personal` included), nor is the active one;
+  and nothing is deleted when the app does not say which profile is active.
 - On a native Linux host the `litellm-*` profiles cannot reach LiteLLM: it
   binds `127.0.0.1`, which a container cannot reach through
   `host.docker.internal`. The `omniroute-*` profiles work.

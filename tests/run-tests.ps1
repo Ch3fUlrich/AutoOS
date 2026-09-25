@@ -4434,6 +4434,43 @@ Test-Case 'zed routing creates a fresh config when none exists' {
     } finally { $env:APPDATA = $realAppData }
 }
 
+Test-Case 'a missing or malformed catalog/ide-models.json stops the IDE writers with one clear line (ide-models)' {
+    # The Zed and OpenCode writers read the model catalog at install time.
+    # Missing or malformed, Get-AutoOSIdeModel must throw ONE message naming
+    # the file (not a parser error or a silent empty list), and the Zed
+    # writer must report it and write nothing.
+    $realAppData = $env:APPDATA
+    $fakeRoot = Join-Path ([IO.Path]::GetTempPath()) "autoos-idecat-$([Guid]::NewGuid().ToString('N'))"
+    $unusedLog = Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log'
+    try {
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $fakeRoot 'catalog')
+        $catPath = Join-Path $fakeRoot 'catalog\ide-models.json'
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $fakeRoot
+        $cases = @('', '{ "models": [ ', '{"models": [{"id": "t1-orchestrator"}]}', '{"other": 1}')
+        for ($i = 0; $i -lt $cases.Count; $i++) {
+            Remove-Item -LiteralPath $catPath -Force -ErrorAction SilentlyContinue
+            if ($cases[$i]) { [IO.File]::WriteAllText($catPath, $cases[$i]) }
+            $msg = $null
+            try { $null = @(Get-AutoOSIdeModel -Gateway 'omniroute' -Surface 'zed') } catch { $msg = $_.Exception.Message }
+            Assert-True ($null -ne $msg) "case ${i}: no error"
+            Assert-True ($msg.Contains($catPath)) "case ${i}: the error does not name the file: $msg"
+            $env:APPDATA = Join-Path $fakeRoot "appdata-$i"
+            $log = Join-Path $fakeRoot "zed-$i.log"
+            Initialize-AutoOSLog -Path $log
+            Set-AutoOSZedProxy
+            Initialize-AutoOSLog -Path $unusedLog
+            $text = Get-Content -LiteralPath $log -Raw -Encoding utf8
+            Assert-True ($text.Contains($catPath)) "case ${i}: the Zed writer did not name the file: $text"
+            Assert-True (-not (Test-Path (Join-Path $env:APPDATA 'Zed'))) "case ${i}: the Zed writer touched its folder"
+        }
+    } finally {
+        $env:APPDATA = $realAppData
+        Initialize-AutoOSLog -Path $unusedLog
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Remove-Item -LiteralPath $fakeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'component profiles name real profiles and verify is set' {
     $bad = @()
     foreach ($file in @('catalog\windows.json', 'catalog\linux.json', 'catalog\macos.json')) {

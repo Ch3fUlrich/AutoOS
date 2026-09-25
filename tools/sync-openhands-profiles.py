@@ -29,10 +29,13 @@ its UI offers no tier profile. The push is idempotent too (an unchanged
 profile is skipped), sends only the fields the app's StrictLLM schema allows,
 seeds the app's settings with the first tier when it has none, and fills the
 app's per-user profile cap (10 on the 2026-09 app) in spec order: before it
-pushes it deletes AutoOS-owned app profiles (omniroute-/litellm-/openrouter-)
-the spec no longer lists, and when the cap refuses a tier it removes the
-lowest-ranked AutoOS profile below it to make room. A profile AutoOS does
-not own, and the active profile, are never deleted.
+pushes it deletes AutoOS-owned app profiles the spec no longer lists, and
+when the cap refuses a tier it removes the lowest-ranked AutoOS profile below
+it to make room. AutoOS-owned means RECORDED - a name this sync pushed
+(profiles/.autoos-pushed.json) or one of the spec's retired_ids - never a
+name that merely starts with omniroute-. A profile AutoOS does not own, and
+the active profile, are never deleted; nothing is when the app does not say
+which profile is active.
 
 Never prints a key. Exit 0 = written/skipped cleanly, 2 = unusable input.
 """
@@ -220,26 +223,23 @@ def _save_marks(path: Path | None, marks: dict) -> None:
         print(f"sync-openhands-profiles: could not record pushed keys ({exc})")
 
 
-# Profile-name prefixes AutoOS writes (tier-profiles.json ids). Only a profile
-# named like this is ever deleted from the app; anything else is the user's.
-OWNED_PREFIXES = ("omniroute-", "litellm-", "openrouter-")
-
-
-def owned(name: str) -> bool:
-    return isinstance(name, str) and name.startswith(OWNED_PREFIXES)
-
-
 def _app_profiles(base: str):
-    """(names the app holds, active profile) or (None, None) when unlistable."""
+    """(names the app holds, active profile, whether the reply named one).
+
+    (None, None, False) when the list cannot be read. The third value is
+    False when the reply has no active_profile field at all (renamed or
+    dropped by an app update): then nothing may be deleted, because a
+    delete could hit the profile the user is working with.
+    """
     status, listing = _http("GET", base + "/api/v1/settings/profiles")
     if status != 200 or not isinstance(listing, dict) or not isinstance(listing.get("profiles"), list):
-        return None, None
+        return None, None, False
     names = [p.get("name") for p in listing["profiles"] if isinstance(p, dict) and p.get("name")]
-    return names, listing.get("active_profile")
+    return names, listing.get("active_profile"), "active_profile" in listing
 
 
 def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None,
-                  spec_ids: set | None = None) -> int:
+                  spec_order: list | None = None, legacy_owned=()) -> int:
     """Save (name, profile) pairs into a running OpenHands app. Returns 0.
 
     The app never returns a profile's key (only api_key_set), so a rotated key
@@ -247,15 +247,20 @@ def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None,
     key last pushed per profile; a different hash forces the POST.
 
     The app keeps at most ~10 profiles and forgets none, so the push also
-    keeps the AutoOS-owned ones (OWNED_PREFIXES) converged on the spec:
-      * retired: an owned profile whose id is not in spec_ids is deleted
-        before anything is pushed (the 2026-09-23 tier rename left
-        omniroute-tier1 & co. holding slots);
+    keeps the AutoOS-owned ones converged on the spec. OWNED means recorded,
+    never "named like ours": a name this sync pushed (the marks record) or
+    one of legacy_owned (the spec's retired_ids, pushed before the record
+    existed). A user's `omniroute-personal` is not ours.
+      * retired: an owned profile not in spec_order is deleted before
+        anything is pushed;
       * cap: when a tier is refused for the cap, the lowest-ranked owned
-        profile the app holds BELOW it in push order is removed and the tier
-        retried - so an app filled under an older spec order converges on
-        the spec's top tiers instead of keeping whatever came first.
-    Never deleted: a profile AutoOS does not own, and the active profile.
+        profile the app holds BELOW it in spec_order is removed and the tier
+        retried - so an app filled under an older order converges on the
+        spec's top tiers. Ranks come from the full spec, so a tier this run
+        could not build (no key) still ranks.
+    Never deleted: a profile AutoOS does not own, the active profile
+    (re-read right before every delete), and anything at all when the app
+    does not say which profile is active.
     """
     marks = _load_marks(marks_path)
     base = push_url.rstrip("/")
@@ -279,15 +284,32 @@ def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None,
         print("sync-openhands-profiles: app settings seeded with %s%s"
               % (profiles[0][0], "" if status == 200 else " FAILED (HTTP %s)" % status))
 
-    held, active = _app_profiles(base)
+    legacy = frozenset(legacy_owned)
+
+    def owned(name) -> bool:
+        return isinstance(name, str) and (name in marks or name in legacy)
+
+    held, active, knows_active = _app_profiles(base)
     if held is None:
-        print("sync-openhands-profiles: cannot list the app's profiles - retired ones left in place")
+        print("sync-openhands-profiles: cannot list the app's profiles - nothing deleted")
         held = []
+    elif not knows_active:
+        print("sync-openhands-profiles: the app does not say which profile is active - "
+              "deleting nothing this run")
     held = set(held)
 
     def delete(name: str, why: str) -> bool:
-        if not owned(name) or name == active:
-            return False  # belt and braces: callers already filter these
+        if not knows_active or not owned(name):
+            return False
+        # Re-read the active profile right before the delete: the user may
+        # have switched to this one in the UI since the first look.
+        _, now_active, still_knows = _app_profiles(base)
+        if not still_knows:
+            print(f"sync-openhands-profiles: cannot confirm the active profile - {name} left in place")
+            return False
+        if name == now_active:
+            print(f"sync-openhands-profiles: app profile {name} became the active profile - left in place")
+            return False
         status, _ = _http("DELETE", f"{base}/api/v1/settings/profiles/{name}")
         if status != 200:
             print(f"sync-openhands-profiles: app profile {name} delete FAILED (HTTP {status})")
@@ -297,7 +319,8 @@ def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None,
         print(f"sync-openhands-profiles: app profile {name} {why}")
         return True
 
-    if spec_ids is not None:
+    spec_ids = list(spec_order) if spec_order is not None else [name for name, _ in profiles]
+    if spec_order is not None and knows_active:
         for name in sorted(held):
             if not owned(name) or name in spec_ids:
                 continue
@@ -307,14 +330,17 @@ def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None,
                 continue
             delete(name, "deleted (retired: not in the tier spec)")
 
-    rank = {name: n for n, (name, _) in enumerate(profiles)}
+    rank = {tid: n for n, tid in enumerate(spec_ids)}
 
     def make_room(name: str) -> bool:
-        below = [h for h in held if owned(h) and h != active and rank.get(h, -1) > rank[name]]
-        if not below:
+        if not knows_active:
             return False
-        victim = max(below, key=rank.get)
-        return delete(victim, f"removed to make room for {name} (the app's profile cap; spec order decides)")
+        below = [h for h in held if owned(h) and h != active and rank.get(h, -1) > rank.get(name, -1)]
+        # Lowest-ranked first; the next one if a delete is refused.
+        for victim in sorted(below, key=rank.get, reverse=True):
+            if delete(victim, f"removed to make room for {name} (the app's profile cap; spec order decides)"):
+                return True
+        return False
 
     capped = []
     for name, profile in profiles:
@@ -433,10 +459,11 @@ def main(argv=None):
             target.write_text(text, encoding="utf-8")
             print(f"sync-openhands-profiles: {name} written")
     if args.push_url:
-        # Every spec id counts as current, pushed this run or not (a tier
-        # skipped for a missing key is not retired).
+        # Every spec id counts as current and keeps its rank, pushed this
+        # run or not (a tier skipped for a missing key is not retired).
         return push_profiles(args.push_url, built, profiles_dir / ".autoos-pushed.json",
-                             spec_ids={t["id"] for t in tiers})
+                             spec_order=[t["id"] for t in tiers],
+                             legacy_owned=spec.get("retired_ids") or ())
     return 0
 
 

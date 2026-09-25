@@ -17,7 +17,10 @@ assert what was (not) sent.
 
 seed.json (optional) pre-loads the app: {"cap": 3, "settings": {...},
 "profiles": {"<name>": {<llm>}}, "active": "<name>"}. Without it the app
-starts empty with CAP 3.
+starts empty with CAP 3. Two knobs model app behaviour a push must survive:
+"omit_active_key": true drops active_profile from the list reply (a renamed
+or missing field), and "activate_on_list": {"call": N, "name": X} makes X
+active just before the N-th list reply (a UI switch mid-run).
 """
 import json
 import sys
@@ -25,10 +28,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CAP = 3
 ALLOWED = {"model", "api_key", "base_url", "max_input_tokens", "max_output_tokens"}
-STATE = {"settings": None, "profiles": {}, "active": None}
+STATE = {"settings": None, "profiles": {}, "active": None, "lists": 0}
 LOG = sys.argv[2]
 LIST = "/api/v1/settings/profiles"
 ONE = LIST + "/"
+OMIT_ACTIVE_KEY = False
+ACTIVATE_ON_LIST = None
 
 if len(sys.argv) > 3:
     with open(sys.argv[3], encoding="utf-8") as _fh:
@@ -37,6 +42,8 @@ if len(sys.argv) > 3:
     STATE["settings"] = _seed.get("settings")
     STATE["profiles"] = dict(_seed.get("profiles") or {})
     STATE["active"] = _seed.get("active")
+    OMIT_ACTIVE_KEY = bool(_seed.get("omit_active_key"))
+    ACTIVATE_ON_LIST = _seed.get("activate_on_list")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -65,11 +72,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "Settings not found"})
             return self._send(200, STATE["settings"])
         if self.path == LIST:
-            return self._send(200, {
-                "profiles": [{"name": n, "model": p.get("model"), "base_url": p.get("base_url"),
-                              "api_key_set": bool(p.get("api_key"))}
-                             for n, p in STATE["profiles"].items()],
-                "active_profile": STATE["active"]})
+            STATE["lists"] += 1
+            if ACTIVATE_ON_LIST and STATE["lists"] == ACTIVATE_ON_LIST["call"]:
+                STATE["active"] = ACTIVATE_ON_LIST["name"]
+            reply = {"profiles": [{"name": n, "model": p.get("model"), "base_url": p.get("base_url"),
+                                   "api_key_set": bool(p.get("api_key"))}
+                                  for n, p in STATE["profiles"].items()]}
+            if not OMIT_ACTIVE_KEY:
+                reply["active_profile"] = STATE["active"]
+            return self._send(200, reply)
         if self.path.startswith(ONE):
             name = self.path.rsplit("/", 1)[1]
             prof = STATE["profiles"].get(name)

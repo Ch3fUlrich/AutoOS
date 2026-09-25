@@ -325,10 +325,38 @@ class UnusableInputTests(SandboxCase):
         self.box.save_catalog(doc)
         self.assert_refused("litellm-t4-rag")
 
-    def test_a_toml_table_naming_an_unknown_model(self):
-        self.box.write("openhands_toml", self.box.text("openhands_toml").replace(
-            'model = "openai/t4-rag"', 'model = "openai/t9-gone"'))
-        self.assert_refused("t9-gone")
+class TomlUnknownModelTests(SandboxCase):
+    """A dev-path table naming a model the catalog does not know is the
+    user's own: it is reported and left alone, and the rest still syncs."""
+
+    def setUp(self):
+        super().setUp()
+        text = self.box.text("openhands_toml").replace(
+            'model = "openai/t4-rag"', 'model = "openai/t9-gone"')
+        # A table of the user's own, with token lines the sync would own if
+        # it named a catalog model.
+        text = text.replace("[llm.t4-rag]", "[llm.mine]")
+        self.box.write("openhands_toml", text)
+        section = text.split("[llm.mine]", 1)[1].split("\n[", 1)[0]
+        self.mine = section
+
+    def test_check_warns_and_stays_clean(self):
+        result = self.box.run("--check")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("WARNING", result.stderr)
+        self.assertIn("t9-gone", result.stderr)
+        self.assertIn("[llm.mine]", result.stderr)
+
+    def test_write_leaves_that_table_untouched_and_syncs_the_rest(self):
+        doc = self.box.catalog()
+        model(doc, "t3-driver")["context"] = 65536
+        self.box.save_catalog(doc)
+        result = self.box.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        toml = self.box.text("openhands_toml")
+        self.assertEqual(toml.split("[llm.mine]", 1)[1].split("\n[", 1)[0], self.mine)
+        t3 = toml.split("[llm.t3-driver]", 1)[1].split("\n[", 1)[0]
+        self.assertIn("max_input_tokens = 65536", t3)
 
 
 if __name__ == "__main__":

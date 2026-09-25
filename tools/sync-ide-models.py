@@ -33,7 +33,8 @@ lib/ read the catalog at run time and need no sync:
   configuration/openhands/config.toml
       the max_input_tokens / max_output_tokens lines of every [llm] /
       [llm.*] table whose model is openai/<catalog id>. Tables without those
-      lines are left without them.
+      lines are left without them; a table naming a model the catalog does
+      not know is reported (WARNING, stderr) and left untouched.
 
 Everything else in those files - comments, prose, hand entries, whitespace -
 is left byte-for-byte untouched, and the newline style is preserved, so a
@@ -53,8 +54,9 @@ Exit codes:
     1   drifted (--check only)
     2   unusable input: a marker missing, doubled or mismatched, a comma the
         region cannot be spliced next to, a catalog entry that fails
-        validation, a surface that names a model the catalog does not offer
-        there, or an unreadable file. Nothing is written.
+        validation, opencode.jsonc or the tier spec naming a model the
+        catalog does not offer there, or an unreadable file. Nothing is
+        written. (A config.toml table with an unknown model only warns.)
 """
 
 from __future__ import annotations
@@ -200,7 +202,7 @@ def strip_jsonc(text):
     return re.sub(r"(?m)^\s*//.*$", "", text)
 
 
-def rewrite_opencode(text, models):
+def rewrite_opencode(text, models, warn=None):
     """(new_text, changed) for opencode.jsonc; keeps the newline style."""
     lines = text.splitlines()
     blocks = locate_blocks(lines)
@@ -256,7 +258,7 @@ def rewrite_opencode(text, models):
 # ------------------------------------------------------- tier-profiles.json
 
 
-def rewrite_tier_profiles(text, models):
+def rewrite_tier_profiles(text, models, warn=None):
     """(new_text, changed): mirror token windows, check membership both ways."""
     try:
         spec = json.loads(text)
@@ -299,8 +301,13 @@ _MODEL_RE = re.compile(r'^\s*model\s*=\s*"openai/([^"]+)"\s*(#.*)?$')
 _TOKENS_RE = re.compile(r"^(\s*(max_input_tokens|max_output_tokens)\s*=\s*)\d+(.*)$")
 
 
-def rewrite_openhands_toml(text, models):
-    """(new_text, changed): the token lines of [llm] / [llm.*] tables."""
+def rewrite_openhands_toml(text, models, warn=None):
+    """(new_text, changed): the token lines of [llm] / [llm.*] tables.
+
+    A table whose openai/<id> the catalog does not know is the user's own
+    dev-path entry: `warn` is told and the table is left untouched - one
+    unknown model must not stop the sync of every other surface.
+    """
     by_id = {m["id"]: m for m in models}
     lines = text.splitlines()
     # Pass 1: which catalog model each llm table names.
@@ -313,10 +320,11 @@ def rewrite_openhands_toml(text, models):
             continue
         model = _MODEL_RE.match(line) if current else None
         if model:
-            if model.group(1) not in by_id:
-                raise ConfigError(
-                    f"config.toml [{current}] line {n + 1}: openai/{model.group(1)} is not in catalog/ide-models.json")
-            table_model[current] = by_id[model.group(1)]
+            if model.group(1) in by_id:
+                table_model[current] = by_id[model.group(1)]
+            elif warn is not None:
+                warn(f"[{current}] line {n + 1}: openai/{model.group(1)} is not in "
+                     "catalog/ide-models.json - that table is left untouched")
     # Pass 2: rewrite the numbers in place.
     changed, current = False, None
     for n, line in enumerate(lines):
@@ -397,7 +405,7 @@ def main(argv=None):
     }
     # Every target is computed before any is written: one unusable file
     # leaves all of them untouched.
-    results = []
+    results, warnings = [], []
     try:
         models = load_catalog(catalog)
         for key, label, rewrite in TARGETS:
@@ -405,13 +413,17 @@ def main(argv=None):
             with open(paths[key], encoding="utf-8", newline="") as fh:
                 original = fh.read()
             try:
-                updated, changed = rewrite(original, models)
+                updated, changed = rewrite(original, models,
+                                           lambda msg, where=paths[key]: warnings.append(f"{where}: {msg}"))
             except ConfigError as exc:
                 raise ConfigError(f"{paths[key]}: {exc}") from exc
             results.append((paths[key], label, original, updated, changed))
     except (OSError, ConfigError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+    # Reported in every mode, --quiet included: each one is a table left alone.
+    for message in warnings:
+        print(f"WARNING: {message}", file=sys.stderr)
 
     drifted = [r for r in results if r[4]]
     if args.check:

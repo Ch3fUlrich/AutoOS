@@ -20,7 +20,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`tools/sync-ide-models.py`** regenerates the static copies — the `opencode.jsonc`
   model blocks (between `// AUTOOS-MANAGED` markers) and the token windows in the
   OpenHands tier spec and `config.toml` — and checks OpenHands membership both ways.
-  `--check` exits 1 with a diff; both suites run it.
+  `--check` exits 1 with a diff; both suites run it. A `config.toml` table naming a
+  model the catalog does not know is warned about and left alone.
+- **A missing or malformed catalog stops each installer writer with one line naming the
+  file** — no traceback, no backup, nothing written (the OpenHands default only loses
+  its token windows).
 - **The OpenHands default LLM uses its own model's windows** (t1 from the catalog, or the
   keyless fallback's from `llm-models.json`) instead of one `1048576` for all three —
   the local 32k Ollama model was told it had a 1M window.
@@ -32,10 +36,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `t3-driver` and `t4-rag` never fit, and a live app filled under an older order kept
   that order. `tier-profiles.json` is reordered (t1 → t2 → t3, t2-orchestrator, the
   `-clean` worker and driver, t4-rag, opus-4-6, gemini-3.8-flash, t2-worker-free-only
-  first; the free-only t1 profiles last), and the push now deletes AutoOS-owned
-  profiles (`omniroute-` / `litellm-` / `openrouter-`) the spec no longer lists and
-  makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one. A
-  profile with any other name, and the active profile, is never deleted.
+  first; the free-only t1 profiles last), and the push now deletes the AutoOS
+  profiles the spec no longer lists and makes room for a higher-ranked tier by
+  removing the lowest-ranked AutoOS one. AutoOS owns only what it recorded pushing
+  plus the spec's `retired_ids` - never a name just because it starts with
+  `omniroute-`. The active profile is re-read before every delete and never
+  deleted; an app that does not name its active profile gets no deletes at all.
 
 ### Fixed — the OpenCode user config converges in one run
 

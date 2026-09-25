@@ -1314,6 +1314,34 @@ PY
     fi
 }
 
+# ide_models_file: this checkout's catalog/ide-models.json, the one list of
+# gateway models the Zed, OpenCode and OpenHands writers project.
+# AUTOOS_IDE_MODELS_FILE overrides it (the suite points it at a broken copy).
+ide_models_file() {
+    printf '%s\n' "${AUTOOS_IDE_MODELS_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/ide-models.json}"
+}
+
+# ide_models_readable <file> <what happens instead>: 0 when <file> is a
+# usable model list (every entry has id, name, context, output, surfaces).
+# Otherwise ONE error line naming the file - never a traceback - and 1, so
+# a writer stops before it backs up or touches anything.
+ide_models_readable() {
+    if python3 - "$1" >/dev/null 2>&1 <<'PY'
+import json, sys
+models = json.load(open(sys.argv[1], encoding="utf-8"))["models"]
+ok = isinstance(models, list) and bool(models) and all(
+    isinstance(m, dict) and isinstance(m.get("id"), str) and isinstance(m.get("name"), str)
+    and isinstance(m.get("context"), int) and isinstance(m.get("output"), int)
+    and isinstance(m.get("surfaces"), dict) for m in models)
+sys.exit(0 if ok else 1)
+PY
+    then
+        return 0
+    fi
+    ui_err "cannot use the gateway model list $1 (missing, not JSON, or an entry without id/name/context/output/surfaces) - $2"
+    return 1
+}
+
 route_zed_to_proxy() {
     # Point Zed's agent panel at the local OmniRoute gateway (:20128) plus
     # the LiteLLM fallback (:4000). Only the provider ids
@@ -1326,14 +1354,18 @@ route_zed_to_proxy() {
     local cfg_dir="$SYS_HOME/.config/zed"
     local cfg="$cfg_dir/settings.json"
     if (( AUTOOS_DRY_RUN )); then ui_muted "would route Zed agents to OmniRoute in $cfg"; return 0; fi
+    local ide
+    ide="$(ide_models_file)"
+    ide_models_readable "$ide" "Zed settings left unchanged" || return 1
     mkdir -p "$cfg_dir"
     if [[ -f "$cfg" ]]; then
         cp "$cfg" "$cfg.autoos-backup-$(date +%Y%m%d-%H%M%S)"
     fi
-    python3 - "$cfg" "$AUTOOS_HARNESS" <<'PY'
+    python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
 import json, os, sys
 path = sys.argv[1]
 harness_file = sys.argv[2]
+ide_file = sys.argv[3]
 cfg = {}
 if os.path.exists(path):
     with open(path, encoding="utf-8") as fh:
@@ -1344,8 +1376,7 @@ pins = json.load(open(harness_file, encoding="utf-8"))["mcp_servers"]
 # here: the two Zed writers once drifted from every other surface.
 # max_tokens is Zed's context window; reasoning_effort only where the
 # catalog sets one.
-with open(os.path.join(os.path.dirname(os.path.abspath(harness_file)), "ide-models.json"),
-          encoding="utf-8") as fh:
+with open(ide_file, encoding="utf-8") as fh:
     ide_models = json.load(fh)["models"]
 
 
@@ -2585,6 +2616,7 @@ setup_opencode_config() {
         ui_muted "would apply the agent harness (catalog/agent-harness.json)"
         return 0
     fi
+    ide_models_readable "$(ide_models_file)" "OpenCode configuration left unchanged" || return 0
 
     mkdir -p "$config_dir"
     if [[ -f "$config_dir/opencode.jsonc" ]]; then
@@ -2680,12 +2712,16 @@ _opencode_merge_config() {
     local ollama_url
     ollama_url="$(resolve_ollama_base_url)"
 
+    local ide_file
+    ide_file="$(ide_models_file)"
+
     OLLAMA_BASE_URL="$ollama_url" python3 -c "
 import json, os, sys
 
 config_path = sys.argv[1]
 secrets_path = sys.argv[2]
 models_file = sys.argv[3]
+ide_file = sys.argv[4]
 
 # Model data lives in catalog/llm-models.json (single source of truth).
 # Everything below projects it into OpenCode's shape; nothing here
@@ -2827,7 +2863,8 @@ deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
 # Gateway tiers from catalog/ide-models.json (single source; the same list
 # tools/sync-ide-models.py writes into the repo opencode.jsonc). Never inline
 # tier ids or windows here.
-with open(os.path.join(os.path.dirname(os.path.abspath(models_file)), 'ide-models.json'), 'r', encoding='utf-8') as _imf:
+# setup_opencode_config checked the file (ide_models_readable) before this ran.
+with open(ide_file, 'r', encoding='utf-8') as _imf:
     IDE_MODELS = json.load(_imf)['models']
 
 def _gateway_tiers(gateway):
@@ -2947,7 +2984,7 @@ with open(tmp_file, 'w', encoding='utf-8') as f:
     # differs by one byte and takes a pointless backup.
     f.write('\\n')
 os.replace(tmp_file, config_path)
-" "$config_file" "$secrets_file" "$models_file"
+" "$config_file" "$secrets_file" "$models_file" "$ide_file"
 }
 
 setup_openhands_config() {
@@ -2989,7 +3026,14 @@ setup_openhands_config() {
     local ollama_url
     ollama_url="$(resolve_ollama_base_url)"
 
-    OLLAMA_BASE_URL="$ollama_url" AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
+    # The gateway default takes its windows from the model catalog; a broken
+    # one is reported here and only costs the default its windows.
+    local ide_file
+    ide_file="$(ide_models_file)"
+    ide_models_readable "$ide_file" "the OpenHands default LLM gets no token windows" || ide_file=""
+
+    OLLAMA_BASE_URL="$ollama_url" AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" AUTOOS_IDE_MODELS="$ide_file" \
+        python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
 import os, sys, json
 
 openhands_dir = sys.argv[1]
@@ -3153,9 +3197,14 @@ if _gw_key:
     llm["api_key"] = _gw_key
     _default_reasoning = True
     # The gateway default IS the t1 tier: its windows come from
-    # catalog/ide-models.json, like every other surface's.
-    with open(os.path.join(os.path.dirname(models_file), "ide-models.json"), "r", encoding="utf-8") as _imf:
-        _default_window = next(m for m in json.load(_imf)["models"] if m["id"] == "t1-orchestrator")
+    # catalog/ide-models.json, like every other surface's. The installer
+    # passes the path only when the file checked out (it reported otherwise).
+    _default_window = None
+    try:
+        with open(os.environ.get("AUTOOS_IDE_MODELS") or "", "r", encoding="utf-8") as _imf:
+            _default_window = next(m for m in json.load(_imf)["models"] if m["id"] == "t1-orchestrator")
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        pass
 elif openrouter_key:
     llm["model"] = "openrouter/openrouter/free"
     llm["base_url"] = "https://openrouter.ai/api/v1"
@@ -3171,8 +3220,9 @@ else:
 
 # The chosen default's own windows (catalog context/output), never one
 # literal for all three: a 1M ceiling on the local 32k model overflowed it.
-llm["max_input_tokens"] = _default_window["context"]
-llm["max_output_tokens"] = _default_window["output"]
+if _default_window:
+    llm["max_input_tokens"] = _default_window["context"]
+    llm["max_output_tokens"] = _default_window["output"]
 if _default_reasoning:
     llm["reasoning_effort"] = "high"
 else:
