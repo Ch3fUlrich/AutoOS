@@ -3206,6 +3206,92 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up aga
     Pass
 }
 
+Test-Case 'backup-once: Copy-AutoOSBackup never overwrites a same-second backup' {
+    # Every writer names its backup to the second. Two changes inside one second
+    # used to share a name, and Copy-Item -Force made the later copy overwrite the
+    # earlier one, so the user's ORIGINAL was lost. -Stamp forces that clash
+    # without touching the clock.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $file = Join-Path $scratch 'config.json'
+    $stamp = '20260101-000000'
+    $null = New-Item -ItemType Directory -Path $scratch -Force
+    try {
+        $paths = @()
+        foreach ($content in 'A', 'B', 'C') {
+            [IO.File]::WriteAllText($file, $content)
+            $paths += @(Copy-AutoOSBackup -Path $file -Stamp $stamp)
+        }
+        if ($paths.Count -ne 3) { throw "expected 3 returned paths, got $($paths.Count): [$($paths -join ', ')]" }
+        if (@($paths | Select-Object -Unique).Count -ne 3) { throw "backup paths are not distinct: [$($paths -join ', ')]" }
+        $want = @("$file.autoos-backup-$stamp", "$file.autoos-backup-$stamp-1", "$file.autoos-backup-$stamp-2")
+        for ($i = 0; $i -lt 3; $i++) {
+            if ($paths[$i] -cne $want[$i]) { throw "backup $($i + 1) is named [$($paths[$i])] (want [$($want[$i])])" }
+        }
+        $wantText = @('A', 'B', 'C')
+        for ($i = 0; $i -lt 3; $i++) {
+            if (-not (Test-Path -LiteralPath $paths[$i])) { throw "backup $($i + 1) does not exist: $($paths[$i])" }
+            $got = [Convert]::ToBase64String([IO.File]::ReadAllBytes($paths[$i]))
+            $exp = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wantText[$i]))
+            if ($got -cne $exp) { throw "backup $($i + 1) does not hold '$($wantText[$i])' (an earlier backup was overwritten)" }
+        }
+        if (@(Get-ChildItem -LiteralPath $scratch -Filter '*.autoos-backup-*').Count -ne 3) { throw 'expected exactly 3 backup files on disk' }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case "backup-once: five Antigravity MCP writes in one second keep the user's original" {
+    # One setup pass writes mcp_config.json five times (Set-AutoOSAntigravityMcp,
+    # then Register-AutoOSAntigravityMcpServer for serena, graphify, playwright
+    # and context7), and each one changes the file. Backups named to the second
+    # used to overwrite each other, so the user's own file survived nowhere. The
+    # wait starts the writes early in a second, so all five share one timestamp
+    # without any mocking of the clock.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        while ((Get-Date).Millisecond -gt 250) { Start-Sleep -Milliseconds 20 }
+        Set-AutoOSAntigravityMcp
+        foreach ($n in 'serena', 'graphify', 'playwright', 'context7') {
+            Register-AutoOSAntigravityMcpServer -Name $n -Spec ([ordered]@{ command = 'npx'; args = @('-y', "$n-mcp-server") })
+        }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        $holdsOriginal = $false
+        foreach ($b in $backups) {
+            if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($b.FullName)) -ceq $seedB64) { $holdsOriginal = $true }
+        }
+        if (-not $holdsOriginal) { throw "none of the $($backups.Count) backup(s) holds the user's original file byte for byte (an earlier backup was overwritten)" }
+        if ($backups.Count -ne 5) { throw "$($backups.Count) backup(s) after 5 writes that each changed the file (want 5)" }
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $names = ($s.mcpServers.PSObject.Properties.Name -join ',')
+        if ($names -ne 'other,omnigraph,serena,graphify,playwright,context7') { throw "servers lost or reordered: [$names]" }
+        if ($s.mcpServers.other.command -ne 'node') { throw 'the foreign server was not kept' }
+        if ($s.theme -ne 'mine') { throw 'the foreign top-level key was not kept' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
     $realAppData = $env:APPDATA
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))
