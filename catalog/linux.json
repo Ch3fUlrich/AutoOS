@@ -589,8 +589,7 @@
           "profiles": [
             "workstation"
           ],
-          "notes": "Desktop IDE — hidden on headless and arm64 machines.",
-          "prompt": "antigravity_url",
+          "notes": "Desktop IDE — hidden on headless and arm64 machines. Adds Google's signed apt repo, which is frozen at 1.23.2.",
           "verify": "antigravity --version",
           "homepage": "https://antigravity.google/"
         },
@@ -1635,11 +1634,6 @@
       "question": "Herdr install source",
       "default": "npm:herdr",
       "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in apt, so AutoOS needs to be told where it lives."
-    },
-    "antigravity_url": {
-      "question": "Antigravity .deb download URL (required to install the app)",
-      "default": "",
-      "help": "Copy the .deb link from https://antigravity.google/download/linux. Left blank, the Antigravity app is reported as failed, not installed."
     },
     "git_user_name": {
       "question": "Git commit author name (e.g. Jane Doe)",

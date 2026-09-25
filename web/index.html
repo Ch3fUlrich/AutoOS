@@ -1700,8 +1700,7 @@ const CONFIGURABLE_COMPONENTS = {
   "claude-code": { card: "cardClaudeAutostart" },
   git: { card: "cardConfig", field: "cfg_git_user_name" },
   herdr: { card: "cardConfig", field: "cfg_herdr_source" },
-  ollama: { card: "cardConfig", field: "cfg_ollama_models" },
-  agy: { card: "cardConfig", field: "cfg_antigravity_url" }
+  ollama: { card: "cardConfig", field: "cfg_ollama_models" }
 };
 
 /* ── claude autostart & session tracking ──────────────────────────────── */
@@ -2402,14 +2401,15 @@ function renderTiers() {
    that fits above a field, falling back to the catalog's own wording.
 
    The list of FIELDS is not here on purpose. It used to be, and it was wrong:
-   the form hardcoded six, of which ollama_models and antigravity_url are asked
-   only by the Linux catalog, so on Windows it showed boxes whose answers no
-   installer ever read. Rendering from STATE.prompts also means the reverse works:
-   git_user_name/git_user_email became Windows prompts later, and the Developer
-   identity section appeared there with no change to this file. */
+   the form hardcoded six, of which ollama_models (and the since-removed
+   antigravity_url) were asked only by the Linux catalog, so on Windows it
+   showed boxes whose answers no installer ever read. Rendering from
+   STATE.prompts also means the reverse works: git_user_name/git_user_email
+   became Windows prompts later, and the Developer identity section appeared
+   there with no change to this file. */
 const CONFIG_SECTIONS = [
   { title: "Developer identity", keys: ["git_user_name", "git_user_email"] },
-  { title: "Knowledge & MCP stack", keys: ["omnigraph_url", "herdr_source", "antigravity_url", "context7_api_key"] },
+  { title: "Knowledge & MCP stack", keys: ["omnigraph_url", "herdr_source", "context7_api_key"] },
   { title: "Local AI & inference", keys: ["ollama_models"] }
 ];
 
@@ -2418,7 +2418,6 @@ const CONFIG_LABELS = {
   git_user_email: "Git user email",
   omnigraph_url: "Omnigraph URL",
   herdr_source: "Herdr source",
-  antigravity_url: "Antigravity download URL",
   ollama_models: "Ollama models",
   context7_api_key: "Context7 API key"
 };

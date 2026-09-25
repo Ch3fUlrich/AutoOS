@@ -313,26 +313,50 @@ install_tailscale() {
 }
 
 install_antigravity() {
-    local url; url="$(answer antigravity_url '')"
-    if [[ -z "$url" ]] && (( AUTOOS_DRY_RUN )); then
-        # A dry run never asks the question: say what the real run will do.
-        ui_warn "Antigravity: no .deb download URL given - the real run reports it failed."
-        ui_muted "    Copy the .deb link from https://antigravity.google/download/linux."
+    # Google's own apt repository (antigravity.google/download/linux), so no
+    # download URL has to be pasted. Measured 2026-09-25: the repo is FROZEN at
+    # 1.23.2 (Release dated 2026-04-16); the 2.x apps are tarball-only. Google
+    # publishes no fingerprint for the signing key, so none is pinned here - a
+    # fingerprint written down now would be our own unverified assertion.
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would add Google's signed apt repo (us-central1-apt.pkg.dev) and install antigravity (repo frozen at 1.23.2)"
         return 0
     fi
-    if [[ -z "$url" ]]; then
-        # A failure, not a quiet skip: returning 0 here was counted as
-        # "installed" although nothing was (operator, 2026-09-25).
-        ui_err "Antigravity not installed: no .deb download URL given (question antigravity_url)."
-        ui_muted "    Copy the .deb link from https://antigravity.google/download/linux and re-run,"
-        ui_muted "    or leave Antigravity out of the selection."
-        return 1
+    # AUTOOS_APT_PREFIX is a test seam (DESTDIR-style): where the two files are
+    # written. The source line keeps the /etc path apt itself will read.
+    local prefix="${AUTOOS_APT_PREFIX:-}"
+    local key=/etc/apt/keyrings/antigravity-repo-key.gpg
+    local list=/etc/apt/sources.list.d/antigravity.list
+    if [[ ! -f "${prefix}${key}" ]]; then
+        # The .gpg name is misleading: the key is served ASCII-armored, so it
+        # needs dearmoring before apt accepts it in signed-by. Each step is
+        # checked - a curl failure must never leave an empty key that the
+        # file guard above would then trust forever.
+        local armored dearmored
+        armored="$(mktemp)"; dearmored="$(mktemp)"
+        if curl -fsSL -o "$armored" https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg \
+            && gpg --dearmor <"$armored" >"$dearmored" \
+            && [[ -s "$dearmored" ]] \
+            && $AUTOOS_SUDO install -D -o root -g root -m 644 "$dearmored" "${prefix}${key}"; then
+            rm -f "$armored" "$dearmored"
+        else
+            rm -f "$armored" "$dearmored"
+            ui_err "Antigravity not installed: could not fetch and install Google's apt signing key."
+            ui_muted "    Needs curl, gpg and network access to us-central1-apt.pkg.dev; re-run once that works."
+            return 1
+        fi
     fi
-    if (( AUTOOS_DRY_RUN )); then ui_muted "would download and install Antigravity from $url"; return 0; fi
-    local tmp; tmp="$(mktemp --suffix=.deb)"
-    curl -fsSL -o "$tmp" "$url"
-    $AUTOOS_SUDO apt-get install -y "$tmp"
-    rm -f "$tmp"
+    if [[ ! -f "${prefix}${list}" ]]; then
+        if ! printf 'deb [signed-by=%s] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main\n' \
+            "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null; then
+            ui_err "Antigravity not installed: could not write ${list}."
+            return 1
+        fi
+        APT_UPDATED=0   # the new repo has to be fetched before install
+    fi
+    ui_warn "Antigravity: Google's apt repo is frozen at 1.23.2 (Release dated 2026-04-16); the 2.x apps are tarball-only, so apt will not bring them."
+    apt_update_once
+    run $AUTOOS_SUDO apt-get install -y antigravity
 }
 
 install_xpipe() {
