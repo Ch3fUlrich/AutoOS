@@ -2986,11 +2986,28 @@ function Install-AutoOSOmniRouteRouting {
                 if ($script:DryRun) {
                     Write-AutoOSLine "would route Qwen Code at OmniRoute in $qcfg (model t2-worker)" -Level muted
                 } else {
+                    # The omniroute CLI edits the file itself, so the backup is taken first
+                    # and kept only when the CLI changed something. An identical result
+                    # deletes AutoOS's own fresh copy and reports skipped. A copy that
+                    # already exists under this second's name belongs to an earlier run:
+                    # it is neither overwritten nor deleted.
+                    $qbefore = $null
+                    $qbak = $null
                     if (Test-Path $qcfg) {
-                        Copy-Item $qcfg "$qcfg.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+                        $qbefore = [IO.File]::ReadAllBytes($qcfg)
+                        $qbak = "$qcfg.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+                        if (Test-Path $qbak) { $qbak = $null }
+                        else { Copy-Item $qcfg $qbak -Force }
                     }
                     & omniroute setup-qwen --model t2-worker --yes 2>&1 | Out-Null
-                    if ($LASTEXITCODE -ne 0) { Write-AutoOSLine 'Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)' -Level warn }
+                    $qrc = $LASTEXITCODE
+                    $qsame = $false
+                    if ($null -ne $qbefore -and (Test-Path $qcfg)) {
+                        $qsame = [Convert]::ToBase64String([IO.File]::ReadAllBytes($qcfg)) -ceq [Convert]::ToBase64String($qbefore)
+                    }
+                    if ($qsame -and $qbak) { Remove-Item $qbak -Force -ErrorAction SilentlyContinue }
+                    if ($qrc -ne 0) { Write-AutoOSLine 'Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)' -Level warn }
+                    elseif ($qsame) { Write-AutoOSLine 'Qwen Code already routed at OmniRoute (model t2-worker) - skipped' -Level ok }
                     else { Write-AutoOSLine 'Qwen Code routed at OmniRoute (model t2-worker)' -Level ok }
                 }
             } else {
@@ -3086,9 +3103,6 @@ function Set-AutoOSZedProxy {
         return
     }
     if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
-    if (Test-Path $cfgPath) {
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
-    }
     # -Encoding UTF8: this writer saves BOM-less UTF-8 (below), and Windows
     # PowerShell 5.1 reads a BOM-less file as ANSI - the catalog's em-dash
     # names and any non-ASCII user setting would come back as mojibake.
@@ -3203,7 +3217,20 @@ function Set-AutoOSZedProxy {
     # BOM-less UTF-8: Zed's parser (serde_json) rejects a leading BOM with
     # "expected value at line 1 column 1", and PowerShell 5.1 Out-File -Encoding
     # utf8 always emits one (measured 2026-09-22 — broke the live file).
-    [IO.File]::WriteAllText($cfgPath, ($settings | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    $json = $settings | ConvertTo-Json -Depth 8
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    if (Test-Path $cfgPath) {
+        # Bytes, not parsed data: a file that already has the right content but a BOM
+        # (which Zed rejects) still differs and gets rewritten. Only a run that
+        # changes the file backs it up.
+        $same = [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfgPath)) -ceq [Convert]::ToBase64String($utf8.GetBytes($json))
+        if ($same) {
+            Write-AutoOSLine "Zed agents already routed to OmniRoute + LiteLLM ($cfgPath) - skipped" -Level ok
+            return
+        }
+        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
+    [IO.File]::WriteAllText($cfgPath, $json, $utf8)
     Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)' -Level ok
 }
 
@@ -3408,15 +3435,19 @@ function Enable-AutoOSSidekickExtra {
             Write-AutoOSLine "could not parse $lj - leaving it alone" -Level warn
             return
         }
-        Copy-Item $lj "$lj.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
     $extras = @()
     if ($cfg.ContainsKey('extras')) { $extras = @($cfg['extras']) }
     if ($extras -contains $extra) {
-        Write-AutoOSLine 'sidekick extra already enabled' -Level muted
+        Write-AutoOSLine 'sidekick extra already enabled - skipped' -Level muted
         return
     }
     $cfg['extras'] = @($extras) + @($extra)
+    # Backup only now that a write is certain: a run that changes nothing must not
+    # leave a backup behind (or, within the same second, overwrite an earlier one).
+    if (Test-Path $lj) {
+        Copy-Item $lj "$lj.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+    }
     $cfg | ConvertTo-Json -Depth 8 | Out-File -FilePath $lj -Encoding utf8
     Write-AutoOSLine 'sidekick extra enabled (<leader>aa toggles the opencode panel)' -Level ok
 }

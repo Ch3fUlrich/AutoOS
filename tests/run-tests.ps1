@@ -4405,6 +4405,82 @@ Test-Case 'Install-AutoOSOmniRouteRouting announces without writing in dry run' 
     Pass
 }
 
+Test-Case 'backup-once: Install-AutoOSOmniRouteRouting does not back up again when nothing changed' {
+    # AutoOS does not write .qwen\settings.json itself: the external `omniroute
+    # setup-qwen` does, so stub `qwen` and `omniroute` on a PATH that is put back in
+    # finally. The keys file names no key, so Set-AutoOSOmniRouteCliKey exports nothing
+    # to the User environment. The stub always writes the same fixture, like the real
+    # CLI does once a file is routed. The backup name carries a second-resolution
+    # timestamp, so run 2 (same second) and run 3 (a later second) both must leave the
+    # ORIGINAL file as the only backup.
+    $realHome = $env:USERPROFILE
+    $realPath = $env:PATH
+    $realShort = $env:AUTOOS_OMNIROUTE_KEY
+    $realCli = $env:OMNIROUTE_API_KEY
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $stub = Join-Path $scratch 'bin'
+        $fakeHome = Join-Path $scratch 'home'
+        $qdir = Join-Path $fakeHome '.qwen'
+        $qcfg = Join-Path $qdir 'settings.json'
+        $noKeys = Join-Path $scratch 'no-keys.yml'
+        $null = New-Item -ItemType Directory -Path $stub, $qdir -Force
+        $seed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}}}'
+        $routed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}},"model":{"name":"t2-worker"}}'
+        [IO.File]::WriteAllText($qcfg, $seed)
+        [IO.File]::WriteAllText((Join-Path $stub 'qwen-settings.json'), $routed)
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [IO.File]::WriteAllText((Join-Path $stub 'qwen.cmd'), (@('@echo off', 'exit /b 0') -join "`r`n"))
+            [IO.File]::WriteAllText((Join-Path $stub 'omniroute.cmd'), (@(
+                '@echo off',
+                'if not exist "%USERPROFILE%\.qwen" mkdir "%USERPROFILE%\.qwen"',
+                'copy /y "%~dp0qwen-settings.json" "%USERPROFILE%\.qwen\settings.json" >nul',
+                'exit /b 0') -join "`r`n"))
+        } else {
+            [IO.File]::WriteAllText((Join-Path $stub 'qwen'), (@('#!/bin/sh', 'exit 0') -join "`n") + "`n")
+            [IO.File]::WriteAllText((Join-Path $stub 'omniroute'), (@(
+                '#!/bin/sh',
+                'mkdir -p "$USERPROFILE/.qwen"',
+                'cp "$(dirname "$0")/qwen-settings.json" "$USERPROFILE/.qwen/settings.json"',
+                'exit 0') -join "`n") + "`n")
+            & chmod +x (Join-Path $stub 'qwen') (Join-Path $stub 'omniroute')
+        }
+        $env:USERPROFILE = $fakeHome
+        $env:PATH = "$stub$([IO.Path]::PathSeparator)$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $log = Join-Path $scratch 'run.log'
+        $run = {
+            Initialize-AutoOSLog -Path $log
+            Install-AutoOSOmniRouteRouting -KeysFile $noKeys | Out-Null
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        }
+        $out1 = & $run
+        $backups1 = @(Get-ChildItem -LiteralPath $qdir -Filter 'settings.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'run 1 backup is not the original file' }
+        if ([IO.File]::ReadAllText($qcfg) -ne $routed) { throw 'the omniroute stub was not run (settings.json is not the routed fixture)' }
+        if ($out1 -notmatch 'Qwen Code routed') { throw "run 1 did not report the routing: [$out1]" }
+        $hash1 = (Get-FileHash -LiteralPath $qcfg -Algorithm SHA256).Hash
+        foreach ($n in 2, 3) {
+            if ($n -eq 3) { Start-Sleep -Milliseconds 1100 }
+            $out = & $run
+            $backups = @(Get-ChildItem -LiteralPath $qdir -Filter 'settings.json.autoos-backup-*')
+            if ($backups.Count -ne 1) { throw "run ${n}: backups=$($backups.Count) (want 1: nothing changed, so no new backup)" }
+            if ([IO.File]::ReadAllText($backups[0].FullName) -ne $seed) { throw "run ${n} replaced the run 1 backup: it is no longer the original file" }
+            if ((Get-FileHash -LiteralPath $qcfg -Algorithm SHA256).Hash -ne $hash1) { throw "run ${n} changed settings.json although nothing needed changing" }
+            if ($out -notmatch 'Qwen Code[^\r\n]*skipped') { throw "run ${n} did not report the Qwen step as skipped: [$out]" }
+        }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realShort) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realShort }
+        if ($null -eq $realCli) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue } else { $env:OMNIROUTE_API_KEY = $realCli }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'zed routing merges one provider and keeps the rest' {
     $realAppData = $env:APPDATA
     $realOmni = $env:AUTOOS_OMNIROUTE_KEY
@@ -4847,6 +4923,54 @@ Test-Case 'a missing or malformed catalog/ide-models.json stops the IDE writers 
     }
 }
 
+Test-Case 'backup-once: Set-AutoOSZedProxy does not back up again when nothing changed' {
+    # Only the run that changes settings.json backs it up. The backup name carries a
+    # second-resolution timestamp, so two quick runs would collide on one name and a
+    # bare count proves nothing: the surviving backup must still be the ORIGINAL file.
+    $realAppData = $env:APPDATA
+    $realOmni = $env:AUTOOS_OMNIROUTE_API_KEY
+    $realLit = $env:AUTOOS_LITELLM_API_KEY
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        $env:APPDATA = $scratch
+        $env:AUTOOS_OMNIROUTE_API_KEY = 'test-omni-key'
+        $env:AUTOOS_LITELLM_API_KEY = 'test-lit-key'
+        $cfgDir = Join-Path $scratch 'Zed'
+        $cfgPath = Join-Path $cfgDir 'settings.json'
+        $null = New-Item -ItemType Directory -Path $cfgDir -Force
+        $seed = '{"theme":"mine","vim_mode":true,"language_models":{"openai":{"api_url":"https://example.invalid"}},"agent":{"default_model":{"provider":"anthropic","model":"claude"}}}'
+        [IO.File]::WriteAllText($cfgPath, $seed)
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSZedProxy
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'settings.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        $hash1 = (Get-FileHash -LiteralPath $cfgPath -Algorithm SHA256).Hash
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSZedProxy
+        $out2 = Get-Content -LiteralPath $log -Raw -Encoding utf8
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'settings.json.autoos-backup-*')
+        if ($backups2.Count -ne 1) { throw "run 2: backups=$($backups2.Count) (want 1: nothing changed, so no new backup)" }
+        if ([IO.File]::ReadAllText($backups2[0].FullName) -ne $seed) { throw 'run 2 overwrote the run 1 backup: it is no longer the original file' }
+        $hash2 = (Get-FileHash -LiteralPath $cfgPath -Algorithm SHA256).Hash
+        if ($hash2 -ne $hash1) { throw 'run 2 changed settings.json although nothing needed changing' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        $s = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($s.theme -ne 'mine' -or $s.vim_mode -ne $true) { throw 'user settings lost' }
+        if ($s.language_models.openai.api_url -ne 'https://example.invalid') { throw 'user provider lost' }
+        if ($s.language_models.openai_compatible.'autoos-omniroute'.api_url -ne 'http://127.0.0.1:20128/v1') { throw 'omniroute provider not written' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_API_KEY = $realOmni }
+        if ($null -eq $realLit) { Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_LITELLM_API_KEY = $realLit }
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'component profiles name real profiles and verify is set' {
     $bad = @()
     foreach ($file in @('catalog\windows.json', 'catalog\linux.json', 'catalog\macos.json')) {
@@ -4958,6 +5082,47 @@ Test-Case 'neovim sidekick enabling merges one extra and keeps the rest' {
         Assert-Equal (@($j.extras | Where-Object { $_ -eq 'lazyvim.plugins.extras.ai.sidekick' }).Count) 1
         Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
     } finally { $env:LOCALAPPDATA = $realLocal }
+}
+
+Test-Case 'backup-once: Enable-AutoOSSidekickExtra does not back up again when nothing changed' {
+    # Only the run that changes lazyvim.json backs it up. The backup name carries a
+    # second-resolution timestamp, so two quick runs would collide on one name and a
+    # bare count proves nothing: the surviving backup must still be the ORIGINAL file.
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'nvim'
+        $lj = Join-Path $cfgDir 'lazyvim.json'
+        $null = New-Item -ItemType Directory -Path $cfgDir -Force
+        $seed = '{"extras":["lazyvim.plugins.extras.lang.python"],"news":{"NEWS.md":"11866"},"version":8}'
+        [IO.File]::WriteAllText($lj, $seed)
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Enable-AutoOSSidekickExtra
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'lazyvim.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        $hash1 = (Get-FileHash -LiteralPath $lj -Algorithm SHA256).Hash
+        Initialize-AutoOSLog -Path $log
+        Enable-AutoOSSidekickExtra
+        $out2 = Get-Content -LiteralPath $log -Raw -Encoding utf8
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'lazyvim.json.autoos-backup-*')
+        if ($backups2.Count -ne 1) { throw "run 2: backups=$($backups2.Count) (want 1: nothing changed, so no new backup)" }
+        if ([IO.File]::ReadAllText($backups2[0].FullName) -ne $seed) { throw 'run 2 overwrote the run 1 backup: it is no longer the original file' }
+        $hash2 = (Get-FileHash -LiteralPath $lj -Algorithm SHA256).Hash
+        if ($hash2 -ne $hash1) { throw 'run 2 changed lazyvim.json although the extra was already enabled' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        $j = Get-Content -LiteralPath $lj -Raw | ConvertFrom-Json
+        if (@($j.extras) -notcontains 'lazyvim.plugins.extras.ai.sidekick') { throw 'sidekick extra missing after run 1' }
+        if (@($j.extras) -notcontains 'lazyvim.plugins.extras.lang.python') { throw 'existing extra lost' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:LOCALAPPDATA = $realLocal
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
 }
 
 # ── OpenHands self-checks ───────────────────────────────────────────────────
