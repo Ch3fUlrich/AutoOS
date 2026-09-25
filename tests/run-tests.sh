@@ -6909,6 +6909,14 @@ if it "resolver v2: measure() features and client_state (unit tests)"; then
     out="$(python3 tests/test_autoos_measure.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "resolver v2: track record and Beta success estimate (unit tests)"; then
+    out="$(python3 tests/test_autoos_track.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "autoos-agent context: fill from the session transcript (unit tests)"; then
+    out="$(python3 tests/test_autoos_context.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/skill-rules.py: the linter for one-line skill rules (routing v2 spec 8.1).
 if it "skill-rules check: ids, length, source, near-duplicates (unit tests)"; then
     out="$(python3 tests/test_skill_rules.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
