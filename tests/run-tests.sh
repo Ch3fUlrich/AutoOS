@@ -7757,11 +7757,12 @@ if it "aistack: migrate without --yes is the announced plan and touches nothing"
     mkdir -p "$d/home/.omniroute"; printf 'STORAGE_ENCRYPTION_KEY=x\n' >"$d/home/.omniroute/.env"
     out="$(_aistack "$d" migrate)"
     ok=1
-    # Order is the contract: back up, stop, copy, start, prove, only then disable.
+    # Order is the contract: stop (quiescent DB), back up, copy, start, prove,
+    # only then disable.
     python3 - "$out" <<'PY' || ok=0
 import sys
 out = sys.argv[1]
-steps = ["back up", "stop the autoos-omniroute unit", "copy", "start the omniroute container",
+steps = ["stop the autoos-omniroute unit", "back up", "copy", "start the omniroute container",
          "answers", "unregister autoos-omniroute", "autoos-opencode", "openhands"]
 pos = [out.find(s) for s in steps]
 if -1 in pos or pos != sorted(pos):

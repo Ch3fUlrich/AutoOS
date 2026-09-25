@@ -259,13 +259,14 @@ plan:
 
 1. `init`, then build/pull the images.
 2. Create the manage key while the native gateway still answers.
-3. Back up `~/.omniroute` to `~/.local/share/autoos/ai-stack/backups/omniroute-<ts>.tar.gz` (0600).
-4. Stop the `autoos-omniroute` unit (a hand-started gateway: `omniroute stop`). The gateway is down from here.
+3. Stop the `autoos-omniroute` unit (a hand-started gateway: `omniroute stop`). The gateway is down from here; the SQLite files are quiescent.
+4. Back up `~/.omniroute` to `~/.local/share/autoos/ai-stack/backups/omniroute-<ts>.tar.gz` (0600).
 5. **Copy** `~/.omniroute` (DB + `.env` with `STORAGE_ENCRYPTION_KEY` - without
    it the stored provider credentials are unreadable) into the data dir. The
    original stays untouched.
 6. Start the container; it must answer `/api/health` **and** refuse a keyless
-   `/v1` call with 401. If not, the container stops and the unit starts again.
+   `/v1` call with 401. If not - or if any step from 3 on fails - the
+   container stops and the unit starts again.
 7. Only then `register-autostart.sh --unregister --only autoos-omniroute`.
 8. The same for `autoos-opencode`: stop, start the container, prove it
    answers, then unregister.

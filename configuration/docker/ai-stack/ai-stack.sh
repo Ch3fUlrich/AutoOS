@@ -335,17 +335,17 @@ cmd_up() {
     (( ${#start[@]} )) || return 0
     ensure_images "${start[@]}"
     if [[ $DRY -eq 1 ]]; then
-        echo "  - would run: docker compose -p autoos-ai up -d ${start[*]}"
+        echo "  - would run: docker compose -p autoos-ai up -d --no-deps ${start[*]}"
         attach_shared_mcp
         return 0
     fi
-    dc up -d "${start[@]}"
+    dc up -d --no-deps "${start[@]}"
     attach_shared_mcp
     for svc in "${start[@]}"; do
         case "$svc" in
             omniroute) wait_for gateway_ok && echo "  + omniroute answers on :20128" || echo "  ! omniroute did not answer - docker logs autoos-omniroute" ;;
             opencode)  wait_for opencode_ok && echo "  + opencode answers on :4096" || echo "  ! opencode did not answer - docker logs autoos-opencode" ;;
-            openhands) wait_for openhands_ok && echo "  + openhands answers on :3000" || echo "  ! openhands did not answer - docker logs openhands-app" ;;
+            openhands) wait_for openhands_ok && echo "  + openhands answers on :3000 (tier profiles: configuration/start-stack.sh openhands)" || echo "  ! openhands did not answer - docker logs openhands-app" ;;
         esac
     done
 }
@@ -411,8 +411,9 @@ Migration plan (native units -> docker AI stack):
   1. init: env files under $CONFIG_DIR, the opencode config, images (build/pull)
   2. create a manage-scoped gateway key for the host CLI ($MANAGE_KEY_FILE)
      while the native gateway is still up
-  3. back up $OMNI_HOME to $DATA_DIR/backups/omniroute-<timestamp>.tar.gz (0600)
-  4. stop the autoos-omniroute unit (the gateway is down from here)
+  3. stop the autoos-omniroute unit (the gateway is down from here; the
+     SQLite files are quiescent from now on)
+  4. back up $OMNI_HOME to $DATA_DIR/backups/omniroute-<timestamp>.tar.gz (0600)
   5. copy $OMNI_HOME (storage.sqlite + .env with STORAGE_ENCRYPTION_KEY) into
      $DATA_DIR/omniroute - the original stays as it is
   6. start the omniroute container and wait until it answers /api/health and
@@ -426,6 +427,26 @@ Migration plan (native units -> docker AI stack):
 Run it with:  $0 migrate --yes
 Undo it with: $0 rollback --yes
 EOF
+}
+
+migrate_gateway_state() {
+    # Backup, then copy (never move): $OMNI_HOME stays the rollback source.
+    [[ -d "$OMNI_HOME" ]] || return 0
+    local ts backup
+    ts="$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$DATA_DIR/backups" && chmod 700 "$DATA_DIR/backups" || return 1
+    backup="$DATA_DIR/backups/omniroute-$ts.tar.gz"
+    ( umask 077; tar -C "$(dirname "$OMNI_HOME")" -czf "$backup" "$(basename "$OMNI_HOME")" ) || return 1
+    echo "  + backed up $OMNI_HOME to $backup"
+    if [[ -e "$DATA_DIR/omniroute/storage.sqlite" ]]; then
+        mv "$DATA_DIR/omniroute" "$DATA_DIR/omniroute.autoos-backup-$ts" || return 1
+        mkdir -p "$DATA_DIR/omniroute" && chmod 700 "$DATA_DIR/omniroute" || return 1
+        echo "  - an earlier copy moved aside to $DATA_DIR/omniroute.autoos-backup-$ts"
+    fi
+    cp -a "$OMNI_HOME/." "$DATA_DIR/omniroute/" || return 1
+    # Pid files of the native server would read as "already running".
+    rm -f "$DATA_DIR/omniroute/server/.pid" "$DATA_DIR/omniroute/supervisor/.pid"
+    echo "  + copied $OMNI_HOME into $DATA_DIR/omniroute"
 }
 
 stop_native() {
@@ -470,31 +491,14 @@ cmd_migrate() {
         echo "  = omniroute already runs in docker (skipped)"
     else
         ensure_manage_key
-        if [[ -d "$OMNI_HOME" ]]; then
-            mkdir -p "$DATA_DIR/backups"; chmod 700 "$DATA_DIR/backups"
-            local ts backup
-            ts="$(date +%Y%m%d-%H%M%S)"
-            backup="$DATA_DIR/backups/omniroute-$ts.tar.gz"
-            ( umask 077; tar -C "$(dirname "$OMNI_HOME")" -czf "$backup" "$(basename "$OMNI_HOME")" )
-            echo "  + backed up $OMNI_HOME to $backup"
-            stop_native autoos-omniroute 20128 || return 1
-            if [[ -e "$DATA_DIR/omniroute/storage.sqlite" ]]; then
-                mv "$DATA_DIR/omniroute" "$DATA_DIR/omniroute.autoos-backup-$ts"
-                mkdir -p "$DATA_DIR/omniroute"; chmod 700 "$DATA_DIR/omniroute"
-                echo "  - an earlier copy moved aside to $DATA_DIR/omniroute.autoos-backup-$ts"
-            fi
-            cp -a "$OMNI_HOME/." "$DATA_DIR/omniroute/"
-            # Pid files of the native server would read as "already running".
-            rm -f "$DATA_DIR/omniroute/server/.pid" "$DATA_DIR/omniroute/supervisor/.pid"
-            echo "  + copied $OMNI_HOME into $DATA_DIR/omniroute"
-        fi
-        dc up -d omniroute
-        if wait_for gateway_ok && gateway_keyed; then
-            echo "  + omniroute container answers on :20128 and refuses keyless /v1 (401)"
-        else
+        stop_native autoos-omniroute 20128 || { restore_native autoos-omniroute omniroute; return 1; }
+        # From here every failure hands :20128 back to the native unit.
+        if ! migrate_gateway_state || ! dc up -d --no-deps omniroute \
+            || ! wait_for gateway_ok || ! gateway_keyed; then
             restore_native autoos-omniroute omniroute
             return 1
         fi
+        echo "  + omniroute container answers on :20128 and refuses keyless /v1 (401)"
     fi
     if [[ -f "$REGISTER" ]] && unit_known autoos-omniroute; then
         bash "$REGISTER" --unregister --only autoos-omniroute
@@ -504,10 +508,9 @@ cmd_migrate() {
     if container_running autoos-opencode; then
         echo "  = opencode already runs in docker (skipped)"
     else
-        stop_native autoos-opencode 4096 || return 1
-        dc up -d opencode
-        attach_shared_mcp
-        if wait_for opencode_ok; then
+        stop_native autoos-opencode 4096 || { restore_native autoos-opencode opencode; return 1; }
+        if dc up -d --no-deps opencode && wait_for opencode_ok; then
+            attach_shared_mcp
             echo "  + opencode container answers on :4096"
         else
             restore_native autoos-opencode opencode
@@ -544,21 +547,31 @@ Run it with: $0 rollback --yes
 EOF
 }
 
+rollback_gateway_state() {
+    local ts="$1"
+    if [[ -d "$OMNI_HOME" ]]; then
+        mkdir -p "$DATA_DIR/backups" || return 1
+        ( umask 077; tar -C "$(dirname "$OMNI_HOME")" -czf "$DATA_DIR/backups/omniroute-native-$ts.tar.gz" "$(basename "$OMNI_HOME")" ) || return 1
+        echo "  + backed up $OMNI_HOME to $DATA_DIR/backups/omniroute-native-$ts.tar.gz"
+    fi
+    mkdir -p "$OMNI_HOME" && cp -a "$DATA_DIR/omniroute/." "$OMNI_HOME/" || return 1
+    echo "  + copied the container state back into $OMNI_HOME"
+}
+
 cmd_rollback() {
     if [[ $YES -eq 0 || $DRY -eq 1 ]]; then rollback_plan; return 0; fi
     local ts
     ts="$(date +%Y%m%d-%H%M%S)"
+    # A foreign container on the network would make `down` fail on it.
+    "$DOCKER" network disconnect autoos-ai serena-mcp >/dev/null 2>&1 || true
     dc down
     echo "  - compose containers removed"
-    if [[ -e "$DATA_DIR/omniroute/storage.sqlite" ]]; then
-        if [[ -d "$OMNI_HOME" ]]; then
-            mkdir -p "$DATA_DIR/backups"
-            ( umask 077; tar -C "$(dirname "$OMNI_HOME")" -czf "$DATA_DIR/backups/omniroute-native-$ts.tar.gz" "$(basename "$OMNI_HOME")" )
-            echo "  + backed up $OMNI_HOME to $DATA_DIR/backups/omniroute-native-$ts.tar.gz"
-        fi
-        mkdir -p "$OMNI_HOME"
-        cp -a "$DATA_DIR/omniroute/." "$OMNI_HOME/"
-        echo "  + copied the container state back into $OMNI_HOME"
+    if [[ -e "$DATA_DIR/omniroute/storage.sqlite" ]] && ! rollback_gateway_state "$ts"; then
+        # Nothing native is registered yet: bring the containers back rather
+        # than leave the host without a gateway.
+        echo "  ! could not restore $OMNI_HOME - starting the docker stack again"
+        dc up -d
+        return 1
     fi
     bash "$REGISTER" --only autoos-omniroute,autoos-opencode
     bash "$REPO/configuration/start-stack.sh" openhands || true
