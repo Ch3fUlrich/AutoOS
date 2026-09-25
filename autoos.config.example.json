@@ -8,7 +8,8 @@
     "herdr_source": "npm:herdr",
     "antigravity_url": "",
     "ollama_models": "nomic-embed-text",
-    "context7_api_key": ""
+    "context7_api_key": "",
+    "claude_gateway_routing": "login"
   },
   "claude_autostart": {
     "enabled": true,

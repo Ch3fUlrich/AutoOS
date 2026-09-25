@@ -183,11 +183,17 @@ back in.
 
 ## CLI coding tools via the gateway
 
-- **Claude Code** — pipeline equivalent landed (`Set-AutoOSClaudeGateway` /
-  `route_claude_to_gateway`, `claude-code` postInstall on all platforms):
-  merges `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` into
-  `~/.claude/settings.json` with backup + idempotent skip. Subscription
-  models additionally need the `claude` gateway OAuth connection above.
+- **Claude Code** — **opt-in** (`Set-AutoOSClaudeGateway` /
+  `route_claude_to_gateway`, postInstall of `claude-code` and the `omniroute`
+  routing step on all platforms), chosen by the `claude_gateway_routing`
+  answer. `gateway` merges `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` into
+  `~/.claude/settings.json`; while those two keys are set the claude.ai
+  connectors are disabled. `login` (the default, also what `--yes` picks)
+  removes exactly those two keys again and keeps everything else. Backup only
+  when the file changes; a second run reports skipped. Pre-answer with
+  `AUTOOS_ANSWER_CLAUDE_GATEWAY_ROUTING=gateway` or the config file's
+  `answers`. Subscription models additionally need the `claude` gateway OAuth
+  connection above.
 - **Qwen Code** — install `npm i -g @qwen-code/qwen-code` (done live
   2026-09-24: 0.24.4), backup `~/.qwen/settings.json` first, then
   `omniroute setup-qwen --model t2-worker --yes --api-key

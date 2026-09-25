@@ -2551,31 +2551,228 @@ if it "zed routing announces in dry run and writes nothing"; then
     rm -rf "$scratch"
 fi
 
-if it "route_claude_to_gateway points Claude Code at OmniRoute"; then
-    scratch="$(mktemp -d)"
-    mkdir -p "$scratch/.claude"
-    printf '{"theme":"mine"}' >"$scratch/.claude/settings.json"
-    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
-    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
-    report="$(python3 - "$scratch/.claude/settings.json" <<'PY'
+# Claude Code gateway routing is opt-in and reversible (catalog prompt
+# claude_gateway_routing, default "login"). ANTHROPIC_BASE_URL/AUTH_TOKEN in
+# ~/.claude/settings.json "env" disable the claude.ai connectors, so every answer
+# other than "gateway" takes exactly those two keys out again. A backup is taken
+# only by a run that changes the file, so each fixture below sees at most ONE
+# modifying run and the exact backup count is safe from the per-second timestamp
+# collision fixed in 0bb5952.
+_claude_settings_report() {  # _claude_settings_report <settings.json>
+    python3 - "$1" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8"))
-print("%s|%s|%s" % (cfg.get("theme"), cfg.get("env", {}).get("ANTHROPIC_BASE_URL"), cfg.get("env", {}).get("ANTHROPIC_AUTH_TOKEN")))
+print("%s|%s|%s" % (cfg.get("theme"),
+                    json.dumps(cfg.get("permissions"), sort_keys=True),
+                    json.dumps(cfg.get("env"), sort_keys=True) if "env" in cfg else "no-env"))
 PY
-)"
-    backups="$(ls "$scratch"/.claude/settings.json.autoos-backup-* 2>/dev/null | wc -l)"
+}
+_claude_backups() {  # _claude_backups <home> -> number of settings.json backups
+    find "$1/.claude" -maxdepth 1 -name 'settings.json.autoos-backup-*' 2>/dev/null | wc -l | tr -d ' '
+}
+
+if it "route_claude_to_gateway (default login answer) strips only the two gateway keys"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '%s' '{"theme":"mine","permissions":{"allow":["Bash(ls)"]},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:20128","ANTHROPIC_AUTH_TOKEN":"test-omni-key","KEEP_ME":"1"}}' \
+        >"$scratch/.claude/settings.json"
+    # A key in the environment must not matter any more: no answer means login.
+    out1="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; unset 'AUTOOS_ANSWERS[claude_gateway_routing]'
+               AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway ) 2>&1)"
+    out2="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; unset 'AUTOOS_ANSWERS[claude_gateway_routing]'
+               AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway ) 2>&1)"
+    report="$(_claude_settings_report "$scratch/.claude/settings.json")"
+    backups="$(_claude_backups "$scratch")"
+    backup_kept_keys="no"
+    if grep -q 'ANTHROPIC_AUTH_TOKEN' "$scratch"/.claude/settings.json.autoos-backup-* 2>/dev/null; then backup_kept_keys="yes"; fi
+    # "env" holding nothing but the two keys disappears entirely.
     scratch2="$(mktemp -d)"
-    ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0; unset AUTOOS_OMNIROUTE_KEY; route_claude_to_gateway >/dev/null 2>&1 )
+    mkdir -p "$scratch2/.claude"
+    printf '%s' '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}' >"$scratch2/.claude/settings.json"
+    ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0; unset 'AUTOOS_ANSWERS[claude_gateway_routing]'; route_claude_to_gateway >/dev/null 2>&1 )
+    report2="$(_claude_settings_report "$scratch2/.claude/settings.json")"
+    rm -rf "$scratch" "$scratch2"
+    want='mine|{"allow": ["Bash(ls)"]}|{"KEEP_ME": "1"}'
+    if [[ "$report" == "$want" && "$report2" == "mine|null|no-env" && "$backups" == 1 \
+          && "$backup_kept_keys" == yes && "$out1" == *"removed"* && "$out2" == *"skipped"* \
+          && "$out2" != *"removed"* ]]; then pass
+    else fail "report=[$report] report2=[$report2] backups=$backups backup_kept_keys=$backup_kept_keys out1=[$out1] out2=[$out2]"; fi
+fi
+
+if it "route_claude_to_gateway (default login answer) leaves a file without the keys untouched"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '%s' '{"theme":"mine","env":{"KEEP_ME":"1"}}' >"$scratch/.claude/settings.json"
+    before="$(cat "$scratch/.claude/settings.json")"
+    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; unset 'AUTOOS_ANSWERS[claude_gateway_routing]'; route_claude_to_gateway ) 2>&1)"
+    after="$(cat "$scratch/.claude/settings.json")"
+    backups="$(_claude_backups "$scratch")"
+    # No settings file at all: nothing is created, not even ~/.claude.
+    scratch2="$(mktemp -d)"
+    ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0; unset 'AUTOOS_ANSWERS[claude_gateway_routing]'; route_claude_to_gateway >/dev/null 2>&1 )
+    created="no"; [[ -e "$scratch2/.claude" ]] && created="yes"
+    rm -rf "$scratch" "$scratch2"
+    if [[ "$before" == "$after" && "$backups" == 0 && "$created" == no && "$out" == *"skipped"* ]]; then pass
+    else fail "changed=$([[ "$before" == "$after" ]] && echo no || echo yes) backups=$backups created=$created out=[$out]"; fi
+fi
+
+if it "route_claude_to_gateway (gateway answer) points Claude Code at OmniRoute, second run skipped"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '%s' '{"theme":"mine","env":{"KEEP_ME":"1"}}' >"$scratch/.claude/settings.json"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=gateway
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    out2="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=gateway
+               AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway ) 2>&1)"
+    report="$(_claude_settings_report "$scratch/.claude/settings.json")"
+    backups="$(_claude_backups "$scratch")"
+    # Gateway mode still needs the key: without it nothing is written.
+    scratch2="$(mktemp -d)"
+    nokey_out="$( ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=gateway
+                    unset AUTOOS_OMNIROUTE_KEY; route_claude_to_gateway ) 2>&1)"
     nokey="no"; [[ -e "$scratch2/.claude/settings.json" ]] || nokey="yes"
     rm -rf "$scratch" "$scratch2"
-    assert_eq "$report" "mine|http://127.0.0.1:20128|test-omni-key"
-    # The backup name carries a timestamp, so two runs inside the same second collide
-    # on one filename and only one backup survives — the exact count was never the
-    # contract, and asserting 1 made this fail on any runner slow enough to straddle a
-    # second. What must hold: the file was backed up before being edited, no more than
-    # one backup per modifying run, and nothing written when the key is absent.
-    if [[ "$backups" -ge 1 && "$backups" -le 2 && "$nokey" == "yes" ]]; then pass
-    else fail "backups=$backups (want 1..2) nokey=$nokey"; fi
+    want='mine|null|{"ANTHROPIC_AUTH_TOKEN": "test-omni-key", "ANTHROPIC_BASE_URL": "http://127.0.0.1:20128", "KEEP_ME": "1"}'
+    if [[ "$report" == "$want" && "$backups" == 1 && "$out2" == *"skipped"* \
+          && "$nokey" == yes && "$nokey_out" == *"AUTOOS_OMNIROUTE_KEY not set"* ]]; then pass
+    else fail "report=[$report] backups=$backups out2=[$out2] nokey=$nokey nokey_out=[$nokey_out]"; fi
+fi
+
+if it "route_claude_to_gateway dry run announces and writes nothing in either mode"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '%s' '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}' >"$scratch/.claude/settings.json"
+    before="$(cat "$scratch/.claude/settings.json")"
+    login_out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=1; unset 'AUTOOS_ANSWERS[claude_gateway_routing]'; route_claude_to_gateway ) 2>&1)"
+    after_login="$(cat "$scratch/.claude/settings.json")"
+    scratch2="$(mktemp -d)"
+    mkdir -p "$scratch2/.claude"
+    printf '%s' '{"theme":"mine"}' >"$scratch2/.claude/settings.json"
+    before2="$(cat "$scratch2/.claude/settings.json")"
+    gw_out="$( ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=1; AUTOOS_ANSWERS[claude_gateway_routing]=gateway
+                 AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway ) 2>&1)"
+    after_gw="$(cat "$scratch2/.claude/settings.json")"
+    scratch3="$(mktemp -d)"
+    ( SYS_HOME="$scratch3" AUTOOS_DRY_RUN=1; AUTOOS_ANSWERS[claude_gateway_routing]=gateway
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    created="no"; [[ -e "$scratch3/.claude" ]] && created="yes"
+    backups="$(( $(_claude_backups "$scratch") + $(_claude_backups "$scratch2") ))"
+    rm -rf "$scratch" "$scratch2" "$scratch3"
+    if [[ "$before" == "$after_login" && "$before2" == "$after_gw" && "$backups" == 0 && "$created" == no \
+          && "$login_out" == *"would remove"* && "$gw_out" == *"would point"* ]]; then pass
+    else fail "backups=$backups created=$created login_out=[$login_out] gw_out=[$gw_out]"; fi
+fi
+
+if it "route_claude_to_gateway login mode works without AUTOOS_OMNIROUTE_KEY"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '%s' '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y","KEEP_ME":"1"}}' >"$scratch/.claude/settings.json"
+    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=login
+              unset AUTOOS_OMNIROUTE_KEY; route_claude_to_gateway ) 2>&1)"
+    report="$(_claude_settings_report "$scratch/.claude/settings.json")"
+    rm -rf "$scratch"
+    if [[ "$report" == 'mine|null|{"KEEP_ME": "1"}' && "$out" != *"AUTOOS_OMNIROUTE_KEY"* ]]; then pass
+    else fail "report=[$report] out=[$out]"; fi
+fi
+
+if it "route_claude_to_gateway leaves an unreadable settings file untouched in either mode"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '%s' '{"theme": "mine", "env": {"ANTHROPIC_BASE_URL": ' >"$scratch/.claude/settings.json"
+    before="$(cat "$scratch/.claude/settings.json")"
+    login_out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; unset 'AUTOOS_ANSWERS[claude_gateway_routing]'; route_claude_to_gateway ) 2>&1)"; rc1=$?
+    gw_out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=gateway
+                 AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway ) 2>&1)"; rc2=$?
+    after="$(cat "$scratch/.claude/settings.json")"
+    backups="$(_claude_backups "$scratch")"
+    rm -rf "$scratch"
+    if [[ "$before" == "$after" && "$backups" == 0 && "$rc1$rc2" == 00 \
+          && "$login_out" == *"left untouched"* && "$gw_out" == *"left untouched"* ]]; then pass
+    else fail "changed=$([[ "$before" == "$after" ]] && echo no || echo yes) backups=$backups rc=$rc1$rc2 login_out=[$login_out] gw_out=[$gw_out]"; fi
+fi
+
+_file_mode() {  # _file_mode <path> -> permission bits in octal, e.g. 600
+    python3 -c 'import os, sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o777))' "$1" 2>&1
+}
+_file_inode() {  # _file_inode <path>
+    python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "$1" 2>&1
+}
+
+if it "route_claude_to_gateway replaces settings.json atomically with mode 600, backups 600"; then
+    # The file holds ANTHROPIC_AUTH_TOKEN, and an in-place rewrite that dies
+    # mid-write (crash, ENOSPC) leaves it empty: temp file + os.replace, 0600.
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '%s' '{"theme":"mine"}' >"$scratch/.claude/settings.json"
+    chmod 644 "$scratch/.claude/settings.json"
+    inode_before="$(_file_inode "$scratch/.claude/settings.json")"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=gateway
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    inode_after="$(_file_inode "$scratch/.claude/settings.json")"
+    gw_mode="$(_file_mode "$scratch/.claude/settings.json")"
+    gw_backup_mode="$(_file_mode "$(find "$scratch/.claude" -name 'settings.json.autoos-backup-*' | head -1)")"
+    leftovers="$(find "$scratch/.claude" -name '*autoos-tmp*' | wc -l | tr -d ' ')"
+    # A settings file created from nothing is 600 as well.
+    scratch2="$(mktemp -d)"
+    ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=gateway
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    new_mode="$(_file_mode "$scratch2/.claude/settings.json")"
+    # The login-mode rewrite goes the same way, and its backup still holds the token.
+    scratch3="$(mktemp -d)"
+    mkdir -p "$scratch3/.claude"
+    printf '%s' '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}' >"$scratch3/.claude/settings.json"
+    chmod 644 "$scratch3/.claude/settings.json"
+    ( SYS_HOME="$scratch3" AUTOOS_DRY_RUN=0; unset 'AUTOOS_ANSWERS[claude_gateway_routing]'; route_claude_to_gateway >/dev/null 2>&1 )
+    login_mode="$(_file_mode "$scratch3/.claude/settings.json")"
+    login_backup_mode="$(_file_mode "$(find "$scratch3/.claude" -name 'settings.json.autoos-backup-*' | head -1)")"
+    rm -rf "$scratch" "$scratch2" "$scratch3"
+    got="$gw_mode|$gw_backup_mode|$new_mode|$login_mode|$login_backup_mode|$leftovers"
+    if [[ "$got" == "600|600|600|600|600|0" && "$inode_before" != "$inode_after" ]]; then pass
+    else fail "modes|leftovers=[$got] (want 600|600|600|600|600|0) inode $inode_before -> $inode_after (must change: replaced, not rewritten in place)"; fi
+fi
+
+if it "route_claude_to_gateway trims and lower-cases the answer, like the PowerShell side"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.claude"
+    printf '%s' '{"theme":"mine"}' >"$scratch/.claude/settings.json"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]=" Gateway "
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    padded="$(_claude_settings_report "$scratch/.claude/settings.json")"
+    # Inner whitespace is not stripped: "gate way" is not gateway, so it means login.
+    scratch2="$(mktemp -d)"
+    mkdir -p "$scratch2/.claude"
+    printf '%s' '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}' >"$scratch2/.claude/settings.json"
+    ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0; AUTOOS_ANSWERS[claude_gateway_routing]="gate way"
+      AUTOOS_OMNIROUTE_KEY="test-omni-key" route_claude_to_gateway >/dev/null 2>&1 )
+    split="$(_claude_settings_report "$scratch2/.claude/settings.json")"
+    rm -rf "$scratch" "$scratch2"
+    if [[ "$padded" == 'mine|null|{"ANTHROPIC_AUTH_TOKEN": "test-omni-key", "ANTHROPIC_BASE_URL": "http://127.0.0.1:20128"}' \
+          && "$split" == "mine|null|no-env" ]]; then pass
+    else fail "padded=[$padded] split=[$split]"; fi
+fi
+
+if it "claude_gateway_routing is asked by claude-code and omniroute on every platform, default login"; then
+    bad="$(python3 - "$ROOT/catalog" 2>&1 <<'PY'
+import json, pathlib, sys
+problems = []
+for name in ("linux", "macos", "windows"):
+    cat = json.loads((pathlib.Path(sys.argv[1]) / f"{name}.json").read_text(encoding="utf-8"))
+    spec = cat.get("prompts", {}).get("claude_gateway_routing")
+    if not spec:
+        problems.append(f"{name}: no claude_gateway_routing prompt"); continue
+    if spec.get("default") != "login":
+        problems.append(f"{name}: default is {spec.get('default')!r}, not 'login'")
+    if not spec.get("question") or not spec.get("help"):
+        problems.append(f"{name}: prompt needs question and help")
+    comps = {c["id"]: c for g in cat["categories"] for c in g["components"]}
+    for cid in ("claude-code", "omniroute"):
+        keys = str(comps.get(cid, {}).get("prompt") or "").replace(",", " ").split()
+        if "claude_gateway_routing" not in keys:
+            problems.append(f"{name}: {cid} does not ask claude_gateway_routing")
+print("; ".join(problems))
+PY
+)"
+    assert_eq "$bad" ""
 fi
 
 if it "install_qodercli announces in dry run and writes nothing"; then

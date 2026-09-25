@@ -1177,39 +1177,119 @@ install_litellm_proxy() {
 }
 
 route_claude_to_gateway() {
-    # Point Claude Code at the local OmniRoute gateway (:20128) by merging
-    # ANTHROPIC_BASE_URL/AUTH_TOKEN into ~/.claude/settings.json env.
-    # Read-modify-write with timestamped backup; idempotent (skips when the
-    # exact values are already set). Needs AUTOOS_OMNIROUTE_KEY. Subscription
-    # models need the gateway `claude` OAuth connection first - until then
-    # use opus/sonnet via direct login (the backup restores it).
-    local cfg_dir="$SYS_HOME/.claude"
-    local cfg="$cfg_dir/settings.json"
-    if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
+    # Claude Code gateway routing is opt-in and reversible: catalog prompt
+    # claude_gateway_routing, default "login". ANTHROPIC_BASE_URL/AUTH_TOKEN
+    # in ~/.claude/settings.json "env" disable the claude.ai connectors, so
+    #   gateway  merges both keys, pointing Claude Code at the local OmniRoute
+    #            gateway (:20128). Needs AUTOOS_OMNIROUTE_KEY. Subscription
+    #            models need the gateway `claude` OAuth connection first.
+    #   login    (any other answer) removes exactly those two keys again;
+    #            every other key stays, "env" goes only if it ends up empty.
+    #            Needs no key.
+    # Read-modify-write; a timestamped backup is taken only by a run that
+    # changes the file, so a second run reports skipped and writes nothing.
+    # The file (and every backup of it) can hold the token, so both are
+    # mode 0600, and the new content lands via a fsynced temp file plus
+    # os.replace - a crash mid-write must never leave an empty settings.json.
+    # A dry run reads the file to say what it would do, and writes nothing.
+    local cfg="$SYS_HOME/.claude/settings.json"
+    local mode
+    mode="$(answer claude_gateway_routing login)"
+    # Trim the ends and lower-case, exactly like the PowerShell side:
+    # " Gateway " is gateway, "gate way" is not (so it means login).
+    mode="${mode#"${mode%%[![:space:]]*}"}"; mode="${mode%"${mode##*[![:space:]]}"}"
+    mode="${mode,,}"
+    [[ "$mode" == gateway ]] || mode=login
+    if [[ "$mode" == gateway && -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
         ui_warn "AUTOOS_OMNIROUTE_KEY not set - export the OmniRoute client key before pointing Claude Code at the gateway"
         return 0
     fi
-    if (( AUTOOS_DRY_RUN )); then ui_muted "would point Claude Code at OmniRoute in $cfg"; return 0; fi
-    mkdir -p "$cfg_dir"
-    if [[ -f "$cfg" ]]; then
-        cp "$cfg" "$cfg.autoos-backup-$(date +%Y%m%d-%H%M%S)"
-    fi
-    AUTOOS_OMNIROUTE_KEY="$AUTOOS_OMNIROUTE_KEY" python3 - "$cfg" <<'PY'
-import json, os, sys
-path = sys.argv[1]
-key = os.environ["AUTOOS_OMNIROUTE_KEY"]
+    local status rc=0
+    # The key travels in the environment only, never on a command line.
+    status="$(AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" \
+        python3 - "$cfg" "$mode" "$AUTOOS_DRY_RUN" <<'PY'
+import json, os, shutil, sys, tempfile, time
+path, mode, dry = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+keys = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
 url = "http://127.0.0.1:20128"
-cfg = json.load(open(path, encoding="utf-8")) if os.path.isfile(path) else {}
-env = cfg.setdefault("env", {})
-if env.get("ANTHROPIC_BASE_URL") == url and env.get("ANTHROPIC_AUTH_TOKEN") == key:
-    print("SKIPPED")
+existed = os.path.isfile(path)
+cfg = {}
+if existed:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        cfg = None
+env = cfg.get("env") if isinstance(cfg, dict) else None
+if not isinstance(cfg, dict) or not isinstance(env, (dict, type(None))):
+    print("INVALID")  # never rewrite a file we cannot read back faithfully
+    sys.exit(0)
+if mode == "gateway":
+    token = os.environ["AUTOOS_OMNIROUTE_KEY"]
+    if env is not None and env.get(keys[0]) == url and env.get(keys[1]) == token:
+        print("SKIPPED")
+        sys.exit(0)
+    if env is None:
+        env = cfg["env"] = {}
+    env[keys[0]] = url
+    env[keys[1]] = token
+    status = "ROUTED"
 else:
-    env["ANTHROPIC_BASE_URL"] = url
-    env["ANTHROPIC_AUTH_TOKEN"] = key
-    with open(path, "w", encoding="utf-8") as fh:
+    if env is None or not any(k in env for k in keys):
+        print("SKIPPED")
+        sys.exit(0)
+    for k in keys:
+        env.pop(k, None)
+    if not env:
+        del cfg["env"]
+    status = "REMOVED"
+if dry:
+    print("WOULD_" + status)
+    sys.exit(0)
+folder = os.path.dirname(path)
+os.makedirs(folder, exist_ok=True)
+if existed:
+    # Created 0600 from the start (shutil.copy2 would carry a 0644 over); the
+    # chmod covers a same-second backup that already exists with another mode.
+    backup = "%s.autoos-backup-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
+    with open(path, "rb") as src, \
+         os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    os.chmod(backup, 0o600)
+# mkstemp: same directory (so os.replace is atomic), O_EXCL, mode 0600.
+fd, tmp = tempfile.mkstemp(dir=folder, prefix="settings.json.autoos-tmp-")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, indent=2)
-    print("WROTE")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    raise
+print(status)
 PY
+)" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "could not update Claude Code settings in $cfg (exit $rc) - left as it was"
+        return 0
+    fi
+    case "$mode:$status" in
+        gateway:SKIPPED)     ui_ok "Claude Code already points at OmniRoute - skipped" ;;
+        login:SKIPPED)       ui_ok "Claude Code already uses its claude.ai login (no gateway keys in $cfg) - skipped" ;;
+        gateway:WOULD_ROUTED) ui_muted "would point Claude Code at OmniRoute in $cfg" ;;
+        login:WOULD_REMOVED) ui_muted "would remove ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN from $cfg (Claude Code back on its claude.ai login)" ;;
+        gateway:ROUTED)
+            ui_ok "Claude Code points at OmniRoute ($cfg)"
+            ui_warn "claude.ai connectors stay disabled while Claude Code routes through the gateway - answer claude_gateway_routing=login to undo"
+            ;;
+        login:REMOVED)       ui_ok "Claude Code gateway keys removed from $cfg - claude.ai login and connectors are back (backup kept)" ;;
+        *:INVALID)           ui_warn "$cfg is not a JSON object - Claude Code settings left untouched, fix the file by hand" ;;
+        *)                   ui_warn "unexpected result '$status' updating $cfg" ;;
+    esac
 }
 
 route_detected_clis_to_gateway() {
