@@ -98,6 +98,15 @@ that file (`chmod 600` it), then log out and in (or `systemctl --user
 daemon-reload` plus `opencode service restart`) so long-running services
 pick it up.
 
+The systemd user units `register-autostart.sh` writes for the processes that
+start an omnigraph client (`autoos-opencode`, and `autoos-stack` whose
+fallback starts `opencode serve`) read the file themselves:
+`EnvironmentFile=-%h/.autoos-omnigraph.env`, on every start, no re-login
+needed — after adding the token, `systemctl --user restart autoos-opencode`
+is enough. The leading dash makes the file optional, so a machine without it
+still starts. The gateway units do not get it: OmniRoute listens on the LAN
+and never talks to the graph.
+
 ### Check it
 
 ```bash

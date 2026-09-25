@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the omnigraph token reaches services started by systemd
+
+- **`autoos-opencode` and `autoos-stack` never saw `OMNIGRAPH_TOKEN`**: a systemd user
+  unit does not inherit what `~/.zshrc` exports, so opencode's omnigraph bridge showed
+  "connected" and then failed every read with "missing bearer token". Both templates now
+  carry `EnvironmentFile=-%h/.autoos-omnigraph.env` (the per-user file the installer
+  keeps; the dash makes it optional). `autoos-omniroute` and `autoos-litellm` do not get
+  it. `register-autostart.sh` backs an installed unit up before it gains the line and
+  skips it on the next run.
+
 ### Changed — one source for the gateway model list (`catalog/ide-models.json`)
 
 - **The tier/model list was hand-kept in about eight places and had drifted**: the 1M

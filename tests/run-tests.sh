@@ -7744,6 +7744,58 @@ if it "svc: the opencode unit runs the wrapper from this checkout"; then
     if (( ok )); then pass; else fail "opencode unit render is wrong"; fi
 fi
 
+# A service started by systemd never sees a token exported from ~/.zshrc, so
+# opencode's omnigraph bridge "connects" and then fails every read with
+# "missing bearer token" (B-omnigraph 2026-09-24, item 6). The per-user env
+# file write_omnigraph_env keeps is the one source; the leading dash makes it
+# optional so a machine without it still starts. Only units that start an
+# omnigraph client get it: OmniRoute listens on the LAN and never needs it.
+if it "svc: omnigraph units read the per-user env file (optional), the gateways do not"; then
+    d="$(_svc_reg_sandbox)"
+    want='EnvironmentFile=-%h/.autoos-omnigraph.env'
+    ok=1
+    for u in autoos-opencode autoos-stack; do
+        out="$(_svc_reg "$d" --render "$u")" || { ok=0; echo "$u: render failed: $out" >&2; continue; }
+        [[ "$(grep -c '^EnvironmentFile=' <<<"$out")" == 1 ]] || { ok=0; echo "$u: not exactly one EnvironmentFile= line" >&2; }
+        grep -qxF "$want" <<<"$out" || { ok=0; echo "$u: missing [$want]" >&2; }
+        # In [Service]: after its header, before [Install].
+        svc_line="$(grep -nx '\[Service\]' <<<"$out" | cut -d: -f1)"
+        env_line="$(grep -nxF "$want" <<<"$out" | cut -d: -f1)"
+        inst_line="$(grep -nx '\[Install\]' <<<"$out" | cut -d: -f1)"
+        [[ -n "$env_line" && "$env_line" -gt "$svc_line" && "$env_line" -lt "$inst_line" ]] \
+            || { ok=0; echo "$u: EnvironmentFile= is outside [Service]" >&2; }
+        # Comments may name the variable; a directive must never carry a value.
+        [[ "$(grep -v '^#' <<<"$out")" == *"OMNIGRAPH_TOKEN"* ]] && { ok=0; echo "$u: a token is set in the unit text" >&2; }
+    done
+    for u in autoos-omniroute autoos-litellm; do
+        out="$(_svc_reg "$d" --render "$u")" || { ok=0; echo "$u: render failed: $out" >&2; continue; }
+        [[ "$out" == *"autoos-omnigraph.env"* ]] && { ok=0; echo "$u: the LAN-facing gateway must not get the omnigraph token" >&2; }
+    done
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "units do not read ~/.autoos-omnigraph.env as expected"; fi
+fi
+
+if it "svc: an installed opencode unit gains the omnigraph line once: backed up, then skipped"; then
+    d="$(_svc_reg_sandbox)"
+    # What an earlier AutoOS wrote: today's render minus the new line.
+    _svc_reg "$d" --render autoos-opencode | grep -v '^EnvironmentFile=' >"$d/old.service"
+    cp "$d/old.service" "$d/units/autoos-opencode.service"
+    first="$(_svc_reg "$d" --only autoos-opencode)"
+    second="$(_svc_reg "$d" --only autoos-opencode)"
+    nbak="$(find "$d/units" -name 'autoos-opencode.service.autoos-backup-*' | wc -l)"
+    ok=1
+    [[ "$first" == *"+ autoos-opencode: replaced"*"(backup: "* ]] || { ok=0; echo "first: $first" >&2; }
+    grep -qxF 'EnvironmentFile=-%h/.autoos-omnigraph.env' "$d/units/autoos-opencode.service" \
+        || { ok=0; echo "unit did not gain the line" >&2; }
+    [[ "$nbak" == 1 ]] || { ok=0; echo "expected exactly one backup, found $nbak" >&2; }
+    cmp -s "$d/old.service" "$(find "$d/units" -name 'autoos-opencode.service.autoos-backup-*' | head -n1)" \
+        || { ok=0; echo "the backup is not the previous unit" >&2; }
+    [[ "$second" == *"= autoos-opencode: unit unchanged (skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$second" == *"+ autoos-opencode"* ]] && { ok=0; echo "second run changed something" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "adding the omnigraph line is not idempotent and backed up"; fi
+fi
+
 # systemd runs ExecStart directly: a 100644 launcher fails with 203/EXEC.
 if it "svc: every script a unit or the healthcheck runs is executable in git"; then
     bad=""
