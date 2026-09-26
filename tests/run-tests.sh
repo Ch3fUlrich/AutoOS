@@ -9623,6 +9623,76 @@ EOS
     if (( ok )); then pass; else fail "rescue-bootstrap overwrote a same-second profile backup"; fi
 fi
 
+# Same class in configuration/start-stack.sh: the OpenHands settings repair
+# used a plain <file>.autoos-backup-<stamp> name in both its python
+# (shutil.copy2) and its bash (cp) site, so two repairs in the same second
+# let the second copy overwrite the first backup. AUTOOS_BACKUP_STAMP pins
+# the python stamp so both runs land in the same "second". The repair code
+# is the file's own, extracted, not a copy of it.
+if it "backup residual: start-stack keeps two same-second OpenHands settings backups"; then
+    d="$(mktemp -d)"
+    sed -n "/^import json, os, shutil, sys, datetime$/,/^sys.exit(0)$/p" configuration/start-stack.sh >"$d/repair.py"
+    f="$d/settings.json"
+    printf '{"agent_settings": {"schema_version": 6, "mcp_config": {}}}' >"$f"
+    contentA="$(cat "$f")"
+    AUTOOS_BACKUP_STAMP=20260101-000000 python3 "$d/repair.py" "$f" >/dev/null
+    printf '{"agent_settings": {"schema_version": 6, "mcp_config": {"s": {"command": "x"}}}}' >"$f"
+    contentB="$(cat "$f")"
+    AUTOOS_BACKUP_STAMP=20260101-000000 python3 "$d/repair.py" "$f" >/dev/null
+    ok=1
+    base="$f.autoos-backup-20260101-000000"
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup content wrong" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d" -maxdepth 1 -name 'settings.json.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    if python3 - "$f" <<'PY'; then :; else ok=0; echo "the settings file itself was not repaired" >&2; fi
+import json, sys
+sys.exit(0 if json.load(open(sys.argv[1]))["agent_settings"]["schema_version"] == 4 else 1)
+PY
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-stack overwrote a same-second settings backup"; fi
+fi
+
+# Both start-stack sites only remove/replace the original after a successful
+# copy: the bash move-aside (cp, stubbed by backup_fail_bin) and the python
+# repair (shutil.copy2, failed through a sitecustomize wrapper - the stub
+# only touches *.autoos-backup-* copies and delegates the rest).
+if it "backup residual: start-stack leaves OpenHands settings in place when the backup copy fails"; then
+    d="$(mktemp -d)"
+    sed -n '/^ss_backup_path()/,/^}/p;/^ss_move_aside()/,/^}/p' configuration/start-stack.sh >"$d/fn.sh"
+    sed -n "/^import json, os, shutil, sys, datetime$/,/^sys.exit(0)$/p" configuration/start-stack.sh >"$d/repair.py"
+    mkdir -p "$d/shadow"
+    cat >"$d/shadow/sitecustomize.py" <<'EOS'
+import shutil as _s
+_real_copy2 = _s.copy2
+def _fail_copy2(src, dst, *a, **k):
+    if ".autoos-backup-" in str(dst):
+        raise OSError(28, "No space left on device (test stub)")
+    return _real_copy2(src, dst, *a, **k)
+_s.copy2 = _fail_copy2
+EOS
+    # shellcheck disable=SC1090
+    source "$d/fn.sh"
+    ok=1
+    printf '{not json' >"$d/unparseable.json"; cp "$d/unparseable.json" "$d/unparseable.json.orig"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" ss_move_aside "$d/unparseable.json" 2>&1)"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "move-aside succeeded without a backup: rc=$rc" >&2; }
+    [[ "$out" == *"could not back up $d/unparseable.json"* ]] || { ok=0; echo "no warning naming the file: ${out:0:300}" >&2; }
+    cmp -s "$d/unparseable.json" "$d/unparseable.json.orig" || { ok=0; echo "the unparseable file was removed without a backup" >&2; }
+    printf '{"agent_settings": {"schema_version": 6, "mcp_config": {}}}' >"$d/settings.json"
+    cp "$d/settings.json" "$d/settings.json.orig"
+    out="$(PYTHONPATH="$d/shadow" AUTOOS_BACKUP_STAMP=20260101-000000 python3 "$d/repair.py" "$d/settings.json" 2>&1)"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "repair succeeded without a backup: rc=$rc" >&2; }
+    [[ "$out" == *"Could not back up $d/settings.json"* ]] || { ok=0; echo "no warning naming the file: ${out:0:300}" >&2; }
+    cmp -s "$d/settings.json" "$d/settings.json.orig" || { ok=0; echo "the settings file was rewritten without a backup" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "start-stack drops settings it could not back up"; fi
+fi
+
 if it "ai dispatcher --list names all three backends, including local (template)"; then
     out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" bash templates/ai-dispatcher.sh --list 2>&1)"
     rc=$?
