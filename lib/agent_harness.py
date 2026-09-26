@@ -417,11 +417,30 @@ def _print_notes(notes):
         print("  note: %s" % note)
 
 
-def _backup_and_write(path, text):
+def _backup_path(path, stamp=None):
+    """The name for a NEW backup of `path`, never one that exists.
+
+    <path>.autoos-backup-<stamp>, then <...>-1, <...>-2, ... while taken. The
+    stamp has one-second resolution, so two changing writes in a second used
+    to overwrite the first backup - the user's original. Same rule as
+    Copy-AutoOSBackup (Windows) and backup_file (lib/linux/install.sh); the
+    first backup keeps the plain name the Windows installer expects.
+    `stamp` defaults to now; it is a parameter so a test can pin it.
+    """
+    if stamp is None:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = "%s.autoos-backup-%s" % (path, stamp)
+    candidate, counter = base, 0
+    while os.path.lexists(candidate):
+        counter += 1
+        candidate = "%s-%d" % (base, counter)
+    return candidate
+
+
+def _backup_and_write(path, text, stamp=None):
     """Write `text` to `path`, copying an existing file aside first (hard rule 5)."""
     if os.path.exists(path):
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        shutil.copyfile(path, "%s.autoos-backup-%s" % (path, stamp))
+        shutil.copyfile(path, _backup_path(path, stamp))
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)

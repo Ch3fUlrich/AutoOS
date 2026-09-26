@@ -13,7 +13,9 @@ import sys
 import tempfile
 import unittest
 from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 MODULE = ROOT / "lib" / "agent_harness.py"
@@ -101,6 +103,56 @@ class PinTests(unittest.TestCase):
         lines = result.stdout.strip().splitlines()
         self.assertIn("read_file", lines)
         self.assertEqual(len(lines), len(harness_data()["mcp_servers"]["serena"]["excluded_tools"]))
+
+
+class BackupTests(unittest.TestCase):
+    """_backup_and_write never overwrites an earlier backup (AGENTS.md hard rule 5).
+
+    The stamp has one-second resolution and shutil.copyfile overwrites, so two
+    writes that both change a file within one second used to destroy the
+    original. The Windows installer calls this harness too: the FIRST backup
+    keeps the name <file>.autoos-backup-<YYYYmmdd-HHMMSS>.
+    """
+
+    STAMP = "20260101-000000"
+
+    def test_backup_path_appends_a_counter_while_the_name_is_taken(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "opencode.json")
+            base = "%s.autoos-backup-%s" % (target, self.STAMP)
+            self.assertEqual(module._backup_path(target, self.STAMP), base)
+            Path(base).write_text("A", encoding="utf-8")
+            self.assertEqual(module._backup_path(target, self.STAMP), base + "-1")
+            Path(base + "-1").write_text("B", encoding="utf-8")
+            self.assertEqual(module._backup_path(target, self.STAMP), base + "-2")
+
+    def test_two_changing_writes_in_one_second_keep_the_original(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            # A frozen clock: both writes land in the same second. The real
+            # strftime still formats it, so the stamp format is checked too.
+            with mock.patch.object(module, "datetime") as fake:
+                fake.now.return_value = datetime(2026, 1, 1, 0, 0, 0)
+                module._backup_and_write(str(target), "first change")
+                module._backup_and_write(str(target), "second change")
+            oldest = Path("%s.autoos-backup-%s" % (target, self.STAMP))
+            self.assertEqual(oldest.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertEqual(
+                Path(str(oldest) + "-1").read_text(encoding="utf-8"), "first change"
+            )
+            self.assertEqual(target.read_text(encoding="utf-8"), "second change")
+            self.assertEqual(len(list(Path(tmp).glob("opencode.json.autoos-backup-*"))), 2)
+
+    def test_a_missing_file_is_written_without_a_backup(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "nested" / "opencode.json"
+            module._backup_and_write(str(target), "new", stamp=self.STAMP)
+            self.assertEqual(target.read_text(encoding="utf-8"), "new")
+            self.assertEqual(list(target.parent.glob("*.autoos-backup-*")), [])
 
 
 class OpencodeMergeTests(unittest.TestCase):
