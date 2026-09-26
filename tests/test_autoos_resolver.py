@@ -532,6 +532,82 @@ class FilterTests(unittest.TestCase):
                 self.assertIsInstance(reason, str)
 
 
+class ToolCallsOverlayTests(unittest.TestCase):
+    """The tool_calls filter's overlay wins over the registry (TC1).
+
+    tools/probe-toolcalls.py writes verdicts to overlay["legs"][leg]
+    ["tool_calls"]["value"], keyed by the leg exactly as written in a route's
+    ``legs`` (an omniroute_id alias included). filter_routes must read that
+    before falling back to the registry model's own ``tool_calls``.
+    """
+
+    def setUp(self):
+        self.registry = {
+            "providers": {
+                "clean": {"id": "clean", "trains_on_prompts": False},
+            },
+            "models": {
+                "flaky": {"id": "flaky", "tool_calls": "unproven",
+                          "context_usable": {"tokens": 100000, "source": "default"}},
+                "solid": {"id": "solid", "tool_calls": "proven",
+                          "context_usable": {"tokens": 100000, "source": "default"}},
+            },
+            "routes": {
+                "r-flaky": {"id": "r-flaky", "legs": ["clean/flaky"]},
+                "r-solid": {"id": "r-solid", "legs": ["clean/solid"]},
+            },
+        }
+
+    def card(self):
+        return {"kind": "implement", "privacy": "public"}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def feats(self):
+        return {"need_tokens": 10}
+
+    def filt(self, overlay):
+        return r.filter_routes(self.card(), self.feats(), self.state(),
+                               self.registry, overlay)
+
+    def test_overlay_proven_keeps_a_route_the_registry_alone_removes(self):
+        survivors, removed = self.filt({})
+        self.assertNotIn("r-flaky", survivors)
+        self.assertIn("tool_calls: clean/flaky is unproven", removed["r-flaky"])
+
+        overlay = {"legs": {"clean/flaky": {"tool_calls": {"value": "proven",
+                                                          "source": "probe"}}}}
+        survivors, removed = self.filt(overlay)
+        self.assertIn("r-flaky", survivors)
+        self.assertNotIn("r-flaky", removed)
+
+    def test_overlay_broken_removes_a_route_the_registry_alone_keeps(self):
+        survivors, removed = self.filt({})
+        self.assertIn("r-solid", survivors)
+
+        overlay = {"legs": {"clean/solid": {"tool_calls": {"value": "broken",
+                                                           "source": "probe"}}}}
+        survivors, removed = self.filt(overlay)
+        self.assertNotIn("r-solid", survivors)
+        self.assertIn("tool_calls: clean/solid is broken", removed["r-solid"])
+
+    def test_overlay_matches_the_leg_exactly_as_written_omniroute_alias(self):
+        self.registry["providers"]["clean"]["omniroute_id"] = "opencode-clean"
+        self.registry["routes"]["r-alias"] = {"id": "r-alias",
+                                              "legs": ["opencode-clean/flaky"]}
+        overlay = {"legs": {"opencode-clean/flaky": {"tool_calls": {"value": "proven"}}}}
+        survivors, _ = self.filt(overlay)
+        self.assertIn("r-alias", survivors)
+
+    def test_overlay_without_a_value_key_falls_back_to_the_registry(self):
+        # A leg the overlay only tracked an error for, never a value: the
+        # registry's own tool_calls still governs.
+        overlay = {"legs": {"clean/solid": {"tool_calls_last_error": {"detail": "429s"}}}}
+        survivors, _ = self.filt(overlay)
+        self.assertIn("r-solid", survivors)
+
+
 class ScoreTests(unittest.TestCase):
     """Expected-cost scoring and theta picking (spec 5.3 steps 4-5, 5.4).
 

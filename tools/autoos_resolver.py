@@ -217,14 +217,15 @@ AGENTIC_KINDS = ("implement", "debug", "bulk")
 _NO_ROUTE_HINTS = ["sign in", "narrow paths", "split the task", "override"]
 
 
-def serving_legs(route, registry):
-    """Available ``(provider_id, model_id)`` legs of `route`, in leg order.
+def _serving_legs_raw(route, registry):
+    """Serving legs of `route`, keeping each leg exactly as written in ``legs``.
 
-    A leg resolves through its provider id (or that provider's omniroute_id)
-    and its model id; an ``unavailable_legs`` entry or a provider-wide
-    ``available: false`` drops it. A leg that resolves to nothing raises
-    ValueError: a broken registry must fail closed, never silently drop a
-    candidate.
+    Same filtering as `serving_legs` (an ``unavailable_legs`` entry or a
+    provider-wide ``available: false`` drops it; an unresolvable leg raises
+    ValueError). Returns ``(leg, provider_id, model_id)`` so a caller that
+    needs the raw leg string too -- e.g. to look it up in the tool_calls
+    overlay, an omniroute_id alias included -- does not have to re-derive it
+    from the resolved ids (which would lose that alias).
     """
     providers = registry["providers"]
     unavailable = route.get("unavailable_legs") or {}
@@ -236,8 +237,36 @@ def serving_legs(route, registry):
             continue
         if providers[provider_id].get("available") is False:
             continue
-        out.append((provider_id, model_id))
+        out.append((leg, provider_id, model_id))
     return out
+
+
+def serving_legs(route, registry):
+    """Available ``(provider_id, model_id)`` legs of `route`, in leg order.
+
+    A leg resolves through its provider id (or that provider's omniroute_id)
+    and its model id; an ``unavailable_legs`` entry or a provider-wide
+    ``available: false`` drops it. A leg that resolves to nothing raises
+    ValueError: a broken registry must fail closed, never silently drop a
+    candidate.
+    """
+    return [(provider_id, model_id)
+           for _, provider_id, model_id in _serving_legs_raw(route, registry)]
+
+
+def _tool_calls_value(leg, model_id, registry, overlay):
+    """The tool_calls verdict for `leg`; a probe's overlay entry wins.
+
+    `leg` is the string exactly as written in a route's ``legs`` (an
+    omniroute_id alias included), matching how tools/probe-toolcalls.py keys
+    ``overlay["legs"]``. Falls back to the registry model's own ``tool_calls``
+    when the overlay carries no measured value for this leg.
+    """
+    legs_overlay = (overlay or {}).get("legs") or {}
+    measured = (legs_overlay.get(leg) or {}).get("tool_calls") or {}
+    if "value" in measured:
+        return measured["value"]
+    return registry["models"][model_id].get("tool_calls")
 
 
 def usable_context(model_id, registry, overlay):
@@ -309,8 +338,8 @@ def filter_routes(card, features, client_state, registry, overlay,
                                % (need, usable, provider_id, model_id))
 
         if agentic:
-            for provider_id, model_id in legs:
-                value = registry["models"][model_id].get("tool_calls")
+            for leg, provider_id, model_id in _serving_legs_raw(route, registry):
+                value = _tool_calls_value(leg, model_id, registry, overlay)
                 if value != "proven":
                     reasons.append("tool_calls: %s/%s is %s"
                                    % (provider_id, model_id, value))
