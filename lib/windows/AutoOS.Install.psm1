@@ -1974,7 +1974,9 @@ function ConvertFrom-AutoOSJsonc {
     #>
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
     # A JSON string literal: consumed whole, so nothing inside it is touched.
-    $str = '"(?:[^"\\]+|\\[\s\S])*"'
+    # Written as an unrolled loop: with a nested quantifier the engine backtracks
+    # exponentially on a string that never closes (26 characters took 4 s).
+    $str = '"[^"\\]*(?:\\[\s\S][^"\\]*)*"'
     $t = $Text.TrimStart([char]0xFEFF)
     $t = [regex]::Replace($t, "($str)|//[^\r\n]*|/\*[\s\S]*?\*/", '$1')
     $t = [regex]::Replace($t, "($str)|,(?=\s*[}\]])", '$1')

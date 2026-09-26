@@ -4093,6 +4093,18 @@ Test-Case 'ConvertFrom-AutoOSJsonc: comments and trailing commas, // inside a st
     Pass
 }
 
+Test-Case 'ConvertFrom-AutoOSJsonc: an unterminated string is rejected at once, not after a regex stall' {
+    # A string literal matched with a nested quantifier backtracks exponentially
+    # when its closing quote is missing (26 characters took four seconds).
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $threw = $false
+    try { $null = ConvertFrom-AutoOSJsonc -Text ('{"a": "' + ('x' * 27)) } catch { $threw = $true }
+    $sw.Stop()
+    if ($sw.ElapsedMilliseconds -gt 2000) { throw "an unterminated string took $($sw.ElapsedMilliseconds) ms to reject" }
+    if (-not $threw) { throw 'an unterminated string was accepted' }
+    Pass
+}
+
 Test-Case "agent harness: the generator's unit tests pass" {
     $py = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
