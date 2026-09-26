@@ -7174,6 +7174,17 @@ EOF
     fi
 fi
 
+# Item 8 (L0): a single pane process killed by the kernel OOM killer must not
+# take the whole herdr-server unit down with it -- systemd's default
+# OOMPolicy=stop did exactly that, twice, ending every pane in the session.
+if it "herdr-sessions: both server unit templates set OOMPolicy=continue so an OOM-killed pane doesn't stop the whole service"; then
+    ok=1
+    for f in configuration/herdr-sessions/systemd/user/herdr-server.service configuration/herdr-sessions/systemd/system/herdr-server.service; do
+        grep -q '^OOMPolicy=continue$' "$f" || { ok=0; echo "missing OOMPolicy=continue in $f" >&2; }
+    done
+    if (( ok )); then pass; else fail "OOMPolicy=continue missing from one or both server unit templates"; fi
+fi
+
 describe "wsl detection"
 
 if it "WSL is detected when running under it"; then

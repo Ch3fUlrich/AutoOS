@@ -35,6 +35,10 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+# A pane process killed by the kernel OOM killer must not take this whole
+# unit (and every other pane) down with it; systemd's default OOMPolicy=stop
+# did exactly that, twice.
+OOMPolicy=continue
 Environment=SHELL=/bin/zsh
 ExecStart=/bin/sh -c 'if %h/.local/bin/herdr status 2>/dev/null | grep -q "status: running"; then echo "herdr server already running — nothing to do"; exit 0; fi; exec %h/.local/bin/herdr server'
 Restart=on-failure

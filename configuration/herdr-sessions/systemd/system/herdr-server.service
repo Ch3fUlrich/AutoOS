@@ -28,6 +28,10 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+# A pane process killed by the kernel OOM killer must not take this whole
+# unit (and every other pane) down with it; systemd's default OOMPolicy=stop
+# did exactly that, twice.
+OOMPolicy=continue
 User=root
 Environment=HOME=/root
 Environment=SHELL=/usr/bin/zsh
