@@ -4052,7 +4052,9 @@ fi
 if it "openhands: repairs a dangling link into the repo"; then
     tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
     dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
-    ln -s "$tmp/repo/.agents/skills/alpha-renamed" "$dest/alpha"   # ours (into the repo), dangling
+    # Ours: the exact shape link_skill_dirs creates (<checkout>/.agents/skills/<name>)
+    # into a checkout that has since moved or been renamed, so it dangles.
+    ln -s "$tmp/moved-checkout/.agents/skills/alpha" "$dest/alpha"
     ln -s /nonexistent-elsewhere/beta "$dest/beta"                 # not ours, dangling: hands off
     out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
     problems=""
@@ -4060,6 +4062,59 @@ if it "openhands: repairs a dangling link into the repo"; then
     [[ -f "$dest/alpha/SKILL.md" ]] || problems+="[alpha does not resolve after the repair] "
     [[ "$(readlink "$dest/beta")" == "/nonexistent-elsewhere/beta" ]] || problems+="[a foreign dangling link was rewritten to $(readlink "$dest/beta")] "
     [[ "$out" == *"repointed alpha"* ]] || problems+="[no 'repointed alpha' line] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# Only a link this function made is ours (AGENTS.md hard rule 2): it dangles AND
+# has the exact shape .../.agents/skills/<name> for the same skill. A live link,
+# or a dangling one of another shape, is the user's and stays as it is - even
+# when it points inside the repo's own .agents directory.
+if it "openhands: a live link of your own into .agents/custom is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest" "$tmp/repo/.agents/custom/alpha"
+    printf 'my own alpha\n' >"$tmp/repo/.agents/custom/alpha/SKILL.md"
+    ln -s "$tmp/repo/.agents/custom/alpha" "$dest/alpha"           # live, inside the repo's .agents, not our shape
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/custom/alpha" ]] || problems+="[the user's live link now points at $(readlink "$dest/alpha")] "
+    [[ "$(cat "$dest/alpha/SKILL.md" 2>/dev/null)" == "my own alpha" ]] || problems+="[alpha no longer resolves to the user's own skill] "
+    [[ "$out" != *"repointed alpha"* ]] || problems+="[the live link was reported as repointed] "
+    [[ "$out" == *"kept $dest/alpha"* ]] || problems+="[no 'kept ...alpha' line: the user is not told it was left alone] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/repo/.agents/skills/beta" ]] || problems+="[beta was not linked next to the user's link] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a live link into another checkout's skills is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    # Another checkout with the same skills layout. One sits beside this repo,
+    # one is nested under this repo's own .agents directory (a worktree kept
+    # there): both are live and both have the shape we would create.
+    oh_skill_repo "$tmp/other"
+    oh_skill_repo "$tmp/repo/.agents/nested"
+    ln -s "$tmp/repo/.agents/nested/.agents/skills/alpha" "$dest/alpha"
+    ln -s "$tmp/other/.agents/skills/beta" "$dest/beta"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/nested/.agents/skills/alpha" ]] || problems+="[the link into the nested checkout now points at $(readlink "$dest/alpha")] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/other/.agents/skills/beta" ]] || problems+="[the link into the other checkout now points at $(readlink "$dest/beta")] "
+    [[ "$out" != *"repointed"* ]] || problems+="[a live link was reported as repointed] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a dangling link of another shape is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    ln -s /nonexistent/other/alpha "$dest/alpha"                    # dangling, outside the repo
+    ln -s "$tmp/repo/.agents/skills/beta-renamed" "$dest/beta"      # dangling, inside the repo, not the shape of beta
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "/nonexistent/other/alpha" ]] || problems+="[the dangling link outside the repo now points at $(readlink "$dest/alpha")] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/repo/.agents/skills/beta-renamed" ]] || problems+="[the dangling link of another shape now points at $(readlink "$dest/beta")] "
+    [[ "$out" != *"repointed"* ]] || problems+="[a link of another shape was reported as repointed] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
