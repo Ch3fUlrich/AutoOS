@@ -3141,9 +3141,116 @@ os.replace(tmp_file, config_path)
 " "$config_file" "$secrets_file" "$models_file" "$ide_file"
 }
 
+# phys_path PATH
+# PATH with every directory that exists resolved (cd -P) and the rest kept as
+# written, so a dangling link's target can be compared with a real directory
+# without `realpath -m` (macOS has none).
+phys_path() {
+    local p="${1%/}" rest="" d
+    [[ -n "$p" ]] || p="/"
+    while [[ ! -d "$p" && "$p" == */* ]]; do
+        rest="/${p##*/}${rest}"
+        p="${p%/*}"
+        [[ -n "$p" ]] || p="/"
+    done
+    if d="$(cd -P -- "$p" 2>/dev/null && pwd -P)"; then
+        if [[ "$d" == "/" ]]; then d=""; fi
+        printf '%s%s\n' "$d" "$rest"
+    else
+        printf '%s%s\n' "$p" "$rest"
+    fi
+}
+
+# link_skill_dirs SRC_DIR DEST_DIR
+# Mirrors every skill in SRC_DIR (a direct child holding a SKILL.md) into
+# DEST_DIR as one symlink per skill. DEST_DIR is a real directory of its own,
+# so a user's skills sit beside ours and are never touched:
+#   absent                                     -> linked
+#   already our link, same directory           -> skipped
+#   our link, dangling or pointing elsewhere
+#     under SRC_DIR's parent (this repo)       -> repointed
+#   anything else (a user's directory or file, a foreign link) -> left alone
+# A DEST_DIR that is itself a symlink (the old whole-directory layout) is not
+# written through - that would create links inside the repo or a clone - it
+# is left with one warning that names the fix. Returns 0 unless a link failed.
+link_skill_dirs() {
+    local src="${1%/}" dest="${2%/}"
+    [[ "$src" == /* ]] || src="$PWD/$src"
+    [[ "$dest" == /* ]] || dest="$PWD/$dest"
+
+    if [[ ! -d "$src" ]]; then
+        ui_muted "no skills to link: $src is not a directory"
+        return 0
+    fi
+    local names=() s_dir
+    for s_dir in "$src"/*/; do
+        if [[ -f "${s_dir}SKILL.md" ]]; then
+            s_dir="${s_dir%/}"
+            names+=("${s_dir##*/}")
+        fi
+    done
+    if (( ${#names[@]} == 0 )); then
+        ui_muted "no skills to link: nothing under $src holds a SKILL.md"
+        return 0
+    fi
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would link ${#names[@]} skill(s) from $src into $dest"
+        return 0
+    fi
+    if [[ -L "$dest" ]]; then
+        ui_warn "$dest is a symlink (the old whole-directory layout); not writing through it."
+        ui_muted "    To mirror the skills one by one instead: rm \"$dest\" and run setup again."
+        return 0
+    fi
+    if ! mkdir -p "$dest" 2>/dev/null; then
+        ui_warn "could not create $dest - skills not linked"
+        return 1
+    fi
+
+    local parent_phys name t raw have want skipped=0 failed=0
+    parent_phys="$(phys_path "${src%/*}")"
+    for name in "${names[@]}"; do
+        t="$dest/$name"
+        want="$(phys_path "$src/$name")"
+        if [[ -L "$t" ]]; then
+            raw="$(readlink -- "$t")"
+            [[ "$raw" == /* ]] || raw="$dest/$raw"
+            have="$(phys_path "$raw")"
+            if [[ "$have" == "$want" ]]; then
+                skipped=$((skipped + 1))
+            elif [[ "$have" == "$parent_phys"/* ]]; then
+                if ln -sfn "$src/$name" "$t" 2>/dev/null; then
+                    ui_ok "repointed $name (was $raw)"
+                else
+                    ui_warn "could not repoint $t - left as it was"
+                    failed=1
+                fi
+            else
+                ui_muted "kept $t: a link of your own, not an AutoOS link"
+            fi
+        elif [[ -e "$t" ]]; then
+            ui_muted "kept $t: yours, not an AutoOS link"
+        elif ln -s "$src/$name" "$t" 2>/dev/null; then
+            ui_ok "linked $name into $dest"
+        else
+            ui_warn "could not link $t"
+            failed=1
+        fi
+    done
+    if (( skipped > 0 )); then
+        ui_muted "skipped $skipped skill link(s) that are already in place in $dest"
+    fi
+    return "$failed"
+}
+
+# setup_openhands_config
+# Writes the OpenHands settings and profiles under ~/.openhands. Every file is
+# written only when its content differs from what is on disk, and settings.json
+# is backed up (never over an earlier backup) only when it is about to change,
+# so a second run reports "unchanged" and touches nothing (AGENTS.md section 4).
 setup_openhands_config() {
     local openhands_dir="$SYS_HOME/.openhands"
-    local settings_file="$openhands_dir/settings.json"
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would configure OpenHands in $openhands_dir"
@@ -3152,22 +3259,20 @@ setup_openhands_config() {
 
     mkdir -p "$openhands_dir/profiles" "$openhands_dir/agent-profiles" "$openhands_dir/automation"
 
-    if [[ -f "$settings_file" ]]; then
-        local ts
-        ts="$(date +%Y%m%d-%H%M%S)"
-        cp "$settings_file" "${settings_file}.autoos-backup-${ts}"
-    fi
-
     local code_root="$SYS_HOME/Documents/Code"
     if [[ -d "$SYS_HOME/Documents/code" ]]; then
         code_root="$SYS_HOME/Documents/code"
     fi
+    # Native OpenHands (host CLI, Windows) loads user skills from
+    # ~/.openhands/skills. The sandbox containers do not mount it: they read the
+    # workspace's .agents/skills instead (AGENTS.md section 8). One link per
+    # repo skill; a failure is already reported and must not stop the rest.
+    # autoos_skills_source is the repo's .agents/skills (the single home), and
+    # only without it the external agent-skills clone.
     local skills_source
     skills_source="$(autoos_skills_source)"
-    local skills_target="$openhands_dir/skills"
-    if [[ -n "$skills_source" && ! -e "$skills_target" ]]; then
-        ln -s "$skills_source" "$skills_target" 2>/dev/null || true
-        ui_ok "Linked agent-skills to OpenHands skills directory"
+    if [[ -n "$skills_source" ]]; then
+        link_skill_dirs "$skills_source" "$openhands_dir/skills" || true
     fi
 
     local secrets_file="$code_root/agent-skills/secrets/api_keys.conf"
@@ -3186,9 +3291,44 @@ setup_openhands_config() {
     ide_file="$(ide_models_file)"
     ide_models_readable "$ide_file" "the OpenHands default LLM gets no token windows" || ide_file=""
 
-    OLLAMA_BASE_URL="$ollama_url" AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" AUTOOS_IDE_MODELS="$ide_file" \
+    # The script prints one word: "changed" when it wrote or replaced a file,
+    # "unchanged" when everything on disk already held what it would write.
+    local oh_status
+    oh_status="$(OLLAMA_BASE_URL="$ollama_url" AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" AUTOOS_IDE_MODELS="$ide_file" \
         python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
-import os, sys, json
+import os, sys, json, shutil, time
+
+# A file is written only when its content differs from what is on disk, and
+# settings.json is backed up only then (AGENTS.md section 4). Equal means equal
+# JSON (sorted keys), not equal bytes: the agent-harness step that follows
+# formats settings.json differently, and a formatting difference alone must not
+# cost a write and a backup on every run. A BOM (utf-8-sig) is read through.
+_changed = []
+
+def _same_json(path, obj):
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            return json.dumps(json.load(f), sort_keys=True) == json.dumps(obj, sort_keys=True)
+    except (OSError, ValueError):
+        return False
+
+def _put_json(path, obj):
+    if _same_json(path, obj):
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+    _changed.append(os.path.basename(path))
+
+def _backup(path):
+    # <file>.autoos-backup-<stamp>-<n>: never a name that exists, so a backup
+    # never overwrites an earlier one (the stamp has one-second resolution). n
+    # starts at 1 on purpose: the agent-harness step that follows names its own
+    # backup with the bare stamp and replaces an existing file of that name.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    n = 1
+    while os.path.exists("%s.autoos-backup-%s-%d" % (path, stamp, n)):
+        n += 1
+    shutil.copy2(path, "%s.autoos-backup-%s-%d" % (path, stamp, n))
 
 openhands_dir = sys.argv[1]
 secrets_file = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -3296,7 +3436,9 @@ settings_file = os.path.join(openhands_dir, "settings.json")
 settings = {}
 if os.path.isfile(settings_file):
     try:
-        with open(settings_file, "r", encoding="utf-8") as f:
+        # utf-8-sig: a BOM (Windows editors add one) must not make the file
+        # "invalid" and drop the user's keys from the merge. Written back plain.
+        with open(settings_file, "r", encoding="utf-8-sig") as f:
             settings = json.load(f)
     except Exception:
         settings = {}
@@ -3466,8 +3608,8 @@ mcp_cfg["cao-ops"] = {
 if "github" in mcp_cfg:
     del mcp_cfg["github"]
 
-with open(settings_file, "w", encoding="utf-8") as f:
-    json.dump(settings, f, indent=2)
+# settings.json is written once, after the llm_profiles merge below: the
+# compare-before-write needs the disk to still hold the original until then.
 
 profiles_dir = os.path.join(openhands_dir, "profiles")
 # Prices are USD per token from catalog/llm-models.json. Free variants bill
@@ -3495,8 +3637,7 @@ profiles = dict([
     _profile_for("ollama-qwen2.5-coder", None),
 ])
 for name, p_data in profiles.items():
-    with open(os.path.join(profiles_dir, name), "w", encoding="utf-8") as f:
-        json.dump(p_data, f, indent=2)
+    _put_json(os.path.join(profiles_dir, name), p_data)
 omni_key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or secrets.get("omniroute")
 # LiteLLM master key for the litellm-tier* fallback profiles: env first
 # (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
@@ -3545,8 +3686,7 @@ if (omni_key or _lit_key or _or_key) and _spec_file and os.path.isfile(_spec_fil
                 _gp["reasoning_effort"] = "none"
                 _gp["enable_encrypted_reasoning"] = False
                 _gp["extended_thinking_budget"] = None
-            with open(os.path.join(profiles_dir, "%s.json" % _t["id"]), "w", encoding="utf-8") as _ff:
-                json.dump(_gp, _ff, indent=2)
+            _put_json(os.path.join(profiles_dir, "%s.json" % _t["id"]), _gp)
     except Exception:
         pass
 
@@ -3582,8 +3722,12 @@ if (omni_key and "omniroute-t1-orchestrator" in _managed) or (_lit_key and "lite
             _default_entry["model"] = llm.get("model")
             _default_entry["base_url"] = llm.get("base_url")
             _default_entry["api_key"] = llm.get("api_key")
-with open(settings_file, "w", encoding="utf-8") as f:
-    json.dump(settings, f, indent=2)
+if not _same_json(settings_file, settings):
+    if os.path.isfile(settings_file):
+        _backup(settings_file)
+    with open(settings_file, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+    _changed.append("settings.json")
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
 # the desired state and are copied verbatim on every setup. Their
 # llm_profile_ref values point at the canonical profile names written above.
@@ -3598,15 +3742,17 @@ if os.path.isdir(_vendored_agents):
         try:
             with open(os.path.join(_vendored_agents, _fn), "r", encoding="utf-8") as _af:
                 _a_data = json.load(_af)
-            with open(os.path.join(agent_profiles_dir, _fn), "w", encoding="utf-8") as _of:
-                json.dump(_a_data, _of, indent=2)
+            _put_json(os.path.join(agent_profiles_dir, _fn), _a_data)
         except Exception:
             pass
+print("changed" if _changed else "unchanged")
 PY
+)"
 
     # The role agent profiles are the generator's job: it merges the harness
     # into whatever the embedded script left, so the roles stay in one place.
-    local harness_root harness_out harness_rc
+    local harness_root harness_out harness_rc oh_changed=0
+    [[ "$oh_status" == unchanged ]] || oh_changed=1
     harness_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
     # "|| harness_rc=$?" keeps a failing generator from ending the run under set -e.
     harness_rc=0
@@ -3617,9 +3763,17 @@ PY
         while IFS= read -r _harness_line; do
             [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
         done <<< "$harness_out"
+        # The generator reports skipped / updated / installed per file.
+        if [[ "$harness_out" == *"agent-harness openhands: updated "* || "$harness_out" == *"agent-harness openhands: installed "* ]]; then
+            oh_changed=1
+        fi
     fi
 
-    ui_ok "OpenHands configuration and profiles written to $openhands_dir"
+    if (( oh_changed )); then
+        ui_ok "OpenHands configuration and profiles written to $openhands_dir"
+    else
+        ui_muted "OpenHands configuration unchanged (skipped): $openhands_dir"
+    fi
 }
 
 # ─── WSL agent home (native ext4) ───────────────────────────────────────────
