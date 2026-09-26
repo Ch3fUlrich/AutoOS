@@ -43,7 +43,6 @@ import shlex
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 
@@ -197,7 +196,9 @@ class Cache(object):
         tmp = None
         try:
             os.makedirs(directory, mode=0o700, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(prefix=".playwright-mcp-", suffix=".tmp", dir=directory)
+            # No tempfile module: its imports cost about a megabyte of RSS per session.
+            tmp = os.path.join(directory, ".playwright-mcp-%d-%s.tmp" % (os.getpid(), os.urandom(4).hex()))
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(text)
             os.chmod(tmp, 0o600)
