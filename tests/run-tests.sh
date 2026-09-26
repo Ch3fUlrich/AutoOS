@@ -4298,6 +4298,36 @@ PY
     assert_eq "$problems" ""
 fi
 
+if it "antigravity catalog text: describes the Hub, not the IDE, and claims to be hidden on headless machines only when its category needs a display"; then
+    problems="$(python3 - 2>&1 <<'PY'
+import json
+doc = json.load(open("catalog/linux.json", encoding="utf-8"))
+found = [(g, c) for g in doc["categories"] for c in g["components"] if c["id"] == "antigravity"]
+if len(found) != 1:
+    print("expected exactly one antigravity entry, found %d" % len(found))
+else:
+    grp, c = found[0]
+    desc, notes = c.get("description", ""), c.get("notes", "")
+    # the display requirement is a property of the CATEGORY (lib/linux/catalog.sh hides
+    # a requiresDisplay category on a headless machine); a claim without it is false
+    for field, text in (("description", desc), ("notes", notes)):
+        if "headless" in text.lower() and not grp.get("requiresDisplay"):
+            print("%s says 'headless' but category %r has no requiresDisplay, so the entry is shown there: %s" % (field, grp.get("id"), text[:120]))
+    if "IDE" in desc or "agent-first" in desc:
+        print("description still describes the IDE: %r" % desc)
+    if "Antigravity 2" not in desc or "desktop app" not in desc:
+        print("description does not describe the Hub (Antigravity 2.x, a desktop app): %r" % desc)
+    if len(desc) > 70:
+        print("description is %d characters, the catalog convention is <= 70: %r" % (len(desc), desc))
+    if "Hub" not in notes:
+        print("notes do not name the Hub: %r" % notes[:120])
+    if "arm64" not in notes:
+        print("notes lost the true part of the hiding claim (the entry is x64-only, so it is hidden on arm64): %r" % notes[:160])
+PY
+)"
+    assert_eq "$problems" ""
+fi
+
 if it "antigravity launch hint: a verify command that is not the app (test -x ...) does not make 'Where to find them' say 'run test'"; then
     ok=1
     for verify in "test -x ~/.local/opt/antigravity/antigravity" "test -d ~/.cao" "[ -x /opt/x ]"; do
