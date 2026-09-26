@@ -7,6 +7,7 @@ Three subcommands:
     python3 tools/registry.py validate [--registry PATH]
     python3 tools/registry.py render omniroute [--registry PATH] [--out PATH] [--check]
     python3 tools/registry.py render litellm   [--registry PATH] [--config PATH] [--check] [--out PATH]
+    python3 tools/registry.py render ide       [--registry PATH] [--ide-models PATH] [--check] [--out PATH]
 
 `check` proves the registry obeys spec 3.1's rules:
 
@@ -62,6 +63,20 @@ a fresh render against --config's own current managed blocks (default: the
 committed config.yaml) and exits 1, naming each differing tier, when they are not
 byte-for-byte equal.
 
+`render ide` renders catalog/ide-models.json - the single source that feeds
+opencode.jsonc's AUTOOS-MANAGED blocks and Zed's own model lists (both via
+tools/sync-ide-models.py) - from a loaded catalog/ai-registry.json (spec 3.2
+phase 1, task A4c; docs/plans/2026-09-25-registry-mapping.md section 12
+documents the mapping and its one intentional equality exception, the same
+$comment exception render omniroute above uses). It never writes catalog/
+ide-models.json itself: with no flag the render goes to stdout; --out PATH
+writes it elsewhere; --check compares a fresh render against --ide-models
+(default: the committed ide-models.json) and exits 1, naming each differing
+model, when they are not semantically equal. tools/sync-ide-models.py's
+default (unflagged) run now sources its model list from this same render
+instead of reading catalog/ide-models.json directly - its own --catalog flag
+still reads that file's shape for anyone who passes it explicitly.
+
 Stdlib only. Path-independent: everything is anchored on the repository root
 derived from this file's own location.
 """
@@ -82,6 +97,7 @@ CONVERTER_PATH = ROOT / "tools" / "registry-convert.py"
 DEFAULT_OMNIROUTE_COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.json"
 SYNC_ROUTER_TIERS_PATH = ROOT / "tools" / "sync-router-tiers.py"
 DEFAULT_LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
+DEFAULT_IDE_MODELS_PATH = ROOT / "catalog" / "ide-models.json"
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMMENT_KEYS = ("$comment", "comment")
@@ -796,6 +812,173 @@ def litellm_diff(rendered: dict, config_text: str) -> list:
 
 
 # ===========================================================================
+# render - catalog/ide-models.json (spec 3.2 phase 1, task A4c)
+# ===========================================================================
+
+# ide-models.json's own per-model shape has one flat entry per route id, not one
+# per (route, gateway) - display_name/context/output/reasoning_effort were copied
+# unchanged into every gateway the id lists during the A1/A2 migration (mapping
+# doc section 3: "there is one name per id, not per gateway, in the old file").
+# Reversing that: for each route, this is the gateway-lookup priority order used
+# to pick ONE canonical value when more than one of routes.<id>.surfaces.<gateway>
+# carries these fields - omniroute first only because it is present for every
+# route that has either (litellm-only routes fall through to litellm). Every
+# existing route's omniroute/litellm surfaces already agree on these four fields
+# (verified 2026-09-26 against the committed registry - no route disagrees), so
+# this ordering is never exercised as a real tie-break today; it only fixes a
+# deterministic choice if that were ever to change. "openhands" is deliberately
+# excluded - it is never a key of ide-models.json's own `surfaces` field (that
+# file's surfaces map is gateway -> [opencode, zed, openhands] client lists, not
+# a third top-level gateway of its own); spark-1.3-contributor's standalone
+# surfaces.openhands.direct_profile (mapping doc section 6) is tier-profiles.json's
+# concern, not this render's.
+IDE_GATEWAYS = ("omniroute", "litellm")
+
+# catalog/ide-models.json's own top-level $comment (the surfaces/gateway glossary,
+# the operator's 2026-09-25 "1M tier is 1000000 everywhere" ruling, the opencode
+# `variants` warning) is pure human documentation, redistributed into docs/plans/
+# 2026-09-25-registry-mapping.md section 3 and section 9 during the A1/A2
+# migration - the same "derived, not reproduced" treatment render_omniroute() gives
+# combos.json's $comment (mapping doc section 10, exception 1). This render emits
+# only the spec-3.2 marker line; ide_diff() ignores the whole "$comment" key.
+IDE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
+
+# catalog/ide-models.json's own comment: "List order = picker order on every
+# surface" - unlike combos.json's `combos`/`retired` arrays (mapping doc section
+# 10, exception 2, proven insignificant by reading apply.sh/apply.ps1), nothing
+# in this repository establishes that opencode.jsonc's / Zed's menu order is
+# insignificant, so render_ide() reproduces today's hand-curated order exactly
+# rather than adding an equality exception for it. No registry field carries this
+# order (routes is a dict, and catalog/ai-registry.json's own routes keys are
+# alphabetical - tools/registry-convert.py's build_registry() sorts every key on
+# write); this is therefore a literal, hand-copied constant, the same convention
+# tools/registry.py's own OMNIROUTE_RETIRED_IDS and tools/registry-convert.py's
+# PROVIDER_EXTRA/MODEL_EXTRA/COMBO_CLASS tables use for facts no source field
+# carries. A route added or removed without updating this list is never silently
+# mis-ordered or dropped - render_ide() raises, naming every id the set disagrees
+# on, the same "never mask a real gap" contract render_omniroute() gives a leg
+# with no surfaces.omniroute.context_declared. Follow-up: a future
+# `routes.<id>.surfaces.ide_order` (or similar) registry field would let this
+# render drop the constant; not added here since spec 3.1 does not list one and
+# task A4c's brief is "keep today's value via the render" for exactly this kind
+# of gap (as A4b did for the litellm rpm lines).
+IDE_MODEL_ORDER = (
+    "t1-orchestrator", "t1-orchestrator-clean", "t1-orchestrator-paid",
+    "t1-orchestrator-free-only",
+    "t2-worker", "t2-worker-clean", "t2-worker-paid", "t2-worker-free-only",
+    "t2-orchestrator",
+    "t3-driver", "t3-driver-clean", "t3-driver-paid", "t3-driver-free-only",
+    "spark-1.3-contributor",
+    "opus-4-6",
+    "t4-rag",
+    "gemini-3.8-flash",
+    "deepseek-v4.1-flash",
+    "auto/smart", "auto", "auto/cheap",
+)
+
+
+def render_ide(registry: dict) -> dict:
+    """Render catalog/ide-models.json's shape from a loaded catalog/ai-registry.json
+    document (spec 3.2 phase 1, task A4c). Pure: no I/O, no clock, no randomness -
+    the same registry always renders the same dict.
+
+    Every route in `registry["routes"]` gets one flat entry - unlike
+    render_omniroute() above, there is no legs-non-empty filter here: mapping doc
+    section 3, "every ide-models id gets a route even when combos.json has no
+    matching combo" (the LiteLLM-only *-paid routes, the dynamic auto* routes).
+    Each entry's id/name/context/output/reasoning_effort come from the first
+    gateway present in IDE_GATEWAYS priority order among
+    `routes.<id>.surfaces.<gateway>` (a dict carrying "clients" - excludes a
+    standalone surfaces.openhands entry, which is not this render's concern);
+    `surfaces` is rebuilt as {gateway: clients} for every such gateway present.
+
+    Raises ValueError, naming every offending id at once, when `registry["routes"]`
+    and IDE_MODEL_ORDER disagree on which ids exist (a route added/removed without
+    updating that constant - see its own comment above), or when a listed route has
+    no omniroute/litellm surface with a "clients" list at all.
+    """
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+
+    wanted = set(IDE_MODEL_ORDER)
+    have = set(routes)
+    missing = sorted(wanted - have)
+    extra = sorted(have - wanted)
+    if missing or extra:
+        raise ValueError(
+            "IDE_MODEL_ORDER is out of sync with registry routes - missing: %s; "
+            "unexpected: %s" % (", ".join(missing) or "none", ", ".join(extra) or "none"))
+
+    models = []
+    for route_id in IDE_MODEL_ORDER:
+        route = routes[route_id]
+        if not isinstance(route, dict):
+            raise ValueError("routes.%s is not an object" % route_id)
+        surfaces = route.get("surfaces")
+        surfaces = surfaces if isinstance(surfaces, dict) else {}
+        gateways = {
+            gw: surfaces[gw] for gw in IDE_GATEWAYS
+            if isinstance(surfaces.get(gw), dict) and "clients" in surfaces[gw]
+        }
+        if not gateways:
+            raise ValueError(
+                "routes.%s has no omniroute/litellm surface with a clients list" % route_id)
+        canonical = gateways[next(gw for gw in IDE_GATEWAYS if gw in gateways)]
+
+        model = {
+            "id": route_id,
+            "name": canonical.get("display_name"),
+            "context": canonical.get("context"),
+            "output": canonical.get("output"),
+        }
+        effort = canonical.get("effort_default")
+        if effort is not None:
+            model["reasoning_effort"] = effort
+        model["surfaces"] = {gw: list(gateways[gw].get("clients") or []) for gw in IDE_GATEWAYS if gw in gateways}
+        models.append(model)
+
+    return {"$comment": IDE_GENERATED_COMMENT, "models": models}
+
+
+def _canonical_ide(doc) -> dict:
+    """Normalize an ide-models.json-shaped dict for semantic-equality comparison:
+    drop "$comment" entirely (see IDE_GENERATED_COMMENT's comment above). Unlike
+    _canonical_omniroute(), "models" stays an ordered list - order is semantic
+    here (see IDE_MODEL_ORDER's comment)."""
+    if not isinstance(doc, dict):
+        return {}
+    return {k: v for k, v in doc.items() if k != "$comment"}
+
+
+def ide_diff(rendered: dict, current: dict) -> list:
+    """Return the keys where a fresh render_ide() output and today's parsed
+    catalog/ide-models.json differ, ignoring $comment (see _canonical_ide).
+    Reports "models.<id>" for a content difference and "models[] order" separately
+    when the two lists cover the same ids in a different order - empty means
+    semantically equal, the spec 3.2 phase-1 gate for catalog/ide-models.json."""
+    a = _canonical_ide(rendered)
+    b = _canonical_ide(current)
+
+    problems = []
+    a_models = {m["id"]: m for m in a.get("models") or [] if isinstance(m, dict) and "id" in m}
+    b_models = {m["id"]: m for m in b.get("models") or [] if isinstance(m, dict) and "id" in m}
+    for model_id in sorted(set(a_models) | set(b_models)):
+        if a_models.get(model_id) != b_models.get(model_id):
+            problems.append("models.%s" % model_id)
+
+    a_order = [m.get("id") for m in a.get("models") or []]
+    b_order = [m.get("id") for m in b.get("models") or []]
+    if not problems and a_order != b_order:
+        problems.append("models[] order")
+
+    for key in sorted((set(a) | set(b)) - {"models"}):
+        if a.get(key) != b.get(key):
+            problems.append(key)
+
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -918,6 +1101,37 @@ def _cmd_render_litellm(args) -> int:
     return 0
 
 
+def _cmd_render_ide(args) -> int:
+    registry_doc = load(args.registry)
+    try:
+        rendered = render_ide(registry_doc)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
+    if args.check:
+        ide_models_path = Path(args.ide_models)
+        if not ide_models_path.exists():
+            print("no such file: %s" % ide_models_path)
+            return 1
+        current = load(ide_models_path)
+        problems = ide_diff(rendered, current)
+        if problems:
+            for key in problems:
+                print("differs: %s" % key)
+            return 1
+        print("ok: render ide matches %s" % ide_models_path)
+        return 0
+
+    text = render_json(rendered)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print("wrote %s" % args.out)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="registry.py",
@@ -968,6 +1182,21 @@ def main(argv=None) -> int:
         "--check", action="store_true",
         help="exit 1 if a managed block differs byte-for-byte from --config")
 
+    ide_parser = render_targets.add_parser(
+        "ide", help="render catalog/ide-models.json (opencode/Zed/OpenHands model lists)")
+    ide_parser.add_argument(
+        "--registry", default=str(DEFAULT_REGISTRY_PATH),
+        help="registry JSON to render from (default: %(default)s)")
+    ide_parser.add_argument(
+        "--out", default=None,
+        help="write the render here instead of stdout (never the real ide-models.json)")
+    ide_parser.add_argument(
+        "--check", action="store_true",
+        help="exit 1 if the render differs semantically from --ide-models")
+    ide_parser.add_argument(
+        "--ide-models", dest="ide_models", default=str(DEFAULT_IDE_MODELS_PATH),
+        help="today's ide-models.json to compare against, --check only (default: %(default)s)")
+
     args = parser.parse_args(argv)
     if args.command == "check":
         return _cmd_check(args)
@@ -978,6 +1207,8 @@ def main(argv=None) -> int:
             return _cmd_render_omniroute(args)
         if args.target == "litellm":
             return _cmd_render_litellm(args)
+        if args.target == "ide":
+            return _cmd_render_ide(args)
         return 2
     return 2
 

@@ -333,7 +333,9 @@ def usable_legs(route, card, features, client_state, registry, overlay,
     - context: ``need_tokens * 1.3 <= usable_context``.
     - tool_calls (agentic kinds only): a value other than ``"proven"``
       (unproven, broken, or no verdict at all) skips the leg.
-    - client_bound: a leg bound to a client other than `client` skips it.
+    - client_bound: a bound leg is always skipped - a route is served through
+      the gateway (omniroute/<route>), never from inside the bound client, so
+      even `client` == bound gets 403 (run 20260926-142228, R-gateway-03).
     - an overlay rate limit (agentic kinds only, and only when the leg is
       not already proven): every trial of the leg's last tool_calls probe
       error was HTTP 429. A leg already proven is kept even if currently
@@ -369,7 +371,7 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                            % (provider_id, model_id, value))
 
         bound = registry["models"][model_id].get("client_bound")
-        if bound and bound != client:
+        if bound:
             reasons.append("client_bound: %s/%s needs %s"
                            % (provider_id, model_id, bound))
 

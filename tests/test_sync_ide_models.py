@@ -18,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "tools" / "sync-ide-models.py"
+REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
 SOURCES = {
     "catalog": ROOT / "catalog" / "ide-models.json",
     "opencode": ROOT / "opencode.jsonc",
@@ -30,6 +31,10 @@ FLAGS = {
     "tier_profiles": "--tier-profiles",
     "openhands_toml": "--openhands-toml",
 }
+
+
+def route_surface(doc, route_id, gateway="omniroute"):
+    return doc["routes"][route_id]["surfaces"][gateway]
 
 
 def strip_jsonc(text):
@@ -357,6 +362,119 @@ class TomlUnknownModelTests(SandboxCase):
         self.assertEqual(toml.split("[llm.mine]", 1)[1].split("\n[", 1)[0], self.mine)
         t3 = toml.split("[llm.t3-driver]", 1)[1].split("\n[", 1)[0]
         self.assertIn("max_input_tokens = 65536", t3)
+
+
+class RegistrySandbox:
+    """Temp copies of catalog/ai-registry.json plus the three generated files,
+    and a runner pointed at them via --registry (no --catalog): task A4c's
+    retarget of tools/sync-ide-models.py's default (unflagged) data source from
+    catalog/ide-models.json to a fresh render of the registry
+    (tools/registry.py's render_ide(), routing v2 spec 3.2 phase 1)."""
+
+    def __init__(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.paths = {"registry": self.dir / REGISTRY_PATH.name}
+        shutil.copyfile(REGISTRY_PATH, self.paths["registry"])
+        for key in ("opencode", "tier_profiles", "openhands_toml"):
+            src = SOURCES[key]
+            dst = self.dir / src.name
+            shutil.copyfile(src, dst)
+            self.paths[key] = dst
+
+    def close(self):
+        self._tmp.cleanup()
+
+    def run(self, *extra):
+        args = [
+            sys.executable, str(TOOL),
+            "--registry", str(self.paths["registry"]),
+            "--opencode", str(self.paths["opencode"]),
+            "--tier-profiles", str(self.paths["tier_profiles"]),
+            "--openhands-toml", str(self.paths["openhands_toml"]),
+        ]
+        return subprocess.run(args + list(extra), capture_output=True, text=True, encoding="utf-8")
+
+    def text(self, key):
+        return self.paths[key].read_text(encoding="utf-8")
+
+    def registry(self):
+        return json.loads(self.text("registry"))
+
+    def save_registry(self, doc):
+        self.paths["registry"].write_text(
+            json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+class RegistrySourcedTests(unittest.TestCase):
+    """tools/sync-ide-models.py's unflagged default now sources its model list
+    from tools/registry.py's render_ide(catalog/ai-registry.json), not from
+    catalog/ide-models.json directly (task A4c). --catalog stays as an explicit
+    override onto the old file's shape - proven unchanged by every test above,
+    which always passes --catalog (see FLAGS/Sandbox.run())."""
+
+    def setUp(self):
+        self.box = RegistrySandbox()
+
+    def tearDown(self):
+        self.box.close()
+
+    def test_check_is_clean_on_a_fresh_registry_copy(self):
+        result = self.box.run("--check")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_registry_context_change_is_drift_in_opencode(self):
+        doc = self.box.registry()
+        route_surface(doc, "t3-driver")["context"] = 65536
+        self.box.save_registry(doc)
+        result = self.box.run("--check")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("65536", result.stdout)
+        self.assertIn("DRIFT", result.stderr)
+
+    def test_write_fixes_every_surface_from_the_registry(self):
+        doc = self.box.registry()
+        # t3-driver lists both gateways - render_ide() takes context/output
+        # from omniroute (IDE_GATEWAYS priority), one shared value for both.
+        route_surface(doc, "t3-driver", "omniroute")["context"] = 65536
+        # t3-driver-paid is litellm-only, so this is the value render_ide() uses.
+        route_surface(doc, "t3-driver-paid", "litellm")["output"] = 40000
+        self.box.save_registry(doc)
+
+        result = self.box.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        oc = json.loads(strip_jsonc(self.box.text("opencode")))
+        self.assertEqual(oc["providers"]["omniroute"]["models"]["t3-driver"]["limit"]["context"], 65536)
+        self.assertEqual(oc["providers"]["litellm"]["models"]["t3-driver"]["limit"]["context"], 65536)
+        self.assertEqual(oc["providers"]["litellm"]["models"]["t3-driver-paid"]["limit"]["output"], 40000)
+
+        spec = json.loads(self.box.text("tier_profiles"))
+        by_id = {t["id"]: t for t in spec["tiers"]}
+        self.assertEqual(by_id["omniroute-t3-driver"]["max_input_tokens"], 65536)
+
+        toml = self.box.text("openhands_toml")
+        section = toml.split("[llm.t3-driver]", 1)[1].split("\n[", 1)[0]
+        self.assertIn("max_input_tokens = 65536", section)
+
+        second = self.box.run()
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("Already in sync", second.stdout)
+
+    def test_an_explicit_catalog_flag_still_wins_over_registry(self):
+        # --catalog is the explicit escape hatch onto the old file shape (used
+        # by every test in this module above); passing it alongside --registry
+        # must not have the new default source silently shadow it.
+        catalog_copy = self.box.dir / "ide-models-explicit.json"
+        shutil.copyfile(SOURCES["catalog"], catalog_copy)
+        cat_doc = json.loads(catalog_copy.read_text(encoding="utf-8"))
+        model(cat_doc, "t3-driver")["context"] = 77777
+        catalog_copy.write_text(json.dumps(cat_doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        result = self.box.run("--catalog", str(catalog_copy))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        oc = json.loads(strip_jsonc(self.box.text("opencode")))
+        self.assertEqual(oc["providers"]["omniroute"]["models"]["t3-driver"]["limit"]["context"], 77777)
 
 
 if __name__ == "__main__":
