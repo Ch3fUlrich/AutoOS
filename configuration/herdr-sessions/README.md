@@ -57,6 +57,38 @@ every profile shipped here (just `example` in this repository). This
 component's tests also run from the AutoOS test harness: `bash
 tests/run-tests.sh --filter=herdr` (repository root).
 
+## Troubleshooting
+
+The units log to the journal, but the commands you'd reach for first can look
+empty even when everything ran correctly:
+
+```bash
+journalctl --user-unit=herdr-sessions-restore.service -b
+journalctl --user-unit=herdr-sessions-snapshot.service -b
+journalctl --user-unit=herdr-sessions-update.service -b
+```
+
+(drop `--user-unit=` for `-u` on a system-scope install, e.g.
+`journalctl -u herdr-sessions-restore.service -b`.)
+
+**`journalctl --user` (no `-unit=`) can come back empty even though the unit
+just ran.** `--user` with no other filter reads only that user's own journal
+file, `user-<uid>.journal`, and journald writes a *per-user* file at all only
+under **persistent** storage (`Storage=persistent`, or `auto` once
+`/var/log/journal` exists). A host tuned for `Storage=volatile` (RAM-only
+journal, common where disk writes are deliberately minimised) never creates
+that file, so a bare `journalctl --user --since today` is unconditionally
+empty there — that is not evidence the restore/snapshot/update unit failed to
+run, or ran and logged nothing.
+
+`journalctl --user-unit=<name>` (or system-scope `-u <name>`) reads the
+*system* journal filtered by unit instead, which volatile storage still keeps
+(bounded by `RuntimeMaxUse`), so the commands above show the same lines
+either way. If those also come back empty, try
+`journalctl _UID=$(id -u) --since today` next (needs read access to the
+system journal — typically membership in the `adm` or `systemd-journal`
+group) before concluding the unit never fired.
+
 ## Design decisions worth keeping
 
 Never compact a resumed session; never overwrite a good snapshot with an
