@@ -3544,6 +3544,8 @@ antigravity_run() {
                         else
                             [[ ! -f "$sb/get.size" ]] || size="$(<"$sb/get.size")"
                             [[ ! -f "$sb/get.status" ]] || st="$(<"$sb/get.status")"
+                            # a file at the OLD predictable desktop temp name (.antigravity.desktop.<pid>)
+                            [[ ! -e "$sb/plant-desktop-tmp" ]] || { mkdir -p "$HOME/.local/share/applications"; printf 'victim\n' >"$HOME/.local/share/applications/.antigravity.desktop.$BASHPID"; }
                             [[ ! -e "$sb/kill-on-download" ]] || kill -TERM "$BASHPID"
                             [[ ! -e "$sb/exit-on-download" ]] || exit 5
                             # like curl: a body announced as bigger than --max-filesize is refused
@@ -3563,6 +3565,8 @@ antigravity_run() {
             sudo() { printf 'sudo %s\n' "$*" >>"$log"; }
             sudo_rec() { printf 'sudo %s\n' "$*" >>"$log"; }
             chown() { printf 'chown %s\n' "$*" >>"$log"; }
+            # AG_MV_FAIL_DESKTOP=1: the final rename of the desktop entry's temp file fails
+            mv() { if [[ "${AG_MV_FAIL_DESKTOP:-0}" == 1 && "$*" == *.antigravity.desktop.* ]]; then return 1; fi; command mv "$@"; }
             update-desktop-database() { printf 'update-desktop-database %s\n' "$*" >>"$log"; }
             xdg-mime() {
                 printf 'xdg-mime %s\n' "$*" >>"$log"
@@ -4159,6 +4163,29 @@ if it "antigravity desktop entry: a symlink is refused, a differing file is back
     [[ -z "$(find "$apps" -name '*.autoos-backup-*')" ]] || { ok=0; echo "symlink: a backup was made" >&2; }
     rm -rf "$sb"
     if (( ok )); then pass; else fail "the desktop entry is not written compare-first with a backup, or follows a symlink"; fi
+fi
+
+if it "antigravity desktop entry: the temp file comes from mktemp, so a file at the old predictable name (.antigravity.desktop.<pid>) is never overwritten or removed, not even when the write fails"; then
+    ok=1; old_umask="$(umask)"; umask 022
+    for mode in ok mv-fails; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        apps="$sb/home/.local/share/applications"; dt="$apps/antigravity.desktop"
+        : >"$sb/plant-desktop-tmp"
+        if [[ "$mode" == mv-fails ]]; then antigravity_run "$sb" AG_ENTRY=direct AG_MV_FAIL_DESKTOP=1; else antigravity_run "$sb" AG_ENTRY=direct; fi
+        [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "$mode: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+        planted=("$apps"/.antigravity.desktop.*)
+        [[ ${#planted[@]} == 1 && -f "${planted[0]}" && "$(cat "${planted[0]}")" == victim ]] \
+            || { ok=0; echo "$mode: the file at the old predictable name was removed or changed (left: ${planted[*]})" >&2; }
+        if [[ "$mode" == ok ]]; then
+            grep -qxF 'MimeType=x-scheme-handler/antigravity;' "$dt" 2>/dev/null || { ok=0; echo "$mode: the desktop entry was not written: ${AG_OUT:0:500}" >&2; }
+            [[ "$(stat -c %a "$dt" 2>/dev/null)" == 644 ]] || { ok=0; echo "$mode: the desktop entry has mode [$(stat -c %a "$dt" 2>&1)], not 644 (umask 022)" >&2; }
+        else
+            [[ ! -e "$dt" && "$AG_OUT" == *"could not write"* ]] || { ok=0; echo "$mode: a failed write must warn and leave no desktop entry: ${AG_OUT:0:500}" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    umask "$old_umask"
+    if (( ok )); then pass; else fail "the desktop entry's temp file name is predictable, or a failed write removes a file AutoOS did not create"; fi
 fi
 
 if it "antigravity desktop entry: the install path is quoted for the Desktop Entry spec (space, quote, dollar, percent, backslash) and the sandbox command is single-quoted"; then

@@ -1173,9 +1173,16 @@ antigravity_desktop_entry() {
             return 0
         fi
     fi
-    tmp="${appdir}/.antigravity.desktop.${BASHPID}"
-    if ! { mkdir -p "$appdir" && ( set -C; printf '%s\n' "$content" >"$tmp" ) && mv -f -- "$tmp" "$file"; }; then
-        rm -f -- "$tmp"
+    # The temp file is mktemp's own (an unpredictable name, created exclusively): a file
+    # that already sits at some guessable name is never written through or removed. On a
+    # failure only what mktemp returned is removed. mktemp makes it 0600; the entry gets
+    # what a plain redirect would have given it, 0666 minus the umask.
+    tmp=""
+    if ! { mkdir -p "$appdir" && tmp="$(mktemp "${appdir}/.antigravity.desktop.XXXXXX")" \
+            && printf '%s\n' "$content" >"$tmp" \
+            && chmod "$(printf '%03o' "$(( 0666 & ~0$(umask) ))")" "$tmp" \
+            && mv -f -- "$tmp" "$file"; }; then
+        if [[ -n "$tmp" ]]; then rm -f -- "$tmp"; fi
         ui_warn "could not write ${file}"
         return 0
     fi
