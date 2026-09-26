@@ -2115,6 +2115,22 @@ elif mode == "orchestrator-commits-wip":
     git("-c", "user.name=orch", "-c", "user.email=orch@example.invalid",
         "commit", "-q", "-m", "orch wip")
     print("fake: orchestrator committed its own WIP")
+elif mode in ("sandbox-write", "sandbox-write-provider-stop"):
+    # The worker edits its own cwd (the --isolate sandbox), then the provider
+    # stops it before it can commit (WIPfix, 2026-09-26).
+    with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+    if mode.endswith("provider-stop"):
+        print("Error: Rate limit exceeded. Please try again later.")
+    else:
+        print("fake: wrote worker-new.txt in its sandbox")
+elif mode == "provider-stop-only":
+    print("Error: Rate limit exceeded. Please try again later.")
+elif mode == "parent-leak-provider-stop":
+    # A leak AND a provider stop: LEAK 7 must win over PROVIDER-STOP 8.
+    with open(os.path.join(root, "tracked.txt"), "a") as fh:
+        fh.write("leaked\\n")
+    print("Error: Rate limit exceeded. Please try again later.")
 sys.exit(0)
 '''
 
@@ -2163,19 +2179,20 @@ class IsolateContainmentTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         return d
 
-    def run_isolated(self, root, stubdir, statedir, mode):
+    def run_isolated(self, root, stubdir, statedir, mode, card=None):
         agent = self.agent
         old_root, old_track = agent.ROOT, agent.TRACK_RECORD
         agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
         try:
             args = argparse.Namespace(
-                client="agy", tier=2, card=None, task="do the thing",
+                client="agy", tier=None if card else 2, card=card, task="do the thing",
                 free=False, free_model=agent.DEFAULT_FREE_MODEL,
                 isolate=True, auto=True, joinable=False, model=None,
                 clean=False, allow_training=False, max_depth=None, lean=False,
                 title=None, dry_run=False, no_defer=False)
             cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
-                   "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+                   "providers": {"omniroute": {"models": {"t2-worker": {},
+                                                          "t3-driver": {}}}}}
             env = dict(os.environ)
             env["PATH"] = stubdir + os.pathsep + env.get("PATH", "")
             env["AUTOOS_STATE_DIR"] = statedir
@@ -2377,6 +2394,74 @@ class IsolateContainmentTests(unittest.TestCase):
         entry = self.agent.track_entry(plan, 7, 1.0)
         self.assertEqual(entry["failure_class"], "containment")
         self.assertEqual(entry["gate"], "fail")
+
+    # WIPfix (rule->code: never lose a worker's uncommitted sandbox work).
+    # Measured 2026-09-26 19:1x-19:3xZ: three --isolate workers were stopped by
+    # the provider right before `git commit`; cmd_run printed 'sandbox changes
+    # (uncommitted)' and exited 0, and the orchestrator WIP-committed by hand.
+
+    def _subject(self, sandbox):
+        return subprocess.run(["git", "-C", sandbox, "log", "-1", "--format=%s"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_provider_stop_with_sandbox_changes_wip_commits_and_exits_8(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "sandbox-write-provider-stop")
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("PROVIDER-STOP", out + err)
+        self.assertIn("WIP-COMMITTED:", out)
+        sb = self.lone_sandbox(state)
+        subject = self._subject(sb)
+        self.assertTrue(subject.startswith("WIP(autoos-agent): uncommitted at exit rc=0"),
+                        subject)
+        self.assertIn("provider stop: Error: Rate limit exceeded", subject)
+        files = subprocess.run(["git", "-C", sb, "show", "--name-only", "--format=", "HEAD"],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertIn("worker-new.txt", files)
+        branch = subprocess.run(["git", "-C", sb, "branch", "--show-current"],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        self.assertTrue(branch.startswith("agent/"), branch)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_sandbox_changes_without_a_stop_wip_commit_and_keep_rc_0(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "sandbox-write")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("WIP-COMMITTED:", out)
+        self.assertNotIn("provider stop:", self._subject(self.lone_sandbox(state)))
+        self.assertNotIn("PROVIDER-STOP", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_provider_stop_without_changes_exits_8_not_5(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "provider-stop-only")
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("PROVIDER-STOP", out + err)
+        # Nothing changed, so nothing was committed: HEAD is still the clone's
+        # initial commit and no WIP line was printed.
+        self.assertNotIn("WIP-COMMITTED", out)
+        self.assertNotIn("WIP(autoos-agent)", self._subject(self.lone_sandbox(state)))
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_parent_leak_wins_over_a_provider_stop(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "parent-leak-provider-stop")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_review_run_is_not_wip_committed(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "sandbox-write",
+                                         card="role=review")
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("WIP-COMMITTED", out)
+        sb = self.lone_sandbox(state)
+        status = subprocess.run(["git", "-C", sb, "status", "--short"],
+                                capture_output=True, text=True, check=True).stdout
+        self.assertIn("worker-new.txt", status)
+        self.assertNotIn("WIP(autoos-agent)", self._subject(sb))
 
 
 if __name__ == "__main__":

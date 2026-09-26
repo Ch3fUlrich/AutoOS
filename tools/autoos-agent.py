@@ -82,7 +82,10 @@ exited 0 (HEADLESS-REFUSAL); 7 = an --isolate run wrote to the parent checkout (
 committed by autoos-worker@users.noreply.github.com on a parent branch that existed at the start - HEAD range,
 branch reflog (commit-then-reset) or moved side refs - or a tracked file outside logs/ left dirtier than
 before - the shas and paths are printed, nothing is reverted, the track record carries
-failure class "containment"; LEAK 7 overrides ANY child rc, including 5 and 6); the child's exit code; 2 bad arguments, card or route refused;
+failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6 and 8); 8 = a provider stop
+(rate limit, 429, capacity, quota or billing) appeared in the captured client output while the client
+exited 0 (PROVIDER-STOP; the track record carries failure class "provider"; an --isolate run WIP-commits
+its uncommitted work first, so nothing is lost); the child's exit code; 2 bad arguments, card or route refused;
 3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
 PAUSE (R-pause-01); 4 depth budget exhausted.
 
@@ -832,6 +835,33 @@ def refusal_exit(rc: int, tail: str) -> tuple:
     return rc, None
 
 
+# A provider that stops a worker mid-task (rate limit, capacity, quota,
+# billing) still lets the client exit 0 with the work uncommitted. WIPfix
+# (measured 2026-09-26 19:1x-19:3xZ): three --isolate workers were cut off
+# right before `git commit`. Matched case-insensitively against the captured
+# client tail (run_client keeps it for CAPTURE_CLIENTS and every --isolate
+# run); the leading space on " 429"/" 402" keeps those digits from matching
+# mid-word. ONE tuple, so the list is the whole contract.
+PROVIDER_STOP_MARKERS = (
+    "rate limit exceeded",
+    "capacity is temporarily unavailable",
+    "resource_exhausted",
+    " 429",
+    "quota reached",
+    "payment required",
+    " 402",
+)
+
+
+def provider_stop(tail: str) -> str | None:
+    """The first client-output line naming a provider stop, or None."""
+    for line in (tail or "").splitlines():
+        low = line.lower()
+        if any(marker in low for marker in PROVIDER_STOP_MARKERS):
+            return line.strip()
+    return None
+
+
 def _porcelain_path_is_logs(p: str) -> bool:
     """True when a porcelain path (quoted or not) is logs/ or under it."""
     p = p.strip().strip('"')
@@ -1021,6 +1051,39 @@ def sandbox_verdict(route: dict, changed: str, ahead: str):
                "unverified and the run as failed (exit 5)")
 
 
+def wip_commit(sandbox: str, rc: int, stop: str | None) -> str | None:
+    """Commit everything uncommitted in the sandbox; return the sha, or None.
+
+    WIPfix (measured 2026-09-26 19:1x-19:3xZ): three --isolate workers were
+    stopped by the provider right before `git commit`; the spawner printed
+    "sandbox changes (uncommitted)" and exited, leaving the work to be
+    recovered by hand. Commit it on the sandbox branch instead, so `take it:`
+    always has a commit to fetch. The sandbox is a private clone with its push
+    URL disabled, so this can never touch the parent. Untracked files are
+    staged except logs/ (the spawner's own state_dir); a commit that does not
+    land returns None and prints nothing.
+    """
+    msg = "WIP(autoos-agent): uncommitted at exit rc=%d" % rc
+    if stop:
+        msg += "; provider stop: %s" % stop
+    others = subprocess.run(["git", "-C", sandbox, "ls-files", "--others",
+                             "--exclude-standard", "-z"],
+                            capture_output=True, text=True)
+    add = [p for p in others.stdout.split("\0")
+           if p and not _porcelain_path_is_logs(p)]
+    if add:
+        subprocess.run(["git", "-C", sandbox, "add", "--", *add],
+                       capture_output=True, text=True)
+    done = subprocess.run(["git", "-C", sandbox, "-c", "user.name=autoos-worker",
+                           "-c", "user.email=" + WORKER_EMAIL, "commit", "-am", msg],
+                          capture_output=True, text=True)
+    if done.returncode != 0:
+        return None
+    sha = subprocess.run(["git", "-C", sandbox, "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    return sha or None
+
+
 def track_class(combo: str | None) -> str | None:
     """The track-record class for a combo, or None when it is not a tier combo."""
     if not combo:
@@ -1067,7 +1130,8 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
         "latency_s": secs,
         "gate": "pass" if rc == 0 else "fail",
         "failure_class": (None if rc == 0 else ("capability" if rc == 5 else
-                          ("containment" if rc == 7 else "logic"))),
+                          ("containment" if rc == 7 else
+                           ("provider" if rc == 8 else "logic")))),
     }
 
 
@@ -1416,17 +1480,38 @@ def cmd_run(args, cfg: dict) -> int:
                                     capture_output=True, text=True, check=True).stdout.strip()
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
     start = time.time()
-    rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
-                    capture=client.name in CAPTURE_CLIENTS)
-    rc, refusal = refusal_exit(int(rc), getattr(rc, "refusal", None) or "")
+    # Every --isolate run is captured too (tee'd to our stdout), so the WIPfix
+    # provider-stop check has the child's tail; CAPTURE_CLIENTS keeps its own.
+    run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
+                        capture=client.name in CAPTURE_CLIENTS or bool(plan["sandbox"]))
+    client_tail = getattr(run_rc, "tail", "") or ""
+    rc, refusal = refusal_exit(int(run_rc), getattr(run_rc, "refusal", None) or "")
+    child_rc = rc  # the WIP message names the client's own rc, not a verdict override
     if refusal is not None:
         print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
     if rc == 0 and client.promo:
         clients.record_probe(client.name)
+    # A provider stop is a failure even though the client exited 0: it was cut
+    # off mid-task (WIPfix, 2026-09-26). Only rc 0 upgrades to 8; a LEAK (7)
+    # still wins below, and the NO-OP (5) verdict never fires on an 8.
+    stop = provider_stop(client_tail)
+    if stop is not None and rc == 0:
+        print("autoos-agent: PROVIDER-STOP: %s" % stop, file=sys.stderr)
+        rc = 8
     if plan["sandbox"]:
         sb = plan["sandbox"]
         changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
                                  capture_output=True, text=True).stdout.strip()
+        # WIPfix: never lose a worker's uncommitted work. Commit it on the
+        # sandbox branch, then re-read changed/ahead so a run that only ever
+        # produced this WIP commit is no longer a NO-OP. A review run's
+        # deliverable is its diff, so leave that one untouched.
+        if changed and not plan["route"].get("review"):
+            wip_sha = wip_commit(sb["path"], child_rc, stop)
+            if wip_sha:
+                print("WIP-COMMITTED: %s" % wip_sha)
+                changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
+                                         capture_output=True, text=True).stdout.strip()
         ahead = subprocess.run(["git", "-C", sb["path"], "log", "--oneline", sb["base"] + "..HEAD"],
                                capture_output=True, text=True).stdout.strip()
         print("\nsandbox changes (uncommitted):\n" + (changed or "  (none)"))
