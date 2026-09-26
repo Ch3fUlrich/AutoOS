@@ -5013,6 +5013,36 @@ if it "claude-autostart: a changed unit is backed up before it is replaced"; the
     if (( ok )); then pass; else fail "a changed autostart unit was replaced without a backup"; fi
 fi
 
+# The model the other stop-on-backup-failure sites copy: when the unit being
+# replaced cannot be backed up (backup_fail_bin's cp refuses), the install
+# stops - the user's edited unit stays byte-identical, the rendered temp file is
+# removed, an error names the unit, nothing is reloaded or enabled, and the
+# return code says it failed. Units after the failing one are not touched either.
+if it "claude-autostart: a changed unit that cannot be backed up is left as it was and the install stops"; then
+    sb="$(mktemp -d)"; bin="$(backup_fail_bin)"; ud="$sb/home/.config/systemd/user"; u=claude-sessions-snapshot.service; ok=1
+    mkdir -p "$ud" "$sb/tmp"; printf 'LOCAL EDIT: do not lose me\n' >"$ud/$u"; cp "$ud/$u" "$sb/unit.orig"
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+              PATH="$bin:$PATH"; export TMPDIR="$sb/tmp"
+              systemctl() { printf 'systemctl %s\n' "$*" >>"$sb/systemctl.log"; return 0; }
+              loginctl() { printf 'yes\n'; }
+              install_claude_autostart ) 2>&1 )"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 for an install that stopped: ${out:0:300}" >&2; }
+    cmp -s "$ud/$u" "$sb/unit.orig" || { ok=0; echo "the edited unit was replaced without a backup: [$(cat "$ud/$u")]" >&2; }
+    [[ -z "$(find "$sb/tmp" -type f)" ]] || { ok=0; echo "the rendered temp unit was left behind: $(find "$sb/tmp" -type f | tr '\n' ' ')" >&2; }
+    [[ "$out" == *"could not back up $ud/$u"* && "$out" == *"left as it was"* ]] || { ok=0; echo "no error naming the unit: [${out:0:300}]" >&2; }
+    [[ "$out" != *"installed "* ]] || { ok=0; echo "reported an install: [${out:0:300}]" >&2; }
+    [[ "$(ls -A "$ud")" == "$u" ]] || { ok=0; echo "the install went on past the failing unit: [$(ls -A "$ud" | tr '\n' ' ')]" >&2; }
+    [[ ! -e "$sb/systemctl.log" ]] || { ok=0; echo "systemctl was called after the failure: $(cat "$sb/systemctl.log")" >&2; }
+    [[ "$(backup_count "$sb")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: with a working cp the same unit is backed up first, then replaced.
+    out="$(autostart_run "$sb")"; rc=$?
+    { (( rc == 0 )) && [[ "$(backup_count "$sb")" == 1 ]] && ! grep -q 'LOCAL EDIT' "$ud/$u" \
+        && [[ "$(cat "$ud/$u".autoos-backup-*)" == "LOCAL EDIT: do not lose me" ]]; } \
+        || { ok=0; echo "control run: rc=$rc backups=$(backup_count "$sb") out=[${out:0:300}]" >&2; }
+    rm -rf "$sb" "$bin"
+    if (( ok )); then pass; else fail "install_claude_autostart replaces a unit it could not back up"; fi
+fi
+
 if it 'claude-autostart: an unchanged unit takes no backup and reports "already current"'; then
     sb="$(mktemp -d)"; ud="$sb/home/.config/systemd/user"; ok=1
     autostart_run "$sb" >/dev/null                   # fresh machine: three units, no backup
