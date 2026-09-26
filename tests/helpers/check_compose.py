@@ -95,6 +95,20 @@ def main(path):
         bad.append("omniroute: HOME %s must be the mount of ${AUTOOS_STACK_DATA}/qoder-home" % home.group(1))
     if not re.search(r"^      - \$\{AUTOOS_STACK_DATA:\?[^}]*\}/omniroute:/app/data$", om, re.M):
         bad.append("omniroute: the gateway data dir must stay mounted at /app/data")
+    # The public URL (stack.env, never this file): passed through, empty when
+    # unset - the gateway treats an empty value as absent. While it is set the
+    # gateway's calls to itself stay on loopback (BASE_URL), or NEXT_PUBLIC_BASE_URL
+    # would become their base.
+    for var, want in (
+        ("NEXT_PUBLIC_BASE_URL", "${AUTOOS_OMNIROUTE_PUBLIC_URL:-}"),
+        ("OMNIROUTE_PUBLIC_BASE_URL", "${AUTOOS_OMNIROUTE_PUBLIC_URL:-}"),
+        ("BASE_URL", "${AUTOOS_OMNIROUTE_PUBLIC_URL:+http://localhost:20128}"),
+    ):
+        if not re.search(r"^      %s: %s$" % (var, re.escape(want)), om, re.M):
+            bad.append("omniroute: %s must be exactly %s" % (var, want))
+    for name, body in svc.items():
+        if name != "omniroute" and re.search(r"PUBLIC_URL|PUBLIC_BASE_URL|NEXT_PUBLIC_BASE_URL", body):
+            bad.append(name + ": the public URL belongs to the gateway only")
     if "docker.sock" in om or "docker.sock" in oc:
         bad.append("only openhands may mount the docker socket")
     code = "${AUTOOS_CODE_DIR:?"

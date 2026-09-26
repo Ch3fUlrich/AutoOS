@@ -51,6 +51,44 @@ The table below describes the native (workstation) layout.
   `autoos-omniroute` unit (Type=notify, watchdog). By hand:
   `omniroute --no-open --port 20128` from `$HOME`.
 
+#### OAuth logins and the public URL
+
+- **Google logins (Antigravity, Agy) use a loopback callback by design.** The
+  dashboard asks Google to redirect to `http://127.0.0.1:20128/callback`, and
+  Google's consent for the bundled client only completes when that address is
+  reachable from the browser that approves it. Do the login from a browser **on
+  the host**, or forward the port and browse through it:
+  `ssh -L 20128:127.0.0.1:20128 <host>`, then `http://127.0.0.1:20128`. If the
+  redirect fails anyway, copy the `http://127.0.0.1:20128/callback?...` address
+  from the failed page's address bar and paste it into the dialog.
+- **`AUTOOS_OMNIROUTE_PUBLIC_URL`** (the docker stack's `stack.env`; unset by
+  default, and an empty value is the same as unset) is handed to the gateway as
+  `NEXT_PUBLIC_BASE_URL` and `OMNIROUTE_PUBLIC_BASE_URL`. Use the exact origin
+  you browse the dashboard from, e.g. `https://omniroute.<domain>`. Read from
+  the image's source (3.8.50), it changes **server-side** behaviour only:
+  - the origin the gateway accepts for browser writes to the dashboard. With a
+    public URL set that origin is accepted and forwarded headers no longer
+    derive one, so browsing from a different name can be refused with
+    `INVALID_ORIGIN` (direct loopback and LAN-IP access keeps working);
+  - the host of links the server generates (image URLs and the like);
+  - the `redirect_uri` of an Antigravity/Agy login becomes `<url>/callback`
+    **only if you also set your own Google OAuth client** (`ANTIGRAVITY_OAUTH_CLIENT_ID`
+    and `ANTIGRAVITY_OAUTH_CLIENT_SECRET`, different from the bundled ones).
+    With the bundled client the redirect stays on loopback: the variable alone
+    does **not** make Google logins work from a remote browser.
+- **What it does not change.** The dashboard's browser code is compiled into the
+  image and cannot read the container's environment, so the OAuth dialog still
+  builds its redirect from the address you browse from. Logins that need no
+  browser redirect (the Qoder PAT, API keys) do not depend on it.
+- **Two more things the stack does with it.** While it is set, `compose.yml`
+  also pins `BASE_URL: http://localhost:20128`: without that the gateway's calls
+  to itself (A2A skills, MCP tools, cloud sync) would take
+  `NEXT_PUBLIC_BASE_URL` as their base and leave through the proxy. And the
+  gateway **exits at startup** on a value that is not an `http(s)` URL, which
+  `restart: unless-stopped` turns into a crash loop, so `ai-stack.sh up` and
+  `migrate` refuse one before compose runs; `verify` prints the value as the
+  app normalizes it (trailing slashes dropped) or `skip - ... is not set`.
+
 ### opencode serve (:4096)
 
 - V2 (`@opencode/cli` 2.x) serves its web UI to anyone and guards `/api/*`
@@ -412,7 +450,8 @@ when M is 0**, 1 otherwise.
 | 4 | code dir | `AUTOOS_CODE_DIR` (environment, then `stack.env`) is a directory inside the opencode container, and the OpenHands container's `SANDBOX_VOLUMES` has a `<dir>:<dir>` entry | that service is not enabled |
 | 5 | gateway CLI | `docker exec autoos-omniroute qodercli --version` prints a version, run as the gateway runs it (same user and `HOME`): the image has the qodercli layer and its `HOME` is writable | the omniroute service is not enabled, or its container is not running (check 1 already FAILs that) |
 | 6 | public URLs | each URL answers 302 (the auth proxy's redirect) without credentials | `AUTOOS_VERIFY_PUBLIC_URLS` is unset |
-| 7 | healthcheck | - | always: `configuration/healthcheck.sh` appends to `logs/healthcheck-<date>.log` on every run and exits 0 whatever it finds, so it is neither read-only nor a verdict; its docker probes are checks 1 and 2 |
+| 7 | gateway public URL | `AUTOOS_OMNIROUTE_PUBLIC_URL` (environment, then `stack.env`) is an `http(s)` URL without credentials or blanks; printed as the app normalizes it, **not requested** (it may be a plain LAN address; reachability is check 6's job) | it is unset or empty |
+| 8 | healthcheck | - | always: `configuration/healthcheck.sh` appends to `logs/healthcheck-<date>.log` on every run and exits 0 whatever it finds, so it is neither read-only nor a verdict; its docker probes are checks 1 and 2 |
 
 The two variables `verify` reads besides the ones above:
 

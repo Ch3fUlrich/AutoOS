@@ -49,6 +49,18 @@ services:
       REQUIRE_API_KEY: "true"
       DATA_DIR: /app/data
       OMNIROUTE_MEMORY_MB: ${OMNIROUTE_MEMORY_MB:-1536}
+      # The gateway's public origin, from stack.env (AUTOOS_OMNIROUTE_PUBLIC_URL;
+      # docs/web-services.md says what it does and does not change). Unset gives
+      # empty values, which are the same as absent: the image's launcher drops
+      # empty variables before it starts the server, and every reader treats ""
+      # as no value (measured, image 3.8.50).
+      NEXT_PUBLIC_BASE_URL: ${AUTOOS_OMNIROUTE_PUBLIC_URL:-}
+      OMNIROUTE_PUBLIC_BASE_URL: ${AUTOOS_OMNIROUTE_PUBLIC_URL:-}
+      # Only while a public URL is set: the gateway's own calls to itself (A2A
+      # skills, MCP tools, cloud sync) fall back to NEXT_PUBLIC_BASE_URL when
+      # BASE_URL is empty, and would then leave through the proxy. Pin them to
+      # loopback, the value they default to when nothing is set.
+      BASE_URL: ${AUTOOS_OMNIROUTE_PUBLIC_URL:+http://localhost:20128}
       # The Qoder PAT login runs this binary (absolute, so PATH plays no part).
       CLI_QODER_BIN: /usr/local/bin/qodercli
       # qodercli crashes at start (even --version) when it cannot create

@@ -23,7 +23,8 @@
 #   ~/.local/share/autoos/ai-stack/          omniroute/ data, opencode-home/, qoder-home/
 # init only ADDS missing keys (backup first); a value you edit stays yours.
 # up/migrate refuse a LAN publish address unless coding-agents-fw.service
-# runs or stack.env says AUTOOS_STACK_ALLOW_LAN=1.
+# runs or stack.env says AUTOOS_STACK_ALLOW_LAN=1, and an AUTOOS_OMNIROUTE_PUBLIC_URL
+# the gateway would exit on (not an http(s) URL).
 # Design, RAM budget, rollback: docs/web-services.md (Server profile section).
 set -euo pipefail
 
@@ -304,8 +305,58 @@ bind_guard() {
 
 # dc_up [args...]: `docker compose up -d`, never past a refusing bind guard.
 dc_up() {
-    bind_guard || return 1
+    preflight || return 1
     dc up -d "$@"
+}
+
+# ─── public URL ─────────────────────────────────────────────────────────────
+# AUTOOS_OMNIROUTE_PUBLIC_URL (stack.env, or the shell - it beats the file in
+# compose) is the gateway's public origin, passed to it as NEXT_PUBLIC_BASE_URL
+# and OMNIROUTE_PUBLIC_BASE_URL. init never writes it. The gateway (image
+# 3.8.50) validates both at startup and EXITS on a value that is not an http(s)
+# URL - under `restart: unless-stopped` that is a crash loop - so a bad one is
+# refused before compose runs.
+omniroute_public_url() {
+    local u="${AUTOOS_OMNIROUTE_PUBLIC_URL:-}"
+    [[ -n "$u" ]] || u="$(env_value "$STACK_ENV" AUTOOS_OMNIROUTE_PUBLIC_URL)"
+    u="${u#"${u%%[![:space:]]*}"}"
+    u="${u%"${u##*[![:space:]]}"}"
+    printf '%s' "$u"
+}
+
+# http(s)://host[:port][/path]: no credentials, no blanks. Anything else is
+# either refused by the gateway at startup or a secret in a redirect URI.
+public_url_valid() {
+    [[ "$1" =~ ^https?://[^/?#@[:space:]]+([/?#][^[:space:]]*)?$ ]]
+}
+
+# public_url_shown <valid url>: what the app makes of it - query and fragment
+# cut, trailing slashes dropped (its normalizeBaseUrl) - for output.
+public_url_shown() {
+    local u="${1%%[?#]*}"
+    while [[ "$u" == */ ]]; do u="${u%/}"; done
+    printf '%s' "$u"
+}
+
+# Runs with bind_guard before every `compose up` (preflight): nothing here
+# echoes the value, which may be mistyped with credentials in it.
+public_url_guard() {
+    local u
+    u="$(omniroute_public_url)"
+    if [[ -z "$u" ]] || public_url_valid "$u"; then return 0; fi
+    echo "  ! refusing to start: AUTOOS_OMNIROUTE_PUBLIC_URL is not an http(s)://host[:port][/path] URL without credentials or blanks."
+    echo "    The gateway exits at startup on an invalid public URL, and docker would restart it in a loop."
+    echo "    Fix it in $STACK_ENV, or remove it (unset and empty are the same)."
+    [[ -n "${AUTOOS_OMNIROUTE_PUBLIC_URL:-}" ]] && echo "    (this shell exports AUTOOS_OMNIROUTE_PUBLIC_URL, which wins over the file)"
+    if [[ $DRY -eq 1 ]]; then echo "    (dry run: a real run stops here)"; return 0; fi
+    return 1
+}
+
+# preflight: everything that can refuse a `compose up`, before anything is
+# built, stopped or recreated.
+preflight() {
+    bind_guard || return 1
+    public_url_guard
 }
 
 # ─── data directories ───────────────────────────────────────────────────────
@@ -548,7 +599,7 @@ cmd_up() {
     (( ${#start[@]} )) || return 0
     # Before the images: compose up below may create these containers or
     # recreate running ones (a changed bind, a rebuilt image).
-    bind_guard || return 1
+    preflight || return 1
     # A mount source added since init ran (qoder-home) must not be left to
     # docker, which would create it as root.
     ensure_data_dirs "$(stack_data_dir)"
@@ -809,7 +860,7 @@ cmd_migrate() {
     "$DOCKER" compose version >/dev/null 2>&1 || { echo "docker compose v2 is required"; return 1; }
     # Everything that can refuse, refuses here - before a native service stops.
     cmd_init || return 1
-    bind_guard || return 1
+    preflight || return 1
     ensure_manage_key || return 1
     ensure_images omniroute opencode openhands || return 1
 
@@ -964,6 +1015,8 @@ cmd_rollback() {
 #   AUTOOS_VERIFY_COMBOS         space separated combo names (default below)
 #   AUTOOS_VERIFY_PUBLIC_URLS    space separated public URLs that must redirect
 #                                (302, the auth proxy) without credentials
+#   AUTOOS_OMNIROUTE_PUBLIC_URL  the gateway's public origin (stack.env): printed as
+#                                the app normalizes it, not requested
 #   AUTOOS_CODE_DIR              the tree that must be visible in the containers
 #                                (the variable compose.yml mounts)
 V_OK=0; V_FAIL=0; V_SKIP=0
@@ -1180,7 +1233,23 @@ verify_public_urls() {
     return 0
 }
 
-# 7. configuration/healthcheck.sh is the repo's stack probe, and it is not a
+# 7. The public origin the gateway was told (AUTOOS_OMNIROUTE_PUBLIC_URL):
+# printed the way the app normalizes it - trailing slashes dropped - or skipped
+# when unset or empty. Checked, not requested: it may be a plain LAN address,
+# and reachability through the proxy is what AUTOOS_VERIFY_PUBLIC_URLS is for.
+# FAIL for what the gateway would exit on at startup; the value is never echoed.
+verify_omniroute_public_url() {
+    local u name="omniroute public URL"
+    u="$(omniroute_public_url)"
+    if [[ -z "$u" ]]; then v_skip "$name" "AUTOOS_OMNIROUTE_PUBLIC_URL is not set"; return 0; fi
+    if ! public_url_valid "$u"; then
+        v_fail "$name" "not an http(s)://host[:port][/path] URL without credentials or blanks - the gateway exits at startup on it (value not echoed)"
+        return 0
+    fi
+    v_ok "$name $(public_url_shown "$u")"
+}
+
+# 8. configuration/healthcheck.sh is the repo's stack probe, and it is not a
 # check verify can run: it appends to logs/healthcheck-<date>.log on every run
 # (mkdir + tee), answers with exit 0 whatever it finds, and its --fix mode
 # resumes services. Everything of it that concerns this stack (the three ports,
@@ -1199,6 +1268,7 @@ cmd_verify() {
     verify_code_dir_visible
     verify_omniroute_qodercli
     verify_public_urls
+    verify_omniroute_public_url
     verify_healthcheck
     printf 'verify: %d ok, %d failed, %d skipped\n' "$V_OK" "$V_FAIL" "$V_SKIP"
     [[ $V_FAIL -eq 0 ]]

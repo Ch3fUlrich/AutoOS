@@ -9557,7 +9557,7 @@ _aistack() {
     while (( $# )) && [[ "$1" == [A-Z]*=* ]]; do extra+=("$1"); shift; done
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
-        -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA \
+        -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
         AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
         AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
@@ -10364,6 +10364,87 @@ STUB
     if (( ok )); then pass; else fail "a failed backup leaves a partial archive"; fi
 fi
 
+# ─── The public URL (AUTOOS_OMNIROUTE_PUBLIC_URL) ───────────────────────────
+# stack.env's AUTOOS_OMNIROUTE_PUBLIC_URL reaches the gateway as
+# NEXT_PUBLIC_BASE_URL + OMNIROUTE_PUBLIC_BASE_URL (compose.yml). Unset must
+# change nothing - and image 3.8.50 exits at startup on a value that is not an
+# http(s) URL, so a bad one must not reach `compose up`.
+
+if it "aistack: stack.env.example documents the public URL as a commented placeholder, nothing real"; then
+    ok=1
+    f="$AISTACK/stack.env.example"
+    line="$(grep -nxF '# AUTOOS_OMNIROUTE_PUBLIC_URL=https://<your-omniroute-host>' "$f" | cut -d: -f1)"
+    [[ -n "$line" ]] || { ok=0; echo "the commented placeholder line is missing" >&2; }
+    if [[ -n "$line" ]]; then
+        sed -n "$((line - 1))p" "$f" | grep -q '^# .*[Pp]ublic' || { ok=0; echo "no one-line description directly above it" >&2; }
+    fi
+    grep -qE '^[[:space:]]*AUTOOS_OMNIROUTE_PUBLIC_URL=' "$f" && { ok=0; echo "an active AUTOOS_OMNIROUTE_PUBLIC_URL line: the example would turn it on" >&2; }
+    if (( ok )); then pass; else fail "the public URL is not a commented placeholder"; fi
+fi
+
+if it "aistack: init never invents the public URL and keeps the operator's value"; then
+    # A guard: green before the feature, it fails if init ever starts writing the key.
+    d="$(_aistack_sandbox)"
+    ok=1
+    _aistack "$d" init >/dev/null
+    grep -q 'AUTOOS_OMNIROUTE_PUBLIC_URL' "$d/cfg/stack.env" && { ok=0; echo "init wrote the key: $(grep AUTOOS_OMNIROUTE_PUBLIC_URL "$d/cfg/stack.env")" >&2; }
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL='https://gw.example.invalid/'\n" >>"$d/cfg/stack.env"
+    _aistack "$d" init >/dev/null
+    [[ "$(grep -c '^AUTOOS_OMNIROUTE_PUBLIC_URL=' "$d/cfg/stack.env")" == 1 ]] || { ok=0; echo "the key is not there exactly once" >&2; }
+    grep -qxF "AUTOOS_OMNIROUTE_PUBLIC_URL='https://gw.example.invalid/'" "$d/cfg/stack.env" || { ok=0; echo "the operator's value changed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "init touches the public URL"; fi
+fi
+
+if it "aistack: up and migrate refuse an invalid public URL before anything starts or stops"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_OMNIROUTE_PUBLIC_URL='https://opuser:oppw-secret@gw.example.invalid'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up omniroute)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "up accepted a URL with credentials" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran" >&2; }
+    [[ "$out" == *AUTOOS_OMNIROUTE_PUBLIC_URL* ]] || { ok=0; echo "the refusal does not name the variable: $out" >&2; }
+    [[ "$out" == *oppw-secret* ]] && { ok=0; echo "the credentials were echoed" >&2; }
+    # A dry run explains and carries on, like the bind guard.
+    out="$(_aistack "$d" --dry-run up omniroute)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "dry run: exit $rc, not 0" >&2; }
+    [[ "$out" == *"refusing"*AUTOOS_OMNIROUTE_PUBLIC_URL* || "$out" == *AUTOOS_OMNIROUTE_PUBLIC_URL*"refusing"* ]] || { ok=0; echo "dry run does not explain: $out" >&2; }
+    rm -rf "$d"
+    for bad in 'gw.example.invalid' 'ftp://gw.example.invalid' 'https://gw example.invalid'; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"; : >"$d/image-exists"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL="$bad" up omniroute >/dev/null && { ok=0; echo "up accepted [$bad] from the environment" >&2; }
+        grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran for [$bad]" >&2; }
+        rm -rf "$d"
+    done
+    # What the gateway accepts (and nothing at all) goes through.
+    for good in '' 'https://gw.example.invalid' 'https://gw.example.invalid/' 'http://gw.example.invalid:20128' 'https://gw.example.invalid/omniroute/'; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"; : >"$d/image-exists"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL="$good" up omniroute >/dev/null || { ok=0; echo "up refused [$good]" >&2; }
+        rm -rf "$d"
+    done
+    # migrate: refused before a native unit stops.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL=gw.example.invalid migrate --yes >/dev/null && { ok=0; echo "migrate accepted an invalid URL" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "migrate stopped a unit first" >&2; }
+    [[ -e "$d/active-autoos-omniroute" ]] || { ok=0; echo "the native gateway is gone" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an invalid public URL reaches compose"; fi
+fi
+
+if it "aistack: the docs explain the loopback callback and what the public URL does and does not change"; then
+    ok=1
+    f="$ROOT/docs/web-services.md"
+    for needle in 'AUTOOS_OMNIROUTE_PUBLIC_URL' 'NEXT_PUBLIC_BASE_URL' 'OMNIROUTE_PUBLIC_BASE_URL' 'ANTIGRAVITY_OAUTH_CLIENT_ID' \
+                  'ssh -L 20128:127.0.0.1:20128' 'http://127.0.0.1:20128/callback' 'BASE_URL: http://localhost:20128' 'INVALID_ORIGIN'; do
+        grep -qF -- "$needle" "$f" || { ok=0; echo "docs/web-services.md does not mention: $needle" >&2; }
+    done
+    if (( ok )); then pass; else fail "the OAuth / public URL docs are incomplete"; fi
+fi
+
 # ─── ai-stack.sh verify ─────────────────────────────────────────────────────
 # The read-only end-to-end check. Docker is the usual stub; curl is a second
 # stand-in wired through AUTOOS_CURL that answers from a table and logs the
@@ -10457,7 +10538,7 @@ if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
         AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "exit $rc, not 0" >&2; }
-    grep -qx 'verify: 13 ok, 0 failed, 1 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
+    grep -qx 'verify: 13 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
     grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
     for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
                 'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
@@ -10660,6 +10741,50 @@ if it "aistack: verify checks the gateway container has qodercli: ok, FAIL, or s
     grep -q 'qodercli' "$d/docker.log" 2>/dev/null && { ok=0; echo "profile off: docker was asked about qodercli" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the qodercli check is not ok/FAIL/skip as specified"; fi
+fi
+
+if it "aistack: verify prints the public URL as the app normalizes it, skips it when unset or empty, FAILs one the gateway would refuse"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    skipline='  skip  omniroute public URL - AUTOOS_OMNIROUTE_PUBLIC_URL is not set'
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "unset: exit $rc, not 0" >&2; }
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "unset: no skip line: $(grep 'public URL' <<<"$out")" >&2; }
+    # Empty - in the environment, in stack.env, or blanks only - is the same as unset.
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_PUBLIC_URL= verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "empty env: no skip line" >&2; }
+    out="$(_aistack_verify "$d" 'AUTOOS_OMNIROUTE_PUBLIC_URL=   ' verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "blank env: no skip line" >&2; }
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL=''\n" >>"$d/cfg/stack.env"
+    out="$(_aistack_verify "$d" verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "empty in stack.env: no skip line" >&2; }
+    # Printed the way the app normalizes it: trimmed, trailing slashes dropped, a path kept.
+    for pair in 'https://gw.example.invalid|https://gw.example.invalid' 'https://gw.example.invalid/|https://gw.example.invalid' \
+                'https://gw.example.invalid///|https://gw.example.invalid' '  https://gw.example.invalid/  |https://gw.example.invalid' \
+                'https://gw.example.invalid/omniroute/|https://gw.example.invalid/omniroute' 'http://gw.example.invalid:20128/|http://gw.example.invalid:20128'; do
+        out="$(_aistack_verify "$d" "AUTOOS_OMNIROUTE_PUBLIC_URL=${pair%%|*}" verify)" && rc=0 || rc=$?
+        (( rc == 0 )) || { ok=0; echo "[${pair%%|*}]: exit $rc, not 0" >&2; }
+        grep -qxF "  ok    omniroute public URL ${pair#*|}" <<<"$out" || { ok=0; echo "[${pair%%|*}]: no ok line for ${pair#*|}: $(grep 'public URL' <<<"$out")" >&2; }
+    done
+    # The environment beats stack.env, as it does in compose's interpolation.
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL='https://from-file.example.invalid/'\n" >>"$d/cfg/stack.env"
+    out="$(_aistack_verify "$d" verify)" || true
+    grep -qxF '  ok    omniroute public URL https://from-file.example.invalid' <<<"$out" || { ok=0; echo "stack.env value not shown" >&2; }
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_PUBLIC_URL=https://from-env.example.invalid verify)" || true
+    grep -qxF '  ok    omniroute public URL https://from-env.example.invalid' <<<"$out" || { ok=0; echo "the environment value does not win" >&2; }
+    # Printing is not probing: it may be a plain LAN address, not the proxy's 302.
+    grep -q 'example.invalid' "$d/curl-argv.log" 2>/dev/null && { ok=0; echo "verify requested the public URL" >&2; }
+    # What the gateway would refuse at startup: FAIL, and the value is not echoed.
+    for bad in 'gw.example.invalid' 'ftp://gw.example.invalid' 'https://opuser:oppw-secret@gw.example.invalid' 'https://gw example.invalid'; do
+        out="$(_aistack_verify "$d" "AUTOOS_OMNIROUTE_PUBLIC_URL=$bad" verify)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "[$bad]: exit $rc, not 1" >&2; }
+        grep -qE '^  FAIL  omniroute public URL - ' <<<"$out" || { ok=0; echo "[$bad]: no FAIL line" >&2; }
+        [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "[$bad]: not exactly one FAIL" >&2; }
+        [[ "$out" == *oppw-secret* || "$out" == *"gw example"* ]] && { ok=0; echo "[$bad]: the value is echoed" >&2; }
+    done
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the public URL line of verify misbehaves"; fi
 fi
 
 if it "aistack: verify follows the compose profiles: a disabled openhands is skipped, an enabled one is checked"; then
