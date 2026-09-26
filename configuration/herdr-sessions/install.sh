@@ -114,15 +114,41 @@ else
     SYSTEMCTL_SCOPE=()
 fi
 
+# _replace_token <line> <token> <value>: every occurrence of <token> in <line>
+# replaced by the literal bytes of <value> -- plain split-and-concatenate, no
+# pattern-substitution replacement field involved, so nothing in <value> is
+# ever read as an escape or backreference (see render_unit below for why that
+# matters here).
+_replace_token() {
+    local rest="$1" token="$2" value="$3" out=""
+    while [[ "$rest" == *"$token"* ]]; do
+        out+="${rest%%"$token"*}$value"
+        rest="${rest#*"$token"}"
+    done
+    out+="$rest"
+    printf '%s' "$out"
+}
+
 # Render a unit template into a real unit file. The checked-in units carry
 # four literal tokens -- @PROFILE@ (the --profile argument as given, informational
 # only), @APPDIR@ (where this checkout lives), @WORKDIR@ (the cwd panes
 # inherit) and @PROFILE_PATH@ (the resolved absolute profile path, what
-# HERDR_PROFILE is actually set to). "#" is the sed delimiter because every
-# replacement is a path.
+# HERDR_PROFILE is actually set to). Every replacement is an arbitrary
+# filesystem path, so this does NOT use sed (its replacement text treats `&`
+# as "the matched text" and `\` as an escape, both unescaped here) -- and,
+# less obviously, does NOT use bash's own `${var/pattern/value}` either: on
+# bash >= 5.2 (patsub_replacement, on by default) that construct has the exact
+# same `&`-as-backreference behaviour as sed's replacement field. Plain
+# split-and-concatenate (_replace_token) is immune to both.
 render_unit() {
-    sed -e "s#@PROFILE@#$PROFILE#g" -e "s#@APPDIR@#$APPDIR#g" \
-        -e "s#@WORKDIR@#$WORKDIR#g" -e "s#@PROFILE_PATH@#$PROFILE_CONF#g" "$1"
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="$(_replace_token "$line" "@PROFILE@" "$PROFILE")"
+        line="$(_replace_token "$line" "@APPDIR@" "$APPDIR")"
+        line="$(_replace_token "$line" "@WORKDIR@" "$WORKDIR")"
+        line="$(_replace_token "$line" "@PROFILE_PATH@" "$PROFILE_CONF")"
+        printf '%s\n' "$line"
+    done < "$1"
 }
 
 # unique_backup_path <path>: the next "<path>.autoos-backup-<ts>[-N]" name that

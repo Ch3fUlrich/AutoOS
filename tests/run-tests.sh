@@ -7136,6 +7136,30 @@ EOF
     fi
 fi
 
+# Finding 5 (qoder review, L1-backlog.review-herdr-qoder.md, low): render_unit
+# spliced user-supplied paths into sed replacement text with no escaping -- a
+# profile at /srv/a&b/hs.conf rendered HERDR_PROFILE=/srv/a@PROFILE_PATH@b/hs.conf
+# (& expands to the matched token in sed's replacement), the install reported
+# success, and restore would fail at the next boot with a bogus profile path.
+if it "herdr-sessions: render_unit renders a profile path containing '&' literally, not as a sed backreference"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    site_dir="$tmp/a&b"; mkdir -p "$site_dir"
+    conf="$site_dir/hs.conf"
+    cat > "$conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$conf" 2>&1)"; rc=$?
+    got="$(grep -h HERDR_PROFILE "$tmp/home/.config/systemd/user/herdr-sessions-restore.service" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=$conf" ]; then
+        pass
+    else
+        fail "rc=$rc got=[$got] out=${out:0:300}"
+    fi
+fi
+
 if it "herdr-sessions: re-run reports already current; a drifted unit is backed up before replacing"; then
     tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
     cat > "$tmp/site.conf" <<EOF
