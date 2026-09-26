@@ -13,6 +13,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import math
 import os
 import queue
 import shutil
@@ -99,6 +100,13 @@ def call(rid, params):
     if CRASH_AFTER and CALLS[0] >= CRASH_AFTER:
         log("crash")
         os._exit(3)
+    if params.get("name") == "nan":
+        # Python's json.loads accepts these, a strict JSON parser does not; both are
+        # lines a proxy that re-serialized or forwarded them would pass on.
+        send_line('{"jsonrpc":"2.0","method":"notifications/message","params":{"data":NaN}}')
+        send_line('{"jsonrpc":"2.0","id":%s,"result":{"v":-Infinity}}' % json.dumps(rid))
+        reply(rid, {"content": [], "pid": os.getpid()})
+        return
     if params.get("name") == "raw":
         # A deliberately non-canonical line: reversed key order, raw UTF-8, a
         # \u escape, odd spacing. Only a verbatim forwarder keeps it byte for byte.
@@ -200,6 +208,22 @@ def key(rid):
     return json.dumps(rid)
 
 
+def _not_json(token):
+    raise ValueError("%s is not JSON" % token)
+
+
+def _finite(token):
+    value = float(token)
+    if not math.isfinite(value):
+        _not_json(token)
+    return value
+
+
+def strict_loads(text):
+    """json.loads as JSON defines it: NaN, Infinity, -Infinity and 1e999 are refused."""
+    return json.loads(text, parse_constant=_not_json, parse_float=_finite)
+
+
 def alive(pid):
     try:
         os.kill(pid, 0)
@@ -229,6 +253,7 @@ class Session(object):
         self.lines = queue.Queue()
         self.raw = []          # every stdout line, as bytes
         self.messages = []     # parsed stdout lines (None when not JSON)
+        self.invalid = []      # stdout lines that are not strict JSON
         self.stderr = []
         self.closed = False
         self.pumps = [threading.Thread(target=self._pump_stdout, daemon=True),
@@ -267,11 +292,14 @@ class Session(object):
                                          % (self.proc.returncode, self.stderr[-8:]))
                 continue
             self.raw.append(raw)
-            try:
-                parsed = json.loads(raw.decode("utf-8"))
-            except ValueError:
-                parsed = None
-            self.messages.append(parsed)
+            self.messages.append(self._parse(raw))
+
+    def _parse(self, raw):
+        try:
+            return strict_loads(raw.decode("utf-8"))
+        except ValueError:
+            self.invalid.append(raw)
+            return None
 
     def response(self, rid, timeout=15.0):
         return self.wait_for(lambda m: isinstance(m, dict) and "method" not in m
@@ -311,10 +339,7 @@ class Session(object):
             except queue.Empty:
                 return
             self.raw.append(raw)
-            try:
-                self.messages.append(json.loads(raw.decode("utf-8")))
-            except ValueError:
-                self.messages.append(None)
+            self.messages.append(self._parse(raw))
 
     def close(self, timeout=15.0):
         if self.closed:
@@ -361,6 +386,10 @@ class LazyProxyCase(unittest.TestCase):
                     os.kill(rec["pid"], signal.SIGKILL)
                 except OSError:
                     pass
+        # every test: nothing but strict JSON, one message per line, ever reached the client
+        bad = [raw for s in self.sessions for raw in s.invalid]
+        if bad:
+            raise AssertionError("the proxy wrote stdout lines that are not JSON: %r" % bad[:3])
 
     def env(self, idle=1, cmd="json", **extra):
         env = dict(os.environ)
@@ -911,6 +940,34 @@ class Streams(LazyProxyCase):
                         "the dropped non-JSON backend line was not reported")
         for text in s.stderr + [r.decode("utf-8") for r in s.raw]:
             self.assertNotIn("canary-value-for-the-leak-check", text)
+
+    def test_nan_and_infinity_are_a_parse_error_in_both_directions(self):
+        self.prime_cache()
+        s = self.session(idle=30)
+        s.initialize()
+        bad_lines = [
+            b'{"jsonrpc":"2.0","id":NaN,"method":"ping"}',
+            b'{"jsonrpc":"2.0","id":Infinity,"method":"ping"}',
+            b'{"jsonrpc":"2.0","id":-Infinity,"method":"ping"}',
+            b'{"jsonrpc":"2.0","id":1e999,"method":"ping"}',
+            b'{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"arguments":{"x":NaN}}}',
+        ]
+
+        def errors():
+            return [m for m in s.messages if m and m.get("id") is None and "error" in m]
+        for n, line in enumerate(bad_lines, 1):
+            s.send(line)
+            s.wait_for(lambda m: len(errors()) >= n, 3)
+        self.assertEqual([e["error"]["code"] for e in errors()], [-32700] * len(bad_lines))
+        self.assertEqual(s.request("ping")["result"], {}, "the proxy did not survive")
+        self.assertEqual(self.starts(), [], "a line that is not JSON must not reach a backend")
+        # and a backend that prints such numbers is not repeated to the client
+        reply = self.call(s, name="nan", rid=8)
+        self.assertEqual(reply["result"]["content"], [])
+        self.assertEqual([m.get("method") for m in s.messages if m and "method" in m], [])
+        self.assertTrue(wait_until(lambda: len([l for l in s.stderr if "dropped a backend line" in l]) == 2, 3),
+                        s.stderr)
+        self.assertEqual(s.invalid, [])
 
     def test_the_backend_command_env_takes_a_json_list_or_a_quoted_string(self):
         spaced = os.path.join(self.tmp, "with space")

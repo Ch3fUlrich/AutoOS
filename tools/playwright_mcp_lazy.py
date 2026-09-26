@@ -38,6 +38,7 @@ Python 3.8+, standard library only. Linux and macOS (the backend gets its own se
 so a terminal Ctrl-C reaches the proxy, which then stops it in an orderly way).
 """
 import json
+import math
 import os
 import re
 import shlex
@@ -128,12 +129,30 @@ def id_key(rid):
 
 
 def encode(message):
-    return json.dumps(message, separators=(",", ":")).encode("utf-8")
+    return json.dumps(message, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def _not_json(token):
+    raise ValueError("%s is not a JSON number" % token)
+
+
+def _finite(token):
+    value = float(token)
+    if not math.isfinite(value):
+        _not_json(token)
+    return value
+
+
+def loads(text):
+    """json.loads for a wire message. Python's json also takes NaN, Infinity and -Infinity
+    (and 1e999, which is one), and would echo them back as `{"id":NaN,...}`: not JSON,
+    and a line the client cannot read. They are a parse error here."""
+    return json.loads(text, parse_constant=_not_json, parse_float=_finite)
 
 
 def parse_line(raw):
     try:
-        return json.loads(raw.decode("utf-8"))
+        return loads(raw.decode("utf-8"))
     except Exception:  # bad UTF-8, bad JSON, absurd nesting: all "not a message"
         return _MISSING
 
@@ -152,7 +171,7 @@ class Cache(object):
     def _load(self):
         try:
             with open(self.path, encoding="utf-8") as fh:
-                data = json.load(fh)
+                data = loads(fh.read())
         except (OSError, ValueError):
             return
         init = data.get("initialize") if isinstance(data, dict) else None
