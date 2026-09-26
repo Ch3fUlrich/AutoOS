@@ -9,7 +9,9 @@ no real browser, no network: the docker case uses a stub `docker` on PATH.
 
 Run:  python3 tests/test_playwright_mcp_lazy.py
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import queue
@@ -22,6 +24,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -39,6 +42,10 @@ DOCKER_DEFAULT = ["docker", "run", "-i", "--rm", "--init", "--network", "host",
 #   FAKE_EXTRA_TOOL   1: list a fourth tool
 #   FAKE_GARBAGE      1: print a non-JSON line on stdout at start
 #   FAKE_NO_INIT      1: never answer initialize
+#   FAKE_ROOTS        1: right after notifications/initialized, ask the client for
+#                        roots/list (id FAKE_ROOTS_ID, default 1); every answer that
+#                        comes back is logged as an "answer" event
+#   FAKE_HOLD_TOOLS   1: do not answer tools/list until an answer to that roots/list arrived
 FAKE_BACKEND = r'''
 import json, os, sys, threading, time
 
@@ -47,6 +54,8 @@ LOG_LOCK = threading.Lock()
 OUT_LOCK = threading.Lock()
 CALLS = [0]
 PENDING = {}
+HELD = []
+ANSWERED = [False]
 CRASH_AFTER = int(os.environ.get("FAKE_CRASH_AFTER") or 0)
 SUPPORTED = ("2025-06-18", "2025-03-26", "2024-11-05")
 
@@ -119,6 +128,12 @@ def handle(msg, text):
     method = msg.get("method")
     rid = msg.get("id")
     params = msg.get("params") or {}
+    if method is None and rid is not None:
+        log("answer", id=rid, result=msg.get("result"))
+        ANSWERED[0] = True
+        for held in HELD:
+            reply(held, {"tools": tools()})
+        del HELD[:]
     if method is None and rid in PENDING:
         PENDING[rid]["reply"] = msg
         PENDING[rid]["event"].set()
@@ -133,10 +148,16 @@ def handle(msg, text):
                                    "version": os.environ.get("FAKE_VERSION", "1.0.0")}})
     elif method == "notifications/initialized":
         log("initialized")
+        if os.environ.get("FAKE_ROOTS") == "1":
+            send({"jsonrpc": "2.0", "id": int(os.environ.get("FAKE_ROOTS_ID", "1")),
+                  "method": "roots/list"})
     elif method == "notifications/cancelled":
         log("cancelled", params=params)
     elif method == "tools/list":
         log("tools_list", id=rid, params=params)
+        if os.environ.get("FAKE_HOLD_TOOLS") == "1" and not ANSWERED[0]:
+            HELD.append(rid)
+            return
         result = {"tools": tools()}
         if params.get("cursor") is not None:
             result["echoCursor"] = params["cursor"]
@@ -502,6 +523,82 @@ class CacheAndLazyStart(LazyProxyCase):
         s.send({"jsonrpc": "2.0", "id": "srv-1", "result": {"roots": [{"uri": "file:///w"}]}})
         reply = s.response(3)
         self.assertEqual(reply["result"]["asked"], {"roots": [{"uri": "file:///w"}]})
+
+
+class Startup(LazyProxyCase):
+    """The backend starts on a thread of its own: the client keeps being heard meanwhile."""
+
+    def test_a_backend_that_asks_the_client_while_it_starts_does_not_stall_the_session(self):
+        self.prime_cache()
+        # A changed serverInfo makes the replay fetch tools/list, and this backend holds
+        # that answer back until the client has answered its roots/list.
+        s = self.session(idle=30, FAKE_VERSION="2.0.0", FAKE_ROOTS="1", FAKE_HOLD_TOOLS="1",
+                         AUTOOS_PLAYWRIGHT_HANDSHAKE_SECONDS="4")
+        s.initialize()
+        s.send({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                "params": {"name": "browser_navigate", "arguments": {"n": 5}}})
+        ask = s.wait_for(lambda m: m.get("method") == "roots/list", 10)
+        # The start is now blocked on the client's answer. The client must still be heard:
+        self.assertEqual(s.request("ping", timeout=2)["result"], {},
+                         "the proxy stopped reading the client while the backend started")
+        s.send({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                "params": {"name": "browser_navigate", "arguments": {"n": 6}}})
+        roots = {"roots": [{"uri": "file:///work"}]}
+        s.send({"jsonrpc": "2.0", "id": ask["id"], "result": roots})
+        for rid in (5, 6):
+            self.assertNotIn("error", s.response(rid, 10))
+        self.assertEqual(len(self.starts()), 1, "the queued request must wait for the same start")
+        self.assertEqual([r["id"] for r in self.events("call")], [5, 6], "the queue lost its order")
+        self.assertEqual([a["result"] for a in self.events("answer")], [roots],
+                         "the client's answer did not reach the backend during its start")
+        self.assertEqual(len(self.events("tools_list")), 1)
+
+    def test_requests_queued_behind_a_failed_start_fail_together_and_the_next_one_starts_again(self):
+        self.prime_cache()
+        s = self.session(idle=30, FAKE_NO_INIT="1", AUTOOS_PLAYWRIGHT_HANDSHAKE_SECONDS="1.5")
+        s.initialize()
+        for rid in (21, 22):
+            s.send({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                    "params": {"name": "browser_navigate", "arguments": {}}})
+        for rid in (21, 22):
+            err = s.response(rid, 10)
+            self.assertEqual(err["error"]["code"], -32000)
+            self.assertIn("did not answer", err["error"]["message"])
+        self.assertEqual(len(self.starts()), 1, "each queued request started a backend of its own")
+        self.assertEqual(self.call(s, rid=23, timeout=10)["error"]["code"], -32000)
+        self.assertEqual(len(self.starts()), 2, "a request after the failure must try again")
+
+
+class StarterSurvivesBugs(unittest.TestCase):
+    """The starter thread's own guard: a bug must fail the queue, not leave the proxy unable to start."""
+
+    def test_an_unexpected_error_while_starting_fails_the_queue_and_frees_the_starter(self):
+        spec = importlib.util.spec_from_file_location("playwright_mcp_lazy", PROXY)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        tmp = tempfile.mkdtemp(prefix="pwlazy-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        out = io.BytesIO()
+        with mock.patch.dict(os.environ, {"AUTOOS_PLAYWRIGHT_MCP_CACHE": os.path.join(tmp, "c", "h.json")}):
+            proxy = module.Proxy(io.BytesIO(), out)
+
+        def boom():
+            raise RuntimeError("a bug in the start")
+        proxy.ensure_backend = boom
+
+        def answers():
+            return [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+        with contextlib.redirect_stderr(io.StringIO()) as noise:
+            for rid in (1, 2):
+                proxy.on_client_line(json.dumps({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                                                 "params": {"name": "browser_navigate"}}).encode())
+                self.assertTrue(wait_until(lambda: len(answers()) == rid, 5),
+                                "request %d was never answered: %r" % (rid, answers()))
+        self.assertEqual([a["id"] for a in answers()], [1, 2])
+        for answer in answers():
+            self.assertEqual(answer["error"]["code"], -32603)
+        self.assertIn("internal error while starting the backend (RuntimeError)", noise.getvalue())
+        self.assertTrue(wait_until(lambda: proxy.starter is None, 5), "the starter flag stayed set")
 
 
 class Negotiation(LazyProxyCase):

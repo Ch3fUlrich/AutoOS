@@ -54,6 +54,7 @@ EOF_WAIT_SECONDS = 5.0      # after closing the backend's stdin, before terminat
 TERM_WAIT_SECONDS = 3.0     # after terminate, before kill
 DOCKER_STOP_SECONDS = 30.0
 BACKEND_ERROR = -32000
+INTERNAL_ERROR = -32603
 FALLBACK_PROTOCOL = "2025-06-18"
 DEFAULT_CLIENT_PARAMS = {
     "protocolVersion": FALLBACK_PROTOCOL,
@@ -215,6 +216,18 @@ class Cache(object):
                     pass
 
 
+class Job(object):
+    """A client request that has to wait for a backend."""
+
+    def __init__(self, kind, rid, raw, params=None):
+        self.kind = kind            # "forward", "tools_list" (cold cache) or "initialize" (cold cache)
+        self.rid = rid
+        self.key = id_key(rid)
+        self.raw = raw
+        self.params = params
+        self.attempts = 0
+
+
 class StartError(Exception):
     """The backend could not be started or handshaken; the message is the reason."""
 
@@ -256,6 +269,9 @@ class Proxy(object):
         self.signalled = 0
         self.closing = False
         self.backend = None
+        self.starting = None                # the backend whose handshake is being replayed
+        self.queue = []                     # Jobs waiting for a backend, oldest first
+        self.starter = None                 # the thread that starts backends and serves the queue
         self.live = set()                   # backends whose stop has not finished
         self.sequence = 0
         self.client_params = None
@@ -302,7 +318,7 @@ class Proxy(object):
         try:
             method = msg.get("method")
             if method is None:
-                self.forward_or_drop(raw)               # the client's answer to a backend request
+                self.on_client_response(raw)            # the client's answer to a backend request
             elif "id" in msg:
                 self.on_request(msg, raw)
             else:
@@ -310,7 +326,7 @@ class Proxy(object):
         except Exception as exc:  # one bad message must not take the session down
             log("internal error while handling a client message (%s)" % type(exc).__name__)
             if isinstance(msg.get("method"), str) and "id" in msg:
-                self.reply_error(msg["id"], -32603, "playwright proxy internal error")
+                self.reply_error(msg["id"], INTERNAL_ERROR, "playwright proxy internal error")
 
     def on_request(self, msg, raw):
         rid = msg["id"]
@@ -324,12 +340,12 @@ class Proxy(object):
             return
         cursor = isinstance(params, dict) and params.get("cursor") is not None
         if method == "tools/list" and not cursor:
-            if self.cache.tools is None and self.ensure_started(rid) is None:
-                return          # starting fetches and caches the tool list; the error is sent
             if self.cache.tools is not None:
                 self.reply(rid, self.cache.tools)
-                return
-        self.forward_request(rid, raw)
+            else:
+                self.submit(Job("tools_list", rid, raw))    # starting fetches and caches the list
+            return
+        self.submit(Job("forward", rid, raw))
 
     def on_notification(self, msg, raw):
         if msg.get("method") == "notifications/initialized":
@@ -340,45 +356,26 @@ class Proxy(object):
         params = params if isinstance(params, dict) else {}
         with self.lock:
             self.client_params = params
-        if self.cache.initialize is None:
-            if self.ensure_started(rid) is None:
-                return
-        if self.cache.initialize is None:       # cannot happen after a successful start
-            self.reply_error(rid, BACKEND_ERROR, "playwright backend gave no initialize result")
-            return
-        self.reply(rid, self.cache.initialize_for(params.get("protocolVersion")))
+        if self.cache.initialize is not None:
+            self.reply(rid, self.cache.initialize_for(params.get("protocolVersion")))
+        else:
+            self.submit(Job("initialize", rid, None, params))
 
-    def ensure_started(self, rid):
-        """The running backend, starting one if needed; None after answering `rid` with the reason."""
-        try:
-            return self.ensure_backend()
-        except StartError as exc:
-            self.reply_error(rid, BACKEND_ERROR, "playwright backend could not start: %s" % exc)
-            return None
+    def on_client_response(self, raw):
+        """The client's answer to a request the backend sent: straight to that backend.
 
-    def forward_request(self, rid, raw):
-        key = id_key(rid)
-        be = None
-        for _ in range(3):
-            be = self.ensure_started(rid)
-            if be is None:
-                return
-            with self.lock:
-                if be is self.backend and be.alive and not be.stopping:
-                    be.inflight[key] = rid
-                    self.last_activity = time.monotonic()
-                    break
-            be = None       # stopped between the start and the registration: start again
-        if be is None:
-            self.reply_error(rid, BACKEND_ERROR, "playwright backend could not start: it kept stopping")
-            return
-        try:
-            self.send_backend(be, raw)
-        except StartError:
-            with self.lock:
-                owned = be.inflight.pop(key, _MISSING) is not _MISSING
-            if owned:           # otherwise the exit handler already answered it
-                self.reply_error(rid, BACKEND_ERROR, "playwright backend exited")
+        It goes to a backend that is still replaying its handshake as well: the answer
+        may be what that handshake is waiting for."""
+        with self.lock:
+            be = self.starting or self.backend
+            usable = be is not None and be.alive and not be.stopping
+            if usable:
+                self.last_activity = time.monotonic()
+        if usable:
+            try:
+                self.send_backend(be, raw)
+            except StartError:
+                pass
 
     def forward_or_drop(self, raw):
         with self.lock:
@@ -392,6 +389,95 @@ class Proxy(object):
             except StartError:
                 pass
 
+    # -- starting and the queue -------------------------------------------------
+
+    def submit(self, job):
+        """Forward `job` at once when a backend is ready, else queue it for the starter.
+
+        The client thread never waits for a backend: while one starts, the client's
+        messages keep being read (a backend may need an answer from the client before
+        it finishes its handshake), and what needs the backend waits in the queue."""
+        direct = None
+        with self.lock:
+            be = self.backend
+            if (job.kind == "forward" and not self.queue and self.starter is None
+                    and be is not None and be.alive and be.ready and not be.stopping):
+                be.inflight[job.key] = job.rid
+                self.last_activity = time.monotonic()
+                direct = be
+            else:
+                self.queue.append(job)
+                if self.starter is None:
+                    self.starter = threading.Thread(target=self.start_loop, daemon=True)
+                    self.starter.start()
+        if direct is not None:
+            self.send_job(direct, job)
+
+    def send_job(self, be, job):
+        """Send a job that is already registered as in flight on `be`."""
+        try:
+            self.send_backend(be, job.raw)
+        except StartError:
+            with self.lock:
+                owned = be.inflight.pop(job.key, _MISSING) is not _MISSING
+            if owned:           # otherwise the exit handler already answered it
+                self.reply_error(job.rid, BACKEND_ERROR, "playwright backend exited")
+
+    def start_loop(self):
+        """The starter thread: starts a backend when the queue needs one and serves the queue."""
+        while True:
+            with self.lock:
+                if not self.queue:
+                    self.starter = None
+                    return
+            try:
+                self.serve(self.ensure_backend())
+            except StartError as exc:
+                self.fail_queued(BACKEND_ERROR, "playwright backend could not start: %s" % exc)
+            except Exception as exc:  # the flag above must never stay set: nothing would start a backend again
+                log("internal error while starting the backend (%s)" % type(exc).__name__)
+                self.fail_queued(INTERNAL_ERROR, "playwright proxy internal error")
+
+    def fail_queued(self, code, message):
+        with self.lock:
+            jobs, self.queue = self.queue, []
+        for job in jobs:
+            self.reply_error(job.rid, code, message)
+
+    def serve(self, be):
+        """Run the queued jobs on `be`, oldest first; return early when `be` is gone."""
+        while True:
+            with self.lock:
+                if not self.queue:
+                    return
+                job = self.queue.pop(0)
+                forwards = job.kind == "forward" or (job.kind == "tools_list" and self.cache.tools is None)
+                usable = be is self.backend and be.alive and not be.stopping
+                if forwards and usable:
+                    be.inflight[job.key] = job.rid
+                    self.last_activity = time.monotonic()
+                elif forwards:
+                    job.attempts += 1
+                    if job.attempts < 3:
+                        self.queue.insert(0, job)
+                        return          # stopped between the start and now: start another
+            if not forwards:
+                self.answer_locally(job)
+            elif usable:
+                self.send_job(be, job)
+            else:
+                self.reply_error(job.rid, BACKEND_ERROR, "playwright backend could not start: it kept stopping")
+
+    def answer_locally(self, job):
+        """A cold-cache initialize or tools/list, answered from the cache the start filled."""
+        if job.kind == "initialize":
+            if self.cache.initialize is None:       # cannot happen after a successful start
+                self.reply_error(job.rid, BACKEND_ERROR, "playwright backend gave no initialize result")
+            else:
+                self.reply(job.rid, self.cache.initialize_for(job.params.get("protocolVersion")))
+        else:
+            self.reply(job.rid, self.cache.tools)
+
     # -- backend side ---------------------------------------------------------
 
     def send_backend(self, be, raw):
@@ -403,7 +489,7 @@ class Proxy(object):
             raise StartError("the backend closed its input")
 
     def ensure_backend(self):
-        """Only the client thread starts backends, so starts never race each other."""
+        """Only the starter thread starts backends, so starts never race each other."""
         with self.lock:
             be = self.backend
             if be is not None and be.alive and be.ready and not be.stopping:
@@ -411,6 +497,7 @@ class Proxy(object):
         be = self.start_backend()
         with self.lock:
             self.backend = be
+            self.starting = None
             self.last_activity = time.monotonic()
         return be
 
@@ -435,12 +522,15 @@ class Proxy(object):
         be.alive = True
         with self.lock:
             self.live.add(be)
+            self.starting = be
         be.reader = threading.Thread(target=self.backend_loop, args=(be,), daemon=True)
         be.reader.start()
         log("starting the backend (%s)" % name)
         try:
             self.replay_handshake(be)
         except StartError:
+            with self.lock:
+                self.starting = None
             self.stop_backend(be)
             raise
         return be
