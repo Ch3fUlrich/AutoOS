@@ -7,15 +7,21 @@ tests/run-tests.sh for machines without bash/python3.
 Exit non-zero with a diagnostic on any mismatch.
 """
 import glob
+import importlib.util
 import json
 import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-models = {m["id"]: m for m in
-          json.load(open(os.path.join(ROOT, "catalog", "llm-models.json"),
-                         encoding="utf-8"))["models"]}
+spec = importlib.util.spec_from_file_location(
+    "autoos_registry", os.path.join(ROOT, "tools", "registry.py"))
+_registry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(_registry)
+_registry_doc = json.load(open(os.path.join(ROOT, "catalog", "ai-registry.json"),
+                               encoding="utf-8"))
+
+models = {m["id"]: m for m in _registry.legacy_models(_registry_doc)}
 # Legacy alias: muse-spark-1.3-contributor.json is the vendored template for
 # the muse-spark catalog entry (same shape as the deleted muse-spark-1.3
 # alias; only the contributor variant is kept).

@@ -5,7 +5,7 @@ Spec: docs/plans/2026-09-25-routing-v2-spec.md sections 3.1 ("Measured values
 never write the registry") and 5.3 step 1 (tool_calls = proven required for
 agentic kinds) and section 10 (probes, free legs only).
 
-catalog/ai-registry.json is generated (tools/registry-convert.py) and starts
+catalog/ai-registry.json is the hand-edited source of truth and starts
 every model at tool_calls "unproven". This script sends each distinct leg
 (a "<provider>/<model>" string exactly as written in a route's ``legs``) two
 tool-calling trials through the OmniRoute gateway (OpenAI chat/completions
