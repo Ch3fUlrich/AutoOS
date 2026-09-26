@@ -6561,14 +6561,14 @@ if it "playwright lazy proxy installer: an add that fails after the remove puts 
     for form in docker npx stale-proxy; do
         tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
         case "$form" in
-            docker) old=("${PW_DOCKER_FORM[@]}") ;;
-            npx) old=(npx -y @playwright/mcp@0.0.81) ;;
-            stale-proxy) old=(python3 "/old checkout/AutoOS/tools/playwright_mcp_lazy.py") ;;
+            docker) old_argv=("${PW_DOCKER_FORM[@]}") ;;
+            npx) old_argv=(npx -y @playwright/mcp@0.0.81) ;;
+            stale-proxy) old_argv=(python3 "/old checkout/AutoOS/tools/playwright_mcp_lazy.py") ;;
         esac
-        pw_seed "$cfg" "${old[@]}"
+        pw_seed "$cfg" "${old_argv[@]}"
         out="$(PW_ADD_FAIL="$ROOT/tools/playwright_mcp_lazy.py" pw_run "$tmp" install_mcp_playwright 2>&1)"
         got="$(pw_argv_json "$cfg")"
-        want="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "${old[@]}")"
+        want="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "${old_argv[@]}")"
         [[ "$got" == "$want" ]] || problems+=" [$form] entry after the failed add=[$got], want [$want];"
         [[ "$out" == *"put back"* ]] || problems+=" [$form] the rollback was not reported;"
         rm -rf "$tmp"
