@@ -646,7 +646,8 @@ class McpStdioTests(unittest.TestCase):
                 proc.stdout.close()
             self.assertEqual(replies[1]["result"]["serverInfo"]["name"], "autoos-agent")
             names = {t["name"] for t in replies[2]["result"]["tools"]}
-            self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel"})
+            self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
+                                     "route", "list_agents", "context"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "t3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])
@@ -1457,6 +1458,241 @@ class CardV2Tests(unittest.TestCase):
         ]
         for card, expected in cases:
             self.assertEqual(routing.select_combo(card), expected, card)
+
+
+def _small_route_registry():
+    """A hand-computable registry: two survivable routes (families alpha/beta)
+    for a `kind=review,paths=tools/registry.py` card, in the same style as
+    tests/test_autoos_resolver.py's PlanTests fixture."""
+    return {
+        "providers": {"free-p": {"id": "free-p"}, "cheap-p": {"id": "cheap-p"}},
+        "models": {
+            "free-model": {"id": "free-model", "family": "alpha", "reasoning": False,
+                          "effort_ladder": [], "tool_calls": "proven",
+                          "price_in": 0.0, "price_out": 0.0, "output_max": 1000,
+                          "context_usable": {"tokens": 100000, "source": "default"}},
+            "cheap-model": {"id": "cheap-model", "family": "beta", "reasoning": False,
+                           "effort_ladder": [], "tool_calls": "proven",
+                           "price_in": 1e-6, "price_out": 2e-6, "output_max": 100000,
+                           "context_usable": {"tokens": 200000, "source": "default"}},
+            "orch": {"id": "orch", "price_in": 5e-6, "price_out": 1e-5,
+                    "context_usable": {"tokens": 200000, "source": "default"}},
+        },
+        "routes": {
+            "r-free": {"id": "r-free", "class": "free", "legs": ["free-p/free-model"]},
+            "r-cheap": {"id": "r-cheap", "class": "cheap", "legs": ["cheap-p/cheap-model"]},
+        },
+        "policy": {
+            "modes": {"balanced": {"theta": {"value": 0.8}, "lambda": {"value": 0.01}}},
+            "verify_tokens": {"S0": {"tokens": 2000}},
+            "latency_seed": {"free": {"minutes": 5}, "cheap": {"minutes": 10}},
+            "seed_priors": {
+                "free": {"S0": {"alpha": 8, "beta": 2}},
+                "cheap": {"S0": {"alpha": 8, "beta": 2}},
+            },
+        },
+    }
+
+
+def _fake_client_state():
+    return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+
+class _FakeClients:
+    """A clients module stand-in whose one client is always installed and
+    carries no sign-in probe (`signed_in: None` never removes a route, spec
+    5.3's own rule) - so `cmd_route` can be exercised without touching a real
+    CLI or the network. `binary` is this interpreter's own absolute path, so
+    shutil.which resolves it on every OS without depending on PATH."""
+
+    CLIENTS = {"opencode": types.SimpleNamespace(binary=sys.executable)}
+
+    @staticmethod
+    def signin_state(client, env=None):
+        return None, ""
+
+
+class RouteCliTests(unittest.TestCase):
+    """tools/autoos-agent.py `route` (spec 6.1) and its shared core
+    route_plan_for (spec 6.1/6.2, shared with the MCP `route` tool).
+    """
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def now(self):
+        return datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc)
+
+    def isolate(self):
+        """Point the freshly loaded agent module at a controlled, empty
+        overlay/track-record and a fake clients module - registry stays
+        whatever the caller passes to route_plan_for directly."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        self.agent.clients = _FakeClients
+
+    def test_route_plan_for_with_inline_registry_and_fake_state_returns_a_plan(self):
+        result = self.agent.route_plan_for(
+            "kind=review,paths=tools/registry.py", "", str(ROOT), "orch",
+            self.now(), _small_route_registry(), {}, [], _fake_client_state())
+        self.assertIn(result["route"], ("r-free", "r-cheap"))
+        self.assertEqual(result["state"], "ready")
+
+    def test_no_route_card_is_input_required(self):
+        result = self.agent.route_plan_for(
+            "kind=review,paths=tools/registry.py,override.route=zzz-nonexistent",
+            "", str(ROOT), "orch", self.now(), _small_route_registry(), {}, [],
+            _fake_client_state())
+        self.assertIsNone(result["route"])
+        self.assertEqual(result["state"], "input_required")
+
+    def test_bad_card_raises_card_error(self):
+        with self.assertRaises(routing.CardError) as cm:
+            self.agent.route_plan_for("bogus=x", "", str(ROOT), "orch", self.now(),
+                                      _small_route_registry(), {}, [],
+                                      _fake_client_state())
+        self.assertIn("bogus", str(cm.exception))
+
+    def test_unknown_orchestrator_model_raises_naming_it(self):
+        with self.assertRaises(ValueError) as cm:
+            self.agent.route_plan_for(
+                "kind=review,paths=tools/registry.py", "", str(ROOT),
+                "no-such-model", self.now(), _small_route_registry(), {}, [],
+                _fake_client_state())
+        self.assertIn("no-such-model", str(cm.exception))
+
+    def test_dict_card_is_accepted_too(self):
+        result = self.agent.route_plan_for(
+            {"kind": "review", "paths": ["tools/registry.py"]}, "", str(ROOT),
+            "orch", self.now(), _small_route_registry(), {}, [],
+            _fake_client_state())
+        self.assertIn(result["route"], ("r-free", "r-cheap"))
+
+    def test_real_registry_review_card_returns_a_route(self):
+        registry = json.loads((ROOT / "catalog" / "ai-registry.json")
+                              .read_text(encoding="utf-8"))
+        result = self.agent.route_plan_for(
+            "kind=review,paths=tools/registry.py", "", str(ROOT),
+            self.agent.DEFAULT_ORCHESTRATOR_MODEL, self.now(), registry, {}, [],
+            _fake_client_state())
+        self.assertIsNotNone(result["route"])
+        self.assertEqual(result["state"], "ready")
+        self.assertIn(result["route"], registry["routes"])
+
+    # --- cmd_route: exit codes and the --explain stderr/stdout split --------
+
+    def run_cmd_route(self, **overrides):
+        ns = argparse.Namespace(card="kind=review,paths=tools/registry.py", brief="",
+                                explain=False, orchestrator_model="orch",
+                                repo=str(ROOT), now=None)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with mock.patch.object(self.agent, "load_registry",
+                                   lambda path: _small_route_registry()):
+                rc = self.agent.cmd_route(ns)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_cmd_route_exits_0_and_prints_json_on_stdout(self):
+        self.isolate()
+        rc, out, err = self.run_cmd_route()
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["state"], "ready")
+
+    def test_cmd_route_exits_5_when_no_route_survives(self):
+        self.isolate()
+        rc, out, err = self.run_cmd_route(
+            card="kind=review,paths=tools/registry.py,override.route=zzz-nonexistent")
+        self.assertEqual(rc, 5, err)
+        self.assertIsNone(json.loads(out)["route"])
+
+    def test_cmd_route_exits_2_on_a_bad_card(self):
+        self.isolate()
+        rc, out, err = self.run_cmd_route(card="bogus=x")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+        self.assertIn("bogus", err)
+
+    def test_cmd_route_exits_2_on_an_unknown_orchestrator_model(self):
+        self.isolate()
+        rc, out, err = self.run_cmd_route(orchestrator_model="no-such-model")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+        self.assertIn("no-such-model", err)
+
+    def test_explain_writes_lines_to_stderr_and_stdout_stays_json(self):
+        self.isolate()
+        rc, out, err = self.run_cmd_route(explain=True)
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)  # stdout is exactly one parseable route_plan
+        self.assertTrue(err.strip())
+        self.assertIn(data["reason"], err)
+
+    def test_cli_bad_card_exits_2(self):
+        r = run_agent("route", "--card", "bogus=x")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("bogus", r.stderr)
+        self.assertEqual(r.stdout, "")
+
+    def test_cli_no_route_card_exits_5(self):
+        # override to an id no registry has forces input_required regardless
+        # of this host's own client sign-in state (spec 5.3: an override never
+        # resurrects a filtered route, and an unknown one is refused the same way).
+        r = run_agent("route", "--card",
+                      "kind=review,paths=tools/registry.py,override.route=zzz-nonexistent")
+        self.assertEqual(r.returncode, 5, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertIsNone(data["route"])
+        self.assertEqual(data["state"], "input_required")
+
+
+class McpRouteTests(unittest.TestCase):
+    """The route/list_agents/context MCP tools as plain functions (spec 6.2)."""
+
+    def test_route_returns_a_dict_for_the_real_registry(self):
+        out = mcp_server.route_plan("kind=review,paths=tools/registry.py")
+        self.assertNotIn("error", out)
+        self.assertIn("route", out)
+        self.assertIn("state", out)
+
+    def test_route_error_is_a_plain_dict(self):
+        out = mcp_server.route_plan("bogus=x")
+        self.assertEqual(set(out), {"error"})
+        self.assertIn("bogus", out["error"])
+
+    def test_route_accepts_a_dict_card_and_explain_adds_text(self):
+        out = mcp_server.route_plan({"kind": "review", "paths": ["tools/registry.py"]},
+                                    explain=True)
+        self.assertNotIn("error", out)
+        if out.get("route") is not None:
+            self.assertIn("explain_text", out)
+            self.assertIn(out["reason"], out["explain_text"])
+
+    def test_list_agents_returns_clients_and_routes(self):
+        out = mcp_server.list_agents()
+        self.assertNotIn("error", out)
+        self.assertTrue(out["clients"])
+        for row in out["clients"]:
+            self.assertEqual(set(row), {"id", "installed", "signed_in", "reason"})
+        for row in out["routes"]:
+            self.assertEqual(set(row), {"id", "class", "legs", "retired"})
+            for leg in row["legs"]:
+                self.assertEqual(set(leg), {"leg", "available"})
+
+    def test_context_returns_a_dict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"HOME": tmp}):
+                out = mcp_server.context_info()
+        self.assertEqual(out, {"context": "unknown", "reason": "no transcript"})
+
+    def test_context_bad_transcript_path_is_an_error(self):
+        out = mcp_server.context_info(
+            transcript=os.path.join(tempfile.gettempdir(), "autoos-test-nope.jsonl"))
+        self.assertEqual(set(out), {"error"})
 
 
 if __name__ == "__main__":

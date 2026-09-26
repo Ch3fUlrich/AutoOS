@@ -57,6 +57,7 @@ Usage:
     python3 tools/autoos-agent.py run --tier 3 --dry-run "..."     # print the plan only
     python3 tools/autoos-agent.py context                          # this session's fill
     python3 tools/autoos-agent.py context --transcript s.jsonl --json
+    python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
 
 --free maps every tier agent to one of opencode's own free models (default
 opencode/big-pickle) through OPENCODE_CONFIG_CONTENT: no gateway, no key, no
@@ -71,6 +72,12 @@ logs/orch-<date>.log (git-ignored), which the watchdog protocol reads.
 Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); 6 = a headless client auto-denied a tool and
 exited 0 (HEADLESS-REFUSAL); the child's exit code; 2 bad arguments, card or route refused;
 3 gateway, key or client binary missing; 4 depth budget exhausted.
+
+`route` (spec 6.1) has its own exit codes: 0 a route was chosen (ready or
+deferred), 5 input_required (no route survived the filters, or a removed
+override), 2 bad input (a bad card, a bad --now, an unknown
+--orchestrator-model, or any other measure()/plan() ValueError - fail closed,
+message on stderr).
 """
 from __future__ import annotations
 
@@ -92,6 +99,8 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
+import autoos_measure as measure_mod  # noqa: E402
+import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_track as track  # noqa: E402
 from registry import resolve_leg  # noqa: E402
@@ -112,6 +121,9 @@ TRACK_RECORD = os.path.join(ROOT, "logs", "routing", "track-record.jsonl")
 REGISTRY_PATH = os.path.join(ROOT, "catalog", "ai-registry.json")
 MEASURED_OVERLAY_PATH = os.path.join(ROOT, "logs", "routing", "measured.json")
 PROBE_PROPOSALS_LOG = os.path.join(ROOT, "logs", "routing", "probe-proposals.jsonl")
+# `route`'s default orchestrator model (spec 6.1): a registry model id billed
+# for verification cost when the caller does not pin one.
+DEFAULT_ORCHESTRATOR_MODEL = "claude-opus-4-6"
 # --lean drops these MCP servers. Measured 2026-09-24, one --free opencode run,
 # peak process-tree RSS: 1406 MB with every server, 678 MB with these off
 # (516 MB with graphify off too).
@@ -338,6 +350,44 @@ def cmd_list(cfg: dict) -> int:
     return 0
 
 
+def context_state(transcript_path: str | None, model_override: str | None) -> tuple:
+    """(data, rc): the same fields the `context` subcommand prints, as data.
+
+    A known fill returns ``{tokens, cap, pct, model, transcript, source}`` and
+    rc 0. An unknown state (no transcript, no usage, or an unreadable
+    ``transcript_path``) returns ``{"context": "unknown", "reason": ...}``; rc
+    is 2 only for the unreadable-path case (matching the CLI's own exit code),
+    0 otherwise. Pure aside from the transcript read itself - `autoos-agent.py
+    context` and the MCP `context` tool both call this so their numbers can
+    never drift apart.
+    """
+    if transcript_path:
+        path = transcript_path
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError as exc:
+            return ({"context": "unknown",
+                    "reason": "cannot read %s: %s" % (path, exc.strerror or exc)}, 2)
+    else:
+        path = ctx.discover_transcript(os.getcwd())
+        if path is None:
+            return {"context": "unknown", "reason": "no transcript"}, 0
+        with io.open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+
+    fill = ctx.fill_from_transcript(lines)
+    if fill is None:
+        return {"context": "unknown", "reason": "no usage"}, 0
+
+    model = model_override or fill.get("model") or "unknown"
+    cap = ctx.cap_for(model)
+    tokens = fill["tokens"]
+    pct = int(round(100 * tokens / cap)) if cap else 0
+    return ({"tokens": tokens, "cap": cap, "pct": pct, "model": model,
+             "transcript": path, "source": "default"}, 0)
+
+
 def cmd_context(args) -> int:
     """Print the calling session's context fill (spec 6.1, caps 8.3).
 
@@ -347,40 +397,117 @@ def cmd_context(args) -> int:
     an object (its `source` is the cap's provenance, `default` until a probe
     measures one).
     """
-    if args.transcript:
-        path = args.transcript
-        try:
-            with io.open(path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-        except OSError as exc:
-            print("context: unknown (cannot read %s: %s)"
-                  % (path, exc.strerror or exc), file=sys.stderr)
-            return 2
-    else:
-        path = ctx.discover_transcript(os.getcwd())
-        if path is None:
-            print("context: unknown (no transcript)")
-            return 0
-        with io.open(path, encoding="utf-8") as fh:
-            lines = fh.readlines()
-
-    fill = ctx.fill_from_transcript(lines)
-    if fill is None:
-        print("context: unknown (no usage)")
-        return 0
-
-    model = args.model or fill.get("model") or "unknown"
-    cap = ctx.cap_for(model)
-    tokens = fill["tokens"]
-    pct = int(round(100 * tokens / cap)) if cap else 0
+    data, rc = context_state(args.transcript, args.model)
+    if data.get("context") == "unknown":
+        stream = sys.stderr if rc == 2 else sys.stdout
+        print("context: unknown (%s)" % data["reason"], file=stream)
+        return rc
     if args.json:
-        print(json.dumps({"tokens": tokens, "cap": cap, "pct": pct,
-                          "model": model, "transcript": path,
-                          "source": "default"}))
+        print(json.dumps({k: data[k] for k in
+                          ("tokens", "cap", "pct", "model", "transcript", "source")}))
     else:
         print("context: %d / %d (%d%%) model=%s transcript=%s"
-              % (tokens, cap, pct, model, path))
-    return 0
+              % (data["tokens"], data["cap"], data["pct"], data["model"],
+                 data["transcript"]))
+    return rc
+
+
+def parse_now(value: str | None):
+    """--now as a UTC datetime; None means "the wall clock, right now".
+
+    Accepts an ISO 8601 string, a trailing "Z" included (autoos_resolver's own
+    format, spec 6.4); a naive string is read as UTC. ValueError names the bad
+    text.
+    """
+    if value is None:
+        return datetime.datetime.now(datetime.timezone.utc)
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError("now=%r: expected an ISO 8601 UTC string" % (value,))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def load_registry(path: str) -> dict:
+    """catalog/ai-registry.json (or a test's own copy); a missing/bad file raises."""
+    with io.open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def load_overlay(path: str) -> dict:
+    """logs/routing/measured.json if present, else {} (spec 3.1: git-ignored)."""
+    if not os.path.isfile(path):
+        return {}
+    with io.open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
+                   registry: dict, overlay: dict, track_record: list,
+                   client_state: dict) -> dict:
+    """card -> route_plan (spec 6.1/6.2): the CLI `route` subcommand and the MCP
+    `route` tool's shared, pure-ish core.
+
+    `card` is a task card exactly as `run --card` accepts it - text
+    (``kind=review,paths=...`` or a JSON object string, parsed by
+    ``routing.parse_card``) - or already a dict (the MCP tool's own shape).
+    Either way it is normalized to v2 with ``routing.normalize_v2`` (a
+    ``routing.CardError`` on a bad one propagates to the caller). Features come
+    from ``autoos_measure.measure`` against `repo`; the resolver itself
+    (``autoos_resolver.plan``) is pure, so `registry`, `overlay`,
+    `track_record` and `client_state` are exactly what the caller passes -
+    real data from disk/probes for the CLI and the MCP tool, anything a test
+    wants to inject. A ``measure``/``plan`` ValueError (a missing feature, an
+    unknown orchestrator model, ...) is not caught here: both callers fail
+    closed on it.
+    """
+    parsed = routing.parse_card(card) if isinstance(card, str) else dict(card or {})
+    normalized = routing.normalize_v2(parsed)
+    features = measure_mod.measure(normalized, repo, brief or "")
+    return resolver.plan(normalized, features, client_state, registry, overlay,
+                         track_record, orchestrator_model, now)
+
+
+def cmd_route(args) -> int:
+    """Print the resolver v2 route_plan for one task card (spec 6.1).
+
+    Exit 0 when a route was chosen (ready or deferred), 5 when the state is
+    input_required (no route survived the filters or an override was
+    refused), 2 on bad input (a bad card, a bad --now, an unknown
+    --orchestrator-model, or any other measure()/plan() ValueError - all fail
+    closed with the message on stderr). --explain writes the per-route explain
+    lines and the final reason to stderr before the JSON, so stdout always
+    stays one parseable route_plan.
+    """
+    try:
+        now = parse_now(args.now)
+    except ValueError as exc:
+        return refuse(str(exc))
+    repo = args.repo or ROOT
+    try:
+        registry = load_registry(REGISTRY_PATH)
+        overlay = load_overlay(MEASURED_OVERLAY_PATH)
+    except (OSError, ValueError) as exc:
+        return refuse("cannot load routing data: %s" % exc)
+    track_record = track.load(TRACK_RECORD)
+    client_state = measure_mod.client_state(clients)
+    try:
+        result = route_plan_for(args.card, args.brief or "", repo,
+                                args.orchestrator_model, now, registry, overlay,
+                                track_record, client_state)
+    except (routing.CardError, ValueError) as exc:
+        return refuse(str(exc))
+    if args.explain:
+        for line in result.get("explain") or []:
+            print(line, file=sys.stderr)
+        print(result.get("reason", ""), file=sys.stderr)
+    print(json.dumps(result, sort_keys=True, indent=2))
+    return 0 if result.get("route") is not None else 5
 
 
 def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:
@@ -882,9 +1009,22 @@ def main(argv=None) -> int:
     context.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
     context.add_argument("--model", help="override the model the cap is looked up for")
     context.add_argument("--json", action="store_true", help="print the fill as JSON")
+    route = sub.add_parser("route", help="print the resolver v2 route_plan for a task card")
+    route.add_argument("--card", required=True,
+                       help="task card, e.g. kind=review,paths=tools/registry.py (or JSON)")
+    route.add_argument("--brief", default="", help="the task brief text (counts toward need_tokens)")
+    route.add_argument("--explain", action="store_true",
+                       help="print the explain lines and reason to stderr before the JSON")
+    route.add_argument("--orchestrator-model", dest="orchestrator_model",
+                       default=DEFAULT_ORCHESTRATOR_MODEL,
+                       help="registry model id billed for verification (default: %(default)s)")
+    route.add_argument("--repo", help="repo root to measure against (default: this checkout)")
+    route.add_argument("--now", help="ISO 8601 UTC clock reading (default: now)")
     args = ap.parse_args(argv)
     if args.cmd == "context":
         return cmd_context(args)
+    if args.cmd == "route":
+        return cmd_route(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
     return cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)
 
