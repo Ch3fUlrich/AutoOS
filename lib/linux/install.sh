@@ -21,6 +21,18 @@ answer() {  # answer <key> [default]
     else printf '%s' "$default"; fi
 }
 
+# omnigraph_base_url: the omnigraph server the clients' bridges point at - the
+# omnigraph_url answer without its trailing slashes (ALL of them, as the Windows
+# side's TrimEnd('/') does: consumers append /paths), else http://localhost:8080.
+# ONE derivation, used by install_agent_skills and route_zed_to_proxy (the Zed
+# writer once hardcoded the default and ignored the answer).
+omnigraph_base_url() {
+    local omni
+    omni="$(answer omnigraph_url '')"
+    while [[ "$omni" == */ ]]; do omni="${omni%/}"; done
+    if [[ -z "$omni" ]]; then printf '%s\n' "http://localhost:8080"; else printf '%s\n' "$omni"; fi
+}
+
 run() {
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would run: $*"
@@ -31,6 +43,77 @@ run() {
 }
 
 # ─── Idempotent file editing ────────────────────────────────────────────────
+# backup_path <path> [stamp]: prints the name for a NEW backup of <path>:
+# <path>.autoos-backup-<stamp>, or that name with -1, -2, ... appended while it
+# is taken. The stamp has one-second resolution and cp overwrites, so two
+# changing writes in one second used to destroy the user's original (the
+# Windows side has the same rule in Copy-AutoOSBackup). <stamp> defaults to
+# now (YYYYmmdd-HHMMSS); it is a parameter so a test can pin it.
+backup_path() {
+    local path="$1" stamp="${2:-}" base candidate n=0
+    [[ -n "$stamp" ]] || stamp="$(date +%Y%m%d-%H%M%S)"
+    base="${path}.autoos-backup-${stamp}"
+    candidate="$base"
+    while [[ -e "$candidate" || -L "$candidate" ]]; do
+        n=$((n + 1))
+        candidate="${base}-${n}"
+    done
+    printf '%s\n' "$candidate"
+}
+
+# backup_file <path> [stamp]: copies <path> (mode and times kept) to a backup
+# name that did not exist yet, prints that name, and returns non-zero - with
+# nothing left behind - when the copy failed. Callers keep their own dry-run and
+# "does it exist / did it change" logic; this only copies. Callers that do not
+# need the name redirect stdout to /dev/null.
+backup_file() {
+    local dest
+    dest="$(backup_path "$1" "${2:-}")" || return 1
+    if ! cp -p -- "$1" "$dest"; then
+        rm -f -- "$dest"
+        return 1
+    fi
+    printf '%s\n' "$dest"
+}
+
+# backup_name_key <path> <backup>: a string that sorts the backups of <path> in
+# the order backup_path named them - the stamp first, then the -N counter zero-
+# padded, so -10 follows -2 under plain string comparison. Done in bash: BSD and
+# macOS sort have no -V, and plain sort ranks -2 above -10. A stamp that is not
+# YYYYmmdd-HHMMSS (a test can pin any) still splits at its last -<digits>.
+backup_name_key() {
+    local rest="${2#"$1".autoos-backup-}" stamp n=0
+    local std='^([0-9]{8}-[0-9]{6})(-([0-9]+))?$' any='^(.+)-([0-9]+)$'
+    if [[ "$rest" =~ $std ]]; then
+        stamp="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[3]:-0}"
+    elif [[ "$rest" =~ $any ]]; then
+        stamp="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[2]}"
+    else
+        stamp="$rest"
+    fi
+    printf '%s.%010d\n' "$stamp" "$((10#$n))"
+}
+
+# backup_newest <path>: prints the most recent backup of <path>, nothing when
+# there is none. Newest = latest modification time, NOT the last name: ...-10
+# sorts before ...-2. (cp -p keeps the source's mtime, which still orders the
+# backups of one file: each is a copy of a later state.) Equal mtimes fall back
+# to the name (backup_name_key) so -10 still beats -2.
+backup_newest() {
+    local path="$1" f best="" LC_COLLATE=C
+    for f in "${path}".autoos-backup-*; do
+        [[ -f "$f" ]] || continue
+        if [[ -z "$best" || "$f" -nt "$best" ]]; then
+            best="$f"
+        elif ! [[ "$best" -nt "$f" ]] \
+             && [[ "$(backup_name_key "$path" "$f")" > "$(backup_name_key "$path" "$best")" ]]; then
+            best="$f"
+        fi
+    done
+    [[ -z "$best" ]] || printf '%s\n' "$best"
+    return 0
+}
+
 append_line_once() {
     # append_line_once <file> <marker> <line...>
     local file="$1" marker="$2"; shift 2
@@ -44,8 +127,11 @@ append_line_once() {
         return 0
     fi
     mkdir -p "$(dirname "$file")"
-    # Never modify a user's file without a copy of the original.
-    [[ -f "$file" ]] && cp "$file" "${file}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    # Never modify a user's file without a copy of the original: no copy, no write.
+    if [[ -f "$file" ]] && ! backup_file "$file" >/dev/null; then
+        ui_warn "could not back up ${file} - nothing was changed"
+        return 1
+    fi
     printf '\n# added by AutoOS\n%s\n' "$content" >>"$file"
     ui_ok "updated ${file}"
 }
@@ -54,6 +140,37 @@ apt_update_once() {
     (( APT_UPDATED )) && return 0
     run $AUTOOS_SUDO apt-get update -y
     APT_UPDATED=1
+}
+
+# apt_repo_key_install <label> <url> <dest> <dearmor 0|1>
+# Puts a vendor's apt signing key at <dest> (root-owned, 0644) and returns 0, or
+# warns why not and returns 1. <dest> is trusted by the caller's guard on later
+# runs, so it is written ONLY from a temp file that already holds a non-empty
+# key: install_component runs an installer with errexit off, and the unchecked
+# `curl | gpg --dearmor >tmp; install tmp dest` used to leave an EMPTY key that
+# the old `-f` guard then trusted forever (apt failed on every later run).
+# A non-empty key already in place is left alone; an empty one from such a
+# run is replaced. <dearmor> 1 = the key is served ASCII-armored.
+apt_repo_key_install() {
+    local label="$1" url="$2" dest="$3" dearmor="$4"
+    [[ -s "$dest" ]] && return 0
+    local tmp need="curl"
+    [[ "$dearmor" == 1 ]] && need="curl and gpg"
+    tmp="$(mktemp)" || { ui_warn "${label} not installed: could not create a temp file for the apt signing key."; return 1; }
+    if (
+        # pipefail: a failed curl must fail the pipeline even though gpg
+        # (which then reads nothing) is the last command in it.
+        set -o pipefail
+        if [[ "$dearmor" == 1 ]]; then curl -fsSL "$url" | gpg --dearmor; else curl -fsSL "$url"; fi
+    ) >"$tmp" \
+        && [[ -s "$tmp" ]] \
+        && $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$dest"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    rm -f "$tmp"
+    ui_warn "${label} not installed: could not fetch and install the apt signing key from ${url} (needs ${need} and network access); re-run once that works."
+    return 1
 }
 
 # ─── Idempotency checks ─────────────────────────────────────────────────────
@@ -375,16 +492,15 @@ install_vscode() {
         ui_muted "would add Microsoft's signed apt repo and install code"
         return 0
     fi
+    # AUTOOS_APT_PREFIX is a test seam (DESTDIR-style), as in install_antigravity:
+    # where the files are written. The source line keeps the /etc path apt reads.
+    local prefix="${AUTOOS_APT_PREFIX:-}"
     local key=/etc/apt/keyrings/packages.microsoft.gpg
-    if [[ ! -f "$key" ]]; then
-        local tmp; tmp="$(mktemp)"
-        curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor >"$tmp"
-        $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
-        rm -f "$tmp"
-    fi
-    if [[ ! -f /etc/apt/sources.list.d/vscode.list ]]; then
+    local list=/etc/apt/sources.list.d/vscode.list
+    apt_repo_key_install "VS Code" https://packages.microsoft.com/keys/microsoft.asc "${prefix}${key}" 1 || return 1
+    if [[ ! -f "${prefix}${list}" ]]; then
         printf 'deb [arch=amd64,arm64,armhf signed-by=%s] https://packages.microsoft.com/repos/code stable main\n' \
-            "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/vscode.list >/dev/null
+            "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null
         APT_UPDATED=0   # the new repo has to be fetched before install
     fi
     apt_update_once
@@ -475,7 +591,12 @@ install_agy() {
     # these profiles (measured 2026-09-25) - keep the originals.
     local rc=0 f stamp; stamp="$(date +%Y%m%d-%H%M%S)"
     for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
-        [[ -f "$f" ]] && cp "$f" "$f.autoos-backup-$stamp"
+        if [[ -f "$f" ]] && ! backup_file "$f" "$stamp" >/dev/null; then
+            # The vendor script edits these files blind: no copy, no run.
+            ui_err "could not back up ${f} - Antigravity CLI installer not run, nothing was changed"
+            rm -f "$tmp"
+            return 1
+        fi
     done
     bash "$tmp" || rc=$?
     rm -f "$tmp"
@@ -581,6 +702,13 @@ install_claude_autostart() {
             ui_info "$u is already current"
             rm -f "$tmp"
         else
+            # The unit being replaced may carry a local edit: keep it (AGENTS.md
+            # hard rule 5). Only reached when the rendered unit differs.
+            if [[ -f "${udest}/${u}" ]] && ! backup_file "${udest}/${u}" >/dev/null; then
+                ui_err "could not back up ${udest}/${u} - left as it was"
+                rm -f "$tmp"
+                return 1
+            fi
             mv -f "$tmp" "${udest}/${u}"
             ui_ok "installed $u"
             changed=1
@@ -658,16 +786,13 @@ install_google_chrome() {
         ui_muted "would add Google's signed apt repo and install google-chrome-stable"
         return 0
     fi
+    local prefix="${AUTOOS_APT_PREFIX:-}"   # test seam, see install_vscode
     local key=/etc/apt/keyrings/google-chrome.gpg
-    if [[ ! -f "$key" ]]; then
-        local tmp; tmp="$(mktemp)"
-        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor >"$tmp"
-        $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
-        rm -f "$tmp"
-    fi
-    if [[ ! -f /etc/apt/sources.list.d/google-chrome.list ]]; then
+    local list=/etc/apt/sources.list.d/google-chrome.list
+    apt_repo_key_install "Google Chrome" https://dl.google.com/linux/linux_signing_key.pub "${prefix}${key}" 1 || return 1
+    if [[ ! -f "${prefix}${list}" ]]; then
         printf 'deb [arch=amd64 signed-by=%s] http://dl.google.com/linux/chrome/deb/ stable main\n' \
-            "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
+            "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null
         APT_UPDATED=0
     fi
     apt_update_once
@@ -717,18 +842,16 @@ install_gh() {
         return 0
     fi
     if has_cmd apt-get; then
+        local prefix="${AUTOOS_APT_PREFIX:-}"   # test seam, see install_vscode
         local key=/etc/apt/keyrings/githubcli-archive-keyring.gpg
-        $AUTOOS_SUDO mkdir -p -m 755 /etc/apt/keyrings
-        if [[ ! -f "$key" ]]; then
-            local tmp; tmp="$(mktemp)"
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg >"$tmp"
-            $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
-            rm -f "$tmp"
-        fi
+        local list=/etc/apt/sources.list.d/github-cli.list
+        $AUTOOS_SUDO mkdir -p -m 755 "${prefix}/etc/apt/keyrings"
+        # The keyring is already binary (dearmor 0): served as it is.
+        apt_repo_key_install "GitHub CLI" https://cli.github.com/packages/githubcli-archive-keyring.gpg "${prefix}${key}" 0 || return 1
         local arch; arch="$(dpkg --print-architecture)"
-        if [[ ! -f /etc/apt/sources.list.d/github-cli.list ]]; then
+        if [[ ! -f "${prefix}${list}" ]]; then
             printf 'deb [arch=%s signed-by=%s] https://cli.github.com/packages stable main\n' \
-                "$arch" "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+                "$arch" "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null
             APT_UPDATED=0
         fi
         apt_update_once
@@ -1361,10 +1484,9 @@ PY
         elif (( AUTOOS_DRY_RUN )); then
             ui_muted "would route Qwen Code at OmniRoute (model t2-worker)"
         else
-            if [[ -f "$SYS_HOME/.qwen/settings.json" ]]; then
-                cp "$SYS_HOME/.qwen/settings.json" "$SYS_HOME/.qwen/settings.json.autoos-backup-$(date +%Y%m%d-%H%M%S)"
-            fi
-            if ! omniroute setup-qwen --model t2-worker --yes >/dev/null 2>&1; then
+            if [[ -f "$SYS_HOME/.qwen/settings.json" ]] && ! backup_file "$SYS_HOME/.qwen/settings.json" >/dev/null; then
+                ui_warn "could not back up $SYS_HOME/.qwen/settings.json - Qwen Code routing skipped, nothing was changed"
+            elif ! omniroute setup-qwen --model t2-worker --yes >/dev/null 2>&1; then
                 ui_warn "Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)"
             else
                 ui_ok "Qwen Code routed at OmniRoute (model t2-worker)"
@@ -1419,10 +1541,11 @@ route_zed_to_proxy() {
     ide="$(ide_models_file)"
     ide_models_readable "$ide" "Zed settings left unchanged" || return 1
     mkdir -p "$cfg_dir"
-    if [[ -f "$cfg" ]]; then
-        cp "$cfg" "$cfg.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    if [[ -f "$cfg" ]] && ! backup_file "$cfg" >/dev/null; then
+        ui_err "could not back up $cfg - Zed settings left unchanged"
+        return 1
     fi
-    python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
+    OMNI_BASE="$(omnigraph_base_url)" python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
 import json, os, sys
 path = sys.argv[1]
 harness_file = sys.argv[2]
@@ -1484,7 +1607,7 @@ ctx["graphify"] = {
 ctx["omnigraph"] = {
     "command": "npx",
     "args": ["-y", pins["omnigraph"]["package"]],
-    "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
+    "env": {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"], "OMNIGRAPH_GRAPH_ID": "autoos"},
 }
 ctx["playwright"] = {
     "command": "npx",
@@ -1639,8 +1762,9 @@ register_antigravity_mcp_server() {
     fi
 
     mkdir -p "$cfg_dir"
-    if [[ -f "$cfg_path" && -s "$cfg_path" ]]; then
-        cp "$cfg_path" "${cfg_path}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    if [[ -f "$cfg_path" && -s "$cfg_path" ]] && ! backup_file "$cfg_path" >/dev/null; then
+        ui_warn "could not back up ${cfg_path} - Antigravity MCP config left unchanged"
+        return 0
     fi
 
     local out
@@ -2273,7 +2397,10 @@ enable_project_mcp_server() {
         return 0
     fi
     mkdir -p "$repo/.claude"
-    [[ -f "$path" ]] && cp "$path" "${path}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    if [[ -f "$path" ]] && ! backup_file "$path" >/dev/null; then
+        ui_warn "could not back up ${path} - left unchanged"
+        return 0
+    fi
     if ! python3 - "$path" "$name" <<'PY'; then
 import json, pathlib, sys
 path, name = pathlib.Path(sys.argv[1]), sys.argv[2]
@@ -2462,7 +2589,10 @@ replace_or_append_marked_line() {
                 ui_muted "would remove the stale '${old_marker}' line from ${file}"
                 return 0
             fi
-            cp "$file" "${file}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+            if ! backup_file "$file" >/dev/null; then
+                ui_warn "could not back up ${file} - left unchanged"
+                return 0
+            fi
             AUTOOS_OLD="$old_marker" AUTOOS_NEW="$new_marker" python3 - "$file" <<'PY'
 import os, sys
 path = sys.argv[1]
@@ -2487,7 +2617,10 @@ PY
         ui_muted "would replace the '${old_marker}' line in ${file}"
         return 0
     fi
-    cp "$file" "${file}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    if ! backup_file "$file" >/dev/null; then
+        ui_warn "could not back up ${file} - left unchanged"
+        return 0
+    fi
     AUTOOS_OLD="$old_marker" AUTOOS_LINE="$line" python3 - "$file" <<'PY'
 import os, sys
 path = sys.argv[1]
@@ -2510,9 +2643,8 @@ install_agent_skills() {
     (( AUTOOS_DRY_RUN )) || mkdir -p "$code_root"
     clone_or_update https://github.com/Ch3fUlrich/agent-skills.git "$dest"
 
-    local omni base
-    omni="$(answer omnigraph_url '')"
-    if [[ -z "$omni" ]]; then base="http://localhost:8080"; else base="${omni%/}"; fi
+    local base
+    base="$(omnigraph_base_url)"
     ui_info "Omnigraph base URL: ${base}"
 
     write_omnigraph_env "$base"
@@ -2544,17 +2676,19 @@ install_agent_skills() {
 
     local omni_pkg omni_spec
     omni_pkg="$(mcp_package omnigraph)"
-    omni_spec="$(python3 -c "
+    # The base URL is the user's omnigraph_url answer: it reaches python through
+    # the environment (as in the Zed writer), never spliced into the source.
+    omni_spec="$(OMNI_BASE="$base" OMNI_PKG="$omni_pkg" python3 -c "
 import json, os
 # bridge 0.8 refuses to start without a graph id (there is no fallback graph
 # any more), so an unset one pins this repo's graph like the other clients.
-env_vars = {'OMNIGRAPH_BASE_URL': '$base',
+env_vars = {'OMNIGRAPH_BASE_URL': os.environ['OMNI_BASE'],
             'OMNIGRAPH_GRAPH_ID': os.environ.get('OMNIGRAPH_GRAPH_ID') or 'autoos'}
 if os.environ.get('OMNIGRAPH_TOKEN'):
     env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
 print(json.dumps({
     'command': 'npx',
-    'args': ['-y', '$omni_pkg'],
+    'args': ['-y', os.environ['OMNI_PKG']],
     'env': env_vars
 }))
 ")"
@@ -2667,7 +2801,8 @@ autoos_skills_source() {
 # works in every cwd. Both files are merged in place, never replaced: V2
 # (@opencode/cli) reads opencode.json, V1 also config.json. Each file is read
 # JSONC-tolerantly (comments, trailing commas); one that still does not parse
-# is left untouched. A file is backed up only when this run changes it, so a
+# is left untouched. A file is backed up before it is written and left alone
+# when that backup fails; a run that changes nothing keeps no backup, so a
 # second run changes nothing. Keys are {env:NAME} references, never values.
 setup_opencode_config() {
     local config_dir="$SYS_HOME/.config/opencode"
@@ -2683,7 +2818,7 @@ setup_opencode_config() {
     if [[ -f "$config_dir/opencode.jsonc" ]]; then
         ui_muted "$config_dir/opencode.jsonc is yours and stays as is; AutoOS merges into opencode.json"
     fi
-    local config_file snapshot merge_rc merged_first=0
+    local config_file backup merge_rc merged_first=0
     for config_file in "$config_dir/config.json" "$config_dir/opencode.json"; do
         # First V2 run on a V1 machine: opencode.json starts as a copy of the
         # merged config.json, as the old writer's cp did - but never replaces
@@ -2693,10 +2828,15 @@ setup_opencode_config() {
             cp -p "$config_dir/config.json" "$config_file"
             seeded=1
         fi
-        snapshot=""
+        backup=""
         if [[ -f "$config_file" ]] && (( ! seeded )); then
-            snapshot="$(mktemp)"
-            cp -p "$config_file" "$snapshot"
+            # The backup is taken BEFORE anything is written (hard rule 5: no
+            # copy, no write) and dropped again below when this run turns out to
+            # change nothing, so a second run still leaves no backup behind.
+            if ! backup="$(backup_file "$config_file")"; then
+                ui_warn "could not back up $config_file - left unchanged"
+                continue
+            fi
         fi
         # V2 reads opencode.json's `providers` block; V1 reads config.json.
         local v2_source=""
@@ -2708,11 +2848,11 @@ setup_opencode_config() {
         AUTOOS_OPENCODE_V2_SOURCE="$v2_source" _opencode_merge_config "$config_file" || merge_rc=$?
         if (( merge_rc == 3 )); then
             ui_warn "$config_file is not valid JSON or JSONC - left alone (fix it, then re-run)"
-            [[ -n "$snapshot" ]] && rm -f "$snapshot"
+            [[ -n "$backup" ]] && rm -f "$backup"
             continue
         elif (( merge_rc != 0 )); then
             ui_warn "OpenCode configuration not written to $config_file (exit $merge_rc)"
-            [[ -n "$snapshot" ]] && rm -f "$snapshot"
+            [[ -n "$backup" ]] && rm -f "$backup"
             continue
         fi
 
@@ -2736,15 +2876,12 @@ setup_opencode_config() {
         fi
 
         [[ "$config_file" == */config.json ]] && merged_first=1
-        if [[ -z "$snapshot" ]]; then
+        if [[ -z "$backup" ]]; then
             ui_ok "OpenCode configuration written to $config_file"
-        elif cmp -s "$snapshot" "$config_file"; then
-            rm -f "$snapshot"
+        elif cmp -s "$backup" "$config_file"; then
+            rm -f "$backup"
             ui_muted "$config_file already current"
         else
-            local backup
-            backup="${config_file}.autoos-backup-$(date +%Y%m%d%H%M%S)"
-            mv "$snapshot" "$backup"
             ui_ok "OpenCode configuration merged into $config_file (backup: $backup)"
         fi
     done
@@ -3048,9 +3185,119 @@ os.replace(tmp_file, config_path)
 " "$config_file" "$secrets_file" "$models_file" "$ide_file"
 }
 
+# phys_path PATH
+# PATH with every directory that exists resolved (cd -P) and the rest kept as
+# written, so a dangling link's target can be compared with a real directory
+# without `realpath -m` (macOS has none).
+phys_path() {
+    local p="${1%/}" rest="" d
+    [[ -n "$p" ]] || p="/"
+    while [[ ! -d "$p" && "$p" == */* ]]; do
+        rest="/${p##*/}${rest}"
+        p="${p%/*}"
+        [[ -n "$p" ]] || p="/"
+    done
+    if d="$(cd -P -- "$p" 2>/dev/null && pwd -P)"; then
+        if [[ "$d" == "/" ]]; then d=""; fi
+        printf '%s%s\n' "$d" "$rest"
+    else
+        printf '%s%s\n' "$p" "$rest"
+    fi
+}
+
+# link_skill_dirs SRC_DIR DEST_DIR
+# Mirrors every skill in SRC_DIR (a direct child holding a SKILL.md) into
+# DEST_DIR as one symlink per skill. DEST_DIR is a real directory of its own,
+# so a user's skills sit beside ours and are never touched:
+#   absent                                     -> linked
+#   a link to the same directory               -> skipped
+#   a link that is ours and dangling           -> repointed
+#   anything else (a user's directory or file, any live link that resolves
+#     somewhere else, a dangling link of another shape)   -> left alone
+# A link is ours only when it dangles AND its target ends with
+# /.agents/skills/<this skill's name> - the exact shape this function creates,
+# so a moved or renamed checkout is repaired. A live link is the user's, even
+# when it points inside the repo's own .agents directory (AGENTS.md hard rule 4).
+# A DEST_DIR that is itself a symlink (the old whole-directory layout) is not
+# written through - that would create links inside the repo or a clone - it
+# is left with one warning that names the fix. Returns 0 unless a link failed.
+link_skill_dirs() {
+    local src="${1%/}" dest="${2%/}"
+    [[ "$src" == /* ]] || src="$PWD/$src"
+    [[ "$dest" == /* ]] || dest="$PWD/$dest"
+
+    if [[ ! -d "$src" ]]; then
+        ui_muted "no skills to link: $src is not a directory"
+        return 0
+    fi
+    local names=() s_dir
+    for s_dir in "$src"/*/; do
+        if [[ -f "${s_dir}SKILL.md" ]]; then
+            s_dir="${s_dir%/}"
+            names+=("${s_dir##*/}")
+        fi
+    done
+    if (( ${#names[@]} == 0 )); then
+        ui_muted "no skills to link: nothing under $src holds a SKILL.md"
+        return 0
+    fi
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would link ${#names[@]} skill(s) from $src into $dest"
+        return 0
+    fi
+    if [[ -L "$dest" ]]; then
+        ui_warn "$dest is a symlink (the old whole-directory layout); not writing through it."
+        ui_muted "    To mirror the skills one by one instead: rm \"$dest\" and run setup again."
+        return 0
+    fi
+    if ! mkdir -p "$dest" 2>/dev/null; then
+        ui_warn "could not create $dest - skills not linked"
+        return 1
+    fi
+
+    local name t raw have want skipped=0 failed=0
+    for name in "${names[@]}"; do
+        t="$dest/$name"
+        want="$(phys_path "$src/$name")"
+        if [[ -L "$t" ]]; then
+            raw="$(readlink -- "$t")"
+            [[ "$raw" == /* ]] || raw="$dest/$raw"
+            have="$(phys_path "$raw")"
+            if [[ "$have" == "$want" ]]; then
+                skipped=$((skipped + 1))
+            elif [[ ! -e "$t" && "${raw%/}" == */.agents/skills/"$name" ]]; then
+                if ln -sfn "$src/$name" "$t" 2>/dev/null; then
+                    ui_ok "repointed $name (was $raw)"
+                else
+                    ui_warn "could not repoint $t - left as it was"
+                    failed=1
+                fi
+            else
+                ui_muted "kept $t: a link of your own, not an AutoOS link"
+            fi
+        elif [[ -e "$t" ]]; then
+            ui_muted "kept $t: yours, not an AutoOS link"
+        elif ln -s "$src/$name" "$t" 2>/dev/null; then
+            ui_ok "linked $name into $dest"
+        else
+            ui_warn "could not link $t"
+            failed=1
+        fi
+    done
+    if (( skipped > 0 )); then
+        ui_muted "skipped $skipped skill link(s) that are already in place in $dest"
+    fi
+    return "$failed"
+}
+
+# setup_openhands_config
+# Writes the OpenHands settings and profiles under ~/.openhands. Every file is
+# written only when its content differs from what is on disk, and settings.json
+# is backed up (never over an earlier backup) only when it is about to change,
+# so a second run reports "unchanged" and touches nothing (AGENTS.md section 4).
 setup_openhands_config() {
     local openhands_dir="$SYS_HOME/.openhands"
-    local settings_file="$openhands_dir/settings.json"
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would configure OpenHands in $openhands_dir"
@@ -3059,22 +3306,20 @@ setup_openhands_config() {
 
     mkdir -p "$openhands_dir/profiles" "$openhands_dir/agent-profiles" "$openhands_dir/automation"
 
-    if [[ -f "$settings_file" ]]; then
-        local ts
-        ts="$(date +%Y%m%d-%H%M%S)"
-        cp "$settings_file" "${settings_file}.autoos-backup-${ts}"
-    fi
-
     local code_root="$SYS_HOME/Documents/Code"
     if [[ -d "$SYS_HOME/Documents/code" ]]; then
         code_root="$SYS_HOME/Documents/code"
     fi
+    # Native OpenHands (host CLI, Windows) loads user skills from
+    # ~/.openhands/skills. The sandbox containers do not mount it: they read the
+    # workspace's .agents/skills instead (AGENTS.md section 8). One link per
+    # repo skill; a failure is already reported and must not stop the rest.
+    # autoos_skills_source is the repo's .agents/skills (the single home), and
+    # only without it the external agent-skills clone.
     local skills_source
     skills_source="$(autoos_skills_source)"
-    local skills_target="$openhands_dir/skills"
-    if [[ -n "$skills_source" && ! -e "$skills_target" ]]; then
-        ln -s "$skills_source" "$skills_target" 2>/dev/null || true
-        ui_ok "Linked agent-skills to OpenHands skills directory"
+    if [[ -n "$skills_source" ]]; then
+        link_skill_dirs "$skills_source" "$openhands_dir/skills" || true
     fi
 
     local secrets_file="$code_root/agent-skills/secrets/api_keys.conf"
@@ -3093,9 +3338,47 @@ setup_openhands_config() {
     ide_file="$(ide_models_file)"
     ide_models_readable "$ide_file" "the OpenHands default LLM gets no token windows" || ide_file=""
 
-    OLLAMA_BASE_URL="$ollama_url" AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" AUTOOS_IDE_MODELS="$ide_file" \
+    # The script prints one word: "changed" when it wrote or replaced a file,
+    # "unchanged" when everything on disk already held what it would write.
+    # "|| oh_rc=$?" keeps a failing script from ending the run under set -e; its
+    # status is read below, because a script that died wrote nothing (or only
+    # part) and must never be reported as written.
+    local oh_status oh_rc=0
+    oh_status="$(OLLAMA_BASE_URL="$ollama_url" AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" AUTOOS_IDE_MODELS="$ide_file" \
         python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
-import os, sys, json
+import os, sys, json, shutil, time
+
+# A file is written only when its content differs from what is on disk, and
+# settings.json is backed up only then (AGENTS.md section 4). Equal means equal
+# JSON (sorted keys), not equal bytes: the agent-harness step that follows
+# formats settings.json differently, and a formatting difference alone must not
+# cost a write and a backup on every run. A BOM (utf-8-sig) is read through.
+_changed = []
+
+def _same_json(path, obj):
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            return json.dumps(json.load(f), sort_keys=True) == json.dumps(obj, sort_keys=True)
+    except (OSError, ValueError):
+        return False
+
+def _put_json(path, obj):
+    if _same_json(path, obj):
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+    _changed.append(os.path.basename(path))
+
+def _backup(path):
+    # <file>.autoos-backup-<stamp>-<n>: never a name that exists, so a backup
+    # never overwrites an earlier one (the stamp has one-second resolution). n
+    # starts at 1 on purpose: the agent-harness step that follows names its own
+    # backup with the bare stamp and replaces an existing file of that name.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    n = 1
+    while os.path.exists("%s.autoos-backup-%s-%d" % (path, stamp, n)):
+        n += 1
+    shutil.copy2(path, "%s.autoos-backup-%s-%d" % (path, stamp, n))
 
 openhands_dir = sys.argv[1]
 secrets_file = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -3203,7 +3486,9 @@ settings_file = os.path.join(openhands_dir, "settings.json")
 settings = {}
 if os.path.isfile(settings_file):
     try:
-        with open(settings_file, "r", encoding="utf-8") as f:
+        # utf-8-sig: a BOM (Windows editors add one) must not make the file
+        # "invalid" and drop the user's keys from the merge. Written back plain.
+        with open(settings_file, "r", encoding="utf-8-sig") as f:
             settings = json.load(f)
     except Exception:
         settings = {}
@@ -3373,8 +3658,8 @@ mcp_cfg["cao-ops"] = {
 if "github" in mcp_cfg:
     del mcp_cfg["github"]
 
-with open(settings_file, "w", encoding="utf-8") as f:
-    json.dump(settings, f, indent=2)
+# settings.json is written once, after the llm_profiles merge below: the
+# compare-before-write needs the disk to still hold the original until then.
 
 profiles_dir = os.path.join(openhands_dir, "profiles")
 # Prices are USD per token from catalog/llm-models.json. Free variants bill
@@ -3402,8 +3687,7 @@ profiles = dict([
     _profile_for("ollama-qwen2.5-coder", None),
 ])
 for name, p_data in profiles.items():
-    with open(os.path.join(profiles_dir, name), "w", encoding="utf-8") as f:
-        json.dump(p_data, f, indent=2)
+    _put_json(os.path.join(profiles_dir, name), p_data)
 omni_key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or secrets.get("omniroute")
 # LiteLLM master key for the litellm-tier* fallback profiles: env first
 # (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
@@ -3452,8 +3736,7 @@ if (omni_key or _lit_key or _or_key) and _spec_file and os.path.isfile(_spec_fil
                 _gp["reasoning_effort"] = "none"
                 _gp["enable_encrypted_reasoning"] = False
                 _gp["extended_thinking_budget"] = None
-            with open(os.path.join(profiles_dir, "%s.json" % _t["id"]), "w", encoding="utf-8") as _ff:
-                json.dump(_gp, _ff, indent=2)
+            _put_json(os.path.join(profiles_dir, "%s.json" % _t["id"]), _gp)
     except Exception:
         pass
 
@@ -3489,8 +3772,12 @@ if (omni_key and "omniroute-t1-orchestrator" in _managed) or (_lit_key and "lite
             _default_entry["model"] = llm.get("model")
             _default_entry["base_url"] = llm.get("base_url")
             _default_entry["api_key"] = llm.get("api_key")
-with open(settings_file, "w", encoding="utf-8") as f:
-    json.dump(settings, f, indent=2)
+if not _same_json(settings_file, settings):
+    if os.path.isfile(settings_file):
+        _backup(settings_file)
+    with open(settings_file, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+    _changed.append("settings.json")
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
 # the desired state and are copied verbatim on every setup. Their
 # llm_profile_ref values point at the canonical profile names written above.
@@ -3505,15 +3792,25 @@ if os.path.isdir(_vendored_agents):
         try:
             with open(os.path.join(_vendored_agents, _fn), "r", encoding="utf-8") as _af:
                 _a_data = json.load(_af)
-            with open(os.path.join(agent_profiles_dir, _fn), "w", encoding="utf-8") as _of:
-                json.dump(_a_data, _of, indent=2)
+            _put_json(os.path.join(agent_profiles_dir, _fn), _a_data)
         except Exception:
             pass
+print("changed" if _changed else "unchanged")
 PY
+)" || oh_rc=$?
+    if (( oh_rc != 0 )); then
+        # Skip the harness too: it would add enable_sub_agents to a settings.json
+        # (or create one) that the writer never got to merge. Warn and skip, like
+        # the OpenCode writer; setup runs postInstall under set -e.
+        ui_warn "OpenHands configuration not written to $openhands_dir/settings.json (settings script exit $oh_rc)"
+        ui_muted "    The profiles under $openhands_dir may be incomplete and the agent harness was skipped; fix the error above and re-run."
+        return 0
+    fi
 
     # The role agent profiles are the generator's job: it merges the harness
     # into whatever the embedded script left, so the roles stay in one place.
-    local harness_root harness_out harness_rc
+    local harness_root harness_out harness_rc oh_changed=0
+    [[ "$oh_status" == unchanged ]] || oh_changed=1
     harness_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
     # "|| harness_rc=$?" keeps a failing generator from ending the run under set -e.
     harness_rc=0
@@ -3524,9 +3821,19 @@ PY
         while IFS= read -r _harness_line; do
             [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
         done <<< "$harness_out"
+        # The generator reports skipped / updated / installed per file.
+        if [[ "$harness_out" == *"agent-harness openhands: updated "* || "$harness_out" == *"agent-harness openhands: installed "* ]]; then
+            oh_changed=1
+        fi
     fi
 
-    ui_ok "OpenHands configuration and profiles written to $openhands_dir"
+    if (( harness_rc != 0 )); then
+        ui_warn "OpenHands configuration only partly applied (the role profiles are missing): $openhands_dir"
+    elif (( oh_changed )); then
+        ui_ok "OpenHands configuration and profiles written to $openhands_dir"
+    else
+        ui_muted "OpenHands configuration unchanged (skipped): $openhands_dir"
+    fi
 }
 
 # ─── WSL agent home (native ext4) ───────────────────────────────────────────
@@ -3697,7 +4004,7 @@ autoos_undo() {
     ui_section "Files AutoOS can restore"
     local -a newest=()
     for orig in "${originals[@]}"; do
-        b="$(find "$(dirname "$orig")" -maxdepth 1 -name "$(basename "$orig").autoos-backup-*" -type f 2>/dev/null | sort | tail -1)"
+        b="$(backup_newest "$orig")"
         newest+=("$b")
         printf '  %-52s <- %s\n' "$orig" "$(basename "$b")"
     done
@@ -3710,9 +4017,14 @@ autoos_undo() {
             return 0
         fi
     fi
-    local i
+    local i failed=0
     for i in "${!originals[@]}"; do
-        cp "${newest[i]}" "${originals[i]}"
-        ui_ok "restored ${originals[i]}"
+        if cp "${newest[i]}" "${originals[i]}"; then
+            ui_ok "restored ${originals[i]}"
+        else
+            ui_err "could not restore ${originals[i]} from ${newest[i]}"
+            failed=1
+        fi
     done
+    return "$failed"
 }

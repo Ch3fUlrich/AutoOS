@@ -39,6 +39,25 @@ if ([string]::IsNullOrWhiteSpace($Key)) {
 # launches would start unauthenticated.
 $env:AUTOOS_OMNIROUTE_KEY = $Key
 
+function New-FileBackup {
+    # <file>.autoos-backup-<stamp>, and the path it returns. The stamp has
+    # whole-second resolution and Copy-Item -Force would let a second backup in
+    # the same second replace the first: the user's ORIGINAL gone. On a name
+    # clash this appends -1, -2, ... (the same rule as Copy-AutoOSBackup in
+    # lib\windows\AutoOS.Install.psm1, which this standalone launcher does not
+    # import). -Stamp exists so a test can force the clash.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
+    )
+    $base = "$Path.autoos-backup-$Stamp"
+    $backup = $base
+    $n = 0
+    while (Test-Path -LiteralPath $backup) { $n++; $backup = "$base-$n" }
+    Copy-Item -LiteralPath $Path -Destination $backup
+    $backup
+}
+
 function Test-Gateway {
     # /api/health, not /v1/models: the latter 401s for a normal client key in
     # this build, so probing it would call a healthy gateway "down" forever.
@@ -92,8 +111,7 @@ switch ($App) {
                 $ohNum = 0
                 if ("$ohAgentVer" -match '^\d+$') { $ohNum = [int]"$ohAgentVer" }
                 if ($ohNum -gt 4 -or $ohHasEnabled) {
-                    $backup = "$ohSettings.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-                    Copy-Item $ohSettings $backup -Force
+                    $backup = New-FileBackup -Path $ohSettings
                     if ($ohNum -gt 4) { $ohJson.agent_settings.schema_version = 4 }
                     foreach ($srv in @($ohJson.agent_settings.mcp_config.PSObject.Properties.Value)) {
                         if ($null -ne $srv.PSObject.Properties['enabled']) { $srv.PSObject.Properties.Remove('enabled') }
@@ -105,8 +123,7 @@ switch ($App) {
                     Write-Host "Repaired OpenHands settings (agent_settings.schema_version $ohAgentVer -> $($ohJson.agent_settings.schema_version), stripped enabled keys). Backup: $backup."
                 }
             } catch {
-                $backup = "$ohSettings.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-                Copy-Item $ohSettings $backup -Force
+                $backup = New-FileBackup -Path $ohSettings
                 Remove-Item $ohSettings -Force
                 Write-Host "Unparseable OpenHands settings moved aside to $backup."
             }

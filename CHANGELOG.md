@@ -5,6 +5,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the Windows OpenCode writer knows the V2 CLI
+
+- **`Set-AutoOSOpenCodeConfig` writes the V2 `providers` block** when `opencode --version` reports 2.x (the same
+  test as Linux): `providers.omniroute` and `providers.litellm` are copied verbatim from the repo `opencode.jsonc`,
+  a user's other providers stay, and `model` switches to the repo default only while it is unset or still the
+  AutoOS Ollama default. A V1 CLI gets no `providers` key. `ConvertFrom-AutoOSJsonc` reads the JSONC source on
+  Windows PowerShell 5.1 (comments and trailing commas outside strings; linear time, fails loudly).
+- **The `%APPDATA%\opencode\config.json` copy is written only on change** and backed up once; it used to be
+  rewritten on every run with no backup. `Get-AutoOSBackups` ranks the newest backup by stamp, then by the
+  numeric suffix (`-10` no longer loses to `-2`), and `configuration/start-stack.ps1` never overwrites a
+  same-second OpenHands settings backup.
+
+### Added — OpenHands gets the repo skills
+
+- **The installer mirrors `.agents/skills` into `~/.openhands/skills`, one link per skill** (`link_skill_dirs` on
+  Linux, `Sync-AutoOSSkillDirs` with a junction per skill on Windows). A user's own skill, a foreign link and a
+  whole-directory link from an older install are left alone, a dangling link into the repo is repaired, a second
+  run reports `skipped`. Measured: `load_user_skills()` reads `~/.openhands/skills` in the process that runs the
+  agent, so the mirror serves native OpenHands and Windows; in the Docker stack the agent runs in a sandbox
+  container whose home is not the host's, and only `{workspace}/.agents/skills` reaches it. AGENTS.md section 8
+  states this (it wrongly said the profiles set `load_skills_from_dir`).
+- **The OpenHands settings writers are idempotent.** Linux backed `settings.json` up on every run and always
+  said "written"; both writers now back up and write only on a change and read a BOM'd file as UTF-8 (a BOM
+  used to parse as invalid and drop the user's keys from the merge).
+
+### Fixed — Linux installer: a failed key download, a same-second backup
+
+- **vscode, chrome and gh no longer trust an empty apt key.** A failed fetch used to leave a 0-byte key that the
+  `-f` guard accepted forever; one checked helper (`apt_repo_key_install`) now installs a key only when it is
+  non-empty, warns and installs nothing otherwise, and heals a leftover empty key on the next run.
+- **One backup helper (`backup_file`) never overwrites an earlier backup**: a second changing write in the same
+  second used to replace the backup of the user's original. Ten sites use it; `undo` picks the newest backup by
+  mtime. `lib/agent_harness.py` (also called by the Windows installer) follows the same rule. Sites that still
+  use a one-second name: three embedded-Python writers in `install.sh` and the scripts under `configuration/`.
+- **`install_claude_autostart` backs a changed unit up before replacing it** (it used `mv -f` with no backup),
+  and the Zed omnigraph entry honours the `omnigraph_url` answer instead of a hard-coded `localhost:8080`.
+
 ### Added — `ai-stack.sh verify`: the post-migrate checklist as one read-only command
 
 - **`configuration/docker/ai-stack/ai-stack.sh verify`** replaces the by-hand checks run

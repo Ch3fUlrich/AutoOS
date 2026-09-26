@@ -686,6 +686,70 @@ Test-Case 'backups are grouped newest-per-original' {
     Assert-True ($b.Count -eq 1 -and $b[0].Backup -match '20260202') "got: $($b | ConvertTo-Json -Compress)"
 }
 
+# Get-AutoOSBackups: what "newest" means. Copy-AutoOSBackup appends -1, -2, ...
+# on a same-second clash, and Copy-Item keeps the ORIGINAL's LastWriteTime, so
+# neither a name sort (-10 lands before -2) nor the file time (a backup of a
+# just-restored old file looks old) picks the backup taken last.
+function New-BackupFixture {
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][DateTime]$When)
+    $path = Join-Path $Dir $Name
+    [IO.File]::WriteAllText($path, $Name)
+    (Get-Item -LiteralPath $path).LastWriteTimeUtc = $When
+}
+
+Test-Case 'Get-AutoOSBackups: the newest per original counts -10 after -2 (the suffix is a number)' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $t0 = [DateTime]::UtcNow.AddDays(-30)
+        $names = @('x.autoos-backup-20260101-000000', 'x.autoos-backup-20260101-000000-1', 'x.autoos-backup-20260101-000000-2', 'x.autoos-backup-20260101-000000-10')
+        for ($i = 0; $i -lt $names.Count; $i++) { New-BackupFixture -Dir $scratch -Name $names[$i] -When $t0.AddMinutes($i) }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1 -or $b[0].Count -ne 4) { throw "want one original with 4 backups, got: $($b | ConvertTo-Json -Compress)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260101-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want ...-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Get-AutoOSBackups: equal file times, the higher numeric suffix wins' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $when = [DateTime]::UtcNow.AddDays(-30)
+        foreach ($n in @('x.autoos-backup-20260101-000000', 'x.autoos-backup-20260101-000000-1', 'x.autoos-backup-20260101-000000-2', 'x.autoos-backup-20260101-000000-10')) {
+            New-BackupFixture -Dir $scratch -Name $n -When $when
+        }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1) { throw "want one original, got $($b.Count)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260101-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want ...-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Get-AutoOSBackups: the stamp in the name decides, not the copied file time' {
+    # Copy-Item keeps the original's LastWriteTime: the backup taken LAST of a
+    # file that was just restored from an old copy carries an OLD file time.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $old = [DateTime]::UtcNow.AddDays(-30)
+        New-BackupFixture -Dir $scratch -Name 'x.autoos-backup-20260101-000000' -When $old.AddDays(20)
+        foreach ($n in @('x.autoos-backup-20260202-000000', 'x.autoos-backup-20260202-000000-2', 'x.autoos-backup-20260202-000000-10')) {
+            New-BackupFixture -Dir $scratch -Name $n -When $old
+        }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1) { throw "want one original, got $($b.Count)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260202-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want 20260202-000000-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'undo never uninstalls anything' {
     # The safety property, asserted on the source rather than by removing software.
     $src = Get-Content (Join-Path $Lib 'AutoOS.State.psm1') -Raw
@@ -3988,6 +4052,59 @@ Test-Case 'agent harness installers: the OpenCode writer calls the generator' {
     Assert-True ($hands -match 'Get-AutoOSSkillsSource') 'Set-AutoOSOpenHandsConfig does not use Get-AutoOSSkillsSource'
 }
 
+Test-Case 'ConvertFrom-AutoOSJsonc: comments and trailing commas, // inside a string survives' {
+    # Windows PowerShell 5.1 has no JSONC parser and the repo opencode.jsonc is
+    # JSONC. Comments and commas go only where they are syntax: a URL's "//"
+    # and a ",}" inside a string are text. (The Linux writer's _strip_jsonc
+    # strips the same way; it does not protect a ",}" inside a string.)
+    $text = @'
+{
+  // a line comment
+  "url": "http://x/a", /* a block
+     comment */
+  "note": "keep // this, /* this */ and ,} this",
+  "esc": "a \" // still inside",
+  "path": "c:\\dir\\", // comment after an escaped backslash
+  "list": [1, 2, 3,],
+  "obj": { "k": "v", // comment before a trailing comma
+  },
+}
+'@
+    $o = ConvertFrom-AutoOSJsonc -Text $text
+    if ($o.url -cne 'http://x/a') { throw "url did not survive: [$($o.url)]" }
+    if ($o.note -cne 'keep // this, /* this */ and ,} this') { throw "a string with comment markers changed: [$($o.note)]" }
+    if ($o.esc -cne 'a " // still inside') { throw "an escaped quote ended the string early: [$($o.esc)]" }
+    if ($o.path -cne 'c:\dir\') { throw "an escaped backslash broke the string: [$($o.path)]" }
+    if (@($o.list).Count -ne 3 -or $o.list[2] -ne 3) { throw 'the trailing comma in an array was not removed' }
+    if ($o.obj.k -cne 'v') { throw 'the trailing comma in an object was not removed' }
+    $bom = ConvertFrom-AutoOSJsonc -Text ([string][char]0xFEFF + '{"a":1,}')
+    if ($bom.a -ne 1) { throw 'a leading BOM was not tolerated' }
+
+    # The real file. Expected value parsed independently of the function under
+    # test: the file has whole-line comments only and no trailing commas.
+    $raw = Get-Content -LiteralPath (Join-Path $Root 'opencode.jsonc') -Raw -Encoding UTF8
+    if ($raw -notmatch '(?m)^\s*//') { throw 'opencode.jsonc has no comment lines left: this test proves nothing' }
+    $real = ConvertFrom-AutoOSJsonc -Text $raw
+    $plain = ($raw -replace '(?m)^\s*//.*$', '') | ConvertFrom-Json
+    $a = $real | ConvertTo-Json -Depth 100 -Compress
+    $b = $plain | ConvertTo-Json -Depth 100 -Compress
+    if ($a -cne $b) { throw 'opencode.jsonc parsed differently from the comment-free reading' }
+    if ($real.providers.omniroute.settings.baseURL -cne 'http://127.0.0.1:20128/v1') { throw "the gateway URL lost its //: [$($real.providers.omniroute.settings.baseURL)]" }
+    Pass
+}
+
+Test-Case 'ConvertFrom-AutoOSJsonc: an unterminated string is rejected at once, not after a regex stall' {
+    # A string literal matched with a nested quantifier backtracks exponentially
+    # when its closing quote is missing (26 characters took four seconds).
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $threw = $false
+    try { $null = ConvertFrom-AutoOSJsonc -Text ('{"a": "' + ('x' * 27)) } catch { $threw = $true }
+    $sw.Stop()
+    if ($sw.ElapsedMilliseconds -gt 2000) { throw "an unterminated string took $($sw.ElapsedMilliseconds) ms to reject" }
+    if (-not $threw) { throw 'an unterminated string was accepted' }
+    Pass
+}
+
 Test-Case "agent harness: the generator's unit tests pass" {
     $py = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -4042,10 +4159,25 @@ Test-Case 'the embedded OpenHands setup script is valid Python' {    # Set-AutoO
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
 
+function Remove-TestDirLinks {
+    # Delete every link directly under $Directory WITHOUT following it. Windows
+    # PowerShell 5.1 follows a junction inside Remove-Item -Recurse and deletes
+    # what the junction points at (here: the repo's own skills), so a scratch
+    # tree that holds skill links is unlinked before it is removed.
+    param([string]$Directory)
+    if (-not $Directory -or -not (Test-Path -LiteralPath $Directory)) { return }
+    foreach ($child in @(Get-ChildItem -LiteralPath $Directory -Force -ErrorAction SilentlyContinue)) {
+        if ($child.LinkType) {
+            try { $child.Delete() } catch { Write-Host "      could not unlink $($child.FullName): $($_.Exception.Message)" }
+        }
+    }
+}
+
 Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when nothing changed' {
     # The real writer with its real embedded setup script and agent generator,
     # against a scratch home: HOME, USERPROFILE and LOCALAPPDATA point into a temp
-    # dir, the skills target already exists (no junction is made), Ollama's
+    # dir, the skills directory already exists (the writer links the repo skills
+    # into it; the links go before the tree does), Ollama's
     # address is pinned (no probe), and every key the writer reads is a dummy or
     # unset (so the repo's git-ignored api-keys.yml is never consulted).
     # The one thing no variable redirects is the PowerShell profile under the real
@@ -4076,7 +4208,10 @@ Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when no
     # What an earlier AutoOS run leaves, plus a key and an MCP server of the user's own.
     # enable_sub_agents is already there so the agent generator, which would add it,
     # has nothing to rewrite: the only backup of run 1 is the writer's own.
-    $seed = '{"schema_version":2,"theme":"mine","agent_settings":{"schema_version":4,"enable_sub_agents":true,"llm":{"model":"ollama_chat/qwen2.5-coder:7b","base_url":"http://127.0.0.1:11434"},"mcp_config":{"mine":{"transport":"stdio","command":"mine-mcp","args":[]}}}}'
+    # The theme is non-ASCII and the file is written with an explicit BOM: a backup
+    # that lost either would still read as the same text, so it is judged on bytes.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    $seed = '{"schema_version":2,"theme":"@THEME@","agent_settings":{"schema_version":4,"enable_sub_agents":true,"llm":{"model":"ollama_chat/qwen2.5-coder:7b","base_url":"http://127.0.0.1:11434"},"mcp_config":{"mine":{"transport":"stdio","command":"mine-mcp","args":[]}}}}'.Replace('@THEME@', $theme)
     $runLogged = {
         $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohbackup-$([Guid]::NewGuid().ToString('N')).log"
         try {
@@ -4089,7 +4224,7 @@ Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when no
         }
     }
     try {
-        # skills: the junction target exists. Documents: on Linux .NET only resolves
+        # skills: exists up front. Documents: on Linux .NET only resolves
         # the Documents folder when it exists, and the writer joins paths onto it.
         $null = New-Item -ItemType Directory -Path $bin, (Join-Path $ohDir 'skills'), (Join-Path $scratch 'Documents') -Force
         if ($py3) {
@@ -4097,7 +4232,10 @@ Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when no
             [IO.File]::WriteAllText($fake, "#!/bin/sh`nexec '$($py3.Source)' `"`$@`"`n")
             & chmod +x $fake
         }
-        [IO.File]::WriteAllText($settingsFile, $seed)
+        [IO.File]::WriteAllText($settingsFile, $seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($settingsFile)
+        $seedB64 = [Convert]::ToBase64String($seedBytes)
+        if ($seedBytes.Length -lt 4 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191 -or @($seedBytes | Where-Object { $_ -gt 127 }).Count -le 3) { throw 'the seed must carry a BOM and a non-ASCII character, or the byte compare has nothing to lose' }
         Set-Variable -Name HOME -Value $scratch -Force -Scope Global
         $env:USERPROFILE = $scratch; $env:HOME = $scratch; $env:LOCALAPPDATA = $scratch
         $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
@@ -4115,11 +4253,11 @@ Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when no
         $sha1 = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash
         $backups1 = @(Get-ChildItem -LiteralPath $ohDir -Filter 'settings.json.autoos-backup-*')
         $all1 = @(Get-ChildItem -LiteralPath $ohDir -Recurse -Filter '*.autoos-backup-*').Count
-        if ([IO.File]::ReadAllText($settingsFile) -eq $seed) { throw 'the first run left settings.json unchanged' }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($settingsFile)) -ceq $seedB64) { throw 'the first run left settings.json unchanged' }
         if ($backups1.Count -ne 1) { throw "settings.json backups after run 1 = $($backups1.Count) (want 1)" }
-        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'the backup is not the original file' }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the original file, byte for byte (a BOM or a non-ASCII byte was lost)' }
         $written = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($written.theme -ne 'mine' -or $null -eq $written.agent_settings.mcp_config.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
+        if ($written.theme -cne $theme -or $null -eq $written.agent_settings.mcp_config.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
         if ($null -eq $written.agent_settings.mcp_config.PSObject.Properties['serena']) { throw 'run 1 did not write the MCP servers' }
 
         # Backup names carry whole seconds: without this pause a wrongly repeated
@@ -4138,8 +4276,553 @@ Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when no
     } finally {
         Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
         foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-TestDirLinks -Directory (Join-Path $ohDir 'skills')
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
+    Pass
+}
+
+# --- OpenHands skills mirror and settings reader (Windows twin of the Linux `openhands:` tests) ---
+Describe-Group 'openhands skills'
+
+function New-TestDirLink {
+    # A directory junction on Windows (what the writer makes), a symlink elsewhere
+    # (the suite also runs under pwsh on Linux, where a junction cannot be made).
+    param([string]$Path, [string]$Target)
+    $type = 'SymbolicLink'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $type = 'Junction' }
+    $null = New-Item -ItemType $type -Path $Path -Target $Target
+}
+
+function New-TestDanglingLink {
+    # A link whose target is gone: link to a real directory, then remove it.
+    param([string]$Path, [string]$Target)
+    $null = New-Item -ItemType Directory -Path $Target -Force
+    New-TestDirLink -Path $Path -Target $Target
+    Remove-Item -LiteralPath $Target -Force
+}
+
+function New-TestSkillRepo {
+    # A scratch repo with two skills (alpha, beta) and one directory without a
+    # SKILL.md (nofile) that is not a skill.
+    param([string]$Repo)
+    foreach ($n in @('alpha', 'beta')) {
+        $d = Join-Path $Repo ".agents\skills\$n"
+        $null = New-Item -ItemType Directory -Path $d -Force
+        [IO.File]::WriteAllText((Join-Path $d 'SKILL.md'), "---`nname: $n`ndescription: demo`n---`n")
+    }
+    $d = Join-Path $Repo '.agents\skills\nofile'
+    $null = New-Item -ItemType Directory -Path $d -Force
+    [IO.File]::WriteAllText((Join-Path $d 'README.md'), "not a skill`n")
+}
+
+function Invoke-LoggedSkillSync {
+    # Sync-AutoOSSkillDirs with its output captured from the log, like the
+    # writer tests capture theirs.
+    param([string]$Source, [string]$Destination)
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        Initialize-AutoOSLog -Path $log
+        $null = Sync-AutoOSSkillDirs -Source $Source -Destination $Destination
+        Get-Content -LiteralPath $log -Raw -Encoding utf8
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-TestLinkTarget {
+    # The full path a link points at ('' when the item is not a link). Target is
+    # a string[] in Windows PowerShell 5.1 and may be relative for a symlink.
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item -or -not $item.LinkType) { return '' }
+    $t = @($item.Target)[0]
+    if (-not $t) { return '' }
+    if (-not [IO.Path]::IsPathRooted($t)) { $t = Join-Path (Split-Path -Parent $Path) $t }
+    [IO.Path]::GetFullPath($t).TrimEnd('\', '/')
+}
+
+function Get-RepoSkillName {
+    # The skills of THIS repo: direct children of .agents/skills that hold a SKILL.md.
+    @(Get-ChildItem -LiteralPath (Join-Path $Root '.agents\skills') -Directory |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'SKILL.md') -PathType Leaf } |
+        Sort-Object Name | ForEach-Object { $_.Name })
+}
+
+function Invoke-WithOpenHandsScratch {
+    # Runs -Body against the real Set-AutoOSOpenHandsConfig, its real embedded
+    # setup script and agent generator, in a scratch home (see the backup-once
+    # test above for why each variable is pinned). Body gets one argument: an
+    # object with Scratch, OhDir, Settings, Skills and Run (a scriptblock that
+    # runs the writer once and returns what it logged). Unlike that test the
+    # `skills` directory is NOT created up front: the writer makes it. Returns
+    # $false after calling Skip when this host cannot run the writer hermetically.
+    param([Parameter(Mandatory)][scriptblock]$Body)
+    $pyCmd = @(Get-Command python, py -ErrorAction SilentlyContinue)
+    $py3 = $null
+    if ($pyCmd.Count -eq 0) {
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { $py3 = Get-Command python3 -ErrorAction SilentlyContinue }
+        if (-not $py3) { Skip 'no python on PATH'; return $false }
+    }
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    if ($docs) {
+        foreach ($rel in @('PowerShell\Microsoft.PowerShell_profile.ps1', 'PowerShell\profile.ps1', 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1', 'WindowsPowerShell\profile.ps1')) {
+            if (Test-Path -LiteralPath (Join-Path $docs $rel)) { Skip 'a real PowerShell profile exists and the writer would edit it'; return $false }
+        }
+    }
+    $envNames = @('USERPROFILE', 'HOME', 'LOCALAPPDATA', 'PATH', 'OLLAMA_BASE_URL', 'AUTOOS_OMNIROUTE_KEY', 'OPENROUTER_API_KEY', 'LITELLM_MASTER_KEY',
+                  'AUTOOS_LITELLM_API_KEY', 'META_API_KEY', 'MUSE_API_KEY', 'DEEPSEEK_API_KEY', 'CONTEXT7_API_KEY', 'OMNIGRAPH_TOKEN')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $ohDir = Join-Path $scratch '.openhands'
+    $runLogged = {
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            $null = Set-AutoOSOpenHandsConfig
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $ctx = [pscustomobject]@{
+        Scratch  = $scratch
+        OhDir    = $ohDir
+        Settings = (Join-Path $ohDir 'settings.json')
+        Skills   = (Join-Path $ohDir 'skills')
+        Run      = $runLogged
+    }
+    try {
+        # Documents: on Linux .NET only resolves the Documents folder when it exists.
+        $null = New-Item -ItemType Directory -Path $bin, (Join-Path $scratch 'Documents') -Force
+        if ($py3) {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexec '$($py3.Source)' `"`$@`"`n")
+            & chmod +x $fake
+        }
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch; $env:LOCALAPPDATA = $scratch
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'; $env:OPENROUTER_API_KEY = 'test-or-key'; $env:LITELLM_MASTER_KEY = 'test-lit-key'
+        foreach ($n in @('AUTOOS_LITELLM_API_KEY', 'META_API_KEY', 'MUSE_API_KEY', 'DEEPSEEK_API_KEY', 'CONTEXT7_API_KEY', 'OMNIGRAPH_TOKEN')) {
+            Remove-Item "env:$n" -ErrorAction SilentlyContinue
+        }
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return $false }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $null = & $Body $ctx
+        return $true
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-TestDirLinks -Directory (Join-Path $ohDir 'skills')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'openhands skills: Set-AutoOSOpenHandsConfig links every repo skill into ~/.openhands/skills' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $expected = @(Get-RepoSkillName)
+        if ($expected.Count -eq 0) { throw 'this repo has no skills under .agents/skills' }
+        # A symlink needs administrator rights on Windows (a CI runner has them, a
+        # user often does not), so there the link must be a Junction, not just "a link".
+        $onWindows = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
+        $out = & $ctx.Run
+        $dest = Get-Item -LiteralPath $ctx.Skills -Force -ErrorAction SilentlyContinue
+        if (-not $dest) { throw "$($ctx.Skills) was not created" }
+        if ($dest.LinkType) { throw "$($ctx.Skills) is a $($dest.LinkType), not a real directory" }
+        foreach ($name in $expected) {
+            $link = Join-Path $ctx.Skills $name
+            $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+            if (-not $item) { throw "skill '$name' was not linked" }
+            if (@('Junction', 'SymbolicLink') -notcontains [string]$item.LinkType) { throw "skill '$name' is not a junction (LinkType: [$($item.LinkType)])" }
+            if ($onWindows -and [string]$item.LinkType -cne 'Junction') { throw "skill '$name' is a $($item.LinkType), not a Junction (a symlink needs administrator rights, so the writer must make a junction on Windows)" }
+            $want = [IO.Path]::GetFullPath((Join-Path $Root ".agents\skills\$name")).TrimEnd('\', '/')
+            $got = Get-TestLinkTarget -Path $link
+            if ($got -ne $want) { throw "skill '$name' points at [$got], want [$want]" }
+            if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$name' does not resolve through its link" }
+            if ($out -notmatch "(?m)^\[[\d:]+\] OK\s+linked $([regex]::Escape($name)) ") { throw "no 'linked $name' line in the log" }
+        }
+        $extra = @(Get-ChildItem -LiteralPath $ctx.Skills -Force | Where-Object { $expected -notcontains $_.Name })
+        if ($extra.Count -gt 0) { throw "entries that are not repo skills: $(($extra | ForEach-Object { $_.Name }) -join ', ')" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands skills: a second run is skipped and adds no linked line' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $null = & $ctx.Run
+        $names = @(Get-RepoSkillName)
+        $mtime1 = [IO.Directory]::GetLastWriteTimeUtc($ctx.Skills).Ticks
+        $targets1 = ($names | ForEach-Object { Get-TestLinkTarget -Path (Join-Path $ctx.Skills $_) }) -join '|'
+        $out2 = & $ctx.Run
+        $mtime2 = [IO.Directory]::GetLastWriteTimeUtc($ctx.Skills).Ticks
+        $targets2 = ($names | ForEach-Object { Get-TestLinkTarget -Path (Join-Path $ctx.Skills $_) }) -join '|'
+        if ($out2 -match '(?m)^\[[\d:]+\] \S+\s+(linked|repointed) [a-z]') { throw "the second run logged a linked/repointed line: [$out2]" }
+        if ($out2 -notmatch 'skipped \d+ skill link') { throw "the second run never says skipped: [$out2]" }
+        if ($mtime1 -ne $mtime2) { throw 'the skills directory changed on the second run' }
+        if ($targets1 -ne $targets2) { throw "a link changed on the second run: [$targets1] -> [$targets2]" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case "openhands skills: a user's own skill directory and foreign link are kept" {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $names = @(Get-RepoSkillName)
+        if ($names.Count -lt 2) { throw 'this test needs two repo skills' }
+        $own = $names[0]; $foreign = $names[1]
+        $null = New-Item -ItemType Directory -Path (Join-Path $ctx.Skills $own), (Join-Path $ctx.Skills 'mine'), (Join-Path $ctx.Scratch 'theirs') -Force
+        [IO.File]::WriteAllText((Join-Path $ctx.Skills "$own\SKILL.md"), 'my own copy')
+        [IO.File]::WriteAllText((Join-Path $ctx.Skills 'mine\SKILL.md'), 'my own skill')
+        New-TestDirLink -Path (Join-Path $ctx.Skills $foreign) -Target (Join-Path $ctx.Scratch 'theirs')
+        $foreignBefore = Get-TestLinkTarget -Path (Join-Path $ctx.Skills $foreign)
+        $null = & $ctx.Run
+        if ((Get-Item -LiteralPath (Join-Path $ctx.Skills $own) -Force).LinkType) { throw "the user's own '$own' directory was replaced by a link" }
+        if ([IO.File]::ReadAllText((Join-Path $ctx.Skills "$own\SKILL.md")) -ne 'my own copy') { throw "the user's own '$own' skill changed" }
+        if ([IO.File]::ReadAllText((Join-Path $ctx.Skills 'mine\SKILL.md')) -ne 'my own skill') { throw "the user's own 'mine' skill changed" }
+        if ((Get-TestLinkTarget -Path (Join-Path $ctx.Skills $foreign)) -ne $foreignBefore) { throw "a foreign link named '$foreign' was rewritten" }
+        foreach ($name in @($names | Where-Object { $_ -ne $own -and $_ -ne $foreign })) {
+            $item = Get-Item -LiteralPath (Join-Path $ctx.Skills $name) -Force -ErrorAction SilentlyContinue
+            if (-not $item -or -not $item.LinkType) { throw "repo skill '$name' was not linked beside the user's own" }
+        }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands skills: a dangling link into the repo is repaired and a foreign one is left alone' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $dest -Force
+        # Ours: the exact shape Sync-AutoOSSkillDirs creates (<checkout>\.agents\skills\<name>)
+        # into a checkout that has since moved or been renamed, so it dangles.
+        New-TestDanglingLink -Path (Join-Path $dest 'alpha') -Target (Join-Path $scratch 'moved-checkout\.agents\skills\alpha')
+        New-TestDanglingLink -Path (Join-Path $dest 'beta') -Target (Join-Path $scratch 'elsewhere\beta')
+        $foreignBefore = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $want = [IO.Path]::GetFullPath((Join-Path $repo '.agents\skills\alpha')).TrimEnd('\', '/')
+        $got = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        if ($got -ne $want) { throw "alpha still points at [$got], want [$want]" }
+        if (-not (Test-Path -LiteralPath (Join-Path $dest 'alpha\SKILL.md'))) { throw 'alpha does not resolve after the repair' }
+        if ((Get-TestLinkTarget -Path (Join-Path $dest 'beta')) -ne $foreignBefore) { throw 'a foreign dangling link was rewritten' }
+        if ($log -notmatch 'repointed alpha') { throw "no 'repointed alpha' line: [$log]" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+# Only a link this function made is ours (AGENTS.md hard rule 4): it dangles AND
+# has the exact shape ...\.agents\skills\<name> for the same skill. A live link,
+# or a dangling one of another shape, is the user's and stays as it is - even
+# when it points inside the repo's own .agents directory. (Here a symlink stands
+# in for the junction off Windows; the junction itself is only exercised by
+# Windows CI.)
+Test-Case 'openhands skills: a live link of your own into .agents\custom is kept' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $custom = Join-Path $repo '.agents\custom\alpha'
+        $null = New-Item -ItemType Directory -Path $custom, $dest -Force
+        [IO.File]::WriteAllText((Join-Path $custom 'SKILL.md'), 'my own alpha')
+        New-TestDirLink -Path (Join-Path $dest 'alpha') -Target $custom      # live, inside the repo's .agents, not our shape
+        $before = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $got = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        if ($got -ne $before) { throw "the user's live link now points at [$got], was [$before]" }
+        if ([IO.File]::ReadAllText((Join-Path $dest 'alpha\SKILL.md')) -ne 'my own alpha') { throw "alpha no longer resolves to the user's own skill" }
+        if ($log -match 'repointed') { throw "the live link was reported as repointed: [$log]" }
+        if ($log -notmatch ('kept ' + [regex]::Escape((Join-Path $dest 'alpha')))) { throw "no 'kept ...alpha' line, the user is not told it was left alone: [$log]" }
+        $wantBeta = [IO.Path]::GetFullPath((Join-Path $repo '.agents\skills\beta')).TrimEnd('\', '/')
+        if ((Get-TestLinkTarget -Path (Join-Path $dest 'beta')) -ne $wantBeta) { throw "beta was not linked next to the user's link" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case "openhands skills: a live link into another checkout's skills is kept" {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $dest -Force
+        # Another checkout with the same skills layout. One sits beside this repo,
+        # one is nested under this repo's own .agents directory (a worktree kept
+        # there): both are live and both have the shape we would create.
+        New-TestSkillRepo -Repo (Join-Path $scratch 'other')
+        New-TestSkillRepo -Repo (Join-Path $repo '.agents\nested')
+        New-TestDirLink -Path (Join-Path $dest 'alpha') -Target (Join-Path $repo '.agents\nested\.agents\skills\alpha')
+        New-TestDirLink -Path (Join-Path $dest 'beta') -Target (Join-Path $scratch 'other\.agents\skills\beta')
+        $alphaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $alphaNow = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaNow = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        if ($alphaNow -ne $alphaBefore) { throw "the link into the nested checkout now points at [$alphaNow], was [$alphaBefore]" }
+        if ($betaNow -ne $betaBefore) { throw "the link into the other checkout now points at [$betaNow], was [$betaBefore]" }
+        if ($log -match 'repointed') { throw "a live link was reported as repointed: [$log]" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'openhands skills: a dangling link of another shape is kept' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $dest -Force
+        New-TestDanglingLink -Path (Join-Path $dest 'alpha') -Target (Join-Path $scratch 'nowhere\other\alpha')          # dangling, outside the repo
+        New-TestDanglingLink -Path (Join-Path $dest 'beta') -Target (Join-Path $repo '.agents\skills\beta-renamed')     # dangling, inside the repo, not the shape of beta
+        $alphaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $alphaNow = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaNow = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        if ($alphaNow -ne $alphaBefore) { throw "the dangling link outside the repo now points at [$alphaNow], was [$alphaBefore]" }
+        if ($betaNow -ne $betaBefore) { throw "the dangling link of another shape now points at [$betaNow], was [$betaBefore]" }
+        if ($log -match 'repointed') { throw "a link of another shape was reported as repointed: [$log]" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'openhands skills: Sync-AutoOSSkillDirs owns a link by its shape, not by a prefix, and unlinks without recursing' {
+    # Static twin of the three tests above, for the parts a Linux run cannot
+    # exercise (a junction is only made on Windows): no repo-prefix ownership test,
+    # the exact .agents/skills/<name> shape, and a deletion that stays on the link.
+    $body = (Get-Command Sync-AutoOSSkillDirs).Definition
+    if ($body -match 'ownRoot|StartsWith') { throw 'Sync-AutoOSSkillDirs still decides ownership by a path prefix' }
+    if ($body -notmatch [regex]::Escape('.agents/skills/')) { throw 'Sync-AutoOSSkillDirs does not test the .agents/skills/<name> shape' }
+    if ($body -notmatch 'Test-Path -LiteralPath \$have') { throw 'Sync-AutoOSSkillDirs does not require the old target to be gone before repointing' }
+    if ($body -notmatch '\$item\.Delete\(\)') { throw 'the reparse-point-safe junction deletion is gone' }
+    if ($body -match 'Remove-Item') { throw 'Remove-Item on a junction can follow it into the target' }
+    Pass
+}
+
+Test-Case 'openhands skills: an existing whole-dir link is not written through' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $clone = Join-Path $scratch 'clone-skills'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $clone -Force
+        New-TestDirLink -Path $dest -Target $clone            # the old whole-directory layout
+        $repoBefore = (Get-ChildItem -LiteralPath (Join-Path $repo '.agents\skills') -Force | ForEach-Object { $_.Name }) -join ','
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        if (-not (Get-Item -LiteralPath $dest -Force).LinkType) { throw 'the whole-dir link was replaced' }
+        if ((Get-TestLinkTarget -Path $dest) -ne [IO.Path]::GetFullPath($clone).TrimEnd('\', '/')) { throw 'the whole-dir link was repointed' }
+        $inClone = @(Get-ChildItem -LiteralPath $clone -Force)
+        if ($inClone.Count -gt 0) { throw "links were written through it into the clone: $(($inClone | ForEach-Object { $_.Name }) -join ', ')" }
+        $repoAfter = (Get-ChildItem -LiteralPath (Join-Path $repo '.agents\skills') -Force | ForEach-Object { $_.Name }) -join ','
+        if ($repoAfter -ne $repoBefore) { throw "the repo's skills directory changed: [$repoBefore] -> [$repoAfter]" }
+        $hints = [regex]::Matches($log, 'rmdir').Count
+        if ($hints -ne 1) { throw "expected one warning naming the rmdir command, got $hints in [$log]" }
+    } finally {
+        $d = Get-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+        if ($d -and $d.LinkType) { try { $d.Delete() } catch { Write-Host "      could not unlink ${dest}: $($_.Exception.Message)" } }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'openhands skills: a dry run links nothing' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'home\.openhands\skills'
+    try {
+        New-TestSkillRepo -Repo $repo
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        if (Test-Path -LiteralPath (Join-Path $scratch 'home')) { throw 'a dry run created the home directory' }
+        if ($log -notmatch 'would link') { throw "no 'would link' line: [$log]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'openhands skills: the writer no longer runs an unconditional mklink /J' {
+    if ($installSource -match 'mklink') { throw 'lib\windows\AutoOS.Install.psm1 still shells out to mklink (a false "Linked" line on failure)' }
+    Pass
+}
+
+Test-Case "openhands settings: a BOM'd settings.json keeps the user's keys" {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $null = New-Item -ItemType Directory -Path $ctx.OhDir -Force
+        $json = '{"custom_user_key": "keep-me", "schema_version": 2}'
+        [IO.File]::WriteAllText($ctx.Settings, $json, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($seedBytes.Length -lt 3 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191) { throw 'the seed must start with a BOM, or the rewrite has none to drop' }
+        $null = & $ctx.Run
+        $written = Get-Content -LiteralPath $ctx.Settings -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $written.PSObject.Properties['custom_user_key'] -or $written.custom_user_key -ne 'keep-me') { throw "the user's key was lost from a BOM'd settings.json" }
+        if ($null -eq $written.PSObject.Properties['agent_settings']) { throw 'the writer did not merge its own settings' }
+        # "Written back plain" (the embedded script) and the agent generator both write
+        # UTF-8 without a BOM: the rewritten file must not start with EF BB BF.
+        $rewritten = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($rewritten.Length -ge 3 -and $rewritten[0] -eq 239 -and $rewritten[1] -eq 187 -and $rewritten[2] -eq 191) { throw "the rewritten settings.json still starts with the BOM (239,187,191): the user's BOM'd file was not written back plain" }
+
+        # The agent generator rewrites this file as well (it adds enable_sub_agents),
+        # so the check above cannot say which writer dropped the BOM. With
+        # enable_sub_agents already set the generator has nothing to change, and only
+        # the embedded settings script rewrites the file.
+        $json2 = '{"custom_user_key": "keep-me-too", "schema_version": 2, "agent_settings": {"enable_sub_agents": true}}'
+        [IO.File]::WriteAllText($ctx.Settings, $json2, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $null = & $ctx.Run
+        $written2 = Get-Content -LiteralPath $ctx.Settings -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $written2.PSObject.Properties['custom_user_key'] -or $written2.custom_user_key -ne 'keep-me-too') { throw "the user's key was lost from a BOM'd settings.json that the generator leaves alone" }
+        if ($null -eq $written2.agent_settings.PSObject.Properties['llm']) { throw 'the settings script did not rewrite the file, so the BOM check below proves nothing' }
+        $rewritten2 = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($rewritten2.Length -ge 3 -and $rewritten2[0] -eq 239 -and $rewritten2[1] -eq 187 -and $rewritten2[2] -eq 191) { throw "the settings script kept the BOM (239,187,191) when it rewrote a BOM'd settings.json" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: the user original survives the writer and the agent generator in one second' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        # No enable_sub_agents: the agent generator that runs after the embedded
+        # script therefore rewrites settings.json too, and backs it up too.
+        # The original has a BOM and a non-ASCII value, so a backup that lost either
+        # differs in bytes although it reads as the same text.
+        $null = New-Item -ItemType Directory -Path $ctx.OhDir -Force
+        $seed = '{"custom_user_key": "keep-me-@V@", "schema_version": 2}'.Replace('@V@', "$([char]0x00E9)$([char]0x2603)")
+        [IO.File]::WriteAllText($ctx.Settings, $seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ctx.Settings))
+        $null = & $ctx.Run
+        $backups = @(Get-ChildItem -LiteralPath $ctx.OhDir -Filter 'settings.json.autoos-backup-*')
+        $holdsOriginal = @($backups | Where-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) -ceq $seedB64 })
+        if ($holdsOriginal.Count -eq 0) { throw "none of the $($backups.Count) backup(s) holds the user's original file byte for byte (an earlier backup was overwritten, or a BOM / non-ASCII byte was lost)" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+# The closing line must say what happened. "written" only when a file was
+# written; a run that changed nothing says it is up to date; a run whose script
+# failed (or that had no python) says so and prints neither.
+Test-Case 'openhands settings: the final line says written only when something was written' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        # Every file under ~/.openhands as name=SHA-256, sorted. The skills directory
+        # holds links into the repo (not files of this tree) and is left out.
+        $snapshot = {
+            $skillsPrefix = $ctx.Skills + [IO.Path]::DirectorySeparatorChar
+            $lines = @()
+            foreach ($f in @(Get-ChildItem -LiteralPath $ctx.OhDir -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+                if ($f.FullName.StartsWith($skillsPrefix, [StringComparison]::Ordinal)) { continue }
+                $lines += ($f.FullName.Substring($ctx.OhDir.Length) + '=' + (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash)
+            }
+            @($lines | Sort-Object)
+        }
+        $out1 = & $ctx.Run
+        $before = @(& $snapshot)
+        if (@($before | Where-Object { $_ -like '*settings.json=*' }).Count -ne 1 -or $before.Count -lt 5) { throw "the snapshot of the first run's files is too thin to prove anything: [$($before -join '; ')]" }
+        $out2 = & $ctx.Run
+        $after = @(& $snapshot)
+        if ($out1 -notmatch 'OpenHands configuration and profiles written to') { throw "the first run never says written: [$out1]" }
+        if ($out1 -match 'already up to date') { throw "the first run also says it is up to date: [$out1]" }
+        if ($out2 -notmatch 'openhands settings: skipped') { throw "the second run did not skip the settings writer, so this test proves nothing: [$out2]" }
+        if ($out2 -match 'OpenHands configuration and profiles written to') { throw "the second run still says written although nothing changed: [$out2]" }
+        if ($out2 -notmatch 'OpenHands configuration already up to date') { throw "the second run does not say it is up to date: [$out2]" }
+        # The log lines are only what the writers say; the files are what they did.
+        $changed = @(Compare-Object -ReferenceObject $before -DifferenceObject $after | ForEach-Object { $_.InputObject.Substring(0, $_.InputObject.LastIndexOf('=')) } | Select-Object -Unique)
+        if ($changed.Count -gt 0) { throw "the second run changed, added or removed $($changed.Count) file(s) under .openhands (a second run must neither rewrite a file nor take a backup), first: $(@($changed | Select-Object -First 4) -join '; ')" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: a profile file that had to be recreated counts as written' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $null = & $ctx.Run
+        $profile = Join-Path $ctx.OhDir 'profiles\openrouter-free.json'
+        if (-not (Test-Path -LiteralPath $profile)) { throw 'the first run did not write profiles\openrouter-free.json' }
+        Remove-Item -LiteralPath $profile -Force
+        $out = & $ctx.Run
+        if (-not (Test-Path -LiteralPath $profile)) { throw 'the second run did not recreate the profile' }
+        if ($out -notmatch 'OpenHands configuration and profiles written to') { throw "a recreated profile file is not reported as written: [$out]" }
+        if ($out -match 'already up to date') { throw "a run that recreated a file says it is up to date: [$out]" }
+        if ($out -notmatch 'openhands profiles: 1 written') { throw "the writer does not report the one profile it wrote: [$out]" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: a failing settings script is reported, not called written' {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { Skip 'the stub is a POSIX shell script'; return }
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $real = @(Get-Command python3, python -All -ErrorAction SilentlyContinue | Where-Object { $_.Source -and -not $_.Source.StartsWith($ctx.Scratch) })
+        if ($real.Count -eq 0) { Skip 'no real python to pass the other calls through to'; return }
+        # First on PATH: fail the embedded settings script (python -c ...), pass
+        # everything else (the agent generator runs a script file) through.
+        $stub = Join-Path $ctx.Scratch 'bin/python'
+        [IO.File]::WriteAllText($stub, "#!/bin/sh`nif [ `"`$1`" = `"-c`" ]; then echo `"stub: the settings script failed`" >&2; exit 1; fi`nexec '$($real[0].Source)' `"`$@`"`n")
+        & chmod +x $stub
+        $null = New-Item -ItemType Directory -Path $ctx.OhDir -Force
+        $seed = '{"custom_user_key": "keep-me", "schema_version": 2}'
+        [IO.File]::WriteAllText($ctx.Settings, $seed)
+        $out = & $ctx.Run
+        if ([IO.File]::ReadAllText($ctx.Settings) -ne $seed) { throw 'settings.json changed although its writer failed' }
+        if (@(Get-ChildItem -LiteralPath $ctx.OhDir -Filter 'settings.json.autoos-backup-*').Count -ne 0) { throw 'a backup was taken for a file that was not written' }
+        if ($out -notmatch 'not written to [^\r\n]*settings\.json') { throw "no warning naming settings.json: [$out]" }
+        if ($out -match 'OpenHands configuration and profiles written to') { throw "the success line was printed after the writer failed: [$out]" }
+        if ($out -match 'already up to date') { throw "the up-to-date line was printed after the writer failed: [$out]" }
+        if ($out -match 'agent-harness openhands:') { throw "the agent generator ran after the writer failed: [$out]" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: a missing python is reported, not called written' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        # Nothing on PATH but an empty directory: no python, no py.
+        Remove-Item -LiteralPath (Join-Path $ctx.Scratch 'bin/python') -Force -ErrorAction SilentlyContinue
+        $env:PATH = Join-Path $ctx.Scratch 'bin'
+        $out = & $ctx.Run
+        if ($out -notmatch 'python was not found') { throw "no warning that python is missing: [$out]" }
+        if ($out -match 'OpenHands configuration and profiles written to') { throw "the success line was printed without python: [$out]" }
+        if ($out -match 'already up to date') { throw "the up-to-date line was printed without python: [$out]" }
+        if (Test-Path -LiteralPath $ctx.Settings) { throw 'settings.json exists although python never ran' }
+    }
+    if (-not $ran) { return }
     Pass
 }
 
@@ -4797,7 +5480,10 @@ Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when not
     $bin = Join-Path $scratch 'bin'
     $cfgDir = Join-Path $scratch '.config\opencode'
     $cfgFile = Join-Path $cfgDir 'opencode.json'
-    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"mine","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"mcp":{"mine":{"type":"local","command":["mine-mcp"],"enabled":true}}}'
+    # The theme is non-ASCII and the file is written with an explicit BOM: a backup
+    # that lost either would still read as the same text, so it is judged on bytes.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"@THEME@","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"mcp":{"mine":{"type":"local","command":["mine-mcp"],"enabled":true}}}'.Replace('@THEME@', $theme)
     $runLogged = {
         $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocbackup-$([Guid]::NewGuid().ToString('N')).log"
         try {
@@ -4818,7 +5504,10 @@ Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when not
             [IO.File]::WriteAllText($fake, "#!/bin/sh`nexit 0`n")
             & chmod +x $fake
         }
-        [IO.File]::WriteAllText($cfgFile, $seed)
+        [IO.File]::WriteAllText($cfgFile, $seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($cfgFile)
+        $seedB64 = [Convert]::ToBase64String($seedBytes)
+        if ($seedBytes.Length -lt 4 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191 -or @($seedBytes | Where-Object { $_ -gt 127 }).Count -le 3) { throw 'the seed must carry a BOM and a non-ASCII character, or the byte compare has nothing to lose' }
         Set-Variable -Name HOME -Value $scratch -Force -Scope Global
         $env:USERPROFILE = $scratch; $env:HOME = $scratch
         $env:APPDATA = Join-Path $scratch 'AppData'
@@ -4833,11 +5522,11 @@ Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when not
         $null = & $runLogged
         $sha1 = (Get-FileHash -LiteralPath $cfgFile -Algorithm SHA256).Hash
         $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'opencode.json.autoos-backup-*')
-        if ([IO.File]::ReadAllText($cfgFile) -eq $seed) { throw 'the first run left the file unchanged' }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($cfgFile)) -ceq $seedB64) { throw 'the first run left the file unchanged' }
         if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1)" }
-        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'the backup is not the original file' }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the original file, byte for byte (a BOM or a non-ASCII byte was lost)' }
         $written = Get-Content -LiteralPath $cfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($written.theme -ne 'mine' -or $null -eq $written.provider.PSObject.Properties['custom'] -or $null -eq $written.mcp.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
+        if ($written.theme -cne $theme -or $null -eq $written.provider.PSObject.Properties['custom'] -or $null -eq $written.mcp.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
         if ($null -eq $written.provider.PSObject.Properties['omniroute']) { throw 'run 1 did not write the gateway provider' }
 
         # Backup names carry whole seconds: without this pause a wrongly repeated
@@ -4855,6 +5544,413 @@ Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when not
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
     Pass
+}
+
+# Stand-in `opencode` CLI for the hermetic writer tests: prints $Line for any
+# arguments. `opencode.cmd` on Windows (PATHEXT finds it), an executable sh
+# script elsewhere. Windows PowerShell 5.1 has no $IsWindows, so the platform
+# is read from [Environment]::OSVersion, as the neighbouring tests do.
+function New-OpenCodeStandIn {
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Line)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [IO.File]::WriteAllText((Join-Path $Dir 'opencode.cmd'), "@echo off`r`necho $Line`r`n")
+    } else {
+        $fake = Join-Path $Dir 'opencode'
+        [IO.File]::WriteAllText($fake, "#!/bin/sh`necho '$Line'`n")
+        & chmod +x $fake
+    }
+}
+
+# The REAL Set-AutoOSOpenCodeConfig against a scratch home. HOME, USERPROFILE
+# and APPDATA point into a temp dir; a stand-in `python` keeps the agent
+# generator (it links skills and rewrites the file in its own formatting) out
+# of it; a stand-in `opencode` printing $OpenCodeVersion sits first on PATH, so
+# the result never depends on the CLI the host has; Ollama's address is pinned
+# so nothing probes the network; no key comes from the caller's environment.
+# Nothing outside the temp dir is read or written. $Body receives one
+# hashtable: Scratch, Bin, CfgDir, CfgFile, AppDataDir, AppDataFile and Run
+# (one logged run of the writer; returns what it logged).
+function Invoke-OpenCodeScratch {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Body,
+        [string]$OpenCodeVersion = '1.4.0',
+        [string]$Seed = ''
+    )
+    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocscratch-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $ctx = @{
+        Scratch      = $scratch
+        Bin          = $bin
+        CfgDir       = Join-Path $scratch '.config\opencode'
+        CfgFile      = Join-Path $scratch '.config\opencode\opencode.json'
+        AppDataDir   = Join-Path $scratch 'AppData\opencode'
+        AppDataFile  = Join-Path $scratch 'AppData\opencode\config.json'
+        Run          = {
+            $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocscratch-$([Guid]::NewGuid().ToString('N')).log"
+            try {
+                Initialize-AutoOSLog -Path $log
+                $null = Set-AutoOSOpenCodeConfig
+                Get-Content -LiteralPath $log -Raw -Encoding utf8
+            } finally {
+                Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+                Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    try {
+        $null = New-Item -ItemType Directory -Path $bin, $ctx.CfgDir -Force
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [IO.File]::WriteAllText((Join-Path $bin 'python.cmd'), "@echo off`r`nexit /b 0`r`n")
+        } else {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexit 0`n")
+            & chmod +x $fake
+        }
+        New-OpenCodeStandIn -Dir $bin -Line $OpenCodeVersion
+        if ($Seed) { [IO.File]::WriteAllText($ctx.CfgFile, $Seed) }
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch
+        $env:APPDATA = Join-Path $scratch 'AppData'
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+        # The writer reads $HOME, which the environment does not set on every
+        # host: prove the module sees the scratch home before it writes anything.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        & $Body $ctx
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# What the repo declares for V2, parsed WITHOUT the function under test: the
+# file has whole-line comments only and no trailing commas.
+function Read-RepoOpenCodeJsonc {
+    $raw = Get-Content -LiteralPath (Join-Path $Root 'opencode.jsonc') -Raw -Encoding UTF8
+    ($raw -replace '(?m)^\s*//.*$', '') | ConvertFrom-Json
+}
+
+# Stand-in `opencode` that RECORDS how it was called and can answer strictly: each
+# call appends `[<arguments>]` to opencode-args.log beside it, then it prints $Line
+# (nothing when empty) and exits $ExitCode. With -OnlyVersion it answers only when
+# its arguments are exactly `--version` and fails (exit 64, stderr) for anything
+# else, so a caller that stops asking for --version gets no version at all. Keep
+# $Line to characters cmd.exe passes through echo unchanged (no % & | < > ^ ( ) !).
+function New-OpenCodeArgsStandIn {
+    param(
+        [Parameter(Mandatory)][string]$Dir,
+        [string]$Line = '',
+        [int]$ExitCode = 0,
+        [switch]$OnlyVersion
+    )
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $lines = @('@echo off', '>>"%~dp0opencode-args.log" echo [%*]')
+        if ($OnlyVersion) {
+            $lines += 'if "%~1"=="--version" if "%~2"=="" goto :answer'
+            $lines += 'echo unexpected arguments 1>&2'
+            $lines += 'exit /b 64'
+            $lines += ':answer'
+        }
+        if ($Line -ne '') { $lines += "echo $Line" }
+        if ($ExitCode -ne 0) { $lines += 'echo error: cannot start 1>&2' }
+        $lines += "exit /b $ExitCode"
+        [IO.File]::WriteAllText((Join-Path $Dir 'opencode.cmd'), (($lines -join "`r`n") + "`r`n"))
+    } else {
+        $sh = "#!/bin/sh`n" + 'printf ' + "'[%s]\n'" + ' "$*" >> "${0%/*}/opencode-args.log"' + "`n"
+        if ($OnlyVersion) { $sh += 'if [ "$#" -ne 1 ] || [ "$1" != "--version" ]; then echo "unexpected arguments" >&2; exit 64; fi' + "`n" }
+        if ($Line -ne '') { $sh += "echo '$Line'`n" }
+        if ($ExitCode -ne 0) { $sh += 'echo "error: cannot start" >&2' + "`n" }
+        $sh += "exit $ExitCode`n"
+        $fake = Join-Path $Dir 'opencode'
+        [IO.File]::WriteAllText($fake, $sh)
+        & chmod +x $fake
+    }
+}
+
+Test-Case 'opencode V2: Test-AutoOSOpenCodeV2 tells V2 from V1 by --version, like the Linux writer' {
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        $cases = [ordered]@{
+            '2.1.0'          = $true
+            'v2.0.0'         = $true
+            'opencode 2.3.1' = $true
+            '1.4.0'          = $false
+            '1.2.0'          = $false
+            '12.0.1'         = $false
+            '0.2.9'          = $false
+            'no version'     = $false
+        }
+        foreach ($v in $cases.Keys) {
+            New-OpenCodeStandIn -Dir $c.Bin -Line $v
+            $got = Test-AutoOSOpenCodeV2
+            if ($got -ne $cases[$v]) { throw "opencode --version printing [$v]: Test-AutoOSOpenCodeV2 = $got, want $($cases[$v])" }
+        }
+
+        # The stand-in above prints its version for ANY arguments, so that loop passes
+        # even if the function stops calling --version. This one records how it was
+        # called and answers only to exactly `--version`: the recorded call must be
+        # that one call, and the answers must not change.
+        $argsLog = Join-Path $c.Bin 'opencode-args.log'
+        foreach ($v in $cases.Keys) {
+            New-OpenCodeArgsStandIn -Dir $c.Bin -Line $v -OnlyVersion
+            Remove-Item -LiteralPath $argsLog -Force -ErrorAction SilentlyContinue
+            $got = Test-AutoOSOpenCodeV2
+            $calls = @(Get-Content -LiteralPath $argsLog -ErrorAction SilentlyContinue)
+            if (($calls -join '|') -cne '[--version]') { throw "Test-AutoOSOpenCodeV2 ran opencode as [$($calls -join '|')], want exactly one call, [--version]" }
+            if ($got -ne $cases[$v]) { throw "an opencode that prints [$v] only for --version: Test-AutoOSOpenCodeV2 = $got, want $($cases[$v])" }
+        }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: Set-AutoOSOpenCodeConfig adds the gateway providers when the CLI is V2' {
+    # The theme is non-ASCII and the file is written with an explicit BOM: a backup
+    # that lost either would still read as the same text, so it is judged on bytes.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    # Not called $seed: Invoke-OpenCodeScratch has a -Seed parameter, and PowerShell
+    # variable names are case-insensitive, so the body would see the helper's own.
+    $v2Seed = '{"$schema":"https://opencode.ai/config.json","theme":"@THEME@","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"providers":{"foreign":{"name":"Foreign V2","env":["FOREIGN_KEY"],"package":"p"},"omniroute":{"name":"stale"}}}'.Replace('@THEME@', $theme)
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Body {
+        param($c)
+        [IO.File]::WriteAllText($c.CfgFile, $v2Seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($c.CfgFile)
+        $seedB64 = [Convert]::ToBase64String($seedBytes)
+        if ($seedBytes.Length -lt 4 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191 -or @($seedBytes | Where-Object { $_ -gt 127 }).Count -le 3) { throw 'the seed must carry a BOM and a non-ASCII character, or the byte compare has nothing to lose' }
+        $repo = Read-RepoOpenCodeJsonc
+        $canon = { param($o) $o | ConvertTo-Json -Depth 100 -Compress }
+        $null = & $c.Run
+        $hash1 = (Get-FileHash -LiteralPath $c.CfgFile -Algorithm SHA256).Hash
+        $backups1 = @(Get-ChildItem -LiteralPath $c.CfgDir -Filter 'opencode.json.autoos-backup-*')
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($name in @('omniroute', 'litellm')) {
+            if ($null -eq $w.PSObject.Properties['providers'] -or $null -eq $w.providers.PSObject.Properties[$name]) { throw "providers.$name was not written for a V2 CLI" }
+            if ((& $canon $w.providers.$name) -cne (& $canon $repo.providers.$name)) { throw "providers.$name differs from the repo opencode.jsonc" }
+        }
+        if ($w.model -cne $repo.model) { throw "model = [$($w.model)], want the repo model [$($repo.model)]" }
+        if ($null -eq $w.providers.PSObject.Properties['foreign'] -or $w.providers.foreign.name -cne 'Foreign V2') { throw 'a foreign providers entry of the user was dropped' }
+        if ($null -eq $w.provider.PSObject.Properties['custom'] -or $w.provider.custom.name -cne 'Mine') { throw 'a foreign V1 provider of the user was dropped' }
+        if ($w.theme -cne $theme) { throw 'a foreign key of the user was dropped' }
+        if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw 'the V1 gateway provider block went missing' }
+        if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the original file, byte for byte (a BOM or a non-ASCII byte was lost)' }
+
+        # Backup names carry whole seconds: without this pause a wrongly
+        # repeated backup would overwrite the first one and the count could
+        # not tell.
+        Start-Sleep -Milliseconds 1200
+        $out2 = & $c.Run
+        $hash2 = (Get-FileHash -LiteralPath $c.CfgFile -Algorithm SHA256).Hash
+        $backups2 = @(Get-ChildItem -LiteralPath $c.CfgDir -Filter 'opencode.json.autoos-backup-*')
+        if ($hash2 -ne $hash1) { throw 'run 2 changed the file (SHA256 differs from run 1)' }
+        if ($backups2.Count -ne $backups1.Count) { throw "backups after run 2 = $($backups2.Count), after run 1 = $($backups1.Count)" }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: a model the user chose is kept' {
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Seed '{"model":"custom/mine"}' -Body {
+        param($c)
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $w.PSObject.Properties['providers'] -or $null -eq $w.providers.PSObject.Properties['omniroute']) { throw 'the V2 providers were not written' }
+        if ($w.model -cne 'custom/mine') { throw "the user's model was replaced: [$($w.model)]" }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: a V1 CLI gets no providers block' {
+    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"mine","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}}}'
+    Invoke-OpenCodeScratch -OpenCodeVersion '1.4.0' -Seed $seed -Body {
+        param($c)
+        if (Test-AutoOSOpenCodeV2) { throw 'the stand-in opencode 1.4.0 was taken for a V2 CLI' }
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -ne $w.PSObject.Properties['providers']) { throw 'a V1 CLI got a providers block' }
+        if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw 'the V1 gateway provider block went missing' }
+        if ($null -eq $w.provider.PSObject.Properties['custom']) { throw 'a foreign V1 provider of the user was dropped' }
+        if ($w.model -notlike 'ollama/*') { throw "a V1 CLI's default model is not the Ollama default: [$($w.model)]" }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: an opencode that is missing or fails or prints garbage for --version is taken for V1' {
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        $pathBefore = $env:PATH
+        $sep = [IO.Path]::PathSeparator
+        $scenarios = [ordered]@{
+            'is missing'                     = $null
+            'exits 1 and prints nothing'     = @{ Line = ''; ExitCode = 1 }
+            'exits 0 and prints nothing'     = @{ Line = ''; ExitCode = 0 }
+            'prints text that is no version' = @{ Line = 'usage opencode command'; ExitCode = 0 }
+            'prints the number 12.2.0'       = @{ Line = 'build 12.2.0 nightly'; ExitCode = 0 }
+        }
+        foreach ($name in $scenarios.Keys) {
+            $env:PATH = $pathBefore
+            foreach ($f in @('opencode', 'opencode.cmd', 'opencode-args.log')) { Remove-Item -LiteralPath (Join-Path $c.Bin $f) -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $c.CfgFile, $c.AppDataFile -Force -ErrorAction SilentlyContinue
+            $spec = $scenarios[$name]
+            if ($null -eq $spec) {
+                # Missing: the stand-in is gone, and so is every directory that holds a
+                # real opencode (a developer machine has one), so nothing answers.
+                $kept = @()
+                foreach ($dir in $pathBefore.Split($sep)) {
+                    if (-not $dir) { continue }
+                    $holdsOne = @(Get-ChildItem -LiteralPath $dir -Filter 'opencode*' -Force -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -eq 'opencode' }).Count -gt 0
+                    if (-not $holdsOne) { $kept += $dir }
+                }
+                $env:PATH = $kept -join $sep
+                if (@(Get-Command opencode -CommandType Application -ErrorAction SilentlyContinue).Count -gt 0) { throw 'an opencode stayed on PATH after hiding every directory that holds one, so the missing case cannot be tested here' }
+            } else {
+                New-OpenCodeArgsStandIn -Dir $c.Bin -Line $spec.Line -ExitCode $spec.ExitCode
+            }
+            $isV2 = Test-AutoOSOpenCodeV2
+            if ($isV2 -ne $false) { throw "opencode $name when asked for --version: Test-AutoOSOpenCodeV2 = [$isV2], want False" }
+            $null = & $c.Run
+            $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $w.PSObject.Properties['providers']) { throw "opencode $name when asked for --version: the config got a V2 providers block" }
+            if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw "opencode $name when asked for --version: the V1 gateway provider block went missing" }
+        }
+        $env:PATH = $pathBefore
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig leaves an unchanged APPDATA config.json untouched' {
+    # The APPDATA copy used to be rewritten on EVERY run: no compare, no backup.
+    Invoke-OpenCodeScratch -Seed '{"theme":"mine"}' -Body {
+        param($c)
+        $null = & $c.Run
+        if (-not (Test-Path -LiteralPath $c.AppDataFile)) { throw 'run 1 did not write the APPDATA config.json' }
+        $time1 = (Get-Item -LiteralPath $c.AppDataFile).LastWriteTimeUtc
+        $hash1 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+
+        # Timestamps are coarse on some filesystems: pause so a rewrite shows.
+        Start-Sleep -Milliseconds 1200
+        $null = & $c.Run
+        $time2 = (Get-Item -LiteralPath $c.AppDataFile).LastWriteTimeUtc
+        $hash2 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+        $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+        if ($time2 -ne $time1) { throw "run 2 rewrote the unchanged APPDATA config.json (LastWriteTimeUtc $($time1.ToString('o')) -> $($time2.ToString('o')))" }
+        if ($hash2 -ne $hash1) { throw 'run 2 changed the APPDATA config.json (SHA256 differs from run 1)' }
+        if ($backups.Count -ne 0) { throw "an unchanged APPDATA config.json got $($backups.Count) backup(s)" }
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig backs up a foreign APPDATA config.json once' {
+    Invoke-OpenCodeScratch -Seed '{"theme":"mine"}' -Body {
+        param($c)
+        $foreign = [Text.Encoding]::UTF8.GetBytes('{"foreign":"a file the user owns"}' + "`n")
+        $null = New-Item -ItemType Directory -Path $c.AppDataDir -Force
+        [IO.File]::WriteAllBytes($c.AppDataFile, $foreign)
+        $seedB64 = [Convert]::ToBase64String($foreign)
+
+        $null = & $c.Run
+        $backups1 = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter 'config.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1: the foreign file, once)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the foreign file, byte for byte' }
+        $now = (Get-Content -LiteralPath $c.AppDataFile -Raw -Encoding UTF8).TrimEnd()
+        $want = (Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8).TrimEnd()
+        if ($now -cne $want) { throw 'run 1 did not put the OpenCode config into the APPDATA config.json' }
+        $appDataSha1 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+
+        # Runs 2 and 3 change nothing, so they back nothing up and leave the file
+        # alone. The pause keeps a wrongly repeated backup from hiding behind a
+        # same-second name; the hash catches a rewrite that takes no backup.
+        foreach ($run in 2, 3) {
+            Start-Sleep -Milliseconds 1200
+            $null = & $c.Run
+            $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+            if ($backups.Count -ne 1) { throw "backups after run $run = $($backups.Count) (want 1)" }
+            $appDataSha = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+            if ($appDataSha -cne $appDataSha1) { throw "run $run changed the APPDATA config.json (SHA256 differs from run 1)" }
+        }
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig treats an APPDATA config.json that differs only by a BOM or a final newline as unchanged' {
+    # The APPDATA copy is compared as text: the encoding Out-File writes (BOM or not)
+    # is the host's, so a copy that differs only in it or in its final newline is
+    # the same config and must be neither rewritten nor backed up.
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        [IO.File]::WriteAllText($c.CfgFile, '{"theme":"mine"}')
+        $null = & $c.Run
+        if (-not (Test-Path -LiteralPath $c.AppDataFile)) { throw 'run 1 did not write the APPDATA config.json' }
+        $canonicalB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+        $written = [IO.File]::ReadAllBytes($c.AppDataFile)
+        $hasBom = ($written.Length -ge 3 -and $written[0] -eq 239 -and $written[1] -eq 187 -and $written[2] -eq 191)
+        $text = [IO.File]::ReadAllText($c.AppDataFile)      # without the BOM
+        $trimmed = $text.TrimEnd("`r", "`n")
+        $variants = [ordered]@{
+            'the BOM'                       = @{ Bom = (-not $hasBom); Text = $text }
+            'the final newline (removed)'   = @{ Bom = $hasBom; Text = $trimmed }
+            'the final newline (repeated)'  = @{ Bom = $hasBom; Text = $trimmed + "`r`n`n`r`n" }
+            'the BOM and the final newline' = @{ Bom = (-not $hasBom); Text = $trimmed }
+        }
+        foreach ($label in $variants.Keys) {
+            $v = $variants[$label]
+            [IO.File]::WriteAllText($c.AppDataFile, $v.Text, (New-Object Text.UTF8Encoding([bool]$v.Bom)))
+            $variantB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+            if ($variantB64 -ceq $canonicalB64) { throw "the variant that differs by $label equals the file the writer makes, so it proves nothing" }
+            $null = & $c.Run
+            $nowB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+            $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+            if ($nowB64 -cne $variantB64) { throw "an APPDATA config.json that differs only by $label was rewritten" }
+            if ($backups.Count -ne 0) { throw "an APPDATA config.json that differs only by $label got $($backups.Count) backup(s)" }
+        }
+
+        # Control: a file whose CONTENT differs is still backed up once and rewritten,
+        # so the checks above are not just a writer that never touches the file.
+        [IO.File]::WriteAllText($c.AppDataFile, '{"theme":"someone else"}' + "`n")
+        $null = & $c.Run
+        $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "control: an APPDATA config.json with other content got $($backups.Count) backup(s) (want 1)" }
+        if ((Get-Content -LiteralPath $c.AppDataFile -Raw -Encoding UTF8).TrimEnd() -cne (Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8).TrimEnd()) { throw 'control: an APPDATA config.json with other content was not rewritten' }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: an invalid repo opencode.jsonc leaves the user opencode.json byte-identical and takes no backup' {
+    # The writer reads the repo file up front, like the model catalog, so an
+    # unreadable one must stop it before any backup or write.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    $userConfig = '{"$schema":"https://opencode.ai/config.json","theme":"@THEME@","model":"custom/mine"}'.Replace('@THEME@', $theme)
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Body {
+        param($c)
+        [IO.File]::WriteAllText($c.CfgFile, $userConfig, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $userB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.CfgFile))
+        # A scratch repo root: the real catalog, an (empty) skills directory so that a
+        # writer that wrongly carried on would run to the end and fail the checks below
+        # instead of dying on a missing directory, and an opencode.jsonc cut off mid-file.
+        $repo = Join-Path $c.Scratch 'repo'
+        $null = New-Item -ItemType Directory -Path $repo, (Join-Path $repo '.agents\skills') -Force
+        Copy-Item -LiteralPath (Join-Path $Root 'catalog') -Destination (Join-Path $repo 'catalog') -Recurse
+        [IO.File]::WriteAllText((Join-Path $repo 'opencode.jsonc'), "{`n  // cut off mid-file`n  `"providers`": {`n    `"omniroute`": ")
+        try {
+            Initialize-AutoOSInstaller -DryRun $false -RepoRoot $repo
+            if (-not (Test-AutoOSOpenCodeV2)) { throw 'the stand-in opencode 2.1.0 was not taken for a V2 CLI, so the invalid repo file is never read' }
+            $out = & $c.Run
+        } finally {
+            Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        }
+        if ($out -notmatch 'is not valid JSONC' -or $out -notmatch 'left unchanged') { throw "the run did not say the repo opencode.jsonc is invalid and that the config was left unchanged: [$out]" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($c.CfgFile)) -cne $userB64) { throw "the user's opencode.json changed although the repo opencode.jsonc is invalid" }
+        $files = @(Get-ChildItem -LiteralPath $c.CfgDir -Force | ForEach-Object { $_.Name })
+        if ($files.Count -ne 1) { throw "the config directory holds [$($files -join ', ')], want only opencode.json (no backup, nothing written)" }
+        if (Test-Path -LiteralPath $c.AppDataFile) { throw 'the APPDATA config.json was written although the run stopped early' }
+        Pass
+    }
 }
 
 Test-Case 'zed default_model converges litellm to omniroute (zed routing)' {
@@ -5006,6 +6102,56 @@ Test-Case 'start-stack.ps1 parses without syntax errors' {
     $null = [System.Management.Automation.PSParser]::Tokenize(
         (Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw), [ref]$errors)
     Assert-Equal (@($errors)).Count 0
+}
+
+Test-Case 'start-stack.ps1: a settings backup never overwrites an earlier one taken in the same second' {
+    # The launcher is standalone (no module import, so no Copy-AutoOSBackup) and
+    # cannot run here (gateway, docker): pull its backup function out of the AST
+    # and run that in a scratch dir. Its two call sites are pinned by text. The
+    # stamp has whole-second resolution, so the same-second case is forced with
+    # -Stamp, as the module's test does.
+    $script = Join-Path $Root 'configuration\start-stack.ps1'
+    $tokens = $null; $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
+    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-FileBackup' }, $true))
+    if ($fn.Count -ne 1) { throw "want exactly one function New-FileBackup in start-stack.ps1, found $($fn.Count)" }
+    . ([scriptblock]::Create($fn[0].Extent.Text))
+
+    $text = Get-Content -LiteralPath $script -Raw
+    if (([regex]::Matches($text, [regex]::Escape('New-FileBackup -Path $ohSettings'))).Count -ne 2) { throw 'both OpenHands settings backups must go through New-FileBackup' }
+    if ($text -match [regex]::Escape('Copy-Item $ohSettings $backup')) { throw 'a settings backup still copies straight to a second-resolution name' }
+
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-stackbak-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $settings = Join-Path $scratch 'settings.json'
+        $stamp = '20260101-000000'
+        # Three versions of a settings file, judged on bytes: the first has a BOM and
+        # a non-ASCII character, the second only the character, the third neither. A
+        # backup that lost the BOM or a byte would still read as the same text.
+        $withBom = New-Object Text.UTF8Encoding($true)
+        $withoutBom = New-Object Text.UTF8Encoding($false)
+        $texts = @("v0 caf$([char]0x00E9)", "v1 caf$([char]0x00E9) $([char]0x2603)", 'v2')
+        $encodings = @($withBom, $withoutBom, $withoutBom)
+        $wantB64 = @()
+        $made = @()
+        for ($i = 0; $i -lt 3; $i++) {
+            [IO.File]::WriteAllText($settings, $texts[$i], $encodings[$i])
+            $bytes = [IO.File]::ReadAllBytes($settings)
+            if ($i -eq 0 -and ($bytes[0] -ne 239 -or $bytes[1] -ne 187 -or $bytes[2] -ne 191)) { throw 'version 0 must carry a BOM, or the byte compare has nothing to lose' }
+            $wantB64 += [Convert]::ToBase64String($bytes)
+            $made += New-FileBackup -Path $settings -Stamp $stamp
+        }
+        $want = @("settings.json.autoos-backup-$stamp", "settings.json.autoos-backup-$stamp-1", "settings.json.autoos-backup-$stamp-2")
+        if ((@($made | ForEach-Object { Split-Path -Leaf $_ }) -join ',') -cne ($want -join ',')) { throw "backup names: [$(@($made | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')], want [$($want -join ', ')]" }
+        for ($i = 0; $i -lt 3; $i++) {
+            $got = [Convert]::ToBase64String([IO.File]::ReadAllBytes($made[$i]))
+            if ($got -cne $wantB64[$i]) { throw "$($want[$i]) does not hold version $i byte for byte (an earlier backup was overwritten, or a BOM / non-ASCII byte was lost)" }
+        }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
 }
 
 Test-Case 'openhands launch is detached, probed and stale-settings safe' {

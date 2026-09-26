@@ -9,6 +9,12 @@
 #   bash tests/run-tests.sh --filter catalog
 #   bash tests/run-tests.sh --filter usb,catalog   comma = OR (shard union)
 #
+# Environment:
+#   AUTOOS_SHELLCHECK_REQUIRED=1  a shellcheck that runs out of memory FAILS the
+#                                 "shellcheck is clean" cases (default: a loud skip)
+#   AUTOOS_MEMINFO=<file>         meminfo that sizes shellcheck's memory limit
+#                                 (default /proc/meminfo; unreadable = no limit)
+#
 # No test installs anything. Providers are asserted on the PLANNED command,
 # never on system state.
 #
@@ -151,8 +157,94 @@ httpd.serve_forever()
     printf '%s %s\n' "$pid" "$port"
 }
 
+# Function shellcheck_limit_kb. (Keep comment lines from starting with the linter's
+# name: it parses those as directives and stops with SC1073.)
+# Prints the address-space limit (KiB) run_shellcheck puts on shellcheck: 90% of
+# MemAvailable + SwapFree from ${AUTOOS_MEMINFO:-/proc/meminfo}. Prints nothing
+# (= no limit) when that file is unreadable (macOS, Git Bash) or has no
+# MemAvailable line. Why bound it at all: shellcheck's memory grows faster than
+# the input (about 1.2 GB for setup.sh + lib/linux, and this 9.4k-line file alone
+# went past 2.5 GB), and an OOM kill used to surface as a `fail` with an EMPTY
+# message. Under `ulimit -v` shellcheck instead says "out of memory" and exits 251.
+shellcheck_limit_kb() {
+    local meminfo="${AUTOOS_MEMINFO:-/proc/meminfo}" key val avail="" swap=0
+    [[ -r "$meminfo" ]] || return 0
+    while read -r key val _; do
+        case "$key" in
+            MemAvailable:) avail="$val" ;;
+            SwapFree:)     swap="$val" ;;
+        esac
+    done < "$meminfo"
+    [[ "$avail" =~ ^[0-9]+$ && "$swap" =~ ^[0-9]+$ ]] || return 0
+    printf '%d\n' $(( (avail + swap) * 9 / 10 ))
+}
+
+# run_shellcheck FILES...
+# ONE shellcheck process over FILES, `-S warning` (what CI runs), inside a
+# subshell whose `ulimit -v` is shellcheck_limit_kb. Sets, for the caller:
+#   SHELLCHECK_OUT         everything shellcheck printed (stdout + stderr)
+#   SHELLCHECK_OOM         1 when it ran out of memory, else 0
+#   SHELLCHECK_LIMIT_MIB   the limit that was in force, empty when there was none
+# and returns shellcheck's own status, EXCEPT out-of-memory, which returns 3
+# (test SHELLCHECK_OOM, not the 3: shellcheck itself uses 3 for a usage error).
+# Out of memory is: rc 251 (the GHC runtime's heap overflow), rc 137 (SIGKILL
+# from the kernel OOM killer), or - for any rc other than 0/1 - output that says
+# "out of memory" / "Cannot allocate". rc 0/1 never count as OOM from the text:
+# a finding prints the offending source line, and a line that merely mentions
+# "out of memory" must not turn a real finding into a skip.
+run_shellcheck() {
+    local limit_kb rc
+    SHELLCHECK_OOM=0
+    limit_kb="$(shellcheck_limit_kb)"
+    if [[ "$limit_kb" =~ ^[1-9][0-9]*$ ]]; then
+        SHELLCHECK_LIMIT_MIB="$(( limit_kb / 1024 ))"
+        SHELLCHECK_OUT="$( ( ulimit -v "$limit_kb" 2>/dev/null; shellcheck -S warning "$@" ) 2>&1 )"; rc=$?
+    else
+        SHELLCHECK_LIMIT_MIB=""
+        SHELLCHECK_OUT="$(shellcheck -S warning "$@" 2>&1)"; rc=$?
+    fi
+    case "$rc" in
+        251|137) SHELLCHECK_OOM=1 ;;
+        0|1)     ;;
+        *)       if grep -qiE 'out of memory|cannot allocate' <<<"$SHELLCHECK_OUT"; then SHELLCHECK_OOM=1; fi ;;
+    esac
+    if (( SHELLCHECK_OOM )); then return 3; fi
+    return "$rc"
+}
+
+# report_shellcheck RC
+# Turns the result of a run_shellcheck (RC, SHELLCHECK_OOM, SHELLCHECK_OUT) into
+# ONE pass / fail / skip for the case that is running. A finding is a failure with
+# its first lines. Out of memory is a LOUD skip that names the limit and the way
+# to make it a failure (AUTOOS_SHELLCHECK_REQUIRED=1, for a host or CI job that is
+# supposed to have the memory); it is never a silent pass and never an empty fail.
+report_shellcheck() {
+    local rc="$1" msg
+    if (( SHELLCHECK_OOM )); then
+        if [[ -n "$SHELLCHECK_LIMIT_MIB" ]]; then
+            msg="shellcheck ran out of memory at a limit of ${SHELLCHECK_LIMIT_MIB} MiB"
+        else
+            msg="shellcheck ran out of memory with no limit of its own (the host ran short)"
+        fi
+        msg+=" - run it in CI or on a host with more free memory (AUTOOS_SHELLCHECK_REQUIRED=1 makes this a failure)"
+        if [[ "${AUTOOS_SHELLCHECK_REQUIRED:-}" == 1 ]]; then fail "$msg"; else skip "$msg"; fi
+    elif (( rc == 0 )); then
+        pass
+    else
+        fail "$(printf '%s' "$SHELLCHECK_OUT" | head -20)"
+    fi
+}
+
 # ─── Load the libraries under test ──────────────────────────────────────────
 cd "$ROOT" || { echo "cannot enter $ROOT" >&2; exit 1; }
+
+# The ONE list of files the "shellcheck is clean" case lints, and it must stay the
+# list CI lints (.github/workflows/ci.yml: `shellcheck -S warning setup.sh
+# lib/linux/*.sh tests/run-tests.sh`; a test compares the two). One process over
+# all of them on purpose, not one per file: files on one command line resolve
+# each other's `source=` directives, and alone setup.sh draws 8 false SC2034.
+SHELLCHECK_FILES=(setup.sh lib/linux/*.sh tests/run-tests.sh)
+
 # shellcheck source=../lib/linux/ui.sh
 . lib/linux/ui.sh
 # shellcheck source=../lib/linux/detect.sh
@@ -1958,6 +2050,399 @@ if it "undo restores a backed-up file"; then
     assert_eq "$body" "ORIGINAL"
 fi
 
+# backup_file names its copy <file>.autoos-backup-<stamp> with ONE-SECOND
+# resolution and cp overwrites, so two changing writes within a second used to
+# destroy the user's original (the Windows side got Copy-AutoOSBackup for the
+# same reason: base name, then -1, -2, ... never overwrite).
+if it "backup: backup_file never overwrites a same-second backup"; then
+    d="$(mktemp -d)"; f="$d/settings.json"; ok=1
+    printf 'A' >"$f"; chmod 600 "$f"; p1="$(backup_file "$f" 20260101-000000)"; rc1=$?
+    printf 'B' >"$f"; p2="$(backup_file "$f" 20260101-000000)"
+    printf 'C' >"$f"; p3="$(backup_file "$f" 20260101-000000)"
+    [[ "$p1" == "$f.autoos-backup-20260101-000000" ]]   || { ok=0; echo "first backup path: [$p1]" >&2; }
+    [[ "$p2" == "$f.autoos-backup-20260101-000000-1" ]] || { ok=0; echo "second backup path: [$p2]" >&2; }
+    [[ "$p3" == "$f.autoos-backup-20260101-000000-2" ]] || { ok=0; echo "third backup path: [$p3]" >&2; }
+    (( rc1 == 0 )) || { ok=0; echo "first call rc=$rc1" >&2; }
+    [[ "$(cat "$p1" 2>/dev/null)" == A && "$(cat "$p2" 2>/dev/null)" == B && "$(cat "$p3" 2>/dev/null)" == C ]] \
+        || { ok=0; echo "bytes: [$(cat "$p1" 2>/dev/null)] [$(cat "$p2" 2>/dev/null)] [$(cat "$p3" 2>/dev/null)]" >&2; }
+    [[ "$(stat -c '%a' "$p1" 2>/dev/null)" == 600 ]] || { ok=0; echo "the backup did not keep the file mode" >&2; }
+    [[ "$(find "$d" -name '*.autoos-backup-*' | wc -l | tr -d ' ')" == 3 ]] || { ok=0; echo "expected exactly 3 backups" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "backup_file overwrote or misnamed a backup"; fi
+fi
+
+# A name that is a DANGLING symlink is taken: `-e` follows the link and calls it
+# free, and cp would then write through the link (GNU cp refuses; other cps
+# create the link's target). backup_path tests -L too, and skips it.
+if it "backup: backup_path skips a candidate name that is a dangling symlink"; then
+    d="$(mktemp -d)"; f="$d/settings.json"; ok=1
+    printf 'A\n' >"$f"
+    base="$f.autoos-backup-20260101-000000"
+    ln -s "$d/nowhere-0" "$base"; ln -s "$d/nowhere-1" "$base-1"
+    [[ ! -e "$base" && -L "$base" ]] || { ok=0; echo "the fixture link does not dangle" >&2; }
+    got="$(backup_path "$f" 20260101-000000)"
+    [[ "$got" == "$base-2" ]] || { ok=0; echo "the next backup name is [${got##*/}], expected [settings.json.autoos-backup-20260101-000000-2]" >&2; }
+    # End to end: the copy lands under the free name and touches neither link.
+    p="$(backup_file "$f" 20260101-000000)"; rc=$?
+    { (( rc == 0 )) && [[ "$p" == "$base-2" && -f "$p" && ! -L "$p" ]] && cmp -s "$f" "$p"; } \
+        || { ok=0; echo "backup_file: rc=$rc path=[${p##*/}]" >&2; }
+    [[ "$(readlink "$base")|$(readlink "$base-1")" == "$d/nowhere-0|$d/nowhere-1" ]] || { ok=0; echo "a dangling link was rewritten" >&2; }
+    [[ ! -e "$d/nowhere-0" && ! -e "$d/nowhere-1" ]] || { ok=0; echo "the copy wrote through a link and created its target" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "backup_path treats a dangling symlink as a free name"; fi
+fi
+
+if it "backup: backup_file fails and prints nothing when the copy cannot be made"; then
+    d="$(mktemp -d)"; ok=1
+    out="$(backup_file "$d/does-not-exist" 20260101-000000 2>/dev/null)"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 for a file that is not there" >&2; }
+    [[ -z "$out" ]] || { ok=0; echo "printed [$out] for a backup that was not made" >&2; }
+    [[ "$(find "$d" -type f | wc -l | tr -d ' ')" == 0 ]] || { ok=0; echo "left a file behind" >&2; }
+    # ...and the same call works once the file is there (a missing helper also "fails").
+    printf 'X' >"$d/there"
+    out="$(backup_file "$d/there" 20260101-000000 2>/dev/null)"; rc=$?
+    (( rc == 0 )) && [[ "$out" == "$d/there.autoos-backup-20260101-000000" && -f "$out" ]] \
+        || { ok=0; echo "a valid backup did not work: rc=$rc out=[$out]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "backup_file does not report a failed copy honestly"; fi
+fi
+
+if it "backup: two changing writes in one second keep the user's original"; then
+    d="$(mktemp -d)"; f="$d/.zshrc"
+    printf 'ORIGINAL\n' >"$f"
+    (
+        AUTOOS_DRY_RUN=0
+        date() { printf '20260101-000000\n'; }   # every backup lands in the same second
+        append_line_once "$f" "AutoOS:one" "export ONE=1  # AutoOS:one"
+        append_line_once "$f" "AutoOS:two" "export TWO=2  # AutoOS:two"
+    ) >/dev/null 2>&1
+    ok=1
+    [[ "$(cat "$f.autoos-backup-20260101-000000" 2>/dev/null)" == "ORIGINAL" ]] \
+        || { ok=0; echo "the oldest backup is [$(cat "$f.autoos-backup-20260101-000000" 2>/dev/null)], not the seed" >&2; }
+    grep -q 'AutoOS:one' "$f.autoos-backup-20260101-000000-1" 2>/dev/null \
+        || { ok=0; echo "the second backup (state before the second write) is missing" >&2; }
+    grep -q 'AutoOS:two' "$f" || { ok=0; echo "the second write did not land" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a second write in the same second destroyed the user's original"; fi
+fi
+
+# ...-10 sorts before ...-2 by name, so "the newest backup" cannot be the last
+# name: undo picks by modification time.
+if it "backup: undo restores the newest backup, not the last name (-10 sorts before -2)"; then
+    ok=1
+    # Written one after the other (rising mtimes), and all inside one clock tick.
+    for spread in rising equal; do
+        scratch="$(mktemp -d)"; target="$scratch/.zshrc"; printf 'NOW\n' >"$target"
+        n=0
+        for sfx in "" -1 -2 -10; do
+            printf 'state%s\n' "$sfx" >"$target.autoos-backup-20260101-000000$sfx"
+            n=$((n+1))
+            if [[ "$spread" == rising ]]; then touch -d "2026-01-01 00:00:0$n" "$target.autoos-backup-20260101-000000$sfx"
+            else touch -d "2026-01-01 00:00:00" "$target.autoos-backup-20260101-000000$sfx"; fi
+        done
+        ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; autoos_undo 1 >/dev/null 2>&1 )
+        body="$(cat "$target")"
+        [[ "$body" == "state-10" ]] || { ok=0; echo "$spread mtimes: restored [$body], expected [state-10]" >&2; }
+        rm -rf "$scratch"
+    done
+    if (( ok )); then pass; else fail "undo restored a backup that is not the newest"; fi
+fi
+
+# backup_newest broke a tie between equal mtimes with `sort -V`, which BSD and
+# macOS sort do not have (the plain-sort fallback ranks -2 above -10). A `sort`
+# that rejects -V the way BSD sort does must not change the answer, so the
+# suffix is compared in bash. The stamp decides first: a later second beats an
+# earlier second's higher counter.
+if it "backup: backup_newest picks -10 over -2 on equal mtimes without sort -V"; then
+    d="$(mktemp -d)"; bin="$(mktemp -d)"; ok=1
+    real_sort="$(command -v sort)"
+    printf '#!/bin/sh\nfor a in "$@"; do\n    case "$a" in\n        -V|--version-sort) echo "sort: invalid option -- V (test stub: a sort without version sort)" >&2; exit 2 ;;\n    esac\ndone\nexec %s "$@"\n' "$real_sort" >"$bin/sort"
+    chmod +x "$bin/sort"
+    for stamp in 20260101-000000 S; do
+        f="$d/x-$stamp"; : >"$f"
+        for sfx in "" -1 -2 -10; do
+            : >"$f.autoos-backup-$stamp$sfx"; touch -d "2026-01-01 00:00:00" "$f.autoos-backup-$stamp$sfx"
+        done
+        got="$( PATH="$bin:$PATH"; backup_newest "$f" 2>&1 )"
+        [[ "$got" == "$f.autoos-backup-$stamp-10" ]] || { ok=0; echo "stamp $stamp: the newest is [${got##*/}], expected [x-$stamp.autoos-backup-$stamp-10]" >&2; }
+    done
+    # A later stamp with no counter beats an earlier stamp's -10 (same mtime).
+    f="$d/y"; : >"$f"
+    for n in 20260101-000000 20260101-000000-10 20260101-000001; do
+        : >"$f.autoos-backup-$n"; touch -d "2026-01-01 00:00:00" "$f.autoos-backup-$n"
+    done
+    got="$( PATH="$bin:$PATH"; backup_newest "$f" 2>&1 )"
+    [[ "$got" == "$f.autoos-backup-20260101-000001" ]] || { ok=0; echo "mixed stamps: the newest is [${got##*/}], expected [y.autoos-backup-20260101-000001]" >&2; }
+    # No backup at all: prints nothing, still succeeds.
+    got="$( backup_newest "$d/none" 2>&1 )"; rc=$?
+    { [[ -z "$got" ]] && (( rc == 0 )); } || { ok=0; echo "no backup: printed [$got] rc=$rc" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "backup_newest depends on sort -V to rank equal mtimes"; fi
+fi
+
+# backup_file returns non-zero when the copy fails (full disk, read-only
+# directory). Nine call sites moved onto it and eight ignored that answer, so
+# the file was then modified with NO backup - AGENTS.md hard rule 5 broken in
+# exactly the case the helper detects. install_claude_autostart is the model:
+# a failed backup leaves the file alone, says so, and reports failure.
+#
+# backup_fail_bin: prints a scratch dir holding a `cp` that refuses any
+# operand named *.autoos-backup-* (creating a backup, or reading one for a
+# restore) and delegates to the real cp for everything else. The copy fails
+# deterministically, with no root tricks. The caller puts the dir first on PATH
+# inside a subshell and removes it afterwards.
+backup_fail_bin() {
+    local d real; d="$(mktemp -d)"; real="$(command -v cp)"
+    printf '#!/bin/sh\nfor a in "$@"; do\n    case "$a" in\n        *.autoos-backup-*) echo "cp: cannot copy $a: No space left on device (test stub)" >&2; exit 1 ;;\n    esac\ndone\nexec %s "$@"\n' "$real" >"$d/cp"
+    chmod +x "$d/cp"
+    printf '%s\n' "$d"
+}
+
+# backup_count <dir>: how many backups sit anywhere under <dir>.
+backup_count() { find "$1" -name '*.autoos-backup-*' 2>/dev/null | wc -l | tr -d ' '; }
+
+# backup_holds <file> <bytes>: some backup of <file> holds exactly <bytes>.
+backup_holds() {
+    local b
+    for b in "$1".autoos-backup-*; do
+        [[ -f "$b" && "$(cat "$b")" == "$2" ]] && return 0
+    done
+    return 1
+}
+
+if it "backup: append_line_once leaves the file alone and fails when its backup cannot be made"; then
+    d="$(mktemp -d)"; f="$d/.zshrc"; bin="$(backup_fail_bin)"; ok=1
+    printf 'ORIGINAL\n' >"$f"; cp "$f" "$f.orig"
+    out="$( ( PATH="$bin:$PATH"; AUTOOS_DRY_RUN=0; append_line_once "$f" "AutoOS:t" "export T=1  # AutoOS:t" ) 2>&1 )"; rc=$?
+    # cmp, not $(cat): command substitution strips trailing newlines, so a rewrite that only dropped the last one would pass.
+    cmp -s "$f" "$f.orig" || { ok=0; echo "the file was modified without a backup: [$(cat "$f")]" >&2; }
+    [[ "$out" == *"could not back up $f"* ]] || { ok=0; echo "no warning naming the file: [$out]" >&2; }
+    (( rc != 0 )) || { ok=0; echo "rc=0 for a write that did not happen" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: the same call with a working cp does write, and backs up first.
+    out="$( ( AUTOOS_DRY_RUN=0; append_line_once "$f" "AutoOS:t" "export T=1  # AutoOS:t" ) 2>&1 )"; rc=$?
+    { grep -q 'AutoOS:t' "$f" && (( rc == 0 )) && [[ "$(backup_count "$d")" == 1 ]]; } \
+        || { ok=0; echo "control run: rc=$rc backups=$(backup_count "$d") out=[$out]" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "append_line_once edits a file it could not back up"; fi
+fi
+
+if it "backup: install_agy does not run the vendor installer when a profile cannot be backed up"; then
+    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    printf 'original zshrc\n' >"$home/.zshrc"; printf 'original profile\n' >"$home/.profile"
+    cp "$home/.zshrc" "$home/.zshrc.orig"; cp "$home/.profile" "$home/.profile.orig"
+    _agy_run() {   # _agy_run [stub-dir]
+        (
+            HOME="$home"; AUTOOS_DRY_RUN=0; [[ -z "${1:-}" ]] || PATH="$1:$PATH"
+            curl() {
+                local o="" p="" a
+                for a in "$@"; do [[ "$p" == "-o" ]] && o="$a"; p="$a"; done
+                printf '#!/usr/bin/env bash\ntouch "$HOME/vendor-ran"\necho "export PATH=x" >>"$HOME/.zshrc"\necho "export PATH=x" >>"$HOME/.profile"\n' >"$o"
+            }
+            install_agy
+        ) 2>&1
+    }
+    out="$(_agy_run "$bin")"; rc=$?
+    { cmp -s "$home/.zshrc" "$home/.zshrc.orig" && cmp -s "$home/.profile" "$home/.profile.orig"; } \
+        || { ok=0; echo "a profile was edited without a backup: [$(cat "$home/.zshrc")] [$(cat "$home/.profile")]" >&2; }
+    [[ ! -e "$home/vendor-ran" ]] || { ok=0; echo "the vendor installer ran although a profile could not be backed up" >&2; }
+    [[ "$out" == *"could not back up $home/"* ]] || { ok=0; echo "no warning naming the profile: [${out:0:300}]" >&2; }
+    (( rc != 0 )) || { ok=0; echo "rc=0 for an installer that did not run" >&2; }
+    [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: with a working cp the vendor installer runs and both profiles are kept.
+    out="$(_agy_run)"; rc=$?
+    { (( rc == 0 )) && [[ -e "$home/vendor-ran" && "$(backup_count "$home")" == 2 ]]; } \
+        || { ok=0; echo "control run: rc=$rc backups=$(backup_count "$home") out=[${out:0:300}]" >&2; }
+    rm -rf "$home" "$bin"
+    if (( ok )); then pass; else fail "install_agy lets its vendor installer edit profiles it could not back up"; fi
+fi
+
+if it "backup: the Qwen Code routing does not run when settings.json cannot be backed up"; then
+    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    mkdir -p "$home/.qwen"; printf '{"mine": true}\n' >"$home/.qwen/settings.json"
+    cp "$home/.qwen/settings.json" "$home/.qwen/settings.json.orig"
+    _qwen_run() {   # _qwen_run [stub-dir]
+        (
+            SYS_HOME="$home"; AUTOOS_DRY_RUN=0; OMNIROUTE_API_KEY=k1; AUTOOS_OMNIROUTE_KEY=k2
+            [[ -z "${1:-}" ]] || PATH="$1:$PATH"
+            has_cmd() { [[ "$1" == qwen || "$1" == omniroute ]]; }
+            omniroute() { touch "$home/omniroute-ran"; printf '{"routed": true}\n' >"$SYS_HOME/.qwen/settings.json"; }
+            route_detected_clis_to_gateway
+        ) 2>&1
+    }
+    out="$(_qwen_run "$bin")"
+    cmp -s "$home/.qwen/settings.json" "$home/.qwen/settings.json.orig" || { ok=0; echo "settings.json was modified without a backup: [$(cat "$home/.qwen/settings.json")]" >&2; }
+    [[ ! -e "$home/omniroute-ran" ]] || { ok=0; echo "omniroute setup-qwen ran although settings.json could not be backed up" >&2; }
+    [[ "$out" == *"could not back up $home/.qwen/settings.json"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
+    [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: with a working cp the routing runs, after a backup of the original.
+    out="$(_qwen_run)"
+    { [[ -e "$home/omniroute-ran" && "$(backup_count "$home")" == 1 ]] \
+        && [[ "$(cat "$home"/.qwen/settings.json.autoos-backup-*)" == '{"mine": true}' ]]; } \
+        || { ok=0; echo "control run: backups=$(backup_count "$home") out=[${out:0:300}]" >&2; }
+    rm -rf "$home" "$bin"
+    if (( ok )); then pass; else fail "Qwen Code routing edits a settings.json it could not back up"; fi
+fi
+
+if it "backup: route_zed_to_proxy leaves settings.json alone and fails when its backup cannot be made"; then
+    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    mkdir -p "$home/.config/zed"; printf '{"theme":"mine"}' >"$home/.config/zed/settings.json"
+    cp "$home/.config/zed/settings.json" "$home/.config/zed/settings.json.orig"   # no final newline: a rewrite that ADDS one must fail too
+    out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; route_zed_to_proxy ) 2>&1 )"; rc=$?
+    cmp -s "$home/.config/zed/settings.json" "$home/.config/zed/settings.json.orig" || { ok=0; echo "settings.json was modified without a backup: [$(cat "$home/.config/zed/settings.json")]" >&2; }
+    [[ "$out" == *"could not back up $home/.config/zed/settings.json"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
+    (( rc != 0 )) || { ok=0; echo "rc=0 for a routing that did not happen" >&2; }
+    [[ "$out" != *"routed to OmniRoute"* ]] || { ok=0; echo "reported success" >&2; }
+    [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: with a working cp the merge lands and the original is kept.
+    out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; route_zed_to_proxy ) 2>&1 )"; rc=$?
+    { (( rc == 0 )) && grep -q 'autoos-omniroute' "$home/.config/zed/settings.json" \
+        && [[ "$(cat "$home"/.config/zed/settings.json.autoos-backup-*)" == '{"theme":"mine"}' ]]; } \
+        || { ok=0; echo "control run: rc=$rc out=[${out:0:300}]" >&2; }
+    rm -rf "$home" "$bin"
+    if (( ok )); then pass; else fail "route_zed_to_proxy edits a settings.json it could not back up"; fi
+fi
+
+if it "backup: register_antigravity_mcp_server leaves the config alone when its backup cannot be made"; then
+    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    cfg="$home/.gemini/config/mcp_config.json"
+    mkdir -p "${cfg%/*}"; printf '{"mcpServers": {"keep": {"command": "x"}}}\n' >"$cfg"
+    before="$(cat "$cfg")"; cp "$cfg" "$cfg.orig"
+    out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; register_antigravity_mcp_server newone '{"command":"npx"}' ) 2>&1 )"
+    cmp -s "$cfg" "$cfg.orig" || { ok=0; echo "the config was modified without a backup: [$(cat "$cfg")]" >&2; }
+    [[ "$out" == *"could not back up $cfg"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
+    [[ "$out" != *"configured MCP server"* ]] || { ok=0; echo "reported success" >&2; }
+    [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; register_antigravity_mcp_server newone '{"command":"npx"}' ) 2>&1 )"
+    { grep -q '"newone"' "$cfg" && [[ "$(cat "$cfg".autoos-backup-*)" == "$before" ]]; } \
+        || { ok=0; echo "control run: out=[${out:0:300}]" >&2; }
+    rm -rf "$home" "$bin"
+    if (( ok )); then pass; else fail "register_antigravity_mcp_server edits a config it could not back up"; fi
+fi
+
+if it "backup: enable_project_mcp_server leaves settings.local.json alone when its backup cannot be made"; then
+    repo="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    f="$repo/.claude/settings.local.json"
+    mkdir -p "${f%/*}"; printf '{"theme":"mine"}\n' >"$f"; cp "$f" "$f.orig"
+    out="$( ( AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; enable_project_mcp_server "$repo" omnigraph ) 2>&1 )"
+    cmp -s "$f" "$f.orig" || { ok=0; echo "the file was modified without a backup: [$(cat "$f")]" >&2; }
+    [[ "$out" == *"could not back up $f"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
+    [[ "$out" != *"approved project MCP server"* ]] || { ok=0; echo "reported success" >&2; }
+    [[ "$(backup_count "$repo")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    out="$( ( AUTOOS_DRY_RUN=0; enable_project_mcp_server "$repo" omnigraph ) 2>&1 )"
+    { grep -q 'omnigraph' "$f" && [[ "$(cat "$f".autoos-backup-*)" == '{"theme":"mine"}' ]]; } \
+        || { ok=0; echo "control run: out=[${out:0:300}]" >&2; }
+    rm -rf "$repo" "$bin"
+    if (( ok )); then pass; else fail "enable_project_mcp_server edits a file it could not back up"; fi
+fi
+
+if it "backup: replace_or_append_marked_line leaves the file alone when its backup cannot be made"; then
+    d="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    # Branch 1: the current line is there and a stale old-marker line must go.
+    printf 'keep me\nstale line  # AutoOS:old\ncurrent line  # AutoOS:new\n' >"$d/purge"
+    # Branch 2: only the old-marker line is there and it must be replaced in place.
+    printf 'keep me\nstale line  # AutoOS:old\n' >"$d/replace"
+    cp "$d/purge" "$d/purge.orig"; cp "$d/replace" "$d/replace.orig"
+    out="$( ( PATH="$bin:$PATH"; AUTOOS_DRY_RUN=0
+              replace_or_append_marked_line "$d/purge" "AutoOS:old" "AutoOS:new" "fresh line  # AutoOS:new"
+              replace_or_append_marked_line "$d/replace" "AutoOS:old" "AutoOS:new" "fresh line  # AutoOS:new" ) 2>&1 )"
+    cmp -s "$d/purge" "$d/purge.orig" || { ok=0; echo "the stale-line purge modified the file without a backup: [$(cat "$d/purge")]" >&2; }
+    cmp -s "$d/replace" "$d/replace.orig" || { ok=0; echo "the replace modified the file without a backup: [$(cat "$d/replace")]" >&2; }
+    [[ "$out" == *"could not back up $d/purge"* && "$out" == *"could not back up $d/replace"* ]] \
+        || { ok=0; echo "no warning naming both files: [${out:0:500}]" >&2; }
+    [[ "$out" != *"removed the stale"* && "$out" != *"replaced the"* ]] || { ok=0; echo "reported success" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: with a working cp both edits land, each after a backup.
+    ( AUTOOS_DRY_RUN=0
+      replace_or_append_marked_line "$d/purge" "AutoOS:old" "AutoOS:new" "fresh line  # AutoOS:new"
+      replace_or_append_marked_line "$d/replace" "AutoOS:old" "AutoOS:new" "fresh line  # AutoOS:new" ) >/dev/null 2>&1
+    { ! grep -q 'AutoOS:old' "$d/purge" "$d/replace" && [[ "$(backup_count "$d")" == 2 ]]; } \
+        || { ok=0; echo "control run: purge=[$(cat "$d/purge")] replace=[$(cat "$d/replace")]" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "replace_or_append_marked_line edits a file it could not back up"; fi
+fi
+
+if it "backup: setup_opencode_config leaves a config alone when its backup cannot be made"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    oc="$home/.config/opencode"; mkdir -p "$oc"
+    printf '{"model": "anthropic/mine"}\n' >"$oc/opencode.json"
+    printf '{"model": "anthropic/mine"}\n' >"$oc/config.json"
+    for f in opencode.json config.json; do cp "$oc/$f" "$home/$f.orig"; done   # outside $oc: the stray-entries check lists it
+    _oc_fail_run() {   # _oc_fail_run [stub-dir]
+        ( SYS_HOME="$home" AUTOOS_DRY_RUN=0 AUTOOS_ROOT="$ROOT"
+          [[ -z "${1:-}" ]] || PATH="$1:$PATH"
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          opencode_is_v2() { return 1; }
+          OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config 2>&1 )
+    }
+    out="$(_oc_fail_run "$bin")"
+    for f in opencode.json config.json; do
+        cmp -s "$oc/$f" "$home/$f.orig" || { ok=0; echo "$f was modified without a backup: [$(head -c 120 "$oc/$f")]" >&2; }
+    done
+    [[ "$out" == *"could not back up $oc/config.json"* && "$out" == *"could not back up $oc/opencode.json"* ]] \
+        || { ok=0; echo "no warning naming both files: [${out:0:500}]" >&2; }
+    [[ "$(ls -A "$oc" | tr '\n' ' ')" == "config.json opencode.json " ]] || { ok=0; echo "stray entries: [$(ls -A "$oc" | tr '\n' ' ')]" >&2; }
+    # Control: with a working cp both files are merged and the originals kept.
+    out="$(_oc_fail_run)"
+    { grep -q 'omniroute' "$oc/config.json" "$oc/opencode.json" \
+        && backup_holds "$oc/config.json" '{"model": "anthropic/mine"}' \
+        && backup_holds "$oc/opencode.json" '{"model": "anthropic/mine"}'; } \
+        || { ok=0; echo "control run: backups=$(backup_count "$oc") out=[${out:0:300}]" >&2; }
+    rm -rf "$home" "$bin"
+    if (( ok )); then pass; else fail "setup_opencode_config edits a config it could not back up"; fi
+    fi
+fi
+
+if it "backup: undo says restored only when the copy worked, and fails when it did not"; then
+    scratch="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    target="$scratch/.zshrc"; printf 'NOW\n' >"$target"
+    printf 'BEFORE\n' >"$target.autoos-backup-20260101-000000"
+    out="$( ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; autoos_undo 1 ) 2>&1 )"; rc=$?
+    [[ "$(cat "$target")" == NOW ]] || { ok=0; echo "the file changed although the restore failed: [$(cat "$target")]" >&2; }
+    [[ "$out" != *"restored $target"* ]] || { ok=0; echo "claimed a restore that did not happen: [${out:0:400}]" >&2; }
+    [[ "$out" == *"could not restore $target"* ]] || { ok=0; echo "no message naming the file: [${out:0:400}]" >&2; }
+    (( rc != 0 )) || { ok=0; echo "rc=0 for an undo that restored nothing" >&2; }
+    # Control: with a working cp it restores, says so, and succeeds.
+    out="$( ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; autoos_undo 1 ) 2>&1 )"; rc=$?
+    { [[ "$(cat "$target")" == BEFORE && "$out" == *"restored $target"* ]] && (( rc == 0 )); } \
+        || { ok=0; echo "control run: rc=$rc body=[$(cat "$target")] out=[${out:0:300}]" >&2; }
+    rm -rf "$scratch" "$bin"
+    if (( ok )); then pass; else fail "autoos_undo reports a restore that did not happen"; fi
+fi
+
+# Several originals, ONE restore failing (a read-only or vanished destination):
+# the others are still restored, the failing one is named and stays as it was,
+# the return code says the undo was not complete, and no line claims the failed
+# file (or "everything") was restored. autoos_undo prints no summary line - the
+# per-file "restored <file>" lines are the only claim, so they are counted.
+if it "backup: undo restores the other files when one restore fails, names the failure and returns non-zero"; then
+    scratch="$(mktemp -d)"; bin="$(mktemp -d)"; ok=1
+    # A cp that refuses one destination (its last operand) and delegates for the rest.
+    printf '#!/bin/sh\nfor a in "$@"; do last="$a"; done\ncase "$last" in\n    */.bashrc) echo "cp: cannot create regular file $last: Permission denied (test stub)" >&2; exit 1 ;;\nesac\nexec %s "$@"\n' "$(command -v cp)" >"$bin/cp"
+    chmod +x "$bin/cp"
+    # Sorted, the failing one sits in the middle: one restore comes before it, one after.
+    for n in .aliases .bashrc .zshrc; do
+        printf 'NOW\n' >"$scratch/$n"; printf 'BEFORE\n' >"$scratch/$n.autoos-backup-20260101-000000"
+    done
+    out="$( ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; autoos_undo 1 ) 2>&1 )"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 for an undo in which a restore failed: [${out:0:300}]" >&2; }
+    cmp -s "$scratch/.aliases" <(printf 'BEFORE\n') || { ok=0; echo ".aliases (before the failure) was not restored: [$(cat "$scratch/.aliases")]" >&2; }
+    cmp -s "$scratch/.zshrc" <(printf 'BEFORE\n') || { ok=0; echo ".zshrc (after the failure) was not restored: [$(cat "$scratch/.zshrc")]" >&2; }
+    cmp -s "$scratch/.bashrc" <(printf 'NOW\n') || { ok=0; echo "the failing file changed: [$(cat "$scratch/.bashrc")]" >&2; }
+    [[ "$out" == *"could not restore $scratch/.bashrc"* ]] || { ok=0; echo "no message naming the failed file: [${out:0:400}]" >&2; }
+    [[ "$out" != *"restored $scratch/.bashrc"* ]] || { ok=0; echo "claimed a restore that did not happen: [${out:0:400}]" >&2; }
+    [[ "$out" == *"restored $scratch/.aliases"* && "$out" == *"restored $scratch/.zshrc"* ]] || { ok=0; echo "the restores that worked are not reported: [${out:0:400}]" >&2; }
+    [[ "$(grep -c 'restored /' <<<"$out")" == 2 ]] || { ok=0; echo "expected exactly two restored lines, got $(grep -c 'restored /' <<<"$out")" >&2; }
+    # Control: with a working cp the same undo restores all three and succeeds.
+    out="$( ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; autoos_undo 1 ) 2>&1 )"; rc=$?
+    { (( rc == 0 )) && [[ "$(grep -c 'restored /' <<<"$out")" == 3 ]] && cmp -s "$scratch/.bashrc" <(printf 'BEFORE\n'); } \
+        || { ok=0; echo "control run: rc=$rc restored=$(grep -c 'restored /' <<<"$out") .bashrc=[$(cat "$scratch/.bashrc")]" >&2; }
+    rm -rf "$scratch" "$bin"
+    if (( ok )); then pass; else fail "autoos_undo stops at, or hides, a restore that failed"; fi
+fi
+
 if it "undo never uninstalls anything"; then
     # The safety property, asserted on the source rather than by removing software.
     if grep -qE '(apt-get remove|brew uninstall|npm uninstall)' lib/linux/install.sh; then
@@ -2967,6 +3452,149 @@ if it "install_antigravity writes no key and no source list when the key fetch f
     if (( ok )); then pass; else fail "a failed Antigravity key fetch leaves a half-configured apt"; fi
 fi
 
+# VS Code, Google Chrome and the GitHub CLI share the pattern Antigravity was
+# fixed for: guard on the key file, fetch, install, write the apt source line.
+# install_component runs an installer with errexit OFF, so an unchecked failed
+# fetch installed an EMPTY key file that the `-f` guard then trusted forever
+# (apt failed on every later run). The key must exist only when it is non-empty.
+#
+# apt_key_case <vscode|chrome|gh>: sets AK_* for one installer.
+apt_key_case() {
+    case "$1" in
+        vscode) AK_FN=install_vscode; AK_KEY=/etc/apt/keyrings/packages.microsoft.gpg
+                AK_LIST=/etc/apt/sources.list.d/vscode.list; AK_PKG=code
+                AK_URL=https://packages.microsoft.com/keys/microsoft.asc; AK_BODY="DEARMORED:ARMORED-KEY"
+                AK_LINE="deb [arch=amd64,arm64,armhf signed-by=$AK_KEY] https://packages.microsoft.com/repos/code stable main" ;;
+        chrome) AK_FN=install_google_chrome; AK_KEY=/etc/apt/keyrings/google-chrome.gpg
+                AK_LIST=/etc/apt/sources.list.d/google-chrome.list; AK_PKG=google-chrome-stable
+                AK_URL=https://dl.google.com/linux/linux_signing_key.pub; AK_BODY="DEARMORED:ARMORED-KEY"
+                AK_LINE="deb [arch=amd64 signed-by=$AK_KEY] http://dl.google.com/linux/chrome/deb/ stable main" ;;
+        gh)     AK_FN=install_gh; AK_KEY=/etc/apt/keyrings/githubcli-archive-keyring.gpg
+                AK_LIST=/etc/apt/sources.list.d/github-cli.list; AK_PKG=gh
+                AK_URL=https://cli.github.com/packages/githubcli-archive-keyring.gpg; AK_BODY="ARMORED-KEY"
+                AK_LINE="deb [arch=amd64 signed-by=$AK_KEY] https://cli.github.com/packages stable main" ;;
+    esac
+}
+
+# apt_key_run <scratch> <installer function> [fail-curl|empty-body]
+# One installer run in its own subshell against a scratch apt tree
+# (AUTOOS_APT_PREFIX). Every writing stub refuses a path outside the scratch
+# tree, so even code that ignores the seam cannot touch the real /etc/apt, as
+# root or not. Temp files go to <scratch>/tmp so leftovers are visible.
+apt_key_run() {
+    local sb="$1" fn="$2" mode="${3:-}"
+    (
+        AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""; AUTOOS_APT_PREFIX="$sb"; APT_UPDATED=0
+        export TMPDIR="$sb/tmp"; mkdir -p "$TMPDIR"
+        log="$sb/calls.log"
+        inside() { [[ "$1" == "$sb"/* ]] || { printf 'REFUSED (outside the scratch tree) %s\n' "$1" >>"$log"; return 1; }; }
+        curl() {
+            printf 'curl %s\n' "$*" >>"$log"
+            [[ "$mode" == fail-curl ]] && return 22
+            [[ "$mode" == empty-body ]] && return 0
+            printf 'ARMORED-KEY\n'
+        }
+        gpg() { printf 'gpg %s\n' "$*" >>"$log"; sed 's/^/DEARMORED:/'; }
+        install() {
+            printf 'install %s\n' "$*" >>"$log"
+            local src="${*: -2:1}" dst="${*: -1}"
+            inside "$dst" || return 1
+            command mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
+        }
+        tee() {
+            printf 'tee %s\n' "$*" >>"$log"
+            inside "${*: -1}" || { cat >/dev/null; return 1; }
+            command tee "$@"
+        }
+        mkdir() { printf 'mkdir %s\n' "$*" >>"$log"; inside "${*: -1}" || return 1; command mkdir "$@"; }
+        # shellcheck disable=SC2120  # stub: the installers (sourced, not visible here) call it with arguments
+        run() { printf 'run %s\n' "$*" >>"$log"; }
+        has_cmd() { [[ "$1" == apt-get ]]; }
+        dpkg() { printf 'amd64\n'; }
+        "$fn"
+    ) 2>&1
+}
+
+for _k in vscode chrome gh; do
+    if it "apt keys: $_k leaves no key when the download fails"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; ok=1
+        for mode in fail-curl empty-body; do
+            rm -rf "${sb:?}/etc" "${sb:?}/tmp" "${sb:?}/calls.log"; mkdir -p "$sb/etc/apt/sources.list.d"
+            out="$(apt_key_run "$sb" "$AK_FN" "$mode")"; rc=$?
+            (( rc != 0 )) || { ok=0; echo "$mode: rc=0 counts a failed key download as installed" >&2; }
+            [[ -z "$(find "$sb/etc" -type f)" ]] || { ok=0; echo "$mode: left files behind: $(find "$sb/etc" -type f | tr '\n' ' ')" >&2; }
+            [[ -z "$(find "$sb/tmp" -type f)" ]] || { ok=0; echo "$mode: temp file not removed" >&2; }
+            grep -qF -- "$AK_URL" "$sb/calls.log" 2>/dev/null || { ok=0; echo "$mode: the key download was never attempted" >&2; }
+            ! grep -q 'apt-get install' "$sb/calls.log" 2>/dev/null || { ok=0; echo "$mode: went on to apt-get install" >&2; }
+            [[ "$out" == *"not installed"* ]] || { ok=0; echo "$mode: no reason given: ${out:0:200}" >&2; }
+        done
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "a failed $_k key download leaves an empty key or a source line apt cannot use"; fi
+    fi
+
+    if it "apt keys: $_k an existing empty key is replaced on the next successful run"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/keyrings" "$sb/etc/apt/sources.list.d"
+        # What the old code left behind after a failed download: an empty key
+        # and the source line that names it.
+        : >"$sb$AK_KEY"; printf '%s\n' "$AK_LINE" >"$sb$AK_LIST"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc=$?
+        ok=1
+        (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:200}" >&2; }
+        [[ "$(cat "$sb$AK_KEY" 2>/dev/null)" == "$AK_BODY" ]] || { ok=0; echo "the empty key was trusted, not replaced: [$(cat "$sb$AK_KEY" 2>/dev/null)]" >&2; }
+        [[ "$(cat "$sb$AK_LIST")" == "$AK_LINE" ]] || { ok=0; echo "source line changed: $(cat "$sb$AK_LIST")" >&2; }
+        grep -qx "run apt-get install -y $AK_PKG" "$sb/calls.log" 2>/dev/null || { ok=0; echo "the package was not installed: $(cat "$sb/calls.log" 2>/dev/null)" >&2; }
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "an empty key from an earlier bad run is trusted forever"; fi
+    fi
+
+    # The suite's install() stub only copies, so a key installed without the
+    # ownership and mode would pass every other test here. The stub logs its argv;
+    # install(1) without -m gives 0755, and the key must be root-owned and 0644
+    # for apt (sandboxed as _apt) to read it.
+    if it "apt keys: $_k the key is installed root-owned with mode 644"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc=$?
+        ok=1
+        (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:200}" >&2; }
+        inst="$(grep '^install ' "$sb/calls.log" 2>/dev/null)"
+        [[ "$(grep -c . <<<"$inst")" == 1 ]] || { ok=0; echo "expected exactly one install call, got: [$inst]" >&2; }
+        for want in " -D " " -o root " " -g root " " -m 644 "; do
+            [[ " $inst " == *"$want"* ]] || { ok=0; echo "the key install lacks [${want//[[:space:]]/}]: [$inst]" >&2; }
+        done
+        [[ "${inst##* }" == "$sb$AK_KEY" ]] || { ok=0; echo "the key was not installed to $AK_KEY: [$inst]" >&2; }
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "the $_k apt key is not installed root-owned with mode 644"; fi
+    fi
+
+    if it "apt keys: $_k a second successful run is unchanged"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc1=$?
+        ok=1
+        (( rc1 == 0 )) || { ok=0; echo "first run rc=$rc1: ${out:0:200}" >&2; }
+        [[ "$(cat "$sb$AK_KEY" 2>/dev/null)" == "$AK_BODY" ]] || { ok=0; echo "first run: key is [$(cat "$sb$AK_KEY" 2>/dev/null)]" >&2; }
+        [[ "$(cat "$sb$AK_LIST" 2>/dev/null)" == "$AK_LINE" ]] || { ok=0; echo "first run: source line is [$(cat "$sb$AK_LIST" 2>/dev/null)]" >&2; }
+        [[ "$(grep '^run ' "$sb/calls.log" 2>/dev/null)" == $'run apt-get update -y\nrun apt-get install -y '"$AK_PKG" ]] \
+            || { ok=0; echo "first run: apt commands: $(grep '^run ' "$sb/calls.log" 2>/dev/null | tr '\n' '|')" >&2; }
+        before="$(cksum "$sb$AK_KEY" "$sb$AK_LIST" 2>/dev/null)"
+        : >"$sb/calls.log"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc2=$?
+        after="$(cksum "$sb$AK_KEY" "$sb$AK_LIST" 2>/dev/null)"
+        (( rc2 == 0 )) || { ok=0; echo "second run rc=$rc2: ${out:0:200}" >&2; }
+        writes="$(grep -E '^(curl|gpg|install|tee) ' "$sb/calls.log" || true)"
+        [[ -z "$writes" ]] || { ok=0; echo "the second run wrote again: $writes" >&2; }
+        [[ "$before" == "$after" ]] || { ok=0; echo "key or source list changed on the second run" >&2; }
+        [[ "$(wc -l <"$sb$AK_LIST" 2>/dev/null)" == 1 ]] || { ok=0; echo "source list grew" >&2; }
+        grep -qx "run apt-get install -y $AK_PKG" "$sb/calls.log" || { ok=0; echo "apt's own no-op install was skipped" >&2; }
+        [[ -z "$(find "$sb/tmp" -type f)" ]] || { ok=0; echo "temp file left behind" >&2; }
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "a second $_k run is not a no-op"; fi
+    fi
+done
+
 if it "the antigravity catalog entry needs no download URL: no prompt, and no catalog asks antigravity_url"; then
     problems="$(python3 - 2>&1 <<'PY'
 import json
@@ -3515,6 +4143,72 @@ print(bool(e.get('OMNIGRAPH_BASE_URL')), e.get('OMNIGRAPH_GRAPH_ID'), 'OMNIGRAPH
     assert_eq "$got" "True autoos False"
 fi
 
+# The omnigraph_url answer decides where every client's bridge points.
+# install_agent_skills honoured it; the Zed writer hardcoded localhost:8080, so
+# a machine with a remote omnigraph got Zed pointed at nothing. One helper,
+# omnigraph_base_url, now derives it for both.
+# zed_omni_url <answer or empty>: the OMNIGRAPH_BASE_URL route_zed_to_proxy writes.
+zed_omni_url() {
+    local scratch out
+    scratch="$(mktemp -d)"
+    (
+        AUTOOS_ANSWERS=()
+        [[ -z "$1" ]] || AUTOOS_ANSWERS[omnigraph_url]="$1"
+        SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 route_zed_to_proxy >/dev/null 2>&1
+    )
+    out="$(python3 -c "
+import json, sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['context_servers']['omnigraph']['env']['OMNIGRAPH_BASE_URL'])
+" "$scratch/.config/zed/settings.json" 2>&1)"
+    rm -rf "$scratch"
+    printf '%s' "$out"
+}
+
+if it "zed: the omnigraph entry uses the omnigraph_url answer"; then
+    ok=1
+    got="$(zed_omni_url "https://graph.example.invalid:9000/")"
+    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got], not the answer without its trailing slash" >&2; }
+    helper="$( ( AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="https://graph.example.invalid:9000/"; omnigraph_base_url ) 2>&1)"
+    [[ "$helper" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
+    if (( ok )); then pass; else fail "the Zed omnigraph entry ignores the omnigraph_url answer"; fi
+fi
+
+# The contract is "no trailing slash", not "one slash off": consumers append
+# /paths to the base, and the Windows side does .TrimEnd('/') (every trailing
+# slash). A pasted "http://host//" must not survive as "http://host/".
+if it "omnigraph: omnigraph_base_url strips every trailing slash and nothing else"; then
+    ok=1
+    while IFS='|' read -r given want; do
+        got="$( ( AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="$given"; omnigraph_base_url ) 2>&1)"
+        [[ "$got" == "$want" ]] || { ok=0; echo "omnigraph_url [$given]: the helper says [$got], expected [$want]" >&2; }
+    done <<'CASES'
+http://host|http://host
+http://host/|http://host
+http://host//|http://host
+http://host:8080///|http://host:8080
+http://host/graph//|http://host/graph
+http://host//graph/|http://host//graph
+/|http://localhost:8080
+//|http://localhost:8080
+CASES
+    # ...and the Zed writer, the other consumer, writes the same stripped value.
+    got="$(zed_omni_url "https://graph.example.invalid:9000//")"
+    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got] for a doubled trailing slash" >&2; }
+    if (( ok )); then pass; else fail "omnigraph_base_url leaves a trailing slash on the base URL"; fi
+fi
+
+if it "zed: the omnigraph entry defaults to localhost:8080"; then
+    ok=1
+    got="$(zed_omni_url "")"
+    [[ "$got" == "http://localhost:8080" ]] || { ok=0; echo "the Zed entry says [$got]" >&2; }
+    # Both consumers take the default from the one helper, so they cannot drift.
+    helper="$( ( AUTOOS_ANSWERS=(); omnigraph_base_url ) 2>&1)"
+    [[ "$helper" == "http://localhost:8080" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
+    [[ "$(grep -c '\$(omnigraph_base_url)' lib/linux/install.sh)" -ge 2 ]] \
+        || { ok=0; echo "the helper is not called by both install_agent_skills and route_zed_to_proxy" >&2; }
+    if (( ok )); then pass; else fail "the omnigraph default differs between the Zed writer and install_agent_skills"; fi
+fi
+
 if it "the omnigraph env file is private, merged, linked for systemd, and stable on a re-run"; then
     tmp="$(mktemp -d)"
     printf 'KEEP_ME=1\nOMNIGRAPH_BASE_URL=http://old.invalid\n' >"$tmp/.autoos-omnigraph.env"
@@ -3631,6 +4325,51 @@ if it "antigravity's omnigraph entry pins a graph id (the bridge refuses to star
     assert_eq "$got" "autoos False"
 fi
 
+# The omnigraph_url answer is user input. install_agent_skills used to splice it
+# into the SOURCE of a `python3 -c "..."` string, so a quote, a backslash or
+# Python code in the answer broke the literal or ran (`' + os.system(...) + '`).
+# It travels in the environment now (like the Zed writer's OMNI_BASE) and must
+# arrive byte for byte. Every marker file below is what a payload would create.
+if it "omnigraph: a hostile omnigraph_url answer is data, never python source"; then
+    scratch="$(mktemp -d)"; ok=1
+    payloads=(
+        "http://x/\"; touch $scratch/pwned1; echo \""
+        "http://x/'\$(touch $scratch/pwned2)"
+        "http://x/'\`touch $scratch/pwned3\`"
+        "http://x/' + str(__import__('os').system('touch $scratch/pwned4')) + '"
+        'http://x/a\nb\\c\x41'
+    )
+    i=0
+    for url in "${payloads[@]}"; do
+        i=$((i + 1))
+        (
+            # AUTOOS_ROOT is an empty scratch dir: the repo's own .claude/skills
+            # links are never touched.
+            SYS_HOME="$scratch/home$i"; AUTOOS_ROOT="$scratch/root$i"; AUTOOS_DRY_RUN=0
+            mkdir -p "$SYS_HOME/Documents/code/agent-skills" "$AUTOOS_ROOT"
+            unset OMNIGRAPH_GRAPH_ID OMNIGRAPH_TOKEN
+            AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="$url"
+            clone_or_update() { :; }
+            install_mcp_graphify() { :; }; install_mcp_serena() { :; }
+            install_mcp_playwright() { :; }; install_mcp_context7() { :; }
+            mcp_has_server() { return 1; }; enable_project_mcp_server() { :; }
+            write_omnigraph_env() { :; }
+            register_antigravity_mcp_server() { [[ "$1" == omnigraph ]] && printf '%s' "$2" >"$scratch/spec-$i.json"; return 0; }
+            omnigraph_readiness() { return 0; }
+            install_agent_skills >/dev/null 2>&1
+        )
+        if [[ ! -s "$scratch/spec-$i.json" ]]; then
+            ok=0; echo "payload $i [$url]: no omnigraph spec was produced (the python source broke)" >&2
+        else
+            got="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["env"]["OMNIGRAPH_BASE_URL"])' "$scratch/spec-$i.json")"
+            [[ "$got" == "$url" ]] || { ok=0; echo "payload $i: the config holds [$got], not [$url]" >&2; }
+        fi
+    done
+    compgen -G "$scratch/pwned*" >/dev/null && { ok=0; echo "a payload ran: $(cd "$scratch" && ls -d pwned* | tr '\n' ' ')" >&2; }
+    rm -rf "$scratch"
+    if (( ok )); then pass; else fail "the omnigraph_url answer is interpolated into python source"; fi
+fi
+
 if it "Antigravity MCP config is merged, not replaced"; then
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/.gemini/config"
@@ -3723,6 +4462,289 @@ if it "repo skills link into project .claude/skills and win as skills source"; t
     [[ "$(AUTOOS_ROOT="$tmp" autoos_skills_source)" == "$tmp/.agents/skills" ]] || ok=0
     rm -rf "$tmp"
     if (( ok )); then pass; else fail "vendored skills did not win or were not linked"; fi
+fi
+
+# ─── OpenHands: repo skills mirrored per skill, idempotent settings writer ──
+# oh_setup_run <home> <repo>: setup_openhands_config in a hermetic subshell -
+# scratch HOME and AUTOOS_ROOT, no gateway or provider key, no network - with
+# stdout and stderr merged. AUTOOS_KEYS_FILE points at a file that does not
+# exist so the repo's own keys file is never consulted.
+oh_setup_run() {
+    local home="$1" repo="$2"
+    mkdir -p "$home"
+    (
+        SYS_HOME="$home"; AUTOOS_DRY_RUN=0
+        if [[ -n "$repo" ]]; then AUTOOS_ROOT="$repo"; else unset AUTOOS_ROOT; fi
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY OMNIGRAPH_TOKEN
+        unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY
+        export AUTOOS_KEYS_FILE="$home/no-keys.yml"
+        curl() { return 6; }
+        setup_openhands_config
+    ) 2>&1
+}
+
+# oh_skill_repo <repo>: a scratch AUTOOS_ROOT with two skills (alpha, beta) and
+# one directory without a SKILL.md (nofile) that is not a skill.
+oh_skill_repo() {
+    local repo="$1" n
+    for n in alpha beta; do
+        mkdir -p "$repo/.agents/skills/$n"
+        printf -- '---\nname: %s\ndescription: demo\n---\n' "$n" >"$repo/.agents/skills/$n/SKILL.md"
+    done
+    mkdir -p "$repo/.agents/skills/nofile"
+    printf 'not a skill\n' >"$repo/.agents/skills/nofile/README.md"
+}
+
+if it "openhands: links every repo skill into ~/.openhands/skills"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    dest="$tmp/home/.openhands/skills"; problems=""
+    { [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is not a real directory] "; }
+    for n in alpha beta; do
+        [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
+            || problems+="[$n is not a link to the repo skill (got: $(readlink "$dest/$n" 2>/dev/null || echo none))] "
+        [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
+        [[ "$out" == *"linked $n"* ]] || problems+="[no 'linked $n' line] "
+    done
+    { [[ ! -e "$dest/nofile" && ! -L "$dest/nofile" ]] || problems+="[nofile (no SKILL.md) was linked] "; }
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a second run reports skipped and changes nothing"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    oh_setup_run "$tmp/home" "$tmp/repo" >/dev/null
+    dest="$tmp/home/.openhands/skills"
+    before="$(stat -c '%y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    after="$(stat -c '%y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
+    problems=""
+    [[ "$before" == "$after" ]] || problems+="[the skills directory or a link changed: $before -> $after] "
+    grep -Eq '(^|[^[:alnum:]])(linked|repointed) [a-z]' <<<"$out" && problems+="[second run printed a linked/repointed line] "
+    [[ "$out" == *skipped* ]] || problems+="[second run never says skipped] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: keeps a user's own skill"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"
+    mkdir -p "$dest/alpha" "$dest/mine"
+    printf 'my own alpha\n' >"$dest/alpha/SKILL.md"
+    printf 'my own skill\n'  >"$dest/mine/SKILL.md"
+    ln -s /nonexistent-user-skill "$dest/foreign"
+    snap() { ( cd "$dest" && find alpha mine -type f -exec sha256sum {} + | sort; readlink foreign; ls -A ) ; }
+    before="$(snap)"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    after="$(snap)"
+    problems=""
+    [[ -d "$dest/alpha" && ! -L "$dest/alpha" ]] || problems+="[the user's own alpha is no longer a real directory] "
+    [[ "$(readlink "$dest/beta" 2>/dev/null)" == "$tmp/repo/.agents/skills/beta" ]] || problems+="[beta was not linked next to the user's skills] "
+    # beta is the one new entry: nothing else may differ from before.
+    [[ "$(grep -v '^beta$' <<<"$after")" == "$before" ]] || problems+="[the user's skills changed: $before -> $after] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: repairs a dangling link into the repo"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    # Ours: the exact shape link_skill_dirs creates (<checkout>/.agents/skills/<name>)
+    # into a checkout that has since moved or been renamed, so it dangles.
+    ln -s "$tmp/moved-checkout/.agents/skills/alpha" "$dest/alpha"
+    ln -s /nonexistent-elsewhere/beta "$dest/beta"                 # not ours, dangling: hands off
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/skills/alpha" ]] || problems+="[alpha still points at $(readlink "$dest/alpha")] "
+    [[ -f "$dest/alpha/SKILL.md" ]] || problems+="[alpha does not resolve after the repair] "
+    [[ "$(readlink "$dest/beta")" == "/nonexistent-elsewhere/beta" ]] || problems+="[a foreign dangling link was rewritten to $(readlink "$dest/beta")] "
+    [[ "$out" == *"repointed alpha"* ]] || problems+="[no 'repointed alpha' line] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# Only a link this function made is ours (AGENTS.md hard rule 4): it dangles AND
+# has the exact shape .../.agents/skills/<name> for the same skill. A live link,
+# or a dangling one of another shape, is the user's and stays as it is - even
+# when it points inside the repo's own .agents directory.
+if it "openhands: a live link of your own into .agents/custom is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest" "$tmp/repo/.agents/custom/alpha"
+    printf 'my own alpha\n' >"$tmp/repo/.agents/custom/alpha/SKILL.md"
+    ln -s "$tmp/repo/.agents/custom/alpha" "$dest/alpha"           # live, inside the repo's .agents, not our shape
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/custom/alpha" ]] || problems+="[the user's live link now points at $(readlink "$dest/alpha")] "
+    [[ "$(cat "$dest/alpha/SKILL.md" 2>/dev/null)" == "my own alpha" ]] || problems+="[alpha no longer resolves to the user's own skill] "
+    [[ "$out" != *"repointed alpha"* ]] || problems+="[the live link was reported as repointed] "
+    [[ "$out" == *"kept $dest/alpha"* ]] || problems+="[no 'kept ...alpha' line: the user is not told it was left alone] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/repo/.agents/skills/beta" ]] || problems+="[beta was not linked next to the user's link] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a live link into another checkout's skills is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    # Another checkout with the same skills layout. One sits beside this repo,
+    # one is nested under this repo's own .agents directory (a worktree kept
+    # there): both are live and both have the shape we would create.
+    oh_skill_repo "$tmp/other"
+    oh_skill_repo "$tmp/repo/.agents/nested"
+    ln -s "$tmp/repo/.agents/nested/.agents/skills/alpha" "$dest/alpha"
+    ln -s "$tmp/other/.agents/skills/beta" "$dest/beta"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/nested/.agents/skills/alpha" ]] || problems+="[the link into the nested checkout now points at $(readlink "$dest/alpha")] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/other/.agents/skills/beta" ]] || problems+="[the link into the other checkout now points at $(readlink "$dest/beta")] "
+    [[ "$out" != *"repointed"* ]] || problems+="[a live link was reported as repointed] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a dangling link of another shape is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    ln -s /nonexistent/other/alpha "$dest/alpha"                    # dangling, outside the repo
+    ln -s "$tmp/repo/.agents/skills/beta-renamed" "$dest/beta"      # dangling, inside the repo, not the shape of beta
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "/nonexistent/other/alpha" ]] || problems+="[the dangling link outside the repo now points at $(readlink "$dest/alpha")] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/repo/.agents/skills/beta-renamed" ]] || problems+="[the dangling link of another shape now points at $(readlink "$dest/beta")] "
+    [[ "$out" != *"repointed"* ]] || problems+="[a link of another shape was reported as repointed] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: an existing whole-dir symlink is not written through"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/clone-skills" "$tmp/home/.openhands"
+    ln -s "$tmp/clone-skills" "$tmp/home/.openhands/skills"     # the old whole-dir layout
+    repo_before="$(ls -A "$tmp/repo/.agents/skills")"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$tmp/home/.openhands/skills")" == "$tmp/clone-skills" ]] || problems+="[the whole-dir link was changed] "
+    [[ -z "$(ls -A "$tmp/clone-skills")" ]] || problems+="[links were written through it into the clone: $(ls -A "$tmp/clone-skills" | tr '\n' ' ')] "
+    [[ "$(ls -A "$tmp/repo/.agents/skills")" == "$repo_before" ]] || problems+="[the repo's skills directory gained entries] "
+    [[ "$(grep -c 'rm ' <<<"$out")" == 1 ]] || problems+="[expected one warning naming the rm command, got $(grep -c 'rm ' <<<"$out")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a dry run links nothing"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    out="$( ( AUTOOS_DRY_RUN=1; link_skill_dirs "$tmp/repo/.agents/skills" "$tmp/home/.openhands/skills" ) 2>&1 )"
+    problems=""
+    [[ ! -e "$tmp/home" ]] || problems+="[a dry run created $tmp/home] "
+    [[ "$out" == *"would link"* ]] || problems+="[no 'would link' line: $out] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: second run of the settings writer takes no backup and reports unchanged"; then
+    tmp="$(mktemp -d)"
+    oh="$tmp/home/.openhands"
+    # Name, size and mtime of every backup: a bare count cannot tell a skipped
+    # second run from one that overwrote a same-second backup.
+    oh_backups() { find "$oh" -maxdepth 1 -name 'settings.json.autoos-backup-*' -printf '%f %s %T@\n' | sort; }
+    oh_setup_run "$tmp/home" "" >/dev/null
+    b1="$(oh_backups)"
+    sum1="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    prof1="$(stat -c '%y' "$oh/profiles/openrouter-free.json")"
+    out="$(oh_setup_run "$tmp/home" "")"
+    b2="$(oh_backups)"
+    sum2="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    prof2="$(stat -c '%y' "$oh/profiles/openrouter-free.json")"
+    problems=""
+    [[ "$b1" == "$b2" ]] || problems+="[the second run took or overwrote a settings.json backup: {$b1} -> {$b2}] "
+    [[ "$sum1" == "$sum2" ]] || problems+="[the second run rewrote settings.json] "
+    [[ "$prof1" == "$prof2" ]] || problems+="[the second run rewrote an identical profile] "
+    [[ "$out" == *unchanged* ]] || problems+="[the second run never says unchanged] "
+    [[ "$out" != *"written to"* ]] || problems+="[the second run still says 'written to'] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a BOM'd settings.json keeps the user's keys"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home/.openhands"
+    printf '\xef\xbb\xbf{"custom_user_key": "keep-me", "schema_version": 2}' >"$tmp/home/.openhands/settings.json"
+    oh_setup_run "$tmp/home" "" >/dev/null
+    got="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8-sig")); print(d.get("custom_user_key"), "agent_settings" in d)' "$tmp/home/.openhands/settings.json" 2>&1)"
+    rm -rf "$tmp"
+    assert_eq "$got" "keep-me True"
+fi
+
+if it "openhands: a backup of settings.json never overwrites an earlier one"; then
+    tmp="$(mktemp -d)"
+    oh="$tmp/home/.openhands"; mkdir -p "$oh"
+    seed1='{"user_key": "first original"}'
+    seed2='{"user_key": "second original"}'
+    printf '%s' "$seed1" >"$oh/settings.json"
+    oh_setup_run "$tmp/home" "" >/dev/null
+    printf '%s' "$seed2" >"$oh/settings.json"
+    oh_setup_run "$tmp/home" "" >/dev/null
+    have1=0; have2=0; b=""
+    for b in "$oh"/settings.json.autoos-backup-*; do
+        [[ -f "$b" ]] || continue
+        [[ "$(cat "$b")" == "$seed1" ]] && have1=1
+        [[ "$(cat "$b")" == "$seed2" ]] && have2=1
+    done
+    rm -rf "$tmp"
+    if (( have1 && have2 )); then pass
+    else fail "a backup holding the user's file was overwritten (first original kept: $have1, second original kept: $have2)"; fi
+fi
+
+# A python step that fails writes nothing, and the function must say so instead
+# of printing its success line. python3 is stubbed in a subshell (the function
+# lookup wins over PATH), failing only the one call under test and passing the
+# rest through to the real interpreter.
+if it "openhands: a failing settings writer is reported, not called written"; then
+    tmp="$(mktemp -d)"
+    oh="$tmp/home/.openhands"; mkdir -p "$oh"
+    printf '%s' '{"user_key": "mine"}' >"$oh/settings.json"
+    before="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    out="$(
+        python3() {
+            # The settings/profiles script: "python3 - <openhands dir> <secrets> <models>" on stdin.
+            if [[ "${1:-}" == "-" && "${2:-}" == */.openhands ]]; then
+                cat >/dev/null; echo "stub: the settings script failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" ""
+    )"
+    after="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    problems=""
+    [[ "$before" == "$after" ]] || problems+="[settings.json changed although its writer failed] "
+    ! compgen -G "$oh/settings.json.autoos-backup-*" >/dev/null || problems+="[a backup was taken for a file that was not written] "
+    [[ "$out" == *"not written to $oh/settings.json"* ]] || problems+="[no warning naming $oh/settings.json, output ends: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"configuration and profiles written to"* ]] || problems+="[the success line was printed after the writer failed] "
+    [[ "$out" != *"configuration unchanged"* ]] || problems+="[the 'unchanged' line was printed after the writer failed] "
+    [[ "$out" != *"agent-harness openhands: "* ]] || problems+="[the agent harness ran after the writer failed and may have created settings.json content of its own] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a failing agent harness is reported, not called written"; then
+    tmp="$(mktemp -d)"
+    out="$(
+        python3() {
+            if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+                echo "stub: the harness failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" ""
+    )"
+    problems=""
+    [[ "$out" == *"agent harness not applied to OpenHands (exit 1)"* ]] || problems+="[no warning for the failed agent harness, output ends: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"configuration and profiles written to"* ]] || problems+="[the success line was printed after the agent harness failed] "
+    [[ "$out" != *"configuration unchanged"* ]] || problems+="[the 'unchanged' line was printed after the agent harness failed] "
+    [[ "$out" == *"only partly applied"* ]] || problems+="[the final message does not say the configuration is partial, output ends: $(tail -n 3 <<<"$out")] "
+    [[ -f "$tmp/home/.openhands/settings.json" ]] || problems+="[the settings writer itself no longer ran] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
 if it "custom_is_installed detects agent-skills under Documents/code or Documents/Code"; then
@@ -4143,6 +5165,93 @@ if it "the live-process probe answers on the real system without throwing"; then
     # is ever exercised. This runs the probe production actually takes.
     n="$(cs_engine probe-live 2>&1 || echo ERR)"
     if [[ "$n" =~ ^[0-9]+$ ]]; then pass; else fail "probe-live returned [$n]"; fi
+fi
+
+# install_claude_autostart renders each unit to a temp file and, when it differs
+# from the installed one, moves it over it. That silently dropped a local edit
+# of the unit (AGENTS.md hard rule 5: back a user-owned file up first).
+#
+# autostart_run <scratch>: one install_claude_autostart run against a scratch
+# home. systemctl and loginctl are stubs, so nothing is enabled or started.
+autostart_run() {
+    local sb="$1"
+    (
+        AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+        systemctl() { return 0; }
+        loginctl() { printf 'yes\n'; }
+        install_claude_autostart
+    ) 2>&1
+}
+
+if it "claude-autostart: a changed unit is backed up before it is replaced"; then
+    sb="$(mktemp -d)"; ud="$sb/home/.config/systemd/user"; u=claude-sessions-snapshot.service
+    mkdir -p "$ud"; printf 'LOCAL EDIT: do not lose me\n' >"$ud/$u"
+    out="$(autostart_run "$sb")"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:300}" >&2; }
+    mapfile -t baks < <(find "$ud" -name '*.autoos-backup-*')
+    (( ${#baks[@]} == 1 )) || { ok=0; echo "expected exactly one backup, found ${#baks[@]}" >&2; }
+    [[ "${baks[0]:-}" == "$ud/$u.autoos-backup-"* ]] || { ok=0; echo "backup is named [${baks[0]:-}]" >&2; }
+    [[ "$(cat "${baks[0]:-/nonexistent}" 2>/dev/null)" == "LOCAL EDIT: do not lose me" ]] \
+        || { ok=0; echo "the backup does not hold the user's edit: [$(cat "${baks[0]:-/nonexistent}" 2>/dev/null)]" >&2; }
+    if grep -q '^ExecStart=' "$ud/$u" && ! grep -q 'LOCAL EDIT' "$ud/$u"; then :
+    else ok=0; echo "the new unit is not in place" >&2; fi
+    [[ "$out" == *"installed $u"* ]] || { ok=0; echo "no 'installed' line: ${out:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a changed autostart unit was replaced without a backup"; fi
+fi
+
+# The model the other stop-on-backup-failure sites copy: when the unit being
+# replaced cannot be backed up (backup_fail_bin's cp refuses), the install
+# stops - the user's edited unit stays byte-identical, the rendered temp file is
+# removed, an error names the unit, nothing is reloaded or enabled, and the
+# return code says it failed. Units after the failing one are not touched either.
+if it "claude-autostart: a changed unit that cannot be backed up is left as it was and the install stops"; then
+    sb="$(mktemp -d)"; bin="$(backup_fail_bin)"; ud="$sb/home/.config/systemd/user"; u=claude-sessions-snapshot.service; ok=1
+    mkdir -p "$ud" "$sb/tmp"; printf 'LOCAL EDIT: do not lose me\n' >"$ud/$u"; cp "$ud/$u" "$sb/unit.orig"
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+              PATH="$bin:$PATH"; export TMPDIR="$sb/tmp"
+              systemctl() { printf 'systemctl %s\n' "$*" >>"$sb/systemctl.log"; return 0; }
+              loginctl() { printf 'yes\n'; }
+              install_claude_autostart ) 2>&1 )"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 for an install that stopped: ${out:0:300}" >&2; }
+    cmp -s "$ud/$u" "$sb/unit.orig" || { ok=0; echo "the edited unit was replaced without a backup: [$(cat "$ud/$u")]" >&2; }
+    [[ -z "$(find "$sb/tmp" -type f)" ]] || { ok=0; echo "the rendered temp unit was left behind: $(find "$sb/tmp" -type f | tr '\n' ' ')" >&2; }
+    [[ "$out" == *"could not back up $ud/$u"* && "$out" == *"left as it was"* ]] || { ok=0; echo "no error naming the unit: [${out:0:300}]" >&2; }
+    [[ "$out" != *"installed "* ]] || { ok=0; echo "reported an install: [${out:0:300}]" >&2; }
+    [[ "$(ls -A "$ud")" == "$u" ]] || { ok=0; echo "the install went on past the failing unit: [$(ls -A "$ud" | tr '\n' ' ')]" >&2; }
+    [[ ! -e "$sb/systemctl.log" ]] || { ok=0; echo "systemctl was called after the failure: $(cat "$sb/systemctl.log")" >&2; }
+    [[ "$(backup_count "$sb")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: with a working cp the same unit is backed up first, then replaced.
+    out="$(autostart_run "$sb")"; rc=$?
+    { (( rc == 0 )) && [[ "$(backup_count "$sb")" == 1 ]] && ! grep -q 'LOCAL EDIT' "$ud/$u" \
+        && [[ "$(cat "$ud/$u".autoos-backup-*)" == "LOCAL EDIT: do not lose me" ]]; } \
+        || { ok=0; echo "control run: rc=$rc backups=$(backup_count "$sb") out=[${out:0:300}]" >&2; }
+    rm -rf "$sb" "$bin"
+    if (( ok )); then pass; else fail "install_claude_autostart replaces a unit it could not back up"; fi
+fi
+
+if it 'claude-autostart: an unchanged unit takes no backup and reports "already current"'; then
+    sb="$(mktemp -d)"; ud="$sb/home/.config/systemd/user"; ok=1
+    autostart_run "$sb" >/dev/null                   # fresh machine: three units, no backup
+    [[ "$(find "$ud" -name '*.autoos-backup-*' | wc -l | tr -d ' ')" == 0 ]] || { ok=0; echo "a fresh install took a backup" >&2; }
+    before="$(cksum "$ud"/claude-sessions-*)"
+    out="$(autostart_run "$sb")"; rc=$?              # second run: nothing changes
+    (( rc == 0 )) || { ok=0; echo "second run rc=$rc" >&2; }
+    [[ "$(grep -c 'already current' <<<"$out")" == 3 ]] || { ok=0; echo "second run not current for all three: ${out:0:400}" >&2; }
+    [[ "$(find "$ud" -name '*.autoos-backup-*' | wc -l | tr -d ' ')" == 0 ]] || { ok=0; echo "an unchanged run took a backup" >&2; }
+    [[ "$(cksum "$ud"/claude-sessions-*)" == "$before" ]] || { ok=0; echo "an unchanged unit was rewritten" >&2; }
+    # One unit edited by hand: only that one is backed up; the other two stay untouched.
+    printf '# local tweak\n' >>"$ud/claude-sessions-snapshot.timer"
+    edited="$(cat "$ud/claude-sessions-snapshot.timer")"
+    out="$(autostart_run "$sb")"
+    mapfile -t baks < <(find "$ud" -name '*.autoos-backup-*')
+    (( ${#baks[@]} == 1 )) || { ok=0; echo "expected one backup for the edited unit, found ${#baks[@]}" >&2; }
+    [[ "${baks[0]:-}" == "$ud/claude-sessions-snapshot.timer.autoos-backup-"* && "$(cat "${baks[0]:-/nonexistent}" 2>/dev/null)" == "$edited" ]] \
+        || { ok=0; echo "the edited timer was not the one backed up, or its bytes differ: ${baks[0]:-none}" >&2; }
+    [[ "$(grep -c 'already current' <<<"$out")" == 2 ]] || { ok=0; echo "the two untouched units are not reported current: ${out:0:400}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the autostart backup is missing for a changed unit or taken for an unchanged one"; fi
 fi
 
 if it "claude-autostart is defined for linux and windows, and not for macos"; then
@@ -6118,8 +7227,7 @@ fi
 if it "the rescue bootstrap template is shellcheck clean"; then
     files=(templates/rescue-bootstrap.sh templates/ai-dispatcher.sh)
     if has_cmd shellcheck; then
-        out="$(shellcheck -S warning "${files[@]}" 2>&1)"; rc=$?
-        if [[ $rc -eq 0 ]]; then pass; else fail "$(printf '%s' "$out" | head -20)"; fi
+        run_shellcheck "${files[@]}"; report_shellcheck "$?"
     elif has_cmd docker && docker info >/dev/null 2>&1; then
         # MSYS_NO_PATHCONV: on Windows Git Bash, MSYS mangles the bare "/mnt"
         # argument into a host path before docker ever sees it. A no-op
@@ -9430,10 +10538,8 @@ if it "shellcheck is clean"; then
     # Fall back to the official image when shellcheck is not installed. This
     # check being skipped locally is precisely how a shellcheck failure reached
     # CI unnoticed, so "no binary" should not silently mean "no check".
-    files=(setup.sh lib/linux/*.sh tests/run-tests.sh)
     if has_cmd shellcheck; then
-        out="$(shellcheck -S warning "${files[@]}" 2>&1)"; rc=$?
-        if [[ $rc -eq 0 ]]; then pass; else fail "$(printf '%s' "$out" | head -20)"; fi
+        run_shellcheck "${SHELLCHECK_FILES[@]}"; report_shellcheck "$?"
     elif has_cmd docker && docker info >/dev/null 2>&1; then
         # MSYS_NO_PATHCONV: same Windows Git Bash trap as the answer-file
         # template lint above — MSYS rewrites the bare "/mnt" into a host path
@@ -9441,11 +10547,232 @@ if it "shellcheck is clean"; then
         # Without this the whole lint FAILS (not skips) on Windows, which is
         # where this repository is developed.
         out="$(MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable \
-               -S warning "${files[@]}" 2>&1)"; rc=$?
+               -S warning "${SHELLCHECK_FILES[@]}" 2>&1)"; rc=$?
         if [[ $rc -eq 0 ]]; then pass; else fail "(via docker) $(printf '%s' "$out" | head -20)"; fi
     else
         skip "no shellcheck binary and no usable docker"
     fi
+fi
+
+# ─── shellcheck helper: memory bound + honest verdict ───────────────────────
+# Every test here runs through a STUB shellcheck on PATH and a fake meminfo,
+# so none of them needs the real binary (or its memory). The helpers under
+# test, run_shellcheck and shellcheck_limit_kb, sit at the top of this file.
+describe "shellcheck helper"
+
+# _sc_sandbox
+# Prints a fresh temp dir holding bin/shellcheck (a stub: appends its argv and
+# the address-space limit it was started under to $STUB_LOG, prints $STUB_OUT,
+# exits $STUB_RC) and meminfo (4 GiB available + 1 GiB swap, so the bound is
+# 90% of 5242880 KiB = 4718592 KiB = 4608 MiB whatever the real host looks like).
+_sc_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin"
+    cat > "$d/bin/shellcheck" <<'STUB'
+#!/usr/bin/env bash
+{
+    printf 'argv: %s\n' "$*"
+    printf 'ulimit: %s\n' "$(ulimit -v)"
+} >> "${STUB_LOG:-/dev/null}"
+[[ -n "${STUB_OUT:-}" ]] && printf '%s\n' "$STUB_OUT"
+exit "${STUB_RC:-0}"
+STUB
+    chmod +x "$d/bin/shellcheck"
+    printf 'MemTotal: 8388608 kB\nMemFree: 1024 kB\nMemAvailable: 4194304 kB\nSwapTotal: 2097152 kB\nSwapFree: 1048576 kB\n' > "$d/meminfo"
+    printf '%s\n' "$d"
+}
+
+if it "shellcheck helper: the memory limit is 90% of MemAvailable + SwapFree, read from AUTOOS_MEMINFO"; then
+    d="$(mktemp -d)"
+    printf 'MemTotal: 8000000 kB\nMemFree: 100 kB\nMemAvailable: 1000000 kB\nSwapTotal: 999 kB\nSwapFree: 500000 kB\n' > "$d/full"
+    printf 'MemAvailable: 1000000 kB\n' > "$d/noswap"
+    printf 'MemTotal: 8000000 kB\nSwapFree: 500000 kB\n' > "$d/noavail"
+    ok=1
+    got="$(AUTOOS_MEMINFO="$d/full" shellcheck_limit_kb)"
+    [[ "$got" == 1350000 ]] || { ok=0; echo "MemAvailable 1000000 + SwapFree 500000: expected 1350000, got [$got]" >&2; }
+    got="$(AUTOOS_MEMINFO="$d/noswap" shellcheck_limit_kb)"
+    [[ "$got" == 900000 ]] || { ok=0; echo "no SwapFree line counts as 0: expected 900000, got [$got]" >&2; }
+    got="$(AUTOOS_MEMINFO="$d/noavail" shellcheck_limit_kb)"
+    [[ -z "$got" ]] || { ok=0; echo "no MemAvailable: expected no limit, got [$got]" >&2; }
+    got="$(AUTOOS_MEMINFO="$d/does-not-exist" shellcheck_limit_kb)"
+    [[ -z "$got" ]] || { ok=0; echo "unreadable file: expected no limit, got [$got]" >&2; }
+    if [[ -r /proc/meminfo ]]; then
+        got="$( unset AUTOOS_MEMINFO; shellcheck_limit_kb )"
+        [[ "$got" =~ ^[1-9][0-9]*$ ]] || { ok=0; echo "default /proc/meminfo: expected a positive KiB number, got [$got]" >&2; }
+    fi
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the limit is not 90% of MemAvailable + SwapFree"; fi
+fi
+
+if it "shellcheck helper: run_shellcheck starts shellcheck under that limit (ulimit -v) with -S warning and the files"; then
+    d="$(_sc_sandbox)"
+    ok=1
+    ( PATH="$d/bin:$PATH" AUTOOS_MEMINFO="$d/meminfo" STUB_LOG="$d/log" run_shellcheck one.sh two.sh ) >/dev/null 2>&1
+    grep -qx 'argv: -S warning one.sh two.sh' "$d/log" 2>/dev/null || { ok=0; echo "argv: $(grep '^argv' "$d/log" 2>&1)" >&2; }
+    grep -qx 'ulimit: 4718592' "$d/log" 2>/dev/null || { ok=0; echo "limit: $(grep '^ulimit' "$d/log" 2>&1) (want 4718592)" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "shellcheck was not started under the computed memory limit"; fi
+fi
+
+if it "shellcheck helper: with no readable meminfo run_shellcheck sets no limit of its own"; then
+    d="$(_sc_sandbox)"
+    ( PATH="$d/bin:$PATH" AUTOOS_MEMINFO="$d/does-not-exist" STUB_LOG="$d/log" run_shellcheck one.sh ) >/dev/null 2>&1
+    got="$(grep '^ulimit' "$d/log" 2>/dev/null)"
+    rm -rf "$d"
+    assert_eq "$got" "ulimit: $(ulimit -v)"
+fi
+
+if it "shellcheck helper: rc 251 and rc 137 are out-of-memory (flag set, returns 3); a finding and a clean run are not"; then
+    d="$(_sc_sandbox)"
+    res=""
+    for spec in "251:shellcheck: out of memory" "137:" "1:a finding" "0:"; do
+        want_rc="${spec%%:*}"
+        res+="$( PATH="$d/bin:$PATH" AUTOOS_MEMINFO="$d/meminfo" STUB_RC="$want_rc" STUB_OUT="${spec#*:}" run_shellcheck one.sh >/dev/null 2>&1
+                 echo "stub=$want_rc rc=$? oom=${SHELLCHECK_OOM:-unset}" )"$'\n'
+    done
+    rm -rf "$d"
+    exp=$'stub=251 rc=3 oom=1\nstub=137 rc=3 oom=1\nstub=1 rc=1 oom=0\nstub=0 rc=0 oom=0\n'
+    assert_eq "$res" "$exp"
+fi
+
+if it "shellcheck helper: any other rc is out-of-memory only when the output says so; a finding that quotes those words stays a finding"; then
+    d="$(_sc_sandbox)"
+    res=""
+    for spec in "2:shellcheck: mmap: Cannot allocate memory" "2:shellcheck: out of memory (requested 2097152 bytes)" "2:could not read a.sh" "1:echo \"out of memory\""; do
+        want_rc="${spec%%:*}"
+        res+="$( PATH="$d/bin:$PATH" AUTOOS_MEMINFO="$d/meminfo" STUB_RC="$want_rc" STUB_OUT="${spec#*:}" run_shellcheck one.sh >/dev/null 2>&1
+                 echo "rc=$? oom=${SHELLCHECK_OOM:-unset}" )"$'\n'
+    done
+    rm -rf "$d"
+    exp=$'rc=3 oom=1\nrc=3 oom=1\nrc=2 oom=0\nrc=1 oom=0\n'
+    assert_eq "$res" "$exp"
+fi
+
+# _sc_case_run <sandbox> <stub-rc> <stub-stdout> <case-filter> [NAME=value...]
+# Runs THIS suite in a child process, filtered to one shellcheck case, with the
+# stub first on PATH and the fake meminfo, and prints everything the child said.
+# AUTOOS_SHELLCHECK_REQUIRED is cleared first so the caller's shell cannot leak
+# into the verdict; pass it as a NAME=value argument when a test wants it.
+_sc_case_run() {
+    local d="$1" rc="$2" text="$3" filter="$4"
+    shift 4
+    rm -f "$d/log"
+    env -u AUTOOS_SHELLCHECK_REQUIRED NO_COLOR=1 PATH="$d/bin:$PATH" AUTOOS_MEMINFO="$d/meminfo" \
+        STUB_RC="$rc" STUB_OUT="$text" STUB_LOG="$d/log" "$@" \
+        bash "$ROOT/tests/run-tests.sh" --filter="$filter" 2>&1
+}
+
+# _sc_verdict_is <child-output> <case-name> pass|fail|skip [text]
+# True when the child reported exactly ONE result, of that kind, for that case,
+# and (when given) the text appears in what it printed.
+_sc_verdict_is() {
+    local out="$1" name="$2" kind="$3" text="${4:-}" mark counts
+    case "$kind" in
+        pass) mark='✓'; counts='passed 1   failed 0   skipped 0' ;;
+        fail) mark='✗'; counts='passed 0   failed 1   skipped 0' ;;
+        skip) mark='-'; counts='passed 0   failed 0   skipped 1' ;;
+    esac
+    grep -qF -- "  $mark $name" <<<"$out" || return 1
+    grep -qF -- "$counts" <<<"$out" || return 1
+    [[ -z "$text" ]] || grep -qF -- "$text" <<<"$out"
+}
+
+# _sc_seen <child-output>: the result lines of a child run on one line, for failure messages.
+_sc_seen() { grep -E '^ +[-✓✗] |^      |passed' <<<"$1" | tr '\n' '|'; }
+
+_sc_oom_msg='shellcheck ran out of memory at a limit of 4608 MiB - run it in CI or on a host with more free memory (AUTOOS_SHELLCHECK_REQUIRED=1 makes this a failure)'
+
+if it "shellcheck helper: the case SKIPS loudly, with the memory message, when shellcheck runs out of memory (rc 251)"; then
+    d="$(_sc_sandbox)"
+    out="$(_sc_case_run "$d" 251 'shellcheck: out of memory' 'shellcheck is clean')"
+    rm -rf "$d"
+    if _sc_verdict_is "$out" 'shellcheck is clean' skip "($_sc_oom_msg)"; then pass
+    else fail "wanted one skip carrying the memory message, got: $(_sc_seen "$out")"; fi
+fi
+
+if it "shellcheck helper: AUTOOS_SHELLCHECK_REQUIRED=1 turns that out-of-memory skip into a failure with the same text"; then
+    d="$(_sc_sandbox)"
+    out="$(_sc_case_run "$d" 251 'shellcheck: out of memory' 'shellcheck is clean' AUTOOS_SHELLCHECK_REQUIRED=1)"
+    rm -rf "$d"
+    if _sc_verdict_is "$out" 'shellcheck is clean' fail "$_sc_oom_msg"; then pass
+    else fail "wanted one failure carrying the memory message, got: $(_sc_seen "$out")"; fi
+fi
+
+if it "shellcheck helper: rc 137 with no output (the OOM killer) is the same out-of-memory skip, not an empty failure"; then
+    d="$(_sc_sandbox)"
+    ok=1
+    out="$(_sc_case_run "$d" 137 '' 'shellcheck is clean')"
+    _sc_verdict_is "$out" 'shellcheck is clean' skip "($_sc_oom_msg)" \
+        || { ok=0; echo "not required: $(_sc_seen "$out")" >&2; }
+    out="$(_sc_case_run "$d" 137 '' 'shellcheck is clean' AUTOOS_SHELLCHECK_REQUIRED=1)"
+    _sc_verdict_is "$out" 'shellcheck is clean' fail "$_sc_oom_msg" \
+        || { ok=0; echo "required: $(_sc_seen "$out")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an OOM kill is not reported as an out-of-memory verdict"; fi
+fi
+
+if it "shellcheck helper: a real finding (rc 1) FAILS with the finding, even when its source line says 'out of memory'"; then
+    d="$(_sc_sandbox)"
+    finding=$'In lib/linux/x.sh line 3:\necho "out of memory" $unquoted\n                     ^-- SC2086 (info): Double quote to prevent globbing and word splitting.'
+    out="$(_sc_case_run "$d" 1 "$finding" 'shellcheck is clean')"
+    rm -rf "$d"
+    if _sc_verdict_is "$out" 'shellcheck is clean' fail 'In lib/linux/x.sh line 3:' && grep -qF 'SC2086' <<<"$out"; then pass
+    else fail "wanted one failure that shows the finding, got: $(_sc_seen "$out")"; fi
+fi
+
+if it "shellcheck helper: a clean shellcheck run (rc 0) PASSES the case"; then
+    d="$(_sc_sandbox)"
+    out="$(_sc_case_run "$d" 0 '' 'shellcheck is clean')"
+    rm -rf "$d"
+    if _sc_verdict_is "$out" 'shellcheck is clean' pass; then pass
+    else fail "wanted one pass, got: $(_sc_seen "$out")"; fi
+fi
+
+if it "shellcheck helper: the rescue-bootstrap case runs its own two files through the same helper and verdict"; then
+    d="$(_sc_sandbox)"
+    ok=1
+    name='the rescue bootstrap template is shellcheck clean'
+    out="$(_sc_case_run "$d" 0 '' 'template is shellcheck clean')"
+    _sc_verdict_is "$out" "$name" pass \
+        || { ok=0; echo "clean: $(_sc_seen "$out")" >&2; }
+    grep -qx 'argv: -S warning templates/rescue-bootstrap.sh templates/ai-dispatcher.sh' "$d/log" 2>/dev/null \
+        || { ok=0; echo "argv: $(grep '^argv' "$d/log" 2>&1 | tr '\n' '|')" >&2; }
+    out="$(_sc_case_run "$d" 251 'shellcheck: out of memory' 'template is shellcheck clean')"
+    _sc_verdict_is "$out" "$name" skip "($_sc_oom_msg)" \
+        || { ok=0; echo "oom: $(_sc_seen "$out")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the rescue-bootstrap lint does not share the bounded helper and verdict"; fi
+fi
+
+if it "shellcheck helper: the case starts ONE shellcheck -S warning over setup.sh, every lib/linux/*.sh and tests/run-tests.sh"; then
+    d="$(_sc_sandbox)"
+    _sc_case_run "$d" 0 '' 'shellcheck is clean' >/dev/null
+    want="argv: -S warning $(cd "$ROOT" && printf '%s ' setup.sh lib/linux/*.sh)tests/run-tests.sh"
+    calls="$(grep -c '^argv: ' "$d/log" 2>/dev/null)"
+    got="$(grep '^argv: ' "$d/log" 2>/dev/null)"
+    rm -rf "$d"
+    if [[ "$calls" == 1 && "$got" == "$want" ]]; then pass
+    else fail "calls: [$calls] (want 1); argv: [$got] (want [$want])"; fi
+fi
+
+if it "shellcheck helper: SHELLCHECK_FILES, the suite's file set, is the file set CI lints"; then
+    ok=1
+    ci_yml="$ROOT/.github/workflows/ci.yml"
+    grep -qF -- 'run: shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh' "$ci_yml" \
+        || { ok=0; echo "ci.yml no longer has: shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh" >&2; }
+    ci_args="$(sed -n 's/^[[:space:]]*run:[[:space:]]*shellcheck -S warning //p' "$ci_yml")"
+    if [[ -z "$ci_args" ]]; then
+        ok=0; echo "no 'run: shellcheck -S warning ...' line found in ci.yml" >&2
+    elif ! declare -p SHELLCHECK_FILES >/dev/null 2>&1; then
+        ok=0; echo "SHELLCHECK_FILES is not defined" >&2
+    else
+        # shellcheck disable=SC2086  # deliberate: CI's shell expands the glob in that line, so must this
+        want="$(cd "$ROOT" && printf '%s\n' $ci_args)"
+        got="$(printf '%s\n' "${SHELLCHECK_FILES[@]}")"
+        [[ "$got" == "$want" ]] || { ok=0; echo "suite lints [$(tr '\n' ' ' <<<"$got")] but CI lints [$(tr '\n' ' ' <<<"$want")]" >&2; }
+    fi
+    if (( ok )); then pass; else fail "the suite and .github/workflows/ci.yml lint different files"; fi
 fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────

@@ -8,12 +8,15 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 MODULE = ROOT / "lib" / "agent_harness.py"
@@ -101,6 +104,107 @@ class PinTests(unittest.TestCase):
         lines = result.stdout.strip().splitlines()
         self.assertIn("read_file", lines)
         self.assertEqual(len(lines), len(harness_data()["mcp_servers"]["serena"]["excluded_tools"]))
+
+
+class BackupTests(unittest.TestCase):
+    """_backup_and_write never overwrites an earlier backup (AGENTS.md hard rule 5).
+
+    The stamp has one-second resolution and shutil.copyfile overwrites, so two
+    writes that both change a file within one second used to destroy the
+    original. The Windows installer calls this harness too: the FIRST backup
+    keeps the name <file>.autoos-backup-<YYYYmmdd-HHMMSS>.
+    """
+
+    STAMP = "20260101-000000"
+
+    def test_backup_path_appends_a_counter_while_the_name_is_taken(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "opencode.json")
+            base = "%s.autoos-backup-%s" % (target, self.STAMP)
+            self.assertEqual(module._backup_path(target, self.STAMP), base)
+            Path(base).write_text("A", encoding="utf-8")
+            self.assertEqual(module._backup_path(target, self.STAMP), base + "-1")
+            Path(base + "-1").write_text("B", encoding="utf-8")
+            self.assertEqual(module._backup_path(target, self.STAMP), base + "-2")
+
+    def test_backup_path_skips_a_name_that_is_a_dangling_symlink(self):
+        # os.path.exists follows the link, so a dangling one reads as "free":
+        # the copy would then write THROUGH it (or fail) instead of taking the
+        # next name. lexists sees the link itself, like the bash helper's -L.
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "opencode.json")
+            base = "%s.autoos-backup-%s" % (target, self.STAMP)
+            nowhere = [os.path.join(tmp, "nowhere-0"), os.path.join(tmp, "nowhere-1")]
+            try:
+                os.symlink(nowhere[0], base)
+                os.symlink(nowhere[1], base + "-1")
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest("cannot create symlinks here: %s" % exc)
+            self.assertFalse(os.path.exists(base), "the fixture link must dangle")
+            self.assertEqual(module._backup_path(target, self.STAMP), base + "-2")
+            # End to end: the backup lands under the free name, the links stay
+            # as they were and nothing is created where they point.
+            Path(target).write_text("ORIGINAL", encoding="utf-8")
+            module._backup_and_write(target, "changed", stamp=self.STAMP)
+            self.assertEqual(Path(base + "-2").read_text(encoding="utf-8"), "ORIGINAL")
+            # Windows readlink prefixes the target with \\?\ (extended-length path).
+            def link_target(link):
+                found = os.readlink(link)
+                return found[4:] if found.startswith("\\\\?\\") else found
+            self.assertEqual(link_target(base), nowhere[0])
+            self.assertEqual(link_target(base + "-1"), nowhere[1])
+            self.assertFalse(any(os.path.lexists(n) for n in nowhere))
+
+    def test_two_changing_writes_in_one_second_keep_the_original(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            # A frozen clock: both writes land in the same second. The real
+            # strftime still formats it, so the stamp format is checked too.
+            with mock.patch.object(module, "datetime") as fake:
+                fake.now.return_value = datetime(2026, 1, 1, 0, 0, 0)
+                module._backup_and_write(str(target), "first change")
+                module._backup_and_write(str(target), "second change")
+            oldest = Path("%s.autoos-backup-%s" % (target, self.STAMP))
+            self.assertEqual(oldest.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertEqual(
+                Path(str(oldest) + "-1").read_text(encoding="utf-8"), "first change"
+            )
+            self.assertEqual(target.read_text(encoding="utf-8"), "second change")
+            self.assertEqual(len(list(Path(tmp).glob("opencode.json.autoos-backup-*"))), 2)
+
+    def test_a_missing_file_is_written_without_a_backup(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "nested" / "opencode.json"
+            module._backup_and_write(str(target), "new", stamp=self.STAMP)
+            self.assertEqual(target.read_text(encoding="utf-8"), "new")
+            self.assertEqual(list(target.parent.glob("*.autoos-backup-*")), [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits do not exist on Windows")
+    def test_the_backup_keeps_the_mode_of_the_file_it_copies(self):
+        # A 0600 config may hold a key: shutil.copyfile makes the backup with
+        # the umask's mode (0644 here), so the copy was more readable than the
+        # original. The bash helper (cp -p) keeps 0600; so must this one. The
+        # umask is pinned so the old behaviour cannot pass by accident.
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            os.chmod(target, 0o600)
+            old_umask = os.umask(0o022)
+            try:
+                module._backup_and_write(str(target), "changed", stamp=self.STAMP)
+            finally:
+                os.umask(old_umask)
+            # The first backup keeps the plain name the Windows installer expects.
+            backup = Path("%s.autoos-backup-%s" % (target, self.STAMP))
+            self.assertEqual(backup.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+            self.assertEqual(target.read_text(encoding="utf-8"), "changed")
 
 
 class OpencodeMergeTests(unittest.TestCase):

@@ -1961,6 +1961,53 @@ function Get-AutoOSSkillsSource {
     return $null
 }
 
+function ConvertFrom-AutoOSJsonc {
+    <#
+      .SYNOPSIS ConvertFrom-Json for JSONC: // and /* */ comments, trailing commas.
+
+      .DESCRIPTION
+        Windows PowerShell 5.1 has no JSONC parser and the repo opencode.jsonc
+        is JSONC. Comments and commas are dropped only where they are syntax:
+        a "//" inside a string (a URL) and a ",}" inside a string are text and
+        survive. Same rules as the Linux writer's _strip_jsonc, which does not
+        protect a ",}" inside a string. A leading BOM is tolerated.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    # A JSON string literal: consumed whole, so nothing inside it is touched.
+    # Written as an unrolled loop: with a nested quantifier the engine backtracks
+    # exponentially on a string that never closes (26 characters took 4 s).
+    $str = '"[^"\\]*(?:\\[\s\S][^"\\]*)*"'
+    $t = $Text.TrimStart([char]0xFEFF)
+    $t = [regex]::Replace($t, "($str)|//[^\r\n]*|/\*[\s\S]*?\*/", '$1')
+    $t = [regex]::Replace($t, "($str)|,(?=\s*[}\]])", '$1')
+    $t | ConvertFrom-Json
+}
+
+function Test-AutoOSOpenCodeV2 {
+    <#
+      .SYNOPSIS $true when the `opencode` on PATH is the V2 CLI (@opencode/cli).
+
+      .DESCRIPTION
+        Same test as opencode_is_v2 in lib/linux/install.sh: `opencode
+        --version` prints a version starting with 2 (an optional leading v).
+        No opencode on PATH, or one that does not answer, is not V2.
+    #>
+    $cmd = Get-Command opencode -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cmd) { return $false }
+    # Windows PowerShell 5.1 turns a native command's stderr into a
+    # terminating error under 'Stop' (AGENTS.md section 6): judge the output.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $cmd.Source --version 2>$null
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    return ((@($out) -join "`n") -match '(^|[^0-9.])v?2\.')
+}
+
 function Set-AutoOSOpenCodeConfig {
     <#
       .SYNOPSIS Configure OpenCode CLI with local Ollama, MCP tools, and optional keys.
@@ -1971,6 +2018,11 @@ function Set-AutoOSOpenCodeConfig {
         Works 100% keyless by default against local Ollama (http://127.0.0.1:11434/v1).
         Tier routing (omniroute/tierN + litellm/tierN) comes from the repo
         opencode.jsonc, which merges over this user config by precedence.
+        The V2 CLI (@opencode/cli) reads a top-level `providers` block instead
+        of `provider`: when Test-AutoOSOpenCodeV2 says V2, the repo's
+        providers.omniroute and providers.litellm are copied into it verbatim
+        (as lib/linux/install.sh does), and `model` follows the repo default
+        only while it is unset or still the Ollama default below.
     #>
     $configDir = Join-Path $HOME '.config\opencode'
     $configFile = Join-Path $configDir 'opencode.json'
@@ -1998,6 +2050,23 @@ function Set-AutoOSOpenCodeConfig {
     } catch {
         Write-AutoOSLine "$($_.Exception.Message) - OpenCode configuration left unchanged" -Level error
         return
+    }
+
+    # V2 reads `providers`, not the V1 `provider` block written below: its
+    # gateway entries come from the repo opencode.jsonc (single source). Read
+    # up front like the catalog above, so an unreadable file stops the run
+    # before any backup. V1, or no opencode at all, leaves $v2Repo empty.
+    $v2Repo = $null
+    if (Test-AutoOSOpenCodeV2) {
+        $v2Source = Join-Path $script:RepoRoot 'opencode.jsonc'
+        if (Test-Path -LiteralPath $v2Source) {
+            try {
+                $v2Repo = ConvertFrom-AutoOSJsonc -Text (Get-Content -LiteralPath $v2Source -Raw -Encoding UTF8)
+            } catch {
+                Write-AutoOSLine "$v2Source is not valid JSONC ($($_.Exception.Message)) - OpenCode configuration left unchanged" -Level error
+                return
+            }
+        }
     }
 
     if (-not (Test-Path $configDir)) {
@@ -2150,12 +2219,14 @@ function Set-AutoOSOpenCodeConfig {
 
     $existing['provider'] = $providers
 
+    # The V1 default is keyless local Ollama; the V2 branch below moves off it.
+    $ollamaDefaultModel = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
     if (-not $existing.Contains('model') -or -not $existing['model']) {
-        $existing['model'] = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
+        $existing['model'] = $ollamaDefaultModel
     } elseif ((($existing['model'] -split '/')[0] -eq 'deepseek') -and -not $providers.Contains('deepseek')) {
         # The default pointed at a removed direct provider (deepseek):
         # fall back to keyless local Ollama instead of leaving it dangling.
-        $existing['model'] = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
+        $existing['model'] = $ollamaDefaultModel
     }
 
 
@@ -2203,6 +2274,30 @@ function Set-AutoOSOpenCodeConfig {
     foreach ($t in $serenaMemoryTools) { $serenaToolsOff["serena_$t"] = $false }
     $existing['tools'] = $serenaToolsOff
 
+    # V2 (@opencode/cli): copy the repo's gateway providers verbatim into the
+    # top-level `providers` object, keeping every other provider the user has
+    # there. The V1 default (local Ollama) has no V2 provider entry: `model`
+    # follows the repo default, but only while it is still unset or that
+    # default (-ceq: the model id is case-sensitive, as on Linux).
+    if ($null -ne $v2Repo) {
+        $v2Providers = [ordered]@{}
+        if ($existing.Contains('providers') -and $existing['providers'] -is [System.Management.Automation.PSCustomObject]) {
+            foreach ($p in $existing['providers'].PSObject.Properties) { $v2Providers[$p.Name] = $p.Value }
+        }
+        $repoProviders = $v2Repo.PSObject.Properties['providers']
+        if ($null -ne $repoProviders -and $repoProviders.Value -is [System.Management.Automation.PSCustomObject]) {
+            foreach ($gateway in @('omniroute', 'litellm')) {
+                $entry = $repoProviders.Value.PSObject.Properties[$gateway]
+                if ($null -ne $entry) { $v2Providers[$gateway] = $entry.Value }
+            }
+        }
+        $existing['providers'] = $v2Providers
+        $repoModel = $v2Repo.PSObject.Properties['model']
+        if ($null -ne $repoModel -and $repoModel.Value -and $existing['model'] -ceq $ollamaDefaultModel) {
+            $existing['model'] = $repoModel.Value
+        }
+    }
+
     $json = $existing | ConvertTo-Json -Depth 10
     # Parsed JSON, not bytes: the agent generator below rewrites this file in its
     # own formatting, and a formatting difference alone must cost neither a
@@ -2247,8 +2342,162 @@ function Set-AutoOSOpenCodeConfig {
         $appDataDir = Join-Path $env:APPDATA 'opencode'
         if (-not (Test-Path $appDataDir)) { New-Item -ItemType Directory -Path $appDataDir -Force | Out-Null }
         $appDataFile = Join-Path $appDataDir 'config.json'
-        (Get-Content $configFile -Raw) | Out-File -FilePath $appDataFile -Encoding utf8
+        # Same rule as every other file this writer touches (AGENTS.md section
+        # 4): read, write only on change, back up what was there once. Compared
+        # as text, not bytes: the encoding Out-File writes (BOM or not) is the
+        # host's, and a copy that only differs in it or in its final newline is
+        # the same config. The copy itself is written exactly as before.
+        $copyText = Get-Content $configFile -Raw
+        $appDataCurrent = $false
+        if (Test-Path -LiteralPath $appDataFile) {
+            $appDataText = [string](Get-Content -LiteralPath $appDataFile -Raw -Encoding UTF8)
+            $appDataCurrent = ($appDataText.TrimEnd("`r", "`n") -ceq ([string]$copyText).TrimEnd("`r", "`n"))
+        }
+        if (-not $appDataCurrent) {
+            if (Test-Path -LiteralPath $appDataFile) { $null = Copy-AutoOSBackup -Path $appDataFile }
+            $copyText | Out-File -FilePath $appDataFile -Encoding utf8
+        }
     }
+}
+
+function New-AutoOSSkillLink {
+    <#
+      .SYNOPSIS
+        Make one directory link (a junction on Windows, a symlink elsewhere) and
+        prove it exists.
+      .DESCRIPTION
+        The link is read back after New-Item: a link that was silently not created
+        must never be reported as linked. Returns $false, after a warn line, when
+        it could not be made. A junction needs no administrator rights; other
+        hosts only run this from the test suite, where a symlink stands in for it.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Target)
+    $type = 'SymbolicLink'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $type = 'Junction' }
+    try {
+        $null = New-Item -ItemType $type -Path $Path -Target $Target
+    } catch {
+        Write-AutoOSLine "could not link ${Path}: $($_.Exception.Message)" -Level warn
+        return $false
+    }
+    $made = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $made -or -not $made.LinkType) {
+        Write-AutoOSLine "could not link ${Path}: no link was created" -Level warn
+        return $false
+    }
+    return $true
+}
+
+function Sync-AutoOSSkillDirs {
+    <#
+      .SYNOPSIS
+        Mirror every skill in -Source into -Destination as one directory junction per skill.
+
+      .DESCRIPTION
+        A skill is a direct child of -Source that holds a SKILL.md. -Destination is a
+        real directory of its own, so a user's skills sit beside ours and are never
+        touched:
+          absent                                    -> linked
+          a link to the same directory              -> skipped
+          a link that is ours and dangling          -> repointed
+          anything else (a user's directory or file, any live link that
+            resolves somewhere else, a dangling link of another shape) -> left alone
+        A link is ours only when its target no longer exists AND its path ends with
+        \.agents\skills\<this skill's name> - the exact shape this function creates,
+        so a moved or renamed checkout is repaired. A live link is the user's, even
+        when it points inside the repo's own .agents directory (AGENTS.md hard rule 4).
+        A -Destination that is itself a link (the old whole-directory junction
+        layout) is not written through - that would create links inside the repo or a
+        clone - it is left with one warning that names the fix. A link that cannot be
+        made is a warning, never an ok line. Returns $false when a link failed.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        Write-AutoOSLine "no skills to link: $Source is not a directory" -Level muted
+        return $true
+    }
+    $skills = @(Get-ChildItem -LiteralPath $Source -Directory |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'SKILL.md') -PathType Leaf } |
+        Sort-Object Name)
+    if ($skills.Count -eq 0) {
+        Write-AutoOSLine "no skills to link: nothing under $Source holds a SKILL.md" -Level muted
+        return $true
+    }
+    if ($script:DryRun) {
+        Write-AutoOSLine "would link $($skills.Count) skill(s) from $Source into $Destination" -Level muted
+        return $true
+    }
+
+    $destItem = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    if ($destItem -and $destItem.LinkType) {
+        Write-AutoOSLine "$Destination is a link (the old whole-directory layout); not writing through it." -Level warn
+        Write-AutoOSLine "    To mirror the skills one by one instead: cmd /c rmdir `"$Destination`" and run setup again." -Level muted
+        return $true
+    }
+    if ($destItem -and -not $destItem.PSIsContainer) {
+        Write-AutoOSLine "$Destination is a file - skills not linked" -Level warn
+        return $false
+    }
+    if (-not $destItem) {
+        try { $null = New-Item -ItemType Directory -Path $Destination -Force }
+        catch {
+            Write-AutoOSLine "could not create ${Destination}: $($_.Exception.Message) - skills not linked" -Level warn
+            return $false
+        }
+    }
+
+    $comparison = [StringComparison]::Ordinal
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $comparison = [StringComparison]::OrdinalIgnoreCase }
+
+    $ok = $true
+    $skipped = 0
+    foreach ($skill in $skills) {
+        $link = Join-Path $Destination $skill.Name
+        $want = [IO.Path]::GetFullPath($skill.FullName).TrimEnd('\', '/')
+        $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+        if (-not $item) {
+            if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
+                Write-AutoOSLine "linked $($skill.Name) into $Destination" -Level ok
+            } else { $ok = $false }
+        } elseif ($item.LinkType) {
+            # Target is a string[] in Windows PowerShell 5.1 and may be relative.
+            $raw = [string]@($item.Target)[0]
+            $have = ''
+            if ($raw) {
+                if (-not [IO.Path]::IsPathRooted($raw)) { $raw = Join-Path $Destination $raw }
+                try { $have = [IO.Path]::GetFullPath($raw).TrimEnd('\', '/') } catch { $have = '' }
+            }
+            # Ours = dangling AND shaped .../.agents/skills/<this skill> (either
+            # separator: a symlink stands in for the junction off Windows).
+            $shape = '/.agents/skills/' + $skill.Name
+            if ($have -and [string]::Equals($have, $want, $comparison)) {
+                $skipped++
+            } elseif ($have -and -not (Test-Path -LiteralPath $have) -and $have.Replace('\', '/').EndsWith($shape, $comparison)) {
+                # Reparse-point safe: Delete() on the link removes the link only,
+                # and here the target is gone anyway. Never a recursive delete.
+                try { $item.Delete() }
+                catch {
+                    Write-AutoOSLine "could not repoint ${link}: $($_.Exception.Message) - left as it was" -Level warn
+                    $ok = $false
+                    continue
+                }
+                if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
+                    Write-AutoOSLine "repointed $($skill.Name) (was $raw)" -Level ok
+                } else { $ok = $false }
+            } else {
+                Write-AutoOSLine "kept ${link}: a link of your own, not an AutoOS link" -Level muted
+            }
+        } else {
+            Write-AutoOSLine "kept ${link}: yours, not an AutoOS link" -Level muted
+        }
+    }
+    if ($skipped -gt 0) {
+        Write-AutoOSLine "skipped $skipped skill link(s) that are already in place in $Destination" -Level muted
+    }
+    return $ok
 }
 
 function Set-AutoOSOpenHandsConfig {
@@ -2260,8 +2509,8 @@ function Set-AutoOSOpenHandsConfig {
         ~/.openhands/profiles/ (direct providers plus the gateway-routed
         omniroute-tier* / litellm-tier* profiles from
         configuration/openhands/tier-profiles.json),
-        wires agent-skills via junction/symlink, creates ACP agent profiles, and
-        seeds default configuration.
+        mirrors the repo skills into ~/.openhands/skills (one junction per skill),
+        creates ACP agent profiles, and seeds default configuration.
     #>
     $openhandsDir = Join-Path $HOME '.openhands'
 
@@ -2300,21 +2549,27 @@ function Set-AutoOSOpenHandsConfig {
     $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
     $context7Key = if ($env:CONTEXT7_API_KEY) { $env:CONTEXT7_API_KEY } elseif ($secrets.ContainsKey('context7')) { $secrets['context7'] } else { $null }
 
+    # Native OpenHands (host CLI, Windows) loads user skills from
+    # ~/.openhands/skills. The sandbox containers do not mount it: they read the
+    # workspace's .agents/skills instead (AGENTS.md section 8). One junction per
+    # skill; a failure is already reported and must not stop the rest.
     $skillsSource = Get-AutoOSSkillsSource
-    $skillsTarget = Join-Path $openhandsDir 'skills'
-    if ($skillsSource -and (Test-Path $skillsSource) -and -not (Test-Path $skillsTarget)) {
-        try {
-            cmd.exe /c "mklink /J `"$skillsTarget`" `"$skillsSource`"" | Out-Null
-            Write-AutoOSLine "Linked agent-skills to OpenHands skills directory" -Level ok
-        } catch {
-            Write-AutoOSLine "Could not create skills junction: $_" -Level warn
-        }
+    if ($skillsSource) {
+        $null = Sync-AutoOSSkillDirs -Source $skillsSource -Destination (Join-Path $openhandsDir 'skills')
     }
 
     $pythonCmd = (Get-Command python -ErrorAction SilentlyContinue)
     if (-not $pythonCmd) {
         $pythonCmd = (Get-Command py -ErrorAction SilentlyContinue)
     }
+
+    # What the closing line may claim: $ohChanged when a sub-writer reports a
+    # file written (the settings script's status lines, the agent generator's),
+    # $ohFailed when the settings script did not run or died (already warned),
+    # $ohHarnessFailed when only the role profiles are missing.
+    $ohChanged = $false
+    $ohFailed = $false
+    $ohHarnessFailed = $false
 
     if ($pythonCmd) {
         # Literal (single-quoted) here-string: the embedded Python contains
@@ -2413,7 +2668,9 @@ settings_file = os.path.join(openhands_dir, 'settings.json')
 settings = {}
 if os.path.isfile(settings_file):
     try:
-        with open(settings_file, 'r', encoding='utf-8') as f:
+        # utf-8-sig: a BOM (Windows editors add one) must not make the file
+        # invalid and drop the user's keys from the merge. Written back plain.
+        with open(settings_file, 'r', encoding='utf-8-sig') as f:
             settings = json.load(f)
     except Exception:
         settings = {}
@@ -2436,11 +2693,34 @@ def _save_settings():
         except (OSError, ValueError):
             pass
         if not _settings_backed_up:
-            shutil.copyfile(settings_file, '%s.autoos-backup-%s' % (settings_file, datetime.now().strftime('%Y%m%d-%H%M%S')))
+            # <file>.autoos-backup-<stamp>-<n>: never a name that exists, so a backup
+            # never overwrites an earlier one (the stamp has one-second resolution). n
+            # starts at 1 on purpose: the agent generator that runs next names its own
+            # backup with the bare stamp and replaces a file of that name.
+            _stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            _n = 1
+            while os.path.exists('%s.autoos-backup-%s-%d' % (settings_file, _stamp, _n)):
+                _n += 1
+            shutil.copyfile(settings_file, '%s.autoos-backup-%s-%d' % (settings_file, _stamp, _n))
             _settings_backed_up = True
     with open(settings_file, 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=2)
     _settings_written = True
+
+# A profile file is written only when its JSON differs from what is on disk, so
+# a second run touches nothing; the names written are counted for the summary.
+_files_written = []
+
+def _put_json(path, obj):
+    try:
+        with open(path, 'r', encoding='utf-8-sig') as _cf:
+            if json.dumps(json.load(_cf), sort_keys=True) == json.dumps(obj, sort_keys=True):
+                return
+    except (OSError, ValueError):
+        pass
+    with open(path, 'w', encoding='utf-8') as _wf:
+        json.dump(obj, _wf, indent=2)
+    _files_written.append(os.path.basename(path))
 
 settings.setdefault('schema_version', 2)
 agent_settings = settings.setdefault('agent_settings', {})
@@ -2620,8 +2900,7 @@ profiles = dict([
     _profile_for('ollama-qwen2.5-coder', None),
 ])
 for name, p_data in profiles.items():
-    with open(os.path.join(profiles_dir, name), 'w', encoding='utf-8') as f:
-        json.dump(p_data, f, indent=2)
+    _put_json(os.path.join(profiles_dir, name), p_data)
 gw_key = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] != 'null' else None
 # LiteLLM master key for the litellm-tier* fallback profiles: env first
 # (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
@@ -2681,8 +2960,7 @@ if (gw_key or _lit_key or _or_key) and _spec_file and os.path.isfile(_spec_file)
                 _gp['reasoning_effort'] = 'none'
                 _gp['enable_encrypted_reasoning'] = False
                 _gp['extended_thinking_budget'] = None
-            with open(os.path.join(profiles_dir, '%s.json' % _t['id']), 'w', encoding='utf-8') as _ff:
-                json.dump(_gp, _ff, indent=2)
+            _put_json(os.path.join(profiles_dir, '%s.json' % _t['id']), _gp)
     except Exception:
         pass
 
@@ -2733,11 +3011,12 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
         try:
             with open(os.path.join(_vendored_agents, _fn), 'r', encoding='utf-8') as _af:
                 _a_data = json.load(_af)
-            with open(os.path.join(agent_profiles_dir, _fn), 'w', encoding='utf-8') as _of:
-                json.dump(_a_data, _of, indent=2)
+            _put_json(os.path.join(agent_profiles_dir, _fn), _a_data)
         except Exception:
             pass
 print('openhands settings: %s %s' % (('updated' if _settings_existed else 'installed') if _settings_written else 'skipped', settings_file))
+if _files_written:
+    print('openhands profiles: %d written' % len(_files_written))
 '@
         $argMuse = if ($museKey) { $museKey } else { 'null' }
         $argDeepseek = if ($deepseekKey) { $deepseekKey } else { 'null' }
@@ -2776,18 +3055,38 @@ print('openhands settings: %s %s' % (('updated' if _settings_existed else 'insta
             $setupOut = & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot $argOmni
         }
         finally { $env:OLLAMA_BASE_URL = $savedOllama; $env:AUTOOS_IDE_MODELS = $savedIde }
-        foreach ($line in $setupOut) { Write-AutoOSLine "$line" -Level muted }
-
-        # The role agent profiles are the generator's job: it merges the
-        # harness into whatever the embedded script left, so the roles stay in
-        # one place. Judge by exit code only; no 2>&1, since under 'Stop' Windows
-        # PowerShell 5.1 turns a native stderr line into a terminating error.
-        $harnessOut = & $pythonCmd.Source (Join-Path $script:RepoRoot 'lib\agent_harness.py') openhands --openhands-dir $openhandsDir --repo-root $script:RepoRoot
-        if ($LASTEXITCODE -ne 0) {
-            Write-AutoOSLine "agent harness not applied to OpenHands (exit $LASTEXITCODE)" -Level warn
-        } else {
-            foreach ($line in $harnessOut) { Write-AutoOSLine $line -Level muted }
+        $setupRc = $LASTEXITCODE
+        foreach ($line in $setupOut) {
+            Write-AutoOSLine "$line" -Level muted
+            if ("$line" -match '^openhands (settings: (updated|installed)|profiles: [1-9][0-9]* written)') { $ohChanged = $true }
         }
+
+        if ($setupRc -ne 0) {
+            # A script that died wrote nothing (or only part) and must never be
+            # reported as written. The generator is skipped too: it would add
+            # enable_sub_agents to a settings.json the script never got to merge.
+            Write-AutoOSLine "OpenHands configuration not written to $(Join-Path $openhandsDir 'settings.json') (settings script exit $setupRc)" -Level warn
+            Write-AutoOSLine "    The profiles under $openhandsDir may be incomplete and the agent generator was skipped; fix the error above and re-run." -Level muted
+            $ohFailed = $true
+        } else {
+            # The role agent profiles are the generator's job: it merges the
+            # harness into whatever the embedded script left, so the roles stay in
+            # one place. Judge by exit code only; no 2>&1, since under 'Stop' Windows
+            # PowerShell 5.1 turns a native stderr line into a terminating error.
+            $harnessOut = & $pythonCmd.Source (Join-Path $script:RepoRoot 'lib\agent_harness.py') openhands --openhands-dir $openhandsDir --repo-root $script:RepoRoot
+            if ($LASTEXITCODE -ne 0) {
+                Write-AutoOSLine "agent harness not applied to OpenHands (exit $LASTEXITCODE)" -Level warn
+                $ohHarnessFailed = $true
+            } else {
+                foreach ($line in $harnessOut) {
+                    Write-AutoOSLine $line -Level muted
+                    if ("$line" -match '^agent-harness openhands: (updated|installed) ') { $ohChanged = $true }
+                }
+            }
+        }
+    } else {
+        Write-AutoOSLine "python was not found - OpenHands settings and profiles not written to $openhandsDir (install Python, then re-run)" -Level warn
+        $ohFailed = $true
     }
 
     # OpenHands probes PowerShell with a 5 s timeout and without -NoProfile
@@ -2804,7 +3103,15 @@ print('openhands settings: %s %s' % (('updated' if _settings_existed else 'insta
         }
     }
 
-    Write-AutoOSLine "OpenHands configuration and profiles written to $openhandsDir" -Level ok
+    # Say what happened, and only that (the warnings above already covered a failure).
+    if ($ohFailed) { return }
+    if ($ohHarnessFailed) {
+        Write-AutoOSLine "OpenHands configuration only partly applied (the role profiles are missing): $openhandsDir" -Level warn
+    } elseif ($ohChanged) {
+        Write-AutoOSLine "OpenHands configuration and profiles written to $openhandsDir" -Level ok
+    } else {
+        Write-AutoOSLine "OpenHands configuration already up to date (skipped): $openhandsDir" -Level muted
+    }
 }
 
 function Install-AutoOSLitellm {
@@ -3505,7 +3812,7 @@ Export-ModuleMember -Function `
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
-    Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
+    Set-AutoOSOpenCodeConfig, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig, Sync-AutoOSSkillDirs,
     Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Set-AutoOSQoderMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
