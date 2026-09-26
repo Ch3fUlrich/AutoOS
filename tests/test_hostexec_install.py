@@ -293,6 +293,7 @@ class ClientWriterTests(_DriverCase):
         self.assertEqual(entry["type"], "http")
         self.assertEqual(entry["url"], f"http://127.0.0.1:{TEST_PORT}/mcp")
         self.assertEqual(entry["headers"], {"Authorization": f"Bearer {TOKEN_VALUE}"})
+        self.assertEqual(entry.get("x-autoos"), "hostexec")
         self.assert_token_nowhere(proc)
         before = claude_json.read_bytes()
         again = self.run_driver_ok("--clients", "claude")
@@ -311,6 +312,7 @@ class ClientWriterTests(_DriverCase):
         self.assertIn("[mcp_servers.hostexec]", text)
         self.assertIn(f"http://127.0.0.1:{TEST_PORT}/mcp", text)
         self.assertIn('bearer_token_env_var = "AUTOOS_EXEC_TOKEN"', text)
+        self.assertIn('x-autoos = "hostexec"', text)
         self.assertIn("AUTOOS_EXEC_TOKEN", proc.stdout + proc.stderr)
         self.assert_token_nowhere(proc, extra_files=[config])
         before = config.read_bytes()
@@ -335,6 +337,7 @@ class ClientWriterTests(_DriverCase):
         entry = data["mcp"]["hostexec"]
         self.assertEqual(entry["type"], "remote")
         self.assertEqual(entry["url"], f"http://127.0.0.1:{TEST_PORT}/mcp")
+        self.assertEqual(entry.get("x-autoos"), "hostexec")
         self.assert_token_nowhere(proc)
         before = opencode_json.read_bytes()
         again = self.run_driver_ok("--clients", "opencode")
@@ -484,6 +487,89 @@ class UnregisterTests(_DriverCase):
         again = self.run_driver_ok("--unregister")
         self.assertIn("nothing to remove", again.stdout + again.stderr)
         self.assert_no_enable_or_start()
+
+    def test_unregister_leaves_foreign_json_entry_untouched(self):
+        # install.sh:368 -- --unregister removes only entries this driver
+        # wrote (fingerprint x-autoos marker; openhands: url+header shape).
+        import json
+
+        self.write_token("claude")
+        claude_json = self.home / ".claude.json"
+        foreign = {
+            "mcpServers": {
+                "hostexec": {
+                    "type": "http",
+                    "url": f"http://127.0.0.1:{TEST_PORT}/mcp",
+                    "headers": {"Authorization": "Bearer foreign-operator-value"},
+                }
+            }
+        }
+        claude_json.write_text(json.dumps(foreign), encoding="utf-8")
+        proc = self.run_driver_ok("--unregister", "--clients", "claude")
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
+        self.assertIn("hostexec", data["mcpServers"], "foreign entry must stay")
+        self.assertIn("leaving untouched", (proc.stdout + proc.stderr).lower())
+        self.assert_token_nowhere(proc)
+
+    def test_unregister_removes_own_json_entry_with_marker(self):
+        import json
+
+        self.write_token("claude")
+        self.run_driver_ok("--clients", "claude")
+        claude_json = self.home / ".claude.json"
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["mcpServers"]["hostexec"].get("x-autoos"), "hostexec")
+        proc = self.run_driver_ok("--unregister", "--clients", "claude")
+        data2 = json.loads(claude_json.read_text(encoding="utf-8"))
+        self.assertNotIn("hostexec", data2.get("mcpServers", {}))
+        self.assert_token_nowhere(proc)
+
+    def test_unregister_leaves_foreign_openhands_entry_untouched(self):
+        import json
+
+        self.write_token("openhands")
+        settings = self.home / ".openhands" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        foreign = {
+            "agent_settings": {
+                "mcp_config": {
+                    "hostexec": {
+                        "url": "http://operator-example:9999/mcp",
+                        "headers": {"Authorization": "Bearer operator"},
+                    }
+                }
+            }
+        }
+        settings.write_text(json.dumps(foreign), encoding="utf-8")
+        proc = self.run_driver_ok(
+            "--unregister",
+            "--clients",
+            "openhands",
+            env_extra={"AUTOOS_EXEC_BIND": "172.17.0.1"},
+        )
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        self.assertIn("hostexec", data["agent_settings"]["mcp_config"])
+        self.assertIn("leaving untouched", (proc.stdout + proc.stderr).lower())
+        self.assert_token_nowhere(proc)
+
+    def test_unregister_leaves_foreign_codex_section_untouched(self):
+        self.write_token("codex")
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        original = '[mcp_servers.hostexec]\nurl = "http://operator:9999/mcp"\n'
+        config.write_text(original, encoding="utf-8")
+        proc = self.run_driver_ok("--unregister", "--clients", "codex")
+        self.assertEqual(config.read_text(encoding="utf-8"), original)
+        self.assertIn("leaving untouched", (proc.stdout + proc.stderr).lower())
+        self.assert_token_nowhere(proc)
+
+    def test_unregister_leaves_foreign_unit_untouched(self):
+        unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text("# operator-edited unit\n", encoding="utf-8")
+        proc = self.run_driver_ok("--unregister")
+        self.assertEqual(unit.read_text(encoding="utf-8"), "# operator-edited unit\n")
+        self.assertIn("leaving untouched", (proc.stdout + proc.stderr).lower())
 
 
 if __name__ == "__main__":

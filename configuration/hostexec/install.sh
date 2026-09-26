@@ -138,12 +138,11 @@ backup_file() {
     say "backup: ${path} -> ${dest}"
 }
 
-# install_unit: render the template with the repo path and install it to
-# ~/.config/systemd/user/ only when it differs (cmp). A failed copy stops
-# with the existing file untouched (stage + rename, never truncate).
-install_unit() {
-    local dest rendered esc stage
-    dest="$HOME/.config/systemd/user/${UNIT_NAME}"
+# render_unit_template <out>: render the unit template with the repo path.
+# Shared by install and remove so --unregister can compare to what the
+# driver would write (foreign units are left untouched).
+render_unit_template() {
+    local out="$1" esc
     if [[ "${AUTOOS_HOSTEXEC_BREAK:-}" == "no-template" ]]; then
         err "install: refusing: unit template is unavailable (test hook)"
         return 1
@@ -152,15 +151,25 @@ install_unit() {
         err "install: refusing: unit template not found: ${TEMPLATE}"
         return 1
     fi
-    rendered="$(new_tmp)"
     esc="$REPO"
     esc="${esc//\\/\\\\}"
     esc="${esc//&/\\&}"
     esc="${esc//|/\\|}"
-    if ! sed "s|<repo>|${esc}|g" "$TEMPLATE" > "$rendered"; then
+    if ! sed "s|<repo>|${esc}|g" "$TEMPLATE" > "$out"; then
         err "install: refusing: could not render unit template"
         return 1
     fi
+    return 0
+}
+
+# install_unit: render the template with the repo path and install it to
+# ~/.config/systemd/user/ only when it differs (cmp). A failed copy stops
+# with the existing file untouched (stage + rename, never truncate).
+install_unit() {
+    local dest rendered stage
+    dest="$HOME/.config/systemd/user/${UNIT_NAME}"
+    rendered="$(new_tmp)"
+    render_unit_template "$rendered" || return 1
     if [[ -f "$dest" ]] && cmp -s "$rendered" "$dest"; then
         say "unit: already current: ${dest}"
     else
@@ -359,6 +368,11 @@ def main(argv):
             entry["type"] = etype
         entry["url"] = url
         entry["headers"] = {"Authorization": "Bearer " + token}
+        if client != "openhands":
+            # Fingerprint: only this driver writes x-autoos=hostexec.
+            # OpenHands schema forbids extra keys, so it is excluded there
+            # (remove compares url+header shape instead).
+            entry["x-autoos"] = "hostexec"
         current = node.get("hostexec")
         popped = False
         if isinstance(current, dict) and "enabled" in current:
@@ -373,6 +387,32 @@ def main(argv):
         if "hostexec" not in node:
             status = "same"
         else:
+            cur = node.get("hostexec")
+            ours = False
+            if client == "openhands":
+                # No marker key (schema forbids it): compare url+header
+                # shape to what the driver would write.
+                if isinstance(cur, dict) and cur.get("url") == url:
+                    headers = cur.get("headers")
+                    if (isinstance(headers, dict) and len(headers) == 1
+                            and isinstance(headers.get("Authorization"), str)
+                            and headers["Authorization"].startswith("Bearer ")
+                            and len(headers["Authorization"]) > len("Bearer ")
+                            and set(cur.keys()) <= {"url", "headers"}):
+                        ours = True
+            else:
+                if isinstance(cur, dict) and cur.get("x-autoos") == "hostexec":
+                    ours = True
+            if not ours:
+                # Foreign entry: leave untouched, report separately.
+                with open(out, "w", encoding="utf-8") as fh:
+                    if os.path.exists(path):
+                        with open(path, encoding="utf-8") as orig_fh:
+                            fh.write(orig_fh.read())
+                    else:
+                        fh.write(json.dumps(data, indent=2) + "\n")
+                sys.stdout.write("foreign")
+                return 0
             del node["hostexec"]
             status = "changed"
     else:
@@ -426,6 +466,7 @@ def main(argv):
     op, path, url, out = argv[1:5]
     url_line = 'url = "%s"' % url
     env_line = 'bearer_token_env_var = "AUTOOS_EXEC_TOKEN"'
+    marker_line = 'x-autoos = "hostexec"'
     text = ""
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
@@ -448,7 +489,7 @@ def main(argv):
                 out_lines.pop()
             if out_lines:
                 out_lines.append("")
-            out_lines += [SECTION, url_line, env_line]
+            out_lines += [SECTION, url_line, env_line, marker_line]
         else:
             body_end = end if end is not None else len(lines)
             body = lines[start + 1:body_end]
@@ -457,20 +498,27 @@ def main(argv):
             new_body = []
             seen_url = False
             seen_env = False
+            seen_marker = False
             for line in body:
                 key = line.split("=", 1)[0].strip() if "=" in line else ""
-                if key == "url" and not seen_url:
+                key_norm = key.strip('"\'')
+                if key_norm == "url" and not seen_url:
                     new_body.append(url_line)
                     seen_url = True
-                elif key == "bearer_token_env_var" and not seen_env:
+                elif key_norm == "bearer_token_env_var" and not seen_env:
                     new_body.append(env_line)
                     seen_env = True
+                elif key_norm == "x-autoos" and not seen_marker:
+                    new_body.append(marker_line)
+                    seen_marker = True
                 else:
                     new_body.append(line)
             if not seen_url:
                 new_body.append(url_line)
             if not seen_env:
                 new_body.append(env_line)
+            if not seen_marker:
+                new_body.append(marker_line)
             out_lines = lines[:start + 1] + new_body
             if end is not None:
                 out_lines += lines[body_end:]
@@ -482,6 +530,21 @@ def main(argv):
             new = text
         else:
             body_end = end if end is not None else len(lines)
+            body = lines[start + 1:body_end]
+            ours = False
+            for line in body:
+                if "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip().strip('"\'') == "x-autoos" and "hostexec" in v:
+                    ours = True
+                    break
+            if not ours:
+                orig = text if text == "" or text.endswith("\n") else text + "\n"
+                with open(out, "w", encoding="utf-8") as fh:
+                    fh.write(orig)
+                sys.stdout.write("foreign")
+                return 0
             pre = start
             if pre > 0 and lines[pre - 1].strip() == "":
                 pre -= 1
@@ -655,6 +718,10 @@ apply_remove_candidate() {
         say "${client}: nothing to remove in ${file}"
         return 0
     fi
+    if [[ "$status" == "foreign" ]]; then
+        say "${client}: foreign ${what}, leaving untouched: ${file}"
+        return 0
+    fi
     if (( DRY_RUN )); then
         say "dry-run: would remove ${what} from ${file}"
         return 0
@@ -665,13 +732,18 @@ apply_remove_candidate() {
     return 0
 }
 
-# remove_json_client <client> <file>: drop the client's own hostexec entry
-# (backup first). No token needed -- removal names the key, not the value.
+# remove_json_client <client> <file>: drop only the driver's own hostexec
+# entry (fingerprint: x-autoos marker, or url+header shape for openhands).
+# No token needed -- removal names the key, not the value.
 remove_json_client() {
-    local client="$1" file="$2"
+    local client="$1" file="$2" expected_url
     local cand rc=0 status=""
+    case "$client" in
+        openhands) expected_url="http://host.docker.internal:${PORT}/mcp" ;;
+        *) expected_url="$(loopback_url)" ;;
+    esac
     cand="$(new_tmp)"
-    status="$(json_candidate remove "$file" "$client" "" "" "$cand")" || rc=$?
+    status="$(json_candidate remove "$file" "$client" "$expected_url" "" "$cand")" || rc=$?
     if (( rc != 0 )); then
         err "install: ${client}: config helper failed (exit ${rc})"
         return 1
@@ -716,10 +788,18 @@ remove_qoder() {
 }
 
 remove_unit() {
-    local dest
+    local dest rendered
     dest="$HOME/.config/systemd/user/${UNIT_NAME}"
     if [[ ! -e "$dest" && ! -L "$dest" ]]; then
         say "unit: nothing to remove: ${dest}"
+        return 0
+    fi
+    rendered="$(new_tmp)"
+    if ! render_unit_template "$rendered"; then
+        return 1
+    fi
+    if ! cmp -s "$rendered" "$dest"; then
+        say "unit: foreign unit, leaving untouched: ${dest}"
         return 0
     fi
     if (( DRY_RUN )); then

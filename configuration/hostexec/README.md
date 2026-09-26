@@ -99,6 +99,12 @@ cp configuration/hostexec/policy.example.toml ~/.config/autoos/exec/policy.toml 
     bash configuration/hostexec/install.sh --unregister     # remove only what the driver wrote
     ```
 
+    `--unregister` removes only entries this driver wrote: JSON/TOML
+    entries carry an `"x-autoos": "hostexec"` fingerprint (OpenHands
+    forbids extra keys, so there the url+header shape is compared
+    instead), and the unit is removed only when it matches the rendered
+    template -- anything else is left untouched with a message.
+
     The driver renders `autoos-hostexec.service` with your checkout's
     path into `~/.config/systemd/user/` (backed up before any replace; a
     second run reports "already current") and sets only its own
