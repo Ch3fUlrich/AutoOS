@@ -129,12 +129,13 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 
 ### cost
 
-- R-cost-01: Claude sessions only orchestrate: plan, brief, gate, merge, decide. (why: a Claude rate-limit stop halts the whole run; source: briefs/common.md "Claude budget", operator 2026-09-26)
-- R-cost-02: No Claude Agent-tool subagent to implement, read or review unless all external legs failed; log why. (why: same Claude budget; source: briefs/common.md "Claude budget")
-- R-cost-03: Spawn by bucket: free/Zen S0, then credit legs (samba, cheaperinference, OpenRouter), qoder/agy, native DeepSeek. (why: credits sat unused; source: briefs/common.md "Claude budget" table)
-- R-cost-04: Before each ready: gateway review on cheaperinference/claude-sonnet-5 + a cross-family one. (why: keeps the gate off the Claude budget; source: briefs/common.md "Claude budget")
+- R-cost-01: Claude sessions orchestrate and give the final check; they never implement. (why: a Claude rate-limit stop halts the run; source: briefs/common.md "Claude budget" 16:4xZ)
+- R-cost-02: No Claude subagent to implement, read or first-pass review unless all external legs failed; log why. (why: same Claude budget; source: briefs/common.md "Claude budget")
+- R-cost-03: Spawn by the common.md bucket table; never Claude/GPT via paid API, DeepSeek only V4.1 Flash. (why: cost; source: briefs/common.md "Claude budget" 16:4xZ)
+- R-cost-04: Lane order: cheap writer, cheap cross-family review, your gate, then one Sonnet subagent last. (why: Sonnet is the trusted final check; source: briefs/common.md "Claude budget" 16:4xZ)
 - R-cost-05: Verify every cheap worker's "done" yourself: tests, diff vs brief. (why: a cheap done is unproven; source: work/L1-routing/review-a8.out)
 - R-cost-06: Count a client worker as ~0.7 GB; run at most 3 per orchestrator while MemAvailable >= 3000. (why: measured per client worker; source: briefs/common.md "Claude budget")
+- R-cost-07: OpenRouter is BYOK, no credit: only its deepseek-v4.1-flash + muse-spark-1.3 legs; 402 = leg down. (why: Qwen there 402d; source: inbox/L1-routing.md 2026-09-26T15:57:34Z)
 
 ### brief
 
