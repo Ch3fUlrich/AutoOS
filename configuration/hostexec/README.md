@@ -107,8 +107,8 @@ cp configuration/hostexec/policy.example.toml ~/.config/autoos/exec/policy.toml 
     files (mode `0600`, refused otherwise; never on any argv or in
     output). Codex stores only `bearer_token_env_var =
     "AUTOOS_EXEC_TOKEN"`, so export that from the token file before
-    starting codex; qoder prints the `qodercli mcp add-json` command for
-    you to run yourself. Then, as the operator:
+    starting codex; qoder wiring is not automated yet (headless MCP use
+    unmeasured) -- see this README for manual steps. Then, as the operator:
 
     ```bash
     systemctl --user daemon-reload && systemctl --user enable --now autoos-hostexec.service

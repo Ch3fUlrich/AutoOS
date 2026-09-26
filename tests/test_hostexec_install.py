@@ -324,12 +324,19 @@ class ClientWriterTests(_DriverCase):
             self.assertEqual(claude_json.read_text(encoding="utf-8"), bad)
             self.assert_token_nowhere(proc)
 
-    def test_qoder_prints_subshell_command_without_token(self):
+    def test_qoder_prints_no_token_command(self):
+        # install.sh:550 -- qoder wiring is not automated: never print or
+        # build a command containing the token (no $(cat ...), no token
+        # value); point to the README instead.
         token_file = self.write_token("qoder")
+        token_content = token_file.read_text(encoding="utf-8").strip()
         before = self.home_files()
         proc = self.run_driver_ok("--clients", "qoder")
-        self.assertIn("qodercli mcp add-json", proc.stdout)
-        self.assertIn(f"$(cat {token_file})", proc.stdout)
+        combined = proc.stdout + proc.stderr
+        self.assertNotIn(token_content, combined)
+        self.assertNotIn("$(cat", combined)
+        self.assertIn("not automated", combined.lower())
+        self.assertIn("README", combined)
         self.assert_token_nowhere(proc)
         after = self.home_files() - {
             ".config/systemd/user/autoos-hostexec.service",  # unit install is expected

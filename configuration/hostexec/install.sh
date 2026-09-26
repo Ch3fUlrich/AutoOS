@@ -543,15 +543,10 @@ wire_opencode() {
 }
 
 wire_qoder() {
-    local path url
-    token_file_ok qoder || return 1
-    path="$(token_file_for qoder)"
-    url="$(loopback_url)"
     if (( DRY_RUN )); then
-        say "dry-run: would print the qoder operator command (token stays in ${path})"
+        say "dry-run: qoder wiring is not automated yet"
     fi
-    say "qoder: run this yourself (the token is read from the file at run time, never printed):"
-    printf '%s\n' "qodercli mcp add-json hostexec \"{\\\"url\\\": \\\"${url}\\\", \\\"headers\\\": {\\\"Authorization\\\": \\\"Bearer \$(cat ${path})\\\"}}\""
+    say "qoder: wiring is not automated yet (headless MCP use unmeasured); see configuration/hostexec/README.md for manual steps."
     return 0
 }
 
