@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Write a minimal Electron asar archive for the Antigravity installer tests.
+
+usage: fake_antigravity_asar.py <out> <version> [noicon]
+
+The archive holds package.json (name antigravity, the given version) and, unless
+"noicon" is given, icon.png (the PNG signature plus filler). The layout is the
+one asar documents and the installer reads:
+
+    <uint32 4> <uint32 header pickle size> <uint32 payload size> <uint32 json length>
+    <json header, padded to 4 bytes> <file data>
+
+with every file's "offset" counted from 8 + header pickle size. Nothing here
+touches the network or the machine: it only writes <out>.
+"""
+import json
+import struct
+import sys
+
+
+def main(argv):
+    if len(argv) < 3:
+        print(__doc__, file=sys.stderr)
+        return 2
+    out, version = argv[1], argv[2]
+    with_icon = "noicon" not in argv[3:]
+    package = json.dumps({"name": "antigravity", "productName": "Antigravity", "version": version}).encode()
+    files = [("package.json", package)]
+    if with_icon:
+        files.append(("icon.png", b"\x89PNG\r\n\x1a\n" + b"fake icon\n"))
+    header, blob, offset = {"files": {}}, b"", 0
+    for name, data in files:
+        header["files"][name] = {"size": len(data), "offset": str(offset)}
+        blob += data
+        offset += len(data)
+    text = json.dumps(header, separators=(",", ":")).encode()
+    padded = text + b"\0" * (-len(text) % 4)
+    pickle_size = 8 + len(padded)          # payload size field + string length field + padded json
+    with open(out, "wb") as f:
+        f.write(struct.pack("<4I", 4, pickle_size, pickle_size - 4, len(text)))
+        f.write(padded)
+        f.write(blob)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
