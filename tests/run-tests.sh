@@ -4287,6 +4287,28 @@ if it "antigravity refuses to run as root when the home is not root's own (sudo 
     if (( ok )); then pass; else fail "root can write a user's home through the Antigravity installer"; fi
 fi
 
+if it "antigravity dry run as root in a home that is not root's: says what would be refused and succeeds (a dry run changes nothing); the real run still refuses"; then
+    ok=1
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    for entry in direct component; do
+        antigravity_run "$sb" AG_ENTRY="$entry" AUTOOS_DRY_RUN=1 SYS_IS_ROOT=1 "AG_ROOT_HOME=$sb/rootshome"
+        [[ "$AG_STATE" != failed && "$AG_RC" == 0 ]] || { ok=0; echo "$entry: a dry run as root reported state=[$AG_STATE] rc=[$AG_RC] (must succeed): ${AG_OUT:0:400}" >&2; }
+        [[ "$AG_OUT" == *"would refuse: run setup as your own user"* ]] || { ok=0; echo "$entry: the dry run does not say what would be refused (would refuse: run setup as your own user): ${AG_OUT:0:400}" >&2; }
+        [[ "$AG_OUT" != *"would look up"* && "$AG_OUT" != *"would download"* ]] || { ok=0; echo "$entry: the dry run previews an install that the real run would refuse: ${AG_OUT:0:400}" >&2; }
+        [[ ! -s "$sb/calls.log" && -z "$(find "$sb/home" -mindepth 1)" ]] || { ok=0; echo "$entry: a dry run called or wrote something: $(cat "$sb/calls.log" 2>&1)" >&2; }
+    done
+    # the same machine without --dry-run still refuses, and says what to do
+    antigravity_run "$sb" AG_ENTRY=direct SYS_IS_ROOT=1 "AG_ROOT_HOME=$sb/rootshome"
+    [[ "$AG_STATE" == failed && "$AG_RC" != 0 && "$AG_OUT" == *"run setup as your own user"* && "$AG_OUT" != *"would refuse"* ]] \
+        || { ok=0; echo "the real run as root in a user's home: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    [[ -z "$(find "$sb/home" -mindepth 1)" ]] || { ok=0; echo "the refused real run wrote: $(find "$sb/home" -mindepth 1 | tr '\n' ' ')" >&2; }
+    # root in ITS OWN home gets the normal preview, not a refusal
+    antigravity_run "$sb" AG_ENTRY=direct AUTOOS_DRY_RUN=1 SYS_IS_ROOT=1 "AG_ROOT_HOME=$sb/home"
+    [[ "$AG_RC" == 0 && "$AG_OUT" == *"winget-pkgs"* && "$AG_OUT" != *"would refuse"* ]] || { ok=0; echo "root in its own home: rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a dry run as root in another user's home reports Antigravity as failed, or the real run stopped refusing"; fi
+fi
+
 if it "antigravity detection: a valid stamp counts as installed, the old apt command /usr/bin/antigravity does not, and neither do a wrong marker or a stamp behind a symlink"; then
     sb="$(antigravity_scratch)"; ok=1
     dir="$sb/home/.local/opt/antigravity"; mkdir -p "$sb/bin" "$dir"

@@ -1265,20 +1265,17 @@ antigravity_warn_old_apt() {
     return 0
 }
 
-# antigravity_root_check: `sudo ./setup.sh` runs this as root with SYS_HOME the
-# invoking user's home; the files it made there would be root-owned and a normal
-# update could never replace them. Root in root's own home (a container, a root
-# login) is fine.
-antigravity_root_check() {
+# antigravity_root_refused: true when `sudo ./setup.sh` runs this as root with
+# SYS_HOME the invoking user's home; the files it made there would be root-owned and
+# a normal update could never replace them. Root in root's own home (a container, a
+# root login) is fine. Only the question: the caller words the answer (an error in a
+# real run, a "would refuse" line in a dry run).
+antigravity_root_refused() {
     local root_home
-    (( ${SYS_IS_ROOT:-0} )) || return 0
+    (( ${SYS_IS_ROOT:-0} )) || return 1
     root_home="$(getent passwd root 2>/dev/null | cut -d: -f6 || true)"
     [[ -n "$root_home" ]] || root_home=/root
-    if [[ "${SYS_HOME%/}" != "${root_home%/}" ]]; then
-        ui_err "Antigravity not installed: setup is running as root but would install into ${SYS_HOME}, which is not root's home - it would leave root-owned files there that a normal update cannot replace. Please run setup as your own user (without sudo); nothing was changed."
-        return 1
-    fi
-    return 0
+    [[ "${SYS_HOME%/}" != "${root_home%/}" ]]
 }
 
 # antigravity_install_staged <dir> <existing 0|1> <installed-id>: everything from
@@ -1374,7 +1371,15 @@ install_antigravity() {
         ui_err "Antigravity not installed: there is no usable home directory (SYS_HOME='${SYS_HOME:-}')."
         return 1
     fi
-    antigravity_root_check || return 1
+    if antigravity_root_refused; then
+        # A dry run changes nothing, so it does not fail: it says what the real run would do.
+        if (( AUTOOS_DRY_RUN )); then
+            ui_muted "would refuse: run setup as your own user (without sudo) - setup is running as root but would install into ${SYS_HOME}, which is not root's home, so the files would be root-owned there; a real run changes nothing"
+            return 0
+        fi
+        ui_err "Antigravity not installed: setup is running as root but would install into ${SYS_HOME}, which is not root's home - it would leave root-owned files there that a normal update cannot replace. Please run setup as your own user (without sudo); nothing was changed."
+        return 1
+    fi
     dir="$(antigravity_dir)"; parent="$(dirname "$dir")"
     # The install directory is ours only with a valid stamp. Anything else -
     # somebody's own directory, a symlink, an old IDE-era install - is left alone.
