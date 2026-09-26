@@ -586,3 +586,129 @@ before every consumer has moved off it; the Zed and V1 OpenCode writers in
 `lib/` still read it directly at install time on the target machine, unaffected
 by this repo-internal tool's retarget) — that is a later phase-2 step, together
 with whatever also retargets those `lib/` writers.
+
+## 13. Task A4d — rendering `configuration/openhands/tier-profiles.json` back from the registry, and retargeting `tools/sync-openhands-profiles.py`
+
+Spec 3.2 phase 1 for `configuration/openhands/tier-profiles.json`: `tools/registry.py
+render openhands` reads `catalog/ai-registry.json` and produces that file's own
+shape via the pure function `render_openhands(registry) -> dict`. It is the
+reverse of §6 above (the `openhands_profile`/`direct_profile` fields §6's table
+already lands in the registry during the A1–A3 migration) — unlike `render
+omniroute`'s legs-non-empty filter or `render ide`'s "every route" rule, this
+render's membership is "every `routes.<id>.surfaces.<omniroute|litellm>.
+openhands_profile`, plus every standalone `surfaces.openhands.direct_profile`" —
+computed by `_openhands_tier_membership()` and checked both ways against
+`OPENHANDS_TIER_ORDER`, the same bidirectional membership check `tools/sync-ide-
+models.py`'s own `rewrite_tier_profiles()` already ran against `catalog/ide-
+models.json`'s `surfaces.openhands` client list (that check stays; this render
+gives the *shape itself* a source, where before only its `max_input_tokens`/
+`max_output_tokens` fields were kept in sync from the catalog).
+
+Field mapping back, per tier:
+
+| Registry path | `tier-profiles.json` path | Notes |
+|---|---|---|
+| `<gateway>-<route id>` (computed) | `tiers[].id` | `<gateway>` is `omniroute` or `litellm`. The one direct-profile tier is the exception — see below. |
+| `routes.<id>.surfaces.<gw>.openhands_profile.model`? (litellm only) / **derived** `"openai/<route id>"` (omniroute) | `tiers[].model` | The registry carries `model` explicitly on every `litellm` `openhands_profile` (redundant with the route id, kept anyway — §6's own mapping never dropped it going *forward*, only documented it as *redundant*) but never on an `omniroute` one; `render_openhands()` reads `.get("model", "openai/%s" % route_id)`, reproducing today's file exactly either way (verified against all 21 tiers, 2026-09-26: zero disagreements). |
+| `routes.<id>.surfaces.<gw>.openhands_profile.max_input_tokens` | `tiers[].max_input_tokens` | Unchanged. Kept in sync with `catalog/ide-models.json`/`render_ide()` by `tools/sync-ide-models.py`'s pre-existing `rewrite_tier_profiles()` — unaffected by this task. |
+| `routes.<id>.surfaces.<gw>.openhands_profile.max_output_tokens` | `tiers[].max_output_tokens` | Same as above. |
+| `routes.<id>.surfaces.<gw>.openhands_profile.reasoning` | `tiers[].reasoning` | Unchanged. |
+| `routes.<id>.surfaces.litellm.openhands_profile.gateway` (always `"litellm"` when present) | `tiers[].gateway`? | Present only on a `litellm` tier — an `omniroute` tier carries no `gateway` key at all, matching today's file. |
+| `routes.spark-1.3-contributor.surfaces.openhands.direct_profile.{gateway,model,base_url,max_input_tokens,max_output_tokens,reasoning}` | `tiers[].{gateway,model,base_url,max_input_tokens,max_output_tokens,reasoning}` (the one `openrouter-muse-spark-1.3-contributor` tier) | §6's own mapping, read back field for field; this tier's `id` cannot be computed as `<gateway>-<route id>` (it names the OpenRouter leg's own bare model spelling, `muse-spark-1.3-contributor`, not the route id `spark-1.3-contributor`) — `OPENHANDS_DIRECT_PROFILE_IDS` names the one exception as a literal `{tier id: route id}` table, the same convention as the order/retired-ids constants below. |
+| — | `tiers[]` order | **derived**: `OPENHANDS_TIER_ORDER`, a literal constant — see below. |
+| — | `retired_ids` | **derived**: `OPENHANDS_RETIRED_IDS`, a literal constant — see below. |
+| — | `gateway_base_url` / `litellm_base_url` | **derived**: `OPENHANDS_GATEWAY_BASE_URL` / `OPENHANDS_LITELLM_BASE_URL`, literal constants — §6's own mapping already dropped these as "container-side constant[s], not a per-model fact… out of scope for models/routes/providers". |
+
+Three intentional, documented "keep today's value via the render" treatments —
+never a silently dropped field, all covered by `tests/test_registry_render.py`
+and by `openhands_diff()`/`_canonical_openhands()`:
+
+1. **`$comment` is not reproduced**, exactly the same treatment §10/§12 give
+   `combos.json`/`ide-models.json`'s own top-level comments — its substance
+   (rename history, the `openai/`-prefix measurement, retired-ids provenance)
+   already landed in §6 and in `tools/registry-convert.py`'s docstring during
+   the A1–A3 migration. The render emits only the spec-3.2 marker line;
+   `openhands_diff()` ignores the whole `$comment` key.
+2. **`gateway_base_url`, `litellm_base_url` and `retired_ids` are literal
+   constants, not registry fields** — §6's mapping already established this
+   (container-side Docker convention; a prune list with "nothing to migrate",
+   the same category as `combos.json`'s own `retired` array, §4). `retired_ids`'
+   own order carries no semantics either — `tools/sync-openhands-profiles.py`'s
+   `push_profiles()` immediately does `frozenset(legacy_owned)` — so
+   `openhands_diff()` compares it as a set, the same treatment `omniroute_diff()`
+   gives `combos.json`'s `retired` (§10, exception 2).
+3. **`tiers[]` order is reproduced exactly, as a literal constant
+   (`OPENHANDS_TIER_ORDER`), not treated as an exception** — unlike (2),
+   because tier-profiles.json's own `$comment` states outright that order is
+   semantic ("ORDER IS THE PUSH PRIORITY … a human decision") and
+   `tools/sync-openhands-profiles.py`'s `push_profiles()` reads `spec_order=
+   [t["id"] for t in tiers]` to rank which profiles survive the app's 10-profile
+   cap — the same "order is real data, reproduce it via a hand-copied
+   constant" choice `render_ide()` makes for `IDE_MODEL_ORDER` (§12) rather
+   than `render_omniroute()`'s "array order is insignificant" choice for
+   `combos`/`retired` (§10). `render_openhands()` raises, naming every id at
+   once, if a future openhands profile is added or removed without updating
+   this list — never a silent reorder or drop
+   (`tests/test_registry_render.py::MissingTierFailsOpenhandsRenderTests`).
+   **Follow-up**: same as `IDE_MODEL_ORDER`'s own follow-up (§12) — a future
+   registry field for push rank would let this render drop the constant; not
+   added here since spec 3.1 lists no such field and this is exactly the
+   "keep today's value" gap task A4d's brief calls out by name.
+
+**`catalog/ide-models.json`'s own `max_input_tokens`/`max_output_tokens` sync
+into this file is out of scope for this render, and untouched by it.**
+`tools/sync-ide-models.py`'s pre-existing `rewrite_tier_profiles()` (task
+predates A4d; §12 does not mention it because it only rewrites two fields,
+never the file's shape) already keeps those two fields converged from
+`catalog/ide-models.json`/`render_ide()`'s own token windows on every
+`tools/sync-ide-models.py` run, membership-checked both ways against the
+catalog's `openhands` surface — this task's render only gives the *rest* of
+the file's shape (`id`, `model`, `gateway`, `reasoning`, order, the base URLs,
+`retired_ids`) a source in the registry too; the two overlapping fields
+(`max_input_tokens`/`max_output_tokens`) are produced identically by both
+paths today (verified: `render_openhands()`'s figures equal `render_ide()`'s
+`context`/`output` for every shared route, 2026-09-26), so nothing regresses.
+
+**`configuration/openhands/config.toml`'s generated part needs no new render —
+it is already sourced from the registry, transitively, since task A4c.**
+`tools/sync-ide-models.py`'s pre-existing `rewrite_openhands_toml()` rewrites
+only the `max_input_tokens`/`max_output_tokens` lines of every `[llm]`/`[llm.*]`
+table whose `model` names a catalog id, from the same `models` list every other
+target in that tool now gets from `load_from_registry()` (task A4c) — i.e.
+`render_ide()`'s output, not `tier-profiles.json`. `config.toml`'s token windows
+and `tier-profiles.json`'s token windows are therefore two independent
+consumers of the *same* `render_ide()` numbers (confirmed identical today,
+above), never of each other — task A4d's own brief text ("and whatever part of
+`configuration/openhands/config.toml` is generated today") is satisfied by this
+fact, not by a new code path: `python3 tools/sync-ide-models.py --check` is
+still the gate for `config.toml`'s generated lines, unchanged by this task.
+
+### Retargeting `tools/sync-openhands-profiles.py`
+
+`tools/sync-openhands-profiles.py`'s default, unflagged run now sources its
+`spec` dict from a new `load_spec(spec_path, registry_path)` helper, which
+calls `tools/registry.py`'s `render_openhands()` on `catalog/ai-registry.json`
+(default path) instead of reading `configuration/openhands/tier-profiles.json`
+directly — the exact retarget task A4d's brief calls for, mirroring task A4c's
+own `--catalog` treatment for `tools/sync-ide-models.py`. Because `render
+openhands --check` proves `render_openhands(catalog/ai-registry.json)` is
+semantically identical to `configuration/openhands/tier-profiles.json` today,
+this changes nothing about what gets written to any profile file or pushed to
+a running app on an unmodified checkout — every existing regression case in
+`tests/run-tests.sh` that exercises this tool without `--spec` (`"tier profiles
+come from the spec, installer and tool agree"`, and every `"svc: profile
+sync/push …"` case) passes unchanged, proving it; a matching in-process check
+(`SyncOpenhandsProfilesSourcesFromRegistryTests`) was added to
+`tests/test_registry_render.py` since no dedicated `test_sync_openhands_
+profiles.py` file exists (grepped, per task A4d's own brief) — the coverage for
+this tool lives entirely in `tests/run-tests.sh`/`.ps1`.
+
+`--spec PATH` stays as an explicit, lower-level override that reads a
+tier-profiles.json-shaped file directly via `json.loads` (the pre-A4d code
+path, now factored into `load_spec()`'s `spec_path is not None` branch) —
+every test that ever passed `--spec` explicitly would be unaffected either
+way, though grepping `tests/` found none that do (the tool's own default path
+is what every existing case exercises). A new `--registry PATH` flag (default
+`catalog/ai-registry.json`) names the render source when `--spec` is not
+given, ignored otherwise — the same pairing `tools/sync-ide-models.py`'s
+`--registry`/`--catalog` flags give that tool.
