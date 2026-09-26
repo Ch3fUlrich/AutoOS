@@ -10754,7 +10754,7 @@ _aistack() {
     while (( $# )) && [[ "$1" == [A-Z]*=* ]]; do extra+=("$1"); shift; done
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
-        -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES \
+        -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
         AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
         AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
@@ -11344,13 +11344,186 @@ if it "aistack: the guard and compose agree on the bind when the shell exports A
     if (( ok )); then pass; else fail "the guarded bind and the published bind can differ"; fi
 fi
 
-if it "aistack: every FROM in opencode.Dockerfile is digest-pinned, or the rebuild hash is blind"; then
+if it "aistack: every FROM in opencode.Dockerfile and omniroute.Dockerfile is digest-pinned, or the rebuild hash is blind"; then
     # The rebuild label hashes the Dockerfile text: a tag-only FROM could move
     # underneath an unchanged text and the stale layer would never rebuild.
-    f="$AISTACK/opencode.Dockerfile"
-    froms="$(grep -ciE '^[[:space:]]*FROM[[:space:]]' "$f")"
-    pinned="$(grep -cE '^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]{64}([[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+)?[[:space:]]*$' "$f")"
-    if (( froms >= 1 && froms == pinned )); then pass; else fail "$pinned of $froms FROM lines are @sha256:-pinned in $f"; fi
+    ok=1
+    for f in "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile"; do
+        froms="$(grep -ciE '^[[:space:]]*FROM[[:space:]]' "$f" 2>/dev/null || true)"
+        pinned="$(grep -cE '^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]{64}([[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+)?[[:space:]]*$' "$f" 2>/dev/null || true)"
+        (( froms >= 1 && froms == pinned )) || { ok=0; echo "${pinned:-0} of ${froms:-0} FROM lines are @sha256:-pinned in $f" >&2; }
+    done
+    if (( ok )); then pass; else fail "a FROM is not digest-pinned"; fi
+fi
+
+# ─── The gateway image: OmniRoute + qodercli (omniroute.Dockerfile) ─────────
+# The Qoder PAT login runs `qodercli` inside the gateway container. The
+# upstream image has none (`spawn qodercli ENOENT`), so a derived layer adds
+# it - built like the opencode one, from a digest-pinned base.
+
+if it "aistack: the omniroute layer adds qodercli at an exact version on a digest-pinned base, no vendor binary"; then
+    ok=1
+    f="$AISTACK/omniroute.Dockerfile"
+    [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
+    base="$(sed -n 's/^FROM diegosouzapw\/omniroute:\([0-9][0-9.]*\)@sha256:[0-9a-f]\{64\}$/\1/p' "$f" 2>/dev/null)"
+    [[ -n "$base" ]] || { ok=0; echo "FROM is not diegosouzapw/omniroute:<version>@sha256:<digest>" >&2; }
+    # The local tag names the upstream version it is built on: bumped together.
+    grep -qxE "    image: autoos/omniroute:${base//./\\.}-autoos[0-9]+" "$AISTACK/compose.yml" \
+        || { ok=0; echo "compose.yml's image tag does not carry the FROM version [$base]" >&2; }
+    grep -qxE 'RUN npm install -g @qoder-ai/qodercli@[0-9]+\.[0-9]+\.[0-9]+ && npm cache clean --force' "$f" 2>/dev/null \
+        || { ok=0; echo "qodercli is not installed at an exact version, cache cleaned in the same layer" >&2; }
+    grep -qx 'USER root' "$f" 2>/dev/null || { ok=0; echo "no USER root for the install" >&2; }
+    [[ "$(grep -E '^USER ' "$f" 2>/dev/null | tail -n1)" == "USER node" ]] || { ok=0; echo "the image must end as USER node" >&2; }
+    grep -qiE '^(COPY|ADD)[[:space:]]' "$f" 2>/dev/null && { ok=0; echo "COPY/ADD: a vendor binary would be committed; npm fetches at build" >&2; }
+    if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned qodercli"; fi
+fi
+
+if it "aistack: init creates the qoder home, private and the operator's, and leaves the gateway data alone"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    mkdir -p "$d/data/omniroute"
+    printf 'db\n' >"$d/data/omniroute/storage.sqlite"; printf 'k=v\n' >"$d/data/omniroute/.env"
+    before="$(cd "$d/data/omniroute" && cksum storage.sqlite .env)"
+    out="$(_aistack "$d" --dry-run init)"
+    [[ "$out" == *"would create $d/data/qoder-home"* ]] || { ok=0; echo "the dry run does not announce the qoder home" >&2; }
+    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "the dry run created it" >&2; }
+    _aistack "$d" init >/dev/null
+    got="$(stat -c '%a %U' "$d/data/qoder-home" 2>&1)"
+    [[ "$got" == "700 $(id -un)" ]] || { ok=0; echo "qoder home is not 700 and the operator's: $got" >&2; }
+    out="$(_aistack "$d" init)"
+    [[ "$out" == *qoder-home* ]] && { ok=0; echo "a second init touched it again: $out" >&2; }
+    [[ "$(cd "$d/data/omniroute" && cksum storage.sqlite .env)" == "$before" ]] || { ok=0; echo "the gateway data changed" >&2; }
+    [[ "$(LC_ALL=C ls -A "$d/data/omniroute" | tr '\n' ' ')" == ".env storage.sqlite " ]] || { ok=0; echo "files appeared in the gateway data dir" >&2; }
+    # One that already exists with looser rights (made by hand) is tightened.
+    chmod 755 "$d/data/qoder-home"
+    _aistack "$d" init >/dev/null
+    got="$(stat -c '%a' "$d/data/qoder-home" 2>&1)"
+    [[ "$got" == 700 ]] || { ok=0; echo "an existing qoder home stays $got" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the qoder home is not created private, or init touched the gateway data"; fi
+fi
+
+if it "aistack: up creates the qoder home before compose starts the gateway, on a host init ran on long ago"; then
+    ok=1
+    # init ran long ago (stack.env exists), so up does not run it again: docker
+    # would create the missing mount source as root and the gateway (host uid)
+    # could not write its HOME.
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/data/omniroute" "$d/data/opencode-home"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed" >&2; }
+    [[ "$(cat "$d/qoder-home-at-up.log" 2>/dev/null)" == present ]] || { ok=0; echo "compose up saw: [$(cat "$d/qoder-home-at-up.log" 2>&1)]" >&2; }
+    got="$(stat -c '%a %U' "$d/data/qoder-home" 2>&1)"
+    [[ "$got" == "700 $(id -un)" ]] || { ok=0; echo "qoder home: $got" >&2; }
+    rm -rf "$d"
+    # compose mounts AUTOOS_STACK_DATA from stack.env: that is where it is made.
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/elsewhere/omniroute"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_STACK_DATA='%s'\n" "$d/elsewhere" >"$d/cfg/stack.env"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up (stack.env data dir) failed" >&2; }
+    [[ -d "$d/elsewhere/qoder-home" ]] || { ok=0; echo "not created under the AUTOOS_STACK_DATA of stack.env" >&2; }
+    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "created under the default data dir, which compose does not mount" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "compose can be the one to create the qoder home"; fi
+fi
+
+if it "aistack: the omniroute image is rebuilt when its label, base digest or Dockerfile changes, and only then"; then
+    d="$(_aistack_sandbox)"
+    t="$d/tree/configuration"
+    mkdir -p "$t/docker/ai-stack" "$d/cfg"
+    cp "$AISTACK/ai-stack.sh" "$AISTACK/compose.yml" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
+    cp "$ROOT/configuration/env-file.sh" "$t/"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    _omni_up() { rm -f "$d/docker.log" "$d/run-autoos-omniroute"; _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up omniroute >/dev/null; }
+    _omni_builds() { grep -c '^build' "$d/docker.log" 2>/dev/null || true; }
+    ok=1
+    : >"$d/image-exists"; printf 'stale\n' >"$d/omniroute-label"
+    _omni_up
+    grep -qE "^build --label org\.autoos\.omniroute\.source=[0-9a-f]{64} -t autoos/omniroute:[^ ]+ -f $t/docker/ai-stack/omniroute\.Dockerfile " "$d/docker.log" \
+        || { ok=0; echo "a stale label was not rebuilt: $(cat "$d/docker.log")" >&2; }
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "up omniroute built something else too" >&2; }
+    [[ -e "$d/opencode-label" ]] && { ok=0; echo "the omniroute build wrote the opencode label" >&2; }
+    first="$(cat "$d/omniroute-label")"
+    _omni_up
+    [[ "$(_omni_builds)" == 0 ]] || { ok=0; echo "rebuilt an up-to-date image" >&2; }
+    # A bumped base digest, the Dockerfile text unchanged otherwise.
+    sed -i -E "s/^(FROM [^ ]+@sha256:)[0-9a-f]{64}/\1$(printf '%064d' 0)/" "$t/docker/ai-stack/omniroute.Dockerfile"
+    _omni_up
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a bumped base digest was not rebuilt" >&2; }
+    second="$(cat "$d/omniroute-label")"
+    [[ "$second" != "$first" ]] || { ok=0; echo "label did not change with the digest" >&2; }
+    _omni_up
+    [[ "$(_omni_builds)" == 0 ]] || { ok=0; echo "rebuilt after the digest bump was built" >&2; }
+    printf '# a changed layer\n' >>"$t/docker/ai-stack/omniroute.Dockerfile"
+    _omni_up
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a changed Dockerfile was not rebuilt" >&2; }
+    [[ "$(cat "$d/omniroute-label")" != "$second" ]] || { ok=0; echo "label did not change with the text" >&2; }
+    # No local image at all: built, not pulled.
+    : >"$d/noimage-omniroute"
+    _omni_up
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a missing image was not built" >&2; }
+    grep -qE '(^| )pull( |$)' "$d/docker.log" && { ok=0; echo "the image was pulled: $(cat "$d/docker.log")" >&2; }
+    unset -f _omni_up _omni_builds
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the omniroute image does not track its Dockerfile and base"; fi
+fi
+
+if it "aistack: --dry-run up says would build or rebuild the omniroute image and builds nothing"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    ok=1
+    out="$(_aistack "$d" --dry-run up omniroute)"
+    [[ "$out" == *"would build autoos/omniroute:"*" (omniroute.Dockerfile)"* ]] || { ok=0; echo "no image: $out" >&2; }
+    : >"$d/image-exists"; printf 'stale\n' >"$d/omniroute-label"
+    out="$(_aistack "$d" --dry-run up omniroute)"
+    [[ "$out" == *"would rebuild autoos/omniroute:"*" (omniroute.Dockerfile or its base image changed)"* ]] || { ok=0; echo "stale label: $out" >&2; }
+    grep -q '^build' "$d/docker.log" 2>/dev/null && { ok=0; echo "a dry run built: $(cat "$d/docker.log")" >&2; }
+    # Up to date (label from a real build): nothing to announce.
+    _aistack "$d" up omniroute >/dev/null
+    rm -f "$d/docker.log"
+    out="$(_aistack "$d" --dry-run up omniroute)"
+    [[ "$out" == *"would build"* || "$out" == *"would rebuild"* ]] && { ok=0; echo "an up-to-date image is announced: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the dry-run wording for the omniroute image is wrong"; fi
+fi
+
+if it "aistack: migrate builds the omniroute image before it stops anything, up before it starts the gateway"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    ok=1
+    _aistack "$d" migrate --yes >/dev/null || { ok=0; echo "migrate failed" >&2; }
+    _aistack_seq "$d/events.log" "docker: build --label org.autoos.omniroute.source=" "-t autoos/omniroute:" \
+        "systemctl: --user stop autoos-omniroute.service" "up -d --no-deps omniroute" \
+        || { ok=0; echo "the build did not come first: $(cat "$d/events.log")" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"; : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed" >&2; }
+    _aistack_seq "$d/events.log" "docker: build --label org.autoos.omniroute.source=" "up -d --no-deps omniroute" \
+        || { ok=0; echo "up started the gateway before building it: $(cat "$d/events.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the gateway can start from a stale or missing image"; fi
+fi
+
+if it "aistack: a failed omniroute build stops nothing and starts nothing"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/fail-build-omniroute"
+    ok=1
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "migrate stopped a unit before the image existed" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran" >&2; }
+    [[ "$out" == *"building autoos/omniroute:"*"failed"* ]] || { ok=0; echo "not explained: $out" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"; : >"$d/image-exists"; : >"$d/fail-build-omniroute"
+    _aistack "$d" up omniroute >/dev/null && { ok=0; echo "up reported success" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "up started the gateway from a failed build" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed image build does not stop the run"; fi
 fi
 
 if it "aistack: a failed backup leaves no partial archive and hands the service back"; then
@@ -11386,6 +11559,87 @@ STUB
     [[ -e "$d2/run-autoos-omniroute" && -e "$d2/cfg/stack.active" ]] || { ok=0; echo "stack or marker gone" >&2; }
     rm -rf "$d" "$d2"
     if (( ok )); then pass; else fail "a failed backup leaves a partial archive"; fi
+fi
+
+# ─── The public URL (AUTOOS_OMNIROUTE_PUBLIC_URL) ───────────────────────────
+# stack.env's AUTOOS_OMNIROUTE_PUBLIC_URL reaches the gateway as
+# NEXT_PUBLIC_BASE_URL + OMNIROUTE_PUBLIC_BASE_URL (compose.yml). Unset must
+# change nothing - and image 3.8.50 exits at startup on a value that is not an
+# http(s) URL, so a bad one must not reach `compose up`.
+
+if it "aistack: stack.env.example documents the public URL as a commented placeholder, nothing real"; then
+    ok=1
+    f="$AISTACK/stack.env.example"
+    line="$(grep -nxF '# AUTOOS_OMNIROUTE_PUBLIC_URL=https://<your-omniroute-host>' "$f" | cut -d: -f1)"
+    [[ -n "$line" ]] || { ok=0; echo "the commented placeholder line is missing" >&2; }
+    if [[ -n "$line" ]]; then
+        sed -n "$((line - 1))p" "$f" | grep -q '^# .*[Pp]ublic' || { ok=0; echo "no one-line description directly above it" >&2; }
+    fi
+    grep -qE '^[[:space:]]*AUTOOS_OMNIROUTE_PUBLIC_URL=' "$f" && { ok=0; echo "an active AUTOOS_OMNIROUTE_PUBLIC_URL line: the example would turn it on" >&2; }
+    if (( ok )); then pass; else fail "the public URL is not a commented placeholder"; fi
+fi
+
+if it "aistack: init never invents the public URL and keeps the operator's value"; then
+    # A guard: green before the feature, it fails if init ever starts writing the key.
+    d="$(_aistack_sandbox)"
+    ok=1
+    _aistack "$d" init >/dev/null
+    grep -q 'AUTOOS_OMNIROUTE_PUBLIC_URL' "$d/cfg/stack.env" && { ok=0; echo "init wrote the key: $(grep AUTOOS_OMNIROUTE_PUBLIC_URL "$d/cfg/stack.env")" >&2; }
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL='https://gw.example.invalid/'\n" >>"$d/cfg/stack.env"
+    _aistack "$d" init >/dev/null
+    [[ "$(grep -c '^AUTOOS_OMNIROUTE_PUBLIC_URL=' "$d/cfg/stack.env")" == 1 ]] || { ok=0; echo "the key is not there exactly once" >&2; }
+    grep -qxF "AUTOOS_OMNIROUTE_PUBLIC_URL='https://gw.example.invalid/'" "$d/cfg/stack.env" || { ok=0; echo "the operator's value changed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "init touches the public URL"; fi
+fi
+
+if it "aistack: up and migrate refuse an invalid public URL before anything starts or stops"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_OMNIROUTE_PUBLIC_URL='https://opuser:oppw-secret@gw.example.invalid'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up omniroute)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "up accepted a URL with credentials" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran" >&2; }
+    [[ "$out" == *AUTOOS_OMNIROUTE_PUBLIC_URL* ]] || { ok=0; echo "the refusal does not name the variable: $out" >&2; }
+    [[ "$out" == *oppw-secret* ]] && { ok=0; echo "the credentials were echoed" >&2; }
+    # A dry run explains and carries on, like the bind guard.
+    out="$(_aistack "$d" --dry-run up omniroute)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "dry run: exit $rc, not 0" >&2; }
+    [[ "$out" == *"refusing"*AUTOOS_OMNIROUTE_PUBLIC_URL* || "$out" == *AUTOOS_OMNIROUTE_PUBLIC_URL*"refusing"* ]] || { ok=0; echo "dry run does not explain: $out" >&2; }
+    rm -rf "$d"
+    for bad in 'gw.example.invalid' 'ftp://gw.example.invalid' 'https://gw example.invalid'; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"; : >"$d/image-exists"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL="$bad" up omniroute >/dev/null && { ok=0; echo "up accepted [$bad] from the environment" >&2; }
+        grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran for [$bad]" >&2; }
+        rm -rf "$d"
+    done
+    # What the gateway accepts (and nothing at all) goes through.
+    for good in '' 'https://gw.example.invalid' 'https://gw.example.invalid/' 'http://gw.example.invalid:20128' 'https://gw.example.invalid/omniroute/'; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"; : >"$d/image-exists"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL="$good" up omniroute >/dev/null || { ok=0; echo "up refused [$good]" >&2; }
+        rm -rf "$d"
+    done
+    # migrate: refused before a native unit stops.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL=gw.example.invalid migrate --yes >/dev/null && { ok=0; echo "migrate accepted an invalid URL" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "migrate stopped a unit first" >&2; }
+    [[ -e "$d/active-autoos-omniroute" ]] || { ok=0; echo "the native gateway is gone" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an invalid public URL reaches compose"; fi
+fi
+
+if it "aistack: the docs explain the loopback callback and what the public URL does and does not change"; then
+    ok=1
+    f="$ROOT/docs/web-services.md"
+    for needle in 'AUTOOS_OMNIROUTE_PUBLIC_URL' 'NEXT_PUBLIC_BASE_URL' 'OMNIROUTE_PUBLIC_BASE_URL' 'ANTIGRAVITY_OAUTH_CLIENT_ID' \
+                  'ssh -L 20128:127.0.0.1:20128' 'http://127.0.0.1:20128/callback' 'BASE_URL: http://localhost:20128' 'INVALID_ORIGIN'; do
+        grep -qF -- "$needle" "$f" || { ok=0; echo "docs/web-services.md does not mention: $needle" >&2; }
+    done
+    if (( ok )); then pass; else fail "the OAuth / public URL docs are incomplete"; fi
 fi
 
 # ─── ai-stack.sh verify ─────────────────────────────────────────────────────
@@ -11481,11 +11735,11 @@ if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
         AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "exit $rc, not 0" >&2; }
-    grep -qx 'verify: 12 ok, 0 failed, 1 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
+    grep -qx 'verify: 13 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
     grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
     for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
                 'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
-                'combo t2-worker-free-only' 'combo t3-driver-free-only' 'combo t2-worker-clean' \
+                'combo t2-worker-free-only' 'combo t3-driver-free-only' 'combo t2-worker-clean' 'omniroute has qodercli' \
                 'public URL http://127.0.0.1:18081/' 'public URL http://127.0.0.1:18082/'; do
         grep -qx "  ok    $name" <<<"$out" || { ok=0; echo "no ok line for: $name" >&2; }
     done
@@ -11645,6 +11899,91 @@ if it "aistack: verify checks the code dir in opencode and in the OpenHands sand
     if (( ok )); then pass; else fail "the code dir check misbehaves"; fi
 fi
 
+if it "aistack: verify checks the gateway container has qodercli: ok, FAIL, or skip with a reason"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "healthy: exit $rc, not 0" >&2; }
+    grep -qx '  ok    omniroute has qodercli' <<<"$out" || { ok=0; echo "healthy: no ok line" >&2; }
+    grep -qx 'exec autoos-omniroute qodercli --version' "$d/docker.log" || { ok=0; echo "the check did not run qodercli --version in the gateway container" >&2; }
+    # The image without the layer: the exec cannot find the binary.
+    : >"$d/noqoder-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "no qodercli: exit $rc, not 1" >&2; }
+    grep -qE '^  FAIL  omniroute has qodercli - ' <<<"$out" || { ok=0; echo "no qodercli: no FAIL line: $out" >&2; }
+    [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "no qodercli: not exactly one FAIL" >&2; }
+    # A command that answers, but not with a version.
+    rm -f "$d/noqoder-autoos-omniroute"; printf 'not a version\n' >"$d/qoder-version-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "no version: exit $rc, not 1" >&2; }
+    grep -qE '^  FAIL  omniroute has qodercli - ' <<<"$out" || { ok=0; echo "no version: no FAIL line" >&2; }
+    rm -f "$d/qoder-version-autoos-omniroute"
+    # A stopped gateway is the container check's FAIL; this one skips, and does not exec.
+    rm -f "$d/run-autoos-omniroute" "$d/docker.log"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    grep -qx '  skip  omniroute has qodercli - autoos-omniroute is not running' <<<"$out" || { ok=0; echo "stopped: no skip line: $(grep qodercli <<<"$out")" >&2; }
+    grep -q 'qodercli' "$d/docker.log" 2>/dev/null && { ok=0; echo "stopped: docker was asked to exec qodercli" >&2; }
+    rm -rf "$d"
+    # The gateway service is not enabled: skipped, and docker is not asked.
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    t="$d/tree/configuration"
+    mkdir -p "$t/docker/ai-stack"
+    cp "$AISTACK/ai-stack.sh" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
+    cp "$ROOT/configuration/env-file.sh" "$t/"
+    sed 's/^    container_name: autoos-omniroute$/&\n    profiles: ["gateway"]/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
+    out="$(_AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack_verify "$d" verify)" && rc=0 || rc=$?
+    grep -qx '  skip  omniroute has qodercli - the omniroute service is not enabled' <<<"$out" || { ok=0; echo "profile off: no skip line: $(grep qodercli <<<"$out")" >&2; }
+    grep -q 'qodercli' "$d/docker.log" 2>/dev/null && { ok=0; echo "profile off: docker was asked about qodercli" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the qodercli check is not ok/FAIL/skip as specified"; fi
+fi
+
+if it "aistack: verify prints the public URL as the app normalizes it, skips it when unset or empty, FAILs one the gateway would refuse"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    skipline='  skip  omniroute public URL - AUTOOS_OMNIROUTE_PUBLIC_URL is not set'
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "unset: exit $rc, not 0" >&2; }
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "unset: no skip line: $(grep 'public URL' <<<"$out")" >&2; }
+    # Empty - in the environment, in stack.env, or blanks only - is the same as unset.
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_PUBLIC_URL= verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "empty env: no skip line" >&2; }
+    out="$(_aistack_verify "$d" 'AUTOOS_OMNIROUTE_PUBLIC_URL=   ' verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "blank env: no skip line" >&2; }
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL=''\n" >>"$d/cfg/stack.env"
+    out="$(_aistack_verify "$d" verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "empty in stack.env: no skip line" >&2; }
+    # Printed the way the app normalizes it: trimmed, trailing slashes dropped, a path kept.
+    for pair in 'https://gw.example.invalid|https://gw.example.invalid' 'https://gw.example.invalid/|https://gw.example.invalid' \
+                'https://gw.example.invalid///|https://gw.example.invalid' '  https://gw.example.invalid/  |https://gw.example.invalid' \
+                'https://gw.example.invalid/omniroute/|https://gw.example.invalid/omniroute' 'http://gw.example.invalid:20128/|http://gw.example.invalid:20128'; do
+        out="$(_aistack_verify "$d" "AUTOOS_OMNIROUTE_PUBLIC_URL=${pair%%|*}" verify)" && rc=0 || rc=$?
+        (( rc == 0 )) || { ok=0; echo "[${pair%%|*}]: exit $rc, not 0" >&2; }
+        grep -qxF "  ok    omniroute public URL ${pair#*|}" <<<"$out" || { ok=0; echo "[${pair%%|*}]: no ok line for ${pair#*|}: $(grep 'public URL' <<<"$out")" >&2; }
+    done
+    # The environment beats stack.env, as it does in compose's interpolation.
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL='https://from-file.example.invalid/'\n" >>"$d/cfg/stack.env"
+    out="$(_aistack_verify "$d" verify)" || true
+    grep -qxF '  ok    omniroute public URL https://from-file.example.invalid' <<<"$out" || { ok=0; echo "stack.env value not shown" >&2; }
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_PUBLIC_URL=https://from-env.example.invalid verify)" || true
+    grep -qxF '  ok    omniroute public URL https://from-env.example.invalid' <<<"$out" || { ok=0; echo "the environment value does not win" >&2; }
+    # Printing is not probing: it may be a plain LAN address, not the proxy's 302.
+    grep -q 'example.invalid' "$d/curl-argv.log" 2>/dev/null && { ok=0; echo "verify requested the public URL" >&2; }
+    # What the gateway would refuse at startup: FAIL, and the value is not echoed.
+    for bad in 'gw.example.invalid' 'ftp://gw.example.invalid' 'https://opuser:oppw-secret@gw.example.invalid' 'https://gw example.invalid'; do
+        out="$(_aistack_verify "$d" "AUTOOS_OMNIROUTE_PUBLIC_URL=$bad" verify)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "[$bad]: exit $rc, not 1" >&2; }
+        grep -qE '^  FAIL  omniroute public URL - ' <<<"$out" || { ok=0; echo "[$bad]: no FAIL line" >&2; }
+        [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "[$bad]: not exactly one FAIL" >&2; }
+        [[ "$out" == *oppw-secret* || "$out" == *"gw example"* ]] && { ok=0; echo "[$bad]: the value is echoed" >&2; }
+    done
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the public URL line of verify misbehaves"; fi
+fi
+
 if it "aistack: verify follows the compose profiles: a disabled openhands is skipped, an enabled one is checked"; then
     ok=1
     for style in inline block; do
@@ -11687,7 +12026,7 @@ if it "aistack: verify is read-only: only inspect and exec reach docker, nothing
     [[ "$(grep -cE '^(start|stop|restart|rm|up|down|run|create|compose|build|pull|network|kill|pause|unpause|cp|update)( |$)' "$d/docker.log" || true)" == 0 ]] \
         || { ok=0; echo "a mutating docker verb: $(grep -E '^(start|stop|restart|rm|up|down|run|create|compose)' "$d/docker.log" | head -3)" >&2; }
     grep -vE '^(inspect|exec) ' "$d/docker.log" | grep -q . && { ok=0; echo "docker verbs beyond inspect/exec: $(grep -vE '^(inspect|exec) ' "$d/docker.log" | head -3)" >&2; }
-    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ test -d ' | grep -q . && { ok=0; echo "an exec that is not test -d" >&2; }
+    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |qodercli --version$)' | grep -q . && { ok=0; echo "an exec that is neither test -d nor qodercli --version" >&2; }
     # Nothing but docker inspect/exec: not systemctl, not ss, not the plain curl on PATH.
     grep -vE '^docker: (inspect|exec) ' "$d/events.log" | grep -q . && { ok=0; echo "another tool was called: $(grep -vE '^docker: (inspect|exec) ' "$d/events.log" | head -3)" >&2; }
     rm -rf "$d"
