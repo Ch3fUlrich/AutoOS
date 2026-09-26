@@ -4498,7 +4498,9 @@ Test-Case 'openhands skills: a dangling link into the repo is repaired and a for
     try {
         New-TestSkillRepo -Repo $repo
         $null = New-Item -ItemType Directory -Path $dest -Force
-        New-TestDanglingLink -Path (Join-Path $dest 'alpha') -Target (Join-Path $repo '.agents\skills\alpha-renamed')
+        # Ours: the exact shape Sync-AutoOSSkillDirs creates (<checkout>\.agents\skills\<name>)
+        # into a checkout that has since moved or been renamed, so it dangles.
+        New-TestDanglingLink -Path (Join-Path $dest 'alpha') -Target (Join-Path $scratch 'moved-checkout\.agents\skills\alpha')
         New-TestDanglingLink -Path (Join-Path $dest 'beta') -Target (Join-Path $scratch 'elsewhere\beta')
         $foreignBefore = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
         $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
@@ -4512,6 +4514,107 @@ Test-Case 'openhands skills: a dangling link into the repo is repaired and a for
         Remove-TestDirLinks -Directory $dest
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
+    Pass
+}
+
+# Only a link this function made is ours (AGENTS.md hard rule 2): it dangles AND
+# has the exact shape ...\.agents\skills\<name> for the same skill. A live link,
+# or a dangling one of another shape, is the user's and stays as it is - even
+# when it points inside the repo's own .agents directory. (Here a symlink stands
+# in for the junction off Windows; the junction itself is only exercised by
+# Windows CI.)
+Test-Case 'openhands skills: a live link of your own into .agents\custom is kept' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $custom = Join-Path $repo '.agents\custom\alpha'
+        $null = New-Item -ItemType Directory -Path $custom, $dest -Force
+        [IO.File]::WriteAllText((Join-Path $custom 'SKILL.md'), 'my own alpha')
+        New-TestDirLink -Path (Join-Path $dest 'alpha') -Target $custom      # live, inside the repo's .agents, not our shape
+        $before = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $got = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        if ($got -ne $before) { throw "the user's live link now points at [$got], was [$before]" }
+        if ([IO.File]::ReadAllText((Join-Path $dest 'alpha\SKILL.md')) -ne 'my own alpha') { throw "alpha no longer resolves to the user's own skill" }
+        if ($log -match 'repointed') { throw "the live link was reported as repointed: [$log]" }
+        if ($log -notmatch ('kept ' + [regex]::Escape((Join-Path $dest 'alpha')))) { throw "no 'kept ...alpha' line, the user is not told it was left alone: [$log]" }
+        $wantBeta = [IO.Path]::GetFullPath((Join-Path $repo '.agents\skills\beta')).TrimEnd('\', '/')
+        if ((Get-TestLinkTarget -Path (Join-Path $dest 'beta')) -ne $wantBeta) { throw "beta was not linked next to the user's link" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case "openhands skills: a live link into another checkout's skills is kept" {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $dest -Force
+        # Another checkout with the same skills layout. One sits beside this repo,
+        # one is nested under this repo's own .agents directory (a worktree kept
+        # there): both are live and both have the shape we would create.
+        New-TestSkillRepo -Repo (Join-Path $scratch 'other')
+        New-TestSkillRepo -Repo (Join-Path $repo '.agents\nested')
+        New-TestDirLink -Path (Join-Path $dest 'alpha') -Target (Join-Path $repo '.agents\nested\.agents\skills\alpha')
+        New-TestDirLink -Path (Join-Path $dest 'beta') -Target (Join-Path $scratch 'other\.agents\skills\beta')
+        $alphaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $alphaNow = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaNow = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        if ($alphaNow -ne $alphaBefore) { throw "the link into the nested checkout now points at [$alphaNow], was [$alphaBefore]" }
+        if ($betaNow -ne $betaBefore) { throw "the link into the other checkout now points at [$betaNow], was [$betaBefore]" }
+        if ($log -match 'repointed') { throw "a live link was reported as repointed: [$log]" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'openhands skills: a dangling link of another shape is kept' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $dest -Force
+        New-TestDanglingLink -Path (Join-Path $dest 'alpha') -Target (Join-Path $scratch 'nowhere\other\alpha')          # dangling, outside the repo
+        New-TestDanglingLink -Path (Join-Path $dest 'beta') -Target (Join-Path $repo '.agents\skills\beta-renamed')     # dangling, inside the repo, not the shape of beta
+        $alphaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $alphaNow = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaNow = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        if ($alphaNow -ne $alphaBefore) { throw "the dangling link outside the repo now points at [$alphaNow], was [$alphaBefore]" }
+        if ($betaNow -ne $betaBefore) { throw "the dangling link of another shape now points at [$betaNow], was [$betaBefore]" }
+        if ($log -match 'repointed') { throw "a link of another shape was reported as repointed: [$log]" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'openhands skills: Sync-AutoOSSkillDirs owns a link by its shape, not by a prefix, and unlinks without recursing' {
+    # Static twin of the three tests above, for the parts a Linux run cannot
+    # exercise (a junction is only made on Windows): no repo-prefix ownership test,
+    # the exact .agents/skills/<name> shape, and a deletion that stays on the link.
+    $body = (Get-Command Sync-AutoOSSkillDirs).Definition
+    if ($body -match 'ownRoot|StartsWith') { throw 'Sync-AutoOSSkillDirs still decides ownership by a path prefix' }
+    if ($body -notmatch [regex]::Escape('.agents/skills/')) { throw 'Sync-AutoOSSkillDirs does not test the .agents/skills/<name> shape' }
+    if ($body -notmatch 'Test-Path -LiteralPath \$have') { throw 'Sync-AutoOSSkillDirs does not require the old target to be gone before repointing' }
+    if ($body -notmatch '\$item\.Delete\(\)') { throw 'the reparse-point-safe junction deletion is gone' }
+    if ($body -match 'Remove-Item') { throw 'Remove-Item on a junction can follow it into the target' }
     Pass
 }
 

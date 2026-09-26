@@ -2398,10 +2398,14 @@ function Sync-AutoOSSkillDirs {
         real directory of its own, so a user's skills sit beside ours and are never
         touched:
           absent                                    -> linked
-          already our link to the same directory    -> skipped
-          our link, dangling or pointing elsewhere
-            under -Source's parent (this repo)      -> repointed
-          anything else (a user's directory or file, a foreign link) -> left alone
+          a link to the same directory              -> skipped
+          a link that is ours and dangling          -> repointed
+          anything else (a user's directory or file, any live link that
+            resolves somewhere else, a dangling link of another shape) -> left alone
+        A link is ours only when its target no longer exists AND its path ends with
+        \.agents\skills\<this skill's name> - the exact shape this function creates,
+        so a moved or renamed checkout is repaired. A live link is the user's, even
+        when it points inside the repo's own .agents directory (AGENTS.md rule 2).
         A -Destination that is itself a link (the old whole-directory junction
         layout) is not written through - that would create links inside the repo or a
         clone - it is left with one warning that names the fix. A link that cannot be
@@ -2447,7 +2451,6 @@ function Sync-AutoOSSkillDirs {
 
     $comparison = [StringComparison]::Ordinal
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $comparison = [StringComparison]::OrdinalIgnoreCase }
-    $ownRoot = ([IO.Path]::GetFullPath((Split-Path -Parent $Source))).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
 
     $ok = $true
     $skipped = 0
@@ -2467,10 +2470,14 @@ function Sync-AutoOSSkillDirs {
                 if (-not [IO.Path]::IsPathRooted($raw)) { $raw = Join-Path $Destination $raw }
                 try { $have = [IO.Path]::GetFullPath($raw).TrimEnd('\', '/') } catch { $have = '' }
             }
+            # Ours = dangling AND shaped .../.agents/skills/<this skill> (either
+            # separator: a symlink stands in for the junction off Windows).
+            $shape = '/.agents/skills/' + $skill.Name
             if ($have -and [string]::Equals($have, $want, $comparison)) {
                 $skipped++
-            } elseif ($have -and $have.StartsWith($ownRoot, $comparison)) {
-                # Ours (it points into this repo) but dangling or at another skill.
+            } elseif ($have -and -not (Test-Path -LiteralPath $have) -and $have.Replace('\', '/').EndsWith($shape, $comparison)) {
+                # Reparse-point safe: Delete() on the link removes the link only,
+                # and here the target is gone anyway. Never a recursive delete.
                 try { $item.Delete() }
                 catch {
                     Write-AutoOSLine "could not repoint ${link}: $($_.Exception.Message) - left as it was" -Level warn
