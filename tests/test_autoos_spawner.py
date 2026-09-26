@@ -720,6 +720,27 @@ class RunDirCollisionTests(unittest.TestCase):
         self.assertIn("error", out)
 
 
+class TrackEntryClientTests(unittest.TestCase):
+    """A run on an own-account client (qoder, agy, claude) never touches the
+    gateway route its plan names, so it is no observation of that route:
+    no track record and hence no re-probe proposal (measured 2026-09-26:
+    agy/qoder NO-OPs were recorded as t2-worker failures)."""
+
+    def setUp(self):
+        self.cli = load_agent()
+
+    def plan(self, client):
+        return {"client": client, "route": {"combo": "t2-worker", "card": None}}
+
+    def test_a_gateway_client_run_is_recorded(self):
+        self.assertEqual(self.cli.track_entry(self.plan("opencode"), 0, 1.0)["route"],
+                         "t2-worker")
+
+    def test_an_own_account_client_run_is_not_recorded(self):
+        for client in ("qoder", "agy", "claude"):
+            self.assertIsNone(self.cli.track_entry(self.plan(client), 5, 1.0), client)
+
+
 class ProbeProposalTests(unittest.TestCase):
     """TC2: propose a tool-calling re-probe when a real run's gate contradicts
     the recorded tool_calls status of its route's legs (spec 5.6 track_entry,

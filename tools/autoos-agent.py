@@ -472,6 +472,9 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     value the run exits with, the NO-OP override included.
     """
     route = plan["route"]
+    client = clients.CLIENTS.get(plan.get("client"))
+    if client is not None and not client.gateway:
+        return None  # an own-account client never ran the gateway route it names
     klass = track_class(route.get("combo"))
     if not klass:
         return None
