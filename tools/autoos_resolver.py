@@ -715,6 +715,79 @@ def defer_until(card, chosen_score, registry, now):
 
 
 # ---------------------------------------------------------------------------
+# decompose(): spec 5.3 step 3 / D7. Pure: it only reads the `whole_plan` and
+# `subtask_plans` dicts the caller already produced by calling `plan()` once
+# on the whole task and once per orchestrator-proposed subtask card. One level
+# deep only -- a subtask plan's own `decompose` flag (true when it is itself
+# S3/S4) is never read here, so a subtask is always just costed, never split
+# again.
+# ---------------------------------------------------------------------------
+
+
+def decompose(whole_plan, subtask_plans, bucket_name, registry, orchestrator_model):
+    """Whether to split into `subtask_plans` instead of running `whole_plan`.
+
+    Only for `bucket_name` in ("S3", "S4"); every other bucket returns
+    ``split: False`` without touching `registry` or either plan. A subtask
+    plan whose ``route`` is None (no route survived its own filters) fails
+    the whole split closed -- naming which subtask and its reason -- since a
+    piece that cannot run makes the split worse than the whole task, not
+    better.
+
+    ``overhead`` is the cost of the orchestrator writing one extra brief per
+    subtask: ``len(subtask_plans) * policy.brief_tokens[bucket_name].tokens *
+    registry["models"][orchestrator_model]["price_in"]``. Split when
+    ``overhead + sum(subtask expected_cost) < whole_plan["expected_cost"]``.
+    A `whole_plan` with no route (``route`` is None, as `no_route()` returns
+    it -- with no ``expected_cost`` key at all) counts as infinite cost, so a
+    working decomposition always beats it.
+
+    A missing ``policy.brief_tokens[bucket_name]`` or an `orchestrator_model`
+    absent from ``registry["models"]`` raises ValueError naming it (the same
+    fail-closed style as `verify_cost`).
+    """
+    if bucket_name not in ("S3", "S4"):
+        return {"split": False,
+                "reason": "bucket %s: no decompose (S3/S4 only)" % bucket_name}
+
+    for index, subtask in enumerate(subtask_plans, start=1):
+        if subtask.get("route") is None:
+            return {"split": False,
+                    "reason": "subtask %d has no route: %s"
+                             % (index, subtask.get("reason"))}
+
+    tokens = _policy_value(registry, "brief_tokens", bucket_name, "tokens")
+    models = registry["models"]
+    if orchestrator_model not in models:
+        raise ValueError("unknown orchestrator model %r" % orchestrator_model)
+
+    overhead = (len(subtask_plans) * float(tokens)
+               * float(models[orchestrator_model]["price_in"]))
+    subtasks_cost = sum(s["expected_cost"] for s in subtask_plans)
+    total = overhead + subtasks_cost
+
+    whole_route = whole_plan.get("route")
+    whole_cost = None if whole_route is None else whole_plan["expected_cost"]
+    compare_to = whole_cost if whole_cost is not None else float("inf")
+    whole_display = "inf" if whole_cost is None else "%.6f" % whole_cost
+
+    split = total < compare_to
+    if split:
+        reason = "split: %.6f < %s" % (total, whole_display)
+    else:
+        reason = "keep whole: %.6f >= %s" % (total, whole_display)
+
+    return {
+        "split": split,
+        "overhead": overhead,
+        "subtasks_cost": subtasks_cost,
+        "whole_cost": whole_cost,
+        "reason": reason,
+        "subtasks": [s["route"] for s in subtask_plans],
+    }
+
+
+# ---------------------------------------------------------------------------
 # plan(): the resolver v2 entry point (spec sections 5 intro, 5.3 steps 1-7,
 # 5.5, 5.7). Pure: it only composes the functions above, no I/O, no clock of
 # its own -- `now` is passed in. A missing `card["kind"/"mode"/"risk"]` fails

@@ -1420,5 +1420,141 @@ class PlanTests(unittest.TestCase):
         self.assertIn(result["route"], registry["routes"])
 
 
+class DecomposeTests(unittest.TestCase):
+    """decompose(): spec 5.3 step 3 / D7 -- S3/S4 only, one level deep.
+
+    A tiny inline registry (just the two things decompose() reads: the
+    orchestrator's price_in and policy.brief_tokens per bucket) keeps every
+    number hand-computable. `whole_plan` and `subtask_plans` are plain dicts
+    carrying only the keys decompose() reads (route, expected_cost, reason) --
+    exactly what plan()'s output shape provides.
+    """
+
+    def registry(self):
+        return {
+            "models": {"orch": {"price_in": 5e-6}},
+            "policy": {
+                "brief_tokens": {
+                    "S3": {"tokens": 2000, "source": "default"},
+                    "S4": {"tokens": 3000, "source": "default"},
+                },
+            },
+        }
+
+    def subtask(self, route="r1", expected_cost=0.02, reason="ok"):
+        return {"route": route, "expected_cost": expected_cost, "reason": reason}
+
+    # --- bucket filter: S3/S4 only -----------------------------------------
+
+    def test_s2_never_decomposes(self):
+        result = r.decompose({"route": "whole", "expected_cost": 1.0}, [],
+                             "S2", self.registry(), "orch")
+        self.assertEqual(result, {
+            "split": False,
+            "reason": "bucket S2: no decompose (S3/S4 only)",
+        })
+
+    def test_s0_and_s1_never_decompose_either(self):
+        for bucket_name in ("S0", "S1"):
+            with self.subTest(bucket=bucket_name):
+                result = r.decompose({"route": "whole", "expected_cost": 1.0},
+                                     [], bucket_name, self.registry(), "orch")
+                self.assertFalse(result["split"])
+                self.assertEqual(
+                    result["reason"],
+                    "bucket %s: no decompose (S3/S4 only)" % bucket_name)
+
+    # --- S3: split vs keep whole --------------------------------------------
+
+    def test_s3_splits_when_cheaper(self):
+        # overhead = 2 * 2000 * 5e-6 = 0.02; subtasks_cost = 0.02 + 0.02 = 0.04
+        # total = 0.06 < whole 0.5 -> split.
+        subtasks = [self.subtask("r1", 0.02), self.subtask("r2", 0.02)]
+        whole = {"route": "whole", "expected_cost": 0.5}
+        result = r.decompose(whole, subtasks, "S3", self.registry(), "orch")
+        self.assertTrue(result["split"])
+        self.assertAlmostEqual(result["overhead"], 0.02)
+        self.assertAlmostEqual(result["subtasks_cost"], 0.04)
+        self.assertAlmostEqual(result["whole_cost"], 0.5)
+        self.assertEqual(result["reason"], "split: 0.060000 < 0.500000")
+        self.assertEqual(result["subtasks"], ["r1", "r2"])
+
+    def test_s3_keeps_whole_when_not_cheaper(self):
+        # Same 0.06 total, whole is only 0.05 -> keep whole.
+        subtasks = [self.subtask("r1", 0.02), self.subtask("r2", 0.02)]
+        whole = {"route": "whole", "expected_cost": 0.05}
+        result = r.decompose(whole, subtasks, "S3", self.registry(), "orch")
+        self.assertFalse(result["split"])
+        self.assertAlmostEqual(result["overhead"], 0.02)
+        self.assertAlmostEqual(result["subtasks_cost"], 0.04)
+        self.assertAlmostEqual(result["whole_cost"], 0.05)
+        self.assertEqual(result["reason"], "keep whole: 0.060000 >= 0.050000")
+        self.assertEqual(result["subtasks"], ["r1", "r2"])
+
+    # --- whole plan has no route: infinite cost, D7 ------------------------
+
+    def test_whole_route_none_counts_as_infinite_cost(self):
+        # no_route()'s shape: no "expected_cost" key at all when route is None.
+        whole = {"route": None,
+                "reason": "no route survives the filters: sign in"}
+        subtasks = [self.subtask("r1", 0.02), self.subtask("r2", 0.02)]
+        result = r.decompose(whole, subtasks, "S3", self.registry(), "orch")
+        self.assertTrue(result["split"])
+        self.assertIsNone(result["whole_cost"])
+        self.assertEqual(result["reason"], "split: 0.060000 < inf")
+
+    # --- a subtask with no route fails the split closed ---------------------
+
+    def test_subtask_with_no_route_fails_closed_naming_it(self):
+        subtasks = [self.subtask("r1", 0.01),
+                   {"route": None,
+                    "reason": "no route survives the filters: sign in"}]
+        whole = {"route": "whole", "expected_cost": 1.0}
+        result = r.decompose(whole, subtasks, "S3", self.registry(), "orch")
+        self.assertEqual(result, {
+            "split": False,
+            "reason": "subtask 2 has no route: "
+                     "no route survives the filters: sign in",
+        })
+
+    def test_first_subtask_with_no_route_is_named_subtask_1(self):
+        subtasks = [{"route": None, "reason": "no route: narrow paths"},
+                   self.subtask("r2", 0.01)]
+        whole = {"route": "whole", "expected_cost": 1.0}
+        result = r.decompose(whole, subtasks, "S3", self.registry(), "orch")
+        self.assertEqual(result["reason"],
+                        "subtask 1 has no route: no route: narrow paths")
+
+    # --- overhead arithmetic, S4 ---------------------------------------------
+
+    def test_overhead_arithmetic_scales_with_subtask_count(self):
+        # overhead = 3 * 3000 * 5e-6 = 0.045; subtasks_cost = 3 * 0.001 = 0.003
+        subtasks = [self.subtask("r%d" % i, 0.001) for i in range(1, 4)]
+        whole = {"route": "whole", "expected_cost": 10.0}
+        result = r.decompose(whole, subtasks, "S4", self.registry(), "orch")
+        self.assertAlmostEqual(result["overhead"], 0.045)
+        self.assertAlmostEqual(result["subtasks_cost"], 0.003)
+        self.assertTrue(result["split"])
+
+    # --- fail closed on registry gaps ---------------------------------------
+
+    def test_missing_brief_tokens_bucket_fails_closed_naming_it(self):
+        reg = self.registry()
+        del reg["policy"]["brief_tokens"]["S3"]
+        subtasks = [self.subtask("r1", 0.01)]
+        whole = {"route": "whole", "expected_cost": 1.0}
+        with self.assertRaises(ValueError) as cm:
+            r.decompose(whole, subtasks, "S3", reg, "orch")
+        self.assertIn("brief_tokens", str(cm.exception))
+        self.assertIn("S3", str(cm.exception))
+
+    def test_unknown_orchestrator_fails_closed_naming_it(self):
+        subtasks = [self.subtask("r1", 0.01)]
+        whole = {"route": "whole", "expected_cost": 1.0}
+        with self.assertRaises(ValueError) as cm:
+            r.decompose(whole, subtasks, "S3", self.registry(), "ghost")
+        self.assertIn("ghost", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
