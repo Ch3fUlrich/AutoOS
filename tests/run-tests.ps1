@@ -4106,11 +4106,14 @@ Test-Case 'ConvertFrom-AutoOSJsonc: comments and trailing commas, // inside a st
 Test-Case 'ConvertFrom-AutoOSJsonc: an unterminated string is rejected at once, not after a regex stall' {
     # A string literal matched with a nested quantifier backtracks exponentially
     # when its closing quote is missing (26 characters took four seconds).
+    # Warm up first; 30 characters would stall about a minute, so a 20 s limit
+    # still catches it without flaking on a loaded runner (5.8 s seen, CI 36253266736).
+    $null = ConvertFrom-AutoOSJsonc -Text '{"a": "b"}'
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $threw = $false
-    try { $null = ConvertFrom-AutoOSJsonc -Text ('{"a": "' + ('x' * 27)) } catch { $threw = $true }
+    try { $null = ConvertFrom-AutoOSJsonc -Text ('{"a": "' + ('x' * 30)) } catch { $threw = $true }
     $sw.Stop()
-    if ($sw.ElapsedMilliseconds -gt 2000) { throw "an unterminated string took $($sw.ElapsedMilliseconds) ms to reject" }
+    if ($sw.ElapsedMilliseconds -gt 20000) { throw "an unterminated string took $($sw.ElapsedMilliseconds) ms to reject" }
     if (-not $threw) { throw 'an unterminated string was accepted' }
     Pass
 }
