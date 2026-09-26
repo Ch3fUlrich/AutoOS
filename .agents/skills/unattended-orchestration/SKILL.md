@@ -40,17 +40,18 @@ every L1 session needs before touching a brief.
 One rule per line, grouped by topic: `R-<topic>-<nn>: <imperative>. (why: …; source: …)`. A
 source names the test or measurement behind the rule (D20) — an unmeasured lesson is not a rule
 yet. `python3 tools/skill-rules.py check` (CI) enforces the format, uniqueness and near-duplicates.
-A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date>/<file>`
-(default date 2026-09-25 unless the line names another).
+Source paths: `tests/…` is the repo's `tests/`; a bare `test_*.py` is this skill's `tests/`
+(`test_autoos_spawner.py` is the repo's `tests/`); `inbox/…`, `work/…`, `done/…` and `status/…` are the
+run log `logs/handoff-sessions/<date>/` (default date 2026-09-25 unless the line names another).
 
 ### spawn
 
-- R-spawn-01: After a lane's DONE note, `claude stop <id>` it and remove the merged, clean worktree. (why: a finished session can idle for hours; source: tests/test_l1_handoff.py, 2026-09-25)
+- R-spawn-01: After a lane's DONE note, `claude stop <id>` it and remove the merged, clean worktree. (why: a finished session can idle for hours; source: test_l1_handoff.py, 2026-09-25)
 - R-spawn-02: Run the client in its own process group; reap leftovers after it exits. (why: Serena/language servers survive a cancelled worker; source: test_autoos_spawner.py ProcessGroupTests)
 - R-spawn-03: `--mcp-config`/`--allowedTools` are variadic: add another option before the prompt. (why: the prompt is silently eaten as an argument; source: daemon.log, test_autoos_spawner.py)
 - R-spawn-04: Give lane Claude sessions trust_worktree.py --lane-mcp's strict per-worktree MCP config. (why: each worktree gets a private Serena; source: test_trust_worktree.py, 20:50Z)
 - R-spawn-05: Pre-approve a fresh worktree with `trust_worktree.py` before its first session starts. (why: a background session can't answer a trust dialog; source: measured: three lanes blocked in 3s)
-- R-spawn-06: Launch lane subagents with Agent isolation:worktree; never give one a raw worktree path. (why: a bare path made a subagent call EnterWorktree, stall; source: inbox/L1-routing.md 21:1xZ)
+- R-spawn-06: Launch non-shell lane subagents with Agent isolation:worktree, never a raw worktree path. (why: a bare path made a subagent call EnterWorktree, stall; source: inbox/L1-routing.md 21:1xZ)
 - R-spawn-07: An isolation:worktree subagent can't run pwsh/bash; use a non-isolated agent for shell work. (why: 3 of 3 isolated agents stopped before any edit; source: inbox/L1-backlog.md 19:30Z)
 - R-spawn-08: The spawner reads configuration/api-keys.yml from the main checkout if a worktree lacks it. (why: it's git-ignored, absent in a fresh worktree; source: test_autoos_spawner.py KeyFileTests)
 - R-spawn-09: Use qoder only as a writer (you test and commit), agy only for read-only reviews. (why: headless denies qoder shell, agy shell+writes; source: work/L1-routing/B2fix.out, B3c1.out)
@@ -118,7 +119,7 @@ A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date
 
 - R-safety-01: Never put a secret in a committed handoff config; read tokens at preflight only. (why: a committed config is read by every clone; source: HandoffCore.psm1, AGENTS.md rule 1)
 - R-safety-02: Treat a classifier refusal as a signal: record it verbatim and stop, never work around it. (why: a background session can't negotiate a denial; source: refusals measured 2026-09-24/25)
-- R-safety-03: Never give a spawning role Bash, Write or Edit itself; only a leaf gets them. (why: a supervisor wanting to write code mis-decomposed; source: tests/test_agent_harness.py)
+- R-safety-03: A leaf role never spawns; only a spawning role lists the autoos-agent MCP. (why: a supervisor wanting to write code mis-decomposed; source: tests/test_agent_harness.py)
 
 ## CAO quickstart
 
