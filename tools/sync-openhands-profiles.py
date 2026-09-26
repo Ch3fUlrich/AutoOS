@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 """Regenerate OpenHands gateway tier profiles from the spec, with local keys.
 
-configuration/openhands/tier-profiles.json is the single source of truth for
-the tier profile SHAPE (profile ids, model ids, token windows, reasoning
-flags). This tool projects it into real profiles (omniroute-tier*.json +
-litellm-tier*.json) by injecting the client keys, which never live in the repo:
+configuration/openhands/tier-profiles.json used to be the single hand-edited
+source of truth for the tier profile SHAPE (profile ids, model ids, token
+windows, reasoning flags). This tool's default, unflagged run now sources
+that shape from `tools/registry.py render openhands`'s output (routing v2
+spec 3.2 phase 1, task A4d) - the reverse of the mapping catalog/ai-
+registry.json was built from - instead of reading tier-profiles.json
+directly. `render openhands --check` proves that render reproduces today's
+committed tier-profiles.json semantically, so this is the same data, sourced
+one hop earlier. --spec PATH stays an explicit, lower-level override that
+reads a tier-profiles.json-shaped file directly (the same convention task
+A4c gave tools/sync-ide-models.py's --catalog flag).
+
+Either way, this tool projects the resulting shape into real profiles
+(omniroute-tier*.json + litellm-tier*.json) by injecting the client keys,
+which never live in the repo:
 
     python3 tools/sync-openhands-profiles.py --openhands-dir ~/.openhands [--keys-file configuration/api-keys.yml]
 
@@ -43,10 +54,45 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+REGISTRY_TOOL_PATH = ROOT / "tools" / "registry.py"
+
+
+def _load_registry_tool():
+    """Import tools/registry.py by path (its name is not a valid module
+    identifier) - the same importlib-by-path technique tools/sync-ide-
+    models.py's own _load_registry_tool() uses."""
+    spec = importlib.util.spec_from_file_location("autoos_registry", REGISTRY_TOOL_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_spec(spec_path: Path | None, registry_path: Path) -> dict:
+    """The tier-profiles.json-shaped dict this tool projects into real
+    profiles.
+
+    spec_path given -> read that file directly (the explicit, lower-level
+    override task A4d's brief calls for, "keeping any explicit old-file flag
+    as an override" - the same convention A4c gave tools/sync-ide-models.py's
+    --catalog flag). spec_path None (this tool's default, unflagged run) ->
+    render it from catalog/ai-registry.json via tools/registry.py's
+    render_openhands() (routing v2 spec 3.2 phase 1, task A4d) - `render
+    openhands --check` proves that render reproduces today's committed
+    tier-profiles.json semantically, so this is the same data, sourced one
+    hop earlier.
+    """
+    if spec_path is not None:
+        return json.loads(spec_path.read_text(encoding="utf-8"))
+    registry_tool = _load_registry_tool()
+    registry_doc = json.loads(registry_path.read_text(encoding="utf-8"))
+    return registry_tool.render_openhands(registry_doc)
 
 
 def read_flat_value(path: Path, name: str) -> str | None:
@@ -410,25 +456,33 @@ def parse_args(argv):
         help="also save the profiles into this running OpenHands app (e.g. http://127.0.0.1:3000)",
     )
     parser.add_argument(
+        "--registry",
+        default=None,
+        help="catalog/ai-registry.json to render the spec from (default: catalog/ai-registry.json; "
+             "ignored when --spec is given)",
+    )
+    parser.add_argument(
         "--spec",
         default=None,
-        help="tier-profiles.json path (default: configuration/openhands/tier-profiles.json)",
+        help="an explicit tier-profiles.json-shaped file to read directly instead of rendering "
+             "--registry (default: not used)",
     )
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    root = Path(__file__).resolve().parent.parent
-    spec_path = Path(args.spec) if args.spec else root / "configuration" / "openhands" / "tier-profiles.json"
+    root = ROOT
+    spec_path = Path(args.spec) if args.spec else None
+    registry_path = Path(args.registry) if args.registry else root / "catalog" / "ai-registry.json"
     keys_path = Path(args.keys_file) if args.keys_file else root / "configuration" / "api-keys.yml"
     litellm_env = Path(args.litellm_env) if args.litellm_env else root / "configuration" / "litellm" / ".env"
     try:
-        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec = load_spec(spec_path, registry_path)
         tiers = spec["tiers"]
         spec["gateway_base_url"]
     except (OSError, ValueError, KeyError) as exc:
-        print(f"ERROR: cannot read spec {spec_path}: {exc}", file=sys.stderr)
+        print(f"ERROR: cannot read spec {spec_path or registry_path}: {exc}", file=sys.stderr)
         return 2
     omni_key = read_omni_key(keys_path)
     litellm_key = read_litellm_key(litellm_env)
