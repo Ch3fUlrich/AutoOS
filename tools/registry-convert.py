@@ -41,10 +41,13 @@ today's files exactly for the phase-1 equality gate - but marked available: fals
 with a $comment citing this decision (see mark_openrouter_unavailable()).
 
 Usage:
-    python3 tools/registry-convert.py [--check]
+    python3 tools/registry-convert.py [--check] [--out PATH]
 
     (default)   write catalog/ai-registry.json
     --check     change nothing; exit 1 if a fresh render would differ
+                (always compared against catalog/ai-registry.json)
+    --out PATH  write the render to PATH instead (tests use a temp dir;
+                the real registry is never overwritten by a test)
 """
 from __future__ import annotations
 
@@ -1111,6 +1114,8 @@ def main(argv=None) -> int:
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true",
                          help="change nothing; exit 1 if a fresh render would differ")
+    parser.add_argument("--out", type=Path, default=OUTPUT_PATH,
+                         help="where to write the render (default: %(default)s)")
     args = parser.parse_args(argv)
 
     text = render(build_registry())
@@ -1122,7 +1127,7 @@ def main(argv=None) -> int:
             return 1
         return 0
 
-    OUTPUT_PATH.write_text(text, encoding="utf-8")
+    args.out.write_text(text, encoding="utf-8")
     return 0
 
 
