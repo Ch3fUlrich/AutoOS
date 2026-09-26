@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -648,6 +649,132 @@ class LegacyModelsTests(unittest.TestCase):
         self.assertEqual(by_id["muse-spark"].get("default_for"), "muse_key")
         self.assertEqual(by_id["ollama-qwen2.5-coder"].get("default_for"),
                          "fallback")
+
+
+class UnavailableUntilTests(unittest.TestCase):
+    """Time-bounded unavailability (brief UNTIL, 2026-09-26; skill rule
+    R-gateway-12: a 429 with retryable:true but a multi-day reset is not
+    soon-retryable -- mark the entry unavailable till the reset, then let it
+    come back on its own instead of relying on someone hand-undoing an
+    ``available: false``).
+
+    One helper, registry.unavailable_now(entry, now), answers "is this
+    clients/providers/unavailable_legs entry unavailable at `now`":
+
+    - ``available: false`` with no ``unavailable_until`` is unavailable
+      forever (today's behaviour, unchanged);
+    - a future ``unavailable_until`` is unavailable until that instant;
+    - a past ``unavailable_until`` counts as available again -- the entry
+      self-heals, no hand edit to undo.
+    """
+
+    def dt(self, *args):
+        return datetime(*args, tzinfo=timezone.utc)
+
+    def test_available_false_without_an_until_stays_unavailable_forever(self):
+        entry = {"available": False}
+        self.assertTrue(registry.unavailable_now(entry, self.dt(2026, 9, 26)))
+        self.assertTrue(registry.unavailable_now(entry, self.dt(2030, 1, 1)))
+
+    def test_a_future_until_is_unavailable(self):
+        entry = {"unavailable_until": "2026-10-01T09:05:00Z"}
+        self.assertTrue(registry.unavailable_now(entry, self.dt(2026, 9, 26, 19, 17)))
+        self.assertTrue(registry.unavailable_now(
+            entry, self.dt(2026, 10, 1, 9, 4, 59)))
+
+    def test_a_past_until_counts_as_available_again(self):
+        entry = {"available": False, "unavailable_until": "2026-10-01T09:05:00Z"}
+        self.assertTrue(registry.unavailable_now(
+            entry, self.dt(2026, 10, 1, 9, 4, 59)))
+        self.assertFalse(registry.unavailable_now(
+            entry, self.dt(2026, 10, 1, 9, 5, 0)))
+        self.assertFalse(registry.unavailable_now(
+            entry, self.dt(2026, 12, 31)))
+
+    def test_no_flags_at_all_is_available(self):
+        self.assertFalse(registry.unavailable_now({}, self.dt(2026, 9, 26)))
+        self.assertFalse(registry.unavailable_now(None, self.dt(2026, 9, 26)))
+
+    def test_an_unparsable_until_fails_check_not_the_helper(self):
+        # The helper itself never raises (a resolver runs it against live
+        # state); the shape is a check-time problem, reported by rule 7.
+        entry = {"unavailable_until": "next tuesday"}
+        self.assertIs(registry.unavailable_now(entry, self.dt(2026, 9, 26)),
+                      False)
+
+
+class RuleSevenUnavailableUntilTests(unittest.TestCase):
+    """Rule 7: every ``unavailable_until`` value anywhere in the registry is
+    an ISO-8601 UTC timestamp. The key itself holds a date by design, so
+    rule 5 (no dated values) must exempt it; a value that does not parse is
+    a check failure, never a silent pass (an unparsable until would quietly
+    read as available forever -- the exact hand-edit-forgot-to-undo failure
+    this field exists to remove)."""
+
+    def test_an_unparsable_until_on_a_client_is_flagged(self):
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = "next tuesday"
+        problems = registry.check_registry(reg)
+        self.assertIn("bad unavailable_until: clients.agy 'next tuesday'",
+                      problems)
+
+    def test_an_unparsable_until_on_a_provider_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["openrouter"]["unavailable_until"] = "soon"
+        problems = registry.check_registry(reg)
+        self.assertIn("bad unavailable_until: providers.openrouter 'soon'",
+                      problems)
+
+    def test_an_unparsable_until_on_an_unavailable_leg_is_flagged(self):
+        reg = mutated()
+        reg["routes"]["t2-worker-clean"]["unavailable_legs"][
+            "opencode-zen/deepseek-v4.1-flash"]["unavailable_until"] = "2026-13-01"
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(p.startswith(
+            "bad unavailable_until: routes.t2-worker-clean.unavailable_legs."
+            "opencode-zen/deepseek-v4.1-flash") for p in problems), problems)
+
+    def test_a_non_string_until_is_flagged(self):
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = 1759258200
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(p.startswith("bad unavailable_until: clients.agy")
+                            for p in problems), problems)
+
+    def test_a_parsable_until_is_not_a_dated_value(self):
+        # Rule 5 exempts the key by name: "2026-10-01T09:05:00Z" matches
+        # DATE_RE, so only an explicit exemption keeps this quiet.
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        problems = registry.check_registry(reg)
+        self.assertFalse(any("dated" in p and "agy" in p for p in problems),
+                         problems)
+        self.assertFalse(any(p.startswith("bad unavailable_until")
+                             for p in problems), problems)
+
+    def test_offsets_and_naive_timestamps_are_rejected(self):
+        # UTC only ("...Z"): an offset or a naive timestamp is ambiguous
+        # about which clock it means on a machine in another zone.
+        for value in ("2026-10-01T11:05:00+02:00", "2026-10-01T09:05:00"):
+            reg = mutated()
+            reg["clients"]["agy"]["unavailable_until"] = value
+            problems = registry.check_registry(reg)
+            self.assertTrue(any(p.startswith("bad unavailable_until: clients.agy")
+                                for p in problems), (value, problems))
+
+    def test_the_committed_schema_permits_the_field_on_all_three_surfaces(self):
+        # The schema carries additionalProperties: false on client, provider
+        # and unavailable_legs entries; it must name unavailable_until on all
+        # three, and the committed registry itself passes check with one set.
+        schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
+                            .read_text(encoding="utf-8"))
+        defs = schema["$defs"]
+        for surface in (defs["client"]["properties"],
+                        defs["provider"]["properties"],
+                        defs["route"]["properties"]["unavailable_legs"]
+                        ["additionalProperties"]["properties"]):
+            self.assertIn("unavailable_until", surface)
+        self.assertEqual(registry.check_registry(load_registry()), [])
 
 
 if __name__ == "__main__":

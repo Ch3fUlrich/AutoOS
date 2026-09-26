@@ -849,5 +849,66 @@ class UnknownModelsDocDocsFlagStillGoesThroughRenderTargetsTests(unittest.TestCa
             self.assertEqual(proc.returncode, 0, "%s: %s" % (target, proc.stdout + proc.stderr))
 
 
+class UnavailableUntilRenderIndependenceTests(unittest.TestCase):
+    """``unavailable_until`` (brief UNTIL, 2026-09-26) is resolver-only: the
+    OmniRoute gateway handles a quota 429 itself, so every render -- and the
+    CI drift gates built on them -- must stay TIME-INDEPENDENT. Adding or
+    removing the field (on a provider, an unavailable_legs entry or a
+    client) changes no render, byte-for-byte; a future until and a past one
+    render identically. models-doc's strikethrough keeps reacting only to
+    the timeless ``available: false`` flags (_leg_is_unavailable).
+    """
+
+    def with_untils(self):
+        reg = copy.deepcopy(real_registry())
+        reg["providers"]["cxa"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        reg["routes"]["t2-worker-clean"]["unavailable_legs"][
+            "opencode-zen/deepseek-v4.1-flash"]["unavailable_until"] = (
+                "2026-10-01T09:05:00Z")
+        # One leg with an until but no available:false at all.
+        reg["routes"]["opus-4-6"]["unavailable_legs"] = {
+            "antigravity/claude-opus-4-6-thinking": {
+                "unavailable_until": "2026-10-01T09:05:00Z"},
+        }
+        reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        return reg
+
+    def test_omniroute_render_ignores_unavailable_until(self):
+        self.assertEqual(registry.render_omniroute(real_registry()),
+                         registry.render_omniroute(self.with_untils()))
+
+    def test_litellm_render_ignores_unavailable_until(self):
+        config = real_litellm_config()
+        self.assertEqual(
+            registry.render_litellm_blocks(real_registry(), config),
+            registry.render_litellm_blocks(self.with_untils(), config))
+
+    def test_ide_render_ignores_unavailable_until(self):
+        self.assertEqual(registry.render_ide(real_registry()),
+                         registry.render_ide(self.with_untils()))
+
+    def test_openhands_render_ignores_unavailable_until(self):
+        self.assertEqual(registry.render_openhands(real_registry()),
+                         registry.render_openhands(self.with_untils()))
+
+    def test_models_doc_render_ignores_unavailable_until(self):
+        self.assertEqual(registry.render_models_doc(real_registry()),
+                         registry.render_models_doc(self.with_untils()))
+
+    def test_leg_is_unavailable_ignores_the_until_field(self):
+        route = {"legs": ["clean/big"],
+                 "unavailable_legs": {"clean/big": {
+                     "available": False,
+                     "unavailable_until": "2026-10-01T09:05:00Z"}}}
+        reg = {"providers": {"clean": {"id": "clean"}},
+               "models": {"big": {"id": "big"}}}
+        self.assertTrue(registry._leg_is_unavailable("clean/big", route, reg))
+        # An until alone (no available: false) never strikes a leg through.
+        route2 = {"legs": ["clean/big"],
+                  "unavailable_legs": {"clean/big": {
+                      "unavailable_until": "2026-10-01T09:05:00Z"}}}
+        self.assertFalse(registry._leg_is_unavailable("clean/big", route2, reg))
+
+
 if __name__ == "__main__":
     unittest.main()

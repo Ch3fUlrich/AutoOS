@@ -21,7 +21,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import autoos_track as track  # tools/ is on sys.path for every caller
-from registry import resolve_leg, private_safe  # tools/ is on sys.path for every caller
+from registry import resolve_leg, private_safe, unavailable_now  # tools/ is on sys.path for every caller
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's

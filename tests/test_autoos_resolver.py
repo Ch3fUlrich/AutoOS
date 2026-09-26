@@ -2076,5 +2076,149 @@ class DecomposeTests(unittest.TestCase):
         self.assertIn("ghost", str(cm.exception))
 
 
+class UnavailableUntilResolverTests(unittest.TestCase):
+    """The resolver honours ``unavailable_until`` (brief UNTIL, 2026-09-26;
+    R-gateway-12: a 429 with retryable:true but a multi-day reset is not
+    soon-retryable -- mark the entry unavailable till the reset). ``now`` is
+    injectable into filter_routes/_serving_legs_raw/_client_reason so these
+    tests never depend on the wall clock; an entry whose until has passed is
+    available again and the reason says "re-probe". The renders
+    (tools/registry.py render_*) never read the field at all -- that
+    time-independence is pinned in tests/test_registry_render.py.
+    """
+
+    def dt(self, *args):
+        return datetime(*args, tzinfo=timezone.utc)
+
+    def setUp(self):
+        # One leg per provider so dropping a provider/leg/client is visible
+        # as a whole removed route.
+        self.registry = {
+            "providers": {
+                "cheap": {"id": "cheap", "tier": "paid",
+                          "trains_on_prompts": False},
+                "quota": {"id": "quota", "tier": "paid",
+                          "trains_on_prompts": False},
+            },
+            "models": {
+                "fast": {"id": "fast", "tool_calls": "proven",
+                         "context_usable": {"tokens": 100000,
+                                            "source": "default"}},
+                "slow": {"id": "slow", "tool_calls": "proven",
+                         "context_usable": {"tokens": 100000,
+                                            "source": "default"}},
+            },
+            "routes": {
+                "r-quota": {"id": "r-quota", "legs": ["quota/slow"]},
+                "r-plain": {"id": "r-plain", "legs": ["cheap/fast"]},
+            },
+            "clients": {
+                "agy": {"id": "agy"},
+            },
+        }
+        self.card = {"kind": "review", "privacy": "public"}
+        self.features = {"need_tokens": 1000}
+        self.state = {"opencode": {"installed": True, "signed_in": True,
+                                   "reason": ""},
+                      "agy": {"installed": True, "signed_in": True,
+                              "reason": ""}}
+
+    def filter(self, client="opencode", now=None):
+        return r.filter_routes(self.card, self.features, self.state,
+                               self.registry, {}, client=client, now=now)
+
+    # --- providers.<id> / unavailable_legs ---------------------------------
+
+    def test_a_provider_with_a_future_until_drops_its_legs(self):
+        self.registry["providers"]["quota"]["unavailable_until"] = (
+            "2026-10-01T09:05:00Z")
+        survivors, removed = self.filter(now=self.dt(2026, 9, 26, 19, 17))
+        self.assertEqual(survivors, ["r-plain"])
+        self.assertEqual(
+            removed["r-quota"],
+            ["no usable leg: quota/slow: unavailable: quota until "
+             "2026-10-01T09:05:00Z"])
+
+    def test_a_provider_whose_until_passed_serves_again_and_says_re_probe(self):
+        self.registry["providers"]["quota"]["available"] = False
+        self.registry["providers"]["quota"]["unavailable_until"] = (
+            "2026-10-01T09:05:00Z")
+        now = self.dt(2026, 10, 1, 9, 5, 0)
+        survivors, removed = self.filter(now=now)
+        self.assertIn("r-quota", survivors)
+        _, skipped = r.usable_legs(self.registry["routes"]["r-quota"],
+                                   self.card, self.features, self.state,
+                                   self.registry, {}, now=now)
+        self.assertEqual(skipped["quota/slow"],
+                         ["re-probe: quota unavailable_until passed"])
+
+    def test_an_unavailable_leg_with_a_future_until_names_the_date(self):
+        self.registry["routes"]["r-plain"]["unavailable_legs"] = {
+            "cheap/fast": {"available": False,
+                           "unavailable_until": "2026-10-01T09:05:00Z"}}
+        survivors, removed = self.filter(now=self.dt(2026, 9, 30))
+        self.assertNotIn("r-plain", survivors)
+        self.assertIn("unavailable: cheap/fast until 2026-10-01T09:05:00Z",
+                      removed["r-plain"][0])
+
+    def test_an_unavailable_leg_with_no_until_stays_unavailable_forever(self):
+        self.registry["routes"]["r-plain"]["unavailable_legs"] = {
+            "cheap/fast": {"available": False}}
+        for now in (self.dt(2026, 9, 26), self.dt(2030, 1, 1)):
+            survivors, removed = self.filter(now=now)
+            self.assertNotIn("r-plain", survivors)
+            self.assertEqual(removed["r-plain"],
+                             ["no usable leg: cheap/fast: unavailable"])
+            _, skipped = r.usable_legs(self.registry["routes"]["r-plain"],
+                                       self.card, self.features, self.state,
+                                       self.registry, {}, now=now)
+            self.assertEqual(skipped["cheap/fast"], ["unavailable"])
+
+    # --- clients.<id> -------------------------------------------------------
+
+    def test_a_client_with_a_future_until_is_filtered_with_the_date(self):
+        self.registry["clients"]["agy"]["unavailable_until"] = (
+            "2026-10-01T09:05:00Z")
+        survivors, removed = self.filter(client="agy",
+                                         now=self.dt(2026, 9, 26, 19, 17))
+        self.assertEqual(survivors, [])
+        for route_id in ("r-quota", "r-plain"):
+            self.assertIn("client: agy unavailable until 2026-10-01T09:05:00Z",
+                          removed[route_id])
+
+    def test_a_client_whose_until_passed_is_filtered_again_says_re_probe(self):
+        self.registry["clients"]["agy"]["available"] = False
+        self.registry["clients"]["agy"]["unavailable_until"] = (
+            "2026-10-01T09:05:00Z")
+        survivors, removed = self.filter(client="agy",
+                                         now=self.dt(2026, 10, 1, 9, 5, 0))
+        self.assertNotIn("r-plain", survivors)
+        self.assertIn("re-probe: agy unavailable_until passed",
+                      removed["r-plain"])
+        self.assertIn("re-probe: agy unavailable_until passed",
+                      removed["r-quota"])
+
+    def test_a_client_available_false_without_an_until_stays_filtered(self):
+        self.registry["clients"]["agy"]["available"] = False
+        survivors, removed = self.filter(client="agy", now=self.dt(2030, 1, 1))
+        self.assertEqual(survivors, [])
+        self.assertIn("client: agy unavailable", removed["r-plain"])
+
+    def test_no_until_keys_changes_nothing_for_a_passing_client(self):
+        survivors, removed = self.filter(client="agy",
+                                         now=self.dt(2026, 9, 26))
+        self.assertEqual(sorted(survivors), ["r-plain", "r-quota"])
+
+    # --- injectability -------------------------------------------------------
+
+    def test_the_same_registry_is_available_or_not_by_now_alone(self):
+        self.registry["providers"]["quota"]["unavailable_until"] = (
+            "2026-10-01T09:05:00Z")
+        before, _ = self.filter(now=self.dt(2026, 10, 1, 9, 4, 59))
+        after, _ = self.filter(now=self.dt(2026, 10, 1, 9, 5, 0))
+        self.assertNotIn("r-quota", before)
+        self.assertIn("r-quota", after)
+
+
 if __name__ == "__main__":
     unittest.main()

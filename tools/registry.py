@@ -34,10 +34,15 @@ Three subcommands:
        a model's direct.base_url; private IPv4 ranges, single-label hosts,
        .local/.lan/.internal/.vm hosts and any userinfo@ are always rejected;
     5. no key or value anywhere carries a date, except values under keys named
-       source/verified/version and anything inside a $comment/comment;
+       source/verified/version/unavailable_until and anything inside a
+       $comment/comment;
     6. every key the schema marks required is present (a small hand-rolled
        structural walk of catalog/ai-registry.schema.json - no jsonschema
-       dependency, matching the rest of this repo's suites, AGENTS.md section 5).
+       dependency, matching the rest of this repo's suites, AGENTS.md section 5);
+    7. every ``unavailable_until`` value (clients/providers/unavailable_legs,
+       brief UNTIL 2026-09-26) parses as an ISO-8601 UTC timestamp -- the
+       resolver reads it via unavailable_now(), the renders never do (they
+       stay time-independent so the CI drift gates do not move with the date).
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -125,6 +130,7 @@ import ipaddress
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -139,7 +145,9 @@ DEFAULT_MODELS_DOC_PATH = ROOT / "docs" / "models.md"
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMMENT_KEYS = ("$comment", "comment")
-DATE_EXEMPT_KEYS = ("source", "verified", "version")
+# unavailable_until's whole job is to hold a date (rule 7 checks the value
+# parses); version is a date by definition. Neither is a rule-5 violation.
+DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until")
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"
@@ -156,6 +164,62 @@ def _section(registry, name) -> dict:
     (rule 6 reports it) instead of crashing a later rule."""
     value = registry.get(name)
     return value if isinstance(value, dict) else {}
+
+
+def _parse_until(value):
+    """Parse an ISO-8601 UTC ``unavailable_until`` value to an aware datetime.
+
+    Accepts a trailing ``Z`` or an explicit ``+00:00``; anything else (a
+    non-string, a naive timestamp, another offset, a calendar that does not
+    exist) returns None -- parseability is rule 7's job, the helper never
+    raises into a live resolver.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    return moment.astimezone(timezone.utc)
+
+
+def unavailable_now(entry, now) -> bool:
+    """Whether a clients/providers/unavailable_legs `entry` is unavailable at
+    `now` (brief UNTIL, 2026-09-26; skill rule R-gateway-12: a 429 with
+    retryable:true but a multi-day reset is not soon-retryable -- mark the
+    entry unavailable till the reset, and let it come back on its own instead
+    of relying on someone hand-undoing an ``available: false``).
+
+    Semantics: an entry with ``unavailable_until`` strictly in the future is
+    unavailable; once that instant passes the entry counts as available again
+    (the resolver's reason says "re-probe"). An entry with ``available:
+    false`` and no until stays unavailable forever -- today's behaviour,
+    unchanged. An unparsable until reads as available here and is reported by
+    `check` rule 7 instead: a resolver must never crash on a hand-edited
+    timestamp, and a bad one must never silently extend an outage.
+
+    `now` is injectable for tests; a naive `now` is assumed UTC. Pure: no
+    clock of its own, no I/O. The renders deliberately never call this --
+    they stay time-independent so the CI drift gates do not move with the
+    date (the gateway handles a quota 429 itself).
+    """
+    if not isinstance(entry, dict):
+        return False
+    until = entry.get("unavailable_until")
+    if until is not None:
+        moment = _parse_until(until)
+        if moment is not None:
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            return now < moment
+        # unparsable: falls through to the plain `available` flag; rule 7
+        # reports the value itself.
+    return entry.get("available") is False
 
 
 def load(path) -> dict:
@@ -586,6 +650,43 @@ def _check_dated_values(registry) -> list:
                         problems.append("dated value: %s" % child)
                 else:
                     walk(value, child)
+
+    walk(registry, "")
+    return problems
+
+
+# ===========================================================================
+# rule 7 - every unavailable_until parses as ISO-8601 UTC
+# ===========================================================================
+
+
+def _check_until_values(registry) -> list:
+    """Every ``unavailable_until`` value anywhere in the registry parses as an
+    ISO-8601 UTC timestamp (``...Z`` or an explicit zero offset -- a naive or
+    offset value is ambiguous about which clock it means). A value that does
+    not parse would quietly read as available forever (see unavailable_now),
+    which is exactly the hand-edit-forgot-to-undo failure the field exists to
+    remove -- so it fails check loudly, naming the dotted path."""
+    problems = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in COMMENT_KEYS:
+                    continue
+                child = "%s.%s" % (path, key) if path else key
+                if key == "unavailable_until":
+                    if _parse_until(value) is None or (
+                            isinstance(value, str)
+                            and not value.strip().endswith("Z")
+                            and not value.strip().endswith("+00:00")):
+                        problems.append(
+                            "bad unavailable_until: %s %r" % (path, value))
+                    continue
+                walk(value, child)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, "%s[%d]" % (path, index))
 
     walk(registry, "")
     return problems
@@ -1666,6 +1767,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_private_hosts(registry))
     problems.extend(_check_dated_values(registry))
     problems.extend(_check_required_keys(registry))
+    problems.extend(_check_until_values(registry))
     return problems
 
 
