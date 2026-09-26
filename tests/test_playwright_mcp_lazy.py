@@ -1404,6 +1404,46 @@ class Concurrency(LazyProxyCase):
         self.assertEqual(reply["result"]["blob_len"], mib)
 
 
+class DefaultCachePath(unittest.TestCase):
+    """~/.cache/autoos is shared: lib/linux/download.sh creates it with `mkdir -p`, so on a
+    umask-002 host it is group-writable. The proxy's cache sits in a directory of its own,
+    created 0700, so that parent never makes it refuse its cache (a container per session)."""
+
+    def setUp(self):
+        self.module = load_proxy_module()
+        tmp = tempfile.mkdtemp(prefix="pwlazy-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.xdg = tmp
+        env = {"XDG_CACHE_HOME": tmp, "AUTOOS_PLAYWRIGHT_MCP_CACHE": ""}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_default_cache_has_a_directory_of_its_own(self):
+        path = self.module.cache_path()
+        self.assertEqual(path, os.path.join(self.xdg, "autoos", "playwright-mcp", "handshake.json"))
+
+    def test_a_group_writable_shared_autoos_directory_does_not_disable_the_cache(self):
+        shared = os.path.join(self.xdg, "autoos")
+        os.mkdir(shared)
+        os.chmod(shared, 0o775)
+        path = self.module.cache_path()
+        with contextlib.redirect_stderr(io.StringIO()) as noise:
+            cache = self.module.Cache(path)
+            cache.initialize = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                                "serverInfo": {"name": "t", "version": "1"}}
+            cache.accepted = ["2025-06-18"]
+            cache.tools = {"tools": []}
+            cache.save()
+        self.assertEqual(noise.getvalue(), "")
+        self.assertTrue(os.path.isfile(path))
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode), 0o700)
+        with contextlib.redirect_stderr(io.StringIO()) as noise:
+            again = self.module.Cache(path)
+        self.assertEqual(noise.getvalue(), "")
+        self.assertEqual(again.tools, {"tools": []})
+
+
 class DefaultCommand(unittest.TestCase):
     def test_default_backend_command_is_the_documented_argv(self):
         module = load_proxy_module()

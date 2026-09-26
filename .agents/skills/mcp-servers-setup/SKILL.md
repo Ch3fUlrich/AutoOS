@@ -457,7 +457,8 @@ claude mcp add -s user playwright -- python3 "$PWD/tools/playwright_mcp_lazy.py"
 - The proxy's default backend is `docker run -i --rm --init --network host --name
   autoos-pw-<pid>-<n> mcr.microsoft.com/playwright/mcp:latest`; `AUTOOS_PLAYWRIGHT_MCP_CMD`
   replaces it. The very first session on a machine has no handshake cache and starts one
-  container to fill it (`~/.cache/autoos/playwright-mcp-handshake.json`). The proxy reads
+  container to fill it (`~/.cache/autoos/playwright-mcp/handshake.json`, in a directory of its
+  own because `~/.cache/autoos` is shared with the image cache). The proxy reads
   that file only if it is a regular file of at most 4 MiB, owned by you and not writable
   by group or others, in a directory that is too (never through a symlink); otherwise it
   logs one line to stderr and starts the backend as on a cold cache. An existing

@@ -21,7 +21,7 @@ Environment (all optional):
                                      mcr.microsoft.com/playwright/mcp:latest`
   AUTOOS_PLAYWRIGHT_IDLE_SECONDS     idle period before the backend is stopped (900)
   AUTOOS_PLAYWRIGHT_MCP_CACHE        handshake cache file (default
-                                     $XDG_CACHE_HOME/autoos/playwright-mcp-handshake.json,
+                                     $XDG_CACHE_HOME/autoos/playwright-mcp/handshake.json,
                                      else ~/.cache/autoos/...); written atomically, mode 600,
                                      in a directory created with mode 700. It is read only
                                      if it is a regular file (never through a symlink) of at
@@ -145,7 +145,9 @@ def cache_path():
     if explicit:
         return explicit
     base = os.environ.get("XDG_CACHE_HOME", "").strip() or os.path.join(os.path.expanduser("~"), ".cache")
-    return os.path.join(base, "autoos", "playwright-mcp-handshake.json")
+    # A directory of its own: ~/.cache/autoos is shared (lib/linux/download.sh creates it with
+    # the umask mode, group-writable under umask 002) and would make every session refuse the cache.
+    return os.path.join(base, "autoos", "playwright-mcp", "handshake.json")
 
 
 def id_key(rid):
