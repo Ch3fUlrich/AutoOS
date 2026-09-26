@@ -868,8 +868,9 @@ def parent_snapshot(root=None):
 def parent_leak(before_head, before_status, root=None):
     """(worker-commit shas, changed tracked paths) since a parent_snapshot.
 
-    A LEAK is a commit in before_head..HEAD_after authored by WORKER_EMAIL
-    (commits by anyone else - the orchestrator merging meanwhile - are not),
+    A LEAK is a first-parent commit in before_head..HEAD_after authored by
+    WORKER_EMAIL (commits by anyone else, and worker commits a --no-ff merge
+    brings in as a second parent - the orchestrator merging a lane - are not),
     or any tracked path outside logs/ whose porcelain state changed.
     """
     if root is None:
@@ -881,7 +882,10 @@ def parent_leak(before_head, before_status, root=None):
         after_head = r.stdout.strip()
     shas = []
     if before_head and after_head and before_head != after_head:
-        r = subprocess.run(["git", "-C", root, "log", "--format=%H%x00%ae",
+        # --first-parent: a worker lane the orchestrator merged meanwhile
+        # (--no-ff) brings autoos-worker commits in as a second parent - not
+        # a leak; a leaked commit lands on the parent branch itself.
+        r = subprocess.run(["git", "-C", root, "log", "--first-parent", "--format=%H%x00%ae",
                             before_head + ".." + after_head],
                            capture_output=True, text=True)
         if r.returncode == 0:

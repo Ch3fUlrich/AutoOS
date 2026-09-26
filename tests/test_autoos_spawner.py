@@ -2041,6 +2041,20 @@ elif mode == "commit-other":
         "-c", "user.email=someone@example.invalid",
         "commit", "-q", "-m", "other change")
     print("fake: committed as someone else")
+elif mode == "merge-worker-lane":
+    # The orchestrator merges a finished worker lane (--no-ff) while this
+    # run is going: the lane's commits are autoos-worker's but not a leak.
+    git("switch", "-q", "-c", "lane")
+    with open(os.path.join(root, "lane-file.txt"), "w") as fh:
+        fh.write("lane\\n")
+    git("add", "lane-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "lane change")
+    git("switch", "-q", "-")
+    git("-c", "user.name=orch", "-c", "user.email=orch@example.invalid",
+        "merge", "-q", "--no-ff", "-m", "merge lane", "lane")
+    print("fake: orchestrator merged a worker lane")
 sys.exit(0)
 '''
 
@@ -2142,6 +2156,15 @@ class IsolateContainmentTests(unittest.TestCase):
         rc, out, err = self.run_isolated(root, stub, state, "commit-other")
         self.assertNotIn("LEAK", out + err)
         self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_merged_worker_lane_is_not_a_leak(self):
+        # Measured 2026-09-26 19:13Z: the orchestrator merged lane A5f
+        # (autoos-worker commits) into the parent while ISOfix ran.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "merge-worker-lane")
+        self.assertNotIn("LEAK", out + err)
+        self.assertEqual(rc, 5, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_push_from_the_sandbox_to_the_parent_fails(self):
