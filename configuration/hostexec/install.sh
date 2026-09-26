@@ -292,7 +292,7 @@ apply_candidate() {
 # JSONC (comments outside strings) is refused, never rewritten. Exit 3 on
 # refusal.
 json_candidate() {
-    HOSTEXEC_TOKEN="$HOSTEXEC_TOKEN" python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PYEOF'
+    HOSTEXEC_TOKEN="${HOSTEXEC_TOKEN:-}" python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PYEOF'
 import json, os, sys
 
 PARENTS = {
@@ -563,10 +563,132 @@ wire_client() {
     esac
 }
 
-# unregister_all: implemented under item 4.
+REMOVED_ANY=0
+
+# apply_remove_candidate <client> <file> <status> <cand> <what>: fold a
+# removal candidate into place; marks REMOVED_ANY when something left.
+apply_remove_candidate() {
+    local client="$1" file="$2" status="$3" cand="$4" what="$5"
+    if [[ "$status" == "same" ]]; then
+        say "${client}: nothing to remove in ${file}"
+        return 0
+    fi
+    if (( DRY_RUN )); then
+        say "dry-run: would remove ${what} from ${file}"
+        return 0
+    fi
+    publish_candidate "$file" "$cand" || return 1
+    say "${client}: removed ${what} from ${file}"
+    REMOVED_ANY=1
+    return 0
+}
+
+# remove_json_client <client> <file>: drop the client's own hostexec entry
+# (backup first). No token needed -- removal names the key, not the value.
+remove_json_client() {
+    local client="$1" file="$2"
+    local cand rc=0 status=""
+    cand="$(new_tmp)"
+    status="$(json_candidate remove "$file" "$client" "" "" "$cand")" || rc=$?
+    if (( rc != 0 )); then
+        err "install: ${client}: config helper failed (exit ${rc})"
+        return 1
+    fi
+    apply_remove_candidate "$client" "$file" "$status" "$cand" "hostexec entry" || return 1
+    return 0
+}
+
+remove_openhands() {
+    remove_json_client openhands "$HOME/.openhands/settings.json" || return 1
+}
+
+remove_claude() {
+    remove_json_client claude "$HOME/.claude.json" || return 1
+}
+
+remove_codex() {
+    local file cand rc=0 status=""
+    file="$HOME/.codex/config.toml"
+    cand="$(new_tmp)"
+    status="$(toml_candidate remove "$file" "" "$cand")" || rc=$?
+    if (( rc != 0 )); then
+        err "install: codex: config helper failed (exit ${rc})"
+        return 1
+    fi
+    apply_remove_candidate codex "$file" "$status" "$cand" "hostexec section" || return 1
+    return 0
+}
+
+remove_opencode() {
+    local file
+    file="$HOME/.config/opencode/opencode.json"
+    if [[ ! -e "$file" && -e "$HOME/.config/opencode/opencode.jsonc" ]]; then
+        file="$HOME/.config/opencode/opencode.jsonc"
+    fi
+    remove_json_client opencode "$file" || return 1
+}
+
+remove_qoder() {
+    say "qoder: no local state is written by this driver; nothing to remove here."
+    return 0
+}
+
+remove_unit() {
+    local dest
+    dest="$HOME/.config/systemd/user/${UNIT_NAME}"
+    if [[ ! -e "$dest" && ! -L "$dest" ]]; then
+        say "unit: nothing to remove: ${dest}"
+        return 0
+    fi
+    if (( DRY_RUN )); then
+        say "dry-run: would remove unit: ${dest}"
+        return 0
+    fi
+    backup_file "$dest" || return 1
+    rm -f "$dest"
+    say "unit: removed: ${dest}"
+    REMOVED_ANY=1
+    return 0
+}
+
+remove_client() {
+    case "$1" in
+        openhands) remove_openhands ;;
+        claude) remove_claude ;;
+        codex) remove_codex ;;
+        opencode) remove_opencode ;;
+        qoder) remove_qoder ;;
+        *) err "install: unknown client: $1"; return 2 ;;
+    esac
+}
+
+# unregister_all: remove only what this driver writes (backup first).
+# Scoped to --clients when given, else all five clients. A second run
+# reports "nothing to remove".
 unregister_all() {
-    err "install: --unregister is not implemented yet"
-    return 2
+    local fail=0 name targets=()
+    if (( ${#REQUESTED[@]} > 0 )); then
+        targets=("${REQUESTED[@]}")
+    else
+        read -ra targets <<< "$KNOWN_CLIENTS"
+    fi
+    if ! remove_unit; then
+        fail=1
+    fi
+    for name in "${targets[@]}"; do
+        if ! remove_client "$name"; then
+            fail=1
+        fi
+    done
+    if (( fail != 0 )); then
+        return 1
+    fi
+    if (( REMOVED_ANY )); then
+        say "unregister: done."
+    else
+        say "unregister: nothing to remove."
+    fi
+    return 0
 }
 
 main() {
