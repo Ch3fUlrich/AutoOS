@@ -3483,13 +3483,21 @@ antigravity_run() {
     local sb="$1"; shift
     AG_OUT="$(
         (
-            trap - EXIT INT TERM     # this subshell must not replay the harness's EXIT trap
             export TMPDIR="$sb/tmp"
             CATALOG_PATH="$ROOT/catalog/linux.json"
             AUTOOS_DRY_RUN=0; AUTOOS_UPDATE=0; AUTOOS_SUDO=sudo_rec; AG_ENTRY=component
             AUTOOS_ANTIGRAVITY_MIN_BYTES=100; SYS_IS_ROOT=0
             unset GITHUB_TOKEN GH_TOKEN
             for kv in "$@"; do export "${kv?}"; done
+            # AG_TRAPS: clear (default) - this subshell must not replay the harness's EXIT trap;
+            # own - a caller trap set in the very shell that runs the install; inherited -
+            # the caller's traps stay as this subshell got them (the traps test wraps the
+            # call in a shell of its own that has one)
+            case "${AG_TRAPS:-clear}" in
+                clear)     trap - EXIT INT TERM ;;
+                own)       trap - EXIT INT TERM; trap 'echo CALLER_EXIT' EXIT ;;
+                inherited) ;;
+            esac
             HOME="${AG_HOME:-$sb/home}"; SYS_HOME="$HOME"; export HOME SYS_HOME
             XDG_CONFIG_HOME="$HOME/.config"; export XDG_CONFIG_HOME
             PATH="${AG_PATH_FIRST:+$AG_PATH_FIRST:}$HOME/.local/bin:$PATH"; export PATH
@@ -3598,6 +3606,7 @@ antigravity_run() {
                     st="$INSTALL_STATE" ;;
             esac
             printf 'AGRESULT %s %s\n' "$st" "$rc"
+            [[ "${AG_TRAPS:-clear}" != own ]] || printf 'AGTRAPS %s\n' "$(trap -p EXIT | tr '\n' ' ')"
         ) 2>&1
     )"
     AG_STATE="$(sed -n 's/^AGRESULT \([a-z]*\) [0-9]*$/\1/p' <<<"$AG_OUT")"
@@ -4271,12 +4280,42 @@ if it "antigravity interrupted download: a SIGTERM or an exit from underneath re
         antigravity_serve "$sb" "$AG_VB" "$AG_IDB"
         before="$(antigravity_tree_state "$sb")"; : >"$sb/$how-on-download"; : >"$sb/calls.log"
         antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
-        [[ -z "$AG_STATE" ]] || { ok=0; echo "$how: the run was not interrupted: state=[$AG_STATE]" >&2; }
+        # the install runs in a subshell of its own: that one dies of the TERM (143) or exits
+        # (5) - and the caller is told the install failed and carries on
+        want_rc=143; if [[ "$how" == exit ]]; then want_rc=5; fi
+        [[ "$AG_STATE" == failed && "$AG_RC" == "$want_rc" ]] || { ok=0; echo "$how: state=[$AG_STATE] rc=[$AG_RC], expected failed with rc $want_rc: ${AG_OUT:0:300}" >&2; }
         [[ "$(antigravity_count "$sb" '^curl .* -o [^ ]*pkg\.tgz')" == 1 ]] || { ok=0; echo "$how: the download was never started: $(grep '^curl' "$sb/calls.log" | tail -2)" >&2; }
         [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "$how: the interrupt left something behind: $(diff <(echo "$before") <(antigravity_tree_state "$sb") | head -5)" >&2; }
         rm -rf "$sb"
     done
     if (( ok )); then pass; else fail "an interrupted install leaves a staging directory with a half-downloaded tarball"; fi
+fi
+
+if it "antigravity traps: a caller's EXIT trap does not run inside the install and is still armed afterwards (the install neither replays nor drops it)"; then
+    ok=1
+    # (1) the caller's trap lives in the shell AROUND the one that runs the install (the test
+    # suite itself is like that): it must not be re-armed in the install's own shell, where it
+    # would run at that shell's exit - inside a $(...) it lands in the captured output
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    ( trap 'echo CALLER_EXIT' EXIT
+      antigravity_run "$sb" AG_ENTRY=direct AG_TRAPS=inherited
+      printf '%s\n' "$AG_STATE" >"$sb/h.state"; printf '%s\n' "$AG_OUT" >"$sb/h.out"
+      echo H_AFTER_INSTALL
+      trap -p EXIT >"$sb/h.traps" ) >"$sb/h.stdout" 2>&1
+    [[ "$(<"$sb/h.state")" == installed ]] || { ok=0; echo "inherited: state=[$(<"$sb/h.state")]: $(head -c 500 "$sb/h.out")" >&2; }
+    ! grep -qx CALLER_EXIT "$sb/h.out" || { ok=0; echo "inherited: the caller's EXIT trap ran inside the install: $(grep -n CALLER_EXIT "$sb/h.out")" >&2; }
+    [[ "$(<"$sb/h.stdout")" == $'H_AFTER_INSTALL\nCALLER_EXIT' ]] || { ok=0; echo "inherited: the caller's own trap did not run exactly once, after the install: [$(tr '\n' '|' <"$sb/h.stdout")]" >&2; }
+    [[ "$(<"$sb/h.traps")" == "trap -- 'echo CALLER_EXIT' EXIT" ]] || { ok=0; echo "inherited: the caller's trap is [$(<"$sb/h.traps")] afterwards" >&2; }
+    rm -rf "$sb"
+    # (2) the caller's trap is set in the very shell that runs the install: not run during it, still there after it
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb" AG_ENTRY=direct AG_TRAPS=own
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "own: state=[$AG_STATE]: ${AG_OUT:0:500}" >&2; }
+    [[ "$AG_OUT" == *"AGTRAPS trap -- 'echo CALLER_EXIT' EXIT"* ]] || { ok=0; echo "own: the caller's trap is not armed after the install: $(grep '^AGTRAPS' <<<"$AG_OUT")" >&2; }
+    [[ "$(grep -c CALLER_EXIT <<<"$AG_OUT")" == 2 && "${AG_OUT##*$'\n'}" == CALLER_EXIT ]] \
+        || { ok=0; echo "own: CALLER_EXIT must appear once in the AGTRAPS line and once at the very end, after the install: $(grep -n CALLER_EXIT <<<"$AG_OUT")" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the Antigravity install runs a caller's EXIT trap early or loses it"; fi
 fi
 
 if it "antigravity staging: a SIGTERM or an exit right after the staging directory is made, before any request or check, still removes it (the cleanup is armed before the directory exists)"; then

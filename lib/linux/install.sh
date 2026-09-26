@@ -1316,9 +1316,38 @@ antigravity_install_staged() {
     return 0
 }
 
+# antigravity_install_guarded <parent> <dir> <existing 0|1> <installed-id>: the
+# whole install from the staging directory on. It runs ONLY inside the subshell
+# install_antigravity opens around it, and that is the point: the subshell owns
+# the INT/TERM/EXIT traps, so the caller's traps are never saved, replaced or
+# put back (a `$(trap -p)` snapshot taken inside a subshell reports the PARENT's
+# traps, and re-arming them replays the parent's EXIT handler in the subshell).
+# The stage goes away on EVERY way out of it: a normal return, a signal, and an
+# exit from anywhere underneath (set -e, an unbound variable). The traps are
+# armed BEFORE the directory is made (the cleanup does nothing while there is no
+# stage), so a signal right after mktemp cannot leave it behind.
+# A subshell cannot set INSTALL_SCRIPT_STATE for its caller, so "finished on
+# purpose without changing anything" leaves as this exit status instead.
+ANTIGRAVITY_RC_SKIPPED=64
+antigravity_install_guarded() {
+    local parent="$1" dir="$2" existing="$3" installed_id="$4" rc=0
+    ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT=""
+    trap 'antigravity_on_signal INT' INT
+    trap 'antigravity_on_signal TERM' TERM
+    trap 'antigravity_stage_cleanup' EXIT
+    if antigravity_stage_make "$parent"; then
+        antigravity_install_staged "$dir" "$existing" "$installed_id" || rc=$?
+        if (( rc == 0 )) && [[ "$INSTALL_SCRIPT_STATE" == skipped ]]; then rc=$ANTIGRAVITY_RC_SKIPPED; fi
+    else
+        ui_err "Antigravity not installed: cannot create a private staging directory under ${parent}."
+        rc=1
+    fi
+    return "$rc"
+}
+
 install_antigravity() {
     INSTALL_SCRIPT_STATE=""
-    local dir parent installed_id="" existing=0 rc=0 tool old_traps
+    local dir parent installed_id="" existing=0 rc=0 tool
     if [[ "${SYS_ARCH:-x64}" != x64 ]]; then
         ui_err "Antigravity is only wired up for x64 (this machine is ${SYS_ARCH}); nothing was installed."
         return 1
@@ -1348,25 +1377,10 @@ install_antigravity() {
     for tool in curl tar gzip; do
         if ! has_cmd "$tool"; then ui_err "Antigravity not installed: ${tool} was not found."; return 1; fi
     done
-    # The stage goes away on EVERY way out: a normal return (below), a signal, and
-    # an exit from anywhere underneath (set -e, an unbound variable). The traps are
-    # armed BEFORE the directory is made (the cleanup does nothing while there is no
-    # stage), so a signal right after mktemp cannot leave it behind. The caller's own
-    # traps are put back afterwards.
-    ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT=""
-    old_traps="$(trap -p INT TERM EXIT)"
-    trap 'antigravity_on_signal INT' INT
-    trap 'antigravity_on_signal TERM' TERM
-    trap 'antigravity_stage_cleanup' EXIT
-    if antigravity_stage_make "$parent"; then
-        antigravity_install_staged "$dir" "$existing" "$installed_id" || rc=$?
-    else
-        ui_err "Antigravity not installed: cannot create a private staging directory under ${parent}."
-        rc=1
-    fi
-    trap - INT TERM EXIT
-    if [[ -n "$old_traps" ]]; then eval "$old_traps"; fi
-    antigravity_stage_cleanup
+    # The install runs in a subshell of its own (see antigravity_install_guarded), so
+    # the caller's traps stay exactly as they are.
+    ( antigravity_install_guarded "$parent" "$dir" "$existing" "$installed_id" ) || rc=$?
+    if (( rc == ANTIGRAVITY_RC_SKIPPED )); then INSTALL_SCRIPT_STATE=skipped; rc=0; fi
     return "$rc"
 }
 
