@@ -1832,6 +1832,19 @@ class ModelOverridePrivacyTests(unittest.TestCase):
         self.assertEqual(rc, 2, out + err)
         self.assertIn("privacy", err)
 
+    def test_sensitive_card_with_free_is_refused(self):
+        # close-priv 2026-09-26: --free swapped a sensitive card's -clean combo
+        # for the promo model (opencode/big-pickle, may train on prompts).
+        for card in ("privacy=sensitive", "kind=review,paths=tools/registry.py,privacy=sensitive"):
+            with mock.patch.object(self.agent.measure_mod, "client_state", lambda *a, **k: {}), \
+                    mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: {
+                        "route": "t3-driver-clean", "state": "ready", "reason": "stub",
+                        "bucket": "S1", "defer_until": None}):
+                rc, out, err = self.run_cmd(card=card, free=True)
+            self.assertEqual(rc, 2, card + out + err)
+            self.assertIn("privacy", err)
+            self.assertNotIn("big-pickle", out)
+
     def test_public_card_with_any_model_is_not_checked(self):
         rc, out, err = self.run_cmd(card="privacy=public", model="omniroute/t3-driver")
         self.assertEqual(rc, 0, err)

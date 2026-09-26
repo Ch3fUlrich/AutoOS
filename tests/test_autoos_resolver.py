@@ -413,6 +413,22 @@ class FilterTests(unittest.TestCase):
                                       overlay=self.overlay)
         self.assertIn("privacy: nosy/big trains on prompts", removed["r-mixed"])
 
+    def test_privacy_checks_an_unavailable_leg_the_gateway_still_serves(self):
+        # close-priv 2026-09-26: unavailable_legs is registry-only; the gateway
+        # combo still lists the leg, so a sensitive card must not pass a route
+        # whose hidden leg is unsafe.
+        self.registry["providers"]["freepool"] = {
+            "id": "freepool", "tier": "free", "trains_on_prompts": False}
+        self.registry["models"]["free-model"] = {
+            "id": "free-model", "tool_calls": "proven",
+            "context_usable": {"tokens": 100000, "source": "default"}}
+        self.registry["routes"]["r-hidden"] = {
+            "id": "r-hidden", "legs": ["clean/big", "freepool/free-model"],
+            "unavailable_legs": {"freepool/free-model": {"available": False}}}
+        survivors, removed = self.run_filters(card=self.card(privacy="sensitive"))
+        self.assertNotIn("r-hidden", survivors)
+        self.assertTrue(any("freepool/free-model" in r for r in removed["r-hidden"]))
+
     def test_privacy_removes_route_with_a_free_pool_leg_even_after_a_clean_leg(self):
         # PRIV brief 2026-09-26 ("Free first, private never"): a free-tier
         # leg is never private-safe, even one whose own trains_on_prompts is

@@ -367,6 +367,11 @@ def resolve_route(args, cfg: dict, client) -> dict:
     explicit --model replaced the card's combo must still land on private-safe
     legs only (--allow-training keeps its documented, logged escape)."""
     route = resolve_route_unchecked(args, cfg, client)
+    if args.free and route.get("privacy") == "sensitive":
+        # close-priv 2026-09-26: --free replaces the combo with the promo
+        # model, which may train on prompts - never for a sensitive task.
+        raise PrivacyRefused("privacy: --free runs the promo model %s, which may train on "
+                             "prompts; a privacy=sensitive task cannot use it" % args.free_model)
     override = args.model if client.gateway else None
     if (override and route.get("model") and route.get("privacy") == "sensitive"
             and not args.allow_training):
