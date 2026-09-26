@@ -731,7 +731,7 @@ class Shutdown(LazyProxyCase):
 class Streams(LazyProxyCase):
     def test_stdout_is_json_rpc_only_and_backend_stderr_stays_on_stderr(self):
         self.prime_cache()
-        s = self.session(idle=30, FAKE_GARBAGE="1", AUTOOS_SECRET_PROBE="hunter2-unique-value")
+        s = self.session(idle=30, FAKE_GARBAGE="1", AUTOOS_SECRET_PROBE="canary-value-for-the-leak-check")
         s.initialize()
         self.call(s, rid=41)
         s.request("tools/list", {})
@@ -750,7 +750,7 @@ class Streams(LazyProxyCase):
         self.assertTrue(any(l.startswith("playwright-lazy:") for l in s.stderr),
                         "the dropped non-JSON backend line was not reported")
         for text in s.stderr + [r.decode("utf-8") for r in s.raw]:
-            self.assertNotIn("hunter2-unique-value", text)
+            self.assertNotIn("canary-value-for-the-leak-check", text)
 
     def test_the_backend_command_env_takes_a_json_list_or_a_quoted_string(self):
         spaced = os.path.join(self.tmp, "with space")
