@@ -20,15 +20,21 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
     forbid-host              host not declared, or declared with forbid=true
     env-injection            argv[0] is a NAME=value assignment, or
                              LD_PRELOAD/LD_LIBRARY_PATH/BASH_ENV appear anywhere
+                             (checked on every command head)
     path-hijack              argv[0] is a relative path, or a bare name that
                              does not resolve on the policy's FIXED PATH, or
                              an absolute path under a world-writable directory
-    no-sudo                  sudo/su/doas/pkexec/run0, directly or behind
-                             env/nice/nohup/timeout/xargs/ionice/stdbuf/setsid
-    no-inline-shell          sh/bash/zsh/dash/fish -c, python* -c, perl -e/-E,
+                             (checked on every command head)
+    no-sudo                  sudo/su/doas/pkexec/run0 as any argv element's
+                             basename, anywhere (accepted false positive:
+                             `grep sudo file` denies); heads cover wrappers
+    no-inline-shell          sh/bash/ksh/mksh/csh/tcsh/ash/dash/zsh/fish/
+                             busybox -c, python* -c, perl -e/-E,
                              node -e/-p, ruby -e, awk with "system(" in a
-                             program argument -- argv only, scripts by path
-                             are allowed
+                             program argument, bare shell via a wrapper,
+                             script/systemd-run/at/batch/setpriv/chroot/
+                             unshare/nsenter/runuser/sg always -- scripts by
+                             path are allowed (checked on every head)
     destructive              rm -r/-f on a root-ish path or glob of one,
                              mkfs*/wipefs, dd of=/dev/*, shred /dev/*,
                              shutdown/reboot/poweroff/halt, init 0|6,
@@ -36,11 +42,19 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              git push --force/-f/--mirror/--delete or a
                              +refspec, docker system prune, docker volume
                              rm/prune, iptables -F, nft flush, crontab -r
+                             (checked on every command head)
     git-option-injection     git -c/-C/--git-dir/--work-tree/--exec-path/
                              --output/--upload-pack/--receive-pack/
                              --config-env/--exec (review F2: these read
                              .git/config or run arbitrary programs even for
-                             "read" verbs like status/log/diff)
+                             "read" verbs like status/log/diff;
+                             checked on every command head)
+
+Command heads (brief A): argv[0], then recursively the command after any
+transparent launcher (env, nice, nohup, timeout, xargs, ionice, stdbuf,
+setsid, chrt, flock, taskset, time, watch, unbuffer, parallel,
+busybox <applet>, find -exec/-execdir/-ok/-okdir, ssh remote). Every rule
+above runs on every head.
 """
 from __future__ import annotations
 
@@ -173,7 +187,14 @@ def _build(raw: object, *, source: str) -> Policy:
 
 def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str) -> Decision:
     """allow/deny one call. Rules are checked in a fixed priority order so
-    the reported `rule` is deterministic when more than one would match."""
+    the reported `rule` is deterministic when more than one would match.
+
+    Wrapper transparency (review Qoder-1, L1 high): argv is expanded into
+    "command heads" -- argv[0], then recursively the command after any
+    exec-capable launcher (env, nice, timeout, xargs, find -exec, busybox
+    applet, ssh remote, ...). EVERY rule below runs on EVERY head, so
+    ["env","rm","-rf","/"] trips destructive via its "rm" head just like a
+    direct ["rm","-rf","/"] would. See _command_heads()."""
     if not actor or actor not in policy.actor_names():
         return Decision(False, "unknown-actor", (f"actor not declared in policy: {actor!r}",))
 
@@ -195,29 +216,59 @@ def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str)
     if host_entry.forbid:
         return Decision(False, "forbid-host", (f"host is forbidden: {host!r}",))
 
-    env_problem = _env_injection_problem(argv)
-    if env_problem:
-        return Decision(False, "env-injection", (env_problem,))
+    heads = _command_heads(argv)
 
-    hijack_problem = _path_hijack_problem(argv[0], policy)
-    if hijack_problem:
-        return Decision(False, "path-hijack", (hijack_problem,))
+    for head in heads:
+        env_problem = _env_injection_problem(head)
+        if env_problem:
+            return Decision(False, "env-injection", (env_problem,))
 
-    stripped = _strip_wrappers(argv)
-    if stripped and _basename(stripped[0]) in _SUDO_FAMILY:
-        return Decision(False, "no-sudo", (f"{_basename(stripped[0])} is never allowed (Q3)",))
+    for head in heads:
+        if not head:
+            continue
+        hijack_problem = _path_hijack_problem(head[0], policy)
+        if hijack_problem:
+            return Decision(False, "path-hijack", (hijack_problem,))
 
-    shell_problem = _inline_shell_problem(argv)
-    if shell_problem:
-        return Decision(False, "no-inline-shell", (shell_problem,))
+    # no-sudo: any argv element whose basename is exactly sudo/su/doas/
+    # pkexec/run0 denies, anywhere (review L1 high). Accepted false
+    # positive: `grep sudo file` is denied too -- documented here and in
+    # configuration/hostexec/README.md; the operator chose fail-closed
+    # over allowing a token that spells a privilege boundary.
+    for tok in argv:
+        if isinstance(tok, str) and _basename(tok) in _SUDO_FAMILY:
+            return Decision(False, "no-sudo", (f"{_basename(tok)} is never allowed (Q3)",))
 
-    destructive_problem = _destructive_problem(argv)
-    if destructive_problem:
-        return Decision(False, "destructive", (destructive_problem,))
+    for idx, head in enumerate(heads):
+        if not head:
+            continue
+        base = _basename(head[0])
+        if base in _ALWAYS_DENY_WRAPPERS:
+            return Decision(False, "no-inline-shell",
+                             (f"{base} is an exec wrapper; run the command directly",))
+        # flock -c/--command runs its argument via a shell (sh -c).
+        if base == "flock" and any(
+                t == "-c" or t == "--command" or t.startswith("--command=")
+                for t in head[1:]):
+            return Decision(False, "no-inline-shell",
+                             ("flock -c runs its command via a shell; put the script on disk",))
+        shell_problem = _inline_shell_problem(head)
+        if shell_problem:
+            return Decision(False, "no-inline-shell", (shell_problem,))
+        if idx > 0 and _is_wrapped_bare_shell(head):
+            return Decision(False, "no-inline-shell",
+                             (f"{base} via a wrapper without a script path runs a shell; "
+                              "run the command directly",))
 
-    git_opt_problem = _git_option_injection_problem(argv)
-    if git_opt_problem:
-        return Decision(False, "git-option-injection", (git_opt_problem,))
+    for head in heads:
+        destructive_problem = _destructive_problem(head)
+        if destructive_problem:
+            return Decision(False, "destructive", (destructive_problem,))
+
+    for head in heads:
+        git_opt_problem = _git_option_injection_problem(head)
+        if git_opt_problem:
+            return Decision(False, "git-option-injection", (git_opt_problem,))
 
     return Decision(True, None, ())
 
@@ -230,6 +281,15 @@ def _basename(token: str) -> str:
 
 _WRAPPERS = {"env", "nice", "nohup", "timeout", "xargs", "ionice", "stdbuf", "setsid"}
 _SUDO_FAMILY = {"sudo", "su", "doas", "pkexec", "run0"}
+# Exec wrappers that are always denied as no-inline-shell (L1 high):
+# script allocates a pty, systemd-run/at/batch create scheduled/transient
+# jobs that outlive the audited call, setpriv/chroot/unshare/nsenter change
+# privilege/root/namespaces, runuser/sg change uid/gid like sudo. Benign
+# resource wrappers (nice/timeout/xargs/find/busybox/...) stay transparent:
+# their wrapped command ("head") is checked instead, so `find . -name x`
+# and `xargs -a f echo` still allow while `find -exec sh -c` denies.
+_ALWAYS_DENY_WRAPPERS = {"script", "systemd-run", "at", "batch", "setpriv",
+                         "chroot", "unshare", "nsenter", "runuser", "sg"}
 
 
 def _looks_like_duration(token: str) -> bool:
@@ -272,6 +332,436 @@ def _strip_wrappers(argv: Sequence[str]) -> list[str]:
     return rest
 
 
+# ─── command heads: transparent exec launchers (brief A) ─────────────────
+# _command_heads(argv) returns [argv, child, grandchild, ...] where each
+# child is the wrapped command's own argv slice. Every deny rule runs on
+# every head, so a wrapper cannot hide sudo/shell/destructive/git flags.
+
+def _idx_after_env(s: Sequence[str]) -> int | None:
+    i, n = 1, len(s)
+    longs_with_val = {"--unset", "--chdir", "--split-string", "--argv0",
+                      "--block-signal", "--default-signal", "--ignore-signal"}
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok.startswith("--"):
+            if "=" in tok:
+                i += 1
+                continue
+            i += 2 if tok in longs_with_val else 1
+            continue
+        if tok.startswith("-") and len(tok) > 1 and tok != "-":
+            if tok in ("-u", "-C", "-S", "-a"):
+                i += 2
+                continue
+            if len(tok) > 2 and tok[1] in "uCSa":
+                i += 1
+                continue
+            i += 1
+            continue
+        if _looks_like_assignment(tok):
+            i += 1
+            continue
+        break
+    return i if i < n else None
+
+
+def _idx_after_nice(s: Sequence[str]) -> int | None:
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in ("-n", "--adjustment"):
+            i += 2
+            continue
+        if tok.startswith("--adjustment=") or tok.startswith("--"):
+            i += 1
+            continue
+        if re.match(r"^-\d+$", tok) or (tok.startswith("-n") and len(tok) > 2):
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            i += 1
+            continue
+        break
+    return i if i < n else None
+
+
+def _idx_after_simple_flags(s: Sequence[str]) -> int | None:
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok.startswith("-") and len(tok) > 1 and tok != "-":
+            i += 1
+            continue
+        break
+    return i if i < n else None
+
+
+def _idx_after_timeout(s: Sequence[str]) -> int | None:
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in ("-s", "--signal", "-k", "--kill-after"):
+            i += 2
+            continue
+        if tok.startswith("--signal=") or tok.startswith("--kill-after=") or tok.startswith("--"):
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            if len(tok) > 2 and tok[1] in "sk":
+                i += 1
+                continue
+            i += 1
+            continue
+        break
+    if i < n and not s[i].startswith("-") and _looks_like_duration(s[i]):
+        i += 1
+    return i if i < n else None
+
+
+def _idx_after_xargs(s: Sequence[str]) -> int | None:
+    shorts_val = set("adEeILnsP")
+    longs_val = {"--arg-file", "--delimiter", "--eof", "--replace", "--max-lines",
+                 "--max-args", "--max-chars", "--max-procs", "--process-slot-var"}
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok.startswith("--"):
+            if "=" in tok:
+                i += 1
+                continue
+            i += 2 if tok in longs_val else 1
+            continue
+        if tok.startswith("-") and len(tok) > 1 and tok != "-":
+            if tok in ("-a", "-d", "-E", "-e", "-I", "-L", "-n", "-s", "-P"):
+                i += 2
+                continue
+            i += 1
+            continue
+        break
+    return i if i < n else None
+
+
+def _idx_after_ionice(s: Sequence[str]) -> int | None:
+    for tok in s[1:]:
+        if tok == "--":
+            break
+        if tok in ("-p", "--pid") or tok.startswith("--pid="):
+            return None  # pid mode: operates on a pid, runs nothing
+        if tok.startswith("-"):
+            continue
+        break
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in ("-c", "--class", "-n", "--classdata"):
+            i += 2
+            continue
+        if tok.startswith("--class=") or tok.startswith("--classdata=") or tok.startswith("--"):
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            i += 1
+            continue
+        break
+    return i if i < n else None
+
+
+def _idx_after_stdbuf(s: Sequence[str]) -> int | None:
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in ("-i", "--input", "-o", "--output", "-e", "--error"):
+            i += 2
+            continue
+        if tok.startswith(("--input=", "--output=", "--error=")) or tok.startswith("--"):
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            i += 1
+            continue
+        break
+    return i if i < n else None
+
+
+def _idx_after_chrt(s: Sequence[str]) -> int | None:
+    for tok in s[1:]:
+        if tok == "--":
+            break
+        if tok in ("-p", "--pid") or tok.startswith("--pid="):
+            return None  # pid mode: no wrapped command
+        if tok.startswith("-"):
+            continue
+        break
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok.startswith("-") and len(tok) > 1:
+            i += 1
+            continue
+        break
+    if i < n and not s[i].startswith("-") and s[i].lstrip("-").isdigit():
+        i += 1
+    return i if i < n else None
+
+
+def _idx_after_flock(s: Sequence[str]) -> int | None:
+    for tok in s[1:]:
+        if tok in ("-c", "--command") or tok.startswith("--command="):
+            return None  # shell mode: denied separately, no transparent head
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in ("-w", "--timeout", "-E", "--conflict-exit-code"):
+            i += 2
+            continue
+        if tok.startswith(("--timeout=", "--conflict-exit-code=")) or tok.startswith("--"):
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            i += 1
+            continue
+        break
+    if i < n and not s[i].startswith("-"):
+        i += 1  # the locked file
+    return i if i < n else None
+
+
+def _idx_after_taskset(s: Sequence[str]) -> int | None:
+    for tok in s[1:]:
+        if tok == "--":
+            break
+        if tok in ("-p", "--pid") or tok.startswith("--pid="):
+            return None  # pid mode: no wrapped command
+        if tok.startswith("-"):
+            continue
+        break
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in ("-c", "--cpu-list"):
+            i += 2
+            continue
+        if tok.startswith("--cpu-list=") or tok.startswith("--"):
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            i += 1
+            continue
+        break
+    if i < n and not s[i].startswith("-") and re.match(r"^[0-9a-fA-Fx,\-]+$", s[i]):
+        i += 1  # the cpu mask
+    return i if i < n else None
+
+
+def _idx_after_watch(s: Sequence[str]) -> int | None:
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in ("-n", "--interval"):
+            i += 2
+            continue
+        if tok.startswith("--interval=") or tok.startswith("--"):
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            i += 1
+            continue
+        break
+    return i if i < n else None
+
+
+def _idx_after_parallel(s: Sequence[str]) -> tuple[int | None, int | None]:
+    shorts_val = set("adEjLmnsST")
+    longs_val = {"--arg-file", "--delimiter", "--jobs", "--load", "--timeout",
+                 "--delay", "--joblog", "--results", "--sshlogin", "--sshloginfile",
+                 "--transfer", "--return", "--workdir", "--ssh", "--tagstring",
+                 "--header", "--colsep", "--argfilesep", "--max-args", "--number-of-args"}
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok in (":::", "::::", "--"):
+            break
+        if tok.startswith("--"):
+            if "=" in tok:
+                i += 1
+                continue
+            i += 2 if tok in longs_val else 1
+            continue
+        if tok.startswith("-") and len(tok) > 1 and tok != "-":
+            if len(tok) == 2 and tok[1] in shorts_val:
+                i += 2
+                continue
+            i += 1
+            continue
+        break
+    if i >= n:
+        return None, None
+    if s[i] in (":::", "::::", "--"):
+        return None, None
+    j = i
+    while j < n and s[j] not in (":::", "::::", "--"):
+        j += 1
+    return i, j
+
+
+def _idx_after_ssh_remote(s: Sequence[str]) -> int | None:
+    shorts_val = set("pilmFoJWDmLRbESQwceI")
+    i, n = 1, len(s)
+    while i < n:
+        tok = s[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok.startswith("-") and len(tok) > 1 and tok != "-":
+            if tok.startswith("--"):
+                i += 1
+                continue
+            if len(tok) == 2 and tok[1] in shorts_val:
+                i += 2
+                continue
+            if len(tok) > 2 and tok[1] in shorts_val:
+                i += 1
+                continue
+            i += 1
+            continue
+        break
+    if i >= n:
+        return None
+    i += 1  # skip the destination
+    if i >= n or s[i].startswith("-"):
+        return None
+    return i
+
+
+def _direct_child_heads(cur: Sequence[str]) -> list[list[str]]:
+    if not cur:
+        return []
+    base = _basename(cur[0])
+    cur = list(cur)
+    if base == "env":
+        idx = _idx_after_env(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base == "nice":
+        idx = _idx_after_nice(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base in ("nohup", "setsid", "time", "unbuffer"):
+        idx = _idx_after_simple_flags(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base == "timeout":
+        idx = _idx_after_timeout(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base == "xargs":
+        idx = _idx_after_xargs(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base == "ionice":
+        idx = _idx_after_ionice(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base == "stdbuf":
+        idx = _idx_after_stdbuf(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base == "chrt":
+        idx = _idx_after_chrt(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base == "flock":
+        idx = _idx_after_flock(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base == "taskset":
+        idx = _idx_after_taskset(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base == "watch":
+        idx = _idx_after_watch(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base == "parallel":
+        i, j = _idx_after_parallel(cur)
+        if i is None or j is None:
+            return []
+        child = cur[i:j]
+        return [child] if child and not child[0].startswith("-") else []
+    if base == "busybox":
+        if len(cur) > 1 and not cur[1].startswith("-"):
+            return [cur[1:]]
+        return []
+    if base == "find":
+        kids: list[list[str]] = []
+        i, n = 1, len(cur)
+        while i < n:
+            if cur[i] in ("-exec", "-execdir", "-ok", "-okdir"):
+                j = i + 1
+                buf: list[str] = []
+                while j < n and cur[j] not in (";", "+"):
+                    buf.append(cur[j])
+                    j += 1
+                if buf and not buf[0].startswith("-"):
+                    kids.append(buf)
+                i = j + 1
+            else:
+                i += 1
+        return kids
+    if base in ("ssh", "scp"):
+        # scp runs no remote command; ssh remote heads feed no-sudo/shell
+        # checks (D denies ssh/scp on local hosts separately).
+        if base != "ssh":
+            return []
+        idx = _idx_after_ssh_remote(cur)
+        return [cur[idx:]] if idx is not None and cur[idx:] else []
+    return []
+
+
+def _command_heads(argv: Sequence[str]) -> list[list[str]]:
+    """All command heads: argv itself plus, recursively, the command after
+    any transparent launcher, busybox applet, find -exec, or ssh remote."""
+    if not argv:
+        return []
+    heads: list[list[str]] = [list(argv)]
+    queue: list[list[str]] = [list(argv)]
+    seen = {tuple(argv)}
+    while queue:
+        cur = queue.pop(0)
+        for child in _direct_child_heads(cur):
+            t = tuple(child)
+            if not child or t in seen:
+                continue
+            seen.add(t)
+            heads.append(child)
+            queue.append(child)
+            if len(heads) > 32:  # argv-caps bounds length; this bounds heads
+                return heads
+    return heads
+
+
 _DANGEROUS_ENV_VARS = ("LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV")
 
 
@@ -311,8 +801,35 @@ def _path_hijack_problem(argv0: str, policy: Policy) -> str | None:
     return f"argv[0] {argv0!r} does not resolve on the policy's fixed PATH"
 
 
-_SHELL_NAMES = {"sh", "bash", "zsh", "dash", "fish"}
+_SHELL_NAMES = {"sh", "bash", "zsh", "dash", "fish",
+                "busybox", "ksh", "mksh", "csh", "tcsh", "ash"}
 _PYTHON_RE = re.compile(r"^python[0-9.]*$")
+
+
+def _is_wrapped_bare_shell(head: Sequence[str]) -> bool:
+    """A shell via a wrapper without a script path (e.g. `xargs -a f sh`)
+    runs with hidden input (the wrapper's file/found-files) that decide()
+    cannot see -- deny even without an explicit -c flag. A shell WITH an
+    explicit script path (`env bash /opt/tool.sh`) or a --version/--help
+    query still allows."""
+    if not head:
+        return False
+    base = _basename(head[0])
+    if base not in _SHELL_NAMES or base == "busybox":
+        return False
+    tail = list(head[1:])
+    if not tail:
+        return True
+    if any(t in ("--version", "--help", "-h", "-V") for t in tail):
+        return False
+    for t in tail:
+        if t.startswith("-"):
+            continue
+        if t in ("{}", ";", "+", ":::", "::::", "--"):
+            continue
+        # Any other positional arg is treated as an explicit script path.
+        return False
+    return True
 
 
 def _short_opt_cluster_has(argv_tail: Sequence[str], letters: str) -> bool:

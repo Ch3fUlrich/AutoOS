@@ -31,12 +31,17 @@ from hostexec import policy  # noqa: E402
 _KNOWN_COMMANDS = [
     "sudo", "su", "doas", "pkexec", "run0",
     "sh", "bash", "zsh", "dash", "fish",
+    "ksh", "mksh", "csh", "tcsh", "ash", "busybox",
     "python3", "python", "perl", "node", "ruby", "awk",
     "rm", "mkfs", "mkfs.ext4", "wipefs", "dd", "shred",
     "shutdown", "reboot", "poweroff", "halt", "init",
     "systemctl", "chmod", "chown", "git", "docker",
     "iptables", "nft", "crontab",
     "env", "nice", "nohup", "timeout", "xargs", "ionice", "stdbuf", "setsid",
+    "chrt", "flock", "taskset", "time", "watch", "unbuffer", "sg", "runuser",
+    "script", "systemd-run", "at", "batch", "setpriv", "chroot", "unshare",
+    "nsenter", "busybox", "find", "parallel", "ssh", "scp", "sftp", "rsync",
+    "podman", "ls", "make", "grep",
     "echo", "id", "uptime", "df",
 ]
 

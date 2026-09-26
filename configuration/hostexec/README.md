@@ -109,12 +109,20 @@ narrow allow-list), not an oversight.
 | `empty-argv` | argv is empty, or every element is blank |
 | `argv-caps` | too many arguments, or one argument longer than `[limits]` allows |
 | `forbid-host` | the host is not declared in the policy, or is declared with `forbid = true` |
-| `env-injection` | argv[0] is a `NAME=value` assignment, or `LD_PRELOAD`/`LD_LIBRARY_PATH`/`BASH_ENV` appear anywhere in argv as an assignment |
-| `path-hijack` | argv[0] is a relative path, resolves under a world-writable directory, or (for a bare name) does not resolve on the policy's own fixed `path` -- never the caller's `$PATH` |
-| `no-sudo` | `sudo`/`su`/`doas`/`pkexec`/`run0`, directly or hidden behind `env`/`nice`/`nohup`/`timeout`/`xargs`/`ionice`/`stdbuf`/`setsid`. There is no sudo/mutating tier today -- one week of soak before it is re-asked |
-| `no-inline-shell` | `sh`/`bash`/`zsh`/`dash`/`fish -c`, `python* -c`, `perl -e`/`-E`, `node -e`/`-p`, `ruby -e`, or an `awk` program that calls `system(`. A script invoked BY PATH (`bash /opt/tool.sh`) is fine -- only *inline* code is refused |
-| `destructive` | `rm -r`/`-f` on `/`, `~`, `/home`, `/etc`, `/var`, `/usr`, `/boot` (or a glob directly under one), `mkfs*`, `wipefs`, `dd of=/dev/*`, `shred /dev/*`, `shutdown`/`reboot`/`poweroff`/`halt`, `init 0\|6`, `systemctl poweroff\|reboot\|halt`, `chmod`/`chown -R /`, `git push --force`/`-f`/`--mirror`/`--delete`/a `+refspec`, `docker system prune`, `docker volume rm\|prune`, `iptables -F`, `nft flush`, `crontab -r` |
-| `git-option-injection` | `git -c`/`-C`/`--git-dir`/`--work-tree`/`--exec-path`/`--output`/`--upload-pack`/`--receive-pack`/`--config-env`/`--exec` -- these read `.git/config` or run an arbitrary external program even behind a "read" verb like `status`/`log`/`diff` |
+| `env-injection` | argv[0] is a `NAME=value` assignment, or `LD_PRELOAD`/`LD_LIBRARY_PATH`/`BASH_ENV` appear anywhere in argv as an assignment -- checked on every command head (see below) |
+| `path-hijack` | argv[0] is a relative path, resolves under a world-writable directory, or (for a bare name) does not resolve on the policy's own fixed `path` -- never the caller's `$PATH` -- checked on every command head |
+| `no-sudo` | `sudo`/`su`/`doas`/`pkexec`/`run0` as any argv element's basename, anywhere (accepted false positive: `grep sudo file` is denied too -- fail-closed over a token that spells a privilege boundary), directly or hidden behind any exec-capable launcher. There is no sudo/mutating tier today -- one week of soak before it is re-asked |
+| `no-inline-shell` | `sh`/`bash`/`ksh`/`mksh`/`csh`/`tcsh`/`ash`/`dash`/`zsh`/`fish`/`busybox -c`, `python* -c`, `perl -e`/`-E`, `node -e`/`-p`, `ruby -e`, or an `awk` program that calls `system(`; a bare shell via a wrapper without a script path (`xargs -a f sh`); `script`/`systemd-run`/`at`/`batch`/`setpriv`/`chroot`/`unshare`/`nsenter`/`runuser`/`sg` always (exec wrappers -- run the command directly). A script invoked BY PATH (`bash /opt/tool.sh`) is fine -- only *inline* code is refused. Checked on every command head |
+| `destructive` | `rm -r`/`-f` on `/`, `~`, `/home`, `/etc`, `/var`, `/usr`, `/boot` (or a glob directly under one), `mkfs*`, `wipefs`, `dd of=/dev/*`, `shred /dev/*`, `shutdown`/`reboot`/`poweroff`/`halt`, `init 0\|6`, `systemctl poweroff\|reboot\|halt`, `chmod`/`chown -R /`, `git push --force`/`-f`/`--mirror`/`--delete`/a `+refspec`, `docker system prune`, `docker volume rm\|prune`, `iptables -F`, `nft flush`, `crontab -r` -- checked on every command head |
+| `git-option-injection` | `git -c`/`-C`/`--git-dir`/`--work-tree`/`--exec-path`/`--output`/`--upload-pack`/`--receive-pack`/`--config-env`/`--exec` -- these read `.git/config` or run an arbitrary external program even behind a "read" verb like `status`/`log`/`diff` -- checked on every command head |
+
+Command heads: `argv[0]`, then recursively the command after any
+exec-capable launcher (`env` incl. `NAME=val` and `-i`/`-u`, `nice`,
+`nohup`, `timeout`, `xargs`, `ionice`, `stdbuf`, `setsid`, `chrt`,
+`flock`, `taskset`, `time`, `watch`, `unbuffer`, `parallel`,
+`busybox <applet>`, `find -exec`/`-execdir`/`-ok`/`-okdir`, `ssh`
+remote). Every rule above runs on every head, not on raw `argv[0]`
+only.
 
 A denied MCP call comes back as a tool error whose text is a JSON object:
 
