@@ -74,19 +74,38 @@ backup_file() {
     printf '%s\n' "$dest"
 }
 
+# backup_name_key <path> <backup>: a string that sorts the backups of <path> in
+# the order backup_path named them - the stamp first, then the -N counter zero-
+# padded, so -10 follows -2 under plain string comparison. Done in bash: BSD and
+# macOS sort have no -V, and plain sort ranks -2 above -10. A stamp that is not
+# YYYYmmdd-HHMMSS (a test can pin any) still splits at its last -<digits>.
+backup_name_key() {
+    local rest="${2#"$1".autoos-backup-}" stamp n=0
+    local std='^([0-9]{8}-[0-9]{6})(-([0-9]+))?$' any='^(.+)-([0-9]+)$'
+    if [[ "$rest" =~ $std ]]; then
+        stamp="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[3]:-0}"
+    elif [[ "$rest" =~ $any ]]; then
+        stamp="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[2]}"
+    else
+        stamp="$rest"
+    fi
+    printf '%s.%010d\n' "$stamp" "$((10#$n))"
+}
+
 # backup_newest <path>: prints the most recent backup of <path>, nothing when
 # there is none. Newest = latest modification time, NOT the last name: ...-10
 # sorts before ...-2. (cp -p keeps the source's mtime, which still orders the
 # backups of one file: each is a copy of a later state.) Equal mtimes fall back
-# to a version sort so -10 still beats -2.
+# to the name (backup_name_key) so -10 still beats -2.
 backup_newest() {
-    local path="$1" f best=""
+    local path="$1" f best="" LC_COLLATE=C
     for f in "${path}".autoos-backup-*; do
         [[ -f "$f" ]] || continue
         if [[ -z "$best" || "$f" -nt "$best" ]]; then
             best="$f"
-        elif ! [[ "$best" -nt "$f" ]]; then
-            best="$(printf '%s\n%s\n' "$best" "$f" | { sort -V 2>/dev/null || sort; } | tail -n 1)"
+        elif ! [[ "$best" -nt "$f" ]] \
+             && [[ "$(backup_name_key "$path" "$f")" > "$(backup_name_key "$path" "$best")" ]]; then
+            best="$f"
         fi
     done
     [[ -z "$best" ]] || printf '%s\n' "$best"

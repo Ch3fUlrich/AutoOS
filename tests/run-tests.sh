@@ -2035,6 +2035,38 @@ if it "backup: undo restores the newest backup, not the last name (-10 sorts bef
     if (( ok )); then pass; else fail "undo restored a backup that is not the newest"; fi
 fi
 
+# backup_newest broke a tie between equal mtimes with `sort -V`, which BSD and
+# macOS sort do not have (the plain-sort fallback ranks -2 above -10). A `sort`
+# that rejects -V the way BSD sort does must not change the answer, so the
+# suffix is compared in bash. The stamp decides first: a later second beats an
+# earlier second's higher counter.
+if it "backup: backup_newest picks -10 over -2 on equal mtimes without sort -V"; then
+    d="$(mktemp -d)"; bin="$(mktemp -d)"; ok=1
+    real_sort="$(command -v sort)"
+    printf '#!/bin/sh\nfor a in "$@"; do\n    case "$a" in\n        -V|--version-sort) echo "sort: invalid option -- V (test stub: a sort without version sort)" >&2; exit 2 ;;\n    esac\ndone\nexec %s "$@"\n' "$real_sort" >"$bin/sort"
+    chmod +x "$bin/sort"
+    for stamp in 20260101-000000 S; do
+        f="$d/x-$stamp"; : >"$f"
+        for sfx in "" -1 -2 -10; do
+            : >"$f.autoos-backup-$stamp$sfx"; touch -d "2026-01-01 00:00:00" "$f.autoos-backup-$stamp$sfx"
+        done
+        got="$( PATH="$bin:$PATH"; backup_newest "$f" 2>&1 )"
+        [[ "$got" == "$f.autoos-backup-$stamp-10" ]] || { ok=0; echo "stamp $stamp: the newest is [${got##*/}], expected [x-$stamp.autoos-backup-$stamp-10]" >&2; }
+    done
+    # A later stamp with no counter beats an earlier stamp's -10 (same mtime).
+    f="$d/y"; : >"$f"
+    for n in 20260101-000000 20260101-000000-10 20260101-000001; do
+        : >"$f.autoos-backup-$n"; touch -d "2026-01-01 00:00:00" "$f.autoos-backup-$n"
+    done
+    got="$( PATH="$bin:$PATH"; backup_newest "$f" 2>&1 )"
+    [[ "$got" == "$f.autoos-backup-20260101-000001" ]] || { ok=0; echo "mixed stamps: the newest is [${got##*/}], expected [y.autoos-backup-20260101-000001]" >&2; }
+    # No backup at all: prints nothing, still succeeds.
+    got="$( backup_newest "$d/none" 2>&1 )"; rc=$?
+    { [[ -z "$got" ]] && (( rc == 0 )); } || { ok=0; echo "no backup: printed [$got] rc=$rc" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "backup_newest depends on sort -V to rank equal mtimes"; fi
+fi
+
 # backup_file returns non-zero when the copy fails (full disk, read-only
 # directory). Nine call sites moved onto it and eight ignored that answer, so
 # the file was then modified with NO backup - AGENTS.md hard rule 5 broken in
