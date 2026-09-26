@@ -110,6 +110,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-tests-12: Prove a real docker build with --no-cache; a build after an identical one is cached. (why: a cached build proves nothing; source: status/L1-backlog.lane-omni.report.md)
 - R-tests-13: Make each guard test fail on its bug: seed state the bug changes, assert the reason line, reset per loop. (why: three guard tests passed vacuously; source: c4dd31a, 1d64a1e, 68e519d)
 - R-tests-14: Mutation-test a scratch copy (`tar --exclude=.git`), never the worktree. (why: a mutation must not touch the lane's tree; source: status/L1-backlog.lane-omni.report.md)
+- R-tests-15: A test that fakes a user via USER/HOME must also unset SUDO_USER. (why: detect.sh prefers it and CI's sudo unshare+setpriv leaks SUDO_USER=runner; source: CI 36250221249, fix 854be02)
 
 ### gateway
 
@@ -188,9 +189,10 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-host-02: Give every session its own Omnigraph stdio bridge rather than sharing one. (why: measured ~7 MB each, 22 MB for three; source: inbox/L1-main.md 20:34Z)
 - R-host-03: Read a "shellcheck is clean" failure at exit 137 as host OOM, not a lint finding. (why: reproduced on a loaded host across five lanes; source: 20260924-25 DONE notes, five lanes)
 - R-host-04: Keep the machine awake yourself before an overnight run. (why: the runner cannot change power settings; source: SKILL.md history, rule 6)
-- R-host-05: Per orchestrator: <= 3 worktree lanes + 3 readers, MemAvailable >= 3000 MB. (why: daemon OOM-killed every session at 4+4; source: inbox/L1-routing.md 2026-09-26T15:27:16Z)
+- R-host-05: Per orchestrator: <= 3 worktree lanes + 3 readers, MemAvailable >= 3000 MB. (why: headroom for tests/builds on a 16 GB host; source: briefs/common.md "Host limits" 2026-09-26)
 - R-host-06: The Bash tool shell is zsh: run multi-step shell as `bash <<'EOF'`; never name a var `path`. (why: zsh clobbered PATH and broke globs; source: status/L1-backlog.lane-omni.report.md)
 - R-host-07: Tell a live Claude session by ~/.claude/sessions/<pid>.json procStart vs /proc. (why: a job's state field is not liveness; source: status/L1-backlog.herdr-home-proposal.md)
+- R-host-08: Never shellcheck tests/run-tests.sh locally (CI gates it); cap heavy commands via systemd-run MemoryMax. (why: its OOM stopped herdr and every session twice; source: herdr-server.log 2026-09-26T15:25Z)
 
 ### safety
 
