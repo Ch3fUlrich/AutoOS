@@ -29,7 +29,7 @@ replaced.
 | Path under `~/.openhands` | Contents |
 |---|---|
 | `settings.json` | The default LLM — the first of Muse Spark → DeepSeek → OpenRouter free → local Ollama you have a key for — plus the Serena, Graphify and Omnigraph MCP servers |
-| `profiles/*.json` | One LLM profile per model in [`catalog/llm-models.json`](../catalog/llm-models.json) (DeepSeek, Muse Spark, OpenRouter models, Ollama) with context windows and prices, plus one per gateway tier (`omniroute-tier*`, `litellm-tier*`) from [`configuration/openhands/tier-profiles.json`](../configuration/openhands/tier-profiles.json) |
+| `profiles/*.json` | One LLM profile per model in [`catalog/ai-registry.json`](../catalog/ai-registry.json) `models` (DeepSeek, Muse Spark, OpenRouter models, Ollama) with context windows and prices, plus one per gateway tier (`omniroute-tier*`, `litellm-tier*`) from [`configuration/openhands/tier-profiles.json`](../configuration/openhands/tier-profiles.json) |
 | `agent-profiles/*.json` | The agent hierarchy, copied from [`openhands/agent-profiles/`](../openhands/agent-profiles) |
 | `skills` | A link to `agent-skills/skills`, when that checkout exists |
 

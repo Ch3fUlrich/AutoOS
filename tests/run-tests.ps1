@@ -124,19 +124,21 @@ Test-Case 'a malformed catalog is rejected' {
         "expected provider/kebab/ghost problems, got: $joined"
 }
 
-# ─── Shared LLM model catalogue (single source of truth) ────────────────
-Describe-Group 'llm models'
+# ─── Registry models (single source of truth) ─────────────────────────
+Describe-Group 'registry models'
 
-Test-Case 'llm-models.json is valid and has unique ids' {
-    $doc = Get-Content (Join-Path $Root 'catalog\llm-models.json') -Raw | ConvertFrom-Json
-    $ids = @($doc.models | ForEach-Object { $_.id })
-    Assert-True ($ids.Count -ge 18) "expected >= 18 models, got $($ids.Count)"
-    $dupes = @($ids | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
-    @(Assert-True ($dupes.Count -eq 0) ("duplicate model ids: " + ($dupes -join ', ')))
-    foreach ($m in $doc.models) {
-        $hasOr = $m.PSObject.Properties.Name.Contains('openrouter_id') -and $m.openrouter_id
-        $hasDirect = $m.PSObject.Properties.Name.Contains('direct') -and $m.direct
-        if (-not $hasOr -and -not $hasDirect) { throw "model '$($m.id)' has neither openrouter_id nor direct" }
+Test-Case 'registry models are valid' {
+    # catalog/ai-registry.json `models` is a map keyed by model id, so ids are
+    # unique by construction; assert the map is non-empty and that every entry
+    # carrying a `direct` block is keyed by its own id.
+    $models = (Get-Content (Join-Path $Root 'catalog\ai-registry.json') -Raw | ConvertFrom-Json).models
+    $names = @($models.PSObject.Properties.Name)
+    Assert-True ($names.Count -ge 18) "expected >= 18 registry models, got $($names.Count)"
+    foreach ($name in $names) {
+        $m = $models.$name
+        if ($m.PSObject.Properties.Name.Contains('direct') -and $m.direct) {
+            Assert-True ($m.id -eq $name) "model key '$name' does not match its id '$($m.id)'"
+        }
     }
 }
 

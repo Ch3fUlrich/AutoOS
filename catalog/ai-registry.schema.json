@@ -106,7 +106,7 @@
     },
     "direct": {
       "type": "object",
-      "description": "today's llm-models.json direct-provider block: access that bypasses the OmniRoute gateway entirely (opencode's own provider catalog).",
+      "description": "the former llm-models.json direct-provider block: access that bypasses the OmniRoute gateway entirely (opencode's own provider catalog).",
       "required": ["provider", "model"],
       "additionalProperties": false,
       "properties": {
@@ -128,11 +128,11 @@
         "id": { "type": "string" },
         "display_name": {
           "type": "string",
-          "description": "Additive field, not in spec 3.1: llm-models.json's human-readable 'name'. Kept so it is not lost (D9); routes carry their own per-surface display_name separately."
+          "description": "Additive field, not in spec 3.1: the former llm-models.json's human-readable 'name'. Kept so it is not lost (D9); routes carry their own per-surface display_name separately."
         },
         "default_for": {
           "type": "string",
-          "description": "Additive field, not in spec 3.1: llm-models.json's opencode default-selection key (e.g. which api-key condition makes this model opencode's default). Kept so it is not lost (D9); it is an opencode.jsonc rendering concern, not consumed by the resolver."
+          "description": "Additive field, not in spec 3.1: the former llm-models.json's opencode default-selection key (e.g. which api-key condition makes this model opencode's default). Kept so it is not lost (D9); it is an opencode.jsonc rendering concern, not consumed by the resolver."
         },
         "family": {
           "type": "string",
@@ -162,7 +162,7 @@
         "paid_price_in": {
           "type": "number",
           "minimum": 0,
-          "description": "Additive field, not in spec 3.1: the post-free-cap price on llm-models.json entries that are free only under a cap (paid_input_price). Kept so the fact is not lost (D9); price_in/price_out stay the free-tier price."
+          "description": "Additive field, not in spec 3.1: the post-free-cap price on the former llm-models.json entries that are free only under a cap (paid_input_price). Kept so the fact is not lost (D9); price_in/price_out stay the free-tier price."
         },
         "paid_price_out": { "type": "number", "minimum": 0 },
         "client_bound": {
