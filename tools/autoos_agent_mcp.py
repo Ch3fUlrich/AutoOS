@@ -309,7 +309,8 @@ def spawn(req: dict) -> dict:
     # when the caller names an inbox - no AUTOOS_AGENT_INBOX means no check.
     inbox = os.environ.get("AUTOOS_AGENT_INBOX")
     if inbox:
-        pause = agent.heartbeat.pause_state(inbox)
+        pause = agent.heartbeat.pause_state(inbox, since=agent.heartbeat.session_start(
+            os.environ.get("AUTOOS_AGENT_TRANSCRIPT")))
         if pause["active"]:
             return {"error": "PAUSE active (%s): %s" % (pause["at"], pause["text"])}
     try:

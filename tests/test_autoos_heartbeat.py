@@ -79,6 +79,35 @@ class PauseStateTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.inbox = os.path.join(self._tmp.name, "inbox.md")
 
+    # --- a relaunch is the resume: a PAUSE from before the session started
+    # is history (2026-09-26 reboot: the 12:15Z PAUSE had no RESUME line and
+    # the relaunched session read it as active).
+
+    def test_pause_before_since_is_not_active(self):
+        write_inbox(self.inbox, "2026-09-26T12:15:41Z from L0 PAUSE NOW")
+        since = hb._parse_iso("2026-09-26T13:35:00Z")
+        self.assertFalse(hb.pause_state(self.inbox, since=since)["active"])
+
+    def test_pause_after_since_is_active(self):
+        write_inbox(self.inbox, "2026-09-26T14:00:00Z from L0 PAUSE NOW")
+        since = hb._parse_iso("2026-09-26T13:35:00Z")
+        self.assertTrue(hb.pause_state(self.inbox, since=since)["active"])
+
+    def test_lesson_and_done_lines_that_quote_pause_are_not_a_pause(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T14:00:00Z lesson: two PAUSE lines were ignored",
+                    "2026-09-26T14:01:00Z → done: PAUSE handled")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_session_start_is_the_first_transcript_timestamp(self):
+        path = os.path.join(self._tmp.name, "t.jsonl")
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write('{"type":"summary"}\n')
+            fh.write('{"timestamp":"2026-09-26T13:35:02.123Z","type":"user"}\n')
+            fh.write('{"timestamp":"2026-09-26T14:00:00.000Z","type":"user"}\n')
+        self.assertEqual(hb.session_start(path), hb._parse_iso("2026-09-26T13:35:02Z"))
+        self.assertIsNone(hb.session_start(os.path.join(self._tmp.name, "nope")))
+
     def test_missing_inbox_is_not_active(self):
         self.assertEqual(hb.pause_state(os.path.join(self._tmp.name, "nope.md")),
                          {"active": False, "at": None, "text": None})
@@ -240,6 +269,15 @@ class HeartbeatCliTests(unittest.TestCase):
              "--transcript", self.transcript, "--repo", self.work, *extra],
             capture_output=True, text=True, env=clean_env(), stdin=subprocess.DEVNULL)
 
+    def test_a_pause_older_than_the_session_is_history(self):
+        write_inbox(self.inbox, "2026-09-26T12:15:41Z from L0 PAUSE NOW")
+        with io.open(self.transcript, "w", encoding="utf-8") as fh:
+            fh.write('{"timestamp":"2026-09-26T13:35:00.000Z","type":"user"}\n')
+            fh.write(assistant_line("claude-opus-4-6", 1000) + "\n")
+        proc = self.run_heartbeat()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("pause: none", proc.stdout)
+
     def test_a_clean_repo_with_no_pause_and_low_context_is_all_clear(self):
         proc = self.run_heartbeat()
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -307,6 +345,19 @@ class RunRefusesOnPauseTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.inbox = os.path.join(self._tmp.name, "inbox.md")
+
+    def test_a_pause_older_than_the_callers_session_does_not_refuse(self):
+        write_inbox(self.inbox, "2026-09-26T11:19:41Z operator: PAUSE NOW")
+        transcript = os.path.join(self._tmp.name, "s.jsonl")
+        with io.open(transcript, "w", encoding="utf-8") as fh:
+            fh.write('{"timestamp":"2026-09-26T13:35:00.000Z","type":"user"}\n')
+        proc = subprocess.run(
+            [sys.executable, str(AGENT), "run", "--tier", "2", "--dry-run", "t"],
+            capture_output=True, text=True,
+            env=clean_env(AUTOOS_AGENT_INBOX=self.inbox, AUTOOS_AGENT_TRANSCRIPT=transcript),
+            stdin=subprocess.DEVNULL)
+        self.assertNotEqual(proc.returncode, 3, proc.stderr)
+        self.assertNotIn("PAUSE active", proc.stderr)
 
     def test_active_pause_refuses_the_run(self):
         write_inbox(self.inbox, "2026-09-26T11:19:41Z operator: PAUSE NOW")

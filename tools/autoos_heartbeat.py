@@ -29,6 +29,9 @@ import subprocess
 # another word ("PAUSED" must not count).
 _PAUSE_RE = re.compile(r"\bPAUSE\b")
 _RESUME_RE = re.compile(r"\bRESUME\b")
+# a line that reports on a pause is not an order to pause
+_NOT_AN_ORDER_RE = re.compile(r"lesson:|→ done")
+_TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
 
 # The first-80-chars report the CLI/MCP print for an active pause.
 _TEXT_PREVIEW = 80
@@ -85,14 +88,33 @@ def parse_inbox_line(line: str):
 _NONE_PAUSE = {"active": False, "at": None, "text": None}
 
 
-def pause_state(inbox_path: str | None) -> dict:
+def session_start(transcript_path: str | None):
+    """The first ``timestamp`` in a session transcript (JSONL), to the second,
+    or None when the file is missing or has none. A relaunch is the resume:
+    pause_state() ignores a PAUSE line older than this."""
+    if not transcript_path:
+        return None
+    try:
+        with io.open(transcript_path, encoding="utf-8") as fh:
+            for raw in fh:
+                found = _TIMESTAMP_RE.search(raw)
+                if found:
+                    return _parse_iso(found.group(1).split(".")[0] + "Z")
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def pause_state(inbox_path: str | None, since=None) -> dict:
     """The newest PAUSE/RESUME state of an inbox file (R-pause-01,
     R-heartbeat-03: "a hard stop, checked every heartbeat and before every
     launch").
 
     PAUSE is active when the newest line whose text contains the word PAUSE
     is newer than the newest line containing the word RESUME, or there is no
-    RESUME line at all. Lines are ordered by their own parsed timestamp, not
+    RESUME line at all. A line older than `since` (the session start, see
+    session_start()) and a `lesson:` / `→ done` line never count as a PAUSE:
+    the relaunch after a pause is its resume. Lines are ordered by their own parsed timestamp, not
     file order, so an inbox is read correctly even if a line was appended
     out of order. A missing/unreadable inbox, or one with no PAUSE line
     (win or lose to a RESUME), is `{"active": False, "at": None, "text":
@@ -115,7 +137,10 @@ def pause_state(inbox_path: str | None) -> dict:
         when, text = parsed
         if _RESUME_RE.search(text) and (newest_resume is None or when > newest_resume):
             newest_resume = when
-        if _PAUSE_RE.search(text) and (newest_pause is None or when > newest_pause[0]):
+        if since is not None and when < since:
+            continue
+        if (_PAUSE_RE.search(text) and not _NOT_AN_ORDER_RE.search(text)
+                and (newest_pause is None or when > newest_pause[0])):
             newest_pause = (when, text)
     if newest_pause is None:
         return dict(_NONE_PAUSE)

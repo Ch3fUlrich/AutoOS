@@ -587,7 +587,7 @@ def heartbeat_state(inbox: str | None, transcript: str | None, repos: list | Non
     else), else 4 when over cap, else 1 when any repo has an unpushed branch
     or a dirty working tree, else 0.
     """
-    pause = heartbeat.pause_state(inbox)
+    pause = heartbeat.pause_state(inbox, since=heartbeat.session_start(transcript))
     repo_list = list(repos) if repos else [os.getcwd()]
     repo_rows = []
     any_problem = False
@@ -1114,10 +1114,13 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
 def cmd_run(args, cfg: dict) -> int:
     # R-pause-01/R-heartbeat-03: a hard stop, checked before every launch. Only
     # when the caller names an inbox - a run with no AUTOOS_AGENT_INBOX set is
-    # not policed here (e.g. an interactive, watched run).
+    # not policed here (e.g. an interactive, watched run). AUTOOS_AGENT_TRANSCRIPT
+    # (the caller's session transcript) makes a PAUSE older than that session
+    # history: the relaunch after a pause is its resume.
     inbox = os.environ.get("AUTOOS_AGENT_INBOX")
     if inbox:
-        pause = heartbeat.pause_state(inbox)
+        pause = heartbeat.pause_state(inbox, since=heartbeat.session_start(
+            os.environ.get("AUTOOS_AGENT_TRANSCRIPT")))
         if pause["active"]:
             return refuse("PAUSE active (%s): %s" % (pause["at"], pause["text"]), 3)
     client = clients.CLIENTS[args.client]
