@@ -884,8 +884,8 @@ class HeadlessRefusalTests(unittest.TestCase):
         self.cli = load_agent()
 
     def test_the_agy_refusal_is_recognised_case_insensitively(self):
-        for tail in (self.AGY_REFUSAL, "HEADLESS MODE CANNOT PROMPT",
-                     "No Output Produced"):
+        for tail in (self.AGY_REFUSAL, "JETSKI: HEADLESS MODE CANNOT PROMPT",
+                     "log line\n  Jetski: No Output Produced\n"):
             msg = self.cli.headless_refusal(tail)
             self.assertIsNotNone(msg, tail)
             self.assertEqual(len(msg.splitlines()), 1, msg)
@@ -893,6 +893,13 @@ class HeadlessRefusalTests(unittest.TestCase):
     def test_an_ordinary_run_is_not_a_refusal(self):
         self.assertIsNone(self.cli.headless_refusal("done\n"))
         self.assertIsNone(self.cli.headless_refusal(""))
+
+    def test_a_worker_quoting_the_marker_is_not_a_refusal(self):
+        # A worker whose brief or report quotes this lesson must not exit 6:
+        # only agy's own "jetski:" line is the refusal.
+        for tail in ('lesson: agy printed "no output produced" and exited 0\n',
+                     "REPORT . the headless mode cannot prompt case is handled\n"):
+            self.assertIsNone(self.cli.headless_refusal(tail), tail)
 
     def test_a_zero_exit_refusal_maps_to_six_and_a_message(self):
         rc, msg = self.cli.refusal_exit(0, self.AGY_REFUSAL)

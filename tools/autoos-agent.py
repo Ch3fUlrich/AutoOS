@@ -398,28 +398,27 @@ def refuse(msg: str, rc: int = 2) -> int:
 
 
 # A headless client that hits a tool it cannot prompt for prints one of these
-# and still exits 0 (measured 2026-09-25, run 20260925-215048-85ba11). Matched
-# case-insensitively so the wording can drift.
+# and still exits 0 (measured 2026-09-25, run 20260925-215048-85ba11). Only a
+# line agy's own harness prints ("jetski: ...") counts: a worker whose brief or
+# report quotes the marker must not fail. Matched case-insensitively.
+HEADLESS_REFUSAL_PREFIX = "jetski:"
 HEADLESS_REFUSAL_MARKERS = ("no output produced", "headless mode cannot prompt")
 
 
 def headless_refusal(tail: str) -> str | None:
     """The one-line refusal a headless client printed, or None.
 
-    Measured 2026-09-25: agy printed "no output produced - a tool required the
-    \"command\" permission that headless mode cannot prompt for, so it was
-    auto-denied" and exited 0. The agent's report is not evidence, but its own
-    refusal line is.
+    Measured 2026-09-25: agy printed "jetski: no output produced - a tool
+    required the \"command\" permission that headless mode cannot prompt for,
+    so it was auto-denied" and exited 0. The agent's report is not evidence,
+    but its harness's own refusal line is.
     """
-    low = tail.lower()
-    if not any(m in low for m in HEADLESS_REFUSAL_MARKERS):
-        return None
     for line in tail.splitlines():
-        if any(m in line.lower() for m in HEADLESS_REFUSAL_MARKERS):
+        low = line.strip().lower()
+        if low.startswith(HEADLESS_REFUSAL_PREFIX) and any(
+                m in low for m in HEADLESS_REFUSAL_MARKERS):
             return line.strip()
-    # A marker split across lines is still a refusal; report it as one line.
-    collapsed = " ".join(tail.split())
-    return collapsed[:240] or "the client refused a tool headless mode cannot prompt for"
+    return None
 
 
 def refusal_exit(rc: int, tail: str) -> tuple:
