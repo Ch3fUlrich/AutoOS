@@ -5,6 +5,7 @@ Every boundary of the bucket table is pinned here, plus every effort row, the
 ladder clamp and the max_tokens floors. The module is pure: it imports from any
 cwd once `tools/` is on sys.path, which is the first thing this file does.
 """
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -282,6 +283,253 @@ class InvalidFeatureTests(unittest.TestCase):
         for key, bad in (("files", -1), ("lines", "10"), ("fanout", 1.5), ("modules", True)):
             with self.assertRaises(ValueError, msg=key):
                 r.points(dict(base, **{key: bad}), card)
+
+
+class FilterTests(unittest.TestCase):
+    """Hard filters, override-after-filters and no_route (spec 5.3 step 1, 4).
+
+    A small inline registry keeps every reason exact and independent of the
+    real catalog; one smoke test then runs the same functions over the real
+    catalog/ai-registry.json.
+    """
+
+    def setUp(self):
+        self.registry = {
+            "providers": {
+                "clean": {"id": "clean", "trains_on_prompts": False},
+                "nosy": {"id": "nosy", "trains_on_prompts": True},
+            },
+            "models": {
+                "big": {"id": "big", "tool_calls": "proven",
+                        "context_usable": {"tokens": 100000, "source": "default"}},
+                "tiny": {"id": "tiny", "tool_calls": "proven",
+                         "context_usable": {"tokens": 100, "source": "default"}},
+                "bound": {"id": "bound", "tool_calls": "unproven",
+                          "client_bound": "claude",
+                          "context_usable": {"tokens": 100000, "source": "default"}},
+            },
+            "routes": {
+                # clean/tiny is listed but unavailable, so only clean/big serves
+                # and the route survives: an unavailable leg is really excluded.
+                "r-ok": {"id": "r-ok", "legs": ["clean/big", "clean/tiny"],
+                         "unavailable_legs": {"clean/tiny": {"available": False}}},
+                "r-retired": {"id": "r-retired", "retired": True,
+                              "legs": ["clean/big"]},
+                "r-noleg": {"id": "r-noleg", "legs": []},
+                # Serving three legs that fail privacy, context, tool_calls and
+                # client_bound respectively.
+                "r-mixed": {"id": "r-mixed",
+                            "legs": ["nosy/big", "clean/tiny", "clean/bound"]},
+            },
+        }
+        self.overlay = {"models": {"tiny": {
+            "context_usable": {"tokens": 5000, "source": "probe"}}}}
+
+    def card(self, kind="review", privacy="public", **extra):
+        card = {"kind": kind, "privacy": privacy}
+        card.update(extra)
+        return card
+
+    def feats(self, need_tokens=1000):
+        return {"need_tokens": need_tokens}
+
+    def state(self, installed=True, signed_in=True):
+        return {"opencode": {"installed": installed, "signed_in": signed_in,
+                             "reason": ""}}
+
+    def run_filters(self, card=None, features=None, client_state=None,
+                    overlay=None):
+        return r.filter_routes(card or self.card(),
+                               features or self.feats(),
+                               client_state or self.state(),
+                               self.registry,
+                               {} if overlay is None else overlay)
+
+    def test_agentic_kinds_are_the_three_write_kinds(self):
+        self.assertEqual(r.AGENTIC_KINDS, ("implement", "debug", "bulk"))
+
+    # --- serving_legs -----------------------------------------------------
+
+    def test_serving_legs_skips_an_unavailable_leg(self):
+        self.assertEqual(
+            r.serving_legs(self.registry["routes"]["r-ok"], self.registry),
+            [("clean", "big")])
+
+    def test_serving_legs_resolves_a_provider_omniroute_id(self):
+        self.registry["providers"]["clean"]["omniroute_id"] = "opencode-clean"
+        route = {"id": "r-alias", "legs": ["opencode-clean/big"]}
+        self.assertEqual(r.serving_legs(route, self.registry), [("clean", "big")])
+
+    def test_serving_legs_unknown_leg_fails_closed(self):
+        with self.assertRaises(ValueError) as cm:
+            r.serving_legs({"id": "broken", "legs": ["clean/ghost"]}, self.registry)
+        self.assertIn("clean/ghost", str(cm.exception))
+
+    def test_serving_legs_malformed_leg_fails_closed(self):
+        with self.assertRaises(ValueError) as cm:
+            r.serving_legs({"id": "broken", "legs": ["nodivider"]}, self.registry)
+        self.assertIn("nodivider", str(cm.exception))
+
+    # --- usable_context ---------------------------------------------------
+
+    def test_usable_context_falls_back_to_the_registry(self):
+        self.assertEqual(r.usable_context("tiny", self.registry, {}), 100)
+        self.assertEqual(r.usable_context("big", self.registry, {}), 100000)
+
+    def test_usable_context_overlay_wins(self):
+        self.assertEqual(r.usable_context("tiny", self.registry, self.overlay),
+                         5000)
+        self.assertEqual(r.usable_context("big", self.registry, self.overlay),
+                         100000)
+
+    # --- one test per filter reason ---------------------------------------
+
+    def test_survivors_are_route_ids_in_registry_order(self):
+        survivors, removed = self.run_filters(overlay={})
+        self.assertEqual(survivors, ["r-ok"])
+        self.assertEqual(sorted(removed), ["r-mixed", "r-noleg", "r-retired"])
+
+    def test_retired_reason(self):
+        _, removed = self.run_filters(overlay={})
+        self.assertEqual(removed["r-retired"], ["retired"])
+
+    def test_no_available_leg_reason(self):
+        _, removed = self.run_filters(overlay={})
+        self.assertEqual(removed["r-noleg"], ["no available leg"])
+
+    def test_privacy_reason(self):
+        _, removed = self.run_filters(card=self.card(privacy="sensitive"),
+                                      overlay=self.overlay)
+        self.assertIn("privacy: nosy/big trains on prompts", removed["r-mixed"])
+
+    def test_context_reason(self):
+        _, removed = self.run_filters(overlay={})
+        self.assertIn("context: need 1000x1.3 > usable 100 on clean/tiny",
+                      removed["r-mixed"])
+
+    def test_tool_calls_reason(self):
+        _, removed = self.run_filters(card=self.card(kind="implement"),
+                                      overlay=self.overlay)
+        self.assertIn("tool_calls: clean/bound is unproven", removed["r-mixed"])
+
+    def test_tool_calls_filter_is_skipped_for_a_non_agentic_kind(self):
+        _, removed = self.run_filters(card=self.card(kind="research"),
+                                      features=self.feats(need_tokens=10),
+                                      overlay={})
+        self.assertEqual(removed["r-mixed"],
+                         ["client_bound: clean/bound needs claude"])
+
+    def test_client_not_installed_reason(self):
+        _, removed = self.run_filters(client_state=self.state(installed=False),
+                                      overlay=self.overlay)
+        self.assertEqual(removed["r-ok"], ["client: opencode not installed"])
+
+    def test_client_not_signed_in_reason(self):
+        _, removed = self.run_filters(
+            client_state=self.state(installed=True, signed_in=False),
+            overlay=self.overlay)
+        self.assertEqual(removed["r-ok"], ["client: opencode not signed in"])
+
+    def test_unknown_sign_in_is_not_a_failure(self):
+        survivors, removed = self.run_filters(
+            client_state={"opencode": {"installed": True, "signed_in": None,
+                                       "reason": ""}},
+            overlay=self.overlay)
+        self.assertIn("r-ok", survivors)
+
+    def test_client_bound_reason(self):
+        _, removed = self.run_filters(card=self.card(kind="review"),
+                                      features=self.feats(need_tokens=10),
+                                      overlay={})
+        self.assertEqual(removed["r-mixed"],
+                         ["client_bound: clean/bound needs claude"])
+
+    def test_all_reasons_are_collected_never_stopping_at_the_first(self):
+        _, removed = self.run_filters(
+            card=self.card(kind="implement", privacy="sensitive"),
+            features=self.feats(need_tokens=1000), overlay={})
+        self.assertEqual(removed["r-mixed"], [
+            "privacy: nosy/big trains on prompts",
+            "context: need 1000x1.3 > usable 100 on clean/tiny",
+            "tool_calls: clean/bound is unproven",
+            "client_bound: clean/bound needs claude",
+        ])
+
+    def test_missing_need_tokens_fails_closed(self):
+        with self.assertRaises(ValueError) as cm:
+            r.filter_routes(self.card(), {}, self.state(), self.registry, {})
+        self.assertIn("need_tokens", str(cm.exception))
+
+    # --- override after the filters ---------------------------------------
+
+    def test_override_none(self):
+        self.assertEqual(r.apply_override(self.card(), ["r-ok"], {}),
+                         (None, "no override"))
+        self.assertEqual(r.apply_override({"override": {}}, ["r-ok"], {}),
+                         (None, "no override"))
+
+    def test_override_survivor(self):
+        self.assertEqual(
+            r.apply_override({"override": {"route": "r-ok"}}, ["r-ok"], {}),
+            ("r-ok", "override: r-ok"))
+
+    def test_override_removed_names_every_reason(self):
+        self.assertEqual(
+            r.apply_override({"override": {"route": "r-mixed"}}, [],
+                             {"r-mixed": ["retired", "no available leg"]}),
+            (None, "override r-mixed removed by filters: "
+                   "retired; no available leg"))
+
+    def test_override_unknown_route(self):
+        self.assertEqual(
+            r.apply_override({"override": {"route": "r-nope"}}, ["r-ok"], {}),
+            (None, "override r-nope: unknown route"))
+
+    def test_override_cannot_resurrect_a_filtered_route(self):
+        survivors, removed = self.run_filters(overlay={})
+        route, reason = r.apply_override({"override": {"route": "r-mixed"}},
+                                         survivors, removed)
+        self.assertIsNone(route)
+        self.assertTrue(reason.startswith("override r-mixed removed by filters: "))
+
+    # --- no_route ---------------------------------------------------------
+
+    def test_no_route_shape(self):
+        removed = {
+            "a": ["retired"],
+            "b": ["no available leg", "client: opencode not installed"],
+        }
+        self.assertEqual(r.no_route(removed), {
+            "route": None,
+            "state": "input_required",
+            "reason": ("no route survives the filters: "
+                       "a: retired | b: no available leg; "
+                       "client: opencode not installed"),
+            "hints": ["sign in", "narrow paths", "split the task", "override"],
+        })
+
+    # --- the real catalog -------------------------------------------------
+
+    def test_real_registry_filters_without_error(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        card = {"kind": "implement", "privacy": "public"}
+        features = {"need_tokens": 1000}
+        client_state = {"opencode": {"installed": True, "signed_in": True,
+                                     "reason": ""}}
+        survivors, removed = r.filter_routes(card, features, client_state,
+                                             registry, {})
+        self.assertIsInstance(survivors, list)
+        self.assertIsInstance(removed, dict)
+        for route_id in survivors:
+            self.assertIn(route_id, registry["routes"])
+        for route_id, reasons in removed.items():
+            self.assertIn(route_id, registry["routes"])
+            self.assertTrue(reasons)
+            for reason in reasons:
+                self.assertIsInstance(reason, str)
+
 
 if __name__ == "__main__":
     unittest.main()

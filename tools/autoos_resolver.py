@@ -17,6 +17,8 @@ default: a silently mis-scored task is routed to a model that cannot do it.
 """
 from __future__ import annotations
 
+from registry import resolve_leg  # tools/ is on sys.path for every caller
+
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
 # ladder.
@@ -198,3 +200,161 @@ def max_tokens(effort_name, reasoning, output_max):
     else:
         floor = 48000
     return min(floor, output_max)
+
+
+# ---------------------------------------------------------------------------
+# Hard filters (spec sections 4 and 5.3 step 1). An override is applied after
+# these: it can pick any route that survived, never one a filter removed.
+# ---------------------------------------------------------------------------
+
+# Kinds whose result depends on the model actually calling tools (spec 5.3).
+AGENTIC_KINDS = ("implement", "debug", "bulk")
+
+_NO_ROUTE_HINTS = ["sign in", "narrow paths", "split the task", "override"]
+
+
+def serving_legs(route, registry):
+    """Available ``(provider_id, model_id)`` legs of `route`, in leg order.
+
+    A leg resolves through its provider id (or that provider's omniroute_id)
+    and its model id; an ``unavailable_legs`` entry or a provider-wide
+    ``available: false`` drops it. A leg that resolves to nothing raises
+    ValueError: a broken registry must fail closed, never silently drop a
+    candidate.
+    """
+    providers = registry["providers"]
+    unavailable = route.get("unavailable_legs") or {}
+    out = []
+    for leg in route.get("legs") or []:
+        # One leg-resolution rule for the validator and the resolver.
+        provider_id, model_id = resolve_leg(leg, registry)
+        if leg in unavailable:
+            continue
+        if providers[provider_id].get("available") is False:
+            continue
+        out.append((provider_id, model_id))
+    return out
+
+
+def usable_context(model_id, registry, overlay):
+    """Usable context tokens for `model_id`; the overlay (a probe) wins.
+
+    Falls back to the registry's ``context_usable.tokens`` when the overlay
+    carries no measured value for the model.
+    """
+    models = (overlay or {}).get("models") or {}
+    measured = (models.get(model_id) or {}).get("context_usable") or {}
+    if "tokens" in measured:
+        return int(measured["tokens"])
+    return int(registry["models"][model_id]["context_usable"]["tokens"])
+
+
+def _client_reason(client_state, client):
+    """The sign-in filter's reason for `client`, or None when it passes.
+
+    A client absent from `client_state` is not installed; an installed client
+    whose ``signed_in`` is explicitly False is not signed in. ``signed_in``
+    None (no probe) does not remove a route -- only a measured False does.
+    """
+    entry = (client_state or {}).get(client) or {}
+    if not entry.get("installed"):
+        return "client: %s not installed" % client
+    if entry.get("signed_in") is False:
+        return "client: %s not signed in" % client
+    return None
+
+
+def filter_routes(card, features, client_state, registry, overlay,
+                  client="opencode"):
+    """Split routes into ``(survivors, removed)`` per spec 5.3 step 1.
+
+    ``survivors`` is route ids in registry order. ``removed`` maps a route id
+    to every reason that removed it -- one per failing filter, collecting all
+    of them rather than stopping at the first. Filters are never relaxed; an
+    override runs later, over exactly these survivors.
+    """
+    if "need_tokens" not in features:
+        raise ValueError("missing feature 'need_tokens' in features")
+    need = features["need_tokens"]
+    privacy_sensitive = card.get("privacy") == "sensitive"
+    agentic = card.get("kind") in AGENTIC_KINDS
+    client_reason = _client_reason(client_state, client)
+
+    survivors = []
+    removed = {}
+    for route_id, route in registry["routes"].items():
+        legs = serving_legs(route, registry)
+        reasons = []
+
+        if route.get("retired"):
+            reasons.append("retired")
+
+        if not legs:
+            reasons.append("no available leg")
+
+        if privacy_sensitive:
+            for provider_id, model_id in legs:
+                if registry["providers"][provider_id].get("trains_on_prompts"):
+                    reasons.append("privacy: %s/%s trains on prompts"
+                                   % (provider_id, model_id))
+
+        for provider_id, model_id in legs:
+            usable = usable_context(model_id, registry, overlay)
+            if need * 1.3 > usable:
+                reasons.append("context: need %sx1.3 > usable %s on %s/%s"
+                               % (need, usable, provider_id, model_id))
+
+        if agentic:
+            for provider_id, model_id in legs:
+                value = registry["models"][model_id].get("tool_calls")
+                if value != "proven":
+                    reasons.append("tool_calls: %s/%s is %s"
+                                   % (provider_id, model_id, value))
+
+        if client_reason:
+            reasons.append(client_reason)
+
+        for provider_id, model_id in legs:
+            bound = registry["models"][model_id].get("client_bound")
+            if bound and bound != client:
+                reasons.append("client_bound: %s/%s needs %s"
+                               % (provider_id, model_id, bound))
+
+        if reasons:
+            removed[route_id] = reasons
+        else:
+            survivors.append(route_id)
+
+    return survivors, removed
+
+
+def apply_override(card, survivors, removed):
+    """``(route_id, reason)`` for a card's override, after the hard filters.
+
+    No ``route`` key -> ``(None, "no override")``. A surviving route is
+    returned; a removed route is refused with every reason it failed; an
+    unknown route id is refused as unknown. An override never resurrects a
+    filtered route.
+    """
+    override = card.get("override") or {}
+    if "route" not in override:
+        return None, "no override"
+    route = override["route"]
+    if route in survivors:
+        return route, "override: %s" % route
+    if route in removed:
+        return None, "override %s removed by filters: %s" % (
+            route, "; ".join(removed[route]))
+    return None, "override %s: unknown route" % route
+
+
+def no_route(removed):
+    """The ``input_required`` plan when no route survives the filters (5.3)."""
+    return {
+        "route": None,
+        "state": "input_required",
+        "reason": "no route survives the filters: " + " | ".join(
+            "%s: %s" % (route_id, "; ".join(reasons))
+            for route_id, reasons in removed.items()),
+        "hints": list(_NO_ROUTE_HINTS),
+    }
