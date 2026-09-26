@@ -7078,6 +7078,19 @@ if it "no inline onclick handler is introduced in the web UI"; then
     if [ "$n" = "0" ]; then pass; else fail "$n inline onclick handler(s) left"; fi
 fi
 
+describe "herdr-sessions"
+
+# Boot-restore engine for Claude Code sessions in Herdr
+# (configuration/herdr-sessions/, imported from the Server repo's
+# Applications/herdr-sessions at 12f0ff7). Not wired into the catalog yet
+# (separate lane). Dry-run only: no live systemctl, no live herdr --
+# install.sh --dry-run never execs either (its `run()` wrapper only echoes
+# "would: ...", it never calls systemctl or herdr for real), so nothing here
+# needs an env/PATH stub the way a live-call test would.
+if it "herdr-sessions: smoke (bash -n, py_compile, install --dry-run)"; then
+    out="$(bash configuration/herdr-sessions/tests/test_smoke.sh 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 describe "wsl detection"
 
 if it "WSL is detected when running under it"; then
