@@ -2301,10 +2301,11 @@ PY
 
 # register_playwright_lazy_proxy: the Claude Code side of install_mcp_playwright when
 # docker is present. Registers the proxy when there is no playwright entry, replaces
-# an entry that is exactly one of the two forms this installer used to write (after a
-# backup of the config file, and putting the old entry back if the add fails), and
-# leaves everything else alone. It never stops a container: sessions that are running
-# keep the one they have until they end.
+# an entry that is exactly one of the two forms this installer used to write (putting
+# the old entry back if the add fails), and leaves everything else alone. Whatever it
+# does, `claude mcp add|remove` rewrites the config file the user owns, so that file is
+# copied once first and no copy means no write. It never stops a container: sessions
+# that are running keep the one they have until they end.
 register_playwright_lazy_proxy() {
     local package="$1" proxy="$AUTOOS_PLAYWRIGHT_PROXY" cfg entry kind backup
     local -a old=()
@@ -2346,12 +2347,20 @@ register_playwright_lazy_proxy() {
         return 0
     fi
 
-    if [[ "$kind" != none ]]; then
-        # Never modify a file the user owns without a copy: no copy, no write.
-        if ! backup="$(backup_file "$cfg")"; then
+    # Never modify a file the user owns without a copy: no copy, no write - for the add
+    # into a config that has other servers and session data just as for the replace.
+    # (No file yet: claude creates it, and there is nothing to lose.)
+    backup=""
+    if [[ -f "$cfg" ]] && ! backup="$(backup_file "$cfg")"; then
+        if [[ "$kind" == none ]]; then
+            ui_warn "could not back up ${cfg} - 'playwright' was not registered"
+        else
             ui_warn "could not back up ${cfg} - the ${kind} 'playwright' entry was left unchanged"
-            return 0
         fi
+        return 0
+    fi
+
+    if [[ "$kind" != none ]]; then
         ui_muted "run: claude mcp remove playwright --scope user"
         if ! claude mcp remove playwright --scope user; then
             ui_warn "could not remove the ${kind} 'playwright' entry - left unchanged"
@@ -2362,7 +2371,7 @@ register_playwright_lazy_proxy() {
     ui_muted "run: claude mcp add --scope user playwright -- python3 ${proxy}"
     if ( cd "$SYS_HOME" 2>/dev/null; claude mcp add --scope user playwright -- python3 "$proxy" ); then
         if [[ "$kind" == none ]]; then
-            ui_ok "registered MCP server 'playwright' (user scope, lazy proxy)"
+            ui_ok "registered MCP server 'playwright' (user scope, lazy proxy)${backup:+ (config backup: ${backup})}"
         else
             ui_ok "replaced the ${kind} 'playwright' entry with the lazy proxy (config backup: ${backup})"
             ui_muted "Sessions that are already running keep their current Playwright container until they end; AutoOS did not stop any. New sessions use the proxy."

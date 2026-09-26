@@ -5255,6 +5255,60 @@ if it "playwright lazy proxy installer: a failed backup stops the replace with a
     else fail "writes=$writes unchanged=$same out=$(printf '%s' "$out" | tail -2)"; fi
 fi
 
+if it "playwright lazy proxy installer: with no entry the config is backed up before the add, a second run makes no backup and no add"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" -; chmod 666 "$cfg"; cp "$cfg" "$tmp/seed.json"   # 666: a plain cp would change it under any umask
+    printf 'an earlier backup' >"$cfg.autoos-backup-20200101-000000"
+    out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+    problems=""; fresh=0; kept=0
+    for b in "$cfg".autoos-backup-*; do
+        if [[ "$b" == *-20200101-000000 ]]; then
+            [[ "$(cat "$b")" == "an earlier backup" ]] && kept=1
+        elif cmp -s "$b" "$tmp/seed.json"; then
+            fresh=$((fresh + 1))
+            [[ "$(_file_mode "$b")" == 666 ]] || problems+=" the backup lost the file mode ($(_file_mode "$b"));"
+        fi
+    done
+    [[ "$fresh" == 1 ]] || problems+=" $fresh byte-identical new backups, want 1;"
+    [[ "$kept" == 1 ]] || problems+=" the earlier backup was touched;"
+    [[ "$out" == *"config backup: $cfg.autoos-backup-"* ]] || problems+=" the backup was not named in the report;"
+    calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+    [[ "$calls" == "mcp add --scope user playwright -- python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" calls=[$calls];"
+    [[ "$(pw_entry "$cfg")" == "python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" the proxy was not registered;"
+    [[ "$(pw_servers "$cfg")" == "playwright,serena" ]] || problems+=" other servers changed: $(pw_servers "$cfg");"
+    # the second run finds the proxy: nothing to do, so nothing to back up either
+    : >"$tmp/claude.log"
+    out2="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+    again=( "$cfg".autoos-backup-* )
+    [[ "$(pw_writes "$tmp")" == "0" && "$out2" == *"skipped"* && "${#again[@]}" == "2" ]] \
+        || problems+=" the second run wrote or made a backup: writes=$(pw_writes "$tmp") backups=${#again[@]};"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: with no entry a failed backup stops the add with a warning"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"; bin="$(backup_fail_bin)"
+    pw_seed "$cfg" -; cp "$cfg" "$tmp/seed.json"
+    out="$(PATH="$bin:$PATH" pw_run "$tmp" install_mcp_playwright 2>&1)"
+    same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+    adds="$(grep -c '^mcp add' "$tmp/claude.log" 2>/dev/null)" || adds=0
+    partial="$(backup_count "$tmp/home")"
+    rm -rf "$tmp" "$bin"
+    if [[ "$adds" == "0" && "$same" == "1" && "$partial" == "0" && "$out" == *"could not back up"* ]]; then pass
+    else fail "adds=$adds unchanged=$same partial backups=$partial out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: with no config file yet there is nothing to back up and the proxy is still registered"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"
+    out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+    calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+    got="$(pw_entry "$tmp/home/.claude.json")"
+    left="$(backup_count "$tmp/home")"
+    rm -rf "$tmp"
+    if [[ "$calls" == "mcp add --scope user playwright -- python3 $ROOT/tools/playwright_mcp_lazy.py" && "$got" == "python3 $ROOT/tools/playwright_mcp_lazy.py" && "$left" == "0" && "$out" != *"could not back up"* ]]; then pass
+    else fail "calls=[$calls] entry=[$got] backups=$left out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
 if it "playwright lazy proxy installer: an add that fails after the remove puts the old entry back"; then
     problems=""
     for form in docker npx; do
