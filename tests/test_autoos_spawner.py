@@ -2055,6 +2055,66 @@ elif mode == "merge-worker-lane":
     git("-c", "user.name=orch", "-c", "user.email=orch@example.invalid",
         "merge", "-q", "--no-ff", "-m", "merge lane", "lane")
     print("fake: orchestrator merged a worker lane")
+elif mode == "amend-worker":
+    # The worker amends the parent tip: author stays the orchestrator's, the
+    # committer is the worker's (review 2026-09-26: a %ae-only scan misses it).
+    with open(os.path.join(root, "tracked.txt"), "a") as fh:
+        fh.write("amended\\n")
+    git("add", "tracked.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "--amend", "--no-edit")
+    print("fake: amended the parent tip as committer=worker")
+elif mode == "commit-reset":
+    # The worker commits and resets back: HEAD ends where it started and the
+    # porcelain stays clean - only the branch reflog saw it.
+    with open(os.path.join(root, "tracked.txt"), "a") as fh:
+        fh.write("gone\\n")
+    git("add", "tracked.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    git("reset", "-q", "--hard", "HEAD^")
+    print("fake: committed as worker, then reset back")
+elif mode == "fetch-lane-new-ref":
+    # The orchestrator fetches a finished worker lane into a NEW ref mid-run:
+    # worker-authored, but never a leak (R: test_a_merged_worker_lane...).
+    git("checkout", "-q", "-b", "lane")
+    with open(os.path.join(root, "lane2.txt"), "w") as fh:
+        fh.write("lane2\\n")
+    git("add", "lane2.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "lane2 change")
+    git("checkout", "-q", "-")
+    git("update-ref", "refs/heads/lane2", "lane")
+    git("branch", "-q", "-D", "lane")
+    print("fake: orchestrator fetched a worker lane into a new ref")
+elif mode == "commit-other-branch":
+    # The worker commits on `side`, an existing branch that is not checked
+    # out (make_root created it before the snapshot): HEAD and the
+    # checked-out tree never move.
+    back = subprocess.run(["git", "-C", root, "branch", "--show-current"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    git("switch", "-q", "side")
+    with open(os.path.join(root, "tracked.txt"), "a") as fh:
+        fh.write("side\\n")
+    git("add", "tracked.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker side change")
+    git("switch", "-q", back)
+    print("fake: committed as worker on another existing branch")
+elif mode == "orchestrator-commits-wip":
+    # The orchestrator commits its own pre-existing WIP mid-run: the path was
+    # dirty before, is clean after - the orchestrator's own cleanup, not a
+    # worker leak.
+    with open(os.path.join(root, "tracked.txt"), "a") as fh:
+        fh.write("wip\\n")
+    git("add", "tracked.txt")
+    git("-c", "user.name=orch", "-c", "user.email=orch@example.invalid",
+        "commit", "-q", "-m", "orch wip")
+    print("fake: orchestrator committed its own WIP")
 sys.exit(0)
 '''
 
@@ -2080,6 +2140,9 @@ class IsolateContainmentTests(unittest.TestCase):
             fh.write("base\n")
         subprocess.run(git + ["-C", tmp, "add", "tracked.txt"], check=True)
         subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "init"], check=True)
+        # A second EXISTING branch (not checked out) for the side-ref cases;
+        # refs created mid-run are new and never scanned.
+        subprocess.run(git + ["-C", tmp, "branch", "side"], check=True)
         return tmp
 
     def make_fake_agy(self):
@@ -2167,6 +2230,67 @@ class IsolateContainmentTests(unittest.TestCase):
         self.assertEqual(rc, 5, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_an_amend_with_a_worker_committer_is_a_leak(self):
+        # Review 2026-09-26: --amend keeps the original author, so a %ae-only
+        # scan misses a worker amending the parent tip; the committer is the
+        # worker's.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "amend-worker")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        # log_run records the FINAL rc (after the LEAK override), so
+        # orch-*.log and the track record cannot disagree (review 2026-09-26).
+        logdir = os.path.join(root, "logs")
+        lines = []
+        for name in os.listdir(logdir):
+            if name.startswith("orch-"):
+                with open(os.path.join(logdir, name), encoding="utf-8") as fh:
+                    lines.extend(fh.read().splitlines())
+        self.assertTrue(any(" rc=7 " in ln for ln in lines), lines)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_commit_then_reset_on_the_checked_out_branch_is_a_leak(self):
+        # after_head == before_head and the porcelain is clean; only the
+        # branch reflog shows the worker's commit (review 2026-09-26).
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "commit-reset")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_worker_commit_on_another_existing_branch_is_a_leak(self):
+        # HEAD and the checked-out tree never move; the moved side ref does.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "commit-other-branch")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn("refs/heads/side", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_lane_fetched_into_a_new_ref_is_not_a_leak(self):
+        # The orchestrator fetches worker lanes into NEW refs during a run;
+        # a ref that did not exist at the snapshot is never scanned.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "fetch-lane-new-ref")
+        self.assertNotIn("LEAK", out + err)
+        self.assertEqual(rc, 5, out + err)
+        refs = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
+                               "--format=%(refname)"], capture_output=True, text=True,
+                              check=True).stdout.split()
+        self.assertIn("refs/heads/lane2", refs)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_the_orchestrator_committing_its_own_wip_is_not_a_leak(self):
+        # Pre-dirty a tracked file; the orchestrator committing it mid-run
+        # leaves the path cleaner than before - only new dirt counts.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        with open(os.path.join(root, "tracked.txt"), "a", encoding="utf-8") as fh:
+            fh.write("wip\n")
+        rc, out, err = self.run_isolated(root, stub, state, "orchestrator-commits-wip")
+        self.assertNotIn("LEAK", out + err)
+        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_push_from_the_sandbox_to_the_parent_fails(self):
         root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
         self.run_isolated(root, stub, state, "noop")
@@ -2185,9 +2309,9 @@ class IsolateContainmentTests(unittest.TestCase):
         cfg = agent.load_jsonc(str(ROOT / "opencode.jsonc"))
         state = self.make_state()
 
-        def args(isolate):
+        def args(isolate, client="opencode"):
             return argparse.Namespace(
-                client="opencode", tier=2, card=None, task="do the thing",
+                client=client, tier=2, card=None, task="do the thing",
                 free=False, free_model=agent.DEFAULT_FREE_MODEL,
                 isolate=isolate, auto=True, joinable=False, model=None,
                 clean=False, allow_training=False, max_depth=None, lean=False, title=None)
@@ -2201,6 +2325,51 @@ class IsolateContainmentTests(unittest.TestCase):
             plain = agent.build_plan(args(False), cfg)
         self.assertEqual(plain["cmd"][-1], "do the thing")
         self.assertNotIn("only writable checkout", plain["cmd"][-1])
+
+    def test_every_headless_client_keeps_the_prefix_last_under_isolate(self):
+        # Review 2026-09-26: the prefix rewrite assumes every build_command
+        # leaves the task last; a future client appending a flag after the
+        # prompt would silently drop it.
+        agent = self.agent
+        state = self.make_state()
+        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+               "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+        for name, c in clients.CLIENTS.items():
+            if not c.headless:
+                continue
+            with self.subTest(client=name):
+                args = argparse.Namespace(
+                    client=name, tier=2, card=None, task="do the thing",
+                    free=False, free_model=agent.DEFAULT_FREE_MODEL,
+                    isolate=True, auto=True, joinable=False, model=None,
+                    clean=False, allow_training=False, max_depth=None,
+                    lean=False, title=None)
+                with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state}):
+                    plan = agent.build_plan(args, cfg)
+                self.assertTrue(plan["cmd"][-1].startswith("Your working directory "),
+                                "%s: cmd[-1] = %r" % (name, plan["cmd"][-1]))
+
+    def test_filtered_parent_status_keeps_renames_with_one_side_outside_logs(self):
+        # Review 2026-09-26: `any(logs/)` dropped `R  catalog/x -> logs/x`
+        # (a tracked file leaving the tree); only all-logs/ entries drop, and
+        # the entry keys by the non-logs side.
+        agent = self.agent
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.CompletedProcess(args=[], returncode=0, stdout=(
+                'R  catalog/x -> logs/x\n'
+                'R  logs/y -> catalog/y\n'
+                'R  logs/a -> logs/b\n'
+                'M  catalog/z\n'
+                'R  "logs/space name" -> "catalog/space name"\n'
+            ), stderr="")
+            with mock.patch.object(agent.subprocess, "run", return_value=proc):
+                out = agent._filtered_parent_status(tmp)
+        self.assertEqual(out, {
+            "catalog/x -> logs/x": "R ",
+            "logs/y -> catalog/y": "R ",
+            "catalog/z": "M ",
+            '"logs/space name" -> "catalog/space name"': "R ",
+        })
 
     def test_track_entry_maps_exit_7_to_containment(self):
         plan = {"client": "opencode", "free": False,

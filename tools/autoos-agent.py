@@ -78,10 +78,11 @@ child through its environment only. One line per run is appended to
 logs/orch-<date>.log (git-ignored), which the watchdog protocol reads.
 
 Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); 6 = a headless client auto-denied a tool and
-exited 0 (HEADLESS-REFUSAL); 7 = an --isolate run wrote to the parent checkout (LEAK: a commit by
-autoos-worker@users.noreply.github.com in HEAD_before..HEAD_after, or a tracked file outside logs/ whose
-porcelain state changed - the shas and paths are printed, nothing is reverted, the track record carries
-failure class "containment"; overrides exit 5); the child's exit code; 2 bad arguments, card or route refused;
+exited 0 (HEADLESS-REFUSAL); 7 = an --isolate run wrote to the parent checkout (LEAK: a commit authored or
+committed by autoos-worker@users.noreply.github.com on a parent branch that existed at the start - HEAD range,
+branch reflog (commit-then-reset) or moved side refs - or a tracked file outside logs/ left dirtier than
+before - the shas and paths are printed, nothing is reverted, the track record carries
+failure class "containment"; LEAK 7 overrides ANY child rc, including 5 and 6); the child's exit code; 2 bad arguments, card or route refused;
 3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
 PAUSE (R-pause-01); 4 depth budget exhausted.
 
@@ -831,11 +832,19 @@ def refusal_exit(rc: int, tail: str) -> tuple:
     return rc, None
 
 
+def _porcelain_path_is_logs(p: str) -> bool:
+    """True when a porcelain path (quoted or not) is logs/ or under it."""
+    p = p.strip().strip('"')
+    return p == "logs" or p.startswith("logs/")
+
+
 def _filtered_parent_status(root: str) -> dict:
     """{path-part: XY} of `git status --porcelain --untracked-files=no`, logs/ excluded.
 
     The --isolate clone and every run log live under logs/ (clients.state_dir),
-    so logs/ paths are the spawner's own, never a worker's leak.
+    so logs/ paths are the spawner's own, never a worker's leak. Only entries
+    where EVERY path is under logs/ drop; a rename with one side outside
+    (e.g. `R  catalog/x -> logs/x`) is kept, keyed by the non-logs side.
     """
     r = subprocess.run(["git", "-C", root, "status", "--porcelain",
                         "--untracked-files=no"], capture_output=True, text=True)
@@ -846,15 +855,58 @@ def _filtered_parent_status(root: str) -> dict:
         if not line.strip():
             continue
         rest = line[3:] if len(line) > 3 else ""
-        paths = [p.strip().strip('"') for p in rest.split(" -> ")]
-        if any(p == "logs" or p.startswith("logs/") for p in paths):
+        paths = [p.strip() for p in rest.split(" -> ")]
+        if all(_porcelain_path_is_logs(p) for p in paths):
             continue
         out[rest] = line[:2]
     return out
 
 
+def _scan_first_parent_range(root: str, old: str, new: str) -> list:
+    """Shas of first-parent commits in old..new with WORKER_EMAIL as author
+    or committer (an --amend of a tip keeps the author but makes the worker
+    the committer, so either field matches - review 2026-09-26)."""
+    out = []
+    if not old or not new or old == new:
+        return out
+    r = subprocess.run(["git", "-C", root, "log", "--first-parent",
+                        "--format=%H%x00%ae%x00%ce", old + ".." + new],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return out
+    for line in r.stdout.splitlines():
+        sha, _, emails = line.partition("\x00")
+        ae, _, ce = emails.partition("\x00")
+        if sha and WORKER_EMAIL in (ae.strip(), ce.strip()):
+            out.append(sha)
+    return out
+
+
+def _branch_reflog_entries(root: str, branch: str, count: int) -> list:
+    """The newest `count` reflog entries of refs/heads/<branch>.
+
+    The branch's OWN reflog, not HEAD's: the lane commits of an orchestrator
+    merge update the lane ref's reflog, never the checked-out branch's, so
+    they stay exempt.
+    """
+    r = subprocess.run(["git", "-C", root, "reflog", "show", "--format=%H%x00%ae%x00%ce",
+                        "-n", str(count), "refs/heads/" + branch],
+                       capture_output=True, text=True)
+    out = []
+    if r.returncode != 0:
+        return out
+    for line in r.stdout.splitlines():
+        sha, _, emails = line.partition("\x00")
+        ae, _, ce = emails.partition("\x00")
+        if sha and WORKER_EMAIL in (ae.strip(), ce.strip()):
+            out.append(sha)
+    return out
+
+
 def parent_snapshot(root=None):
-    """(HEAD sha or None, filtered porcelain status) of the parent checkout."""
+    """(HEAD, branch, reflog count, ref tips, filtered porcelain) of the
+    parent checkout. `branch` is None on a detached HEAD (the commit-then-
+    reset check is skipped then)."""
     if root is None:
         root = ROOT
     head = None
@@ -862,41 +914,98 @@ def parent_snapshot(root=None):
                        capture_output=True, text=True)
     if r.returncode == 0 and r.stdout.strip():
         head = r.stdout.strip()
-    return head, _filtered_parent_status(root)
+    branch = None
+    r = subprocess.run(["git", "-C", root, "symbolic-ref", "-q", "--short", "HEAD"],
+                       capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip():
+        branch = r.stdout.strip()
+    reflog_count = 0
+    if branch:
+        r = subprocess.run(["git", "-C", root, "reflog", "show",
+                            "refs/heads/" + branch], capture_output=True, text=True)
+        if r.returncode == 0:
+            reflog_count = len([ln for ln in r.stdout.splitlines() if ln.strip()])
+    refs = {}
+    r = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
+                        "--format=%(refname)%00%(objectname)"],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            name, _, sha = line.partition("\x00")
+            if name and sha:
+                refs[name] = sha
+    return head, branch, reflog_count, refs, _filtered_parent_status(root)
 
 
-def parent_leak(before_head, before_status, root=None):
-    """(worker-commit shas, changed tracked paths) since a parent_snapshot.
+def parent_leak(snapshot, root=None):
+    """(leak lines) since a parent_snapshot; empty list = no leak.
 
-    A LEAK is a first-parent commit in before_head..HEAD_after authored by
-    WORKER_EMAIL (commits by anyone else, and worker commits a --no-ff merge
-    brings in as a second parent - the orchestrator merging a lane - are not),
-    or any tracked path outside logs/ whose porcelain state changed.
+    A LEAK is, since the snapshot:
+    - a first-parent commit on the checked-out branch (HEAD range, or the
+      branch reflog when HEAD is back where it started - a commit-then-reset)
+      whose author OR committer is WORKER_EMAIL (the committer catches an
+      --amend of the parent tip);
+    - the same scan on every branch ref that EXISTED at the snapshot and
+      moved (a worker committing on a side branch). NEW refs are never
+      scanned: the orchestrator fetches or merges worker lanes into new refs
+      during a run - never a leak. The --first-parent exemption assumes
+      lanes merge with --no-ff (repo convention); a fast-forward would land
+      worker commits on the first-parent chain and false-flag;
+    - any tracked path outside logs/ whose porcelain state is DIRTY after
+      and differs from before (new dirt is the worker-shaped signal; a path
+      that became clean - the orchestrator committing its own WIP - is not a
+      leak).
+
+    Git-ignored parent files (configuration/api-keys.yml, inventory.yml) are
+    NOT covered: porcelain cannot see them. Nothing here is reverted, and the
+    parent must stay untouched by anyone else during a run.
     """
     if root is None:
         root = ROOT
+    before_head, branch, reflog_count, before_refs, before_status = snapshot
+    leaks = []
     after_head = None
     r = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
                        capture_output=True, text=True)
     if r.returncode == 0 and r.stdout.strip():
         after_head = r.stdout.strip()
-    shas = []
-    if before_head and after_head and before_head != after_head:
-        # --first-parent: a worker lane the orchestrator merged meanwhile
-        # (--no-ff) brings autoos-worker commits in as a second parent - not
-        # a leak; a leaked commit lands on the parent branch itself.
-        r = subprocess.run(["git", "-C", root, "log", "--first-parent", "--format=%H%x00%ae",
-                            before_head + ".." + after_head],
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            for line in r.stdout.splitlines():
-                sha, _, email = line.partition("\x00")
-                if sha and email.strip() == WORKER_EMAIL:
-                    shas.append(sha)
+    shas = _scan_first_parent_range(root, before_head, after_head)
+    if not shas and branch and after_head == before_head:
+        # commit-then-reset: HEAD is back at the start; scan the reflog
+        # entries appended during the run.
+        shas = _branch_reflog_entries(root, branch, max(0, _reflog_len(root, branch) - reflog_count))
+    if shas:
+        leaks.append("worker commits in the parent checkout: %s" % ", ".join(shas))
+    r = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
+                        "--format=%(refname)%00%(objectname)"],
+                       capture_output=True, text=True)
+    moved = {}
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            name, _, sha = line.partition("\x00")
+            if name and sha and name in before_refs and before_refs[name] != sha:
+                moved[name] = (before_refs[name], sha)
+    side = []
+    for name, (old, new) in sorted(moved.items()):
+        # New refs are skipped: only refs that existed at the snapshot count.
+        for sha in _scan_first_parent_range(root, old, new):
+            side.append("%s %s" % (name, sha))
+    if side:
+        leaks.append("worker commits on moved parent branches: %s" % ", ".join(side))
     after_status = _filtered_parent_status(root)
-    changed = sorted(p for p in set(before_status) | set(after_status)
-                     if before_status.get(p) != after_status.get(p))
-    return shas, changed
+    changed = sorted(p for p, xy in after_status.items()
+                     if before_status.get(p) != xy)
+    if changed:
+        leaks.append("changed tracked paths in the parent checkout: %s" % ", ".join(changed))
+    return leaks
+
+
+def _reflog_len(root: str, branch: str) -> int:
+    r = subprocess.run(["git", "-C", root, "reflog", "show", "refs/heads/" + branch],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return 0
+    return len([ln for ln in r.stdout.splitlines() if ln.strip()])
 
 
 def sandbox_verdict(route: dict, changed: str, ahead: str):
@@ -1257,7 +1366,8 @@ def cmd_run(args, cfg: dict) -> int:
         print("lean: no %s" % (", ".join(LEAN_DROP) if client.name == "opencode" else "MCP servers"))
     if plan["sandbox"] and client.name != "opencode":
         print("note: --isolate gives %s a private clone as its cwd; the outside-path fence is "
-              "opencode-only." % client.name)
+              "opencode-only, but every client gets the containment prompt line and the "
+              "post-run leak check (exit 7)." % client.name)
     if args.dry_run:
         if plan["sandbox"]:
             print("would run: git clone --local %s %s && git switch -c %s" % (ROOT, plan["sandbox"]["path"], plan["sandbox"]["branch"]))
@@ -1288,12 +1398,12 @@ def cmd_run(args, cfg: dict) -> int:
                   "(or use --free)." % GATEWAY, file=sys.stderr)
             return 3
         env["AUTOOS_OMNIROUTE_KEY"] = key
-    parent_head, parent_status = None, {}
+    parent_snap = None
     if plan["sandbox"]:
         sb = plan["sandbox"]
         # Snapshot the parent checkout before the run: a worker that writes
         # outside its clone (live 2026-09-26) must fail as a leak, not a NO-OP.
-        parent_head, parent_status = parent_snapshot()
+        parent_snap = parent_snapshot()
         os.makedirs(os.path.dirname(sb["path"]), exist_ok=True)
         subprocess.run(["git", "clone", "-q", "--local", ROOT, sb["path"]], check=True)
         # The orchestrator still fetches from the sandbox path (unchanged);
@@ -1311,7 +1421,6 @@ def cmd_run(args, cfg: dict) -> int:
     rc, refusal = refusal_exit(int(rc), getattr(rc, "refusal", None) or "")
     if refusal is not None:
         print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
-    log_run(plan, rc, time.time() - start, args.free)
     if rc == 0 and client.promo:
         clients.record_probe(client.name)
     if plan["sandbox"]:
@@ -1329,17 +1438,13 @@ def cmd_run(args, cfg: dict) -> int:
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
         override, message = sandbox_verdict(plan["route"], changed, ahead)
-        leak_shas, leak_paths = parent_leak(parent_head, parent_status)
-        if leak_shas or leak_paths:
-            # A LEAK overrides the NO-OP verdict: the run did change
-            # something, just in the wrong checkout. Never reverts anything.
-            bits = []
-            if leak_shas:
-                bits.append("worker commits in the parent checkout: %s" % ", ".join(leak_shas))
-            if leak_paths:
-                bits.append("changed tracked paths in the parent checkout: %s" % ", ".join(leak_paths))
+        leak = parent_leak(parent_snap)
+        if leak:
+            # A LEAK overrides the child's rc AND the NO-OP verdict: the run
+            # did change something, just in the wrong checkout. Never reverts
+            # anything.
             print("LEAK: the --isolate run wrote outside its sandbox "
-                  "(containment failure, exit 7): %s" % "; ".join(bits), file=sys.stderr)
+                  "(containment failure, exit 7): %s" % "; ".join(leak), file=sys.stderr)
             rc = 7
         elif override is not None and rc == 0:
             print(message)
@@ -1350,6 +1455,9 @@ def cmd_run(args, cfg: dict) -> int:
             record_run(TRACK_RECORD, tracked)
             propose_reprobe(tracked, REGISTRY_PATH, MEASURED_OVERLAY_PATH,
                             PROBE_PROPOSALS_LOG, sb["path"])
+    # Log the FINAL rc: the LEAK override happens above and the log, the
+    # orch-*.log watchdog and the track record must not disagree.
+    log_run(plan, rc, time.time() - start, args.free)
     return rc
 
 
