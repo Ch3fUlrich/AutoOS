@@ -26,13 +26,15 @@ answer() {  # answer <key> [default]
 }
 
 # omnigraph_base_url: the omnigraph server the clients' bridges point at - the
-# omnigraph_url answer without a trailing slash, else http://localhost:8080.
+# omnigraph_url answer without its trailing slashes (ALL of them, as the Windows
+# side's TrimEnd('/') does: consumers append /paths), else http://localhost:8080.
 # ONE derivation, used by install_agent_skills and route_zed_to_proxy (the Zed
 # writer once hardcoded the default and ignored the answer).
 omnigraph_base_url() {
     local omni
     omni="$(answer omnigraph_url '')"
-    if [[ -z "$omni" ]]; then printf '%s\n' "http://localhost:8080"; else printf '%s\n' "${omni%/}"; fi
+    while [[ "$omni" == */ ]]; do omni="${omni%/}"; done
+    if [[ -z "$omni" ]]; then printf '%s\n' "http://localhost:8080"; else printf '%s\n' "$omni"; fi
 }
 
 run() {
@@ -78,19 +80,38 @@ backup_file() {
     printf '%s\n' "$dest"
 }
 
+# backup_name_key <path> <backup>: a string that sorts the backups of <path> in
+# the order backup_path named them - the stamp first, then the -N counter zero-
+# padded, so -10 follows -2 under plain string comparison. Done in bash: BSD and
+# macOS sort have no -V, and plain sort ranks -2 above -10. A stamp that is not
+# YYYYmmdd-HHMMSS (a test can pin any) still splits at its last -<digits>.
+backup_name_key() {
+    local rest="${2#"$1".autoos-backup-}" stamp n=0
+    local std='^([0-9]{8}-[0-9]{6})(-([0-9]+))?$' any='^(.+)-([0-9]+)$'
+    if [[ "$rest" =~ $std ]]; then
+        stamp="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[3]:-0}"
+    elif [[ "$rest" =~ $any ]]; then
+        stamp="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[2]}"
+    else
+        stamp="$rest"
+    fi
+    printf '%s.%010d\n' "$stamp" "$((10#$n))"
+}
+
 # backup_newest <path>: prints the most recent backup of <path>, nothing when
 # there is none. Newest = latest modification time, NOT the last name: ...-10
 # sorts before ...-2. (cp -p keeps the source's mtime, which still orders the
 # backups of one file: each is a copy of a later state.) Equal mtimes fall back
-# to a version sort so -10 still beats -2.
+# to the name (backup_name_key) so -10 still beats -2.
 backup_newest() {
-    local path="$1" f best=""
+    local path="$1" f best="" LC_COLLATE=C
     for f in "${path}".autoos-backup-*; do
         [[ -f "$f" ]] || continue
         if [[ -z "$best" || "$f" -nt "$best" ]]; then
             best="$f"
-        elif ! [[ "$best" -nt "$f" ]]; then
-            best="$(printf '%s\n%s\n' "$best" "$f" | { sort -V 2>/dev/null || sort; } | tail -n 1)"
+        elif ! [[ "$best" -nt "$f" ]] \
+             && [[ "$(backup_name_key "$path" "$f")" > "$(backup_name_key "$path" "$best")" ]]; then
+            best="$f"
         fi
     done
     [[ -z "$best" ]] || printf '%s\n' "$best"
@@ -110,8 +131,11 @@ append_line_once() {
         return 0
     fi
     mkdir -p "$(dirname "$file")"
-    # Never modify a user's file without a copy of the original.
-    [[ -f "$file" ]] && backup_file "$file" >/dev/null
+    # Never modify a user's file without a copy of the original: no copy, no write.
+    if [[ -f "$file" ]] && ! backup_file "$file" >/dev/null; then
+        ui_warn "could not back up ${file} - nothing was changed"
+        return 1
+    fi
     printf '\n# added by AutoOS\n%s\n' "$content" >>"$file"
     ui_ok "updated ${file}"
 }
@@ -885,7 +909,12 @@ install_agy() {
     # these profiles (measured 2026-09-25) - keep the originals.
     local rc=0 f stamp; stamp="$(date +%Y%m%d-%H%M%S)"
     for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
-        [[ -f "$f" ]] && backup_file "$f" "$stamp" >/dev/null
+        if [[ -f "$f" ]] && ! backup_file "$f" "$stamp" >/dev/null; then
+            # The vendor script edits these files blind: no copy, no run.
+            ui_err "could not back up ${f} - Antigravity CLI installer not run, nothing was changed"
+            rm -f "$tmp"
+            return 1
+        fi
     done
     bash "$tmp" || rc=$?
     rm -f "$tmp"
@@ -1773,10 +1802,9 @@ PY
         elif (( AUTOOS_DRY_RUN )); then
             ui_muted "would route Qwen Code at OmniRoute (model t2-worker)"
         else
-            if [[ -f "$SYS_HOME/.qwen/settings.json" ]]; then
-                backup_file "$SYS_HOME/.qwen/settings.json" >/dev/null
-            fi
-            if ! omniroute setup-qwen --model t2-worker --yes >/dev/null 2>&1; then
+            if [[ -f "$SYS_HOME/.qwen/settings.json" ]] && ! backup_file "$SYS_HOME/.qwen/settings.json" >/dev/null; then
+                ui_warn "could not back up $SYS_HOME/.qwen/settings.json - Qwen Code routing skipped, nothing was changed"
+            elif ! omniroute setup-qwen --model t2-worker --yes >/dev/null 2>&1; then
                 ui_warn "Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)"
             else
                 ui_ok "Qwen Code routed at OmniRoute (model t2-worker)"
@@ -1831,8 +1859,9 @@ route_zed_to_proxy() {
     ide="$(ide_models_file)"
     ide_models_readable "$ide" "Zed settings left unchanged" || return 1
     mkdir -p "$cfg_dir"
-    if [[ -f "$cfg" ]]; then
-        backup_file "$cfg" >/dev/null
+    if [[ -f "$cfg" ]] && ! backup_file "$cfg" >/dev/null; then
+        ui_err "could not back up $cfg - Zed settings left unchanged"
+        return 1
     fi
     OMNI_BASE="$(omnigraph_base_url)" python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
 import json, os, sys
@@ -2051,8 +2080,9 @@ register_antigravity_mcp_server() {
     fi
 
     mkdir -p "$cfg_dir"
-    if [[ -f "$cfg_path" && -s "$cfg_path" ]]; then
-        backup_file "$cfg_path" >/dev/null
+    if [[ -f "$cfg_path" && -s "$cfg_path" ]] && ! backup_file "$cfg_path" >/dev/null; then
+        ui_warn "could not back up ${cfg_path} - Antigravity MCP config left unchanged"
+        return 0
     fi
 
     local out
@@ -2685,7 +2715,10 @@ enable_project_mcp_server() {
         return 0
     fi
     mkdir -p "$repo/.claude"
-    [[ -f "$path" ]] && backup_file "$path" >/dev/null
+    if [[ -f "$path" ]] && ! backup_file "$path" >/dev/null; then
+        ui_warn "could not back up ${path} - left unchanged"
+        return 0
+    fi
     if ! python3 - "$path" "$name" <<'PY'; then
 import json, pathlib, sys
 path, name = pathlib.Path(sys.argv[1]), sys.argv[2]
@@ -2874,7 +2907,10 @@ replace_or_append_marked_line() {
                 ui_muted "would remove the stale '${old_marker}' line from ${file}"
                 return 0
             fi
-            backup_file "$file" >/dev/null
+            if ! backup_file "$file" >/dev/null; then
+                ui_warn "could not back up ${file} - left unchanged"
+                return 0
+            fi
             AUTOOS_OLD="$old_marker" AUTOOS_NEW="$new_marker" python3 - "$file" <<'PY'
 import os, sys
 path = sys.argv[1]
@@ -2899,7 +2935,10 @@ PY
         ui_muted "would replace the '${old_marker}' line in ${file}"
         return 0
     fi
-    backup_file "$file" >/dev/null
+    if ! backup_file "$file" >/dev/null; then
+        ui_warn "could not back up ${file} - left unchanged"
+        return 0
+    fi
     AUTOOS_OLD="$old_marker" AUTOOS_LINE="$line" python3 - "$file" <<'PY'
 import os, sys
 path = sys.argv[1]
@@ -2955,17 +2994,19 @@ install_agent_skills() {
 
     local omni_pkg omni_spec
     omni_pkg="$(mcp_package omnigraph)"
-    omni_spec="$(python3 -c "
+    # The base URL is the user's omnigraph_url answer: it reaches python through
+    # the environment (as in the Zed writer), never spliced into the source.
+    omni_spec="$(OMNI_BASE="$base" OMNI_PKG="$omni_pkg" python3 -c "
 import json, os
 # bridge 0.8 refuses to start without a graph id (there is no fallback graph
 # any more), so an unset one pins this repo's graph like the other clients.
-env_vars = {'OMNIGRAPH_BASE_URL': '$base',
+env_vars = {'OMNIGRAPH_BASE_URL': os.environ['OMNI_BASE'],
             'OMNIGRAPH_GRAPH_ID': os.environ.get('OMNIGRAPH_GRAPH_ID') or 'autoos'}
 if os.environ.get('OMNIGRAPH_TOKEN'):
     env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
 print(json.dumps({
     'command': 'npx',
-    'args': ['-y', '$omni_pkg'],
+    'args': ['-y', os.environ['OMNI_PKG']],
     'env': env_vars
 }))
 ")"
@@ -3078,7 +3119,8 @@ autoos_skills_source() {
 # works in every cwd. Both files are merged in place, never replaced: V2
 # (@opencode/cli) reads opencode.json, V1 also config.json. Each file is read
 # JSONC-tolerantly (comments, trailing commas); one that still does not parse
-# is left untouched. A file is backed up only when this run changes it, so a
+# is left untouched. A file is backed up before it is written and left alone
+# when that backup fails; a run that changes nothing keeps no backup, so a
 # second run changes nothing. Keys are {env:NAME} references, never values.
 setup_opencode_config() {
     local config_dir="$SYS_HOME/.config/opencode"
@@ -3094,7 +3136,7 @@ setup_opencode_config() {
     if [[ -f "$config_dir/opencode.jsonc" ]]; then
         ui_muted "$config_dir/opencode.jsonc is yours and stays as is; AutoOS merges into opencode.json"
     fi
-    local config_file snapshot merge_rc merged_first=0
+    local config_file backup merge_rc merged_first=0
     for config_file in "$config_dir/config.json" "$config_dir/opencode.json"; do
         # First V2 run on a V1 machine: opencode.json starts as a copy of the
         # merged config.json, as the old writer's cp did - but never replaces
@@ -3104,10 +3146,15 @@ setup_opencode_config() {
             cp -p "$config_dir/config.json" "$config_file"
             seeded=1
         fi
-        snapshot=""
+        backup=""
         if [[ -f "$config_file" ]] && (( ! seeded )); then
-            snapshot="$(mktemp)"
-            cp -p "$config_file" "$snapshot"
+            # The backup is taken BEFORE anything is written (hard rule 5: no
+            # copy, no write) and dropped again below when this run turns out to
+            # change nothing, so a second run still leaves no backup behind.
+            if ! backup="$(backup_file "$config_file")"; then
+                ui_warn "could not back up $config_file - left unchanged"
+                continue
+            fi
         fi
         # V2 reads opencode.json's `providers` block; V1 reads config.json.
         local v2_source=""
@@ -3119,11 +3166,11 @@ setup_opencode_config() {
         AUTOOS_OPENCODE_V2_SOURCE="$v2_source" _opencode_merge_config "$config_file" || merge_rc=$?
         if (( merge_rc == 3 )); then
             ui_warn "$config_file is not valid JSON or JSONC - left alone (fix it, then re-run)"
-            [[ -n "$snapshot" ]] && rm -f "$snapshot"
+            [[ -n "$backup" ]] && rm -f "$backup"
             continue
         elif (( merge_rc != 0 )); then
             ui_warn "OpenCode configuration not written to $config_file (exit $merge_rc)"
-            [[ -n "$snapshot" ]] && rm -f "$snapshot"
+            [[ -n "$backup" ]] && rm -f "$backup"
             continue
         fi
 
@@ -3147,15 +3194,12 @@ setup_opencode_config() {
         fi
 
         [[ "$config_file" == */config.json ]] && merged_first=1
-        if [[ -z "$snapshot" ]]; then
+        if [[ -z "$backup" ]]; then
             ui_ok "OpenCode configuration written to $config_file"
-        elif cmp -s "$snapshot" "$config_file"; then
-            rm -f "$snapshot"
+        elif cmp -s "$backup" "$config_file"; then
+            rm -f "$backup"
             ui_muted "$config_file already current"
         else
-            local backup
-            backup="$(backup_path "$config_file")"
-            mv "$snapshot" "$backup"
             ui_ok "OpenCode configuration merged into $config_file (backup: $backup)"
         fi
     done
@@ -3484,10 +3528,14 @@ phys_path() {
 # DEST_DIR as one symlink per skill. DEST_DIR is a real directory of its own,
 # so a user's skills sit beside ours and are never touched:
 #   absent                                     -> linked
-#   already our link, same directory           -> skipped
-#   our link, dangling or pointing elsewhere
-#     under SRC_DIR's parent (this repo)       -> repointed
-#   anything else (a user's directory or file, a foreign link) -> left alone
+#   a link to the same directory               -> skipped
+#   a link that is ours and dangling           -> repointed
+#   anything else (a user's directory or file, any live link that resolves
+#     somewhere else, a dangling link of another shape)   -> left alone
+# A link is ours only when it dangles AND its target ends with
+# /.agents/skills/<this skill's name> - the exact shape this function creates,
+# so a moved or renamed checkout is repaired. A live link is the user's, even
+# when it points inside the repo's own .agents directory (AGENTS.md hard rule 4).
 # A DEST_DIR that is itself a symlink (the old whole-directory layout) is not
 # written through - that would create links inside the repo or a clone - it
 # is left with one warning that names the fix. Returns 0 unless a link failed.
@@ -3526,8 +3574,7 @@ link_skill_dirs() {
         return 1
     fi
 
-    local parent_phys name t raw have want skipped=0 failed=0
-    parent_phys="$(phys_path "${src%/*}")"
+    local name t raw have want skipped=0 failed=0
     for name in "${names[@]}"; do
         t="$dest/$name"
         want="$(phys_path "$src/$name")"
@@ -3537,7 +3584,7 @@ link_skill_dirs() {
             have="$(phys_path "$raw")"
             if [[ "$have" == "$want" ]]; then
                 skipped=$((skipped + 1))
-            elif [[ "$have" == "$parent_phys"/* ]]; then
+            elif [[ ! -e "$t" && "${raw%/}" == */.agents/skills/"$name" ]]; then
                 if ln -sfn "$src/$name" "$t" 2>/dev/null; then
                     ui_ok "repointed $name (was $raw)"
                 else
@@ -3611,7 +3658,10 @@ setup_openhands_config() {
 
     # The script prints one word: "changed" when it wrote or replaced a file,
     # "unchanged" when everything on disk already held what it would write.
-    local oh_status
+    # "|| oh_rc=$?" keeps a failing script from ending the run under set -e; its
+    # status is read below, because a script that died wrote nothing (or only
+    # part) and must never be reported as written.
+    local oh_status oh_rc=0
     oh_status="$(OLLAMA_BASE_URL="$ollama_url" AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" AUTOOS_IDE_MODELS="$ide_file" \
         python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
 import os, sys, json, shutil, time
@@ -4065,7 +4115,15 @@ if os.path.isdir(_vendored_agents):
             pass
 print("changed" if _changed else "unchanged")
 PY
-)"
+)" || oh_rc=$?
+    if (( oh_rc != 0 )); then
+        # Skip the harness too: it would add enable_sub_agents to a settings.json
+        # (or create one) that the writer never got to merge. Warn and skip, like
+        # the OpenCode writer; setup runs postInstall under set -e.
+        ui_warn "OpenHands configuration not written to $openhands_dir/settings.json (settings script exit $oh_rc)"
+        ui_muted "    The profiles under $openhands_dir may be incomplete and the agent harness was skipped; fix the error above and re-run."
+        return 0
+    fi
 
     # The role agent profiles are the generator's job: it merges the harness
     # into whatever the embedded script left, so the roles stay in one place.
@@ -4087,7 +4145,9 @@ PY
         fi
     fi
 
-    if (( oh_changed )); then
+    if (( harness_rc != 0 )); then
+        ui_warn "OpenHands configuration only partly applied (the role profiles are missing): $openhands_dir"
+    elif (( oh_changed )); then
         ui_ok "OpenHands configuration and profiles written to $openhands_dir"
     else
         ui_muted "OpenHands configuration unchanged (skipped): $openhands_dir"
@@ -4275,9 +4335,14 @@ autoos_undo() {
             return 0
         fi
     fi
-    local i
+    local i failed=0
     for i in "${!originals[@]}"; do
-        cp "${newest[i]}" "${originals[i]}"
-        ui_ok "restored ${originals[i]}"
+        if cp "${newest[i]}" "${originals[i]}"; then
+            ui_ok "restored ${originals[i]}"
+        else
+            ui_err "could not restore ${originals[i]} from ${newest[i]}"
+            failed=1
+        fi
     done
+    return "$failed"
 }

@@ -438,9 +438,14 @@ def _backup_path(path, stamp=None):
 
 
 def _backup_and_write(path, text, stamp=None):
-    """Write `text` to `path`, copying an existing file aside first (hard rule 5)."""
+    """Write `text` to `path`, copying an existing file aside first (hard rule 5).
+
+    copy2, not copyfile: the backup keeps the source's mode (and times), like
+    the bash helper's `cp -p`. A 0600 config that may hold a key must not get a
+    0644 copy of itself.
+    """
     if os.path.exists(path):
-        shutil.copyfile(path, _backup_path(path, stamp))
+        shutil.copy2(path, _backup_path(path, stamp))
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
