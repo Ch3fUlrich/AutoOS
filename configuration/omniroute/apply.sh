@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 # Apply the AutoOS router configuration to OmniRoute:
 #   1. registers every provider key found in configuration/api-keys.yml
-#   2. (re)creates the tier combos from configuration/omniroute/combos.json
+#   2. (re)creates the tier combos from `tools/registry.py render omniroute`
+#      (catalog/ai-registry.json), skipping any leg the registry marks
+#      unavailable (routes.<id>.unavailable_legs, providers.<p>.available:
+#      false); configuration/omniroute/combos.json stays the checked-in,
+#      byte-comparable render of the same registry (`render omniroute
+#      --check`) - AUTOOS_OMNIROUTE_COMBOS_FILE reads it (or another file of
+#      that shape) directly instead, unfiltered, as an explicit override
 #   3. prunes the combos listed there as "retired" from the store (only those)
 #
 # Safe to re-run: providers are add-or-update, combos are replaced in place,
 # and a retired combo that is already gone is simply not found again.
 # Model refs the live catalog does not know are skipped with a warning, so a
 # renamed upstream model degrades one tier leg instead of breaking the run.
+# A combo left with no available leg at all (registry-unavailable or catalog-
+# unknown) is reported and never created - an empty combo is never pushed.
 #
 #   ./configuration/omniroute/apply.sh [--dry-run] [--probe]
 #
@@ -24,6 +32,19 @@ GATEWAY="${AUTOOS_OMNIROUTE_URL:-http://127.0.0.1:20128}"
 if [[ -n "${AUTOOS_OMNIROUTE_URL:-}" ]]; then export OMNIROUTE_BASE_URL="$GATEWAY"; fi
 KEYS_FILE="${AUTOOS_KEYS_FILE:-$ROOT/configuration/api-keys.yml}"
 COMBOS_FILE="$HERE/combos.json"
+# The live combo list (task A5a) comes from `tools/registry.py render
+# omniroute` against catalog/ai-registry.json by default, so a leg the
+# registry has since marked unavailable (routes.<id>.unavailable_legs,
+# providers.<p>.available: false - e.g. the cerebras legs, zen deepseek-
+# v4.1-flash, openrouter) is skipped instead of pushed to the live gateway.
+# AUTOOS_REGISTRY_FILE overrides which registry render omniroute reads.
+# AUTOOS_OMNIROUTE_COMBOS_FILE bypasses the render entirely and reads a
+# combos.json-shaped file directly (today's pre-A5a behaviour, unfiltered) -
+# an explicit escape hatch for a test or a checkout whose registry has not
+# caught up. $COMBOS_FILE itself stays the "retired" source for the prune
+# step below either way; it never drives the live combo list on its own.
+REGISTRY_FILE="${AUTOOS_REGISTRY_FILE:-$ROOT/catalog/ai-registry.json}"
+COMBOS_OVERRIDE="${AUTOOS_OMNIROUTE_COMBOS_FILE:-}"
 DRY=0
 PROBE=0
 for arg in "$@"; do
@@ -254,7 +275,16 @@ else
 fi
 
 echo "Combos:"
-while IFS=$'\t' read -r name strategy models; do
+while IFS=$'\t' read -r tag a b c; do
+    [[ -z "$tag" ]] && continue
+    if [[ "$tag" == SKIP ]]; then
+        # a=combo name, b=leg, c=registry comment (first 60 chars) or reason.
+        echo "  - skip leg $a $b: unavailable ($c)"
+        continue
+    fi
+    # tag == COMBO: a=name, b=strategy, c=models (csv; already registry-
+    # available - a SKIP line was emitted above for anything dropped there).
+    name="$a" strategy="$b" models="$c"
     [[ -z "$name" ]] && continue
     keep=""
     dropped=""
@@ -293,11 +323,68 @@ while IFS=$'\t' read -r name strategy models; do
             echo "  ! $name creation failed (previous version, if any, is untouched)"
         fi
     fi
-done < <(python3 - "$COMBOS_FILE" <<'PY'
+done < <(python3 - "$ROOT" "$REGISTRY_FILE" "$COMBOS_OVERRIDE" <<'PY'
 import json, sys
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-for c in data.get("combos", []):
-    print("%s\t%s\t%s" % (c["name"], c.get("strategy", "priority"), ",".join(c["models"])))
+from pathlib import Path
+
+root, registry_path, override = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def emit(name, strategy, models, reason_of):
+    """Print one SKIP line per unavailable leg, then one COMBO line with the
+    survivors - reason_of(leg) returns None (keep) or a reason string."""
+    keep = []
+    for leg in models:
+        reason = reason_of(leg)
+        if reason is None:
+            keep.append(leg)
+        else:
+            reason = reason.replace("\t", " ").replace("\n", " ").strip()[:60]
+            print("SKIP\t%s\t%s\t%s" % (name, leg, reason))
+    print("COMBO\t%s\t%s\t%s" % (name, strategy, ",".join(keep)))
+
+
+if override:
+    # The explicit escape hatch: read a combos.json-shaped file directly,
+    # unfiltered - today's pre-A5a behaviour, no registry consulted at all.
+    data = json.load(open(override, encoding="utf-8"))
+    for c in data.get("combos", []):
+        emit(c["name"], c.get("strategy", "priority"), c["models"], lambda leg: None)
+else:
+    # Default: render the live combo list from the registry (task A5a) and
+    # drop a leg it marks unavailable instead of pushing it to the gateway.
+    sys.path.insert(0, str(Path(root) / "tools"))
+    import registry as R
+
+    doc = R.load(registry_path)
+    rendered = R.render_omniroute(doc)
+    routes = doc.get("routes") or {}
+    providers = doc.get("providers") or {}
+
+    def reason_of(route):
+        unavailable = route.get("unavailable_legs") or {}
+
+        def f(leg):
+            # routes.<id>.unavailable_legs.<leg>.available: false - an
+            # operator decision with a comment naming why.
+            entry = unavailable.get(leg)
+            if isinstance(entry, dict) and entry.get("available") is False:
+                return entry.get("$comment") or "unavailable"
+            # providers.<p>.available: false - a provider-wide outage/close
+            # with no per-leg entry (e.g. a future leg on a dead provider).
+            try:
+                provider_id, _ = R.resolve_leg(leg, doc)
+            except ValueError:
+                return None
+            if not (providers.get(provider_id) or {}).get("available", True):
+                return "provider %s is marked unavailable" % provider_id
+            return None
+        return f
+
+    for c in rendered.get("combos", []):
+        name = c["name"]
+        emit(name, c.get("strategy") or "priority", c["models"],
+             reason_of(routes.get(name) or {}))
 PY
 )
 

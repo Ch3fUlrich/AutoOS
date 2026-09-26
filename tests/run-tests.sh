@@ -8082,6 +8082,113 @@ if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
     else fail "the real mistral key was not planned"; fi
 fi
 
+# A5a: apply.sh's live combo list now comes from `tools/registry.py render
+# omniroute` (task A5a) instead of reading combos.json's legs verbatim, so a
+# leg the registry marks unavailable (routes.<id>.unavailable_legs,
+# providers.<p>.available: false) never reaches a live create/replace call.
+# AUTOOS_REGISTRY_FILE points the render at this fixture instead of the real
+# catalog/ai-registry.json, so the case does not drift with operator updates.
+_a5a_registry_fixture() {
+    local d="$1"
+    cat >"$d/ai-registry.json" <<'JSON'
+{
+  "providers": {
+    "avail": {"omniroute_id": "avail"},
+    "flagged": {"omniroute_id": "flagged"},
+    "deadprov": {"omniroute_id": "deadprov", "available": false}
+  },
+  "models": {
+    "model-a": {},
+    "model-b": {},
+    "model-c": {}
+  },
+  "routes": {
+    "test-combo": {
+      "strategy": "priority",
+      "legs": ["avail/model-a", "flagged/model-b", "deadprov/model-c"],
+      "unavailable_legs": {
+        "flagged/model-b": {
+          "$comment": "fixture: leg intentionally marked unavailable for testing",
+          "available": false
+        }
+      },
+      "surfaces": {"omniroute": {"context_declared": "8K"}}
+    },
+    "empty-combo": {
+      "strategy": "priority",
+      "legs": ["deadprov/model-c"],
+      "surfaces": {"omniroute": {"context_declared": "8K"}}
+    }
+  }
+}
+JSON
+}
+
+if it "apply skips a registry-unavailable leg and holds back a combo with no available leg"; then
+    d="$(mktemp -d)"
+    _a5a_registry_fixture "$d"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
+        AUTOOS_REGISTRY_FILE="$d/ai-registry.json" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -rf "$d"
+    ok=1
+    # A leg-level unavailable_legs entry (flagged/model-b) is skipped with its
+    # reason (the registry comment), and the leftover leg still gets planned.
+    [[ "$out" == *"skip leg test-combo flagged/model-b: unavailable (fixture: leg intentionally marked unavailable for testing)"* ]] \
+        || { ok=0; echo "no skip line for the flagged leg: $out" >&2; }
+    [[ "$out" == *"test-combo: would create [priority] with avail/model-a"* ]] \
+        || { ok=0; echo "test-combo was not planned with its surviving leg: $out" >&2; }
+    # A provider-level available:false (deadprov) is skipped too, even with no
+    # per-leg unavailable_legs entry naming it.
+    [[ "$out" == *"skip leg test-combo deadprov/model-c: unavailable (provider deadprov is marked unavailable)"* ]] \
+        || { ok=0; echo "no skip line for the provider-unavailable leg: $out" >&2; }
+    [[ "$out" == *"skip leg empty-combo deadprov/model-c:"* ]] \
+        || { ok=0; echo "no skip line for empty-combo's only leg: $out" >&2; }
+    # A combo whose every leg is unavailable is reported, never planned.
+    [[ "$out" == *"empty-combo: no usable models — not created"* ]] \
+        || { ok=0; echo "the dead-only combo was not reported: $out" >&2; }
+    [[ "$out" == *"empty-combo: would create"* ]] && { ok=0; echo "the dead-only combo was still planned" >&2; }
+    if (( ok )); then pass; else fail "registry-driven leg skip is not wired into apply.sh"; fi
+fi
+
+if it "AUTOOS_OMNIROUTE_COMBOS_FILE overrides the registry render with the old file, unfiltered"; then
+    d="$(mktemp -d)"
+    cat >"$d/combos.json" <<'JSON'
+{
+  "combos": [
+    {"name": "override-combo", "strategy": "priority", "models": ["avail/model-a", "deadprov/model-c"]}
+  ]
+}
+JSON
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
+        AUTOOS_OMNIROUTE_COMBOS_FILE="$d/combos.json" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -rf "$d"
+    ok=1
+    [[ "$out" == *"override-combo: would create [priority] with avail/model-a,deadprov/model-c"* ]] \
+        || { ok=0; echo "the old-file override was not read: $out" >&2; }
+    [[ "$out" == *"skip leg override-combo"* ]] && { ok=0; echo "the override path still consulted the registry" >&2; }
+    if (( ok )); then pass; else fail "the old-file override is not wired"; fi
+fi
+
+# Regression lock for today's operator-flagged dead legs (2026-09-25/26):
+# proves the real catalog/ai-registry.json's unavailable_legs and
+# providers.openrouter.available:false actually reach apply.sh's live plan.
+if it "apply --dry-run against the real registry skips today's dead legs and holds back dead-only combos"; then
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    ok=1
+    [[ "$out" == *"skip leg t1-orchestrator openrouter/meta/muse-spark-1.3-contributor: unavailable ("* ]] \
+        || { ok=0; echo "t1-orchestrator's dead openrouter leg was not flagged: $out" >&2; }
+    [[ "$out" == *"t1-orchestrator: would create [priority] with opencode-zen/muse-spark-1.3-contributor-free"* ]] \
+        || { ok=0; echo "t1-orchestrator was not planned with its live leg: $out" >&2; }
+    [[ "$out" == *"t1-orchestrator-clean: no usable models — not created"* ]] \
+        || { ok=0; echo "t1-orchestrator-clean (its one leg is dead) was not held back: $out" >&2; }
+    [[ "$out" == *"deepseek-v4.1-flash: no usable models — not created"* ]] \
+        || { ok=0; echo "deepseek-v4.1-flash (both legs dead) was not held back: $out" >&2; }
+    if (( ok )); then pass; else fail "the real registry's dead legs still reach the live plan"; fi
+fi
+
 # start-stack.sh sits in configuration/, one level below the repo root. A
 # `/../..` root pointed at the repo's parent, so the OpenHands tier-profile
 # sync was never found and every start printed "reported a problem".
