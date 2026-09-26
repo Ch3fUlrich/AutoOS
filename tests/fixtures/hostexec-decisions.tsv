@@ -226,3 +226,8 @@ claude	default	coding-host	["vim","+!id"]	deny	no-inline-shell	vim +cmd shell es
 claude	default	coding-host	["ex","-c","!id"]	deny	no-inline-shell	ex -c shell escape (r2)
 claude	default	coding-host	["less","+!id","/etc/passwd"]	deny	no-inline-shell	less +! runs a shell command (r2)
 claude	default	coding-host	["more","+!id"]	deny	no-inline-shell	more +! runs a shell command (r2)
+claude	default	lab-ssh	["ssh","storage","id"]	deny	use-host-alias	ssh second hop from an ssh-kind host must use host_run host= alias (hop)
+claude	default	lab-ssh	["ssh","other","id"]	deny	use-host-alias	ssh to an undeclared host from an ssh-kind host still bypasses the host table (hop)
+claude	default	lab-ssh	["scp","a","other:b"]	deny	use-host-alias	scp second hop from an ssh-kind host must use host_run host= alias (hop)
+claude	default	lab-ssh	["id"]	allow		plain command on an ssh-kind host still works (hop allow)
+claude	default	lab-ssh	["ls","-la"]	allow		plain ls on an ssh-kind host still works (hop allow)

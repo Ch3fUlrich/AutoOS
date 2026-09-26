@@ -69,6 +69,7 @@ def _test_policy(bindir: str) -> policy.Policy:
     }
     hosts = {
         "coding-host": policy.HostEntry(alias="coding-host", kind="local"),
+        "lab-ssh": policy.HostEntry(alias="lab-ssh", kind="ssh", target="lab-ssh"),
         "storage": policy.HostEntry(alias="storage", kind="ssh", target="storage", forbid=True),
         "firewall": policy.HostEntry(alias="firewall", kind="ssh", target="firewall", forbid=True),
     }
