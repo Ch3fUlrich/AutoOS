@@ -3176,8 +3176,13 @@ setup_openhands_config() {
     # ~/.openhands/skills. The sandbox containers do not mount it: they read the
     # workspace's .agents/skills instead (AGENTS.md section 8). One link per
     # repo skill; a failure is already reported and must not stop the rest.
-    link_skill_dirs "${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/.agents/skills" \
-        "$openhands_dir/skills" || true
+    # autoos_skills_source is the repo's .agents/skills (the single home), and
+    # only without it the external agent-skills clone.
+    local skills_source
+    skills_source="$(autoos_skills_source)"
+    if [[ -n "$skills_source" ]]; then
+        link_skill_dirs "$skills_source" "$openhands_dir/skills" || true
+    fi
 
     local secrets_file="$code_root/agent-skills/secrets/api_keys.conf"
 
