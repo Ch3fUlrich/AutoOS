@@ -4208,7 +4208,10 @@ Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when no
     # What an earlier AutoOS run leaves, plus a key and an MCP server of the user's own.
     # enable_sub_agents is already there so the agent generator, which would add it,
     # has nothing to rewrite: the only backup of run 1 is the writer's own.
-    $seed = '{"schema_version":2,"theme":"mine","agent_settings":{"schema_version":4,"enable_sub_agents":true,"llm":{"model":"ollama_chat/qwen2.5-coder:7b","base_url":"http://127.0.0.1:11434"},"mcp_config":{"mine":{"transport":"stdio","command":"mine-mcp","args":[]}}}}'
+    # The theme is non-ASCII and the file is written with an explicit BOM: a backup
+    # that lost either would still read as the same text, so it is judged on bytes.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    $seed = '{"schema_version":2,"theme":"@THEME@","agent_settings":{"schema_version":4,"enable_sub_agents":true,"llm":{"model":"ollama_chat/qwen2.5-coder:7b","base_url":"http://127.0.0.1:11434"},"mcp_config":{"mine":{"transport":"stdio","command":"mine-mcp","args":[]}}}}'.Replace('@THEME@', $theme)
     $runLogged = {
         $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohbackup-$([Guid]::NewGuid().ToString('N')).log"
         try {
@@ -4229,7 +4232,10 @@ Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when no
             [IO.File]::WriteAllText($fake, "#!/bin/sh`nexec '$($py3.Source)' `"`$@`"`n")
             & chmod +x $fake
         }
-        [IO.File]::WriteAllText($settingsFile, $seed)
+        [IO.File]::WriteAllText($settingsFile, $seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($settingsFile)
+        $seedB64 = [Convert]::ToBase64String($seedBytes)
+        if ($seedBytes.Length -lt 4 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191 -or @($seedBytes | Where-Object { $_ -gt 127 }).Count -le 3) { throw 'the seed must carry a BOM and a non-ASCII character, or the byte compare has nothing to lose' }
         Set-Variable -Name HOME -Value $scratch -Force -Scope Global
         $env:USERPROFILE = $scratch; $env:HOME = $scratch; $env:LOCALAPPDATA = $scratch
         $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
@@ -4247,11 +4253,11 @@ Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when no
         $sha1 = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash
         $backups1 = @(Get-ChildItem -LiteralPath $ohDir -Filter 'settings.json.autoos-backup-*')
         $all1 = @(Get-ChildItem -LiteralPath $ohDir -Recurse -Filter '*.autoos-backup-*').Count
-        if ([IO.File]::ReadAllText($settingsFile) -eq $seed) { throw 'the first run left settings.json unchanged' }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($settingsFile)) -ceq $seedB64) { throw 'the first run left settings.json unchanged' }
         if ($backups1.Count -ne 1) { throw "settings.json backups after run 1 = $($backups1.Count) (want 1)" }
-        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'the backup is not the original file' }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the original file, byte for byte (a BOM or a non-ASCII byte was lost)' }
         $written = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($written.theme -ne 'mine' -or $null -eq $written.agent_settings.mcp_config.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
+        if ($written.theme -cne $theme -or $null -eq $written.agent_settings.mcp_config.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
         if ($null -eq $written.agent_settings.mcp_config.PSObject.Properties['serena']) { throw 'run 1 did not write the MCP servers' }
 
         # Backup names carry whole seconds: without this pause a wrongly repeated
@@ -4424,6 +4430,9 @@ Test-Case 'openhands skills: Set-AutoOSOpenHandsConfig links every repo skill in
         param($ctx)
         $expected = @(Get-RepoSkillName)
         if ($expected.Count -eq 0) { throw 'this repo has no skills under .agents/skills' }
+        # A symlink needs administrator rights on Windows (a CI runner has them, a
+        # user often does not), so there the link must be a Junction, not just "a link".
+        $onWindows = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
         $out = & $ctx.Run
         $dest = Get-Item -LiteralPath $ctx.Skills -Force -ErrorAction SilentlyContinue
         if (-not $dest) { throw "$($ctx.Skills) was not created" }
@@ -4433,6 +4442,7 @@ Test-Case 'openhands skills: Set-AutoOSOpenHandsConfig links every repo skill in
             $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
             if (-not $item) { throw "skill '$name' was not linked" }
             if (@('Junction', 'SymbolicLink') -notcontains [string]$item.LinkType) { throw "skill '$name' is not a junction (LinkType: [$($item.LinkType)])" }
+            if ($onWindows -and [string]$item.LinkType -cne 'Junction') { throw "skill '$name' is a $($item.LinkType), not a Junction (a symlink needs administrator rights, so the writer must make a junction on Windows)" }
             $want = [IO.Path]::GetFullPath((Join-Path $Root ".agents\skills\$name")).TrimEnd('\', '/')
             $got = Get-TestLinkTarget -Path $link
             if ($got -ne $want) { throw "skill '$name' points at [$got], want [$want]" }
@@ -4674,10 +4684,29 @@ Test-Case "openhands settings: a BOM'd settings.json keeps the user's keys" {
         $null = New-Item -ItemType Directory -Path $ctx.OhDir -Force
         $json = '{"custom_user_key": "keep-me", "schema_version": 2}'
         [IO.File]::WriteAllText($ctx.Settings, $json, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($seedBytes.Length -lt 3 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191) { throw 'the seed must start with a BOM, or the rewrite has none to drop' }
         $null = & $ctx.Run
         $written = Get-Content -LiteralPath $ctx.Settings -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($null -eq $written.PSObject.Properties['custom_user_key'] -or $written.custom_user_key -ne 'keep-me') { throw "the user's key was lost from a BOM'd settings.json" }
         if ($null -eq $written.PSObject.Properties['agent_settings']) { throw 'the writer did not merge its own settings' }
+        # "Written back plain" (the embedded script) and the agent generator both write
+        # UTF-8 without a BOM: the rewritten file must not start with EF BB BF.
+        $rewritten = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($rewritten.Length -ge 3 -and $rewritten[0] -eq 239 -and $rewritten[1] -eq 187 -and $rewritten[2] -eq 191) { throw "the rewritten settings.json still starts with the BOM (239,187,191): the user's BOM'd file was not written back plain" }
+
+        # The agent generator rewrites this file as well (it adds enable_sub_agents),
+        # so the check above cannot say which writer dropped the BOM. With
+        # enable_sub_agents already set the generator has nothing to change, and only
+        # the embedded settings script rewrites the file.
+        $json2 = '{"custom_user_key": "keep-me-too", "schema_version": 2, "agent_settings": {"enable_sub_agents": true}}'
+        [IO.File]::WriteAllText($ctx.Settings, $json2, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $null = & $ctx.Run
+        $written2 = Get-Content -LiteralPath $ctx.Settings -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $written2.PSObject.Properties['custom_user_key'] -or $written2.custom_user_key -ne 'keep-me-too') { throw "the user's key was lost from a BOM'd settings.json that the generator leaves alone" }
+        if ($null -eq $written2.agent_settings.PSObject.Properties['llm']) { throw 'the settings script did not rewrite the file, so the BOM check below proves nothing' }
+        $rewritten2 = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($rewritten2.Length -ge 3 -and $rewritten2[0] -eq 239 -and $rewritten2[1] -eq 187 -and $rewritten2[2] -eq 191) { throw "the settings script kept the BOM (239,187,191) when it rewrote a BOM'd settings.json" }
     }
     if (-not $ran) { return }
     Pass
@@ -4688,13 +4717,16 @@ Test-Case 'openhands settings: the user original survives the writer and the age
         param($ctx)
         # No enable_sub_agents: the agent generator that runs after the embedded
         # script therefore rewrites settings.json too, and backs it up too.
+        # The original has a BOM and a non-ASCII value, so a backup that lost either
+        # differs in bytes although it reads as the same text.
         $null = New-Item -ItemType Directory -Path $ctx.OhDir -Force
-        $seed = '{"custom_user_key": "keep-me", "schema_version": 2}'
-        [IO.File]::WriteAllText($ctx.Settings, $seed)
+        $seed = '{"custom_user_key": "keep-me-@V@", "schema_version": 2}'.Replace('@V@', "$([char]0x00E9)$([char]0x2603)")
+        [IO.File]::WriteAllText($ctx.Settings, $seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ctx.Settings))
         $null = & $ctx.Run
         $backups = @(Get-ChildItem -LiteralPath $ctx.OhDir -Filter 'settings.json.autoos-backup-*')
-        $holdsOriginal = @($backups | Where-Object { [IO.File]::ReadAllText($_.FullName) -eq $seed })
-        if ($holdsOriginal.Count -eq 0) { throw "none of the $($backups.Count) backup(s) holds the user's original file (an earlier backup was overwritten)" }
+        $holdsOriginal = @($backups | Where-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) -ceq $seedB64 })
+        if ($holdsOriginal.Count -eq 0) { throw "none of the $($backups.Count) backup(s) holds the user's original file byte for byte (an earlier backup was overwritten, or a BOM / non-ASCII byte was lost)" }
     }
     if (-not $ran) { return }
     Pass
@@ -4706,13 +4738,30 @@ Test-Case 'openhands settings: the user original survives the writer and the age
 Test-Case 'openhands settings: the final line says written only when something was written' {
     $ran = Invoke-WithOpenHandsScratch -Body {
         param($ctx)
+        # Every file under ~/.openhands as name=SHA-256, sorted. The skills directory
+        # holds links into the repo (not files of this tree) and is left out.
+        $snapshot = {
+            $skillsPrefix = $ctx.Skills + [IO.Path]::DirectorySeparatorChar
+            $lines = @()
+            foreach ($f in @(Get-ChildItem -LiteralPath $ctx.OhDir -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+                if ($f.FullName.StartsWith($skillsPrefix, [StringComparison]::Ordinal)) { continue }
+                $lines += ($f.FullName.Substring($ctx.OhDir.Length) + '=' + (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash)
+            }
+            @($lines | Sort-Object)
+        }
         $out1 = & $ctx.Run
+        $before = @(& $snapshot)
+        if (@($before | Where-Object { $_ -like '*settings.json=*' }).Count -ne 1 -or $before.Count -lt 5) { throw "the snapshot of the first run's files is too thin to prove anything: [$($before -join '; ')]" }
         $out2 = & $ctx.Run
+        $after = @(& $snapshot)
         if ($out1 -notmatch 'OpenHands configuration and profiles written to') { throw "the first run never says written: [$out1]" }
         if ($out1 -match 'already up to date') { throw "the first run also says it is up to date: [$out1]" }
         if ($out2 -notmatch 'openhands settings: skipped') { throw "the second run did not skip the settings writer, so this test proves nothing: [$out2]" }
         if ($out2 -match 'OpenHands configuration and profiles written to') { throw "the second run still says written although nothing changed: [$out2]" }
         if ($out2 -notmatch 'OpenHands configuration already up to date') { throw "the second run does not say it is up to date: [$out2]" }
+        # The log lines are only what the writers say; the files are what they did.
+        $changed = @(Compare-Object -ReferenceObject $before -DifferenceObject $after | ForEach-Object { $_.InputObject.Substring(0, $_.InputObject.LastIndexOf('=')) } | Select-Object -Unique)
+        if ($changed.Count -gt 0) { throw "the second run changed, added or removed $($changed.Count) file(s) under .openhands (a second run must neither rewrite a file nor take a backup), first: $(@($changed | Select-Object -First 4) -join '; ')" }
     }
     if (-not $ran) { return }
     Pass
@@ -5431,7 +5480,10 @@ Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when not
     $bin = Join-Path $scratch 'bin'
     $cfgDir = Join-Path $scratch '.config\opencode'
     $cfgFile = Join-Path $cfgDir 'opencode.json'
-    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"mine","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"mcp":{"mine":{"type":"local","command":["mine-mcp"],"enabled":true}}}'
+    # The theme is non-ASCII and the file is written with an explicit BOM: a backup
+    # that lost either would still read as the same text, so it is judged on bytes.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"@THEME@","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"mcp":{"mine":{"type":"local","command":["mine-mcp"],"enabled":true}}}'.Replace('@THEME@', $theme)
     $runLogged = {
         $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocbackup-$([Guid]::NewGuid().ToString('N')).log"
         try {
@@ -5452,7 +5504,10 @@ Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when not
             [IO.File]::WriteAllText($fake, "#!/bin/sh`nexit 0`n")
             & chmod +x $fake
         }
-        [IO.File]::WriteAllText($cfgFile, $seed)
+        [IO.File]::WriteAllText($cfgFile, $seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($cfgFile)
+        $seedB64 = [Convert]::ToBase64String($seedBytes)
+        if ($seedBytes.Length -lt 4 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191 -or @($seedBytes | Where-Object { $_ -gt 127 }).Count -le 3) { throw 'the seed must carry a BOM and a non-ASCII character, or the byte compare has nothing to lose' }
         Set-Variable -Name HOME -Value $scratch -Force -Scope Global
         $env:USERPROFILE = $scratch; $env:HOME = $scratch
         $env:APPDATA = Join-Path $scratch 'AppData'
@@ -5467,11 +5522,11 @@ Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when not
         $null = & $runLogged
         $sha1 = (Get-FileHash -LiteralPath $cfgFile -Algorithm SHA256).Hash
         $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'opencode.json.autoos-backup-*')
-        if ([IO.File]::ReadAllText($cfgFile) -eq $seed) { throw 'the first run left the file unchanged' }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($cfgFile)) -ceq $seedB64) { throw 'the first run left the file unchanged' }
         if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1)" }
-        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'the backup is not the original file' }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the original file, byte for byte (a BOM or a non-ASCII byte was lost)' }
         $written = Get-Content -LiteralPath $cfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($written.theme -ne 'mine' -or $null -eq $written.provider.PSObject.Properties['custom'] -or $null -eq $written.mcp.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
+        if ($written.theme -cne $theme -or $null -eq $written.provider.PSObject.Properties['custom'] -or $null -eq $written.mcp.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
         if ($null -eq $written.provider.PSObject.Properties['omniroute']) { throw 'run 1 did not write the gateway provider' }
 
         # Backup names carry whole seconds: without this pause a wrongly repeated
@@ -5582,6 +5637,43 @@ function Read-RepoOpenCodeJsonc {
     ($raw -replace '(?m)^\s*//.*$', '') | ConvertFrom-Json
 }
 
+# Stand-in `opencode` that RECORDS how it was called and can answer strictly: each
+# call appends `[<arguments>]` to opencode-args.log beside it, then it prints $Line
+# (nothing when empty) and exits $ExitCode. With -OnlyVersion it answers only when
+# its arguments are exactly `--version` and fails (exit 64, stderr) for anything
+# else, so a caller that stops asking for --version gets no version at all. Keep
+# $Line to characters cmd.exe passes through echo unchanged (no % & | < > ^ ( ) !).
+function New-OpenCodeArgsStandIn {
+    param(
+        [Parameter(Mandatory)][string]$Dir,
+        [string]$Line = '',
+        [int]$ExitCode = 0,
+        [switch]$OnlyVersion
+    )
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $lines = @('@echo off', '>>"%~dp0opencode-args.log" echo [%*]')
+        if ($OnlyVersion) {
+            $lines += 'if "%~1"=="--version" if "%~2"=="" goto :answer'
+            $lines += 'echo unexpected arguments 1>&2'
+            $lines += 'exit /b 64'
+            $lines += ':answer'
+        }
+        if ($Line -ne '') { $lines += "echo $Line" }
+        if ($ExitCode -ne 0) { $lines += 'echo error: cannot start 1>&2' }
+        $lines += "exit /b $ExitCode"
+        [IO.File]::WriteAllText((Join-Path $Dir 'opencode.cmd'), (($lines -join "`r`n") + "`r`n"))
+    } else {
+        $sh = "#!/bin/sh`n" + 'printf ' + "'[%s]\n'" + ' "$*" >> "${0%/*}/opencode-args.log"' + "`n"
+        if ($OnlyVersion) { $sh += 'if [ "$#" -ne 1 ] || [ "$1" != "--version" ]; then echo "unexpected arguments" >&2; exit 64; fi' + "`n" }
+        if ($Line -ne '') { $sh += "echo '$Line'`n" }
+        if ($ExitCode -ne 0) { $sh += 'echo "error: cannot start" >&2' + "`n" }
+        $sh += "exit $ExitCode`n"
+        $fake = Join-Path $Dir 'opencode'
+        [IO.File]::WriteAllText($fake, $sh)
+        & chmod +x $fake
+    }
+}
+
 Test-Case 'opencode V2: Test-AutoOSOpenCodeV2 tells V2 from V1 by --version, like the Linux writer' {
     Invoke-OpenCodeScratch -Body {
         param($c)
@@ -5600,14 +5692,37 @@ Test-Case 'opencode V2: Test-AutoOSOpenCodeV2 tells V2 from V1 by --version, lik
             $got = Test-AutoOSOpenCodeV2
             if ($got -ne $cases[$v]) { throw "opencode --version printing [$v]: Test-AutoOSOpenCodeV2 = $got, want $($cases[$v])" }
         }
+
+        # The stand-in above prints its version for ANY arguments, so that loop passes
+        # even if the function stops calling --version. This one records how it was
+        # called and answers only to exactly `--version`: the recorded call must be
+        # that one call, and the answers must not change.
+        $argsLog = Join-Path $c.Bin 'opencode-args.log'
+        foreach ($v in $cases.Keys) {
+            New-OpenCodeArgsStandIn -Dir $c.Bin -Line $v -OnlyVersion
+            Remove-Item -LiteralPath $argsLog -Force -ErrorAction SilentlyContinue
+            $got = Test-AutoOSOpenCodeV2
+            $calls = @(Get-Content -LiteralPath $argsLog -ErrorAction SilentlyContinue)
+            if (($calls -join '|') -cne '[--version]') { throw "Test-AutoOSOpenCodeV2 ran opencode as [$($calls -join '|')], want exactly one call, [--version]" }
+            if ($got -ne $cases[$v]) { throw "an opencode that prints [$v] only for --version: Test-AutoOSOpenCodeV2 = $got, want $($cases[$v])" }
+        }
         Pass
     }
 }
 
 Test-Case 'opencode V2: Set-AutoOSOpenCodeConfig adds the gateway providers when the CLI is V2' {
-    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"mine","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"providers":{"foreign":{"name":"Foreign V2","env":["FOREIGN_KEY"],"package":"p"},"omniroute":{"name":"stale"}}}'
-    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Seed $seed -Body {
+    # The theme is non-ASCII and the file is written with an explicit BOM: a backup
+    # that lost either would still read as the same text, so it is judged on bytes.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    # Not called $seed: Invoke-OpenCodeScratch has a -Seed parameter, and PowerShell
+    # variable names are case-insensitive, so the body would see the helper's own.
+    $v2Seed = '{"$schema":"https://opencode.ai/config.json","theme":"@THEME@","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"providers":{"foreign":{"name":"Foreign V2","env":["FOREIGN_KEY"],"package":"p"},"omniroute":{"name":"stale"}}}'.Replace('@THEME@', $theme)
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Body {
         param($c)
+        [IO.File]::WriteAllText($c.CfgFile, $v2Seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($c.CfgFile)
+        $seedB64 = [Convert]::ToBase64String($seedBytes)
+        if ($seedBytes.Length -lt 4 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191 -or @($seedBytes | Where-Object { $_ -gt 127 }).Count -le 3) { throw 'the seed must carry a BOM and a non-ASCII character, or the byte compare has nothing to lose' }
         $repo = Read-RepoOpenCodeJsonc
         $canon = { param($o) $o | ConvertTo-Json -Depth 100 -Compress }
         $null = & $c.Run
@@ -5621,10 +5736,10 @@ Test-Case 'opencode V2: Set-AutoOSOpenCodeConfig adds the gateway providers when
         if ($w.model -cne $repo.model) { throw "model = [$($w.model)], want the repo model [$($repo.model)]" }
         if ($null -eq $w.providers.PSObject.Properties['foreign'] -or $w.providers.foreign.name -cne 'Foreign V2') { throw 'a foreign providers entry of the user was dropped' }
         if ($null -eq $w.provider.PSObject.Properties['custom'] -or $w.provider.custom.name -cne 'Mine') { throw 'a foreign V1 provider of the user was dropped' }
-        if ($w.theme -cne 'mine') { throw 'a foreign key of the user was dropped' }
+        if ($w.theme -cne $theme) { throw 'a foreign key of the user was dropped' }
         if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw 'the V1 gateway provider block went missing' }
         if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1)" }
-        if ([IO.File]::ReadAllText($backups1[0].FullName) -cne $seed) { throw 'the backup is not the original file' }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the original file, byte for byte (a BOM or a non-ASCII byte was lost)' }
 
         # Backup names carry whole seconds: without this pause a wrongly
         # repeated backup would overwrite the first one and the count could
@@ -5666,6 +5781,49 @@ Test-Case 'opencode V2: a V1 CLI gets no providers block' {
     }
 }
 
+Test-Case 'opencode V2: an opencode that is missing or fails or prints garbage for --version is taken for V1' {
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        $pathBefore = $env:PATH
+        $sep = [IO.Path]::PathSeparator
+        $scenarios = [ordered]@{
+            'is missing'                     = $null
+            'exits 1 and prints nothing'     = @{ Line = ''; ExitCode = 1 }
+            'exits 0 and prints nothing'     = @{ Line = ''; ExitCode = 0 }
+            'prints text that is no version' = @{ Line = 'usage opencode command'; ExitCode = 0 }
+            'prints the number 12.2.0'       = @{ Line = 'build 12.2.0 nightly'; ExitCode = 0 }
+        }
+        foreach ($name in $scenarios.Keys) {
+            $env:PATH = $pathBefore
+            foreach ($f in @('opencode', 'opencode.cmd', 'opencode-args.log')) { Remove-Item -LiteralPath (Join-Path $c.Bin $f) -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $c.CfgFile, $c.AppDataFile -Force -ErrorAction SilentlyContinue
+            $spec = $scenarios[$name]
+            if ($null -eq $spec) {
+                # Missing: the stand-in is gone, and so is every directory that holds a
+                # real opencode (a developer machine has one), so nothing answers.
+                $kept = @()
+                foreach ($dir in $pathBefore.Split($sep)) {
+                    if (-not $dir) { continue }
+                    $holdsOne = @(Get-ChildItem -LiteralPath $dir -Filter 'opencode*' -Force -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -eq 'opencode' }).Count -gt 0
+                    if (-not $holdsOne) { $kept += $dir }
+                }
+                $env:PATH = $kept -join $sep
+                if (@(Get-Command opencode -CommandType Application -ErrorAction SilentlyContinue).Count -gt 0) { throw 'an opencode stayed on PATH after hiding every directory that holds one, so the missing case cannot be tested here' }
+            } else {
+                New-OpenCodeArgsStandIn -Dir $c.Bin -Line $spec.Line -ExitCode $spec.ExitCode
+            }
+            $isV2 = Test-AutoOSOpenCodeV2
+            if ($isV2 -ne $false) { throw "opencode $name when asked for --version: Test-AutoOSOpenCodeV2 = [$isV2], want False" }
+            $null = & $c.Run
+            $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $w.PSObject.Properties['providers']) { throw "opencode $name when asked for --version: the config got a V2 providers block" }
+            if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw "opencode $name when asked for --version: the V1 gateway provider block went missing" }
+        }
+        $env:PATH = $pathBefore
+        Pass
+    }
+}
+
 Test-Case 'backup-once: Set-AutoOSOpenCodeConfig leaves an unchanged APPDATA config.json untouched' {
     # The APPDATA copy used to be rewritten on EVERY run: no compare, no backup.
     Invoke-OpenCodeScratch -Seed '{"theme":"mine"}' -Body {
@@ -5703,15 +5861,94 @@ Test-Case 'backup-once: Set-AutoOSOpenCodeConfig backs up a foreign APPDATA conf
         $now = (Get-Content -LiteralPath $c.AppDataFile -Raw -Encoding UTF8).TrimEnd()
         $want = (Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8).TrimEnd()
         if ($now -cne $want) { throw 'run 1 did not put the OpenCode config into the APPDATA config.json' }
+        $appDataSha1 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
 
-        # Runs 2 and 3 change nothing, so they back nothing up. The pause keeps a
-        # wrongly repeated backup from hiding behind a same-second name.
+        # Runs 2 and 3 change nothing, so they back nothing up and leave the file
+        # alone. The pause keeps a wrongly repeated backup from hiding behind a
+        # same-second name; the hash catches a rewrite that takes no backup.
         foreach ($run in 2, 3) {
             Start-Sleep -Milliseconds 1200
             $null = & $c.Run
             $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
             if ($backups.Count -ne 1) { throw "backups after run $run = $($backups.Count) (want 1)" }
+            $appDataSha = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+            if ($appDataSha -cne $appDataSha1) { throw "run $run changed the APPDATA config.json (SHA256 differs from run 1)" }
         }
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig treats an APPDATA config.json that differs only by a BOM or a final newline as unchanged' {
+    # The APPDATA copy is compared as text: the encoding Out-File writes (BOM or not)
+    # is the host's, so a copy that differs only in it or in its final newline is
+    # the same config and must be neither rewritten nor backed up.
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        [IO.File]::WriteAllText($c.CfgFile, '{"theme":"mine"}')
+        $null = & $c.Run
+        if (-not (Test-Path -LiteralPath $c.AppDataFile)) { throw 'run 1 did not write the APPDATA config.json' }
+        $canonicalB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+        $written = [IO.File]::ReadAllBytes($c.AppDataFile)
+        $hasBom = ($written.Length -ge 3 -and $written[0] -eq 239 -and $written[1] -eq 187 -and $written[2] -eq 191)
+        $text = [IO.File]::ReadAllText($c.AppDataFile)      # without the BOM
+        $trimmed = $text.TrimEnd("`r", "`n")
+        $variants = [ordered]@{
+            'the BOM'                       = @{ Bom = (-not $hasBom); Text = $text }
+            'the final newline (removed)'   = @{ Bom = $hasBom; Text = $trimmed }
+            'the final newline (repeated)'  = @{ Bom = $hasBom; Text = $trimmed + "`r`n`n`r`n" }
+            'the BOM and the final newline' = @{ Bom = (-not $hasBom); Text = $trimmed }
+        }
+        foreach ($label in $variants.Keys) {
+            $v = $variants[$label]
+            [IO.File]::WriteAllText($c.AppDataFile, $v.Text, (New-Object Text.UTF8Encoding([bool]$v.Bom)))
+            $variantB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+            if ($variantB64 -ceq $canonicalB64) { throw "the variant that differs by $label equals the file the writer makes, so it proves nothing" }
+            $null = & $c.Run
+            $nowB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+            $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+            if ($nowB64 -cne $variantB64) { throw "an APPDATA config.json that differs only by $label was rewritten" }
+            if ($backups.Count -ne 0) { throw "an APPDATA config.json that differs only by $label got $($backups.Count) backup(s)" }
+        }
+
+        # Control: a file whose CONTENT differs is still backed up once and rewritten,
+        # so the checks above are not just a writer that never touches the file.
+        [IO.File]::WriteAllText($c.AppDataFile, '{"theme":"someone else"}' + "`n")
+        $null = & $c.Run
+        $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "control: an APPDATA config.json with other content got $($backups.Count) backup(s) (want 1)" }
+        if ((Get-Content -LiteralPath $c.AppDataFile -Raw -Encoding UTF8).TrimEnd() -cne (Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8).TrimEnd()) { throw 'control: an APPDATA config.json with other content was not rewritten' }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: an invalid repo opencode.jsonc leaves the user opencode.json byte-identical and takes no backup' {
+    # The writer reads the repo file up front, like the model catalog, so an
+    # unreadable one must stop it before any backup or write.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    $userConfig = '{"$schema":"https://opencode.ai/config.json","theme":"@THEME@","model":"custom/mine"}'.Replace('@THEME@', $theme)
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Body {
+        param($c)
+        [IO.File]::WriteAllText($c.CfgFile, $userConfig, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $userB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.CfgFile))
+        # A scratch repo root: the real catalog, an (empty) skills directory so that a
+        # writer that wrongly carried on would run to the end and fail the checks below
+        # instead of dying on a missing directory, and an opencode.jsonc cut off mid-file.
+        $repo = Join-Path $c.Scratch 'repo'
+        $null = New-Item -ItemType Directory -Path $repo, (Join-Path $repo '.agents\skills') -Force
+        Copy-Item -LiteralPath (Join-Path $Root 'catalog') -Destination (Join-Path $repo 'catalog') -Recurse
+        [IO.File]::WriteAllText((Join-Path $repo 'opencode.jsonc'), "{`n  // cut off mid-file`n  `"providers`": {`n    `"omniroute`": ")
+        try {
+            Initialize-AutoOSInstaller -DryRun $false -RepoRoot $repo
+            if (-not (Test-AutoOSOpenCodeV2)) { throw 'the stand-in opencode 2.1.0 was not taken for a V2 CLI, so the invalid repo file is never read' }
+            $out = & $c.Run
+        } finally {
+            Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        }
+        if ($out -notmatch 'is not valid JSONC' -or $out -notmatch 'left unchanged') { throw "the run did not say the repo opencode.jsonc is invalid and that the config was left unchanged: [$out]" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($c.CfgFile)) -cne $userB64) { throw "the user's opencode.json changed although the repo opencode.jsonc is invalid" }
+        $files = @(Get-ChildItem -LiteralPath $c.CfgDir -Force | ForEach-Object { $_.Name })
+        if ($files.Count -ne 1) { throw "the config directory holds [$($files -join ', ')], want only opencode.json (no backup, nothing written)" }
+        if (Test-Path -LiteralPath $c.AppDataFile) { throw 'the APPDATA config.json was written although the run stopped early' }
         Pass
     }
 }
@@ -5889,16 +6126,27 @@ Test-Case 'start-stack.ps1: a settings backup never overwrites an earlier one ta
         $null = New-Item -ItemType Directory -Path $scratch -Force
         $settings = Join-Path $scratch 'settings.json'
         $stamp = '20260101-000000'
+        # Three versions of a settings file, judged on bytes: the first has a BOM and
+        # a non-ASCII character, the second only the character, the third neither. A
+        # backup that lost the BOM or a byte would still read as the same text.
+        $withBom = New-Object Text.UTF8Encoding($true)
+        $withoutBom = New-Object Text.UTF8Encoding($false)
+        $texts = @("v0 caf$([char]0x00E9)", "v1 caf$([char]0x00E9) $([char]0x2603)", 'v2')
+        $encodings = @($withBom, $withoutBom, $withoutBom)
+        $wantB64 = @()
         $made = @()
-        foreach ($v in 'v0', 'v1', 'v2') {
-            [IO.File]::WriteAllText($settings, $v)
+        for ($i = 0; $i -lt 3; $i++) {
+            [IO.File]::WriteAllText($settings, $texts[$i], $encodings[$i])
+            $bytes = [IO.File]::ReadAllBytes($settings)
+            if ($i -eq 0 -and ($bytes[0] -ne 239 -or $bytes[1] -ne 187 -or $bytes[2] -ne 191)) { throw 'version 0 must carry a BOM, or the byte compare has nothing to lose' }
+            $wantB64 += [Convert]::ToBase64String($bytes)
             $made += New-FileBackup -Path $settings -Stamp $stamp
         }
         $want = @("settings.json.autoos-backup-$stamp", "settings.json.autoos-backup-$stamp-1", "settings.json.autoos-backup-$stamp-2")
         if ((@($made | ForEach-Object { Split-Path -Leaf $_ }) -join ',') -cne ($want -join ',')) { throw "backup names: [$(@($made | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')], want [$($want -join ', ')]" }
         for ($i = 0; $i -lt 3; $i++) {
-            $got = [IO.File]::ReadAllText($made[$i])
-            if ($got -cne "v$i") { throw "$($want[$i]) holds [$got], want [v$i] (an earlier backup was overwritten)" }
+            $got = [Convert]::ToBase64String([IO.File]::ReadAllBytes($made[$i]))
+            if ($got -cne $wantB64[$i]) { throw "$($want[$i]) does not hold version $i byte for byte (an earlier backup was overwritten, or a BOM / non-ASCII byte was lost)" }
         }
     } finally {
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
