@@ -465,9 +465,10 @@ claude mcp add -s user playwright -- python3 "$PWD/tools/playwright_mcp_lazy.py"
   browse `http://host.docker.internal:PORT`.
 - **`--rm`** → ephemeral browser profile per run; **`--init`** reaps zombie browser
   processes.
-- The installer replaces an existing entry only when it is exactly the old docker
-  form or `npx -y @playwright/mcp…` (after a backup of the Claude config); sessions
-  that are already running keep their current container until they end.
+- On Linux with docker the installer registers the proxy, and replaces an existing
+  entry only when it is exactly the old docker form or `npx -y @playwright/mcp…`
+  (after a backup of the Claude config); macOS and hosts without docker keep the npx
+  entry. Sessions that are already running keep their current container until they end.
 - Status: tested against a fake backend (`tests/test_playwright_mcp_lazy.py`); not yet
   observed in a live Claude Code session or against the real image.
 
