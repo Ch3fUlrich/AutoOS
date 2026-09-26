@@ -3965,6 +3965,15 @@ Test-Case 'mirror-litellm-env projects keys without printing them' {
     } finally { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case "mirror-litellm-env's unit tests pass (registry-sourced, task A5c)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_mirror_litellm_env_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "mirror-litellm-env registry unit tests failed: $out"
+}
+
 Test-Case 'the embedded OpenHands setup script defaults to the gateway with a key' {
     # Same temp-dir isolation as the Ollama test. With an OmniRoute key the
     # default LLM must mirror the opencode t1 setup (openai/t1-orchestrator via the
@@ -6096,6 +6105,15 @@ Test-Case 'litellm fallback config is internally consistent' {
     Pass
 }
 
+Test-Case "sync-router-tiers's unit tests pass (registry-sourced, task A5c)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_sync_router_tiers_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "sync-router-tiers registry unit tests failed: $out"
+}
+
 Test-Case 'start scripts exist and name the client key' {
     Assert-True (Test-Path (Join-Path $Root 'configuration\start-stack.ps1')) 'ps1 missing'
     Assert-True (Test-Path (Join-Path $Root 'configuration\start-stack.sh')) 'sh missing'
@@ -6659,6 +6677,15 @@ Test-Case 'the router declarations do not drift from each other' {
     if (-not $py) { Skip 'no python on PATH'; return }
     $out = & $py.Source (Join-Path $Root 'tools\audit-router.py') --offline 2>&1 | Out-String
     Assert-Equal $LASTEXITCODE 0 "audit-router drift: $out"
+}
+
+Test-Case "audit-router's unit tests pass (registry-sourced, task A5c)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_audit_router_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "audit-router registry unit tests failed: $out"
 }
 
 Test-Case 'the IDE model lists match catalog/ide-models.json (sync-ide-models --check)' {

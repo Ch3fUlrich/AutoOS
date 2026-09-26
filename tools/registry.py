@@ -164,6 +164,29 @@ def load(path) -> dict:
         return json.load(fh)
 
 
+def provider_field_map(providers: dict, field: str) -> dict:
+    """{provider id: providers.<id>.<field>} for every entry whose field is
+    truthy, in registry order.
+
+    Small reusable loader (task A5c, spec 3.2 phase 2): the generic form of
+    the provider-id -> single-field map a consumer used to build by hand
+    against catalog/providers.json (tools/mirror-litellm-env.py's KEY_MAP was
+    `{name: entry["litellm_env"] for name, entry in doc["providers"].items()}`
+    with no presence filter - harmless against the old catalog, where every
+    entry already had a real litellm_env, but wrong against this registry,
+    which also carries OAuth/subscription-bridge providers (`cc`,
+    `antigravity`) whose litellm_env is null). Falsy values (missing, None,
+    "", 0) are dropped rather than kept as a null/empty entry, and a
+    non-dict provider value is skipped defensively, matching
+    provider_maps_from_dict()'s own (tools/sync-router-tiers.py) presence
+    checks for its three fields."""
+    return {
+        name: entry[field]
+        for name, entry in providers.items()
+        if isinstance(entry, dict) and entry.get(field)
+    }
+
+
 # ===========================================================================
 # rule 1 - leg resolution
 # ===========================================================================

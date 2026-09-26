@@ -6,10 +6,14 @@ configuration/api-keys.yml is the single source of truth for keys (one
 LiteLLM's conventional names (GROQ_API_KEY, ...) plus a random
 LITELLM_MASTER_KEY. This tool regenerates the .env from the yml so the two
 never drift apart by hand-editing. The name mapping itself comes from
-catalog/providers.json, the registry shared with apply.ps1/apply.sh and
-tools/sync-router-tiers.py.
+catalog/ai-registry.json's `providers` section (task A5c, spec 3.2 phase 2 -
+this used to read catalog/providers.json directly; same field names,
+mapping doc section 2, only the source file changed). --registry overrides
+the registry path (a test fixture, mainly); catalog/providers.json itself is
+untouched and unread by this tool now, but stays in the repo (spec 3.2: no
+old catalog is deleted before every consumer has moved off it).
 
-    python3 tools/mirror-litellm-env.py [--check]
+    python3 tools/mirror-litellm-env.py [--check] [--registry PATH]
 
     (default)   rewrite the .env in place (missing keys stay placeholders)
     --check     change nothing; exit 1 when a present key is stale/missing
@@ -23,25 +27,41 @@ touches a tracked file. Exit 0 = in sync / written, 1 = drifted (--check),
 from __future__ import annotations
 
 import argparse
-import json
+import importlib.util
 import secrets
 import sys
 from pathlib import Path
 
-# The provider registry shared with apply.ps1/apply.sh and
-# tools/sync-router-tiers.py; this tool used to carry its own copy of the map.
-CATALOG = Path(__file__).resolve().parent.parent / "catalog" / "providers.json"
+# catalog/ai-registry.json - the single registry shared with apply.ps1/
+# apply.sh and tools/sync-router-tiers.py (spec 3.2 phase 2, task A5c).
+DEFAULT_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "catalog" / "ai-registry.json"
+REGISTRY_TOOL_PATH = Path(__file__).resolve().parent / "registry.py"
+
+
+def _load_registry_tool():
+    """Import tools/registry.py by path - the same importlib-by-path
+    technique tools/sync-ide-models.py's _load_registry_tool() and
+    tools/registry.py's own _load_sync_router_tiers() already use, so this
+    tool carries no second copy of the loader."""
+    spec = importlib.util.spec_from_file_location("autoos_registry", REGISTRY_TOOL_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def load_key_map(path=None) -> dict:
-    """api-keys.yml name -> litellm .env name, from the provider registry.
+    """api-keys.yml name -> litellm .env name, from catalog/ai-registry.json's
+    `providers` section (tools/registry.py's provider_field_map()).
 
     Keys keep the registry's spelling - api-keys.yml spells SambaNova with a
     capital S/N and this lookup is case-sensitive. Value order is the order
-    lines are emitted into .env, so it follows the registry exactly.
+    lines are emitted into .env, so it follows the registry exactly. A
+    provider with no litellm_env (an OAuth/subscription bridge - `cc`,
+    `antigravity`) is skipped: it never had an api-keys.yml entry either.
     """
-    doc = json.loads(Path(path or CATALOG).read_text(encoding="utf-8"))
-    return {name: entry["litellm_env"] for name, entry in doc["providers"].items()}
+    registry = _load_registry_tool()
+    doc = registry.load(path or DEFAULT_REGISTRY_PATH)
+    return registry.provider_field_map(doc["providers"], "litellm_env")
 
 
 # api-keys.yml name -> litellm .env name.
@@ -65,10 +85,18 @@ def read_flat_map(path: Path) -> dict:
 
 
 def render(keys: dict, keep_master: str | None) -> tuple[str, list, list]:
-    """Build the .env text. Returns (text, mirrored, missing)."""
+    """Build the .env text. Returns (text, mirrored, missing).
+
+    Skips any KEY_MAP entry with a falsy destination - defense in depth
+    alongside load_key_map()'s own filter, since KEY_MAP is settable
+    directly (module global, task A5c's --registry reload path) and a null
+    litellm_env (an OAuth/subscription bridge's provider entry) must never
+    reach a written line ("None=REPLACE_WITH_..." is not a valid env var)."""
     lines = [HEADER]
     mirrored, missing = [], []
     for src, dst in KEY_MAP.items():
+        if not dst:
+            continue
         if src in keys:
             lines.append("%s=%s" % (dst, keys[src]))
             mirrored.append(dst)
@@ -91,6 +119,11 @@ def parse_args(argv):
     )
     parser.add_argument("--keys", default=None)
     parser.add_argument("--env", default=None)
+    parser.add_argument(
+        "--registry",
+        default=None,
+        help="path to catalog/ai-registry.json (default: catalog/ai-registry.json)",
+    )
     return parser.parse_args(argv)
 
 
@@ -99,6 +132,13 @@ def main(argv=None):
     root = Path(__file__).resolve().parent.parent
     keys_path = Path(args.keys) if args.keys else root / "configuration" / "api-keys.yml"
     env_path = Path(args.env) if args.env else root / "configuration" / "litellm" / ".env"
+    registry_path = Path(args.registry) if args.registry else DEFAULT_REGISTRY_PATH
+    global KEY_MAP
+    try:
+        KEY_MAP = load_key_map(registry_path)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"ERROR: cannot read {registry_path}: {exc}", file=sys.stderr)
+        return 2
     try:
         keys = read_flat_map(keys_path)
     except OSError as exc:

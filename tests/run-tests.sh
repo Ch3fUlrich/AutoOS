@@ -3790,6 +3790,10 @@ PY
     assert_eq "$report" ""
 fi
 
+if it "sync-router-tiers's unit tests pass (registry-sourced, task A5c)"; then
+    out="$(python3 tests/test_sync_router_tiers_registry.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "free-only litellm groups mirror combos minus gateway-only legs"; then
     # The *-free-only groups are hand-curated (not sync-managed), so this
     # pins them to combos.json with hardcoded expectations: same legs in the
@@ -3952,6 +3956,10 @@ if it "mirror-litellm-env projects keys without printing them"; then
     [[ $? -eq 0 ]] || { ok=0; echo "fresh check failed" >&2; }
     rm -rf "$tmp"
     if (( ok )); then pass; else fail "mirror tool broken"; fi
+fi
+
+if it "mirror-litellm-env's unit tests pass (registry-sourced, task A5c)"; then
+    out="$(python3 tests/test_mirror_litellm_env_registry.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "no committed secrets in router files"; then    # Report file:line only - a failure message must never echo the value it
@@ -8194,6 +8202,10 @@ fi
 
 if it "audit-router live probes retry a 503 with backoff and never a drift status (unit tests)"; then
     out="$(python3 tests/test_audit_router_probe_retry.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "audit-router's unit tests pass (registry-sourced, task A5c)"; then
+    out="$(python3 tests/test_audit_router_registry.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "autoos-agent outside-path fence denies first and re-allows only opencode scratch"; then
