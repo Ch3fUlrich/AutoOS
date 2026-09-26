@@ -586,6 +586,7 @@ class Idle(LazyProxyCase):
         self.assertTrue(alive(pid), "the backend was stopped under a call that was still running")
         reply = s.response(5)
         self.assertNotIn("error", reply)
+        time.sleep(0.5)     # half an idle period after completion: the timer restarted with the call
         self.assertTrue(alive(pid), "the idle period must restart when the call completes")
         self.assertTrue(self.gone(pid, 10))
 
