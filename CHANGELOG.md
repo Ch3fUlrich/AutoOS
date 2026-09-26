@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — herdr-sessions: Claude Code panes come back after a reboot (opt-in, Linux)
+
+- **`configuration/herdr-sessions/`**, imported from the Server repo's `Applications/herdr-sessions` at 12f0ff7 and
+  scrubbed for a public repo (only `profiles/example.conf`, `/home/youruser` placeholders): systemd units snapshot
+  the live Claude Code sessions every 5 minutes and restore them into Herdr panes at boot (full resume).
+  `install.sh --profile` takes a profile name or an absolute path to a site profile kept outside AutoOS,
+  `--unregister` removes exactly the installed units (backup first; a second run says "nothing to remove"), and
+  a re-run with unchanged units prints `herdr-sessions: all units already current`.
+- **Fixes in the engine:** background (`claude --bg`) sessions are no longer picked as a pane's session (T1-T4),
+  and the pid registry wins over the newest transcript (T5-T7); `tests/test_herdr_sessions.py`.
+- **`herdr-server.service` sets `OOMPolicy=continue`** (user and system templates): one process killed by the
+  kernel OOM killer no longer stops the whole unit and every pane with it (happened twice on 2026-09-26).
+- **Catalog component `herdr-sessions`** (opt-in, in no profile): prompt `herdr_sessions_profile` = absolute
+  path of a site profile; empty => `skipped: no profile`. It and `claude-autostart` refuse each other. Detected
+  by `~/.config/systemd/user/herdr-sessions-restore.service`. The component reports `skipped` only when every
+  unit was already current, and a drifted unit's backup never overwrites a same-second earlier one.
+- **Operator step (not run):** on the herdr host, `./setup.sh --only herdr-sessions` with the site profile path;
+  it replaces the units installed from the Server repo copy (backed up first).
+
 ### Added — the OmniRoute gateway can log in to Qoder, and knows its public origin
 
 - **The gateway image carries `qodercli`**: `configuration/docker/ai-stack/omniroute.Dockerfile` builds
