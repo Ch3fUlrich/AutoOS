@@ -150,7 +150,7 @@ def handle(msg, text):
         log("initialized")
         if os.environ.get("FAKE_ROOTS") == "1":
             send({"jsonrpc": "2.0", "id": int(os.environ.get("FAKE_ROOTS_ID", "1")),
-                  "method": "roots/list"})
+                  "method": "roots/list", "params": {"probe": os.getpid()}})
     elif method == "notifications/cancelled":
         log("cancelled", params=params)
     elif method == "tools/list":
@@ -519,8 +519,13 @@ class CacheAndLazyStart(LazyProxyCase):
         s.send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": {"name": "browser_navigate", "arguments": {"ask": True}}})
         ask = s.wait_for(lambda m: m.get("method") == "roots/list")
-        self.assertEqual(ask, {"jsonrpc": "2.0", "id": "srv-1", "method": "roots/list"})
-        s.send({"jsonrpc": "2.0", "id": "srv-1", "result": {"roots": [{"uri": "file:///w"}]}})
+        # the client sees a proxy-unique id, never the backend's own "srv-1" ...
+        self.assertEqual({k: v for k, v in ask.items() if k != "id"},
+                         {"jsonrpc": "2.0", "method": "roots/list"})
+        self.assertIsInstance(ask["id"], str)
+        self.assertNotEqual(ask["id"], "srv-1", "the backend's request id reached the client unchanged")
+        # ... and the backend gets its answer under the id it asked with
+        s.send({"jsonrpc": "2.0", "id": ask["id"], "result": {"roots": [{"uri": "file:///w"}]}})
         reply = s.response(3)
         self.assertEqual(reply["result"]["asked"], {"roots": [{"uri": "file:///w"}]})
 
@@ -599,6 +604,64 @@ class StarterSurvivesBugs(unittest.TestCase):
             self.assertEqual(answer["error"]["code"], -32603)
         self.assertIn("internal error while starting the backend (RuntimeError)", noise.getvalue())
         self.assertTrue(wait_until(lambda: proxy.starter is None, 5), "the starter flag stayed set")
+
+
+class BackendRequestIds(LazyProxyCase):
+    """A request the backend sends to the client carries an id that names its backend generation."""
+
+    ROOTS_A = {"roots": [{"uri": "file:///from-the-first-backend"}]}
+    ROOTS_B = {"roots": [{"uri": "file:///from-the-second-backend"}]}
+
+    def asks(self, s):
+        return [m for m in s.messages if m and m.get("method") == "roots/list"]
+
+    def test_a_late_answer_to_a_stopped_backends_request_never_reaches_the_next_backend(self):
+        self.prime_cache()
+        s = self.session(idle=1, FAKE_ROOTS="1")        # every backend asks with id 1
+        s.initialize()
+        pid_a = self.call(s, rid=5)["result"]["pid"]
+        s.wait_for(lambda m: len(self.asks(s)) >= 1)
+        self.assertTrue(self.gone(pid_a, 10), "the first backend was not stopped when idle")
+        pid_b = self.call(s, rid=6)["result"]["pid"]
+        self.assertNotEqual(pid_a, pid_b)
+        s.wait_for(lambda m: len(self.asks(s)) >= 2)
+        ask_a, ask_b = self.asks(s)[:2]
+        # the client answers the stopped backend's request, then the live one's
+        s.send({"jsonrpc": "2.0", "id": ask_a["id"], "result": self.ROOTS_A})
+        s.send({"jsonrpc": "2.0", "id": ask_b["id"], "result": self.ROOTS_B})
+        self.assertTrue(wait_until(lambda: self.events("answer"), 5))
+        time.sleep(0.4)     # a wrongly forwarded answer would have arrived by now
+        self.assertEqual([(a["pid"], a["id"], a["result"]) for a in self.events("answer")],
+                         [(pid_b, 1, self.ROOTS_B)],
+                         "only the live backend's answer may arrive, under the id it asked with")
+        self.assertNotEqual(ask_a["id"], ask_b["id"], "two backends asked the client under one id")
+        self.assertIsInstance(ask_b["id"], str)
+        self.assertEqual(ask_b["params"], {"probe": pid_b}, "the request's parameters were lost")
+        self.assertTrue(wait_until(lambda: any("gone" in l and l.startswith("playwright-lazy:")
+                                               for l in s.stderr), 3),
+                        "the dropped answer was not reported: %r" % s.stderr)
+        self.assertEqual(len([l for l in s.stderr if "gone" in l]), 1, "expected exactly one line")
+        self.assertEqual(s.request("ping")["result"], {})
+        self.assertFalse([m for m in s.messages if m and m.get("id") in (ask_a["id"], ask_b["id"])
+                          and "method" not in m], "the proxy replied to the client's answer")
+
+    def test_an_answer_with_an_id_the_proxy_never_issued_is_dropped(self):
+        self.prime_cache()
+        s = self.session(idle=30, FAKE_ROOTS="1")
+        s.initialize()
+        self.call(s, rid=5)
+        ask = s.wait_for(lambda m: m.get("method") == "roots/list")
+        for stray in (1, "autoos-s1-99", "nonsense"):
+            s.send({"jsonrpc": "2.0", "id": stray, "result": {"roots": []}})
+        self.assertTrue(wait_until(lambda: len([l for l in s.stderr if "dropped" in l]) == 3, 5), s.stderr)
+        self.assertEqual(s.request("ping")["result"], {})
+        self.assertEqual(self.events("answer"), [], "an answer nobody asked for reached the backend")
+        # the real one still goes through, once; a second copy is dropped as well
+        s.send({"jsonrpc": "2.0", "id": ask["id"], "result": self.ROOTS_A})
+        s.send({"jsonrpc": "2.0", "id": ask["id"], "result": self.ROOTS_B})
+        self.assertTrue(wait_until(lambda: len(self.events("answer")) == 1, 5))
+        time.sleep(0.3)
+        self.assertEqual([a["result"] for a in self.events("answer")], [self.ROOTS_A])
 
 
 class Negotiation(LazyProxyCase):

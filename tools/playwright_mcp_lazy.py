@@ -39,6 +39,7 @@ so a terminal Ctrl-C reaches the proxy, which then stops it in an orderly way).
 """
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -62,6 +63,7 @@ DEFAULT_CLIENT_PARAMS = {
     "clientInfo": {"name": "autoos-playwright-lazy", "version": "1"},
 }
 _MISSING = object()
+_ASKED_ID = re.compile(r"^autoos-s(\d+)-\d+$")     # the ids the client sees on a backend's own requests
 
 _log_lock = threading.Lock()
 
@@ -248,6 +250,7 @@ class Backend(object):
         self.stopped = False
         self.inflight = {}          # id_key -> the client's original id
         self.waiters = {}           # reserved id -> [Event, response or None]
+        self.requests_sent = 0      # requests this backend has sent to the client so far
         self.write_lock = threading.Lock()
         self.stop_lock = threading.Lock()
 
@@ -269,7 +272,7 @@ class Proxy(object):
         self.signalled = 0
         self.closing = False
         self.backend = None
-        self.starting = None                # the backend whose handshake is being replayed
+        self.asked = {}                     # proxy id -> (backend, the backend's own id)
         self.queue = []                     # Jobs waiting for a backend, oldest first
         self.starter = None                 # the thread that starts backends and serves the queue
         self.live = set()                   # backends whose stop has not finished
@@ -318,7 +321,7 @@ class Proxy(object):
         try:
             method = msg.get("method")
             if method is None:
-                self.on_client_response(raw)            # the client's answer to a backend request
+                self.on_client_response(msg)            # the client's answer to a backend request
             elif "id" in msg:
                 self.on_request(msg, raw)
             else:
@@ -361,21 +364,33 @@ class Proxy(object):
         else:
             self.submit(Job("initialize", rid, None, params))
 
-    def on_client_response(self, raw):
-        """The client's answer to a request the backend sent: straight to that backend.
+    def on_client_response(self, msg):
+        """The client's answer to a request a backend sent: back to that backend, under its own id.
 
-        It goes to a backend that is still replaying its handshake as well: the answer
-        may be what that handshake is waiting for."""
+        The backend's request ids are rewritten to one that names the backend generation
+        (see on_backend_line), so an answer can only reach the backend that asked. It
+        goes to a backend that is still replaying its handshake as well: the answer may
+        be what that handshake is waiting for."""
+        rid = msg.get("id")
         with self.lock:
-            be = self.starting or self.backend
+            entry = self.asked.pop(rid, None) if isinstance(rid, str) else None
+            be = entry[0] if entry is not None else None
             usable = be is not None and be.alive and not be.stopping
             if usable:
                 self.last_activity = time.monotonic()
-        if usable:
-            try:
-                self.send_backend(be, raw)
-            except StartError:
-                pass
+        if entry is None or not usable:
+            match = _ASKED_ID.match(rid) if isinstance(rid, str) else None
+            if match:       # only our own id format is quoted; a client's id may be anything
+                log("dropped the client's answer to a request of backend generation %s, which is gone"
+                    % match.group(1))
+            else:
+                log("dropped a client answer that matches no request of a backend")
+            return
+        msg["id"] = entry[1]
+        try:
+            self.send_backend(be, encode(msg))
+        except StartError:
+            pass
 
     def forward_or_drop(self, raw):
         with self.lock:
@@ -497,7 +512,6 @@ class Proxy(object):
         be = self.start_backend()
         with self.lock:
             self.backend = be
-            self.starting = None
             self.last_activity = time.monotonic()
         return be
 
@@ -522,15 +536,12 @@ class Proxy(object):
         be.alive = True
         with self.lock:
             self.live.add(be)
-            self.starting = be
         be.reader = threading.Thread(target=self.backend_loop, args=(be,), daemon=True)
         be.reader.start()
         log("starting the backend (%s)" % name)
         try:
             self.replay_handshake(be)
         except StartError:
-            with self.lock:
-                self.starting = None
             self.stop_backend(be)
             raise
         return be
@@ -612,6 +623,16 @@ class Proxy(object):
                 waiter[1] = msg     # a reserved id: ours, never the client's
                 waiter[0].set()
                 return
+        elif "method" in msg and "id" in msg:
+            # A request of the backend's own (roots/list, sampling, ...). Its id is only
+            # unique within that backend, and a late answer must never reach a later one.
+            with self.lock:
+                be.requests_sent += 1
+                new_id = "autoos-s%d-%d" % (be.number, be.requests_sent)
+                self.asked[new_id] = (be, msg["id"])
+                self.last_activity = time.monotonic()
+            msg["id"] = new_id
+            raw = encode(msg)
         else:
             with self.lock:
                 self.last_activity = time.monotonic()
@@ -625,6 +646,8 @@ class Proxy(object):
             pending = list(be.inflight.values())
             be.inflight.clear()
             waiters = list(be.waiters.values())
+            for key in [k for k, (owner, _) in self.asked.items() if owner is be]:
+                del self.asked[key]         # nobody can answer these any more
             deliberate = be.stopping
         for waiter in waiters:
             waiter[0].set()             # response stays None: the handshake failed
