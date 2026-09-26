@@ -108,7 +108,11 @@ cp configuration/hostexec/policy.example.toml ~/.config/autoos/exec/policy.toml 
     output). Codex stores only `bearer_token_env_var =
     "AUTOOS_EXEC_TOKEN"`, so export that from the token file before
     starting codex; qoder wiring is not automated yet (headless MCP use
-    unmeasured) -- see this README for manual steps. Then, as the operator:
+    unmeasured) -- see this README for manual steps. OpenHands is
+    skipped unless `AUTOOS_EXEC_BIND` (or the unit's
+    `~/.config/autoos/exec/hostexec.env` when the variable is unset)
+    contains a non-loopback address -- the docker bridge gateway address
+    -- since containers cannot reach a loopback-only broker. Then, as the operator:
 
     ```bash
     systemctl --user daemon-reload && systemctl --user enable --now autoos-hostexec.service

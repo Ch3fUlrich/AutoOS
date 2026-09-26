@@ -505,7 +505,90 @@ sys.exit(main(sys.argv))
 PYEOF
 }
 
+# effective_bind: AUTOOS_EXEC_BIND the same way tools/hostexec/server.py
+# does (parse_bind default 127.0.0.1), plus the unit's env file
+# ~/.config/autoos/exec/hostexec.env when the variable is unset (systemd
+# provides it via EnvironmentFile). Prints the raw comma-separated value.
+effective_bind() {
+    if [[ -n "${AUTOOS_EXEC_BIND+x}" ]]; then
+        printf '%s' "${AUTOOS_EXEC_BIND}"
+        return 0
+    fi
+    local envfile="$HOME/.config/autoos/exec/hostexec.env" line val="" v
+    if [[ -f "$envfile" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Strip leading whitespace, optional "export ", comments handled below.
+            v="$line"
+            v="${v#"${v%%[![:space:]]*}"}"
+            case "$v" in
+                ""|\#*) continue ;;
+            esac
+            case "$v" in
+                export[[:space:]]*) v="${v#export}"; v="${v#"${v%%[![:space:]]*}"}" ;;
+            esac
+            case "$v" in
+                AUTOOS_EXEC_BIND=*)
+                    v="${v#AUTOOS_EXEC_BIND=}"
+                    # Strip trailing comment (simple: space+#) and whitespace/quotes.
+                    v="${v%%#*}"
+                    v="${v%"${v##*[![:space:]]}"}"
+                    v="${v#"${v%%[![:space:]]*}"}"
+                    case "$v" in
+                        \"*\") v="${v#\"}"; v="${v%\"}" ;;
+                        \'*\') v="${v#\'}"; v="${v%\'}" ;;
+                    esac
+                    val="$v"
+                    ;;
+            esac
+        done < "$envfile"
+        if [[ -n "$val" ]]; then
+            printf '%s' "$val"
+            return 0
+        fi
+    fi
+    printf '127.0.0.1'
+}
+
+# is_loopback_addr <addr>: same loopback notion as server.py (localhost,
+# 127/8, ::1). Everything else (0.0.0.0, bridge gateway, LAN) is non-loopback.
+is_loopback_addr() {
+    local a="$1"
+    a="${a#"${a%%[![:space:]]*}"}"
+    a="${a%"${a##*[![:space:]]}"}"
+    case "$a" in
+        \"*\") a="${a#\"}"; a="${a%\"}" ;;
+        \'*\') a="${a#\'}"; a="${a%\'}" ;;
+    esac
+    case "$a" in
+        localhost|127.*|::1|'[::1]') return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# bind_has_non_loopback <bind>: true when any comma-separated address is
+# non-loopback (docker bridge gateway address). Empty bind has none.
+bind_has_non_loopback() {
+    local bind="$1" part
+    local IFS=','
+    read -ra parts <<< "$bind"
+    for part in "${parts[@]}"; do
+        part="${part#"${part%%[![:space:]]*}"}"
+        part="${part%"${part##*[![:space:]]}"}"
+        [[ -z "$part" ]] && continue
+        if ! is_loopback_addr "$part"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 wire_openhands() {
+    local bind
+    bind="$(effective_bind)"
+    if ! bind_has_non_loopback "$bind"; then
+        say "openhands: skipped: broker bind is loopback-only; set AUTOOS_EXEC_BIND to the docker bridge gateway address so containers can reach the broker (containers cannot reach 127.0.0.1)"
+        return 0
+    fi
     wire_json_client openhands "$HOME/.openhands/settings.json" \
         "http://host.docker.internal:${PORT}/mcp" "" || return 1
     return 0

@@ -205,6 +205,8 @@ class UnitInstallTests(_DriverCase):
 
 
 class ClientWriterTests(_DriverCase):
+    BRIDGE_BIND = "172.17.0.1"
+
     def test_openhands_keeps_unrelated_keys_and_writes_no_enabled(self):
         self.write_token("openhands")
         settings = self.home / ".openhands" / "settings.json"
@@ -213,7 +215,9 @@ class ClientWriterTests(_DriverCase):
             '{"agent_settings": {"mcp_config": {"other": {"url": "x"}}}, "keep": 1}',
             encoding="utf-8",
         )
-        proc = self.run_driver_ok("--clients", "openhands")
+        proc = self.run_driver_ok(
+            "--clients", "openhands", env_extra={"AUTOOS_EXEC_BIND": self.BRIDGE_BIND}
+        )
         import json
 
         data = json.loads(settings.read_text(encoding="utf-8"))
@@ -231,9 +235,47 @@ class ClientWriterTests(_DriverCase):
         self.assert_no_enable_or_start()
         # Second run: unchanged, reported as already current.
         before = settings.read_bytes()
-        again = self.run_driver_ok("--clients", "openhands")
+        again = self.run_driver_ok(
+            "--clients", "openhands", env_extra={"AUTOOS_EXEC_BIND": self.BRIDGE_BIND}
+        )
         self.assertEqual(settings.read_bytes(), before)
         self.assertIn("already current", again.stdout + again.stderr)
+
+    def test_openhands_skipped_when_bind_loopback_only(self):
+        # install.sh:505 -- loopback-only bind cannot be reached from
+        # containers: SKIP with a message naming AUTOOS_EXEC_BIND.
+        self.write_token("openhands")
+        settings = self.home / ".openhands" / "settings.json"
+        proc = self.run_driver_ok("--clients", "openhands")
+        combined = proc.stdout + proc.stderr
+        self.assertIn("AUTOOS_EXEC_BIND", combined)
+        self.assertFalse(settings.exists(), "loopback-only bind must write nothing")
+        self.assert_token_nowhere(proc)
+
+    def test_openhands_reads_bind_from_env_file(self):
+        # Same as server.py: ~/.config/autoos/exec/hostexec.env provides
+        # AUTOOS_EXEC_BIND when the env var is unset. Tests both ways.
+        self.write_token("openhands")
+        envfile = self.home / ".config" / "autoos" / "exec" / "hostexec.env"
+        envfile.parent.mkdir(parents=True, exist_ok=True)
+        settings = self.home / ".openhands" / "settings.json"
+        envfile.write_text(f"AUTOOS_EXEC_BIND={self.BRIDGE_BIND}\n", encoding="utf-8")
+        proc = self.run_driver_ok("--clients", "openhands")
+        import json
+
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        self.assertEqual(
+            data["agent_settings"]["mcp_config"]["hostexec"]["url"],
+            f"http://host.docker.internal:{TEST_PORT}/mcp",
+        )
+        self.assert_token_nowhere(proc)
+        # Loopback-only env file -> skip again.
+        settings.unlink()
+        envfile.write_text("AUTOOS_EXEC_BIND=127.0.0.1\n", encoding="utf-8")
+        proc2 = self.run_driver_ok("--clients", "openhands")
+        self.assertIn("AUTOOS_EXEC_BIND", proc2.stdout + proc2.stderr)
+        self.assertFalse(settings.exists())
+        self.assert_token_nowhere(proc2)
 
     def test_claude_keeps_unrelated_keys(self):
         self.write_token("claude")
@@ -410,7 +452,12 @@ class UnregisterTests(_DriverCase):
             self.write_token(client)
         self.write_token("qoder")
         # No --unit: one run installs the unit AND wires every client.
-        self.run_driver_ok("--clients", "openhands,claude,codex,opencode,qoder")
+        # OpenHands needs a container-reachable bind (docker bridge gateway).
+        self.run_driver_ok(
+            "--clients",
+            "openhands,claude,codex,opencode,qoder",
+            env_extra={"AUTOOS_EXEC_BIND": "172.17.0.1"},
+        )
 
     def test_unregister_twice(self):
         import json
