@@ -83,6 +83,8 @@ run log `logs/handoff-sessions/<date>/` (default date 2026-09-25 unless the line
 - R-gateway-04: After a combo/id rename, confirm the live gateway's combos match the code before routing. (why: a stale gateway 400s every card/--tier route; source: done/R-merge.md, item 1)
 - R-gateway-05: Match a tool-allowlist entry to its MCP wiring: `mcp__<name>__*`, plugin form otherwise. (why: the wrong prefix leaves the tool silently missing; source: mcp-servers-setup skill)
 - R-gateway-06: Keep a Qwen (t3-driver-free-only) request under 7000 input tokens; send one file. (why: larger requests fail 413 at its ITPM limit; source: work/L1-routing/review-b4b5.out)
+- R-gateway-07: Each heartbeat, give a subagent every probe-proposals.jsonl line newer than its leg's probe. (why: a run contradicted the record; source: test_autoos_spawner.py ProbeProposalTests)
+- R-gateway-08: Have a subagent re-run probe-toolcalls.py once measured.json results are 7+ days old. (why: operator 2026-09-26: keep setups current; source: tests/test_probe_toolcalls.py)
 
 ### brief
 
