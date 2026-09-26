@@ -1,0 +1,49 @@
+# Herdr agent multiplexer, started at boot for a login user.
+#
+# WHY A UNIT AND NOT A LOGIN SHELL: before this existed, herdr only came up when
+# somebody SSH'd in -- so every reboot silently ended the session, and nothing
+# could restore automatically, because the thing that owns the panes was not
+# running.
+#
+# WHY IT MATTERS THAT SYSTEMD STARTS IT, NOT A CLAUDE SESSION: a herdr server
+# inherits the environment of whatever launched it and hands that to every pane
+# it spawns. Started from inside a Claude session it inherits CLAUDE_CODE_*,
+# which makes every claude in every pane believe it is a CHILD session and
+# silently DISABLES TRANSCRIPT SAVING — the sessions then cannot be resumed at
+# all. The user manager's environment is clean, so this unit cannot reintroduce
+# that bug.
+#
+# WHY THE `already running` GUARD: herdr refuses to start a second instance and
+# exits 1. Without the guard, starting this unit while a manually-launched herdr
+# is up puts it in an endless Restart=on-failure loop. The unit's job is "a
+# herdr server is running", which is already satisfied in that case, so it
+# reports success and supervises nothing.
+#
+# Requires lingering so it starts at boot without a login:
+#   sudo loginctl enable-linger <user>
+# Install: see ../../install.sh --profile <yours>
+[Unit]
+Description=Herdr agent multiplexer (headless, user session)
+Documentation=file://@APPDIR@/README.md
+# The update unit runs first so a fresh herdr/claude binary is what this server
+# and every pane it spawns pick up. Wants= (not Requires=): a failed or skipped
+# update must never keep the session from coming back.
+After=network-online.target herdr-sessions-update.service
+Wants=network-online.target herdr-sessions-update.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment=SHELL=/bin/zsh
+ExecStart=/bin/sh -c 'if %h/.local/bin/herdr status 2>/dev/null | grep -q "status: running"; then echo "herdr server already running — nothing to do"; exit 0; fi; exec %h/.local/bin/herdr server'
+Restart=on-failure
+RestartSec=10
+# The guard above exits 0 when a server is already up; RemainAfterExit keeps the
+# unit active in that case (and if the binary daemonises itself) rather than flap.
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

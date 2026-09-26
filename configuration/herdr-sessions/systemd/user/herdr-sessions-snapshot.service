@@ -1,0 +1,20 @@
+# Record which Claude sessions are live, so they can be restored after a reboot.
+# Cheap (a process list + one herdr call) and refuses to overwrite a good
+# snapshot with an empty one, so running it often is safe.
+#
+# @PROFILE@ below is substituted by install.sh at install time.
+# Install: see ../../install.sh --profile <yours>
+[Unit]
+Description=Snapshot live Claude Code sessions for reboot restore
+Documentation=file://@APPDIR@/README.md
+After=herdr-server.service
+
+[Service]
+Type=oneshot
+Environment=HERDR_PROFILE=@APPDIR@/profiles/@PROFILE@.conf
+ExecStart=@APPDIR@/herdr-sessions.sh snapshot
+Nice=15
+# Without these the script output does not reach the journal, and the
+# troubleshooting commands in the README show nothing.
+StandardOutput=journal
+StandardError=journal

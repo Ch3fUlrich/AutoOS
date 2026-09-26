@@ -1,0 +1,35 @@
+[Unit]
+# Put Claude back into the herdr pane after boot, resuming the FULL conversation
+# (never the "recommended" summary, which throws away the context that made the
+# session worth restoring).
+#
+# Ordering: herdr-server must own the panes before anything can be started in
+# them; the driver additionally waits for the socket, because "unit started" and
+# "socket accepting calls" are not the same instant.
+#
+# @PROFILE@ below is substituted by install.sh at install time (--profile flag);
+# the checked-in file is a template, not something to edit and copy by hand.
+# Install: see ../../install.sh --profile <yours>
+Description=Restore the Claude Code session into Herdr after boot
+Documentation=file://@APPDIR@/README.md
+After=herdr-server.service network-online.target
+Requires=herdr-server.service
+Wants=network-online.target
+RequiresMountsFor=@APPDIR@
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=HOME=/root
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HERDR_PROFILE=@APPDIR@/profiles/@PROFILE@.conf
+ExecStart=@APPDIR@/herdr-sessions.sh restore
+# Must exceed the profile's own wait budget (WAIT_SOCKET_SEC + WAIT_PROMPT_SEC =
+# 240s), or systemd kills the unit mid-restore and the pane is left sitting on an
+# unanswered resume prompt.
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

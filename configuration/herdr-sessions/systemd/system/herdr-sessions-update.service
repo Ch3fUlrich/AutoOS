@@ -1,0 +1,31 @@
+[Unit]
+# Update the handler (herdr) and the agent (claude) BEFORE herdr-server owns a
+# pane. `herdr update` refuses to run from inside a herdr pane, and `claude
+# update` only swaps the versions/ symlink -- a session that has lived inside
+# herdr for a week never picks up either. Boot, before the server, is the one
+# moment both can be updated and the very next thing to start uses the result.
+#
+# It is NOT a gate: herdr-server only Wants= this unit. No network, a stalled
+# download, a failed update -- the driver logs it and exits 0, and the session
+# is restored on whatever version is on disk.
+Description=Update herdr and claude before the session is restored
+Documentation=file://@APPDIR@/README.md
+After=network-online.target
+Wants=network-online.target
+Before=herdr-server.service
+RequiresMountsFor=@APPDIR@
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=HOME=/root
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HERDR_PROFILE=@APPDIR@/profiles/@PROFILE@.conf
+ExecStart=@APPDIR@/herdr-sessions.sh update
+# Two downloads at UPDATE_TIMEOUT_SEC (180 s) each, plus slack.
+TimeoutStartSec=420
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

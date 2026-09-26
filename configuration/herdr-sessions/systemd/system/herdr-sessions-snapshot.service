@@ -1,0 +1,28 @@
+[Unit]
+# Record which Claude session is live, so a reboot restores that EXACT
+# conversation instead of falling back to `claude --continue` (which guesses
+# "the most recent conversation for this directory" — and /clear, or a second
+# session in the same directory, makes that guess wrong).
+#
+# Cheap — a process list plus two herdr calls — and the driver refuses to
+# overwrite a good snapshot with an empty one, so running it often is safe.
+#
+# System unit, not a --user unit: everything here runs as root and there is no
+# user session at boot.
+#
+# @PROFILE@ below is substituted by install.sh at install time.
+Description=Snapshot the live Claude Code session for reboot restore
+Documentation=file://@APPDIR@/README.md
+After=herdr-server.service
+Requires=herdr-server.service
+RequiresMountsFor=@APPDIR@
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HERDR_PROFILE=@APPDIR@/profiles/@PROFILE@.conf
+ExecStart=@APPDIR@/herdr-sessions.sh snapshot
+Nice=15
+StandardOutput=journal
+StandardError=journal
