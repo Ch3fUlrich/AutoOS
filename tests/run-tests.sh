@@ -4524,7 +4524,7 @@ if it "openhands: a failing settings writer is reported, not called written"; th
     after="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
     problems=""
     [[ "$before" == "$after" ]] || problems+="[settings.json changed although its writer failed] "
-    [[ -z "$(ls "$oh" | grep 'settings.json.autoos-backup-')" ]] || problems+="[a backup was taken for a file that was not written] "
+    ! compgen -G "$oh/settings.json.autoos-backup-*" >/dev/null || problems+="[a backup was taken for a file that was not written] "
     [[ "$out" == *"not written to $oh/settings.json"* ]] || problems+="[no warning naming $oh/settings.json, output ends: $(tail -n 3 <<<"$out")] "
     [[ "$out" != *"configuration and profiles written to"* ]] || problems+="[the success line was printed after the writer failed] "
     [[ "$out" != *"configuration unchanged"* ]] || problems+="[the 'unchanged' line was printed after the writer failed] "
