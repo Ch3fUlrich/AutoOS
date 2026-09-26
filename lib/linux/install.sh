@@ -1785,7 +1785,9 @@ install_herdr_sessions() {
         ui_err "herdr-sessions: driver failed (rc=$rc) for profile $profile"
         return 1
     fi
-    if [[ "$out" == *"already current"* ]]; then
+    # The driver prints this exact line only when no unit changed; a run that
+    # replaced one unit and left the rest current is still an install.
+    if grep -qx 'herdr-sessions: all units already current' <<<"$out"; then
         ui_ok "herdr-sessions: already current"
         INSTALL_SCRIPT_STATE=skipped
     else

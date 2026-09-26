@@ -142,14 +142,37 @@ install_unit() {  # $1=src template  $2=dest path
         return
     fi
     if [ -f "$2" ]; then
-        local backup; backup="$2.autoos-backup-$(date +%Y%m%d%H%M%S)"
-        cp -p "$2" "$backup"
+        # A name that did not exist yet: two drifted re-runs in the same second
+        # must not overwrite the first backup (lib/linux/install.sh backup_path).
+        local backup n=0; backup="$2.autoos-backup-$(date +%Y%m%d%H%M%S)"
+        local base="$backup"
+        while [ -e "$backup" ] || [ -L "$backup" ]; do
+            n=$((n + 1)); backup="$base-$n"
+        done
+        if ! cp -p "$2" "$backup"; then
+            rm -f "$backup" "$tmp"
+            echo "FATAL: could not back up $2 -- left it unchanged" >&2
+            exit 1
+        fi
         echo "    $name: differs from the installed copy -- backed up to $(basename "$backup")"
     fi
     install -m 0644 "$tmp" "$2"
     rm -f "$tmp"
+    CHANGED=$((CHANGED + 1))
     echo "    $name: installed"
 }
+
+# One line the AutoOS installer keys its "skipped" on (hard rule 3): printed
+# only when every unit was already current, never after a partial change.
+units_summary() {
+    [ "$DRY" = 1 ] && return
+    if [ "$CHANGED" = 0 ]; then
+        echo "herdr-sessions: all units already current"
+    else
+        echo "herdr-sessions: $CHANGED unit(s) installed or replaced"
+    fi
+}
+CHANGED=0
 
 # --unregister: disable + back up + remove exactly the units this scope would
 # install. Never errors on a unit that is not there (or not loaded) -- that is
@@ -197,6 +220,7 @@ if [ "$SCOPE" = user ]; then
     for u in "${UNITS[@]}"; do
         install_unit "$SRC_DIR/$u" "$DEST/$u"
     done
+    units_summary
 
     say "checking linger (needed for start-at-boot without login)"
     if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = "yes" ]; then
@@ -244,6 +268,7 @@ else
     for u in "${UNITS[@]}"; do
         install_unit "$SRC_DIR/$u" "$DEST/$u"
     done
+    units_summary
 
     say "systemd daemon-reload"
     run systemctl daemon-reload

@@ -7157,6 +7157,36 @@ EOF
     if [ "$ok" = "1" ]; then pass; else fail "rerun=[$rerun] drift=[$drift] backups=$backups"; fi
 fi
 
+if it "herdr-sessions: install.sh prints the all-current summary only when no unit changed"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    printf 'HS_SCOPE=user\nHS_WORKDIR=%s/proj\nFALLBACK=none\n' "$tmp" > "$tmp/site.conf"
+    run_hs() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1; }
+    first="$(run_hs)"; rerun="$(run_hs)"
+    echo "# hand edit" >> "$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    drift="$(run_hs)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$first" != *"herdr-sessions: all units already current"* ]] || { ok=0; echo "fresh install claims all current" >&2; }
+    [[ "$rerun" == *"herdr-sessions: all units already current"* ]] || { ok=0; echo "unchanged re-run lacks the summary" >&2; }
+    [[ "$drift" != *"herdr-sessions: all units already current"* ]] || { ok=0; echo "a run that replaced a unit claims all current" >&2; }
+    if (( ok )); then pass; else fail "first=[${first:0:200}] rerun=[${rerun:0:200}] drift=[${drift:0:300}]"; fi
+fi
+
+if it "herdr-sessions: two drifted re-runs in the same second keep two distinct backups"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    printf '#!/usr/bin/env bash\necho 20260926120000\n' > "$stub/date"; chmod +x "$stub/date"
+    printf 'HS_SCOPE=user\nHS_WORKDIR=%s/proj\nFALLBACK=none\n' "$tmp" > "$tmp/site.conf"
+    run_hs() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1; }
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    run_hs
+    echo "# edit one" >> "$unit"; run_hs
+    echo "# edit two" >> "$unit"; run_hs
+    n="$(ls "$tmp/home/.config/systemd/user" | grep -c 'herdr-sessions-restore.service.autoos-backup' || true)"
+    one="$(grep -l '# edit one' "$tmp"/home/.config/systemd/user/herdr-sessions-restore.service.autoos-backup* 2>/dev/null | wc -l)"
+    rm -rf "$tmp"
+    if [[ "$n" == 2 && "$one" -ge 1 ]]; then pass; else fail "backups=$n, backups holding the first edit=$one (a same-second backup overwrote the earlier one)"; fi
+fi
+
 if it "herdr-sessions: --unregister removes what it installed, twice is 'nothing to remove'"; then
     tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
     cat > "$tmp/site.conf" <<EOF
@@ -7217,7 +7247,8 @@ if (( dry )); then
 fi
 case "$mode" in
     fail) printf 'driver: boom\n' >&2; exit 1 ;;
-    current) printf 'already current\n'; exit 0 ;;
+    current) printf '    x.service: already current\nherdr-sessions: all units already current\n'; exit 0 ;;
+    partial) printf '    x.service: already current\n    y.service: installed\n'; exit 0 ;;
     *) printf 'installed\n' >"$dir/installed-marker"; printf 'installed from %s\n' "\$profile"; exit 0 ;;
 esac
 STUB
@@ -7380,6 +7411,16 @@ if it "herdr-sessions detect: true only when the restore service unit exists"; t
     ( SYS_HOME="$sb/home"; script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the unit file exists" >&2; }
     rm -rf "$sb"
     if (( ok )); then pass; else fail "herdr-sessions detection does not match the unit file's presence"; fi
+fi
+
+if it "herdr-sessions: a driver run that replaced some units is installed, not skipped"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"
+    herdr_stub_driver "$drv" partial
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$drv" "$profile")"
+    state="$(herdr_state "$out")"
+    rm -rf "$sb"
+    if [[ "$state" != skipped ]]; then pass; else fail "one unit changed but the component reports skipped: ${out:0:300}"; fi
 fi
 
 describe "wsl detection"
