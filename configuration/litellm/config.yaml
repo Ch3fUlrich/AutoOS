@@ -176,6 +176,28 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
   - model_name: t3-driver
     litellm_params:
+      model: samba/gpt-oss-120b
+      api_key: os.environ/SAMBA_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openai/glm-5.2
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openai/kimi-k3
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: samba/MiniMax-M3
+      api_key: os.environ/SAMBA_API_KEY
+  - model_name: t3-driver
+    litellm_params:
       model: cerebras/qwen-3.8-27b
       api_key: os.environ/CEREBRAS_API_KEY
   - model_name: t3-driver
@@ -193,10 +215,6 @@ model_list:
       model: mistral/mistral-small-latest
       api_key: os.environ/MISTRAL_API_KEY
       rpm: 2
-  - model_name: t3-driver
-    litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: openai/deepseek-v4.1-flash

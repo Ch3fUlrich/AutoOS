@@ -670,10 +670,25 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         self.assertIn("leg model", row)
 
     def test_legs_column_lists_every_leg_in_order(self):
+        # t3-driver deliberately carries the SAME real model through two
+        # providers (groq/qwen/qwen3.8-27b free, openrouter/qwen/qwen3.8-27b
+        # paid - Q1 2026-09-26, docs/plans/2026-09-25-registry-mapping.md
+        # Open choice 11's naming convention extended to a same-spelling
+        # collision): both legs render the identical backtick text
+        # "`qwen/qwen3.8-27b`", so a naive str.index() finds only the FIRST
+        # occurrence for both and cannot tell them apart. Search forward from
+        # the previous match instead, so a repeated model spelling is found
+        # at its own, later position rather than colliding on the first one.
         rendered = registry.render_models_doc(real_registry())
         row = row_for(rendered, "t3-driver")
         legs = real_registry()["routes"]["t3-driver"]["legs"]
-        positions = [row.index("`%s`" % leg.split("/", 1)[1]) for leg in legs]
+        positions = []
+        cursor = 0
+        for leg in legs:
+            needle = "`%s`" % leg.split("/", 1)[1]
+            found = row.index(needle, cursor)
+            positions.append(found)
+            cursor = found + 1
         self.assertEqual(positions, sorted(positions))
 
     def test_empty_legs_render_as_none(self):
@@ -687,10 +702,17 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         self.assertEqual(row.count("(unavailable)"), 2)
 
     def test_leg_whose_provider_is_globally_unavailable_is_marked(self):
-        # providers.openrouter.available is false today, independent of any
-        # per-route unavailable_legs annotation.
+        # A provider-wide providers.<id>.available: false (independent of any
+        # per-route unavailable_legs annotation) still marks every leg
+        # reached through it - exercised with a synthetic flip on a copied
+        # registry rather than tying this test to whichever real provider
+        # happens to be globally down today (openrouter's own blanket flag
+        # was lifted 2026-09-26 once Qwen 3.8 credits were funded; its still-
+        # dead legs are flagged individually now - see
+        # test_leg_flagged_unavailable_in_its_own_route_is_marked).
         reg = copy.deepcopy(real_registry())
         reg["routes"]["t2-orchestrator"]["unavailable_legs"] = {}
+        reg["providers"]["openrouter"]["available"] = False
         rendered = registry.render_models_doc(reg)
         row = row_for(rendered, "t2-orchestrator")
         self.assertIn("~~openrouter", row)

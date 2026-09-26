@@ -911,6 +911,8 @@ IDE_MODEL_ORDER = (
     "t4-rag",
     "gemini-3.8-flash",
     "deepseek-v4.1-flash",
+    "cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
+    "samba/gpt-oss-120b", "samba/MiniMax-M3",
     "auto/smart", "auto", "auto/cheap",
 )
 
@@ -1094,6 +1096,19 @@ OPENHANDS_TIER_ORDER = (
     "litellm-t3-driver-free-only",
     "litellm-t1-orchestrator-free-only",
     "omniroute-t1-orchestrator-free-only",
+    # NOTE (Q1, 2026-09-26 16:4xZ "Claude budget" revision): the 4 new pinned
+    # single-leg credit routes (cheaperinference/kimi-k3, cheaperinference/
+    # glm-5.2, samba/gpt-oss-120b, samba/MiniMax-M3) deliberately carry NO
+    # openhands_profile and are NOT listed here. tools/sync-openhands-
+    # profiles.py writes each tier to profiles/<tier id>.json as a literal
+    # filesystem path (measured: FileNotFoundError - it does not mkdir a
+    # nested directory), and an id of the form "omniroute-cheaperinference/
+    # kimi-k3" would create one; a route id containing "/" cannot safely get
+    # an OpenHands profile under that tool's current (unfixed) file-writing
+    # scheme. tools/audit-router.py --offline therefore still reports these 4
+    # combos as missing a tier-profiles.json entry - a known, deliberate gap
+    # (see this lane's REPORT), not something to route around by picking a
+    # different, unrelated tier id.
 )
 
 OPENHANDS_GATEWAYS = ("omniroute", "litellm")
@@ -1330,7 +1345,10 @@ def _leg_is_unavailable(leg: str, route: dict, registry: dict) -> bool:
     """True when either of spec 3.1's two operator-facing unavailability
     flags marks `leg` down: routes.<id>.unavailable_legs[leg].available is
     false, or the leg's own provider carries providers.<id>.available:
-    false (today only openrouter). Both flags are registry-only signals the
+    false (today only cxa - openrouter's own blanket flag was lifted
+    2026-09-26 once Qwen 3.8 credits were funded; its still-dead legs stay
+    flagged individually via their own unavailable_legs entry instead - see
+    providers.openrouter's $comment). Both flags are registry-only signals the
     OmniRoute gateway itself never consults (mapping doc's "PRIV2" note) -
     this render surfaces them for a human reader, it does not change what a
     caller is served."""

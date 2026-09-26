@@ -64,6 +64,22 @@
     }
   },
   "models": {
+    "MiniMax-M3": {
+      "$comment": "samba's leg (extension item 1, operator priority 2026-09-26T15:54Z), exact operator-given spelling/casing preserved. tier paid, trains_on_prompts true (conservative default, providers.samba's own $comment) - NOT private-safe, never added to a -clean route. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror sibling minimax-m2.7 entry already in this registry; price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "minimax",
+      "id": "MiniMax-M3",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "proven"
+    },
     "claude-opus-4-6": {
       "$comment": "cc (Claude Code subscription) overflow leg; same sourced $0 marginal cost and conservative ladder as claude-opus-4-6-thinking.",
       "context_advertised": 200000,
@@ -297,6 +313,22 @@
       "reasoning": false,
       "tool_calls": "unproven"
     },
+    "glm-5.2": {
+      "$comment": "cheaperinference's leg (operator 'Claude budget' revision, briefs/common.md 2026-09-26 16:2xZ/16:4xZ): S0-S1 edits/docs/triage, measured 200 by L0 at 16:4xZ. tier paid, trains_on_prompts false per providers.cheapinference's researched $comment (https://www.cheaperinference.com/legal/privacy). Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. Unsourced (D20): context/output mirror the sibling cheaperinference-hosted entries already in this registry (e.g. glm-4.5-air); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention. reasoning/effort_ladder default to false/[] - unmeasured, not evidence the model lacks reasoning. tool_calls promoted to proven from this probe (3/3 trials).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "zhipu",
+      "id": "glm-5.2",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "proven"
+    },
     "google/gemini-3.8-flash": {
       "$comment": "openrouter's paid twin of the native gemini-3.8-flash free head (docs/models.md: the bare 'openrouter/gemini-3.8-flash' spelling 400s - only this google-scoped spelling ships). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
       "context_advertised": 131072,
@@ -318,7 +350,7 @@
       "tool_calls": "unproven"
     },
     "gpt-oss-120b": {
-      "$comment": "cerebras's and sambanova's shared bare spelling of the same free GPT-OSS-120B model as 'openai/gpt-oss-120b' (groq's spelling); one entry covers both providers' legs.",
+      "$comment": "cerebras's and sambanova's shared bare spelling of the same free GPT-OSS-120B model as 'openai/gpt-oss-120b' (groq's spelling); one entry covers both providers' legs. Q1 extension 2026-09-26: samba/gpt-oss-120b (new paid-credit provider) also resolves to this entry; tier/trains_on_prompts still resolve correctly per-leg via each serving provider's own fields (samba: paid+trains; groq/cerebras/sambanova: free+no-train) since this entry carries no model-level override. Probed 2026-09-26 (Q1 lane): samba/gpt-oss-120b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq/cerebras/sambanova's copies were not themselves probed by this run.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -911,8 +943,24 @@
       "reasoning": false,
       "tool_calls": "unproven"
     },
+    "qwen/qwen3-coder-flash": {
+      "$comment": "openrouter's coding-specialised sibling of qwen3.8-flash, same SPEED directive (operator 2026-09-26T15:44Z/15:49Z): S0-S1 small edits/docs/triage/lint fixes, measured 200 in 1.1-1.4s by L0. tier paid / trains_on_prompts false inherited from providers.openrouter. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "qwen/qwen3-coder-flash",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "proven"
+    },
     "qwen/qwen3.8-27b": {
-      "$comment": "groq's vendor-prefixed spelling; true free tier (t3-driver-free-only).",
+      "$comment": "groq's vendor-prefixed spelling; true free tier (t3-driver-free-only). Q1 2026-09-26: openrouter/qwen/qwen3.8-27b (SPEED directive, S1-S2 worker routes) resolves to this SAME entry - see the module-level note above models['qwen/qwen3.8-27b'] in tools/registry.py's git history / this migration's commit for why price stays groq's-free 0.0 rather than openrouter's real paid price (one model id, two providers with different commercial terms; tier/trains_on_prompts still resolve correctly per-leg via the provider fallback, only price is shared/imprecise). Probed 2026-09-26 (Q1 lane): openrouter/qwen/qwen3.8-27b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq's copy was not itself probed by this run - tools/autoos_resolver.py _tool_calls_value() already prefers the overlay's leg-specific verdict over this model default. Q1 2026-09-26 16:4xZ revision: the openrouter/qwen/qwen3.8-27b leg added for the (withdrawn) SPEED directive is removed from every route - SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -926,6 +974,38 @@
       "price_out": 0.0,
       "reasoning": false,
       "tool_calls": "unproven"
+    },
+    "qwen/qwen3.8-flash": {
+      "$comment": "openrouter's leg for the SPEED directive (operator 2026-09-26T15:44Z/15:49Z, common.md 'Model mix' UPDATE): S0-S1 small edits/docs/triage/lint fixes, measured 200 in 1.1-1.4s by L0. tier paid (providers.openrouter.tier), trains_on_prompts false inherited from providers.openrouter (no model-level override needed - the provider itself is already paid + non-training). Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "qwen/qwen3.8-flash",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "proven"
+    },
+    "qwen/qwen3.8-max-0902": {
+      "$comment": "openrouter's biggest Qwen 3.8 leg, SPEED directive (operator 2026-09-26T15:44Z/15:49Z): S2-S3 harder implement / cross-family reviews, measured 200 in 2.6s by L0. tier paid / trains_on_prompts false inherited from providers.openrouter. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "qwen/qwen3.8-max-0902",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "proven"
     }
   },
   "policy": {
@@ -1371,6 +1451,7 @@
   },
   "providers": {
     "SambaNova": {
+      "$comment": "Privacy research 2026-09-26 (Q1 lane): SambaNova's general Privacy Policy (https://sambanova.ai/privacy-policy) and Terms & Conditions (https://sambanova.ai/terms-and-conditions) were fetched and read; neither makes any statement about whether SambaNova Cloud API inference/prompts are used to train models, nor about opting out. Inconclusive research defaults conservative (trains_on_prompts: true, was unsourced 'false' before this migration) per operator policy 2026-09-26 ('default true / not private-safe unless the policy clearly says no training'). Distinct from the new 'samba' provider (a separately-funded paid credit tier) - see that entry's own $comment.",
       "api_base": null,
       "id": "SambaNova",
       "litellm_env": "SAMBANOVA_API_KEY",
@@ -1378,7 +1459,7 @@
       "omniroute_id": "sambanova",
       "provider_data": null,
       "tier": "free",
-      "trains_on_prompts": false
+      "trains_on_prompts": true
     },
     "antigravity": {
       "$comment": "Google Antigravity OAuth bridge (agy CLI): hosts both Gemini and Claude legs (gemini-3.7-flash-high/medium, claude-opus-4-6-thinking). No published data-training policy found for this consumer surface (checked docs/ and .agents/skills/unattended-orchestration/, 2026-09-25); trains_on_prompts defaults conservatively to true (unmeasured, D8's 'assume the less private option' pattern). Never referenced by a -clean route today, so this default changes no filter outcome.",
@@ -1438,6 +1519,7 @@
       "trains_on_prompts": false
     },
     "cheapinference": {
+      "$comment": "Privacy research 2026-09-26 (Q1 lane): https://www.cheaperinference.com/legal/privacy states 'We do not use customer prompt or response bodies to train Keak models' and 'Cheaper Inference does not store prompt or response bodies in its application database' - only operational/billing metadata (model, endpoint, timestamps, token usage, latency) is retained, generally 12 months. CheaperInference is itself a marketplace proxy to upstream providers (OpenAI/Anthropic/Google/Meta/etc, owned by Keak) - this citation covers CheaperInference's own handling only, not each upstream provider's separate policy. trains_on_prompts: false confirmed (was unsourced before this migration).",
       "api_base": "https://api.cheaperinference.com/v1",
       "id": "cheapinference",
       "litellm_env": "CHEAPINFERENCE_API_KEY",
@@ -1468,6 +1550,18 @@
       "provider_data": null,
       "tier": "free",
       "trains_on_prompts": false
+    },
+    "cxa": {
+      "$comment": "The Codex app-server transport in OmniRoute (cxa/*) is NOT configured: 503 'not configured', measured by L0 2026-09-26T15:44Z (logs/handoff-sessions/20260925/briefs/common.md 'Model mix' / inbox/L1-routing.md same timestamp). No route references a cxa/* leg today - this entry exists only so the registry's existing unavailability mechanism (available: false, same shape as providers.openrouter's 2026-09-25 entry) immediately drops any future cxa/* leg a route might add, per tools/autoos_resolver.py _serving_legs_raw's provider-level check. The codex CLI itself keeps routing through the gateway only (omniroute run codex ...), unaffected.",
+      "api_base": null,
+      "available": false,
+      "id": "cxa",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "omniroute_id": "cxa",
+      "provider_data": null,
+      "tier": "subscription",
+      "trains_on_prompts": true
     },
     "deepseek": {
       "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either.",
@@ -1669,10 +1763,10 @@
     "openrouter": {
       "$comment": [
         "KNOWN EXCEPTION (provider-level trains_on_prompts cannot express this): the meta/muse-spark-1.3-contributor leg reached through this provider trains by contract; combos.json's own $comment documents the 2026-09-21 operator downgrade this caused - 't1-orchestrator-clean ... no longer means trains-nothing - it means paid-only'. Every other leg reached through openrouter (deepseek, mistral, google twins) does not train.",
-        "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg."
+        "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
+        "Partial recovery, operator 2026-09-26T15:44Z/15:49Z (L0, common.md 'Model mix' UPDATE): operator funded OpenRouter credits for Qwen 3.8 legs specifically (qwen3.8-flash/qwen3-coder-flash/qwen3.8-27b/qwen3.8-max-0902 all measured 200, 0.9-2.6s) - the blanket provider-level 'available: false' from 2026-09-25 is removed so those new legs (and the deepseek-v4-pro/deepseek-v4-flash credit legs added 2026-09-26) can actually serve. This does NOT resurrect the other openrouter legs still dead from 2026-09-25 (deepseek/deepseek-v4.1-flash, google/gemini-3.8-flash, meta/muse-spark-1.3-contributor incl. t1-orchestrator-clean's only leg): each of those already carries its own routes.*.unavailable_legs entry, unaffected by this provider-wide flag's removal - see tools/registry.py _serving_legs_raw, which checks route-level unavailable_legs before the provider-level flag, so both gates are independently enforced. Re-probe before trusting any of the other three again."
       ],
       "api_base": null,
-      "available": false,
       "id": "openrouter",
       "litellm_env": "OPENROUTER_API_KEY",
       "litellm_prefix": null,
@@ -1680,6 +1774,17 @@
       "provider_data": null,
       "tier": "paid",
       "trains_on_prompts": false
+    },
+    "samba": {
+      "$comment": "New paid-credit access tier funded 2026-09-26 (orchestrator extension, operator priority 2026-09-26T15:54Z), distinct from the pre-existing free 'SambaNova' provider (omniroute_id 'sambanova') used by t2-worker/t2-worker-free-only today - 'samba' is its own leg prefix (measured leg strings: samba/DeepSeek-V3.2, samba/MiniMax-M3, samba/gpt-oss-120b), not resolvable via the 'SambaNova' key or its 'sambanova' omniroute_id (tools/registry.py resolve_leg matches on exact spelling). trains_on_prompts: true is the conservative default (see SambaNova's own $comment for the research checked, which was inconclusive for the whole SambaNova surface) - not private-safe until a policy is found that clearly says otherwise. litellm_env/omniroute_id are unsourced placeholders (D20): this migration only declares and probes the leg via the OmniRoute gateway, real wiring is a follow-up.",
+      "api_base": null,
+      "id": "samba",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "omniroute_id": "samba",
+      "provider_data": null,
+      "tier": "paid",
+      "trains_on_prompts": true
     },
     "zen": {
       "$comment": "KNOWN EXCEPTION: the free 'muse-spark-1.3-contributor-free' promo leg trains by contract like its contributor siblings, but no -clean combo ever references it - only the paid opencode-zen/deepseek-v4.1-flash leg does, which does not train (see models.'muse-spark-1.3-contributor-free').",
@@ -1745,6 +1850,48 @@
           "context": 131072,
           "display_name": "bootstrap: auto smart (no combo needed)",
           "effort_default": "xhigh",
+          "output": 32768
+        }
+      }
+    },
+    "cheaperinference/glm-5.2": {
+      "$comment": "Pinned single-model route (mapping doc Open choice 11: a route id may coincide with a model id/leg spelling): cheaperinference's glm-5.2, S0-S1 edits/docs/triage, from the 2026-09-26 16:4xZ 'Claude budget' worker table (briefs/common.md). Exists so `--model omniroute/cheaperinference/glm-5.2` is independently addressable (declared_models() in tools/autoos-agent.py needs an opencode.jsonc modelID, which only a named route - not a bare route leg - ever renders into), per this lane's 'still wanted' item: `--client opencode --model omniroute/cheaperinference/glm-5.2 --dry-run` must pass.",
+      "class": "cheap",
+      "id": "cheaperinference/glm-5.2",
+      "legs": [
+        "cheaperinference/glm-5.2"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "cheaperinference glm-5.2 (S0-S1 credit)",
+          "output": 16384
+        }
+      }
+    },
+    "cheaperinference/kimi-k3": {
+      "$comment": "Pinned single-model route (mapping doc Open choice 11: a route id may coincide with a model id/leg spelling): cheaperinference's kimi-k3, S1-S2 implement + tests, from the 2026-09-26 16:4xZ 'Claude budget' worker table (briefs/common.md). Exists so `--model omniroute/cheaperinference/kimi-k3` is independently addressable (declared_models() in tools/autoos-agent.py needs an opencode.jsonc modelID, which only a named route - not a bare route leg - ever renders into), per this lane's 'still wanted' item: `--client opencode --model omniroute/cheaperinference/kimi-k3 --dry-run` must pass.",
+      "class": "cheap",
+      "id": "cheaperinference/kimi-k3",
+      "legs": [
+        "cheaperinference/kimi-k3"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "cheaperinference kimi-k3 (S1-S2 credit)",
           "output": 32768
         }
       }
@@ -1842,6 +1989,48 @@
             "max_output_tokens": 32768,
             "reasoning": true
           },
+          "output": 32768
+        }
+      }
+    },
+    "samba/MiniMax-M3": {
+      "$comment": "Pinned single-model route (mapping doc Open choice 11: a route id may coincide with a model id/leg spelling): samba's paid-credit MiniMax-M3 leg, S1-S2 implement + tests, from the 2026-09-26 16:4xZ 'Claude budget' worker table (briefs/common.md). Exists so `--model omniroute/samba/MiniMax-M3` is independently addressable (declared_models() in tools/autoos-agent.py needs an opencode.jsonc modelID, which only a named route - not a bare route leg - ever renders into), per this lane's 'still wanted' item: `--client opencode --model omniroute/samba/MiniMax-M3 --dry-run` must pass.",
+      "class": "cheap",
+      "id": "samba/MiniMax-M3",
+      "legs": [
+        "samba/MiniMax-M3"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "samba MiniMax-M3 (S1-S2 credit)",
+          "output": 16384
+        }
+      }
+    },
+    "samba/gpt-oss-120b": {
+      "$comment": "Pinned single-model route (mapping doc Open choice 11: a route id may coincide with a model id/leg spelling): samba's paid-credit gpt-oss-120b leg, S0-S1 edits/docs/triage, from the 2026-09-26 16:4xZ 'Claude budget' worker table (briefs/common.md). Exists so `--model omniroute/samba/gpt-oss-120b` is independently addressable (declared_models() in tools/autoos-agent.py needs an opencode.jsonc modelID, which only a named route - not a bare route leg - ever renders into), per this lane's 'still wanted' item: `--client opencode --model omniroute/samba/gpt-oss-120b --dry-run` must pass.",
+      "class": "cheap",
+      "id": "samba/gpt-oss-120b",
+      "legs": [
+        "samba/gpt-oss-120b"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "samba gpt-oss-120b (S0-S1 credit)",
           "output": 32768
         }
       }
@@ -2125,6 +2314,10 @@
           "$comment": "L0 decision 2026-09-26T11:44Z (measured): 402 billing_error payment_required; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
           "available": false
         },
+        "cheaperinference/deepseek-v4-flash": {
+          "$comment": "Operator decision 2026-09-26 16:4xZ ('Claude budget' revision, briefs/common.md): 'DeepSeek = ONLY V4.1 Flash: native deepseek/deepseek-flash or openrouter/deepseek/deepseek-v4.1-flash ... incl. samba/cheaperinference DeepSeek rows' - this leg is DeepSeek v4 (not v4.1), so it is out. Kept in place (operator flags, never deletes or reorders) so combos.json still mirrors today's committed data.",
+          "available": false
+        },
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
           "available": false
@@ -2251,11 +2444,15 @@
       "legs": [
         "mistral/mistral-code-latest",
         "groq/qwen/qwen3.8-27b",
+        "samba/gpt-oss-120b",
+        "cheaperinference/glm-5.2",
+        "deepseek/deepseek-flash",
+        "cheaperinference/kimi-k3",
+        "samba/MiniMax-M3",
         "cerebras/qwen-3.8-27b",
         "cheaperinference/glm-4.5-air",
         "cheaperinference/minimax-m2.7",
         "mistral/mistral-small-latest",
-        "deepseek/deepseek-flash",
         "opencode-zen/deepseek-v4.1-flash"
       ],
       "strategy": "priority",
@@ -2444,5 +2641,5 @@
       }
     }
   },
-  "version": "2026-09-25"
+  "version": "2026-09-26"
 }
