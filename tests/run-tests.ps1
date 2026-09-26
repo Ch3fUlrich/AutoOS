@@ -5637,6 +5637,43 @@ function Read-RepoOpenCodeJsonc {
     ($raw -replace '(?m)^\s*//.*$', '') | ConvertFrom-Json
 }
 
+# Stand-in `opencode` that RECORDS how it was called and can answer strictly: each
+# call appends `[<arguments>]` to opencode-args.log beside it, then it prints $Line
+# (nothing when empty) and exits $ExitCode. With -OnlyVersion it answers only when
+# its arguments are exactly `--version` and fails (exit 64, stderr) for anything
+# else, so a caller that stops asking for --version gets no version at all. Keep
+# $Line to characters cmd.exe passes through echo unchanged (no % & | < > ^ ( ) !).
+function New-OpenCodeArgsStandIn {
+    param(
+        [Parameter(Mandatory)][string]$Dir,
+        [string]$Line = '',
+        [int]$ExitCode = 0,
+        [switch]$OnlyVersion
+    )
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $lines = @('@echo off', '>>"%~dp0opencode-args.log" echo [%*]')
+        if ($OnlyVersion) {
+            $lines += 'if "%~1"=="--version" if "%~2"=="" goto :answer'
+            $lines += 'echo unexpected arguments 1>&2'
+            $lines += 'exit /b 64'
+            $lines += ':answer'
+        }
+        if ($Line -ne '') { $lines += "echo $Line" }
+        if ($ExitCode -ne 0) { $lines += 'echo error: cannot start 1>&2' }
+        $lines += "exit /b $ExitCode"
+        [IO.File]::WriteAllText((Join-Path $Dir 'opencode.cmd'), (($lines -join "`r`n") + "`r`n"))
+    } else {
+        $sh = "#!/bin/sh`n" + 'printf ' + "'[%s]\n'" + ' "$*" >> "${0%/*}/opencode-args.log"' + "`n"
+        if ($OnlyVersion) { $sh += 'if [ "$#" -ne 1 ] || [ "$1" != "--version" ]; then echo "unexpected arguments" >&2; exit 64; fi' + "`n" }
+        if ($Line -ne '') { $sh += "echo '$Line'`n" }
+        if ($ExitCode -ne 0) { $sh += 'echo "error: cannot start" >&2' + "`n" }
+        $sh += "exit $ExitCode`n"
+        $fake = Join-Path $Dir 'opencode'
+        [IO.File]::WriteAllText($fake, $sh)
+        & chmod +x $fake
+    }
+}
+
 Test-Case 'opencode V2: Test-AutoOSOpenCodeV2 tells V2 from V1 by --version, like the Linux writer' {
     Invoke-OpenCodeScratch -Body {
         param($c)
@@ -5654,6 +5691,20 @@ Test-Case 'opencode V2: Test-AutoOSOpenCodeV2 tells V2 from V1 by --version, lik
             New-OpenCodeStandIn -Dir $c.Bin -Line $v
             $got = Test-AutoOSOpenCodeV2
             if ($got -ne $cases[$v]) { throw "opencode --version printing [$v]: Test-AutoOSOpenCodeV2 = $got, want $($cases[$v])" }
+        }
+
+        # The stand-in above prints its version for ANY arguments, so that loop passes
+        # even if the function stops calling --version. This one records how it was
+        # called and answers only to exactly `--version`: the recorded call must be
+        # that one call, and the answers must not change.
+        $argsLog = Join-Path $c.Bin 'opencode-args.log'
+        foreach ($v in $cases.Keys) {
+            New-OpenCodeArgsStandIn -Dir $c.Bin -Line $v -OnlyVersion
+            Remove-Item -LiteralPath $argsLog -Force -ErrorAction SilentlyContinue
+            $got = Test-AutoOSOpenCodeV2
+            $calls = @(Get-Content -LiteralPath $argsLog -ErrorAction SilentlyContinue)
+            if (($calls -join '|') -cne '[--version]') { throw "Test-AutoOSOpenCodeV2 ran opencode as [$($calls -join '|')], want exactly one call, [--version]" }
+            if ($got -ne $cases[$v]) { throw "an opencode that prints [$v] only for --version: Test-AutoOSOpenCodeV2 = $got, want $($cases[$v])" }
         }
         Pass
     }
@@ -5726,6 +5777,49 @@ Test-Case 'opencode V2: a V1 CLI gets no providers block' {
         if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw 'the V1 gateway provider block went missing' }
         if ($null -eq $w.provider.PSObject.Properties['custom']) { throw 'a foreign V1 provider of the user was dropped' }
         if ($w.model -notlike 'ollama/*') { throw "a V1 CLI's default model is not the Ollama default: [$($w.model)]" }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: an opencode that is missing, fails or prints garbage for --version is taken for V1' {
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        $pathBefore = $env:PATH
+        $sep = [IO.Path]::PathSeparator
+        $scenarios = [ordered]@{
+            'is missing'                     = $null
+            'exits 1 and prints nothing'     = @{ Line = ''; ExitCode = 1 }
+            'exits 0 and prints nothing'     = @{ Line = ''; ExitCode = 0 }
+            'prints text that is no version' = @{ Line = 'usage opencode command'; ExitCode = 0 }
+            'prints the number 12.2.0'       = @{ Line = 'build 12.2.0 nightly'; ExitCode = 0 }
+        }
+        foreach ($name in $scenarios.Keys) {
+            $env:PATH = $pathBefore
+            foreach ($f in @('opencode', 'opencode.cmd', 'opencode-args.log')) { Remove-Item -LiteralPath (Join-Path $c.Bin $f) -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $c.CfgFile, $c.AppDataFile -Force -ErrorAction SilentlyContinue
+            $spec = $scenarios[$name]
+            if ($null -eq $spec) {
+                # Missing: the stand-in is gone, and so is every directory that holds a
+                # real opencode (a developer machine has one), so nothing answers.
+                $kept = @()
+                foreach ($dir in $pathBefore.Split($sep)) {
+                    if (-not $dir) { continue }
+                    $holdsOne = @(Get-ChildItem -LiteralPath $dir -Filter 'opencode*' -Force -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -eq 'opencode' }).Count -gt 0
+                    if (-not $holdsOne) { $kept += $dir }
+                }
+                $env:PATH = $kept -join $sep
+                if (@(Get-Command opencode -CommandType Application -ErrorAction SilentlyContinue).Count -gt 0) { throw 'an opencode stayed on PATH after hiding every directory that holds one, so the missing case cannot be tested here' }
+            } else {
+                New-OpenCodeArgsStandIn -Dir $c.Bin -Line $spec.Line -ExitCode $spec.ExitCode
+            }
+            $isV2 = Test-AutoOSOpenCodeV2
+            if ($isV2 -ne $false) { throw "opencode $name when asked for --version: Test-AutoOSOpenCodeV2 = [$isV2], want False" }
+            $null = & $c.Run
+            $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $w.PSObject.Properties['providers']) { throw "opencode $name when asked for --version: the config got a V2 providers block" }
+            if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw "opencode $name when asked for --version: the V1 gateway provider block went missing" }
+        }
+        $env:PATH = $pathBefore
         Pass
     }
 }
