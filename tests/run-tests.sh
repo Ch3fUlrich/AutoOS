@@ -11471,6 +11471,73 @@ if it "aistack: init twice: 0600 env files, the second run skips, user values su
     if (( ok )); then pass; else fail "init is not idempotent read-modify-write"; fi
 fi
 
+# Same class as lib/linux/install.sh backup_path/backup_file (main fixed
+# this there): ensure_env_file's own backup used a plain <file>.autoos-
+# backup-<stamp> name with a bare cp, so two changed writes to the same env
+# file in the same second let the second cp overwrite the first backup and
+# destroy it. Pin `date` on PATH so both writes land in the same "second".
+if it "backup residual: aistack backs up stack.env twice in one second without overwriting"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf '#!/bin/sh\necho 20260101-000000\n' >"$d/bin/date"; chmod +x "$d/bin/date"
+    printf '# mine\nMY_EXTRA=keep\n' >"$d/cfg/stack.env"
+    contentA="$(cat "$d/cfg/stack.env")"
+    _aistack "$d" init >/dev/null
+    sed -i '/^AUTOOS_UID=/d' "$d/cfg/stack.env"
+    contentB="$(cat "$d/cfg/stack.env")"
+    _aistack "$d" init >/dev/null
+    ok=1
+    base="$d/cfg/stack.env.autoos-backup-20260101-000000"
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup content wrong" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d/cfg" -maxdepth 1 -name 'stack.env.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    grep -q '^AUTOOS_UID=' "$d/cfg/stack.env" || { ok=0; echo "final file missing the re-added key" >&2; }
+    grep -q '^MY_EXTRA=keep$' "$d/cfg/stack.env" || { ok=0; echo "user's extra line lost" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "ai-stack overwrote a same-second stack.env backup"; fi
+fi
+
+# replace_dir_with_copy's own aside= (moving a non-empty dest out of the way
+# before the swap) used <dest>.autoos-backup-<ts>, then a single -$$ escape
+# if that name was taken - safe against a second SEPARATE process (a
+# different PID) but not against a second PRE-EXISTING collision at that
+# exact name. Extracted in isolation (sourcing the whole script would run its
+# case-driven CLI dispatch and exit this test shell): pre-seed both names an
+# old run could have left and confirm the previous dest still lands under a
+# genuinely free name, never inside either.
+if it "backup residual: aistack replace_dir_with_copy never lands inside a taken aside name"; then
+    d="$(mktemp -d)"
+    src="$d/src"; dest="$d/dest"
+    mkdir -p "$src" "$dest"
+    printf 'new\n' >"$src/data"
+    printf 'old\n' >"$dest/data"
+    ts="20260101-000000"
+    base="$dest.autoos-backup-$ts"
+    mkdir -p "$base"; printf 'sentinelA\n' >"$base/marker"
+    mkdir -p "$base-$$"; printf 'sentinelB\n' >"$base-$$/marker"
+    fn="$d/fn.sh"
+    sed -n '/^autoos_backup_path()/,/^}/p;/^replace_dir_with_copy()/,/^}/p' "$AISTACK/ai-stack.sh" >"$fn"
+    # shellcheck disable=SC1090  # $fn is a scratch fixture generated above, not a repo file
+    ( . "$fn"; replace_dir_with_copy "$src" "$dest" "$ts" ) >/dev/null 2>&1; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "replace_dir_with_copy failed, rc=$rc" >&2; }
+    [[ "$(cat "$dest/data" 2>/dev/null)" == "new" ]] || { ok=0; echo "dest not swapped to the new content" >&2; }
+    [[ "$(cat "$base/marker" 2>/dev/null)" == "sentinelA" ]] || { ok=0; echo "the first taken aside name was overwritten" >&2; }
+    [[ "$(cat "$base-$$/marker" 2>/dev/null)" == "sentinelB" ]] || { ok=0; echo "the second taken aside name (this process's PID) was overwritten" >&2; }
+    extra=""
+    for cand in "$d"/dest.autoos-backup-"$ts"*; do
+        [[ "$cand" == "$base" || "$cand" == "$base-$$" ]] && continue
+        [[ -f "$cand/data" ]] && extra="$cand"
+    done
+    [[ -n "$extra" && "$(cat "$extra/data" 2>/dev/null)" == "old" ]] \
+        || { ok=0; echo "the previous dest did not land under a third, genuinely free name" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "replace_dir_with_copy's aside collided with an existing name"; fi
+fi
+
 if it "aistack: init reuses the pinned opencode-serve password so phone logins survive"; then
     d="$(_aistack_sandbox)"
     mkdir -p "$d/home/.config/autoos"
