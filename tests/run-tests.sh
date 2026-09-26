@@ -2967,6 +2967,129 @@ if it "install_antigravity writes no key and no source list when the key fetch f
     if (( ok )); then pass; else fail "a failed Antigravity key fetch leaves a half-configured apt"; fi
 fi
 
+# VS Code, Google Chrome and the GitHub CLI share the pattern Antigravity was
+# fixed for: guard on the key file, fetch, install, write the apt source line.
+# install_component runs an installer with errexit OFF, so an unchecked failed
+# fetch installed an EMPTY key file that the `-f` guard then trusted forever
+# (apt failed on every later run). The key must exist only when it is non-empty.
+#
+# apt_key_case <vscode|chrome|gh>: sets AK_* for one installer.
+apt_key_case() {
+    case "$1" in
+        vscode) AK_FN=install_vscode; AK_KEY=/etc/apt/keyrings/packages.microsoft.gpg
+                AK_LIST=/etc/apt/sources.list.d/vscode.list; AK_PKG=code
+                AK_URL=https://packages.microsoft.com/keys/microsoft.asc; AK_BODY="DEARMORED:ARMORED-KEY"
+                AK_LINE="deb [arch=amd64,arm64,armhf signed-by=$AK_KEY] https://packages.microsoft.com/repos/code stable main" ;;
+        chrome) AK_FN=install_google_chrome; AK_KEY=/etc/apt/keyrings/google-chrome.gpg
+                AK_LIST=/etc/apt/sources.list.d/google-chrome.list; AK_PKG=google-chrome-stable
+                AK_URL=https://dl.google.com/linux/linux_signing_key.pub; AK_BODY="DEARMORED:ARMORED-KEY"
+                AK_LINE="deb [arch=amd64 signed-by=$AK_KEY] http://dl.google.com/linux/chrome/deb/ stable main" ;;
+        gh)     AK_FN=install_gh; AK_KEY=/etc/apt/keyrings/githubcli-archive-keyring.gpg
+                AK_LIST=/etc/apt/sources.list.d/github-cli.list; AK_PKG=gh
+                AK_URL=https://cli.github.com/packages/githubcli-archive-keyring.gpg; AK_BODY="ARMORED-KEY"
+                AK_LINE="deb [arch=amd64 signed-by=$AK_KEY] https://cli.github.com/packages stable main" ;;
+    esac
+}
+
+# apt_key_run <scratch> <installer function> [fail-curl|empty-body]
+# One installer run in its own subshell against a scratch apt tree
+# (AUTOOS_APT_PREFIX). Every writing stub refuses a path outside the scratch
+# tree, so even code that ignores the seam cannot touch the real /etc/apt, as
+# root or not. Temp files go to <scratch>/tmp so leftovers are visible.
+apt_key_run() {
+    local sb="$1" fn="$2" mode="${3:-}"
+    (
+        AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""; AUTOOS_APT_PREFIX="$sb"; APT_UPDATED=0
+        export TMPDIR="$sb/tmp"; mkdir -p "$TMPDIR"
+        log="$sb/calls.log"
+        inside() { [[ "$1" == "$sb"/* ]] || { printf 'REFUSED (outside the scratch tree) %s\n' "$1" >>"$log"; return 1; }; }
+        curl() {
+            printf 'curl %s\n' "$*" >>"$log"
+            [[ "$mode" == fail-curl ]] && return 22
+            [[ "$mode" == empty-body ]] && return 0
+            printf 'ARMORED-KEY\n'
+        }
+        gpg() { printf 'gpg %s\n' "$*" >>"$log"; sed 's/^/DEARMORED:/'; }
+        install() {
+            printf 'install %s\n' "$*" >>"$log"
+            local src="${*: -2:1}" dst="${*: -1}"
+            inside "$dst" || return 1
+            command mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
+        }
+        tee() {
+            printf 'tee %s\n' "$*" >>"$log"
+            inside "${*: -1}" || { cat >/dev/null; return 1; }
+            command tee "$@"
+        }
+        mkdir() { printf 'mkdir %s\n' "$*" >>"$log"; inside "${*: -1}" || return 1; command mkdir "$@"; }
+        # shellcheck disable=SC2120  # stub: the installers (sourced, not visible here) call it with arguments
+        run() { printf 'run %s\n' "$*" >>"$log"; }
+        has_cmd() { [[ "$1" == apt-get ]]; }
+        dpkg() { printf 'amd64\n'; }
+        "$fn"
+    ) 2>&1
+}
+
+for _k in vscode chrome gh; do
+    if it "apt keys: $_k leaves no key when the download fails"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; ok=1
+        for mode in fail-curl empty-body; do
+            rm -rf "$sb/etc" "$sb/tmp" "$sb/calls.log"; mkdir -p "$sb/etc/apt/sources.list.d"
+            out="$(apt_key_run "$sb" "$AK_FN" "$mode")"; rc=$?
+            (( rc != 0 )) || { ok=0; echo "$mode: rc=0 counts a failed key download as installed" >&2; }
+            [[ -z "$(find "$sb/etc" -type f)" ]] || { ok=0; echo "$mode: left files behind: $(find "$sb/etc" -type f | tr '\n' ' ')" >&2; }
+            [[ -z "$(find "$sb/tmp" -type f)" ]] || { ok=0; echo "$mode: temp file not removed" >&2; }
+            grep -qF -- "$AK_URL" "$sb/calls.log" 2>/dev/null || { ok=0; echo "$mode: the key download was never attempted" >&2; }
+            ! grep -q 'apt-get install' "$sb/calls.log" 2>/dev/null || { ok=0; echo "$mode: went on to apt-get install" >&2; }
+            [[ "$out" == *"not installed"* ]] || { ok=0; echo "$mode: no reason given: ${out:0:200}" >&2; }
+        done
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "a failed $_k key download leaves an empty key or a source line apt cannot use"; fi
+    fi
+
+    if it "apt keys: $_k an existing empty key is replaced on the next successful run"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/keyrings" "$sb/etc/apt/sources.list.d"
+        # What the old code left behind after a failed download: an empty key
+        # and the source line that names it.
+        : >"$sb$AK_KEY"; printf '%s\n' "$AK_LINE" >"$sb$AK_LIST"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc=$?
+        ok=1
+        (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:200}" >&2; }
+        [[ "$(cat "$sb$AK_KEY" 2>/dev/null)" == "$AK_BODY" ]] || { ok=0; echo "the empty key was trusted, not replaced: [$(cat "$sb$AK_KEY" 2>/dev/null)]" >&2; }
+        [[ "$(cat "$sb$AK_LIST")" == "$AK_LINE" ]] || { ok=0; echo "source line changed: $(cat "$sb$AK_LIST")" >&2; }
+        grep -qx "run apt-get install -y $AK_PKG" "$sb/calls.log" 2>/dev/null || { ok=0; echo "the package was not installed: $(cat "$sb/calls.log" 2>/dev/null)" >&2; }
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "an empty key from an earlier bad run is trusted forever"; fi
+    fi
+
+    if it "apt keys: $_k a second successful run is unchanged"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc1=$?
+        ok=1
+        (( rc1 == 0 )) || { ok=0; echo "first run rc=$rc1: ${out:0:200}" >&2; }
+        [[ "$(cat "$sb$AK_KEY" 2>/dev/null)" == "$AK_BODY" ]] || { ok=0; echo "first run: key is [$(cat "$sb$AK_KEY" 2>/dev/null)]" >&2; }
+        [[ "$(cat "$sb$AK_LIST" 2>/dev/null)" == "$AK_LINE" ]] || { ok=0; echo "first run: source line is [$(cat "$sb$AK_LIST" 2>/dev/null)]" >&2; }
+        [[ "$(grep '^run ' "$sb/calls.log" 2>/dev/null)" == $'run apt-get update -y\nrun apt-get install -y '"$AK_PKG" ]] \
+            || { ok=0; echo "first run: apt commands: $(grep '^run ' "$sb/calls.log" 2>/dev/null | tr '\n' '|')" >&2; }
+        before="$(cksum "$sb$AK_KEY" "$sb$AK_LIST" 2>/dev/null)"
+        : >"$sb/calls.log"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc2=$?
+        after="$(cksum "$sb$AK_KEY" "$sb$AK_LIST" 2>/dev/null)"
+        (( rc2 == 0 )) || { ok=0; echo "second run rc=$rc2: ${out:0:200}" >&2; }
+        writes="$(grep -E '^(curl|gpg|install|tee) ' "$sb/calls.log" || true)"
+        [[ -z "$writes" ]] || { ok=0; echo "the second run wrote again: $writes" >&2; }
+        [[ "$before" == "$after" ]] || { ok=0; echo "key or source list changed on the second run" >&2; }
+        [[ "$(wc -l <"$sb$AK_LIST" 2>/dev/null)" == 1 ]] || { ok=0; echo "source list grew" >&2; }
+        grep -qx "run apt-get install -y $AK_PKG" "$sb/calls.log" || { ok=0; echo "apt's own no-op install was skipped" >&2; }
+        [[ -z "$(find "$sb/tmp" -type f)" ]] || { ok=0; echo "temp file left behind" >&2; }
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "a second $_k run is not a no-op"; fi
+    fi
+done
+
 if it "the antigravity catalog entry needs no download URL: no prompt, and no catalog asks antigravity_url"; then
     problems="$(python3 - 2>&1 <<'PY'
 import json

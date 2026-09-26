@@ -56,6 +56,37 @@ apt_update_once() {
     APT_UPDATED=1
 }
 
+# apt_repo_key_install <label> <url> <dest> <dearmor 0|1>
+# Puts a vendor's apt signing key at <dest> (root-owned, 0644) and returns 0, or
+# warns why not and returns 1. <dest> is trusted by the caller's guard on later
+# runs, so it is written ONLY from a temp file that already holds a non-empty
+# key: install_component runs an installer with errexit off, and the unchecked
+# `curl | gpg --dearmor >tmp; install tmp dest` used to leave an EMPTY key that
+# the old `-f` guard then trusted forever (apt failed on every later run).
+# A non-empty key already in place is left alone; an empty one from such a
+# run is replaced. <dearmor> 1 = the key is served ASCII-armored.
+apt_repo_key_install() {
+    local label="$1" url="$2" dest="$3" dearmor="$4"
+    [[ -s "$dest" ]] && return 0
+    local tmp need="curl"
+    [[ "$dearmor" == 1 ]] && need="curl and gpg"
+    tmp="$(mktemp)" || { ui_warn "${label} not installed: could not create a temp file for the apt signing key."; return 1; }
+    if (
+        # pipefail: a failed curl must fail the pipeline even though gpg
+        # (which then reads nothing) is the last command in it.
+        set -o pipefail
+        if [[ "$dearmor" == 1 ]]; then curl -fsSL "$url" | gpg --dearmor; else curl -fsSL "$url"; fi
+    ) >"$tmp" \
+        && [[ -s "$tmp" ]] \
+        && $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$dest"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    rm -f "$tmp"
+    ui_warn "${label} not installed: could not fetch and install the apt signing key from ${url} (needs ${need} and network access); re-run once that works."
+    return 1
+}
+
 # ─── Idempotency checks ─────────────────────────────────────────────────────
 is_installed() {
     detect_installed_status "$1" "$2" "${3:-0}"
@@ -375,16 +406,15 @@ install_vscode() {
         ui_muted "would add Microsoft's signed apt repo and install code"
         return 0
     fi
+    # AUTOOS_APT_PREFIX is a test seam (DESTDIR-style), as in install_antigravity:
+    # where the files are written. The source line keeps the /etc path apt reads.
+    local prefix="${AUTOOS_APT_PREFIX:-}"
     local key=/etc/apt/keyrings/packages.microsoft.gpg
-    if [[ ! -f "$key" ]]; then
-        local tmp; tmp="$(mktemp)"
-        curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor >"$tmp"
-        $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
-        rm -f "$tmp"
-    fi
-    if [[ ! -f /etc/apt/sources.list.d/vscode.list ]]; then
+    local list=/etc/apt/sources.list.d/vscode.list
+    apt_repo_key_install "VS Code" https://packages.microsoft.com/keys/microsoft.asc "${prefix}${key}" 1 || return 1
+    if [[ ! -f "${prefix}${list}" ]]; then
         printf 'deb [arch=amd64,arm64,armhf signed-by=%s] https://packages.microsoft.com/repos/code stable main\n' \
-            "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/vscode.list >/dev/null
+            "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null
         APT_UPDATED=0   # the new repo has to be fetched before install
     fi
     apt_update_once
@@ -658,16 +688,13 @@ install_google_chrome() {
         ui_muted "would add Google's signed apt repo and install google-chrome-stable"
         return 0
     fi
+    local prefix="${AUTOOS_APT_PREFIX:-}"   # test seam, see install_vscode
     local key=/etc/apt/keyrings/google-chrome.gpg
-    if [[ ! -f "$key" ]]; then
-        local tmp; tmp="$(mktemp)"
-        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor >"$tmp"
-        $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
-        rm -f "$tmp"
-    fi
-    if [[ ! -f /etc/apt/sources.list.d/google-chrome.list ]]; then
+    local list=/etc/apt/sources.list.d/google-chrome.list
+    apt_repo_key_install "Google Chrome" https://dl.google.com/linux/linux_signing_key.pub "${prefix}${key}" 1 || return 1
+    if [[ ! -f "${prefix}${list}" ]]; then
         printf 'deb [arch=amd64 signed-by=%s] http://dl.google.com/linux/chrome/deb/ stable main\n' \
-            "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
+            "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null
         APT_UPDATED=0
     fi
     apt_update_once
@@ -717,18 +744,16 @@ install_gh() {
         return 0
     fi
     if has_cmd apt-get; then
+        local prefix="${AUTOOS_APT_PREFIX:-}"   # test seam, see install_vscode
         local key=/etc/apt/keyrings/githubcli-archive-keyring.gpg
-        $AUTOOS_SUDO mkdir -p -m 755 /etc/apt/keyrings
-        if [[ ! -f "$key" ]]; then
-            local tmp; tmp="$(mktemp)"
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg >"$tmp"
-            $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
-            rm -f "$tmp"
-        fi
+        local list=/etc/apt/sources.list.d/github-cli.list
+        $AUTOOS_SUDO mkdir -p -m 755 "${prefix}/etc/apt/keyrings"
+        # The keyring is already binary (dearmor 0): served as it is.
+        apt_repo_key_install "GitHub CLI" https://cli.github.com/packages/githubcli-archive-keyring.gpg "${prefix}${key}" 0 || return 1
         local arch; arch="$(dpkg --print-architecture)"
-        if [[ ! -f /etc/apt/sources.list.d/github-cli.list ]]; then
+        if [[ ! -f "${prefix}${list}" ]]; then
             printf 'deb [arch=%s signed-by=%s] https://cli.github.com/packages stable main\n' \
-                "$arch" "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+                "$arch" "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null
             APT_UPDATED=0
         fi
         apt_update_once
