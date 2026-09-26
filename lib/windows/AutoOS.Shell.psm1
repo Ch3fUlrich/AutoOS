@@ -2,6 +2,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1') -DisableNameChecking
+# For Copy-AutoOSBackup. No -Force: AutoOS.Install imports this module inside a
+# function, after it is loaded itself, so this import is a no-op there.
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Install.psm1') -DisableNameChecking
 
 function Set-AutoOSManagedFile {

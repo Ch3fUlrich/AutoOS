@@ -3548,7 +3548,7 @@ Test-Case 'shell: managed files keep rankable same-second backups' {
         $backups = @(Get-ChildItem -LiteralPath $scratch -Filter 'profile.ps1.autoos-backup-*')
         if ($backups.Count -ne 2) { throw "expected two backups after two changed writes, got $($backups.Count)" }
         foreach ($backup in $backups) {
-            if ($backup.Name -notmatch '^profile\.ps1\.autoos-backup-\d{8}-\d{6}(?:-\d+)?$') {
+            if ($backup.Name -notmatch '^profile\.ps1\.autoos-backup-\d{8}-\d{6}(?:-\d{1,3})?$') {
                 throw "backup name is not rankable: $($backup.Name)"
             }
         }
