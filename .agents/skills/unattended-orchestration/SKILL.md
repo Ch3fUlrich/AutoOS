@@ -64,6 +64,7 @@ A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date
 - R-review-02: Treat a cheap/free reviewer's "no findings" as unproven; self-review often finds real defects. (why: measured across five lanes' DONE notes; source: 20260924/done, 20260925/done)
 - R-review-03: Never let a reviewer share the writer's model family; pair across families. (why: same-family reviewers repeat the writer's blind spots; source: cao/dispatch.py, review_degraded tag)
 - R-review-04: Inline run-log files into a qoder/agy task; under --isolate it cannot read outside its clone. (why: qoder asked for access, then NO-OP; source: work/L1-routing/review-c2.out, 2026-09-26)
+- R-review-05: Start every review run with `--card role=review`, or a clean sandbox exits 5 (NO-OP). (why: a full 8-finding review exited 5; source: work/L1-routing/review-a3.out, 2026-09-26)
 
 ### tests
 
