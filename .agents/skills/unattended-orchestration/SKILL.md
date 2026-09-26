@@ -192,7 +192,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-host-05: Per orchestrator: <= 3 worktree lanes + 3 readers, MemAvailable >= 3000 MB. (why: headroom for tests/builds on a 16 GB host; source: briefs/common.md "Host limits" 2026-09-26)
 - R-host-06: The Bash tool shell is zsh: run multi-step shell as `bash <<'EOF'`; never name a var `path`. (why: zsh clobbered PATH and broke globs; source: status/L1-backlog.lane-omni.report.md)
 - R-host-07: Tell a live Claude session by ~/.claude/sessions/<pid>.json procStart vs /proc. (why: a job's state field is not liveness; source: status/L1-backlog.herdr-home-proposal.md)
-- R-host-08: Never shellcheck tests/run-tests.sh locally (CI gates it); cap heavy commands via systemd-run MemoryMax. (why: its OOM stopped herdr and every session twice; source: herdr-server.log 2026-09-26T15:25Z)
+- R-host-08: Never shellcheck tests/run-tests.sh locally; CI gates it. (why: its OOM stopped herdr, killing all sessions twice; source: herdr-server.log 2026-09-26T15:25Z)
 
 ### safety
 
