@@ -164,7 +164,7 @@ ensure_env_file() {
         backup="$(autoos_backup_path "$file")"
         if ! cp -p -- "$file" "$backup"; then
             rm -f -- "$backup"
-            echo "  ! $file: could not back up - leaving it untouched" >&2
+            echo "  ! could not back up $file - leaving it untouched" >&2
             return 1
         fi
         chmod 600 "$backup"
@@ -429,7 +429,8 @@ cmd_init() {
         AUTOOS_STACK_CONFIG "$CONFIG_DIR" AUTOOS_OPENHANDS_DIR "$OH_DIR" \
         AUTOOS_STACK_BIND 0.0.0.0 \
         OMNIROUTE_MEMORY_MB 1536 OMNIROUTE_MEM_LIMIT 2560m \
-        OPENCODE_MEM_LIMIT 1536m AUTOOS_OPENHANDS_MEMORY 2g
+        OPENCODE_MEM_LIMIT 1536m AUTOOS_OPENHANDS_MEMORY 2g \
+        || return 1
 
     # opencode config: derived from the host's, never hand-kept twice.
     local oc_cfg="$DATA_DIR/opencode-home/.config/opencode/opencode.json" names=()
@@ -467,7 +468,7 @@ cmd_init() {
         [[ "$n" == AUTOOS_OMNIROUTE_KEY ]] && continue
         pairs+=("$n" "$(secret_for "$n")")
     done
-    ensure_env_file "$CONFIG_DIR/opencode.env" "${pairs[@]}"
+    ensure_env_file "$CONFIG_DIR/opencode.env" "${pairs[@]}" || return 1
 
     local url_pattern="${AUTOOS_OPENHANDS_SANDBOX_URL:-}" web_host="${AUTOOS_OPENHANDS_WEB_HOST:-}"
     [[ -z "$url_pattern" ]] && url_pattern="$(running_container_env openhands-app OH_SANDBOX_CONTAINER_URL_PATTERN)"
@@ -475,7 +476,8 @@ cmd_init() {
     ensure_env_file "$CONFIG_DIR/openhands.env" \
         LLM_API_KEY "$client_key" \
         OH_SANDBOX_CONTAINER_URL_PATTERN "$url_pattern" \
-        WEB_HOST "$web_host"
+        WEB_HOST "$web_host" \
+        || return 1
     [[ -z "$client_key" ]] && echo "  ! no omniroute client key (configuration/api-keys.yml) - opencode and OpenHands cannot use the gateway yet"
     return 0
 }

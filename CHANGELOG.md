@@ -11,6 +11,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   migrate `aside` directory) and `templates/rescue-bootstrap.sh` named backups `<file>.autoos-backup-<second>` and
   overwrote an earlier backup taken in the same second. They now pick a name that did not exist yet (`-1`, `-2`, ...,
   the rule of `lib/linux/install.sh` `backup_path`), and a failed copy leaves the file untouched.
+- `ai-stack.sh init` (also run by `up` and `migrate`) now stops when a config backup fails instead of continuing with
+  a stack.env it could not update. `configuration/start-stack.sh` moves an unparseable OpenHands `settings.json` aside
+  under a unique name and deletes it only after the copy succeeded.
+- `configuration/herdr-sessions`: detection also sees a system-scope install; `--unregister` stops the timer
+  (`disable --now`) and backs up under a unique name; profile paths with `&` and values with inner spaces render
+  correctly.
 
 ### Added — herdr-sessions: Claude Code panes come back after a reboot (opt-in, Linux)
 
