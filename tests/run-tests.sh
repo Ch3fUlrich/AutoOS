@@ -2445,7 +2445,9 @@ fi
 
 if it "undo never uninstalls anything"; then
     # The safety property, asserted on the source rather than by removing software.
-    if grep -qE '(apt-get remove|brew uninstall|npm uninstall)' lib/linux/install.sh; then
+    # Lines that only PRINT a command for the operator (ui_warn/ui_muted/... messages, e.g. the
+    # old-apt-package hint) are not commands the installer runs.
+    if grep -vE '^[[:space:]]*ui_[a-z_]+[[:space:]]' lib/linux/install.sh | grep -qE '(apt-get remove|brew uninstall|npm uninstall)'; then
         fail "undo path contains an uninstall command"
     else pass; fi
 fi
