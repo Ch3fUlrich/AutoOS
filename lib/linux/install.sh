@@ -739,6 +739,9 @@ def cmd_icon(tree, dest):
             rel = candidates[0][1] if candidates else rel
         data = asar_read(asar, rel, 8 << 20)
         if data == "unpacked":
+            # the key is the archive's, i.e. untrusted: never let it leave app.asar.unpacked
+            if rel.startswith("/") or ".." in rel.split("/"):
+                raise ValueError("%s is not a plain path inside app.asar" % rel)
             with open(os.path.join(asar + ".unpacked", *rel.split("/")), "rb") as f:
                 data = f.read((8 << 20) + 1)
     except (OSError, ValueError, KeyError, TypeError) as exc:

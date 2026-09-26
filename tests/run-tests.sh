@@ -3412,7 +3412,9 @@ EOF
 # serve/<build-id>.tar.gz: a tiny tarball with the real layout. variants: garbage
 # (not a tarball), corrupt (a damaged gzip stream), dotdot, absolute, symlink,
 # hardlink, fifo, setuid, setgid, wrongtop, nosandbox, sandboxlink, noasar, asarver,
-# noelf, noicon, nestedicon (icon.png under resources/ inside the asar), size and
+# noelf, noicon, nestedicon (icon.png under resources/ inside the asar), unpackedicon
+# (the icon lives in resources/app.asar.unpacked/), dotdoticon (the asar names the icon
+# "../icon.png", unpacked, and a decoy PNG sits at resources/icon.png), size and
 # sizehead (see antigravity_serve). Sets AG_SIZE and AG_SHA (the tarball's size and sha256).
 antigravity_build() {
     local sb="$1" id="$2" variant="${3:-}" tree top asarver="${2%%-*}" out
@@ -3425,7 +3427,7 @@ antigravity_build() {
     printf 'pak\n' >"$top/locales/en-US.pak"
     chmod 755 "$top/antigravity" "$top/chrome-sandbox"
     [[ "$variant" != asarver ]] || asarver="0.0.1"
-    [[ "$variant" != noicon && "$variant" != nestedicon ]] || icon_arg=("$variant")
+    case "$variant" in noicon|nestedicon|unpackedicon|dotdoticon) icon_arg=("$variant") ;; esac
     python3 "$ROOT/tests/helpers/fake_antigravity_asar.py" "$top/resources/app.asar" "$asarver" "${icon_arg[@]}"
     case "$variant" in
         nosandbox)   rm -f "$top/chrome-sandbox" ;;
@@ -3437,6 +3439,8 @@ antigravity_build() {
         hardlink)    printf 'pak\n' >"$top/locales/en-GB.pak"; ln -f "$top/locales/en-GB.pak" "$top/locales/en-AU.pak" ;;
         fifo)        mkfifo "$top/resources/pipe" ;;
         dotdot|absolute) printf 'evil\n' >"$top/extra" ;;
+        unpackedicon)    mkdir -p "$top/resources/app.asar.unpacked"; printf '\211PNG\r\n\032\nunpacked icon\n' >"$top/resources/app.asar.unpacked/icon.png" ;;
+        dotdoticon)      mkdir -p "$top/resources/app.asar.unpacked"; printf '\211PNG\r\n\032\nOUTSIDE the unpacked dir\n' >"$top/resources/icon.png" ;;
     esac
     case "$variant" in
         garbage)  head -c 2000 /dev/zero >"$out" ;;
@@ -3714,6 +3718,26 @@ if it "antigravity icon: taken from app.asar wherever icon.png sits; without one
         rm -rf "$sb"
     done
     if (( ok )); then pass; else fail "the desktop entry's icon is not taken from app.asar, or has no fallback"; fi
+fi
+
+if it "antigravity icon: an unpacked icon is read from app.asar.unpacked, but an asar key with a '..' component is never joined onto it (no icon is taken from outside)"; then
+    ok=1
+    for variant in unpackedicon dotdoticon; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA" "$variant"
+        antigravity_run "$sb"
+        dir="$sb/home/.local/opt/antigravity"; dt="$sb/home/.local/share/applications/antigravity.desktop"
+        [[ "$AG_STATE" == installed ]] || { ok=0; echo "$variant: state=[$AG_STATE]: ${AG_OUT:0:500}" >&2; }
+        if [[ "$variant" == unpackedicon ]]; then
+            grep -q 'unpacked icon' "$dir/icon.png" 2>/dev/null || { ok=0; echo "$variant: the icon in app.asar.unpacked was not used" >&2; }
+            grep -qxF "Icon=$dir/icon.png" "$dt" || { ok=0; echo "$variant: Icon line is [$(grep '^Icon' "$dt" 2>&1)]" >&2; }
+        else
+            [[ ! -e "$dir/icon.png" ]] || { ok=0; echo "$variant: an icon.png was taken from outside app.asar.unpacked through a '..' key: $(head -c 60 "$dir/icon.png" | tr -c '[:print:]' '.')" >&2; }
+            grep -qxF 'Icon=antigravity' "$dt" || { ok=0; echo "$variant: Icon line is [$(grep '^Icon' "$dt" 2>&1)], not the themed fallback" >&2; }
+            [[ "$AG_OUT" == *"no icon extracted"* ]] || { ok=0; echo "$variant: the refusal is not reported: ${AG_OUT:0:500}" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "an asar key can steer the icon lookup out of app.asar.unpacked"; fi
 fi
 
 if it "antigravity sandbox: the SUID commands are printed once, verbatim, only when this kernel restricts user namespaces; the installer never runs them"; then
