@@ -348,6 +348,21 @@
           "launcher": "none"
         },
         {
+          "id": "herdr-sessions",
+          "name": "Herdr sessions",
+          "description": "Snapshots and restores Herdr panes across a reboot",
+          "provider": "script",
+          "package": "herdr-sessions",
+          "requires": [
+            "herdr",
+            "claude-code"
+          ],
+          "profiles": [],
+          "prompt": "herdr_sessions_profile",
+          "launcher": "none",
+          "notes": "Snapshots every Herdr pane every 5 minutes and restores them at boot, on machines that run Herdr as their terminal host. Mutually exclusive with Claude autostart - only one session-restore mechanism may be installed at a time; remove the other first."
+        },
+        {
           "id": "agy",
           "name": "Antigravity CLI",
           "description": "Google's terminal coding agent",
@@ -1635,6 +1650,11 @@
       "question": "Herdr install source",
       "default": "npm:herdr",
       "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in apt, so AutoOS needs to be told where it lives."
+    },
+    "herdr_sessions_profile": {
+      "question": "Absolute path to a herdr-sessions site profile (.conf), blank to skip",
+      "default": "",
+      "help": "Site-specific (hosts, paths) and never shipped in this public repo. Leave blank and the component reports 'skipped: no profile' rather than guessing one."
     },
     "git_user_name": {
       "question": "Git commit author name (e.g. Jane Doe)",

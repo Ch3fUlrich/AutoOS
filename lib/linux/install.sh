@@ -363,6 +363,7 @@ install_script() {
         uv)              install_uv ;;
         ollama)          install_ollama ;;
         claude-autostart) install_claude_autostart ;;
+        herdr-sessions)  install_herdr_sessions ;;
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
         zed)             install_zed ;;
@@ -1596,7 +1597,26 @@ install_devin_cli() {
     return $rc
 }
 
+# autoos_conflict_present <other-id>: true when <other-id> is either already
+# installed on this machine (script_is_installed, detect.sh) or was selected
+# earlier in this run's plan (PLAN_IDS, filled by catalog_resolve before
+# execution starts - see setup.sh stage 4). claude-autostart and
+# herdr-sessions both restore Claude Code sessions across a reboot by
+# snapshotting and replaying panes; running both would double-restore the
+# same sessions, so each refuses to install while the other is present,
+# checked before either writes anything.
+autoos_conflict_present() {
+    local other="$1"
+    [[ " ${PLAN_IDS} " == *" ${other} "* ]] && return 0
+    script_is_installed "$other"
+}
+
 install_claude_autostart() {
+    if autoos_conflict_present herdr-sessions; then
+        ui_err "claude-autostart: herdr-sessions is already installed or selected - the two restore Claude Code sessions the same way and must not both run. Remove herdr-sessions first (its driver's --unregister) or leave claude-autostart unselected."
+        return 1
+    fi
+
     local appdir="${AUTOOS_ROOT}/lib/linux"
     local udest="${SYS_HOME}/.config/systemd/user"
     local units=(claude-sessions-snapshot.service claude-sessions-snapshot.timer claude-sessions-restore.service)
@@ -1713,6 +1733,65 @@ claude_autostart_interval() {
              sed -n "s/^AUTOOS_CLAUDE_SNAPSHOT_INTERVAL_MINS='\(.*\)'$/\1/p")"
     [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 59 )) || value=5
     printf '%s' "$value"
+}
+
+# install_herdr_sessions: a thin dispatch to the herdr-sessions driver, on the
+# pattern of install_claude_autostart above - AutoOS's own job is answer
+# collection, mutual exclusion and the profile-path check; the driver
+# (imported separately to configuration/herdr-sessions/, see
+# logs/handoff-sessions/20260925/status/L1-backlog.herdr-home-proposal.md
+# section 1) owns the systemd units, the snapshot and the restore. This
+# function does not exist for that directory yet in every checkout - see the
+# "missing driver" branch below.
+#
+# AUTOOS_HERDR_SESSIONS_DIR overrides where the driver lives (test seam; a
+# real run always uses $AUTOOS_ROOT/configuration/herdr-sessions).
+install_herdr_sessions() {
+    INSTALL_SCRIPT_STATE=""
+
+    if autoos_conflict_present claude-autostart; then
+        ui_err "herdr-sessions: claude-autostart is already installed or selected - the two restore Claude Code sessions the same way and must not both run. Remove claude-autostart first (./setup.sh --undo restores any file it backed up; its systemd units still need disabling by hand) or leave herdr-sessions unselected."
+        return 1
+    fi
+
+    local profile; profile="$(answer herdr_sessions_profile '')"
+    if [[ -z "$profile" ]]; then
+        ui_info "herdr-sessions: skipped: no profile"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+    if [[ ! -f "$profile" ]]; then
+        ui_err "herdr-sessions: profile path does not exist or is not a regular file: $profile"
+        return 1
+    fi
+
+    local dir="${AUTOOS_HERDR_SESSIONS_DIR:-${AUTOOS_ROOT}/configuration/herdr-sessions}"
+    local driver="${dir}/install.sh"
+    if [[ ! -f "$driver" ]]; then
+        ui_err "herdr-sessions: driver not found at $driver - import configuration/herdr-sessions before installing this component"
+        return 1
+    fi
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would run: bash $driver --profile $profile --dry-run"
+        bash "$driver" --profile "$profile" --dry-run
+        return 0
+    fi
+
+    local out rc=0
+    out="$(bash "$driver" --profile "$profile" 2>&1)" || rc=$?
+    [[ -n "$out" ]] && ui_muted "$out"
+    if (( rc != 0 )); then
+        ui_err "herdr-sessions: driver failed (rc=$rc) for profile $profile"
+        return 1
+    fi
+    if [[ "$out" == *"already current"* ]]; then
+        ui_ok "herdr-sessions: already current"
+        INSTALL_SCRIPT_STATE=skipped
+    else
+        ui_ok "herdr-sessions: installed from profile $profile"
+    fi
+    return 0
 }
 
 install_google_chrome() {

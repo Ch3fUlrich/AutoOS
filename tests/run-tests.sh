@@ -7084,8 +7084,8 @@ describe "herdr-sessions"
 
 # Boot-restore engine for Claude Code sessions in Herdr
 # (configuration/herdr-sessions/, imported from the Server repo's
-# Applications/herdr-sessions at 12f0ff7). Not wired into the catalog yet
-# (separate lane). Dry-run only: no live systemctl, no live herdr --
+# Applications/herdr-sessions at 12f0ff7; the catalog component and its
+# dispatch are tested further down). Dry-run only: no live systemctl, no live herdr --
 # install.sh --dry-run never execs either (its `run()` wrapper only echoes
 # "would: ...", it never calls systemctl or herdr for real), so nothing here
 # needs an env/PATH stub the way a live-call test would.
@@ -7185,6 +7185,201 @@ if it "herdr-sessions: both server unit templates set OOMPolicy=continue so an O
         grep -q '^OOMPolicy=continue$' "$f" || { ok=0; echo "missing OOMPolicy=continue in $f" >&2; }
     done
     if (( ok )); then pass; else fail "OOMPolicy=continue missing from one or both server unit templates"; fi
+fi
+
+# herdr_stub_driver <dir> [mode]: writes a fake configuration/herdr-sessions/
+# driver (the interface herdr-a imports separately - see spec.herdr-b.md's
+# PARALLEL note: `install.sh --profile <path> [--dry-run]`) into
+# <dir>/install.sh. --dry-run always prints a "would" line and NEVER touches
+# <dir>/installed-marker, regardless of mode - that is exactly what "dry run
+# changes nothing" checks. A real run's behaviour depends on mode:
+#   installed (default) - touches the marker, prints "installed from <profile>"
+#   current             - prints "already current", touches no marker (the
+#                         driver's OWN idempotency, as on a second call)
+#   fail                - exits 1
+herdr_stub_driver() {
+    local dir="$1" mode="${2:-installed}"
+    mkdir -p "$dir"
+    cat >"$dir/install.sh" <<STUB
+#!/usr/bin/env bash
+set -euo pipefail
+profile=""; dry=0
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        --profile) profile="\$2"; shift 2 ;;
+        --dry-run) dry=1; shift ;;
+        *) shift ;;
+    esac
+done
+if (( dry )); then
+    printf 'would restore panes from %s\n' "\$profile"
+    exit 0
+fi
+case "$mode" in
+    fail) printf 'driver: boom\n' >&2; exit 1 ;;
+    current) printf 'already current\n'; exit 0 ;;
+    *) printf 'installed\n' >"$dir/installed-marker"; printf 'installed from %s\n' "\$profile"; exit 0 ;;
+esac
+STUB
+    chmod +x "$dir/install.sh"
+}
+
+# herdr_run <scratch> <driver-dir> <profile-or-empty> [dry:0|1] [plan_ids]
+# One install_herdr_sessions call against a scratch SYS_HOME, with
+# AUTOOS_HERDR_SESSIONS_DIR pointed at the stub driver (the test seam
+# lib/linux/install.sh adds next to install_herdr_sessions for exactly this).
+# INSTALL_SCRIPT_STATE cannot cross the subshell boundary back to the caller
+# (lib/linux/install.sh's own note on that global), so it is printed as a
+# trailer line and parsed back out - the pattern the antigravity tests use.
+herdr_run() {
+    local sb="$1" drv="$2" profile="$3" dry="${4:-0}" plan="${5:-}"
+    (
+        AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN="$dry"
+        AUTOOS_HERDR_SESSIONS_DIR="$drv"; PLAN_IDS="$plan"
+        if [[ -n "$profile" ]]; then AUTOOS_ANSWERS[herdr_sessions_profile]="$profile"
+        else unset 'AUTOOS_ANSWERS[herdr_sessions_profile]'; fi
+        INSTALL_SCRIPT_STATE=""
+        rc=0
+        install_herdr_sessions || rc=$?
+        printf 'HERDR_RESULT %s %s\n' "${INSTALL_SCRIPT_STATE:-installed}" "$rc"
+    ) 2>&1
+}
+herdr_state() { sed -n 's/^HERDR_RESULT \([a-z]*\) [0-9]*$/\1/p' <<<"$1"; }
+herdr_rc()    { sed -n 's/^HERDR_RESULT [a-z]* \([0-9]*\)$/\1/p' <<<"$1"; }
+
+if it "herdr-sessions: a dry run calls the driver with --dry-run and changes nothing"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$drv" "$profile" 1)"
+    rc="$(herdr_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:300}" >&2; }
+    [[ "$out" == *"would run: bash"* && "$out" == *"--dry-run"* ]] || { ok=0; echo "no 'would run ... --dry-run' line: ${out:0:300}" >&2; }
+    [[ "$out" == *"would restore panes from $profile"* ]] || { ok=0; echo "the driver's own dry-run output is missing: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "a dry run touched the driver's marker file" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions dry run is not side-effect free"; fi
+fi
+
+if it "herdr-sessions: an empty profile answer is skipped, never a guessed path"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    out="$(herdr_run "$sb" "$drv" "")"
+    state="$(herdr_state "$out")"; rc="$(herdr_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "state=[$state] want skipped" >&2; }
+    [[ "$out" == *"skipped: no profile"* ]] || { ok=0; echo "no 'skipped: no profile' line: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran although no profile was given" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions guessed at a profile instead of skipping"; fi
+fi
+
+if it "herdr-sessions: a profile path that is not a regular file fails, naming the path"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/does-not-exist.conf"
+    out="$(herdr_run "$sb" "$drv" "$profile")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "rc=0 for a missing profile: ${out:0:300}" >&2; }
+    [[ "$out" == *"$profile"* ]] || { ok=0; echo "the error does not name the path: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran against a missing profile" >&2; }
+    # A directory is not a regular file either.
+    mkdir -p "$sb/adir"
+    out2="$(herdr_run "$sb" "$drv" "$sb/adir")"; rc2="$(herdr_rc "$out2")"
+    (( rc2 != 0 )) || { ok=0; echo "rc=0 for a directory given as the profile: ${out2:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions did not refuse a bad profile path"; fi
+fi
+
+if it "herdr-sessions: a missing driver directory is a clear error, not a silent success"; then
+    sb="$(mktemp -d)"; ok=1
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$sb/no-such-driver-dir" "$profile")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "rc=0 with no driver present: ${out:0:300}" >&2; }
+    [[ "$out" == *"driver not found"* && "$out" == *"$sb/no-such-driver-dir"* ]] || { ok=0; echo "no clear error naming the driver dir: ${out:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions silently accepted a missing driver"; fi
+fi
+
+if it "herdr-sessions: the driver reporting already current is skipped, never installed a second time"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out1="$(herdr_run "$sb" "$drv" "$profile")"
+    state1="$(herdr_state "$out1")"; rc1="$(herdr_rc "$out1")"
+    (( rc1 == 0 )) || { ok=0; echo "first run rc=$rc1: ${out1:0:300}" >&2; }
+    [[ "$state1" != skipped ]] || { ok=0; echo "the FIRST run already reports skipped - the test is not isolating the second run" >&2; }
+    [[ -e "$drv/installed-marker" ]] || { ok=0; echo "the driver never ran on the first call" >&2; }
+    # AGENTS.md hard rule 3: safe to run twice, second run reports skipped. Here
+    # the DRIVER is the one deciding it is current (its own idempotency) - the
+    # dispatch must pass that straight through, not report installed again.
+    herdr_stub_driver "$drv" current
+    out2="$(herdr_run "$sb" "$drv" "$profile")"
+    state2="$(herdr_state "$out2")"; rc2="$(herdr_rc "$out2")"
+    (( rc2 == 0 )) || { ok=0; echo "second run rc=$rc2: ${out2:0:300}" >&2; }
+    [[ "$state2" == skipped ]] || { ok=0; echo "second run state=[$state2] want skipped" >&2; }
+    [[ "$out2" == *"already current"* ]] || { ok=0; echo "no 'already current' line: ${out2:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a second herdr-sessions run reported installed instead of skipped"; fi
+fi
+
+if it "herdr-sessions: refuses when claude-autostart was selected this run or is already installed, writing nothing"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+
+    out="$(herdr_run "$sb" "$drv" "$profile" 0 "claude-autostart")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "rc=0 with claude-autostart selected: ${out:0:300}" >&2; }
+    [[ "$out" == *"claude-autostart"* ]] || { ok=0; echo "no mention of claude-autostart: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the conflict (selected)" >&2; }
+
+    mkdir -p "$sb/home2/.config/systemd/user"
+    touch "$sb/home2/.config/systemd/user/claude-sessions-restore.service"
+    out2="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home2"; AUTOOS_DRY_RUN=0
+               AUTOOS_HERDR_SESSIONS_DIR="$drv"; PLAN_IDS=""
+               AUTOOS_ANSWERS[herdr_sessions_profile]="$profile"
+               install_herdr_sessions ) 2>&1 )"; rc2=$?
+    (( rc2 != 0 )) || { ok=0; echo "rc=0 with claude-autostart already installed: ${out2:0:300}" >&2; }
+    [[ "$out2" == *"claude-autostart"* ]] || { ok=0; echo "no mention of claude-autostart (installed case): ${out2:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the conflict (installed)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions installed alongside claude-autostart"; fi
+fi
+
+if it "herdr-sessions: claude-autostart refuses when herdr-sessions was selected this run or is already installed, writing nothing"; then
+    sb="$(mktemp -d)"; ok=1
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home1"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+              PLAN_IDS="herdr-sessions"
+              systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
+              install_claude_autostart ) 2>&1 )"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 with herdr-sessions selected: ${out:0:300}" >&2; }
+    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions: ${out:0:300}" >&2; }
+    [[ ! -d "$sb/home1/.config/systemd/user" ]] || { ok=0; echo "claude-autostart wrote units despite the conflict (selected)" >&2; }
+
+    mkdir -p "$sb/home2/.config/systemd/user"
+    touch "$sb/home2/.config/systemd/user/herdr-sessions-restore.service"
+    out2="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home2"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+               PLAN_IDS=""
+               systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
+               install_claude_autostart ) 2>&1 )"; rc2=$?
+    (( rc2 != 0 )) || { ok=0; echo "rc=0 with herdr-sessions already installed: ${out2:0:300}" >&2; }
+    [[ "$out2" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions (installed case): ${out2:0:300}" >&2; }
+    [[ -z "$(find "$sb/home2/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "claude-autostart wrote units despite the conflict (installed)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart installed alongside herdr-sessions"; fi
+fi
+
+if it "herdr-sessions detect: true only when the restore service unit exists"; then
+    sb="$(mktemp -d)"; ok=1
+    ( SYS_HOME="$sb/home"; ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with no unit file present" >&2; }
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    ( SYS_HOME="$sb/home"; script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the unit file exists" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions detection does not match the unit file's presence"; fi
 fi
 
 describe "wsl detection"
