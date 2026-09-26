@@ -2513,8 +2513,9 @@ PY
     fi
 }
 
-# ide_models_file: this checkout's catalog/ide-models.json, the one list of
-# gateway models the Zed, OpenCode and OpenHands writers project.
+# ide_models_file: this checkout's catalog/ide-models.json (rendered from
+# catalog/ai-registry.json - do not edit), the one list of gateway models
+# the Zed, OpenCode and OpenHands writers project.
 # AUTOOS_IDE_MODELS_FILE overrides it (the suite points it at a broken copy).
 ide_models_file() {
     printf '%s\n' "${AUTOOS_IDE_MODELS_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/ide-models.json}"
@@ -2572,8 +2573,8 @@ if os.path.exists(path):
         cfg = json.load(fh)
 pins = json.load(open(harness_file, encoding="utf-8"))["mcp_servers"]
 # Model ids, display names, context windows and membership come from
-# catalog/ide-models.json at run time (single source) - never inline tiers
-# here: the two Zed writers once drifted from every other surface.
+# catalog/ide-models.json at run time (rendered from catalog/ai-registry.json)
+# - never inline tiers here: the two Zed writers once drifted from every other surface.
 # max_tokens is Zed's context window; reasoning_effort only where the
 # catalog sets one.
 with open(ide_file, encoding="utf-8") as fh:
@@ -4265,9 +4266,9 @@ deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
 # (omniroute on :20128, litellm on :4000) is offered here GLOBALLY so every
 # cwd gets the tiers.
 
-# Gateway tiers from catalog/ide-models.json (single source; the same list
-# tools/sync-ide-models.py writes into the repo opencode.jsonc). Never inline
-# tier ids or windows here.
+# Gateway tiers from catalog/ide-models.json (rendered from
+# catalog/ai-registry.json; the same list tools/sync-ide-models.py writes
+# into the repo opencode.jsonc). Never inline tier ids or windows here.
 # setup_opencode_config checked the file (ide_models_readable) before this ran.
 with open(ide_file, 'r', encoding='utf-8') as _imf:
     IDE_MODELS = json.load(_imf)['models']
@@ -4759,7 +4760,8 @@ if _gw_key:
     llm["api_key"] = _gw_key
     _default_reasoning = True
     # The gateway default IS the t1 tier: its windows come from
-    # catalog/ide-models.json, like every other surface's. The installer
+    # catalog/ide-models.json (rendered from catalog/ai-registry.json),
+    # like every other surface's. The installer
     # passes the path only when the file checked out (it reported otherwise).
     _default_window = None
     try:

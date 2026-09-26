@@ -694,7 +694,7 @@ only, then run `python3 tools/sync-ide-models.py`: it regenerates the
 `opencode.jsonc` model blocks and the token windows in
 `configuration/openhands/tier-profiles.json` and `config.toml`
 (`--check` shows drift, exit 1). The Zed writers and the OpenCode user-config
-writers read the catalog at install time. The OpenHands spec keeps its own
+writers read the catalog at install time. `catalog/ide-models.json` is rendered from `catalog/ai-registry.json` — regenerate with `python3 tools/registry.py render ide --out catalog/ide-models.json`. The OpenHands spec keeps its own
 profile **order** — the app holds at most 10 profiles, pushed in that order.
 
 Edit tier order in `configuration/omniroute/combos.json` — that file is the
