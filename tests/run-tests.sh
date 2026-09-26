@@ -9947,6 +9947,76 @@ EOS
     if (( ok )); then pass; else fail "rescue-bootstrap overwrote a same-second profile backup"; fi
 fi
 
+# Same class in configuration/start-stack.sh: the OpenHands settings repair
+# used a plain <file>.autoos-backup-<stamp> name in both its python
+# (shutil.copy2) and its bash (cp) site, so two repairs in the same second
+# let the second copy overwrite the first backup. AUTOOS_BACKUP_STAMP pins
+# the python stamp so both runs land in the same "second". The repair code
+# is the file's own, extracted, not a copy of it.
+if it "backup residual: start-stack keeps two same-second OpenHands settings backups"; then
+    d="$(mktemp -d)"
+    sed -n "/^import json, os, shutil, sys, datetime$/,/^sys.exit(0)$/p" configuration/start-stack.sh >"$d/repair.py"
+    f="$d/settings.json"
+    printf '{"agent_settings": {"schema_version": 6, "mcp_config": {}}}' >"$f"
+    contentA="$(cat "$f")"
+    AUTOOS_BACKUP_STAMP=20260101-000000 python3 "$d/repair.py" "$f" >/dev/null
+    printf '{"agent_settings": {"schema_version": 6, "mcp_config": {"s": {"command": "x"}}}}' >"$f"
+    contentB="$(cat "$f")"
+    AUTOOS_BACKUP_STAMP=20260101-000000 python3 "$d/repair.py" "$f" >/dev/null
+    ok=1
+    base="$f.autoos-backup-20260101-000000"
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup content wrong" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d" -maxdepth 1 -name 'settings.json.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    if python3 - "$f" <<'PY'; then :; else ok=0; echo "the settings file itself was not repaired" >&2; fi
+import json, sys
+sys.exit(0 if json.load(open(sys.argv[1]))["agent_settings"]["schema_version"] == 4 else 1)
+PY
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-stack overwrote a same-second settings backup"; fi
+fi
+
+# Both start-stack sites only remove/replace the original after a successful
+# copy: the bash move-aside (cp, stubbed by backup_fail_bin) and the python
+# repair (shutil.copy2, failed through a sitecustomize wrapper - the stub
+# only touches *.autoos-backup-* copies and delegates the rest).
+if it "backup residual: start-stack leaves OpenHands settings in place when the backup copy fails"; then
+    d="$(mktemp -d)"
+    sed -n '/^ss_backup_path()/,/^}/p;/^ss_move_aside()/,/^}/p' configuration/start-stack.sh >"$d/fn.sh"
+    sed -n "/^import json, os, shutil, sys, datetime$/,/^sys.exit(0)$/p" configuration/start-stack.sh >"$d/repair.py"
+    mkdir -p "$d/shadow"
+    cat >"$d/shadow/sitecustomize.py" <<'EOS'
+import shutil as _s
+_real_copy2 = _s.copy2
+def _fail_copy2(src, dst, *a, **k):
+    if ".autoos-backup-" in str(dst):
+        raise OSError(28, "No space left on device (test stub)")
+    return _real_copy2(src, dst, *a, **k)
+_s.copy2 = _fail_copy2
+EOS
+    # shellcheck disable=SC1090
+    source "$d/fn.sh"
+    ok=1
+    printf '{not json' >"$d/unparseable.json"; cp "$d/unparseable.json" "$d/unparseable.json.orig"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" ss_move_aside "$d/unparseable.json" 2>&1)"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "move-aside succeeded without a backup: rc=$rc" >&2; }
+    [[ "$out" == *"could not back up $d/unparseable.json"* ]] || { ok=0; echo "no warning naming the file: ${out:0:300}" >&2; }
+    cmp -s "$d/unparseable.json" "$d/unparseable.json.orig" || { ok=0; echo "the unparseable file was removed without a backup" >&2; }
+    printf '{"agent_settings": {"schema_version": 6, "mcp_config": {}}}' >"$d/settings.json"
+    cp "$d/settings.json" "$d/settings.json.orig"
+    out="$(PYTHONPATH="$d/shadow" AUTOOS_BACKUP_STAMP=20260101-000000 python3 "$d/repair.py" "$d/settings.json" 2>&1)"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "repair succeeded without a backup: rc=$rc" >&2; }
+    [[ "$out" == *"Could not back up $d/settings.json"* ]] || { ok=0; echo "no warning naming the file: ${out:0:300}" >&2; }
+    cmp -s "$d/settings.json" "$d/settings.json.orig" || { ok=0; echo "the settings file was rewritten without a backup" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "start-stack drops settings it could not back up"; fi
+fi
+
 if it "ai dispatcher --list names all three backends, including local (template)"; then
     out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" bash templates/ai-dispatcher.sh --list 2>&1)"
     rc=$?
@@ -11398,6 +11468,25 @@ if it "backup residual: register-autostart backs up omniroute.env twice in one s
     if (( ok )); then pass; else fail "register-autostart overwrote a same-second omniroute.env backup"; fi
 fi
 
+# register-autostart.sh keeps the old unit when its backup copy fails
+# (continue at the unit-replace site): the file must be unchanged.
+if it "backup residual: register-autostart leaves the unit in place when its backup copy fails"; then
+    d="$(_svc_reg_sandbox)"
+    _svc_reg "$d" --only autoos-omniroute >/dev/null
+    printf '# hand-edit\n' >>"$d/units/autoos-omniroute.service"
+    cp "$d/units/autoos-omniroute.service" "$d/units/autoos-omniroute.service.orig"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" _svc_reg "$d" --only autoos-omniroute 2>&1)"; rc=$?
+    ok=1
+    cmp -s "$d/units/autoos-omniroute.service" "$d/units/autoos-omniroute.service.orig" \
+        || { ok=0; echo "the unit was replaced without a backup" >&2; }
+    [[ "$out" == *"could not back up $d/units/autoos-omniroute.service"* ]] \
+        || { ok=0; echo "no warning naming the unit: ${out:0:300}" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "register-autostart replaces a unit it could not back up"; fi
+fi
+
 if it "svc: register-autostart never runs a second gateway next to omniroute autostart"; then
     d="$(_svc_reg_sandbox)"
     echo "[Service]" >"$d/units/omniroute.service"
@@ -12297,6 +12386,49 @@ if it "backup residual: aistack backs up stack.env twice in one second without o
     grep -q '^MY_EXTRA=keep$' "$d/cfg/stack.env" || { ok=0; echo "user's extra line lost" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "ai-stack overwrote a same-second stack.env backup"; fi
+fi
+
+# ensure_env_file returns 1 when its backup copy fails, but cmd_init's three
+# call sites ignored that answer. errexit is no help: up and migrate call
+# `cmd_init || return 1`, which suppresses set -e for the whole call, so the
+# failed backup was swallowed and up went on to start containers on a
+# half-written config. Each call site now passes the failure on - up must
+# stop before docker is touched at all (backup_fail_bin breaks the copy;
+# the firewall flag lets the 0.0.0.0 bind init writes pass its guard).
+if it "backup residual: aistack up fails before docker when init cannot back up an env file"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf '# operator\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
+    cp "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig"
+    : >"$d/active-coding-agents-fw"; : >"$d/image-exists"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" _aistack "$d" up omniroute)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "up continued after a failed backup: rc=$rc" >&2; }
+    [[ "$out" == *"could not back up $d/cfg/opencode.env"* ]] || { ok=0; echo "no warning naming the file: ${out:0:300}" >&2; }
+    cmp -s "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig" || { ok=0; echo "the env file was modified without a backup" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    [[ ! -e "$d/docker.log" ]] || { ok=0; echo "docker was driven although init had failed" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "a failed init backup does not stop up"; fi
+fi
+
+# ai-stack.sh ensure_env_file returns 1 when its backup copy fails: init
+# must stop there and leave the env file alone.
+if it "backup residual: aistack init leaves the env file in place when its backup copy fails"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf '# operator\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
+    cp "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" _aistack "$d" init 2>&1)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "init succeeded without a backup: rc=$rc" >&2; }
+    [[ "$out" == *"could not back up $d/cfg/opencode.env"* ]] || { ok=0; echo "no warning naming the file: ${out:0:300}" >&2; }
+    cmp -s "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig" || { ok=0; echo "the env file was modified without a backup" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "aistack init edits an env file it could not back up"; fi
 fi
 
 # replace_dir_with_copy's own aside= (moving a non-empty dest out of the way
