@@ -360,6 +360,7 @@
           "profiles": [],
           "prompt": "herdr_sessions_profile",
           "launcher": "none",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/tree/main/configuration/herdr-sessions",
           "notes": "Snapshots every Herdr pane every 5 minutes and restores them at boot, on machines that run Herdr as their terminal host. Mutually exclusive with Claude autostart - only one session-restore mechanism may be installed at a time; remove the other first."
         },
         {
