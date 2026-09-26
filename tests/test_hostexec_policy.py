@@ -140,11 +140,61 @@ class PathHijackWorldWritableTests(unittest.TestCase):
     def test_absolute_argv0_under_a_normal_dir_is_not_flagged_by_path_hijack(self):
         with tempfile.TemporaryDirectory() as tmp:
             bindir = _make_fixed_path(tmp)
-            os.chmod(bindir, 0o755)
+            # G: uid-writable counts, so the "normal" dir must not be
+            # writable by anyone (0555) -- 0755 owned by us would deny.
+            os.chmod(bindir, 0o555)
             target = os.path.join(bindir, "id")
+            os.chmod(target, 0o555)
             pol = _test_policy(bindir)
             decision = policy.decide(pol, "claude", "coding-host", [target], cwd="/tmp")
             self.assertTrue(decision.allow, decision.reason)
+
+    def test_absolute_argv0_under_a_uid_writable_dir_is_denied(self):
+        # G: resolved file or any parent writable by the current uid denies.
+        with tempfile.TemporaryDirectory() as tmp:
+            evil_dir = os.path.join(tmp, "evil")
+            os.makedirs(evil_dir)
+            os.chmod(evil_dir, 0o755)  # owner-writable (we own tmp)
+            target = os.path.join(evil_dir, "id")
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\nexit 0\n")
+            os.chmod(target, 0o755)
+            pol = _test_policy(_make_fixed_path(tmp))
+            decision = policy.decide(pol, "claude", "coding-host", [target], cwd="/tmp")
+            self.assertFalse(decision.allow)
+            self.assertEqual(decision.rule, "path-hijack")
+
+    def test_absolute_symlink_to_sudo_is_denied(self):
+        # G/Qoder-3: ln -s /usr/bin/sudo /home/op/bin/id then
+        # [/home/op/bin/id -n id] must deny (resolved basename sudo).
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = _make_fixed_path(tmp)
+            os.chmod(bindir, 0o555)
+            for name in ("sudo", "id"):
+                try:
+                    os.chmod(os.path.join(bindir, name), 0o555)
+                except OSError:
+                    pass
+            # real sudo stand-in on the fixed PATH
+            sudo_target = os.path.join(bindir, "sudo")
+            link_dir = os.path.join(tmp, "linkdir")
+            os.makedirs(link_dir)
+            link = os.path.join(link_dir, "id")
+            try:
+                os.symlink(sudo_target, link)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            # Make the link's parent non-writable AFTER creating the link,
+            # so the denial (if any) is the symlink itself, not the parent.
+            try:
+                os.chmod(link_dir, 0o555)
+            except OSError:
+                pass
+            pol = _test_policy(bindir)
+            decision = policy.decide(pol, "claude", "coding-host", [link, "-n", "id"], cwd="/tmp")
+            self.assertFalse(decision.allow)
+            # path-hijack (symlink target differs) or no-sudo (resolved sudo)
+            self.assertIn(decision.rule, ("path-hijack", "no-sudo"))
 
 
 class PolicyLoaderTests(unittest.TestCase):
@@ -208,6 +258,14 @@ forbid = true
     def test_actor_missing_tier_raises_policy_error(self):
         with self.assertRaises(policy.PolicyError):
             policy.loads('path = ["/bin"]\n[actors.x]\nname = "a"\n[hosts.h]\nkind = "local"\n')
+
+    def test_duplicate_actor_names_raise_policy_error(self):
+        # H/Qoder-8: rotating a token must not silently grant two clients
+        # the same name (cross-actor logTail isolation, run_as attribution).
+        with self.assertRaises(policy.PolicyError):
+            policy.loads('path = ["/bin"]\n[hosts.h]\nkind = "local"\n'
+                         '[actors.old]\nname = "claude"\ntier = "default"\n'
+                         '[actors.new]\nname = "claude"\ntier = "default"\n')
 
 
 class CliCheckTests(unittest.TestCase):

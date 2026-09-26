@@ -27,7 +27,10 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              (checked on every command head)
     path-hijack              argv[0] is a relative path, or a bare name that
                              does not resolve on the policy's FIXED PATH, or
-                             an absolute path under a world-writable directory
+                             an absolute path whose resolved file/immediate
+                             parent is writable by the uid or world-writable,
+                             or a symlink outside the fixed PATH (resolved
+                             targets re-enter basename rules)
                              (checked on every command head)
     use-host-alias           on a local host, ssh/scp/sftp always and rsync
                              with host:path (checked on every head)
@@ -169,6 +172,13 @@ def _build(raw: object, *, source: str) -> Policy:
         if not isinstance(entry, dict) or "name" not in entry or "tier" not in entry:
             raise PolicyError(f"{source}: actors.{token_sha!r} needs 'name' and 'tier'")
         actors[str(token_sha)] = Actor(name=str(entry["name"]), tier=str(entry["tier"]))
+    # H/Qoder-8: duplicate actor names break host_log_tail isolation and
+    # run_as attribution -- refuse at load (e.g. token rotation overlap).
+    seen_names: set[str] = set()
+    for actor in actors.values():
+        if actor.name in seen_names:
+            raise PolicyError(f"{source}: duplicate actor name {actor.name!r}")
+        seen_names.add(actor.name)
 
     hosts: dict[str, HostEntry] = {}
     for alias, entry in hosts_raw.items():
@@ -228,6 +238,9 @@ def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str)
         return Decision(False, "forbid-host", (f"host is forbidden: {host!r}",))
 
     heads = _command_heads(argv)
+    # G: symlink targets become extra heads so basename rules re-apply to
+    # the resolved file (Qoder-3).
+    heads = heads + _resolved_extra_heads(heads)
 
     for head in heads:
         env_problem = _env_injection_problem(head)
@@ -260,9 +273,10 @@ def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str)
     # positive: `grep sudo file` is denied too -- documented here and in
     # configuration/hostexec/README.md; the operator chose fail-closed
     # over allowing a token that spells a privilege boundary.
-    for tok in argv:
-        if isinstance(tok, str) and _basename(tok) in _SUDO_FAMILY:
-            return Decision(False, "no-sudo", (f"{_basename(tok)} is never allowed (Q3)",))
+    for head in heads:
+        for tok in head:
+            if isinstance(tok, str) and _basename(tok) in _SUDO_FAMILY:
+                return Decision(False, "no-sudo", (f"{_basename(tok)} is never allowed (Q3)",))
 
     for idx, head in enumerate(heads):
         if not head:
@@ -826,21 +840,96 @@ def _is_world_writable_dir(directory: str) -> bool:
     return bool(st.st_mode & stat.S_IWOTH)
 
 
+def _is_writable_by_me_or_world(path: str) -> bool:
+    """G: world-writable (stat) or writable by the current uid (os.access,
+    skipped for root where access is always True). Missing paths do not
+    deny -- exec would fail anyway, and this rule is about hijack."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if bool(st.st_mode & stat.S_IWOTH):
+        return True
+    try:
+        if os.geteuid() == 0:
+            # Root can write everything; check owner-write instead so this
+            # rule still means "attacker-writable", not "everything".
+            return False
+    except AttributeError:
+        pass
+    try:
+        return os.access(path, os.W_OK)
+    except OSError:
+        return False
+
+
+def _parent_chain(directory: str) -> list[str]:
+    """[/a/b, /a, /] for /a/b (absolute only)."""
+    out: list[str] = []
+    cur = directory
+    while True:
+        out.append(cur or "/")
+        if cur in ("", "/"):
+            break
+        cur = cur.rsplit("/", 1)[0] or "/"
+        if len(out) > 64:
+            break
+    return out
+
+
 def _path_hijack_problem(argv0: str, policy: Policy) -> str | None:
     if not argv0:
         return None  # empty-argv already covers this
     if "/" in argv0:
         if not argv0.startswith("/"):
             return f"argv[0] is a relative path: {argv0!r}"
-        parent = argv0.rsplit("/", 1)[0] or "/"
-        if _is_world_writable_dir(parent):
-            return f"argv[0] lives under a world-writable directory: {parent!r}"
+        # G: realpath + uid/world-writable on the resolved file and the
+        # immediate parents (original and resolved), plus symlink target
+        # outside the fixed PATH. Only immediates -- not the full chain to
+        # / -- so system sticky dirs like /tmp don't deny everything under
+        # them (tests use /tmp temp dirs; real hijack is the writable leaf).
+        try:
+            resolved = os.path.realpath(argv0)
+        except OSError:
+            resolved = argv0
+        for p in (resolved, resolved.rsplit("/", 1)[0] or "/",
+                  argv0.rsplit("/", 1)[0] or "/"):
+            if _is_writable_by_me_or_world(p):
+                return f"argv[0] resolves under a writable path: {p!r}"
+        if resolved != argv0:
+            rdir = resolved.rsplit("/", 1)[0] or "/"
+            allowed = {d.rstrip("/") or "/" for d in policy.path}
+            if rdir not in allowed:
+                return (f"argv[0] is a symlink to {resolved!r}, outside the "
+                        f"policy's fixed PATH")
         return None
     for directory in policy.path:
         candidate = f"{directory.rstrip('/')}/{argv0}"
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return None
     return f"argv[0] {argv0!r} does not resolve on the policy's fixed PATH"
+
+
+def _resolved_extra_heads(heads: list[list[str]]) -> list[list[str]]:
+    """G/Qoder-3: for every absolute head, re-apply basename rules to the
+    realpath target (e.g. /home/op/bin/id -> /usr/bin/sudo denies as
+    no-sudo even though the spelled basename is `id`)."""
+    extra: list[list[str]] = []
+    seen = {tuple(h) for h in heads}
+    for h in heads:
+        if not h or "/" not in h[0] or not h[0].startswith("/"):
+            continue
+        try:
+            resolved = os.path.realpath(h[0])
+        except OSError:
+            continue
+        if resolved == h[0]:
+            continue
+        nh = [resolved] + list(h[1:])
+        if tuple(nh) not in seen:
+            seen.add(tuple(nh))
+            extra.append(nh)
+    return extra
 
 
 def _looks_like_rsync_remote(token: str) -> bool:
