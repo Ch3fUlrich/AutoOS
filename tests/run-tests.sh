@@ -3112,7 +3112,7 @@ for _k in vscode chrome gh; do
         apt_key_case "$_k"
         sb="$(mktemp -d)"; ok=1
         for mode in fail-curl empty-body; do
-            rm -rf "$sb/etc" "$sb/tmp" "$sb/calls.log"; mkdir -p "$sb/etc/apt/sources.list.d"
+            rm -rf "${sb:?}/etc" "${sb:?}/tmp" "${sb:?}/calls.log"; mkdir -p "$sb/etc/apt/sources.list.d"
             out="$(apt_key_run "$sb" "$AK_FN" "$mode")"; rc=$?
             (( rc != 0 )) || { ok=0; echo "$mode: rc=0 counts a failed key download as installed" >&2; }
             [[ -z "$(find "$sb/etc" -type f)" ]] || { ok=0; echo "$mode: left files behind: $(find "$sb/etc" -type f | tr '\n' ' ')" >&2; }
