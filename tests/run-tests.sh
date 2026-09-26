@@ -7199,13 +7199,13 @@ EOF
     rerun="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"
     echo "# hand edit" >> "$unit"
     drift="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"
-    backups="$(ls "$tmp/home/.config/systemd/user" | grep -c autoos-backup || true)"
+    n_bak="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name '*autoos-backup*' | wc -l | tr -d ' ')"
     rm -rf "$tmp"
     ok=1
     printf '%s\n' "$rerun" | grep -q "herdr-sessions-restore.service: already current" || ok=0
     printf '%s\n' "$drift" | grep -q "herdr-sessions-restore.service: differs from the installed copy -- backed up" || ok=0
-    [ "$backups" = "1" ] || ok=0
-    if [ "$ok" = "1" ]; then pass; else fail "rerun=[$rerun] drift=[$drift] backups=$backups"; fi
+    [ "$n_bak" = "1" ] || ok=0
+    if [ "$ok" = "1" ]; then pass; else fail "rerun=[$rerun] drift=[$drift] backups=$n_bak"; fi
 fi
 
 if it "herdr-sessions: install.sh prints the all-current summary only when no unit changed"; then
@@ -7232,7 +7232,7 @@ if it "herdr-sessions: two drifted re-runs in the same second keep two distinct 
     run_hs
     echo "# edit one" >> "$unit"; run_hs
     echo "# edit two" >> "$unit"; run_hs
-    n="$(ls "$tmp/home/.config/systemd/user" | grep -c 'herdr-sessions-restore.service.autoos-backup' || true)"
+    n="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name 'herdr-sessions-restore.service.autoos-backup*' | wc -l | tr -d ' ')"
     one="$(grep -l '# edit one' "$tmp"/home/.config/systemd/user/herdr-sessions-restore.service.autoos-backup* 2>/dev/null | wc -l)"
     rm -rf "$tmp"
     if [[ "$n" == 2 && "$one" -ge 1 ]]; then pass; else fail "backups=$n, backups holding the first edit=$one (a same-second backup overwrote the earlier one)"; fi
@@ -7247,7 +7247,7 @@ FALLBACK=none
 EOF
     HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
     first="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"
-    left="$(ls "$tmp/home/.config/systemd/user" 2>/dev/null | grep -vc autoos-backup || true)"
+    left="$(find "$tmp/home/.config/systemd/user" -mindepth 1 -maxdepth 1 ! -name '*autoos-backup*' 2>/dev/null | wc -l | tr -d ' ')"
     second="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"
     rm -rf "$tmp"
     if printf '%s\n' "$first" | grep -q "removed 5 unit(s)" && [ "$left" = "0" ] && printf '%s\n' "$second" | grep -q "nothing to remove"; then
@@ -7277,7 +7277,7 @@ EOF
     echo "# original edit" >> "$unit"
     run_hs2   # drift, same stubbed second: backs up "# original edit" content
     run_hs2 --unregister   # same stubbed second: must not overwrite that backup
-    n="$(ls "$tmp/home/.config/systemd/user" 2>/dev/null | grep -c 'herdr-sessions-restore.service.autoos-backup' || true)"
+    n="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name 'herdr-sessions-restore.service.autoos-backup*' 2>/dev/null | wc -l | tr -d ' ')"
     original_kept="$(grep -l '# original edit' "$tmp"/home/.config/systemd/user/herdr-sessions-restore.service.autoos-backup* 2>/dev/null | wc -l)"
     rm -rf "$tmp"
     if [[ "$n" == 2 && "$original_kept" -ge 1 ]]; then
@@ -12085,12 +12085,12 @@ if it "backup residual: aistack replace_dir_with_copy never lands inside a taken
     [[ "$(cat "$dest/data" 2>/dev/null)" == "new" ]] || { ok=0; echo "dest not swapped to the new content" >&2; }
     [[ "$(cat "$base/marker" 2>/dev/null)" == "sentinelA" ]] || { ok=0; echo "the first taken aside name was overwritten" >&2; }
     [[ "$(cat "$base-$$/marker" 2>/dev/null)" == "sentinelB" ]] || { ok=0; echo "the second taken aside name (this process's PID) was overwritten" >&2; }
-    extra=""
+    aside_dir=""
     for cand in "$d"/dest.autoos-backup-"$ts"*; do
         [[ "$cand" == "$base" || "$cand" == "$base-$$" ]] && continue
-        [[ -f "$cand/data" ]] && extra="$cand"
+        [[ -f "$cand/data" ]] && aside_dir="$cand"
     done
-    [[ -n "$extra" && "$(cat "$extra/data" 2>/dev/null)" == "old" ]] \
+    [[ -n "$aside_dir" && "$(cat "$aside_dir/data" 2>/dev/null)" == "old" ]] \
         || { ok=0; echo "the previous dest did not land under a third, genuinely free name" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "replace_dir_with_copy's aside collided with an existing name"; fi
