@@ -7093,6 +7093,33 @@ if it "herdr-sessions: smoke (bash -n, py_compile, install --dry-run)"; then
     out="$(bash configuration/herdr-sessions/tests/test_smoke.sh 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# Finding 6 (qoder review, L1-backlog.review-herdr-qoder.md, low): prof_key's
+# `tr -d '[:space:]'` deleted whitespace INSIDE the value too, not just around
+# it -- HS_WORKDIR=/opt/My Files parsed as /opt/MyFiles, the units installed
+# cleanly, and the service would fail at boot with a nonexistent
+# WorkingDirectory, nothing at install time saying so. prof_key also parses
+# HERDR_BIN (used only for the system-scope dry-run precondition message,
+# which is safe to run with no root and no stubs), so that key -- not
+# HS_WORKDIR, which render_unit only ever splices into the system-scope
+# herdr-server.service and a REAL system-scope install needs root and writes
+# to a real /etc, disallowed for this suite -- is what exercises prof_key's
+# trimming here without live systemctl or a real /etc write.
+if it "herdr-sessions: prof_key trims only leading/trailing whitespace, not spaces inside the value"; then
+    tmp="$(mktemp -d)"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=system
+HERDR_BIN=$tmp/My Herdr/bin/herdr
+FALLBACK=none
+EOF
+    out="$(bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --dry-run 2>&1)"; rc=$?
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [[ "$out" == *"herdr at $tmp/My Herdr/bin/herdr"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=${out:0:400}"
+    fi
+fi
+
 # Bug (b) from the proposal doc: which uuid a restored pane resumes, when a
 # background job's transcript shares the pane's own directory (unit tests).
 if it "herdr-sessions: uuid picking excludes background sessions (unit tests)"; then
@@ -7133,6 +7160,30 @@ EOF
         pass
     else
         fail "rc=$rc got=[$got] out=$out"
+    fi
+fi
+
+# Finding 5 (qoder review, L1-backlog.review-herdr-qoder.md, low): render_unit
+# spliced user-supplied paths into sed replacement text with no escaping -- a
+# profile at /srv/a&b/hs.conf rendered HERDR_PROFILE=/srv/a@PROFILE_PATH@b/hs.conf
+# (& expands to the matched token in sed's replacement), the install reported
+# success, and restore would fail at the next boot with a bogus profile path.
+if it "herdr-sessions: render_unit renders a profile path containing '&' literally, not as a sed backreference"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    site_dir="$tmp/a&b"; mkdir -p "$site_dir"
+    conf="$site_dir/hs.conf"
+    cat > "$conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$conf" 2>&1)"; rc=$?
+    got="$(grep -h HERDR_PROFILE "$tmp/home/.config/systemd/user/herdr-sessions-restore.service" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=$conf" ]; then
+        pass
+    else
+        fail "rc=$rc got=[$got] out=${out:0:300}"
     fi
 fi
 
@@ -7203,6 +7254,99 @@ EOF
         pass
     else
         fail "first=[$first] left=$left second=[$second]"
+    fi
+fi
+
+# Finding 2 (qoder review, L1-backlog.review-herdr-qoder.md, medium):
+# remove_unit's backup had no taken-suffix loop, and cp -p overwrites -- an
+# --unregister backup in the same second as a drifted install's own backup
+# silently destroyed the only copy of the user's original unit. Both paths
+# now share one helper (unique_backup_path + back_up_or_die) instead of
+# drifting apart.
+if it "herdr-sessions: remove_unit's backup uses install_unit's collision loop -- a same-second unregister keeps both backups"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    printf '#!/usr/bin/env bash\necho 20260926130000\n' > "$stub/date"; chmod +x "$stub/date"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    run_hs2() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" "$@" >/dev/null 2>&1; }
+    run_hs2   # fresh install: no backup yet
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    echo "# original edit" >> "$unit"
+    run_hs2   # drift, same stubbed second: backs up "# original edit" content
+    run_hs2 --unregister   # same stubbed second: must not overwrite that backup
+    n="$(ls "$tmp/home/.config/systemd/user" 2>/dev/null | grep -c 'herdr-sessions-restore.service.autoos-backup' || true)"
+    original_kept="$(grep -l '# original edit' "$tmp"/home/.config/systemd/user/herdr-sessions-restore.service.autoos-backup* 2>/dev/null | wc -l)"
+    rm -rf "$tmp"
+    if [[ "$n" == 2 && "$original_kept" -ge 1 ]]; then
+        pass
+    else
+        fail "backups=$n, backups holding the original edit=$original_kept (unregister overwrote the install backup)"
+    fi
+fi
+
+if it "herdr-sessions: remove_unit is fail-closed -- a backup that cannot be written leaves the unit in place"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    cat > "$stub/cp" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$stub/cp"
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "rc=0 although the backup copy failed: ${out:0:300}" >&2; }
+    [[ "$out" == *"FATAL"*"back up"* ]] || { ok=0; echo "no FATAL backup message: ${out:0:300}" >&2; }
+    [[ -f "$unit" ]] || { ok=0; echo "the unit was removed although its backup failed" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "remove_unit is not fail-closed on a backup failure"; fi
+fi
+
+# Finding 3 (qoder review, L1-backlog.review-herdr-qoder.md, medium):
+# remove_unit disabled but never stopped, and install starts the snapshot
+# timer with --now -- so --unregister left the timer active in memory,
+# still firing and writing snapshots, while detection now (correctly, after
+# finding 1/2's fixes) reports herdr-sessions gone -- letting claude-autostart
+# install and run concurrently.
+if it "herdr-sessions: --unregister disables --now (stops the timer) before removing, not disable alone"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; mkdir -p "$stub"
+    log="$tmp/systemctl.log"
+    cat > "$stub/systemctl" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+exit 0
+STUB
+    chmod +x "$stub/systemctl"
+    cat > "$stub/loginctl" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "show-user" ] && echo yes
+exit 0
+STUB
+    chmod +x "$stub/loginctl"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    run_hs3() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" "$@" >/dev/null 2>&1; }
+    run_hs3
+    : > "$log"
+    run_hs3 --unregister
+    n="$(grep -c '^--user disable --now ' "$log" 2>/dev/null || true)"
+    stale="$(grep -c '^--user disable [^-]' "$log" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [[ "$n" -ge 1 && "$stale" -eq 0 ]]; then
+        pass
+    else
+        fail "disable --now calls=$n, disable-without-now calls=$stale"
     fi
 fi
 
@@ -7290,6 +7434,32 @@ if it "herdr-sessions: a dry run calls the driver with --dry-run and changes not
     [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "a dry run touched the driver's marker file" >&2; }
     rm -rf "$sb"
     if (( ok )); then pass; else fail "install_herdr_sessions dry run is not side-effect free"; fi
+fi
+
+# Finding 4 (qoder review, L1-backlog.review-herdr-qoder.md, low): the dry-run
+# branch ran the driver uncaptured, so its output bypassed the ui_* layer --
+# under NO_COLOR it printed the driver's raw ANSI escapes and none of its
+# would-lines reached the AutoOS log file, unlike the real (non-dry) path,
+# which captures and re-emits via ui_muted. Proven here via ui_muted's own
+# side effect (it also calls _log, which writes to AUTOOS_LOG) rather than by
+# stdout content alone, since stdout is captured either way by this test's
+# own subshell.
+if it "herdr-sessions: a dry run's driver output goes through ui_muted, reaching the AutoOS log like the real path"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile
+' >"$profile"
+    logfile="$sb/autoos.log"
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=1
+              AUTOOS_HERDR_SESSIONS_DIR="$drv"; PLAN_IDS=""; AUTOOS_LOG="$logfile"
+              AUTOOS_ANSWERS[herdr_sessions_profile]="$profile"
+              INSTALL_SCRIPT_STATE=""
+              install_herdr_sessions ) 2>&1 )"
+    [[ "$out" == *"would restore panes from $profile"* ]] || { ok=0; echo "driver dry-run line missing from stdout: ${out:0:300}" >&2; }
+    grep -q "would restore panes from $profile" "$logfile" 2>/dev/null \
+        || { ok=0; echo "driver dry-run line never reached the AutoOS log (ui_muted bypassed): $(cat "$logfile" 2>/dev/null)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions dry-run does not route the driver's output through ui_muted"; fi
 fi
 
 if it "herdr-sessions: an empty profile answer is skipped, never a guessed path"; then
@@ -7403,14 +7573,53 @@ if it "herdr-sessions: claude-autostart refuses when herdr-sessions was selected
     if (( ok )); then pass; else fail "claude-autostart installed alongside herdr-sessions"; fi
 fi
 
-if it "herdr-sessions detect: true only when the restore service unit exists"; then
+if it "herdr-sessions detect: true only when the restore service unit exists (user scope)"; then
     sb="$(mktemp -d)"; ok=1
-    ( SYS_HOME="$sb/home"; ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with no unit file present" >&2; }
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/no-etc"
+      ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with no unit file present" >&2; }
     mkdir -p "$sb/home/.config/systemd/user"
     touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
-    ( SYS_HOME="$sb/home"; script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the unit file exists" >&2; }
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/no-etc"
+      script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the user-scope unit file exists" >&2; }
     rm -rf "$sb"
-    if (( ok )); then pass; else fail "herdr-sessions detection does not match the unit file's presence"; fi
+    if (( ok )); then pass; else fail "herdr-sessions detection does not match the user-scope unit file's presence"; fi
+fi
+
+# Finding 1 (qoder review, L1-backlog.review-herdr-qoder.md): a SYSTEM-scope
+# install (HS_SCOPE=system, units in /etc/systemd/system - see
+# configuration/herdr-sessions/install.sh) was invisible here, so a later
+# claude-autostart install passed autoos_conflict_present's mutual-exclusion
+# gate and ran beside a live herdr restore. /etc/systemd/system is injectable
+# via AUTOOS_ETC_SYSTEMD_SYSTEM_DIR, the same seam pattern as SYS_HOME, so
+# this never needs a real /etc write to test.
+if it "herdr-sessions detect: also true for a system-scope unit, independent of the user-scope path"; then
+    sb="$(mktemp -d)"; ok=1
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+      ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with neither path present" >&2; }
+    mkdir -p "$sb/etc"
+    touch "$sb/etc/herdr-sessions-restore.service"
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+      script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the system-scope unit file exists" >&2; }
+    [[ ! -d "$sb/home" ]] || { ok=0; echo "the user-scope dir was touched by a system-scope check" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions detection does not see a system-scope install"; fi
+fi
+
+if it "herdr-sessions: claude-autostart's mutual-exclusion gate sees a system-scope herdr-sessions install too"; then
+    sb="$(mktemp -d)"; ok=1
+    mkdir -p "$sb/home/.config/systemd/user" "$sb/etc"
+    touch "$sb/etc/herdr-sessions-restore.service"
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+              AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+              PLAN_IDS=""
+              systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
+              install_claude_autostart ) 2>&1 )"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 with herdr-sessions installed system-scope only: ${out:0:300}" >&2; }
+    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions (system-scope case): ${out:0:300}" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "claude-autostart wrote units despite the system-scope conflict" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart installed alongside a system-scope-only herdr-sessions"; fi
 fi
 
 if it "herdr-sessions: a driver run that replaced some units is installed, not skipped"; then

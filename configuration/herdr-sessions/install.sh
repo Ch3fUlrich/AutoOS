@@ -84,7 +84,15 @@ esac
 # default to guess from the profile's name: that only ever worked for the
 # hosts this driver was written on, and cannot generalise to an arbitrary
 # profile a downstream user creates.
-prof_key() { sed -n "s/^[[:space:]]*$1=\([^#]*\).*/\1/p" "$PROFILE_CONF" | tail -1 | tr -d '[:space:]'; }
+# Trims only leading/trailing whitespace (not `tr -d`, which deletes every
+# space -- HS_WORKDIR=/opt/My Files must stay "/opt/My Files", not become
+# "/opt/MyFiles" and fail at boot with a WorkingDirectory that never existed).
+prof_key() {
+    local v; v="$(sed -n "s/^[[:space:]]*$1=\([^#]*\).*/\1/p" "$PROFILE_CONF" | tail -1)"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    printf '%s' "$v"
+}
 SCOPE="$(prof_key HS_SCOPE)"
 [ -n "$SCOPE" ] || {
     echo "FATAL: $PROFILE_CONF must set HS_SCOPE=user or HS_SCOPE=system (see profiles/example.conf)" >&2
@@ -114,15 +122,73 @@ else
     SYSTEMCTL_SCOPE=()
 fi
 
+# _replace_token <line> <token> <value>: every occurrence of <token> in <line>
+# replaced by the literal bytes of <value> -- plain split-and-concatenate, no
+# pattern-substitution replacement field involved, so nothing in <value> is
+# ever read as an escape or backreference (see render_unit below for why that
+# matters here).
+_replace_token() {
+    local rest="$1" token="$2" value="$3" out=""
+    while [[ "$rest" == *"$token"* ]]; do
+        out+="${rest%%"$token"*}$value"
+        rest="${rest#*"$token"}"
+    done
+    out+="$rest"
+    printf '%s' "$out"
+}
+
 # Render a unit template into a real unit file. The checked-in units carry
 # four literal tokens -- @PROFILE@ (the --profile argument as given, informational
 # only), @APPDIR@ (where this checkout lives), @WORKDIR@ (the cwd panes
 # inherit) and @PROFILE_PATH@ (the resolved absolute profile path, what
-# HERDR_PROFILE is actually set to). "#" is the sed delimiter because every
-# replacement is a path.
+# HERDR_PROFILE is actually set to). Every replacement is an arbitrary
+# filesystem path, so this does NOT use sed (its replacement text treats `&`
+# as "the matched text" and `\` as an escape, both unescaped here) -- and,
+# less obviously, does NOT use bash's own `${var/pattern/value}` either: on
+# bash >= 5.2 (patsub_replacement, on by default) that construct has the exact
+# same `&`-as-backreference behaviour as sed's replacement field. Plain
+# split-and-concatenate (_replace_token) is immune to both.
 render_unit() {
-    sed -e "s#@PROFILE@#$PROFILE#g" -e "s#@APPDIR@#$APPDIR#g" \
-        -e "s#@WORKDIR@#$WORKDIR#g" -e "s#@PROFILE_PATH@#$PROFILE_CONF#g" "$1"
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="$(_replace_token "$line" "@PROFILE@" "$PROFILE")"
+        line="$(_replace_token "$line" "@APPDIR@" "$APPDIR")"
+        line="$(_replace_token "$line" "@WORKDIR@" "$WORKDIR")"
+        line="$(_replace_token "$line" "@PROFILE_PATH@" "$PROFILE_CONF")"
+        printf '%s\n' "$line"
+    done < "$1"
+}
+
+# unique_backup_path <path>: the next "<path>.autoos-backup-<ts>[-N]" name that
+# is not already taken (file or symlink) -- the "two drifted runs in the same
+# second must not overwrite the first backup" loop, shared by install_unit and
+# remove_unit so the two cannot drift apart (qoder review finding 2: they once
+# had two separate implementations and only one had the loop).
+unique_backup_path() {
+    local target="$1" backup base n=0
+    backup="$target.autoos-backup-$(date +%Y%m%d%H%M%S)"
+    base="$backup"
+    while [ -e "$backup" ] || [ -L "$backup" ]; do
+        n=$((n + 1)); backup="$base-$n"
+    done
+    printf '%s\n' "$backup"
+}
+
+# back_up_or_die <path>: copies <path> to unique_backup_path's next free name.
+# Fail-closed, same as install_unit always was: a copy failure prints FATAL
+# and exits the whole script, rather than letting a caller (remove_unit, in
+# particular) carry on as though the only copy of the file had been saved.
+# Success leaves the path it used in BACKUP_PATH -- a global, not a command
+# substitution, so the exit above stops the real script, not just a $(...)
+# subshell.
+back_up_or_die() {
+    local target="$1"
+    BACKUP_PATH="$(unique_backup_path "$target")"
+    if ! cp -p "$target" "$BACKUP_PATH"; then
+        rm -f "$BACKUP_PATH"
+        echo "FATAL: could not back up $target -- left it unchanged" >&2
+        exit 1
+    fi
 }
 
 # Idempotent: an unchanged render is left alone ("already current"); a changed
@@ -142,19 +208,8 @@ install_unit() {  # $1=src template  $2=dest path
         return
     fi
     if [ -f "$2" ]; then
-        # A name that did not exist yet: two drifted re-runs in the same second
-        # must not overwrite the first backup (lib/linux/install.sh backup_path).
-        local backup n=0; backup="$2.autoos-backup-$(date +%Y%m%d%H%M%S)"
-        local base="$backup"
-        while [ -e "$backup" ] || [ -L "$backup" ]; do
-            n=$((n + 1)); backup="$base-$n"
-        done
-        if ! cp -p "$2" "$backup"; then
-            rm -f "$backup" "$tmp"
-            echo "FATAL: could not back up $2 -- left it unchanged" >&2
-            exit 1
-        fi
-        echo "    $name: differs from the installed copy -- backed up to $(basename "$backup")"
+        back_up_or_die "$2"
+        echo "    $name: differs from the installed copy -- backed up to $(basename "$BACKUP_PATH")"
     fi
     install -m 0644 "$tmp" "$2"
     rm -f "$tmp"
@@ -184,11 +239,14 @@ remove_unit() {  # $1=dest path
         echo "  would: disable $name, back it up, remove $dest"
         return 0
     fi
-    systemctl "${SYSTEMCTL_SCOPE[@]}" disable "$name" >/dev/null 2>&1 || true
-    local backup; backup="$dest.autoos-backup-$(date +%Y%m%d%H%M%S)"
-    cp -p "$dest" "$backup"
+    # --now: stop a running service or timer (e.g. the snapshot timer, started
+    # with --now at install time) before removing its unit -- disable alone
+    # only stops it starting at the NEXT boot, leaving it running in memory
+    # until then.
+    systemctl "${SYSTEMCTL_SCOPE[@]}" disable --now "$name" >/dev/null 2>&1 || true
+    back_up_or_die "$dest"
     rm -f "$dest"
-    echo "    $name: disabled, backed up to $(basename "$backup"), removed"
+    echo "    $name: disabled, backed up to $(basename "$BACKUP_PATH"), removed"
     return 0
 }
 
