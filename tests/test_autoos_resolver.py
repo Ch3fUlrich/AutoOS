@@ -1777,6 +1777,150 @@ class PlanTests(unittest.TestCase):
                      % (provider_id, model_id, result["route"], reason))
 
 
+class GatewayOrderTests(unittest.TestCase):
+    """R-gateway-01 evolved order, twice-revised 2026-09-26 (briefs/common.md
+    'Model mix' then 'Claude budget'): the 15:44Z/15:49Z Qwen-3.8-via-
+    OpenRouter-credits directive was SUPERSEDED at 16:4xZ once the operator
+    found OpenRouter has no shared credit (BYOK only, a probe there spends the
+    operator's own key -> 402). Final, current order: free pools -> the
+    "credits" tier (samba, cheaperinference; qoder/agy at the client level,
+    never a registry leg) -> paid native DeepSeek (V4.1 Flash only - no
+    v4-pro/v4-flash/V3.x anywhere, including samba/cheaperinference rows).
+    `qoder`/`agy` client-level fallbacks have no registry leg at all (agy
+    reaches the pre-existing `antigravity/...` legs, untouched here). The part
+    this module can pin is leg ORDER within a route (OmniRoute's own priority
+    strategy tries legs in this order) and which providers/models are
+    actually referenced.
+    """
+
+    def _legs(self, registry, route_id):
+        return registry["routes"][route_id]["legs"]
+
+    def registry(self):
+        path = (Path(__file__).resolve().parent.parent
+               / "catalog" / "ai-registry.json")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_t3_driver_credit_legs_rank_behind_free_ahead_of_older_fallbacks(self):
+        legs = self._legs(self.registry(), "t3-driver")
+        free_leg = legs.index("groq/qwen/qwen3.8-27b")  # true free tier
+        # cerebras/qwen-3.8-27b is qwen-3.8-27b's own PAID overflow leg (an
+        # older, pre-existing fallback) - the new credit tier ranks ahead of it.
+        older_fallback = legs.index("cerebras/qwen-3.8-27b")
+        for credit_leg in ("samba/gpt-oss-120b", "cheaperinference/glm-5.2",
+                          "cheaperinference/kimi-k3", "samba/MiniMax-M3",
+                          "deepseek/deepseek-flash"):
+            with self.subTest(leg=credit_leg):
+                idx = legs.index(credit_leg)
+                self.assertGreater(idx, free_leg,
+                                   "%s must rank behind the free groq leg" % credit_leg)
+                self.assertLess(idx, older_fallback,
+                               "%s must rank ahead of the older cerebras "
+                               "paid-overflow fallback" % credit_leg)
+
+    def test_openrouter_qwen_legs_are_unreferenced_by_any_route(self):
+        # 16:4xZ revision: OpenRouter has no shared credit (BYOK only) - the
+        # four openrouter/qwen legs added for the withdrawn 15:44Z SPEED
+        # directive keep their model entries (operator instruction) but are
+        # "unavailable and in no route order" - confirmed here by absence,
+        # since an unreferenced leg needs no unavailable_legs entry at all.
+        registry = self.registry()
+        for mid in ("qwen/qwen3.8-flash", "qwen/qwen3-coder-flash",
+                   "qwen/qwen3.8-max-0902"):
+            self.assertIn(mid, registry["models"])
+        for route in registry["routes"].values():
+            for leg in route.get("legs") or []:
+                self.assertFalse(leg.startswith("openrouter/qwen/"), leg)
+
+    def test_only_deepseek_v41_flash_survives_of_the_deepseek_family(self):
+        # 16:4xZ revision: "DeepSeek = ONLY V4.1 Flash ... no v4-pro, v4-flash,
+        # V3.x anywhere (incl. samba/cheaperinference DeepSeek rows)". Every
+        # leg naming a non-V4.1 DeepSeek model is either absent or flagged
+        # unavailable; deepseek/deepseek-flash (native) and
+        # openrouter/deepseek/deepseek-v4.1-flash / opencode-zen/deepseek-
+        # v4.1-flash (the two BYOK/zen V4.1 paths) are the only ones left
+        # servable.
+        registry = self.registry()
+        rejected_models = ("DeepSeek-V3.2", "deepseek/deepseek-v4-pro",
+                          "deepseek/deepseek-v4-flash")
+        for mid in rejected_models:
+            self.assertNotIn(mid, registry["models"])
+        for route_id, route in registry["routes"].items():
+            for leg in route.get("legs") or []:
+                if leg == "cheaperinference/deepseek-v4-flash":
+                    unavailable = route.get("unavailable_legs") or {}
+                    with self.subTest(route=route_id, leg=leg):
+                        self.assertIn(leg, unavailable)
+                        self.assertIs(unavailable[leg].get("available"), False)
+                elif "deepseek" in leg and leg not in (
+                    "deepseek/deepseek-flash",
+                    "openrouter/deepseek/deepseek-v4.1-flash",
+                    "opencode-zen/deepseek-v4.1-flash",
+                ):
+                    self.fail("unexpected non-V4.1 DeepSeek leg %s in %s"
+                             % (leg, route_id))
+
+    def test_no_claude_or_gpt_leg_through_cheaperinference(self):
+        # "Claude budget" 2026-09-26 16:2xZ/16:4xZ: "NEVER Claude or GPT
+        # models through paid APIs (no cheaperinference/claude-*, no
+        # cheaperinference/gpt-*): too expensive" - "DROP the review combo on
+        # cheaperinference/claude-sonnet-5".
+        registry = self.registry()
+        self.assertNotIn("claude-sonnet-5", registry["models"])
+        self.assertNotIn("gpt-5.6-terra", registry["models"])
+        for route in registry["routes"].values():
+            for leg in route.get("legs") or []:
+                self.assertFalse(leg.startswith("cheaperinference/claude"), leg)
+                self.assertFalse(leg.startswith("cheaperinference/gpt"), leg)
+
+    def test_credit_legs_are_opencode_addressable_pinned_routes(self):
+        # "still wanted" (16:4xZ): declared through the registry render into
+        # the opencode provider list, so `--model omniroute/<leg>` resolves -
+        # see tools/registry.py IDE_MODEL_ORDER and this lane's REPORT for the
+        # `--dry-run` proof.
+        registry = self.registry()
+        for route_id in ("cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
+                        "samba/gpt-oss-120b", "samba/MiniMax-M3"):
+            self.assertEqual(registry["routes"][route_id]["legs"], [route_id])
+
+    def test_no_qoder_leg_exists_in_any_route(self):
+        # qoder is a client-level fallback (R-spawn-09), never resolvable as
+        # a registry leg - confirms the "ahead of qoder" half of the order is
+        # not (and cannot be) expressed as route leg data.
+        registry = self.registry()
+        for route in registry["routes"].values():
+            for leg in route.get("legs") or []:
+                self.assertFalse(leg.startswith("qoder/"), leg)
+
+    def test_agentic_card_never_resolves_to_a_leg_without_proven_tool_calls(self):
+        # Brief item 5: "an agentic card never picks a leg without
+        # tool_calls." New legs default to tool_calls: unproven (D20 - no
+        # value enters without evidence) until promoted from a probe
+        # verdict; this proves the pre-existing per-leg filter
+        # (tools/autoos_resolver.py usable_legs) still holds it for an
+        # implement (agentic) card over the now-larger real registry, using
+        # the same inline overlay shape PlanTests._inline_toolcalls_overlay
+        # builds (deepseek/deepseek-flash proven, every other real leg
+        # explicitly unproven).
+        registry = self.registry()
+        overlay = PlanTests._inline_toolcalls_overlay(registry)
+        card = {"kind": "implement", "spec": "exact", "risk": "normal",
+               "mode": "balanced", "privacy": "public"}
+        features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                   "tests": True, "need_tokens": 1000}
+        client_state = {"opencode": {"installed": True, "signed_in": True,
+                                     "reason": ""}}
+        result = r.plan(card, features, client_state, registry, overlay, [],
+                        "muse-spark", datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc))
+        self.assertIsNotNone(result["route"], result)
+        # result["leg"] is the route's first *usable* leg (per-leg tool_calls
+        # filter already applied by usable_legs/score_route), not merely its
+        # first serving one - every leg but deepseek/deepseek-flash is
+        # explicitly unproven in this overlay, so that is the only leg an
+        # agentic (implement) card may land on.
+        self.assertEqual(result["leg"], "deepseek/deepseek-flash")
+
+
 class DecomposeTests(unittest.TestCase):
     """decompose(): spec 5.3 step 3 / D7 -- S3/S4 only, one level deep.
 

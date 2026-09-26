@@ -66,7 +66,7 @@ TIER_PROFILES_PATH = CONFIG / "openhands" / "tier-profiles.json"
 PROVIDER_WINDOWS_PATH = UNATTENDED_SKILL / "provider-windows.json"
 OUTPUT_PATH = CATALOG / "ai-registry.json"
 
-REGISTRY_VERSION = "2026-09-25"
+REGISTRY_VERSION = "2026-09-26"
 D8_USABLE_FRACTION = 0.5  # spec D8: 50% of advertised until a probe measures it.
 BUCKETS = ("S0", "S1", "S2", "S3", "S4")
 
@@ -149,9 +149,16 @@ PROVIDER_EXTRA = {
     },
     "cheapinference": {
         "trains_on_prompts": False, "tier": "paid",
+        "comment": "Q1 2026-09-26: https://www.cheaperinference.com/legal/privacy states "
+                   "'We do not use customer prompt or response bodies to train Keak "
+                   "models' - trains_on_prompts: false confirmed (was unsourced before).",
     },
     "SambaNova": {
-        "trains_on_prompts": False, "tier": "free",
+        "trains_on_prompts": True, "tier": "free",
+        "comment": "Q1 2026-09-26: SambaNova's Privacy Policy and Terms & Conditions were "
+                   "checked; neither states whether API inference is used for training. "
+                   "Inconclusive research defaults conservative (was unsourced 'false' "
+                   "before this migration).",
     },
     "cloudflare_workers_ai": {
         "trains_on_prompts": False, "tier": "free",
@@ -203,6 +210,23 @@ EXTRA_PROVIDERS = {
                    "not to train on these conversations by default. audit-router.py bans "
                    "any other anthropic/claude API reference, so this is the only Claude "
                    "provider entry the registry needs.",
+    },
+    "cxa": {
+        "omniroute_id": "cxa", "litellm_env": None, "litellm_prefix": None,
+        "api_base": None, "provider_data": None,
+        "available": False, "trains_on_prompts": True, "tier": "subscription",
+        "comment": "The Codex app-server transport in OmniRoute (cxa/*) is NOT "
+                   "configured: 503 'not configured', measured by L0 2026-09-26T15:44Z. "
+                   "No route references a cxa/* leg today.",
+    },
+    "samba": {
+        "omniroute_id": "samba", "litellm_env": None, "litellm_prefix": None,
+        "api_base": None, "provider_data": None,
+        "trains_on_prompts": True, "tier": "paid",
+        "comment": "New paid-credit access tier funded 2026-09-26, distinct from the "
+                   "pre-existing free 'SambaNova' provider (omniroute_id 'sambanova'). "
+                   "trains_on_prompts: true is the conservative default (inconclusive "
+                   "research, see SambaNova's own comment) - not private-safe.",
     },
 }
 
@@ -324,6 +348,13 @@ UNAVAILABLE_LEGS = {
     "cerebras/qwen-3.8-27b": (
         "L0 decision 2026-09-26T11:44Z (measured): 401 credits exhausted; "
         "OmniRoute deactivated the cerebras connection itself. Re-probe weekly."),
+    "cheaperinference/deepseek-v4-flash": (
+        "Operator decision 2026-09-26 16:4xZ ('Claude budget' revision, "
+        "briefs/common.md): 'DeepSeek = ONLY V4.1 Flash: native deepseek/"
+        "deepseek-flash or openrouter/deepseek/deepseek-v4.1-flash ... incl. "
+        "samba/cheaperinference DeepSeek rows' - this leg is DeepSeek v4 (not "
+        "v4.1), so it is out. Kept in place (operator flags, never deletes or "
+        "reorders) so combos.json still mirrors today's committed data."),
 }
 
 
@@ -338,15 +369,15 @@ def mark_legs_unavailable(registry, legs=None):
 
 
 def mark_openrouter_unavailable(registry):
-    """Operator decision 2026-09-25 (see OPENROUTER_DOWN_COMMENT): flag the provider
-    and every leg reached through it, without deleting or reordering anything."""
-    provider = registry["providers"]["openrouter"]
-    provider["available"] = False
-    existing = provider.get("$comment")
-    comments = (existing if isinstance(existing, list) else [existing] if existing else [])
-    comments.append(OPENROUTER_DOWN_COMMENT)
-    provider["$comment"] = comments if len(comments) > 1 else comments[0]
-
+    """Operator decision 2026-09-25 (see OPENROUTER_DOWN_COMMENT), PARTIALLY
+    superseded 2026-09-26 16:4xZ ('Claude budget' revision, briefs/common.md):
+    OpenRouter has no shared credit (BYOK only) but is no longer blanket-down -
+    the provider-level `available: false` this function used to set is gone
+    (removed here rather than reproduced, so a fresh convert matches). Every
+    openrouter leg still referenced by a route today is exactly the set that
+    was already flagged individually before this migration (deepseek-v4.1-
+    flash, google/gemini-3.8-flash, meta/muse-spark-1.3-contributor) - this
+    loop keeps flagging those per-route, unchanged."""
     for route in registry["routes"].values():
         openrouter_legs = [leg for leg in route["legs"] if leg.split("/", 1)[0] == "openrouter"]
         if openrouter_legs:
@@ -626,6 +657,45 @@ EXTRA_MODELS = {
                    "(docs/models.md: the bare 'openrouter/gemini-3.8-flash' spelling "
                    "400s - only this google-scoped spelling ships). " + _UNPRICED,
     },
+    # Q1, 2026-09-26: openrouter/qwen legs added for the 15:44Z SPEED directive,
+    # kept (operator instruction) after the 16:4xZ 'Claude budget' revision
+    # withdrew them from every route (OpenRouter has no shared credit - BYOK
+    # only). tool_calls: proven from tools/probe-toolcalls.py (3/3 trials,
+    # logs/routing/measured.json).
+    "qwen/qwen3.8-flash": {
+        "family": "qwen", "context_advertised": 131072, "output_max": 16384,
+        "reasoning": False, "effort_ladder": [], "tool_calls": "proven",
+        "price_in": 0.0, "price_out": 0.0,
+        "comment": "Unreferenced by any route - see module note above. " + _UNPRICED,
+    },
+    "qwen/qwen3-coder-flash": {
+        "family": "qwen", "context_advertised": 131072, "output_max": 16384,
+        "reasoning": False, "effort_ladder": [], "tool_calls": "proven",
+        "price_in": 0.0, "price_out": 0.0,
+        "comment": "Unreferenced by any route - see module note above. " + _UNPRICED,
+    },
+    "qwen/qwen3.8-max-0902": {
+        "family": "qwen", "context_advertised": 131072, "output_max": 16384,
+        "reasoning": False, "effort_ladder": [], "tool_calls": "proven",
+        "price_in": 0.0, "price_out": 0.0,
+        "comment": "Unreferenced by any route - see module note above. " + _UNPRICED,
+    },
+    # Q1 extension, 2026-09-26 16:4xZ 'Claude budget' worker table.
+    "glm-5.2": {
+        "family": "zhipu", "context_advertised": 131072, "output_max": 16384,
+        "reasoning": False, "effort_ladder": [], "tool_calls": "proven",
+        "price_in": 0.0, "price_out": 0.0,
+        "comment": "cheaperinference's S0-S1 credit leg; trains_on_prompts false per "
+                   "providers.cheapinference. tool_calls: proven (probe, 3/3 trials). "
+                   + _UNPRICED,
+    },
+    "MiniMax-M3": {
+        "family": "minimax", "context_advertised": 131072, "output_max": 16384,
+        "reasoning": False, "effort_ladder": [], "tool_calls": "proven",
+        "price_in": 0.0, "price_out": 0.0,
+        "comment": "samba's S1-S2 credit leg; tool_calls: proven (probe, 3/3 trials). "
+                   + _UNPRICED,
+    },
 }
 
 
@@ -705,6 +775,12 @@ COMBO_CLASS = {
     "deepseek-v4.1-flash": "cheap",
     "opus-4-6": "frontier",
     "auto": "mid", "auto/smart": "mid", "auto/cheap": "cheap",
+    # Pinned single-leg credit routes (Q1, 2026-09-26 16:4xZ "Claude budget"
+    # revision, briefs/common.md): declared so `--model omniroute/<leg>` is
+    # independently opencode-addressable (see catalog/ai-registry.json's own
+    # $comment on each route).
+    "cheaperinference/kimi-k3": "cheap", "cheaperinference/glm-5.2": "cheap",
+    "samba/gpt-oss-120b": "cheap", "samba/MiniMax-M3": "cheap",
 }
 
 AUTO_IDS = frozenset({"auto", "auto/smart", "auto/cheap"})
