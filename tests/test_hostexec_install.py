@@ -368,7 +368,8 @@ class UnregisterTests(_DriverCase):
         for client in ("openhands", "claude", "codex", "opencode"):
             self.write_token(client)
         self.write_token("qoder")
-        self.run_driver_ok("--unit", "--clients", "openhands,claude,codex,opencode,qoder")
+        # No --unit: one run installs the unit AND wires every client.
+        self.run_driver_ok("--clients", "openhands,claude,codex,opencode,qoder")
 
     def test_unregister_twice(self):
         import json
