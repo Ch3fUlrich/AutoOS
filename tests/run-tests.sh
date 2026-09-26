@@ -4641,7 +4641,9 @@ if it "antigravity update flag: the plan says 'checking for a newer version' onl
         mkdir -p "$sb/home/.local/opt/antigravity"; printf '%s\n%s\nsize=1\nsha256=abc\n' "$AG_MARKER" "$AG_IDA" >"$sb/home/.local/opt/antigravity/.autoos-version"
         antigravity_inert_clients "$sb/bin"
         # USER names nobody, so detection falls back to HOME: the scratch home is the machine.
-        run_setup() { PATH="$sb/bin:$PATH" USER=agy-test-nobody HOME="$sb/home" DISPLAY=:0 AUTOOS_CACHE_DIR="$sb/cache" \
+        # SUDO_USER wins over USER in detect.sh: CI's setpriv runner inherits it from
+        # `sudo unshare`, which pointed the install at the runner's real home.
+        run_setup() { env -u SUDO_USER PATH="$sb/bin:$PATH" USER=agy-test-nobody HOME="$sb/home" DISPLAY=:0 AUTOOS_CACHE_DIR="$sb/cache" \
             bash setup.sh --only antigravity --dry-run --yes --no-color "$@" 2>&1; }
         before="$(find "$sb/home/.local" -printf '%p|%T@\n' | sort)"
         out="$(run_setup)"; rc=$?
