@@ -172,7 +172,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-host-02: Give every session its own Omnigraph stdio bridge rather than sharing one. (why: measured ~7 MB each, 22 MB for three; source: inbox/L1-main.md 20:34Z)
 - R-host-03: Read a "shellcheck is clean" failure at exit 137 as host OOM, not a lint finding. (why: reproduced on a loaded host across five lanes; source: 20260924-25 DONE notes, five lanes)
 - R-host-04: Keep the machine awake yourself before an overnight run. (why: the runner cannot change power settings; source: SKILL.md history, rule 6)
-- R-host-05: Start a client worker only at MemAvailable >= 1500 MB, max 2 per orchestrator; else use subagents. (why: one costs ~0.7 GB; source: ps 2026-09-26T07:34Z, common.md Host limits)
+- R-host-05: Per orchestrator: <= 4 worktree lanes + 4 read-only subagents, MemAvailable >= 2500 MB; parallel unless same files. (why: 16 GB host; source: operator 2026-09-26T15:03:37Z)
 
 ### safety
 
