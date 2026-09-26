@@ -269,6 +269,24 @@ def _tool_calls_value(leg, model_id, registry, overlay):
     return registry["models"][model_id].get("tool_calls")
 
 
+def _rate_limited(leg, overlay):
+    """True when `leg`'s last recorded tool_calls probe error was all 429s.
+
+    Reads ``overlay["legs"][leg]["tool_calls_last_error"]["trials"]``, the
+    shape ``tools/probe-toolcalls.py`` writes (``record_verdict``/
+    ``run_trial``): a list of trial dicts, each carrying its HTTP ``status``.
+    No error on record, or no trials in it, is not rate-limited -- this is
+    about a *current* rate limit, not a leg that has simply never been
+    probed.
+    """
+    legs_overlay = (overlay or {}).get("legs") or {}
+    last_error = (legs_overlay.get(leg) or {}).get("tool_calls_last_error") or {}
+    trials = last_error.get("trials") or []
+    if not trials:
+        return False
+    return all(t.get("status") == 429 for t in trials)
+
+
 def usable_context(model_id, registry, overlay):
     """Usable context tokens for `model_id`; the overlay (a probe) wins.
 
@@ -297,20 +315,107 @@ def _client_reason(client_state, client):
     return None
 
 
+def usable_legs(route, card, features, client_state, registry, overlay,
+               client="opencode"):
+    """``(legs, skipped)`` -- FT (fall-through, spec 2026-09-26 operator
+    decision): the serving legs of `route` that also pass every *per-leg*
+    filter, and why each rejected leg did not.
+
+    ``legs`` is ``(provider_id, model_id)`` tuples, same shape as
+    ``serving_legs``, in route order. ``skipped`` maps the leg string exactly
+    as written in the route (an omniroute_id alias included) to every reason
+    that leg did not qualify -- collecting all of them for that leg, never
+    stopping at the first, in route order.
+
+    Per-leg filters (replacing the old route-level context/tool_calls/
+    client_bound checks, which blocked the whole route on one bad leg):
+
+    - context: ``need_tokens * 1.3 <= usable_context``.
+    - tool_calls (agentic kinds only): a value other than ``"proven"``
+      (unproven, broken, or no verdict at all) skips the leg.
+    - client_bound: a leg bound to a client other than `client` skips it.
+    - an overlay rate limit (agentic kinds only, and only when the leg is
+      not already proven): every trial of the leg's last tool_calls probe
+      error was HTTP 429. A leg already proven is kept even if currently
+      rate-limited -- OmniRoute's own "priority" combo strategy falls
+      through to the next leg of the route at run time on a 429; the
+      resolver does not need to pre-empt that for a leg it already trusts.
+
+    None of these remove the *route* by themselves -- ``filter_routes`` does
+    that only when every leg is unusable (``legs`` comes back empty).
+    ``client_state`` is accepted for symmetry with ``filter_routes`` (the
+    client installed/signed-in check stays route-level, spec FT point 2; it
+    plays no part in a per-leg reason here).
+    """
+    if "need_tokens" not in features:
+        raise ValueError("missing feature 'need_tokens' in features")
+    need = features["need_tokens"]
+    agentic = card.get("kind") in AGENTIC_KINDS
+
+    legs = []
+    skipped = {}
+    for leg, provider_id, model_id in _serving_legs_raw(route, registry):
+        reasons = []
+
+        usable = usable_context(model_id, registry, overlay)
+        if need * 1.3 > usable:
+            reasons.append("context: need %sx1.3 > usable %s on %s/%s"
+                           % (need, usable, provider_id, model_id))
+
+        value = _tool_calls_value(leg, model_id, registry, overlay)
+        proven = value == "proven"
+        if agentic and not proven:
+            reasons.append("tool_calls: %s/%s is %s"
+                           % (provider_id, model_id, value))
+
+        bound = registry["models"][model_id].get("client_bound")
+        if bound and bound != client:
+            reasons.append("client_bound: %s/%s needs %s"
+                           % (provider_id, model_id, bound))
+
+        if agentic and not proven and _rate_limited(leg, overlay):
+            reasons.append("rate_limited: %s/%s (429)" % (provider_id, model_id))
+
+        if reasons:
+            skipped[leg] = reasons
+        else:
+            legs.append((provider_id, model_id))
+
+    return legs, skipped
+
+
 def filter_routes(card, features, client_state, registry, overlay,
                   client="opencode"):
-    """Split routes into ``(survivors, removed)`` per spec 5.3 step 1.
+    """Split routes into ``(survivors, removed)`` per spec 5.3 step 1, as
+    amended by FT (2026-09-26 operator decision): "a leg that is
+    rate-limited or unproven makes the combo fall through to the next proven
+    leg; it does not block the route. A route is blocked only when NO leg is
+    available."
 
     ``survivors`` is route ids in registry order. ``removed`` maps a route id
     to every reason that removed it -- one per failing filter, collecting all
     of them rather than stopping at the first. Filters are never relaxed; an
     override runs later, over exactly these survivors.
+
+    Route-level filters (unchanged by FT -- these remove the route outright,
+    regardless of any leg's own usability): retired; privacy (a
+    privacy-sensitive card removed by *any* serving leg that trains on
+    prompts -- a training leg must never be a fallback for a private
+    prompt, so it disqualifies the whole route even when another leg of it
+    would otherwise be perfectly usable); client installed/signed in.
+
+    Every other filter (context, tool_calls, client_bound, the rate-limit
+    overlay) is now per-leg (``usable_legs``): it no longer removes the
+    route by itself. The route is removed only when ``usable_legs`` comes
+    back with no usable leg at all, with reason ``"no usable leg: " +
+    "<leg>: <reasons>" for each skipped leg, joined by "; "`` -- the same
+    "no usable leg" reason covers a route with zero serving legs to begin
+    with (nothing to list after the colon) as one where every leg was
+    individually filtered out.
     """
     if "need_tokens" not in features:
         raise ValueError("missing feature 'need_tokens' in features")
-    need = features["need_tokens"]
     privacy_sensitive = card.get("privacy") == "sensitive"
-    agentic = card.get("kind") in AGENTIC_KINDS
     client_reason = _client_reason(client_state, client)
 
     survivors = []
@@ -322,36 +427,21 @@ def filter_routes(card, features, client_state, registry, overlay,
         if route.get("retired"):
             reasons.append("retired")
 
-        if not legs:
-            reasons.append("no available leg")
-
         if privacy_sensitive:
             for provider_id, model_id in legs:
                 if registry["providers"][provider_id].get("trains_on_prompts"):
                     reasons.append("privacy: %s/%s trains on prompts"
                                    % (provider_id, model_id))
 
-        for provider_id, model_id in legs:
-            usable = usable_context(model_id, registry, overlay)
-            if need * 1.3 > usable:
-                reasons.append("context: need %sx1.3 > usable %s on %s/%s"
-                               % (need, usable, provider_id, model_id))
-
-        if agentic:
-            for leg, provider_id, model_id in _serving_legs_raw(route, registry):
-                value = _tool_calls_value(leg, model_id, registry, overlay)
-                if value != "proven":
-                    reasons.append("tool_calls: %s/%s is %s"
-                                   % (provider_id, model_id, value))
-
         if client_reason:
             reasons.append(client_reason)
 
-        for provider_id, model_id in legs:
-            bound = registry["models"][model_id].get("client_bound")
-            if bound and bound != client:
-                reasons.append("client_bound: %s/%s needs %s"
-                               % (provider_id, model_id, bound))
+        usable, skipped = usable_legs(route, card, features, client_state,
+                                      registry, overlay, client)
+        if not usable:
+            reasons.append("no usable leg: " + "; ".join(
+                "%s: %s" % (leg, "; ".join(leg_reasons))
+                for leg, leg_reasons in skipped.items()))
 
         if reasons:
             removed[route_id] = reasons
@@ -470,7 +560,7 @@ def latency_minutes(route_id, route_class, records, registry):
 
 
 def score_route(route_id, bucket, effort_name, features, registry, records,
-                orchestrator_model, mode):
+                orchestrator_model, mode, leg=None):
     """Score one surviving route at a bucket/effort, per spec 5.3 step 4.
 
     Returns a dict::
@@ -481,12 +571,20 @@ def score_route(route_id, bucket, effort_name, features, registry, records,
     ``expected_cost`` is ``(C_attempt + C_verify) / p + lambda_mode * T / p``.
     A missing policy key, an unscored route with no serving leg, or a missing
     ``need_tokens`` raises ValueError.
+
+    ``leg`` (FT, spec 2026-09-26 operator decision) is the ``(provider_id,
+    model_id)`` to score -- the route's first *usable* leg, per
+    ``usable_legs``, not merely its first serving one. Left at its default
+    ``None``, it falls back to ``expected_leg`` (the first serving leg), so
+    an old caller that never knew about per-leg filters keeps working
+    unchanged.
     """
     if "need_tokens" not in features:
         raise ValueError("missing feature 'need_tokens' in features")
     route = registry["routes"][route_id]
     route_class = route["class"]
-    leg = expected_leg(route, registry)
+    if leg is None:
+        leg = expected_leg(route, registry)
     if leg is None:
         raise ValueError("route %r has no serving leg to score" % route_id)
     provider_id, model_id = leg
@@ -828,33 +926,41 @@ def _next_rung(ladder, current):
     return ladder[index + 1]
 
 
-def _score_candidates(route_ids, bucket_name, kind, features, registry,
-                      track_record, orchestrator_model, mode):
+def _score_candidates(route_ids, bucket_name, card, features, client_state,
+                      registry, overlay, track_record, orchestrator_model,
+                      mode, client="opencode"):
     """``score_route`` (with ``effort`` kept on it) for each id, in order.
 
-    Mirrors spec 5.3 step 4: for every route, its expected serving leg decides
-    the effort rung, then the route is scored at that rung.
+    Mirrors spec 5.3 step 4 as amended by FT: for every route, its first
+    *usable* leg (``usable_legs`` -- not merely its first serving one)
+    decides the effort rung, then the route is scored at that rung on that
+    leg. Every ``route_id`` here already survived ``filter_routes``, so
+    ``usable_legs`` is never empty for it; a caller that passes one that did
+    not gets a ValueError naming it, the same fail-closed shape as before.
     """
     out = []
     for route_id in route_ids:
         route = registry["routes"][route_id]
-        leg = expected_leg(route, registry)
-        if leg is None:
-            raise ValueError("route %r has no serving leg to score" % route_id)
-        _, model_id = leg
+        legs, _ = usable_legs(route, card, features, client_state, registry,
+                              overlay, client)
+        if not legs:
+            raise ValueError("route %r has no usable leg to score" % route_id)
+        leg = legs[0]
+        model_id = leg[1]
         model = registry["models"][model_id]
-        eff = effort(bucket_name, kind, route["class"], model["effort_ladder"],
-                     model["reasoning"])
+        eff = effort(bucket_name, card["kind"], route["class"],
+                    model["effort_ladder"], model["reasoning"])
         score = dict(score_route(route_id, bucket_name, eff, features, registry,
-                                 track_record, orchestrator_model, mode))
+                                 track_record, orchestrator_model, mode,
+                                 leg=leg))
         score["effort"] = eff
         out.append(score)
     return out
 
 
-def _select_reviewers(scores, survivors, chosen, risk, bucket_name, kind,
-                      features, registry, track_record, orchestrator_model,
-                      mode):
+def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
+                      client_state, registry, overlay, track_record,
+                      orchestrator_model, mode, client="opencode"):
     """``{"routes": [...], "reason": ...}`` reviewer routes, spec 5.7 / D2.
 
     Candidates come from the already-scored routes when there is more than
@@ -866,14 +972,15 @@ def _select_reviewers(scores, survivors, chosen, risk, bucket_name, kind,
     over. Too few distinct families still returns what was found, naming the
     shortfall in ``reason`` rather than silently reviewing with fewer eyes.
     """
+    risk = card["risk"]
     try:
         needed = _REVIEW_COUNTS[risk]
     except KeyError:
         raise ValueError("unknown card risk %r" % (risk,))
 
     pool = scores if len(scores) > 1 else _score_candidates(
-        survivors, bucket_name, kind, features, registry, track_record,
-        orchestrator_model, mode)
+        survivors, bucket_name, card, features, client_state, registry,
+        overlay, track_record, orchestrator_model, mode, client)
 
     chosen_family = _model_family(chosen["leg"], registry)
     ranked = sorted(
@@ -974,9 +1081,9 @@ def plan(card, features, client_state, registry, overlay, track_record,
         }
 
     route_ids = [override_route] if override_route else survivors
-    scores = _score_candidates(route_ids, bucket_name, card["kind"], features,
-                               registry, track_record, orchestrator_model,
-                               card["mode"])
+    scores = _score_candidates(route_ids, bucket_name, card, features,
+                               client_state, registry, overlay, track_record,
+                               orchestrator_model, card["mode"], client)
 
     chosen, pick_reason = pick(scores, card["mode"], registry)
     reason_parts = [pick_reason]
@@ -987,6 +1094,15 @@ def plan(card, features, client_state, registry, overlay, track_record,
         chosen, time_reason = tie_break(eligible, registry, now)
         reason_parts.append(time_reason)
 
+    # FT (spec 2026-09-26 operator decision): the chosen route's own skipped
+    # legs, so a caller can see which legs it fell through past.
+    _, skipped_legs = usable_legs(registry["routes"][chosen["route"]], card,
+                                  features, client_state, registry, overlay,
+                                  client)
+    if skipped_legs:
+        reason_parts.append(
+            "falls through %d skipped leg(s)" % len(skipped_legs))
+
     defer_time, defer_reason = defer_until(card, chosen, registry, now)
     reason_parts.append(defer_reason)
 
@@ -994,10 +1110,10 @@ def plan(card, features, client_state, registry, overlay, track_record,
     model = registry["models"][model_id]
     route_class = registry["routes"][chosen["route"]]["class"]
 
-    reviewers = _select_reviewers(scores, survivors, chosen, card["risk"],
-                                  bucket_name, card["kind"], features,
-                                  registry, track_record, orchestrator_model,
-                                  card["mode"])
+    reviewers = _select_reviewers(scores, survivors, chosen, card, bucket_name,
+                                  features, client_state, registry, overlay,
+                                  track_record, orchestrator_model,
+                                  card["mode"], client)
     escalation = _escalation(chosen, scores, registry)
 
     return {
@@ -1019,4 +1135,5 @@ def plan(card, features, client_state, registry, overlay, track_record,
         "defer_until": _format_iso_z(defer_time) if defer_time is not None else None,
         "reason": "; ".join(reason_parts),
         "explain": [s["reason"] for s in scores],
+        "skipped_legs": skipped_legs,
     }
