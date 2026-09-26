@@ -5781,7 +5781,7 @@ Test-Case 'opencode V2: a V1 CLI gets no providers block' {
     }
 }
 
-Test-Case 'opencode V2: an opencode that is missing, fails or prints garbage for --version is taken for V1' {
+Test-Case 'opencode V2: an opencode that is missing or fails or prints garbage for --version is taken for V1' {
     Invoke-OpenCodeScratch -Body {
         param($c)
         $pathBefore = $env:PATH
