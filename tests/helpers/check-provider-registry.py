@@ -129,10 +129,15 @@ def main() -> int:
 
     # 5. apply scripts read the registry (shell/PowerShell, so asserted from
     #    source; the Windows suite executes Get-AutoOSProviderMap for real).
+    #    Task A5a (routing v2 spec 3.2, D11) moved their provider source from
+    #    catalog/providers.json to catalog/ai-registry.json's `providers`
+    #    section - this file's other consumers (mirror-litellm-env.py,
+    #    sync-router-tiers.py, checked above) still read providers.json;
+    #    only the two apply scripts moved.
     for rel in ("configuration/omniroute/apply.sh", "configuration/omniroute/apply.ps1"):
         text = (ROOT / rel).read_text(encoding="utf-8")
-        if "providers.json" not in text:
-            problems.append(f"{rel} does not read catalog/providers.json")
+        if "ai-registry.json" not in text:
+            problems.append(f"{rel} does not read catalog/ai-registry.json")
 
     # 6. the docs table names the registry as its source.
     docs = (ROOT / "docs" / "api-keys.md").read_text(encoding="utf-8")

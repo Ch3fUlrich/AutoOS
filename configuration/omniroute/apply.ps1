@@ -90,23 +90,95 @@ if (-not (Test-Gateway)) {
 }
 if (Test-Gateway) { Write-Host "Gateway OK on $Gateway" }
 
-# Provider registry: catalog\providers.json is the single source of truth for
-# which api-keys.yml name maps to which OmniRoute provider id and for the
-# provider-specific connection data. apply.sh and the two Python tools read the
-# same file, so the copies these maps used to carry cannot drift. Only providers
-# with an omniroute_id are registered: meta (unregistered 2026-09-23,
-# openrouter-first, no combo leg) and the omniroute client key carry none and
-# are skipped, exactly as before.
+# Provider registry: catalog\ai-registry.json's `providers` section is the
+# single source of truth for which api-keys.yml name maps to which OmniRoute
+# provider id and for the provider-specific connection data. catalog\providers.json
+# is retired as apply's source as of task A5a (routing v2 spec 3.2, D11) - it
+# still exists (a later task deletes it) but is no longer read here. apply.sh
+# reads the same registry file, so the two scripts cannot drift. Only
+# providers with an omniroute_id are registered: meta (unregistered
+# 2026-09-23, openrouter-first, no combo leg) and the omniroute client key
+# carry none and are skipped, exactly as before. A provider every one of
+# whose route legs the registry marks unavailable
+# (routes.<id>.unavailable_legs, providers.<id>.available: false) is skipped
+# too - registering a connection nothing can ever route to proves nothing
+# and just leaves a dead entry.
 function Get-AutoOSProviderMap {
     param([string]$CatalogPath)
-    $providers = (Get-Content $CatalogPath -Raw -Encoding utf8 | ConvertFrom-Json).providers
+    $doc = Get-Content $CatalogPath -Raw -Encoding utf8 | ConvertFrom-Json
+    $providers = $doc.providers
+    $routes = if ($doc.PSObject.Properties['routes']) { $doc.routes } else { $null }
+
+    # A route leg's prefix names a providers key or any provider's
+    # omniroute_id (mirrors tools/registry.py's resolve_leg two-step match).
+    function Resolve-AutoOSProviderId {
+        param($Providers, [string]$Prefix)
+        if ($null -ne $Providers.PSObject.Properties[$Prefix]) { return $Prefix }
+        foreach ($prop in $Providers.PSObject.Properties) {
+            if ($null -ne $prop.Value.PSObject.Properties['omniroute_id'] -and $prop.Value.omniroute_id -eq $Prefix) {
+                return $prop.Name
+            }
+        }
+        return $null
+    }
+
+    # Mirrors tools/registry.py's _leg_is_unavailable(): a route's own
+    # unavailable_legs entry, or the leg's provider carrying available: false
+    # registry-wide (spec 3.1's two operator-facing "this is down" flags).
+    function Test-AutoOSLegUnavailable {
+        param($Providers, $Leg, $Route)
+        $ul = $Route.unavailable_legs
+        if ($null -ne $ul -and $ul.PSObject.Properties[$Leg]) {
+            $entry = $ul.$Leg
+            if ($entry.PSObject.Properties['available'] -and $entry.available -eq $false) { return $true }
+        }
+        $prefix = $Leg.Split('/', 2)[0]
+        $pid = Resolve-AutoOSProviderId $Providers $prefix
+        if ($null -eq $pid) { return $false }
+        $p = $Providers.$pid
+        return ($null -ne $p -and $p.PSObject.Properties['available'] -and $p.available -eq $false)
+    }
+
+    # Every leg any route lists, grouped by the provider id it resolves to -
+    # used only to find a provider none of whose legs can ever be served.
+    $legsByProvider = @{}
+    if ($null -ne $routes) {
+        foreach ($routeProp in $routes.PSObject.Properties) {
+            $route = $routeProp.Value
+            if (-not $route.PSObject.Properties['legs'] -or $null -eq $route.legs) { continue }
+            foreach ($leg in $route.legs) {
+                $prefix = $leg.Split('/', 2)[0]
+                $pid = Resolve-AutoOSProviderId $providers $prefix
+                if ($null -ne $pid) {
+                    if (-not $legsByProvider.ContainsKey($pid)) { $legsByProvider[$pid] = New-Object System.Collections.ArrayList }
+                    [void]$legsByProvider[$pid].Add(@($leg, $route))
+                }
+            }
+        }
+    }
+
     $map = [ordered]@{}
     $data = @{}
+    $skipped = New-Object System.Collections.ArrayList
     foreach ($prop in $providers.PSObject.Properties) {
         $entry = $prop.Value
         if ($null -eq $entry.omniroute_id) { continue }
         # api-keys.yml keys are lower-cased when read above, so match that.
         $keyName = $prop.Name.ToLowerInvariant()
+        $legs = $legsByProvider[$prop.Name]
+        # A provider with no leg anywhere is not "every leg unavailable" (it
+        # is simply unused elsewhere) - only a used provider whose every leg
+        # is down is skipped here.
+        if ($null -ne $legs -and $legs.Count -gt 0) {
+            $allUnavailable = $true
+            foreach ($pair in $legs) {
+                if (-not (Test-AutoOSLegUnavailable $providers $pair[0] $pair[1])) { $allUnavailable = $false; break }
+            }
+            if ($allUnavailable) {
+                [void]$skipped.Add($entry.omniroute_id)
+                continue
+            }
+        }
         $map[$keyName] = $entry.omniroute_id
         if ($null -ne $entry.provider_data) {
             # Keep the plain JSON string: the 5.1-vs-7.x escaping branch below
@@ -114,11 +186,12 @@ function Get-AutoOSProviderMap {
             $data[$entry.omniroute_id] = ($entry.provider_data | ConvertTo-Json -Compress)
         }
     }
-    [pscustomobject]@{ Map = $map; Data = $data }
+    [pscustomobject]@{ Map = $map; Data = $data; Skipped = @($skipped) }
 }
-$registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\providers.json')
+$registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\ai-registry.json')
 $ProviderMap = $registry.Map
 $ProviderData = $registry.Data
+$ProviderSkipped = $registry.Skipped
 
 # Build the --provider-specific-data JSON for the running shell. PowerShell
 # 5.1 strips inner double quotes when marshalling to a native exe (the same
@@ -135,6 +208,12 @@ function Get-AutoOSProviderDataJson {
 }
 
 Write-Host 'Providers:'
+# A provider whose every route leg is registry-unavailable (task A5a) is
+# reported here and never touched below - no key lookup, no existing-id
+# check, no register call.
+foreach ($providerId in $ProviderSkipped) {
+    Write-Host "  - ${providerId}: all legs unavailable (skipped)"
+}
 # Connections that already exist are left alone: re-adding would either fail
 # or duplicate them, and neither proves the pipeline works.
 $existingIds = @()

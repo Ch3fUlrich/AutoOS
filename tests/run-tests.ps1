@@ -7016,12 +7016,14 @@ Test-Case 'apply scripts carry the Cloudflare User-Agent fix and stay openrouter
     $ps1 = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
     $sh = Get-Content (Join-Path $Root 'configuration\omniroute\apply.sh') -Raw
     foreach ($text in @($ps1, $sh)) {
-        Assert-True ($text -match 'providers\.json') 'does not read catalog/providers.json'
+        # Task A5a (routing v2 spec 3.2, D11) moved the provider source from
+        # catalog/providers.json to catalog/ai-registry.json's `providers`.
+        Assert-True ($text -match 'ai-registry\.json') 'does not read catalog/ai-registry.json'
         Assert-True ($text -match 'provider-specific-data') 'provider-specific-data flag missing'
         Assert-True ($text -notmatch "'meta'|`"meta:|meta:muse-code") 'muse-code mapping must stay removed (openrouter-first)'
     }
     # The Cloudflare UA quirk now has one home: the registry.
-    $reg = (Get-Content (Join-Path $Root 'catalog\providers.json') -Raw | ConvertFrom-Json).providers
+    $reg = (Get-Content (Join-Path $Root 'catalog\ai-registry.json') -Raw | ConvertFrom-Json).providers
     foreach ($id in @('groq', 'cerebras')) {
         Assert-Equal $reg.$id.provider_data.customUserAgent 'curl/8.7.1'
     }
@@ -7044,7 +7046,9 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
     Assert-True ($null -ne $jsonDef) 'Get-AutoOSProviderDataJson missing from apply.ps1'
     . ([scriptblock]::Create($mapDef.Extent.Text + "`n" + $jsonDef.Extent.Text))
-    $registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\providers.json')
+    # Task A5a: the real call site now points at catalog/ai-registry.json, so
+    # this test does too - it exercises the exact call apply.ps1 itself makes.
+    $registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\ai-registry.json')
     $ProviderData = $registry.Data
     Assert-Equal $registry.Map['groq'] 'groq'
     Assert-Equal $registry.Map['google_ai_studio'] 'gemini'
@@ -7053,6 +7057,19 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     Assert-Equal $registry.Map['sambanova'] 'sambanova'
     Assert-True (-not $registry.Map.Contains('meta')) 'meta must not be registered (2026-09-23)'
     Assert-True (-not $registry.Map.Contains('omniroute')) 'omniroute is the client key, not a provider'
+    # antigravity and cc exist only in the registry (no catalog/providers.json
+    # entry) - switching the source picks them up for the first time.
+    Assert-Equal $registry.Map['antigravity'] 'antigravity'
+    Assert-Equal $registry.Map['cc'] 'cc'
+    # Regression lock for today's registry (2026-09-26): cerebras (402/401
+    # credit exhaustion, L0 2026-09-26T11:44Z) and openrouter (every leg
+    # individually flagged, docs/plans/2026-09-25-routing-v2-plan.md's
+    # "OpenRouter is not to be trusted" decision) are all-unavailable across
+    # every route that lists them, so neither is offered for registration.
+    Assert-True ($registry.Skipped -contains 'cerebras') 'cerebras (all legs dead today) was not skipped'
+    Assert-True ($registry.Skipped -contains 'openrouter') 'openrouter (all legs dead today) was not skipped'
+    Assert-True (-not $registry.Map.Contains('cerebras')) 'cerebras must not also be in Map'
+    Assert-True (-not $registry.Map.Contains('openrouter')) 'openrouter must not also be in Map'
     $v7 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 7
     $v5 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 5
     Assert-Equal ($v7 | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
@@ -7060,6 +7077,69 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     # quotes arrive as plain quotes) must equal the 7.x literal.
     Assert-Equal (($v5 -replace '\\"','"') | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
     Assert-True ($null -eq (Get-AutoOSProviderDataJson 'nope' -ShellMajor 7)) 'unknown provider must yield null'
+}
+
+Test-Case 'Get-AutoOSProviderMap skips a provider whose every route leg is unavailable' {
+    # A synthetic fixture (task A5a) so this pins the derivation itself and
+    # does not drift with future operator edits to catalog/ai-registry.json -
+    # the real-registry regression is 'apply scripts carry the Cloudflare
+    # User-Agent fix...' / 'provider data JSON survives...' above.
+    $tokens = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Root 'configuration\omniroute\apply.ps1'), [ref]$tokens, [ref]$errs)
+    Assert-Equal $errs.Count 0 'apply.ps1 does not parse'
+    $mapDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $n.Name -eq 'Get-AutoOSProviderMap' }, $false)
+    Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
+    . ([scriptblock]::Create($mapDef.Extent.Text))
+    $fixture = Join-Path ([IO.Path]::GetTempPath()) ('aos_a5a_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "providers": {
+    "avail": {"omniroute_id": "avail-id", "provider_data": {"customUserAgent": "curl/8.7.1"}},
+    "unused": {"omniroute_id": "unused-id"},
+    "alldown": {"omniroute_id": "alldown-id"},
+    "providerdown": {"omniroute_id": "providerdown-id", "available": false},
+    "mixed": {"omniroute_id": "mixed-id"},
+    "noomni": {}
+  },
+  "routes": {
+    "r1": {
+      "legs": ["avail/model-a", "alldown/model-b", "providerdown/model-c", "mixed/model-d"],
+      "unavailable_legs": {
+        "alldown/model-b": {"available": false},
+        "mixed/model-d": {"available": false}
+      }
+    },
+    "r2": {
+      "legs": ["alldown/model-e", "mixed/model-f"],
+      "unavailable_legs": {
+        "alldown/model-e": {"available": false}
+      }
+    }
+  }
+}
+'@ | Set-Content -LiteralPath $fixture -Encoding utf8
+    try {
+        $registry = Get-AutoOSProviderMap $fixture
+        # alldown: both its legs (r1 + r2) are individually flagged.
+        Assert-True ($registry.Skipped -contains 'alldown-id') 'alldown (every leg unavailable_legs-flagged) was not skipped'
+        # providerdown: no per-leg entry at all, but the provider itself
+        # carries available: false - spec 3.1's second down-flag.
+        Assert-True ($registry.Skipped -contains 'providerdown-id') 'providerdown (provider-wide available:false) was not skipped'
+        # avail: no leg ever flagged - registered normally.
+        Assert-True ($registry.Map.Contains('avail')) 'avail (no leg down) was wrongly all-unavailable-skipped'
+        # unused: has an omniroute_id but appears in no route leg at all -
+        # "every leg unavailable" is vacuously false for an unused provider.
+        Assert-True ($registry.Map.Contains('unused')) 'unused (no route leg at all) was wrongly all-unavailable-skipped'
+        # mixed: one leg down (r1), one leg live (r2) - not EVERY leg.
+        Assert-True ($registry.Map.Contains('mixed')) 'mixed (one live leg) was wrongly all-unavailable-skipped'
+        # noomni has no omniroute_id - the pre-existing skip rule, never
+        # even considered (matches today's providers.json behaviour).
+        Assert-True (-not $registry.Map.Contains('noomni')) 'noomni (no omniroute_id) must never appear in Map'
+    } finally {
+        Remove-Item -LiteralPath $fixture -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Case 'provider registry is the single source for apply, mirror and tier maps' {
