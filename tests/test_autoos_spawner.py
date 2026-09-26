@@ -2124,6 +2124,16 @@ elif mode in ("sandbox-write", "sandbox-write-provider-stop"):
         print("Error: Rate limit exceeded. Please try again later.")
     else:
         print("fake: wrote worker-new.txt in its sandbox")
+elif mode == "sandbox-write-marker-mid-run":
+    # WIPfix2: the marker appears EARLY (a brief or lesson quoting a past
+    # 429), then the worker prints 20 normal lines, edits its sandbox and
+    # exits 0. A real provider stop is the client's LAST output only, so this
+    # must stay rc 0 with the work WIP-committed.
+    print("Error: Rate limit exceeded. Please try again later.")
+    for _i in range(20):
+        print("normal output line %d" % _i)
+    with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
 elif mode == "provider-stop-only":
     print("Error: Rate limit exceeded. Please try again later.")
 elif mode == "parent-leak-provider-stop":
@@ -2422,6 +2432,48 @@ class IsolateContainmentTests(unittest.TestCase):
         branch = subprocess.run(["git", "-C", sb, "branch", "--show-current"],
                                 capture_output=True, text=True, check=True).stdout.strip()
         self.assertTrue(branch.startswith("agent/"), branch)
+
+    # WIPfix2 (rule->code: a provider stop is the client's LAST output only).
+    # A worker that merely READS or prints text containing a marker - a brief
+    # quoting a past 429, a lesson - then finishes normally must not exit 8.
+
+    def test_a_marker_quoted_mid_run_is_not_a_provider_stop(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state,
+                                         "sandbox-write-marker-mid-run")
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("PROVIDER-STOP", out + err)
+        self.assertIn("WIP-COMMITTED:", out)
+        sb = self.lone_sandbox(state)
+        subject = self._subject(sb)
+        self.assertTrue(subject.startswith("WIP(autoos-agent): uncommitted at exit rc=0"),
+                        subject)
+        self.assertNotIn("provider stop:", subject)
+        files = subprocess.run(["git", "-C", sb, "show", "--name-only", "--format=", "HEAD"],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertIn("worker-new.txt", files)
+
+    def test_provider_stop_ignores_a_marker_outside_the_window(self):
+        # The only marker is 9+ lines from the end: outside PROVIDER_STOP_WINDOW,
+        # so provider_stop returns None (review WIPfix2).
+        agent = self.agent
+        tail = "Error: Rate limit exceeded. Please try again later.\n"
+        tail += "\n".join("normal line %d" % i for i in range(9))
+        self.assertIsNone(agent.provider_stop(tail))
+
+    def test_provider_stop_returns_the_match_nearest_the_end(self):
+        # Two markers inside the window: the one nearest the end is returned.
+        agent = self.agent
+        tail = ("Error: Rate limit exceeded.\n"
+                "normal line\n"
+                "Error: 429 Too Many Requests\n")
+        self.assertEqual(agent.provider_stop(tail), "Error: 429 Too Many Requests")
+
+    def test_provider_stop_still_matches_at_the_end(self):
+        agent = self.agent
+        self.assertEqual(
+            agent.provider_stop("working\nError: Rate limit exceeded.\n"),
+            "Error: Rate limit exceeded.")
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_sandbox_changes_without_a_stop_wip_commit_and_keep_rc_0(self):

@@ -83,9 +83,10 @@ committed by autoos-worker@users.noreply.github.com on a parent branch that exis
 branch reflog (commit-then-reset) or moved side refs - or a tracked file outside logs/ left dirtier than
 before - the shas and paths are printed, nothing is reverted, the track record carries
 failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6 and 8); 8 = a provider stop
-(rate limit, 429, capacity, quota or billing) appeared in the captured client output while the client
-exited 0 (PROVIDER-STOP; the track record carries failure class "provider"; an --isolate run WIP-commits
-its uncommitted work first, so nothing is lost); the child's exit code; 2 bad arguments, card or route refused;
+(rate limit, 429, capacity, quota or billing) appeared in the last lines of the captured client
+output while the client exited 0 (PROVIDER-STOP; the track record carries failure class
+"provider"; an --isolate run WIP-commits its uncommitted work first, so nothing is lost); the child's
+exit code; 2 bad arguments, card or route refused;
 3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
 PAUSE (R-pause-01); 4 depth budget exhausted.
 
@@ -852,10 +853,24 @@ PROVIDER_STOP_MARKERS = (
     " 402",
 )
 
+# WIPfix2 (measured 2026-09-26 20:2xZ): a worker that merely READS or prints
+# text containing a marker mid-run - a brief or lesson quoting a past 429 -
+# then finishes normally was reported as a provider stop. A real provider stop
+# is the client's LAST output before it exits, so only this many non-empty
+# lines from the end of the tail are scanned.
+PROVIDER_STOP_WINDOW = 8
+
 
 def provider_stop(tail: str) -> str | None:
-    """The first client-output line naming a provider stop, or None."""
-    for line in (tail or "").splitlines():
+    """The provider-stop line among the client's last lines, or None.
+
+    Only the last PROVIDER_STOP_WINDOW non-empty lines of `tail` are scanned:
+    a real provider stop is the client's last output before it exits, so a
+    marker quoted earlier in the run must not match. Returns the matching line
+    nearest the end when several are in the window.
+    """
+    lines = [line for line in (tail or "").splitlines() if line.strip()]
+    for line in reversed(lines[-PROVIDER_STOP_WINDOW:]):
         low = line.lower()
         if any(marker in low for marker in PROVIDER_STOP_MARKERS):
             return line.strip()
