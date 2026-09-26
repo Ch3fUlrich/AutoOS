@@ -971,6 +971,53 @@ Test-Case 'approving twice adds nothing the second time' {
     }
 }
 
+Test-Case 'backup-once: Enable-AutoOSProjectMcpServer does not back up again when nothing changed' {
+    # settings.local.json is the user's own file. The first run that changes it
+    # takes ONE backup; an identical second run must not back up again, must
+    # leave the file byte-identical and must say skipped. The pause keeps a
+    # second-run backup from reusing the first one's per-second timestamp,
+    # which would make an extra backup overwrite (and hide behind) the first.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $claudeDir = Join-Path $scratch '.claude'
+    $file = Join-Path $claudeDir 'settings.local.json'
+    $log1 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $log2 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $claudeDir -Force
+    [IO.File]::WriteAllText($file, '{"permissions":{"allow":["Bash(ls:*)"]}}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+    $run = {
+        param($LogPath)
+        Initialize-AutoOSLog -Path $LogPath
+        Enable-AutoOSProjectMcpServer -RepoPath $scratch -Name 'omnigraph'
+        Get-Content -LiteralPath $LogPath -Raw -Encoding utf8
+    }
+    try {
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        $null = & $run $log1
+        $backups1 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*').Count
+        $backup1B64 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
+        $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        Start-Sleep -Milliseconds 1100
+        $out2 = & $run $log2
+        $backups2 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*').Count
+        $hash2 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (@($s.enabledMcpjsonServers) -notcontains 'omnigraph') { throw 'run 1 did not approve the server' }
+        if (@($s.permissions.allow) -notcontains 'Bash(ls:*)') { throw 'run 1 dropped the existing permissions' }
+        if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
+        if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
+        if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log1, $log2 -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'the Antigravity config is merged, not replaced' {
     # It used to be written from scratch, which silently deleted every other MCP
     # server the user had configured there.
@@ -3033,6 +3080,306 @@ Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to 
     }
 }
 
+Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when nothing changed' {
+    # mcp_config.json is the user's own file. The first run that changes it takes
+    # ONE backup; an identical second run must not back up again, must leave the
+    # file byte-identical and must say skipped. The pause keeps a second-run
+    # backup from reusing the first one's per-second timestamp, which would make
+    # an extra backup overwrite (and hide behind) the first.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log1 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $log2 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+    $run = {
+        param($LogPath)
+        Initialize-AutoOSLog -Path $LogPath
+        Set-AutoOSAntigravityMcp
+        Get-Content -LiteralPath $LogPath -Raw -Encoding utf8
+    }
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        $null = & $run $log1
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
+        $backup1B64 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
+        $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        Start-Sleep -Milliseconds 1100
+        $out2 = & $run $log2
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
+        $hash2 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (($s.PSObject.Properties.Name -join ',') -ne 'mcpServers,theme') { throw "top-level keys reordered or lost: [$($s.PSObject.Properties.Name -join ',')]" }
+        if (($s.mcpServers.PSObject.Properties.Name -join ',') -ne 'other,omnigraph') { throw "servers reordered or lost: [$($s.mcpServers.PSObject.Properties.Name -join ',')]" }
+        if ($s.mcpServers.other.command -ne 'node') { throw 'the existing server was not kept' }
+        if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
+        if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
+        if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log1, $log2 -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up again when nothing changed' {
+    # mcp_config.json is the user's own file. The first run that changes it takes
+    # ONE backup; an identical second run must not back up again, must leave the
+    # file byte-identical and must say skipped. The pause keeps a second-run
+    # backup from reusing the first one's per-second timestamp, which would make
+    # an extra backup overwrite (and hide behind) the first. A third run finds the
+    # same entry hand-formatted with its keys in another order (which is all a
+    # [hashtable] parameter guarantees across processes): still nothing to do.
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $logs = @(1..3 | ForEach-Object { Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log') })
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+    $run = {
+        param($LogPath)
+        Initialize-AutoOSLog -Path $LogPath
+        # An [ordered] spec, as the Install-AutoOSMcp* callers pass it.
+        Register-AutoOSAntigravityMcpServer -Name 'example' -Spec ([ordered]@{
+            command      = 'npx'
+            args         = @('-y', 'example-mcp-server')
+            env          = @{ EXAMPLE_HOME = 'example-home' }
+            excludeTools = @('tool_a', 'tool_b')
+        })
+        Get-Content -LiteralPath $LogPath -Raw -Encoding utf8
+    }
+    $countBackups = { @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count }
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        $null = & $run $logs[0]
+        $backups1 = & $countBackups
+        $backup1B64 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
+        $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        Start-Sleep -Milliseconds 1100
+        $out2 = & $run $logs[1]
+        $backups2 = & $countBackups
+        $hash2 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (($s.PSObject.Properties.Name -join ',') -ne 'mcpServers,theme') { throw "top-level keys reordered or lost: [$($s.PSObject.Properties.Name -join ',')]" }
+        if (($s.mcpServers.PSObject.Properties.Name -join ',') -ne 'other,example') { throw "servers reordered or lost: [$($s.mcpServers.PSObject.Properties.Name -join ',')]" }
+        if ($s.mcpServers.other.command -ne 'node') { throw 'the existing server was not kept' }
+        if ($s.mcpServers.example.command -ne 'npx') { throw 'the new server was not written' }
+        if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
+        if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
+        if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+
+        $hand = @'
+{
+  "theme": "mine",
+  "mcpServers": {
+    "example": {
+      "excludeTools": ["tool_a", "tool_b"],
+      "env": { "EXAMPLE_HOME": "example-home" },
+      "args": ["-y", "example-mcp-server"],
+      "command": "npx"
+    },
+    "other": { "command": "node", "args": ["srv.js"] }
+  }
+}
+'@
+        [IO.File]::WriteAllText($file, $hand)
+        $hash3 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        $out3 = & $run $logs[2]
+        if ((& $countBackups) -ne $backups1) { throw 'run 3 backed up a file that already held the entry' }
+        if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $hash3) { throw 'run 3 rewrote a file that already held the entry' }
+        if ($out3 -notmatch 'skipped') { throw "run 3 did not report skipped: [$out3]" }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $logs -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Copy-AutoOSBackup never overwrites a same-second backup' {
+    # Every writer names its backup to the second. Two changes inside one second
+    # used to share a name, and Copy-Item -Force made the later copy overwrite the
+    # earlier one, so the user's ORIGINAL was lost. -Stamp forces that clash
+    # without touching the clock.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $file = Join-Path $scratch 'config.json'
+    $stamp = '20260101-000000'
+    $null = New-Item -ItemType Directory -Path $scratch -Force
+    try {
+        $paths = @()
+        foreach ($content in 'A', 'B', 'C') {
+            [IO.File]::WriteAllText($file, $content)
+            $paths += @(Copy-AutoOSBackup -Path $file -Stamp $stamp)
+        }
+        if ($paths.Count -ne 3) { throw "expected 3 returned paths, got $($paths.Count): [$($paths -join ', ')]" }
+        if (@($paths | Select-Object -Unique).Count -ne 3) { throw "backup paths are not distinct: [$($paths -join ', ')]" }
+        $want = @("$file.autoos-backup-$stamp", "$file.autoos-backup-$stamp-1", "$file.autoos-backup-$stamp-2")
+        for ($i = 0; $i -lt 3; $i++) {
+            if ($paths[$i] -cne $want[$i]) { throw "backup $($i + 1) is named [$($paths[$i])] (want [$($want[$i])])" }
+        }
+        $wantText = @('A', 'B', 'C')
+        for ($i = 0; $i -lt 3; $i++) {
+            if (-not (Test-Path -LiteralPath $paths[$i])) { throw "backup $($i + 1) does not exist: $($paths[$i])" }
+            $got = [Convert]::ToBase64String([IO.File]::ReadAllBytes($paths[$i]))
+            $exp = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wantText[$i]))
+            if ($got -cne $exp) { throw "backup $($i + 1) does not hold '$($wantText[$i])' (an earlier backup was overwritten)" }
+        }
+        if (@(Get-ChildItem -LiteralPath $scratch -Filter '*.autoos-backup-*').Count -ne 3) { throw 'expected exactly 3 backup files on disk' }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case "backup-once: five Antigravity MCP writes in one second keep the user's original" {
+    # One setup pass writes mcp_config.json five times (Set-AutoOSAntigravityMcp,
+    # then Register-AutoOSAntigravityMcpServer for serena, graphify, playwright
+    # and context7), and each one changes the file. Backups named to the second
+    # used to overwrite each other, so the user's own file survived nowhere. The
+    # wait starts the writes early in a second, so all five share one timestamp
+    # without any mocking of the clock.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        while ((Get-Date).Millisecond -gt 250) { Start-Sleep -Milliseconds 20 }
+        Set-AutoOSAntigravityMcp
+        foreach ($n in 'serena', 'graphify', 'playwright', 'context7') {
+            Register-AutoOSAntigravityMcpServer -Name $n -Spec ([ordered]@{ command = 'npx'; args = @('-y', "$n-mcp-server") })
+        }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        $holdsOriginal = $false
+        foreach ($b in $backups) {
+            if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($b.FullName)) -ceq $seedB64) { $holdsOriginal = $true }
+        }
+        if (-not $holdsOriginal) { throw "none of the $($backups.Count) backup(s) holds the user's original file byte for byte (an earlier backup was overwritten)" }
+        if ($backups.Count -ne 5) { throw "$($backups.Count) backup(s) after 5 writes that each changed the file (want 5)" }
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $names = ($s.mcpServers.PSObject.Properties.Name -join ',')
+        if ($names -ne 'other,omnigraph,serena,graphify,playwright,context7') { throw "servers lost or reordered: [$names]" }
+        if ($s.mcpServers.other.command -ne 'node') { throw 'the foreign server was not kept' }
+        if ($s.theme -ne 'mine') { throw 'the foreign top-level key was not kept' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs only in case' {
+    # JSON is case-sensitive and PowerShell's -eq on strings is not: a file whose
+    # omnigraph entry says "NPX" compared equal to the entry the writer produces
+    # ("npx"), so the writer reported skipped and left the wrong command behind.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        # The entry the writer produces, except that the command is in capitals.
+        $seedEntry = [ordered]@{
+            command = 'NPX'
+            args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
+            env     = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://localhost:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
+        }
+        [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ omnigraph = $seedEntry } } | ConvertTo-Json -Depth 12))
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+        Set-AutoOSAntigravityMcp
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $cmd = $s.mcpServers.omnigraph.command
+        if ($cmd -cne 'npx') { throw "the file still says [$cmd] (want npx): an entry that differs only in case was treated as unchanged" }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "$($backups.Count) backup(s) after the rewrite (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName)) -cne $seedB64) { throw 'the backup does not hold the seeded file byte for byte' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer rewrites an entry that differs only in case' {
+    # Same trap as above, in the comparison of the canonical strings of the
+    # entry in the file and the spec being registered.
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        $seedEntry = [ordered]@{ command = 'NPX'; args = @('-y', 'example-mcp-server') }
+        [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ example = $seedEntry } } | ConvertTo-Json -Depth 12))
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+        Register-AutoOSAntigravityMcpServer -Name 'example' -Spec ([ordered]@{ command = 'npx'; args = @('-y', 'example-mcp-server') })
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $cmd = $s.mcpServers.example.command
+        if ($cmd -cne 'npx') { throw "the file still says [$cmd] (want npx): an entry that differs only in case was treated as unchanged" }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "$($backups.Count) backup(s) after the rewrite (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName)) -cne $seedB64) { throw 'the backup does not hold the seeded file byte for byte' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
     $realAppData = $env:APPDATA
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))
@@ -3574,6 +3921,34 @@ Test-Case 'the embedded OpenHands setup script defaults to the gateway with a ke
     }
 }
 
+Test-Case 'the embedded OpenHands setup script points omnigraph at the host, not at the container itself' {
+    # The app and its sandboxes run in Docker, where localhost is the container:
+    # omnigraph-server (published on the host's :8080) is reached through
+    # host.docker.internal, like the gateway URL the same file carries.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+    $script = [regex]::Match($src, "(?s)\`$setupScript = @'\r?\n(.*?)\r?\n'@").Groups[1].Value
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-omni-$PID"
+    $oh = Join-Path $tmp '.openhands'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $oh 'profiles'), (Join-Path $oh 'agent-profiles')
+    $saved = @{ OLLAMA_BASE_URL = $env:OLLAMA_BASE_URL; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME; LOCALAPPDATA = $env:LOCALAPPDATA }
+    try {
+        $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
+        $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
+        & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-gw-key' *> $null
+        $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $settings.agent_settings.mcp_config.omnigraph.env.OMNIGRAPH_BASE_URL 'http://host.docker.internal:8080'
+        Assert-Equal $settings.agent_settings.mcp_config.omnigraph.env.OMNIGRAPH_GRAPH_ID 'autoos'
+    } finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            else { Set-Item "env:$k" -Value $saved[$k] }
+        }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'agent harness installers: the OpenHands writer calls the generator and skips role profiles' {
     Assert-True ($body -match "agent_harness\.py[\s'\)]*openhands") 'Set-AutoOSOpenHandsConfig does not call agent_harness.py openhands'
     Assert-True ($body -match '_role_profiles') 'Set-AutoOSOpenHandsConfig does not skip role profiles'
@@ -3665,6 +4040,107 @@ Test-Case 'the embedded OpenHands setup script is valid Python' {    # Set-AutoO
         $enb = [regex]::Matches($m.Groups[1].Value, "'enabled': True")
         Assert-Equal $enb.Count 0 'enabled key in OpenHands mcp_config (live schema forbids it)'
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when nothing changed' {
+    # The real writer with its real embedded setup script and agent generator,
+    # against a scratch home: HOME, USERPROFILE and LOCALAPPDATA point into a temp
+    # dir, the skills target already exists (no junction is made), Ollama's
+    # address is pinned (no probe), and every key the writer reads is a dummy or
+    # unset (so the repo's git-ignored api-keys.yml is never consulted).
+    # The one thing no variable redirects is the PowerShell profile under the real
+    # Documents folder, which the writer edits when one exists: skip on such a host.
+    $pyCmd = @(Get-Command python, py -ErrorAction SilentlyContinue)
+    $py3 = $null
+    if ($pyCmd.Count -eq 0) {
+        # A host that only has python3 (most Linux): the writer looks for `python`.
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { $py3 = Get-Command python3 -ErrorAction SilentlyContinue }
+        if (-not $py3) { Skip 'no python on PATH'; return }
+    }
+    # (Empty on a Linux home without a Documents folder: nothing to protect there.)
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    if ($docs) {
+        foreach ($rel in @('PowerShell\Microsoft.PowerShell_profile.ps1', 'PowerShell\profile.ps1', 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1', 'WindowsPowerShell\profile.ps1')) {
+            if (Test-Path -LiteralPath (Join-Path $docs $rel)) { Skip 'a real PowerShell profile exists and the writer would edit it'; return }
+        }
+    }
+    $envNames = @('USERPROFILE', 'HOME', 'LOCALAPPDATA', 'PATH', 'OLLAMA_BASE_URL', 'AUTOOS_OMNIROUTE_KEY', 'OPENROUTER_API_KEY', 'LITELLM_MASTER_KEY',
+                  'AUTOOS_LITELLM_API_KEY', 'META_API_KEY', 'MUSE_API_KEY', 'DEEPSEEK_API_KEY', 'CONTEXT7_API_KEY', 'OMNIGRAPH_TOKEN')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohbackup-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $ohDir = Join-Path $scratch '.openhands'
+    $settingsFile = Join-Path $ohDir 'settings.json'
+    # What an earlier AutoOS run leaves, plus a key and an MCP server of the user's own.
+    # enable_sub_agents is already there so the agent generator, which would add it,
+    # has nothing to rewrite: the only backup of run 1 is the writer's own.
+    $seed = '{"schema_version":2,"theme":"mine","agent_settings":{"schema_version":4,"enable_sub_agents":true,"llm":{"model":"ollama_chat/qwen2.5-coder:7b","base_url":"http://127.0.0.1:11434"},"mcp_config":{"mine":{"transport":"stdio","command":"mine-mcp","args":[]}}}}'
+    $runLogged = {
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohbackup-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            $null = Set-AutoOSOpenHandsConfig
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
+    }
+    try {
+        # skills: the junction target exists. Documents: on Linux .NET only resolves
+        # the Documents folder when it exists, and the writer joins paths onto it.
+        $null = New-Item -ItemType Directory -Path $bin, (Join-Path $ohDir 'skills'), (Join-Path $scratch 'Documents') -Force
+        if ($py3) {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexec '$($py3.Source)' `"`$@`"`n")
+            & chmod +x $fake
+        }
+        [IO.File]::WriteAllText($settingsFile, $seed)
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch; $env:LOCALAPPDATA = $scratch
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'; $env:OPENROUTER_API_KEY = 'test-or-key'; $env:LITELLM_MASTER_KEY = 'test-lit-key'
+        foreach ($n in @('AUTOOS_LITELLM_API_KEY', 'META_API_KEY', 'MUSE_API_KEY', 'DEEPSEEK_API_KEY', 'CONTEXT7_API_KEY', 'OMNIGRAPH_TOKEN')) {
+            Remove-Item "env:$n" -ErrorAction SilentlyContinue
+        }
+        # The writer reads $HOME, which the environment does not set on every
+        # host: prove the module sees the scratch home before it writes anything.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+
+        $out1 = & $runLogged
+        $sha1 = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash
+        $backups1 = @(Get-ChildItem -LiteralPath $ohDir -Filter 'settings.json.autoos-backup-*')
+        $all1 = @(Get-ChildItem -LiteralPath $ohDir -Recurse -Filter '*.autoos-backup-*').Count
+        if ([IO.File]::ReadAllText($settingsFile) -eq $seed) { throw 'the first run left settings.json unchanged' }
+        if ($backups1.Count -ne 1) { throw "settings.json backups after run 1 = $($backups1.Count) (want 1)" }
+        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'the backup is not the original file' }
+        $written = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($written.theme -ne 'mine' -or $null -eq $written.agent_settings.mcp_config.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
+        if ($null -eq $written.agent_settings.mcp_config.PSObject.Properties['serena']) { throw 'run 1 did not write the MCP servers' }
+
+        # Backup names carry whole seconds: without this pause a wrongly repeated
+        # backup would overwrite the first one and the count could not tell.
+        Start-Sleep -Milliseconds 1200
+        $out2 = & $runLogged
+        $sha2 = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash
+        $backups2 = @(Get-ChildItem -LiteralPath $ohDir -Filter 'settings.json.autoos-backup-*')
+        $all2 = @(Get-ChildItem -LiteralPath $ohDir -Recurse -Filter '*.autoos-backup-*').Count
+        if ($backups2.Count -ne $backups1.Count) { throw "settings.json backups after run 2 = $($backups2.Count), after run 1 = $($backups1.Count) (an unchanged run must not back up again)" }
+        if ($all2 -ne $all1) { throw "backups under ~/.openhands after run 2 = $all2, after run 1 = $all1" }
+        if ($sha2 -ne $sha1) { throw 'run 2 rewrote settings.json (SHA256 differs from run 1)' }
+        # The generator also prints 'skipped' for settings.json: name the writer's own lines.
+        if ($out1 -notmatch 'openhands settings: updated') { throw "run 1 did not report the settings.json update: [$out1]" }
+        if ($out2 -notmatch 'openhands settings: skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
 }
 
 # --- AI routing stack (omniroute / litellm / zed / opencode) ---
@@ -4103,6 +4579,82 @@ Test-Case 'Install-AutoOSOmniRouteRouting announces without writing in dry run' 
     Pass
 }
 
+Test-Case 'backup-once: Install-AutoOSOmniRouteRouting does not back up again when nothing changed' {
+    # AutoOS does not write .qwen\settings.json itself: the external `omniroute
+    # setup-qwen` does, so stub `qwen` and `omniroute` on a PATH that is put back in
+    # finally. The keys file names no key, so Set-AutoOSOmniRouteCliKey exports nothing
+    # to the User environment. The stub always writes the same fixture, like the real
+    # CLI does once a file is routed. The backup name carries a second-resolution
+    # timestamp, so run 2 (same second) and run 3 (a later second) both must leave the
+    # ORIGINAL file as the only backup.
+    $realHome = $env:USERPROFILE
+    $realPath = $env:PATH
+    $realShort = $env:AUTOOS_OMNIROUTE_KEY
+    $realCli = $env:OMNIROUTE_API_KEY
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $stub = Join-Path $scratch 'bin'
+        $fakeHome = Join-Path $scratch 'home'
+        $qdir = Join-Path $fakeHome '.qwen'
+        $qcfg = Join-Path $qdir 'settings.json'
+        $noKeys = Join-Path $scratch 'no-keys.yml'
+        $null = New-Item -ItemType Directory -Path $stub, $qdir -Force
+        $seed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}}}'
+        $routed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}},"model":{"name":"t2-worker"}}'
+        [IO.File]::WriteAllText($qcfg, $seed)
+        [IO.File]::WriteAllText((Join-Path $stub 'qwen-settings.json'), $routed)
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [IO.File]::WriteAllText((Join-Path $stub 'qwen.cmd'), (@('@echo off', 'exit /b 0') -join "`r`n"))
+            [IO.File]::WriteAllText((Join-Path $stub 'omniroute.cmd'), (@(
+                '@echo off',
+                'if not exist "%USERPROFILE%\.qwen" mkdir "%USERPROFILE%\.qwen"',
+                'copy /y "%~dp0qwen-settings.json" "%USERPROFILE%\.qwen\settings.json" >nul',
+                'exit /b 0') -join "`r`n"))
+        } else {
+            [IO.File]::WriteAllText((Join-Path $stub 'qwen'), (@('#!/bin/sh', 'exit 0') -join "`n") + "`n")
+            [IO.File]::WriteAllText((Join-Path $stub 'omniroute'), (@(
+                '#!/bin/sh',
+                'mkdir -p "$USERPROFILE/.qwen"',
+                'cp "$(dirname "$0")/qwen-settings.json" "$USERPROFILE/.qwen/settings.json"',
+                'exit 0') -join "`n") + "`n")
+            & chmod +x (Join-Path $stub 'qwen') (Join-Path $stub 'omniroute')
+        }
+        $env:USERPROFILE = $fakeHome
+        $env:PATH = "$stub$([IO.Path]::PathSeparator)$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $log = Join-Path $scratch 'run.log'
+        $run = {
+            Initialize-AutoOSLog -Path $log
+            Install-AutoOSOmniRouteRouting -KeysFile $noKeys | Out-Null
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        }
+        $out1 = & $run
+        $backups1 = @(Get-ChildItem -LiteralPath $qdir -Filter 'settings.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'run 1 backup is not the original file' }
+        if ([IO.File]::ReadAllText($qcfg) -ne $routed) { throw 'the omniroute stub was not run (settings.json is not the routed fixture)' }
+        if ($out1 -notmatch 'Qwen Code routed') { throw "run 1 did not report the routing: [$out1]" }
+        $hash1 = (Get-FileHash -LiteralPath $qcfg -Algorithm SHA256).Hash
+        foreach ($n in 2, 3) {
+            if ($n -eq 3) { Start-Sleep -Milliseconds 1100 }
+            $out = & $run
+            $backups = @(Get-ChildItem -LiteralPath $qdir -Filter 'settings.json.autoos-backup-*')
+            if ($backups.Count -ne 1) { throw "run ${n}: backups=$($backups.Count) (want 1: nothing changed, so no new backup)" }
+            if ([IO.File]::ReadAllText($backups[0].FullName) -ne $seed) { throw "run ${n} replaced the run 1 backup: it is no longer the original file" }
+            if ((Get-FileHash -LiteralPath $qcfg -Algorithm SHA256).Hash -ne $hash1) { throw "run ${n} changed settings.json although nothing needed changing" }
+            if ($out -notmatch 'Qwen Code[^\r\n]*skipped') { throw "run ${n} did not report the Qwen step as skipped: [$out]" }
+        }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realShort) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realShort }
+        if ($null -eq $realCli) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue } else { $env:OMNIROUTE_API_KEY = $realCli }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'zed routing merges one provider and keeps the rest' {
     $realAppData = $env:APPDATA
     $realOmni = $env:AUTOOS_OMNIROUTE_KEY
@@ -4229,6 +4781,80 @@ Test-Case 'serena memory tools off from harness field (serena)' {
     }
     $sh = Get-Content (Join-Path $Root 'lib\linux\install.sh') -Raw -Encoding UTF8
     Assert-True ($sh -match 'memory_tools') 'sh opencode writer does not read the harness memory_tools field'
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when nothing changed' {
+    # The real writer against a scratch home. HOME, USERPROFILE and APPDATA point
+    # into a temp dir; a stand-in `python` first on PATH keeps the agent generator
+    # (it links skills and rewrites the file in its own formatting) out of it;
+    # Ollama's address is pinned so nothing probes the network; no key comes from
+    # the caller's environment. Nothing outside the temp dir is read or written.
+    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocbackup-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $cfgDir = Join-Path $scratch '.config\opencode'
+    $cfgFile = Join-Path $cfgDir 'opencode.json'
+    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"mine","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"mcp":{"mine":{"type":"local","command":["mine-mcp"],"enabled":true}}}'
+    $runLogged = {
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocbackup-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            $null = Set-AutoOSOpenCodeConfig
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
+    }
+    try {
+        $null = New-Item -ItemType Directory -Path $bin, $cfgDir -Force
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [IO.File]::WriteAllText((Join-Path $bin 'python.cmd'), "@echo off`r`nexit /b 0`r`n")
+        } else {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexit 0`n")
+            & chmod +x $fake
+        }
+        [IO.File]::WriteAllText($cfgFile, $seed)
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch
+        $env:APPDATA = Join-Path $scratch 'AppData'
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+        # The writer reads $HOME, which the environment does not set on every
+        # host: prove the module sees the scratch home before it writes anything.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+
+        $null = & $runLogged
+        $sha1 = (Get-FileHash -LiteralPath $cfgFile -Algorithm SHA256).Hash
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'opencode.json.autoos-backup-*')
+        if ([IO.File]::ReadAllText($cfgFile) -eq $seed) { throw 'the first run left the file unchanged' }
+        if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1)" }
+        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'the backup is not the original file' }
+        $written = Get-Content -LiteralPath $cfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($written.theme -ne 'mine' -or $null -eq $written.provider.PSObject.Properties['custom'] -or $null -eq $written.mcp.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
+        if ($null -eq $written.provider.PSObject.Properties['omniroute']) { throw 'run 1 did not write the gateway provider' }
+
+        # Backup names carry whole seconds: without this pause a wrongly repeated
+        # backup would overwrite the first one and the count could not tell.
+        Start-Sleep -Milliseconds 1200
+        $out2 = & $runLogged
+        $sha2 = (Get-FileHash -LiteralPath $cfgFile -Algorithm SHA256).Hash
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'opencode.json.autoos-backup-*')
+        if ($backups2.Count -ne $backups1.Count) { throw "backups after run 2 = $($backups2.Count), after run 1 = $($backups1.Count) (an unchanged run must not back up again)" }
+        if ($sha2 -ne $sha1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
 }
 
 Test-Case 'zed default_model converges litellm to omniroute (zed routing)' {
@@ -4471,6 +5097,54 @@ Test-Case 'a missing or malformed catalog/ide-models.json stops the IDE writers 
     }
 }
 
+Test-Case 'backup-once: Set-AutoOSZedProxy does not back up again when nothing changed' {
+    # Only the run that changes settings.json backs it up. The backup name carries a
+    # second-resolution timestamp, so two quick runs would collide on one name and a
+    # bare count proves nothing: the surviving backup must still be the ORIGINAL file.
+    $realAppData = $env:APPDATA
+    $realOmni = $env:AUTOOS_OMNIROUTE_API_KEY
+    $realLit = $env:AUTOOS_LITELLM_API_KEY
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        $env:APPDATA = $scratch
+        $env:AUTOOS_OMNIROUTE_API_KEY = 'test-omni-key'
+        $env:AUTOOS_LITELLM_API_KEY = 'test-lit-key'
+        $cfgDir = Join-Path $scratch 'Zed'
+        $cfgPath = Join-Path $cfgDir 'settings.json'
+        $null = New-Item -ItemType Directory -Path $cfgDir -Force
+        $seed = '{"theme":"mine","vim_mode":true,"language_models":{"openai":{"api_url":"https://example.invalid"}},"agent":{"default_model":{"provider":"anthropic","model":"claude"}}}'
+        [IO.File]::WriteAllText($cfgPath, $seed)
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSZedProxy
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'settings.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        $hash1 = (Get-FileHash -LiteralPath $cfgPath -Algorithm SHA256).Hash
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSZedProxy
+        $out2 = Get-Content -LiteralPath $log -Raw -Encoding utf8
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'settings.json.autoos-backup-*')
+        if ($backups2.Count -ne 1) { throw "run 2: backups=$($backups2.Count) (want 1: nothing changed, so no new backup)" }
+        if ([IO.File]::ReadAllText($backups2[0].FullName) -ne $seed) { throw 'run 2 overwrote the run 1 backup: it is no longer the original file' }
+        $hash2 = (Get-FileHash -LiteralPath $cfgPath -Algorithm SHA256).Hash
+        if ($hash2 -ne $hash1) { throw 'run 2 changed settings.json although nothing needed changing' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        $s = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($s.theme -ne 'mine' -or $s.vim_mode -ne $true) { throw 'user settings lost' }
+        if ($s.language_models.openai.api_url -ne 'https://example.invalid') { throw 'user provider lost' }
+        if ($s.language_models.openai_compatible.'autoos-omniroute'.api_url -ne 'http://127.0.0.1:20128/v1') { throw 'omniroute provider not written' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_API_KEY = $realOmni }
+        if ($null -eq $realLit) { Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_LITELLM_API_KEY = $realLit }
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'component profiles name real profiles and verify is set' {
     $bad = @()
     foreach ($file in @('catalog\windows.json', 'catalog\linux.json', 'catalog\macos.json')) {
@@ -4582,6 +5256,47 @@ Test-Case 'neovim sidekick enabling merges one extra and keeps the rest' {
         Assert-Equal (@($j.extras | Where-Object { $_ -eq 'lazyvim.plugins.extras.ai.sidekick' }).Count) 1
         Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
     } finally { $env:LOCALAPPDATA = $realLocal }
+}
+
+Test-Case 'backup-once: Enable-AutoOSSidekickExtra does not back up again when nothing changed' {
+    # Only the run that changes lazyvim.json backs it up. The backup name carries a
+    # second-resolution timestamp, so two quick runs would collide on one name and a
+    # bare count proves nothing: the surviving backup must still be the ORIGINAL file.
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'nvim'
+        $lj = Join-Path $cfgDir 'lazyvim.json'
+        $null = New-Item -ItemType Directory -Path $cfgDir -Force
+        $seed = '{"extras":["lazyvim.plugins.extras.lang.python"],"news":{"NEWS.md":"11866"},"version":8}'
+        [IO.File]::WriteAllText($lj, $seed)
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Enable-AutoOSSidekickExtra
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'lazyvim.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        $hash1 = (Get-FileHash -LiteralPath $lj -Algorithm SHA256).Hash
+        Initialize-AutoOSLog -Path $log
+        Enable-AutoOSSidekickExtra
+        $out2 = Get-Content -LiteralPath $log -Raw -Encoding utf8
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'lazyvim.json.autoos-backup-*')
+        if ($backups2.Count -ne 1) { throw "run 2: backups=$($backups2.Count) (want 1: nothing changed, so no new backup)" }
+        if ([IO.File]::ReadAllText($backups2[0].FullName) -ne $seed) { throw 'run 2 overwrote the run 1 backup: it is no longer the original file' }
+        $hash2 = (Get-FileHash -LiteralPath $lj -Algorithm SHA256).Hash
+        if ($hash2 -ne $hash1) { throw 'run 2 changed lazyvim.json although the extra was already enabled' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        $j = Get-Content -LiteralPath $lj -Raw | ConvertFrom-Json
+        if (@($j.extras) -notcontains 'lazyvim.plugins.extras.ai.sidekick') { throw 'sidekick extra missing after run 1' }
+        if (@($j.extras) -notcontains 'lazyvim.plugins.extras.lang.python') { throw 'existing extra lost' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:LOCALAPPDATA = $realLocal
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
 }
 
 # ── OpenHands self-checks ───────────────────────────────────────────────────

@@ -37,6 +37,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -171,6 +172,13 @@ def probe_gateway(model: str, timeout: int = 180) -> tuple[object, str]:
 
 MIN_REASONING_MAX_WAIT_MS = 120_000
 
+# Retry delays (seconds) for transient 503 responses from the gateway.
+# 503 = the gateway shedding load under host memory pressure, transient; we retry with backoff.
+RETRY_DELAYS_S = (5, 15, 45)
+
+# Assignable sleep function for easier testing/mocking.
+_sleep = time.sleep
+
 # The free promo leg stays FIRST (free when it works), so the breaker must skip
 # it fast: a 403 is a permanent-class error, and at the shipped threshold of 12
 # the gateway retried the dead promo on every single request (operator call
@@ -198,7 +206,7 @@ def probe_litellm(model: str, timeout: int = 180) -> tuple[object, str]:
     return _chat("http://127.0.0.1:4000", model, key, timeout)
 
 
-def _chat(base: str, model: str, key: str, timeout: int,
+def _chat_once(base: str, model: str, key: str, timeout: int,
           max_tokens: int = 2048) -> tuple[object, str]:
     # 2048, not a few dozen: reasoning legs (spark, gemini-flash) spend tokens
     # on hidden thinking before emitting content, and a small budget makes them
@@ -218,6 +226,18 @@ def _chat(base: str, model: str, key: str, timeout: int,
         return exc.code, exc.read(160).decode("utf-8", "replace").replace("\n", " ")[:160]
     except Exception as exc:  # noqa: BLE001 - any transport failure is a finding
         return "ERR", str(exc)[:160]
+
+
+def _chat(base: str, model: str, key: str, timeout: int,
+          max_tokens: int = 2048) -> tuple[object, str]:
+    # 503 = the gateway shedding load under host memory pressure, transient;
+    # 400/404/ERR are drift and are never retried.
+    delays = list(RETRY_DELAYS_S)
+    while True:
+        status, snippet = _chat_once(base, model, key, timeout, max_tokens)
+        if status != 503 or not delays:
+            return status, snippet
+        _sleep(delays.pop(0))
 
 
 def main(argv=None) -> int:

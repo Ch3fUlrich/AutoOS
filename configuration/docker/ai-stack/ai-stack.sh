@@ -9,6 +9,7 @@
 #   ai-stack.sh is-active         exit 0 when the stack owns the services (marker below)
 #   ai-stack.sh migrate [--yes]   native units -> containers (plan without --yes)
 #   ai-stack.sh rollback [--yes]  containers -> native units (plan without --yes)
+#   ai-stack.sh verify            read-only end-to-end checks; exit 1 on any FAIL
 #   --dry-run                     with any command: say what would happen
 #
 # Files (never tracked, all mode 600 under a 700 directory):
@@ -30,10 +31,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 CONFIG_DIR="${AUTOOS_AI_STACK_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/autoos/ai-stack}"
 DATA_DIR="${AUTOOS_AI_STACK_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/autoos/ai-stack}"
-# Tests replace both with logging stubs: nothing in the suite may reach the
-# live docker daemon or user manager (AGENTS.md §5).
+# Tests replace these with logging stubs: nothing in the suite may reach the
+# live docker daemon, user manager or network (AGENTS.md §5).
 DOCKER="${AUTOOS_DOCKER:-docker}"
 SYSTEMCTL="${AUTOOS_SYSTEMCTL:-systemctl}"
+CURL="${AUTOOS_CURL:-curl}"
 OMNI_HOME="${AUTOOS_OMNIROUTE_HOME:-$HOME/.omniroute}"
 OH_DIR="${AUTOOS_OPENHANDS_DIR:-$HOME/.openhands}"
 KEYS_FILE="${AUTOOS_KEYS_FILE:-$REPO/configuration/api-keys.yml}"
@@ -63,7 +65,7 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY=1 ;;
         --yes)     YES=1 ;;
-        -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,27p' "${BASH_SOURCE[0]}"; exit 0 ;;
         -*) echo "Unknown option: $arg"; exit 2 ;;
         *) if [[ -z "$CMD" ]]; then CMD="$arg"; else SERVICES+=("$arg"); fi ;;
     esac
@@ -199,12 +201,18 @@ container_running() {
     [[ "$("$DOCKER" inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)" == "true" ]]
 }
 
+# container_state <container>: docker's own verdict - "running (healthy)",
+# "exited", "no container"... (status and verify read the same words).
+container_state() {
+    "$DOCKER" inspect -f '{{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}}' "$1" 2>/dev/null || echo 'no container'
+}
+
 port_listening() {
     [[ -n "$(ss -ltnH "sport = :$1" 2>/dev/null)" ]]
 }
 
 http_code() {
-    curl -s -m 5 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true
+    "$CURL" -s -m 5 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true
 }
 
 gateway_ok()   { [[ "$(http_code http://127.0.0.1:20128/api/health)" == 200 ]]; }
@@ -509,8 +517,7 @@ cmd_status() {
     else echo "  owner: native units (no $MARKER)"; fi
     for svc in omniroute opencode openhands; do
         c="$(service_container "$svc")"
-        printf '  %-10s %-18s %s\n' "$svc" "$c" \
-            "$("$DOCKER" inspect -f '{{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}}' "$c" 2>/dev/null || echo 'no container')"
+        printf '  %-10s %-18s %s\n' "$svc" "$c" "$(container_state "$c")"
     done
     echo "  gateway :20128 /api/health -> $(http_code http://127.0.0.1:20128/api/health); keyless /v1/models -> $(http_code http://127.0.0.1:20128/v1/models) (401 expected)"
     echo "  opencode :4096 / -> $(http_code http://127.0.0.1:4096/); /api/session without password -> $(http_code http://127.0.0.1:4096/api/session) (401 expected)"
@@ -875,6 +882,243 @@ cmd_rollback() {
     bash "$START_STACK" openhands || true
 }
 
+# ─── verify ─────────────────────────────────────────────────────────────────
+# The by-hand checklist after `migrate --yes`, as one command. READ-ONLY: docker
+# is only asked `inspect` and `exec <opencode> test -d`, curl only makes GETs
+# and the combo probes (POST /v1/chat/completions, max_tokens 16); nothing is
+# started, stopped, written or printed that could be a key. One line per
+# check - "  ok    <name>", "  FAIL  <name> - <why>", "  skip  <name> - <why>" -
+# then the totals; exit 0 only when nothing FAILed.
+#   AUTOOS_OMNIROUTE_KEY         gateway key for the combo probes (never read from
+#                                a file; unset -> that check is skipped)
+#   AUTOOS_VERIFY_COMBOS         space separated combo names (default below)
+#   AUTOOS_VERIFY_PUBLIC_URLS    space separated public URLs that must redirect
+#                                (302, the auth proxy) without credentials
+#   AUTOOS_CODE_DIR              the tree that must be visible in the containers
+#                                (the variable compose.yml mounts)
+V_OK=0; V_FAIL=0; V_SKIP=0
+V_SVCS=(); V_CTRS=()
+v_ok()   { V_OK=$((V_OK + 1));     printf '  ok    %s\n' "$1"; }
+v_fail() { V_FAIL=$((V_FAIL + 1)); printf '  FAIL  %s - %s\n' "$1" "$2"; }
+v_skip() { V_SKIP=$((V_SKIP + 1)); printf '  skip  %s - %s\n' "$1" "$2"; }
+
+# verify_code <curl args...>: the HTTP status ("000": nothing answered).
+# -q first, so a ~/.curlrc cannot add a header to a probe that must be keyless.
+# stdin reaches curl (the combo probe hands it the key there).
+verify_code() {
+    local out
+    out="$("$CURL" -q -s -m 10 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true)"
+    printf '%s' "${out:-000}"
+}
+# verify_expected <code> <wanted>: the reason of a FAIL.
+verify_expected() {
+    if [[ "$1" == 000 ]]; then printf 'no answer, expected %s' "$2"; else printf 'HTTP %s, expected %s' "$1" "$2"; fi
+}
+
+# compose_services: "<service> <container> <profiles>" per service of
+# compose.yml - the container falls back to compose's own default name, the
+# profiles are comma separated or "-". Plain awk, like ensure_images: the file
+# is kept anchor-free so that no YAML library is needed.
+compose_services() {
+    awk '
+        function emit() {
+            if (svc != "") printf "%s %s %s\n", svc, (cname != "" ? cname : "autoos-ai-" svc "-1"), (prof != "" ? prof : "-")
+            svc = ""
+        }
+        function add_profile(v) {
+            gsub(/[][" \047]/, "", v)
+            if (v != "") prof = (prof == "" ? v : prof "," v)
+        }
+        /^[^[:space:]#]/ { emit(); in_svc = ($0 ~ /^services:/); next }
+        !in_svc { next }
+        /^  [A-Za-z0-9_.-]+:[[:space:]]*(#.*)?$/ {
+            emit(); svc = $1; sub(/:$/, "", svc); cname = ""; prof = ""; in_prof = 0; next
+        }
+        /^    container_name:/ {
+            v = $0; sub(/^    container_name:[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v)
+            gsub(/["\047]/, "", v); cname = v; in_prof = 0; next
+        }
+        /^    profiles:/ {
+            v = $0; sub(/^    profiles:[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v)
+            in_prof = (v == ""); add_profile(v); next
+        }
+        in_prof && /^[[:space:]]+-[[:space:]]/ {
+            v = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v); add_profile(v); next
+        }
+        /^    [A-Za-z_]+:/ { in_prof = 0 }
+        END { emit() }
+    ' "$HERE/compose.yml"
+}
+
+# verify_load_services: V_SVCS/V_CTRS = the services compose would start:
+# every one without profiles, and those whose profile COMPOSE_PROFILES names
+# (environment first, then stack.env - the two places compose itself reads).
+verify_load_services() {
+    local active="${COMPOSE_PROFILES:-}" svc ctr prof plist alist p a hit
+    [[ -n "$active" ]] || active="$(env_value "$STACK_ENV" COMPOSE_PROFILES)"
+    IFS=, read -ra alist <<<"$active"
+    V_SVCS=(); V_CTRS=()
+    while read -r svc ctr prof; do
+        [[ -n "$svc" ]] || continue
+        if [[ "$prof" != - ]]; then
+            hit=0
+            IFS=, read -ra plist <<<"$prof"
+            for p in "${plist[@]}"; do
+                for a in "${alist[@]}"; do
+                    if [[ "$a" == "$p" || "$a" == '*' ]]; then hit=1; fi
+                done
+            done
+            (( hit )) || continue
+        fi
+        V_SVCS+=("$svc"); V_CTRS+=("$ctr")
+    done < <(compose_services)
+    return 0
+}
+
+# verify_container <service>: its container name, or nothing when compose
+# would not start that service.
+verify_container() {
+    local i
+    for i in "${!V_SVCS[@]}"; do
+        if [[ "${V_SVCS[$i]}" == "$1" ]]; then printf '%s' "${V_CTRS[$i]}"; return 0; fi
+    done
+    return 0
+}
+
+# The tree compose mounts into opencode and every OpenHands sandbox: the
+# variable compose reads (the environment beats --env-file), then stack.env,
+# then what init would have written.
+verify_code_dir() {
+    local d="${AUTOOS_CODE_DIR:-}"
+    [[ -n "$d" ]] || d="$(env_value "$STACK_ENV" AUTOOS_CODE_DIR)"
+    printf '%s' "${d:-$CODE_DIR}"
+}
+
+# 1. Every service compose starts is running and, where docker reports a
+# health status, healthy.
+verify_containers() {
+    local i c state
+    if (( ${#V_SVCS[@]} == 0 )); then v_fail "containers" "no service of $HERE/compose.yml is enabled"; return 0; fi
+    for i in "${!V_SVCS[@]}"; do
+        c="${V_CTRS[$i]}"
+        state="$(container_state "$c")"
+        case "$state" in
+            running|"running (healthy)") v_ok "container $c" ;;
+            *) v_fail "container $c" "$state" ;;
+        esac
+    done
+    return 0
+}
+
+# 2. The published ports refuse a request without credentials.
+verify_keyless_one() {
+    local svc="$1" path="$2" port name code
+    port="$(service_port "$svc")"
+    name="keyless $path refused on :$port"
+    if [[ -z "$(verify_container "$svc")" ]]; then v_skip "$name" "the $svc service is not enabled"; return 0; fi
+    code="$(verify_code --noproxy '*' "http://127.0.0.1:$port$path")"
+    if [[ "$code" == 401 ]]; then v_ok "$name"; else v_fail "$name" "$(verify_expected "$code" 401)"; fi
+}
+
+# 3. A one-word request per combo, with the gateway key. The key goes to curl
+# on stdin (`-H @-` from a here-string): never on a command line, where `ps`
+# shows it, and never in this script's output.
+verify_combos() {
+    local key="${AUTOOS_OMNIROUTE_KEY:-}" combos c url body code why
+    if [[ -z "$(verify_container omniroute)" ]]; then v_skip "keyed combos" "the omniroute service is not enabled"; return 0; fi
+    if [[ -z "$key" ]]; then v_skip "keyed combos" "AUTOOS_OMNIROUTE_KEY is not set"; return 0; fi
+    if [[ "$key" == *$'\n'* || "$key" == *$'\r'* ]]; then
+        v_fail "keyed combos" "AUTOOS_OMNIROUTE_KEY holds a line break"; return 0
+    fi
+    read -ra combos <<<"${AUTOOS_VERIFY_COMBOS:-t2-worker-free-only t3-driver-free-only t2-worker-clean}"
+    if (( ${#combos[@]} == 0 )); then v_skip "keyed combos" "AUTOOS_VERIFY_COMBOS lists no combo"; return 0; fi
+    url="http://127.0.0.1:$(service_port omniroute)/v1/chat/completions"
+    for c in "${combos[@]}"; do
+        # The name goes into a JSON body: only what a combo name can be.
+        if [[ ! "$c" =~ ^[A-Za-z0-9._:/-]+$ ]]; then v_fail "combo (invalid name)" "AUTOOS_VERIFY_COMBOS entries are [A-Za-z0-9._:/-]"; continue; fi
+        body="{\"model\":\"$c\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":16}"
+        code="$(verify_code -m 60 --noproxy '*' -X POST -H 'Content-Type: application/json' -H @- -d "$body" "$url" \
+            <<<"Authorization: Bearer $key")"
+        if [[ "$code" == 200 ]]; then v_ok "combo $c"; continue; fi
+        why="$(verify_expected "$code" 200)"
+        [[ "$code" == 401 ]] && why="HTTP 401, the gateway did not accept AUTOOS_OMNIROUTE_KEY"
+        v_fail "combo $c" "$why"
+    done
+    return 0
+}
+
+# 4. The code tree is where the agents look for it: inside opencode, and in
+# the volumes every OpenHands sandbox gets (SANDBOX_VOLUMES: host:container[:mode]).
+verify_code_dir_visible() {
+    local dir oc oh vols entry found=0 list name
+    dir="$(verify_code_dir)"
+    oc="$(verify_container opencode)"
+    if [[ -z "$oc" ]]; then
+        v_skip "code dir visible in opencode" "the opencode service is not enabled"
+    else
+        name="code dir $dir visible in $oc"
+        if "$DOCKER" exec "$oc" test -d "$dir" >/dev/null 2>&1; then v_ok "$name"
+        elif container_running "$oc"; then v_fail "$name" "not a directory in the container - AUTOOS_CODE_DIR must be mounted at the same path"
+        else v_fail "$name" "the container is not running"; fi
+    fi
+    oh="$(verify_container openhands)"
+    if [[ -z "$oh" ]]; then
+        v_skip "code dir in openhands sandbox volumes" "the openhands service is not enabled"
+    else
+        name="code dir $dir in $oh SANDBOX_VOLUMES"
+        vols="$(running_container_env "$oh" SANDBOX_VOLUMES)"
+        IFS=, read -ra list <<<"$vols"
+        for entry in "${list[@]}"; do
+            if [[ "$entry" == "$dir:$dir" || "$entry" == "$dir:$dir:"* ]]; then found=1; fi
+        done
+        if (( found )); then v_ok "$name"
+        elif [[ -z "$vols" ]]; then v_fail "$name" "SANDBOX_VOLUMES is empty or the container does not exist"
+        else v_fail "$name" "no $dir:$dir entry in SANDBOX_VOLUMES"; fi
+    fi
+    return 0
+}
+
+# 5. What the public sees: the auth proxy redirects, it never serves. No
+# credentials are sent, and none that sit in a URL are echoed.
+verify_public_urls() {
+    local urls u code shown
+    read -ra urls <<<"${AUTOOS_VERIFY_PUBLIC_URLS:-}"
+    if (( ${#urls[@]} == 0 )); then v_skip "public URLs" "AUTOOS_VERIFY_PUBLIC_URLS is not set"; return 0; fi
+    for u in "${urls[@]}"; do
+        if [[ ! "$u" =~ ^https?://[^/?#@]+([/?#].*)?$ ]]; then
+            v_fail "public URL (rejected)" "not an http(s) URL, or it carries credentials - verify sends none"; continue
+        fi
+        shown="${u%%[?#]*}"
+        code="$(verify_code "$u")"
+        if [[ "$code" == 302 ]]; then v_ok "public URL $shown"
+        else v_fail "public URL $shown" "$(verify_expected "$code" "302 (the auth proxy's redirect)")"; fi
+    done
+    return 0
+}
+
+# 6. configuration/healthcheck.sh is the repo's stack probe, and it is not a
+# check verify can run: it appends to logs/healthcheck-<date>.log on every run
+# (mkdir + tee), answers with exit 0 whatever it finds, and its --fix mode
+# resumes services. Everything of it that concerns this stack (the three ports,
+# docker's health verdicts) is checked above.
+verify_healthcheck() {
+    v_skip "healthcheck" "configuration/healthcheck.sh writes a log file and always exits 0 - not read-only, no verdict"
+}
+
+cmd_verify() {
+    V_OK=0; V_FAIL=0; V_SKIP=0
+    verify_load_services
+    verify_containers
+    verify_keyless_one omniroute /v1/models
+    verify_keyless_one opencode /api/session
+    verify_combos
+    verify_code_dir_visible
+    verify_public_urls
+    verify_healthcheck
+    printf 'verify: %d ok, %d failed, %d skipped\n' "$V_OK" "$V_FAIL" "$V_SKIP"
+    [[ $V_FAIL -eq 0 ]]
+}
+
 case "$CMD" in
     init)      cmd_init ;;
     up)        cmd_up ;;
@@ -883,5 +1127,6 @@ case "$CMD" in
     is-active) cmd_is_active ;;
     migrate)   cmd_migrate ;;
     rollback)  cmd_rollback ;;
-    *) echo "Unknown command: $CMD (init, up, down, status, is-active, migrate, rollback)"; exit 2 ;;
+    verify)    cmd_verify ;;
+    *) echo "Unknown command: $CMD (init, up, down, status, is-active, migrate, rollback, verify)"; exit 2 ;;
 esac

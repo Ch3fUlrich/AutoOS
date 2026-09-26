@@ -46,6 +46,35 @@ function ConvertTo-AutoOSProcessArgument {
     '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
 }
 
+function Copy-AutoOSBackup {
+    <#
+      .SYNOPSIS
+        Copy a user's file to <file>.autoos-backup-<stamp> and return that path.
+        Never overwrites an earlier backup.
+      .DESCRIPTION
+        The stamp has one-second resolution. Two writes that both change a file
+        inside one second used to share a backup name, and Copy-Item -Force let
+        the later copy replace the earlier one: the user's ORIGINAL was gone and
+        only an intermediate file survived. On a name clash this appends -1, -2,
+        ... so every backup is its own file. -Stamp exists so a test can force
+        the clash without touching the clock. Callers that do not need the path
+        discard it ($null = ...), or it leaks into their output.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
+    )
+    $base = "$Path.autoos-backup-$Stamp"
+    $backup = $base
+    $n = 0
+    while (Test-Path -LiteralPath $backup) {
+        $n++
+        $backup = "$base-$n"
+    }
+    Copy-Item -LiteralPath $Path -Destination $backup
+    $backup
+}
+
 function Get-AutoOSNativePercent {
     param([string]$Line)
     if ($Line -match '(?<!\d)(100|\d{1,2})(?:\.\d+)?\s*%') { return [int]$Matches[1] }
@@ -695,7 +724,7 @@ function Add-AutoOSProfileLine {
             Write-AutoOSLine "profile already configured ($Marker)" -Level muted
             return
         }
-        Copy-Item $ProfilePath "$ProfilePath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        $null = Copy-AutoOSBackup -Path $ProfilePath
     } else {
         New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
     }
@@ -942,7 +971,6 @@ function Enable-AutoOSProjectMcpServer {
             Write-AutoOSLine "$path is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $path "$path.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     } elseif (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
@@ -950,10 +978,14 @@ function Enable-AutoOSProjectMcpServer {
     $enabled = @()
     if ($settings.Contains('enabledMcpjsonServers')) { $enabled = @($settings['enabledMcpjsonServers']) }
     if ($Name -in $enabled) {
-        Write-AutoOSLine "project MCP server '$Name' was already approved" -Level muted
+        Write-AutoOSLine "project MCP server '$Name' was already approved - skipped" -Level muted
         return
     }
     $settings['enabledMcpjsonServers'] = @($enabled + $Name)
+    # Back up only a run that changes the file, so a second run leaves no copy.
+    if (Test-Path $path) {
+        $null = Copy-AutoOSBackup -Path $path
+    }
     $settings | ConvertTo-Json -Depth 12 | Out-File -FilePath $path -Encoding utf8
     Write-AutoOSLine "approved project MCP server '$Name' in $path" -Level ok
 }
@@ -1102,8 +1134,7 @@ function Set-AutoOSOmnigraphEnv {
         Write-AutoOSLine "omnigraph env file unchanged ($EnvFile)" -Level muted
     } else {
         if ($old) {
-            $backup = "$EnvFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-            Copy-Item $EnvFile $backup -Force
+            $backup = Copy-AutoOSBackup -Path $EnvFile
             if ((Protect-AutoOSUserFile -Path $backup) -eq 'failed') {
                 Write-AutoOSLine "could not restrict $backup to your account (icacls)" -Level warn
             }
@@ -1301,26 +1332,38 @@ function Set-AutoOSAntigravityMcp {
             Write-AutoOSLine "$cfgPath is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
 
     $servers = [ordered]@{}
     if ($cfg.Contains('mcpServers') -and $cfg['mcpServers']) {
         foreach ($p in $cfg['mcpServers'].PSObject.Properties) { $servers[$p.Name] = $p.Value }
     }
-    $servers['omnigraph'] = [ordered]@{
+    $entry = [ordered]@{
         command = 'npx'
         args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
         env     = $envBlock
     }
-    $cfg['mcpServers'] = $servers
-
-    $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
-    $kept = @($servers.Keys | Where-Object { $_ -ne 'omnigraph' })
-    if ($kept.Count) {
-        Write-AutoOSLine "omnigraph merged into $cfgPath (kept: $($kept -join ', '))" -Level ok
+    # Compare the entry as data (a parsed file and a fresh entry serialise the
+    # same way), so a hand-formatted file that already holds it is left alone.
+    # -ceq: JSON is case-sensitive ("NPX" is not "npx"), PowerShell's -eq is not.
+    $unchanged = $servers.Contains('omnigraph') -and
+        ((ConvertTo-Json -InputObject $servers['omnigraph'] -Depth 12 -Compress) -ceq (ConvertTo-Json -InputObject $entry -Depth 12 -Compress))
+    if ($unchanged) {
+        Write-AutoOSLine "omnigraph already configured in $cfgPath - skipped" -Level ok
     } else {
-        Write-AutoOSLine "Antigravity MCP config written to $cfgPath" -Level ok
+        $servers['omnigraph'] = $entry
+        $cfg['mcpServers'] = $servers
+        # Back up only a run that changes the file, so a second run leaves no copy.
+        if (Test-Path $cfgPath) {
+            $null = Copy-AutoOSBackup -Path $cfgPath
+        }
+        $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
+        $kept = @($servers.Keys | Where-Object { $_ -ne 'omnigraph' })
+        if ($kept.Count) {
+            Write-AutoOSLine "omnigraph merged into $cfgPath (kept: $($kept -join ', '))" -Level ok
+        } else {
+            Write-AutoOSLine "Antigravity MCP config written to $cfgPath" -Level ok
+        }
     }
     if (-not $env:OMNIGRAPH_TOKEN) {
         Write-AutoOSLine 'OMNIGRAPH_TOKEN was not set, so no bearer token was written.' -Level warn
@@ -1353,16 +1396,40 @@ function Register-AutoOSAntigravityMcpServer {
             Write-AutoOSLine "$cfgPath is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
 
     $servers = [ordered]@{}
     if ($cfg.Contains('mcpServers') -and $cfg['mcpServers']) {
         foreach ($p in $cfg['mcpServers'].PSObject.Properties) { $servers[$p.Name] = $p.Value }
     }
+    # Compare the entry as data, key order aside: a [hashtable] parameter keeps
+    # no order (and PowerShell 7 hashes differently per process), and a
+    # hand-formatted file that already holds the entry must be left alone.
+    $canon = $null
+    $canon = {
+        param($v)
+        if ($v -is [System.Collections.IDictionary]) {
+            '{' + ((@($v.Keys) | Sort-Object | ForEach-Object { "$_=" + (& $canon $v[$_]) }) -join ',') + '}'
+        } elseif ($v -is [System.Management.Automation.PSCustomObject]) {
+            '{' + ((@($v.PSObject.Properties.Name) | Sort-Object | ForEach-Object { "$_=" + (& $canon $v.PSObject.Properties[$_].Value) }) -join ',') + '}'
+        } elseif ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) {
+            '[' + ((@($v) | ForEach-Object { & $canon $_ }) -join ',') + ']'
+        } else {
+            ConvertTo-Json -InputObject $v -Compress
+        }
+    }
+    # -ceq: JSON is case-sensitive ("NPX" is not "npx"), PowerShell's -eq is not.
+    if ($servers.Contains($Name) -and ((& $canon $servers[$Name]) -ceq (& $canon $Spec))) {
+        Write-AutoOSLine "Antigravity MCP server '$Name' already configured in $cfgPath - skipped" -Level ok
+        return
+    }
     $servers[$Name] = $Spec
     $cfg['mcpServers'] = $servers
 
+    # Back up only a run that changes the file, so a second run leaves no copy.
+    if (Test-Path $cfgPath) {
+        $null = Copy-AutoOSBackup -Path $cfgPath
+    }
     $cfg | ConvertTo-Json -Depth 12 | Out-File -FilePath $cfgPath -Encoding utf8
     Write-AutoOSLine "Antigravity MCP server '$Name' configured in $cfgPath" -Level ok
 }
@@ -1803,7 +1870,7 @@ function Set-AutoOSSerenaExclusions {
 
     if ($existed) {
         try {
-            Copy-Item $ConfigPath "$ConfigPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+            $null = Copy-AutoOSBackup -Path $ConfigPath
         } catch {
             Write-AutoOSLine "could not update Serena's excluded_tools in $ConfigPath - could not back it up: $($_.Exception.Message)" -Level warn
             return
@@ -1938,18 +2005,21 @@ function Set-AutoOSOpenCodeConfig {
     }
 
     $existing = [ordered]@{}
+    $existingCanon = $null
     if (Test-Path $configFile) {
         try {
             $raw = Get-Content -Path $configFile -Raw -Encoding UTF8
             if ($raw.Trim()) {
                 $parsed = $raw | ConvertFrom-Json
                 foreach ($p in $parsed.PSObject.Properties) { $existing[$p.Name] = $p.Value }
+                # What is on disk, as parsed JSON: compared with the result below,
+                # so a run that changes nothing neither backs up nor rewrites.
+                $existingCanon = $parsed | ConvertTo-Json -Depth 100 -Compress
             }
         } catch {
             Write-AutoOSLine "$configFile is not valid JSON - leaving it alone." -Level warn
             return
         }
-        Copy-Item $configFile "$configFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
 
     if (-not $existing.Contains('$schema')) {
@@ -2134,8 +2204,20 @@ function Set-AutoOSOpenCodeConfig {
     $existing['tools'] = $serenaToolsOff
 
     $json = $existing | ConvertTo-Json -Depth 10
-    $json | Out-File -FilePath $configFile -Encoding utf8
-    Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
+    # Parsed JSON, not bytes: the agent generator below rewrites this file in its
+    # own formatting, and a formatting difference alone must cost neither a
+    # backup nor a write (hard rule 5: the first run that changes the file backs
+    # it up once).
+    $resultCanon = $json | ConvertFrom-Json | ConvertTo-Json -Depth 100 -Compress
+    if ($null -ne $existingCanon -and $resultCanon -ceq $existingCanon) {
+        Write-AutoOSLine "OpenCode configuration already up to date in $configFile - skipped" -Level ok
+    } else {
+        if (Test-Path $configFile) {
+            $null = Copy-AutoOSBackup -Path $configFile
+        }
+        $json | Out-File -FilePath $configFile -Encoding utf8
+        Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
+    }
 
     # Merge the shared agent harness (roles, skills link) after the config is
     # written. Judge by exit code only; no 2>&1, since under 'Stop' Windows
@@ -2182,7 +2264,6 @@ function Set-AutoOSOpenHandsConfig {
         seeds default configuration.
     #>
     $openhandsDir = Join-Path $HOME '.openhands'
-    $settingsFile = Join-Path $openhandsDir 'settings.json'
 
     if ($script:DryRun) {
         Write-AutoOSLine "would configure OpenHands in $openhandsDir" -Level muted
@@ -2208,9 +2289,8 @@ function Set-AutoOSOpenHandsConfig {
         New-Item -ItemType Directory -Path $autoDir -Force | Out-Null
     }
 
-    if (Test-Path $settingsFile) {
-        Copy-Item $settingsFile "$settingsFile.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
-    }
+    # settings.json is backed up by the setup script below - once, right before
+    # the first change of a run, and not at all when the run changes nothing.
 
     $secretsPath = Join-Path $HOME 'Documents\Code\agent-skills\secrets\api_keys.conf'
     $secrets = Read-AutoOSApiSecrets -SecretsPath $secretsPath
@@ -2244,7 +2324,8 @@ function Set-AutoOSOpenHandsConfig {
         # automatic OpenHands setup entirely. The catalog is read from disk
         # via the repo-root argument, never inlined into a string literal.
         $setupScript = @'
-import os, sys, json
+import os, sys, json, shutil
+from datetime import datetime
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -2336,6 +2417,30 @@ if os.path.isfile(settings_file):
             settings = json.load(f)
     except Exception:
         settings = {}
+
+# settings.json is written only when its JSON differs from what is on disk (same
+# key order; the agent generator formats the file differently from this script,
+# so bytes do not count), and the original is copied aside once, right before
+# the first change of a run. A run that changes nothing leaves no backup.
+_settings_existed = os.path.isfile(settings_file)
+_settings_backed_up = False
+_settings_written = False
+
+def _save_settings():
+    global _settings_backed_up, _settings_written
+    if os.path.isfile(settings_file):
+        try:
+            with open(settings_file, 'r', encoding='utf-8-sig') as _cf:
+                if json.dumps(json.load(_cf)) == json.dumps(settings):
+                    return
+        except (OSError, ValueError):
+            pass
+        if not _settings_backed_up:
+            shutil.copyfile(settings_file, '%s.autoos-backup-%s' % (settings_file, datetime.now().strftime('%Y%m%d-%H%M%S')))
+            _settings_backed_up = True
+    with open(settings_file, 'w', encoding='utf-8') as f:
+        json.dump(settings, f, indent=2)
+    _settings_written = True
 
 settings.setdefault('schema_version', 2)
 agent_settings = settings.setdefault('agent_settings', {})
@@ -2431,7 +2536,11 @@ mcp_cfg['graphify'] = {
 }
 # The agent-server may run in a container; it never sees a token from a shell
 # profile. Take it from the env, else the per-user omnigraph env file.
-omni_env = {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'}
+# Container-side URL, like llm['base_url'] above: this file is read by the
+# OpenHands app and its sandbox containers, where localhost is the container
+# itself. omnigraph-server is published on the host's :8080 and Docker Desktop
+# resolves host.docker.internal.
+omni_env = {'OMNIGRAPH_BASE_URL': 'http://host.docker.internal:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'}
 omni_token = os.environ.get('OMNIGRAPH_TOKEN', '')
 if not omni_token:
     try:
@@ -2483,8 +2592,7 @@ mcp_cfg['cao-ops'] = {
 if 'github' in mcp_cfg:
     del mcp_cfg['github']
 
-with open(settings_file, 'w', encoding='utf-8') as f:
-    json.dump(settings, f, indent=2)
+_save_settings()
 
 profiles_dir = os.path.join(openhands_dir, 'profiles')
 # Prices are USD per token from catalog/llm-models.json. Free variants bill
@@ -2610,8 +2718,7 @@ if (gw_key and 'omniroute-t1-orchestrator' in _managed) or (_lit_key and 'litell
             _default_entry['model'] = llm.get('model')
             _default_entry['base_url'] = llm.get('base_url')
             _default_entry['api_key'] = llm.get('api_key')
-with open(settings_file, 'w', encoding='utf-8') as f:
-    json.dump(settings, f, indent=2)
+_save_settings()
 # Vendored agent profiles (openhands/agent-profiles/*.json in the repo) are
 # the desired state and are copied verbatim on every setup. Their
 # llm_profile_ref values point at the canonical profile names written above.
@@ -2630,6 +2737,7 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
                 json.dump(_a_data, _of, indent=2)
         except Exception:
             pass
+print('openhands settings: %s %s' % (('updated' if _settings_existed else 'installed') if _settings_written else 'skipped', settings_file))
 '@
         $argMuse = if ($museKey) { $museKey } else { 'null' }
         $argDeepseek = if ($deepseekKey) { $deepseekKey } else { 'null' }
@@ -2661,12 +2769,14 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
         # its environment; the caller's own values are restored afterwards.
         $savedOllama = $env:OLLAMA_BASE_URL
         $savedIde = $env:AUTOOS_IDE_MODELS
+        $setupOut = @()
         try {
             $env:OLLAMA_BASE_URL = Resolve-AutoOSOllamaBaseUrl
             $env:AUTOOS_IDE_MODELS = $ideModels
-            & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot $argOmni
+            $setupOut = & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot $argOmni
         }
         finally { $env:OLLAMA_BASE_URL = $savedOllama; $env:AUTOOS_IDE_MODELS = $savedIde }
+        foreach ($line in $setupOut) { Write-AutoOSLine "$line" -Level muted }
 
         # The role agent profiles are the generator's job: it merges the
         # harness into whatever the embedded script left, so the roles stay in
@@ -2802,7 +2912,7 @@ function Set-AutoOSClaudeGateway {
 
     if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
     if ($existed) {
-        Copy-Item -LiteralPath $cfgPath -Destination "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+        $null = Copy-AutoOSBackup -Path $cfgPath
     }
     # -Depth 100: at the default (or 10) anything nested deeper in the user's
     # settings would come back as a "@{...}" string. The temp file can hold
@@ -2906,11 +3016,26 @@ function Install-AutoOSOmniRouteRouting {
                 if ($script:DryRun) {
                     Write-AutoOSLine "would route Qwen Code at OmniRoute in $qcfg (model t2-worker)" -Level muted
                 } else {
+                    # The omniroute CLI edits the file itself, so the backup is taken first
+                    # and kept only when the CLI changed something. An identical result
+                    # deletes AutoOS's own fresh copy and reports skipped. The helper never
+                    # reuses a name, so that copy is always this run's own new file: an
+                    # earlier run's backup is neither overwritten nor deleted.
+                    $qbefore = $null
+                    $qbak = $null
                     if (Test-Path $qcfg) {
-                        Copy-Item $qcfg "$qcfg.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+                        $qbefore = [IO.File]::ReadAllBytes($qcfg)
+                        $qbak = Copy-AutoOSBackup -Path $qcfg
                     }
                     & omniroute setup-qwen --model t2-worker --yes 2>&1 | Out-Null
-                    if ($LASTEXITCODE -ne 0) { Write-AutoOSLine 'Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)' -Level warn }
+                    $qrc = $LASTEXITCODE
+                    $qsame = $false
+                    if ($null -ne $qbefore -and (Test-Path $qcfg)) {
+                        $qsame = [Convert]::ToBase64String([IO.File]::ReadAllBytes($qcfg)) -ceq [Convert]::ToBase64String($qbefore)
+                    }
+                    if ($qsame -and $qbak) { Remove-Item $qbak -Force -ErrorAction SilentlyContinue }
+                    if ($qrc -ne 0) { Write-AutoOSLine 'Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)' -Level warn }
+                    elseif ($qsame) { Write-AutoOSLine 'Qwen Code already routed at OmniRoute (model t2-worker) - skipped' -Level ok }
                     else { Write-AutoOSLine 'Qwen Code routed at OmniRoute (model t2-worker)' -Level ok }
                 }
             } else {
@@ -3006,9 +3131,6 @@ function Set-AutoOSZedProxy {
         return
     }
     if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
-    if (Test-Path $cfgPath) {
-        Copy-Item $cfgPath "$cfgPath.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
-    }
     # -Encoding UTF8: this writer saves BOM-less UTF-8 (below), and Windows
     # PowerShell 5.1 reads a BOM-less file as ANSI - the catalog's em-dash
     # names and any non-ASCII user setting would come back as mojibake.
@@ -3123,7 +3245,20 @@ function Set-AutoOSZedProxy {
     # BOM-less UTF-8: Zed's parser (serde_json) rejects a leading BOM with
     # "expected value at line 1 column 1", and PowerShell 5.1 Out-File -Encoding
     # utf8 always emits one (measured 2026-09-22 — broke the live file).
-    [IO.File]::WriteAllText($cfgPath, ($settings | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    $json = $settings | ConvertTo-Json -Depth 8
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    if (Test-Path $cfgPath) {
+        # Bytes, not parsed data: a file that already has the right content but a BOM
+        # (which Zed rejects) still differs and gets rewritten. Only a run that
+        # changes the file backs it up.
+        $same = [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfgPath)) -ceq [Convert]::ToBase64String($utf8.GetBytes($json))
+        if ($same) {
+            Write-AutoOSLine "Zed agents already routed to OmniRoute + LiteLLM ($cfgPath) - skipped" -Level ok
+            return
+        }
+        $null = Copy-AutoOSBackup -Path $cfgPath
+    }
+    [IO.File]::WriteAllText($cfgPath, $json, $utf8)
     Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)' -Level ok
 }
 
@@ -3328,15 +3463,19 @@ function Enable-AutoOSSidekickExtra {
             Write-AutoOSLine "could not parse $lj - leaving it alone" -Level warn
             return
         }
-        Copy-Item $lj "$lj.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
     }
     $extras = @()
     if ($cfg.ContainsKey('extras')) { $extras = @($cfg['extras']) }
     if ($extras -contains $extra) {
-        Write-AutoOSLine 'sidekick extra already enabled' -Level muted
+        Write-AutoOSLine 'sidekick extra already enabled - skipped' -Level muted
         return
     }
     $cfg['extras'] = @($extras) + @($extra)
+    # Backup only now that a write is certain: a run that changes nothing must not
+    # leave a backup behind (or, within the same second, overwrite an earlier one).
+    if (Test-Path $lj) {
+        $null = Copy-AutoOSBackup -Path $lj
+    }
     $cfg | ConvertTo-Json -Depth 8 | Out-File -FilePath $lj -Encoding utf8
     Write-AutoOSLine 'sidekick extra enabled (<leader>aa toggles the opencode panel)' -Level ok
 }
@@ -3358,7 +3497,7 @@ Export-ModuleMember -Function `
     Read-AutoOSSecretsFile, Read-AutoOSApiSecrets, Resolve-AutoOSOllamaBaseUrl,
     Get-AutoOSMcpPackage, Get-AutoOSSerenaExcludedTools, Get-AutoOSIdeModel,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
-    Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv, Protect-AutoOSUserFile,
+    Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv, Protect-AutoOSUserFile, Copy-AutoOSBackup,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
     Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
     Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,

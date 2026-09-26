@@ -131,7 +131,7 @@ keeps the native installs (the sections above).
 Files: [`configuration/docker/ai-stack/`](../configuration/docker/ai-stack/) -
 `compose.yml`, `opencode.Dockerfile`, `stack.env.example` and `ai-stack.sh`,
 the one entry point (`init`, `up`, `down`, `status`, `is-active`, `migrate`,
-`rollback`; `--dry-run` with any of them). Catalog id: `ai-stack-docker`,
+`rollback`, `verify`; `--dry-run` with any of them). Catalog id: `ai-stack-docker`,
 pre-ticked in `server`, requires `docker`.
 
 ### Why docker on a server
@@ -353,6 +353,39 @@ at):
 5. Remove the marker, then `register-autostart.sh --only
    autoos-omniroute,autoos-opencode`.
 6. `start-stack.sh openhands` (the `docker run` container, as before).
+
+### Verifying the stack
+
+`ai-stack.sh verify` is the checklist to run after `migrate --yes` (or any
+`up`), as one repeatable command. It is **read-only**: docker is only asked
+`inspect` and `exec <opencode> test -d`, curl only probes the loopback ports
+(and the public URLs you list), nothing is started, stopped, restarted or
+written, and the gateway key is never printed (`--dry-run` changes nothing
+either, there is nothing to change). Each check prints one line - `ok`,
+`FAIL - <reason>`, or `skip - <why>` when its input is not configured - and the
+command ends with `verify: N ok, M failed, K skipped`. **Exit status: 0 only
+when M is 0**, 1 otherwise.
+
+| # | Check | Passes when | Skipped when |
+|---|---|---|---|
+| 1 | containers | every service compose starts (those without `profiles`, plus the ones `COMPOSE_PROFILES` names) is `running`, and `healthy` where docker reports a health status | - |
+| 2 | keyless refusal | `GET /v1/models` on `:20128` and `GET /api/session` on `:4096`, without an `Authorization` header, answer 401 | that service is not enabled |
+| 3 | keyed combos | `POST /v1/chat/completions` with a one-word prompt and `max_tokens` 16 answers 200 for each combo | `AUTOOS_OMNIROUTE_KEY` is unset |
+| 4 | code dir | `AUTOOS_CODE_DIR` (environment, then `stack.env`) is a directory inside the opencode container, and the OpenHands container's `SANDBOX_VOLUMES` has a `<dir>:<dir>` entry | that service is not enabled |
+| 5 | public URLs | each URL answers 302 (the auth proxy's redirect) without credentials | `AUTOOS_VERIFY_PUBLIC_URLS` is unset |
+| 6 | healthcheck | - | always: `configuration/healthcheck.sh` appends to `logs/healthcheck-<date>.log` on every run and exits 0 whatever it finds, so it is neither read-only nor a verdict; its docker probes are checks 1 and 2 |
+
+The two variables `verify` reads besides the ones above:
+
+- `AUTOOS_VERIFY_COMBOS` - space separated combo names for check 3
+  (default `t2-worker-free-only t3-driver-free-only t2-worker-clean`).
+- `AUTOOS_VERIFY_PUBLIC_URLS` - space separated public URLs for check 5. Keep
+  them in your shell environment, not in a file that is committed. A URL with
+  credentials in it is refused, and a query string is never echoed.
+
+The gateway key comes from `AUTOOS_OMNIROUTE_KEY` only (no key file is read).
+It is handed to curl on stdin (`-H @-`), so it never appears on a command line
+that `ps` shows, and no line of the output contains it.
 
 ### Bumping an image
 

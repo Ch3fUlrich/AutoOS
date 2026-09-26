@@ -5,6 +5,88 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `ai-stack.sh verify`: the post-migrate checklist as one read-only command
+
+- **`configuration/docker/ai-stack/ai-stack.sh verify`** replaces the by-hand checks run
+  after `migrate --yes`: every compose service running (and healthy), the gateway and
+  opencode refusing a keyless request with 401, the three router combos answering 200 with
+  the gateway key, the code directory visible in the opencode container and in the OpenHands
+  sandbox volumes, and the public URLs redirecting (302). One `ok` / `FAIL - reason` /
+  `skip - why` line per check, then `verify: N ok, M failed, K skipped`; exit 0 only when
+  nothing failed.
+- **Read-only, and the key never leaves stdin.** Docker is only asked `inspect` and
+  `exec ... test -d`; the key (`AUTOOS_OMNIROUTE_KEY`, never read from a file) reaches curl
+  as `-H @-`, not on argv. `AUTOOS_VERIFY_COMBOS` overrides the combo list and
+  `AUTOOS_VERIFY_PUBLIC_URLS` supplies the public URLs (none are kept in the repo).
+  `configuration/healthcheck.sh` is reported as `skip`: it writes a log file on every run and
+  always exits 0. `docs/web-services.md` describes the checks.
+- Ten `aistack: verify ...` tests run it against the docker stub and a curl stand-in
+  (`AUTOOS_CURL`) that logs the argv it received.
+
+### Fixed — the router audit no longer reads a load-shed 503 as a dead leg
+
+- **`tools/audit-router.py` reported OmniRoute's HTTP 503 "resource pressure" (host short of
+  memory) as a probe result on the first answer.** A live probe now retries a 503 with a
+  backoff of 5 s, 15 s and 45 s before reporting it; 400, 404 and transport errors are
+  drift and are never retried. `docs/routing.md` says so. A leg that still answers 503
+  after the last retry is reported as state, as before, and does not fail the audit.
+
+### Fixed — Windows config writers back up only when the content changes
+
+- **Eight Windows writers took a backup on every run, so a second run was not `skipped`**
+  and the backup folder grew by one file per run (AGENTS.md §4, the twice-safe rule).
+  `Enable-AutoOSProjectMcpServer`, `Set-AutoOSAntigravityMcp`,
+  `Register-AutoOSAntigravityMcpServer`, `Set-AutoOSOpenCodeConfig`,
+  `Set-AutoOSOpenHandsConfig`, `Install-AutoOSOmniRouteRouting` (the Qwen settings),
+  `Set-AutoOSZedProxy` and `Enable-AutoOSSidekickExtra` now compare first and back up once,
+  before the first change only, as the Linux writers do.
+  `Set-AutoOSSerenaExclusions` and `Set-AutoOSClaudeGateway` were measured and already
+  complied. One `backup-once:` test per writer runs it twice and asserts that the surviving
+  backup is the user's original, not just that there is one (the backup name has one-second
+  resolution, so a bare count cannot tell a skipped second run from an overwritten backup).
+- The OpenHands settings script now writes `settings.json` only on a real difference.
+- **A backup no longer overwrites an earlier one.** The backup name has one-second resolution, and one
+  setup pass changes `mcp_config.json` five times (`Set-AutoOSAntigravityMcp`, then serena, graphify,
+  playwright and context7): the later `Copy-Item -Force` replaced the earlier copy, so the user's original
+  was lost and only an intermediate file survived. Every Windows writer now copies through
+  `Copy-AutoOSBackup`, which appends `-1`, `-2`, ... on a name clash. The two Antigravity writers also
+  compare an entry case-sensitively (`"NPX"` is not `npx`; PowerShell's `-eq` ignores case).
+
+### Fixed — OpenHands reaches omnigraph from inside its container
+
+- **The OpenHands profile pointed its omnigraph bridge at `http://localhost:8080`**, which
+  inside the app container (and its sandbox containers) is the container itself: the
+  connection was refused. `setup_openhands_config` (and its Windows twin
+  `Set-AutoOSOpenHandsConfig`) now writes `http://host.docker.internal:8080`, the
+  container-side form the same file already uses for the gateway. Measured on the live stack: both containers resolve
+  `host.docker.internal` (compose `extra_hosts: host-gateway`) and get 200 from
+  `/healthz`; omnigraph-server is already published on the host's `0.0.0.0:8080`, so no
+  binding or firewall change was needed. A profile written earlier keeps the old URL
+  until the installer's OpenHands step runs again.
+
+### Fixed — the omnigraph token reaches services started by systemd
+
+- **`autoos-opencode` and `autoos-stack` never saw `OMNIGRAPH_TOKEN`**: a systemd user
+  unit does not inherit what `~/.zshrc` exports, so opencode's omnigraph bridge showed
+  "connected" and then failed every read with "missing bearer token". Both templates now
+  carry `EnvironmentFile=-%h/.autoos-omnigraph.env` (the per-user file the installer
+  keeps; the dash makes it optional). `autoos-omniroute` and `autoos-litellm` do not get
+  it. `register-autostart.sh` backs an installed unit up before it gains the line and
+  skips it on the next run.
+
+### Changed — Antigravity installs from Google's apt repo, no pasted URL
+
+- **The Antigravity app no longer asks for a `.deb` link.** The installer adds Google's
+  signed apt repository (`us-central1-apt.pkg.dev`, the one antigravity.google/download/linux
+  prescribes) and installs `antigravity` from it. The `antigravity_url` question, the
+  catalog entry's `prompt` and the web form's field are gone; an old `antigravity_url`
+  answer in a saved config is ignored.
+- **The repo is frozen at 1.23.2** (Release dated 2026-04-16; the current 2.x apps are
+  tarball-only), and the installer says so with a warning. The signing key is fetched
+  over https and dearmored but not fingerprint-pinned: Google publishes no fingerprint.
+- A second run finds the key and the source line and writes nothing; a failed key fetch
+  leaves no key and no source list behind (`failed`, never `installed`).
+
 ### Changed — one source for the gateway model list (`catalog/ide-models.json`)
 
 - **The tier/model list was hand-kept in about eight places and had drifted**: the 1M
@@ -56,7 +138,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   way): `list` shows `signed-out` with the reason, `run --client agy` refuses with exit 3,
   and the MCP `list_clients` carries `usable` + `reason`.
 - **The Antigravity app on Linux counted as installed when it was skipped**: a blank
-  `.deb` URL returned 0. It is `failed` now, with the download page as the next step.
+  `.deb` URL returned 0. (The URL is gone altogether now: see the apt-repo entry above.)
 - **agy's vendor installer edits shell profiles** (`agy install` appends a PATH line to
   `~/.zshrc`, `~/.zprofile`, `~/.profile`); `install_agy` backs them up first.
 - **`--client gemini` exited 55 in any folder gemini had not been told to trust.** The

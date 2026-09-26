@@ -6,7 +6,6 @@
     "git_user_email": "you@example.com",
     "omnigraph_url": "http://localhost:8080",
     "herdr_source": "npm:herdr",
-    "antigravity_url": "",
     "ollama_models": "nomic-embed-text",
     "context7_api_key": "",
     "claude_gateway_routing": "login"

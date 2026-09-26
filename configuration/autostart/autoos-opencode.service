@@ -6,6 +6,11 @@
 # own auth: HTTP Basic on /api/* (user "opencode"); the wrapper pins the
 # password in ~/.config/autoos/opencode-serve.password and exports the
 # {env:...} keys the global opencode config references.
+#
+# The omnigraph MCP bridge needs OMNIGRAPH_TOKEN, and a unit never sees what
+# ~/.zshrc exports. EnvironmentFile= reads the per-user file setup.sh keeps
+# (mode 600) on every start; the leading dash makes it optional, so a machine
+# without it still starts. Only the file's path is here, never a value.
 [Unit]
 Description=AutoOS opencode serve (web UI :4096, password protected)
 After=network-online.target autoos-omniroute.service
@@ -14,6 +19,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h
+EnvironmentFile=-%h/.autoos-omnigraph.env
 Environment=PATH=@PATH@
 ExecStart=@REPO@/configuration/autostart/run-opencode-serve.sh
 Restart=on-failure
