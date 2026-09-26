@@ -11849,6 +11849,31 @@ if it "backup residual: aistack backs up stack.env twice in one second without o
     if (( ok )); then pass; else fail "ai-stack overwrote a same-second stack.env backup"; fi
 fi
 
+# ensure_env_file returns 1 when its backup copy fails, but cmd_init's three
+# call sites ignored that answer. errexit is no help: up and migrate call
+# `cmd_init || return 1`, which suppresses set -e for the whole call, so the
+# failed backup was swallowed and up went on to start containers on a
+# half-written config. Each call site now passes the failure on - up must
+# stop before docker is touched at all (backup_fail_bin breaks the copy;
+# the firewall flag lets the 0.0.0.0 bind init writes pass its guard).
+if it "backup residual: aistack up fails before docker when init cannot back up an env file"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf '# operator\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
+    cp "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig"
+    : >"$d/active-coding-agents-fw"; : >"$d/image-exists"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" _aistack "$d" up omniroute)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "up continued after a failed backup: rc=$rc" >&2; }
+    [[ "$out" == *"could not back up $d/cfg/opencode.env"* ]] || { ok=0; echo "no warning naming the file: ${out:0:300}" >&2; }
+    cmp -s "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig" || { ok=0; echo "the env file was modified without a backup" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    [[ ! -e "$d/docker.log" ]] || { ok=0; echo "docker was driven although init had failed" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "a failed init backup does not stop up"; fi
+fi
+
 # replace_dir_with_copy's own aside= (moving a non-empty dest out of the way
 # before the swap) used <dest>.autoos-backup-<ts>, then a single -$$ escape
 # if that name was taken - safe against a second SEPARATE process (a
