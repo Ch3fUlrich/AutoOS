@@ -1804,7 +1804,7 @@ if it "--check-catalog validates all five catalogs by type, not just component c
     out="$(bash setup.sh --check-catalog 2>&1)"; rc=$?
     if [[ $rc -eq 0 && "$out" == *"engines.json is valid"* && "$out" == *"images.json is valid"* \
         && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"*         && "$out" == *"agent-harness.json is valid"* \
-        && "$out" == *"providers.json is valid"* ]]; then
+        && "$out" == *"providers.json is valid"* && "$out" == *"ai-registry.json is valid"* ]]; then
         pass
     else
         fail "rc=$rc out=$out"
