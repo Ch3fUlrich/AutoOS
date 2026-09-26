@@ -663,6 +663,13 @@ install_claude_autostart() {
             ui_info "$u is already current"
             rm -f "$tmp"
         else
+            # The unit being replaced may carry a local edit: keep it (AGENTS.md
+            # hard rule 5). Only reached when the rendered unit differs.
+            if [[ -f "${udest}/${u}" ]] && ! backup_file "${udest}/${u}" >/dev/null; then
+                ui_err "could not back up ${udest}/${u} - left as it was"
+                rm -f "$tmp"
+                return 1
+            fi
             mv -f "$tmp" "${udest}/${u}"
             ui_ok "installed $u"
             changed=1

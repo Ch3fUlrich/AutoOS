@@ -4345,6 +4345,63 @@ if it "the live-process probe answers on the real system without throwing"; then
     if [[ "$n" =~ ^[0-9]+$ ]]; then pass; else fail "probe-live returned [$n]"; fi
 fi
 
+# install_claude_autostart renders each unit to a temp file and, when it differs
+# from the installed one, moves it over it. That silently dropped a local edit
+# of the unit (AGENTS.md hard rule 5: back a user-owned file up first).
+#
+# autostart_run <scratch>: one install_claude_autostart run against a scratch
+# home. systemctl and loginctl are stubs, so nothing is enabled or started.
+autostart_run() {
+    local sb="$1"
+    (
+        AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+        systemctl() { return 0; }
+        loginctl() { printf 'yes\n'; }
+        install_claude_autostart
+    ) 2>&1
+}
+
+if it "claude-autostart: a changed unit is backed up before it is replaced"; then
+    sb="$(mktemp -d)"; ud="$sb/home/.config/systemd/user"; u=claude-sessions-snapshot.service
+    mkdir -p "$ud"; printf 'LOCAL EDIT: do not lose me\n' >"$ud/$u"
+    out="$(autostart_run "$sb")"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:300}" >&2; }
+    mapfile -t baks < <(find "$ud" -name '*.autoos-backup-*')
+    (( ${#baks[@]} == 1 )) || { ok=0; echo "expected exactly one backup, found ${#baks[@]}" >&2; }
+    [[ "${baks[0]:-}" == "$ud/$u.autoos-backup-"* ]] || { ok=0; echo "backup is named [${baks[0]:-}]" >&2; }
+    [[ "$(cat "${baks[0]:-/nonexistent}" 2>/dev/null)" == "LOCAL EDIT: do not lose me" ]] \
+        || { ok=0; echo "the backup does not hold the user's edit: [$(cat "${baks[0]:-/nonexistent}" 2>/dev/null)]" >&2; }
+    if grep -q '^ExecStart=' "$ud/$u" && ! grep -q 'LOCAL EDIT' "$ud/$u"; then :
+    else ok=0; echo "the new unit is not in place" >&2; fi
+    [[ "$out" == *"installed $u"* ]] || { ok=0; echo "no 'installed' line: ${out:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a changed autostart unit was replaced without a backup"; fi
+fi
+
+if it 'claude-autostart: an unchanged unit takes no backup and reports "already current"'; then
+    sb="$(mktemp -d)"; ud="$sb/home/.config/systemd/user"; ok=1
+    autostart_run "$sb" >/dev/null                   # fresh machine: three units, no backup
+    [[ "$(find "$ud" -name '*.autoos-backup-*' | wc -l | tr -d ' ')" == 0 ]] || { ok=0; echo "a fresh install took a backup" >&2; }
+    before="$(cksum "$ud"/claude-sessions-*)"
+    out="$(autostart_run "$sb")"; rc=$?              # second run: nothing changes
+    (( rc == 0 )) || { ok=0; echo "second run rc=$rc" >&2; }
+    [[ "$(grep -c 'already current' <<<"$out")" == 3 ]] || { ok=0; echo "second run not current for all three: ${out:0:400}" >&2; }
+    [[ "$(find "$ud" -name '*.autoos-backup-*' | wc -l | tr -d ' ')" == 0 ]] || { ok=0; echo "an unchanged run took a backup" >&2; }
+    [[ "$(cksum "$ud"/claude-sessions-*)" == "$before" ]] || { ok=0; echo "an unchanged unit was rewritten" >&2; }
+    # One unit edited by hand: only that one is backed up; the other two stay untouched.
+    printf '# local tweak\n' >>"$ud/claude-sessions-snapshot.timer"
+    edited="$(cat "$ud/claude-sessions-snapshot.timer")"
+    out="$(autostart_run "$sb")"
+    mapfile -t baks < <(find "$ud" -name '*.autoos-backup-*')
+    (( ${#baks[@]} == 1 )) || { ok=0; echo "expected one backup for the edited unit, found ${#baks[@]}" >&2; }
+    [[ "${baks[0]:-}" == "$ud/claude-sessions-snapshot.timer.autoos-backup-"* && "$(cat "${baks[0]:-/nonexistent}" 2>/dev/null)" == "$edited" ]] \
+        || { ok=0; echo "the edited timer was not the one backed up, or its bytes differ: ${baks[0]:-none}" >&2; }
+    [[ "$(grep -c 'already current' <<<"$out")" == 2 ]] || { ok=0; echo "the two untouched units are not reported current: ${out:0:400}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the autostart backup is missing for a changed unit or taken for an unchanged one"; fi
+fi
+
 if it "claude-autostart is defined for linux and windows, and not for macos"; then
     ok=1
     for f in catalog/linux.json catalog/windows.json; do
