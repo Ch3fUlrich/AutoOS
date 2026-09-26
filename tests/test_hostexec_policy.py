@@ -43,6 +43,10 @@ _KNOWN_COMMANDS = [
     "nsenter", "busybox", "find", "parallel", "ssh", "scp", "sftp", "rsync",
     "podman", "ls", "make", "grep",
     "echo", "id", "uptime", "df",
+    "tar", "tmux", "screen", "dtach",
+    "php", "lua", "luajit", "Rscript", "R", "julia",
+    "vim", "vi", "nvim", "view", "ex", "less", "more", "man",
+    "sudo-rs", "gawk", "mawk", "nawk",
 ]
 
 

@@ -328,7 +328,8 @@ _SUDO_FAMILY = {"sudo", "su", "doas", "pkexec", "run0"}
 # their wrapped command ("head") is checked instead, so `find . -name x`
 # and `xargs -a f echo` still allow while `find -exec sh -c` denies.
 _ALWAYS_DENY_WRAPPERS = {"script", "systemd-run", "at", "batch", "setpriv",
-                         "chroot", "unshare", "nsenter", "runuser", "sg"}
+                         "chroot", "unshare", "nsenter", "runuser", "sg",
+                         "tmux", "screen", "dtach"}
 
 
 def _looks_like_duration(token: str) -> bool:
@@ -964,6 +965,22 @@ def _use_host_alias_problem(head: Sequence[str], host_entry: HostEntry) -> str |
             if _looks_like_rsync_remote(tok):
                 return (f"rsync with a remote spec {tok!r} on a local host bypasses "
                         f"the host table; call host_run with host=<alias>")
+    if base == "parallel":
+        for tok in head[1:]:
+            if tok in ("--sshlogin", "--sshloginfile", "--transfer", "--return",
+                       "--ssh", "-S"):
+                return (f"parallel {tok} on a local host bypasses the host table "
+                        f"(forbid-host, audit host); call host_run with host=<alias>")
+            if tok.startswith(("--sshlogin=", "--sshloginfile=", "--transfer=",
+                               "--return=", "--ssh=")):
+                return (f"parallel {tok.split('=', 1)[0]} on a local host bypasses the host table; "
+                        f"call host_run with host=<alias>")
+            if tok.startswith("--sshlogin"):
+                return ("parallel --sshlogin on a local host bypasses the host table; "
+                        "call host_run with host=<alias>")
+            if tok.startswith("-S") and len(tok) > 2 and not tok.startswith("--"):
+                return ("parallel -S on a local host bypasses the host table; "
+                        "call host_run with host=<alias>")
     return None
 
 
@@ -1097,6 +1114,11 @@ def _docker_root_problem(head: Sequence[str]) -> str | None:
 _SHELL_NAMES = {"sh", "bash", "zsh", "dash", "fish",
                 "busybox", "ksh", "mksh", "csh", "tcsh", "ash"}
 _PYTHON_RE = re.compile(r"^python[0-9.]*$")
+# awk pipe-to-command: print | "cmd" and "cmd" | getline (r2). Single-pipe
+# only ((?<!\|)\|(?!\|)) so logical-or `||` never matches.
+_AWK_PIPE_QUOTE_RE = re.compile(r"(?<!\|)\|(?!\|)\s*[\"']")
+_AWK_PIPE_GETLINE_RE = re.compile(r"(?<!\|)\|(?!\|)\s*getline\b")
+_AWK_QUOTE_PIPE_RE = re.compile(r"[\"']\s*(?<!\|)\|(?!\|)")
 
 
 def _is_wrapped_bare_shell(head: Sequence[str]) -> bool:
@@ -1149,8 +1171,32 @@ def _inline_shell_problem(argv: Sequence[str]) -> str | None:
         return "node -e/-p runs inline code, not a script path"
     if base == "ruby" and _short_opt_cluster_has(tail, "e"):
         return "ruby -e runs inline code, not a script path"
-    if base in ("awk", "gawk", "mawk", "nawk") and any("system(" in a for a in tail):
-        return "awk program calls system(); argv only, no shell escape"
+    if base in ("awk", "gawk", "mawk", "nawk"):
+        for prog in tail:
+            if "system(" in prog:
+                return "awk program calls system(); argv only, no shell escape"
+            if _AWK_PIPE_QUOTE_RE.search(prog) or _AWK_PIPE_GETLINE_RE.search(prog) \
+                    or _AWK_QUOTE_PIPE_RE.search(prog):
+                return "awk program pipes to a command; argv only, no shell escape"
+    if base == "tar":
+        for idx, tok in enumerate(tail):
+            if tok.startswith("--checkpoint-action"):
+                rest_val = tok.split("=", 1)[1] if "=" in tok else (
+                    tail[idx + 1] if idx + 1 < len(tail) else "")
+                if "exec" in rest_val.lower():
+                    return "tar --checkpoint-action=exec runs a command via a shell"
+                if tok == "--checkpoint-action":
+                    # Bare --checkpoint-action with a separate exec= value is
+                    # still an exec hook; fail closed on the flag itself when
+                    # the value is missing (git would error, but deny first).
+                    continue
+            if tok == "--to-command" or tok.startswith("--to-command="):
+                return "tar --to-command runs a command via a shell"
+            if tok == "--use-compress-program" or tok.startswith("--use-compress-program="):
+                return "tar --use-compress-program runs a program"
+            if tok.startswith("-") and not tok.startswith("--") and len(tok) > 1 \
+                    and "I" in tok[1:]:
+                return "tar -I runs a program"
     return None
 
 
@@ -1218,8 +1264,32 @@ def _destructive_problem(argv: Sequence[str]) -> str | None:
         return "iptables -F flushes the firewall"
     if base == "nft" and "flush" in tail:
         return "nft flush"
-    if base == "crontab" and "-r" in tail:
-        return "crontab -r deletes the crontab"
+    if base == "crontab":
+        # r2: a crontab file install (or `-`/edit) schedules commands outside
+        # the audited call window, like at/batch. Only a pure list stays allowed.
+        if "-r" in tail:
+            return "crontab -r deletes the crontab"
+        asking_list = "-l" in tail or "--list" in tail
+        # Strip flag values (-u user) before looking for a positional file.
+        tmp = list(tail)
+        i = 0
+        while i < len(tmp):
+            if tmp[i] in ("-u", "--user") and i + 1 < len(tmp):
+                del tmp[i:i + 2]
+                continue
+            if tmp[i].startswith("--user="):
+                del tmp[i]
+                continue
+            i += 1
+        has_positional = any(t == "-" or not t.startswith("-") for t in tmp
+                             if t not in ("-l", "--list"))
+        # Remove the list flags themselves from the positional test above;
+        # anything else positional (a file, `-`, a username without -u) denies.
+        if has_positional:
+            return "crontab installs a file that runs outside the audited call"
+        if asking_list:
+            return None
+        return "crontab installs a file that runs outside the audited call"
     return None
 
 
