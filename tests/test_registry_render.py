@@ -133,6 +133,17 @@ class RenderDeterminismTests(unittest.TestCase):
             self.assertTrue(out1.read_bytes().endswith(b"\n"))
 
 
+class MalformedComboTests(unittest.TestCase):
+    """review-b5a4: a nameless combo (or a bare string) in the compared file
+    was dropped before comparing, so --check passed with extra legs."""
+
+    def test_a_nameless_combo_is_a_difference(self):
+        combos = real_combos()
+        for extra in ({"strategy": "priority", "models": ["x/y"]}, "stray"):
+            doc = dict(combos, combos=list(combos["combos"]) + [extra])
+            self.assertNotEqual(registry.omniroute_diff(registry.render_omniroute(real_registry()), doc), [])
+
+
 class ChangedLegFailsCheckTests(unittest.TestCase):
     """--check exits 1 and names the combo when a leg differs from combos.json."""
 

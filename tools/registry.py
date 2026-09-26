@@ -483,9 +483,12 @@ def _canonical_omniroute(doc) -> dict:
     out = {k: v for k, v in doc.items() if k != "$comment"}
     combos = out.get("combos")
     if isinstance(combos, list):
+        # A malformed entry (no name, not a dict) is kept, keyed by its JSON,
+        # so it shows up as a difference instead of being dropped (review-b5a4).
         out["combos"] = sorted(
-            (c for c in combos if isinstance(c, dict) and "name" in c),
-            key=lambda c: c["name"],
+            combos,
+            key=lambda c: (c["name"] if isinstance(c, dict) and "name" in c
+                           else "~" + json.dumps(c, sort_keys=True)),
         )
     retired = out.get("retired")
     if isinstance(retired, list):
@@ -505,8 +508,14 @@ def omniroute_diff(rendered: dict, current: dict) -> list:
     if a.get("retired") != b.get("retired"):
         problems.append("retired")
 
-    a_combos = {c["name"]: c for c in a.get("combos") or []}
-    b_combos = {c["name"]: c for c in b.get("combos") or []}
+    def keyed(combos):
+        # A malformed entry keys by its JSON, so it is a difference, not a crash.
+        return {(c["name"] if isinstance(c, dict) and "name" in c
+                 else "malformed:" + json.dumps(c, sort_keys=True)): c
+                for c in combos or []}
+
+    a_combos = keyed(a.get("combos"))
+    b_combos = keyed(b.get("combos"))
     for name in sorted(set(a_combos) | set(b_combos)):
         if a_combos.get(name) != b_combos.get(name):
             problems.append("combos.%s" % name)

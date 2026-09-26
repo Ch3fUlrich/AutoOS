@@ -147,8 +147,8 @@ def route_plan(card, brief: str = "", explain: bool = False) -> dict:
         result = agent.route_plan_for(card, brief, agent.ROOT,
                                       agent.DEFAULT_ORCHESTRATOR_MODEL, now,
                                       registry, overlay, track_record, client_state)
-    except (OSError, routing.CardError, ValueError) as exc:
-        return {"error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - an MCP tool returns errors, never raises
+        return {"error": "%s: %s" % (type(exc).__name__, exc)}
     if explain:
         lines = list(result.get("explain") or [])
         lines.append(result.get("reason", ""))
@@ -202,7 +202,10 @@ def context_info(transcript: str | None = None) -> dict:
     "unknown", "reason": ...}`` result - there is simply nothing to report,
     not a failure.
     """
-    data, rc = agent.context_state(transcript, None)
+    try:
+        data, rc = agent.context_state(transcript, None)
+    except Exception as exc:  # noqa: BLE001 - a vanished transcript is an error, not a crash
+        return {"error": "%s: %s" % (type(exc).__name__, exc)}
     if data.get("context") == "unknown" and rc == 2:
         return {"error": data["reason"]}
     return data

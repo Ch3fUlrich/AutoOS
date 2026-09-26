@@ -1668,9 +1668,28 @@ class McpRouteTests(unittest.TestCase):
         out = mcp_server.route_plan({"kind": "review", "paths": ["tools/registry.py"]},
                                     explain=True)
         self.assertNotIn("error", out)
-        if out.get("route") is not None:
-            self.assertIn("explain_text", out)
-            self.assertIn(out["reason"], out["explain_text"])
+        # review-b5a4: asserted unconditionally - a no-route result must not
+        # silently skip the explain check.
+        self.assertIn("explain_text", out)
+        self.assertIn(out["reason"], out["explain_text"])
+
+    def test_route_never_raises_on_a_wrong_type(self):
+        # review-b5a4: an int card raised TypeError through the MCP tool.
+        out = mcp_server.route_plan(5)
+        self.assertEqual(set(out), {"error"})
+
+    def test_context_never_raises_when_the_transcript_vanishes(self):
+        # review-b5a4: context_state's discovered-transcript branch opened
+        # the file outside its OSError guard.
+        original = mcp_server.agent.context_state
+        def boom(*a, **k):
+            raise OSError("vanished")
+        mcp_server.agent.context_state = boom
+        try:
+            out = mcp_server.context_info(None)
+        finally:
+            mcp_server.agent.context_state = original
+        self.assertEqual(set(out), {"error"})
 
     def test_list_agents_returns_clients_and_routes(self):
         out = mcp_server.list_agents()
