@@ -25,11 +25,18 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
      checkout's root, and a relative write from inside one landed in the main
      repo (live, 2026-09-24). Nothing is merged or deleted for you.
 
-Routing: without --tier the model comes from a task card through
-autoos_routing.select_combo (ADR 0006) - the one decision point, shared with
-the MCP server. An empty card is t2-worker; `--card privacy=sensitive,ctx=1m`
-fails closed unless --allow-training. The combo's tier picks the opencode
-agent. Every run logs card -> combo, reason and the routing version.
+Routing: without --tier the model comes from a task card. A v1 card
+(role/complexity/ctx/spend, or empty) goes through autoos_routing.select_combo
+(ADR 0006) - the one decision point, shared with the MCP server. An empty card
+is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed unless
+--allow-training. A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
+paths/override, spec 6.1 "run takes card v2") instead goes through the
+resolver (route_plan_for/autoos_resolver.plan, the same core the `route`
+subcommand uses): `state` input_required refuses with exit 2 and the plan's
+reason; `deferred` refuses with exit 2 ("deferred until <time>: <reason>")
+unless --no-defer. Either way the combo's tier picks the opencode agent (a v2
+route id's own t1/t2/t3- prefix, when it has one, else tier 2). Every run logs
+card -> combo, reason and the routing version.
 
 Clients (autoos_clients.py; `list` prints the matrix): opencode (default),
 claude (`claude -p` on its own login; --joinable = a `--bg --remote-control`
@@ -57,6 +64,7 @@ Usage:
     python3 tools/autoos-agent.py run --tier 3 --dry-run "..."     # print the plan only
     python3 tools/autoos-agent.py context                          # this session's fill
     python3 tools/autoos-agent.py context --transcript s.jsonl --json
+    python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
 
 --free maps every tier agent to one of opencode's own free models (default
 opencode/big-pickle) through OPENCODE_CONFIG_CONTENT: no gateway, no key, no
@@ -71,6 +79,12 @@ logs/orch-<date>.log (git-ignored), which the watchdog protocol reads.
 Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); 6 = a headless client auto-denied a tool and
 exited 0 (HEADLESS-REFUSAL); the child's exit code; 2 bad arguments, card or route refused;
 3 gateway, key or client binary missing; 4 depth budget exhausted.
+
+`route` (spec 6.1) has its own exit codes: 0 a route was chosen (ready or
+deferred), 5 input_required (no route survived the filters, or a removed
+override), 2 bad input (a bad card, a bad --now, an unknown
+--orchestrator-model, or any other measure()/plan() ValueError - fail closed,
+message on stderr).
 """
 from __future__ import annotations
 
@@ -92,9 +106,11 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
+import autoos_measure as measure_mod  # noqa: E402
+import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_track as track  # noqa: E402
-from registry import resolve_leg  # noqa: E402
+from registry import private_safe, resolve_leg  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
@@ -112,6 +128,17 @@ TRACK_RECORD = os.path.join(ROOT, "logs", "routing", "track-record.jsonl")
 REGISTRY_PATH = os.path.join(ROOT, "catalog", "ai-registry.json")
 MEASURED_OVERLAY_PATH = os.path.join(ROOT, "logs", "routing", "measured.json")
 PROBE_PROPOSALS_LOG = os.path.join(ROOT, "logs", "routing", "probe-proposals.jsonl")
+# `route`'s default orchestrator model (spec 6.1): a registry model id billed
+# for verification cost when the caller does not pin one.
+DEFAULT_ORCHESTRATOR_MODEL = "claude-opus-4-6"
+# A v1 combo (t1-orchestrator, t2-worker, t3-driver, their -clean twins) always
+# carries one of these prefixes. A resolver v2 route id (RUNV2) may or may not
+# (e.g. "t1-orchestrator-free-only" does; "t4-rag" and "deepseek-v4.1-flash" do
+# not - t4 is not even a TIERS key). _tier_for_route defaults to tier 2 when it
+# does not: the resolver has already priced and picked the model that will
+# actually run, so this only decides which local opencode agent identity
+# (t1-orchestrator/t2-worker/t3-reviewer) spawns the client.
+_TIER_PREFIX_RE = re.compile(r"^t([123])-")
 # --lean drops these MCP servers. Measured 2026-09-24, one --free opencode run,
 # peak process-tree RSS: 1406 MB with every server, 678 MB with these off
 # (516 MB with graphify off too).
@@ -227,8 +254,139 @@ def unique_suffix() -> str:
     return os.urandom(3).hex()
 
 
+def _tier_for_route(combo: str) -> int:
+    """The opencode tier agent for a resolver v2 route id (RUNV2, spec 6.1).
+
+    See the comment on _TIER_PREFIX_RE for why an unrecognised prefix defaults
+    to tier 2 rather than raising.
+    """
+    match = _TIER_PREFIX_RE.match(combo or "")
+    return int(match.group(1)) if match else 2
+
+
+def _is_v2_card(parsed: dict) -> bool:
+    """True when `parsed` (routing.parse_card's own output, not yet validated
+    or defaulted) carries any card-v2-only field (spec 4): kind, risk, spec,
+    mode, deferrable, deadline, paths, override (spelled either as one
+    ``override`` object/JSON value or as ``override.route=``/``.client=``/
+    ``.effort=`` key=value pairs). An empty card, or one with only v1 and/or
+    the shared ``privacy`` field, is not v2 - it keeps today's select_combo
+    path unchanged (spec 4: "v1 cards stay valid").
+    """
+    for key in parsed:
+        if key in routing.CARD_V2_ONLY:
+            return True
+        if isinstance(key, str) and key.startswith("override."):
+            return True
+    return False
+
+
+class RouteInputRequired(ValueError):
+    """A v2 card's resolver plan is input_required: no route survives the filters."""
+
+
+class RouteDeferred(ValueError):
+    """A v2 card's resolver plan is deferred and --no-defer was not given."""
+
+
+def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None) -> dict:
+    """A v2 card is routed by the resolver, not select_combo (RUNV2, spec 6.1
+    "run takes card v2"). Shares route_plan_for/autoos_resolver.plan with the
+    `route` subcommand and the MCP `route` tool, so `run` and `route` can never
+    disagree about the same card.
+
+    `state` "input_required" (no route survived the filters) raises
+    RouteInputRequired with the plan's own reason; "deferred" raises
+    RouteDeferred with "deferred until <time>: <reason>" unless --no-defer was
+    given, in which case the deferral is ignored and the chosen route runs now
+    (the reason says so). Both exceptions are ValueError subclasses that
+    cmd_run catches ahead of its generic ValueError handler, so the message is
+    printed as-is - no "(see: ...)" suffix tacked on.
+
+    privacy: a card's privacy=sensitive is enforced entirely inside plan()'s
+    own filters (spec 5.3 step 1) - this function adds no privacy rule of its
+    own; it only turns whatever route plan() already picked into a combo/tier.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    registry = load_registry(REGISTRY_PATH)
+    overlay = load_overlay(MEASURED_OVERLAY_PATH)
+    track_record = track.load(TRACK_RECORD)
+    client_state = measure_mod.client_state(clients)
+    result = route_plan_for(parsed_card, args.task, ROOT, DEFAULT_ORCHESTRATOR_MODEL,
+                            now, registry, overlay, track_record, client_state)
+
+    if result["state"] == "input_required":
+        raise RouteInputRequired(result["reason"])
+    if result["state"] == "deferred" and not args.no_defer:
+        raise RouteDeferred("deferred until %s: %s" % (result["defer_until"], result["reason"]))
+
+    combo = result["route"]
+    tier = _tier_for_route(combo)
+    model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
+    reason = "resolver-v2: %s" % result["reason"]
+    if result["state"] == "deferred":  # only reachable with --no-defer, per the raise above
+        reason = "resolver-v2 (ignoring defer until %s via --no-defer): %s" % (
+            result["defer_until"], result["reason"])
+    if override and model:  # an explicit --model wins over the resolver's route, and says so
+        combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
+
+    card = routing.normalize_v2(parsed_card)
+    # the registry class of the combo that actually runs (an explicit --model may
+    # have replaced the resolver's route); the track record keys on it
+    route_class = registry.get("routes", {}).get(combo, {}).get("class")
+    return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
+            "privacy": card["privacy"], "review": card["kind"] == "review",
+            "bucket": result["bucket"], "class": route_class}
+
+
+class PrivacyRefused(ValueError):
+    """A sensitive run whose explicit --model names a combo with a leg that is
+    not private-safe (PRIV3)."""
+
+
+def sensitive_combo_refusal(combo: str, registry: dict):
+    """Why `combo` may not carry privacy=sensitive work, or None when it may.
+
+    Every leg the gateway serves counts - unavailable_legs included, since
+    combos.json keeps them and OmniRoute can still fall through to them. An id
+    that is not a registry route is refused: nothing proves it private-safe.
+    """
+    route = (registry.get("routes") or {}).get(combo)
+    if route is None:
+        return "privacy: %r is not a registry route, so nothing proves it private-safe" % combo
+    for leg in route.get("legs") or []:
+        try:
+            provider_id, model_id = resolve_leg(leg, registry)
+        except ValueError as exc:
+            return "privacy: %s: %s" % (leg, exc)
+        safe, why = private_safe(provider_id, model_id, registry)
+        if not safe:
+            return "privacy: --model %s serves %s, which is not private-safe (%s)" % (combo, leg, why)
+    return None
+
+
 def resolve_route(args, cfg: dict, client) -> dict:
-    """Tier/model/combo for this run: an explicit --tier, or the card through select_combo."""
+    """resolve_route_unchecked plus the PRIV3 check: a sensitive run whose
+    explicit --model replaced the card's combo must still land on private-safe
+    legs only (--allow-training keeps its documented, logged escape)."""
+    route = resolve_route_unchecked(args, cfg, client)
+    if args.free and route.get("privacy") == "sensitive":
+        # close-priv 2026-09-26: --free replaces the combo with the promo
+        # model, which may train on prompts - never for a sensitive task.
+        raise PrivacyRefused("privacy: --free runs the promo model %s, which may train on "
+                             "prompts; a privacy=sensitive task cannot use it" % args.free_model)
+    override = args.model if client.gateway else None
+    if (override and route.get("model") and route.get("privacy") == "sensitive"
+            and not args.allow_training):
+        reason = sensitive_combo_refusal(route["combo"], load_registry(REGISTRY_PATH))
+        if reason:
+            raise PrivacyRefused(reason)
+    return route
+
+
+def resolve_route_unchecked(args, cfg: dict, client) -> dict:
+    """Tier/model/combo for this run: an explicit --tier, a v2 card through the
+    resolver (RUNV2), or a v1 card through select_combo."""
     # --model names a gateway combo for opencode and the gateway clients; for
     # agy/claude/qoder it is the client's own model id and is not checked here.
     override = args.model if client.gateway else None
@@ -238,7 +396,10 @@ def resolve_route(args, cfg: dict, client) -> dict:
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
                 "review": args.tier == 3}
-    card = routing.normalize(routing.parse_card(args.card or ""))
+    parsed = routing.parse_card(args.card or "")
+    if _is_v2_card(parsed):
+        return _resolve_route_v2(args, parsed, cfg, override)
+    card = routing.normalize(parsed)
     combo, reason = routing.select_combo(card, args.allow_training)
     tier = int(re.match(r"t(\d)-", combo).group(1))  # t2-worker-clean -> 2
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
@@ -338,6 +499,44 @@ def cmd_list(cfg: dict) -> int:
     return 0
 
 
+def context_state(transcript_path: str | None, model_override: str | None) -> tuple:
+    """(data, rc): the same fields the `context` subcommand prints, as data.
+
+    A known fill returns ``{tokens, cap, pct, model, transcript, source}`` and
+    rc 0. An unknown state (no transcript, no usage, or an unreadable
+    ``transcript_path``) returns ``{"context": "unknown", "reason": ...}``; rc
+    is 2 only for the unreadable-path case (matching the CLI's own exit code),
+    0 otherwise. Pure aside from the transcript read itself - `autoos-agent.py
+    context` and the MCP `context` tool both call this so their numbers can
+    never drift apart.
+    """
+    if transcript_path:
+        path = transcript_path
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError as exc:
+            return ({"context": "unknown",
+                    "reason": "cannot read %s: %s" % (path, exc.strerror or exc)}, 2)
+    else:
+        path = ctx.discover_transcript(os.getcwd())
+        if path is None:
+            return {"context": "unknown", "reason": "no transcript"}, 0
+        with io.open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+
+    fill = ctx.fill_from_transcript(lines)
+    if fill is None:
+        return {"context": "unknown", "reason": "no usage"}, 0
+
+    model = model_override or fill.get("model") or "unknown"
+    cap = ctx.cap_for(model)
+    tokens = fill["tokens"]
+    pct = int(round(100 * tokens / cap)) if cap else 0
+    return ({"tokens": tokens, "cap": cap, "pct": pct, "model": model,
+             "transcript": path, "source": "default"}, 0)
+
+
 def cmd_context(args) -> int:
     """Print the calling session's context fill (spec 6.1, caps 8.3).
 
@@ -347,40 +546,117 @@ def cmd_context(args) -> int:
     an object (its `source` is the cap's provenance, `default` until a probe
     measures one).
     """
-    if args.transcript:
-        path = args.transcript
-        try:
-            with io.open(path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-        except OSError as exc:
-            print("context: unknown (cannot read %s: %s)"
-                  % (path, exc.strerror or exc), file=sys.stderr)
-            return 2
-    else:
-        path = ctx.discover_transcript(os.getcwd())
-        if path is None:
-            print("context: unknown (no transcript)")
-            return 0
-        with io.open(path, encoding="utf-8") as fh:
-            lines = fh.readlines()
-
-    fill = ctx.fill_from_transcript(lines)
-    if fill is None:
-        print("context: unknown (no usage)")
-        return 0
-
-    model = args.model or fill.get("model") or "unknown"
-    cap = ctx.cap_for(model)
-    tokens = fill["tokens"]
-    pct = int(round(100 * tokens / cap)) if cap else 0
+    data, rc = context_state(args.transcript, args.model)
+    if data.get("context") == "unknown":
+        stream = sys.stderr if rc == 2 else sys.stdout
+        print("context: unknown (%s)" % data["reason"], file=stream)
+        return rc
     if args.json:
-        print(json.dumps({"tokens": tokens, "cap": cap, "pct": pct,
-                          "model": model, "transcript": path,
-                          "source": "default"}))
+        print(json.dumps({k: data[k] for k in
+                          ("tokens", "cap", "pct", "model", "transcript", "source")}))
     else:
         print("context: %d / %d (%d%%) model=%s transcript=%s"
-              % (tokens, cap, pct, model, path))
-    return 0
+              % (data["tokens"], data["cap"], data["pct"], data["model"],
+                 data["transcript"]))
+    return rc
+
+
+def parse_now(value: str | None):
+    """--now as a UTC datetime; None means "the wall clock, right now".
+
+    Accepts an ISO 8601 string, a trailing "Z" included (autoos_resolver's own
+    format, spec 6.4); a naive string is read as UTC. ValueError names the bad
+    text.
+    """
+    if value is None:
+        return datetime.datetime.now(datetime.timezone.utc)
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError("now=%r: expected an ISO 8601 UTC string" % (value,))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def load_registry(path: str) -> dict:
+    """catalog/ai-registry.json (or a test's own copy); a missing/bad file raises."""
+    with io.open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def load_overlay(path: str) -> dict:
+    """logs/routing/measured.json if present, else {} (spec 3.1: git-ignored)."""
+    if not os.path.isfile(path):
+        return {}
+    with io.open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
+                   registry: dict, overlay: dict, track_record: list,
+                   client_state: dict) -> dict:
+    """card -> route_plan (spec 6.1/6.2): the CLI `route` subcommand and the MCP
+    `route` tool's shared, pure-ish core.
+
+    `card` is a task card exactly as `run --card` accepts it - text
+    (``kind=review,paths=...`` or a JSON object string, parsed by
+    ``routing.parse_card``) - or already a dict (the MCP tool's own shape).
+    Either way it is normalized to v2 with ``routing.normalize_v2`` (a
+    ``routing.CardError`` on a bad one propagates to the caller). Features come
+    from ``autoos_measure.measure`` against `repo`; the resolver itself
+    (``autoos_resolver.plan``) is pure, so `registry`, `overlay`,
+    `track_record` and `client_state` are exactly what the caller passes -
+    real data from disk/probes for the CLI and the MCP tool, anything a test
+    wants to inject. A ``measure``/``plan`` ValueError (a missing feature, an
+    unknown orchestrator model, ...) is not caught here: both callers fail
+    closed on it.
+    """
+    parsed = routing.parse_card(card) if isinstance(card, str) else dict(card or {})
+    normalized = routing.normalize_v2(parsed)
+    features = measure_mod.measure(normalized, repo, brief or "")
+    return resolver.plan(normalized, features, client_state, registry, overlay,
+                         track_record, orchestrator_model, now)
+
+
+def cmd_route(args) -> int:
+    """Print the resolver v2 route_plan for one task card (spec 6.1).
+
+    Exit 0 when a route was chosen (ready or deferred), 5 when the state is
+    input_required (no route survived the filters or an override was
+    refused), 2 on bad input (a bad card, a bad --now, an unknown
+    --orchestrator-model, or any other measure()/plan() ValueError - all fail
+    closed with the message on stderr). --explain writes the per-route explain
+    lines and the final reason to stderr before the JSON, so stdout always
+    stays one parseable route_plan.
+    """
+    try:
+        now = parse_now(args.now)
+    except ValueError as exc:
+        return refuse(str(exc))
+    repo = args.repo or ROOT
+    try:
+        registry = load_registry(REGISTRY_PATH)
+        overlay = load_overlay(MEASURED_OVERLAY_PATH)
+    except (OSError, ValueError) as exc:
+        return refuse("cannot load routing data: %s" % exc)
+    track_record = track.load(TRACK_RECORD)
+    client_state = measure_mod.client_state(clients)
+    try:
+        result = route_plan_for(args.card, args.brief or "", repo,
+                                args.orchestrator_model, now, registry, overlay,
+                                track_record, client_state)
+    except (routing.CardError, ValueError) as exc:
+        return refuse(str(exc))
+    if args.explain:
+        for line in result.get("explain") or []:
+            print(line, file=sys.stderr)
+        print(result.get("reason", ""), file=sys.stderr)
+    print(json.dumps(result, sort_keys=True, indent=2))
+    return 0 if result.get("route") is not None else 5
 
 
 def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:
@@ -466,16 +742,24 @@ def track_class(combo: str | None) -> str | None:
 def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     """The track-record line for a finished run, or None when it has no combo.
 
+    The class is the route's registry class (RUNV2 sets ``route["class"]``),
+    else the v1 tier prefix's class.
+
     Only a card or --tier run carries a combo (--free is keyless); a gateway
     run's served leg, effort and tokens are unknown to this process, so they
     are recorded as unknown/0 until the resolver measures them. rc is the same
     value the run exits with, the NO-OP override included.
+
+    ``bucket`` is the resolver's own bucket (RUNV2: ``route["bucket"]``, set
+    only for a v2-routed run) when there is one, else the v1 compat card's
+    ``bucket_hint`` (also unset today - v1's ``normalize`` never adds it),
+    else "unknown".
     """
     route = plan["route"]
     client = clients.CLIENTS.get(plan.get("client"))
     if client is not None and not client.gateway:
         return None  # an own-account client never ran the gateway route it names
-    klass = track_class(route.get("combo"))
+    klass = route.get("class") or track_class(route.get("combo"))
     if not klass:
         return None
     card = route.get("card") or {}
@@ -483,7 +767,7 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
         "route": route["combo"],
         "class": klass,
         "served_leg": "unknown",
-        "bucket": card.get("bucket_hint") or "unknown",
+        "bucket": route.get("bucket") or card.get("bucket_hint") or "unknown",
         "effort": "unknown",
         "tokens_in": 0,
         "tokens_out": 0,
@@ -759,6 +1043,8 @@ def cmd_run(args, cfg: dict) -> int:
         plan = build_plan(args, cfg)
     except clients.DepthError as exc:
         return refuse(str(exc), 4)
+    except (RouteInputRequired, RouteDeferred, PrivacyRefused) as exc:  # plan's / PRIV3's own
+        return refuse(str(exc))                        # message, no suffix added
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
     route = plan["route"]
@@ -859,6 +1145,9 @@ def main(argv=None) -> int:
     run.add_argument("--tier", type=int, choices=sorted(TIERS),
                      help="pick the tier by hand (default: resolve --card, an empty card is t2-worker)")
     run.add_argument("--card", help="task card, e.g. role=review,privacy=sensitive (or JSON)")
+    run.add_argument("--no-defer", dest="no_defer", action="store_true",
+                     help="a v2 card (RUNV2): ignore the resolver's deferral (state=deferred) "
+                          "and run now instead of refusing with exit 2")
     run.add_argument("--allow-training", action="store_true",
                      help="let privacy=sensitive,ctx=1m use t1-orchestrator-clean, whose leg trains on prompts (logged)")
     run.add_argument("--client", choices=sorted(clients.CLIENTS), default="opencode")
@@ -882,9 +1171,22 @@ def main(argv=None) -> int:
     context.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
     context.add_argument("--model", help="override the model the cap is looked up for")
     context.add_argument("--json", action="store_true", help="print the fill as JSON")
+    route = sub.add_parser("route", help="print the resolver v2 route_plan for a task card")
+    route.add_argument("--card", required=True,
+                       help="task card, e.g. kind=review,paths=tools/registry.py (or JSON)")
+    route.add_argument("--brief", default="", help="the task brief text (counts toward need_tokens)")
+    route.add_argument("--explain", action="store_true",
+                       help="print the explain lines and reason to stderr before the JSON")
+    route.add_argument("--orchestrator-model", dest="orchestrator_model",
+                       default=DEFAULT_ORCHESTRATOR_MODEL,
+                       help="registry model id billed for verification (default: %(default)s)")
+    route.add_argument("--repo", help="repo root to measure against (default: this checkout)")
+    route.add_argument("--now", help="ISO 8601 UTC clock reading (default: now)")
     args = ap.parse_args(argv)
     if args.cmd == "context":
         return cmd_context(args)
+    if args.cmd == "route":
+        return cmd_route(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
     return cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)
 

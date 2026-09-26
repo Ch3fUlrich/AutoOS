@@ -177,7 +177,7 @@
       "tool_calls": "unproven"
     },
     "deepseek-v4.1-flash": {
-      "$comment": "opencode-zen's bare spelling of the same real model as 'deepseek/deepseek-v4.1-flash' (openrouter's spelling); the paid zen leg (used in t2-worker-clean/t3-driver-clean). Ladder from docs/models.md. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration.",
+      "$comment": "opencode-zen's bare spelling of the same real model as 'deepseek/deepseek-v4.1-flash' (openrouter's spelling); the paid zen leg (used in t2-worker-clean/t3-driver-clean). Ladder from docs/models.md. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration. Model-level tier override (PRIV2 brief, 2026-09-26): the zen provider's own tier is 'free', but this is a direct-key leg billed past the pool on the same key - tests/run-tests.sh's own combos.json policy comment: 'Direct-key legs (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool on the same key, so they stay.'",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -196,6 +196,7 @@
       "price_in": 3e-07,
       "price_out": 1.2e-06,
       "reasoning": true,
+      "tier": "paid",
       "tool_calls": "unproven"
     },
     "deepseek/deepseek-v4.1-flash": {
@@ -353,7 +354,7 @@
       "tool_calls": "unproven"
     },
     "meta/muse-spark-1.3-contributor": {
-      "$comment": "The OpenRouter contributor (paid) leg of the same real model as models.muse-spark; price reused from that llm-models.json entry - identical commercial arrangement, different provider path.",
+      "$comment": "The OpenRouter contributor (paid) leg of the same real model as models.muse-spark; price reused from that llm-models.json entry - identical commercial arrangement, different provider path. Model-level trains_on_prompts override (PRIV2 brief, 2026-09-26): a contributor leg trains by contract - tests/run-tests.sh's own combos.json policy comment: '-contributor (trains by contract) is banned in t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries it deliberately since the 2026-09-21 contributor-only block (paid-only, trains).' registry.py's CLEAN_ROUTE_EXEMPTIONS is the one place that deliberate trade-off is allowed through.",
       "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
@@ -374,7 +375,8 @@
       "price_in": 1e-07,
       "price_out": 2e-07,
       "reasoning": true,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "trains_on_prompts": true
     },
     "minimax-m2.7": {
       "$comment": "cheaperinference resale leg inside t3-driver (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
@@ -393,7 +395,7 @@
       "tool_calls": "unproven"
     },
     "mistral-code-latest": {
-      "$comment": "Leads t3-driver; same-key free pool then billed past it (docs/models.md). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "$comment": "Leads t3-driver; same-key free pool then billed past it (docs/models.md). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups). Model-level trains_on_prompts override (PRIV brief, 2026-09-26): this free pool trains, but the mistral provider is otherwise paid/non-training (mistral-small-latest does not train) - tests/run-tests.sh's own combos.json rule already treats 'mistral/mistral-code' as a free leg that must never appear in a -clean combo ('*-clean = paid legs only: no free pool may train on private prompts').",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -406,7 +408,8 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": false,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "trains_on_prompts": true
     },
     "mistral-small-latest": {
       "$comment": "mistral direct, keyed/billed account (docs/models.md: 'same key bills past the free pool'). output_max uses t2-worker-clean's 32768 (its larger use site) as the model's own ceiling; t3-driver's surface still declares its own clamped 16384. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
@@ -458,7 +461,7 @@
       "tool_calls": "unproven"
     },
     "muse-spark-1.3-contributor-free": {
-      "$comment": "The Zen free contributor promo leg. Same real model as models.muse-spark (llm-models.json) and models.'meta/muse-spark-1.3-contributor', free while the promo runs. client_bound follows spec 3.1's own example ('opencode for Zen free legs'): combos.json documents this leg 403ing proxied traffic ('OpenCode's free tier can only be used from within OpenCode').",
+      "$comment": "The Zen free contributor promo leg. Same real model as models.muse-spark (llm-models.json) and models.'meta/muse-spark-1.3-contributor', free while the promo runs. client_bound follows spec 3.1's own example ('opencode for Zen free legs'): combos.json documents this leg 403ing proxied traffic ('OpenCode's free tier can only be used from within OpenCode'). Model-level trains_on_prompts override (PRIV2 brief, 2026-09-26): a contributor leg trains by contract - tests/run-tests.sh's own combos.json policy comment: '-contributor (trains by contract) is banned in t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries it deliberately since the 2026-09-21 contributor-only block (paid-only, trains).'",
       "client_bound": "opencode",
       "context_advertised": 1048576,
       "context_usable": {
@@ -479,7 +482,8 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "trains_on_prompts": true
     },
     "ollama-qwen2.5-coder": {
       "$comment": "family is the underlying model's lineage (Qwen), not the hosting provider (Ollama, direct.provider).",
@@ -2117,6 +2121,10 @@
         }
       },
       "unavailable_legs": {
+        "cerebras/gpt-oss-120b": {
+          "$comment": "L0 decision 2026-09-26T11:44Z (measured): 402 billing_error payment_required; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
+          "available": false
+        },
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
           "available": false
@@ -2211,6 +2219,12 @@
           },
           "output": 32768
         }
+      },
+      "unavailable_legs": {
+        "cerebras/gpt-oss-120b": {
+          "$comment": "L0 decision 2026-09-26T11:44Z (measured): 402 billing_error payment_required; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
+          "available": false
+        }
       }
     },
     "t2-worker-paid": {
@@ -2281,6 +2295,10 @@
         }
       },
       "unavailable_legs": {
+        "cerebras/qwen-3.8-27b": {
+          "$comment": "L0 decision 2026-09-26T11:44Z (measured): 401 credits exhausted; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
+          "available": false
+        },
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
           "available": false
@@ -2362,6 +2380,12 @@
             "reasoning": false
           },
           "output": 16384
+        }
+      },
+      "unavailable_legs": {
+        "cerebras/qwen-3.8-27b": {
+          "$comment": "L0 decision 2026-09-26T11:44Z (measured): 401 credits exhausted; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
+          "available": false
         }
       }
     },

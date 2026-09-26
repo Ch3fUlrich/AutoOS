@@ -151,9 +151,13 @@ boundary.
 
 ### 5.3 Steps
 
-1. **Filter** routes: privacy (§3.1 rule); `need_tokens × 1.3 ≤ context_usable` of every leg that may
-   serve; `tool_calls = proven` for agentic kinds; client installed **and** signed in;
-   `client_bound` legs only through their client; mode budget cap. Filters are never relaxed later.
+1. **Filter** routes. Route-level filters remove the whole route: privacy (§3.1 rule — a leg that
+   trains on prompts is never a fallback for a `privacy=sensitive` task; sensitive work falls through
+   only to other clean legs); client installed **and** signed in; retired; mode budget cap.
+   Per-leg filters skip a leg and let the combo fall through to the next one (operator 2026-09-26):
+   `need_tokens × 1.3 ≤ context_usable`; `tool_calls = proven` for agentic kinds; a rate-limited
+   unproven leg; `client_bound` legs only through their client. A route is removed only when no leg
+   is usable. The expected serving leg is the first usable one. Filters are never relaxed later.
    **No route survives** → `route_plan.route = null`, state `input_required`, and a reason naming each
    filter that removed a candidate (sign in, narrow `paths`, split the task, or override).
 2. **Bucket** (§5.2).

@@ -9862,6 +9862,12 @@ if it "registry.py: check rules (unit tests) and the committed registry has no d
     out="$(python3 tests/test_registry.py 2>&1 && python3 tools/registry.py validate 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# registry.py render omniroute (routing v2 spec 3.2 phase 1, task A4a): combos.json
+# generated from catalog/ai-registry.json, gated on semantic equality.
+if it "registry.py render omniroute: matches combos.json semantically (unit tests)"; then
+    out="$(python3 tests/test_registry_render.py 2>&1 && python3 tools/registry.py render omniroute --check 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/probe-toolcalls.py: tool-calling probe writes the overlay (routing v2 spec 3.1, 5.3, 10).
 if it "probe-toolcalls: tool-calling probe writes the overlay (unit tests)"; then
     out="$(python3 tests/test_probe_toolcalls.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"

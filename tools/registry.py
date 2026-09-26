@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Validator for catalog/ai-registry.json (routing v2 spec section 3.1).
 
-Two subcommands:
+Three subcommands:
 
     python3 tools/registry.py check    [--registry PATH]
     python3 tools/registry.py validate [--registry PATH]
+    python3 tools/registry.py render omniroute [--registry PATH] [--out PATH] [--check]
+    python3 tools/registry.py render litellm   [--registry PATH] [--config PATH] [--check] [--out PATH]
 
 `check` proves the registry obeys spec 3.1's rules:
 
@@ -13,11 +15,17 @@ Two subcommands:
     2. ids are unique within and across providers/models/clients/routes; a
        route may share the id of a model one of its legs serves (a per-model
        fallback group, mapping doc Open choice 11);
-    3. a privacy-sensitive route (one whose id ends in "-clean") only uses
-       available legs whose provider has trains_on_prompts: false (a missing
-       or null value counts as training). A leg listed in
-       routes.<id>.unavailable_legs, or reached through a provider marked
-       available: false, is not checked; there is no per-route exemption;
+    3. a privacy-sensitive route (one whose id ends in "-clean") uses only
+       private-safe legs (private_safe(): effective tier exactly paid or
+       subscription, provider trains_on_prompts exactly false, model
+       trains_on_prompts missing or exactly false) - checked for EVERY leg
+       the route lists, including one flagged in unavailable_legs or reached
+       through a provider marked available: false (PRIV2, 2026-09-26: the
+       OmniRoute gateway does not consult that registry-only flag, and
+       combos.json/apply.sh still push the leg verbatim). CLEAN_ROUTE_
+       EXEMPTIONS names the one route (t1-orchestrator-clean) deliberately
+       exempted from this rule; `check`/`validate` still report it, as an
+       info line, never silently;
     4. providers.<id>.api_base and models.<id>.direct.base_url hold only a public
        vendor endpoint. Loopback (127.0.0.1 / localhost / ::1) is allowed ONLY in
        a model's direct.base_url; private IPv4 ranges, single-label hosts,
@@ -32,6 +40,27 @@ Two subcommands:
 tools/registry-convert.py's build_registry() and compares parsed JSON for
 equality - a committed file that no longer matches its sources is drift
 (spec 3.2 phase-1 gate).
+
+`render omniroute` renders configuration/omniroute/combos.json from a loaded
+catalog/ai-registry.json (spec 3.2 phase 1, task A4a; docs/plans/2026-09-25-
+registry-mapping.md section 10 documents the mapping and its two intentional
+equality exceptions). It never writes configuration/omniroute/combos.json itself
+(phase 1 proves equality only - apply.sh/apply.ps1 keep reading the committed file
+until phase 2 switches them over): with no flag the render goes to stdout; --out
+PATH writes it elsewhere; --check compares a fresh render against --combos
+(default: the committed combos.json) and exits 1, naming each differing key, when
+they are not semantically equal.
+
+`render litellm` renders the AUTOOS-MANAGED tier blocks of configuration/litellm/
+config.yaml (the ones tools/sync-router-tiers.py owns) from a loaded catalog/
+ai-registry.json, reusing that tool's own leg->entry logic instead of copying it
+(spec 3.2 phase 1, task A4b; docs/plans/2026-09-25-registry-mapping.md section 11
+documents the mapping - byte-for-byte equal to today's blocks, no documented
+exception needed). It never writes configuration/litellm/config.yaml itself: with
+no flag the render goes to stdout; --out PATH writes it elsewhere; --check compares
+a fresh render against --config's own current managed blocks (default: the
+committed config.yaml) and exits 1, naming each differing tier, when they are not
+byte-for-byte equal.
 
 Stdlib only. Path-independent: everything is anchored on the repository root
 derived from this file's own location.
@@ -50,6 +79,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
 SCHEMA_PATH = ROOT / "catalog" / "ai-registry.schema.json"
 CONVERTER_PATH = ROOT / "tools" / "registry-convert.py"
+DEFAULT_OMNIROUTE_COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.json"
+SYNC_ROUTER_TIERS_PATH = ROOT / "tools" / "sync-router-tiers.py"
+DEFAULT_LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMMENT_KEYS = ("$comment", "comment")
@@ -165,27 +197,128 @@ def _check_unique_ids(registry) -> list:
 # ===========================================================================
 
 
+def private_safe(provider_id, model_id, registry) -> tuple:
+    """Whether `provider_id`/`model_id` is private-safe (spec 3.1 rule 3, tightened
+    by the PRIV finding of 2026-09-26: `autoos-agent.py route --card
+    kind=implement,...,privacy=sensitive` chose a FREE pool because only a
+    provider's ``trains_on_prompts`` was ever checked -- "Free first, private
+    never" needs the pool's tier checked too -- and further tightened by PRIV2,
+    2026-09-26: fail CLOSED on anything that is not exactly the safe shape, and
+    let a model override its provider's ``tier`` too, not only its
+    ``trains_on_prompts``). The single predicate both this module's rule 3
+    (-clean routes) and tools/autoos_resolver.py's route-level privacy filter
+    use, so the two can never drift apart.
+
+    Safe only when ALL of:
+      - the EFFECTIVE tier -- ``models.<id>.tier`` when present, else
+        ``providers.<id>.tier`` -- is exactly ``"paid"`` or ``"subscription"``.
+        A free pool is never private-safe, even one whose own
+        ``trains_on_prompts`` is ``false`` (the found bug: groq/cerebras/
+        sambanova free legs, and mistral's own ``mistral-code-latest`` free
+        pool, all carry ``trains_on_prompts: false`` at the provider level and
+        were wrongly treated as clean). The model-level override is additive
+        (PRIV2): a provider whose own tier is ``"free"`` (e.g. ``zen``) can
+        still serve one direct-key, paid leg (``deepseek-v4.1-flash``) that
+        bills past the pool -- and, symmetrically, a provider whose tier is
+        otherwise paid can serve one free leg that is not private-safe. An
+        unrecognised or missing effective tier is unsafe, not a pass-through;
+      - the provider's ``trains_on_prompts`` is exactly ``False`` (``True`` or
+        missing/``None`` both count as training -- unknown is unsafe, matching
+        the original rule);
+      - the model's ``trains_on_prompts``, when the key is present at all, is
+        exactly ``False`` -- a MISSING key is safe (inherit the provider,
+        already covered above), but a present key that is anything else
+        (``true``, an explicit ``null``, ``1``, ``"no"``, ...) is unsafe. This
+        is deliberately fail-closed (PRIV2): only ``dict.get(...) is True``
+        let a non-boolean truthy value (``1``, ``"no"``) slip through as
+        "safe" before this fix.
+
+    Returns ``(True, None)`` when safe, or ``(False, reason)`` naming which
+    check failed. `provider_id`/`model_id` are assumed already resolved (rule
+    1 / the resolver's own ``resolve_leg`` already reject anything that does
+    not resolve); an id absent from the registry is reported as not safe
+    rather than raising, so a caller never needs its own guard before calling
+    this.
+    """
+    provider = _section(registry, "providers").get(provider_id)
+    if not isinstance(provider, dict):
+        return False, "unknown provider %r" % (provider_id,)
+    model = _section(registry, "models").get(model_id)
+    if not isinstance(model, dict):
+        return False, "unknown model %r" % (model_id,)
+
+    effective_tier = model["tier"] if "tier" in model else provider.get("tier")
+    if effective_tier not in ("paid", "subscription"):
+        return False, "effective tier %r is not paid or subscription" % (effective_tier,)
+    if provider.get("trains_on_prompts") is not False:  # True or missing: unsafe
+        return False, "trains on prompts"
+    if "trains_on_prompts" in model and model["trains_on_prompts"] is not False:
+        return False, "model trains on prompts"
+    return True, None
+
+
+# The one documented, deliberate exception to rule 3 (PRIV2, 2026-09-26):
+# t1-orchestrator-clean's only leg is the OpenRouter contributor model, which
+# trains by contract (see the meta/muse-spark-1.3-contributor $comment in
+# catalog/ai-registry.json). combos.json's own $comment already recorded this
+# trade-off on 2026-09-21 ("t1-orchestrator-clean ... no longer means
+# trains-nothing - it means paid-only"); tools/autoos-agent.py's spawner
+# requires an explicit --allow-training to route a sensitive card there
+# (tools/autoos_routing.py select_combo()). A route named here is never
+# evaluated by _check_privacy below - it is reported separately, as an
+# "info:" line (privacy_exemption_lines()), never silently and never as a
+# check_registry() problem. The resolver's own privacy filter
+# (tools/autoos_resolver.py filter_routes()) does NOT consult this table: it
+# calls private_safe() on every *available* serving leg of *every* route, and
+# t1-orchestrator-clean's only leg has no available leg at all, so a
+# privacy=sensitive card can never land there regardless.
+CLEAN_ROUTE_EXEMPTIONS = {
+    "t1-orchestrator-clean": (
+        "carries the OpenRouter contributor leg "
+        "(openrouter/meta/muse-spark-1.3-contributor) deliberately, since the "
+        "2026-09-21 contributor-only block made it paid-only rather than "
+        "trains-nothing (combos.json's own $comment); the spawner requires "
+        "--allow-training to route a privacy=sensitive card there "
+        "(tools/autoos-agent.py, tools/autoos_routing.py select_combo())."
+    ),
+}
+
+
 def _check_privacy(registry) -> list:
     problems = []
     for route_id, route in _section(registry, "routes").items():
         if not isinstance(route, dict) or not route_id.endswith(CLEAN_ROUTE_SUFFIX):
             continue
-        unavailable = route.get("unavailable_legs") or {}
-        for leg in route.get("legs") or []:
-            if leg in unavailable:
-                continue
+        if route_id in CLEAN_ROUTE_EXEMPTIONS:
+            continue  # reported separately by privacy_exemption_lines(), never here
+        for leg in dict.fromkeys(route.get("legs") or []):
             try:
-                provider_id, _ = resolve_leg(leg, registry)
+                provider_id, model_id = resolve_leg(leg, registry)
             except ValueError:
                 continue  # rule 1 already reports an unresolved leg
-            provider = _section(registry, "providers").get(provider_id, {})
-            if not isinstance(provider, dict):
-                continue
-            if provider.get("available") is False:
-                continue
-            if provider.get("trains_on_prompts") is not False:  # unknown = unsafe
-                problems.append("privacy: %s leg %s trains on prompts" % (route_id, leg))
+            # Every leg is checked, an unavailable_legs entry or a
+            # provider-wide available:false included (PRIV2, 2026-09-26): the
+            # OmniRoute gateway does not consult that registry-only flag, and
+            # combos.json/apply.sh push the leg verbatim regardless.
+            safe, reason = private_safe(provider_id, model_id, registry)
+            if not safe:
+                problems.append("privacy: %s leg %s %s" % (route_id, leg, reason))
     return problems
+
+
+def privacy_exemption_lines(registry) -> list:
+    """One ``"info: ..."`` line per routes.<id> in CLEAN_ROUTE_EXEMPTIONS that
+    exists in `registry` (PRIV2, 2026-09-26: "an exempt route is reported as
+    an info line by check, never silently skipped"). Always printed by
+    `check`/`validate`, regardless of whether the registry has any problem;
+    never counted in check_registry()'s own return value, so an exemption
+    never fails the check."""
+    lines = []
+    routes = _section(registry, "routes")
+    for route_id, reason in CLEAN_ROUTE_EXEMPTIONS.items():
+        if route_id in routes:
+            lines.append("info: %s exempt from privacy rule 3 - %s" % (route_id, reason))
+    return lines
 
 
 # ===========================================================================
@@ -362,6 +495,307 @@ def _check_required_keys(registry, schema=None) -> list:
 
 
 # ===========================================================================
+# render - omniroute combos.json (spec 3.2 phase 1, task A4a)
+# ===========================================================================
+
+# combos.json's own top-level $comment (the ~190-line role-label glossary,
+# free-first/fast-skip mechanism, per-family chain descriptions, retry settings,
+# verification dates) is pure human documentation: neither apply.sh nor apply.ps1
+# ever read a "$comment"/"comment" key (checked both scripts, 2026-09-26). Its
+# substance was already redistributed into per-entry providers/models/routes
+# $comment fields during the A1/A2 registry migration, not kept as one block -
+# docs/plans/2026-09-25-registry-mapping.md section 4 and section 9 ("Where every
+# $comment landed") document exactly where each fact went. Reproducing the whole
+# block verbatim here would duplicate that already-migrated prose with nothing to
+# keep it in sync; the render therefore emits only the spec-3.2 generated-file
+# marker, and semantic equality (omniroute_diff, below) excludes the entire
+# $comment key, not only this one line - see the mapping doc section 10 for this
+# documented exception.
+OMNIROUTE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
+
+# combos.json's "retired" array (pre-2026-09-23-rename dead combo ids: tier1,
+# tier1-clean, ...) has no registry entry at all - docs/plans/2026-09-25-registry-
+# mapping.md section 4: "these are ... dead ids with no recoverable leg/class data
+# ... there is nothing to migrate". Reproduced here as a literal, hand-maintained
+# constant, the same convention tools/registry-convert.py uses for facts no source
+# file carries (PROVIDER_EXTRA, MODEL_EXTRA, COMBO_CLASS, ...): apply.sh/apply.ps1
+# still need this exact list once a later phase switches them onto a rendered file.
+OMNIROUTE_RETIRED_IDS = [
+    "tier1", "tier1-clean",
+    "tier2", "tier2-clean",
+    "tier3", "tier3-clean",
+    "rag",
+    "tier1-paid", "tier2-paid", "tier3-paid",
+    "tier2-credit", "tier3-credit",
+]
+
+
+def render_omniroute(registry: dict) -> dict:
+    """Render configuration/omniroute/combos.json's shape from a loaded
+    catalog/ai-registry.json document (spec 3.2 phase 1). Pure: no I/O, no clock,
+    no randomness - the same registry always renders the same dict.
+
+    A route becomes a combo iff it has at least one leg (`legs` non-empty): the
+    LiteLLM-only routes (t1-orchestrator-paid, t2-worker-paid, t3-driver-paid) and
+    the dynamic `auto`/`auto/smart`/`auto/cheap` routes carry `legs: []`
+    (tools/registry-convert.py's ROUTE_COMMENT / AUTO_IDS) and have no
+    combos.json counterpart at all - mapping doc section 4.
+
+    Legs an operator has since flagged unavailable (routes.<id>.unavailable_legs;
+    providers.openrouter.available: false) stay in `legs` unchanged - today's
+    committed combos.json already lists those same dead legs (the operator chose
+    to flag them in the registry rather than remove them, 2026-09-25/26), so no
+    special case is needed for the render to match.
+    """
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+
+    combos = []
+    for route_id in sorted(routes):
+        route = routes[route_id]
+        if not isinstance(route, dict):
+            continue
+        legs = route.get("legs") or []
+        if not legs:
+            continue
+        surfaces = route.get("surfaces")
+        omniroute_surface = surfaces.get("omniroute") if isinstance(surfaces, dict) else None
+        if not isinstance(omniroute_surface, dict) or "context_declared" not in omniroute_surface:
+            raise ValueError(
+                "routes.%s has legs but no surfaces.omniroute.context_declared - "
+                "every omniroute combo needs a declared context string" % route_id)
+        combos.append({
+            "name": route_id,
+            "strategy": route.get("strategy"),
+            "context": omniroute_surface["context_declared"],
+            "models": list(legs),
+        })
+
+    return {
+        "$comment": OMNIROUTE_GENERATED_COMMENT,
+        "retired": list(OMNIROUTE_RETIRED_IDS),
+        "combos": combos,
+    }
+
+
+def render_json(doc) -> str:
+    """Serialize a rendered document with today's combos.json formatting: 2-space
+    indent, insertion key order kept (no forced sort - render_omniroute already
+    builds each combo in name/strategy/context/models order to match), literal
+    UTF-8 (no \\uXXXX escapes), one trailing newline."""
+    return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+
+
+def _canonical_omniroute(doc) -> dict:
+    """Normalize a combos.json-shaped dict for semantic-equality comparison:
+
+    - drop "$comment" entirely (see OMNIROUTE_GENERATED_COMMENT's comment above -
+      a documented exception, not only its generated-marker line);
+    - treat "combos" and "retired" as unordered: apply.sh (`for c in
+      data.get("combos", [])`, `current = {c["name"] for c in ...}`) and apply.ps1
+      (`foreach ($combo in $combos)`, retired filtered by `-cnotcontains`) both
+      look combos up by name and retired ids up by membership, never by array
+      position (read both scripts, 2026-09-26) - so array order is not semantic
+      data here, unlike the ordered `models` list inside each combo (a fallback
+      priority order, which this function leaves untouched).
+    """
+    if not isinstance(doc, dict):
+        return {}
+    out = {k: v for k, v in doc.items() if k != "$comment"}
+    combos = out.get("combos")
+    if isinstance(combos, list):
+        # A malformed entry (no name, not a dict) is kept, keyed by its JSON,
+        # so it shows up as a difference instead of being dropped (review-b5a4).
+        out["combos"] = sorted(
+            combos,
+            key=lambda c: (c["name"] if isinstance(c, dict) and "name" in c
+                           else "~" + json.dumps(c, sort_keys=True)),
+        )
+    retired = out.get("retired")
+    if isinstance(retired, list):
+        out["retired"] = sorted(retired, key=str)
+    return out
+
+
+def omniroute_diff(rendered: dict, current: dict) -> list:
+    """Return the keys where a fresh render_omniroute() output and today's parsed
+    combos.json differ, ignoring $comment and the order of "combos"/"retired"
+    (see _canonical_omniroute). Empty means semantically equal - the spec 3.2
+    phase-1 gate."""
+    a = _canonical_omniroute(rendered)
+    b = _canonical_omniroute(current)
+
+    problems = []
+    if a.get("retired") != b.get("retired"):
+        problems.append("retired")
+
+    def keyed(combos):
+        # A malformed entry keys by its JSON, so it is a difference, not a crash.
+        return {(c["name"] if isinstance(c, dict) and "name" in c
+                 else "malformed:" + json.dumps(c, sort_keys=True)): c
+                for c in combos or []}
+
+    a_combos = keyed(a.get("combos"))
+    b_combos = keyed(b.get("combos"))
+    for name in sorted(set(a_combos) | set(b_combos)):
+        if a_combos.get(name) != b_combos.get(name):
+            problems.append("combos.%s" % name)
+
+    for key in sorted((set(a) | set(b)) - {"combos", "retired"}):
+        if a.get(key) != b.get(key):
+            problems.append(key)
+
+    return problems
+
+
+# ===========================================================================
+# render - litellm config.yaml managed blocks (spec 3.2 phase 1, task A4b)
+# ===========================================================================
+
+
+def _load_sync_router_tiers():
+    """Import tools/sync-router-tiers.py by path (its name is not a valid
+    module identifier) - the same importlib-by-path technique
+    _build_fresh_registry() below already uses for tools/registry-convert.py.
+    Reused, not copied, so Leg/render_block/locate_blocks/parse_block/
+    leading_indent/GATEWAY_ONLY/SYNCED_TIERS/provider_maps_from_dict can never
+    drift from the tool that still owns configuration/litellm/config.yaml's
+    actual managed blocks (task A4b's brief: "reuse ... rather than copying
+    it"). A fresh module object every call, deliberately: render_litellm_
+    blocks() below mutates its PROVIDER_PREFIX/API_BASE/ENV_KEY globals (Leg
+    reads them at construction time, same as tools/sync-router-tiers.py's own
+    main() does), and a fresh import per call keeps that mutation from
+    leaking between two renders in the same process - the same isolation
+    _build_fresh_registry() gets from re-importing tools/registry-convert.py
+    every time it is called."""
+    spec = importlib.util.spec_from_file_location(
+        "autoos_sync_router_tiers", SYNC_ROUTER_TIERS_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
+    """Render the AUTOOS-MANAGED litellm blocks tools/sync-router-tiers.py owns
+    (spec 3.2 phase 1, task A4b), sourcing what that tool takes from
+    configuration/omniroute/combos.json and catalog/providers.json instead from
+    the loaded registry: each tier's ordered leg list from `routes.<tier>.legs`,
+    and each leg's LiteLLM transport (prefix/api_base/env var) from
+    `providers.<id>.litellm_prefix`/`litellm_env`/`api_base` - registry field
+    names verified identical to catalog/providers.json's own in docs/plans/
+    2026-09-25-registry-mapping.md section 2, so
+    tools.sync_router_tiers.provider_maps_from_dict() reads either shape the
+    same way (that function was factored out of provider_maps() for exactly
+    this reuse).
+
+    `config_text` is still needed, exactly as tools/sync-router-tiers.py's own
+    rewrite() needs it: to locate each tier's existing "# AUTOOS-MANAGED-START/
+    END <tier>" block (its indent included) and to carry across any hand-tuned
+    litellm_params line a leg already has - an rpm cap and its comment, for
+    example - that is NOT a registry field (no rpm/rate-limit key exists
+    anywhere in catalog/ai-registry.json or its schema) and was never derived
+    from combos.json either: tools/sync-router-tiers.py has only ever preserved
+    such a line across a resync, never generated it. Passing today's own
+    config_text back in therefore reproduces it exactly, with no documented
+    equality exception needed here (contrast render_omniroute()'s $comment/
+    array-order exceptions above) - docs/plans/2026-09-25-registry-mapping.md
+    section 11 has the full accounting.
+
+    Pure with respect to I/O and the clock: the SAME (registry, config_text)
+    pair always renders the SAME {tier: block_text}; no file is opened inside
+    this function (the caller reads catalog/ai-registry.json and config.yaml,
+    exactly like render_omniroute(registry) leaves combos.json's own read to
+    its caller).
+
+    Returns {tier: block_text}, one entry per synced tier (tools/sync-router-
+    tiers.py's own SYNCED_TIERS by default - currently t2-worker/t3-driver;
+    t1-orchestrator and every *-paid/*-free-only group are hand-curated, not
+    sync-managed, same as today), each block running from its "# AUTOOS-
+    MANAGED-START <tier>" line to its "# AUTOOS-MANAGED-END <tier>" line
+    inclusive, newline-joined with no leading or trailing blank line - the
+    exact slice tools/sync-router-tiers.py's own rewrite() replaces.
+
+    Raises ValueError, naming every offending tier at once, when the registry
+    has no `routes.<tier>` for a tier being rendered, or when `config_text` has
+    no managed block for one (a missing/duplicate/mismatched marker - the same
+    cases tools/sync-router-tiers.py itself refuses via its own ConfigError,
+    surfaced here as ValueError so a caller needs only one exception type)."""
+    sync = _load_sync_router_tiers()
+    tiers = tuple(tiers) if tiers is not None else sync.SYNCED_TIERS
+
+    providers = _section(registry, "providers")
+    sync.PROVIDER_PREFIX, sync.API_BASE, sync.ENV_KEY = sync.provider_maps_from_dict(providers)
+
+    routes = _section(registry, "routes")
+    missing_routes = [t for t in tiers if not isinstance(routes.get(t), dict)]
+    if missing_routes:
+        raise ValueError("registry has no routes.<id> for tier(s): %s" % ", ".join(missing_routes))
+
+    refs_by_tier = {}
+    for tier in tiers:
+        legs = routes[tier].get("legs") or []
+        refs_by_tier[tier] = [
+            leg for leg in legs
+            if isinstance(leg, str) and leg.split("/", 1)[0] not in sync.GATEWAY_ONLY
+        ]
+
+    lines = config_text.splitlines()
+    try:
+        blocks = sync.locate_blocks(lines)
+    except sync.ConfigError as exc:
+        raise ValueError(str(exc)) from exc
+    missing_blocks = [t for t in tiers if t not in blocks]
+    if missing_blocks:
+        raise ValueError("config.yaml has no managed block for: %s" % ", ".join(missing_blocks))
+
+    rendered = {}
+    for tier in tiers:
+        start, end = blocks[tier]
+        indent = sync.leading_indent(lines[start])
+        extras = sync.parse_block(lines, start, end)
+        try:
+            block_lines = sync.render_block(tier, refs_by_tier[tier], indent, extras)
+        except sync.ConfigError as exc:
+            raise ValueError(str(exc)) from exc
+        rendered[tier] = "\n".join(block_lines)
+    return rendered
+
+
+def litellm_block_text(config_text: str, tier: str) -> str:
+    """The current, as-committed text of one tier's managed block ("# AUTOOS-
+    MANAGED-START/END <tier>" lines inclusive), for comparing against
+    render_litellm_blocks()'s output. Raises ValueError when `config_text` has
+    no such block (mirrors render_litellm_blocks()'s own exception type)."""
+    sync = _load_sync_router_tiers()
+    lines = config_text.splitlines()
+    try:
+        blocks = sync.locate_blocks(lines)
+    except sync.ConfigError as exc:
+        raise ValueError(str(exc)) from exc
+    if tier not in blocks:
+        raise ValueError("config.yaml has no managed block for: %s" % tier)
+    start, end = blocks[tier]
+    return "\n".join(lines[start : end + 1])
+
+
+def litellm_diff(rendered: dict, config_text: str) -> list:
+    """Return the tiers (sorted) where a fresh render_litellm_blocks() output
+    differs, byte for byte, from `config_text`'s own current managed block.
+    Empty means every rendered tier matches exactly - the spec 3.2 phase-1
+    gate for configuration/litellm/config.yaml (task A4b)."""
+    problems = []
+    for tier in sorted(rendered):
+        try:
+            current = litellm_block_text(config_text, tier)
+        except ValueError:
+            problems.append(tier)
+            continue
+        if rendered[tier] != current:
+            problems.append(tier)
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -396,6 +830,8 @@ def _build_fresh_registry() -> dict:
 
 def _cmd_check(args) -> int:
     registry = load(args.registry)
+    for line in privacy_exemption_lines(registry):
+        print(line)
     problems = check_registry(registry)
     if problems:
         for problem in problems:
@@ -407,6 +843,8 @@ def _cmd_check(args) -> int:
 
 def _cmd_validate(args) -> int:
     registry = load(args.registry)
+    for line in privacy_exemption_lines(registry):
+        print(line)
     problems = check_registry(registry)
     if problems:
         for problem in problems:
@@ -417,6 +855,66 @@ def _cmd_validate(args) -> int:
         print("drift: %s differs from a fresh registry-convert.py render" % args.registry)
         return 1
     print(_ok_line(registry))
+    return 0
+
+
+def _cmd_render_omniroute(args) -> int:
+    registry_doc = load(args.registry)
+    rendered = render_omniroute(registry_doc)
+
+    if args.check:
+        combos_path = Path(args.combos)
+        if not combos_path.exists():
+            print("no such file: %s" % combos_path)
+            return 1
+        current = load(combos_path)
+        problems = omniroute_diff(rendered, current)
+        if problems:
+            for key in problems:
+                print("differs: %s" % key)
+            return 1
+        print("ok: render omniroute matches %s" % combos_path)
+        return 0
+
+    text = render_json(rendered)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print("wrote %s" % args.out)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def _cmd_render_litellm(args) -> int:
+    registry_doc = load(args.registry)
+    config_path = Path(args.config)
+    try:
+        config_text = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print("cannot read %s: %s" % (config_path, exc))
+        return 1
+
+    try:
+        rendered = render_litellm_blocks(registry_doc, config_text)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
+    if args.check:
+        problems = litellm_diff(rendered, config_text)
+        if problems:
+            for tier in problems:
+                print("differs: %s" % tier)
+            return 1
+        print("ok: render litellm matches %s" % config_path)
+        return 0
+
+    text = "\n\n".join(rendered[tier] for tier in sorted(rendered)) + "\n"
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print("wrote %s" % args.out)
+    else:
+        sys.stdout.write(text)
     return 0
 
 
@@ -435,11 +933,52 @@ def main(argv=None) -> int:
         sub.add_argument("--registry", default=str(DEFAULT_REGISTRY_PATH),
                          help="registry JSON to inspect (default: %(default)s)")
 
+    render_parser = subparsers.add_parser(
+        "render", help="render a generated file from the registry (spec 3.2)")
+    render_targets = render_parser.add_subparsers(dest="target", required=True)
+    omniroute_parser = render_targets.add_parser(
+        "omniroute", help="render configuration/omniroute/combos.json")
+    omniroute_parser.add_argument(
+        "--registry", default=str(DEFAULT_REGISTRY_PATH),
+        help="registry JSON to render from (default: %(default)s)")
+    omniroute_parser.add_argument(
+        "--out", default=None,
+        help="write the render here instead of stdout (never the real combos.json)")
+    omniroute_parser.add_argument(
+        "--check", action="store_true",
+        help="exit 1 if the render differs semantically from --combos")
+    omniroute_parser.add_argument(
+        "--combos", default=str(DEFAULT_OMNIROUTE_COMBOS_PATH),
+        help="today's combos.json to compare against, --check only (default: %(default)s)")
+
+    litellm_parser = render_targets.add_parser(
+        "litellm",
+        help="render the AUTOOS-MANAGED tier blocks of configuration/litellm/config.yaml")
+    litellm_parser.add_argument(
+        "--registry", default=str(DEFAULT_REGISTRY_PATH),
+        help="registry JSON to render from (default: %(default)s)")
+    litellm_parser.add_argument(
+        "--config", default=str(DEFAULT_LITELLM_CONFIG_PATH),
+        help="today's config.yaml to locate blocks in / compare against "
+             "(default: %(default)s)")
+    litellm_parser.add_argument(
+        "--out", default=None,
+        help="write the render here instead of stdout (never the real config.yaml)")
+    litellm_parser.add_argument(
+        "--check", action="store_true",
+        help="exit 1 if a managed block differs byte-for-byte from --config")
+
     args = parser.parse_args(argv)
     if args.command == "check":
         return _cmd_check(args)
     if args.command == "validate":
         return _cmd_validate(args)
+    if args.command == "render":
+        if args.target == "omniroute":
+            return _cmd_render_omniroute(args)
+        if args.target == "litellm":
+            return _cmd_render_litellm(args)
+        return 2
     return 2
 
 
