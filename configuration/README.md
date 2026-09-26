@@ -16,6 +16,8 @@ git-ignored, only the template is tracked.
 | `litellm/` | The manual fallback router (off by default) | `setup.*` when LiteLLM is ticked |
 | `openhands/config.toml` | OpenHands LLM profiles (dev path); docker path uses env. Token windows are synced from `catalog/ide-models.json` | OpenHands |
 | `openhands/tier-profiles.json` | OpenHands tier profile spec; its ORDER is the push priority (the app keeps 10). Token windows synced from `catalog/ide-models.json` | `start-stack.*`, the installers |
+| `hostexec/policy.example.toml` | Template for the hostexec deny-list broker's policy — copy elsewhere and fill in, never edit in place | `tools/hostexec.py check\|serve` (real policy lives outside this repo) |
+| `hostexec/README.md` | What hostexec is (a deny-list + audit boundary, NOT containment), quick start, the rule table | you, before enabling it — see the file |
 
 ## First run
 

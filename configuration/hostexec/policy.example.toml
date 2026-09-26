@@ -1,0 +1,76 @@
+# hostexec policy -- EXAMPLE TEMPLATE. Copy this to a git-ignored path
+# (e.g. ~/.config/autoos/exec/policy.toml, mode 700 dir) and fill in real
+# values there. This file ships in the public repo, so it MUST NEVER gain
+# a real hostname, IP, username or token -- AGENTS.md rule 1. Every
+# <placeholder> below is exactly that: a placeholder.
+#
+# hostexec is a broad DENY-LIST + audit boundary, NOT containment: a host
+# CLI that already holds docker/sudo group membership can bypass it by
+# running a shell directly. See configuration/hostexec/README.md, "What
+# this is (and isn't)", before enabling this on a live host.
+
+# The fixed PATH hostexec resolves a BARE command name against -- never
+# the caller's own $PATH (that would defeat the path-hijack rule). Order
+# matters: the first directory with a matching, executable file wins.
+path = ["/usr/local/bin", "/usr/bin", "/bin"]
+
+[limits]
+# argv-caps rule: refuse a call with more arguments than this...
+max_args = 64
+# ...or with any single argument longer than this (characters).
+max_arg_length = 4096
+
+# ─── actors ─────────────────────────────────────────────────────────────
+# One [actors."<...>"] table per token. The TABLE KEY is the token's
+# sha256 hex digest -- NEVER the raw token itself. Create a token with:
+#
+#     python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+#
+# Save that raw value into a 0600 file the CLIENT reads at connect time
+# (never commit it). Hash it into this policy with:
+#
+#     python3 -c 'import hashlib; print(hashlib.sha256(open("<token file>").read().strip().encode()).hexdigest())'
+#
+# `tier` is kept in the data model for a later narrowing -- as of
+# 2026-09-26 every actor is on one tier ("ALL: read AND mutating, for all
+# actors"; see README.md), so this field does not yet change behaviour.
+
+[actors."<sha256 of the claude token>"]
+name = "claude"
+tier = "default"
+
+[actors."<sha256 of the openhands token>"]
+name = "openhands"
+tier = "default"
+
+[actors."<sha256 of the opencode token>"]
+name = "opencode"
+tier = "default"
+
+# ─── hosts ──────────────────────────────────────────────────────────────
+# kind = "local"  -- runs on the broker's own host (runner.run_local).
+# kind = "ssh"    -- runs via `ssh -o BatchMode=yes -T <target>`
+#                    (runner.run_remote); `target` defaults to the alias
+#                    when omitted.
+# forbid = true   -- ALWAYS denies this host, for every actor and every
+#                    argv. Use this for anything that must never be
+#                    reachable through hostexec (e.g. a storage host or a
+#                    firewall box) -- list it explicitly with forbid=true
+#                    rather than only omitting it, so a caller gets an
+#                    audited, named refusal (`forbid-host`) instead of an
+#                    ambiguous "host not declared" one.
+
+[hosts."<coding-host>"]
+kind = "local"
+
+[hosts."<vm-alias>"]
+kind = "ssh"
+target = "<vm-alias>"
+
+# Example of a host that must stay unreachable through hostexec on
+# purpose -- uncomment and fill in, do not just leave it out:
+#
+# [hosts."<storage-host>"]
+# kind = "ssh"
+# target = "<storage-host>"
+# forbid = true
