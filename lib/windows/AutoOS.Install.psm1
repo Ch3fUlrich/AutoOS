@@ -75,6 +75,32 @@ function Copy-AutoOSBackup {
     $backup
 }
 
+function ConvertTo-AutoOSCanonicalJson {
+    <#
+      .SYNOPSIS
+        Serialize a value to canonical JSON: object keys sorted, arrays in
+        order, so two values that differ only in key order serialize to the
+        same string.
+      .DESCRIPTION
+        Single home for order-insensitive JSON equality. Callers compare two
+        canonical strings with -ceq (JSON is case-sensitive; -eq is not). A
+        [hashtable] parameter keeps no order, Add-Member -Force moves an
+        existing property to the end - any of these can leave equal data with
+        different key order, which an order-sensitive text compare would call
+        a change.
+    #>
+    param($Value)
+    if ($Value -is [System.Collections.IDictionary]) {
+        '{' + ((@($Value.Keys) | Sort-Object | ForEach-Object { "$_=" + (ConvertTo-AutoOSCanonicalJson $Value[$_]) }) -join ',') + '}'
+    } elseif ($Value -is [System.Management.Automation.PSCustomObject]) {
+        '{' + ((@($Value.PSObject.Properties.Name) | Sort-Object | ForEach-Object { "$_=" + (ConvertTo-AutoOSCanonicalJson $Value.PSObject.Properties[$_].Value) }) -join ',') + '}'
+    } elseif ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        '[' + ((@($Value) | ForEach-Object { ConvertTo-AutoOSCanonicalJson $_ }) -join ',') + ']'
+    } else {
+        ConvertTo-Json -InputObject $Value -Compress
+    }
+}
+
 function Get-AutoOSNativePercent {
     param([string]$Line)
     if ($Line -match '(?<!\d)(100|\d{1,2})(?:\.\d+)?\s*%') { return [int]$Matches[1] }
@@ -1405,21 +1431,8 @@ function Register-AutoOSAntigravityMcpServer {
     # Compare the entry as data, key order aside: a [hashtable] parameter keeps
     # no order (and PowerShell 7 hashes differently per process), and a
     # hand-formatted file that already holds the entry must be left alone.
-    $canon = $null
-    $canon = {
-        param($v)
-        if ($v -is [System.Collections.IDictionary]) {
-            '{' + ((@($v.Keys) | Sort-Object | ForEach-Object { "$_=" + (& $canon $v[$_]) }) -join ',') + '}'
-        } elseif ($v -is [System.Management.Automation.PSCustomObject]) {
-            '{' + ((@($v.PSObject.Properties.Name) | Sort-Object | ForEach-Object { "$_=" + (& $canon $v.PSObject.Properties[$_].Value) }) -join ',') + '}'
-        } elseif ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) {
-            '[' + ((@($v) | ForEach-Object { & $canon $_ }) -join ',') + ']'
-        } else {
-            ConvertTo-Json -InputObject $v -Compress
-        }
-    }
     # -ceq: JSON is case-sensitive ("NPX" is not "npx"), PowerShell's -eq is not.
-    if ($servers.Contains($Name) -and ((& $canon $servers[$Name]) -ceq (& $canon $Spec))) {
+    if ($servers.Contains($Name) -and ((ConvertTo-AutoOSCanonicalJson $servers[$Name]) -ceq (ConvertTo-AutoOSCanonicalJson $Spec))) {
         Write-AutoOSLine "Antigravity MCP server '$Name' already configured in $cfgPath - skipped" -Level ok
         return
     }
@@ -3886,7 +3899,7 @@ Export-ModuleMember -Function `
     Read-AutoOSSecretsFile, Read-AutoOSApiSecrets, Resolve-AutoOSOllamaBaseUrl,
     Get-AutoOSMcpPackage, Get-AutoOSSerenaExcludedTools, Get-AutoOSIdeModel,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
-    Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv, Protect-AutoOSUserFile, Copy-AutoOSBackup,
+    Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv, Protect-AutoOSUserFile, Copy-AutoOSBackup, ConvertTo-AutoOSCanonicalJson,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
     Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
     Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,

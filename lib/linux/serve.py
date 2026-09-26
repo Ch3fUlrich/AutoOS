@@ -804,9 +804,10 @@ class Handler(BaseHTTPRequestHandler):
                     merged[key].update(value)
                 else:
                     merged[key] = value
-            if original is not None and merged == json.loads(original):
-                # An unchanged save must not churn the file or pile up
-                # backups of identical bytes.
+            # Compare serialized JSON, not dicts: True == 1 in Python, so an
+            # unchanged save must not churn the file or pile up backups of
+            # identical bytes - and {"flag": true} over {"flag": 1} IS a change.
+            if original is not None and json.dumps(merged, sort_keys=True) == json.dumps(json.loads(original), sort_keys=True):
                 return self._json(200, {"ok": True, "saved": str(cfg_file), "unchanged": True})
             if original is not None:
                 # The undo listing only ranks \d{8}-?\d{6} stamps; a name that

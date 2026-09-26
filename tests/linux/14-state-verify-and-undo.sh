@@ -582,6 +582,18 @@ if set(backups) != want: problems.append("same-second-backups=%s" % backups)
 for name in backups:
     if not rx.search(name): problems.append("name-not-rankable:%s" % name)
 if json.loads((root / backups[0]).read_text()) != {"version": 1}: problems.append("first-backup-holds-the-seed")
+
+# 4: JSON types are strict - posting {"flag": true} over a file holding
+#    {"flag": 1} is a CHANGE (a backup + a write), not an unchanged save:
+#    True == 1 in Python, so a plain dict compare treats them as equal and
+#    the route must compare serialized JSON, where "true" != "1".
+cfg.write_text(json.dumps({"flag": 1}) + "\n", encoding="utf-8")
+code4, obj4 = post({"flag": True})
+if code4 != 200 or obj4.get("ok") is not True or obj4.get("unchanged"):
+    problems.append("bool-vs-int-treated-as-unchanged:%s:%s" % (code4, obj4))
+if json.loads(cfg.read_text()) != {"flag": True}: problems.append("bool-change-not-written")
+if not any(json.loads(b.read_text()) == {"flag": 1} for b in root.glob("autoos.config.json.autoos-backup-*")):
+    problems.append("int-seed-not-backed-up")
 print(" ".join(problems) or "ok")
 PY
 }

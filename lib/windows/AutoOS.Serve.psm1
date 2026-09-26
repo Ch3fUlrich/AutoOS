@@ -664,6 +664,42 @@ function Get-AutoOSDetectedAnswers {
     $answers
 }
 
+function Save-AutoOSWebConfig {
+    <#
+      .SYNOPSIS
+        Merge $Updates into the JSON config at -Path; back up and rewrite only
+        when the merged result actually differs from the file.
+      .DESCRIPTION
+        The body of POST /api/config, extracted from the listener scriptblock
+        so a test can drive it without starting the real server. Returns
+        @{ ok = $true; saved = <path> }, plus unchanged = $true when nothing
+        changed. The equality check is canonical JSON (-ceq), not plain
+        ConvertTo-Json text: Add-Member -Force moves an existing property to
+        the end, so a merge that changed nothing still reorders keys, and an
+        order-sensitive compare would treat the no-op save as a change and
+        churn a backup + rewrite of identical bytes.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][pscustomobject]$Updates
+    )
+    $exists = Test-Path -LiteralPath $Path
+    $merged = if ($exists) { Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+    foreach ($property in $Updates.PSObject.Properties) {
+        if ($property.Name -eq 'answers' -and $merged.PSObject.Properties.Name -contains 'answers') {
+            foreach ($answer in $property.Value.PSObject.Properties) { $merged.answers | Add-Member -NotePropertyName $answer.Name -NotePropertyValue $answer.Value -Force }
+        } else { $merged | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force }
+    }
+    if ($exists -and ((ConvertTo-AutoOSCanonicalJson $merged) -ceq (ConvertTo-AutoOSCanonicalJson (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)))) {
+        return @{ ok = $true; saved = $Path; unchanged = $true }
+    }
+    if ($exists) { $null = Copy-AutoOSBackup -Path $Path }
+    $tmpPath = "$Path.tmp"
+    [System.IO.File]::WriteAllText($tmpPath, ($merged | ConvertTo-Json -Depth 100), [System.Text.Encoding]::UTF8)
+    Move-Item -Path $tmpPath -Destination $Path -Force
+    @{ ok = $true; saved = $Path }
+}
+
 function Start-AutoOSServer {
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
@@ -839,27 +875,9 @@ function Start-AutoOSServer {
             elseif ($path -eq '/api/config' -and $req.HttpMethod -eq 'POST') {
                 $body = (New-Object IO.StreamReader($req.InputStream, $req.ContentEncoding)).ReadToEnd()
                 $cfgPath = Join-Path $RepoRoot 'autoos.config.json'
-                $tmpPath = "$cfgPath.tmp"
                 $updates = $body | ConvertFrom-Json
                 if ($updates -isnot [pscustomobject]) { throw 'Configuration must be a JSON object.' }
-                $exists = Test-Path -LiteralPath $cfgPath
-                $merged = if ($exists) { Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
-                foreach ($property in $updates.PSObject.Properties) {
-                    if ($property.Name -eq 'answers' -and $merged.PSObject.Properties.Name -contains 'answers') {
-                        foreach ($answer in $property.Value.PSObject.Properties) { $merged.answers | Add-Member -NotePropertyName $answer.Name -NotePropertyValue $answer.Value -Force }
-                    } else { $merged | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force }
-                }
-                # An unchanged save must not churn the file or pile up backups
-                # of identical bytes; only a changed save backs up and rewrites.
-                $currentJson = if ($exists) { (Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json) | ConvertTo-Json -Depth 100 -Compress } else { $null }
-                if ($exists -and (($merged | ConvertTo-Json -Depth 100 -Compress) -ceq $currentJson)) {
-                    & $json 200 @{ ok = $true; saved = $cfgPath; unchanged = $true }
-                } else {
-                    if ($exists) { $null = Copy-AutoOSBackup -Path $cfgPath }
-                    [System.IO.File]::WriteAllText($tmpPath, ($merged | ConvertTo-Json -Depth 100), [System.Text.Encoding]::UTF8)
-                    Move-Item -Path $tmpPath -Destination $cfgPath -Force
-                    & $json 200 @{ ok = $true; saved = $cfgPath }
-                }
+                & $json 200 (Save-AutoOSWebConfig -Path $cfgPath -Updates $updates)
             }
             elseif ($path -eq '/api/claude/sessions' -and $req.HttpMethod -eq 'GET') {
                 # Reads the recorded state; a GET must not have side effects.
@@ -1003,4 +1021,4 @@ function Start-AutoOSServer {
 
 Export-ModuleMember -Function Start-AutoOSServer, Get-AutoOSServeState, Get-AutoOSLineLevel, Start-AutoOSInstallJob, Update-AutoOSInstallLog, `
     Start-AutoOSUsbCreateJob, Get-AutoOSServeUsbCatalog, Get-AutoOSServeUsbDevices, Get-AutoOSServeUsbCreateResult, Get-AutoOSProviderStatus, `
-    Get-AutoOSServiceStatus, Get-AutoOSServiceActionResult, Start-AutoOSServiceActionJob
+    Get-AutoOSServiceStatus, Get-AutoOSServiceActionResult, Start-AutoOSServiceActionJob, Save-AutoOSWebConfig
