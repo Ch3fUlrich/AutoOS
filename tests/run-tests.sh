@@ -7719,8 +7719,10 @@ fi
 # Finding 1 (qoder review, L1-backlog.review-herdr-qoder.md): a SYSTEM-scope
 # install (HS_SCOPE=system, units in /etc/systemd/system - see
 # configuration/herdr-sessions/install.sh) was invisible here, so a later
-# claude-autostart install passed autoos_conflict_present's mutual-exclusion
-# gate and ran beside a live herdr restore. /etc/systemd/system is injectable
+# claude-autostart install passed the install_claude_autostart mutual-exclusion
+# gate (lib/linux/install.sh: the other selected in this plan is refused, the
+# other already installed is skipped, rc 0) and ran beside a live herdr
+# restore. /etc/systemd/system is injectable
 # via AUTOOS_ETC_SYSTEMD_SYSTEM_DIR, the same seam pattern as SYS_HOME, so
 # this never needs a real /etc write to test.
 if it "herdr-sessions detect: also true for a system-scope unit, independent of the user-scope path"; then
@@ -7799,6 +7801,30 @@ if it "herdr-sessions: herdr-sessions skips when claude-autostart is already ins
     [[ "$statedry" == skipped ]] || { ok=0; echo "dry-run state=[$statedry] want skipped" >&2; }
     rm -rf "$sb"
     if (( ok )); then pass; else fail "herdr-sessions did not skip when claude-autostart is already installed"; fi
+fi
+
+if it "herdr-sessions: with both units already present, both installers report skipped, rc 0"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    mkdir -p "$sb/home/.config/systemd/user"
+    printf 'seeded claude restore\n' >"$sb/home/.config/systemd/user/claude-sessions-restore.service"
+    printf 'seeded herdr restore\n' >"$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    out_h="$(herdr_run "$sb" "$drv" "$profile" 0 "")"
+    state_h="$(herdr_state "$out_h")"; rc_h="$(herdr_rc "$out_h")"
+    (( rc_h == 0 )) || { ok=0; echo "herdr rc=$rc_h want 0: ${out_h:0:300}" >&2; }
+    [[ "$state_h" == skipped ]] || { ok=0; echo "herdr state=[$state_h] want skipped" >&2; }
+    [[ "$out_h" == *"claude-autostart"* && "$out_h" == *"skipped"* ]] || { ok=0; echo "herdr skip names nothing: ${out_h:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the skip" >&2; }
+    out_a="$(autostart_run_full "$sb" 0 "")"
+    state_a="$(autostart_state "$out_a")"; rc_a="$(autostart_rc "$out_a")"
+    (( rc_a == 0 )) || { ok=0; echo "autostart rc=$rc_a want 0: ${out_a:0:300}" >&2; }
+    [[ "$state_a" == skipped ]] || { ok=0; echo "autostart state=[$state_a] want skipped" >&2; }
+    [[ "$out_a" == *"herdr-sessions"* && "$out_a" == *"skipped"* ]] || { ok=0; echo "autostart skip names nothing: ${out_a:0:300}" >&2; }
+    [[ "$(cat "$sb/home/.config/systemd/user/claude-sessions-restore.service")" == "seeded claude restore" ]] || { ok=0; echo "claude-autostart rewrote the seeded unit" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name '*.autoos-backup-*')" ]] || { ok=0; echo "autostart took a backup during a skip" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "both installers did not skip with both units already present"; fi
 fi
 
 if it "herdr-sessions: both selected in one plan is still refused"; then
