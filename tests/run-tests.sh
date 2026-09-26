@@ -8033,11 +8033,12 @@ fi
 if it "apply handles the Cloudflare UA and stays openrouter-first"; then
     ok=1
     # The UA quirk now lives once, in the registry; apply.sh only passes
-    # provider_data through.
-    grep -q 'providers\.json' configuration/omniroute/apply.sh || ok=0
+    # provider_data through. Task A5a moved the read from catalog/providers.json
+    # to catalog/ai-registry.json.
+    grep -q 'ai-registry\.json' configuration/omniroute/apply.sh || ok=0
     grep -q 'muse-code' configuration/omniroute/apply.sh && ok=0
     grep -q 'provider-specific-data' configuration/omniroute/apply.sh || ok=0
-    ua="$(python3 -c "import json; p=json.load(open('catalog/providers.json', encoding='utf-8'))['providers']; print(' '.join((p[n]['provider_data'] or {}).get('customUserAgent','') for n in ('groq','cerebras')))")"
+    ua="$(python3 -c "import json; p=json.load(open('catalog/ai-registry.json', encoding='utf-8'))['providers']; print(' '.join((p[n]['provider_data'] or {}).get('customUserAgent','') for n in ('groq','cerebras')))")"
     [[ "$ua" == "curl/8.7.1 curl/8.7.1" ]] || { ok=0; echo "registry UA quirk wrong: $ua" >&2; }
     if (( ok )); then pass; else fail "apply.sh is missing the provider quirks"; fi
 fi
@@ -8080,6 +8081,127 @@ if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
     assert_contains "$out" "groq: no key in api-keys.yml, skipped"
     if grep -q "mistral: would register\|mistral already registered" <<<"$out"; then pass
     else fail "the real mistral key was not planned"; fi
+fi
+
+# A5a (routing v2 spec 3.2, D11): apply.sh's provider rows now come from
+# catalog/ai-registry.json's `providers` section instead of the retired
+# catalog/providers.json - same row shape (name.lower, omniroute_id,
+# provider_data compact JSON), same "no omniroute_id -> skip" rule, plus a
+# new skip: a provider whose every leg in every route the registry marks
+# unavailable is never registered (routes.<id>.unavailable_legs,
+# providers.<id>.available: false). AUTOOS_REGISTRY_FILE points apply.sh at
+# this fixture instead of the real catalog so the case does not drift with
+# operator updates.
+_a5a_provider_registry_fixture() {
+    local d="$1"
+    cat >"$d/ai-registry.json" <<'JSON'
+{
+  "providers": {
+    "avail": {"omniroute_id": "avail-id", "provider_data": {"customUserAgent": "curl/8.7.1"}},
+    "unused": {"omniroute_id": "unused-id"},
+    "alldown": {"omniroute_id": "alldown-id"},
+    "providerdown": {"omniroute_id": "providerdown-id", "available": false},
+    "mixed": {"omniroute_id": "mixed-id"},
+    "noomni": {}
+  },
+  "routes": {
+    "r1": {
+      "legs": ["avail/model-a", "alldown/model-b", "providerdown/model-c", "mixed/model-d"],
+      "unavailable_legs": {
+        "alldown/model-b": {"available": false, "$comment": "fixture: down"},
+        "mixed/model-d": {"available": false}
+      }
+    },
+    "r2": {
+      "legs": ["alldown/model-e", "mixed/model-f"],
+      "unavailable_legs": {
+        "alldown/model-e": {"available": false}
+      }
+    }
+  }
+}
+JSON
+}
+
+if it "apply.sh reads provider rows from ai-registry.json and skips a provider whose every leg is unavailable"; then
+    d="$(mktemp -d)"
+    _a5a_provider_registry_fixture "$d"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
+        AUTOOS_REGISTRY_FILE="$d/ai-registry.json" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -rf "$d"
+    ok=1
+    # alldown: both its legs (r1 + r2) are individually flagged - skipped.
+    [[ "$out" == *"  - alldown-id: all legs unavailable (skipped)"* ]] \
+        || { ok=0; echo "alldown (every leg unavailable_legs-flagged) was not skipped: $out" >&2; }
+    # providerdown: no per-leg entry at all, but the provider itself carries
+    # available: false - the second of spec 3.1's two down-flags.
+    [[ "$out" == *"  - providerdown-id: all legs unavailable (skipped)"* ]] \
+        || { ok=0; echo "providerdown (provider-wide available:false) was not skipped: $out" >&2; }
+    # avail: no leg ever flagged - registered normally (no key -> "no key").
+    [[ "$out" == *"  - avail-id: no key in api-keys.yml, skipped"* ]] \
+        || { ok=0; echo "avail (no leg down) was wrongly all-unavailable-skipped: $out" >&2; }
+    # unused: has an omniroute_id but appears in no route leg at all - "every
+    # leg unavailable" is vacuously false for an unused provider, not true.
+    [[ "$out" == *"  - unused-id: no key in api-keys.yml, skipped"* ]] \
+        || { ok=0; echo "unused (no route leg at all) was wrongly all-unavailable-skipped: $out" >&2; }
+    # mixed: one leg down (r1), one leg live (r2) - not EVERY leg, so it must
+    # still be offered for registration.
+    [[ "$out" == *"  - mixed-id: no key in api-keys.yml, skipped"* ]] \
+        || { ok=0; echo "mixed (one live leg) was wrongly all-unavailable-skipped: $out" >&2; }
+    # noomni has no omniroute_id at all - the pre-existing skip rule, never
+    # even printed (matches today's providers.json behaviour).
+    [[ "$out" == *"noomni"* ]] && { ok=0; echo "noomni (no omniroute_id) must never appear: $out" >&2; }
+    if (( ok )); then pass; else fail "provider-level all-unavailable skip is not wired into apply.sh"; fi
+fi
+
+# Regression lock for today's registry (2026-09-26): openrouter (every leg
+# individually flagged, docs/plans/2026-09-25-routing-v2-plan.md's "OpenRouter
+# is not to be trusted" decision) and cerebras (402/401 credit exhaustion, L0
+# 2026-09-26T11:44Z) are, right now, all-unavailable across every route that
+# lists them - proves the real catalog/ai-registry.json actually reaches
+# apply.sh's live plan, not just the synthetic fixture above.
+if it "apply --dry-run against the real registry skips a provider whose every leg is dead today"; then
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    ok=1
+    [[ "$out" == *"  - cerebras: all legs unavailable (skipped)"* ]] \
+        || { ok=0; echo "cerebras was not flagged: $out" >&2; }
+    [[ "$out" == *"  - openrouter: all legs unavailable (skipped)"* ]] \
+        || { ok=0; echo "openrouter was not flagged: $out" >&2; }
+    # antigravity carries no unavailable_legs entry anywhere today - a
+    # provider with a live leg must still be offered normally.
+    [[ "$out" == *"  - antigravity: no key in api-keys.yml, skipped"* ]] \
+        || { ok=0; echo "antigravity (has a live leg today) was wrongly skipped: $out" >&2; }
+    if (( ok )); then pass; else fail "the real registry's dead providers do not reach apply.sh's plan"; fi
+fi
+
+# Equivalence: switching apply.sh's provider source from catalog/providers.json
+# to catalog/ai-registry.json (task A5a) must keep the same row shape for
+# every provider the old file still knows about - same omniroute_id, same
+# provider_data. New registry-only providers (antigravity, cc - no
+# catalog/providers.json entry) and the all-unavailable skip are additive,
+# checked by the two tests above and by the "provider registry drives apply,
+# mirror and the tier maps" helper test.
+if it "ai-registry.json providers agree field-for-field with providers.json for every shared entry"; then
+    report="$(python3 - 2>&1 <<'PY'
+import json
+
+old = json.load(open("catalog/providers.json", encoding="utf-8"))["providers"]
+new = json.load(open("catalog/ai-registry.json", encoding="utf-8"))["providers"]
+problems = []
+for name, entry in old.items():
+    if name not in new:
+        problems.append(f"{name}: missing from ai-registry.json")
+        continue
+    if entry.get("omniroute_id") != new[name].get("omniroute_id"):
+        problems.append(f"{name}: omniroute_id differs ({entry.get('omniroute_id')!r} vs {new[name].get('omniroute_id')!r})")
+    if entry.get("provider_data") != new[name].get("provider_data"):
+        problems.append(f"{name}: provider_data differs")
+print(" ".join(problems))
+PY
+)"
+    assert_eq "$report" ""
 fi
 
 # start-stack.sh sits in configuration/, one level below the repo root. A
