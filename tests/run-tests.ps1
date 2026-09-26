@@ -686,6 +686,70 @@ Test-Case 'backups are grouped newest-per-original' {
     Assert-True ($b.Count -eq 1 -and $b[0].Backup -match '20260202') "got: $($b | ConvertTo-Json -Compress)"
 }
 
+# Get-AutoOSBackups: what "newest" means. Copy-AutoOSBackup appends -1, -2, ...
+# on a same-second clash, and Copy-Item keeps the ORIGINAL's LastWriteTime, so
+# neither a name sort (-10 lands before -2) nor the file time (a backup of a
+# just-restored old file looks old) picks the backup taken last.
+function New-BackupFixture {
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][DateTime]$When)
+    $path = Join-Path $Dir $Name
+    [IO.File]::WriteAllText($path, $Name)
+    (Get-Item -LiteralPath $path).LastWriteTimeUtc = $When
+}
+
+Test-Case 'Get-AutoOSBackups: the newest per original counts -10 after -2 (the suffix is a number)' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $t0 = [DateTime]::UtcNow.AddDays(-30)
+        $names = @('x.autoos-backup-20260101-000000', 'x.autoos-backup-20260101-000000-1', 'x.autoos-backup-20260101-000000-2', 'x.autoos-backup-20260101-000000-10')
+        for ($i = 0; $i -lt $names.Count; $i++) { New-BackupFixture -Dir $scratch -Name $names[$i] -When $t0.AddMinutes($i) }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1 -or $b[0].Count -ne 4) { throw "want one original with 4 backups, got: $($b | ConvertTo-Json -Compress)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260101-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want ...-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Get-AutoOSBackups: equal file times, the higher numeric suffix wins' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $when = [DateTime]::UtcNow.AddDays(-30)
+        foreach ($n in @('x.autoos-backup-20260101-000000', 'x.autoos-backup-20260101-000000-1', 'x.autoos-backup-20260101-000000-2', 'x.autoos-backup-20260101-000000-10')) {
+            New-BackupFixture -Dir $scratch -Name $n -When $when
+        }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1) { throw "want one original, got $($b.Count)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260101-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want ...-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Get-AutoOSBackups: the stamp in the name decides, not the copied file time' {
+    # Copy-Item keeps the original's LastWriteTime: the backup taken LAST of a
+    # file that was just restored from an old copy carries an OLD file time.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $old = [DateTime]::UtcNow.AddDays(-30)
+        New-BackupFixture -Dir $scratch -Name 'x.autoos-backup-20260101-000000' -When $old.AddDays(20)
+        foreach ($n in @('x.autoos-backup-20260202-000000', 'x.autoos-backup-20260202-000000-2', 'x.autoos-backup-20260202-000000-10')) {
+            New-BackupFixture -Dir $scratch -Name $n -When $old
+        }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1) { throw "want one original, got $($b.Count)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260202-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want 20260202-000000-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'undo never uninstalls anything' {
     # The safety property, asserted on the source rather than by removing software.
     $src = Get-Content (Join-Path $Lib 'AutoOS.State.psm1') -Raw
@@ -3988,6 +4052,59 @@ Test-Case 'agent harness installers: the OpenCode writer calls the generator' {
     Assert-True ($hands -match 'Get-AutoOSSkillsSource') 'Set-AutoOSOpenHandsConfig does not use Get-AutoOSSkillsSource'
 }
 
+Test-Case 'ConvertFrom-AutoOSJsonc: comments and trailing commas, // inside a string survives' {
+    # Windows PowerShell 5.1 has no JSONC parser and the repo opencode.jsonc is
+    # JSONC. Comments and commas go only where they are syntax: a URL's "//"
+    # and a ",}" inside a string are text. (The Linux writer's _strip_jsonc
+    # strips the same way; it does not protect a ",}" inside a string.)
+    $text = @'
+{
+  // a line comment
+  "url": "http://x/a", /* a block
+     comment */
+  "note": "keep // this, /* this */ and ,} this",
+  "esc": "a \" // still inside",
+  "path": "c:\\dir\\", // comment after an escaped backslash
+  "list": [1, 2, 3,],
+  "obj": { "k": "v", // comment before a trailing comma
+  },
+}
+'@
+    $o = ConvertFrom-AutoOSJsonc -Text $text
+    if ($o.url -cne 'http://x/a') { throw "url did not survive: [$($o.url)]" }
+    if ($o.note -cne 'keep // this, /* this */ and ,} this') { throw "a string with comment markers changed: [$($o.note)]" }
+    if ($o.esc -cne 'a " // still inside') { throw "an escaped quote ended the string early: [$($o.esc)]" }
+    if ($o.path -cne 'c:\dir\') { throw "an escaped backslash broke the string: [$($o.path)]" }
+    if (@($o.list).Count -ne 3 -or $o.list[2] -ne 3) { throw 'the trailing comma in an array was not removed' }
+    if ($o.obj.k -cne 'v') { throw 'the trailing comma in an object was not removed' }
+    $bom = ConvertFrom-AutoOSJsonc -Text ([string][char]0xFEFF + '{"a":1,}')
+    if ($bom.a -ne 1) { throw 'a leading BOM was not tolerated' }
+
+    # The real file. Expected value parsed independently of the function under
+    # test: the file has whole-line comments only and no trailing commas.
+    $raw = Get-Content -LiteralPath (Join-Path $Root 'opencode.jsonc') -Raw -Encoding UTF8
+    if ($raw -notmatch '(?m)^\s*//') { throw 'opencode.jsonc has no comment lines left: this test proves nothing' }
+    $real = ConvertFrom-AutoOSJsonc -Text $raw
+    $plain = ($raw -replace '(?m)^\s*//.*$', '') | ConvertFrom-Json
+    $a = $real | ConvertTo-Json -Depth 100 -Compress
+    $b = $plain | ConvertTo-Json -Depth 100 -Compress
+    if ($a -cne $b) { throw 'opencode.jsonc parsed differently from the comment-free reading' }
+    if ($real.providers.omniroute.settings.baseURL -cne 'http://127.0.0.1:20128/v1') { throw "the gateway URL lost its //: [$($real.providers.omniroute.settings.baseURL)]" }
+    Pass
+}
+
+Test-Case 'ConvertFrom-AutoOSJsonc: an unterminated string is rejected at once, not after a regex stall' {
+    # A string literal matched with a nested quantifier backtracks exponentially
+    # when its closing quote is missing (26 characters took four seconds).
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $threw = $false
+    try { $null = ConvertFrom-AutoOSJsonc -Text ('{"a": "' + ('x' * 27)) } catch { $threw = $true }
+    $sw.Stop()
+    if ($sw.ElapsedMilliseconds -gt 2000) { throw "an unterminated string took $($sw.ElapsedMilliseconds) ms to reject" }
+    if (-not $threw) { throw 'an unterminated string was accepted' }
+    Pass
+}
+
 Test-Case "agent harness: the generator's unit tests pass" {
     $py = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -4857,6 +4974,231 @@ Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when not
     Pass
 }
 
+# Stand-in `opencode` CLI for the hermetic writer tests: prints $Line for any
+# arguments. `opencode.cmd` on Windows (PATHEXT finds it), an executable sh
+# script elsewhere. Windows PowerShell 5.1 has no $IsWindows, so the platform
+# is read from [Environment]::OSVersion, as the neighbouring tests do.
+function New-OpenCodeStandIn {
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Line)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [IO.File]::WriteAllText((Join-Path $Dir 'opencode.cmd'), "@echo off`r`necho $Line`r`n")
+    } else {
+        $fake = Join-Path $Dir 'opencode'
+        [IO.File]::WriteAllText($fake, "#!/bin/sh`necho '$Line'`n")
+        & chmod +x $fake
+    }
+}
+
+# The REAL Set-AutoOSOpenCodeConfig against a scratch home. HOME, USERPROFILE
+# and APPDATA point into a temp dir; a stand-in `python` keeps the agent
+# generator (it links skills and rewrites the file in its own formatting) out
+# of it; a stand-in `opencode` printing $OpenCodeVersion sits first on PATH, so
+# the result never depends on the CLI the host has; Ollama's address is pinned
+# so nothing probes the network; no key comes from the caller's environment.
+# Nothing outside the temp dir is read or written. $Body receives one
+# hashtable: Scratch, Bin, CfgDir, CfgFile, AppDataDir, AppDataFile and Run
+# (one logged run of the writer; returns what it logged).
+function Invoke-OpenCodeScratch {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Body,
+        [string]$OpenCodeVersion = '1.4.0',
+        [string]$Seed = ''
+    )
+    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocscratch-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $ctx = @{
+        Scratch      = $scratch
+        Bin          = $bin
+        CfgDir       = Join-Path $scratch '.config\opencode'
+        CfgFile      = Join-Path $scratch '.config\opencode\opencode.json'
+        AppDataDir   = Join-Path $scratch 'AppData\opencode'
+        AppDataFile  = Join-Path $scratch 'AppData\opencode\config.json'
+        Run          = {
+            $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocscratch-$([Guid]::NewGuid().ToString('N')).log"
+            try {
+                Initialize-AutoOSLog -Path $log
+                $null = Set-AutoOSOpenCodeConfig
+                Get-Content -LiteralPath $log -Raw -Encoding utf8
+            } finally {
+                Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+                Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    try {
+        $null = New-Item -ItemType Directory -Path $bin, $ctx.CfgDir -Force
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [IO.File]::WriteAllText((Join-Path $bin 'python.cmd'), "@echo off`r`nexit /b 0`r`n")
+        } else {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexit 0`n")
+            & chmod +x $fake
+        }
+        New-OpenCodeStandIn -Dir $bin -Line $OpenCodeVersion
+        if ($Seed) { [IO.File]::WriteAllText($ctx.CfgFile, $Seed) }
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch
+        $env:APPDATA = Join-Path $scratch 'AppData'
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+        # The writer reads $HOME, which the environment does not set on every
+        # host: prove the module sees the scratch home before it writes anything.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        & $Body $ctx
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# What the repo declares for V2, parsed WITHOUT the function under test: the
+# file has whole-line comments only and no trailing commas.
+function Read-RepoOpenCodeJsonc {
+    $raw = Get-Content -LiteralPath (Join-Path $Root 'opencode.jsonc') -Raw -Encoding UTF8
+    ($raw -replace '(?m)^\s*//.*$', '') | ConvertFrom-Json
+}
+
+Test-Case 'opencode V2: Test-AutoOSOpenCodeV2 tells V2 from V1 by --version, like the Linux writer' {
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        $cases = [ordered]@{
+            '2.1.0'          = $true
+            'v2.0.0'         = $true
+            'opencode 2.3.1' = $true
+            '1.4.0'          = $false
+            '1.2.0'          = $false
+            '12.0.1'         = $false
+            '0.2.9'          = $false
+            'no version'     = $false
+        }
+        foreach ($v in $cases.Keys) {
+            New-OpenCodeStandIn -Dir $c.Bin -Line $v
+            $got = Test-AutoOSOpenCodeV2
+            if ($got -ne $cases[$v]) { throw "opencode --version printing [$v]: Test-AutoOSOpenCodeV2 = $got, want $($cases[$v])" }
+        }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: Set-AutoOSOpenCodeConfig adds the gateway providers when the CLI is V2' {
+    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"mine","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"providers":{"foreign":{"name":"Foreign V2","env":["FOREIGN_KEY"],"package":"p"},"omniroute":{"name":"stale"}}}'
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Seed $seed -Body {
+        param($c)
+        $repo = Read-RepoOpenCodeJsonc
+        $canon = { param($o) $o | ConvertTo-Json -Depth 100 -Compress }
+        $null = & $c.Run
+        $hash1 = (Get-FileHash -LiteralPath $c.CfgFile -Algorithm SHA256).Hash
+        $backups1 = @(Get-ChildItem -LiteralPath $c.CfgDir -Filter 'opencode.json.autoos-backup-*')
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($name in @('omniroute', 'litellm')) {
+            if ($null -eq $w.PSObject.Properties['providers'] -or $null -eq $w.providers.PSObject.Properties[$name]) { throw "providers.$name was not written for a V2 CLI" }
+            if ((& $canon $w.providers.$name) -cne (& $canon $repo.providers.$name)) { throw "providers.$name differs from the repo opencode.jsonc" }
+        }
+        if ($w.model -cne $repo.model) { throw "model = [$($w.model)], want the repo model [$($repo.model)]" }
+        if ($null -eq $w.providers.PSObject.Properties['foreign'] -or $w.providers.foreign.name -cne 'Foreign V2') { throw 'a foreign providers entry of the user was dropped' }
+        if ($null -eq $w.provider.PSObject.Properties['custom'] -or $w.provider.custom.name -cne 'Mine') { throw 'a foreign V1 provider of the user was dropped' }
+        if ($w.theme -cne 'mine') { throw 'a foreign key of the user was dropped' }
+        if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw 'the V1 gateway provider block went missing' }
+        if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1)" }
+        if ([IO.File]::ReadAllText($backups1[0].FullName) -cne $seed) { throw 'the backup is not the original file' }
+
+        # Backup names carry whole seconds: without this pause a wrongly
+        # repeated backup would overwrite the first one and the count could
+        # not tell.
+        Start-Sleep -Milliseconds 1200
+        $out2 = & $c.Run
+        $hash2 = (Get-FileHash -LiteralPath $c.CfgFile -Algorithm SHA256).Hash
+        $backups2 = @(Get-ChildItem -LiteralPath $c.CfgDir -Filter 'opencode.json.autoos-backup-*')
+        if ($hash2 -ne $hash1) { throw 'run 2 changed the file (SHA256 differs from run 1)' }
+        if ($backups2.Count -ne $backups1.Count) { throw "backups after run 2 = $($backups2.Count), after run 1 = $($backups1.Count)" }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: a model the user chose is kept' {
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Seed '{"model":"custom/mine"}' -Body {
+        param($c)
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $w.PSObject.Properties['providers'] -or $null -eq $w.providers.PSObject.Properties['omniroute']) { throw 'the V2 providers were not written' }
+        if ($w.model -cne 'custom/mine') { throw "the user's model was replaced: [$($w.model)]" }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: a V1 CLI gets no providers block' {
+    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"mine","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}}}'
+    Invoke-OpenCodeScratch -OpenCodeVersion '1.4.0' -Seed $seed -Body {
+        param($c)
+        if (Test-AutoOSOpenCodeV2) { throw 'the stand-in opencode 1.4.0 was taken for a V2 CLI' }
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -ne $w.PSObject.Properties['providers']) { throw 'a V1 CLI got a providers block' }
+        if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw 'the V1 gateway provider block went missing' }
+        if ($null -eq $w.provider.PSObject.Properties['custom']) { throw 'a foreign V1 provider of the user was dropped' }
+        if ($w.model -notlike 'ollama/*') { throw "a V1 CLI's default model is not the Ollama default: [$($w.model)]" }
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig leaves an unchanged APPDATA config.json untouched' {
+    # The APPDATA copy used to be rewritten on EVERY run: no compare, no backup.
+    Invoke-OpenCodeScratch -Seed '{"theme":"mine"}' -Body {
+        param($c)
+        $null = & $c.Run
+        if (-not (Test-Path -LiteralPath $c.AppDataFile)) { throw 'run 1 did not write the APPDATA config.json' }
+        $time1 = (Get-Item -LiteralPath $c.AppDataFile).LastWriteTimeUtc
+        $hash1 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+
+        # Timestamps are coarse on some filesystems: pause so a rewrite shows.
+        Start-Sleep -Milliseconds 1200
+        $null = & $c.Run
+        $time2 = (Get-Item -LiteralPath $c.AppDataFile).LastWriteTimeUtc
+        $hash2 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+        $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+        if ($time2 -ne $time1) { throw "run 2 rewrote the unchanged APPDATA config.json (LastWriteTimeUtc $($time1.ToString('o')) -> $($time2.ToString('o')))" }
+        if ($hash2 -ne $hash1) { throw 'run 2 changed the APPDATA config.json (SHA256 differs from run 1)' }
+        if ($backups.Count -ne 0) { throw "an unchanged APPDATA config.json got $($backups.Count) backup(s)" }
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig backs up a foreign APPDATA config.json once' {
+    Invoke-OpenCodeScratch -Seed '{"theme":"mine"}' -Body {
+        param($c)
+        $foreign = [Text.Encoding]::UTF8.GetBytes('{"foreign":"a file the user owns"}' + "`n")
+        $null = New-Item -ItemType Directory -Path $c.AppDataDir -Force
+        [IO.File]::WriteAllBytes($c.AppDataFile, $foreign)
+        $seedB64 = [Convert]::ToBase64String($foreign)
+
+        $null = & $c.Run
+        $backups1 = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter 'config.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1: the foreign file, once)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the foreign file, byte for byte' }
+        $now = (Get-Content -LiteralPath $c.AppDataFile -Raw -Encoding UTF8).TrimEnd()
+        $want = (Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8).TrimEnd()
+        if ($now -cne $want) { throw 'run 1 did not put the OpenCode config into the APPDATA config.json' }
+
+        # Runs 2 and 3 change nothing, so they back nothing up. The pause keeps a
+        # wrongly repeated backup from hiding behind a same-second name.
+        foreach ($run in 2, 3) {
+            Start-Sleep -Milliseconds 1200
+            $null = & $c.Run
+            $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+            if ($backups.Count -ne 1) { throw "backups after run $run = $($backups.Count) (want 1)" }
+        }
+        Pass
+    }
+}
+
 Test-Case 'zed default_model converges litellm to omniroute (zed routing)' {
     $realAppData = $env:APPDATA
     $scratch = Join-Path $env:TEMP "autoos-zeddm-$([Guid]::NewGuid().ToString('N'))"
@@ -5006,6 +5348,45 @@ Test-Case 'start-stack.ps1 parses without syntax errors' {
     $null = [System.Management.Automation.PSParser]::Tokenize(
         (Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw), [ref]$errors)
     Assert-Equal (@($errors)).Count 0
+}
+
+Test-Case 'start-stack.ps1: a settings backup never overwrites an earlier one taken in the same second' {
+    # The launcher is standalone (no module import, so no Copy-AutoOSBackup) and
+    # cannot run here (gateway, docker): pull its backup function out of the AST
+    # and run that in a scratch dir. Its two call sites are pinned by text. The
+    # stamp has whole-second resolution, so the same-second case is forced with
+    # -Stamp, as the module's test does.
+    $script = Join-Path $Root 'configuration\start-stack.ps1'
+    $tokens = $null; $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
+    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-FileBackup' }, $true))
+    if ($fn.Count -ne 1) { throw "want exactly one function New-FileBackup in start-stack.ps1, found $($fn.Count)" }
+    . ([scriptblock]::Create($fn[0].Extent.Text))
+
+    $text = Get-Content -LiteralPath $script -Raw
+    if (([regex]::Matches($text, [regex]::Escape('New-FileBackup -Path $ohSettings'))).Count -ne 2) { throw 'both OpenHands settings backups must go through New-FileBackup' }
+    if ($text -match [regex]::Escape('Copy-Item $ohSettings $backup')) { throw 'a settings backup still copies straight to a second-resolution name' }
+
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-stackbak-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $settings = Join-Path $scratch 'settings.json'
+        $stamp = '20260101-000000'
+        $made = @()
+        foreach ($v in 'v0', 'v1', 'v2') {
+            [IO.File]::WriteAllText($settings, $v)
+            $made += New-FileBackup -Path $settings -Stamp $stamp
+        }
+        $want = @("settings.json.autoos-backup-$stamp", "settings.json.autoos-backup-$stamp-1", "settings.json.autoos-backup-$stamp-2")
+        if ((@($made | ForEach-Object { Split-Path -Leaf $_ }) -join ',') -cne ($want -join ',')) { throw "backup names: [$(@($made | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')], want [$($want -join ', ')]" }
+        for ($i = 0; $i -lt 3; $i++) {
+            $got = [IO.File]::ReadAllText($made[$i])
+            if ($got -cne "v$i") { throw "$($want[$i]) holds [$got], want [v$i] (an earlier backup was overwritten)" }
+        }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
 }
 
 Test-Case 'openhands launch is detached, probed and stale-settings safe' {

@@ -1961,6 +1961,53 @@ function Get-AutoOSSkillsSource {
     return $null
 }
 
+function ConvertFrom-AutoOSJsonc {
+    <#
+      .SYNOPSIS ConvertFrom-Json for JSONC: // and /* */ comments, trailing commas.
+
+      .DESCRIPTION
+        Windows PowerShell 5.1 has no JSONC parser and the repo opencode.jsonc
+        is JSONC. Comments and commas are dropped only where they are syntax:
+        a "//" inside a string (a URL) and a ",}" inside a string are text and
+        survive. Same rules as the Linux writer's _strip_jsonc, which does not
+        protect a ",}" inside a string. A leading BOM is tolerated.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    # A JSON string literal: consumed whole, so nothing inside it is touched.
+    # Written as an unrolled loop: with a nested quantifier the engine backtracks
+    # exponentially on a string that never closes (26 characters took 4 s).
+    $str = '"[^"\\]*(?:\\[\s\S][^"\\]*)*"'
+    $t = $Text.TrimStart([char]0xFEFF)
+    $t = [regex]::Replace($t, "($str)|//[^\r\n]*|/\*[\s\S]*?\*/", '$1')
+    $t = [regex]::Replace($t, "($str)|,(?=\s*[}\]])", '$1')
+    $t | ConvertFrom-Json
+}
+
+function Test-AutoOSOpenCodeV2 {
+    <#
+      .SYNOPSIS $true when the `opencode` on PATH is the V2 CLI (@opencode/cli).
+
+      .DESCRIPTION
+        Same test as opencode_is_v2 in lib/linux/install.sh: `opencode
+        --version` prints a version starting with 2 (an optional leading v).
+        No opencode on PATH, or one that does not answer, is not V2.
+    #>
+    $cmd = Get-Command opencode -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cmd) { return $false }
+    # Windows PowerShell 5.1 turns a native command's stderr into a
+    # terminating error under 'Stop' (AGENTS.md section 6): judge the output.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $cmd.Source --version 2>$null
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    return ((@($out) -join "`n") -match '(^|[^0-9.])v?2\.')
+}
+
 function Set-AutoOSOpenCodeConfig {
     <#
       .SYNOPSIS Configure OpenCode CLI with local Ollama, MCP tools, and optional keys.
@@ -1971,6 +2018,11 @@ function Set-AutoOSOpenCodeConfig {
         Works 100% keyless by default against local Ollama (http://127.0.0.1:11434/v1).
         Tier routing (omniroute/tierN + litellm/tierN) comes from the repo
         opencode.jsonc, which merges over this user config by precedence.
+        The V2 CLI (@opencode/cli) reads a top-level `providers` block instead
+        of `provider`: when Test-AutoOSOpenCodeV2 says V2, the repo's
+        providers.omniroute and providers.litellm are copied into it verbatim
+        (as lib/linux/install.sh does), and `model` follows the repo default
+        only while it is unset or still the Ollama default below.
     #>
     $configDir = Join-Path $HOME '.config\opencode'
     $configFile = Join-Path $configDir 'opencode.json'
@@ -1998,6 +2050,23 @@ function Set-AutoOSOpenCodeConfig {
     } catch {
         Write-AutoOSLine "$($_.Exception.Message) - OpenCode configuration left unchanged" -Level error
         return
+    }
+
+    # V2 reads `providers`, not the V1 `provider` block written below: its
+    # gateway entries come from the repo opencode.jsonc (single source). Read
+    # up front like the catalog above, so an unreadable file stops the run
+    # before any backup. V1, or no opencode at all, leaves $v2Repo empty.
+    $v2Repo = $null
+    if (Test-AutoOSOpenCodeV2) {
+        $v2Source = Join-Path $script:RepoRoot 'opencode.jsonc'
+        if (Test-Path -LiteralPath $v2Source) {
+            try {
+                $v2Repo = ConvertFrom-AutoOSJsonc -Text (Get-Content -LiteralPath $v2Source -Raw -Encoding UTF8)
+            } catch {
+                Write-AutoOSLine "$v2Source is not valid JSONC ($($_.Exception.Message)) - OpenCode configuration left unchanged" -Level error
+                return
+            }
+        }
     }
 
     if (-not (Test-Path $configDir)) {
@@ -2150,12 +2219,14 @@ function Set-AutoOSOpenCodeConfig {
 
     $existing['provider'] = $providers
 
+    # The V1 default is keyless local Ollama; the V2 branch below moves off it.
+    $ollamaDefaultModel = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
     if (-not $existing.Contains('model') -or -not $existing['model']) {
-        $existing['model'] = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
+        $existing['model'] = $ollamaDefaultModel
     } elseif ((($existing['model'] -split '/')[0] -eq 'deepseek') -and -not $providers.Contains('deepseek')) {
         # The default pointed at a removed direct provider (deepseek):
         # fall back to keyless local Ollama instead of leaving it dangling.
-        $existing['model'] = 'ollama/' + $repoById['ollama-qwen2.5-coder'].direct.model.Split('/', 2)[1]
+        $existing['model'] = $ollamaDefaultModel
     }
 
 
@@ -2203,6 +2274,30 @@ function Set-AutoOSOpenCodeConfig {
     foreach ($t in $serenaMemoryTools) { $serenaToolsOff["serena_$t"] = $false }
     $existing['tools'] = $serenaToolsOff
 
+    # V2 (@opencode/cli): copy the repo's gateway providers verbatim into the
+    # top-level `providers` object, keeping every other provider the user has
+    # there. The V1 default (local Ollama) has no V2 provider entry: `model`
+    # follows the repo default, but only while it is still unset or that
+    # default (-ceq: the model id is case-sensitive, as on Linux).
+    if ($null -ne $v2Repo) {
+        $v2Providers = [ordered]@{}
+        if ($existing.Contains('providers') -and $existing['providers'] -is [System.Management.Automation.PSCustomObject]) {
+            foreach ($p in $existing['providers'].PSObject.Properties) { $v2Providers[$p.Name] = $p.Value }
+        }
+        $repoProviders = $v2Repo.PSObject.Properties['providers']
+        if ($null -ne $repoProviders -and $repoProviders.Value -is [System.Management.Automation.PSCustomObject]) {
+            foreach ($gateway in @('omniroute', 'litellm')) {
+                $entry = $repoProviders.Value.PSObject.Properties[$gateway]
+                if ($null -ne $entry) { $v2Providers[$gateway] = $entry.Value }
+            }
+        }
+        $existing['providers'] = $v2Providers
+        $repoModel = $v2Repo.PSObject.Properties['model']
+        if ($null -ne $repoModel -and $repoModel.Value -and $existing['model'] -ceq $ollamaDefaultModel) {
+            $existing['model'] = $repoModel.Value
+        }
+    }
+
     $json = $existing | ConvertTo-Json -Depth 10
     # Parsed JSON, not bytes: the agent generator below rewrites this file in its
     # own formatting, and a formatting difference alone must cost neither a
@@ -2247,7 +2342,21 @@ function Set-AutoOSOpenCodeConfig {
         $appDataDir = Join-Path $env:APPDATA 'opencode'
         if (-not (Test-Path $appDataDir)) { New-Item -ItemType Directory -Path $appDataDir -Force | Out-Null }
         $appDataFile = Join-Path $appDataDir 'config.json'
-        (Get-Content $configFile -Raw) | Out-File -FilePath $appDataFile -Encoding utf8
+        # Same rule as every other file this writer touches (AGENTS.md section
+        # 4): read, write only on change, back up what was there once. Compared
+        # as text, not bytes: the encoding Out-File writes (BOM or not) is the
+        # host's, and a copy that only differs in it or in its final newline is
+        # the same config. The copy itself is written exactly as before.
+        $copyText = Get-Content $configFile -Raw
+        $appDataCurrent = $false
+        if (Test-Path -LiteralPath $appDataFile) {
+            $appDataText = [string](Get-Content -LiteralPath $appDataFile -Raw -Encoding UTF8)
+            $appDataCurrent = ($appDataText.TrimEnd("`r", "`n") -ceq ([string]$copyText).TrimEnd("`r", "`n"))
+        }
+        if (-not $appDataCurrent) {
+            if (Test-Path -LiteralPath $appDataFile) { $null = Copy-AutoOSBackup -Path $appDataFile }
+            $copyText | Out-File -FilePath $appDataFile -Encoding utf8
+        }
     }
 }
 
@@ -3505,7 +3614,7 @@ Export-ModuleMember -Function `
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
-    Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
+    Set-AutoOSOpenCodeConfig, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig,
     Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Set-AutoOSQoderMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
