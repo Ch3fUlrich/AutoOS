@@ -940,11 +940,45 @@ class HeadlessRefusalTests(unittest.TestCase):
             captured = io.StringIO()
             with contextlib.redirect_stdout(captured):
                 rc = self.cli.run_client([sys.executable, "-c", code], tmp,
-                                         dict(os.environ))
+                                         dict(os.environ), capture=True)
         self.assertEqual(rc, 0)
         self.assertIn("no output produced", captured.getvalue())
         self.assertIn("no output produced", rc.tail)
         self.assertIsNotNone(self.cli.headless_refusal(rc.tail))
+
+    def test_a_refusal_before_64_kib_of_later_output_is_still_caught(self):
+        # review-spfix: the refusal line scrolled out of the 64 KiB tail.
+        code = ("import sys\n"
+                "sys.stdout.write(%r + 'x' * 70000 + '\\n')\n"
+                "sys.stdout.flush()\n" % self.AGY_REFUSAL)
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = self.cli.run_client([sys.executable, "-c", code], tmp,
+                                         dict(os.environ), capture=True)
+        self.assertNotIn("no output produced", rc.tail)
+        self.assertEqual(self.cli.refusal_exit(0, rc.refusal or "")[0], 6)
+
+    def test_an_uncaptured_client_keeps_the_spawner_stdout(self):
+        # review-spfix: capturing hands every client a pipe instead of the
+        # operator's terminal; only clients whose refusal we detect are piped.
+        code = "import os; print(os.fstat(1).st_ino)"
+        out = os.path.join(tempfile.mkdtemp(), "out.txt")
+        with open(out, "w") as fh:
+            saved = os.dup(1)
+            os.dup2(fh.fileno(), 1)
+            try:
+                rc = self.cli.run_client([sys.executable, "-c", code], ".",
+                                         dict(os.environ))
+            finally:
+                os.dup2(saved, 1)
+                os.close(saved)
+            inode = os.fstat(fh.fileno()).st_ino
+        self.assertEqual(int(rc), 0)
+        self.assertEqual(open(out).read().strip(), str(inode))
+        self.assertEqual(rc.tail, "")
+
+    def test_only_agy_is_captured(self):
+        self.assertEqual(self.cli.CAPTURE_CLIENTS, ("agy",))
 
     def test_the_tail_keeps_only_the_last_64_kib(self):
         code = ("import sys\n"
@@ -953,7 +987,7 @@ class HeadlessRefusalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with contextlib.redirect_stdout(io.StringIO()):
                 rc = self.cli.run_client([sys.executable, "-c", code], tmp,
-                                         dict(os.environ))
+                                         dict(os.environ), capture=True)
         self.assertEqual(rc, 0)
         self.assertLessEqual(len(rc.tail.encode("utf-8")), 64 * 1024)
         self.assertTrue(rc.tail.endswith("THE-END"))

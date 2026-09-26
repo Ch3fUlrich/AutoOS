@@ -17,6 +17,9 @@ default: a silently mis-scored task is routed to a model that cannot do it.
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta, timezone
+
 import autoos_track as track  # tools/ is on sys.path for every caller
 from registry import resolve_leg  # tools/ is on sys.path for every caller
 
@@ -517,3 +520,396 @@ def pick(scores, mode, registry):
     chosen = best[1]
     return chosen, "theta %s missed: best p %s on %s" % (
         theta, chosen["p"], chosen["route"])
+
+
+# ---------------------------------------------------------------------------
+# Time tie-break and defer (spec sections 5.3 step 6 and 6.4). Pure: `now` is
+# passed in, never read from the clock; provider windows come from the
+# registry. Time never overrides a hard filter (D4) -- these functions only
+# order or delay candidates that already survived filtering and scoring.
+# Quota headroom (the other half of step 6's tie-break) is not measured
+# anywhere yet, so it plays no part here: this is price-window only, and a
+# route is never preferred on invented headroom data.
+# ---------------------------------------------------------------------------
+
+_WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+_DEADLINE_RE = re.compile(
+    r"^(?P<y>\d{4})-(?P<mo>\d{2})-(?P<d>\d{2})T"
+    r"(?P<h>\d{2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?Z$")
+
+
+def _minutes_of_day(hhmm):
+    """Minutes since 00:00 for an "HH:MM" string."""
+    hour, minute = hhmm.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def _window_contains(window, now):
+    """True when `now` falls in `window`'s days and [utc_from, utc_to).
+
+    "23:59" as `utc_to` means to midnight (1440), so 23:59 itself is inside.
+    """
+    if _WEEKDAY_NAMES[now.weekday()] not in window["days"]:
+        return False
+    start = _minutes_of_day(window["utc_from"])
+    end_str = window["utc_to"]
+    end = 1440 if end_str == "23:59" else _minutes_of_day(end_str)
+    minute = now.hour * 60 + now.minute
+    return start <= minute < end
+
+
+def price_factor(provider_id, registry, now):
+    """The price_factor of the first window of `provider_id` containing `now`.
+
+    1.0 when the provider has no windows, or none of its windows cover `now`.
+    """
+    windows = registry["providers"].get(provider_id, {}).get("windows") or []
+    for window in windows:
+        if _window_contains(window, now):
+            return float(window["price_factor"])
+    return 1.0
+
+
+def _next_quarter_hour(dt):
+    """The first quarter-hour mark strictly after `dt`."""
+    floored = dt.replace(minute=(dt.minute // 15) * 15, second=0, microsecond=0)
+    return floored + timedelta(minutes=15)
+
+
+def next_cheap_start(provider_id, registry, now, horizon_hours=48):
+    """The first time strictly after `now` where `provider_id` turns cheap.
+
+    Steps 15 minutes at a time from the next quarter hour. None when the
+    provider is already cheap at `now`, has no windows, or does not turn
+    cheap again within `horizon_hours`.
+    """
+    if price_factor(provider_id, registry, now) < 1.0:
+        return None
+    windows = registry["providers"].get(provider_id, {}).get("windows") or []
+    if not windows:
+        return None
+
+    deadline = now + timedelta(hours=horizon_hours)
+    candidate = _next_quarter_hour(now)
+    while candidate < deadline:
+        if price_factor(provider_id, registry, candidate) < 1.0:
+            return candidate
+        candidate += timedelta(minutes=15)
+    return None
+
+
+def _leg_provider(leg):
+    """The provider id half of a "<provider>/<model>" leg string."""
+    return leg.partition("/")[0]
+
+
+def _format_iso_z(dt):
+    """`dt` (always on a whole minute here) as "YYYY-MM-DDTHH:MMZ"."""
+    return dt.strftime("%Y-%m-%dT%H:%MZ")
+
+
+def tie_break(scores, registry, now):
+    """(score, reason) tie-break by provider price window, spec 5.3 step 6.
+
+    `best` is the score with the lowest `expected_cost`; `candidates` are the
+    scores within 10% of it (input order kept). The first candidate whose leg
+    provider is in a cheap window (`price_factor < 1.0`) at `now` wins; with
+    none, `best` is kept. Quota headroom (the other half of step 6) is not
+    measured anywhere yet, so it is not considered here -- this tie-break is
+    price-window only, never invented data. Empty `scores` raises ValueError.
+    """
+    if not scores:
+        raise ValueError("tie_break: no scores to choose from")
+
+    best = min(scores, key=lambda s: s["expected_cost"])
+    threshold = best["expected_cost"] * 1.10
+    candidates = [s for s in scores if s["expected_cost"] <= threshold]
+
+    for score in candidates:
+        factor = price_factor(_leg_provider(score["leg"]), registry, now)
+        if factor < 1.0:
+            reason = ("time: %s in cheap window (x%g) within 10%% of best"
+                      % (score["route"], factor))
+            return score, reason
+
+    return best, "time: no cheaper window within 10%"
+
+
+def defer_until(card, chosen_score, registry, now):
+    """(datetime or None, reason) opt-in defer for a chosen route, spec 5.3/6.4/D4.
+
+    Only considered when `card["deferrable"]` is true and `card["deadline"]`
+    is set; otherwise `(None, "not deferrable")`. Blocking work never waits
+    (D4): a card that is not marked deferrable is never delayed here. When
+    deferrable, `next_cheap_start` is asked about the chosen leg's provider;
+    if it returns a time before the deadline, that is the defer time, else
+    `(None, "no defer: ...")` names why (already cheap, no window in the
+    horizon, or the next window starts too late).
+    """
+    if not (card.get("deferrable") and card.get("deadline")):
+        return None, "not deferrable"
+
+    deadline_str = card["deadline"]
+    match = _DEADLINE_RE.match(deadline_str)
+    if not match:
+        raise ValueError(
+            "deadline %r: expected an ISO 8601 UTC string" % deadline_str)
+    groups = match.groupdict()
+    deadline = datetime(
+        int(groups["y"]), int(groups["mo"]), int(groups["d"]),
+        int(groups["h"]), int(groups["mi"]), int(groups["s"] or 0),
+        tzinfo=timezone.utc)
+
+    provider_id = _leg_provider(chosen_score["leg"])
+    start = next_cheap_start(provider_id, registry, now)
+
+    if start is not None and start < deadline:
+        return start, "defer: %s cheap from %s before deadline %s" % (
+            provider_id, _format_iso_z(start), deadline_str)
+
+    if start is None:
+        if price_factor(provider_id, registry, now) < 1.0:
+            why = "%s is already cheap" % provider_id
+        else:
+            why = "%s has no cheaper window within the horizon" % provider_id
+    else:
+        why = "%s's next cheap window (%s) is not before deadline %s" % (
+            provider_id, _format_iso_z(start), deadline_str)
+    return None, "no defer: %s" % why
+
+
+# ---------------------------------------------------------------------------
+# plan(): the resolver v2 entry point (spec sections 5 intro, 5.3 steps 1-7,
+# 5.5, 5.7). Pure: it only composes the functions above, no I/O, no clock of
+# its own -- `now` is passed in. A missing `card["kind"/"mode"/"risk"]` fails
+# closed here; every other required key is checked by the function that reads
+# it (filter_routes, bucket, pick, ...).
+# ---------------------------------------------------------------------------
+
+_REQUIRED_CARD_KEYS = ("kind", "mode", "risk")
+
+# free < cheap < mid < frontier (spec 3.1); used to find "the next class up".
+_CLASS_ORDER = ("free", "cheap", "mid", "frontier")
+
+# D2: normal risk gets 1 cross-family API review, high risk gets 2 plus a
+# Sonnet close.
+_REVIEW_COUNTS = {"normal": 1, "high": 2}
+_CLOSER_MODEL = "claude-sonnet"
+
+
+def _leg_model_id(leg):
+    """The model id half of a "<provider>/<model>" leg string."""
+    return leg.partition("/")[2]
+
+
+def _model_family(leg, registry):
+    """The ``family`` of the model half of a "<provider>/<model>" leg string."""
+    return registry["models"][_leg_model_id(leg)].get("family")
+
+
+def _next_rung(ladder, current):
+    """The rung immediately above `current` on `ladder`; None at or past the top."""
+    if current is None or current not in ladder:
+        return None
+    index = ladder.index(current)
+    if index + 1 >= len(ladder):
+        return None
+    return ladder[index + 1]
+
+
+def _score_candidates(route_ids, bucket_name, kind, features, registry,
+                      track_record, orchestrator_model, mode):
+    """``score_route`` (with ``effort`` kept on it) for each id, in order.
+
+    Mirrors spec 5.3 step 4: for every route, its expected serving leg decides
+    the effort rung, then the route is scored at that rung.
+    """
+    out = []
+    for route_id in route_ids:
+        route = registry["routes"][route_id]
+        leg = expected_leg(route, registry)
+        if leg is None:
+            raise ValueError("route %r has no serving leg to score" % route_id)
+        _, model_id = leg
+        model = registry["models"][model_id]
+        eff = effort(bucket_name, kind, route["class"], model["effort_ladder"],
+                     model["reasoning"])
+        score = dict(score_route(route_id, bucket_name, eff, features, registry,
+                                 track_record, orchestrator_model, mode))
+        score["effort"] = eff
+        out.append(score)
+    return out
+
+
+def _select_reviewers(scores, survivors, chosen, risk, bucket_name, kind,
+                      features, registry, track_record, orchestrator_model,
+                      mode):
+    """``{"routes": [...], "reason": ...}`` reviewer routes, spec 5.7 / D2.
+
+    Candidates come from the already-scored routes when there is more than
+    the chosen one to pick from; an override that scored only the chosen
+    route falls back to scoring every survivor, so a pinned route never
+    starves review of candidates. Reviewers are picked cheapest-first, each
+    one's serving leg family differing from the chosen leg's and from every
+    reviewer already picked -- a reviewer is never the writer's family twice
+    over. Too few distinct families still returns what was found, naming the
+    shortfall in ``reason`` rather than silently reviewing with fewer eyes.
+    """
+    try:
+        needed = _REVIEW_COUNTS[risk]
+    except KeyError:
+        raise ValueError("unknown card risk %r" % (risk,))
+
+    pool = scores if len(scores) > 1 else _score_candidates(
+        survivors, bucket_name, kind, features, registry, track_record,
+        orchestrator_model, mode)
+
+    chosen_family = _model_family(chosen["leg"], registry)
+    ranked = sorted(
+        (s for s in pool if s["route"] != chosen["route"]),
+        key=lambda s: s["expected_cost"])
+
+    picked = []
+    excluded = {chosen_family}
+    for score in ranked:
+        family = _model_family(score["leg"], registry)
+        if family in excluded:
+            continue
+        picked.append(score["route"])
+        excluded.add(family)
+        if len(picked) == needed:
+            break
+
+    if len(picked) < needed:
+        reason = "only %d of %d distinct-family reviewer(s) available: %s" % (
+            len(picked), needed, ", ".join(picked) if picked else "none")
+    else:
+        reason = "cross-family reviewer(s): %s" % ", ".join(picked)
+
+    routes = list(picked)
+    if risk == "high":
+        routes.append(_CLOSER_MODEL)
+
+    return {"routes": routes, "reason": reason}
+
+
+def _escalation(chosen, scores, registry):
+    """The two escalation steps, spec 5.7.
+
+    ``logic`` raises effort one rung on the chosen leg's ladder; ``capability``
+    moves up a route class. Both look only at the routes actually scored in
+    this plan (never at unscored survivors): an override that narrowed
+    scoring to one route correctly reports no capability escalation rather
+    than inventing one from routes nobody costed.
+    """
+    model = registry["models"][_leg_model_id(chosen["leg"])]
+    ladder = model["effort_ladder"]
+    logic_step = {
+        "on": "logic",
+        "route": chosen["route"],
+        "effort": _next_rung(ladder, chosen["effort"]),
+    }
+
+    chosen_class = registry["routes"][chosen["route"]]["class"]
+    next_class = None
+    if chosen_class in _CLASS_ORDER:
+        index = _CLASS_ORDER.index(chosen_class)
+        if index + 1 < len(_CLASS_ORDER):
+            next_class = _CLASS_ORDER[index + 1]
+
+    capability_route = None
+    if next_class is not None:
+        up = [s for s in scores
+              if registry["routes"][s["route"]]["class"] == next_class]
+        if up:
+            capability_route = min(up, key=lambda s: s["expected_cost"])["route"]
+
+    capability_step = {"on": "capability", "route": capability_route}
+    return [logic_step, capability_step]
+
+
+def plan(card, features, client_state, registry, overlay, track_record,
+        orchestrator_model, now, client="opencode"):
+    """The resolver v2 entry point: compose the pure functions into a ``route_plan``.
+
+    Pure -- no I/O, no clock of its own; `now` is the caller's clock reading.
+    Spec 5 (intro), 5.3 steps 1-7, 5.5, 5.7:
+
+    1. filter, 2. bucket, 3. an override scores only its route (fail closed on
+    a removed/unknown one), 4. score every remaining route, 5. pick the
+    cheapest above theta (tie-broken by time when theta was met -- time never
+    beats reliability), 6. an opt-in defer by provider window, 7. emit the
+    plan with reviewers, escalation and one explain line per scored route.
+
+    A missing ``card["kind"/"mode"/"risk"]`` raises ValueError naming it.
+    """
+    for key in _REQUIRED_CARD_KEYS:
+        if key not in card:
+            raise ValueError("missing card key %r" % key)
+
+    survivors, removed = filter_routes(card, features, client_state, registry,
+                                       overlay, client)
+    bucket_name, _ = bucket(features, card)
+
+    if not survivors:
+        result = no_route(removed)
+        result["bucket"] = bucket_name
+        return result
+
+    override_route, override_reason = apply_override(card, survivors, removed)
+    if override_route is None and override_reason != "no override":
+        return {
+            "route": None,
+            "state": "input_required",
+            "reason": override_reason,
+            "bucket": bucket_name,
+        }
+
+    route_ids = [override_route] if override_route else survivors
+    scores = _score_candidates(route_ids, bucket_name, card["kind"], features,
+                               registry, track_record, orchestrator_model,
+                               card["mode"])
+
+    chosen, pick_reason = pick(scores, card["mode"], registry)
+    reason_parts = [pick_reason]
+
+    theta = _policy_value(registry, "modes", card["mode"], "theta", "value")
+    eligible = [s for s in scores if s["p"] >= theta]
+    if eligible:
+        chosen, time_reason = tie_break(eligible, registry, now)
+        reason_parts.append(time_reason)
+
+    defer_time, defer_reason = defer_until(card, chosen, registry, now)
+    reason_parts.append(defer_reason)
+
+    model_id = _leg_model_id(chosen["leg"])
+    model = registry["models"][model_id]
+    route_class = registry["routes"][chosen["route"]]["class"]
+
+    reviewers = _select_reviewers(scores, survivors, chosen, card["risk"],
+                                  bucket_name, card["kind"], features,
+                                  registry, track_record, orchestrator_model,
+                                  card["mode"])
+    escalation = _escalation(chosen, scores, registry)
+
+    return {
+        "route": chosen["route"],
+        "class": route_class,
+        "client": client,
+        "leg": chosen["leg"],
+        "effort": chosen["effort"],
+        "max_tokens": max_tokens(chosen["effort"], model["reasoning"],
+                                 model["output_max"]),
+        "context_budget": usable_context(model_id, registry, overlay),
+        "bucket": bucket_name,
+        "decompose": bucket_name in ("S3", "S4"),
+        "p": chosen["p"],
+        "expected_cost": chosen["expected_cost"],
+        "reviewers": reviewers,
+        "escalation": escalation,
+        "state": "deferred" if defer_time is not None else "ready",
+        "defer_until": _format_iso_z(defer_time) if defer_time is not None else None,
+        "reason": "; ".join(reason_parts),
+        "explain": [s["reason"] for s in scores],
+    }

@@ -8,6 +8,7 @@ cwd once `tools/` is on sys.path, which is the first thing this file does.
 import json
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
@@ -862,6 +863,464 @@ class ScoreTests(unittest.TestCase):
             self.assertGreaterEqual(score["expected_cost"], 0.0)
             self.assertTrue(score["reason"].startswith("E="))
         self.assertIsInstance(reason, str)
+
+
+class TimeTests(unittest.TestCase):
+    """Time tie-break and defer by provider windows (spec 5.3 step 6, 6.4).
+
+    A small inline registry: provider "dsk" has a weekday cheap window and a
+    weekend cheap window (DeepSeek's real shape, without depending on its
+    exact catalog hours); provider "flat" carries no windows at all. One
+    smoke test then checks the real catalog/ai-registry.json's deepseek
+    windows at a fixed Saturday.
+    """
+
+    def registry(self):
+        return {
+            "providers": {
+                "dsk": {"id": "dsk", "windows": [
+                    {"days": ["mon", "tue", "wed", "thu", "fri"],
+                     "utc_from": "10:00", "utc_to": "23:59",
+                     "price_factor": 0.5, "kind": "price",
+                     "source": "test", "verified": "2026-09-25"},
+                    {"days": ["sat", "sun"],
+                     "utc_from": "00:00", "utc_to": "23:59",
+                     "price_factor": 0.5, "kind": "price",
+                     "source": "test", "verified": "2026-09-25"},
+                ]},
+                "flat": {"id": "flat"},
+            },
+        }
+
+    def dt(self, y, mo, d, h, mi):
+        return datetime(y, mo, d, h, mi, tzinfo=timezone.utc)
+
+    def score(self, route, leg, expected_cost):
+        return {"route": route, "leg": leg, "expected_cost": expected_cost}
+
+    # --- price_factor -------------------------------------------------
+
+    def test_price_factor_inside_window(self):
+        # Monday 2026-09-28 10:00 UTC is inside the weekday window.
+        self.assertEqual(
+            r.price_factor("dsk", self.registry(), self.dt(2026, 9, 28, 10, 0)),
+            0.5)
+
+    def test_price_factor_outside_window(self):
+        self.assertEqual(
+            r.price_factor("dsk", self.registry(), self.dt(2026, 9, 28, 9, 59)),
+            1.0)
+
+    def test_price_factor_at_the_2359_end_boundary(self):
+        # "23:59" as utc_to means to midnight: 23:59 itself is still inside.
+        self.assertEqual(
+            r.price_factor("dsk", self.registry(), self.dt(2026, 9, 28, 23, 59)),
+            0.5)
+
+    def test_price_factor_weekend_window(self):
+        # Saturday 2026-09-26 is covered all day.
+        self.assertEqual(
+            r.price_factor("dsk", self.registry(), self.dt(2026, 9, 26, 3, 0)),
+            0.5)
+
+    def test_price_factor_provider_without_windows_is_always_1(self):
+        self.assertEqual(
+            r.price_factor("flat", self.registry(), self.dt(2026, 9, 28, 10, 0)),
+            1.0)
+
+    # --- next_cheap_start -----------------------------------------------
+
+    def test_next_cheap_start_from_before_the_window(self):
+        self.assertEqual(
+            r.next_cheap_start("dsk", self.registry(),
+                               self.dt(2026, 9, 28, 9, 20)),
+            self.dt(2026, 9, 28, 10, 0))
+
+    def test_next_cheap_start_already_inside_is_none(self):
+        self.assertIsNone(
+            r.next_cheap_start("dsk", self.registry(),
+                               self.dt(2026, 9, 28, 10, 30)))
+
+    def test_next_cheap_start_no_windows_is_none(self):
+        self.assertIsNone(
+            r.next_cheap_start("flat", self.registry(),
+                               self.dt(2026, 9, 28, 9, 20)))
+
+    # --- tie_break --------------------------------------------------------
+
+    def test_tie_break_prefers_a_cheap_window_within_10_percent(self):
+        now = self.dt(2026, 9, 28, 10, 0)  # dsk is cheap now
+        best = self.score("r-best", "flat/model", 1.0)
+        cheap = self.score("r-cheap", "dsk/model", 1.09)  # 9% worse
+        chosen, reason = r.tie_break([best, cheap], self.registry(), now)
+        self.assertIs(chosen, cheap)
+        self.assertEqual(
+            reason, "time: r-cheap in cheap window (x0.5) within 10% of best")
+
+    def test_tie_break_keeps_the_best_when_the_cheap_one_is_11_percent_worse(self):
+        now = self.dt(2026, 9, 28, 10, 0)
+        best = self.score("r-best", "flat/model", 1.0)
+        cheap = self.score("r-cheap", "dsk/model", 1.11)  # outside 10%
+        chosen, reason = r.tie_break([best, cheap], self.registry(), now)
+        self.assertIs(chosen, best)
+        self.assertEqual(reason, "time: no cheaper window within 10%")
+
+    def test_tie_break_empty_scores_fails_closed(self):
+        with self.assertRaises(ValueError):
+            r.tie_break([], self.registry(), self.dt(2026, 9, 28, 10, 0))
+
+    # --- defer_until --------------------------------------------------------
+
+    def test_defer_until_returns_the_start_before_the_deadline(self):
+        now = self.dt(2026, 9, 28, 9, 20)
+        card = {"deferrable": True, "deadline": "2026-09-28T12:00Z"}
+        chosen = self.score("r-x", "dsk/model", 1.0)
+        t, reason = r.defer_until(card, chosen, self.registry(), now)
+        self.assertEqual(t, self.dt(2026, 9, 28, 10, 0))
+        self.assertTrue(
+            reason.startswith("defer: dsk cheap from 2026-09-28T10:00Z"))
+
+    def test_defer_until_none_after_the_deadline(self):
+        now = self.dt(2026, 9, 28, 9, 20)
+        card = {"deferrable": True, "deadline": "2026-09-28T09:30Z"}
+        chosen = self.score("r-x", "dsk/model", 1.0)
+        t, reason = r.defer_until(card, chosen, self.registry(), now)
+        self.assertIsNone(t)
+        self.assertTrue(reason.startswith("no defer"))
+
+    def test_defer_until_none_when_not_deferrable(self):
+        now = self.dt(2026, 9, 28, 9, 20)
+        card = {"deferrable": False, "deadline": "2026-09-28T12:00Z"}
+        chosen = self.score("r-x", "dsk/model", 1.0)
+        self.assertEqual(
+            r.defer_until(card, chosen, self.registry(), now),
+            (None, "not deferrable"))
+
+    def test_defer_until_none_when_already_cheap(self):
+        now = self.dt(2026, 9, 28, 10, 30)  # already inside the cheap window
+        card = {"deferrable": True, "deadline": "2026-09-28T12:00Z"}
+        chosen = self.score("r-x", "dsk/model", 1.0)
+        t, reason = r.defer_until(card, chosen, self.registry(), now)
+        self.assertIsNone(t)
+        self.assertTrue(reason.startswith("no defer"))
+
+    # --- the real catalog -------------------------------------------------
+
+    def test_real_registry_deepseek_weekend_factor(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        saturday = self.dt(2026, 9, 26, 12, 0)
+        self.assertEqual(r.price_factor("deepseek", registry, saturday), 0.5)
+
+
+class PlanTests(unittest.TestCase):
+    """plan(): the resolver v2 entry point, spec 5 intro, 5.3 steps 1-7, 5.5, 5.7.
+
+    A small inline registry, in the same hand-computable style as ScoreTests
+    and TimeTests: two model families ("alpha", "beta") on free/cheap/frontier,
+    plus a third family ("gamma") on a mid route so the S3 case can show two
+    genuinely cross-family reviewers and a capability escalation that moves up
+    a class. One smoke test then runs plan() over the real
+    catalog/ai-registry.json.
+    """
+
+    def registry(self):
+        return {
+            "providers": {
+                "free-p": {"id": "free-p"},
+                "cheap-p": {"id": "cheap-p", "windows": [
+                    {"days": ["mon", "tue", "wed", "thu", "fri"],
+                     "utc_from": "10:00", "utc_to": "23:59",
+                     "price_factor": 0.5, "kind": "price",
+                     "source": "test", "verified": "2026-09-25"},
+                ]},
+                "mid-p": {"id": "mid-p"},
+                "frontier-p": {"id": "frontier-p"},
+            },
+            "models": {
+                "free-model": {"id": "free-model", "family": "alpha",
+                               "reasoning": False, "effort_ladder": [],
+                               "tool_calls": "proven",
+                               "price_in": 0.0, "price_out": 0.0,
+                               "output_max": 1000,
+                               "context_usable": {"tokens": 100000,
+                                                  "source": "default"}},
+                "cheap-model": {"id": "cheap-model", "family": "beta",
+                                "reasoning": True,
+                                "effort_ladder": ["none", "low", "medium", "high"],
+                                "tool_calls": "proven",
+                                "price_in": 1e-6, "price_out": 2e-6,
+                                "output_max": 200000,
+                                "context_usable": {"tokens": 200000,
+                                                   "source": "default"}},
+                "mid-model": {"id": "mid-model", "family": "gamma",
+                              "reasoning": True,
+                              "effort_ladder": ["none", "low", "medium", "high",
+                                                "xhigh"],
+                              "tool_calls": "proven",
+                              "price_in": 5e-6, "price_out": 1e-5,
+                              "output_max": 200000,
+                              "context_usable": {"tokens": 200000,
+                                                 "source": "default"}},
+                "frontier-model": {"id": "frontier-model", "family": "alpha",
+                                   "reasoning": True,
+                                   "effort_ladder": ["none", "low", "medium",
+                                                     "high", "max"],
+                                   "tool_calls": "proven",
+                                   "price_in": 1e-5, "price_out": 3e-5,
+                                   "output_max": 200000,
+                                   "context_usable": {"tokens": 200000,
+                                                      "source": "default"}},
+                "orch": {"id": "orch", "price_in": 5e-6, "price_out": 1e-5,
+                         "context_usable": {"tokens": 200000,
+                                            "source": "default"}},
+            },
+            "routes": {
+                "r-free": {"id": "r-free", "class": "free",
+                           "legs": ["free-p/free-model"]},
+                "r-cheap": {"id": "r-cheap", "class": "cheap",
+                            "legs": ["cheap-p/cheap-model"]},
+                "r-mid": {"id": "r-mid", "class": "mid",
+                          "legs": ["mid-p/mid-model"]},
+                "r-frontier": {"id": "r-frontier", "class": "frontier",
+                               "legs": ["frontier-p/frontier-model"]},
+                "r-retired": {"id": "r-retired", "class": "cheap",
+                              "retired": True, "legs": ["cheap-p/cheap-model"]},
+            },
+            "policy": {
+                "modes": {
+                    "cost-first": {"theta": {"value": 0.6},
+                                   "lambda": {"value": 0.0}},
+                    "balanced": {"theta": {"value": 0.8},
+                                 "lambda": {"value": 0.01}},
+                    "quality-first": {"theta": {"value": 0.95},
+                                      "lambda": {"value": 0.05}},
+                },
+                "verify_tokens": {
+                    "S0": {"tokens": 2000}, "S1": {"tokens": 2000},
+                    "S2": {"tokens": 8000}, "S3": {"tokens": 16000},
+                    "S4": {"tokens": 32000},
+                },
+                "latency_seed": {
+                    "free": {"minutes": 5}, "cheap": {"minutes": 10},
+                    "mid": {"minutes": 15}, "frontier": {"minutes": 30},
+                },
+                # free/cheap: reliable at S0-S1, fail S2+ (spec 5.6's real
+                # measurement shape). mid: steady. frontier: always reliable.
+                "seed_priors": {
+                    "free": {"S0": {"alpha": 8, "beta": 2},
+                             "S1": {"alpha": 8, "beta": 2},
+                             "S2": {"alpha": 2, "beta": 8},
+                             "S3": {"alpha": 1, "beta": 9},
+                             "S4": {"alpha": 1, "beta": 9}},
+                    "cheap": {"S0": {"alpha": 8, "beta": 2},
+                              "S1": {"alpha": 8, "beta": 2},
+                              "S2": {"alpha": 2, "beta": 8},
+                              "S3": {"alpha": 1, "beta": 9},
+                              "S4": {"alpha": 1, "beta": 9}},
+                    "mid": {"S0": {"alpha": 8, "beta": 2},
+                            "S1": {"alpha": 8, "beta": 2},
+                            "S2": {"alpha": 8, "beta": 2},
+                            "S3": {"alpha": 8, "beta": 2},
+                            "S4": {"alpha": 8, "beta": 2}},
+                    "frontier": {"S0": {"alpha": 99, "beta": 1},
+                                 "S1": {"alpha": 99, "beta": 1},
+                                 "S2": {"alpha": 99, "beta": 1},
+                                 "S3": {"alpha": 99, "beta": 1},
+                                 "S4": {"alpha": 99, "beta": 1}},
+                },
+            },
+        }
+
+    def card(self, **overrides):
+        base = {"kind": "implement", "spec": "exact", "risk": "normal",
+                "mode": "balanced", "privacy": "public"}
+        base.update(overrides)
+        return base
+
+    def features(self, **overrides):
+        base = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                "tests": True, "need_tokens": 1000}
+        base.update(overrides)
+        return base
+
+    def state(self, installed=True, signed_in=True):
+        return {"opencode": {"installed": installed, "signed_in": signed_in,
+                             "reason": ""}}
+
+    def dt(self, y, mo, d, h, mi):
+        return datetime(y, mo, d, h, mi, tzinfo=timezone.utc)
+
+    # A fixed clock, Tuesday before cheap-p's 10:00 window: the tie-break has
+    # nothing to prefer, so "ready" plans are deterministic.
+    def now(self):
+        return self.dt(2026, 9, 29, 9, 0)
+
+    def s0_plan(self, **card_overrides):
+        return r.plan(self.card(**card_overrides), self.features(),
+                     self.state(), self.registry(), {}, [], "orch",
+                     self.now())
+
+    # --- every key, the S0/ready shape ------------------------------------
+
+    def test_every_output_key_present(self):
+        result = self.s0_plan()
+        self.assertEqual(set(result.keys()), {
+            "route", "class", "client", "leg", "effort", "max_tokens",
+            "context_budget", "bucket", "decompose", "p", "expected_cost",
+            "reviewers", "escalation", "state", "defer_until", "reason",
+            "explain",
+        })
+        self.assertEqual(result["route"], "r-free")
+        self.assertEqual(result["class"], "free")
+        self.assertEqual(result["client"], "opencode")
+        self.assertEqual(result["leg"], "free-p/free-model")
+        self.assertIsNone(result["effort"])
+        self.assertIsNone(result["max_tokens"])
+        self.assertEqual(result["context_budget"], 100000)
+        self.assertEqual(result["bucket"], "S0")
+        self.assertFalse(result["decompose"])
+        self.assertAlmostEqual(result["p"], 0.8)
+        self.assertAlmostEqual(result["expected_cost"], 0.075)
+        self.assertEqual(result["state"], "ready")
+        self.assertIsNone(result["defer_until"])
+        self.assertEqual(
+            result["reason"],
+            "theta 0.8 met: lowest E=0.075000 on r-free; "
+            "time: no cheaper window within 10%; not deferrable")
+        self.assertEqual(len(result["explain"]), 4)
+
+    def test_reviewers_normal_risk_is_one_cross_family_route(self):
+        result = self.s0_plan()
+        # chosen r-free is family "alpha"; the cheapest non-alpha survivor is
+        # r-cheap ("beta").
+        self.assertEqual(result["reviewers"],
+                         {"routes": ["r-cheap"],
+                          "reason": "cross-family reviewer(s): r-cheap"})
+
+    def test_escalation_none_when_effort_is_none_and_class_moves_up(self):
+        result = self.s0_plan()
+        self.assertEqual(result["escalation"], [
+            {"on": "logic", "route": "r-free", "effort": None},
+            {"on": "capability", "route": "r-cheap"},
+        ])
+
+    def test_explain_has_one_line_per_scored_route_in_registry_order(self):
+        result = self.s0_plan()
+        legs_in_order = ["free-p/free-model", "cheap-p/cheap-model",
+                         "mid-p/mid-model", "frontier-p/frontier-model"]
+        self.assertEqual(len(result["explain"]), len(legs_in_order))
+        for line, leg in zip(result["explain"], legs_in_order):
+            self.assertIn(leg, line)
+
+    # --- no survivor -------------------------------------------------------
+
+    def test_no_survivor_is_input_required_with_bucket(self):
+        result = r.plan(self.card(), self.features(),
+                        self.state(installed=False), self.registry(), {}, [],
+                        "orch", self.now())
+        self.assertEqual(result["route"], None)
+        self.assertEqual(result["state"], "input_required")
+        self.assertEqual(result["bucket"], "S0")
+        self.assertIn("hints", result)
+        self.assertIn("no route survives the filters", result["reason"])
+
+    # --- override ------------------------------------------------------
+
+    def test_override_to_a_survivor_scores_only_it(self):
+        result = self.s0_plan(override={"route": "r-cheap"})
+        self.assertEqual(result["route"], "r-cheap")
+        self.assertEqual(len(result["explain"]), 1)
+
+    def test_override_to_a_removed_route_is_input_required(self):
+        result = self.s0_plan(override={"route": "r-retired"})
+        self.assertEqual(result, {
+            "route": None,
+            "state": "input_required",
+            "reason": "override r-retired removed by filters: retired",
+            "bucket": "S0",
+        })
+
+    # --- S3: decompose, reviewers, escalation across classes ---------------
+
+    def s3_plan(self, **card_overrides):
+        card_overrides.setdefault("risk", "high")
+        card_overrides.setdefault("spec", "partial")
+        return r.plan(self.card(**card_overrides),
+                     self.features(files=6, fanout=10, lines=150,
+                                  tests=False),
+                     self.state(), self.registry(), {}, [], "orch",
+                     self.now())
+
+    def test_bucket_s3_sets_decompose_true(self):
+        result = self.s3_plan()
+        self.assertEqual(result["bucket"], "S3")
+        self.assertTrue(result["decompose"])
+        self.assertEqual(result["route"], "r-mid")
+
+    def test_reviewers_high_risk_is_two_cross_family_routes_plus_the_closer(self):
+        result = self.s3_plan()
+        # chosen r-mid is family "gamma"; the two cheapest routes of a
+        # different family from "gamma" and from each other are r-free
+        # ("alpha") and r-cheap ("beta") -- r-frontier is skipped, same
+        # family ("alpha") as the already-picked r-free.
+        self.assertEqual(result["reviewers"], {
+            "routes": ["r-free", "r-cheap", "claude-sonnet"],
+            "reason": "cross-family reviewer(s): r-free, r-cheap",
+        })
+
+    def test_escalation_logic_raises_one_rung_capability_moves_up_a_class(self):
+        result = self.s3_plan()
+        self.assertEqual(result["escalation"], [
+            {"on": "logic", "route": "r-mid", "effort": "xhigh"},
+            {"on": "capability", "route": "r-frontier"},
+        ])
+
+    # --- time and defer ------------------------------------------------
+
+    def test_deferrable_card_with_a_deadline_after_the_next_cheap_window(self):
+        card = self.card(override={"route": "r-cheap"}, deferrable=True,
+                         deadline="2026-09-29T12:00Z")
+        result = r.plan(card, self.features(), self.state(), self.registry(),
+                        {}, [], "orch", self.dt(2026, 9, 29, 9, 20))
+        self.assertEqual(result["route"], "r-cheap")
+        self.assertEqual(result["state"], "deferred")
+        self.assertEqual(result["defer_until"], "2026-09-29T10:00Z")
+        self.assertIn("defer: cheap-p cheap from 2026-09-29T10:00Z",
+                     result["reason"])
+
+    # --- missing card keys ------------------------------------------------
+
+    def test_missing_card_key_raises_naming_it(self):
+        for key in ("kind", "mode", "risk"):
+            with self.subTest(key=key):
+                card = self.card()
+                del card[key]
+                with self.assertRaises(ValueError) as cm:
+                    r.plan(card, self.features(), self.state(),
+                          self.registry(), {}, [], "orch", self.now())
+                self.assertIn(key, str(cm.exception))
+
+    # --- the real catalog ---------------------------------------------
+
+    def test_real_registry_review_card_returns_a_route(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        # Every model is tool_calls unproven today, so an agentic kind (e.g.
+        # implement) has no surviving route; review is not agentic.
+        card = {"kind": "review", "spec": "exact", "risk": "normal",
+               "mode": "balanced", "privacy": "public"}
+        features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                   "tests": True, "need_tokens": 1000}
+        client_state = {"opencode": {"installed": True, "signed_in": True,
+                                     "reason": ""}}
+        result = r.plan(card, features, client_state, registry, {}, [],
+                        "muse-spark", self.dt(2026, 9, 29, 9, 0))
+        self.assertIsNotNone(result["route"])
+        self.assertEqual(result["state"], "ready")
+        self.assertIn(result["route"], registry["routes"])
 
 
 if __name__ == "__main__":
