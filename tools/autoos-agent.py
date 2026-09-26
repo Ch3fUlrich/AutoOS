@@ -25,11 +25,18 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
      checkout's root, and a relative write from inside one landed in the main
      repo (live, 2026-09-24). Nothing is merged or deleted for you.
 
-Routing: without --tier the model comes from a task card through
-autoos_routing.select_combo (ADR 0006) - the one decision point, shared with
-the MCP server. An empty card is t2-worker; `--card privacy=sensitive,ctx=1m`
-fails closed unless --allow-training. The combo's tier picks the opencode
-agent. Every run logs card -> combo, reason and the routing version.
+Routing: without --tier the model comes from a task card. A v1 card
+(role/complexity/ctx/spend, or empty) goes through autoos_routing.select_combo
+(ADR 0006) - the one decision point, shared with the MCP server. An empty card
+is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed unless
+--allow-training. A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
+paths/override, spec 6.1 "run takes card v2") instead goes through the
+resolver (route_plan_for/autoos_resolver.plan, the same core the `route`
+subcommand uses): `state` input_required refuses with exit 2 and the plan's
+reason; `deferred` refuses with exit 2 ("deferred until <time>: <reason>")
+unless --no-defer. Either way the combo's tier picks the opencode agent (a v2
+route id's own t1/t2/t3- prefix, when it has one, else tier 2). Every run logs
+card -> combo, reason and the routing version.
 
 Clients (autoos_clients.py; `list` prints the matrix): opencode (default),
 claude (`claude -p` on its own login; --joinable = a `--bg --remote-control`
@@ -124,6 +131,14 @@ PROBE_PROPOSALS_LOG = os.path.join(ROOT, "logs", "routing", "probe-proposals.jso
 # `route`'s default orchestrator model (spec 6.1): a registry model id billed
 # for verification cost when the caller does not pin one.
 DEFAULT_ORCHESTRATOR_MODEL = "claude-opus-4-6"
+# A v1 combo (t1-orchestrator, t2-worker, t3-driver, their -clean twins) always
+# carries one of these prefixes. A resolver v2 route id (RUNV2) may or may not
+# (e.g. "t1-orchestrator-free-only" does; "t4-rag" and "deepseek-v4.1-flash" do
+# not - t4 is not even a TIERS key). _tier_for_route defaults to tier 2 when it
+# does not: the resolver has already priced and picked the model that will
+# actually run, so this only decides which local opencode agent identity
+# (t1-orchestrator/t2-worker/t3-reviewer) spawns the client.
+_TIER_PREFIX_RE = re.compile(r"^t([123])-")
 # --lean drops these MCP servers. Measured 2026-09-24, one --free opencode run,
 # peak process-tree RSS: 1406 MB with every server, 678 MB with these off
 # (516 MB with graphify off too).
@@ -239,8 +254,91 @@ def unique_suffix() -> str:
     return os.urandom(3).hex()
 
 
+def _tier_for_route(combo: str) -> int:
+    """The opencode tier agent for a resolver v2 route id (RUNV2, spec 6.1).
+
+    See the comment on _TIER_PREFIX_RE for why an unrecognised prefix defaults
+    to tier 2 rather than raising.
+    """
+    match = _TIER_PREFIX_RE.match(combo or "")
+    return int(match.group(1)) if match else 2
+
+
+def _is_v2_card(parsed: dict) -> bool:
+    """True when `parsed` (routing.parse_card's own output, not yet validated
+    or defaulted) carries any card-v2-only field (spec 4): kind, risk, spec,
+    mode, deferrable, deadline, paths, override (spelled either as one
+    ``override`` object/JSON value or as ``override.route=``/``.client=``/
+    ``.effort=`` key=value pairs). An empty card, or one with only v1 and/or
+    the shared ``privacy`` field, is not v2 - it keeps today's select_combo
+    path unchanged (spec 4: "v1 cards stay valid").
+    """
+    for key in parsed:
+        if key in routing.CARD_V2_ONLY:
+            return True
+        if isinstance(key, str) and key.startswith("override."):
+            return True
+    return False
+
+
+class RouteInputRequired(ValueError):
+    """A v2 card's resolver plan is input_required: no route survives the filters."""
+
+
+class RouteDeferred(ValueError):
+    """A v2 card's resolver plan is deferred and --no-defer was not given."""
+
+
+def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None) -> dict:
+    """A v2 card is routed by the resolver, not select_combo (RUNV2, spec 6.1
+    "run takes card v2"). Shares route_plan_for/autoos_resolver.plan with the
+    `route` subcommand and the MCP `route` tool, so `run` and `route` can never
+    disagree about the same card.
+
+    `state` "input_required" (no route survived the filters) raises
+    RouteInputRequired with the plan's own reason; "deferred" raises
+    RouteDeferred with "deferred until <time>: <reason>" unless --no-defer was
+    given, in which case the deferral is ignored and the chosen route runs now
+    (the reason says so). Both exceptions are ValueError subclasses that
+    cmd_run catches ahead of its generic ValueError handler, so the message is
+    printed as-is - no "(see: ...)" suffix tacked on.
+
+    privacy: a card's privacy=sensitive is enforced entirely inside plan()'s
+    own filters (spec 5.3 step 1) - this function adds no privacy rule of its
+    own; it only turns whatever route plan() already picked into a combo/tier.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    registry = load_registry(REGISTRY_PATH)
+    overlay = load_overlay(MEASURED_OVERLAY_PATH)
+    track_record = track.load(TRACK_RECORD)
+    client_state = measure_mod.client_state(clients)
+    result = route_plan_for(parsed_card, args.task, ROOT, DEFAULT_ORCHESTRATOR_MODEL,
+                            now, registry, overlay, track_record, client_state)
+
+    if result["state"] == "input_required":
+        raise RouteInputRequired(result["reason"])
+    if result["state"] == "deferred" and not args.no_defer:
+        raise RouteDeferred("deferred until %s: %s" % (result["defer_until"], result["reason"]))
+
+    combo = result["route"]
+    tier = _tier_for_route(combo)
+    model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
+    reason = "resolver-v2: %s" % result["reason"]
+    if result["state"] == "deferred":  # only reachable with --no-defer, per the raise above
+        reason = "resolver-v2 (ignoring defer until %s via --no-defer): %s" % (
+            result["defer_until"], result["reason"])
+    if override and model:  # an explicit --model wins over the resolver's route, and says so
+        combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
+
+    card = routing.normalize_v2(parsed_card)
+    return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
+            "privacy": card["privacy"], "review": card["kind"] == "review",
+            "bucket": result["bucket"]}
+
+
 def resolve_route(args, cfg: dict, client) -> dict:
-    """Tier/model/combo for this run: an explicit --tier, or the card through select_combo."""
+    """Tier/model/combo for this run: an explicit --tier, a v2 card through the
+    resolver (RUNV2), or a v1 card through select_combo."""
     # --model names a gateway combo for opencode and the gateway clients; for
     # agy/claude/qoder it is the client's own model id and is not checked here.
     override = args.model if client.gateway else None
@@ -250,7 +348,10 @@ def resolve_route(args, cfg: dict, client) -> dict:
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
                 "review": args.tier == 3}
-    card = routing.normalize(routing.parse_card(args.card or ""))
+    parsed = routing.parse_card(args.card or "")
+    if _is_v2_card(parsed):
+        return _resolve_route_v2(args, parsed, cfg, override)
+    card = routing.normalize(parsed)
     combo, reason = routing.select_combo(card, args.allow_training)
     tier = int(re.match(r"t(\d)-", combo).group(1))  # t2-worker-clean -> 2
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
@@ -597,6 +698,11 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     run's served leg, effort and tokens are unknown to this process, so they
     are recorded as unknown/0 until the resolver measures them. rc is the same
     value the run exits with, the NO-OP override included.
+
+    ``bucket`` is the resolver's own bucket (RUNV2: ``route["bucket"]``, set
+    only for a v2-routed run) when there is one, else the v1 compat card's
+    ``bucket_hint`` (also unset today - v1's ``normalize`` never adds it),
+    else "unknown".
     """
     route = plan["route"]
     client = clients.CLIENTS.get(plan.get("client"))
@@ -610,7 +716,7 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
         "route": route["combo"],
         "class": klass,
         "served_leg": "unknown",
-        "bucket": card.get("bucket_hint") or "unknown",
+        "bucket": route.get("bucket") or card.get("bucket_hint") or "unknown",
         "effort": "unknown",
         "tokens_in": 0,
         "tokens_out": 0,
@@ -886,6 +992,8 @@ def cmd_run(args, cfg: dict) -> int:
         plan = build_plan(args, cfg)
     except clients.DepthError as exc:
         return refuse(str(exc), 4)
+    except (RouteInputRequired, RouteDeferred) as exc:  # RUNV2: the plan's own
+        return refuse(str(exc))                        # message, no suffix added
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
     route = plan["route"]
@@ -986,6 +1094,9 @@ def main(argv=None) -> int:
     run.add_argument("--tier", type=int, choices=sorted(TIERS),
                      help="pick the tier by hand (default: resolve --card, an empty card is t2-worker)")
     run.add_argument("--card", help="task card, e.g. role=review,privacy=sensitive (or JSON)")
+    run.add_argument("--no-defer", dest="no_defer", action="store_true",
+                     help="a v2 card (RUNV2): ignore the resolver's deferral (state=deferred) "
+                          "and run now instead of refusing with exit 2")
     run.add_argument("--allow-training", action="store_true",
                      help="let privacy=sensitive,ctx=1m use t1-orchestrator-clean, whose leg trains on prompts (logged)")
     run.add_argument("--client", choices=sorted(clients.CLIENTS), default="opencode")

@@ -1650,6 +1650,175 @@ class RouteCliTests(unittest.TestCase):
         self.assertEqual(data["state"], "input_required")
 
 
+class RunCardV2Tests(unittest.TestCase):
+    """`run --card` v2 routes through the resolver (RUNV2, spec 6.1 "run takes
+    card v2"). No network, no real clients: MEASURED_OVERLAY_PATH/TRACK_RECORD
+    point at an empty tmp dir, `load_registry` is patched to the hand-computable
+    _small_route_registry() fixture (same one RouteCliTests uses), and
+    measure_mod.client_state is patched to _fake_client_state() so the resolver's
+    own client-installed/signed-in filter never shells out to a real client.
+    `clients.CLIENTS` itself is left real so `cmd_run`'s own client lookup
+    (`.gateway`, `.promo`, `.name`, ...) keeps working unchanged.
+    """
+
+    def setUp(self):
+        self.agent = load_agent()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        # _small_route_registry()'s only orchestrator-priceable model is "orch".
+        self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
+        registry_patch = mock.patch.object(self.agent, "load_registry",
+                                           lambda path: _small_route_registry())
+        registry_patch.start()
+        self.addCleanup(registry_patch.stop)
+        state_patch = mock.patch.object(self.agent.measure_mod, "client_state",
+                                        lambda *a, **k: _fake_client_state())
+        state_patch.start()
+        self.addCleanup(state_patch.stop)
+
+    def cfg(self):
+        """opencode.jsonc-shaped: every v1 combo plus the small registry's own
+        route ids ("r-free"/"r-cheap") declared under omniroute, so
+        resolve_model never refuses a combo this fixture can actually pick."""
+        names = list(routing.ALL_COMBOS) + ["r-free", "r-cheap"]
+        return {"providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="kind=review,paths=tools/registry.py", allow_training=False,
+            client="opencode", joinable=False, max_depth=None, clean=False, model=None,
+            free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=False, auto=True,
+            lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def run_cmd_run(self, **overrides):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(self.args(**overrides), self.cfg())
+        return rc, out.getvalue(), err.getvalue()
+
+    # --- a v2 card is routed by the resolver, not select_combo ------------
+
+    def test_v2_card_routes_via_plan_combo_is_the_resolvers_route(self):
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 0, err)
+        route_line = next(l for l in out.splitlines() if l.startswith("route: "))
+        combo = route_line.split()[1]
+        self.assertIn(combo, ("r-free", "r-cheap"))
+        self.assertIn("reason=resolver-v2:", route_line)
+
+    def test_v1_card_never_calls_the_resolver(self):
+        def boom(*a, **k):
+            raise AssertionError("route_plan_for must not be called for a v1 card")
+        with mock.patch.object(self.agent, "route_plan_for", boom):
+            rc, out, err = self.run_cmd_run(card="role=review")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("route: t3-driver reason=public-light", out)
+
+    def test_empty_card_never_calls_the_resolver(self):
+        def boom(*a, **k):
+            raise AssertionError("route_plan_for must not be called for an empty card")
+        with mock.patch.object(self.agent, "route_plan_for", boom):
+            rc, out, err = self.run_cmd_run(card="")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("route: t2-worker reason=public-default", out)
+
+    # --- tier comes from the route id's own t<1-3>- prefix, else tier 2 ----
+
+    def test_a_route_without_a_recognised_tier_prefix_defaults_to_tier_2(self):
+        self.assertEqual(self.agent._tier_for_route("r-free"), 2)
+        self.assertEqual(self.agent._tier_for_route("t4-rag"), 2)
+        self.assertEqual(self.agent._tier_for_route("deepseek-v4.1-flash"), 2)
+
+    def test_a_recognised_prefix_picks_its_own_tier(self):
+        self.assertEqual(self.agent._tier_for_route("t1-orchestrator-free-only"), 1)
+        self.assertEqual(self.agent._tier_for_route("t2-worker-clean"), 2)
+        self.assertEqual(self.agent._tier_for_route("t3-driver-clean"), 3)
+
+    # --- input_required / deferred / --no-defer -----------------------------
+
+    def test_input_required_state_refuses_with_exit_2_and_the_plans_reason(self):
+        fake = {"route": None, "state": "input_required",
+               "reason": "no route survives the filters: boom", "bucket": "S0"}
+        with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: dict(fake)):
+            rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 2)
+        self.assertIn("no route survives the filters: boom", err)
+        self.assertEqual(out, "")
+
+    def test_deferred_state_refuses_with_exit_2_and_the_defer_time(self):
+        fake = {"route": "r-cheap", "state": "deferred", "bucket": "S1",
+               "defer_until": "2026-10-01T00:00Z", "reason": "defer: cheap window ahead"}
+        with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: dict(fake)):
+            rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 2)
+        self.assertIn("deferred until 2026-10-01T00:00Z: defer: cheap window ahead", err)
+        self.assertEqual(out, "")
+
+    def test_no_defer_ignores_the_deferral_and_runs_now(self):
+        fake = {"route": "r-cheap", "state": "deferred", "bucket": "S1",
+               "defer_until": "2026-10-01T00:00Z", "reason": "defer: cheap window ahead"}
+        with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: dict(fake)):
+            rc, out, err = self.run_cmd_run(no_defer=True)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("route: r-cheap", out)
+        self.assertIn("reason=resolver-v2", out)
+
+    # --- the track entry records the resolver's own bucket ------------------
+
+    def test_track_entry_uses_the_plans_bucket_not_unknown(self):
+        plan = {"client": "opencode", "route": {"combo": "t2-worker", "card": {}, "bucket": "S2"}}
+        self.assertEqual(self.agent.track_entry(plan, 0, 1.0)["bucket"], "S2")
+
+    def test_track_entry_without_a_bucket_still_falls_back_to_unknown(self):
+        plan = {"client": "opencode", "route": {"combo": "t2-worker", "card": {}}}
+        self.assertEqual(self.agent.track_entry(plan, 0, 1.0)["bucket"], "unknown")
+
+
+class RunCardV2AcceptanceTests(unittest.TestCase):
+    """The exact command RUNV2's done-when names, against the real repo: real
+    registry, real opencode.jsonc, real clients (opencode has no sign-in probe;
+    the only client with one, agy, answers in ~1-2s per autoos_clients.py's own
+    measurement)."""
+
+    def test_run_card_kind_review_dry_run_prints_a_plan_on_the_real_repo(self):
+        r = run_agent("run", "--card", "kind=review,paths=tools/registry.py",
+                      "--dry-run", "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("reason=resolver-v2", r.stdout)
+        self.assertIn("would run:", r.stdout)
+
+
+class RunCardV2PrivacyTests(unittest.TestCase):
+    """RUNV2 brief step 4: a sensitive v2 card must never resolve to a non-
+    "-clean" combo. Exercises the real registry + overlay end to end (client
+    state is faked so it never shells out); skips itself when the resolver has
+    no route at all for this card on this host's data, rather than asserting a
+    route exists (that is the other lane's privacy filter to prove, not RUNV2's)."""
+
+    def test_sensitive_v2_card_only_ever_yields_a_clean_combo_when_routed(self):
+        agent = load_agent()
+        registry = json.loads((ROOT / "catalog" / "ai-registry.json")
+                              .read_text(encoding="utf-8"))
+        overlay = agent.load_overlay(agent.MEASURED_OVERLAY_PATH)
+        track_record = agent.track.load(agent.TRACK_RECORD)
+        result = agent.route_plan_for(
+            "kind=review,paths=tools/registry.py,privacy=sensitive", "", str(ROOT),
+            agent.DEFAULT_ORCHESTRATOR_MODEL,
+            datetime.datetime.now(datetime.timezone.utc), registry, overlay,
+            track_record, _fake_client_state())
+        if result["route"] is None:
+            self.skipTest("no route survives for a sensitive card on this host's "
+                          "registry/overlay (%s)" % result["reason"])
+        self.assertTrue(result["route"].endswith("-clean"),
+                        "sensitive card routed to %r, which is not a -clean combo"
+                        % result["route"])
+
+
 class McpRouteTests(unittest.TestCase):
     """The route/list_agents/context MCP tools as plain functions (spec 6.2)."""
 
