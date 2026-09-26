@@ -1037,6 +1037,81 @@ Test-Case 'the server answers a heartbeat the page can poll' {
     Pass
 }
 
+Test-Case 'config save: a changed POST backs up once under a rankable name and writes' {
+    # Behavioural drive of Save-AutoOSWebConfig (the extracted body of POST
+    # /api/config): a save that changes the file must take exactly one backup
+    # under the standard <file>.autoos-backup-yyyyMMdd-HHmmss[-N] name and
+    # write the merged result, and a real value change inside answers counts
+    # as a change even when no top-level key is new.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-cfgsave-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        $cfg = Join-Path $scratch 'autoos.config.json'
+        [IO.File]::WriteAllText($cfg, '{"version":1}')
+        $updates = '{"version":1,"profile":"workstation","answers":{"git_user_name":"Alice"}}' | ConvertFrom-Json
+        $result = Save-AutoOSWebConfig -Path $cfg -Updates $updates
+        Assert-True $result.ok 'a changed save did not report ok'
+        if ($result.ContainsKey('unchanged')) { throw 'a changed save claimed unchanged' }
+        $backups = @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*')
+        Assert-Equal $backups.Count 1
+        Assert-True ($backups[0].Name -match '^autoos\.config\.json\.autoos-backup-\d{8}-\d{6}(-\d{1,3})?$') "backup name not rankable: $($backups[0].Name)"
+        Assert-Equal ((Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).answers.git_user_name) 'Alice'
+        # A changed value inside answers (no new top-level key) is a change too.
+        $updates2 = '{"answers":{"git_user_name":"Bob"}}' | ConvertFrom-Json
+        $result2 = Save-AutoOSWebConfig -Path $cfg -Updates $updates2
+        if ($result2.ContainsKey('unchanged')) { throw 'an answers-value change claimed unchanged' }
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*').Count 2
+        Assert-Equal ((Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).answers.git_user_name) 'Bob'
+    } finally {
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'config save: an unchanged POST backs up and rewrites nothing' {
+    # Behavioural drive of Save-AutoOSWebConfig: the identical save again must
+    # create no backup and leave the bytes alone - and so must a save whose
+    # merge only REORDERS keys. Add-Member -Force moves an existing property
+    # to the end, so merging {version,answers{a,b}} into a file holding
+    # {version,profile,answers{a,b}} yields an object whose key order differs
+    # while every value is equal; an order-sensitive text compare treats that
+    # no-op save as a change and churns a backup + rewrite.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-cfgsave-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        $cfg = Join-Path $scratch 'autoos.config.json'
+        [IO.File]::WriteAllText($cfg, '{"version":1,"profile":"workstation","answers":{"a":"x","b":"y"}}')
+        $reorder = '{"version":1,"answers":{"a":"x","b":"y"}}' | ConvertFrom-Json
+        $result = Save-AutoOSWebConfig -Path $cfg -Updates $reorder
+        Assert-True $result.ok 'the reorder-only save did not report ok'
+        Assert-True $result.ContainsKey('unchanged') 'the reorder-only save was treated as a change'
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*').Count 0
+        Assert-Equal ([IO.File]::ReadAllText($cfg)) '{"version":1,"profile":"workstation","answers":{"a":"x","b":"y"}}'
+        $again = Save-AutoOSWebConfig -Path $cfg -Updates $reorder
+        Assert-True $again.ContainsKey('unchanged') 'the identical re-save was treated as a change'
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*').Count 0
+    } finally {
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'config save: an empty object in the config is compared, not a crash' {
+    # ConvertTo-AutoOSCanonicalJson once read $obj.PSObject.Properties.Name:
+    # member enumeration over zero properties throws under Set-StrictMode, so
+    # a config holding "answers": {} turned every save into a 500.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-cfgsave-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        $cfg = Join-Path $scratch 'autoos.config.json'
+        [IO.File]::WriteAllText($cfg, '{"version":1,"answers":{}}')
+        $result = Save-AutoOSWebConfig -Path $cfg -Updates ('{"version":1,"answers":{}}' | ConvertFrom-Json)
+        Assert-True $result.ContainsKey('unchanged') 'an identical save with an empty object was treated as a change'
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*').Count 0
+        Assert-Equal (ConvertTo-AutoOSCanonicalJson ('{}' | ConvertFrom-Json)) '{}'
+    } finally {
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'a page whose server has gone tears itself down' {
     if ($pageSource -notmatch 'function serverGone') { throw 'the page has no teardown path' }
     if ($pageSource -notmatch 'window\.close')       { throw 'the page never tries to close itself' }

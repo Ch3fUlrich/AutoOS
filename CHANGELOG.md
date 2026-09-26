@@ -27,6 +27,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and the printed `systemctl --user enable --now autoos-hostexec.service`. OpenHands needs `AUTOOS_EXEC_BIND` set to the docker
   bridge address.
 
+### Fixed — the web UI config save no longer churns backups
+
+- `POST /api/config` (`lib/linux/serve.py`, `lib/windows/AutoOS.Serve.psm1`) backed up and rewrote
+  `autoos.config.json` on every save, even when the merged result equalled the file, and the Linux
+  `<time_ns>` / Windows `-fffffff` backup names were not rankable by the undo listing. "Equal" is
+  now a data compare, key order aside (`Add-Member -Force` reorders keys on a no-op merge) and type
+  strict on Linux (`1` is not `true`), via the shared `ConvertTo-AutoOSCanonicalJson` /
+  `Save-AutoOSWebConfig` helpers. An unchanged save — identical or reorder-only — returns
+  `unchanged` with no backup and no write; a changed save backs up under the standard
+  `<file>.autoos-backup-YYYYmmdd-HHMMSS` name (`-1`, `-2`, ... on a clash, never overwrite).
+
 ### Fixed — backups outside the installer never overwrite a same-second backup
 
 - `configuration/autostart/register-autostart.sh`, `configuration/docker/ai-stack/ai-stack.sh` (config backups and the

@@ -516,3 +516,89 @@ if it "serve.py and web UI provide configuration API and card"; then
     pass
 fi
 
+# POST /api/config used to back up and rewrite autoos.config.json on EVERY
+# save, so two identical saves produced a pile of backups of identical bytes,
+# and the Linux backup name (.autoos-backup-<time_ns>) never matched the undo
+# listing regex \.autoos-backup-(\d{8}-?\d{6})(?:-(\d+))?$ - it could not be
+# ranked. An unchanged save must write nothing and create no backup; a changed
+# one must back up under the standard second-resolution name, never overwriting.
+_cfg_api_post_py() {
+    python3 - <<'PY'
+import atexit, importlib.util, io, json, pathlib, re, shutil, sys, tempfile, types
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-cfg-"))
+atexit.register(shutil.rmtree, root, True)
+spec = importlib.util.spec_from_file_location("autoos_serve", "lib/linux/serve.py")
+mod = importlib.util.module_from_spec(spec)
+sys.argv = ["serve.py", str(root), "0", "127.0.0.1", "0"]
+spec.loader.exec_module(mod)
+
+def post(body):
+    h = mod.Handler.__new__(mod.Handler)
+    raw = json.dumps(body).encode()
+    h.headers = {"Content-Length": str(len(raw))}
+    h.rfile = io.BytesIO(raw)
+    sent = {}
+    h._json = lambda code, obj: sent.update(code=code, obj=obj)
+    mod.Handler._post_config(h)
+    return sent["code"], sent["obj"]
+
+cfg = root / "autoos.config.json"
+rx = re.compile(r"\.autoos-backup-(\d{8}-?\d{6})(?:-(\d+))?$")
+problems = []
+
+# 1: a changed save writes and backs up under the standard name...
+cfg.write_text(json.dumps({"version": 1}) + "\n", encoding="utf-8")
+body = {"version": 1, "profile": "workstation", "answers": {"git_user_name": "Alice"}}
+code1, obj1 = post(body)
+if code1 != 200 or obj1.get("ok") is not True: problems.append("changed:%s:%s" % (code1, obj1))
+if obj1.get("unchanged"): problems.append("changed-claims-unchanged")
+backups = sorted(p.name for p in root.glob("autoos.config.json.autoos-backup-*"))
+if len(backups) != 1: problems.append("backups-after-change=%s" % backups)
+elif not rx.search(backups[0]): problems.append("name-not-rankable:%s" % backups[0])
+if json.loads(cfg.read_text()) != {"version": 1, "profile": "workstation", "answers": {"git_user_name": "Alice"}}:
+    problems.append("content-after-change")
+
+# 2: ...and repeating the identical save writes nothing and creates no backup.
+before = cfg.read_text()
+code2, obj2 = post(body)
+if code2 != 200 or obj2.get("ok") is not True or obj2.get("unchanged") is not True:
+    problems.append("unchanged:%s:%s" % (code2, obj2))
+backups = sorted(p.name for p in root.glob("autoos.config.json.autoos-backup-*"))
+if len(backups) != 1: problems.append("unchanged-added-a-backup:%s" % backups)
+if cfg.read_text() != before: problems.append("unchanged-rewrote-the-file")
+
+# 3: two changing saves inside one second keep separate backups (-1, never overwrite).
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-cfg-"))
+atexit.register(shutil.rmtree, root, True)
+mod.ROOT = root
+cfg = root / "autoos.config.json"
+mod.time = types.SimpleNamespace(strftime=lambda fmt: ".autoos-backup-20260101-000000")
+cfg.write_text(json.dumps({"version": 1}) + "\n", encoding="utf-8")
+post({"version": 1, "profile": "workstation"})
+post({"version": 1, "profile": "workstation", "answers": {"git_user_name": "Alice"}})
+backups = sorted(p.name for p in root.glob("autoos.config.json.autoos-backup-*"))
+want = {"autoos.config.json.autoos-backup-20260101-000000", "autoos.config.json.autoos-backup-20260101-000000-1"}
+if set(backups) != want: problems.append("same-second-backups=%s" % backups)
+for name in backups:
+    if not rx.search(name): problems.append("name-not-rankable:%s" % name)
+if json.loads((root / backups[0]).read_text()) != {"version": 1}: problems.append("first-backup-holds-the-seed")
+
+# 4: JSON types are strict - posting {"flag": true} over a file holding
+#    {"flag": 1} is a CHANGE (a backup + a write), not an unchanged save:
+#    True == 1 in Python, so a plain dict compare treats them as equal and
+#    the route must compare serialized JSON, where "true" != "1".
+cfg.write_text(json.dumps({"flag": 1}) + "\n", encoding="utf-8")
+code4, obj4 = post({"flag": True})
+if code4 != 200 or obj4.get("ok") is not True or obj4.get("unchanged"):
+    problems.append("bool-vs-int-treated-as-unchanged:%s:%s" % (code4, obj4))
+if json.loads(cfg.read_text()) != {"flag": True}: problems.append("bool-change-not-written")
+if not any(json.loads(b.read_text()) == {"flag": 1} for b in root.glob("autoos.config.json.autoos-backup-*")):
+    problems.append("int-seed-not-backed-up")
+print(" ".join(problems) or "ok")
+PY
+}
+
+if it "config: an unchanged POST saves nothing and creates no backup"; then
+    assert_eq "$(_cfg_api_post_py 2>&1 | tail -n 1)" "ok"
+fi
+
