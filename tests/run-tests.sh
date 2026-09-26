@@ -2935,113 +2935,445 @@ if it "install_devin_cli announces in dry run and writes nothing"; then
     else fail "dry run wrote or stayed silent"; fi
 fi
 
-# Operator 2026-09-25: the Antigravity app "was not available" on Linux, yet
-# the run said installed - a blank pasted .deb URL returned 0, so
-# install_package counted it installed. F7 removed the cause: Google publishes
-# a signed apt repo (antigravity.google/download/linux), so there is no URL
-# to ask for and nothing to leave blank. The repo is frozen at 1.23.2 (the 2.x
-# apps are tarball-only) and the installer says so.
+# Antigravity IDE 2.x comes from Google's vendor tarball (operator decision
+# 2026-09-26). Google's apt repo is frozen at 1.23.2 and publishes no key
+# fingerprint; the 2.x IDE is tarball-only. Facts measured 2026-09-26 that these
+# fixtures mirror: the update endpoint answers {"sha256hash","url",...} (the url
+# has an UNENCODED space) and its sha256 equals the real tarball's; the tarball
+# holds one top-level "Antigravity IDE/" (with a space), bin/antigravity-ide, a
+# chrome-sandbox that must be root-owned 4755 and NO .desktop file.
 #
-# antigravity_run <scratch> <dry 0|1> [fail-curl] [stale-answer]
-# One install_antigravity run in its own subshell (a fresh APT_UPDATED, like a
-# fresh process) against a scratch apt tree via the AUTOOS_APT_PREFIX test
-# seam. Everything that could touch the machine is a recording stub in
-# <scratch>/calls.log, so this can neither install, write to /etc nor reach
-# the network (AGENTS.md section 5).
-antigravity_run() {
-    local sb="$1" dry="$2" mode="${3:-}" stale="${4:-}"
-    (
-        AUTOOS_DRY_RUN="$dry"; AUTOOS_SUDO=""; AUTOOS_APT_PREFIX="$sb"; APT_UPDATED=0
-        [[ -n "$stale" ]] && AUTOOS_ANSWERS['antigravity_url']=https://example.invalid/stale.deb
-        log="$sb/calls.log"
-        curl() {
-            printf 'curl %s\n' "$*" >>"$log"
-            [[ "$mode" == fail-curl ]] && return 22
-            local o="" p="" a
-            for a in "$@"; do [[ "$p" == "-o" ]] && o="$a"; p="$a"; done
-            if [[ -n "$o" ]]; then printf 'ARMORED-KEY\n' >"$o"; else printf 'ARMORED-KEY\n'; fi
-        }
-        gpg() { printf 'gpg %s\n' "$*" >>"$log"; sed 's/^/DEARMORED:/'; }
-        install() {
-            printf 'install %s\n' "$*" >>"$log"
-            local src="${*: -2:1}" dst="${*: -1}"
-            mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
-        }
-        tee() { printf 'tee %s\n' "$*" >>"$log"; command tee "$@"; }
-        # shellcheck disable=SC2120  # stub: install_antigravity (sourced, not visible here) calls it with arguments
-        run() { printf 'run %s\n' "$*" >>"$log"; }
-        install_antigravity
-    ) 2>&1
+# Every test runs against a scratch tree: a tiny fake tarball with the real
+# layout, a curl stub that serves the endpoint answer and the tarball, a
+# recording AUTOOS_SUDO and a scratch HOME. None reaches the network, the real
+# HOME or sudo (AGENTS.md section 5).
+AG_ENDPOINT="https://antigravity-ide-auto-updater-974169037036.us-central1.run.app/api/update/linux-x64/stable/latest"
+AG_BASE="https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable"
+AG_A="2.5.5-4923483625488384"
+AG_B="2.6.0-5000000000000001"
+
+# antigravity_scratch: prints a fresh scratch dir (home/ cache/ tmp/ serve/).
+antigravity_scratch() {
+    local sb; sb="$(mktemp -d)"
+    mkdir -p "$sb/home" "$sb/cache" "$sb/tmp" "$sb/serve"
+    printf '%s\n' "$sb"
 }
 
-AG_KEY_URL="https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg"
-AG_LIST_LINE="deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main"
+# antigravity_build <scratch> <ver-build> [garbage]
+# serve/<ver-build>.tar.gz: a tiny tarball with the real layout (garbage: bytes
+# that are not a tarball at all). Sets AG_SHA to its real sha256.
+antigravity_build() {
+    local sb="$1" build="$2" mode="${3:-}" top
+    top="$sb/pkg/$build/Antigravity IDE"
+    if [[ "$mode" == garbage ]]; then
+        printf 'this is not a tarball\n' >"$sb/serve/$build.tar.gz"
+    else
+        mkdir -p "$top/bin" "$top/resources/app/resources/linux"
+        printf '#!/bin/sh\necho electron\n' >"$top/antigravity-ide"
+        printf '#!/bin/sh\necho wrapper %s\n' "$build" >"$top/bin/antigravity-ide"
+        chmod +x "$top/antigravity-ide" "$top/bin/antigravity-ide"
+        printf 'sandbox %s\n' "$build" >"$top/chrome-sandbox"; chmod 4755 "$top/chrome-sandbox"
+        printf '{"applicationName":"antigravity-ide","dataFolderName":".antigravity-ide","ideVersion":"%s","version":"1.107.0"}\n' \
+            "${build%%-*}" >"$top/resources/app/product.json"
+        printf 'PNG\n' >"$top/resources/app/resources/linux/code.png"
+        tar -czf "$sb/serve/$build.tar.gz" -C "$sb/pkg/$build" "Antigravity IDE"
+    fi
+    AG_SHA="$(sha256sum "$sb/serve/$build.tar.gz" | awk '{print $1}')"
+}
 
-if it "install_antigravity dry run names Google's apt repo and package, asks for no URL, writes nothing"; then
-    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
-    out="$(antigravity_run "$sb" 1 "" stale)"; rc=$?
+# antigravity_publish <scratch> <ver-build> [url-base] [sha]
+# The endpoint's current answer (serve/../answer.json). url-base defaults to
+# Google's host, sha to AG_SHA (the tarball built last).
+antigravity_publish() {
+    local sb="$1" build="$2" base="${3:-$AG_BASE}" sha="${4:-$AG_SHA}"
+    printf '{"timestamp":1790000000000,"supportsFastUpdate":true,"version":"0123456789abcdef0123456789abcdef01234567","ideVersion":"Antigravity IDE","productVersion":"1.107.0","name":"1.107.0","hash":"da39a3ee5e6b4b0d3255bfef95601890afd80709","sha256hash":"%s","url":"%s/%s/linux-x64/Antigravity IDE.tar.gz","displayName":"Linux x64 (.tar.gz)"}\n' \
+        "$sha" "$base" "$build" >"$sb/answer.json"
+}
+
+# antigravity_run <scratch> [VAR=value ...]
+# One run in its own subshell (fresh globals, like a fresh process). The entry
+# is install_component script antigravity (what setup.sh calls) unless
+# AG_ENTRY=direct: then install_antigravity itself, past the is_installed
+# short-circuit - which is where --update lands. Sets AG_OUT, AG_STATE
+# (installed|skipped|failed) and AG_RC. Everything that could touch the machine
+# is a stub that logs to <scratch>/calls.log; VAR=value arguments are exported
+# into the subshell (AUTOOS_DRY_RUN=1, AUTOOS_UPDATE=1, AG_OLD_APT=1, ...).
+antigravity_run() {
+    local sb="$1"; shift
+    AG_OUT="$(
+        (
+            export HOME="$sb/home" SYS_HOME="$sb/home" AUTOOS_CACHE_DIR="$sb/cache" TMPDIR="$sb/tmp"
+            CATALOG_PATH="$ROOT/catalog/linux.json"
+            AUTOOS_DRY_RUN=0; AUTOOS_UPDATE=0; AUTOOS_SUDO=sudo_rec; AG_ENTRY=component
+            for kv in "$@"; do export "${kv?}"; done
+            log="$sb/calls.log"
+            curl() {
+                printf 'curl %s\n' "$*" >>"$log"
+                [[ -e "$sb/offline" ]] && return 6
+                local a last="" out="" prev=""
+                for a in "$@"; do [[ "$prev" == -o ]] && out="$a"; prev="$a"; last="$a"; done
+                if [[ "$last" == "$AG_ENDPOINT" ]]; then cat "$sb/answer.json"; return; fi
+                if [[ -n "$out" && "$last" =~ /stable/([^/]+)/linux-x64/Antigravity%20IDE\.tar\.gz$ \
+                    && -f "$sb/serve/${BASH_REMATCH[1]}.tar.gz" ]]; then
+                    cp "$sb/serve/${BASH_REMATCH[1]}.tar.gz" "$out"; return
+                fi
+                return 22
+            }
+            # run() executes through python3 in real life, which no function stub can
+            # see; here it logs and runs the stub function by name.
+            run() { printf 'run %s\n' "$*" >>"$log"; "$@"; }
+            sudo_rec() { printf 'sudo %s\n' "$*" >>"$log"; return "${AG_SUDO_RC:-0}"; }
+            update-desktop-database() { printf 'update-desktop-database %s\n' "$*" >>"$log"; }
+            dpkg() { [[ "${AG_OLD_APT:-0}" == 1 && "$1" == -s && "$2" == antigravity ]]; }
+            _extra_bin_dirs() { printf '%s\n' "$SYS_HOME/.local/bin"; }
+            rc=0
+            if [[ "$AG_ENTRY" == direct ]]; then
+                INSTALL_SCRIPT_STATE=""
+                install_antigravity || rc=$?
+                st="${INSTALL_SCRIPT_STATE:-installed}"; (( rc == 0 )) || st=failed
+            else
+                install_component script antigravity 0 || rc=$?
+                st="$INSTALL_STATE"
+            fi
+            printf 'AGRESULT %s %s\n' "$st" "$rc"
+        ) 2>&1
+    )"
+    AG_STATE="$(sed -n 's/^AGRESULT \([a-z]*\) [0-9]*$/\1/p' <<<"$AG_OUT")"
+    AG_RC="$(sed -n 's/^AGRESULT [a-z]* \([0-9]*\)$/\1/p' <<<"$AG_OUT")"
+}
+
+# antigravity_snapshot <scratch>: every path, type, size, mode and mtime under
+# home/ and cache/ - equal before and after means "nothing was written".
+antigravity_snapshot() {
+    find "$1/home" "$1/cache" -printf '%p|%y|%s|%m|%T@\n' 2>/dev/null | sort
+}
+
+# antigravity_installed_problems <scratch> <ver-build> <sha>: one line per thing
+# that is not as a finished install must leave it; empty when all is right.
+antigravity_installed_problems() {
+    local sb="$1" build="$2" sha="$3" dir dt link
+    dir="$sb/home/.local/opt/antigravity-ide"; link="$sb/home/.local/bin/antigravity-ide"
+    dt="$sb/home/.local/share/applications/antigravity-ide.desktop"
+    [[ "$(cat "$dir/.autoos-version" 2>/dev/null)" == "$build $sha" ]] \
+        || printf 'stamp is [%s], not [%s %s]\n' "$(cat "$dir/.autoos-version" 2>&1)" "$build" "$sha"
+    [[ -x "$dir/antigravity-ide" && -x "$dir/bin/antigravity-ide" && -f "$dir/resources/app/product.json" ]] \
+        || printf 'the tarball was not unpacked into %s (top dir not stripped?)\n' "$dir"
+    [[ "$(readlink "$link" 2>/dev/null)" == "$dir/bin/antigravity-ide" ]] \
+        || printf 'command link is [%s], not %s\n' "$(readlink "$link" 2>&1)" "$dir/bin/antigravity-ide"
+    grep -qxF "Exec=$dir/antigravity-ide %U" "$dt" 2>/dev/null || printf 'desktop Exec line wrong: %s\n' "$(grep '^Exec' "$dt" 2>&1)"
+    grep -qxF "Icon=$dir/resources/app/resources/linux/code.png" "$dt" 2>/dev/null || printf 'desktop Icon line wrong: %s\n' "$(grep '^Icon' "$dt" 2>&1)"
+    grep -qxF 'MimeType=x-scheme-handler/antigravity-ide;' "$dt" 2>/dev/null || printf 'desktop entry has no scheme handler\n'
+    [[ ! -e "$dir.new" ]] || printf '%s.new was left behind\n' "$dir"
+    [[ -z "$(find "$sb/cache" -name '*.part')" ]] || printf 'a .part file was left in the cache\n'
+}
+
+if it "antigravity fresh install: tarball unpacked and stamped, command linked, desktop entry written, sandbox fixed, state installed"; then
+    sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; sha="$AG_SHA"; antigravity_publish "$sb" "$AG_A"
+    antigravity_run "$sb"
+    dir="$sb/home/.local/opt/antigravity-ide"; ok=1
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:700}" >&2; }
+    probs="$(antigravity_installed_problems "$sb" "$AG_A" "$sha")"
+    [[ -z "$probs" ]] || { ok=0; echo "$probs" >&2; }
+    grep -qx "sudo chown root:root $dir/chrome-sandbox" "$sb/calls.log" 2>/dev/null \
+        || { ok=0; echo "chrome-sandbox was not chowned to root: [$(grep '^sudo' "$sb/calls.log" 2>&1)]" >&2; }
+    grep -qx "sudo chmod 4755 $dir/chrome-sandbox" "$sb/calls.log" 2>/dev/null \
+        || { ok=0; echo "chrome-sandbox was not made 4755: [$(grep '^sudo' "$sb/calls.log" 2>&1)]" >&2; }
+    grep -q '^curl .*Antigravity%20IDE.tar.gz$' "$sb/calls.log" 2>/dev/null \
+        || { ok=0; echo "the tarball URL was not fetched with %20 for the space: [$(grep '^curl' "$sb/calls.log" 2>&1)]" >&2; }
+    [[ "$AG_OUT" != *"--no-sandbox"* ]] || { ok=0; echo "the output mentions --no-sandbox" >&2; }
+    [[ "$AG_OUT" != *"apt-get remove"* ]] || { ok=0; echo "warned about an old apt package that is not installed" >&2; }
+    [[ "$(grep -c '^update-desktop-database' "$sb/calls.log" 2>/dev/null)" == 1 ]] \
+        || { ok=0; echo "update-desktop-database was not run once: [$(grep '^update' "$sb/calls.log" 2>&1)]" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the Antigravity IDE tarball install is not what the operator decision on 2026-09-26 describes"; fi
+fi
+
+if it "antigravity sandbox: a failing or unavailable sudo warns with the two exact commands, never --no-sandbox, and the install still counts"; then
     ok=1
-    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
-    [[ "$out" == *"us-central1-apt.pkg.dev"* && "$out" == *"antigravity"* ]] \
-        || { ok=0; echo "does not name the apt repo and package: $out" >&2; }
-    for bad in ".deb" "download URL" "antigravity_url" "example.invalid"; do
-        [[ "$out" != *"$bad"* ]] || { ok=0; echo "mentions '$bad': $out" >&2; }
+    for mode in AG_SUDO_RC=1 SYS_CAN_SUDO=0; do
+        sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
+        antigravity_run "$sb" "$mode"
+        dir="$sb/home/.local/opt/antigravity-ide"
+        [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "$mode: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:500}" >&2; }
+        [[ -x "$dir/bin/antigravity-ide" ]] || { ok=0; echo "$mode: no install" >&2; }
+        [[ "$AG_OUT" == *"sudo chown root:root $dir/chrome-sandbox"* && "$AG_OUT" == *"sudo chmod 4755 $dir/chrome-sandbox"* ]] \
+            || { ok=0; echo "$mode: the two commands were not printed: ${AG_OUT:0:700}" >&2; }
+        [[ "$AG_OUT" != *"--no-sandbox"* ]] || { ok=0; echo "$mode: suggests --no-sandbox" >&2; }
+        if [[ "$mode" == SYS_CAN_SUDO=0 ]] && grep -q '^sudo' "$sb/calls.log" 2>/dev/null; then
+            ok=0; echo "$mode: tried sudo although none is available" >&2
+        fi
+        rm -rf "$sb"
     done
-    [[ ! -s "$sb/calls.log" ]] || { ok=0; echo "a dry run ran commands: $(cat "$sb/calls.log")" >&2; }
-    [[ -z "$(find "$sb/etc" -type f)" ]] || { ok=0; echo "a dry run wrote files" >&2; }
-    rm -rf "$sb"
-    if (( ok )); then pass; else fail "the Antigravity dry run still asks for a .deb URL or touches the machine"; fi
+    if (( ok )); then pass; else fail "a sandbox helper that cannot be fixed is not reported with the commands to fix it"; fi
 fi
 
-if it "install_antigravity real run adds Google's signed apt repo, installs the package, warns the repo is frozen"; then
-    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
-    out="$(antigravity_run "$sb" 0 "" stale)"; rc=$?
+if it "antigravity second run is skipped: no download, no write, no backup - with or without the version check"; then
+    sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
+    antigravity_run "$sb" >/dev/null
     ok=1
-    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
-    grep -qF -- "$AG_KEY_URL" "$sb/calls.log" || { ok=0; echo "key not fetched from $AG_KEY_URL" >&2; }
-    grep -q '^gpg .*--dearmor' "$sb/calls.log" || { ok=0; echo "key not dearmored" >&2; }
-    [[ "$(cat "$sb/etc/apt/keyrings/antigravity-repo-key.gpg" 2>/dev/null)" == "DEARMORED:ARMORED-KEY" ]] \
-        || { ok=0; echo "dearmored key not installed at the keyring path" >&2; }
-    [[ "$(cat "$sb/etc/apt/sources.list.d/antigravity.list" 2>/dev/null)" == "$AG_LIST_LINE" ]] \
-        || { ok=0; echo "source line differs from Google's: $(cat "$sb/etc/apt/sources.list.d/antigravity.list" 2>&1)" >&2; }
-    [[ "$(grep '^run ' "$sb/calls.log")" == $'run apt-get update -y\nrun apt-get install -y antigravity' ]] \
-        || { ok=0; echo "apt commands: $(grep '^run ' "$sb/calls.log" | tr '\n' '|')" >&2; }
-    [[ "$out" == *"frozen"* && "$out" == *"1.23.2"* ]] || { ok=0; echo "no frozen-repo warning: $out" >&2; }
-    ! grep -q 'example.invalid' "$sb/calls.log" || { ok=0; echo "a stale antigravity_url answer was used" >&2; }
-    rm -rf "$sb"
-    if (( ok )); then pass; else fail "the Antigravity apt repo route is not what Google's download page prescribes"; fi
-fi
-
-if it "install_antigravity is idempotent: a second run with key and source present writes nothing"; then
-    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
-    antigravity_run "$sb" 0 >/dev/null
-    before="$(cksum "$sb/etc/apt/sources.list.d/antigravity.list" "$sb/etc/apt/keyrings/antigravity-repo-key.gpg")"
-    : >"$sb/calls.log"
-    out="$(antigravity_run "$sb" 0)"; rc=$?
-    after="$(cksum "$sb/etc/apt/sources.list.d/antigravity.list" "$sb/etc/apt/keyrings/antigravity-repo-key.gpg")"
-    ok=1
-    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
-    writes="$(grep -E '^(curl|gpg|install|tee) ' "$sb/calls.log" || true)"
-    [[ -z "$writes" ]] || { ok=0; echo "the second run wrote again: $writes" >&2; }
-    [[ "$before" == "$after" ]] || { ok=0; echo "key or source list changed on the second run" >&2; }
-    [[ "$(wc -l <"$sb/etc/apt/sources.list.d/antigravity.list")" == 1 ]] || { ok=0; echo "source list grew" >&2; }
-    grep -qx 'run apt-get install -y antigravity' "$sb/calls.log" \
-        || { ok=0; echo "apt's own no-op install was skipped: $(cat "$sb/calls.log")" >&2; }
+    before="$(antigravity_snapshot "$sb")"; : >"$sb/calls.log"
+    antigravity_run "$sb"
+    [[ "$AG_STATE" == skipped && "$AG_RC" == 0 ]] || { ok=0; echo "plain second run: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:500}" >&2; }
+    [[ ! -s "$sb/calls.log" ]] || { ok=0; echo "a plain second run made calls: $(cat "$sb/calls.log")" >&2; }
+    antigravity_run "$sb" AG_ENTRY=direct
+    [[ "$AG_STATE" == skipped && "$AG_RC" == 0 ]] || { ok=0; echo "version check on the current build: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:500}" >&2; }
+    ! grep -q '^curl .* -o ' "$sb/calls.log" || { ok=0; echo "the tarball was fetched again: $(grep '^curl' "$sb/calls.log")" >&2; }
+    [[ "$(grep -c '^curl' "$sb/calls.log")" == 1 ]] || { ok=0; echo "expected exactly the endpoint call: $(grep '^curl' "$sb/calls.log")" >&2; }
+    ! grep -q '^sudo' "$sb/calls.log" || { ok=0; echo "the sandbox was touched again" >&2; }
+    [[ "$(antigravity_snapshot "$sb")" == "$before" ]] || { ok=0; echo "the tree changed on a run that had nothing to do" >&2; }
+    [[ -z "$(find "$sb/home" -name '*.autoos-backup-*')" ]] || { ok=0; echo "a backup was made for nothing" >&2; }
     rm -rf "$sb"
     if (( ok )); then pass; else fail "a second Antigravity run is not a no-op"; fi
 fi
 
-if it "install_antigravity writes no key and no source list when the key fetch fails"; then
-    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
-    out="$(antigravity_run "$sb" 0 fail-curl)"; rc=$?
+if it "antigravity hash mismatch: nothing installed or replaced, no .new or .part left, a failure with an error line"; then
     ok=1
-    (( rc != 0 )) || { ok=0; echo "rc=0 counts a failed key fetch as installed" >&2; }
-    [[ -z "$(find "$sb/etc" -type f)" ]] || { ok=0; echo "left files behind: $(find "$sb/etc" -type f | tr '\n' ' ')" >&2; }
-    grep -qF -- "$AG_KEY_URL" "$sb/calls.log" 2>/dev/null || { ok=0; echo "the key fetch was never attempted" >&2; }
-    ! grep -q 'apt-get install' "$sb/calls.log" 2>/dev/null || { ok=0; echo "went on to apt-get install" >&2; }
-    [[ "$out" == *"Antigravity not installed"* ]] || { ok=0; echo "no reason given: $out" >&2; }
+    for scenario in fresh existing; do
+        sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
+        [[ "$scenario" == existing ]] && antigravity_run "$sb" >/dev/null
+        before="$(antigravity_snapshot "$sb")"
+        antigravity_build "$sb" "$AG_B"
+        antigravity_publish "$sb" "$AG_B" "" "$(printf '0%.0s' {1..64})"   # the endpoint promises another hash
+        antigravity_run "$sb" AG_ENTRY=direct
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$scenario: state=[$AG_STATE] rc=[$AG_RC] (must fail)" >&2; }
+        [[ "$AG_OUT" == *"sha256"* ]] || { ok=0; echo "$scenario: no error line naming the sha256: ${AG_OUT:0:500}" >&2; }
+        [[ -z "$(find "$sb" \( -name '*.new' -o -name '*.part' \) )" ]] || { ok=0; echo "$scenario: left $(find "$sb" \( -name '*.new' -o -name '*.part' \))" >&2; }
+        if [[ "$scenario" == existing ]]; then
+            [[ "$(antigravity_snapshot "$sb")" == "$before" ]] || { ok=0; echo "existing: the install or its cache changed" >&2; }
+            [[ "$(cut -d' ' -f1 "$sb/home/.local/opt/antigravity-ide/.autoos-version")" == "$AG_A" ]] || { ok=0; echo "existing: the stamp moved" >&2; }
+        else
+            [[ -z "$(find "$sb/home" "$sb/cache" -type f)" ]] || { ok=0; echo "fresh: wrote files: $(find "$sb/home" "$sb/cache" -type f)" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "a tarball that does not match the endpoint's sha256 was accepted or left debris"; fi
+fi
+
+if it "antigravity download hosts: Google's three are accepted, anything else is refused before a byte is fetched"; then
+    ok=1
+    for host in dl.google.com storage.googleapis.com; do
+        sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A" "https://$host/x/antigravity/stable"
+        antigravity_run "$sb"
+        [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "$host refused: state=[$AG_STATE]: ${AG_OUT:0:400}" >&2; }
+        rm -rf "$sb"
+    done
+    for base in "https://example.invalid/x/antigravity/stable" \
+                "http://edgedl.me.gvt1.com/x/antigravity/stable" \
+                "https://edgedl.me.gvt1.com.example.invalid/x/antigravity/stable" \
+                "https://edgedl.me.gvt1.com@example.invalid/x/antigravity/stable" \
+                "https://edgedl.me.gvt1.com:8443/x/antigravity/stable"; do
+        sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A" "$base"
+        antigravity_run "$sb"
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$base accepted: state=[$AG_STATE] rc=[$AG_RC]" >&2; }
+        ! grep -q '^curl .* -o ' "$sb/calls.log" || { ok=0; echo "$base: a download was attempted" >&2; }
+        [[ -z "$(find "$sb/home" "$sb/cache" -type f)" ]] || { ok=0; echo "$base: wrote files" >&2; }
+        [[ "$AG_OUT" == *"example.invalid"* || "$AG_OUT" == *"not https"* || "$AG_OUT" == *"port"* ]] \
+            || { ok=0; echo "$base: refusal does not say why: ${AG_OUT:0:300}" >&2; }
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "the download URL from the endpoint is trusted beyond Google's own hosts"; fi
+fi
+
+if it "antigravity unusable endpoint answers fail closed: nothing fetched, nothing written"; then
+    ok=1
+    good64="$(printf 'ab%.0s' {1..32})"
+    i=0
+    for body in 'this is not json' '[]' '{}' '' \
+                "{\"url\":\"$AG_BASE/$AG_A/linux-x64/Antigravity IDE.tar.gz\",\"sha256hash\":\"zz$good64\"}" \
+                "{\"url\":\"$AG_BASE/$AG_A/linux-x64/Antigravity IDE.tar.gz\",\"sha256hash\":\"abcd\"}" \
+                "{\"url\":\"$AG_BASE/$AG_A/linux-x64/Antigravity IDE.tar.gz\"}" \
+                "{\"sha256hash\":\"$good64\"}" \
+                "{\"url\":\"https://edgedl.me.gvt1.com/no/version/segment.tar.gz\",\"sha256hash\":\"$good64\"}"; do
+        i=$((i + 1))
+        sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"
+        printf '%s\n' "$body" >"$sb/answer.json"
+        antigravity_run "$sb"
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "answer #$i accepted: state=[$AG_STATE] rc=[$AG_RC]" >&2; }
+        ! grep -q '^curl .* -o ' "$sb/calls.log" || { ok=0; echo "answer #$i: a download was attempted" >&2; }
+        [[ -z "$(find "$sb/home" "$sb/cache" -type f)" ]] || { ok=0; echo "answer #$i: wrote files" >&2; }
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "an unusable update-endpoint answer was acted on"; fi
+fi
+
+if it "antigravity endpoint unreachable on a fresh machine: fails naming the endpoint, guesses no URL, writes nothing"; then
+    sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"; : >"$sb/offline"
+    antigravity_run "$sb"
+    ok=1
+    [[ "$AG_STATE" == failed ]] || { ok=0; echo "state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    [[ "$AG_OUT" == *"$AG_ENDPOINT"* ]] || { ok=0; echo "the failure does not name the endpoint: ${AG_OUT:0:400}" >&2; }
+    [[ -z "$(find "$sb/home" "$sb/cache" -type f)" ]] || { ok=0; echo "wrote files: $(find "$sb/home" "$sb/cache" -type f)" >&2; }
+    [[ "$(grep -c '^curl' "$sb/calls.log")" == 1 ]] || { ok=0; echo "expected one call, the endpoint: $(grep '^curl' "$sb/calls.log")" >&2; }
     rm -rf "$sb"
-    if (( ok )); then pass; else fail "a failed Antigravity key fetch leaves a half-configured apt"; fi
+    if (( ok )); then pass; else fail "an unreachable endpoint on a fresh machine is not a clean, named failure"; fi
+fi
+
+if it "antigravity corrupt tarball: the existing install is untouched, .new is removed, the old stamp stays"; then
+    ok=1
+    for scenario in fresh existing; do
+        sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
+        [[ "$scenario" == existing ]] && antigravity_run "$sb" >/dev/null
+        before="$(antigravity_snapshot "$sb")"
+        antigravity_build "$sb" "$AG_B" garbage        # its sha256 is right, it just is no tarball
+        antigravity_publish "$sb" "$AG_B"
+        antigravity_run "$sb" AG_ENTRY=direct
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$scenario: state=[$AG_STATE] rc=[$AG_RC] (must fail): ${AG_OUT:0:400}" >&2; }
+        [[ -z "$(find "$sb/home" \( -name '*.new' -o -name '*.old-*' \) )" ]] || { ok=0; echo "$scenario: left $(find "$sb/home" \( -name '*.new' -o -name '*.old-*' \))" >&2; }
+        if [[ "$scenario" == existing ]]; then
+            # the cache may hold the (verified but unusable) download; home may not change
+            [[ "$(find "$sb/home" -printf '%p|%y|%s|%m|%T@\n' | sort)" == "$(grep "^$sb/home" <<<"$before")" ]] \
+                || { ok=0; echo "existing: the install changed" >&2; }
+            [[ "$(cut -d' ' -f1 "$sb/home/.local/opt/antigravity-ide/.autoos-version")" == "$AG_A" ]] || { ok=0; echo "existing: the stamp moved" >&2; }
+        else
+            [[ -z "$(find "$sb/home" -type f)" ]] || { ok=0; echo "fresh: wrote files: $(find "$sb/home" -type f)" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "a tarball that cannot be unpacked damaged the machine"; fi
+fi
+
+if it "antigravity command link: created when absent, a regular file or a foreign symlink is never overwritten, its own old link is replaced"; then
+    ok=1
+    for kind in absent file foreign own; do
+        sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
+        dir="$sb/home/.local/opt/antigravity-ide"; link="$sb/home/.local/bin/antigravity-ide"
+        mkdir -p "$sb/home/.local/bin"
+        case "$kind" in
+            file)    printf 'mine\n' >"$link" ;;
+            foreign) ln -s "$sb/elsewhere" "$link" ;;
+            own)     ln -s "$dir/bin/old-name" "$link" ;;
+        esac
+        antigravity_run "$sb" AG_ENTRY=direct
+        [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "$kind: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+        case "$kind" in
+            absent|own)
+                [[ "$(readlink "$link")" == "$dir/bin/antigravity-ide" ]] || { ok=0; echo "$kind: link is [$(readlink "$link")]" >&2; } ;;
+            file)
+                [[ ! -L "$link" && "$(cat "$link")" == mine ]] || { ok=0; echo "file: a regular file was overwritten" >&2; } ;;
+            foreign)
+                [[ "$(readlink "$link")" == "$sb/elsewhere" ]] || { ok=0; echo "foreign: a foreign symlink was replaced: [$(readlink "$link")]" >&2; } ;;
+        esac
+        if [[ "$kind" == file || "$kind" == foreign ]]; then
+            [[ "$AG_OUT" == *"$link"* && "$AG_OUT" == *"left alone"* ]] || { ok=0; echo "$kind: no warning naming $link: ${AG_OUT:0:500}" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "the antigravity-ide command link clobbers something that is not AutoOS's"; fi
+fi
+
+if it "antigravity desktop entry: a differing file is backed up before it is replaced, an identical one is left untouched"; then
+    sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
+    apps="$sb/home/.local/share/applications"; dt="$apps/antigravity-ide.desktop"
+    mkdir -p "$apps"; printf '[Desktop Entry]\nName=mine\n' >"$dt"
+    antigravity_run "$sb" AG_ENTRY=direct
+    ok=1
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    bak=("$dt".autoos-backup-*)
+    [[ ${#bak[@]} == 1 && -f "${bak[0]}" && "$(cat "${bak[0]}")" == $'[Desktop Entry]\nName=mine' ]] \
+        || { ok=0; echo "the differing entry was not backed up first: ${bak[*]}" >&2; }
+    grep -qxF 'MimeType=x-scheme-handler/antigravity-ide;' "$dt" || { ok=0; echo "the entry was not replaced" >&2; }
+    t1="$(find "$dt" -printf '%T@')"
+    antigravity_build "$sb" "$AG_B"; antigravity_publish "$sb" "$AG_B"        # a new build; the launcher does not change
+    antigravity_run "$sb" AG_ENTRY=direct
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "update: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    [[ "$(find "$dt" -printf '%T@')" == "$t1" ]] || { ok=0; echo "an identical desktop entry was rewritten" >&2; }
+    bak=("$dt".autoos-backup-*)
+    [[ ${#bak[@]} == 1 ]] || { ok=0; echo "an identical entry got a backup: ${bak[*]}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the desktop entry is not written compare-first with a backup"; fi
+fi
+
+if it "antigravity keeps a directory AutoOS did not create as .old-<stamp> instead of deleting it"; then
+    sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; sha="$AG_SHA"; antigravity_publish "$sb" "$AG_A"
+    dir="$sb/home/.local/opt/antigravity-ide"
+    mkdir -p "$dir"; printf 'user data\n' >"$dir/notes.txt"
+    antigravity_run "$sb" AG_ENTRY=direct
+    ok=1
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    probs="$(antigravity_installed_problems "$sb" "$AG_A" "$sha")"
+    [[ -z "$probs" ]] || { ok=0; echo "$probs" >&2; }
+    kept=("$dir".old-*/notes.txt)
+    [[ ${#kept[@]} == 1 && -f "${kept[0]}" && "$(cat "${kept[0]}")" == "user data" ]] \
+        || { ok=0; echo "the foreign directory was not kept: ${kept[*]}" >&2; }
+    [[ "$AG_OUT" == *"not created by AutoOS"* ]] || { ok=0; echo "no note about the kept directory: ${AG_OUT:0:500}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a directory the user owns was deleted or silently replaced"; fi
+fi
+
+if it "antigravity dry run names the endpoint and the target directory, makes no request and writes nothing"; then
+    sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
+    antigravity_run "$sb" AUTOOS_DRY_RUN=1
+    ok=1
+    [[ "$AG_RC" == 0 ]] || { ok=0; echo "rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    [[ "$AG_OUT" == *"$AG_ENDPOINT"* ]] || { ok=0; echo "the dry run does not name the endpoint: ${AG_OUT:0:500}" >&2; }
+    [[ "$AG_OUT" == *"$sb/home/.local/opt/antigravity-ide"* ]] || { ok=0; echo "the dry run does not name the target directory: ${AG_OUT:0:500}" >&2; }
+    [[ ! -s "$sb/calls.log" ]] || { ok=0; echo "a dry run made calls: $(cat "$sb/calls.log")" >&2; }
+    [[ -z "$(find "$sb/home" "$sb/cache" -mindepth 1)" ]] || { ok=0; echo "a dry run wrote: $(find "$sb/home" "$sb/cache" -mindepth 1 | tr '\n' ' ')" >&2; }
+    for bad in ".deb" "apt-get" "us-central1-apt" "frozen"; do
+        [[ "$AG_OUT" != *"$bad"* ]] || { ok=0; echo "the dry run still mentions '$bad'" >&2; }
+    done
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the Antigravity dry run asks the network, writes, or does not say what it would do"; fi
+fi
+
+if it "antigravity old apt package: warns with the removal commands, removes nothing, still installs the tarball"; then
+    sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; sha="$AG_SHA"; antigravity_publish "$sb" "$AG_A"
+    antigravity_run "$sb" AG_OLD_APT=1
+    ok=1
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    probs="$(antigravity_installed_problems "$sb" "$AG_A" "$sha")"
+    [[ -z "$probs" ]] || { ok=0; echo "$probs" >&2; }
+    for want in "sudo apt-get remove antigravity" "/etc/apt/sources.list.d/antigravity.list" "/etc/apt/keyrings/antigravity-repo-key.gpg"; do
+        [[ "$AG_OUT" == *"$want"* ]] || { ok=0; echo "the warning lacks '$want': ${AG_OUT:0:700}" >&2; }
+    done
+    ! grep -q 'apt-get' "$sb/calls.log" || { ok=0; echo "apt was run: $(grep apt-get "$sb/calls.log")" >&2; }
+    [[ -z "$(grep '^sudo' "$sb/calls.log" | grep -v -e 'chown root:root' -e 'chmod 4755')" ]] \
+        || { ok=0; echo "sudo did more than fix the sandbox: $(grep '^sudo' "$sb/calls.log")" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the old apt package is not reported, or something was removed automatically"; fi
+fi
+
+if it "antigravity detection: the stamp or antigravity-ide on PATH counts, the old apt command does not"; then
+    sb="$(antigravity_scratch)"; ok=1
+    mkdir -p "$sb/bin" "$sb/home/.local/opt/antigravity-ide"
+    printf '#!/bin/sh\n' >"$sb/bin/antigravity"; chmod +x "$sb/bin/antigravity"      # what the old deb put on PATH
+    # PATH holds only the scratch bin dir, so nothing real can answer.
+    probe() { ( PATH="$sb/bin"; SYS_HOME="$sb/home"; _extra_bin_dirs() { printf '%s\n' "$SYS_HOME/.local/bin" "$sb/bin"; }
+                script_is_installed antigravity && echo installed || echo not-installed ); }
+    [[ "$(probe)" == not-installed ]] || { ok=0; echo "the old apt command /usr/bin/antigravity still counts as installed" >&2; }
+    printf '2.5.5-1 abc\n' >"$sb/home/.local/opt/antigravity-ide/.autoos-version"
+    [[ "$(probe)" == installed ]] || { ok=0; echo "a version stamp does not count as installed" >&2; }
+    rm -f "$sb/home/.local/opt/antigravity-ide/.autoos-version"
+    printf '#!/bin/sh\n' >"$sb/bin/antigravity-ide"; chmod +x "$sb/bin/antigravity-ide"
+    [[ "$(probe)" == installed ]] || { ok=0; echo "antigravity-ide on PATH does not count as installed" >&2; }
+    st="$( ( PATH="$sb/bin"; SYS_HOME="$sb/home"; detect_installed_status script antigravity 0; echo "$INSTALLED_STATUS" ) )"
+    [[ "$st" == installed ]] || { ok=0; echo "detect_installed_status says [$st]" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "Antigravity detection still keys on the old apt command"; fi
+fi
+
+if it "antigravity catalog entry: tarball notes, verify names antigravity-ide, still x64-only with no prompt"; then
+    problems="$(python3 - 2>&1 <<'PY'
+import json
+doc = json.load(open("catalog/linux.json", encoding="utf-8"))
+ent = [c for g in doc["categories"] for c in g["components"] if c["id"] == "antigravity"]
+if len(ent) != 1:
+    print("expected exactly one antigravity entry, found %d" % len(ent))
+else:
+    c = ent[0]
+    notes = c.get("notes", "")
+    if "frozen" in notes.lower() or "1.23.2" in notes: print("notes still describe the frozen apt repo: " + notes)
+    if "tarball" not in notes.lower(): print("notes do not say it comes from the tarball")
+    if "antigravity-ide" not in notes: print("notes do not name the command antigravity-ide")
+    if not c.get("verify", "").startswith("antigravity-ide "): print("verify is %r, not an antigravity-ide command" % c.get("verify"))
+    if c.get("arch") != ["x64"]: print("arch is %r, must stay x64-only" % c.get("arch"))
+    if c.get("prompt"): print("carries prompt %r" % c["prompt"])
+    if (c.get("provider"), c.get("package")) != ("script", "antigravity"): print("provider/package changed: %r" % ((c.get("provider"), c.get("package")),))
+PY
+)"
+    stale="$(grep -rIl 'antigravity_url' lib catalog setup.sh setup.ps1 README.md docs 2>/dev/null | tr '\n' ' ')"
+    [[ -z "$stale" ]] || problems+="antigravity_url is still referenced in: $stale"
+    assert_eq "$problems" ""
 fi
 
 # VS Code, Google Chrome and the GitHub CLI share the pattern Antigravity was
