@@ -151,6 +151,61 @@ httpd.serve_forever()
     printf '%s %s\n' "$pid" "$port"
 }
 
+# Function shellcheck_limit_kb. (Keep comment lines from starting with the linter's
+# name: it parses those as directives and stops with SC1073.)
+# Prints the address-space limit (KiB) run_shellcheck puts on shellcheck: 90% of
+# MemAvailable + SwapFree from ${AUTOOS_MEMINFO:-/proc/meminfo}. Prints nothing
+# (= no limit) when that file is unreadable (macOS, Git Bash) or has no
+# MemAvailable line. Why bound it at all: shellcheck's memory grows faster than
+# the input (about 1.2 GB for setup.sh + lib/linux, and this 9.4k-line file alone
+# went past 2.5 GB), and an OOM kill used to surface as a `fail` with an EMPTY
+# message. Under `ulimit -v` shellcheck instead says "out of memory" and exits 251.
+shellcheck_limit_kb() {
+    local meminfo="${AUTOOS_MEMINFO:-/proc/meminfo}" key val avail="" swap=0
+    [[ -r "$meminfo" ]] || return 0
+    while read -r key val _; do
+        case "$key" in
+            MemAvailable:) avail="$val" ;;
+            SwapFree:)     swap="$val" ;;
+        esac
+    done < "$meminfo"
+    [[ "$avail" =~ ^[0-9]+$ && "$swap" =~ ^[0-9]+$ ]] || return 0
+    printf '%d\n' $(( (avail + swap) * 9 / 10 ))
+}
+
+# run_shellcheck FILES...
+# ONE shellcheck process over FILES, `-S warning` (what CI runs), inside a
+# subshell whose `ulimit -v` is shellcheck_limit_kb. Sets, for the caller:
+#   SHELLCHECK_OUT         everything shellcheck printed (stdout + stderr)
+#   SHELLCHECK_OOM         1 when it ran out of memory, else 0
+#   SHELLCHECK_LIMIT_DESC  the limit that was in force, e.g. "4608 MiB"
+# and returns shellcheck's own status, EXCEPT out-of-memory, which returns 3
+# (test SHELLCHECK_OOM, not the 3: shellcheck itself uses 3 for a usage error).
+# Out of memory is: rc 251 (the GHC runtime's heap overflow), rc 137 (SIGKILL
+# from the kernel OOM killer), or - for any rc other than 0/1 - output that says
+# "out of memory" / "Cannot allocate". rc 0/1 never count as OOM from the text:
+# a finding prints the offending source line, and a line that merely mentions
+# "out of memory" must not turn a real finding into a skip.
+run_shellcheck() {
+    local limit_kb rc
+    SHELLCHECK_OOM=0
+    limit_kb="$(shellcheck_limit_kb)"
+    if [[ "$limit_kb" =~ ^[1-9][0-9]*$ ]]; then
+        SHELLCHECK_LIMIT_DESC="$(( limit_kb / 1024 )) MiB"
+        SHELLCHECK_OUT="$( ( ulimit -v "$limit_kb" 2>/dev/null; shellcheck -S warning "$@" ) 2>&1 )"; rc=$?
+    else
+        SHELLCHECK_LIMIT_DESC="unlimited"
+        SHELLCHECK_OUT="$(shellcheck -S warning "$@" 2>&1)"; rc=$?
+    fi
+    case "$rc" in
+        251|137) SHELLCHECK_OOM=1 ;;
+        0|1)     ;;
+        *)       if grep -qiE 'out of memory|cannot allocate' <<<"$SHELLCHECK_OUT"; then SHELLCHECK_OOM=1; fi ;;
+    esac
+    if (( SHELLCHECK_OOM )); then return 3; fi
+    return "$rc"
+}
+
 # ─── Load the libraries under test ──────────────────────────────────────────
 cd "$ROOT" || { echo "cannot enter $ROOT" >&2; exit 1; }
 # shellcheck source=../lib/linux/ui.sh
@@ -9916,6 +9971,101 @@ if it "shellcheck is clean"; then
     else
         skip "no shellcheck binary and no usable docker"
     fi
+fi
+
+# ─── shellcheck helper: memory bound + honest verdict ───────────────────────
+# Every test here runs through a STUB shellcheck on PATH and a fake meminfo,
+# so none of them needs the real binary (or its memory). The helpers under
+# test, run_shellcheck and shellcheck_limit_kb, sit at the top of this file.
+describe "shellcheck helper"
+
+# _sc_sandbox
+# Prints a fresh temp dir holding bin/shellcheck (a stub: appends its argv and
+# the address-space limit it was started under to $STUB_LOG, prints $STUB_OUT,
+# exits $STUB_RC) and meminfo (4 GiB available + 1 GiB swap, so the bound is
+# 90% of 5242880 KiB = 4718592 KiB = 4608 MiB whatever the real host looks like).
+_sc_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin"
+    cat > "$d/bin/shellcheck" <<'STUB'
+#!/usr/bin/env bash
+{
+    printf 'argv: %s\n' "$*"
+    printf 'ulimit: %s\n' "$(ulimit -v)"
+} >> "${STUB_LOG:-/dev/null}"
+[[ -n "${STUB_OUT:-}" ]] && printf '%s\n' "$STUB_OUT"
+exit "${STUB_RC:-0}"
+STUB
+    chmod +x "$d/bin/shellcheck"
+    printf 'MemTotal: 8388608 kB\nMemFree: 1024 kB\nMemAvailable: 4194304 kB\nSwapTotal: 2097152 kB\nSwapFree: 1048576 kB\n' > "$d/meminfo"
+    printf '%s\n' "$d"
+}
+
+if it "shellcheck helper: the memory limit is 90% of MemAvailable + SwapFree, read from AUTOOS_MEMINFO"; then
+    d="$(mktemp -d)"
+    printf 'MemTotal: 8000000 kB\nMemFree: 100 kB\nMemAvailable: 1000000 kB\nSwapTotal: 999 kB\nSwapFree: 500000 kB\n' > "$d/full"
+    printf 'MemAvailable: 1000000 kB\n' > "$d/noswap"
+    printf 'MemTotal: 8000000 kB\nSwapFree: 500000 kB\n' > "$d/noavail"
+    ok=1
+    got="$(AUTOOS_MEMINFO="$d/full" shellcheck_limit_kb)"
+    [[ "$got" == 1350000 ]] || { ok=0; echo "MemAvailable 1000000 + SwapFree 500000: expected 1350000, got [$got]" >&2; }
+    got="$(AUTOOS_MEMINFO="$d/noswap" shellcheck_limit_kb)"
+    [[ "$got" == 900000 ]] || { ok=0; echo "no SwapFree line counts as 0: expected 900000, got [$got]" >&2; }
+    got="$(AUTOOS_MEMINFO="$d/noavail" shellcheck_limit_kb)"
+    [[ -z "$got" ]] || { ok=0; echo "no MemAvailable: expected no limit, got [$got]" >&2; }
+    got="$(AUTOOS_MEMINFO="$d/does-not-exist" shellcheck_limit_kb)"
+    [[ -z "$got" ]] || { ok=0; echo "unreadable file: expected no limit, got [$got]" >&2; }
+    if [[ -r /proc/meminfo ]]; then
+        got="$( unset AUTOOS_MEMINFO; shellcheck_limit_kb )"
+        [[ "$got" =~ ^[1-9][0-9]*$ ]] || { ok=0; echo "default /proc/meminfo: expected a positive KiB number, got [$got]" >&2; }
+    fi
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the limit is not 90% of MemAvailable + SwapFree"; fi
+fi
+
+if it "shellcheck helper: run_shellcheck starts shellcheck under that limit (ulimit -v) with -S warning and the files"; then
+    d="$(_sc_sandbox)"
+    ok=1
+    ( PATH="$d/bin:$PATH" AUTOOS_MEMINFO="$d/meminfo" STUB_LOG="$d/log" run_shellcheck one.sh two.sh ) >/dev/null 2>&1
+    grep -qx 'argv: -S warning one.sh two.sh' "$d/log" 2>/dev/null || { ok=0; echo "argv: $(grep '^argv' "$d/log" 2>&1)" >&2; }
+    grep -qx 'ulimit: 4718592' "$d/log" 2>/dev/null || { ok=0; echo "limit: $(grep '^ulimit' "$d/log" 2>&1) (want 4718592)" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "shellcheck was not started under the computed memory limit"; fi
+fi
+
+if it "shellcheck helper: with no readable meminfo run_shellcheck sets no limit of its own"; then
+    d="$(_sc_sandbox)"
+    ( PATH="$d/bin:$PATH" AUTOOS_MEMINFO="$d/does-not-exist" STUB_LOG="$d/log" run_shellcheck one.sh ) >/dev/null 2>&1
+    got="$(grep '^ulimit' "$d/log" 2>/dev/null)"
+    rm -rf "$d"
+    assert_eq "$got" "ulimit: $(ulimit -v)"
+fi
+
+if it "shellcheck helper: rc 251 and rc 137 are out-of-memory (flag set, returns 3); a finding and a clean run are not"; then
+    d="$(_sc_sandbox)"
+    res=""
+    for spec in "251:shellcheck: out of memory" "137:" "1:a finding" "0:"; do
+        want_rc="${spec%%:*}"
+        res+="$( PATH="$d/bin:$PATH" AUTOOS_MEMINFO="$d/meminfo" STUB_RC="$want_rc" STUB_OUT="${spec#*:}" run_shellcheck one.sh >/dev/null 2>&1
+                 echo "stub=$want_rc rc=$? oom=${SHELLCHECK_OOM:-unset}" )"$'\n'
+    done
+    rm -rf "$d"
+    exp=$'stub=251 rc=3 oom=1\nstub=137 rc=3 oom=1\nstub=1 rc=1 oom=0\nstub=0 rc=0 oom=0\n'
+    assert_eq "$res" "$exp"
+fi
+
+if it "shellcheck helper: any other rc is out-of-memory only when the output says so; a finding that quotes those words stays a finding"; then
+    d="$(_sc_sandbox)"
+    res=""
+    for spec in "2:shellcheck: mmap: Cannot allocate memory" "2:shellcheck: out of memory (requested 2097152 bytes)" "2:could not read a.sh" "1:echo \"out of memory\""; do
+        want_rc="${spec%%:*}"
+        res+="$( PATH="$d/bin:$PATH" AUTOOS_MEMINFO="$d/meminfo" STUB_RC="$want_rc" STUB_OUT="${spec#*:}" run_shellcheck one.sh >/dev/null 2>&1
+                 echo "rc=$? oom=${SHELLCHECK_OOM:-unset}" )"$'\n'
+    done
+    rm -rf "$d"
+    exp=$'rc=3 oom=1\nrc=3 oom=1\nrc=2 oom=0\nrc=1 oom=0\n'
+    assert_eq "$res" "$exp"
 fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────
