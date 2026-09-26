@@ -363,6 +363,7 @@ install_script() {
         uv)              install_uv ;;
         ollama)          install_ollama ;;
         claude-autostart) install_claude_autostart ;;
+        herdr-sessions)  install_herdr_sessions ;;
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
         zed)             install_zed ;;
@@ -1713,6 +1714,60 @@ claude_autostart_interval() {
              sed -n "s/^AUTOOS_CLAUDE_SNAPSHOT_INTERVAL_MINS='\(.*\)'$/\1/p")"
     [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 59 )) || value=5
     printf '%s' "$value"
+}
+
+# install_herdr_sessions: a thin dispatch to the herdr-sessions driver, on the
+# pattern of install_claude_autostart above - AutoOS's own job is answer
+# collection and the profile-path check; the driver
+# (imported separately to configuration/herdr-sessions/, see
+# logs/handoff-sessions/20260925/status/L1-backlog.herdr-home-proposal.md
+# section 1) owns the systemd units, the snapshot and the restore. This
+# function does not exist for that directory yet in every checkout - see the
+# "missing driver" branch below.
+#
+# AUTOOS_HERDR_SESSIONS_DIR overrides where the driver lives (test seam; a
+# real run always uses $AUTOOS_ROOT/configuration/herdr-sessions).
+install_herdr_sessions() {
+    INSTALL_SCRIPT_STATE=""
+
+    local profile; profile="$(answer herdr_sessions_profile '')"
+    if [[ -z "$profile" ]]; then
+        ui_info "herdr-sessions: skipped: no profile"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+    if [[ ! -f "$profile" ]]; then
+        ui_err "herdr-sessions: profile path does not exist or is not a regular file: $profile"
+        return 1
+    fi
+
+    local dir="${AUTOOS_HERDR_SESSIONS_DIR:-${AUTOOS_ROOT}/configuration/herdr-sessions}"
+    local driver="${dir}/install.sh"
+    if [[ ! -f "$driver" ]]; then
+        ui_err "herdr-sessions: driver not found at $driver - import configuration/herdr-sessions before installing this component"
+        return 1
+    fi
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would run: bash $driver --profile $profile --dry-run"
+        bash "$driver" --profile "$profile" --dry-run
+        return 0
+    fi
+
+    local out rc=0
+    out="$(bash "$driver" --profile "$profile" 2>&1)" || rc=$?
+    [[ -n "$out" ]] && ui_muted "$out"
+    if (( rc != 0 )); then
+        ui_err "herdr-sessions: driver failed (rc=$rc) for profile $profile"
+        return 1
+    fi
+    if [[ "$out" == *"already current"* ]]; then
+        ui_ok "herdr-sessions: already current"
+        INSTALL_SCRIPT_STATE=skipped
+    else
+        ui_ok "herdr-sessions: installed from profile $profile"
+    fi
+    return 0
 }
 
 install_google_chrome() {

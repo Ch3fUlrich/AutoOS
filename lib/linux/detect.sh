@@ -462,6 +462,7 @@ script_is_installed() {
         uv)              has_bin uv ;;
         ollama)          has_bin ollama ;;
         claude-autostart) [[ -f "$SYS_HOME/.config/systemd/user/claude-sessions-restore.service" ]] ;;
+        herdr-sessions)  [[ -f "$SYS_HOME/.config/systemd/user/herdr-sessions-restore.service" ]] ;;
         google-chrome)   has_bin google-chrome || has_bin google-chrome-stable ;;
         bitwarden-chrome) [[ -f /opt/google/chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
                          [[ -f /usr/share/google-chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
