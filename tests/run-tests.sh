@@ -1958,6 +1958,83 @@ if it "undo restores a backed-up file"; then
     assert_eq "$body" "ORIGINAL"
 fi
 
+# backup_file names its copy <file>.autoos-backup-<stamp> with ONE-SECOND
+# resolution and cp overwrites, so two changing writes within a second used to
+# destroy the user's original (the Windows side got Copy-AutoOSBackup for the
+# same reason: base name, then -1, -2, ... never overwrite).
+if it "backup: backup_file never overwrites a same-second backup"; then
+    d="$(mktemp -d)"; f="$d/settings.json"; ok=1
+    printf 'A' >"$f"; chmod 600 "$f"; p1="$(backup_file "$f" 20260101-000000)"; rc1=$?
+    printf 'B' >"$f"; p2="$(backup_file "$f" 20260101-000000)"
+    printf 'C' >"$f"; p3="$(backup_file "$f" 20260101-000000)"
+    [[ "$p1" == "$f.autoos-backup-20260101-000000" ]]   || { ok=0; echo "first backup path: [$p1]" >&2; }
+    [[ "$p2" == "$f.autoos-backup-20260101-000000-1" ]] || { ok=0; echo "second backup path: [$p2]" >&2; }
+    [[ "$p3" == "$f.autoos-backup-20260101-000000-2" ]] || { ok=0; echo "third backup path: [$p3]" >&2; }
+    (( rc1 == 0 )) || { ok=0; echo "first call rc=$rc1" >&2; }
+    [[ "$(cat "$p1" 2>/dev/null)" == A && "$(cat "$p2" 2>/dev/null)" == B && "$(cat "$p3" 2>/dev/null)" == C ]] \
+        || { ok=0; echo "bytes: [$(cat "$p1" 2>/dev/null)] [$(cat "$p2" 2>/dev/null)] [$(cat "$p3" 2>/dev/null)]" >&2; }
+    [[ "$(stat -c '%a' "$p1" 2>/dev/null)" == 600 ]] || { ok=0; echo "the backup did not keep the file mode" >&2; }
+    [[ "$(find "$d" -name '*.autoos-backup-*' | wc -l | tr -d ' ')" == 3 ]] || { ok=0; echo "expected exactly 3 backups" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "backup_file overwrote or misnamed a backup"; fi
+fi
+
+if it "backup: backup_file fails and prints nothing when the copy cannot be made"; then
+    d="$(mktemp -d)"; ok=1
+    out="$(backup_file "$d/does-not-exist" 20260101-000000 2>/dev/null)"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 for a file that is not there" >&2; }
+    [[ -z "$out" ]] || { ok=0; echo "printed [$out] for a backup that was not made" >&2; }
+    [[ "$(find "$d" -type f | wc -l | tr -d ' ')" == 0 ]] || { ok=0; echo "left a file behind" >&2; }
+    # ...and the same call works once the file is there (a missing helper also "fails").
+    printf 'X' >"$d/there"
+    out="$(backup_file "$d/there" 20260101-000000 2>/dev/null)"; rc=$?
+    (( rc == 0 )) && [[ "$out" == "$d/there.autoos-backup-20260101-000000" && -f "$out" ]] \
+        || { ok=0; echo "a valid backup did not work: rc=$rc out=[$out]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "backup_file does not report a failed copy honestly"; fi
+fi
+
+if it "backup: two changing writes in one second keep the user's original"; then
+    d="$(mktemp -d)"; f="$d/.zshrc"
+    printf 'ORIGINAL\n' >"$f"
+    (
+        AUTOOS_DRY_RUN=0
+        date() { printf '20260101-000000\n'; }   # every backup lands in the same second
+        append_line_once "$f" "AutoOS:one" "export ONE=1  # AutoOS:one"
+        append_line_once "$f" "AutoOS:two" "export TWO=2  # AutoOS:two"
+    ) >/dev/null 2>&1
+    ok=1
+    [[ "$(cat "$f.autoos-backup-20260101-000000" 2>/dev/null)" == "ORIGINAL" ]] \
+        || { ok=0; echo "the oldest backup is [$(cat "$f.autoos-backup-20260101-000000" 2>/dev/null)], not the seed" >&2; }
+    grep -q 'AutoOS:one' "$f.autoos-backup-20260101-000000-1" 2>/dev/null \
+        || { ok=0; echo "the second backup (state before the second write) is missing" >&2; }
+    grep -q 'AutoOS:two' "$f" || { ok=0; echo "the second write did not land" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a second write in the same second destroyed the user's original"; fi
+fi
+
+# ...-10 sorts before ...-2 by name, so "the newest backup" cannot be the last
+# name: undo picks by modification time.
+if it "backup: undo restores the newest backup, not the last name (-10 sorts before -2)"; then
+    ok=1
+    # Written one after the other (rising mtimes), and all inside one clock tick.
+    for spread in rising equal; do
+        scratch="$(mktemp -d)"; target="$scratch/.zshrc"; printf 'NOW\n' >"$target"
+        n=0
+        for sfx in "" -1 -2 -10; do
+            printf 'state%s\n' "$sfx" >"$target.autoos-backup-20260101-000000$sfx"
+            n=$((n+1))
+            if [[ "$spread" == rising ]]; then touch -d "2026-01-01 00:00:0$n" "$target.autoos-backup-20260101-000000$sfx"
+            else touch -d "2026-01-01 00:00:00" "$target.autoos-backup-20260101-000000$sfx"; fi
+        done
+        ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; autoos_undo 1 >/dev/null 2>&1 )
+        body="$(cat "$target")"
+        [[ "$body" == "state-10" ]] || { ok=0; echo "$spread mtimes: restored [$body], expected [state-10]" >&2; }
+        rm -rf "$scratch"
+    done
+    if (( ok )); then pass; else fail "undo restored a backup that is not the newest"; fi
+fi
+
 if it "undo never uninstalls anything"; then
     # The safety property, asserted on the source rather than by removing software.
     if grep -qE '(apt-get remove|brew uninstall|npm uninstall)' lib/linux/install.sh; then
