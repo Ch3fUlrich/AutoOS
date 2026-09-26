@@ -142,11 +142,106 @@ Test-Case 'llm-models.json is valid and has unique ids' {
 
 Test-Case 'the windows installer projects the shared catalogue' {
     $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
-    Assert-True ($src -match 'catalog.llm-models\.json') 'shared llm-models.json is not loaded'
+    Assert-True ($src -match 'catalog.ai-registry\.json') 'shared ai-registry.json models are not loaded'
     foreach ($witness in @('REPO_MODELS', 'repoById', 'Get-OpenRouterModelEntry', '_profile_for')) {
         Assert-True ($src.Contains($witness)) "'$witness' projector missing"
     }
     Assert-True (($src -split '_profile_for\(').Count -ge 20) 'expected >= 19 profile projections'
+}
+
+# ─── Registry model reads (A5d) ─────────────────────────────────────
+Describe-Group 'registry model reads'
+
+Test-Case 'registry model reads come from ai-registry.json models' {
+    $sh = Get-Content (Join-Path $Root 'lib\linux\install.sh') -Raw
+    $ps = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
+    Assert-True ($sh -notmatch 'llm-models\.json') 'install.sh still reads llm-models.json'
+    Assert-True ($ps -notmatch 'llm-models\.json') 'AutoOS.Install.psm1 still reads llm-models.json'
+    Assert-True ($sh -match 'ai-registry\.json') 'install.sh has no ai-registry.json read'
+    Assert-True ($ps -match 'ai-registry\.json') 'AutoOS.Install.psm1 has no ai-registry.json read'
+}
+
+Test-Case 'registry model reads project a fixture with no llm-models.json present' {
+    $fixtureDir = Join-Path ([IO.Path]::GetTempPath()) ('a5d-' + [Guid]::NewGuid().ToString('N'))
+    $fixtureCatalog = Join-Path $fixtureDir 'catalog'
+    New-Item -ItemType Directory -Path $fixtureCatalog -Force | Out-Null
+    $fixture = [ordered]@{
+        models = [ordered]@{
+            'muse-spark' = [ordered]@{
+                id = 'muse-spark'; display_name = 'Muse Spark 1.3 Contributor'
+                direct = [ordered]@{
+                    provider = 'meta'; base_url = 'https://api.meta.ai/v1'
+                    model = 'openai/muse-spark-1.3-contributor'
+                    npm = '@ai-sdk/openai'; reasoning_effort = 'high'
+                }
+                context_advertised = 1048576; output_max = 131072
+                reasoning = $true; price_in = 1e-07; price_out = 2e-07
+                price_cache_read = 2e-09
+            }
+            'openrouter-nemotron-ultra' = [ordered]@{
+                id = 'openrouter-nemotron-ultra'; display_name = 'Nemotron 3 Ultra (Free)'
+                direct = [ordered]@{
+                    provider = 'openrouter'
+                    model = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+                }
+                context_advertised = 1000000; output_max = 32768
+                reasoning = $true; price_in = 0; price_out = 0
+                paid_price_in = 6e-07; paid_price_out = 2.4e-06
+                price_cache_read = 1.2e-07
+            }
+        }
+    }
+    $fixture | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $fixtureCatalog 'ai-registry.json') -Encoding UTF8
+    try {
+        Assert-True (-not (Test-Path (Join-Path $fixtureCatalog 'llm-models.json'))) 'fixture must run with no llm-models.json present'
+        # The read under test: the psm1 model block loads the registry map
+        # (keyed by id) and projects the legacy field shape from registry
+        # fields (mapping doc section 1), never from llm-models.json.
+        $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
+        Assert-True ($src -match 'catalog\\ai-registry\.json') 'psm1 model read is not on the registry'
+        $reg = (Get-Content -Path (Join-Path $fixtureCatalog 'ai-registry.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models
+        $repoById = @{}
+        foreach ($modelProp in $reg.PSObject.Properties) {
+            $entryId = $modelProp.Name
+            $entryData = $modelProp.Value
+            $entryProps = $entryData.PSObject.Properties
+            $legacy = [pscustomobject]@{
+                id = $entryId
+                name = if ($null -ne $entryProps['display_name']) { $entryData.display_name } else { $entryId }
+                context = $entryData.context_advertised
+                output = $entryData.output_max
+                reasoning = [bool]$entryData.reasoning
+                input_price = $entryData.price_in
+                output_price = $entryData.price_out
+                openrouter_id = $null
+                direct = $null
+            }
+            if ($null -ne $entryProps['direct'] -and $null -ne $entryProps['direct'].Value) {
+                $directVal = $entryProps['direct'].Value
+                $providerProp = $directVal.PSObject.Properties['provider']
+                $providerName = if ($null -ne $providerProp) { $providerProp.Value } else { $null }
+                if ($providerName -eq 'openrouter') {
+                    $modelProp2 = $directVal.PSObject.Properties['model']
+                    if ($null -ne $modelProp2) { $legacy.openrouter_id = $modelProp2.Value }
+                } else {
+                    $legacy.direct = $directVal
+                }
+            }
+            if ($null -ne $entryProps['price_cache_read']) { Add-Member -InputObject $legacy -NotePropertyName 'cache_read_price' -NotePropertyValue $entryData.price_cache_read }
+            if ($null -ne $entryProps['paid_price_in']) { Add-Member -InputObject $legacy -NotePropertyName 'paid_input_price' -NotePropertyValue $entryData.paid_price_in }
+            if ($null -ne $entryProps['paid_price_out']) { Add-Member -InputObject $legacy -NotePropertyName 'paid_output_price' -NotePropertyValue $entryData.paid_price_out }
+            $repoById[$entryId] = $legacy
+        }
+        Assert-True ($repoById['muse-spark'].name -eq 'Muse Spark 1.3 Contributor') 'muse-spark name wrong'
+        Assert-True ($repoById['muse-spark'].context -eq 1048576 -and $repoById['muse-spark'].output -eq 131072) 'muse-spark windows wrong'
+        Assert-True ($repoById['muse-spark'].direct.provider -eq 'meta') 'muse-spark direct wrong'
+        Assert-True ($null -eq $repoById['muse-spark'].openrouter_id) 'muse-spark must have no openrouter_id'
+        Assert-True ($repoById['openrouter-nemotron-ultra'].openrouter_id -eq 'nvidia/nemotron-3-ultra-550b-a55b:free') 'openrouter_id not derived from direct.model'
+        Assert-True ($null -eq $repoById['openrouter-nemotron-ultra'].direct) 'openrouter entry must have no direct'
+        Assert-True ($repoById['openrouter-nemotron-ultra'].paid_input_price -eq 6e-07) 'paid price not mapped'
+    } finally {
+        Remove-Item -Recurse -Force -Path $fixtureDir -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Case 'every winget component has a non-empty package id' {

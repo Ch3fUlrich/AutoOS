@@ -596,6 +596,110 @@ PY
     then pass; else fail "vendored openhands profiles drifted from catalog (see above)"; fi
 fi
 
+# ─── Registry model reads (A5d) ─────────────────────────────────────
+describe "registry model reads"
+
+if it "registry model reads come from ai-registry.json models"; then
+    # Every model read in the installers targets catalog/ai-registry.json
+    # `models`; no read may still point at catalog/llm-models.json.
+    bad="$(grep -n 'llm-models\.json' lib/linux/install.sh lib/windows/AutoOS.Install.psm1 || true)"
+    if [[ -n "$bad" ]]; then
+        fail "model reads still on llm-models.json: $bad"
+    elif ! grep -q 'ai-registry\.json' lib/linux/install.sh; then
+        fail "lib/linux/install.sh has no ai-registry.json read"
+    elif ! grep -q 'ai-registry\.json' lib/windows/AutoOS.Install.psm1; then
+        fail "lib/windows/AutoOS.Install.psm1 has no ai-registry.json read"
+    else
+        pass
+    fi
+fi
+
+if it "registry model reads project a fixture with no llm-models.json present"; then
+    if python3 - <<'PY'
+import json, os, re, sys, tempfile
+fixture = {"models": {
+    "muse-spark": {
+        "id": "muse-spark", "display_name": "Muse Spark 1.3 Contributor",
+        "direct": {"provider": "meta", "base_url": "https://api.meta.ai/v1",
+                   "model": "openai/muse-spark-1.3-contributor",
+                   "npm": "@ai-sdk/openai", "reasoning_effort": "high"},
+        "context_advertised": 1048576, "output_max": 131072,
+        "reasoning": True, "price_in": 1e-07, "price_out": 2e-07,
+        "price_cache_read": 2e-09},
+    "openrouter-nemotron-ultra": {
+        "id": "openrouter-nemotron-ultra", "display_name": "Nemotron 3 Ultra (Free)",
+        "direct": {"provider": "openrouter",
+                   "model": "nvidia/nemotron-3-ultra-550b-a55b:free"},
+        "context_advertised": 1000000, "output_max": 32768,
+        "reasoning": True, "price_in": 0, "price_out": 0,
+        "paid_price_in": 6e-07, "paid_price_out": 2.4e-06,
+        "price_cache_read": 1.2e-07},
+    "ollama-qwen2.5-coder": {
+        "id": "ollama-qwen2.5-coder", "display_name": "Qwen 2.5 Coder 7B (Local)",
+        "direct": {"provider": "ollama", "base_url": "http://127.0.0.1:11434/v1",
+                   "model": "ollama/qwen2.5-coder:7b",
+                   "npm": "@ai-sdk/openai-compatible"},
+        "context_advertised": 32768, "output_max": 8192,
+        "reasoning": False, "price_in": 0, "price_out": 0},
+}}
+tmp = tempfile.mkdtemp(prefix="a5d-")
+os.makedirs(os.path.join(tmp, "catalog"), exist_ok=True)
+with open(os.path.join(tmp, "catalog", "ai-registry.json"), "w", encoding="utf-8") as fh:
+    json.dump(fixture, fh)
+assert not os.path.exists(os.path.join(tmp, "catalog", "llm-models.json")), \
+    "fixture must run with no llm-models.json present"
+# Run each read's own loader: the _legacy_model helper each embedded python
+# read carries (two in lib/linux/install.sh, one in AutoOS.Install.psm1).
+for path, want in (("lib/linux/install.sh", 2),
+                   ("lib/windows/AutoOS.Install.psm1", 1)):
+    src = open(path, encoding="utf-8").read()
+    found = re.findall(r"^def _legacy_model\(.*?\n((?:    .*\n)+)",
+                       src, re.MULTILINE)
+    assert len(found) == want, \
+        f"{path}: expected {want} _legacy_model loader(s), found {len(found)}"
+    ns = {}
+    exec("def _legacy_model" + src.split("def _legacy_model", 1)[1].split(
+        "\nREPO_MODELS", 1)[0].split("\nREPO_BY_ID", 1)[0], ns)
+    by_id = {mid: ns["_legacy_model"](mid, e)
+             for mid, e in fixture["models"].items()}
+    muse = by_id["muse-spark"]
+    assert muse["name"] == "Muse Spark 1.3 Contributor", muse
+    assert (muse["context"], muse["output"]) == (1048576, 131072), muse
+    assert muse["direct"]["provider"] == "meta", muse
+    assert "openrouter_id" not in muse, muse
+    ultra = by_id["openrouter-nemotron-ultra"]
+    assert ultra["openrouter_id"] == "nvidia/nemotron-3-ultra-550b-a55b:free", ultra
+    assert "direct" not in ultra, ultra
+    assert (ultra["paid_input_price"], ultra["paid_output_price"]) == (6e-07, 2.4e-06), ultra
+    assert ultra["cache_read_price"] == 1.2e-07, ultra
+    local = by_id["ollama-qwen2.5-coder"]
+    assert local["direct"]["model"] == "ollama/qwen2.5-coder:7b", local
+    assert (local["context"], local["output"]) == (32768, 8192), local
+# The projection keeps the output identical on the real catalogs too.
+llm = {m["id"]: m for m in
+       json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]}
+reg = json.load(open("catalog/ai-registry.json", encoding="utf-8"))["models"]
+ns = {}
+ish = open("lib/linux/install.sh", encoding="utf-8").read()
+exec("def _legacy_model" + ish.split("def _legacy_model", 1)[1].split(
+    "\nREPO_MODELS", 1)[0].split("\nREPO_BY_ID", 1)[0], ns)
+for mid, old in sorted(llm.items()):
+    new = ns["_legacy_model"](mid, reg[mid])
+    assert new["name"] == old["name"], (mid, new["name"], old["name"])
+    assert (new["context"], new["output"]) == (old["context"], old["output"]), mid
+    assert bool(new.get("reasoning")) == bool(old.get("reasoning")), mid
+    assert (new["input_price"], new["output_price"]) == \
+        (old["input_price"], old["output_price"]), mid
+    for opt in ("cache_read_price", "paid_input_price", "paid_output_price"):
+        assert new.get(opt) == old.get(opt), (mid, opt)
+    if old.get("openrouter_id"):
+        assert new.get("openrouter_id") == old["openrouter_id"], mid
+    else:
+        assert new.get("direct") == old["direct"], (mid, new.get("direct"))
+PY
+    then pass; else fail "registry fixture does not project to the legacy model shape (see above)"; fi
+fi
+
 if it "resolve_ollama_base_url: OLLAMA_BASE_URL wins and is normalised to /v1"; then
     got="$(curl() { return 1; }; OLLAMA_BASE_URL="http://gpu-box:11434/" resolve_ollama_base_url)"
     assert_eq "$got" "http://gpu-box:11434/v1"

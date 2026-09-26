@@ -2902,10 +2902,10 @@ _opencode_merge_config() {
     local secrets_file="$SYS_HOME/Documents/Code/agent-skills/secrets/api_keys.conf"
     [[ -f "$secrets_file" ]] || secrets_file="$SYS_HOME/Documents/code/agent-skills/secrets/api_keys.conf"
 
-    # catalog/llm-models.json is the single source of truth for model data.
+    # catalog/ai-registry.json models is the single source of truth for model data.
     # The repo root is anchored off this script, never off the caller's cwd.
     local models_file
-    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/llm-models.json"
+    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/ai-registry.json"
 
     local ollama_url
     ollama_url="$(resolve_ollama_base_url)"
@@ -2921,11 +2921,34 @@ secrets_path = sys.argv[2]
 models_file = sys.argv[3]
 ide_file = sys.argv[4]
 
-# Model data lives in catalog/llm-models.json (single source of truth).
+# Model data lives in catalog/ai-registry.json models (single source of truth).
 # Everything below projects it into OpenCode's shape; nothing here
-# duplicates an id, a context window or a price.
+# duplicates an id, a context window or a price. The registry's models is a
+# map keyed by id (the old catalog file was a list); _legacy_model derives the old
+# field shape from registry fields (mapping doc section 1), so the output is
+# identical.
 with open(models_file, 'r', encoding='utf-8') as _mf:
-    REPO_MODELS = json.load(_mf)['models']
+    _REG_MODELS = json.load(_mf)['models']
+def _legacy_model(_mid, _e):
+    _m = {'id': _mid, 'name': _e.get('display_name', _mid)}
+    _d = dict(_e.get('direct') or {})
+    if _d.get('provider') == 'openrouter':
+        _m['openrouter_id'] = _d.get('model')
+    elif _d:
+        _m['direct'] = _d
+    _m['context'] = _e.get('context_advertised')
+    _m['output'] = _e.get('output_max')
+    _m['reasoning'] = bool(_e.get('reasoning', False))
+    _m['input_price'] = _e.get('price_in')
+    _m['output_price'] = _e.get('price_out')
+    if _e.get('price_cache_read') is not None:
+        _m['cache_read_price'] = _e['price_cache_read']
+    if _e.get('paid_price_in') is not None:
+        _m['paid_input_price'] = _e['paid_price_in']
+    if _e.get('paid_price_out') is not None:
+        _m['paid_output_price'] = _e['paid_price_out']
+    return _m
+REPO_MODELS = [_legacy_model(_mid, _e) for _mid, _e in _REG_MODELS.items()]
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
 # MCP package specs live in catalog/agent-harness.json, never inline.
 _harness_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'catalog', 'agent-harness.json')
@@ -3327,7 +3350,7 @@ setup_openhands_config() {
     catalog_require_python || return 0
 
     local models_file
-    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/llm-models.json"
+    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/ai-registry.json"
 
     local ollama_url
     ollama_url="$(resolve_ollama_base_url)"
@@ -3385,7 +3408,27 @@ secrets_file = sys.argv[2] if len(sys.argv) > 2 else ""
 models_file = sys.argv[3] if len(sys.argv) > 3 else ""
 
 with open(models_file, "r", encoding="utf-8") as _mf:
-    REPO_MODELS = json.load(_mf)["models"]
+    _REG_MODELS = json.load(_mf)["models"]
+def _legacy_model(_mid, _e):
+    _m = {"id": _mid, "name": _e.get("display_name", _mid)}
+    _d = dict(_e.get("direct") or {})
+    if _d.get("provider") == "openrouter":
+        _m["openrouter_id"] = _d.get("model")
+    elif _d:
+        _m["direct"] = _d
+    _m["context"] = _e.get("context_advertised")
+    _m["output"] = _e.get("output_max")
+    _m["reasoning"] = bool(_e.get("reasoning", False))
+    _m["input_price"] = _e.get("price_in")
+    _m["output_price"] = _e.get("price_out")
+    if _e.get("price_cache_read") is not None:
+        _m["cache_read_price"] = _e["price_cache_read"]
+    if _e.get("paid_price_in") is not None:
+        _m["paid_input_price"] = _e["paid_price_in"]
+    if _e.get("paid_price_out") is not None:
+        _m["paid_output_price"] = _e["paid_price_out"]
+    return _m
+REPO_MODELS = [_legacy_model(_mid, _e) for _mid, _e in _REG_MODELS.items()]
 REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
 # resolve_ollama_base_url's answer; empty keeps the catalog default. Applied to
 # the catalog entry so the profiles and the settings.json fallback agree.
@@ -3662,7 +3705,7 @@ if "github" in mcp_cfg:
 # compare-before-write needs the disk to still hold the original until then.
 
 profiles_dir = os.path.join(openhands_dir, "profiles")
-# Prices are USD per token from catalog/llm-models.json. Free variants bill
+# Prices are USD per token from catalog/ai-registry.json models. Free variants bill
 # $0 while under the daily cap; paid_*_cost_per_token applies past it, so
 # spend = in_tokens*in_price + out_tokens*out_price stays auditable.
 profiles = dict([

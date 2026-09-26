@@ -2100,10 +2100,46 @@ function Set-AutoOSOpenCodeConfig {
         foreach ($p in $existing['provider'].PSObject.Properties) { $providers[$p.Name] = $p.Value }
     }
 
-    $modelsFile = Join-Path $script:RepoRoot 'catalog\llm-models.json'
-    $repoModels = (Get-Content -Path $modelsFile -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    # catalog/ai-registry.json models is the single source of truth for model
+    # data. The registry's models is a map keyed by id (the old catalog file
+    # was a list); each entry is projected to the old field shape from
+    # registry fields (mapping doc section 1), so the output is identical.
+    $modelsFile = Join-Path $script:RepoRoot 'catalog\ai-registry.json'
+    $regModels = (Get-Content -Path $modelsFile -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    $repoModels = @()
     $repoById = @{}
-    foreach ($m in $repoModels) { $repoById[$m.id] = $m }
+    foreach ($modelProp in $regModels.PSObject.Properties) {
+        $entryId = $modelProp.Name
+        $entryData = $modelProp.Value
+        $entryProps = $entryData.PSObject.Properties
+        $legacy = [pscustomobject]@{
+            id            = $entryId
+            name          = if ($null -ne $entryProps['display_name']) { $entryData.display_name } else { $entryId }
+            context       = $entryData.context_advertised
+            output        = $entryData.output_max
+            reasoning     = [bool]$entryData.reasoning
+            input_price   = $entryData.price_in
+            output_price  = $entryData.price_out
+            openrouter_id = $null
+            direct        = $null
+        }
+        if ($null -ne $entryProps['direct'] -and $null -ne $entryProps['direct'].Value) {
+            $directVal = $entryProps['direct'].Value
+            $providerProp = $directVal.PSObject.Properties['provider']
+            $providerName = if ($null -ne $providerProp) { $providerProp.Value } else { $null }
+            if ($providerName -eq 'openrouter') {
+                $openrouterModelProp = $directVal.PSObject.Properties['model']
+                if ($null -ne $openrouterModelProp) { $legacy.openrouter_id = $openrouterModelProp.Value }
+            } else {
+                $legacy.direct = $directVal
+            }
+        }
+        if ($null -ne $entryProps['price_cache_read']) { Add-Member -InputObject $legacy -NotePropertyName 'cache_read_price' -NotePropertyValue $entryData.price_cache_read }
+        if ($null -ne $entryProps['paid_price_in']) { Add-Member -InputObject $legacy -NotePropertyName 'paid_input_price' -NotePropertyValue $entryData.paid_price_in }
+        if ($null -ne $entryProps['paid_price_out']) { Add-Member -InputObject $legacy -NotePropertyName 'paid_output_price' -NotePropertyValue $entryData.paid_price_out }
+        $repoModels += $legacy
+        $repoById[$entryId] = $legacy
+    }
     $ollamaUrl = Resolve-AutoOSOllamaBaseUrl
     if ($ollamaUrl) { $repoById['ollama-qwen2.5-coder'].direct.base_url = $ollamaUrl }
 
@@ -2188,7 +2224,7 @@ function Set-AutoOSOpenCodeConfig {
         models  = $litTiers
     }
 
-    # Projected from catalog/llm-models.json (single source of truth):
+    # Projected from catalog/ai-registry.json models (single source of truth):
     # `limit` carries the free-variant context window; `cost` is per 1M
     # tokens, so chat spend stays estimable once a free cap is exhausted.
     $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
@@ -2586,9 +2622,29 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
 _repo_root_arg = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] not in ('', 'null') else ''
-_models_file = os.path.join(_repo_root_arg, 'catalog', 'llm-models.json')
+_models_file = os.path.join(_repo_root_arg, 'catalog', 'ai-registry.json')
 with open(_models_file, 'r', encoding='utf-8') as _mf:
-    REPO_MODELS = json.load(_mf)['models']
+    _REG_MODELS = json.load(_mf)['models']
+def _legacy_model(_mid, _e):
+    _m = {'id': _mid, 'name': _e.get('display_name', _mid)}
+    _d = dict(_e.get('direct') or {})
+    if _d.get('provider') == 'openrouter':
+        _m['openrouter_id'] = _d.get('model')
+    elif _d:
+        _m['direct'] = _d
+    _m['context'] = _e.get('context_advertised')
+    _m['output'] = _e.get('output_max')
+    _m['reasoning'] = bool(_e.get('reasoning', False))
+    _m['input_price'] = _e.get('price_in')
+    _m['output_price'] = _e.get('price_out')
+    if _e.get('price_cache_read') is not None:
+        _m['cache_read_price'] = _e['price_cache_read']
+    if _e.get('paid_price_in') is not None:
+        _m['paid_input_price'] = _e['paid_price_in']
+    if _e.get('paid_price_out') is not None:
+        _m['paid_output_price'] = _e['paid_price_out']
+    return _m
+REPO_MODELS = [_legacy_model(_mid, _e) for _mid, _e in _REG_MODELS.items()]
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
 # MCP package specs live in catalog/agent-harness.json, never inlined here.
 _harness_file = os.path.join(_repo_root_arg, 'catalog', 'agent-harness.json')
@@ -2875,7 +2931,7 @@ if 'github' in mcp_cfg:
 _save_settings()
 
 profiles_dir = os.path.join(openhands_dir, 'profiles')
-# Prices are USD per token from catalog/llm-models.json. Free variants bill
+# Prices are USD per token from catalog/ai-registry.json models. Free variants bill
 # $0 while under the daily cap; paid_*_cost_per_token applies past it, so
 # spend = in_tokens*in_price + out_tokens*out_price stays auditable.
 profiles = dict([
