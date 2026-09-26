@@ -3954,6 +3954,10 @@ if it "mirror-litellm-env projects keys without printing them"; then
     if (( ok )); then pass; else fail "mirror tool broken"; fi
 fi
 
+if it "mirror-litellm-env's unit tests pass (registry-sourced, task A5c)"; then
+    out="$(python3 tests/test_mirror_litellm_env_registry.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "no committed secrets in router files"; then    # Report file:line only - a failure message must never echo the value it
     # found into logs or a terminal shared with anyone else.
     hits="$(grep -rnE 'sk-[A-Za-z0-9]{10,}' configuration/litellm/config.yaml \

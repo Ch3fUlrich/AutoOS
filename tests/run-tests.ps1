@@ -3965,6 +3965,15 @@ Test-Case 'mirror-litellm-env projects keys without printing them' {
     } finally { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case "mirror-litellm-env's unit tests pass (registry-sourced, task A5c)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_mirror_litellm_env_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "mirror-litellm-env registry unit tests failed: $out"
+}
+
 Test-Case 'the embedded OpenHands setup script defaults to the gateway with a key' {
     # Same temp-dir isolation as the Ollama test. With an OmniRoute key the
     # default LLM must mirror the opencode t1 setup (openai/t1-orchestrator via the
