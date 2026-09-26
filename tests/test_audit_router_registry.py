@@ -110,5 +110,43 @@ class RegistrySourcedRepoCombosTests(unittest.TestCase):
         self.assertIn(f"cannot read routes from {path}", str(caught.exception))
 
 
+# A registry fixture with two combo routes: one served to opencode only,
+# one served to openhands too. Only the openhands one needs an
+# `omniroute-<name>` tier profile (Q1fix: the four pinned opencode+zed-only
+# routes were wrongly reported as drift).
+OPENHANDS_FIXTURE = {
+    "routes": {
+        "route-opencode-only": {
+            "strategy": "priority",
+            "legs": ["groq/openai/gpt-oss-120b"],
+            "surfaces": {"omniroute": {"clients": ["opencode"],
+                                       "context_declared": "128k"}},
+        },
+        "route-openhands": {
+            "strategy": "priority",
+            "legs": ["groq/openai/gpt-oss-120b"],
+            "surfaces": {"omniroute": {"clients": ["opencode", "openhands"],
+                                       "context_declared": "128k"}},
+        },
+    }
+}
+
+
+class OpenHandsTierProfileTests(unittest.TestCase):
+    """Only routes OpenHands actually serves need a tier profile: routes
+    whose surfaces.omniroute.clients contains "openhands"."""
+
+    def test_openhands_route_names_come_from_the_registry(self):
+        audit = _load_module()
+        self.assertEqual(audit.openhands_route_names(OPENHANDS_FIXTURE),
+                         {"route-openhands"})
+
+    def test_only_the_openhands_route_without_a_profile_is_drift(self):
+        audit = _load_module()
+        drift = audit.tier_profile_drift(
+            ["route-opencode-only", "route-openhands"], set(), OPENHANDS_FIXTURE)
+        self.assertEqual(drift, ["tier-profiles.json lacks 'omniroute-route-openhands'"])
+
+
 if __name__ == "__main__":
     unittest.main()

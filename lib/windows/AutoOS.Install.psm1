@@ -2008,6 +2008,74 @@ function Test-AutoOSOpenCodeV2 {
     return ((@($out) -join "`n") -match '(^|[^0-9.])v?2\.')
 }
 
+function Get-AutoOSLegacyModels {
+    <#
+    .SYNOPSIS
+        Project catalog/ai-registry.json models into the old llm
+        catalog entry shape.
+    .DESCRIPTION
+        The PowerShell twin of tools/registry.py legacy_models(): the models
+        carrying a `direct` block are projected field for field (plus
+        default_for); anything without one is skipped. Every property read is
+        guarded through PSObject.Properties[...] so the function holds under
+        Set-StrictMode even when a registry entry omits an optional key.
+    #>
+    param($RegistryModels)
+    if ($null -eq $RegistryModels) { return @() }
+    $projected = @()
+    foreach ($modelProp in $RegistryModels.PSObject.Properties) {
+        $entryId = $modelProp.Name
+        $entryData = $modelProp.Value
+        $entryProps = $entryData.PSObject.Properties
+        $directProp = $entryProps['direct']
+        if ($null -eq $directProp -or $null -eq $directProp.Value) { continue }
+        $directVal = $directProp.Value
+        if ($directVal -isnot [System.Management.Automation.PSCustomObject]) { continue }
+        $nameProp = $entryProps['display_name']
+        $contextProp = $entryProps['context_advertised']
+        $outputProp = $entryProps['output_max']
+        $reasoningProp = $entryProps['reasoning']
+        $inProp = $entryProps['price_in']
+        $outProp = $entryProps['price_out']
+        $legacy = [pscustomobject][ordered]@{
+            id           = $entryId
+            name         = if ($null -ne $nameProp) { $nameProp.Value } else { $entryId }
+            context      = if ($null -ne $contextProp) { $contextProp.Value } else { $null }
+            output       = if ($null -ne $outputProp) { $outputProp.Value } else { $null }
+            input_price  = if ($null -ne $inProp) { $inProp.Value } else { $null }
+            output_price = if ($null -ne $outProp) { $outProp.Value } else { $null }
+        }
+        $providerProp = $directVal.PSObject.Properties['provider']
+        $providerName = if ($null -ne $providerProp) { $providerProp.Value } else { $null }
+        if ($providerName -eq 'openrouter') {
+            $orModelProp = $directVal.PSObject.Properties['model']
+            $orId = if ($null -ne $orModelProp) { $orModelProp.Value } else { $null }
+            Add-Member -InputObject $legacy -NotePropertyName 'openrouter_id' -NotePropertyValue $orId
+        } else {
+            Add-Member -InputObject $legacy -NotePropertyName 'direct' -NotePropertyValue $directVal
+        }
+        if ($null -ne $reasoningProp -and $reasoningProp.Value) {
+            Add-Member -InputObject $legacy -NotePropertyName 'reasoning' -NotePropertyValue $true
+        }
+        $cacheProp = $entryProps['price_cache_read']
+        if ($null -ne $cacheProp) { Add-Member -InputObject $legacy -NotePropertyName 'cache_read_price' -NotePropertyValue $cacheProp.Value }
+        $paidInProp = $entryProps['paid_price_in']
+        if ($null -ne $paidInProp) { Add-Member -InputObject $legacy -NotePropertyName 'paid_input_price' -NotePropertyValue $paidInProp.Value }
+        $paidOutProp = $entryProps['paid_price_out']
+        if ($null -ne $paidOutProp) { Add-Member -InputObject $legacy -NotePropertyName 'paid_output_price' -NotePropertyValue $paidOutProp.Value }
+        $defaultProp = $entryProps['default_for']
+        if ($null -ne $defaultProp) { Add-Member -InputObject $legacy -NotePropertyName 'default_for' -NotePropertyValue $defaultProp.Value }
+        $projected += $legacy
+    }
+    # openrouter-free first among the openrouter entries (same contract as
+    # tools/registry.py legacy_models()): the registry is alphabetical and
+    # cannot reproduce the old catalog file's hand order, so sort instead.
+    $sorted = @($projected | Sort-Object -Property @{ Expression = {
+        if ($_.id -eq 'openrouter-free') { 1 } elseif ($_.id -like 'openrouter-*') { 2 } else { 0 }
+    } }, @{ Expression = { $_.id } })
+    return $sorted
+}
+
 function Set-AutoOSOpenCodeConfig {
     <#
       .SYNOPSIS Configure OpenCode CLI with local Ollama, MCP tools, and optional keys.
@@ -2100,8 +2168,14 @@ function Set-AutoOSOpenCodeConfig {
         foreach ($p in $existing['provider'].PSObject.Properties) { $providers[$p.Name] = $p.Value }
     }
 
-    $modelsFile = Join-Path $script:RepoRoot 'catalog\llm-models.json'
-    $repoModels = (Get-Content -Path $modelsFile -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    # catalog/ai-registry.json models is the single source of truth for model
+    # data. Get-AutoOSLegacyModels projects the registry map (keyed by id;
+    # the old catalog file was a list) to the old field shape from registry
+    # fields (mapping doc section 1) -- the PowerShell twin of
+    # tools/registry.py legacy_models() -- so the output is identical.
+    $modelsFile = Join-Path $script:RepoRoot 'catalog\ai-registry.json'
+    $regModels = (Get-Content -Path $modelsFile -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    $repoModels = @(Get-AutoOSLegacyModels -RegistryModels $regModels)
     $repoById = @{}
     foreach ($m in $repoModels) { $repoById[$m.id] = $m }
     $ollamaUrl = Resolve-AutoOSOllamaBaseUrl
@@ -2188,15 +2262,16 @@ function Set-AutoOSOpenCodeConfig {
         models  = $litTiers
     }
 
-    # Projected from catalog/llm-models.json (single source of truth):
+    # Projected from catalog/ai-registry.json models (single source of truth):
     # `limit` carries the free-variant context window; `cost` is per 1M
     # tokens, so chat spend stays estimable once a free cap is exhausted.
     $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
     if ($openrouterKey) {
         $orModels = [ordered]@{}
         foreach ($m in $repoModels) {
-            if (-not $m.openrouter_id) { continue }
-            $orModels[$m.openrouter_id] = Get-OpenRouterModelEntry $m
+            $orIdProp = $m.PSObject.Properties['openrouter_id']
+            if ($null -eq $orIdProp -or -not $orIdProp.Value) { continue }
+            $orModels[$orIdProp.Value] = Get-OpenRouterModelEntry $m
         }
         $providers['openrouter'] = [ordered]@{
             npm     = '@ai-sdk/openai-compatible'
@@ -2586,9 +2661,16 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
 _repo_root_arg = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] not in ('', 'null') else ''
-_models_file = os.path.join(_repo_root_arg, 'catalog', 'llm-models.json')
+_models_file = os.path.join(_repo_root_arg, 'catalog', 'ai-registry.json')
 with open(_models_file, 'r', encoding='utf-8') as _mf:
-    REPO_MODELS = json.load(_mf)['models']
+    _REG_DOC = json.load(_mf)
+# The legacy entry shape comes from tools/registry.py legacy_models() -- the
+# one home for it, loaded by path (as tools/audit-router.py does).
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location('autoos_registry', os.path.join(_repo_root_arg, 'tools', 'registry.py'))
+_registry = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_registry)
+REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
 # MCP package specs live in catalog/agent-harness.json, never inlined here.
 _harness_file = os.path.join(_repo_root_arg, 'catalog', 'agent-harness.json')
@@ -2875,7 +2957,7 @@ if 'github' in mcp_cfg:
 _save_settings()
 
 profiles_dir = os.path.join(openhands_dir, 'profiles')
-# Prices are USD per token from catalog/llm-models.json. Free variants bill
+# Prices are USD per token from catalog/ai-registry.json models. Free variants bill
 # $0 while under the daily cap; paid_*_cost_per_token applies past it, so
 # spend = in_tokens*in_price + out_tokens*out_price stays auditable.
 profiles = dict([
@@ -3812,7 +3894,7 @@ Export-ModuleMember -Function `
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
-    Set-AutoOSOpenCodeConfig, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig, Sync-AutoOSSkillDirs,
+    Set-AutoOSOpenCodeConfig, Get-AutoOSLegacyModels, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig, Sync-AutoOSSkillDirs,
     Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Set-AutoOSQoderMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,

@@ -4100,10 +4100,10 @@ _opencode_merge_config() {
     local secrets_file="$SYS_HOME/Documents/Code/agent-skills/secrets/api_keys.conf"
     [[ -f "$secrets_file" ]] || secrets_file="$SYS_HOME/Documents/code/agent-skills/secrets/api_keys.conf"
 
-    # catalog/llm-models.json is the single source of truth for model data.
+    # catalog/ai-registry.json models is the single source of truth for model data.
     # The repo root is anchored off this script, never off the caller's cwd.
     local models_file
-    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/llm-models.json"
+    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/ai-registry.json"
 
     local ollama_url
     ollama_url="$(resolve_ollama_base_url)"
@@ -4112,6 +4112,7 @@ _opencode_merge_config() {
     ide_file="$(ide_models_file)"
 
     OLLAMA_BASE_URL="$ollama_url" python3 -c "
+import importlib.util as _ilu
 import json, os, sys
 
 config_path = sys.argv[1]
@@ -4119,11 +4120,19 @@ secrets_path = sys.argv[2]
 models_file = sys.argv[3]
 ide_file = sys.argv[4]
 
-# Model data lives in catalog/llm-models.json (single source of truth).
+# Model data lives in catalog/ai-registry.json models (single source of truth).
 # Everything below projects it into OpenCode's shape; nothing here
-# duplicates an id, a context window or a price.
+# duplicates an id, a context window or a price. The legacy entry shape comes
+# from tools/registry.py legacy_models() -- the one home for it, loaded by
+# path off the repo root (as tools/audit-router.py does), never derived here
+# and never from the retired llm catalog file.
 with open(models_file, 'r', encoding='utf-8') as _mf:
-    REPO_MODELS = json.load(_mf)['models']
+    _REG_DOC = json.load(_mf)
+_REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools', 'registry.py')
+_spec = _ilu.spec_from_file_location('autoos_registry', _REG_TOOL)
+_registry = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_registry)
+REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
 # MCP package specs live in catalog/agent-harness.json, never inline.
 _harness_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'catalog', 'agent-harness.json')
@@ -4525,7 +4534,7 @@ setup_openhands_config() {
     catalog_require_python || return 0
 
     local models_file
-    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/llm-models.json"
+    models_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/ai-registry.json"
 
     local ollama_url
     ollama_url="$(resolve_ollama_base_url)"
@@ -4583,7 +4592,16 @@ secrets_file = sys.argv[2] if len(sys.argv) > 2 else ""
 models_file = sys.argv[3] if len(sys.argv) > 3 else ""
 
 with open(models_file, "r", encoding="utf-8") as _mf:
-    REPO_MODELS = json.load(_mf)["models"]
+    _REG_DOC = json.load(_mf)
+# The legacy entry shape comes from tools/registry.py legacy_models() -- the
+# one home for it, loaded by path off the repo root (as tools/audit-router.py
+# does), never derived here and never from the retired llm catalog file.
+import importlib.util as _ilu
+_REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), "tools", "registry.py")
+_spec = _ilu.spec_from_file_location("autoos_registry", _REG_TOOL)
+_registry = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_registry)
+REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
 # resolve_ollama_base_url's answer; empty keeps the catalog default. Applied to
 # the catalog entry so the profiles and the settings.json fallback agree.
@@ -4860,7 +4878,7 @@ if "github" in mcp_cfg:
 # compare-before-write needs the disk to still hold the original until then.
 
 profiles_dir = os.path.join(openhands_dir, "profiles")
-# Prices are USD per token from catalog/llm-models.json. Free variants bill
+# Prices are USD per token from catalog/ai-registry.json models. Free variants bill
 # $0 while under the daily cap; paid_*_cost_per_token applies past it, so
 # spend = in_tokens*in_price + out_tokens*out_price stays auditable.
 profiles = dict([

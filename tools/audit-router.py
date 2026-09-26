@@ -191,6 +191,34 @@ def tier_profile_ids() -> set[str]:
     return {t["id"] for t in doc["tiers"]}
 
 
+def openhands_route_names(registry_doc: dict) -> set[str]:
+    """Route ids OpenHands actually serves: routes whose
+    surfaces.omniroute.clients contains "openhands" (catalog/ai-registry.json,
+    read via tools/registry.py's loader). Only these need an
+    `omniroute-<name>` tier profile - opencode/zed-only pinned routes do not."""
+    out = set()
+    routes = registry_doc.get("routes") or {}
+    for rid, route in routes.items():
+        if not isinstance(route, dict):
+            continue
+        surfaces = route.get("surfaces") or {}
+        omni = surfaces.get("omniroute") or {} if isinstance(surfaces, dict) else {}
+        if not isinstance(omni, dict):
+            continue
+        if "openhands" in (omni.get("clients") or []):
+            out.add(rid)
+    return out
+
+
+def tier_profile_drift(names: list[str], tier_ids: set[str],
+                       registry_doc: dict) -> list[str]:
+    """Tier-profile drift lines for `names`, restricted to the routes
+    OpenHands actually serves (see openhands_route_names)."""
+    need = openhands_route_names(registry_doc)
+    return [f"tier-profiles.json lacks 'omniroute-{c}'" for c in names
+            if c in need and f"omniroute-{c}" not in tier_ids]
+
+
 def litellm_declared() -> list[str]:
     text = (ROOT / "configuration" / "litellm" / "config.yaml").read_text(encoding="utf-8")
     return sorted({m.group(1) for m in re.finditer(r"^\s*-\s*model_name:\s*(\S+)\s*$",
@@ -340,9 +368,19 @@ def main(argv=None) -> int:
         if m not in names and not m.startswith("auto"):
             drift.append(f"catalog/ide-models.json offers '{m}' through omniroute but no combo has that name")
     tp = tier_profile_ids()
-    for c in names:
-        if f"omniroute-{c}" not in tp:
-            drift.append(f"tier-profiles.json lacks 'omniroute-{c}'")
+    try:
+        reg_path = Path(args.registry) if args.registry else ROOT / "catalog" / "ai-registry.json"
+        reg_doc = _load_registry_tool().load(reg_path)
+    except (OSError, ValueError):
+        reg_doc = None
+    if not isinstance(reg_doc, dict) or "routes" not in reg_doc:
+        # Registry unreadable: fall back to requiring a profile for every
+        # combo (the old, stricter rule) rather than silently skipping.
+        for c in names:
+            if f"omniroute-{c}" not in tp:
+                drift.append(f"tier-profiles.json lacks 'omniroute-{c}'")
+    else:
+        drift.extend(tier_profile_drift(names, tp, reg_doc))
 
     # 3. forbidden direct refs anywhere in our surfaces
     surfaces = {

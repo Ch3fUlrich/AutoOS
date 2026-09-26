@@ -596,6 +596,113 @@ PY
     then pass; else fail "vendored openhands profiles drifted from catalog (see above)"; fi
 fi
 
+# ─── Registry model reads (A5d) ─────────────────────────────────────
+describe "registry model reads"
+
+if it "registry model reads come from ai-registry.json models"; then
+    # Every model read in the installers targets catalog/ai-registry.json
+    # `models`; no read may still point at catalog/llm-models.json.
+    bad="$(grep -n 'llm-models\.json' lib/linux/install.sh lib/windows/AutoOS.Install.psm1 || true)"
+    if [[ -n "$bad" ]]; then
+        fail "model reads still on llm-models.json: $bad"
+    elif ! grep -q 'ai-registry\.json' lib/linux/install.sh; then
+        fail "lib/linux/install.sh has no ai-registry.json read"
+    elif ! grep -q 'ai-registry\.json' lib/windows/AutoOS.Install.psm1; then
+        fail "lib/windows/AutoOS.Install.psm1 has no ai-registry.json read"
+    else
+        pass
+    fi
+fi
+
+if it "registry model reads project a fixture with no llm-models.json present"; then
+    if python3 - <<'PY'
+import importlib.util, json, os, tempfile
+
+def load_registry_tool():
+    # The real read path: the installers import tools/registry.py by path
+    # (as tools/audit-router.py does) and call legacy_models(); this test
+    # loads the same module the same way, never a copy of its logic.
+    spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+registry = load_registry_tool()
+fixture = {"models": {
+    "muse-spark": {
+        "id": "muse-spark", "display_name": "Muse Spark 1.3 Contributor",
+        "direct": {"provider": "meta", "base_url": "https://api.meta.ai/v1",
+                   "model": "openai/muse-spark-1.3-contributor",
+                   "npm": "@ai-sdk/openai", "reasoning_effort": "high"},
+        "context_advertised": 1048576, "output_max": 131072,
+        "reasoning": True, "price_in": 1e-07, "price_out": 2e-07,
+        "price_cache_read": 2e-09, "default_for": "muse_key"},
+    "openrouter-nemotron-ultra": {
+        "id": "openrouter-nemotron-ultra", "display_name": "Nemotron 3 Ultra (Free)",
+        "direct": {"provider": "openrouter",
+                   "model": "nvidia/nemotron-3-ultra-550b-a55b:free"},
+        "context_advertised": 1000000, "output_max": 32768,
+        "reasoning": True, "price_in": 0, "price_out": 0,
+        "paid_price_in": 6e-07, "paid_price_out": 2.4e-06,
+        "price_cache_read": 1.2e-07},
+    "ollama-qwen2.5-coder": {
+        "id": "ollama-qwen2.5-coder", "display_name": "Qwen 2.5 Coder 7B (Local)",
+        "direct": {"provider": "ollama", "base_url": "http://127.0.0.1:11434/v1",
+                   "model": "ollama/qwen2.5-coder:7b",
+                   "npm": "@ai-sdk/openai-compatible"},
+        "context_advertised": 32768, "output_max": 8192,
+        "reasoning": False, "price_in": 0, "price_out": 0,
+        "default_for": "fallback"},
+    "command-a-03-2025": {
+        "id": "command-a-03-2025", "display_name": "Command A",
+        "context_advertised": 131072, "output_max": 16384,
+        "reasoning": False, "price_in": 0.0, "price_out": 0.0},
+}}
+tmp = tempfile.mkdtemp(prefix="a5d-")
+os.makedirs(os.path.join(tmp, "catalog"), exist_ok=True)
+with open(os.path.join(tmp, "catalog", "ai-registry.json"), "w", encoding="utf-8") as fh:
+    json.dump(fixture, fh)
+assert not os.path.exists(os.path.join(tmp, "catalog", "llm-models.json")), \
+    "fixture must run with no llm-models.json present"
+# The real read path: ai-registry.json from disk, projected by the one
+# helper the installers call -- never a copy of its logic, and a model
+# without a direct block is skipped, never listed.
+with open(os.path.join(tmp, "catalog", "ai-registry.json"), encoding="utf-8") as fh:
+    by_id = {m["id"]: m for m in registry.legacy_models(json.load(fh))}
+assert set(by_id) == {"muse-spark", "openrouter-nemotron-ultra", "ollama-qwen2.5-coder"}, \
+    set(by_id)
+# The installers call the one helper; no local copies remain.
+for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
+    src = open(path, encoding="utf-8").read()
+    assert "legacy_models" in src, path
+    assert "def _legacy_model" not in src, path
+muse = by_id["muse-spark"]
+assert muse["name"] == "Muse Spark 1.3 Contributor", muse
+assert (muse["context"], muse["output"]) == (1048576, 131072), muse
+assert muse["direct"]["provider"] == "meta", muse
+assert "openrouter_id" not in muse, muse
+assert muse.get("default_for") == "muse_key", muse
+ultra = by_id["openrouter-nemotron-ultra"]
+assert ultra["openrouter_id"] == "nvidia/nemotron-3-ultra-550b-a55b:free", ultra
+assert "direct" not in ultra, ultra
+assert (ultra["paid_input_price"], ultra["paid_output_price"]) == (6e-07, 2.4e-06), ultra
+assert ultra["cache_read_price"] == 1.2e-07, ultra
+local = by_id["ollama-qwen2.5-coder"]
+assert local["direct"]["model"] == "ollama/qwen2.5-coder:7b", local
+assert (local["context"], local["output"]) == (32768, 8192), local
+assert local.get("default_for") == "fallback", local
+assert "reasoning" not in local, local
+# The projection keeps the output identical on the real catalogs too.
+llm = {m["id"]: m for m in
+       json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]}
+with open("catalog/ai-registry.json", encoding="utf-8") as _rf:
+    new = {m["id"]: m for m in registry.legacy_models(json.load(_rf))}
+assert set(new) == set(llm), (set(new) ^ set(llm))
+for mid, old in sorted(llm.items()):
+    assert new[mid] == old, mid
+PY
+    then pass; else fail "registry fixture does not project to the legacy model shape (see above)"; fi
+fi
+
 if it "resolve_ollama_base_url: OLLAMA_BASE_URL wins and is normalised to /v1"; then
     got="$(curl() { return 1; }; OLLAMA_BASE_URL="http://gpu-box:11434/" resolve_ollama_base_url)"
     assert_eq "$got" "http://gpu-box:11434/v1"
@@ -5082,7 +5189,7 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,cheaperinference/glm-5.2,cheaperinference/kimi-k3,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,samba/MiniMax-M3,samba/gpt-oss-120b,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
@@ -10336,7 +10443,7 @@ import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
+if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "cheaperinference/kimi-k3", "cheaperinference/glm-5.2", "samba/gpt-oss-120b", "samba/MiniMax-M3", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
     problems.append("names")
 # "retired" is the one home of the ids a rename left behind: apply prunes
 # them from the store, so a retired id must never also be a current combo.

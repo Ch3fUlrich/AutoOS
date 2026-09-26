@@ -142,11 +142,152 @@ Test-Case 'llm-models.json is valid and has unique ids' {
 
 Test-Case 'the windows installer projects the shared catalogue' {
     $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
-    Assert-True ($src -match 'catalog.llm-models\.json') 'shared llm-models.json is not loaded'
+    Assert-True ($src -match 'catalog.ai-registry\.json') 'shared ai-registry.json models are not loaded'
     foreach ($witness in @('REPO_MODELS', 'repoById', 'Get-OpenRouterModelEntry', '_profile_for')) {
         Assert-True ($src.Contains($witness)) "'$witness' projector missing"
     }
     Assert-True (($src -split '_profile_for\(').Count -ge 20) 'expected >= 19 profile projections'
+}
+
+# ─── Registry model reads (A5d) ─────────────────────────────────────
+Describe-Group 'registry model reads'
+
+Test-Case 'registry model reads come from ai-registry.json models' {
+    $sh = Get-Content (Join-Path $Root 'lib\linux\install.sh') -Raw
+    $ps = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
+    Assert-True ($sh -notmatch 'llm-models\.json') 'install.sh still reads llm-models.json'
+    Assert-True ($ps -notmatch 'llm-models\.json') 'AutoOS.Install.psm1 still reads llm-models.json'
+    Assert-True ($sh -match 'ai-registry\.json') 'install.sh has no ai-registry.json read'
+    Assert-True ($ps -match 'ai-registry\.json') 'AutoOS.Install.psm1 has no ai-registry.json read'
+}
+
+Test-Case 'registry model reads project a fixture with no llm-models.json present' {
+    $fixtureDir = Join-Path ([IO.Path]::GetTempPath()) ('a5d-' + [Guid]::NewGuid().ToString('N'))
+    $fixtureCatalog = Join-Path $fixtureDir 'catalog'
+    New-Item -ItemType Directory -Path $fixtureCatalog -Force | Out-Null
+    $fixture = [ordered]@{
+        models = [ordered]@{
+            'muse-spark' = [ordered]@{
+                id = 'muse-spark'; display_name = 'Muse Spark 1.3 Contributor'
+                direct = [ordered]@{
+                    provider = 'meta'; base_url = 'https://api.meta.ai/v1'
+                    model = 'openai/muse-spark-1.3-contributor'
+                    npm = '@ai-sdk/openai'; reasoning_effort = 'high'
+                }
+                context_advertised = 1048576; output_max = 131072
+                reasoning = $true; price_in = 1e-07; price_out = 2e-07
+                price_cache_read = 2e-09
+                default_for = 'muse_key'
+            }
+            'openrouter-nemotron-ultra' = [ordered]@{
+                id = 'openrouter-nemotron-ultra'; display_name = 'Nemotron 3 Ultra (Free)'
+                direct = [ordered]@{
+                    provider = 'openrouter'
+                    model = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+                }
+                context_advertised = 1000000; output_max = 32768
+                reasoning = $true; price_in = 0; price_out = 0
+                paid_price_in = 6e-07; paid_price_out = 2.4e-06
+                price_cache_read = 1.2e-07
+            }
+            'ollama-qwen2.5-coder' = [ordered]@{
+                id = 'ollama-qwen2.5-coder'; display_name = 'Qwen 2.5 Coder 7B (Local)'
+                direct = [ordered]@{
+                    provider = 'ollama'; base_url = 'http://127.0.0.1:11434/v1'
+                    model = 'ollama/qwen2.5-coder:7b'
+                    npm = '@ai-sdk/openai-compatible'
+                }
+                context_advertised = 32768; output_max = 8192
+                reasoning = $false; price_in = 0; price_out = 0
+                default_for = 'fallback'
+            }
+            'command-a-03-2025' = [ordered]@{
+                id = 'command-a-03-2025'; display_name = 'Command A'
+                context_advertised = 131072; output_max = 16384
+                reasoning = $false; price_in = 0.0; price_out = 0.0
+            }
+        }
+    }
+    $fixture | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $fixtureCatalog 'ai-registry.json') -Encoding UTF8
+    try {
+        Assert-True (-not (Test-Path (Join-Path $fixtureCatalog 'llm-models.json'))) 'fixture must run with no llm-models.json present'
+        # The REAL psm1 function (not an inlined copy): it loads the registry
+        # map (keyed by id) and projects the legacy field shape from registry
+        # fields (mapping doc section 1), never from llm-models.json.
+        $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
+        Assert-True ($src -match 'catalog\\ai-registry\.json') 'psm1 model read is not on the registry'
+        Assert-True ($src -match 'legacy_models') 'psm1 does not call the shared legacy_models helper'
+        Assert-True ($src -notmatch 'def _legacy_model') 'psm1 still carries a local _legacy_model copy'
+        $reg = (Get-Content -Path (Join-Path $fixtureCatalog 'ai-registry.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models
+        $got = @(Get-AutoOSLegacyModels -RegistryModels $reg)
+        $repoById = @{}
+        foreach ($m in $got) { $repoById[$m.id] = $m }
+        Assert-True ($repoById.Count -eq 3) "expected 3 projected models, got $($repoById.Count)"
+        Assert-True (-not $repoById.ContainsKey('command-a-03-2025')) 'a model without a direct block must be skipped'
+        Assert-True ($repoById['muse-spark'].name -eq 'Muse Spark 1.3 Contributor') 'muse-spark name wrong'
+        Assert-True ($repoById['muse-spark'].context -eq 1048576 -and $repoById['muse-spark'].output -eq 131072) 'muse-spark windows wrong'
+        Assert-True ($repoById['muse-spark'].direct.provider -eq 'meta') 'muse-spark direct wrong'
+        Assert-True ($null -eq $repoById['muse-spark'].PSObject.Properties['openrouter_id']) 'muse-spark must have no openrouter_id'
+        Assert-True ($repoById['muse-spark'].PSObject.Properties['default_for'].Value -eq 'muse_key') 'muse-spark default_for wrong'
+        Assert-True ($repoById['openrouter-nemotron-ultra'].PSObject.Properties['openrouter_id'].Value -eq 'nvidia/nemotron-3-ultra-550b-a55b:free') 'openrouter_id not derived from direct.model'
+        Assert-True ($null -eq $repoById['openrouter-nemotron-ultra'].PSObject.Properties['direct']) 'openrouter entry must have no direct'
+        Assert-True ($repoById['openrouter-nemotron-ultra'].PSObject.Properties['paid_input_price'].Value -eq 6e-07) 'paid price not mapped'
+        Assert-True ($repoById['ollama-qwen2.5-coder'].direct.model -eq 'ollama/qwen2.5-coder:7b') 'ollama direct wrong'
+        Assert-True ($repoById['ollama-qwen2.5-coder'].PSObject.Properties['default_for'].Value -eq 'fallback') 'ollama default_for wrong'
+        Assert-True ($null -eq $repoById['ollama-qwen2.5-coder'].PSObject.Properties['reasoning']) 'falsy reasoning must stay absent'
+    } finally {
+        Remove-Item -Recurse -Force -Path $fixtureDir -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'registry model reads match python legacy_models on the real catalog' {
+    if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { Skip 'python3 absent'; return }
+    $tool = Join-Path $Root 'tools\registry.py'
+    $catalog = Join-Path $Root 'catalog\ai-registry.json'
+    $pyJson = & python3 -c "import importlib.util,json,sys;spec=importlib.util.spec_from_file_location('r',sys.argv[1]);r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r);print(json.dumps(r.legacy_models(json.load(open(sys.argv[2],encoding='utf-8')))))" $tool $catalog
+    Assert-True ($LASTEXITCODE -eq 0) 'python3 legacy_models failed'
+    # Windows PowerShell 5.1 emits a parsed JSON array as ONE object; enumerate it.
+    $pyModels = @($pyJson | ConvertFrom-Json | ForEach-Object { $_ })
+    $regModels = (Get-Content -Path $catalog -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    $psModels = @(Get-AutoOSLegacyModels -RegistryModels $regModels)
+    $pyById = @{}
+    foreach ($m in $pyModels) { $pyById[$m.id] = $m }
+    $psById = @{}
+    foreach ($m in $psModels) { $psById[$m.id] = $m }
+    $missing = @(@($pyById.Keys) | Where-Object { -not $psById.ContainsKey($_) })
+    $extra = @(@($psById.Keys) | Where-Object { -not $pyById.ContainsKey($_) })
+    Assert-True ($missing.Count -eq 0 -and $extra.Count -eq 0) ("id sets differ: missing [$($missing -join ',')] extra [$($extra -join ',')]")
+    foreach ($id in $pyById.Keys) {
+        $py = $pyById[$id]
+        $ps = $psById[$id]
+        Assert-True ($ps.name -eq $py.name) "$id name"
+        Assert-True ($ps.context -eq $py.context -and $ps.output -eq $py.output) "$id windows"
+        Assert-True ($ps.input_price -eq $py.input_price -and $ps.output_price -eq $py.output_price) "$id prices"
+        $psReason = $ps.PSObject.Properties['reasoning']
+        $pyReason = $py.PSObject.Properties['reasoning']
+        Assert-True (([bool]($psReason -and $psReason.Value)) -eq ([bool]($pyReason -and $pyReason.Value))) "$id reasoning"
+        $psOr = $ps.PSObject.Properties['openrouter_id']
+        $pyOr = $py.PSObject.Properties['openrouter_id']
+        $psOrVal = if ($psOr) { $psOr.Value } else { $null }
+        $pyOrVal = if ($pyOr) { $pyOr.Value } else { $null }
+        Assert-True ($psOrVal -eq $pyOrVal) "$id openrouter_id"
+        $psDirect = $ps.PSObject.Properties['direct']
+        $pyDirect = $py.PSObject.Properties['direct']
+        if ($null -eq $psDirect -and $null -eq $pyDirect) {
+            Assert-True $true "$id direct both absent"
+        } elseif ($null -ne $psDirect -and $null -ne $pyDirect) {
+            Assert-True (($psDirect.Value | ConvertTo-Json -Depth 10 -Compress) -eq ($pyDirect.Value | ConvertTo-Json -Depth 10 -Compress)) "$id direct"
+        } else {
+            throw "$id direct presence differs"
+        }
+        foreach ($opt in @('cache_read_price', 'paid_input_price', 'paid_output_price', 'default_for')) {
+            $psOpt = $ps.PSObject.Properties[$opt]
+            $pyOpt = $py.PSObject.Properties[$opt]
+            $psOptVal = if ($psOpt) { $psOpt.Value } else { $null }
+            $pyOptVal = if ($pyOpt) { $pyOpt.Value } else { $null }
+            Assert-True ($psOptVal -eq $pyOptVal) "$id $opt"
+        }
+    }
 }
 
 Test-Case 'every winget component has a non-empty package id' {
@@ -6005,7 +6146,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $oc = $stripped | ConvertFrom-Json
     Assert-Equal $oc.model 'omniroute/t1-orchestrator'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,cheaperinference/glm-5.2,cheaperinference/kimi-k3,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,samba/gpt-oss-120b,samba/MiniMax-M3,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -6752,7 +6893,7 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
-    Assert-Equal ($names -join ',') 't1-orchestrator,spark-1.3-contributor,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,deepseek-v4.1-flash,opus-4-6'
+    Assert-Equal ($names -join ',') 't1-orchestrator,spark-1.3-contributor,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,cheaperinference/kimi-k3,cheaperinference/glm-5.2,samba/gpt-oss-120b,samba/MiniMax-M3,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,deepseek-v4.1-flash,opus-4-6'
     # "retired" is the one home of the ids a rename left behind: apply prunes
     # them from the store, so a retired id must never also be a current combo.
     $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -6767,6 +6908,7 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         't1-orchestrator' = '1M'; 'spark-1.3-contributor' = '1M'; 't1-orchestrator-clean' = '1M'; 't1-orchestrator-free-only' = '1M'; 't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
         'gemini-3.8-flash' = '128k'; 'deepseek-v4.1-flash' = '128k'; 'opus-4-6' = '200k'
+        'cheaperinference/kimi-k3' = '128k'; 'cheaperinference/glm-5.2' = '128k'; 'samba/gpt-oss-120b' = '128k'; 'samba/MiniMax-M3' = '128k'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"

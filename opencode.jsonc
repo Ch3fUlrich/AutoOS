@@ -267,6 +267,26 @@
           "name": "deepseek-v4.1-flash — paid cheapest-first",
           "limit": { "context": 131072, "output": 32768 }
         },
+        "cheaperinference/kimi-k3": {
+          "modelID": "cheaperinference/kimi-k3",
+          "name": "cheaperinference kimi-k3 (S1-S2 credit)",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "cheaperinference/glm-5.2": {
+          "modelID": "cheaperinference/glm-5.2",
+          "name": "cheaperinference glm-5.2 (S0-S1 credit)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
+        "samba/gpt-oss-120b": {
+          "modelID": "samba/gpt-oss-120b",
+          "name": "samba gpt-oss-120b (S0-S1 credit)",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "samba/MiniMax-M3": {
+          "modelID": "samba/MiniMax-M3",
+          "name": "samba MiniMax-M3 (S1-S2 credit)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
         "auto/smart": {
           "modelID": "auto/smart",
           "name": "bootstrap: auto smart (no combo needed)",

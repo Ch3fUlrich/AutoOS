@@ -16,6 +16,7 @@ import ipaddress
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -31,13 +32,34 @@ sys.path.insert(0, str(ROOT / "tools"))
 import autoos_resolver  # noqa: E402  (path set up above)
 
 
-def run_converter():
-    """Run the converter fresh and return (returncode, stdout, stderr)."""
+def run_converter(out_path):
+    """Run the converter, writing to out_path, and return (rc, stdout, stderr).
+
+    Always writes through --out: no test ever overwrites the real
+    catalog/ai-registry.json (CONVfix, 2026-09-26).
+    """
     proc = subprocess.run(
-        [sys.executable, str(CONVERTER)],
+        [sys.executable, str(CONVERTER), "--out", str(out_path)],
         cwd=str(ROOT), capture_output=True, text=True, timeout=120,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def run_converter_to_temp(test_cls):
+    """Run the converter into a fresh TemporaryDirectory for a setUpClass.
+
+    Sets test_cls.OUT_PATH (the temp output file) and test_cls.registry
+    (its parsed content). The temp dir is cleaned up automatically.
+    """
+    tmpdir = tempfile.TemporaryDirectory(prefix="registry-convert-test-")
+    test_cls.addClassCleanup(tmpdir.cleanup)
+    out_path = Path(tmpdir.name) / "ai-registry.json"
+    rc, out, err = run_converter(out_path)
+    if rc != 0:
+        raise AssertionError("registry-convert.py exited %d\nstdout:\n%s\nstderr:\n%s"
+                             % (rc, out, err))
+    test_cls.OUT_PATH = out_path
+    test_cls.registry = load_json(out_path)
 
 
 def load_json(path: Path):
@@ -51,27 +73,25 @@ class ConverterRunTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.assertTrue = unittest.TestCase.assertTrue  # keep pylint quiet, unused
-        rc, out, err = run_converter()
-        if rc != 0:
-            raise AssertionError("registry-convert.py exited %d\nstdout:\n%s\nstderr:\n%s"
-                                  % (rc, out, err))
-        cls.registry = load_json(REGISTRY_PATH)
+        run_converter_to_temp(cls)
 
-    def test_converter_exits_zero_and_writes_the_registry(self):
-        self.assertTrue(REGISTRY_PATH.is_file(), "%s was not written" % REGISTRY_PATH)
+    def test_converter_exits_zero_and_writes_the_output_file(self):
+        self.assertTrue(self.OUT_PATH.is_file(), "%s was not written" % self.OUT_PATH)
 
     def test_output_is_deterministic_on_a_second_run(self):
-        first = REGISTRY_PATH.read_bytes()
-        rc, out, err = run_converter()
-        self.assertEqual(rc, 0, "second run failed:\n%s\n%s" % (out, err))
-        second = REGISTRY_PATH.read_bytes()
+        first = self.OUT_PATH.read_bytes()
+        with tempfile.TemporaryDirectory(prefix="registry-convert-test-") as tmp:
+            second_path = Path(tmp) / "ai-registry.json"
+            rc, out, err = run_converter(second_path)
+            self.assertEqual(rc, 0, "second run failed:\n%s\n%s" % (out, err))
+            second = second_path.read_bytes()
         self.assertEqual(first, second, "a second run changed the byte-identical output")
 
     def test_output_ends_with_a_trailing_newline(self):
-        self.assertTrue(REGISTRY_PATH.read_bytes().endswith(b"\n"))
+        self.assertTrue(self.OUT_PATH.read_bytes().endswith(b"\n"))
 
     def test_output_keys_are_sorted_and_2_space_indented(self):
-        text = REGISTRY_PATH.read_text(encoding="utf-8")
+        text = self.OUT_PATH.read_text(encoding="utf-8")
         # 2-space indent: the second line (first nested key) starts with exactly 2 spaces,
         # not 4, not a tab.
         lines = text.splitlines()
@@ -104,10 +124,7 @@ class StructuralValidatorTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        rc, out, err = run_converter()
-        if rc != 0:
-            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
-        cls.registry = load_json(REGISTRY_PATH)
+        run_converter_to_temp(cls)
         cls.schema = load_json(SCHEMA_PATH)
 
     def _assert_keys(self, entry, required, where):
@@ -167,10 +184,7 @@ class IdUniquenessTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        rc, out, err = run_converter()
-        if rc != 0:
-            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
-        cls.registry = load_json(REGISTRY_PATH)
+        run_converter_to_temp(cls)
 
     def test_ids_are_unique_across_sections(self):
         # providers/models/clients must be globally unique among themselves - a bare
@@ -199,10 +213,7 @@ class RouteResolutionTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        rc, out, err = run_converter()
-        if rc != 0:
-            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
-        cls.registry = load_json(REGISTRY_PATH)
+        run_converter_to_temp(cls)
         cls.combos = load_json(COMBOS_PATH)
         cls.ide_models = load_json(IDE_MODELS_PATH)
 
@@ -272,10 +283,7 @@ class UnavailableLegTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        rc, out, err = run_converter()
-        if rc != 0:
-            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
-        cls.registry = load_json(REGISTRY_PATH)
+        run_converter_to_temp(cls)
 
     def test_zen_deepseek_leg_is_unavailable_everywhere_it_appears(self):
         leg = "opencode-zen/deepseek-v4.1-flash"
@@ -310,10 +318,7 @@ class PrivacyTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        rc, out, err = run_converter()
-        if rc != 0:
-            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
-        cls.registry = load_json(REGISTRY_PATH)
+        run_converter_to_temp(cls)
 
     def test_no_private_host_or_ip_in_any_provider_api_base(self):
         checked = 0
@@ -365,10 +370,7 @@ class MistralCodeTrainsOnPromptsTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        rc, out, err = run_converter()
-        if rc != 0:
-            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
-        cls.registry = load_json(REGISTRY_PATH)
+        run_converter_to_temp(cls)
 
     def test_mistral_code_latest_carries_a_true_override_with_a_comment(self):
         model = self.registry["models"]["mistral-code-latest"]
@@ -394,10 +396,7 @@ class PRIV2ModelLevelOverrideTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        rc, out, err = run_converter()
-        if rc != 0:
-            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
-        cls.registry = load_json(REGISTRY_PATH)
+        run_converter_to_temp(cls)
         cls.schema = load_json(SCHEMA_PATH)
 
     def test_schema_model_defines_an_optional_tier_override(self):
@@ -437,10 +436,7 @@ class BucketTableParityTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        rc, out, err = run_converter()
-        if rc != 0:
-            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
-        cls.registry = load_json(REGISTRY_PATH)
+        run_converter_to_temp(cls)
 
     def test_bucket_table_matches_the_resolver_default(self):
         reconstructed = _bucket_table_from_registry(self.registry["policy"]["bucket_table"])
@@ -448,6 +444,27 @@ class BucketTableParityTests(unittest.TestCase):
 
     def test_bucket_table_carries_a_source_tag(self):
         self.assertIn("source", self.registry["policy"]["bucket_table"])
+
+
+class RealFileUntouchedTests(unittest.TestCase):
+    """CONVfix: no test may overwrite the real catalog/ai-registry.json.
+
+    tools/registry-convert.py with no arguments WRITES the real registry,
+    so every converter run in this file must go through --out to a temp
+    dir. This test records the real file's bytes + mtime, runs the shared
+    converter helper, and asserts the real file is unchanged."""
+
+    def test_converter_helper_leaves_the_real_registry_untouched(self):
+        before_bytes = REGISTRY_PATH.read_bytes()
+        before_mtime = REGISTRY_PATH.stat().st_mtime_ns
+        with tempfile.TemporaryDirectory(prefix="registry-convert-test-") as tmp:
+            out_path = Path(tmp) / "ai-registry.json"
+            rc, out, err = run_converter(out_path)
+            self.assertEqual(rc, 0, "converter failed:\n%s\n%s" % (out, err))
+        self.assertEqual(REGISTRY_PATH.read_bytes(), before_bytes,
+                         "run_converter() overwrote the real %s" % REGISTRY_PATH)
+        self.assertEqual(REGISTRY_PATH.stat().st_mtime_ns, before_mtime,
+                         "run_converter() touched the real %s" % REGISTRY_PATH)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,8 @@ sys.path.insert(0, str(TOOLS))
 import autoos_routing as routing  # noqa: E402
 import autoos_clients as clients  # noqa: E402
 import autoos_agent_mcp as mcp_server  # noqa: E402
+import autoos_resolver as resolver  # noqa: E402  (tools/autoos_resolver.py; serving_legs)
+import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
 
 
 def load_agent():
@@ -1910,13 +1912,23 @@ class RunCardV2AcceptanceTests(unittest.TestCase):
 
 
 class RunCardV2PrivacyTests(unittest.TestCase):
-    """RUNV2 brief step 4: a sensitive v2 card must never resolve to a non-
-    "-clean" combo. Exercises the real registry + overlay end to end (client
-    state is faked so it never shells out); skips itself when the resolver has
-    no route at all for this card on this host's data, rather than asserting a
-    route exists (that is the other lane's privacy filter to prove, not RUNV2's)."""
+    """RUNV2 brief step 4: a sensitive v2 card must never resolve to a route
+    with an unsafe serving leg. Originally pinned to "-clean"-suffixed combo
+    names (the only privacy-safe routes that existed then); Q1 2026-09-26
+    added genuinely private-safe pinned routes with no "-clean" suffix
+    (cheaperinference/glm-5.2: paid tier, trains_on_prompts false, confirmed
+    - see catalog/ai-registry.json providers.cheapinference's own $comment),
+    so the naming-based check is replaced by the actual safety predicate
+    (tools/registry.py private_safe) every serving leg must satisfy - the
+    same property tests/test_autoos_resolver.py's
+    test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg
+    already pins at the raw resolver level. Exercises the real registry +
+    overlay end to end (client state is faked so it never shells out); skips
+    itself when the resolver has no route at all for this card on this
+    host's data, rather than asserting a route exists (that is the other
+    lane's privacy filter to prove, not RUNV2's)."""
 
-    def test_sensitive_v2_card_only_ever_yields_a_clean_combo_when_routed(self):
+    def test_sensitive_v2_card_only_ever_yields_a_private_safe_route(self):
         agent = load_agent()
         registry = json.loads((ROOT / "catalog" / "ai-registry.json")
                               .read_text(encoding="utf-8"))
@@ -1930,9 +1942,12 @@ class RunCardV2PrivacyTests(unittest.TestCase):
         if result["route"] is None:
             self.skipTest("no route survives for a sensitive card on this host's "
                           "registry/overlay (%s)" % result["reason"])
-        self.assertTrue(result["route"].endswith("-clean"),
-                        "sensitive card routed to %r, which is not a -clean combo"
-                        % result["route"])
+        route = registry["routes"][result["route"]]
+        for provider_id, model_id in resolver.serving_legs(route, registry):
+            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
+            self.assertTrue(
+                safe, "sensitive card routed to %r, leg %s/%s is not private-safe: %s"
+                     % (result["route"], provider_id, model_id, reason))
 
 
 class McpRouteTests(unittest.TestCase):

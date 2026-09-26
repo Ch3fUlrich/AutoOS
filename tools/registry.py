@@ -187,6 +187,74 @@ def provider_field_map(providers: dict, field: str) -> dict:
     }
 
 
+def _legacy_sort_key(mid: str) -> tuple:
+    """Order key for legacy_models(): the registry is alphabetical
+    (tools/registry-convert.py's build_registry() sorts every key on write)
+    and carries no trace of catalog/llm-models.json's hand-curated order, so
+    that order cannot be derived -- sort instead, with `openrouter-free`
+    pinned first among the openrouter entries so the generated openrouter map
+    (which filters this list in order) keeps it first."""
+    if mid == "openrouter-free":
+        return (1, "")
+    if mid.startswith("openrouter-"):
+        return (2, mid)
+    return (0, mid)
+
+
+def legacy_models(doc) -> list:
+    """Project registry `models` into the old catalog/llm-models.json entry
+    shape (A5dfix: the one home for the legacy model projection every
+    installer read calls instead of carrying its own copy).
+
+    Selected, never listed: the old file's 19 entries are exactly the models
+    carrying a `direct` block, so anything with one is projected and anything
+    without one is skipped. Each entry maps registry fields to the old shape
+    (mapping doc section 1): display_name->name, context_advertised->context,
+    output_max->output, price_in/out->input/output_price,
+    price_cache_read->cache_read_price, paid_price_in/out->paid_input/
+    paid_output_price, a direct block with provider "openrouter" becoming
+    openrouter_id (from direct.model) instead of direct -- plus default_for,
+    which models.muse-spark (muse_key) and models.ollama-qwen2.5-coder
+    (fallback) carry. `reasoning` is present only when truthy, matching the
+    old file (which omits it otherwise); every other absent optional stays
+    absent rather than becoming an explicit null.
+
+    Pure: no I/O, no clock. `doc` is a loaded catalog/ai-registry.json
+    document (or a {"models": ...} mapping holding the same entries)."""
+    models = doc.get("models") if isinstance(doc, dict) else {}
+    models = models if isinstance(models, dict) else {}
+    out = []
+    for mid, entry in models.items():
+        if not isinstance(entry, dict):
+            continue
+        direct = entry.get("direct")
+        if not isinstance(direct, dict):
+            continue
+        model = {"id": mid, "name": entry.get("display_name", mid)}
+        direct = dict(direct)
+        if direct.get("provider") == "openrouter":
+            model["openrouter_id"] = direct.get("model")
+        elif direct:
+            model["direct"] = direct
+        model["context"] = entry.get("context_advertised")
+        model["output"] = entry.get("output_max")
+        if entry.get("reasoning"):
+            model["reasoning"] = True
+        model["input_price"] = entry.get("price_in")
+        model["output_price"] = entry.get("price_out")
+        if entry.get("price_cache_read") is not None:
+            model["cache_read_price"] = entry["price_cache_read"]
+        if entry.get("paid_price_in") is not None:
+            model["paid_input_price"] = entry["paid_price_in"]
+        if entry.get("paid_price_out") is not None:
+            model["paid_output_price"] = entry["paid_price_out"]
+        if entry.get("default_for") is not None:
+            model["default_for"] = entry["default_for"]
+        out.append(model)
+    out.sort(key=lambda model: _legacy_sort_key(model["id"]))
+    return out
+
+
 # ===========================================================================
 # rule 1 - leg resolution
 # ===========================================================================
@@ -934,6 +1002,8 @@ IDE_MODEL_ORDER = (
     "t4-rag",
     "gemini-3.8-flash",
     "deepseek-v4.1-flash",
+    "cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
+    "samba/gpt-oss-120b", "samba/MiniMax-M3",
     "auto/smart", "auto", "auto/cheap",
 )
 
@@ -1117,6 +1187,21 @@ OPENHANDS_TIER_ORDER = (
     "litellm-t3-driver-free-only",
     "litellm-t1-orchestrator-free-only",
     "omniroute-t1-orchestrator-free-only",
+    # NOTE (Q1, 2026-09-26 16:4xZ "Claude budget" revision): the 4 new pinned
+    # single-leg credit routes (cheaperinference/kimi-k3, cheaperinference/
+    # glm-5.2, samba/gpt-oss-120b, samba/MiniMax-M3) deliberately carry NO
+    # openhands_profile and are NOT listed here. tools/sync-openhands-
+    # profiles.py writes each tier to profiles/<tier id>.json as a literal
+    # filesystem path (measured: FileNotFoundError - it does not mkdir a
+    # nested directory), and an id of the form "omniroute-cheaperinference/
+    # kimi-k3" would create one; a route id containing "/" cannot safely get
+    # an OpenHands profile under that tool's current (unfixed) file-writing
+    # scheme. tools/audit-router.py --offline therefore never reports these 4
+    # combos as missing a tier-profiles.json entry: openhands_route_names()/
+    # tier_profile_drift() restrict the check to openhands-served routes, so
+    # these opencode/zed-only pinned routes are out of scope - a known,
+    # deliberate gap (see this lane's REPORT), not something to route around
+    # by picking a different, unrelated tier id.
 )
 
 OPENHANDS_GATEWAYS = ("omniroute", "litellm")
@@ -1353,7 +1438,11 @@ def _leg_is_unavailable(leg: str, route: dict, registry: dict) -> bool:
     """True when either of spec 3.1's two operator-facing unavailability
     flags marks `leg` down: routes.<id>.unavailable_legs[leg].available is
     false, or the leg's own provider carries providers.<id>.available:
-    false (today only openrouter). Both flags are registry-only signals the
+    false (today only cxa - openrouter's own blanket flag was lifted
+    2026-09-26; per the 16:4xZ revision OpenRouter is BYOK with no shared
+    credit, and its still-dead legs stay
+    flagged individually via their own unavailable_legs entry instead - see
+    providers.openrouter's $comment). Both flags are registry-only signals the
     OmniRoute gateway itself never consults (mapping doc's "PRIV2" note) -
     this render surfaces them for a human reader, it does not change what a
     caller is served."""
@@ -1579,6 +1668,21 @@ def _ok_line(registry) -> str:
     )
 
 
+def strip_comments(doc):
+    """A copy of `doc` with every "$comment" key removed at any depth.
+
+    Registry prose is hand-edited after migration, so `validate`'s "no drift
+    from a fresh registry-convert.py render" comparison strips it from both
+    sides first; structure, routes, legs, models and providers still match
+    exactly. Never mutates its input."""
+    if isinstance(doc, dict):
+        return {key: strip_comments(value)
+                for key, value in doc.items() if key != "$comment"}
+    if isinstance(doc, list):
+        return [strip_comments(value) for value in doc]
+    return doc
+
+
 def _build_fresh_registry() -> dict:
     spec = importlib.util.spec_from_file_location("autoos_registry_convert", CONVERTER_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -1609,7 +1713,7 @@ def _cmd_validate(args) -> int:
             print(problem)
         return 1
     fresh = _build_fresh_registry()
-    if fresh != registry:
+    if strip_comments(fresh) != strip_comments(registry):
         print("drift: %s differs from a fresh registry-convert.py render" % args.registry)
         return 1
     print(_ok_line(registry))
