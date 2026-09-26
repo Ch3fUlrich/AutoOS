@@ -22,13 +22,15 @@ answer() {  # answer <key> [default]
 }
 
 # omnigraph_base_url: the omnigraph server the clients' bridges point at - the
-# omnigraph_url answer without a trailing slash, else http://localhost:8080.
+# omnigraph_url answer without its trailing slashes (ALL of them, as the Windows
+# side's TrimEnd('/') does: consumers append /paths), else http://localhost:8080.
 # ONE derivation, used by install_agent_skills and route_zed_to_proxy (the Zed
 # writer once hardcoded the default and ignored the answer).
 omnigraph_base_url() {
     local omni
     omni="$(answer omnigraph_url '')"
-    if [[ -z "$omni" ]]; then printf '%s\n' "http://localhost:8080"; else printf '%s\n' "${omni%/}"; fi
+    while [[ "$omni" == */ ]]; do omni="${omni%/}"; done
+    if [[ -z "$omni" ]]; then printf '%s\n' "http://localhost:8080"; else printf '%s\n' "$omni"; fi
 }
 
 run() {

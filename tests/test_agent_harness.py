@@ -128,6 +128,31 @@ class BackupTests(unittest.TestCase):
             Path(base + "-1").write_text("B", encoding="utf-8")
             self.assertEqual(module._backup_path(target, self.STAMP), base + "-2")
 
+    def test_backup_path_skips_a_name_that_is_a_dangling_symlink(self):
+        # os.path.exists follows the link, so a dangling one reads as "free":
+        # the copy would then write THROUGH it (or fail) instead of taking the
+        # next name. lexists sees the link itself, like the bash helper's -L.
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "opencode.json")
+            base = "%s.autoos-backup-%s" % (target, self.STAMP)
+            nowhere = [os.path.join(tmp, "nowhere-0"), os.path.join(tmp, "nowhere-1")]
+            try:
+                os.symlink(nowhere[0], base)
+                os.symlink(nowhere[1], base + "-1")
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest("cannot create symlinks here: %s" % exc)
+            self.assertFalse(os.path.exists(base), "the fixture link must dangle")
+            self.assertEqual(module._backup_path(target, self.STAMP), base + "-2")
+            # End to end: the backup lands under the free name, the links stay
+            # as they were and nothing is created where they point.
+            Path(target).write_text("ORIGINAL", encoding="utf-8")
+            module._backup_and_write(target, "changed", stamp=self.STAMP)
+            self.assertEqual(Path(base + "-2").read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertEqual(os.readlink(base), nowhere[0])
+            self.assertEqual(os.readlink(base + "-1"), nowhere[1])
+            self.assertFalse(any(os.path.lexists(n) for n in nowhere))
+
     def test_two_changing_writes_in_one_second_keep_the_original(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as tmp:
