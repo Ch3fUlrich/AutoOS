@@ -21,6 +21,16 @@ answer() {  # answer <key> [default]
     else printf '%s' "$default"; fi
 }
 
+# omnigraph_base_url: the omnigraph server the clients' bridges point at - the
+# omnigraph_url answer without a trailing slash, else http://localhost:8080.
+# ONE derivation, used by install_agent_skills and route_zed_to_proxy (the Zed
+# writer once hardcoded the default and ignored the answer).
+omnigraph_base_url() {
+    local omni
+    omni="$(answer omnigraph_url '')"
+    if [[ -z "$omni" ]]; then printf '%s\n' "http://localhost:8080"; else printf '%s\n' "${omni%/}"; fi
+}
+
 run() {
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would run: $*"
@@ -31,6 +41,58 @@ run() {
 }
 
 # ─── Idempotent file editing ────────────────────────────────────────────────
+# backup_path <path> [stamp]: prints the name for a NEW backup of <path>:
+# <path>.autoos-backup-<stamp>, or that name with -1, -2, ... appended while it
+# is taken. The stamp has one-second resolution and cp overwrites, so two
+# changing writes in one second used to destroy the user's original (the
+# Windows side has the same rule in Copy-AutoOSBackup). <stamp> defaults to
+# now (YYYYmmdd-HHMMSS); it is a parameter so a test can pin it.
+backup_path() {
+    local path="$1" stamp="${2:-}" base candidate n=0
+    [[ -n "$stamp" ]] || stamp="$(date +%Y%m%d-%H%M%S)"
+    base="${path}.autoos-backup-${stamp}"
+    candidate="$base"
+    while [[ -e "$candidate" || -L "$candidate" ]]; do
+        n=$((n + 1))
+        candidate="${base}-${n}"
+    done
+    printf '%s\n' "$candidate"
+}
+
+# backup_file <path> [stamp]: copies <path> (mode and times kept) to a backup
+# name that did not exist yet, prints that name, and returns non-zero - with
+# nothing left behind - when the copy failed. Callers keep their own dry-run and
+# "does it exist / did it change" logic; this only copies. Callers that do not
+# need the name redirect stdout to /dev/null.
+backup_file() {
+    local dest
+    dest="$(backup_path "$1" "${2:-}")" || return 1
+    if ! cp -p -- "$1" "$dest"; then
+        rm -f -- "$dest"
+        return 1
+    fi
+    printf '%s\n' "$dest"
+}
+
+# backup_newest <path>: prints the most recent backup of <path>, nothing when
+# there is none. Newest = latest modification time, NOT the last name: ...-10
+# sorts before ...-2. (cp -p keeps the source's mtime, which still orders the
+# backups of one file: each is a copy of a later state.) Equal mtimes fall back
+# to a version sort so -10 still beats -2.
+backup_newest() {
+    local path="$1" f best=""
+    for f in "${path}".autoos-backup-*; do
+        [[ -f "$f" ]] || continue
+        if [[ -z "$best" || "$f" -nt "$best" ]]; then
+            best="$f"
+        elif ! [[ "$best" -nt "$f" ]]; then
+            best="$(printf '%s\n%s\n' "$best" "$f" | { sort -V 2>/dev/null || sort; } | tail -n 1)"
+        fi
+    done
+    [[ -z "$best" ]] || printf '%s\n' "$best"
+    return 0
+}
+
 append_line_once() {
     # append_line_once <file> <marker> <line...>
     local file="$1" marker="$2"; shift 2
@@ -45,7 +107,7 @@ append_line_once() {
     fi
     mkdir -p "$(dirname "$file")"
     # Never modify a user's file without a copy of the original.
-    [[ -f "$file" ]] && cp "$file" "${file}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    [[ -f "$file" ]] && backup_file "$file" >/dev/null
     printf '\n# added by AutoOS\n%s\n' "$content" >>"$file"
     ui_ok "updated ${file}"
 }
@@ -54,6 +116,37 @@ apt_update_once() {
     (( APT_UPDATED )) && return 0
     run $AUTOOS_SUDO apt-get update -y
     APT_UPDATED=1
+}
+
+# apt_repo_key_install <label> <url> <dest> <dearmor 0|1>
+# Puts a vendor's apt signing key at <dest> (root-owned, 0644) and returns 0, or
+# warns why not and returns 1. <dest> is trusted by the caller's guard on later
+# runs, so it is written ONLY from a temp file that already holds a non-empty
+# key: install_component runs an installer with errexit off, and the unchecked
+# `curl | gpg --dearmor >tmp; install tmp dest` used to leave an EMPTY key that
+# the old `-f` guard then trusted forever (apt failed on every later run).
+# A non-empty key already in place is left alone; an empty one from such a
+# run is replaced. <dearmor> 1 = the key is served ASCII-armored.
+apt_repo_key_install() {
+    local label="$1" url="$2" dest="$3" dearmor="$4"
+    [[ -s "$dest" ]] && return 0
+    local tmp need="curl"
+    [[ "$dearmor" == 1 ]] && need="curl and gpg"
+    tmp="$(mktemp)" || { ui_warn "${label} not installed: could not create a temp file for the apt signing key."; return 1; }
+    if (
+        # pipefail: a failed curl must fail the pipeline even though gpg
+        # (which then reads nothing) is the last command in it.
+        set -o pipefail
+        if [[ "$dearmor" == 1 ]]; then curl -fsSL "$url" | gpg --dearmor; else curl -fsSL "$url"; fi
+    ) >"$tmp" \
+        && [[ -s "$tmp" ]] \
+        && $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$dest"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    rm -f "$tmp"
+    ui_warn "${label} not installed: could not fetch and install the apt signing key from ${url} (needs ${need} and network access); re-run once that works."
+    return 1
 }
 
 # ─── Idempotency checks ─────────────────────────────────────────────────────
@@ -375,16 +468,15 @@ install_vscode() {
         ui_muted "would add Microsoft's signed apt repo and install code"
         return 0
     fi
+    # AUTOOS_APT_PREFIX is a test seam (DESTDIR-style), as in install_antigravity:
+    # where the files are written. The source line keeps the /etc path apt reads.
+    local prefix="${AUTOOS_APT_PREFIX:-}"
     local key=/etc/apt/keyrings/packages.microsoft.gpg
-    if [[ ! -f "$key" ]]; then
-        local tmp; tmp="$(mktemp)"
-        curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor >"$tmp"
-        $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
-        rm -f "$tmp"
-    fi
-    if [[ ! -f /etc/apt/sources.list.d/vscode.list ]]; then
+    local list=/etc/apt/sources.list.d/vscode.list
+    apt_repo_key_install "VS Code" https://packages.microsoft.com/keys/microsoft.asc "${prefix}${key}" 1 || return 1
+    if [[ ! -f "${prefix}${list}" ]]; then
         printf 'deb [arch=amd64,arm64,armhf signed-by=%s] https://packages.microsoft.com/repos/code stable main\n' \
-            "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/vscode.list >/dev/null
+            "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null
         APT_UPDATED=0   # the new repo has to be fetched before install
     fi
     apt_update_once
@@ -475,7 +567,7 @@ install_agy() {
     # these profiles (measured 2026-09-25) - keep the originals.
     local rc=0 f stamp; stamp="$(date +%Y%m%d-%H%M%S)"
     for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
-        [[ -f "$f" ]] && cp "$f" "$f.autoos-backup-$stamp"
+        [[ -f "$f" ]] && backup_file "$f" "$stamp" >/dev/null
     done
     bash "$tmp" || rc=$?
     rm -f "$tmp"
@@ -581,6 +673,13 @@ install_claude_autostart() {
             ui_info "$u is already current"
             rm -f "$tmp"
         else
+            # The unit being replaced may carry a local edit: keep it (AGENTS.md
+            # hard rule 5). Only reached when the rendered unit differs.
+            if [[ -f "${udest}/${u}" ]] && ! backup_file "${udest}/${u}" >/dev/null; then
+                ui_err "could not back up ${udest}/${u} - left as it was"
+                rm -f "$tmp"
+                return 1
+            fi
             mv -f "$tmp" "${udest}/${u}"
             ui_ok "installed $u"
             changed=1
@@ -658,16 +757,13 @@ install_google_chrome() {
         ui_muted "would add Google's signed apt repo and install google-chrome-stable"
         return 0
     fi
+    local prefix="${AUTOOS_APT_PREFIX:-}"   # test seam, see install_vscode
     local key=/etc/apt/keyrings/google-chrome.gpg
-    if [[ ! -f "$key" ]]; then
-        local tmp; tmp="$(mktemp)"
-        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor >"$tmp"
-        $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
-        rm -f "$tmp"
-    fi
-    if [[ ! -f /etc/apt/sources.list.d/google-chrome.list ]]; then
+    local list=/etc/apt/sources.list.d/google-chrome.list
+    apt_repo_key_install "Google Chrome" https://dl.google.com/linux/linux_signing_key.pub "${prefix}${key}" 1 || return 1
+    if [[ ! -f "${prefix}${list}" ]]; then
         printf 'deb [arch=amd64 signed-by=%s] http://dl.google.com/linux/chrome/deb/ stable main\n' \
-            "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
+            "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null
         APT_UPDATED=0
     fi
     apt_update_once
@@ -717,18 +813,16 @@ install_gh() {
         return 0
     fi
     if has_cmd apt-get; then
+        local prefix="${AUTOOS_APT_PREFIX:-}"   # test seam, see install_vscode
         local key=/etc/apt/keyrings/githubcli-archive-keyring.gpg
-        $AUTOOS_SUDO mkdir -p -m 755 /etc/apt/keyrings
-        if [[ ! -f "$key" ]]; then
-            local tmp; tmp="$(mktemp)"
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg >"$tmp"
-            $AUTOOS_SUDO install -D -o root -g root -m 644 "$tmp" "$key"
-            rm -f "$tmp"
-        fi
+        local list=/etc/apt/sources.list.d/github-cli.list
+        $AUTOOS_SUDO mkdir -p -m 755 "${prefix}/etc/apt/keyrings"
+        # The keyring is already binary (dearmor 0): served as it is.
+        apt_repo_key_install "GitHub CLI" https://cli.github.com/packages/githubcli-archive-keyring.gpg "${prefix}${key}" 0 || return 1
         local arch; arch="$(dpkg --print-architecture)"
-        if [[ ! -f /etc/apt/sources.list.d/github-cli.list ]]; then
+        if [[ ! -f "${prefix}${list}" ]]; then
             printf 'deb [arch=%s signed-by=%s] https://cli.github.com/packages stable main\n' \
-                "$arch" "$key" | $AUTOOS_SUDO tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+                "$arch" "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null
             APT_UPDATED=0
         fi
         apt_update_once
@@ -1362,7 +1456,7 @@ PY
             ui_muted "would route Qwen Code at OmniRoute (model t2-worker)"
         else
             if [[ -f "$SYS_HOME/.qwen/settings.json" ]]; then
-                cp "$SYS_HOME/.qwen/settings.json" "$SYS_HOME/.qwen/settings.json.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+                backup_file "$SYS_HOME/.qwen/settings.json" >/dev/null
             fi
             if ! omniroute setup-qwen --model t2-worker --yes >/dev/null 2>&1; then
                 ui_warn "Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)"
@@ -1420,9 +1514,9 @@ route_zed_to_proxy() {
     ide_models_readable "$ide" "Zed settings left unchanged" || return 1
     mkdir -p "$cfg_dir"
     if [[ -f "$cfg" ]]; then
-        cp "$cfg" "$cfg.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+        backup_file "$cfg" >/dev/null
     fi
-    python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
+    OMNI_BASE="$(omnigraph_base_url)" python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
 import json, os, sys
 path = sys.argv[1]
 harness_file = sys.argv[2]
@@ -1484,7 +1578,7 @@ ctx["graphify"] = {
 ctx["omnigraph"] = {
     "command": "npx",
     "args": ["-y", pins["omnigraph"]["package"]],
-    "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
+    "env": {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"], "OMNIGRAPH_GRAPH_ID": "autoos"},
 }
 ctx["playwright"] = {
     "command": "npx",
@@ -1640,7 +1734,7 @@ register_antigravity_mcp_server() {
 
     mkdir -p "$cfg_dir"
     if [[ -f "$cfg_path" && -s "$cfg_path" ]]; then
-        cp "$cfg_path" "${cfg_path}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+        backup_file "$cfg_path" >/dev/null
     fi
 
     local out
@@ -2273,7 +2367,7 @@ enable_project_mcp_server() {
         return 0
     fi
     mkdir -p "$repo/.claude"
-    [[ -f "$path" ]] && cp "$path" "${path}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    [[ -f "$path" ]] && backup_file "$path" >/dev/null
     if ! python3 - "$path" "$name" <<'PY'; then
 import json, pathlib, sys
 path, name = pathlib.Path(sys.argv[1]), sys.argv[2]
@@ -2462,7 +2556,7 @@ replace_or_append_marked_line() {
                 ui_muted "would remove the stale '${old_marker}' line from ${file}"
                 return 0
             fi
-            cp "$file" "${file}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+            backup_file "$file" >/dev/null
             AUTOOS_OLD="$old_marker" AUTOOS_NEW="$new_marker" python3 - "$file" <<'PY'
 import os, sys
 path = sys.argv[1]
@@ -2487,7 +2581,7 @@ PY
         ui_muted "would replace the '${old_marker}' line in ${file}"
         return 0
     fi
-    cp "$file" "${file}.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+    backup_file "$file" >/dev/null
     AUTOOS_OLD="$old_marker" AUTOOS_LINE="$line" python3 - "$file" <<'PY'
 import os, sys
 path = sys.argv[1]
@@ -2510,9 +2604,8 @@ install_agent_skills() {
     (( AUTOOS_DRY_RUN )) || mkdir -p "$code_root"
     clone_or_update https://github.com/Ch3fUlrich/agent-skills.git "$dest"
 
-    local omni base
-    omni="$(answer omnigraph_url '')"
-    if [[ -z "$omni" ]]; then base="http://localhost:8080"; else base="${omni%/}"; fi
+    local base
+    base="$(omnigraph_base_url)"
     ui_info "Omnigraph base URL: ${base}"
 
     write_omnigraph_env "$base"
@@ -2743,7 +2836,7 @@ setup_opencode_config() {
             ui_muted "$config_file already current"
         else
             local backup
-            backup="${config_file}.autoos-backup-$(date +%Y%m%d%H%M%S)"
+            backup="$(backup_path "$config_file")"
             mv "$snapshot" "$backup"
             ui_ok "OpenCode configuration merged into $config_file (backup: $backup)"
         fi
@@ -3697,7 +3790,7 @@ autoos_undo() {
     ui_section "Files AutoOS can restore"
     local -a newest=()
     for orig in "${originals[@]}"; do
-        b="$(find "$(dirname "$orig")" -maxdepth 1 -name "$(basename "$orig").autoos-backup-*" -type f 2>/dev/null | sort | tail -1)"
+        b="$(backup_newest "$orig")"
         newest+=("$b")
         printf '  %-52s <- %s\n' "$orig" "$(basename "$b")"
     done

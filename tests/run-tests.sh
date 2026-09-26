@@ -1958,6 +1958,83 @@ if it "undo restores a backed-up file"; then
     assert_eq "$body" "ORIGINAL"
 fi
 
+# backup_file names its copy <file>.autoos-backup-<stamp> with ONE-SECOND
+# resolution and cp overwrites, so two changing writes within a second used to
+# destroy the user's original (the Windows side got Copy-AutoOSBackup for the
+# same reason: base name, then -1, -2, ... never overwrite).
+if it "backup: backup_file never overwrites a same-second backup"; then
+    d="$(mktemp -d)"; f="$d/settings.json"; ok=1
+    printf 'A' >"$f"; chmod 600 "$f"; p1="$(backup_file "$f" 20260101-000000)"; rc1=$?
+    printf 'B' >"$f"; p2="$(backup_file "$f" 20260101-000000)"
+    printf 'C' >"$f"; p3="$(backup_file "$f" 20260101-000000)"
+    [[ "$p1" == "$f.autoos-backup-20260101-000000" ]]   || { ok=0; echo "first backup path: [$p1]" >&2; }
+    [[ "$p2" == "$f.autoos-backup-20260101-000000-1" ]] || { ok=0; echo "second backup path: [$p2]" >&2; }
+    [[ "$p3" == "$f.autoos-backup-20260101-000000-2" ]] || { ok=0; echo "third backup path: [$p3]" >&2; }
+    (( rc1 == 0 )) || { ok=0; echo "first call rc=$rc1" >&2; }
+    [[ "$(cat "$p1" 2>/dev/null)" == A && "$(cat "$p2" 2>/dev/null)" == B && "$(cat "$p3" 2>/dev/null)" == C ]] \
+        || { ok=0; echo "bytes: [$(cat "$p1" 2>/dev/null)] [$(cat "$p2" 2>/dev/null)] [$(cat "$p3" 2>/dev/null)]" >&2; }
+    [[ "$(stat -c '%a' "$p1" 2>/dev/null)" == 600 ]] || { ok=0; echo "the backup did not keep the file mode" >&2; }
+    [[ "$(find "$d" -name '*.autoos-backup-*' | wc -l | tr -d ' ')" == 3 ]] || { ok=0; echo "expected exactly 3 backups" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "backup_file overwrote or misnamed a backup"; fi
+fi
+
+if it "backup: backup_file fails and prints nothing when the copy cannot be made"; then
+    d="$(mktemp -d)"; ok=1
+    out="$(backup_file "$d/does-not-exist" 20260101-000000 2>/dev/null)"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 for a file that is not there" >&2; }
+    [[ -z "$out" ]] || { ok=0; echo "printed [$out] for a backup that was not made" >&2; }
+    [[ "$(find "$d" -type f | wc -l | tr -d ' ')" == 0 ]] || { ok=0; echo "left a file behind" >&2; }
+    # ...and the same call works once the file is there (a missing helper also "fails").
+    printf 'X' >"$d/there"
+    out="$(backup_file "$d/there" 20260101-000000 2>/dev/null)"; rc=$?
+    (( rc == 0 )) && [[ "$out" == "$d/there.autoos-backup-20260101-000000" && -f "$out" ]] \
+        || { ok=0; echo "a valid backup did not work: rc=$rc out=[$out]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "backup_file does not report a failed copy honestly"; fi
+fi
+
+if it "backup: two changing writes in one second keep the user's original"; then
+    d="$(mktemp -d)"; f="$d/.zshrc"
+    printf 'ORIGINAL\n' >"$f"
+    (
+        AUTOOS_DRY_RUN=0
+        date() { printf '20260101-000000\n'; }   # every backup lands in the same second
+        append_line_once "$f" "AutoOS:one" "export ONE=1  # AutoOS:one"
+        append_line_once "$f" "AutoOS:two" "export TWO=2  # AutoOS:two"
+    ) >/dev/null 2>&1
+    ok=1
+    [[ "$(cat "$f.autoos-backup-20260101-000000" 2>/dev/null)" == "ORIGINAL" ]] \
+        || { ok=0; echo "the oldest backup is [$(cat "$f.autoos-backup-20260101-000000" 2>/dev/null)], not the seed" >&2; }
+    grep -q 'AutoOS:one' "$f.autoos-backup-20260101-000000-1" 2>/dev/null \
+        || { ok=0; echo "the second backup (state before the second write) is missing" >&2; }
+    grep -q 'AutoOS:two' "$f" || { ok=0; echo "the second write did not land" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a second write in the same second destroyed the user's original"; fi
+fi
+
+# ...-10 sorts before ...-2 by name, so "the newest backup" cannot be the last
+# name: undo picks by modification time.
+if it "backup: undo restores the newest backup, not the last name (-10 sorts before -2)"; then
+    ok=1
+    # Written one after the other (rising mtimes), and all inside one clock tick.
+    for spread in rising equal; do
+        scratch="$(mktemp -d)"; target="$scratch/.zshrc"; printf 'NOW\n' >"$target"
+        n=0
+        for sfx in "" -1 -2 -10; do
+            printf 'state%s\n' "$sfx" >"$target.autoos-backup-20260101-000000$sfx"
+            n=$((n+1))
+            if [[ "$spread" == rising ]]; then touch -d "2026-01-01 00:00:0$n" "$target.autoos-backup-20260101-000000$sfx"
+            else touch -d "2026-01-01 00:00:00" "$target.autoos-backup-20260101-000000$sfx"; fi
+        done
+        ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; autoos_undo 1 >/dev/null 2>&1 )
+        body="$(cat "$target")"
+        [[ "$body" == "state-10" ]] || { ok=0; echo "$spread mtimes: restored [$body], expected [state-10]" >&2; }
+        rm -rf "$scratch"
+    done
+    if (( ok )); then pass; else fail "undo restored a backup that is not the newest"; fi
+fi
+
 if it "undo never uninstalls anything"; then
     # The safety property, asserted on the source rather than by removing software.
     if grep -qE '(apt-get remove|brew uninstall|npm uninstall)' lib/linux/install.sh; then
@@ -2967,6 +3044,129 @@ if it "install_antigravity writes no key and no source list when the key fetch f
     if (( ok )); then pass; else fail "a failed Antigravity key fetch leaves a half-configured apt"; fi
 fi
 
+# VS Code, Google Chrome and the GitHub CLI share the pattern Antigravity was
+# fixed for: guard on the key file, fetch, install, write the apt source line.
+# install_component runs an installer with errexit OFF, so an unchecked failed
+# fetch installed an EMPTY key file that the `-f` guard then trusted forever
+# (apt failed on every later run). The key must exist only when it is non-empty.
+#
+# apt_key_case <vscode|chrome|gh>: sets AK_* for one installer.
+apt_key_case() {
+    case "$1" in
+        vscode) AK_FN=install_vscode; AK_KEY=/etc/apt/keyrings/packages.microsoft.gpg
+                AK_LIST=/etc/apt/sources.list.d/vscode.list; AK_PKG=code
+                AK_URL=https://packages.microsoft.com/keys/microsoft.asc; AK_BODY="DEARMORED:ARMORED-KEY"
+                AK_LINE="deb [arch=amd64,arm64,armhf signed-by=$AK_KEY] https://packages.microsoft.com/repos/code stable main" ;;
+        chrome) AK_FN=install_google_chrome; AK_KEY=/etc/apt/keyrings/google-chrome.gpg
+                AK_LIST=/etc/apt/sources.list.d/google-chrome.list; AK_PKG=google-chrome-stable
+                AK_URL=https://dl.google.com/linux/linux_signing_key.pub; AK_BODY="DEARMORED:ARMORED-KEY"
+                AK_LINE="deb [arch=amd64 signed-by=$AK_KEY] http://dl.google.com/linux/chrome/deb/ stable main" ;;
+        gh)     AK_FN=install_gh; AK_KEY=/etc/apt/keyrings/githubcli-archive-keyring.gpg
+                AK_LIST=/etc/apt/sources.list.d/github-cli.list; AK_PKG=gh
+                AK_URL=https://cli.github.com/packages/githubcli-archive-keyring.gpg; AK_BODY="ARMORED-KEY"
+                AK_LINE="deb [arch=amd64 signed-by=$AK_KEY] https://cli.github.com/packages stable main" ;;
+    esac
+}
+
+# apt_key_run <scratch> <installer function> [fail-curl|empty-body]
+# One installer run in its own subshell against a scratch apt tree
+# (AUTOOS_APT_PREFIX). Every writing stub refuses a path outside the scratch
+# tree, so even code that ignores the seam cannot touch the real /etc/apt, as
+# root or not. Temp files go to <scratch>/tmp so leftovers are visible.
+apt_key_run() {
+    local sb="$1" fn="$2" mode="${3:-}"
+    (
+        AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""; AUTOOS_APT_PREFIX="$sb"; APT_UPDATED=0
+        export TMPDIR="$sb/tmp"; mkdir -p "$TMPDIR"
+        log="$sb/calls.log"
+        inside() { [[ "$1" == "$sb"/* ]] || { printf 'REFUSED (outside the scratch tree) %s\n' "$1" >>"$log"; return 1; }; }
+        curl() {
+            printf 'curl %s\n' "$*" >>"$log"
+            [[ "$mode" == fail-curl ]] && return 22
+            [[ "$mode" == empty-body ]] && return 0
+            printf 'ARMORED-KEY\n'
+        }
+        gpg() { printf 'gpg %s\n' "$*" >>"$log"; sed 's/^/DEARMORED:/'; }
+        install() {
+            printf 'install %s\n' "$*" >>"$log"
+            local src="${*: -2:1}" dst="${*: -1}"
+            inside "$dst" || return 1
+            command mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
+        }
+        tee() {
+            printf 'tee %s\n' "$*" >>"$log"
+            inside "${*: -1}" || { cat >/dev/null; return 1; }
+            command tee "$@"
+        }
+        mkdir() { printf 'mkdir %s\n' "$*" >>"$log"; inside "${*: -1}" || return 1; command mkdir "$@"; }
+        # shellcheck disable=SC2120  # stub: the installers (sourced, not visible here) call it with arguments
+        run() { printf 'run %s\n' "$*" >>"$log"; }
+        has_cmd() { [[ "$1" == apt-get ]]; }
+        dpkg() { printf 'amd64\n'; }
+        "$fn"
+    ) 2>&1
+}
+
+for _k in vscode chrome gh; do
+    if it "apt keys: $_k leaves no key when the download fails"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; ok=1
+        for mode in fail-curl empty-body; do
+            rm -rf "${sb:?}/etc" "${sb:?}/tmp" "${sb:?}/calls.log"; mkdir -p "$sb/etc/apt/sources.list.d"
+            out="$(apt_key_run "$sb" "$AK_FN" "$mode")"; rc=$?
+            (( rc != 0 )) || { ok=0; echo "$mode: rc=0 counts a failed key download as installed" >&2; }
+            [[ -z "$(find "$sb/etc" -type f)" ]] || { ok=0; echo "$mode: left files behind: $(find "$sb/etc" -type f | tr '\n' ' ')" >&2; }
+            [[ -z "$(find "$sb/tmp" -type f)" ]] || { ok=0; echo "$mode: temp file not removed" >&2; }
+            grep -qF -- "$AK_URL" "$sb/calls.log" 2>/dev/null || { ok=0; echo "$mode: the key download was never attempted" >&2; }
+            ! grep -q 'apt-get install' "$sb/calls.log" 2>/dev/null || { ok=0; echo "$mode: went on to apt-get install" >&2; }
+            [[ "$out" == *"not installed"* ]] || { ok=0; echo "$mode: no reason given: ${out:0:200}" >&2; }
+        done
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "a failed $_k key download leaves an empty key or a source line apt cannot use"; fi
+    fi
+
+    if it "apt keys: $_k an existing empty key is replaced on the next successful run"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/keyrings" "$sb/etc/apt/sources.list.d"
+        # What the old code left behind after a failed download: an empty key
+        # and the source line that names it.
+        : >"$sb$AK_KEY"; printf '%s\n' "$AK_LINE" >"$sb$AK_LIST"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc=$?
+        ok=1
+        (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:200}" >&2; }
+        [[ "$(cat "$sb$AK_KEY" 2>/dev/null)" == "$AK_BODY" ]] || { ok=0; echo "the empty key was trusted, not replaced: [$(cat "$sb$AK_KEY" 2>/dev/null)]" >&2; }
+        [[ "$(cat "$sb$AK_LIST")" == "$AK_LINE" ]] || { ok=0; echo "source line changed: $(cat "$sb$AK_LIST")" >&2; }
+        grep -qx "run apt-get install -y $AK_PKG" "$sb/calls.log" 2>/dev/null || { ok=0; echo "the package was not installed: $(cat "$sb/calls.log" 2>/dev/null)" >&2; }
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "an empty key from an earlier bad run is trusted forever"; fi
+    fi
+
+    if it "apt keys: $_k a second successful run is unchanged"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc1=$?
+        ok=1
+        (( rc1 == 0 )) || { ok=0; echo "first run rc=$rc1: ${out:0:200}" >&2; }
+        [[ "$(cat "$sb$AK_KEY" 2>/dev/null)" == "$AK_BODY" ]] || { ok=0; echo "first run: key is [$(cat "$sb$AK_KEY" 2>/dev/null)]" >&2; }
+        [[ "$(cat "$sb$AK_LIST" 2>/dev/null)" == "$AK_LINE" ]] || { ok=0; echo "first run: source line is [$(cat "$sb$AK_LIST" 2>/dev/null)]" >&2; }
+        [[ "$(grep '^run ' "$sb/calls.log" 2>/dev/null)" == $'run apt-get update -y\nrun apt-get install -y '"$AK_PKG" ]] \
+            || { ok=0; echo "first run: apt commands: $(grep '^run ' "$sb/calls.log" 2>/dev/null | tr '\n' '|')" >&2; }
+        before="$(cksum "$sb$AK_KEY" "$sb$AK_LIST" 2>/dev/null)"
+        : >"$sb/calls.log"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc2=$?
+        after="$(cksum "$sb$AK_KEY" "$sb$AK_LIST" 2>/dev/null)"
+        (( rc2 == 0 )) || { ok=0; echo "second run rc=$rc2: ${out:0:200}" >&2; }
+        writes="$(grep -E '^(curl|gpg|install|tee) ' "$sb/calls.log" || true)"
+        [[ -z "$writes" ]] || { ok=0; echo "the second run wrote again: $writes" >&2; }
+        [[ "$before" == "$after" ]] || { ok=0; echo "key or source list changed on the second run" >&2; }
+        [[ "$(wc -l <"$sb$AK_LIST" 2>/dev/null)" == 1 ]] || { ok=0; echo "source list grew" >&2; }
+        grep -qx "run apt-get install -y $AK_PKG" "$sb/calls.log" || { ok=0; echo "apt's own no-op install was skipped" >&2; }
+        [[ -z "$(find "$sb/tmp" -type f)" ]] || { ok=0; echo "temp file left behind" >&2; }
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "a second $_k run is not a no-op"; fi
+    fi
+done
+
 if it "the antigravity catalog entry needs no download URL: no prompt, and no catalog asks antigravity_url"; then
     problems="$(python3 - 2>&1 <<'PY'
 import json
@@ -3513,6 +3713,48 @@ print(bool(e.get('OMNIGRAPH_BASE_URL')), e.get('OMNIGRAPH_GRAPH_ID'), 'OMNIGRAPH
 " "$scratch/.config/zed/settings.json" 2>&1)"
     rm -rf "$scratch"
     assert_eq "$got" "True autoos False"
+fi
+
+# The omnigraph_url answer decides where every client's bridge points.
+# install_agent_skills honoured it; the Zed writer hardcoded localhost:8080, so
+# a machine with a remote omnigraph got Zed pointed at nothing. One helper,
+# omnigraph_base_url, now derives it for both.
+# zed_omni_url <answer or empty>: the OMNIGRAPH_BASE_URL route_zed_to_proxy writes.
+zed_omni_url() {
+    local scratch out
+    scratch="$(mktemp -d)"
+    (
+        AUTOOS_ANSWERS=()
+        [[ -z "$1" ]] || AUTOOS_ANSWERS[omnigraph_url]="$1"
+        SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 route_zed_to_proxy >/dev/null 2>&1
+    )
+    out="$(python3 -c "
+import json, sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['context_servers']['omnigraph']['env']['OMNIGRAPH_BASE_URL'])
+" "$scratch/.config/zed/settings.json" 2>&1)"
+    rm -rf "$scratch"
+    printf '%s' "$out"
+}
+
+if it "zed: the omnigraph entry uses the omnigraph_url answer"; then
+    ok=1
+    got="$(zed_omni_url "https://graph.example.invalid:9000/")"
+    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got], not the answer without its trailing slash" >&2; }
+    helper="$( ( AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="https://graph.example.invalid:9000/"; omnigraph_base_url ) 2>&1)"
+    [[ "$helper" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
+    if (( ok )); then pass; else fail "the Zed omnigraph entry ignores the omnigraph_url answer"; fi
+fi
+
+if it "zed: the omnigraph entry defaults to localhost:8080"; then
+    ok=1
+    got="$(zed_omni_url "")"
+    [[ "$got" == "http://localhost:8080" ]] || { ok=0; echo "the Zed entry says [$got]" >&2; }
+    # Both consumers take the default from the one helper, so they cannot drift.
+    helper="$( ( AUTOOS_ANSWERS=(); omnigraph_base_url ) 2>&1)"
+    [[ "$helper" == "http://localhost:8080" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
+    [[ "$(grep -c '\$(omnigraph_base_url)' lib/linux/install.sh)" -ge 2 ]] \
+        || { ok=0; echo "the helper is not called by both install_agent_skills and route_zed_to_proxy" >&2; }
+    if (( ok )); then pass; else fail "the omnigraph default differs between the Zed writer and install_agent_skills"; fi
 fi
 
 if it "the omnigraph env file is private, merged, linked for systemd, and stable on a re-run"; then
@@ -4143,6 +4385,63 @@ if it "the live-process probe answers on the real system without throwing"; then
     # is ever exercised. This runs the probe production actually takes.
     n="$(cs_engine probe-live 2>&1 || echo ERR)"
     if [[ "$n" =~ ^[0-9]+$ ]]; then pass; else fail "probe-live returned [$n]"; fi
+fi
+
+# install_claude_autostart renders each unit to a temp file and, when it differs
+# from the installed one, moves it over it. That silently dropped a local edit
+# of the unit (AGENTS.md hard rule 5: back a user-owned file up first).
+#
+# autostart_run <scratch>: one install_claude_autostart run against a scratch
+# home. systemctl and loginctl are stubs, so nothing is enabled or started.
+autostart_run() {
+    local sb="$1"
+    (
+        AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+        systemctl() { return 0; }
+        loginctl() { printf 'yes\n'; }
+        install_claude_autostart
+    ) 2>&1
+}
+
+if it "claude-autostart: a changed unit is backed up before it is replaced"; then
+    sb="$(mktemp -d)"; ud="$sb/home/.config/systemd/user"; u=claude-sessions-snapshot.service
+    mkdir -p "$ud"; printf 'LOCAL EDIT: do not lose me\n' >"$ud/$u"
+    out="$(autostart_run "$sb")"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:300}" >&2; }
+    mapfile -t baks < <(find "$ud" -name '*.autoos-backup-*')
+    (( ${#baks[@]} == 1 )) || { ok=0; echo "expected exactly one backup, found ${#baks[@]}" >&2; }
+    [[ "${baks[0]:-}" == "$ud/$u.autoos-backup-"* ]] || { ok=0; echo "backup is named [${baks[0]:-}]" >&2; }
+    [[ "$(cat "${baks[0]:-/nonexistent}" 2>/dev/null)" == "LOCAL EDIT: do not lose me" ]] \
+        || { ok=0; echo "the backup does not hold the user's edit: [$(cat "${baks[0]:-/nonexistent}" 2>/dev/null)]" >&2; }
+    if grep -q '^ExecStart=' "$ud/$u" && ! grep -q 'LOCAL EDIT' "$ud/$u"; then :
+    else ok=0; echo "the new unit is not in place" >&2; fi
+    [[ "$out" == *"installed $u"* ]] || { ok=0; echo "no 'installed' line: ${out:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a changed autostart unit was replaced without a backup"; fi
+fi
+
+if it 'claude-autostart: an unchanged unit takes no backup and reports "already current"'; then
+    sb="$(mktemp -d)"; ud="$sb/home/.config/systemd/user"; ok=1
+    autostart_run "$sb" >/dev/null                   # fresh machine: three units, no backup
+    [[ "$(find "$ud" -name '*.autoos-backup-*' | wc -l | tr -d ' ')" == 0 ]] || { ok=0; echo "a fresh install took a backup" >&2; }
+    before="$(cksum "$ud"/claude-sessions-*)"
+    out="$(autostart_run "$sb")"; rc=$?              # second run: nothing changes
+    (( rc == 0 )) || { ok=0; echo "second run rc=$rc" >&2; }
+    [[ "$(grep -c 'already current' <<<"$out")" == 3 ]] || { ok=0; echo "second run not current for all three: ${out:0:400}" >&2; }
+    [[ "$(find "$ud" -name '*.autoos-backup-*' | wc -l | tr -d ' ')" == 0 ]] || { ok=0; echo "an unchanged run took a backup" >&2; }
+    [[ "$(cksum "$ud"/claude-sessions-*)" == "$before" ]] || { ok=0; echo "an unchanged unit was rewritten" >&2; }
+    # One unit edited by hand: only that one is backed up; the other two stay untouched.
+    printf '# local tweak\n' >>"$ud/claude-sessions-snapshot.timer"
+    edited="$(cat "$ud/claude-sessions-snapshot.timer")"
+    out="$(autostart_run "$sb")"
+    mapfile -t baks < <(find "$ud" -name '*.autoos-backup-*')
+    (( ${#baks[@]} == 1 )) || { ok=0; echo "expected one backup for the edited unit, found ${#baks[@]}" >&2; }
+    [[ "${baks[0]:-}" == "$ud/claude-sessions-snapshot.timer.autoos-backup-"* && "$(cat "${baks[0]:-/nonexistent}" 2>/dev/null)" == "$edited" ]] \
+        || { ok=0; echo "the edited timer was not the one backed up, or its bytes differ: ${baks[0]:-none}" >&2; }
+    [[ "$(grep -c 'already current' <<<"$out")" == 2 ]] || { ok=0; echo "the two untouched units are not reported current: ${out:0:400}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the autostart backup is missing for a changed unit or taken for an unchanged one"; fi
 fi
 
 if it "claude-autostart is defined for linux and windows, and not for macos"; then
