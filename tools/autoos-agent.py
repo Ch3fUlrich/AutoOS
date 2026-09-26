@@ -110,7 +110,7 @@ import autoos_measure as measure_mod  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_track as track  # noqa: E402
-from registry import resolve_leg  # noqa: E402
+from registry import private_safe, resolve_leg  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
@@ -336,7 +336,47 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None) 
             "bucket": result["bucket"]}
 
 
+class PrivacyRefused(ValueError):
+    """A sensitive run whose explicit --model names a combo with a leg that is
+    not private-safe (PRIV3)."""
+
+
+def sensitive_combo_refusal(combo: str, registry: dict):
+    """Why `combo` may not carry privacy=sensitive work, or None when it may.
+
+    Every leg the gateway serves counts - unavailable_legs included, since
+    combos.json keeps them and OmniRoute can still fall through to them. An id
+    that is not a registry route is refused: nothing proves it private-safe.
+    """
+    route = (registry.get("routes") or {}).get(combo)
+    if route is None:
+        return "privacy: %r is not a registry route, so nothing proves it private-safe" % combo
+    for leg in route.get("legs") or []:
+        try:
+            provider_id, model_id = resolve_leg(leg, registry)
+        except ValueError as exc:
+            return "privacy: %s: %s" % (leg, exc)
+        safe, why = private_safe(provider_id, model_id, registry)
+        if not safe:
+            return "privacy: --model %s serves %s, which is not private-safe (%s)" % (combo, leg, why)
+    return None
+
+
 def resolve_route(args, cfg: dict, client) -> dict:
+    """resolve_route_unchecked plus the PRIV3 check: a sensitive run whose
+    explicit --model replaced the card's combo must still land on private-safe
+    legs only (--allow-training keeps its documented, logged escape)."""
+    route = resolve_route_unchecked(args, cfg, client)
+    override = args.model if client.gateway else None
+    if (override and route.get("model") and route.get("privacy") == "sensitive"
+            and not args.allow_training):
+        reason = sensitive_combo_refusal(route["combo"], load_registry(REGISTRY_PATH))
+        if reason:
+            raise PrivacyRefused(reason)
+    return route
+
+
+def resolve_route_unchecked(args, cfg: dict, client) -> dict:
     """Tier/model/combo for this run: an explicit --tier, a v2 card through the
     resolver (RUNV2), or a v1 card through select_combo."""
     # --model names a gateway combo for opencode and the gateway clients; for
@@ -992,7 +1032,7 @@ def cmd_run(args, cfg: dict) -> int:
         plan = build_plan(args, cfg)
     except clients.DepthError as exc:
         return refuse(str(exc), 4)
-    except (RouteInputRequired, RouteDeferred) as exc:  # RUNV2: the plan's own
+    except (RouteInputRequired, RouteDeferred, PrivacyRefused) as exc:  # plan's / PRIV3's own
         return refuse(str(exc))                        # message, no suffix added
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)

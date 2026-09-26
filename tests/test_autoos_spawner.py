@@ -1779,6 +1779,69 @@ class RunCardV2Tests(unittest.TestCase):
         self.assertEqual(self.agent.track_entry(plan, 0, 1.0)["bucket"], "unknown")
 
 
+class ModelOverridePrivacyTests(unittest.TestCase):
+    """PRIV3 (review-priv, qoder 2026-09-26): an explicit --model replaced a
+    sensitive card's -clean combo with no privacy re-check, so
+    `--card privacy=sensitive --model omniroute/t3-driver` ran private work on
+    the mistral-code free pool. Every leg the gateway serves for the chosen
+    combo must be private-safe (tools/registry.py private_safe)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def cfg(self):
+        names = list(routing.ALL_COMBOS)
+        return {"providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def run_cmd(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="privacy=sensitive", allow_training=False,
+            client="opencode", joinable=False, max_depth=None, clean=False, model=None,
+            free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=False, auto=True,
+            lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(ns, self.cfg())
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_sensitive_card_with_a_free_pool_model_is_refused(self):
+        rc, out, err = self.run_cmd(model="omniroute/t3-driver")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("privacy", err)
+
+    def test_sensitive_card_with_a_clean_model_runs(self):
+        rc, out, err = self.run_cmd(model="omniroute/t2-worker-clean")
+        self.assertEqual(rc, 0, err)
+
+    def test_clean_tier_maps_a_free_pool_model_to_its_clean_twin(self):
+        # --tier --clean already resolves an override to its -clean twin
+        # (resolve_model), so the PRIV3 check sees a private-safe combo.
+        rc, out, err = self.run_cmd(card=None, tier=2, clean=True, model="omniroute/t3-driver")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("route: t3-driver-clean", out)
+
+    def test_v2_sensitive_card_with_a_free_pool_model_is_refused(self):
+        plan = {"route": "t3-driver-clean", "state": "ready", "reason": "stub",
+                "bucket": "S1", "defer_until": None}
+        with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: plan), \
+                mock.patch.object(self.agent.measure_mod, "client_state", lambda *a, **k: {}):
+            rc, out, err = self.run_cmd(card="kind=review,paths=tools/registry.py,privacy=sensitive",
+                                        model="omniroute/t3-driver")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("privacy", err)
+
+    def test_public_card_with_any_model_is_not_checked(self):
+        rc, out, err = self.run_cmd(card="privacy=public", model="omniroute/t3-driver")
+        self.assertEqual(rc, 0, err)
+
+    def test_allow_training_keeps_the_documented_escape(self):
+        rc, out, err = self.run_cmd(card="privacy=sensitive,ctx=1m", allow_training=True,
+                                    model="omniroute/t1-orchestrator-clean")
+        self.assertEqual(rc, 0, err)
+
+
 class RunCardV2AcceptanceTests(unittest.TestCase):
     """The exact command RUNV2's done-when names, against the real repo: real
     registry, real opencode.jsonc, real clients (opencode has no sign-in probe;
