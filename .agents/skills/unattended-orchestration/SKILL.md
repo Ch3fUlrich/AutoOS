@@ -40,26 +40,32 @@ every L1 session needs before touching a brief.
 One rule per line, grouped by topic: `R-<topic>-<nn>: <imperative>. (why: …; source: …)`. A
 source names the test or measurement behind the rule (D20) — an unmeasured lesson is not a rule
 yet. `python3 tools/skill-rules.py check` (CI) enforces the format, uniqueness and near-duplicates.
-A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date>/<file>`
-(default date 2026-09-25 unless the line names another).
+Source paths: `tests/…` is the repo's `tests/`; a bare `test_*.py` is this skill's `tests/`
+(`test_autoos_spawner.py` is the repo's `tests/`); `inbox/…`, `work/…`, `done/…` and `status/…` are the
+run log `logs/handoff-sessions/<date>/` (default date 2026-09-25 unless the line names another).
 
 ### spawn
 
-- R-spawn-01: After a lane's DONE note, `claude stop <id>` it and remove the merged, clean worktree. (why: a finished session can idle for hours; source: tests/test_l1_handoff.py, 2026-09-25)
+- R-spawn-01: After a lane's DONE note, `claude stop <id>` it and remove the merged, clean worktree. (why: a finished session can idle for hours; source: test_l1_handoff.py, 2026-09-25)
 - R-spawn-02: Run the client in its own process group; reap leftovers after it exits. (why: Serena/language servers survive a cancelled worker; source: test_autoos_spawner.py ProcessGroupTests)
 - R-spawn-03: `--mcp-config`/`--allowedTools` are variadic: add another option before the prompt. (why: the prompt is silently eaten as an argument; source: daemon.log, test_autoos_spawner.py)
 - R-spawn-04: Give lane Claude sessions trust_worktree.py --lane-mcp's strict per-worktree MCP config. (why: each worktree gets a private Serena; source: test_trust_worktree.py, 20:50Z)
 - R-spawn-05: Pre-approve a fresh worktree with `trust_worktree.py` before its first session starts. (why: a background session can't answer a trust dialog; source: measured: three lanes blocked in 3s)
-- R-spawn-06: Launch lane subagents with Agent isolation:worktree; never give one a raw worktree path. (why: a bare path made a subagent call EnterWorktree, stall; source: inbox/L1-routing.md 21:1xZ)
+- R-spawn-06: Launch non-shell lane subagents with Agent isolation:worktree, never a raw worktree path. (why: a bare path made a subagent call EnterWorktree, stall; source: inbox/L1-routing.md 21:1xZ)
 - R-spawn-07: An isolation:worktree subagent can't run pwsh/bash; use a non-isolated agent for shell work. (why: 3 of 3 isolated agents stopped before any edit; source: inbox/L1-backlog.md 19:30Z)
 - R-spawn-08: The spawner reads configuration/api-keys.yml from the main checkout if a worktree lacks it. (why: it's git-ignored, absent in a fresh worktree; source: test_autoos_spawner.py KeyFileTests)
-- R-spawn-09: Route implement work to qoder/agy as writers only; the orchestrator tests and commits. (why: headless mode auto-denies every command tool; source: work/L1-routing/B2fix.out, MCPb.out)
+- R-spawn-09: Use qoder only as a writer (you test and commit), agy only for read-only reviews. (why: headless denies qoder shell, agy shell+writes; source: work/L1-routing/B2fix.out, B3c1.out)
+- R-spawn-10: An isolation:worktree subagent branches from main; have it `git merge --ff-only <branch>` first. (why: branch-only files are missing otherwise; source: inbox/L1-routing.md 21:38Z, A12)
+- R-spawn-11: Read your inbox right before every launch, not only while waiting. (why: 3 workers started against a 30-min-old stop order; source: inbox/L1-routing.md 21:44Z)
+- R-spawn-12: Omit `--lean` for `--client qoder|agy`; the spawner refuses it with exit 2. (why: those clients start their MCP servers anyway; source: work/L1-routing/review-a3.out, 2026-09-26)
 
 ### review
 
 - R-review-01: Gate a worker's sandbox diff, not its report; a NO-OP (nothing changed) exits 5. (why: workers reported completed with uncommitted files; source: work/L1-routing/C1.out, NoOpGuardTests)
 - R-review-02: Treat a cheap/free reviewer's "no findings" as unproven; self-review often finds real defects. (why: measured across five lanes' DONE notes; source: 20260924/done, 20260925/done)
 - R-review-03: Never let a reviewer share the writer's model family; pair across families. (why: same-family reviewers repeat the writer's blind spots; source: cao/dispatch.py, review_degraded tag)
+- R-review-04: Inline run-log files into a qoder/agy task; under --isolate it cannot read outside its clone. (why: qoder asked for access, then NO-OP; source: work/L1-routing/review-c2.out, 2026-09-26)
+- R-review-05: Start every review run with `--card role=review`, or a clean sandbox exits 5 (NO-OP). (why: a full 8-finding review exited 5; source: work/L1-routing/review-a3.out, 2026-09-26)
 
 ### tests
 
@@ -75,6 +81,7 @@ A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date
 - R-gateway-03: Route opencode's free zen/spark legs through an opencode-launched agent, not a bare API call. (why: that leg 403s any non-opencode caller; source: done/R-merge.md, item 5)
 - R-gateway-04: After a combo/id rename, confirm the live gateway's combos match the code before routing. (why: a stale gateway 400s every card/--tier route; source: done/R-merge.md, item 1)
 - R-gateway-05: Match a tool-allowlist entry to its MCP wiring: `mcp__<name>__*`, plugin form otherwise. (why: the wrong prefix leaves the tool silently missing; source: mcp-servers-setup skill)
+- R-gateway-06: Keep a Qwen (t3-driver-free-only) request under 7000 input tokens; send one file. (why: larger requests fail 413 at its ITPM limit; source: work/L1-routing/review-b4b5.out)
 
 ### brief
 
@@ -99,6 +106,7 @@ A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date
 - R-handoff-02: Delegate reading DONE notes, plans and drafts to a subagent; don't read them all yourself. (why: a 200k orchestrator hit its 150k cap in 7 min; source: inbox/L1-main.md 19:21Z)
 - R-handoff-03: Write a successor's brief from the predecessor's DONE note, never from the plan alone. (why: eight re-cuts converged on the same shape; source: references/layers.md history, 2026-09-05)
 - R-handoff-04: At the cap, run l1_handoff.py --state/--out, append `handoff <name>` to the inbox, stop. (why: lets the parent relaunch you from that file; source: briefs/common.md, Always)
+- R-handoff-05: A handoff is done only once the parent inbox has its line; parents watch handoff mtimes. (why: a handoff with no line sat idle 1.5 h; source: inbox/L1-routing.md 21:45Z)
 
 ### host
 
@@ -111,7 +119,7 @@ A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date
 
 - R-safety-01: Never put a secret in a committed handoff config; read tokens at preflight only. (why: a committed config is read by every clone; source: HandoffCore.psm1, AGENTS.md rule 1)
 - R-safety-02: Treat a classifier refusal as a signal: record it verbatim and stop, never work around it. (why: a background session can't negotiate a denial; source: refusals measured 2026-09-24/25)
-- R-safety-03: Never give a spawning role Bash, Write or Edit itself; only a leaf gets them. (why: a supervisor wanting to write code mis-decomposed; source: tests/test_agent_harness.py)
+- R-safety-03: A leaf role never spawns; only a spawning role lists the autoos-agent MCP. (why: a supervisor wanting to write code mis-decomposed; source: tests/test_agent_harness.py)
 
 ## CAO quickstart
 

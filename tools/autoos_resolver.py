@@ -17,6 +17,9 @@ default: a silently mis-scored task is routed to a model that cannot do it.
 """
 from __future__ import annotations
 
+import autoos_track as track  # tools/ is on sys.path for every caller
+from registry import resolve_leg  # tools/ is on sys.path for every caller
+
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
 # ladder.
@@ -198,3 +201,319 @@ def max_tokens(effort_name, reasoning, output_max):
     else:
         floor = 48000
     return min(floor, output_max)
+
+
+# ---------------------------------------------------------------------------
+# Hard filters (spec sections 4 and 5.3 step 1). An override is applied after
+# these: it can pick any route that survived, never one a filter removed.
+# ---------------------------------------------------------------------------
+
+# Kinds whose result depends on the model actually calling tools (spec 5.3).
+AGENTIC_KINDS = ("implement", "debug", "bulk")
+
+_NO_ROUTE_HINTS = ["sign in", "narrow paths", "split the task", "override"]
+
+
+def serving_legs(route, registry):
+    """Available ``(provider_id, model_id)`` legs of `route`, in leg order.
+
+    A leg resolves through its provider id (or that provider's omniroute_id)
+    and its model id; an ``unavailable_legs`` entry or a provider-wide
+    ``available: false`` drops it. A leg that resolves to nothing raises
+    ValueError: a broken registry must fail closed, never silently drop a
+    candidate.
+    """
+    providers = registry["providers"]
+    unavailable = route.get("unavailable_legs") or {}
+    out = []
+    for leg in route.get("legs") or []:
+        # One leg-resolution rule for the validator and the resolver.
+        provider_id, model_id = resolve_leg(leg, registry)
+        if leg in unavailable:
+            continue
+        if providers[provider_id].get("available") is False:
+            continue
+        out.append((provider_id, model_id))
+    return out
+
+
+def usable_context(model_id, registry, overlay):
+    """Usable context tokens for `model_id`; the overlay (a probe) wins.
+
+    Falls back to the registry's ``context_usable.tokens`` when the overlay
+    carries no measured value for the model.
+    """
+    models = (overlay or {}).get("models") or {}
+    measured = (models.get(model_id) or {}).get("context_usable") or {}
+    if "tokens" in measured:
+        return int(measured["tokens"])
+    return int(registry["models"][model_id]["context_usable"]["tokens"])
+
+
+def _client_reason(client_state, client):
+    """The sign-in filter's reason for `client`, or None when it passes.
+
+    A client absent from `client_state` is not installed; an installed client
+    whose ``signed_in`` is explicitly False is not signed in. ``signed_in``
+    None (no probe) does not remove a route -- only a measured False does.
+    """
+    entry = (client_state or {}).get(client) or {}
+    if not entry.get("installed"):
+        return "client: %s not installed" % client
+    if entry.get("signed_in") is False:
+        return "client: %s not signed in" % client
+    return None
+
+
+def filter_routes(card, features, client_state, registry, overlay,
+                  client="opencode"):
+    """Split routes into ``(survivors, removed)`` per spec 5.3 step 1.
+
+    ``survivors`` is route ids in registry order. ``removed`` maps a route id
+    to every reason that removed it -- one per failing filter, collecting all
+    of them rather than stopping at the first. Filters are never relaxed; an
+    override runs later, over exactly these survivors.
+    """
+    if "need_tokens" not in features:
+        raise ValueError("missing feature 'need_tokens' in features")
+    need = features["need_tokens"]
+    privacy_sensitive = card.get("privacy") == "sensitive"
+    agentic = card.get("kind") in AGENTIC_KINDS
+    client_reason = _client_reason(client_state, client)
+
+    survivors = []
+    removed = {}
+    for route_id, route in registry["routes"].items():
+        legs = serving_legs(route, registry)
+        reasons = []
+
+        if route.get("retired"):
+            reasons.append("retired")
+
+        if not legs:
+            reasons.append("no available leg")
+
+        if privacy_sensitive:
+            for provider_id, model_id in legs:
+                if registry["providers"][provider_id].get("trains_on_prompts"):
+                    reasons.append("privacy: %s/%s trains on prompts"
+                                   % (provider_id, model_id))
+
+        for provider_id, model_id in legs:
+            usable = usable_context(model_id, registry, overlay)
+            if need * 1.3 > usable:
+                reasons.append("context: need %sx1.3 > usable %s on %s/%s"
+                               % (need, usable, provider_id, model_id))
+
+        if agentic:
+            for provider_id, model_id in legs:
+                value = registry["models"][model_id].get("tool_calls")
+                if value != "proven":
+                    reasons.append("tool_calls: %s/%s is %s"
+                                   % (provider_id, model_id, value))
+
+        if client_reason:
+            reasons.append(client_reason)
+
+        for provider_id, model_id in legs:
+            bound = registry["models"][model_id].get("client_bound")
+            if bound and bound != client:
+                reasons.append("client_bound: %s/%s needs %s"
+                               % (provider_id, model_id, bound))
+
+        if reasons:
+            removed[route_id] = reasons
+        else:
+            survivors.append(route_id)
+
+    return survivors, removed
+
+
+def apply_override(card, survivors, removed):
+    """``(route_id, reason)`` for a card's override, after the hard filters.
+
+    No ``route`` key -> ``(None, "no override")``. A surviving route is
+    returned; a removed route is refused with every reason it failed; an
+    unknown route id is refused as unknown. An override never resurrects a
+    filtered route.
+    """
+    override = card.get("override") or {}
+    if "route" not in override:
+        return None, "no override"
+    route = override["route"]
+    if route in survivors:
+        return route, "override: %s" % route
+    if route in removed:
+        return None, "override %s removed by filters: %s" % (
+            route, "; ".join(removed[route]))
+    return None, "override %s: unknown route" % route
+
+
+def no_route(removed):
+    """The ``input_required`` plan when no route survives the filters (5.3)."""
+    return {
+        "route": None,
+        "state": "input_required",
+        "reason": "no route survives the filters: " + " | ".join(
+            "%s: %s" % (route_id, "; ".join(reasons))
+            for route_id, reasons in removed.items()),
+        "hints": list(_NO_ROUTE_HINTS),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Expected-cost scoring and theta picking (spec sections 5.3 steps 4-5, 5.4).
+# Pure: the caller passes the track record in, nothing is read or written. A
+# missing policy key is never defaulted: an unpriced or unseeded route must
+# raise, not be scored as if it were safe.
+# ---------------------------------------------------------------------------
+
+
+def _policy_value(registry, *keys):
+    """Walk ``registry["policy"]`` by ``keys``; ValueError names a missing one."""
+    node = registry.get("policy")
+    path = "policy"
+    if not isinstance(node, dict):
+        raise ValueError("missing policy key %r" % path)
+    for key in keys:
+        path = "%s.%s" % (path, key)
+        try:
+            node = node[key]
+        except (KeyError, TypeError):
+            raise ValueError("missing policy key %r" % path)
+    return node
+
+
+def _median(values):
+    """The median of an odd/even list; an even list averages the middle two."""
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def expected_leg(route, registry):
+    """The ``(provider_id, model_id)`` leg that will serve, or None.
+
+    The route's first available leg wins (priority strategy, spec 5.3 step 4).
+    """
+    legs = serving_legs(route, registry)
+    return legs[0] if legs else None
+
+
+def attempt_cost(model, need_tokens, out_tokens):
+    """USD to attempt one run: input at ``price_in``, output at ``price_out``.
+
+    Prices are per token, as the catalog stores them; a free leg is 0.0.
+    """
+    return (float(need_tokens) * float(model["price_in"])
+            + float(out_tokens) * float(model["price_out"]))
+
+
+def verify_cost(bucket, registry, orchestrator_model):
+    """USD to verify once: ``verify_tokens[bucket]`` at the orchestrator's input price.
+
+    Unknown bucket or orchestrator fails closed with a ValueError.
+    """
+    tokens = _policy_value(registry, "verify_tokens", bucket, "tokens")
+    models = registry["models"]
+    if orchestrator_model not in models:
+        raise ValueError("unknown orchestrator model %r" % orchestrator_model)
+    return float(tokens) * float(models[orchestrator_model]["price_in"])
+
+
+def latency_minutes(route_id, route_class, records, registry):
+    """``(minutes, source)`` wall-clock for this route.
+
+    The median of ``latency_s/60`` over the route's own records (source
+    ``"route"``); with none, the class's ``latency_seed`` (source ``"seed"``).
+    """
+    samples = [r["latency_s"] / 60.0 for r in records
+               if r.get("route") == route_id]
+    if samples:
+        return _median(samples), "route"
+    seed = _policy_value(registry, "latency_seed", route_class, "minutes")
+    return float(seed), "seed"
+
+
+def score_route(route_id, bucket, effort_name, features, registry, records,
+                orchestrator_model, mode):
+    """Score one surviving route at a bucket/effort, per spec 5.3 step 4.
+
+    Returns a dict::
+
+        {route, leg, p, p_source, c_attempt, c_verify, minutes,
+         expected_cost, reason}
+
+    ``expected_cost`` is ``(C_attempt + C_verify) / p + lambda_mode * T / p``.
+    A missing policy key, an unscored route with no serving leg, or a missing
+    ``need_tokens`` raises ValueError.
+    """
+    if "need_tokens" not in features:
+        raise ValueError("missing feature 'need_tokens' in features")
+    route = registry["routes"][route_id]
+    route_class = route["class"]
+    leg = expected_leg(route, registry)
+    if leg is None:
+        raise ValueError("route %r has no serving leg to score" % route_id)
+    provider_id, model_id = leg
+    model = registry["models"][model_id]
+
+    reasoning = bool(model.get("reasoning"))
+    if reasoning:
+        out_tokens = max_tokens(effort_name, reasoning, model["output_max"])
+    else:
+        out_tokens = model["output_max"]
+
+    c_attempt = attempt_cost(model, features["need_tokens"], out_tokens)
+    c_verify = verify_cost(bucket, registry, orchestrator_model)
+    minutes = latency_minutes(route_id, route_class, records, registry)[0]
+    p, p_source = track.p_success(records, route_id, route_class, bucket,
+                                  effort_name or "none",
+                                  _policy_value(registry, "seed_priors"))
+    lam = _policy_value(registry, "modes", mode, "lambda", "value")
+    expected = (c_attempt + c_verify) / p + lam * minutes / p
+
+    leg_name = "%s/%s" % (provider_id, model_id)
+    reason = "E=%.6f p=%.2f (%s) T=%gm on %s" % (
+        expected, p, p_source, minutes, leg_name)
+    return {
+        "route": route_id,
+        "leg": leg_name,
+        "p": p,
+        "p_source": p_source,
+        "c_attempt": c_attempt,
+        "c_verify": c_verify,
+        "minutes": minutes,
+        "expected_cost": expected,
+        "reason": reason,
+    }
+
+
+def pick(scores, mode, registry):
+    """``(score, reason)`` for the route to run, per spec 5.3 step 5.
+
+    The lowest ``expected_cost`` among scores whose ``p >= theta_mode`` (ties
+    keep input order); if none reaches theta, the highest ``p`` (ties take the
+    lowest cost) and the reason says theta was missed. Empty ``scores`` or an
+    unknown mode raises ValueError.
+    """
+    if not scores:
+        raise ValueError("pick: no scores to choose from")
+    theta = _policy_value(registry, "modes", mode, "theta", "value")
+
+    eligible = [s for s in scores if s["p"] >= theta]
+    if eligible:
+        chosen = min(eligible, key=lambda s: s["expected_cost"])
+        return chosen, "theta %s met: lowest E=%.6f on %s" % (
+            theta, chosen["expected_cost"], chosen["route"])
+
+    best = None
+    for score in scores:
+        key = (score["p"], -score["expected_cost"])
+        if best is None or key > best[0]:
+            best = (key, score)
+    chosen = best[1]
+    return chosen, "theta %s missed: best p %s on %s" % (
+        theta, chosen["p"], chosen["route"])

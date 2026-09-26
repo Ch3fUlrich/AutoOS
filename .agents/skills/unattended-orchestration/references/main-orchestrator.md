@@ -58,9 +58,7 @@ cheaper than asking an L2.
 
 ## 4. L3 executors, and cross-family review
 
-Different model families catch each other's mistakes; the same family repeats them. So the model
-that **reviews** or **tests** a change is from a different family than the one that **wrote**
-it. That rule belongs in every L2 brief.
+Cross-family review is rule R-review-03 in [`../SKILL.md`](../SKILL.md); put it in every L2 brief.
 
 | Executor | Family | How to reach it (measured status, 2026-09-18) |
 |---|---|---|
@@ -77,23 +75,9 @@ it. That rule belongs in every L2 brief.
 **The operator's routing rules (2026-09-18).** These hold at L1 and L2, and every L2 brief
 carries them:
 
-1. **DeepSeek first.** Claude usage limits are the scarce resource, so L3 implementation and
-   bulk work go to DeepSeek wherever a DeepSeek route can do the task. Trivial and mechanical
-   work may go cheaper still: OpenRouter free models or local Ollama. See the routing method in
-   [`l3-routing.md`](l3-routing.md).
-2. **Claude closes.** The **last** checks and the **final** implementation pass are done by
-   Claude **Sonnet or Haiku** agents:
-   - Haiku for mechanical checks (a guard run, a diff read against its spec);
-   - Sonnet for anything that needs understanding.
-
-   A change is not done until a Claude closer has passed it.
-3. **The reviewer is never the writer's model:**
-   - DeepSeek wrote it → Sonnet reviews;
-   - Sonnet wrote it → DeepSeek reviews;
-   - any other writer → a reviewer from a different family.
-
-   Tests are run by a third agent or by a guard. When two reviewers disagree, settle it with a
-   test.
+1-3. **Superseded 2026-09-25** (operator decision + routing v2 spec D1/D2): route by
+   [`../SKILL.md`](../SKILL.md) R-gateway-01 (free pools, then qoder/agy, paid DeepSeek and Claude
+   only as fallback) and review by R-review-03; Claude closes only high-risk changes (spec §5.7).
 4. **Opus stays at L1/L2 and does judgement:** decomposing, accepting or rejecting evidence.
    Every DONE note records, for each change, which model wrote it, which reviewed it, and which
    closed it.
@@ -109,7 +93,7 @@ carries them:
    - A leaf reads its whole working directory, its environment and the host. So the rule is
      enforced by the **leaf gate**, not by the prompt ([`l3-routing.md`](l3-routing.md) §4).
      L2s launch leaves only through it.
-   - This rule overrides rule 1 wherever the two disagree.
+   - This rule overrides the routing order wherever the two disagree.
 
 ## 4b. Build piecewise; test on a data ladder
 
@@ -119,8 +103,7 @@ rerun, and one found on ten rows costs seconds.
 1. **Plan with the superpowers skills.** Brainstorm, then `writing-plans`, then execute with
    `subagent-driven-development` or `executing-plans`. A plan's tasks are small enough that each
    has its own test and its own commit.
-2. **Test-driven and fast.** Write the failing test first, and watch it fail for the stated
-   reason. A test that needs minutes is split until the inner loop takes seconds.
+2. **Test-driven and fast.** Failing test first ([`AGENTS.md`](../../../../AGENTS.md) §5). A test that needs minutes is split until the inner loop takes seconds.
 3. **The data ladder.** Every run that processes data climbs three rungs, and never skips one:
    1. **Small artificial data with a known output.** A fixture you built, where you can state
       the expected result before running. It proves the logic.

@@ -8,20 +8,21 @@ Two subcommands:
 
 `check` proves the registry obeys spec 3.1's rules:
 
-    1. every route leg resolves to a providers x models pair;
-    2. ids are unique within and across providers/models/clients (route ids may
-       share a model id by convention - mapping doc Open choice 11 - so routes
-       are exempt from the uniqueness check);
+    1. every route leg - and every unavailable_legs key - resolves to a
+       providers x models pair;
+    2. ids are unique within and across providers/models/clients/routes; a
+       route may share the id of a model one of its legs serves (a per-model
+       fallback group, mapping doc Open choice 11);
     3. a privacy-sensitive route (one whose id ends in "-clean") only uses
-       available legs whose provider has trains_on_prompts: false. A leg listed
-       in routes.<id>.unavailable_legs, or reached through a provider marked
-       available: false, is not checked; a route carrying "allow_training": true
-       is exempt;
+       available legs whose provider has trains_on_prompts: false (a missing
+       or null value counts as training). A leg listed in
+       routes.<id>.unavailable_legs, or reached through a provider marked
+       available: false, is not checked; there is no per-route exemption;
     4. providers.<id>.api_base and models.<id>.direct.base_url hold only a public
        vendor endpoint. Loopback (127.0.0.1 / localhost / ::1) is allowed ONLY in
-       a model's direct.base_url; private IPv4 ranges, .local/.lan/.internal/.vm
-       hosts and any userinfo@ are always rejected;
-    5. no value anywhere carries a date, except values under keys named
+       a model's direct.base_url; private IPv4 ranges, single-label hosts,
+       .local/.lan/.internal/.vm hosts and any userinfo@ are always rejected;
+    5. no key or value anywhere carries a date, except values under keys named
        source/verified/version and anything inside a $comment/comment;
     6. every key the schema marks required is present (a small hand-rolled
        structural walk of catalog/ai-registry.schema.json - no jsonschema
@@ -56,12 +57,19 @@ DATE_EXEMPT_KEYS = ("source", "verified", "version")
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"
-ID_SECTIONS = ("providers", "models", "clients")
+ID_SECTIONS = ("providers", "models", "clients", "routes")
 
 
 # ===========================================================================
 # loading
 # ===========================================================================
+
+
+def _section(registry, name) -> dict:
+    """A top-level section as a dict; a null or wrong-typed one reads as empty
+    (rule 6 reports it) instead of crashing a later rule."""
+    value = registry.get(name)
+    return value if isinstance(value, dict) else {}
 
 
 def load(path) -> dict:
@@ -87,7 +95,7 @@ def resolve_leg(leg, registry) -> tuple:
     if not sep:
         raise ValueError("leg %r is not a provider/model string" % (leg,))
 
-    providers = registry.get("providers", {})
+    providers = _section(registry, "providers")
     provider_id = prefix if prefix in providers else None
     if provider_id is None:
         for candidate_id, provider in providers.items():
@@ -96,17 +104,19 @@ def resolve_leg(leg, registry) -> tuple:
                 break
     if provider_id is None:
         raise ValueError("leg %r: no provider matches prefix %r" % (leg, prefix))
-    if model_id not in registry.get("models", {}):
+    if model_id not in _section(registry, "models"):
         raise ValueError("leg %r: no model matches %r" % (leg, model_id))
     return provider_id, model_id
 
 
 def _check_legs(registry) -> list:
     problems = []
-    for route_id, route in registry.get("routes", {}).items():
+    for route_id, route in _section(registry, "routes").items():
         if not isinstance(route, dict):
             continue
-        for leg in route.get("legs", []):
+        # unavailable legs must still name real providers and models
+        legs = list(route.get("legs") or []) + list(route.get("unavailable_legs") or {})
+        for leg in dict.fromkeys(legs):
             try:
                 resolve_leg(leg, registry)
             except ValueError:
@@ -119,18 +129,28 @@ def _check_legs(registry) -> list:
 # ===========================================================================
 
 
+def _served_models(route, registry) -> set:
+    models = set()
+    for leg in route.get("legs") or []:
+        try:
+            models.add(resolve_leg(leg, registry)[1])
+        except ValueError:
+            pass  # rule 1 reports it
+    return models
+
+
 def _check_unique_ids(registry) -> list:
     seen = {}
     for section in ID_SECTIONS:
-        entries = registry.get(section, {})
-        if not isinstance(entries, dict):
-            continue
+        entries = _section(registry, section)
         for key, entry in entries.items():
             if not isinstance(entry, dict):
                 continue
             value = entry.get("id")
             if value is None:
                 continue
+            if section == "routes" and value in _served_models(entry, registry):
+                continue  # a per-model fallback group may carry its model's id
             seen.setdefault(value, []).append("%s.%s" % (section, key))
 
     problems = []
@@ -147,25 +167,23 @@ def _check_unique_ids(registry) -> list:
 
 def _check_privacy(registry) -> list:
     problems = []
-    for route_id, route in registry.get("routes", {}).items():
+    for route_id, route in _section(registry, "routes").items():
         if not isinstance(route, dict) or not route_id.endswith(CLEAN_ROUTE_SUFFIX):
             continue
-        if route.get("allow_training"):
-            continue
         unavailable = route.get("unavailable_legs") or {}
-        for leg in route.get("legs", []):
+        for leg in route.get("legs") or []:
             if leg in unavailable:
                 continue
             try:
                 provider_id, _ = resolve_leg(leg, registry)
             except ValueError:
                 continue  # rule 1 already reports an unresolved leg
-            provider = registry.get("providers", {}).get(provider_id, {})
+            provider = _section(registry, "providers").get(provider_id, {})
             if not isinstance(provider, dict):
                 continue
             if provider.get("available") is False:
                 continue
-            if provider.get("trains_on_prompts") is True:
+            if provider.get("trains_on_prompts") is not False:  # unknown = unsafe
                 problems.append("privacy: %s leg %s trains on prompts" % (route_id, leg))
     return problems
 
@@ -181,7 +199,7 @@ def _split_host(value: str) -> tuple:
     scheme = ""
     if "://" in rest:
         scheme, rest = rest.split("://", 1)
-    authority = rest.split("/", 1)[0]
+    authority = re.split(r"[/?#]", rest, maxsplit=1)[0]
     has_userinfo = "@" in authority
     hostport = authority.rsplit("@", 1)[-1]
     if hostport.startswith("["):  # bracketed IPv6, with an optional :port
@@ -204,6 +222,8 @@ def _is_loopback(host: str) -> bool:
 
 def _is_private_host(host: str) -> bool:
     if host.endswith(PRIVATE_HOST_SUFFIXES):
+        return True
+    if "." not in host and ":" not in host:  # single-label intranet name
         return True
     try:
         address = ipaddress.ip_address(host)
@@ -228,14 +248,14 @@ def _private_host_reason(value: str, allow_loopback: bool):
 
 def _check_private_hosts(registry) -> list:
     problems = []
-    for provider_id, provider in registry.get("providers", {}).items():
+    for provider_id, provider in _section(registry, "providers").items():
         if not isinstance(provider, dict):
             continue
         value = provider.get("api_base")
         if value and _private_host_reason(value, allow_loopback=False):
             problems.append("private host: providers.%s.api_base %s" % (provider_id, value))
 
-    for model_id, model in registry.get("models", {}).items():
+    for model_id, model in _section(registry, "models").items():
         if not isinstance(model, dict):
             continue
         direct = model.get("direct")
@@ -261,6 +281,8 @@ def _check_dated_values(registry) -> list:
                 if key in COMMENT_KEYS or key in DATE_EXEMPT_KEYS:
                     continue
                 child = "%s.%s" % (path, key) if path else key
+                if DATE_RE.search(str(key)):
+                    problems.append("dated key: %s" % child)
                 if isinstance(value, str):
                     if DATE_RE.search(value):
                         problems.append("dated value: %s" % child)
