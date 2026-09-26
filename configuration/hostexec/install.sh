@@ -138,11 +138,13 @@ backup_file() {
     say "backup: ${path} -> ${dest}"
 }
 
-# render_unit_template <out>: render the unit template with the repo path.
-# Shared by install and remove so --unregister can compare to what the
-# driver would write (foreign units are left untouched). The checkout path
-# in ExecStart is systemd-quoted: wrapped in double quotes, with `"` and
-# `\` escaped and `%` as `%%` (%h specifiers elsewhere stay untouched).
+# render_unit_template <out>: render the unit template with the repo path
+# and the chosen port. Shared by install and remove so --unregister can
+# compare to what the driver would write (foreign units are left
+# untouched). The checkout path in ExecStart is systemd-quoted: wrapped in
+# double quotes, with `"` and `\` escaped and `%` as `%%` (%h specifiers
+# elsewhere stay untouched). The port is rendered as
+# Environment=AUTOOS_EXEC_PORT=<port> so clients and service agree.
 render_unit_template() {
     local out="$1"
     if [[ "${AUTOOS_HOSTEXEC_BREAK:-}" == "no-template" ]]; then
@@ -153,11 +155,12 @@ render_unit_template() {
         err "install: refusing: unit template not found: ${TEMPLATE}"
         return 1
     fi
-    REPO_PATH="$REPO" TEMPLATE_PATH="$TEMPLATE" OUT_PATH="$out" python3 <<'PYEOF' || return 1
+    REPO_PATH="$REPO" TEMPLATE_PATH="$TEMPLATE" OUT_PATH="$out" UNIT_PORT="${PORT:-}" python3 <<'PYEOF' || return 1
 import os
 repo = os.environ["REPO_PATH"]
 template_path = os.environ["TEMPLATE_PATH"]
 out_path = os.environ["OUT_PATH"]
+port = os.environ.get("UNIT_PORT", "")
 with open(template_path, encoding="utf-8") as fh:
     text = fh.read()
 esc = repo.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
@@ -168,6 +171,7 @@ else:
     # Back-compat for templates predating <script-quoted>.
     text = text.replace("<repo>/tools/hostexec.py", script_quoted)
 text = text.replace("<repo>", repo)
+text = text.replace("<port>", port)
 with open(out_path, "w", encoding="utf-8") as fh:
     fh.write(text)
 PYEOF

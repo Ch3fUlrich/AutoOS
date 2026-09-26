@@ -190,6 +190,18 @@ class UnitInstallTests(_DriverCase):
         self.assertIn('"', exec_line)
         self.assertIn("fake repo%%name/tools/hostexec.py", exec_line)
 
+    def test_unit_renders_chosen_port(self):
+        # install.sh:697 -- AUTOOS_EXEC_PORT is rendered into the unit so
+        # clients and service agree.
+        proc = self.run_driver_ok("--unit")
+        unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
+        text = unit.read_text(encoding="utf-8")
+        self.assertIn(f"Environment=AUTOOS_EXEC_PORT={TEST_PORT}", text)
+        self.assert_token_nowhere(proc)
+        # Second run with same port stays current.
+        again = self.run_driver_ok("--unit")
+        self.assertIn("already current", again.stdout + again.stderr)
+
     def test_differing_unit_is_backed_up_before_replace(self):
         unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
         unit.parent.mkdir(parents=True, exist_ok=True)
