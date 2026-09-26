@@ -3715,6 +3715,48 @@ print(bool(e.get('OMNIGRAPH_BASE_URL')), e.get('OMNIGRAPH_GRAPH_ID'), 'OMNIGRAPH
     assert_eq "$got" "True autoos False"
 fi
 
+# The omnigraph_url answer decides where every client's bridge points.
+# install_agent_skills honoured it; the Zed writer hardcoded localhost:8080, so
+# a machine with a remote omnigraph got Zed pointed at nothing. One helper,
+# omnigraph_base_url, now derives it for both.
+# zed_omni_url <answer or empty>: the OMNIGRAPH_BASE_URL route_zed_to_proxy writes.
+zed_omni_url() {
+    local scratch out
+    scratch="$(mktemp -d)"
+    (
+        AUTOOS_ANSWERS=()
+        [[ -z "$1" ]] || AUTOOS_ANSWERS[omnigraph_url]="$1"
+        SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 route_zed_to_proxy >/dev/null 2>&1
+    )
+    out="$(python3 -c "
+import json, sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['context_servers']['omnigraph']['env']['OMNIGRAPH_BASE_URL'])
+" "$scratch/.config/zed/settings.json" 2>&1)"
+    rm -rf "$scratch"
+    printf '%s' "$out"
+}
+
+if it "zed: the omnigraph entry uses the omnigraph_url answer"; then
+    ok=1
+    got="$(zed_omni_url "https://graph.example.invalid:9000/")"
+    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got], not the answer without its trailing slash" >&2; }
+    helper="$( ( AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="https://graph.example.invalid:9000/"; omnigraph_base_url ) 2>&1)"
+    [[ "$helper" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
+    if (( ok )); then pass; else fail "the Zed omnigraph entry ignores the omnigraph_url answer"; fi
+fi
+
+if it "zed: the omnigraph entry defaults to localhost:8080"; then
+    ok=1
+    got="$(zed_omni_url "")"
+    [[ "$got" == "http://localhost:8080" ]] || { ok=0; echo "the Zed entry says [$got]" >&2; }
+    # Both consumers take the default from the one helper, so they cannot drift.
+    helper="$( ( AUTOOS_ANSWERS=(); omnigraph_base_url ) 2>&1)"
+    [[ "$helper" == "http://localhost:8080" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
+    [[ "$(grep -c '\$(omnigraph_base_url)' lib/linux/install.sh)" -ge 2 ]] \
+        || { ok=0; echo "the helper is not called by both install_agent_skills and route_zed_to_proxy" >&2; }
+    if (( ok )); then pass; else fail "the omnigraph default differs between the Zed writer and install_agent_skills"; fi
+fi
+
 if it "the omnigraph env file is private, merged, linked for systemd, and stable on a re-run"; then
     tmp="$(mktemp -d)"
     printf 'KEEP_ME=1\nOMNIGRAPH_BASE_URL=http://old.invalid\n' >"$tmp/.autoos-omnigraph.env"

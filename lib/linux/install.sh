@@ -21,6 +21,16 @@ answer() {  # answer <key> [default]
     else printf '%s' "$default"; fi
 }
 
+# omnigraph_base_url: the omnigraph server the clients' bridges point at - the
+# omnigraph_url answer without a trailing slash, else http://localhost:8080.
+# ONE derivation, used by install_agent_skills and route_zed_to_proxy (the Zed
+# writer once hardcoded the default and ignored the answer).
+omnigraph_base_url() {
+    local omni
+    omni="$(answer omnigraph_url '')"
+    if [[ -z "$omni" ]]; then printf '%s\n' "http://localhost:8080"; else printf '%s\n' "${omni%/}"; fi
+}
+
 run() {
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would run: $*"
@@ -1506,7 +1516,7 @@ route_zed_to_proxy() {
     if [[ -f "$cfg" ]]; then
         backup_file "$cfg" >/dev/null
     fi
-    python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
+    OMNI_BASE="$(omnigraph_base_url)" python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
 import json, os, sys
 path = sys.argv[1]
 harness_file = sys.argv[2]
@@ -1568,7 +1578,7 @@ ctx["graphify"] = {
 ctx["omnigraph"] = {
     "command": "npx",
     "args": ["-y", pins["omnigraph"]["package"]],
-    "env": {"OMNIGRAPH_BASE_URL": "http://localhost:8080", "OMNIGRAPH_GRAPH_ID": "autoos"},
+    "env": {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"], "OMNIGRAPH_GRAPH_ID": "autoos"},
 }
 ctx["playwright"] = {
     "command": "npx",
@@ -2594,9 +2604,8 @@ install_agent_skills() {
     (( AUTOOS_DRY_RUN )) || mkdir -p "$code_root"
     clone_or_update https://github.com/Ch3fUlrich/agent-skills.git "$dest"
 
-    local omni base
-    omni="$(answer omnigraph_url '')"
-    if [[ -z "$omni" ]]; then base="http://localhost:8080"; else base="${omni%/}"; fi
+    local base
+    base="$(omnigraph_base_url)"
     ui_info "Omnigraph base URL: ${base}"
 
     write_omnigraph_env "$base"
