@@ -239,9 +239,13 @@ there (idempotent step, guarded by existence check). OpenHands (SDK 1.36) reads
 the workspace's `.agents/skills/*/SKILL.md` natively and user skills from
 `~/.agents/skills` and `~/.openhands/skills` (`agent_context.load_user_skills`,
 which the installers write as true); the profiles carry no skills path. The
-installers mirror each repo skill into `~/.openhands/skills` as its own link —
-yours are never overwritten, and a whole-dir symlink from the old layout is left
-with one warning. That reaches native OpenHands (host CLI, Windows) only: a
+installers mirror each repo skill into `~/.openhands/skills` as its own link.
+A link is repointed only when it dangles and ends in `.agents/skills/<name>` for
+that skill (the shape the installers create, so a moved checkout is repaired);
+everything else is kept as it is — a directory or file of yours, a live link
+of yours (even one into this repo's `.agents`), a dangling link of any other
+shape — and a whole-dir symlink from the old layout is left with one warning.
+That reaches native OpenHands (host CLI, Windows) only: a
 Docker sandbox runs with `HOME=/home/openhands` and gets no host `~/.openhands`
 (only the app container mounts it), so its agent sees just the workspace
 `.agents/skills` inside the mounted code tree. A skill that loads nowhere is a
