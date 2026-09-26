@@ -3208,10 +3208,14 @@ phys_path() {
 # DEST_DIR as one symlink per skill. DEST_DIR is a real directory of its own,
 # so a user's skills sit beside ours and are never touched:
 #   absent                                     -> linked
-#   already our link, same directory           -> skipped
-#   our link, dangling or pointing elsewhere
-#     under SRC_DIR's parent (this repo)       -> repointed
-#   anything else (a user's directory or file, a foreign link) -> left alone
+#   a link to the same directory               -> skipped
+#   a link that is ours and dangling           -> repointed
+#   anything else (a user's directory or file, any live link that resolves
+#     somewhere else, a dangling link of another shape)   -> left alone
+# A link is ours only when it dangles AND its target ends with
+# /.agents/skills/<this skill's name> - the exact shape this function creates,
+# so a moved or renamed checkout is repaired. A live link is the user's, even
+# when it points inside the repo's own .agents directory (AGENTS.md hard rule 4).
 # A DEST_DIR that is itself a symlink (the old whole-directory layout) is not
 # written through - that would create links inside the repo or a clone - it
 # is left with one warning that names the fix. Returns 0 unless a link failed.
@@ -3250,8 +3254,7 @@ link_skill_dirs() {
         return 1
     fi
 
-    local parent_phys name t raw have want skipped=0 failed=0
-    parent_phys="$(phys_path "${src%/*}")"
+    local name t raw have want skipped=0 failed=0
     for name in "${names[@]}"; do
         t="$dest/$name"
         want="$(phys_path "$src/$name")"
@@ -3261,7 +3264,7 @@ link_skill_dirs() {
             have="$(phys_path "$raw")"
             if [[ "$have" == "$want" ]]; then
                 skipped=$((skipped + 1))
-            elif [[ "$have" == "$parent_phys"/* ]]; then
+            elif [[ ! -e "$t" && "${raw%/}" == */.agents/skills/"$name" ]]; then
                 if ln -sfn "$src/$name" "$t" 2>/dev/null; then
                     ui_ok "repointed $name (was $raw)"
                 else
@@ -3335,7 +3338,10 @@ setup_openhands_config() {
 
     # The script prints one word: "changed" when it wrote or replaced a file,
     # "unchanged" when everything on disk already held what it would write.
-    local oh_status
+    # "|| oh_rc=$?" keeps a failing script from ending the run under set -e; its
+    # status is read below, because a script that died wrote nothing (or only
+    # part) and must never be reported as written.
+    local oh_status oh_rc=0
     oh_status="$(OLLAMA_BASE_URL="$ollama_url" AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" AUTOOS_IDE_MODELS="$ide_file" \
         python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
 import os, sys, json, shutil, time
@@ -3789,7 +3795,15 @@ if os.path.isdir(_vendored_agents):
             pass
 print("changed" if _changed else "unchanged")
 PY
-)"
+)" || oh_rc=$?
+    if (( oh_rc != 0 )); then
+        # Skip the harness too: it would add enable_sub_agents to a settings.json
+        # (or create one) that the writer never got to merge. Warn and skip, like
+        # the OpenCode writer; setup runs postInstall under set -e.
+        ui_warn "OpenHands configuration not written to $openhands_dir/settings.json (settings script exit $oh_rc)"
+        ui_muted "    The profiles under $openhands_dir may be incomplete and the agent harness was skipped; fix the error above and re-run."
+        return 0
+    fi
 
     # The role agent profiles are the generator's job: it merges the harness
     # into whatever the embedded script left, so the roles stay in one place.
@@ -3811,7 +3825,9 @@ PY
         fi
     fi
 
-    if (( oh_changed )); then
+    if (( harness_rc != 0 )); then
+        ui_warn "OpenHands configuration only partly applied (the role profiles are missing): $openhands_dir"
+    elif (( oh_changed )); then
         ui_ok "OpenHands configuration and profiles written to $openhands_dir"
     else
         ui_muted "OpenHands configuration unchanged (skipped): $openhands_dir"

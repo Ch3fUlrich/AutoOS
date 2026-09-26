@@ -4356,7 +4356,9 @@ fi
 if it "openhands: repairs a dangling link into the repo"; then
     tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
     dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
-    ln -s "$tmp/repo/.agents/skills/alpha-renamed" "$dest/alpha"   # ours (into the repo), dangling
+    # Ours: the exact shape link_skill_dirs creates (<checkout>/.agents/skills/<name>)
+    # into a checkout that has since moved or been renamed, so it dangles.
+    ln -s "$tmp/moved-checkout/.agents/skills/alpha" "$dest/alpha"
     ln -s /nonexistent-elsewhere/beta "$dest/beta"                 # not ours, dangling: hands off
     out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
     problems=""
@@ -4364,6 +4366,59 @@ if it "openhands: repairs a dangling link into the repo"; then
     [[ -f "$dest/alpha/SKILL.md" ]] || problems+="[alpha does not resolve after the repair] "
     [[ "$(readlink "$dest/beta")" == "/nonexistent-elsewhere/beta" ]] || problems+="[a foreign dangling link was rewritten to $(readlink "$dest/beta")] "
     [[ "$out" == *"repointed alpha"* ]] || problems+="[no 'repointed alpha' line] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# Only a link this function made is ours (AGENTS.md hard rule 4): it dangles AND
+# has the exact shape .../.agents/skills/<name> for the same skill. A live link,
+# or a dangling one of another shape, is the user's and stays as it is - even
+# when it points inside the repo's own .agents directory.
+if it "openhands: a live link of your own into .agents/custom is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest" "$tmp/repo/.agents/custom/alpha"
+    printf 'my own alpha\n' >"$tmp/repo/.agents/custom/alpha/SKILL.md"
+    ln -s "$tmp/repo/.agents/custom/alpha" "$dest/alpha"           # live, inside the repo's .agents, not our shape
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/custom/alpha" ]] || problems+="[the user's live link now points at $(readlink "$dest/alpha")] "
+    [[ "$(cat "$dest/alpha/SKILL.md" 2>/dev/null)" == "my own alpha" ]] || problems+="[alpha no longer resolves to the user's own skill] "
+    [[ "$out" != *"repointed alpha"* ]] || problems+="[the live link was reported as repointed] "
+    [[ "$out" == *"kept $dest/alpha"* ]] || problems+="[no 'kept ...alpha' line: the user is not told it was left alone] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/repo/.agents/skills/beta" ]] || problems+="[beta was not linked next to the user's link] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a live link into another checkout's skills is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    # Another checkout with the same skills layout. One sits beside this repo,
+    # one is nested under this repo's own .agents directory (a worktree kept
+    # there): both are live and both have the shape we would create.
+    oh_skill_repo "$tmp/other"
+    oh_skill_repo "$tmp/repo/.agents/nested"
+    ln -s "$tmp/repo/.agents/nested/.agents/skills/alpha" "$dest/alpha"
+    ln -s "$tmp/other/.agents/skills/beta" "$dest/beta"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/nested/.agents/skills/alpha" ]] || problems+="[the link into the nested checkout now points at $(readlink "$dest/alpha")] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/other/.agents/skills/beta" ]] || problems+="[the link into the other checkout now points at $(readlink "$dest/beta")] "
+    [[ "$out" != *"repointed"* ]] || problems+="[a live link was reported as repointed] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a dangling link of another shape is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    ln -s /nonexistent/other/alpha "$dest/alpha"                    # dangling, outside the repo
+    ln -s "$tmp/repo/.agents/skills/beta-renamed" "$dest/beta"      # dangling, inside the repo, not the shape of beta
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "/nonexistent/other/alpha" ]] || problems+="[the dangling link outside the repo now points at $(readlink "$dest/alpha")] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/repo/.agents/skills/beta-renamed" ]] || problems+="[the dangling link of another shape now points at $(readlink "$dest/beta")] "
+    [[ "$out" != *"repointed"* ]] || problems+="[a link of another shape was reported as repointed] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
@@ -4445,6 +4500,58 @@ if it "openhands: a backup of settings.json never overwrites an earlier one"; th
     rm -rf "$tmp"
     if (( have1 && have2 )); then pass
     else fail "a backup holding the user's file was overwritten (first original kept: $have1, second original kept: $have2)"; fi
+fi
+
+# A python step that fails writes nothing, and the function must say so instead
+# of printing its success line. python3 is stubbed in a subshell (the function
+# lookup wins over PATH), failing only the one call under test and passing the
+# rest through to the real interpreter.
+if it "openhands: a failing settings writer is reported, not called written"; then
+    tmp="$(mktemp -d)"
+    oh="$tmp/home/.openhands"; mkdir -p "$oh"
+    printf '%s' '{"user_key": "mine"}' >"$oh/settings.json"
+    before="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    out="$(
+        python3() {
+            # The settings/profiles script: "python3 - <openhands dir> <secrets> <models>" on stdin.
+            if [[ "${1:-}" == "-" && "${2:-}" == */.openhands ]]; then
+                cat >/dev/null; echo "stub: the settings script failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" ""
+    )"
+    after="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    problems=""
+    [[ "$before" == "$after" ]] || problems+="[settings.json changed although its writer failed] "
+    [[ -z "$(ls "$oh" | grep 'settings.json.autoos-backup-')" ]] || problems+="[a backup was taken for a file that was not written] "
+    [[ "$out" == *"not written to $oh/settings.json"* ]] || problems+="[no warning naming $oh/settings.json, output ends: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"configuration and profiles written to"* ]] || problems+="[the success line was printed after the writer failed] "
+    [[ "$out" != *"configuration unchanged"* ]] || problems+="[the 'unchanged' line was printed after the writer failed] "
+    [[ "$out" != *"agent-harness openhands: "* ]] || problems+="[the agent harness ran after the writer failed and may have created settings.json content of its own] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a failing agent harness is reported, not called written"; then
+    tmp="$(mktemp -d)"
+    out="$(
+        python3() {
+            if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+                echo "stub: the harness failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" ""
+    )"
+    problems=""
+    [[ "$out" == *"agent harness not applied to OpenHands (exit 1)"* ]] || problems+="[no warning for the failed agent harness, output ends: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"configuration and profiles written to"* ]] || problems+="[the success line was printed after the agent harness failed] "
+    [[ "$out" != *"configuration unchanged"* ]] || problems+="[the 'unchanged' line was printed after the agent harness failed] "
+    [[ "$out" == *"only partly applied"* ]] || problems+="[the final message does not say the configuration is partial, output ends: $(tail -n 3 <<<"$out")] "
+    [[ -f "$tmp/home/.openhands/settings.json" ]] || problems+="[the settings writer itself no longer ran] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
 if it "custom_is_installed detects agent-skills under Documents/code or Documents/Code"; then
