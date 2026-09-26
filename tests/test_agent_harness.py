@@ -149,8 +149,12 @@ class BackupTests(unittest.TestCase):
             Path(target).write_text("ORIGINAL", encoding="utf-8")
             module._backup_and_write(target, "changed", stamp=self.STAMP)
             self.assertEqual(Path(base + "-2").read_text(encoding="utf-8"), "ORIGINAL")
-            self.assertEqual(os.readlink(base), nowhere[0])
-            self.assertEqual(os.readlink(base + "-1"), nowhere[1])
+            # Windows readlink prefixes the target with \\?\ (extended-length path).
+            def link_target(link):
+                found = os.readlink(link)
+                return found[4:] if found.startswith("\\\\?\\") else found
+            self.assertEqual(link_target(base), nowhere[0])
+            self.assertEqual(link_target(base + "-1"), nowhere[1])
             self.assertFalse(any(os.path.lexists(n) for n in nowhere))
 
     def test_two_changing_writes_in_one_second_keep_the_original(self):
