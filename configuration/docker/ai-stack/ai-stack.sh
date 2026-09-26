@@ -20,7 +20,7 @@
 #   ~/.config/autoos/ai-stack/stack.active   ownership marker: written only when a
 #                                            migrate completed (or a fresh host's
 #                                            first `up`), removed by rollback
-#   ~/.local/share/autoos/ai-stack/          omniroute/ data, opencode-home/
+#   ~/.local/share/autoos/ai-stack/          omniroute/ data, opencode-home/, qoder-home/
 # init only ADDS missing keys (backup first); a value you edit stays yours.
 # up/migrate refuse a LAN publish address unless coding-agents-fw.service
 # runs or stack.env says AUTOOS_STACK_ALLOW_LAN=1.
@@ -50,8 +50,6 @@ MARKER="$CONFIG_DIR/stack.active"
 # Tests point both at logging stand-ins (tests/helpers/aistack_fake.sh).
 REGISTER="${AUTOOS_REGISTER_AUTOSTART:-$REPO/configuration/autostart/register-autostart.sh}"
 START_STACK="${AUTOOS_START_STACK:-$REPO/configuration/start-stack.sh}"
-OPENCODE_IMAGE="autoos/opencode:2.0.16-autoos1"
-OPENCODE_LABEL="org.autoos.opencode.source"
 # Filled by migrate; read by migrate_abort / restore_native.
 MOVED=()
 UNITS_BEFORE=()
@@ -310,6 +308,32 @@ dc_up() {
     dc up -d "$@"
 }
 
+# ─── data directories ───────────────────────────────────────────────────────
+# The base compose mounts the bind-mounted state from: the environment beats
+# --env-file in compose's interpolation, then stack.env, then what init writes.
+stack_data_dir() {
+    local d="${AUTOOS_STACK_DATA:-}"
+    [[ -n "$d" ]] || d="$(env_value "$STACK_ENV" AUTOOS_STACK_DATA)"
+    printf '%s' "${d:-$DATA_DIR}"
+}
+
+# ensure_data_dirs <base>: the directories compose bind-mounts from <base>,
+# each created private (0700) and the operator's when missing - never changed
+# when present, the gateway's own data included. A mount source that is missing
+# when compose starts is created by the docker daemon as root, and the
+# containers (host uid) could not write it. init calls this, and so does `up`:
+# an already initialised host gets a newly added mount (qoder-home) that way.
+ensure_data_dirs() {
+    local base="$1" d
+    for d in "$base" "$base/omniroute" "$base/opencode-home" "$base/qoder-home"; do
+        if [[ -d "$d" ]]; then continue; fi
+        if [[ $DRY -eq 1 ]]; then echo "  - would create $d"; continue; fi
+        mkdir -p "$d"
+        chmod 700 "$d"
+        echo "  + created $d"
+    done
+}
+
 # ─── init ───────────────────────────────────────────────────────────────────
 cmd_init() {
     echo "Docker AI stack: config $CONFIG_DIR, data $DATA_DIR, code $CODE_DIR"
@@ -317,12 +341,14 @@ cmd_init() {
         echo "  ! code dir $CODE_DIR does not exist - set AUTOOS_CODE_DIR"; return 1
     fi
     local d
-    for d in "$DATA_DIR/omniroute" "$DATA_DIR/opencode-home/.config/opencode" "$OH_DIR"; do
+    ensure_data_dirs "$DATA_DIR"
+    for d in "$DATA_DIR/opencode-home/.config/opencode" "$OH_DIR"; do
         if [[ -d "$d" ]]; then continue; fi
         if [[ $DRY -eq 1 ]]; then echo "  - would create $d"; else mkdir -p "$d"; echo "  + created $d"; fi
     done
-    # The gateway DB, opencode sessions and the MCP caches: the operator's only.
-    [[ $DRY -eq 1 ]] || chmod 700 "$DATA_DIR" "$DATA_DIR/omniroute" "$DATA_DIR/opencode-home"
+    # The gateway DB, opencode sessions, the MCP caches and qodercli's home:
+    # the operator's only.
+    [[ $DRY -eq 1 ]] || chmod 700 "$DATA_DIR" "$DATA_DIR/omniroute" "$DATA_DIR/opencode-home" "$DATA_DIR/qoder-home"
 
     ensure_env_file "$STACK_ENV" \
         AUTOOS_UID "$(id -u)" AUTOOS_GID "$(id -g)" \
@@ -382,34 +408,73 @@ cmd_init() {
 }
 
 # ─── up / down / status ─────────────────────────────────────────────────────
-# The opencode layer's identity: opencode.Dockerfile plus the digest of the
-# base image it builds FROM. Built images carry it as a label; a mismatch
-# rebuilds, so an edited Dockerfile or a bumped base never keeps serving the
-# old layer under the unchanged local tag.
-opencode_source_hash() {
-    local f="$HERE/opencode.Dockerfile" base
-    base="$(sed -n 's/^FROM[[:space:]][[:space:]]*[^[:space:]]*@\(sha256:[0-9a-f]\{64\}\).*/\1/p' "$f" | head -n1)"
-    { cat "$f"; printf 'base=%s\n' "$base"; } | sha256sum | cut -d' ' -f1
+# compose_service_field <service> <key> [<subkey>]: the value of a key of the
+# service ("image"), or of a key inside a map of it ("build" "dockerfile");
+# nothing when absent. Plain awk, like compose_services: compose.yml is kept
+# anchor-free so that no YAML library is needed.
+compose_service_field() {
+    awk -v svc="$1" -v key="$2" -v subkey="${3:-}" '
+        function clean(v) {
+            sub(/[[:space:]]*#.*$/, "", v)
+            gsub(/["\047]/, "", v)
+            sub(/^[[:space:]]+/, "", v)
+            sub(/[[:space:]]+$/, "", v)
+            return v
+        }
+        /^[^[:space:]#]/ { in_svc = 0; in_map = 0; next }
+        /^  [A-Za-z0-9_.-]+:[[:space:]]*(#.*)?$/ { in_svc = ($1 == svc ":"); in_map = 0; next }
+        !in_svc { next }
+        /^    [A-Za-z_]+:/ {
+            in_map = 0
+            k = $1; sub(/:$/, "", k)
+            v = $0; sub(/^    [A-Za-z_]+:[[:space:]]*/, "", v)
+            if (k == key) {
+                if (subkey == "") { print clean(v); exit }
+                in_map = 1
+            }
+            next
+        }
+        in_map && subkey != "" && $1 == subkey ":" {
+            v = $0; sub(/^[[:space:]]*[A-Za-z_]+:[[:space:]]*/, "", v)
+            print clean(v); exit
+        }
+    ' "$HERE/compose.yml"
 }
 
+# image_source_hash <dockerfile>: a locally built layer's identity - the
+# Dockerfile plus the digest of the base image it builds FROM. Built images
+# carry it as the label org.autoos.<service>.source; a mismatch rebuilds, so an
+# edited Dockerfile or a bumped base never keeps serving the old layer under
+# the unchanged local tag.
+image_source_hash() {
+    local base
+    base="$(sed -n 's/^FROM[[:space:]][[:space:]]*[^[:space:]]*@\(sha256:[0-9a-f]\{64\}\).*/\1/p' "$1" | head -n1)"
+    { cat "$1"; printf 'base=%s\n' "$base"; } | sha256sum | cut -d' ' -f1
+}
+
+# ensure_images <service...>: a service compose builds (it has `build:`) gets
+# its local image built - or rebuilt when the label above differs; every other
+# service is pulled when its image is missing.
 ensure_images() {
-    local svc img want have what
+    local svc img dockerfile label want have what
     for svc in "$@"; do
-        if [[ "$svc" == opencode ]]; then
-            want="$(opencode_source_hash)"
-            if "$DOCKER" image inspect "$OPENCODE_IMAGE" >/dev/null 2>&1; then
-                have="$("$DOCKER" image inspect -f "{{index .Config.Labels \"$OPENCODE_LABEL\"}}" "$OPENCODE_IMAGE" 2>/dev/null || true)"
+        img="$(compose_service_field "$svc" image)"
+        dockerfile="$(compose_service_field "$svc" build dockerfile)"
+        if [[ -n "$dockerfile" ]]; then
+            label="org.autoos.$svc.source"
+            want="$(image_source_hash "$HERE/$dockerfile")"
+            if "$DOCKER" image inspect "$img" >/dev/null 2>&1; then
+                have="$("$DOCKER" image inspect -f "{{index .Config.Labels \"$label\"}}" "$img" 2>/dev/null || true)"
                 [[ "$have" == "$want" ]] && continue
-                what="rebuild $OPENCODE_IMAGE (opencode.Dockerfile or its base image changed)"
+                what="rebuild $img ($dockerfile or its base image changed)"
             else
-                what="build $OPENCODE_IMAGE (opencode.Dockerfile)"
+                what="build $img ($dockerfile)"
             fi
             if [[ $DRY -eq 1 ]]; then echo "  - would $what"; continue; fi
             echo "  + $what"
-            "$DOCKER" build --label "$OPENCODE_LABEL=$want" -t "$OPENCODE_IMAGE" \
-                -f "$HERE/opencode.Dockerfile" "$HERE" || { echo "  ! building $OPENCODE_IMAGE failed"; return 1; }
+            "$DOCKER" build --label "$label=$want" -t "$img" \
+                -f "$HERE/$dockerfile" "$HERE" || { echo "  ! building $img failed"; return 1; }
         else
-            img="$(sed -n "/^  $svc:/,/^  [a-z]/s/^    image: //p" "$HERE/compose.yml" | head -n1)"
             if "$DOCKER" image inspect "$img" >/dev/null 2>&1; then continue; fi
             if [[ $DRY -eq 1 ]]; then echo "  - would pull $img"; continue; fi
             echo "  + pulling $img"
@@ -484,6 +549,9 @@ cmd_up() {
     # Before the images: compose up below may create these containers or
     # recreate running ones (a changed bind, a rebuilt image).
     bind_guard || return 1
+    # A mount source added since init ran (qoder-home) must not be left to
+    # docker, which would create it as root.
+    ensure_data_dirs "$(stack_data_dir)"
     ensure_images "${start[@]}" || return 1
     if [[ $DRY -eq 1 ]]; then
         echo "  - would run: docker compose -p autoos-ai up -d --no-deps ${start[*]}"
@@ -884,9 +952,11 @@ cmd_rollback() {
 
 # ─── verify ─────────────────────────────────────────────────────────────────
 # The by-hand checklist after `migrate --yes`, as one command. READ-ONLY: docker
-# is only asked `inspect` and `exec <opencode> test -d`, curl only makes GETs
-# and the combo probes (POST /v1/chat/completions, max_tokens 16); nothing is
-# started, stopped, written or printed that could be a key. One line per
+# is only asked `inspect`, `exec <opencode> test -d` and `exec <omniroute>
+# qodercli --version` (which leaves qodercli's usual log files in its HOME, the
+# qoder-home mount - nothing else), curl only makes GETs and the combo probes
+# (POST /v1/chat/completions, max_tokens 16); nothing is started, stopped,
+# written or printed that could be a key. One line per
 # check - "  ok    <name>", "  FAIL  <name> - <why>", "  skip  <name> - <why>" -
 # then the totals; exit 0 only when nothing FAILed.
 #   AUTOOS_OMNIROUTE_KEY         gateway key for the combo probes (never read from
@@ -1078,7 +1148,21 @@ verify_code_dir_visible() {
     return 0
 }
 
-# 5. What the public sees: the auth proxy redirects, it never serves. No
+# 5. The gateway container carries qodercli: the Qoder PAT login spawns it
+# there (omniroute.Dockerfile). Run the way the gateway runs it - same user,
+# same HOME - so a missing binary and an unwritable HOME both show up here.
+verify_omniroute_qodercli() {
+    local c out name="omniroute has qodercli"
+    c="$(verify_container omniroute)"
+    if [[ -z "$c" ]]; then v_skip "$name" "the omniroute service is not enabled"; return 0; fi
+    if ! container_running "$c"; then v_skip "$name" "$c is not running"; return 0; fi
+    out="$("$DOCKER" exec "$c" qodercli --version 2>/dev/null || true)"
+    out="${out%%$'\n'*}"
+    if [[ "$out" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then v_ok "$name"; return 0; fi
+    v_fail "$name" "qodercli --version printed no version in $c - the container runs an image without the qodercli layer, or its HOME is not writable (ai-stack.sh up omniroute rebuilds and recreates it)"
+}
+
+# 6. What the public sees: the auth proxy redirects, it never serves. No
 # credentials are sent, and none that sit in a URL are echoed.
 verify_public_urls() {
     local urls u code shown
@@ -1096,7 +1180,7 @@ verify_public_urls() {
     return 0
 }
 
-# 6. configuration/healthcheck.sh is the repo's stack probe, and it is not a
+# 7. configuration/healthcheck.sh is the repo's stack probe, and it is not a
 # check verify can run: it appends to logs/healthcheck-<date>.log on every run
 # (mkdir + tee), answers with exit 0 whatever it finds, and its --fix mode
 # resumes services. Everything of it that concerns this stack (the three ports,
@@ -1113,6 +1197,7 @@ cmd_verify() {
     verify_keyless_one opencode /api/session
     verify_combos
     verify_code_dir_visible
+    verify_omniroute_qodercli
     verify_public_urls
     verify_healthcheck
     printf 'verify: %d ok, %d failed, %d skipped\n' "$V_OK" "$V_FAIL" "$V_SKIP"
