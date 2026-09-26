@@ -311,6 +311,19 @@ class ClientWriterTests(_DriverCase):
         self.assertEqual(opencode_json.read_text(encoding="utf-8"), original)
         self.assert_token_nowhere(proc)
 
+    def test_json_non_object_parent_is_refused_without_writing(self):
+        # install.sh:347 -- a non-object parent (null/list/string) must be
+        # refused without writing, message names the key.
+        self.write_token("claude")
+        claude_json = self.home / ".claude.json"
+        for bad in ('{"mcpServers": null}', '{"mcpServers": []}', '{"mcpServers": "x"}'):
+            claude_json.write_text(bad, encoding="utf-8")
+            proc = self.run_driver("--clients", "claude")
+            self.assertNotEqual(proc.returncode, 0, f"parent {bad} must be refused")
+            self.assertIn("mcpServers", proc.stdout + proc.stderr)
+            self.assertEqual(claude_json.read_text(encoding="utf-8"), bad)
+            self.assert_token_nowhere(proc)
+
     def test_qoder_prints_subshell_command_without_token(self):
         token_file = self.write_token("qoder")
         before = self.home_files()

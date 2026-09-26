@@ -344,10 +344,14 @@ def main(argv):
         data = {}
     node = data
     for key in keys:
+        if key not in node:
+            node[key] = {}
         child = node.get(key)
         if not isinstance(child, dict):
-            child = {}
-            node[key] = child
+            print("install: refusing: %s key '%s' is not an object "
+                  "(refusing to replace user value)" % (path, key),
+                  file=sys.stderr)
+            return 3
         node = child
     if op == "set":
         entry = {}
