@@ -2232,12 +2232,160 @@ print(json.dumps({"command": "uv", "args": ["--quiet", "run", "--with", sys.argv
     register_antigravity_mcp_server graphify "$spec"
 }
 
+# ─── Playwright MCP: the lazy proxy ─────────────────────────────────────────
+# A Playwright container registered directly lives as long as its Claude Code
+# session, browsing or not: Claude Code starts every stdio server at session start
+# and does not reconnect one that exited. tools/playwright_mcp_lazy.py is the entry
+# Claude Code talks to instead - it starts the docker backend on the first real
+# request and stops it when idle. Antigravity, Qoder, Zed, opencode and OpenHands
+# keep their own npx entries: they are other clients' stdio entries and not
+# touched here. Anchored like AUTOOS_HARNESS, so it is absolute and cwd-proof.
+AUTOOS_PLAYWRIGHT_PROXY="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/tools/playwright_mcp_lazy.py"
+
+# claude_user_config_file: the JSON file `claude mcp` keeps user-scope servers in.
+# Read from the strings of the Claude Code 2.1.283 binary, not from a live run:
+# <config dir>/.config.json when that legacy file exists, else
+# <config dir>/.claude.json - the config dir being $CLAUDE_CONFIG_DIR, else ~/.claude
+# for the legacy file and ~ for .claude.json. $HOME, not $SYS_HOME: it is the
+# environment the claude binary itself reads.
+claude_user_config_file() {
+    local legacy_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" main_dir="${CLAUDE_CONFIG_DIR:-$HOME}"
+    if [[ -f "$legacy_dir/.config.json" ]]; then
+        printf '%s\n' "$legacy_dir/.config.json"
+    else
+        printf '%s\n' "$main_dir/.claude.json"
+    fi
+}
+
+# playwright_user_entry <config file> <proxy path>: classifies the user-scope
+# 'playwright' entry - none | proxy | docker | npx | custom. docker and npx are
+# only the two forms this installer used to write, EXACTLY (no extra argument,
+# env or key) and carry the command after a tab so the caller can put it back;
+# anything else is custom. The entry's own arguments are never printed as a
+# message: they may hold a token. The file is read, never written.
+playwright_user_entry() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+
+DOCKER = ["run", "-i", "--rm", "--init", "--network", "host", "mcr.microsoft.com/playwright/mcp:latest"]
+path, proxy = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        entry = (json.load(fh).get("mcpServers") or {}).get("playwright")
+except (OSError, ValueError, AttributeError):
+    entry = None
+if entry is None:
+    print("none")
+    sys.exit(0)
+kind, argv = "custom", []
+if (isinstance(entry, dict) and set(entry) <= {"type", "command", "args", "env"}
+        and entry.get("type", "stdio") == "stdio" and not entry.get("env")
+        and isinstance(entry.get("command"), str)
+        and isinstance(entry.get("args", []), list)
+        and all(isinstance(a, str) for a in entry.get("args", []))):
+    command, args = entry["command"], entry.get("args", [])
+    if command == "docker" and args == DOCKER:
+        kind = "docker"
+    elif (command == "npx" and len(args) == 2 and args[0] == "-y"
+            and (args[1] == "@playwright/mcp" or args[1].startswith("@playwright/mcp@"))):
+        kind = "npx"
+    elif command == "python3" and args == [proxy]:
+        kind = "proxy"
+    if kind in ("docker", "npx"):
+        argv = [command] + args
+print("\t".join([kind] + argv))
+PY
+}
+
+# register_playwright_lazy_proxy: the Claude Code side of install_mcp_playwright when
+# docker is present. Registers the proxy when there is no playwright entry, replaces
+# an entry that is exactly one of the two forms this installer used to write (after a
+# backup of the config file, and putting the old entry back if the add fails), and
+# leaves everything else alone. It never stops a container: sessions that are running
+# keep the one they have until they end.
+register_playwright_lazy_proxy() {
+    local proxy="$AUTOOS_PLAYWRIGHT_PROXY" cfg entry kind backup
+    local -a old=()
+    if ! has_cmd claude; then
+        ui_warn "claude is not on PATH — cannot register 'playwright'. Install claude-code first."
+        return 0
+    fi
+    cfg="$(claude_user_config_file)"
+    entry="$(playwright_user_entry "$cfg" "$proxy" 2>/dev/null)" || entry="none"
+    kind="${entry%%$'\t'*}"
+    if [[ "$entry" == *$'\t'* ]]; then IFS=$'\t' read -r -a old <<<"${entry#*$'\t'}"; fi
+
+    case "$kind" in
+        proxy)
+            ui_muted "MCP server 'playwright' already uses the lazy proxy - skipped."
+            return 0
+            ;;
+        docker | npx) ;;
+        none)
+            # No user-scope entry: a project, local or plugin server of that name
+            # still counts, as it does for every other server (register_mcp_server).
+            if (( ! AUTOOS_DRY_RUN )) && mcp_has_server playwright; then
+                ui_muted "MCP server 'playwright' is already registered outside user scope - left alone."
+                return 0
+            fi
+            ;;
+        *)
+            ui_warn "MCP server 'playwright' has a custom user-scope entry - left alone. To use the lazy proxy, remove it (claude mcp remove playwright --scope user) and run ./setup.sh --only mcp-playwright again."
+            return 0
+            ;;
+    esac
+
+    if (( AUTOOS_DRY_RUN )); then
+        if [[ "$kind" == none ]]; then
+            ui_muted "would run: claude mcp add --scope user playwright -- python3 ${proxy} (unless a 'playwright' server is registered already)"
+        else
+            ui_muted "would back up ${cfg}, run: claude mcp remove playwright --scope user, then claude mcp add --scope user playwright -- python3 ${proxy} (replacing the ${kind} entry)"
+        fi
+        return 0
+    fi
+
+    if [[ "$kind" != none ]]; then
+        # Never modify a file the user owns without a copy: no copy, no write.
+        if ! backup="$(backup_file "$cfg")"; then
+            ui_warn "could not back up ${cfg} - the ${kind} 'playwright' entry was left unchanged"
+            return 0
+        fi
+        ui_muted "run: claude mcp remove playwright --scope user"
+        if ! claude mcp remove playwright --scope user; then
+            ui_warn "could not remove the ${kind} 'playwright' entry - left unchanged"
+            return 0
+        fi
+    fi
+
+    ui_muted "run: claude mcp add --scope user playwright -- python3 ${proxy}"
+    if ( cd "$SYS_HOME" 2>/dev/null; claude mcp add --scope user playwright -- python3 "$proxy" ); then
+        if [[ "$kind" == none ]]; then
+            ui_ok "registered MCP server 'playwright' (user scope, lazy proxy)"
+        else
+            ui_ok "replaced the ${kind} 'playwright' entry with the lazy proxy (config backup: ${backup})"
+            ui_muted "Sessions that are already running keep their current Playwright container until they end; AutoOS did not stop any. New sessions use the proxy."
+        fi
+    elif [[ "$kind" == none ]]; then
+        ui_warn "could not register 'playwright'"
+    elif ( cd "$SYS_HOME" 2>/dev/null; claude mcp add --scope user playwright -- "${old[@]}" ); then
+        ui_warn "could not add the lazy proxy - put back the previous ${kind} entry (config backup: ${backup})"
+    else
+        ui_err "could not add the lazy proxy and could not put back the previous ${kind} entry - restore it with: claude mcp add --scope user playwright -- ${old[*]} (config backup: ${backup})"
+    fi
+    return 0
+}
+
 install_mcp_playwright() {
     ui_info "Setting up Playwright MCP server (Claude Code + Antigravity)"
     local playwright_pkg
     playwright_pkg="$(mcp_package playwright)"
-    register_mcp_server playwright user "$SYS_HOME" \
-        npx -y "$playwright_pkg"
+    if has_cmd docker; then
+        register_playwright_lazy_proxy
+    else
+        # No docker, so no backend for the proxy: today's npx entry.
+        register_mcp_server playwright user "$SYS_HOME" \
+            npx -y "$playwright_pkg"
+    fi
 
     local spec
     spec="$(python3 -c '

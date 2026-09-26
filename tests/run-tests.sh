@@ -5259,12 +5259,12 @@ fi
 
 if it "playwright lazy proxy installer: the user config is CLAUDE_CONFIG_DIR/.claude.json, else HOME/.claude.json, a legacy .config.json first"; then
     tmp="$(mktemp -d)"
-    a="$(SYS_HOME="$tmp/h"; unset CLAUDE_CONFIG_DIR; claude_user_config_file)"
-    b="$(SYS_HOME="$tmp/h" CLAUDE_CONFIG_DIR="$tmp/c" claude_user_config_file)"
+    a="$(HOME="$tmp/h"; unset CLAUDE_CONFIG_DIR; claude_user_config_file)"
+    b="$(HOME="$tmp/h" CLAUDE_CONFIG_DIR="$tmp/c" claude_user_config_file)"
     mkdir -p "$tmp/h/.claude" "$tmp/c"; : >"$tmp/h/.claude/.config.json"
-    c="$(SYS_HOME="$tmp/h"; unset CLAUDE_CONFIG_DIR; claude_user_config_file)"
+    c="$(HOME="$tmp/h"; unset CLAUDE_CONFIG_DIR; claude_user_config_file)"
     : >"$tmp/c/.config.json"
-    d="$(SYS_HOME="$tmp/h" CLAUDE_CONFIG_DIR="$tmp/c" claude_user_config_file)"
+    d="$(HOME="$tmp/h" CLAUDE_CONFIG_DIR="$tmp/c" claude_user_config_file)"
     got="$a|$b|$c|$d"
     want="$tmp/h/.claude.json|$tmp/c/.claude.json|$tmp/h/.claude/.config.json|$tmp/c/.config.json"
     rm -rf "$tmp"
