@@ -283,7 +283,7 @@ class Session(object):
     def drain(self):
         """Read whatever the proxy wrote before it exited."""
         for pump in self.pumps:
-            pump.join(5)
+            pump.join(2)        # a stray backend that kept our pipes open must not hang the test
         while True:
             try:
                 raw = self.lines.get_nowait()
@@ -310,8 +310,9 @@ class Session(object):
             self.proc.wait()
             code = None
         self.drain()
-        self.proc.stdout.close()
-        self.proc.stderr.close()
+        if not any(pump.is_alive() for pump in self.pumps):
+            self.proc.stdout.close()
+            self.proc.stderr.close()
         return code
 
 
