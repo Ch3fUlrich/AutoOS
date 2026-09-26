@@ -70,6 +70,55 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(audit.redact_argv(["curl", "-u", "user:hunter2"]),
                           ["curl", "-u", "***"])
 
+    def test_single_token_bearer_is_masked(self):
+        # I/Qoder-5: "Authorization: Bearer x" and "Bearer x" as ONE token.
+        self.assertEqual(
+            audit.redact_argv(["curl", "-H", "Authorization: Bearer sk-live-x", "https://h"]),
+            ["curl", "-H", "Authorization: Bearer ***", "https://h"])
+        self.assertEqual(
+            audit.redact_argv(["curl", "-H", "Bearer sk-live-x"]),
+            ["curl", "-H", "Bearer ***"])
+
+    def test_single_token_equals_flags_are_masked(self):
+        self.assertEqual(audit.redact_argv(["tool", "--token=abc123"]),
+                          ["tool", "--token=***"])
+        self.assertEqual(audit.redact_argv(["tool", "--password=hunter2"]),
+                          ["tool", "--password=***"])
+
+    def test_x_api_key_header_is_masked(self):
+        self.assertEqual(audit.redact_argv(["curl", "-H", "x-api-key: hunter2"]),
+                          ["curl", "-H", "x-api-key: ***"])
+
+    def test_url_userpass_is_masked(self):
+        self.assertEqual(
+            audit.redact_argv(["git", "clone", "https://user:ghp_x@host/r.git"]),
+            ["git", "clone", "https://***:***@host/r.git"])
+        self.assertEqual(
+            audit.redact_argv(["curl", "-uuser:pass", "https://h"]),
+            ["curl", "-u***", "https://h"])
+
+    def test_key_substring_names_are_masked(self):
+        # I: KEY matches *TOKEN*|*SECRET*|*PASSWORD*|*KEY*.
+        self.assertEqual(audit.redact_argv(["tool", "MY_TOKEN=abc"]),
+                          ["tool", "MY_TOKEN=***"])
+        self.assertEqual(audit.redact_argv(["tool", "MY_SECRET=abc"]),
+                          ["tool", "MY_SECRET=***"])
+        self.assertEqual(audit.redact_argv(["tool", "MY_PASSWORD=abc"]),
+                          ["tool", "MY_PASSWORD=***"])
+        self.assertEqual(audit.redact_argv(["tool", "MY_KEY=abc"]),
+                          ["tool", "MY_KEY=***"])
+
+    def test_known_secret_prefixes_are_masked(self):
+        for tok in ("sk-live-abc123", "ghp_abc123", "gho_abc123",
+                    "glpat-abc123", "xoxb-abc123"):
+            self.assertEqual(audit.redact_argv(["tool", tok]), ["tool", "***"],
+                             f"prefix not masked: {tok}")
+
+    def test_sshpass_dash_p_separate_value_is_masked(self):
+        # I/Qoder-5: mask the value following sshpass -p.
+        self.assertEqual(audit.redact_argv(["sshpass", "-p", "hunter2", "ssh", "h"]),
+                          ["sshpass", "-p", "***", "ssh", "h"])
+
     def test_argv_sha256_is_over_the_raw_unredacted_form(self):
         raw = ["tool", "--token", "abc123"]
         redacted_first = audit.redact_argv(raw)
@@ -193,6 +242,71 @@ class AuditLogWriteTests(unittest.TestCase):
             log.close()
         self.assertGreaterEqual(len(seen), 2)  # start + the write
         self.assertIn('"decision": "allow"', seen[-1])
+
+    def test_seq_survives_a_very_long_line(self):
+        # I/Qoder-6: a legal 8KB+ record must not make the next write reuse seq=1.
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = os.path.join(tmp, "state")
+            log = audit.AuditLog(state_dir, journald=lambda line: None)
+            log.write(actor="claude", session=None, via="http", host="coding-host",
+                      argv=["echo", "A" * 4000, "B" * 4000], cwd="/tmp",
+                      run_as="claude", decision="allow", rule=None, reason=None,
+                      exit_code=0, duration_ms=1, out_bytes=0, truncated=False)
+            log.close()
+            log2 = audit.AuditLog(state_dir, journald=lambda line: None)
+            seq2 = log2.write(actor="claude", session=None, via="http",
+                              host="coding-host", argv=["echo"], cwd="/tmp",
+                              run_as="claude", decision="allow", rule=None,
+                              reason=None, exit_code=0, duration_ms=1,
+                              out_bytes=0, truncated=False)
+            log2.close()
+            self.assertGreater(seq2, 2, "seq restarted after a long line")
+
+    def test_long_reason_session_cwd_are_capped_and_mark_truncated(self):
+        # I: caps (4096) on reason/session/cwd, marked via truncated=True.
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = os.path.join(tmp, "state")
+            log = audit.AuditLog(state_dir, journald=lambda line: None)
+            log.write(actor="claude", session="s" * 5000, via="http",
+                      host="coding-host", argv=["echo"], cwd="/tmp/" + "c" * 5000,
+                      run_as="claude", decision="allow", rule=None,
+                      reason="r" * 5000, exit_code=0, duration_ms=1,
+                      out_bytes=0, truncated=False)
+            log.close()
+            files = list(Path(state_dir).glob("audit-*.jsonl"))
+            data = [json.loads(ln) for ln in _read_lines(files[0])
+                    if json.loads(ln).get("event") != "start"][0]
+            self.assertLessEqual(len(data["reason"]), 4096)
+            self.assertLessEqual(len(data["session"]), 4096)
+            self.assertLessEqual(len(data["cwd"]), 4096)
+            self.assertTrue(data["truncated"])
+
+    def test_journald_timeout_does_not_raise(self):
+        # I/Qoder-15: hung `logger` (TimeoutExpired) must not fail the write.
+        import subprocess as _sp
+
+        def _hung(line: str) -> None:
+            raise _sp.TimeoutExpired(cmd="logger", timeout=2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log = audit.AuditLog(os.path.join(tmp, "state"), journald=None)
+            # Patch the default journald path: AuditLog with journald=None
+            # uses _default_journald; instead inject a wrapper that calls the
+            # real default with a hung `logger` on PATH? Simpler: call the
+            # module helper directly with a patched subprocess.run.
+            orig_run = _sp.run
+            def _fake_run(*a, **k):
+                raise _sp.TimeoutExpired(cmd="logger", timeout=2)
+            _sp.run = _fake_run
+            try:
+                audit._default_journald('{"test": 1}')
+            finally:
+                _sp.run = orig_run
+            # And an AuditLog write with a raising journald must still succeed
+            # when journald is the default? No -- injected raising journald
+            # propagates (only the default swallows). Here we only assert the
+            # default helper swallows TimeoutExpired (no raise above).
+            log.close()
 
     def test_dir_and_file_permissions(self):
         with tempfile.TemporaryDirectory() as tmp:

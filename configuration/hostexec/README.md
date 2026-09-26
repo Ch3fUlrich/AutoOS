@@ -170,11 +170,18 @@ element can never forge terminal output or a fake extra log line:
 python3 tools/hostexec.py log --since 1h --actor openhands --decision deny
 ```
 
-Argv is redacted before it is ever written to disk (`KEY=`/`--token`/
-`--password`/`Bearer <token>`/`-p<secret>`/`-u user:pass` -> `***`); a
+Argv is redacted before it is ever written to disk (`KEY=` where `KEY`
+matches `*TOKEN*`/`*SECRET*`/`*PASSWORD*`/`*KEY*`, `--token`/`--password`
+separate or `=`, `Bearer <token>` separate or inside one token
+(`Authorization: Bearer x`), `x-api-key: <v>`, `user:pass@` in URLs,
+`-p<secret>`/`-u<user:pass>` attached, `-u`/`-p` separate values, and known
+secret prefixes `sk-`, `ghp_`, `gho_`, `glpat-`, `xox` -> `***`); a
 separate `argv_sha256`, over the RAW unredacted argv, lets you still
 correlate two identical calls without the secret ever touching disk in
-clear.
+clear. `reason`/`session`/`cwd` are capped at 4096 chars (excess marks the
+line `truncated`). `seq` resumes by scanning backwards for the last
+complete JSON line (any length); each line is written with an `os.write`
+loop that errors on short write.
 
 `host_log_tail(n)` (the MCP tool) only ever returns the CALLING actor's
 own lines -- never another actor's -- so it cannot become a cross-actor

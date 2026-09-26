@@ -39,9 +39,13 @@ def default_state_dir() -> str:
 # ─── redaction (spec section 5; review F12 broadens the patterns, F13 strips
 # control characters so a log line can never forge terminal output) ────────
 
-_SECRET_NAME_RE = re.compile(r"(?i)(token|secret|password|passwd|bearer|api[_-]?key|credential)")
+_SECRET_NAME_RE = re.compile(r"(?i)(token|secret|password|passwd|bearer|api[_-]?key|credential|key)")
 _SECRET_VALUE_FLAGS = ("--token", "--password", "--passwd", "--secret", "--key",
-                        "--api-key", "--bearer", "-u")
+                        "--api-key", "--bearer", "-u", "-p")
+_SECRET_PREFIX_RE = re.compile(r"^(sk-|ghp_|gho_|glpat-|xox)")
+_BEARER_IN_TOKEN_RE = re.compile(r"(?i)bearer\s+\S+")
+_API_KEY_IN_TOKEN_RE = re.compile(r"(?i)(api[_-]?key\s*[:=]\s*)\S+")
+_URL_USERPASS_RE = re.compile(r"(https?://)[^/\s:@]+:[^/\s:@]+@")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
 
 
@@ -57,11 +61,14 @@ def sanitize_text(s: str) -> str:
 
 def redact_argv(argv: Sequence[str]) -> list[str]:
     """Best-effort credential redaction for the STORED/rendered argv:
-    `KEY=value`-shaped names that look secret, `Bearer <token>`, common
-    `--token`/`--password`/... flags with a separate value, and mysql-style
-    `-pSECRET`. argv_sha256 (below) hashes the RAW, unredacted form
-    separately, so two identical raw calls can still be correlated without
-    the secret ever being stored in clear."""
+    `KEY=value`-shaped names that look secret (*TOKEN*|*SECRET*|*PASSWORD*|
+    *KEY*), `Bearer <token>` separate or inside one token
+    (`Authorization: Bearer x`), common `--token`/`--password`/... flags
+    with a separate value, mysql-style `-pSECRET` and `-uUSER:PASS`
+    attached, `x-api-key: <v>`, `user:pass@` in URLs, and known secret
+    prefixes (sk-, ghp_, gho_, glpat-, xox). argv_sha256 (below) hashes the
+    RAW, unredacted form separately, so two identical raw calls can still
+    be correlated without the secret ever being stored in clear."""
     out: list[str] = []
     mask_next = False
     for tok in argv:
@@ -74,6 +81,16 @@ def redact_argv(argv: Sequence[str]) -> list[str]:
             out.append(tok)
             mask_next = True
             continue
+        if _SECRET_PREFIX_RE.match(tok):
+            out.append("***")
+            continue
+        # Single-token carriers inside a larger token.
+        redacted = _BEARER_IN_TOKEN_RE.sub("Bearer ***", tok)
+        redacted = _API_KEY_IN_TOKEN_RE.sub(r"\1***", redacted)
+        redacted = _URL_USERPASS_RE.sub(r"\1***:***@", redacted)
+        if redacted != tok:
+            out.append(redacted)
+            continue
         if "=" in tok:
             name, _, _value = tok.partition("=")
             bare = name.lstrip("-")
@@ -84,6 +101,14 @@ def redact_argv(argv: Sequence[str]) -> list[str]:
             continue
         if tok.startswith("-p") and len(tok) > 2 and not tok.startswith("--"):
             out.append("-p***")
+            continue
+        if tok.startswith("-u") and len(tok) > 2 and not tok.startswith("--"):
+            # Attached -uUSER is just a username (keep, e.g. -uroot);
+            # -uUSER:PASS carries a secret (mask).
+            if ":" in tok[2:]:
+                out.append("-u***")
+            else:
+                out.append(tok)
             continue
         if tok in _SECRET_VALUE_FLAGS:
             out.append(tok)
@@ -108,25 +133,59 @@ def _path_for(state_dir: str, date: datetime.date) -> Path:
 
 
 def _last_seq(path: Path) -> int:
+    """Last seq in the file, reading backwards until a complete JSON line
+    parses (any length -- Qoder-6). A legal record can be 64x4096 chars, far
+    longer than any fixed window, so a fixed 8KB tail would hold only a
+    fragment and restart seq at 1. Returns 0 for missing/unreadable/empty."""
     if not path.exists():
         return 0
     try:
         with open(path, "rb") as fh:
             try:
-                fh.seek(-8192, os.SEEK_END)
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
             except OSError:
-                fh.seek(0)
-            tail_bytes = fh.read()
+                return 0
+            chunk = 8192
+            offset = size
+            buf = b""
+            while True:
+                if offset <= 0 and buf:
+                    # Whole file already in buf; fall through to parse below.
+                    pass
+                if offset > 0:
+                    read_len = min(chunk, offset)
+                    offset -= read_len
+                    try:
+                        fh.seek(offset)
+                        data = fh.read(read_len)
+                    except OSError:
+                        return 0
+                    buf = data + buf
+                # Candidates: ignore trailing incomplete (no trailing \n)
+                # and leading fragment (when offset>0).
+                lines = buf.split(b"\n")
+                # Last element: b'' if ends with \n (complete), else incomplete.
+                cands = lines[:-1]
+                if offset > 0 and cands:
+                    cands = cands[1:]
+                for raw in reversed(cands):
+                    if not raw.strip():
+                        continue
+                    try:
+                        record = json.loads(raw)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    seq = record.get("seq")
+                    if isinstance(seq, int):
+                        return seq
+                if offset <= 0:
+                    return 0
+                chunk = min(chunk * 2, 65536)
+                if not buf and offset <= 0:
+                    return 0
     except OSError:
         return 0
-    for raw in reversed([ln for ln in tail_bytes.split(b"\n") if ln.strip()]):
-        try:
-            record = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        seq = record.get("seq")
-        if isinstance(seq, int):
-            return seq
     return 0
 
 
@@ -137,13 +196,27 @@ def _default_journald(line: str) -> None:
     try:
         subprocess.run([logger_bin, "-t", "autoos-exec"], input=line.encode("utf-8"),
                         timeout=2, check=False)
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         pass
 
 
 def _iso(dt: datetime.datetime) -> str:
     dt = dt.astimezone(datetime.timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
+_FIELD_CAP = 4096
+
+
+def _cap_field(value: str | None) -> tuple[str | None, bool]:
+    """Cap reason/session/cwd to 4096 chars (Qoder-13); returns (capped,
+    was_truncated). Sanitizes first so control chars never reach disk."""
+    if value is None:
+        return None, False
+    clean = sanitize_text(value)
+    if len(clean) > _FIELD_CAP:
+        return clean[:_FIELD_CAP], True
+    return clean, False
 
 
 class AuditLog:
@@ -215,9 +288,23 @@ class AuditLog:
                 seq = _last_seq(path) + 1
                 record = build(seq)
                 line = json.dumps(record, sort_keys=True) + "\n"
-                os.write(self._fd, line.encode("utf-8"))
+                data = line.encode("utf-8")
+                total = 0
+                while total < len(data):
+                    try:
+                        n = os.write(self._fd, data[total:])
+                    except OSError as exc:
+                        raise AuditWriteError(
+                            f"cannot write audit log under {self.state_dir}: {exc}") from exc
+                    if n <= 0:
+                        raise AuditWriteError(
+                            f"short audit write under {self.state_dir}: "
+                            f"wrote {total}/{len(data)} bytes")
+                    total += n
             finally:
                 fcntl.flock(self._fd, fcntl.LOCK_UN)
+        except AuditWriteError:
+            raise
         except OSError as exc:
             raise AuditWriteError(f"cannot write audit log under {self.state_dir}: {exc}") from exc
         self._journald(line.rstrip("\n"))
@@ -230,20 +317,24 @@ class AuditLog:
         """Write one call's audit line. Raises AuditWriteError on failure --
         the caller must treat that as fail-closed (spec section 5)."""
         self._ensure_open()
+        capped_session, sess_trunc = _cap_field(session)
+        capped_cwd, cwd_trunc = _cap_field(cwd)
+        capped_reason, reason_trunc = _cap_field(reason)
+        truncated = bool(truncated or sess_trunc or cwd_trunc or reason_trunc)
         return self._write_locked(lambda seq: {
             "ts": _iso(self._now()),
             "seq": seq,
             "actor": actor,
-            "session": sanitize_text(session) if session else session,
+            "session": capped_session,
             "via": via,
             "host": host,
             "argv": redact_argv(argv),
             "argv_sha256": hash_argv(argv),
-            "cwd": cwd,
+            "cwd": capped_cwd,
             "run_as": run_as,
             "decision": decision,
             "rule": rule,
-            "reason": sanitize_text(reason) if reason else reason,
+            "reason": capped_reason,
             "exit": exit_code,
             "duration_ms": duration_ms,
             "out_bytes": out_bytes,
