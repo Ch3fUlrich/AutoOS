@@ -311,6 +311,26 @@ def build_providers(providers_doc, provider_windows_doc):
     return providers
 
 
+# Single legs that are down while their provider still serves other models.
+# Kept in place (same order, same data) and flagged like the OpenRouter legs.
+UNAVAILABLE_LEGS = {
+    "opencode-zen/deepseek-v4.1-flash": (
+        "Operator decision 2026-09-26: the tool-calling probe "
+        "(tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; "
+        "marked available: false so the strict tool_calls filter and callers skip it."),
+}
+
+
+def mark_legs_unavailable(registry, legs=None):
+    """Flag each leg of UNAVAILABLE_LEGS in every route that lists it, beside
+    any unavailable_legs entry already there."""
+    for leg, comment in (UNAVAILABLE_LEGS if legs is None else legs).items():
+        for route in registry["routes"].values():
+            if leg in route["legs"]:
+                route.setdefault("unavailable_legs", {})[leg] = {
+                    "available": False, "$comment": comment}
+
+
 def mark_openrouter_unavailable(registry):
     """Operator decision 2026-09-25 (see OPENROUTER_DOWN_COMMENT): flag the provider
     and every leg reached through it, without deleting or reordering anything."""
@@ -966,6 +986,7 @@ def build_registry() -> dict:
         "policy": build_policy(),
     }
     mark_openrouter_unavailable(registry)
+    mark_legs_unavailable(registry)
     return registry
 
 

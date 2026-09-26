@@ -110,6 +110,7 @@ run log `logs/handoff-sessions/<date>/` (default date 2026-09-25 unless the line
 - R-handoff-03: Write a successor's brief from the predecessor's DONE note, never from the plan alone. (why: eight re-cuts converged on the same shape; source: references/layers.md history, 2026-09-05)
 - R-handoff-04: At the cap, run l1_handoff.py --state/--out, append `handoff <name>` to the inbox, stop. (why: lets the parent relaunch you from that file; source: briefs/common.md, Always)
 - R-handoff-05: A handoff is done only once the parent inbox has its line; parents watch handoff mtimes. (why: a handoff with no line sat idle 1.5 h; source: inbox/L1-routing.md 21:45Z)
+- R-handoff-06: Only the coordinator asks the operator; others append `question: … | options: …` or `answered: …` to its inbox. (why: the operator was asked twice; source: operator 2026-09-26)
 
 ### host
 

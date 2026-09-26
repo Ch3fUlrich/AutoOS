@@ -265,6 +265,34 @@ def looks_like_a_private_host(value: str) -> bool:
     return ip.is_private or ip.is_loopback or ip.is_link_local
 
 
+class UnavailableLegTests(unittest.TestCase):
+    """Operator decision 2026-09-26: opencode-zen/deepseek-v4.1-flash answered
+    402 (payment required) in the tool-calling probe -> unavailable, kept in
+    place like the OpenRouter legs."""
+
+    @classmethod
+    def setUpClass(cls):
+        rc, out, err = run_converter()
+        if rc != 0:
+            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
+        cls.registry = load_json(REGISTRY_PATH)
+
+    def test_zen_deepseek_leg_is_unavailable_everywhere_it_appears(self):
+        leg = "opencode-zen/deepseek-v4.1-flash"
+        seen = 0
+        for route_id, route in self.registry["routes"].items():
+            if leg in route["legs"]:
+                seen += 1
+                self.assertIn(leg, route.get("unavailable_legs", {}), route_id)
+                self.assertIs(route["unavailable_legs"][leg]["available"], False)
+        self.assertGreaterEqual(seen, 3)
+
+    def test_openrouter_legs_stay_unavailable_beside_it(self):
+        route = self.registry["routes"]["t2-worker-clean"]
+        self.assertIn("openrouter/deepseek/deepseek-v4.1-flash", route["unavailable_legs"])
+        self.assertIn("opencode-zen/deepseek-v4.1-flash", route["unavailable_legs"])
+
+
 class PrivacyTests(unittest.TestCase):
     """registry.py check rule (spec 3.1): api_base holds only a public vendor endpoint."""
 

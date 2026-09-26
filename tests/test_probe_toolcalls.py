@@ -274,6 +274,16 @@ class ClassifyTests(unittest.TestCase):
         self.assertIsNone(value)
         self.assertIn("429", detail)
 
+    def test_missing_credentials_is_no_verdict(self):
+        # Live run 2026-09-26: antigravity/cc/cerebras answered 401 "No active
+        # credentials for provider" - a sign-in gap, not a tool-calling fact.
+        for status in (401, 403):
+            trial = {"single": "error", "round": "skipped", "status": status,
+                     "note": '{"error":{"message":"No active credentials for provider: cerebras."}}'}
+            value, detail = self.mod.classify([trial] * 3)
+            self.assertIsNone(value, status)
+            self.assertIn(str(status), detail)
+
     def test_5xx_counts_as_no_verdict(self):
         trial = {"single": "error", "round": "skipped", "status": 503, "note": "unavailable"}
         value, _ = self.mod.classify([trial] * 2)

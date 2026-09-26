@@ -66,7 +66,9 @@ RETRY_STATUSES = (429, 503)
 
 # Statuses that mean "we learned nothing about this leg's tool-calling
 # ability", never a verdict: keep whatever the overlay already said.
-NO_VERDICT_STATUSES = (429, 402, "ERR", "timeout")
+# 401/403: the gateway has no credentials for the provider (a sign-in gap,
+# measured 2026-09-26 on antigravity/cc/cerebras) - no fact about tool calling.
+NO_VERDICT_STATUSES = (401, 402, 403, 429, "ERR", "timeout")
 
 # Assignable, so tests need no real network wait.
 _sleep = time.sleep
@@ -273,7 +275,7 @@ def classify(trials):
             return "broken", "HTTP 400 mentions tool/function support: %s" % t["note"]
 
     if all(_is_no_verdict_status(t["status"]) for t in trials):
-        return None, "only transport errors (%s): keeping the previous value" % (
+        return None, "only credential/transport errors (%s): keeping the previous value" % (
             ", ".join(str(t["status"]) for t in trials))
 
     return "unproven", "mixed pass/fail across %d trial(s)" % len(trials)
