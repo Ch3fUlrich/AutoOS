@@ -1196,10 +1196,12 @@ OPENHANDS_TIER_ORDER = (
     # nested directory), and an id of the form "omniroute-cheaperinference/
     # kimi-k3" would create one; a route id containing "/" cannot safely get
     # an OpenHands profile under that tool's current (unfixed) file-writing
-    # scheme. tools/audit-router.py --offline therefore still reports these 4
-    # combos as missing a tier-profiles.json entry - a known, deliberate gap
-    # (see this lane's REPORT), not something to route around by picking a
-    # different, unrelated tier id.
+    # scheme. tools/audit-router.py --offline therefore never reports these 4
+    # combos as missing a tier-profiles.json entry: openhands_route_names()/
+    # tier_profile_drift() restrict the check to openhands-served routes, so
+    # these opencode/zed-only pinned routes are out of scope - a known,
+    # deliberate gap (see this lane's REPORT), not something to route around
+    # by picking a different, unrelated tier id.
 )
 
 OPENHANDS_GATEWAYS = ("omniroute", "litellm")
@@ -1437,7 +1439,8 @@ def _leg_is_unavailable(leg: str, route: dict, registry: dict) -> bool:
     flags marks `leg` down: routes.<id>.unavailable_legs[leg].available is
     false, or the leg's own provider carries providers.<id>.available:
     false (today only cxa - openrouter's own blanket flag was lifted
-    2026-09-26 once Qwen 3.8 credits were funded; its still-dead legs stay
+    2026-09-26; per the 16:4xZ revision OpenRouter is BYOK with no shared
+    credit, and its still-dead legs stay
     flagged individually via their own unavailable_legs entry instead - see
     providers.openrouter's $comment). Both flags are registry-only signals the
     OmniRoute gateway itself never consults (mapping doc's "PRIV2" note) -

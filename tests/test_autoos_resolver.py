@@ -1684,8 +1684,9 @@ class PlanTests(unittest.TestCase):
         path = (Path(__file__).resolve().parent.parent
                 / "catalog" / "ai-registry.json")
         registry = json.loads(path.read_text(encoding="utf-8"))
-        # Every model is tool_calls unproven today, so an agentic kind (e.g.
-        # implement) has no surviving route; review is not agentic.
+        # Review is not an agentic kind, so the strict tool_calls filter
+        # does not apply here (agentic kinds do have surviving routes today:
+        # glm-5.2 and MiniMax-M3 are model-level proven).
         card = {"kind": "review", "spec": "exact", "risk": "normal",
                "mode": "balanced", "privacy": "public"}
         features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,

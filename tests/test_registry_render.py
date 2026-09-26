@@ -670,15 +670,16 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         self.assertIn("leg model", row)
 
     def test_legs_column_lists_every_leg_in_order(self):
-        # t3-driver deliberately carries the SAME real model through two
-        # providers (groq/qwen/qwen3.8-27b free, openrouter/qwen/qwen3.8-27b
-        # paid - Q1 2026-09-26, docs/plans/2026-09-25-registry-mapping.md
-        # Open choice 11's naming convention extended to a same-spelling
-        # collision): both legs render the identical backtick text
-        # "`qwen/qwen3.8-27b`", so a naive str.index() finds only the FIRST
-        # occurrence for both and cannot tell them apart. Search forward from
-        # the previous match instead, so a repeated model spelling is found
-        # at its own, later position rather than colliding on the first one.
+        # Legs render as `model-spelling` without the provider prefix, so
+        # two legs sharing one spelling render identical backtick text and a
+        # naive str.index() finds only the FIRST occurrence for both. Search
+        # forward from the previous match instead, so a repeated model
+        # spelling is found at its own, later position rather than colliding
+        # on the first one. (No t3-driver leg repeats a spelling today - the
+        # 16:4xZ revision removed its openrouter/qwen/qwen3.8-27b leg, so this
+        # currently asserts order only - but t2-worker still repeats
+        # `gpt-oss-120b` across providers, so the forward search is the right
+        # shape if a repeat is ever reintroduced here.)
         rendered = registry.render_models_doc(real_registry())
         row = row_for(rendered, "t3-driver")
         legs = real_registry()["routes"]["t3-driver"]["legs"]
@@ -707,8 +708,9 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         # reached through it - exercised with a synthetic flip on a copied
         # registry rather than tying this test to whichever real provider
         # happens to be globally down today (openrouter's own blanket flag
-        # was lifted 2026-09-26 once Qwen 3.8 credits were funded; its still-
-        # dead legs are flagged individually now - see
+        # was lifted 2026-09-26; per the 16:4xZ revision OpenRouter is BYOK
+        # with no shared credit, and its still-dead legs are flagged
+        # individually now - see
         # test_leg_flagged_unavailable_in_its_own_route_is_marked).
         reg = copy.deepcopy(real_registry())
         reg["routes"]["t2-orchestrator"]["unavailable_legs"] = {}
