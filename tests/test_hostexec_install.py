@@ -259,6 +259,9 @@ class ClientWriterTests(_DriverCase):
         self.assertIn("already current", again.stdout + again.stderr)
 
     def test_opencode_keeps_unrelated_keys(self):
+        # mcp.hostexec is correct for this repo (NOT mcp.servers):
+        # lib/linux/install.sh writes data['mcp'][name] for opencode,
+        # so the driver must use the ["mcp"] parent key here.
         self.write_token("opencode")
         opencode_json = self.home / ".config" / "opencode" / "opencode.json"
         opencode_json.parent.mkdir(parents=True, exist_ok=True)
