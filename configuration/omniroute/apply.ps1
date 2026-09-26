@@ -127,15 +127,15 @@ function Get-AutoOSProviderMap {
     # registry-wide (spec 3.1's two operator-facing "this is down" flags).
     function Test-AutoOSLegUnavailable {
         param($Providers, $Leg, $Route)
-        $ul = $Route.unavailable_legs
+        $ul = if ($Route.PSObject.Properties['unavailable_legs']) { $Route.unavailable_legs } else { $null }
         if ($null -ne $ul -and $ul.PSObject.Properties[$Leg]) {
             $entry = $ul.$Leg
             if ($entry.PSObject.Properties['available'] -and $entry.available -eq $false) { return $true }
         }
         $prefix = $Leg.Split('/', 2)[0]
-        $pid = Resolve-AutoOSProviderId $Providers $prefix
-        if ($null -eq $pid) { return $false }
-        $p = $Providers.$pid
+        $providerId = Resolve-AutoOSProviderId $Providers $prefix
+        if ($null -eq $providerId) { return $false }
+        $p = $Providers.$providerId
         return ($null -ne $p -and $p.PSObject.Properties['available'] -and $p.available -eq $false)
     }
 
@@ -148,10 +148,10 @@ function Get-AutoOSProviderMap {
             if (-not $route.PSObject.Properties['legs'] -or $null -eq $route.legs) { continue }
             foreach ($leg in $route.legs) {
                 $prefix = $leg.Split('/', 2)[0]
-                $pid = Resolve-AutoOSProviderId $providers $prefix
-                if ($null -ne $pid) {
-                    if (-not $legsByProvider.ContainsKey($pid)) { $legsByProvider[$pid] = New-Object System.Collections.ArrayList }
-                    [void]$legsByProvider[$pid].Add(@($leg, $route))
+                $providerId = Resolve-AutoOSProviderId $providers $prefix
+                if ($null -ne $providerId) {
+                    if (-not $legsByProvider.ContainsKey($providerId)) { $legsByProvider[$providerId] = New-Object System.Collections.ArrayList }
+                    [void]$legsByProvider[$providerId].Add(@($leg, $route))
                 }
             }
         }
@@ -162,7 +162,7 @@ function Get-AutoOSProviderMap {
     $skipped = New-Object System.Collections.ArrayList
     foreach ($prop in $providers.PSObject.Properties) {
         $entry = $prop.Value
-        if ($null -eq $entry.omniroute_id) { continue }
+        if (-not $entry.PSObject.Properties['omniroute_id'] -or $null -eq $entry.omniroute_id) { continue }
         # api-keys.yml keys are lower-cased when read above, so match that.
         $keyName = $prop.Name.ToLowerInvariant()
         $legs = $legsByProvider[$prop.Name]
@@ -180,7 +180,7 @@ function Get-AutoOSProviderMap {
             }
         }
         $map[$keyName] = $entry.omniroute_id
-        if ($null -ne $entry.provider_data) {
+        if ($entry.PSObject.Properties['provider_data'] -and $null -ne $entry.provider_data) {
             # Keep the plain JSON string: the 5.1-vs-7.x escaping branch below
             # needs a string, and ConvertTo-Json -Compress is stable across both.
             $data[$entry.omniroute_id] = ($entry.provider_data | ConvertTo-Json -Compress)
