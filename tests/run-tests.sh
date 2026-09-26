@@ -4198,6 +4198,58 @@ if it "openhands: a backup of settings.json never overwrites an earlier one"; th
     else fail "a backup holding the user's file was overwritten (first original kept: $have1, second original kept: $have2)"; fi
 fi
 
+# A python step that fails writes nothing, and the function must say so instead
+# of printing its success line. python3 is stubbed in a subshell (the function
+# lookup wins over PATH), failing only the one call under test and passing the
+# rest through to the real interpreter.
+if it "openhands: a failing settings writer is reported, not called written"; then
+    tmp="$(mktemp -d)"
+    oh="$tmp/home/.openhands"; mkdir -p "$oh"
+    printf '%s' '{"user_key": "mine"}' >"$oh/settings.json"
+    before="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    out="$(
+        python3() {
+            # The settings/profiles script: "python3 - <openhands dir> <secrets> <models>" on stdin.
+            if [[ "${1:-}" == "-" && "${2:-}" == */.openhands ]]; then
+                cat >/dev/null; echo "stub: the settings script failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" ""
+    )"
+    after="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    problems=""
+    [[ "$before" == "$after" ]] || problems+="[settings.json changed although its writer failed] "
+    [[ -z "$(ls "$oh" | grep 'settings.json.autoos-backup-')" ]] || problems+="[a backup was taken for a file that was not written] "
+    [[ "$out" == *"not written to $oh/settings.json"* ]] || problems+="[no warning naming $oh/settings.json, output ends: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"configuration and profiles written to"* ]] || problems+="[the success line was printed after the writer failed] "
+    [[ "$out" != *"configuration unchanged"* ]] || problems+="[the 'unchanged' line was printed after the writer failed] "
+    [[ "$out" != *"agent-harness openhands: "* ]] || problems+="[the agent harness ran after the writer failed and may have created settings.json content of its own] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a failing agent harness is reported, not called written"; then
+    tmp="$(mktemp -d)"
+    out="$(
+        python3() {
+            if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+                echo "stub: the harness failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" ""
+    )"
+    problems=""
+    [[ "$out" == *"agent harness not applied to OpenHands (exit 1)"* ]] || problems+="[no warning for the failed agent harness, output ends: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"configuration and profiles written to"* ]] || problems+="[the success line was printed after the agent harness failed] "
+    [[ "$out" != *"configuration unchanged"* ]] || problems+="[the 'unchanged' line was printed after the agent harness failed] "
+    [[ "$out" == *"only partly applied"* ]] || problems+="[the final message does not say the configuration is partial, output ends: $(tail -n 3 <<<"$out")] "
+    [[ -f "$tmp/home/.openhands/settings.json" ]] || problems+="[the settings writer itself no longer ran] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
 if it "custom_is_installed detects agent-skills under Documents/code or Documents/Code"; then
     tmp="$(mktemp -d)"
     (

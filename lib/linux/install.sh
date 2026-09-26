@@ -3296,7 +3296,10 @@ setup_openhands_config() {
 
     # The script prints one word: "changed" when it wrote or replaced a file,
     # "unchanged" when everything on disk already held what it would write.
-    local oh_status
+    # "|| oh_rc=$?" keeps a failing script from ending the run under set -e; its
+    # status is read below, because a script that died wrote nothing (or only
+    # part) and must never be reported as written.
+    local oh_status oh_rc=0
     oh_status="$(OLLAMA_BASE_URL="$ollama_url" AUTOOS_OMNIROUTE_KEY="${AUTOOS_OMNIROUTE_KEY:-}" AUTOOS_IDE_MODELS="$ide_file" \
         python3 - "$openhands_dir" "$secrets_file" "$models_file" <<'PY'
 import os, sys, json, shutil, time
@@ -3750,7 +3753,15 @@ if os.path.isdir(_vendored_agents):
             pass
 print("changed" if _changed else "unchanged")
 PY
-)"
+)" || oh_rc=$?
+    if (( oh_rc != 0 )); then
+        # Skip the harness too: it would add enable_sub_agents to a settings.json
+        # (or create one) that the writer never got to merge. Warn and skip, like
+        # the OpenCode writer; setup runs postInstall under set -e.
+        ui_warn "OpenHands configuration not written to $openhands_dir/settings.json (settings script exit $oh_rc)"
+        ui_muted "    The profiles under $openhands_dir may be incomplete and the agent harness was skipped; fix the error above and re-run."
+        return 0
+    fi
 
     # The role agent profiles are the generator's job: it merges the harness
     # into whatever the embedded script left, so the roles stay in one place.
@@ -3772,7 +3783,9 @@ PY
         fi
     fi
 
-    if (( oh_changed )); then
+    if (( harness_rc != 0 )); then
+        ui_warn "OpenHands configuration only partly applied (the role profiles are missing): $openhands_dir"
+    elif (( oh_changed )); then
         ui_ok "OpenHands configuration and profiles written to $openhands_dir"
     else
         ui_muted "OpenHands configuration unchanged (skipped): $openhands_dir"
