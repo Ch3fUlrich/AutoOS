@@ -39,10 +39,9 @@ Three subcommands:
        structural walk of catalog/ai-registry.schema.json - no jsonschema
        dependency, matching the rest of this repo's suites, AGENTS.md section 5).
 
-`validate` runs `check`, then re-renders the registry in-process from
-tools/registry-convert.py's build_registry() and compares parsed JSON for
-equality - a committed file that no longer matches its sources is drift
-(spec 3.2 phase-1 gate).
+`validate` runs `check` (kept as a separate subcommand so existing callers
+keep working; the migration drift gate against the one-shot converter
+retired with the old catalogs in task A5e).
 
 `render omniroute` renders configuration/omniroute/combos.json from a loaded
 catalog/ai-registry.json (spec 3.2 phase 1, task A4a; docs/plans/2026-09-25-
@@ -131,7 +130,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
 SCHEMA_PATH = ROOT / "catalog" / "ai-registry.schema.json"
-CONVERTER_PATH = ROOT / "tools" / "registry-convert.py"
 DEFAULT_OMNIROUTE_COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.json"
 SYNC_ROUTER_TIERS_PATH = ROOT / "tools" / "sync-router-tiers.py"
 DEFAULT_LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
@@ -172,9 +170,9 @@ def provider_field_map(providers: dict, field: str) -> dict:
 
     Small reusable loader (task A5c, spec 3.2 phase 2): the generic form of
     the provider-id -> single-field map a consumer used to build by hand
-    against catalog/providers.json (tools/mirror-litellm-env.py's KEY_MAP was
+    against the legacy provider catalog (tools/mirror-litellm-env.py's KEY_MAP was
     `{name: entry["litellm_env"] for name, entry in doc["providers"].items()}`
-    with no presence filter - harmless against the old catalog, where every
+    with no presence filter - harmless against that catalog, where every
     entry already had a real litellm_env, but wrong against this registry,
     which also carries OAuth/subscription-bridge providers (`cc`,
     `antigravity`) whose litellm_env is null). Falsy values (missing, None,
@@ -190,10 +188,9 @@ def provider_field_map(providers: dict, field: str) -> dict:
 
 
 def _legacy_sort_key(mid: str) -> tuple:
-    """Order key for legacy_models(): the registry is alphabetical
-    (tools/registry-convert.py's build_registry() sorts every key on write)
-    and carries no trace of catalog/llm-models.json's hand-curated order, so
-    that order cannot be derived -- sort instead, with `openrouter-free`
+    """Order key for legacy_models(): the registry is written with every key
+    sorted and carries no trace of the legacy models list's hand-curated
+    order, so that order cannot be derived -- sort instead, with `openrouter-free`
     pinned first among the openrouter entries so the generated openrouter map
     (which filters this list in order) keeps it first."""
     if mid == "openrouter-free":
@@ -204,7 +201,7 @@ def _legacy_sort_key(mid: str) -> tuple:
 
 
 def legacy_models(doc) -> list:
-    """Project registry `models` into the old catalog/llm-models.json entry
+    """Project registry `models` into the legacy llm-models entry
     shape (A5dfix: the one home for the legacy model projection every
     installer read calls instead of carrying its own copy).
 
@@ -664,8 +661,8 @@ OMNIROUTE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not 
 # tier1-clean, ...) has no registry entry at all - docs/plans/2026-09-25-registry-
 # mapping.md section 4: "these are ... dead ids with no recoverable leg/class data
 # ... there is nothing to migrate". Reproduced here as a literal, hand-maintained
-# constant, the same convention tools/registry-convert.py uses for facts no source
-# file carries (PROVIDER_EXTRA, MODEL_EXTRA, COMBO_CLASS, ...): apply.sh/apply.ps1
+# constant, the same convention the deleted one-shot converter used for facts no
+# source file carries (PROVIDER_EXTRA, MODEL_EXTRA, COMBO_CLASS, ...): apply.sh/
 # still need this exact list once a later phase switches them onto a rendered file.
 OMNIROUTE_RETIRED_IDS = [
     "tier1", "tier1-clean",
@@ -685,7 +682,7 @@ def render_omniroute(registry: dict) -> dict:
     A route becomes a combo iff it has at least one leg (`legs` non-empty): the
     LiteLLM-only routes (t1-orchestrator-paid, t2-worker-paid, t3-driver-paid) and
     the dynamic `auto`/`auto/smart`/`auto/cheap` routes carry `legs: []`
-    (tools/registry-convert.py's ROUTE_COMMENT / AUTO_IDS) and have no
+    (the migration's ROUTE_COMMENT / AUTO_IDS convention) and have no
     combos.json counterpart at all - mapping doc section 4.
 
     Legs an operator has since flagged unavailable (routes.<id>.unavailable_legs;
@@ -802,8 +799,8 @@ def omniroute_diff(rendered: dict, current: dict) -> list:
 
 def _load_sync_router_tiers():
     """Import tools/sync-router-tiers.py by path (its name is not a valid
-    module identifier) - the same importlib-by-path technique
-    _build_fresh_registry() below already uses for tools/registry-convert.py.
+    module identifier) - the same importlib-by-path technique this repo uses
+    for every other dash-named tool.
     Reused, not copied, so Leg/render_block/locate_blocks/parse_block/
     leading_indent/GATEWAY_ONLY/SYNCED_TIERS/provider_maps_from_dict can never
     drift from the tool that still owns configuration/litellm/config.yaml's
@@ -812,9 +809,7 @@ def _load_sync_router_tiers():
     blocks() below mutates its PROVIDER_PREFIX/API_BASE/ENV_KEY globals (Leg
     reads them at construction time, same as tools/sync-router-tiers.py's own
     main() does), and a fresh import per call keeps that mutation from
-    leaking between two renders in the same process - the same isolation
-    _build_fresh_registry() gets from re-importing tools/registry-convert.py
-    every time it is called."""
+    leaking between two renders in the same process."""
     spec = importlib.util.spec_from_file_location(
         "autoos_sync_router_tiers", SYNC_ROUTER_TIERS_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -825,12 +820,12 @@ def _load_sync_router_tiers():
 def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
     """Render the AUTOOS-MANAGED litellm blocks tools/sync-router-tiers.py owns
     (spec 3.2 phase 1, task A4b), sourcing what that tool takes from
-    configuration/omniroute/combos.json and catalog/providers.json instead from
-    the loaded registry: each tier's ordered leg list from `routes.<tier>.legs`,
+    configuration/omniroute/combos.json and the legacy provider catalog
+    instead from the loaded registry: each tier's ordered leg list from `routes.<tier>.legs`,
     and each leg's LiteLLM transport (prefix/api_base/env var) from
     `providers.<id>.litellm_prefix`/`litellm_env`/`api_base` - registry field
-    names verified identical to catalog/providers.json's own in docs/plans/
-    2026-09-25-registry-mapping.md section 2, so
+    names identical to the legacy provider catalog's own (verified during
+    migration in docs/plans/2026-09-25-registry-mapping.md section 2), so
     tools.sync_router_tiers.provider_maps_from_dict() reads either shape the
     same way (that function was factored out of provider_maps() for exactly
     this reuse).
@@ -981,9 +976,9 @@ IDE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
 # insignificant, so render_ide() reproduces today's hand-curated order exactly
 # rather than adding an equality exception for it. No registry field carries this
 # order (routes is a dict, and catalog/ai-registry.json's own routes keys are
-# alphabetical - tools/registry-convert.py's build_registry() sorts every key on
-# write); this is therefore a literal, hand-copied constant, the same convention
-# tools/registry.py's own OMNIROUTE_RETIRED_IDS and tools/registry-convert.py's
+# alphabetical - the registry is written with every key sorted); this is
+# therefore a literal, hand-copied constant, the same convention
+# this module's own OMNIROUTE_RETIRED_IDS and the migration's
 # PROVIDER_EXTRA/MODEL_EXTRA/COMBO_CLASS tables use for facts no source field
 # carries. A route added or removed without updating this list is never silently
 # mis-ordered or dropped - render_ide() raises, naming every id the set disagrees
@@ -1673,9 +1668,8 @@ def _ok_line(registry) -> str:
 def strip_comments(doc):
     """A copy of `doc` with every "$comment" key removed at any depth.
 
-    Registry prose is hand-edited after migration, so `validate`'s "no drift
-    from a fresh registry-convert.py render" comparison strips it from both
-    sides first; structure, routes, legs, models and providers still match
+    Registry prose is hand-edited, so a comment-stripped comparison ignores
+    it while structure, routes, legs, models and providers still match
     exactly. Never mutates its input."""
     if isinstance(doc, dict):
         return {key: strip_comments(value)
@@ -1683,13 +1677,6 @@ def strip_comments(doc):
     if isinstance(doc, list):
         return [strip_comments(value) for value in doc]
     return doc
-
-
-def _build_fresh_registry() -> dict:
-    spec = importlib.util.spec_from_file_location("autoos_registry_convert", CONVERTER_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.build_registry()
 
 
 def _cmd_check(args) -> int:
@@ -1713,10 +1700,6 @@ def _cmd_validate(args) -> int:
     if problems:
         for problem in problems:
             print(problem)
-        return 1
-    fresh = _build_fresh_registry()
-    if strip_comments(fresh) != strip_comments(registry):
-        print("drift: %s differs from a fresh registry-convert.py render" % args.registry)
         return 1
     print(_ok_line(registry))
     return 0
@@ -1884,7 +1867,7 @@ def main(argv=None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (
         ("check", "validate the registry against spec 3.1"),
-        ("validate", "check + confirm no drift from registry-convert.py"),
+        ("validate", "validate the registry (same rules as check)"),
     ):
         sub = subparsers.add_parser(name, help=help_text)
         sub.add_argument("--registry", default=str(DEFAULT_REGISTRY_PATH),

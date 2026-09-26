@@ -93,8 +93,8 @@ if (Test-Gateway) { Write-Host "Gateway OK on $Gateway" }
 # Provider registry: catalog\ai-registry.json's `providers` section is the
 # single source of truth for which api-keys.yml name maps to which OmniRoute
 # provider id and for the provider-specific connection data. catalog\providers.json
-# is retired as apply's source as of task A5a (routing v2 spec 3.2, D11) - it
-# still exists (a later task deletes it) but is no longer read here. apply.sh
+# is deleted (task A5e); catalog\ai-registry.json is the only provider source.
+# apply.sh
 # reads the same registry file, so the two scripts cannot drift. Only
 # providers with an omniroute_id are registered: meta (unregistered
 # 2026-09-23, openrouter-first, no combo leg) and the omniroute client key

@@ -26,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
 REGISTRY_TOOL = ROOT / "tools" / "registry.py"
+GOLDEN_LEGACY_MODELS_PATH = ROOT / "tests" / "fixtures" / "legacy-models.golden.json"
 
 
 def _load_tool():
@@ -66,7 +67,7 @@ class RealRegistryTests(unittest.TestCase):
             proc.stdout,
             r"^(info: .*\n)*ok: registry \d{4}-\d{2}-\d{2}, \d+ routes, \d+ models, \d+ providers\n$")
 
-    def test_cli_validate_succeeds_and_confirm_no_drift(self):
+    def test_cli_validate_succeeds(self):
         proc = subprocess.run(
             [sys.executable, str(REGISTRY_TOOL), "validate"],
             cwd=str(ROOT), capture_output=True, text=True, timeout=180,
@@ -386,20 +387,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("private host: providers.zen.api_base", proc.stdout)
 
-    def test_validate_reports_drift_for_a_valid_but_stale_file(self):
-        reg = mutated()
-        reg["version"] = "2026-01-01"  # 'version' may hold a date; check still passes
-        self.assertEqual(registry.check_registry(reg), [])
-        path = self._write(reg)
-        try:
-            proc = self._run("validate", "--registry", path)
-        finally:
-            Path(path).unlink()
-        self.assertEqual(proc.returncode, 1)
-        self.assertIn("drift:", proc.stdout)
-
-
-
 class ModelLevelTierOverrideTests(unittest.TestCase):
     """PRIV2 brief 2026-09-26: an optional models.<id>.tier overrides its
     provider's tier in private_safe() -- needed for the zen provider (tier
@@ -620,12 +607,15 @@ class ReviewA3Tests(unittest.TestCase):
 
 class LegacyModelsTests(unittest.TestCase):
     """tools/registry.py legacy_models(): the one projection of registry
-    models into the old catalog/llm-models.json entry shape (A5dfix) --
+    models into the legacy llm-models entry shape (A5dfix) --
     every installer read (lib/linux/install.sh x2, AutoOS.Install.psm1
-    embedded python) calls this instead of carrying its own copy."""
+    embedded python) calls this instead of carrying its own copy. The
+    committed golden fixture tests/fixtures/legacy-models.golden.json pins
+    that shape: it is the deleted legacy models catalog's own "models"
+    list, copied verbatim in task A5e."""
 
-    def test_legacy_models_match_llm_models_json_field_for_field(self):
-        with (ROOT / "catalog" / "llm-models.json").open(encoding="utf-8") as fh:
+    def test_legacy_models_match_the_committed_golden_fixture_field_for_field(self):
+        with GOLDEN_LEGACY_MODELS_PATH.open(encoding="utf-8") as fh:
             old = {m["id"]: m for m in json.load(fh)["models"]}
         new = {m["id"]: m for m in registry.legacy_models(load_registry())}
         self.assertEqual(set(new), set(old))
@@ -661,9 +651,9 @@ class LegacyModelsTests(unittest.TestCase):
 
 
 class ValidateIgnoresCommentTests(unittest.TestCase):
-    """`validate`'s fresh-render comparison ignores "$comment" keys at any
-    depth (hand-edited prose); structure, routes, legs, models and providers
-    still match exactly."""
+    """strip_comments() ignores "$comment" keys at any depth (hand-edited
+    prose); structure, routes, legs, models and providers still match
+    exactly."""
 
     def test_docs_differing_only_in_a_nested_comment_compare_equal(self):
         left = {"routes": {"r": {"legs": ["p/m"], "$comment": "one"}},

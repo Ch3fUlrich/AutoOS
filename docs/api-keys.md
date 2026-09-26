@@ -33,7 +33,7 @@ to your provider key, not to OpenRouter credit — credit-chain economics in
 ## Provider key → OmniRoute provider id
 
 `apply` maps the names in `api-keys.yml` automatically; this table is for
-registering by hand in the dashboard. Source: `catalog/providers.json` — the
+registering by hand in the dashboard. Source: `catalog/ai-registry.json` — the
 registry that `apply`, `tools/mirror-litellm-env.py` and
 `tools/sync-router-tiers.py` all read; this table is its human-readable view.
 
@@ -167,7 +167,7 @@ one `ack` chat per leg before it enters `combos.json` (phantom-leg rule).
 `qoder_pat:` in `api-keys.yml` feeds `QODER_PERSONAL_ACCESS_TOKEN`, which the
 Qoder CLI reads at startup for headless/ACP use. There is no gateway
 provider id for it (the gateway `qoder` entry is OAuth/dashboard-only), so it
-never enters `catalog/providers.json` or the LiteLLM `.env`. **Windows:**
+never enters `catalog/ai-registry.json` or the LiteLLM `.env`. **Windows:**
 the `qodercli` catalog component appends `~/.qoder/bin` to User PATH (the
 dashboard error was precisely this: the binary lives beside the IDE install,
 not on PATH) and exports the PAT absent-only, same mechanism as

@@ -5,7 +5,7 @@
 
 The same folder holds three catalogs of other types: `images.json` (bootable
 images for the [USB creator](usb-creator.md)), `engines.json` (USB write engines)
-and `llm-models.json` (with `llm-models.schema.json`). `--check-catalog` validates
+and `ai-registry.json` (with `ai-registry.schema.json`). `--check-catalog` validates
 every file in `catalog/`, dispatched by its top-level shape; an unrecognised shape
 fails.
 

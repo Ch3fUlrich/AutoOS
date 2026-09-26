@@ -496,14 +496,17 @@ JSON
     fi
 fi
 
-# ─── Shared LLM model catalogue (single source of truth) ──────────────────
-describe "llm models"
+# ─── Registry models (single source of truth) ─────────────────────────────
+describe "registry models"
 
-if it "llm-models.json is valid and every id is unique"; then
+if it "registry models are valid and every id is unique"; then
     if python3 - <<'PY'
-import json, sys
-doc = json.load(open("catalog/llm-models.json", encoding="utf-8"))
-models = doc["models"]
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
+registry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(registry)
+doc = json.load(open("catalog/ai-registry.json", encoding="utf-8"))
+models = registry.legacy_models(doc)
 assert len(models) >= 18, f"expected >= 18 models, got {len(models)}"
 ids = [m["id"] for m in models]
 dupes = {i for i in ids if ids.count(i) > 1}
@@ -512,15 +515,18 @@ for m in models:
     assert m.get("openrouter_id") or m.get("direct"), f"{m['id']}: neither openrouter_id nor direct"
     assert isinstance(m["context"], int) and isinstance(m["output"], int), f"{m['id']}: bad windows"
 PY
-    then pass; else fail "llm-models.json invalid"; fi
+    then pass; else fail "registry models invalid"; fi
 fi
 
 if it "the installers project every shared model instead of hardcoding"; then
     # Single-source/DRY: no model id or price may appear as a literal in the
-    # installers. Everything is projected from llm-models.json.
+    # installers. Everything is projected from the registry models.
     if python3 - <<'PY'
-import json, re, sys
-models = json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]
+import importlib.util, json, re, sys
+spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
+registry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(registry)
+models = registry.legacy_models(json.load(open("catalog/ai-registry.json", encoding="utf-8")))
 bad = []
 for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
     src = open(path, encoding="utf-8").read()
@@ -541,8 +547,11 @@ fi
 
 if it "the openhands projector covers every shared model"; then
     if python3 - <<'PY'
-import json, re, sys
-models = json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]
+import importlib.util, json, re, sys
+spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
+registry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(registry)
+models = registry.legacy_models(json.load(open("catalog/ai-registry.json", encoding="utf-8")))
 for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
     src = open(path, encoding="utf-8").read()
     calls = set()
@@ -562,8 +571,12 @@ if it "the vendored openhands profiles match the catalog snapshot"; then
     # template would ship stale prices to anyone reading the repo, so any
     # mismatch fails here. api_key is injected at install time and absent.
     if python3 - <<'PY'
-import json, glob, os, sys
-models = {m["id"]: m for m in json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]}
+import importlib.util, json, glob, os, sys
+spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
+registry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(registry)
+models = {m["id"]: m for m in registry.legacy_models(
+    json.load(open("catalog/ai-registry.json", encoding="utf-8")))}
 # Legacy alias: muse-spark-1.3-contributor.json is the vendored template for
 # the muse-spark catalog entry (only the contributor variant is kept).
 models["muse-spark-1.3-contributor"] = models["muse-spark"]
@@ -601,10 +614,12 @@ describe "registry model reads"
 
 if it "registry model reads come from ai-registry.json models"; then
     # Every model read in the installers targets catalog/ai-registry.json
-    # `models`; no read may still point at catalog/llm-models.json.
+    # `models`; no read may still point at the deleted legacy models file.
+    # (The grep pattern below names that file on purpose: it is the guard
+    # proving no installer read points there.)
     bad="$(grep -n 'llm-models\.json' lib/linux/install.sh lib/windows/AutoOS.Install.psm1 || true)"
     if [[ -n "$bad" ]]; then
-        fail "model reads still on llm-models.json: $bad"
+        fail "model reads still on the legacy models file: $bad"
     elif ! grep -q 'ai-registry\.json' lib/linux/install.sh; then
         fail "lib/linux/install.sh has no ai-registry.json read"
     elif ! grep -q 'ai-registry\.json' lib/windows/AutoOS.Install.psm1; then
@@ -614,7 +629,7 @@ if it "registry model reads come from ai-registry.json models"; then
     fi
 fi
 
-if it "registry model reads project a fixture with no llm-models.json present"; then
+if it "registry model reads project a fixture with no legacy catalog present"; then
     if python3 - <<'PY'
 import importlib.util, json, os, tempfile
 
@@ -661,8 +676,9 @@ tmp = tempfile.mkdtemp(prefix="a5d-")
 os.makedirs(os.path.join(tmp, "catalog"), exist_ok=True)
 with open(os.path.join(tmp, "catalog", "ai-registry.json"), "w", encoding="utf-8") as fh:
     json.dump(fixture, fh)
-assert not os.path.exists(os.path.join(tmp, "catalog", "llm-models.json")), \
-    "fixture must run with no llm-models.json present"
+# The fixture holds only the registry file: the projection must need no
+# legacy catalog anywhere.
+assert sorted(os.listdir(os.path.join(tmp, "catalog"))) == ["ai-registry.json"]
 # The real read path: ai-registry.json from disk, projected by the one
 # helper the installers call -- never a copy of its logic, and a model
 # without a direct block is skipped, never listed.
@@ -691,9 +707,10 @@ assert local["direct"]["model"] == "ollama/qwen2.5-coder:7b", local
 assert (local["context"], local["output"]) == (32768, 8192), local
 assert local.get("default_for") == "fallback", local
 assert "reasoning" not in local, local
-# The projection keeps the output identical on the real catalogs too.
+# The projection keeps the output identical on the real catalog too:
+# the committed golden fixture pins the legacy shape field-for-field.
 llm = {m["id"]: m for m in
-       json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]}
+       json.load(open("tests/fixtures/legacy-models.golden.json", encoding="utf-8"))["models"]}
 with open("catalog/ai-registry.json", encoding="utf-8") as _rf:
     new = {m["id"]: m for m in registry.legacy_models(json.load(_rf))}
 assert set(new) == set(llm), (set(new) ^ set(llm))
@@ -2032,7 +2049,7 @@ if it "--check-catalog validates all five catalogs by type, not just component c
     out="$(bash setup.sh --check-catalog 2>&1)"; rc=$?
     if [[ $rc -eq 0 && "$out" == *"engines.json is valid"* && "$out" == *"images.json is valid"* \
         && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"*         && "$out" == *"agent-harness.json is valid"* \
-        && "$out" == *"providers.json is valid"* && "$out" == *"ai-registry.json is valid"* ]]; then
+        && "$out" == *"ai-registry.json is valid"* ]]; then
         pass
     else
         fail "rc=$rc out=$out"
@@ -2694,7 +2711,7 @@ if it "every component has a homepage link"; then
     missing="$(python3 - 2>&1 <<'PY'
 import json, glob
 bad = []
-# OS catalogs only: llm-models.json is a model catalogue, not components.
+# OS catalogs only (the AI registry holds models, not components).
 for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     for grp in json.load(open(p, encoding="utf-8")).get("categories", []):
         for c in grp.get("components", []):
@@ -2785,7 +2802,7 @@ if it "the dependency graph the UI draws has no orphan requirements"; then
     bad="$(python3 - 2>&1 <<'PY'
 import json, glob
 bad = []
-# OS catalogs only: llm-models.json is a model catalogue, not components.
+# OS catalogs only (the AI registry holds models, not components).
 for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     d = json.load(open(p, encoding="utf-8"))
     ids = {c["id"] for g in d.get("categories", []) for c in g.get("components", [])}
@@ -2921,7 +2938,7 @@ if it "the core stack is available on all three platforms"; then
     missing="$(python3 - 2>&1 <<'PY'
 import json, glob, collections
 have = collections.defaultdict(set)
-# OS catalogs only: llm-models.json is keyed by model id, not component id.
+# OS catalogs only (the AI registry is keyed by model id, not component id).
 for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     plat = p.replace("catalog", "").strip("/\\").replace(".json", "")
     for g in json.load(open(p, encoding="utf-8"))["categories"]:
@@ -10605,8 +10622,8 @@ fi
 if it "apply handles the Cloudflare UA and stays openrouter-first"; then
     ok=1
     # The UA quirk now lives once, in the registry; apply.sh only passes
-    # provider_data through. Task A5a moved the read from catalog/providers.json
-    # to catalog/ai-registry.json.
+    # provider_data through. Task A5a moved the read to
+    # catalog/ai-registry.json.
     grep -q 'ai-registry\.json' configuration/omniroute/apply.sh || ok=0
     grep -q 'muse-code' configuration/omniroute/apply.sh && ok=0
     grep -q 'provider-specific-data' configuration/omniroute/apply.sh || ok=0
@@ -10616,7 +10633,7 @@ if it "apply handles the Cloudflare UA and stays openrouter-first"; then
 fi
 
 if it "provider registry drives apply, mirror and the tier maps"; then
-    # catalog/providers.json is the one map; the helper asserts every
+    # catalog/ai-registry.json is the one map; the helper asserts every
     # consumer's in-memory map equals it, so a hand-edited copy or a half-done
     # registry edit fails here instead of routing a provider to a wrong name.
     out="$(python3 tests/helpers/check-provider-registry.py 2>&1)"; rc=$?
@@ -10655,9 +10672,8 @@ if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
     else fail "the real mistral key was not planned"; fi
 fi
 
-# A5a (routing v2 spec 3.2, D11): apply.sh's provider rows now come from
-# catalog/ai-registry.json's `providers` section instead of the retired
-# catalog/providers.json - same row shape (name.lower, omniroute_id,
+# A5a (routing v2 spec 3.2, D11): apply.sh's provider rows come from
+# catalog/ai-registry.json's `providers` section - same row shape (name.lower, omniroute_id,
 # provider_data compact JSON), same "no omniroute_id -> skip" rule, plus a
 # new skip: a provider whose every leg in every route the registry marks
 # unavailable is never registered (routes.<id>.unavailable_legs,
@@ -10722,7 +10738,7 @@ if it "apply.sh reads provider rows from ai-registry.json and skips a provider w
     [[ "$out" == *"  - mixed-id: no key in api-keys.yml, skipped"* ]] \
         || { ok=0; echo "mixed (one live leg) was wrongly all-unavailable-skipped: $out" >&2; }
     # noomni has no omniroute_id at all - the pre-existing skip rule, never
-    # even printed (matches today's providers.json behaviour).
+    # even printed (the pre-existing skip rule for entries with no id).
     [[ "$out" == *"noomni"* ]] && { ok=0; echo "noomni (no omniroute_id) must never appear: $out" >&2; }
     if (( ok )); then pass; else fail "provider-level all-unavailable skip is not wired into apply.sh"; fi
 fi
@@ -10746,34 +10762,6 @@ if it "apply --dry-run against the real registry skips a provider whose every le
     [[ "$out" == *"  - antigravity: no key in api-keys.yml, skipped"* ]] \
         || { ok=0; echo "antigravity (has a live leg today) was wrongly skipped: $out" >&2; }
     if (( ok )); then pass; else fail "the real registry's dead providers do not reach apply.sh's plan"; fi
-fi
-
-# Equivalence: switching apply.sh's provider source from catalog/providers.json
-# to catalog/ai-registry.json (task A5a) must keep the same row shape for
-# every provider the old file still knows about - same omniroute_id, same
-# provider_data. New registry-only providers (antigravity, cc - no
-# catalog/providers.json entry) and the all-unavailable skip are additive,
-# checked by the two tests above and by the "provider registry drives apply,
-# mirror and the tier maps" helper test.
-if it "ai-registry.json providers agree field-for-field with providers.json for every shared entry"; then
-    report="$(python3 - 2>&1 <<'PY'
-import json
-
-old = json.load(open("catalog/providers.json", encoding="utf-8"))["providers"]
-new = json.load(open("catalog/ai-registry.json", encoding="utf-8"))["providers"]
-problems = []
-for name, entry in old.items():
-    if name not in new:
-        problems.append(f"{name}: missing from ai-registry.json")
-        continue
-    if entry.get("omniroute_id") != new[name].get("omniroute_id"):
-        problems.append(f"{name}: omniroute_id differs ({entry.get('omniroute_id')!r} vs {new[name].get('omniroute_id')!r})")
-    if entry.get("provider_data") != new[name].get("provider_data"):
-        problems.append(f"{name}: provider_data differs")
-print(" ".join(problems))
-PY
-)"
-    assert_eq "$report" ""
 fi
 
 # start-stack.sh sits in configuration/, one level below the repo root. A
@@ -10851,12 +10839,8 @@ if it "autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE ref
     out="$(python3 tests/test_autoos_heartbeat.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
-# catalog/ai-registry.json (routing v2 spec section 3): converter, schema keys, idempotence.
-if it "ai-registry converter: schema keys, legs resolve, idempotent (unit tests)"; then
-    out="$(python3 tests/test_registry_convert.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
-fi
-
-if it "registry.py: check rules (unit tests) and the committed registry has no drift"; then
+# catalog/ai-registry.json (routing v2 spec section 3): check rules.
+if it "registry.py: check rules (unit tests) and the committed registry is valid"; then
     out="$(python3 tests/test_registry.py 2>&1 && python3 tools/registry.py validate 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 

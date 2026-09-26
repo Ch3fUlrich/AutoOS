@@ -325,7 +325,7 @@ def rewrite_tier_profiles(text, models, warn=None):
     for tier in tiers:
         gateway = tier.get("gateway", "omniroute")
         if gateway not in GATEWAYS:
-            continue  # a direct-provider tier (openrouter): catalog/llm-models.json owns it
+            continue  # a direct-provider tier (openrouter): the registry models own it
         model_ref = str(tier.get("model", ""))
         mid = model_ref[len("openai/"):] if model_ref.startswith("openai/") else None
         m = by_id.get(mid)
