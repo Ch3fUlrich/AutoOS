@@ -7091,6 +7091,12 @@ if it "herdr-sessions: smoke (bash -n, py_compile, install --dry-run)"; then
     out="$(bash configuration/herdr-sessions/tests/test_smoke.sh 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# Bug (b) from the proposal doc: which uuid a restored pane resumes, when a
+# background job's transcript shares the pane's own directory (unit tests).
+if it "herdr-sessions: uuid picking excludes background sessions (unit tests)"; then
+    out="$(python3 tests/test_herdr_sessions.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 describe "wsl detection"
 
 if it "WSL is detected when running under it"; then
