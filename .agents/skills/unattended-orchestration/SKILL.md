@@ -58,6 +58,7 @@ run log `logs/handoff-sessions/<date>/` (default date 2026-09-25 unless the line
 - R-spawn-10: An isolation:worktree subagent branches from main; have it `git merge --ff-only <branch>` first. (why: branch-only files are missing otherwise; source: inbox/L1-routing.md 21:38Z, A12)
 - R-spawn-11: Read your inbox right before every launch, not only while waiting. (why: 3 workers started against a 30-min-old stop order; source: inbox/L1-routing.md 21:44Z)
 - R-spawn-12: Omit `--lean` for `--client qoder|agy`; the spawner refuses it with exit 2. (why: those clients start their MCP servers anyway; source: work/L1-routing/review-a3.out, 2026-09-26)
+- R-spawn-13: Relaunch, never resume, a worktree subagent that stopped without changes. (why: its worktree is deleted; resumed, it works in yours; source: inbox/L1-routing.md, 2026-09-26 08:5xZ)
 
 ### review
 
@@ -82,6 +83,8 @@ run log `logs/handoff-sessions/<date>/` (default date 2026-09-25 unless the line
 - R-gateway-04: After a combo/id rename, confirm the live gateway's combos match the code before routing. (why: a stale gateway 400s every card/--tier route; source: done/R-merge.md, item 1)
 - R-gateway-05: Match a tool-allowlist entry to its MCP wiring: `mcp__<name>__*`, plugin form otherwise. (why: the wrong prefix leaves the tool silently missing; source: mcp-servers-setup skill)
 - R-gateway-06: Keep a Qwen (t3-driver-free-only) request under 7000 input tokens; send one file. (why: larger requests fail 413 at its ITPM limit; source: work/L1-routing/review-b4b5.out)
+- R-gateway-07: Each heartbeat, give a subagent every probe-proposals.jsonl line newer than its leg's probe. (why: a run contradicted the record; source: test_autoos_spawner.py ProbeProposalTests)
+- R-gateway-08: Have a subagent re-run probe-toolcalls.py once measured.json results are 7+ days old. (why: operator 2026-09-26: keep setups current; source: tests/test_probe_toolcalls.py)
 
 ### brief
 

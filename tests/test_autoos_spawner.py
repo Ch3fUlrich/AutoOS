@@ -720,6 +720,206 @@ class RunDirCollisionTests(unittest.TestCase):
         self.assertIn("error", out)
 
 
+class TrackEntryClientTests(unittest.TestCase):
+    """A run on an own-account client (qoder, agy, claude) never touches the
+    gateway route its plan names, so it is no observation of that route:
+    no track record and hence no re-probe proposal (measured 2026-09-26:
+    agy/qoder NO-OPs were recorded as t2-worker failures)."""
+
+    def setUp(self):
+        self.cli = load_agent()
+
+    def plan(self, client):
+        return {"client": client, "route": {"combo": "t2-worker", "card": None}}
+
+    def test_a_gateway_client_run_is_recorded(self):
+        self.assertEqual(self.cli.track_entry(self.plan("opencode"), 0, 1.0)["route"],
+                         "t2-worker")
+
+    def test_an_own_account_client_run_is_not_recorded(self):
+        for client in ("qoder", "agy", "claude"):
+            self.assertIsNone(self.cli.track_entry(self.plan(client), 5, 1.0), client)
+
+
+class ProbeProposalTests(unittest.TestCase):
+    """TC2: propose a tool-calling re-probe when a real run's gate contradicts
+    the recorded tool_calls status of its route's legs (spec 5.6 track_entry,
+    catalog/ai-registry.json models[<model>].tool_calls, overlay
+    logs/routing/measured.json legs[<leg>].tool_calls.value)."""
+
+    REGISTRY = {
+        "providers": {
+            "clean": {"available": True, "trains_on_prompts": False},
+            "flaky": {"available": False, "trains_on_prompts": False},
+        },
+        "models": {
+            "big": {"tool_calls": "proven"},
+            "small": {"tool_calls": "unproven"},
+        },
+        "routes": {
+            "r-proven": {"legs": ["clean/big"]},
+            "r-mixed": {"legs": ["clean/big", "clean/small"]},
+            "r-with-unavailable-provider": {"legs": ["clean/big", "flaky/small"]},
+            "r-with-unavailable-leg": {"legs": ["clean/big", "clean/small"],
+                                       "unavailable_legs": {"clean/small": {}}},
+        },
+    }
+
+    def setUp(self):
+        self.cli = load_agent()
+
+    def test_pass_on_an_unproven_leg_is_unexpected_pass(self):
+        out = self.cli.probe_proposal("r-mixed", "pass", None, self.REGISTRY, {})
+        self.assertEqual(out["route"], "r-mixed")
+        self.assertEqual(out["kind"], "unexpected-pass")
+        self.assertEqual(out["legs"], ["clean/small"])
+        self.assertIn("re-probe to promote", out["reason"])
+        self.assertEqual(out["command"], "python3 tools/probe-toolcalls.py --route r-mixed")
+
+    def test_pass_on_all_proven_legs_is_none(self):
+        self.assertIsNone(self.cli.probe_proposal("r-proven", "pass", None, self.REGISTRY, {}))
+
+    def test_capability_fail_on_a_proven_first_leg_is_unexpected_fail(self):
+        out = self.cli.probe_proposal("r-proven", "fail", "capability", self.REGISTRY, {})
+        self.assertEqual(out["route"], "r-proven")
+        self.assertEqual(out["kind"], "unexpected-fail")
+        self.assertEqual(out["legs"], ["clean/big"])
+        self.assertIn("regressed", out["reason"])
+        self.assertEqual(out["command"], "python3 tools/probe-toolcalls.py --route r-proven")
+
+    def test_capability_fail_on_an_unproven_first_leg_is_none(self):
+        # r-mixed's first leg (clean/big) is proven, so put the unproven leg first.
+        registry = json.loads(json.dumps(self.REGISTRY))
+        registry["routes"]["r-mixed"]["legs"] = ["clean/small", "clean/big"]
+        self.assertIsNone(self.cli.probe_proposal("r-mixed", "fail", "capability", registry, {}))
+
+    def test_logic_fail_is_none(self):
+        self.assertIsNone(self.cli.probe_proposal("r-proven", "fail", "logic", self.REGISTRY, {}))
+
+    def test_overlay_value_wins_over_the_registry_value(self):
+        # Registry says proven; the overlay's probed value says otherwise.
+        overlay = {"legs": {"clean/big": {"tool_calls": {"value": "unproven"}}}}
+        out = self.cli.probe_proposal("r-proven", "pass", None, self.REGISTRY, overlay)
+        self.assertEqual(out["kind"], "unexpected-pass")
+        self.assertEqual(out["legs"], ["clean/big"])
+        # And the reverse: registry unproven, overlay promotes it to proven.
+        registry = json.loads(json.dumps(self.REGISTRY))
+        registry["routes"]["only"] = {"legs": ["clean/small"]}
+        overlay2 = {"legs": {"clean/small": {"tool_calls": {"value": "proven"}}}}
+        self.assertIsNone(self.cli.probe_proposal("only", "pass", None, registry, overlay2))
+
+    def test_a_provider_marked_unavailable_drops_its_leg(self):
+        # Only clean/big remains (proven) once flaky/small is dropped: no proposal.
+        out = self.cli.probe_proposal("r-with-unavailable-provider", "pass", None, self.REGISTRY, {})
+        self.assertIsNone(out)
+
+    def test_a_leg_listed_in_unavailable_legs_is_dropped(self):
+        # Only clean/big remains (proven) once clean/small is excluded: no proposal.
+        out = self.cli.probe_proposal("r-with-unavailable-leg", "pass", None, self.REGISTRY, {})
+        self.assertIsNone(out)
+
+    def test_unknown_route_is_none(self):
+        self.assertIsNone(self.cli.probe_proposal("no-such-route", "pass", None, self.REGISTRY, {}))
+        self.assertIsNone(self.cli.probe_proposal("no-such-route", "fail", "capability", self.REGISTRY, {}))
+
+    def test_jsonl_append_creates_the_file_and_keeps_earlier_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "routing", "probe-proposals.jsonl")
+            self.assertTrue(self.cli.record_probe_proposal(path, {"a": 1}))
+            self.assertTrue(self.cli.record_probe_proposal(path, {"a": 2}))
+            with open(path, encoding="utf-8") as fh:
+                lines = [json.loads(line) for line in fh]
+            self.assertEqual(lines, [{"a": 1}, {"a": 2}])
+
+    def test_a_write_error_is_printed_and_returns_false_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = os.path.join(tmp, "blocked")
+            with open(blocker, "w", encoding="utf-8") as fh:
+                fh.write("not a directory")
+            bad_path = os.path.join(blocker, "probe-proposals.jsonl")
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                ok = self.cli.record_probe_proposal(bad_path, {"a": 1})
+            self.assertFalse(ok)
+            self.assertIn("probe proposal not written", buf.getvalue())
+
+    def test_propose_reprobe_appends_at_and_sandbox_and_prints_a_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = os.path.join(tmp, "registry.json")
+            with open(registry_path, "w", encoding="utf-8") as fh:
+                json.dump(self.REGISTRY, fh)
+            overlay_path = os.path.join(tmp, "measured.json")  # never written: absent is fine
+            proposals_path = os.path.join(tmp, "routing", "probe-proposals.jsonl")
+            entry = {"route": "r-mixed", "gate": "pass", "failure_class": None}
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                self.cli.propose_reprobe(entry, registry_path, overlay_path, proposals_path, "/tmp/sandbox-x")
+            with open(proposals_path, encoding="utf-8") as fh:
+                logged = json.loads(fh.readline())
+            self.assertEqual(logged["route"], "r-mixed")
+            self.assertEqual(logged["kind"], "unexpected-pass")
+            self.assertEqual(logged["sandbox"], "/tmp/sandbox-x")
+            self.assertRegex(logged["at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            self.assertIn("autoos-agent: PROBE-PROPOSAL: unexpected-pass r-mixed:", buf.getvalue())
+
+    def test_propose_reprobe_is_silent_when_there_is_no_proposal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = os.path.join(tmp, "registry.json")
+            with open(registry_path, "w", encoding="utf-8") as fh:
+                json.dump(self.REGISTRY, fh)
+            proposals_path = os.path.join(tmp, "probe-proposals.jsonl")
+            entry = {"route": "r-proven", "gate": "pass", "failure_class": None}
+            self.cli.propose_reprobe(entry, registry_path, os.path.join(tmp, "measured.json"),
+                                     proposals_path, "/tmp/sandbox-x")
+            self.assertFalse(os.path.exists(proposals_path))
+
+    def test_a_missing_or_broken_registry_skips_the_proposal_with_a_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proposals_path = os.path.join(tmp, "probe-proposals.jsonl")
+            entry = {"route": "r-mixed", "gate": "pass", "failure_class": None}
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                self.cli.propose_reprobe(entry, os.path.join(tmp, "no-such-registry.json"),
+                                         os.path.join(tmp, "measured.json"), proposals_path, "/tmp/x")
+            self.assertFalse(os.path.exists(proposals_path))
+            self.assertIn("probe proposal skipped", buf.getvalue())
+
+    def test_a_broken_overlay_skips_the_proposal_with_a_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = os.path.join(tmp, "registry.json")
+            with open(registry_path, "w", encoding="utf-8") as fh:
+                json.dump(self.REGISTRY, fh)
+            overlay_path = os.path.join(tmp, "measured.json")
+            with open(overlay_path, "w", encoding="utf-8") as fh:
+                fh.write("{not json")
+            proposals_path = os.path.join(tmp, "probe-proposals.jsonl")
+            entry = {"route": "r-mixed", "gate": "pass", "failure_class": None}
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                self.cli.propose_reprobe(entry, registry_path, overlay_path, proposals_path, "/tmp/x")
+            self.assertFalse(os.path.exists(proposals_path))
+            self.assertIn("probe proposal skipped", buf.getvalue())
+
+    def test_a_write_error_in_propose_reprobe_does_not_raise(self):
+        # Proves the exit code path is safe: propose_reprobe must not raise
+        # even when the proposals file cannot be written, so cmd_run's
+        # `return rc` right after it is never reached by an exception.
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = os.path.join(tmp, "registry.json")
+            with open(registry_path, "w", encoding="utf-8") as fh:
+                json.dump(self.REGISTRY, fh)
+            blocker = os.path.join(tmp, "blocked")
+            with open(blocker, "w", encoding="utf-8") as fh:
+                fh.write("not a directory")
+            bad_proposals_path = os.path.join(blocker, "probe-proposals.jsonl")
+            entry = {"route": "r-mixed", "gate": "pass", "failure_class": None}
+            try:
+                self.cli.propose_reprobe(entry, registry_path, os.path.join(tmp, "measured.json"),
+                                         bad_proposals_path, "/tmp/x")
+            except Exception as exc:  # pragma: no cover - the point of the test
+                self.fail("propose_reprobe raised %r instead of failing closed" % exc)
+
+
 class NoOpGuardTests(unittest.TestCase):
     """Measured 2026-09-25: two t2-worker workers reported "all fixed" with
     placeholder commit hashes and changed nothing. An isolated run whose job
