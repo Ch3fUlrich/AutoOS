@@ -390,7 +390,10 @@ launch_hint() {
     # there is: command -v resolves it to the exact file that will run.
     if [[ -n "$verify" ]]; then
         exe="${verify%% *}"
-        if resolved="$(command -v "$exe" 2>/dev/null)"; then
+        # `test -x ...` proves an install without being the thing to run: the hint
+        # must not say "run test".
+        case "$exe" in test|\[|\[\[) exe="" ;; esac
+        if [[ -n "$exe" ]] && resolved="$(command -v "$exe" 2>/dev/null)"; then
             LAUNCH_PATH="$resolved"; LAUNCH_HOW="run  $exe"
             return 0
         fi
