@@ -1436,6 +1436,35 @@ if it "backup residual: aistack replace_dir_with_copy never lands inside a taken
     if (( ok )); then pass; else fail "replace_dir_with_copy's aside collided with an existing name"; fi
 fi
 
+if it "backup collision: aistack archive backup chooses a free same-second name"; then
+    d="$(mktemp -d)"
+    src="$d/omniroute"
+    archive="$d/backups/omniroute-20260101-000000.tar.gz"
+    first_archive="${archive%.tar.gz}-1.tar.gz"
+    second_archive="${archive%.tar.gz}-2.tar.gz"
+    original="$d/original.tar.gz"
+    mkdir -p "$src" "$(dirname "$archive")"
+    printf 'first\n' >"$src/state"
+    printf 'original archive\n' >"$original"
+    ln -s "$original" "$archive"
+    fn="$d/fn.sh"
+    sed -n '/^autoos_backup_path()/,/^}/p;/^backup_dir()/,/^}/p' "$AISTACK/ai-stack.sh" >"$fn"
+    # shellcheck disable=SC1090  # $fn is a scratch fixture generated above, not a repo file
+    first_out="$( . "$fn"; backup_dir "$src" "$archive" )"; rc_first=$?
+    printf 'second\n' >"$src/state"
+    # shellcheck disable=SC1090  # $fn is a scratch fixture generated above, not a repo file
+    second_out="$( . "$fn"; backup_dir "$src" "$archive" )"; rc_second=$?
+    ok=1
+    [[ $rc_first -eq 0 && $rc_second -eq 0 ]] || { ok=0; echo "backup failed: first=$rc_first second=$rc_second" >&2; }
+    [[ -L "$archive" && "$(cat "$original" 2>/dev/null)" == 'original archive' ]] || { ok=0; echo "existing archive was changed" >&2; }
+    [[ "$first_out" == *"to $first_archive"* ]] || { ok=0; echo "first archive path not printed: $first_out" >&2; }
+    [[ "$second_out" == *"to $second_archive"* ]] || { ok=0; echo "second archive path not printed: $second_out" >&2; }
+    [[ "$(tar -xOf "$first_archive" "$(basename "$src")/state" 2>/dev/null)" == first ]] || { ok=0; echo "first archive is missing or wrong" >&2; }
+    [[ "$(tar -xOf "$second_archive" "$(basename "$src")/state" 2>/dev/null)" == second ]] || { ok=0; echo "second archive is missing or wrong" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "aistack archive backup overwrote a same-second archive"; fi
+fi
+
 if it "aistack: init reuses the pinned opencode-serve password so phone logins survive"; then
     d="$(_aistack_sandbox)"
     mkdir -p "$d/home/.config/autoos"

@@ -76,20 +76,25 @@ CMD="${CMD:-status}"
 . "$REPO/configuration/env-file.sh"
 
 # ─── Small helpers ──────────────────────────────────────────────────────────
-# autoos_backup_path <path> [stamp]: the name for a NEW backup of <path> -
-# <path>.autoos-backup-<stamp>, then -1, -2, ... while that name is taken.
-# The stamp has one-second resolution and a plain overwrite used to destroy
-# an earlier same-second backup; see lib/linux/install.sh backup_path for the
-# source of this rule. This script is standalone (does not source that lib),
-# so it gets its own copy. <stamp> defaults to now; a test can pin it.
+# autoos_backup_path <path> [stamp] [extension]: the name for a NEW backup.
+# Without <extension>, it is <path>.autoos-backup-<stamp>, then -1, -2, ...;
+# with it, it is <path><extension>, then <path>-N<extension>. The stamp has
+# one-second resolution and a plain overwrite used to destroy an earlier
+# same-second backup; see lib/linux/install.sh backup_path for the source of
+# this rule. This script is standalone (does not source that lib), so it gets
+# its own copy. <stamp> defaults to now; a test can pin it.
 autoos_backup_path() {
-    local path="$1" stamp="${2:-}" base candidate n=0
-    [[ -n "$stamp" ]] || stamp="$(date +%Y%m%d-%H%M%S)"
-    base="$path.autoos-backup-$stamp"
-    candidate="$base"
+    local path="$1" stamp="${2:-}" extension="${3:-}" base candidate n=0
+    if [[ -n "$extension" ]]; then
+        base="$path"
+    else
+        [[ -n "$stamp" ]] || stamp="$(date +%Y%m%d-%H%M%S)"
+        base="$path.autoos-backup-$stamp"
+    fi
+    candidate="${base}${extension}"
     while [[ -e "$candidate" || -L "$candidate" ]]; do
         n=$((n + 1))
-        candidate="$base-$n"
+        candidate="${base}-${n}${extension}"
     done
     printf '%s\n' "$candidate"
 }
@@ -713,10 +718,12 @@ except ValueError:
 # backup_dir <dir> <archive>: a 0600 tar.gz of <dir>. A failed run leaves no
 # partial archive behind - it would pass for a good backup later.
 backup_dir() {
-    local dir="$1" archive="$2"
+    local dir="$1" archive="$2" stem
+    stem="${archive%.tar.gz}"
+    archive="$(autoos_backup_path "$stem" "" ".tar.gz")" || return 1
     if ! mkdir -p "$(dirname "$archive")" || ! chmod 700 "$(dirname "$archive")"; then return 1; fi
     if ! ( umask 077; tar -C "$(dirname "$dir")" -czf "$archive" "$(basename "$dir")" ); then
-        rm -f "$archive"
+        rm -f -- "$archive"
         echo "  ! backing up $dir failed (disk full?) - the partial archive was removed"
         return 1
     fi

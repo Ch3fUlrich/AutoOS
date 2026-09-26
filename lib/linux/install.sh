@@ -5071,11 +5071,23 @@ setup_wsl_agent_home() {
     # so the legacy path never dangles.
     if [[ -d "$cao_legacy" && ! -L "$cao_legacy" ]]; then
         if ! python3 -c "import os; os.mkfifo('$cao_legacy/.autoos-fifo-probe')" 2>/dev/null; then
-            local ts backup
+            local ts backup backup_base n=0
             ts="$(date +%Y%m%d-%H%M%S)"
-            backup="${cao_legacy}.backup-${ts}"
+            backup_base="${cao_legacy}.backup-${ts}"
+            backup="$backup_base"
+            while [[ -e "$backup" || -L "$backup" ]]; do
+                n=$((n + 1))
+                backup="${backup_base}-${n}"
+            done
             ui_info "CAO home $cao_legacy is on drvfs (no FIFO support) - relocating live state to $cao_native"
-            cp -a "$cao_legacy" "$backup"
+            if ! cp -a "$cao_legacy" "$backup"; then
+                # A partial copy would pass for a good backup later. Return 0:
+                # this runs as a postInstall step under set -e, and a failed
+                # relocation must not abort the rest of the install queue.
+                rm -rf -- "$backup"
+                ui_err "could not back up legacy CAO home $cao_legacy - not relocating it"
+                return 0
+            fi
             for sub in agent-context agent-store db workflows skills profiles; do
                 [[ -d "$cao_legacy/$sub" ]] && cp -a "$cao_legacy/$sub/." "$cao_native/$sub/"
             done
