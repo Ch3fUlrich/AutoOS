@@ -47,3 +47,21 @@ if it "shellcheck is clean"; then
     fi
 fi
 
+# The describe blocks live in tests/linux/*.sh and are linted one file per
+# process, as CI does: one shellcheck over the whole suite needed more than
+# 2.5 GB and OOM-killed a 16 GB host twice (2026-09-26); each part alone peaks
+# near 1.2 GB. Stops at the first part with a finding or out of memory and
+# reports it through the same pass / fail / loud-skip rules as above.
+if it "shellcheck per part: every tests/linux file is clean, one process each"; then
+    if has_cmd shellcheck; then
+        part_rc=0
+        for part in tests/linux/*.sh; do
+            run_shellcheck "$part"; part_rc=$?
+            if (( part_rc != 0 )); then SHELLCHECK_OUT="$part: $SHELLCHECK_OUT"; break; fi
+        done
+        report_shellcheck "$part_rc"
+    else
+        skip "no shellcheck binary"
+    fi
+fi
+

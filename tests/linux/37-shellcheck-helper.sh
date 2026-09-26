@@ -207,9 +207,11 @@ fi
 if it "shellcheck helper: SHELLCHECK_FILES, the suite's file set, is the file set CI lints"; then
     ok=1
     ci_yml="$ROOT/.github/workflows/ci.yml"
-    grep -qF -- 'run: shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh' "$ci_yml" \
+    grep -qF -- 'shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh' "$ci_yml" \
         || { ok=0; echo "ci.yml no longer has: shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh" >&2; }
-    ci_args="$(sed -n 's/^[[:space:]]*run:[[:space:]]*shellcheck -S warning //p' "$ci_yml")"
+    grep -qF -- 'tests/linux/*.sh' "$ci_yml" \
+        || { ok=0; echo "ci.yml no longer has: shellcheck on tests/linux/*.sh parts" >&2; }
+    ci_args="$(sed -n 's/^[[:space:]]*shellcheck -S warning //p' "$ci_yml" | head -n1)"
     if [[ -z "$ci_args" ]]; then
         ok=0; echo "no 'run: shellcheck -S warning ...' line found in ci.yml" >&2
     elif ! declare -p SHELLCHECK_FILES >/dev/null 2>&1; then

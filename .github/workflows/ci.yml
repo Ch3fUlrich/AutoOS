@@ -49,7 +49,9 @@ jobs:
           node tests/test-web-progress.js
 
       - name: shellcheck
-        run: shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh
+        run: |
+          shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh
+          for f in tests/linux/*.sh; do shellcheck -S warning "$f" || exit 1; done
 
       - name: yamllint
         run: |
