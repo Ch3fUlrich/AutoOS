@@ -1597,6 +1597,21 @@ def _ok_line(registry) -> str:
     )
 
 
+def strip_comments(doc):
+    """A copy of `doc` with every "$comment" key removed at any depth.
+
+    Registry prose is hand-edited after migration, so `validate`'s "no drift
+    from a fresh registry-convert.py render" comparison strips it from both
+    sides first; structure, routes, legs, models and providers still match
+    exactly. Never mutates its input."""
+    if isinstance(doc, dict):
+        return {key: strip_comments(value)
+                for key, value in doc.items() if key != "$comment"}
+    if isinstance(doc, list):
+        return [strip_comments(value) for value in doc]
+    return doc
+
+
 def _build_fresh_registry() -> dict:
     spec = importlib.util.spec_from_file_location("autoos_registry_convert", CONVERTER_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -1627,7 +1642,7 @@ def _cmd_validate(args) -> int:
             print(problem)
         return 1
     fresh = _build_fresh_registry()
-    if fresh != registry:
+    if strip_comments(fresh) != strip_comments(registry):
         print("drift: %s differs from a fresh registry-convert.py render" % args.registry)
         return 1
     print(_ok_line(registry))
