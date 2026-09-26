@@ -3514,11 +3514,11 @@ antigravity_run() {
                 return 0
             }
             curl() {
-                local a prev="" url="" hdr="" body="" cfg=0 head=0 fail=0 n extra size ver id file st
+                local a prev="" url="" hdr="" body="" cfg=0 head=0 fail=0 maxsize="" n extra size ver id file st
                 n="$(( $(cat "$sb/ncalls" 2>/dev/null || echo 0) + 1 ))"; printf '%s' "$n" >"$sb/ncalls"
                 printf 'curl %s\n' "$*" >>"$log"
                 for a in "$@"; do
-                    case "$prev" in -D) hdr="$a" ;; -o) body="$a" ;; --config) [[ "$a" != - ]] || cfg=1 ;; esac
+                    case "$prev" in -D) hdr="$a" ;; -o) body="$a" ;; --max-filesize) maxsize="$a" ;; --config) [[ "$a" != - ]] || cfg=1 ;; esac
                     case "$a" in --head) head=1 ;; --fail) fail=1 ;; esac
                     prev="$a"; url="$a"
                 done
@@ -3546,6 +3546,11 @@ antigravity_run() {
                             [[ ! -f "$sb/get.status" ]] || st="$(<"$sb/get.status")"
                             [[ ! -e "$sb/kill-on-download" ]] || kill -TERM "$BASHPID"
                             [[ ! -e "$sb/exit-on-download" ]] || exit 5
+                            # like curl: a body announced as bigger than --max-filesize is refused
+                            # (exit 63) after its headers, before any of it is written
+                            if [[ -n "$maxsize" ]] && (( size > maxsize )); then
+                                printf 'content-length: %s\n' "$size" >"$extra"; head=1; reply 200 -; return 63
+                            fi
                         fi
                         printf 'content-length: %s\ncontent-type: application/x-tar\nx-goog-hash: crc32c=AAAAAA==\n' "$size" >"$extra"
                         reply "$st" "$file" ;;
@@ -3910,6 +3915,47 @@ if it "antigravity discovery: the minimum size defaults to 50 MB, and the HEAD a
     grep -E -- ' -o [^ ]*pkg\.tgz' "$sb/calls.log" | grep -q -- ' -D ' || { ok=0; echo "the download does not record its headers (-D)" >&2; }
     rm -rf "$sb"
     if (( ok )); then pass; else fail "the size bound or the transport hardening is not what the design says"; fi
+fi
+
+if it "antigravity download bound: the tarball GET carries --max-filesize (the HEAD length plus 1 MiB), and a server announcing more stops the download with nothing left behind"; then
+    ok=1
+    # (1) the bound is in the argv, computed from the length the HEAD announced
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb"
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "state=[$AG_STATE]: ${AG_OUT:0:400}" >&2; }
+    line="$(grep -E -- ' -o [^ ]*pkg\.tgz' "$sb/calls.log")"
+    [[ "$line" =~ --max-filesize\ ([0-9]+)($|\ ) ]] || { ok=0; echo "the download has no --max-filesize: $line" >&2; }
+    [[ "${BASH_REMATCH[1]:-}" == "$((AG_SIZE + 1048576))" ]] || { ok=0; echo "--max-filesize is [${BASH_REMATCH[1]:-none}], expected $((AG_SIZE + 1048576)) (the $AG_SIZE bytes of the HEAD plus 1 MiB)" >&2; }
+    rm -rf "$sb"
+    # (2) the number comes from the HEAD, not from the file that happens to be served
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    printf '%s' "$((AG_SIZE + 1000))" >"$sb/head.size"
+    antigravity_run "$sb" AG_ENTRY=direct
+    line="$(grep -E -- ' -o [^ ]*pkg\.tgz' "$sb/calls.log")"
+    [[ "$line" =~ --max-filesize\ ([0-9]+)($|\ ) && "${BASH_REMATCH[1]}" == "$((AG_SIZE + 1000 + 1048576))" ]] \
+        || { ok=0; echo "the HEAD said $((AG_SIZE + 1000)) bytes, so --max-filesize must be $((AG_SIZE + 1000 + 1048576)): $line" >&2; }
+    rm -rf "$sb"
+    # (3) a server that announces more than the bound is stopped by curl: a failed download, nothing left
+    for start in fresh update; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        if [[ "$start" == update ]]; then
+            antigravity_run "$sb" >/dev/null
+            antigravity_serve "$sb" "$AG_VB" "$AG_IDB"
+        fi
+        printf '%s' "$((AG_SIZE + 1048576 + 1))" >"$sb/get.size"
+        before="$(antigravity_tree_state "$sb")"
+        antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$start: state=[$AG_STATE] rc=[$AG_RC] (must fail)" >&2; }
+        [[ "$AG_OUT" == *"(download)"* && "$AG_OUT" == *"curl exit 63"* ]] || { ok=0; echo "$start: the failure is not the download being stopped by --max-filesize (curl exit 63): ${AG_OUT:0:500}" >&2; }
+        [[ -z "$(antigravity_debris "$sb")" ]] || { ok=0; echo "$start: left behind: $(antigravity_debris "$sb" | tr '\n' ' ')" >&2; }
+        if [[ "$start" == update ]]; then
+            [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "$start: the existing install or its surroundings changed" >&2; }
+        else
+            [[ -z "$(find "$sb/home" -type f)" ]] || { ok=0; echo "$start: files were left: $(find "$sb/home" -type f | tr '\n' ' ')" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "a server that lies about the size can fill the disk before the size check"; fi
 fi
 
 if it "antigravity verification failures: each one leaves an existing install untouched and no staging directory behind"; then

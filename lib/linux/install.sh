@@ -983,7 +983,11 @@ antigravity_on_signal() {
 # defence (see the header above).
 antigravity_download_verify() {
     local stage="$1" pkg="$1/pkg.tgz" ghdr="$1/get.hdr" list="$1/members.txt" rc=0 size getlen reason
-    antigravity_fetch "$ANTIGRAVITY_URL" "$ghdr" "$pkg" "" --fail --retry 3 --speed-limit 1024 --speed-time 60 || rc=$?
+    # --max-filesize: the HEAD length (validated as a number by antigravity_hub_head)
+    # plus 1 MiB of slack, so a server that lies about its size cannot fill the disk
+    # before the size check below gets to say no (curl stops with exit 63).
+    antigravity_fetch "$ANTIGRAVITY_URL" "$ghdr" "$pkg" "" --fail --retry 3 --speed-limit 1024 --speed-time 60 \
+        --max-filesize "$(( ANTIGRAVITY_SIZE + 1048576 ))" || rc=$?
     if (( rc != 0 )); then
         ui_err "Antigravity (download): could not download ${ANTIGRAVITY_URL} (curl exit ${rc}); nothing was installed or changed."
         return 1
