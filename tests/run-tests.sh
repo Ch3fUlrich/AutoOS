@@ -9,6 +9,12 @@
 #   bash tests/run-tests.sh --filter catalog
 #   bash tests/run-tests.sh --filter usb,catalog   comma = OR (shard union)
 #
+# Environment:
+#   AUTOOS_SHELLCHECK_REQUIRED=1  a shellcheck that runs out of memory FAILS the
+#                                 "shellcheck is clean" cases (default: a loud skip)
+#   AUTOOS_MEMINFO=<file>         meminfo that sizes shellcheck's memory limit
+#                                 (default /proc/meminfo; unreadable = no limit)
+#
 # No test installs anything. Providers are asserted on the PLANNED command,
 # never on system state.
 #
@@ -231,6 +237,14 @@ report_shellcheck() {
 
 # ─── Load the libraries under test ──────────────────────────────────────────
 cd "$ROOT" || { echo "cannot enter $ROOT" >&2; exit 1; }
+
+# The ONE list of files the "shellcheck is clean" case lints, and it must stay the
+# list CI lints (.github/workflows/ci.yml: `shellcheck -S warning setup.sh
+# lib/linux/*.sh tests/run-tests.sh`; a test compares the two). One process over
+# all of them on purpose, not one per file: files on one command line resolve
+# each other's `source=` directives, and alone setup.sh draws 8 false SC2034.
+SHELLCHECK_FILES=(setup.sh lib/linux/*.sh tests/run-tests.sh)
+
 # shellcheck source=../lib/linux/ui.sh
 . lib/linux/ui.sh
 # shellcheck source=../lib/linux/detect.sh
@@ -9977,9 +9991,8 @@ if it "shellcheck is clean"; then
     # Fall back to the official image when shellcheck is not installed. This
     # check being skipped locally is precisely how a shellcheck failure reached
     # CI unnoticed, so "no binary" should not silently mean "no check".
-    files=(setup.sh lib/linux/*.sh tests/run-tests.sh)
     if has_cmd shellcheck; then
-        run_shellcheck "${files[@]}"; report_shellcheck "$?"
+        run_shellcheck "${SHELLCHECK_FILES[@]}"; report_shellcheck "$?"
     elif has_cmd docker && docker info >/dev/null 2>&1; then
         # MSYS_NO_PATHCONV: same Windows Git Bash trap as the answer-file
         # template lint above — MSYS rewrites the bare "/mnt" into a host path
@@ -9987,7 +10000,7 @@ if it "shellcheck is clean"; then
         # Without this the whole lint FAILS (not skips) on Windows, which is
         # where this repository is developed.
         out="$(MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable \
-               -S warning "${files[@]}" 2>&1)"; rc=$?
+               -S warning "${SHELLCHECK_FILES[@]}" 2>&1)"; rc=$?
         if [[ $rc -eq 0 ]]; then pass; else fail "(via docker) $(printf '%s' "$out" | head -20)"; fi
     else
         skip "no shellcheck binary and no usable docker"
@@ -10183,6 +10196,36 @@ if it "shellcheck helper: the rescue-bootstrap case runs its own two files throu
         || { ok=0; echo "oom: $(_sc_seen "$out")" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the rescue-bootstrap lint does not share the bounded helper and verdict"; fi
+fi
+
+if it "shellcheck helper: the case starts ONE shellcheck -S warning over setup.sh, every lib/linux/*.sh and tests/run-tests.sh"; then
+    d="$(_sc_sandbox)"
+    _sc_case_run "$d" 0 '' 'shellcheck is clean' >/dev/null
+    want="argv: -S warning $(cd "$ROOT" && printf '%s ' setup.sh lib/linux/*.sh)tests/run-tests.sh"
+    calls="$(grep -c '^argv: ' "$d/log" 2>/dev/null)"
+    got="$(grep '^argv: ' "$d/log" 2>/dev/null)"
+    rm -rf "$d"
+    if [[ "$calls" == 1 && "$got" == "$want" ]]; then pass
+    else fail "calls: [$calls] (want 1); argv: [$got] (want [$want])"; fi
+fi
+
+if it "shellcheck helper: SHELLCHECK_FILES, the suite's file set, is the file set CI lints"; then
+    ok=1
+    ci_yml="$ROOT/.github/workflows/ci.yml"
+    grep -qF -- 'run: shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh' "$ci_yml" \
+        || { ok=0; echo "ci.yml no longer has: shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh" >&2; }
+    ci_args="$(sed -n 's/^[[:space:]]*run:[[:space:]]*shellcheck -S warning //p' "$ci_yml")"
+    if [[ -z "$ci_args" ]]; then
+        ok=0; echo "no 'run: shellcheck -S warning ...' line found in ci.yml" >&2
+    elif ! declare -p SHELLCHECK_FILES >/dev/null 2>&1; then
+        ok=0; echo "SHELLCHECK_FILES is not defined" >&2
+    else
+        # shellcheck disable=SC2086  # deliberate: CI's shell expands the glob in that line, so must this
+        want="$(cd "$ROOT" && printf '%s\n' $ci_args)"
+        got="$(printf '%s\n' "${SHELLCHECK_FILES[@]}")"
+        [[ "$got" == "$want" ]] || { ok=0; echo "suite lints [$(tr '\n' ' ' <<<"$got")] but CI lints [$(tr '\n' ' ' <<<"$want")]" >&2; }
+    fi
+    if (( ok )); then pass; else fail "the suite and .github/workflows/ci.yml lint different files"; fi
 fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────
