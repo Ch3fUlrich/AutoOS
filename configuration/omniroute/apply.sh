@@ -75,10 +75,9 @@ fi
 # Provider registry: catalog/ai-registry.json's `providers` section is the
 # single source of truth for which api-keys.yml name maps to which OmniRoute
 # provider id and for the provider-specific connection data (the Cloudflare
-# UA quirk on groq/cerebras). catalog/providers.json is retired as apply's
-# source as of task A5a (routing v2 spec 3.2, D11) - it still exists (a later
-# task deletes it) but is no longer read here. apply.ps1 reads the same
-# registry file, so the two scripts cannot drift. Only providers with an
+# UA quirk on groq/cerebras). catalog/providers.json is deleted (task A5e);
+# catalog/ai-registry.json is the only provider source. apply.ps1 reads the
+# same registry file, so the two scripts cannot drift. Only providers with an
 # omniroute_id are registered: meta (unregistered 2026-09-23, openrouter-
 # first, no combo leg) and the omniroute client key carry none and are
 # skipped, exactly as before. A provider every one of whose route legs the

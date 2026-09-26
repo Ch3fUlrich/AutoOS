@@ -1678,20 +1678,6 @@ def _ok_line(registry) -> str:
     )
 
 
-def strip_comments(doc):
-    """A copy of `doc` with every "$comment" key removed at any depth.
-
-    Registry prose is hand-edited, so a comment-stripped comparison ignores
-    it while structure, routes, legs, models and providers still match
-    exactly. Never mutates its input."""
-    if isinstance(doc, dict):
-        return {key: strip_comments(value)
-                for key, value in doc.items() if key != "$comment"}
-    if isinstance(doc, list):
-        return [strip_comments(value) for value in doc]
-    return doc
-
-
 def _cmd_check(args) -> int:
     registry = load(args.registry)
     for line in privacy_exemption_lines(registry):

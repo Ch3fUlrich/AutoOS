@@ -7192,8 +7192,9 @@ Test-Case 'apply scripts carry the Cloudflare User-Agent fix and stay openrouter
     $ps1 = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
     $sh = Get-Content (Join-Path $Root 'configuration\omniroute\apply.sh') -Raw
     foreach ($text in @($ps1, $sh)) {
-        # Task A5a (routing v2 spec 3.2, D11) moved the provider source from
-        # catalog/providers.json to catalog/ai-registry.json's `providers`.
+        # The UA quirk now lives once, in the registry; apply.sh only passes
+        # provider_data through. Task A5e deleted catalog/providers.json;
+        # catalog/ai-registry.json is the only provider source.
         Assert-True ($text -match 'ai-registry\.json') 'does not read catalog/ai-registry.json'
         Assert-True ($text -match 'provider-specific-data') 'provider-specific-data flag missing'
         Assert-True ($text -notmatch "'meta'|`"meta:|meta:muse-code") 'muse-code mapping must stay removed (openrouter-first)'
@@ -7222,8 +7223,9 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
     Assert-True ($null -ne $jsonDef) 'Get-AutoOSProviderDataJson missing from apply.ps1'
     . ([scriptblock]::Create($mapDef.Extent.Text + "`n" + $jsonDef.Extent.Text))
-    # Task A5a: the real call site now points at catalog/ai-registry.json, so
-    # this test does too - it exercises the exact call apply.ps1 itself makes.
+    # Task A5e: catalog/providers.json is deleted; the real call site now
+    # points at catalog/ai-registry.json, so this test does too - it exercises
+    # the exact call apply.ps1 itself makes.
     $registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\ai-registry.json')
     $ProviderData = $registry.Data
     Assert-Equal $registry.Map['groq'] 'groq'
@@ -7234,7 +7236,8 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     Assert-True (-not $registry.Map.Contains('meta')) 'meta must not be registered (2026-09-23)'
     Assert-True (-not $registry.Map.Contains('omniroute')) 'omniroute is the client key, not a provider'
     # antigravity and cc exist only in the registry (no catalog/providers.json
-    # entry) - switching the source picks them up for the first time.
+    # entry - it was deleted in task A5e) - switching the source picks them up
+    # for the first time.
     Assert-Equal $registry.Map['antigravity'] 'antigravity'
     Assert-Equal $registry.Map['cc'] 'cc'
     # Regression lock for today's registry (2026-09-26): cerebras (402/401
@@ -7311,7 +7314,7 @@ Test-Case 'Get-AutoOSProviderMap skips a provider whose every route leg is unava
         # mixed: one leg down (r1), one leg live (r2) - not EVERY leg.
         Assert-True ($registry.Map.Contains('mixed')) 'mixed (one live leg) was wrongly all-unavailable-skipped'
         # noomni has no omniroute_id - the pre-existing skip rule, never
-        # even considered (matches today's providers.json behaviour).
+        # even considered (matches today's ai-registry.json behaviour).
         Assert-True (-not $registry.Map.Contains('noomni')) 'noomni (no omniroute_id) must never appear in Map'
     } finally {
         Remove-Item -LiteralPath $fixture -ErrorAction SilentlyContinue
@@ -7319,9 +7322,9 @@ Test-Case 'Get-AutoOSProviderMap skips a provider whose every route leg is unava
 }
 
 Test-Case 'provider registry is the single source for apply, mirror and tier maps' {
-    # catalog/providers.json is the one map; the helper asserts every consumer's
-    # in-memory map equals it, so a hand-edited copy or a half-done registry
-    # edit fails loudly instead of routing a provider to the wrong name.
+    # catalog/ai-registry.json is the one map; the helper asserts every
+    # consumer's in-memory map equals it, so a hand-edited copy or a half-done
+    # registry edit fails here instead of routing a provider to a wrong name.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $out = & $py.Source (Join-Path $Root 'tests\helpers\check-provider-registry.py') 2>&1 | Out-String
