@@ -331,9 +331,12 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None) 
         combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
 
     card = routing.normalize_v2(parsed_card)
+    # the registry class of the combo that actually runs (an explicit --model may
+    # have replaced the resolver's route); the track record keys on it
+    route_class = registry.get("routes", {}).get(combo, {}).get("class")
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["kind"] == "review",
-            "bucket": result["bucket"]}
+            "bucket": result["bucket"], "class": route_class}
 
 
 class PrivacyRefused(ValueError):
@@ -739,6 +742,9 @@ def track_class(combo: str | None) -> str | None:
 def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     """The track-record line for a finished run, or None when it has no combo.
 
+    The class is the route's registry class (RUNV2 sets ``route["class"]``),
+    else the v1 tier prefix's class.
+
     Only a card or --tier run carries a combo (--free is keyless); a gateway
     run's served leg, effort and tokens are unknown to this process, so they
     are recorded as unknown/0 until the resolver measures them. rc is the same
@@ -753,7 +759,7 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     client = clients.CLIENTS.get(plan.get("client"))
     if client is not None and not client.gateway:
         return None  # an own-account client never ran the gateway route it names
-    klass = track_class(route.get("combo"))
+    klass = route.get("class") or track_class(route.get("combo"))
     if not klass:
         return None
     card = route.get("card") or {}

@@ -1778,6 +1778,29 @@ class RunCardV2Tests(unittest.TestCase):
         plan = {"client": "opencode", "route": {"combo": "t2-worker", "card": {}}}
         self.assertEqual(self.agent.track_entry(plan, 0, 1.0)["bucket"], "unknown")
 
+    # --- review-runv2-a4b: the class is the route's own, not its t1/t2/t3 prefix
+
+    def test_track_entry_uses_the_routes_class_over_the_tier_prefix(self):
+        plan = {"client": "opencode", "route": {"combo": "t1-orchestrator-free-only",
+                                                "class": "free", "card": {}}}
+        self.assertEqual(self.agent.track_entry(plan, 0, 1.0)["class"], "free")
+
+    def test_track_entry_records_a_route_without_a_tier_prefix(self):
+        plan = {"client": "opencode", "route": {"combo": "gemini-3.8-flash",
+                                                "class": "cheap", "card": {}}}
+        entry = self.agent.track_entry(plan, 0, 1.0)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["class"], "cheap")
+
+    def test_v2_route_carries_the_registry_class_of_its_combo(self):
+        # r-cheap has no t1/t2/t3 prefix: its class comes from the registry only
+        fake = {"route": "r-cheap", "state": "ready", "reason": "stub",
+                "bucket": "S1", "defer_until": None}
+        with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: dict(fake)):
+            route = self.agent._resolve_route_v2(
+                self.args(), {"kind": "review", "paths": "tools/registry.py"}, self.cfg(), None)
+        self.assertEqual(route["class"], "cheap")
+
 
 class ModelOverridePrivacyTests(unittest.TestCase):
     """PRIV3 (review-priv, qoder 2026-09-26): an explicit --model replaced a
