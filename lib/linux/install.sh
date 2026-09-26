@@ -1603,8 +1603,11 @@ install_devin_cli() {
 # execution starts - see setup.sh stage 4). claude-autostart and
 # herdr-sessions both restore Claude Code sessions across a reboot by
 # snapshotting and replaying panes; running both would double-restore the
-# same sessions, so each refuses to install while the other is present,
-# checked before either writes anything.
+# same sessions. Kept for callers that treat both cases as a conflict; the
+# two installers below split them (AGENTS.md hard rule 3): the other selected
+# in this plan is still an error, the other merely already installed is a
+# skip so a re-run reports skipped, never fails. Checked before either
+# writes anything.
 autoos_conflict_present() {
     local other="$1"
     [[ " ${PLAN_IDS} " == *" ${other} "* ]] && return 0
@@ -1612,9 +1615,14 @@ autoos_conflict_present() {
 }
 
 install_claude_autostart() {
-    if autoos_conflict_present herdr-sessions; then
-        ui_err "claude-autostart: herdr-sessions is already installed or selected - the two restore Claude Code sessions the same way and must not both run. Remove herdr-sessions first (its driver's --unregister) or leave claude-autostart unselected."
+    if [[ " ${PLAN_IDS} " == *" herdr-sessions "* ]]; then
+        ui_err "claude-autostart: herdr-sessions is selected in this plan - the two restore Claude Code sessions the same way and must not both run. Remove herdr-sessions first (its driver's --unregister) or leave claude-autostart unselected."
         return 1
+    fi
+    if script_is_installed herdr-sessions; then
+        ui_info "claude-autostart: skipped: herdr-sessions is already installed - the two restore Claude Code sessions the same way and must not both run. Remove herdr-sessions first (its driver's --unregister) or leave claude-autostart unselected."
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
     fi
 
     local appdir="${AUTOOS_ROOT}/lib/linux"
@@ -1749,9 +1757,14 @@ claude_autostart_interval() {
 install_herdr_sessions() {
     INSTALL_SCRIPT_STATE=""
 
-    if autoos_conflict_present claude-autostart; then
-        ui_err "herdr-sessions: claude-autostart is already installed or selected - the two restore Claude Code sessions the same way and must not both run. Remove claude-autostart first (./setup.sh --undo restores any file it backed up; its systemd units still need disabling by hand) or leave herdr-sessions unselected."
+    if [[ " ${PLAN_IDS} " == *" claude-autostart "* ]]; then
+        ui_err "herdr-sessions: claude-autostart is selected in this plan - the two restore Claude Code sessions the same way and must not both run. Remove claude-autostart first (./setup.sh --undo restores any file it backed up; its systemd units still need disabling by hand) or leave herdr-sessions unselected."
         return 1
+    fi
+    if script_is_installed claude-autostart; then
+        ui_info "herdr-sessions: skipped: claude-autostart is already installed - the two restore Claude Code sessions the same way and must not both run. Remove claude-autostart first (./setup.sh --undo restores any file it backed up; its systemd units still need disabling by hand) or leave herdr-sessions unselected."
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
     fi
 
     local profile; profile="$(answer herdr_sessions_profile '')"
