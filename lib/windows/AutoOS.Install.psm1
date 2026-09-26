@@ -2251,6 +2251,139 @@ function Set-AutoOSOpenCodeConfig {
     }
 }
 
+function New-AutoOSSkillLink {
+    <#
+      .SYNOPSIS
+        Make one directory link (a junction on Windows, a symlink elsewhere) and
+        prove it exists.
+      .DESCRIPTION
+        The link is read back after New-Item: a link that was silently not created
+        must never be reported as linked. Returns $false, after a warn line, when
+        it could not be made. A junction needs no administrator rights; other
+        hosts only run this from the test suite, where a symlink stands in for it.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Target)
+    $type = 'SymbolicLink'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $type = 'Junction' }
+    try {
+        $null = New-Item -ItemType $type -Path $Path -Target $Target
+    } catch {
+        Write-AutoOSLine "could not link ${Path}: $($_.Exception.Message)" -Level warn
+        return $false
+    }
+    $made = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $made -or -not $made.LinkType) {
+        Write-AutoOSLine "could not link ${Path}: no link was created" -Level warn
+        return $false
+    }
+    return $true
+}
+
+function Sync-AutoOSSkillDirs {
+    <#
+      .SYNOPSIS
+        Mirror every skill in -Source into -Destination as one directory junction per skill.
+
+      .DESCRIPTION
+        A skill is a direct child of -Source that holds a SKILL.md. -Destination is a
+        real directory of its own, so a user's skills sit beside ours and are never
+        touched:
+          absent                                    -> linked
+          already our link to the same directory    -> skipped
+          our link, dangling or pointing elsewhere
+            under -Source's parent (this repo)      -> repointed
+          anything else (a user's directory or file, a foreign link) -> left alone
+        A -Destination that is itself a link (the old whole-directory junction
+        layout) is not written through - that would create links inside the repo or a
+        clone - it is left with one warning that names the fix. A link that cannot be
+        made is a warning, never an ok line. Returns $false when a link failed.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        Write-AutoOSLine "no skills to link: $Source is not a directory" -Level muted
+        return $true
+    }
+    $skills = @(Get-ChildItem -LiteralPath $Source -Directory |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'SKILL.md') -PathType Leaf } |
+        Sort-Object Name)
+    if ($skills.Count -eq 0) {
+        Write-AutoOSLine "no skills to link: nothing under $Source holds a SKILL.md" -Level muted
+        return $true
+    }
+    if ($script:DryRun) {
+        Write-AutoOSLine "would link $($skills.Count) skill(s) from $Source into $Destination" -Level muted
+        return $true
+    }
+
+    $destItem = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    if ($destItem -and $destItem.LinkType) {
+        Write-AutoOSLine "$Destination is a link (the old whole-directory layout); not writing through it." -Level warn
+        Write-AutoOSLine "    To mirror the skills one by one instead: cmd /c rmdir `"$Destination`" and run setup again." -Level muted
+        return $true
+    }
+    if ($destItem -and -not $destItem.PSIsContainer) {
+        Write-AutoOSLine "$Destination is a file - skills not linked" -Level warn
+        return $false
+    }
+    if (-not $destItem) {
+        try { $null = New-Item -ItemType Directory -Path $Destination -Force }
+        catch {
+            Write-AutoOSLine "could not create ${Destination}: $($_.Exception.Message) - skills not linked" -Level warn
+            return $false
+        }
+    }
+
+    $comparison = [StringComparison]::Ordinal
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $comparison = [StringComparison]::OrdinalIgnoreCase }
+    $ownRoot = ([IO.Path]::GetFullPath((Split-Path -Parent $Source))).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+
+    $ok = $true
+    $skipped = 0
+    foreach ($skill in $skills) {
+        $link = Join-Path $Destination $skill.Name
+        $want = [IO.Path]::GetFullPath($skill.FullName).TrimEnd('\', '/')
+        $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+        if (-not $item) {
+            if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
+                Write-AutoOSLine "linked $($skill.Name) into $Destination" -Level ok
+            } else { $ok = $false }
+        } elseif ($item.LinkType) {
+            # Target is a string[] in Windows PowerShell 5.1 and may be relative.
+            $raw = [string]@($item.Target)[0]
+            $have = ''
+            if ($raw) {
+                if (-not [IO.Path]::IsPathRooted($raw)) { $raw = Join-Path $Destination $raw }
+                try { $have = [IO.Path]::GetFullPath($raw).TrimEnd('\', '/') } catch { $have = '' }
+            }
+            if ($have -and [string]::Equals($have, $want, $comparison)) {
+                $skipped++
+            } elseif ($have -and $have.StartsWith($ownRoot, $comparison)) {
+                # Ours (it points into this repo) but dangling or at another skill.
+                try { $item.Delete() }
+                catch {
+                    Write-AutoOSLine "could not repoint ${link}: $($_.Exception.Message) - left as it was" -Level warn
+                    $ok = $false
+                    continue
+                }
+                if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
+                    Write-AutoOSLine "repointed $($skill.Name) (was $raw)" -Level ok
+                } else { $ok = $false }
+            } else {
+                Write-AutoOSLine "kept ${link}: a link of your own, not an AutoOS link" -Level muted
+            }
+        } else {
+            Write-AutoOSLine "kept ${link}: yours, not an AutoOS link" -Level muted
+        }
+    }
+    if ($skipped -gt 0) {
+        Write-AutoOSLine "skipped $skipped skill link(s) that are already in place in $Destination" -Level muted
+    }
+    return $ok
+}
+
 function Set-AutoOSOpenHandsConfig {
     <#
       .SYNOPSIS Configure OpenHands settings, models, profiles, skills, and automations.
@@ -2260,8 +2393,8 @@ function Set-AutoOSOpenHandsConfig {
         ~/.openhands/profiles/ (direct providers plus the gateway-routed
         omniroute-tier* / litellm-tier* profiles from
         configuration/openhands/tier-profiles.json),
-        wires agent-skills via junction/symlink, creates ACP agent profiles, and
-        seeds default configuration.
+        mirrors the repo skills into ~/.openhands/skills (one junction per skill),
+        creates ACP agent profiles, and seeds default configuration.
     #>
     $openhandsDir = Join-Path $HOME '.openhands'
 
@@ -2300,15 +2433,13 @@ function Set-AutoOSOpenHandsConfig {
     $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
     $context7Key = if ($env:CONTEXT7_API_KEY) { $env:CONTEXT7_API_KEY } elseif ($secrets.ContainsKey('context7')) { $secrets['context7'] } else { $null }
 
+    # Native OpenHands (host CLI, Windows) loads user skills from
+    # ~/.openhands/skills. The sandbox containers do not mount it: they read the
+    # workspace's .agents/skills instead (AGENTS.md section 8). One junction per
+    # skill; a failure is already reported and must not stop the rest.
     $skillsSource = Get-AutoOSSkillsSource
-    $skillsTarget = Join-Path $openhandsDir 'skills'
-    if ($skillsSource -and (Test-Path $skillsSource) -and -not (Test-Path $skillsTarget)) {
-        try {
-            cmd.exe /c "mklink /J `"$skillsTarget`" `"$skillsSource`"" | Out-Null
-            Write-AutoOSLine "Linked agent-skills to OpenHands skills directory" -Level ok
-        } catch {
-            Write-AutoOSLine "Could not create skills junction: $_" -Level warn
-        }
+    if ($skillsSource) {
+        $null = Sync-AutoOSSkillDirs -Source $skillsSource -Destination (Join-Path $openhandsDir 'skills')
     }
 
     $pythonCmd = (Get-Command python -ErrorAction SilentlyContinue)
@@ -2413,7 +2544,9 @@ settings_file = os.path.join(openhands_dir, 'settings.json')
 settings = {}
 if os.path.isfile(settings_file):
     try:
-        with open(settings_file, 'r', encoding='utf-8') as f:
+        # utf-8-sig: a BOM (Windows editors add one) must not make the file
+        # invalid and drop the user's keys from the merge. Written back plain.
+        with open(settings_file, 'r', encoding='utf-8-sig') as f:
             settings = json.load(f)
     except Exception:
         settings = {}
@@ -2436,7 +2569,15 @@ def _save_settings():
         except (OSError, ValueError):
             pass
         if not _settings_backed_up:
-            shutil.copyfile(settings_file, '%s.autoos-backup-%s' % (settings_file, datetime.now().strftime('%Y%m%d-%H%M%S')))
+            # <file>.autoos-backup-<stamp>-<n>: never a name that exists, so a backup
+            # never overwrites an earlier one (the stamp has one-second resolution). n
+            # starts at 1 on purpose: the agent generator that runs next names its own
+            # backup with the bare stamp and replaces a file of that name.
+            _stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            _n = 1
+            while os.path.exists('%s.autoos-backup-%s-%d' % (settings_file, _stamp, _n)):
+                _n += 1
+            shutil.copyfile(settings_file, '%s.autoos-backup-%s-%d' % (settings_file, _stamp, _n))
             _settings_backed_up = True
     with open(settings_file, 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=2)
@@ -3505,7 +3646,7 @@ Export-ModuleMember -Function `
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
-    Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig,
+    Set-AutoOSOpenCodeConfig, Set-AutoOSOpenHandsConfig, Sync-AutoOSSkillDirs,
     Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Set-AutoOSQoderMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
