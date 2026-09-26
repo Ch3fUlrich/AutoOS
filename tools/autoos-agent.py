@@ -468,7 +468,7 @@ def build_plan(args, cfg: dict) -> dict:
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
-            "route": route, "depth": (depth, max_depth),
+            "route": route, "depth": (depth, max_depth), "free": bool(args.free),
             "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd()}
 
 
@@ -846,6 +846,8 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     client = clients.CLIENTS.get(plan.get("client"))
     if client is not None and not client.gateway:
         return None  # an own-account client never ran the gateway route it names
+    if plan.get("free"):
+        return None  # --free ran a keyless promo model, not the route it names
     klass = route.get("class") or track_class(route.get("combo"))
     if not klass:
         return None
