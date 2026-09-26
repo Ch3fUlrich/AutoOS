@@ -82,14 +82,23 @@ class ConfigError(RuntimeError):
     """The config file cannot be safely rewritten."""
 
 
-def provider_maps(path=None):
-    """(prefix, api_base, env_key) keyed by OmniRoute provider id.
+def provider_maps_from_dict(providers: dict):
+    """(prefix, api_base, env_key) keyed by OmniRoute provider id, from an
+    already-loaded {name: {omniroute_id, litellm_prefix, api_base,
+    litellm_env, ...}} mapping - the shape both catalog/providers.json's own
+    "providers" section and catalog/ai-registry.json's "providers" section
+    share field-for-field (docs/plans/2026-09-25-registry-mapping.md section
+    2: litellm_env/litellm_prefix/api_base carry over unchanged). Factored out
+    of provider_maps() below (task A4b) so tools/registry.py's
+    render_litellm_blocks() can build the same three maps from the registry
+    instead of catalog/providers.json, without copying this logic or
+    diverging from it.
 
-    catalog/providers.json is the single source of truth shared with
-    apply.ps1/apply.sh and tools/mirror-litellm-env.py. The OmniRoute provider
-    id is the key because it is the first segment of a combos.json model ref;
-    entries with no omniroute_id (meta, the client key) have no refs and are
-    skipped.
+    The OmniRoute provider id is the key because it is the first segment of a
+    combos.json / registry `routes.<id>.legs` model ref; an entry with no
+    omniroute_id (meta, the client key) has no refs and is skipped, as is any
+    non-dict entry (defensive - the caller's source is otherwise trusted to
+    already be well-formed).
 
     Only ids whose LiteLLM transport differs from the OmniRoute id appear in
     the prefix map: OmniRoute's <provider>/<model> is already LiteLLM's shape,
@@ -97,13 +106,10 @@ def provider_maps(path=None):
     gateways, which would otherwise silently point at api.openai.com. env_key
     names the conventional env vars; Leg falls back to <PROVIDER>_API_KEY.
     """
-    try:
-        doc = json.loads(Path(path or PROVIDERS_FILE).read_text(encoding="utf-8"))
-        providers = doc["providers"]
-    except (OSError, ValueError, KeyError) as exc:
-        raise ConfigError(f"cannot read {path or PROVIDERS_FILE}: {exc}") from exc
     prefix, api_base, env_key = {}, {}, {}
     for entry in providers.values():
+        if not isinstance(entry, dict):
+            continue
         omni = entry.get("omniroute_id")
         if not omni:
             continue
@@ -114,6 +120,21 @@ def provider_maps(path=None):
         if entry.get("litellm_env"):
             env_key[omni] = entry["litellm_env"]
     return prefix, api_base, env_key
+
+
+def provider_maps(path=None):
+    """(prefix, api_base, env_key) keyed by OmniRoute provider id, read from
+    catalog/providers.json - the single source of truth shared with
+    apply.ps1/apply.sh and tools/mirror-litellm-env.py. See
+    provider_maps_from_dict() for the field meanings and the OmniRoute-id
+    keying; this wrapper only adds the file read.
+    """
+    try:
+        doc = json.loads(Path(path or PROVIDERS_FILE).read_text(encoding="utf-8"))
+        providers = doc["providers"]
+    except (OSError, ValueError, KeyError) as exc:
+        raise ConfigError(f"cannot read {path or PROVIDERS_FILE}: {exc}") from exc
+    return provider_maps_from_dict(providers)
 
 
 class Leg:

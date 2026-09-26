@@ -6,6 +6,7 @@ Three subcommands:
     python3 tools/registry.py check    [--registry PATH]
     python3 tools/registry.py validate [--registry PATH]
     python3 tools/registry.py render omniroute [--registry PATH] [--out PATH] [--check]
+    python3 tools/registry.py render litellm   [--registry PATH] [--config PATH] [--check] [--out PATH]
 
 `check` proves the registry obeys spec 3.1's rules:
 
@@ -50,6 +51,17 @@ PATH writes it elsewhere; --check compares a fresh render against --combos
 (default: the committed combos.json) and exits 1, naming each differing key, when
 they are not semantically equal.
 
+`render litellm` renders the AUTOOS-MANAGED tier blocks of configuration/litellm/
+config.yaml (the ones tools/sync-router-tiers.py owns) from a loaded catalog/
+ai-registry.json, reusing that tool's own leg->entry logic instead of copying it
+(spec 3.2 phase 1, task A4b; docs/plans/2026-09-25-registry-mapping.md section 11
+documents the mapping - byte-for-byte equal to today's blocks, no documented
+exception needed). It never writes configuration/litellm/config.yaml itself: with
+no flag the render goes to stdout; --out PATH writes it elsewhere; --check compares
+a fresh render against --config's own current managed blocks (default: the
+committed config.yaml) and exits 1, naming each differing tier, when they are not
+byte-for-byte equal.
+
 Stdlib only. Path-independent: everything is anchored on the repository root
 derived from this file's own location.
 """
@@ -68,6 +80,8 @@ DEFAULT_REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
 SCHEMA_PATH = ROOT / "catalog" / "ai-registry.schema.json"
 CONVERTER_PATH = ROOT / "tools" / "registry-convert.py"
 DEFAULT_OMNIROUTE_COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.json"
+SYNC_ROUTER_TIERS_PATH = ROOT / "tools" / "sync-router-tiers.py"
+DEFAULT_LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMMENT_KEYS = ("$comment", "comment")
@@ -635,6 +649,153 @@ def omniroute_diff(rendered: dict, current: dict) -> list:
 
 
 # ===========================================================================
+# render - litellm config.yaml managed blocks (spec 3.2 phase 1, task A4b)
+# ===========================================================================
+
+
+def _load_sync_router_tiers():
+    """Import tools/sync-router-tiers.py by path (its name is not a valid
+    module identifier) - the same importlib-by-path technique
+    _build_fresh_registry() below already uses for tools/registry-convert.py.
+    Reused, not copied, so Leg/render_block/locate_blocks/parse_block/
+    leading_indent/GATEWAY_ONLY/SYNCED_TIERS/provider_maps_from_dict can never
+    drift from the tool that still owns configuration/litellm/config.yaml's
+    actual managed blocks (task A4b's brief: "reuse ... rather than copying
+    it"). A fresh module object every call, deliberately: render_litellm_
+    blocks() below mutates its PROVIDER_PREFIX/API_BASE/ENV_KEY globals (Leg
+    reads them at construction time, same as tools/sync-router-tiers.py's own
+    main() does), and a fresh import per call keeps that mutation from
+    leaking between two renders in the same process - the same isolation
+    _build_fresh_registry() gets from re-importing tools/registry-convert.py
+    every time it is called."""
+    spec = importlib.util.spec_from_file_location(
+        "autoos_sync_router_tiers", SYNC_ROUTER_TIERS_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
+    """Render the AUTOOS-MANAGED litellm blocks tools/sync-router-tiers.py owns
+    (spec 3.2 phase 1, task A4b), sourcing what that tool takes from
+    configuration/omniroute/combos.json and catalog/providers.json instead from
+    the loaded registry: each tier's ordered leg list from `routes.<tier>.legs`,
+    and each leg's LiteLLM transport (prefix/api_base/env var) from
+    `providers.<id>.litellm_prefix`/`litellm_env`/`api_base` - registry field
+    names verified identical to catalog/providers.json's own in docs/plans/
+    2026-09-25-registry-mapping.md section 2, so
+    tools.sync_router_tiers.provider_maps_from_dict() reads either shape the
+    same way (that function was factored out of provider_maps() for exactly
+    this reuse).
+
+    `config_text` is still needed, exactly as tools/sync-router-tiers.py's own
+    rewrite() needs it: to locate each tier's existing "# AUTOOS-MANAGED-START/
+    END <tier>" block (its indent included) and to carry across any hand-tuned
+    litellm_params line a leg already has - an rpm cap and its comment, for
+    example - that is NOT a registry field (no rpm/rate-limit key exists
+    anywhere in catalog/ai-registry.json or its schema) and was never derived
+    from combos.json either: tools/sync-router-tiers.py has only ever preserved
+    such a line across a resync, never generated it. Passing today's own
+    config_text back in therefore reproduces it exactly, with no documented
+    equality exception needed here (contrast render_omniroute()'s $comment/
+    array-order exceptions above) - docs/plans/2026-09-25-registry-mapping.md
+    section 11 has the full accounting.
+
+    Pure with respect to I/O and the clock: the SAME (registry, config_text)
+    pair always renders the SAME {tier: block_text}; no file is opened inside
+    this function (the caller reads catalog/ai-registry.json and config.yaml,
+    exactly like render_omniroute(registry) leaves combos.json's own read to
+    its caller).
+
+    Returns {tier: block_text}, one entry per synced tier (tools/sync-router-
+    tiers.py's own SYNCED_TIERS by default - currently t2-worker/t3-driver;
+    t1-orchestrator and every *-paid/*-free-only group are hand-curated, not
+    sync-managed, same as today), each block running from its "# AUTOOS-
+    MANAGED-START <tier>" line to its "# AUTOOS-MANAGED-END <tier>" line
+    inclusive, newline-joined with no leading or trailing blank line - the
+    exact slice tools/sync-router-tiers.py's own rewrite() replaces.
+
+    Raises ValueError, naming every offending tier at once, when the registry
+    has no `routes.<tier>` for a tier being rendered, or when `config_text` has
+    no managed block for one (a missing/duplicate/mismatched marker - the same
+    cases tools/sync-router-tiers.py itself refuses via its own ConfigError,
+    surfaced here as ValueError so a caller needs only one exception type)."""
+    sync = _load_sync_router_tiers()
+    tiers = tuple(tiers) if tiers is not None else sync.SYNCED_TIERS
+
+    providers = _section(registry, "providers")
+    sync.PROVIDER_PREFIX, sync.API_BASE, sync.ENV_KEY = sync.provider_maps_from_dict(providers)
+
+    routes = _section(registry, "routes")
+    missing_routes = [t for t in tiers if not isinstance(routes.get(t), dict)]
+    if missing_routes:
+        raise ValueError("registry has no routes.<id> for tier(s): %s" % ", ".join(missing_routes))
+
+    refs_by_tier = {}
+    for tier in tiers:
+        legs = routes[tier].get("legs") or []
+        refs_by_tier[tier] = [
+            leg for leg in legs
+            if isinstance(leg, str) and leg.split("/", 1)[0] not in sync.GATEWAY_ONLY
+        ]
+
+    lines = config_text.splitlines()
+    try:
+        blocks = sync.locate_blocks(lines)
+    except sync.ConfigError as exc:
+        raise ValueError(str(exc)) from exc
+    missing_blocks = [t for t in tiers if t not in blocks]
+    if missing_blocks:
+        raise ValueError("config.yaml has no managed block for: %s" % ", ".join(missing_blocks))
+
+    rendered = {}
+    for tier in tiers:
+        start, end = blocks[tier]
+        indent = sync.leading_indent(lines[start])
+        extras = sync.parse_block(lines, start, end)
+        try:
+            block_lines = sync.render_block(tier, refs_by_tier[tier], indent, extras)
+        except sync.ConfigError as exc:
+            raise ValueError(str(exc)) from exc
+        rendered[tier] = "\n".join(block_lines)
+    return rendered
+
+
+def litellm_block_text(config_text: str, tier: str) -> str:
+    """The current, as-committed text of one tier's managed block ("# AUTOOS-
+    MANAGED-START/END <tier>" lines inclusive), for comparing against
+    render_litellm_blocks()'s output. Raises ValueError when `config_text` has
+    no such block (mirrors render_litellm_blocks()'s own exception type)."""
+    sync = _load_sync_router_tiers()
+    lines = config_text.splitlines()
+    try:
+        blocks = sync.locate_blocks(lines)
+    except sync.ConfigError as exc:
+        raise ValueError(str(exc)) from exc
+    if tier not in blocks:
+        raise ValueError("config.yaml has no managed block for: %s" % tier)
+    start, end = blocks[tier]
+    return "\n".join(lines[start : end + 1])
+
+
+def litellm_diff(rendered: dict, config_text: str) -> list:
+    """Return the tiers (sorted) where a fresh render_litellm_blocks() output
+    differs, byte for byte, from `config_text`'s own current managed block.
+    Empty means every rendered tier matches exactly - the spec 3.2 phase-1
+    gate for configuration/litellm/config.yaml (task A4b)."""
+    problems = []
+    for tier in sorted(rendered):
+        try:
+            current = litellm_block_text(config_text, tier)
+        except ValueError:
+            problems.append(tier)
+            continue
+        if rendered[tier] != current:
+            problems.append(tier)
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -724,6 +885,39 @@ def _cmd_render_omniroute(args) -> int:
     return 0
 
 
+def _cmd_render_litellm(args) -> int:
+    registry_doc = load(args.registry)
+    config_path = Path(args.config)
+    try:
+        config_text = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print("cannot read %s: %s" % (config_path, exc))
+        return 1
+
+    try:
+        rendered = render_litellm_blocks(registry_doc, config_text)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
+    if args.check:
+        problems = litellm_diff(rendered, config_text)
+        if problems:
+            for tier in problems:
+                print("differs: %s" % tier)
+            return 1
+        print("ok: render litellm matches %s" % config_path)
+        return 0
+
+    text = "\n\n".join(rendered[tier] for tier in sorted(rendered)) + "\n"
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print("wrote %s" % args.out)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="registry.py",
@@ -757,6 +951,23 @@ def main(argv=None) -> int:
         "--combos", default=str(DEFAULT_OMNIROUTE_COMBOS_PATH),
         help="today's combos.json to compare against, --check only (default: %(default)s)")
 
+    litellm_parser = render_targets.add_parser(
+        "litellm",
+        help="render the AUTOOS-MANAGED tier blocks of configuration/litellm/config.yaml")
+    litellm_parser.add_argument(
+        "--registry", default=str(DEFAULT_REGISTRY_PATH),
+        help="registry JSON to render from (default: %(default)s)")
+    litellm_parser.add_argument(
+        "--config", default=str(DEFAULT_LITELLM_CONFIG_PATH),
+        help="today's config.yaml to locate blocks in / compare against "
+             "(default: %(default)s)")
+    litellm_parser.add_argument(
+        "--out", default=None,
+        help="write the render here instead of stdout (never the real config.yaml)")
+    litellm_parser.add_argument(
+        "--check", action="store_true",
+        help="exit 1 if a managed block differs byte-for-byte from --config")
+
     args = parser.parse_args(argv)
     if args.command == "check":
         return _cmd_check(args)
@@ -765,6 +976,8 @@ def main(argv=None) -> int:
     if args.command == "render":
         if args.target == "omniroute":
             return _cmd_render_omniroute(args)
+        if args.target == "litellm":
+            return _cmd_render_litellm(args)
         return 2
     return 2
 

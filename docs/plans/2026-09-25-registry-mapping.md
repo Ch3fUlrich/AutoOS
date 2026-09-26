@@ -403,3 +403,80 @@ operator decisions only add the sibling `unavailable_legs` annotation, they neve
 remove or reorder anything in `legs` itself, and today's committed `combos.json`
 already lists those same dead legs unchanged. No new equality exception was needed
 for that case, confirming the brief's own example.
+
+## 11. Task A4b — rendering `configuration/litellm/config.yaml`'s managed blocks back from the registry (phase 1 render)
+
+Spec 3.2 phase 1 for `configuration/litellm/config.yaml`'s "model groups": `tools/
+registry.py render litellm` reads `catalog/ai-registry.json` and produces the exact
+text of each AUTOOS-MANAGED tier block `tools/sync-router-tiers.py` already owns
+(`# AUTOOS-MANAGED-START <tier>` … `# AUTOOS-MANAGED-END <tier>`), via the function
+`render_litellm_blocks(registry, config_text) -> {tier: block_text}`. It is the
+reverse of that tool's own `combos_refs()` + `provider_maps()` + `render_block()`
+pipeline, restricted to `SYNCED_TIERS` (today: `t2-worker`, `t3-driver` — `t1-
+orchestrator` and every `*-paid`/`*-free-only` group are hand-curated, never
+sync-managed, unchanged by this task).
+
+`render_litellm_blocks()` reuses `tools/sync-router-tiers.py`'s own `Leg`/
+`render_block()`/`locate_blocks()`/`parse_block()`/`leading_indent()` by importing
+that module by path (`importlib.util.spec_from_file_location`, the same technique
+`tools/registry.py`'s own `_build_fresh_registry()` already uses for
+`tools/registry-convert.py`) rather than copying any of it. The one piece of shared
+logic that genuinely needed factoring — the (prefix, api_base, env_key) map keyed by
+OmniRoute provider id, previously inlined in `sync-router-tiers.py`'s own
+`provider_maps()` — is now `provider_maps_from_dict(providers)`, and `provider_maps
+(path=None)` is a thin wrapper that loads `catalog/providers.json` and calls it.
+`tools/registry.py` calls `provider_maps_from_dict()` with the registry's own
+`providers` section instead. This is safe because the two sections share the exact
+same field names for every fact this needs — `omniroute_id`, `litellm_prefix`,
+`api_base`, `litellm_env` — confirmed field-for-field in §2 above (`catalog/
+providers.json` → `providers.<id>`: those four fields carry over unchanged). `tests/
+helpers/check-provider-registry.py`'s existing `sync.provider_maps()` call is
+untouched — its return value is unchanged since the wrapper still does exactly what
+the old inline code did.
+
+Field mapping back, per tier:
+
+| Registry path | `config.yaml` managed-block content | Notes |
+|---|---|---|
+| `routes.<tier>.legs` | one `- model_name: <tier>` entry per leg, in order | Unchanged, **in order** — same ordered-fallback-chain reasoning as `render_omniroute()`'s `legs` → `combos[].models` mapping (§10). A leg whose provider is gateway-only (`tools/sync-router-tiers.py`'s `GATEWAY_ONLY = {"antigravity", "cc"}` — OAuth/subscription bridges with no LiteLLM transport or key) is dropped, exactly as `combos_refs()` already drops it when reading `combos.json` today; `routes.t2-worker.legs` still carries `antigravity/gemini-3.7-flash-high` (a real leg), and the render must (and does) drop it, not silently keep it or silently omit it without a test noticing — `tests/test_registry_render.py::LitellmRenderMatchesTodayTests::test_gateway_only_leg_is_dropped_not_silently_kept_or_missing` pins exactly this leg. |
+| `providers.<id>.litellm_prefix` (when the leg's provider carries one) | the leg's `model:` line's LiteLLM-transport prefix | `Leg.prefix` (`tools/sync-router-tiers.py`), keyed by the leg's OmniRoute-id first segment — unchanged from today's `provider_maps()`-sourced value, only the source dict changed. |
+| `providers.<id>.api_base` (when present) | the leg's `api_base:` line | Same as above; absent for a leg whose provider passes straight through (no OpenAI-compatible gateway). |
+| `providers.<id>.litellm_env` (when present; else `<PROVIDER>_API_KEY`) | the leg's `api_key: os.environ/<name>` line | Same fallback rule `Leg.__init__` already applies today. |
+
+One documented input the render still needs that is **not** a registry fact, and is
+therefore **not** an equality exception (contrast `render_omniroute()`'s `$comment`/
+array-order exceptions in §10 — this render has none):
+
+- **A leg's hand-tuned extra `litellm_params` line(s)** — an `rpm` cap and its
+  trailing comment, for the two `t2-worker` legs (`gemini/gemini-3.8-flash`,
+  `groq/openai/gpt-oss-120b`) and one `t3-driver` leg (`mistral/mistral-small-
+  latest`) that carry one today. Grepping `catalog/ai-registry.json`, its schema,
+  `tools/registry-convert.py` and this document for `rpm` finds nothing: no
+  rate-limit field exists anywhere in the registry, and `tools/sync-router-tiers.py`
+  has never derived this value from `combos.json` either — `_MANAGED_PARAM_KEYS =
+  ("model", "api_key", "api_base")` in that tool names exactly what it regenerates,
+  and anything else present in an existing block (`parse_block()`) is carried across
+  a resync, never invented. `render_litellm_blocks(registry, config_text)` therefore
+  takes `config_text` — today's own `configuration/litellm/config.yaml` — as a
+  second argument for exactly this reason, purely to extract each leg's existing
+  extra lines the same way `tools/sync-router-tiers.py`'s own `rewrite()` already
+  does, and reproduces them unchanged. The function stays pure with respect to I/O
+  and the clock (the same two inputs always render the same text; no file is opened
+  inside it, matching `render_omniroute(registry)`'s own contract) — it simply takes
+  one more input than that function does, because this generated file, unlike
+  `combos.json`, carries one small piece of hand-tuned data no registry field owns.
+  Because this value is reproduced exactly rather than dropped, the render is
+  byte-for-byte identical to today's committed managed blocks with **zero** documented
+  equality exceptions — `tests/test_registry_render.py::LitellmRenderMatchesTodayTests
+  ::test_render_matches_committed_config_byte_for_byte` asserts this directly via
+  `registry.litellm_diff()`, and `python3 tools/registry.py render litellm --check`
+  confirms it against the real files.
+
+`tools/registry.py render litellm --check` never writes `configuration/litellm/
+config.yaml` itself (phase 1 proves equality only, exactly like `render omniroute`
+above — `tools/sync-router-tiers.py` keeps owning the actual rewrite until a later
+phase switches it to read the registry instead of `combos.json`). A leg changed only
+in the registry (not yet reflected in `config.yaml`) makes `--check` exit 1 naming
+the tier it belongs to, never silently passing — `tests/test_registry_render.py::
+ChangedLegFailsLitellmCheckTests::test_changed_leg_exits_one_and_names_the_tier`
+pins this for a mutated `t3-driver` leg.

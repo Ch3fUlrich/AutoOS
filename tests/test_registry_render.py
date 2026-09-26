@@ -27,6 +27,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
 COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.json"
+LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
+SYNC_ROUTER_TIERS_TOOL = ROOT / "tools" / "sync-router-tiers.py"
+CHECK_PROVIDER_REGISTRY_HELPER = ROOT / "tests" / "helpers" / "check-provider-registry.py"
 REGISTRY_TOOL = ROOT / "tools" / "registry.py"
 
 
@@ -52,6 +55,17 @@ def real_registry() -> dict:
 
 def real_combos() -> dict:
     return load_json(COMBOS_PATH)
+
+
+def real_litellm_config() -> str:
+    return LITELLM_CONFIG_PATH.read_text(encoding="utf-8")
+
+
+def run_helper(path: Path, *args, timeout=60):
+    return subprocess.run(
+        [sys.executable, str(path), *args],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=timeout,
+    )
 
 
 def run_cli(*args, timeout=120):
@@ -189,6 +203,91 @@ class ExistingCommandsStillWorkTests(unittest.TestCase):
 
     def test_validate_subcommand_still_exits_zero(self):
         proc = run_cli("validate", timeout=180)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+
+class LitellmRenderMatchesTodayTests(unittest.TestCase):
+    """Render of the real registry equals today's configuration/litellm/config.yaml
+    AUTOOS-MANAGED blocks, byte for byte (task A4b; docs/plans/2026-09-25-registry-
+    mapping.md section 11 - unlike render omniroute above, no documented equality
+    exception is needed here)."""
+
+    def test_render_matches_committed_config_byte_for_byte(self):
+        rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        self.assertEqual(registry.litellm_diff(rendered, real_litellm_config()), [])
+
+    def test_synced_tiers_are_rendered(self):
+        rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        sync = registry._load_sync_router_tiers()
+        self.assertEqual(set(rendered), set(sync.SYNCED_TIERS))
+
+    def test_gateway_only_leg_is_dropped_not_silently_kept_or_missing(self):
+        # routes.t2-worker.legs carries antigravity/gemini-3.7-flash-high (a
+        # real registry leg) but antigravity has no LiteLLM transport or key
+        # (tools/sync-router-tiers.py GATEWAY_ONLY) - today's config.yaml
+        # never mirrors it, and the render must match: this leg's model name
+        # absent, its sibling gemini-3.8-flash leg present.
+        legs = real_registry()["routes"]["t2-worker"]["legs"]
+        self.assertIn("antigravity/gemini-3.7-flash-high", legs)
+        rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        self.assertNotIn("gemini-3.7-flash-high", rendered["t2-worker"])
+        self.assertIn("gemini-3.8-flash", rendered["t2-worker"])
+
+
+class LitellmRenderDeterminismTests(unittest.TestCase):
+    """A second render changes nothing (spec 11: idempotence)."""
+
+    def test_two_in_process_renders_are_identical(self):
+        first = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        second = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        self.assertEqual(first, second)
+
+    def test_cli_two_runs_write_identical_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            out1, out2 = Path(d) / "a.txt", Path(d) / "b.txt"
+            for out in (out1, out2):
+                proc = run_cli("render", "litellm", "--out", str(out))
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(out1.read_bytes(), out2.read_bytes())
+            self.assertTrue(out1.read_bytes().endswith(b"\n"))
+
+
+class ChangedLegFailsLitellmCheckTests(unittest.TestCase):
+    """--check exits 1 and names the tier when a leg differs from config.yaml."""
+
+    def test_changed_leg_exits_one_and_names_the_tier(self):
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t3-driver"]["legs"][0] = "ghost-provider/ghost-model"
+        path = write_registry(reg)
+        try:
+            proc = run_cli("render", "litellm", "--registry", path, "--check")
+        finally:
+            Path(path).unlink()
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("differs: t3-driver", proc.stdout)
+
+    def test_unmodified_registry_check_exits_zero_on_the_real_files(self):
+        proc = run_cli("render", "litellm", "--check")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ok:", proc.stdout)
+
+    def test_missing_config_file_exits_one(self):
+        proc = run_cli("render", "litellm", "--check",
+                       "--config", "/nonexistent/config.yaml")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+
+
+class ExistingSyncRouterTiersStillWorkTests(unittest.TestCase):
+    """A4b must not disturb tools/sync-router-tiers.py - the brief's own 'it stays
+    a working tool, its tests must pass' rule. Both are the *actual* existing
+    tests/checks for that tool (grepped from tests/), not new ones invented here."""
+
+    def test_sync_router_tiers_check_still_exits_zero(self):
+        proc = run_helper(SYNC_ROUTER_TIERS_TOOL, "--check")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_provider_registry_consistency_helper_still_passes(self):
+        proc = run_helper(CHECK_PROVIDER_REGISTRY_HELPER)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
 
