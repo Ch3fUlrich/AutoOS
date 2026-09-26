@@ -84,7 +84,15 @@ esac
 # default to guess from the profile's name: that only ever worked for the
 # hosts this driver was written on, and cannot generalise to an arbitrary
 # profile a downstream user creates.
-prof_key() { sed -n "s/^[[:space:]]*$1=\([^#]*\).*/\1/p" "$PROFILE_CONF" | tail -1 | tr -d '[:space:]'; }
+# Trims only leading/trailing whitespace (not `tr -d`, which deletes every
+# space -- HS_WORKDIR=/opt/My Files must stay "/opt/My Files", not become
+# "/opt/MyFiles" and fail at boot with a WorkingDirectory that never existed).
+prof_key() {
+    local v; v="$(sed -n "s/^[[:space:]]*$1=\([^#]*\).*/\1/p" "$PROFILE_CONF" | tail -1)"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    printf '%s' "$v"
+}
 SCOPE="$(prof_key HS_SCOPE)"
 [ -n "$SCOPE" ] || {
     echo "FATAL: $PROFILE_CONF must set HS_SCOPE=user or HS_SCOPE=system (see profiles/example.conf)" >&2

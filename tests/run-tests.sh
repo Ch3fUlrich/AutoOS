@@ -7093,6 +7093,33 @@ if it "herdr-sessions: smoke (bash -n, py_compile, install --dry-run)"; then
     out="$(bash configuration/herdr-sessions/tests/test_smoke.sh 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# Finding 6 (qoder review, L1-backlog.review-herdr-qoder.md, low): prof_key's
+# `tr -d '[:space:]'` deleted whitespace INSIDE the value too, not just around
+# it -- HS_WORKDIR=/opt/My Files parsed as /opt/MyFiles, the units installed
+# cleanly, and the service would fail at boot with a nonexistent
+# WorkingDirectory, nothing at install time saying so. prof_key also parses
+# HERDR_BIN (used only for the system-scope dry-run precondition message,
+# which is safe to run with no root and no stubs), so that key -- not
+# HS_WORKDIR, which render_unit only ever splices into the system-scope
+# herdr-server.service and a REAL system-scope install needs root and writes
+# to a real /etc, disallowed for this suite -- is what exercises prof_key's
+# trimming here without live systemctl or a real /etc write.
+if it "herdr-sessions: prof_key trims only leading/trailing whitespace, not spaces inside the value"; then
+    tmp="$(mktemp -d)"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=system
+HERDR_BIN=$tmp/My Herdr/bin/herdr
+FALLBACK=none
+EOF
+    out="$(bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --dry-run 2>&1)"; rc=$?
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [[ "$out" == *"herdr at $tmp/My Herdr/bin/herdr"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=${out:0:400}"
+    fi
+fi
+
 # Bug (b) from the proposal doc: which uuid a restored pane resumes, when a
 # background job's transcript shares the pane's own directory (unit tests).
 if it "herdr-sessions: uuid picking excludes background sessions (unit tests)"; then
