@@ -1233,6 +1233,14 @@ if it "agent harness: the generator's unit tests pass"; then
     fi
 fi
 
+if it "playwright lazy proxy: the stdio proxy's unit tests pass (fake backend, no docker)"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_playwright_mcp_lazy.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
+fi
+
 if it "serena memory tools off from harness field (serena)"; then
     report="$(python3 - 2>&1 <<'PY'
 import json, re, io
@@ -4947,6 +4955,344 @@ EOS
     unset AUTOOS_QODER_STUB_LOG
     if [[ "$adds" == "0" ]]; then pass
     else fail "expected 0 add-json calls when every server already exists, got $adds"; fi
+fi
+
+# ─── Playwright MCP: the lazy proxy registration ────────────────────────────
+describe "playwright lazy proxy"
+
+# A sandbox for install_mcp_playwright: a scratch HOME, a stub `claude` that records
+# every call and edits the scratch user config the way `claude mcp add|remove --scope
+# user` does, and a stub `docker` that records its calls (the installer must never
+# stop a container, so its log has to stay empty). Nothing here touches the real
+# HOME, the real claude or the real docker.
+pw_setup() {
+    local tmp="$1"
+    mkdir -p "$tmp/bin" "$tmp/home"
+    cat >"$tmp/bin/claude" <<'EOS'
+#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+with open(os.environ["PW_STUB_LOG"], "a") as fh:
+    fh.write(" ".join(argv) + "\n")
+cfg = os.environ["PW_STUB_CONFIG"]
+
+def load():
+    try:
+        with open(cfg, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+def save(data):
+    with open(cfg, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+
+if argv[:2] == ["mcp", "list"]:
+    for name, entry in (load().get("mcpServers") or {}).items():
+        print("%s: %s %s - Connected" % (name, entry.get("command", ""), " ".join(entry.get("args", []))))
+    for line in filter(None, os.environ.get("PW_STUB_EXTRA_LIST", "").split("|")):
+        print(line)
+elif argv[:2] == ["mcp", "add"]:
+    name = argv[argv.index("--scope") + 2]
+    command = argv[argv.index("--") + 1:]
+    if os.environ.get("PW_STUB_ADD_FAIL_MATCH") and os.environ["PW_STUB_ADD_FAIL_MATCH"] in " ".join(command):
+        sys.exit(1)
+    data = load()
+    data.setdefault("mcpServers", {})[name] = {"type": "stdio", "command": command[0], "args": command[1:], "env": {}}
+    save(data)
+elif argv[:2] == ["mcp", "remove"]:
+    data = load()
+    (data.get("mcpServers") or {}).pop(argv[2], None)
+    save(data)
+EOS
+    cat >"$tmp/bin/docker" <<'EOS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$PW_STUB_DOCKER_LOG"
+EOS
+    chmod +x "$tmp/bin/claude" "$tmp/bin/docker"
+}
+
+# pw_seed <config> <command|-> [args...]: a user config with a serena server and
+# (unless the command is "-") a playwright stdio entry.
+pw_seed() {
+    python3 - "$@" <<'PY'
+import json, sys
+path, command, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+data = {"numStartups": 42, "mcpServers": {"serena": {"type": "stdio", "command": "uvx", "args": ["serena"], "env": {}}}}
+if command != "-":
+    data["mcpServers"]["playwright"] = {"type": "stdio", "command": command, "args": args, "env": {}}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+PY
+}
+
+# pw_seed_json <config> <json>: the playwright entry verbatim, for the odd shapes.
+pw_seed_json() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+data = {"numStartups": 42, "mcpServers": {"playwright": json.loads(sys.argv[2])}}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+PY
+}
+
+# pw_entry <config>: the playwright entry as "command arg arg", "-" when absent.
+pw_entry() {
+    python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entry = (json.load(fh).get("mcpServers") or {}).get("playwright")
+except (OSError, ValueError):
+    entry = None
+print("-" if entry is None else " ".join([entry.get("command", "")] + entry.get("args", [])))
+PY
+}
+
+# pw_servers <config>: the user-scope server names, sorted and comma-joined.
+pw_servers() {
+    python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        print(",".join(sorted((json.load(fh).get("mcpServers") or {}))))
+except (OSError, ValueError):
+    print("-")
+PY
+}
+
+# pw_run <tmp> <function> [args]: one installer function inside the sandbox. PW_DRY,
+# PW_CONFIG_DIR, PW_ADD_FAIL and PW_EXTRA_LIST steer it; the caller captures the output.
+pw_run() {
+    local tmp="$1"; shift
+    (
+        SYS_HOME="$tmp/home"; HOME="$tmp/home"; AUTOOS_DRY_RUN="${PW_DRY:-0}"
+        PATH="$tmp/bin:$PATH"
+        export PW_STUB_LOG="$tmp/claude.log" PW_STUB_DOCKER_LOG="$tmp/docker.log"
+        export PW_STUB_CONFIG="${PW_CONFIG:-$tmp/home/.claude.json}"
+        export PW_STUB_ADD_FAIL_MATCH="${PW_ADD_FAIL:-}" PW_STUB_EXTRA_LIST="${PW_EXTRA_LIST:-}"
+        unset CLAUDE_CONFIG_DIR
+        [[ -z "${PW_CONFIG_DIR:-}" ]] || export CLAUDE_CONFIG_DIR="$PW_CONFIG_DIR"
+        register_antigravity_mcp_server() { printf '%s %s\n' "$1" "$2" >>"$tmp/antigravity.log"; }
+        "$@"
+    )
+}
+
+pw_without_docker() {
+    has_cmd() { [[ "$1" != docker ]] && command -v "$1" >/dev/null 2>&1; }
+    install_mcp_playwright
+}
+
+pw_without_claude() {
+    has_cmd() { [[ "$1" != claude ]] && command -v "$1" >/dev/null 2>&1; }
+    install_mcp_playwright
+}
+
+pw_backup_fails() {
+    backup_file() { return 1; }
+    install_mcp_playwright
+}
+
+# pw_writes <tmp>: how many claude calls changed something (add or remove).
+pw_writes() {
+    local n
+    n="$(grep -cE '^mcp (add|remove)' "$1/claude.log" 2>/dev/null)" || n=0
+    printf '%s\n' "${n:-0}"
+}
+
+PW_DOCKER_FORM=(docker run -i --rm --init --network host mcr.microsoft.com/playwright/mcp:latest)
+
+if it "playwright lazy proxy installer: no entry and docker present registers the proxy by absolute path"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; pw_seed "$tmp/home/.claude.json" -
+    out="$(cd / && pw_run "$tmp" install_mcp_playwright 2>&1)"
+    calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+    got="$(pw_entry "$tmp/home/.claude.json")"
+    ag="$(cat "$tmp/antigravity.log" 2>/dev/null)"
+    dk="$(cat "$tmp/docker.log" 2>/dev/null)"
+    rm -rf "$tmp"
+    problems=""
+    [[ "$calls" == "mcp add --scope user playwright -- python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" calls=[$calls]"
+    [[ "$got" == "python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" entry=[$got]"
+    [[ "$ag" == 'playwright {"command": "npx", "args": ["-y", "@playwright/mcp@'* ]] || problems+=" antigravity=[$ag]"
+    [[ -z "$dk" ]] || problems+=" docker was called: [$dk]"
+    [[ "$out" == *"registered"* ]] || problems+=" the registration was not reported"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: an exact docker or npx entry is replaced after a backup, a second run skips"; then
+    problems=""
+    for form in docker npx; do
+        tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+        if [[ "$form" == docker ]]; then pw_seed "$cfg" "${PW_DOCKER_FORM[@]}"; else pw_seed "$cfg" npx -y @playwright/mcp@0.0.81; fi
+        cp "$cfg" "$tmp/seed.json"
+        out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+        calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+        got="$(pw_entry "$cfg")"
+        backups=( "$cfg".autoos-backup-* )
+        if [[ ! -f "${backups[0]}" ]] || ! cmp -s "${backups[0]}" "$tmp/seed.json"; then problems+=" [$form] no byte-identical backup;"; fi
+        [[ "$calls" == "mcp remove playwright --scope user|mcp add --scope user playwright -- python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" [$form] calls=[$calls];"
+        [[ "$got" == "python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" [$form] entry=[$got];"
+        [[ "$out" == *"replaced"* ]] || problems+=" [$form] the replace was not reported;"
+        notices="$(printf '%s\n' "$out" | grep -c 'keep their current' || true)"
+        [[ "$notices" == "1" ]] || problems+=" [$form] the running-sessions notice appeared $notices times;"
+        [[ "$(pw_servers "$cfg")" == "playwright,serena" ]] || problems+=" [$form] the other servers changed: $(pw_servers "$cfg");"
+        : >"$tmp/claude.log"
+        out2="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+        again=( "$cfg".autoos-backup-* )
+        [[ "$(pw_writes "$tmp")" == "0" && "$out2" == *"skipped"* && "${#again[@]}" == "1" ]] \
+            || problems+=" [$form] the second run wrote or made another backup: $(pw_writes "$tmp") ${#again[@]};"
+        [[ ! -s "$tmp/docker.log" ]] || problems+=" [$form] docker was called: $(cat "$tmp/docker.log");"
+        rm -rf "$tmp"
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: an entry that already is the proxy is skipped without a write"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" python3 "$ROOT/tools/playwright_mcp_lazy.py"
+    cp "$cfg" "$tmp/seed.json"
+    out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+    writes="$(pw_writes "$tmp")"
+    same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+    backups=( "$cfg".autoos-backup-* )
+    nbackups=0; [[ -e "${backups[0]}" ]] && nbackups="${#backups[@]}"
+    rm -rf "$tmp"
+    if [[ "$writes" == "0" && "$same" == "1" && "$nbackups" == "0" && "$out" == *"skipped"* ]]; then pass
+    else fail "writes=$writes unchanged=$same backups=$nbackups out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: any other custom entry is left alone with a warning that names it"; then
+    problems=""
+    n=0
+    while IFS= read -r entry; do
+        n=$((n + 1))
+        tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+        pw_seed_json "$cfg" "$entry"
+        cp "$cfg" "$tmp/seed.json"
+        out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+        backups=( "$cfg".autoos-backup-* )
+        same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+        [[ "$(pw_writes "$tmp")" == "0" && "$same" == "1" && ! -e "${backups[0]}" ]] || problems+=" [$n] the entry was touched;"
+        [[ "$out" == *"'playwright'"* && "$out" == *"custom"* ]] || problems+=" [$n] no warning naming it;"
+        [[ "$out" != *"sekret-marker"* ]] || problems+=" [$n] the warning printed the entry's own arguments;"
+        rm -rf "$tmp"
+    done <<EOF
+{"type":"stdio","command":"docker","args":["run","-i","--rm","mcr.microsoft.com/playwright/mcp:v9.9.9"],"env":{}}
+{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless"],"env":{}}
+{"type":"stdio","command":"docker","args":["run","-i","--rm","--init","--network","host","mcr.microsoft.com/playwright/mcp:latest"],"env":{"TOKEN":"sekret-marker"}}
+{"type":"stdio","command":"node","args":["/opt/pw/cli.js","--marker","sekret-marker"],"env":{}}
+{"type":"stdio","command":"python3","args":["/elsewhere/tools/playwright_mcp_lazy.py"],"env":{}}
+{"type":"http","url":"http://localhost:1/sekret-marker"}
+EOF
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: without docker today's npx registration is unchanged"; then
+    problems=""
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; pw_seed "$tmp/home/.claude.json" -
+    out="$(pw_run "$tmp" pw_without_docker 2>&1)"
+    calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+    pkg="$(python3 -c "import json;print(json.load(open('catalog/agent-harness.json',encoding='utf-8'))['mcp_servers']['playwright']['package'])")"
+    [[ "$calls" == "mcp add --scope user playwright -- npx -y $pkg" ]] || problems+=" no-entry calls=[$calls];"
+    rm -rf "$tmp"
+    # an existing docker-form entry is not this installer's to replace when there is no docker
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" "${PW_DOCKER_FORM[@]}"; cp "$cfg" "$tmp/seed.json"
+    out="$(pw_run "$tmp" pw_without_docker 2>&1)"
+    same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+    [[ "$(pw_writes "$tmp")" == "0" && "$same" == "1" ]] || problems+=" existing entry was touched;"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: a dry run prints the plan and calls nothing"; then
+    problems=""
+    for form in none docker; do
+        tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+        if [[ "$form" == none ]]; then pw_seed "$cfg" -; else pw_seed "$cfg" "${PW_DOCKER_FORM[@]}"; fi
+        cp "$cfg" "$tmp/seed.json"
+        out="$(PW_DRY=1 pw_run "$tmp" install_mcp_playwright 2>&1)"
+        same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+        backups=( "$cfg".autoos-backup-* )
+        [[ ! -s "$tmp/claude.log" && "$same" == "1" && ! -e "${backups[0]}" && ! -s "$tmp/docker.log" ]] || problems+=" [$form] a dry run called or wrote something;"
+        [[ "$out" == *"would"* && "$out" == *"$ROOT/tools/playwright_mcp_lazy.py"* ]] || problems+=" [$form] no plan naming the proxy: $(printf '%s' "$out" | tail -3);"
+        rm -rf "$tmp"
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: a failed backup stops the replace with a warning"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" "${PW_DOCKER_FORM[@]}"; cp "$cfg" "$tmp/seed.json"
+    out="$(pw_run "$tmp" pw_backup_fails 2>&1)"
+    same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+    writes="$(pw_writes "$tmp")"
+    rm -rf "$tmp"
+    if [[ "$writes" == "0" && "$same" == "1" && "$out" == *"could not back up"* ]]; then pass
+    else fail "writes=$writes unchanged=$same out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: an add that fails after the remove puts the old entry back"; then
+    problems=""
+    for form in docker npx; do
+        tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+        if [[ "$form" == docker ]]; then old=("${PW_DOCKER_FORM[@]}"); else old=(npx -y @playwright/mcp@0.0.81); fi
+        pw_seed "$cfg" "${old[@]}"
+        out="$(PW_ADD_FAIL=playwright_mcp_lazy pw_run "$tmp" install_mcp_playwright 2>&1)"
+        got="$(pw_entry "$cfg")"
+        [[ "$got" == "${old[*]}" ]] || problems+=" [$form] entry after the failed add=[$got];"
+        [[ "$out" == *"put back"* ]] || problems+=" [$form] the rollback was not reported;"
+        rm -rf "$tmp"
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: a playwright server from another scope is left alone"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" -
+    out="$(PW_EXTRA_LIST='playwright: node /somewhere/cli.js - Connected' pw_run "$tmp" install_mcp_playwright 2>&1)"
+    writes="$(pw_writes "$tmp")"
+    rm -rf "$tmp"
+    if [[ "$writes" == "0" && "$out" == *"already registered"* ]]; then pass
+    else fail "writes=$writes out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: the user config is CLAUDE_CONFIG_DIR/.claude.json, else HOME/.claude.json, a legacy .config.json first"; then
+    tmp="$(mktemp -d)"
+    a="$(SYS_HOME="$tmp/h"; unset CLAUDE_CONFIG_DIR; claude_user_config_file)"
+    b="$(SYS_HOME="$tmp/h" CLAUDE_CONFIG_DIR="$tmp/c" claude_user_config_file)"
+    mkdir -p "$tmp/h/.claude" "$tmp/c"; : >"$tmp/h/.claude/.config.json"
+    c="$(SYS_HOME="$tmp/h"; unset CLAUDE_CONFIG_DIR; claude_user_config_file)"
+    : >"$tmp/c/.config.json"
+    d="$(SYS_HOME="$tmp/h" CLAUDE_CONFIG_DIR="$tmp/c" claude_user_config_file)"
+    got="$a|$b|$c|$d"
+    want="$tmp/h/.claude.json|$tmp/c/.claude.json|$tmp/h/.claude/.config.json|$tmp/c/.config.json"
+    rm -rf "$tmp"
+    assert_eq "$got" "$want"
+fi
+
+if it "playwright lazy proxy installer: the backup is of the file claude reads when CLAUDE_CONFIG_DIR is set"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; mkdir -p "$tmp/cfgdir"
+    pw_seed "$tmp/cfgdir/.claude.json" "${PW_DOCKER_FORM[@]}"
+    pw_seed "$tmp/home/.claude.json" -
+    cp "$tmp/cfgdir/.claude.json" "$tmp/seed.json"
+    out="$(PW_CONFIG_DIR="$tmp/cfgdir" PW_CONFIG="$tmp/cfgdir/.claude.json" pw_run "$tmp" install_mcp_playwright 2>&1)"
+    backups=( "$tmp/cfgdir/.claude.json".autoos-backup-* )
+    homebackups=( "$tmp/home/.claude.json".autoos-backup-* )
+    ok=0
+    [[ -f "${backups[0]}" ]] && cmp -s "${backups[0]}" "$tmp/seed.json" && [[ ! -e "${homebackups[0]}" ]] \
+        && [[ "$(pw_entry "$tmp/cfgdir/.claude.json")" == "python3 $ROOT/tools/playwright_mcp_lazy.py" ]] && ok=1
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "the backup or the replace went to the wrong file: $(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: without claude on PATH it warns and calls nothing"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; pw_seed "$tmp/home/.claude.json" -
+    out="$(pw_run "$tmp" pw_without_claude 2>&1)"; rc=$?
+    calls="$(cat "$tmp/claude.log" 2>/dev/null)"
+    rm -rf "$tmp"
+    if [[ "$rc" == "0" && -z "$calls" && "$out" == *"claude is not on PATH"* ]]; then pass
+    else fail "rc=$rc calls=[$calls] out=$(printf '%s' "$out" | tail -2)"; fi
 fi
 
 describe "claude autostart"
