@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — Linux installs the Antigravity Hub 2.x in user space and can update it
+
+- **`./setup.sh --only antigravity` installs the Antigravity Hub** (2.17.0 today) into `~/.local/opt/antigravity`
+  with a command link `~/.local/bin/antigravity` and a desktop entry. No sudo, no apt, nothing root-owned. The
+  vendor publishes no Linux feed, so the newest version is read from the `microsoft/winget-pkgs` manifest: highest
+  numeric version, download URL built only from a constant host plus the version id (nothing taken from the manifest
+  text), a rate-limited GitHub API (403/429) reported with its reset time, a `GITHUB_TOKEN`/`GH_TOKEN` passed on stdin
+  only.
+- **Verified before anything is replaced:** size against `Content-Length` and a floor, gzip, tar members (no `..`,
+  absolute path, link, device or setuid entry), an ELF main binary, `chrome-sandbox`, and the `app.asar` version equal
+  to the manifest's. A failed check leaves the current install byte-identical; install and update are staged and
+  swapped; a directory or link AutoOS did not create (stamp-based ownership) is never touched.
+- **`./setup.sh --update`** (or `--only antigravity --update`) replaces the install only when the discovered version is
+  newer; `--dry-run` names the lookup and the target directory. The old apt package `antigravity` (IDE 1.23.2) is not
+  removed: a warning names the removal commands and the PATH order.
+- **Electron sandbox:** when the kernel restricts unprivileged user namespaces, the installer prints the two sudo
+  commands for `chrome-sandbox`; it never runs sudo.
+- **Unverified, on purpose stated:** the Linux download has no published sha256 (the checks above, TLS and winget-pkgs
+  are the only provenance); the sandbox step on this kernel and the Hub's MCP-config location were not exercised
+  (the MCP writers are unchanged).
+
 ### Added — the Windows OpenCode writer knows the V2 CLI
 
 - **`Set-AutoOSOpenCodeConfig` writes the V2 `providers` block** when `opencode --version` reports 2.x (the same
