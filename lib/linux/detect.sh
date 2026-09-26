@@ -465,8 +465,10 @@ script_is_installed() {
         # A HS_SCOPE=system install (configuration/herdr-sessions/install.sh, the
         # headless-root branch) puts its restore unit in /etc/systemd/system, never
         # under $SYS_HOME - check both, or a system-scope herdr-sessions is invisible
-        # here and to autoos_conflict_present's mutual-exclusion gate
-        # (lib/linux/install.sh), letting claude-autostart install beside a live
+        # here and to the install_claude_autostart/install_herdr_sessions
+        # mutual-exclusion gates (lib/linux/install.sh: the other selected in
+        # this plan is refused, the other already installed is skipped, rc 0),
+        # letting claude-autostart install beside a live
         # restore. Injectable for tests, same seam pattern as SYS_HOME.
         herdr-sessions)  [[ -f "$SYS_HOME/.config/systemd/user/herdr-sessions-restore.service" ]] || \
                          [[ -f "${AUTOOS_ETC_SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/herdr-sessions-restore.service" ]] ;;
