@@ -2340,7 +2340,21 @@ function Set-AutoOSOpenCodeConfig {
         $appDataDir = Join-Path $env:APPDATA 'opencode'
         if (-not (Test-Path $appDataDir)) { New-Item -ItemType Directory -Path $appDataDir -Force | Out-Null }
         $appDataFile = Join-Path $appDataDir 'config.json'
-        (Get-Content $configFile -Raw) | Out-File -FilePath $appDataFile -Encoding utf8
+        # Same rule as every other file this writer touches (AGENTS.md section
+        # 4): read, write only on change, back up what was there once. Compared
+        # as text, not bytes: the encoding Out-File writes (BOM or not) is the
+        # host's, and a copy that only differs in it or in its final newline is
+        # the same config. The copy itself is written exactly as before.
+        $copyText = Get-Content $configFile -Raw
+        $appDataCurrent = $false
+        if (Test-Path -LiteralPath $appDataFile) {
+            $appDataText = [string](Get-Content -LiteralPath $appDataFile -Raw -Encoding UTF8)
+            $appDataCurrent = ($appDataText.TrimEnd("`r", "`n") -ceq ([string]$copyText).TrimEnd("`r", "`n"))
+        }
+        if (-not $appDataCurrent) {
+            if (Test-Path -LiteralPath $appDataFile) { $null = Copy-AutoOSBackup -Path $appDataFile }
+            $copyText | Out-File -FilePath $appDataFile -Encoding utf8
+        }
     }
 }
 

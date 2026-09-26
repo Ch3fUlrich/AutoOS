@@ -5073,6 +5073,56 @@ Test-Case 'opencode V2: a V1 CLI gets no providers block' {
     }
 }
 
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig leaves an unchanged APPDATA config.json untouched' {
+    # The APPDATA copy used to be rewritten on EVERY run: no compare, no backup.
+    Invoke-OpenCodeScratch -Seed '{"theme":"mine"}' -Body {
+        param($c)
+        $null = & $c.Run
+        if (-not (Test-Path -LiteralPath $c.AppDataFile)) { throw 'run 1 did not write the APPDATA config.json' }
+        $time1 = (Get-Item -LiteralPath $c.AppDataFile).LastWriteTimeUtc
+        $hash1 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+
+        # Timestamps are coarse on some filesystems: pause so a rewrite shows.
+        Start-Sleep -Milliseconds 1200
+        $null = & $c.Run
+        $time2 = (Get-Item -LiteralPath $c.AppDataFile).LastWriteTimeUtc
+        $hash2 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+        $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+        if ($time2 -ne $time1) { throw "run 2 rewrote the unchanged APPDATA config.json (LastWriteTimeUtc $($time1.ToString('o')) -> $($time2.ToString('o')))" }
+        if ($hash2 -ne $hash1) { throw 'run 2 changed the APPDATA config.json (SHA256 differs from run 1)' }
+        if ($backups.Count -ne 0) { throw "an unchanged APPDATA config.json got $($backups.Count) backup(s)" }
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig backs up a foreign APPDATA config.json once' {
+    Invoke-OpenCodeScratch -Seed '{"theme":"mine"}' -Body {
+        param($c)
+        $foreign = [Text.Encoding]::UTF8.GetBytes('{"foreign":"a file the user owns"}' + "`n")
+        $null = New-Item -ItemType Directory -Path $c.AppDataDir -Force
+        [IO.File]::WriteAllBytes($c.AppDataFile, $foreign)
+        $seedB64 = [Convert]::ToBase64String($foreign)
+
+        $null = & $c.Run
+        $backups1 = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter 'config.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1: the foreign file, once)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the foreign file, byte for byte' }
+        $now = (Get-Content -LiteralPath $c.AppDataFile -Raw -Encoding UTF8).TrimEnd()
+        $want = (Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8).TrimEnd()
+        if ($now -cne $want) { throw 'run 1 did not put the OpenCode config into the APPDATA config.json' }
+
+        # Runs 2 and 3 change nothing, so they back nothing up. The pause keeps a
+        # wrongly repeated backup from hiding behind a same-second name.
+        foreach ($run in 2, 3) {
+            Start-Sleep -Milliseconds 1200
+            $null = & $c.Run
+            $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+            if ($backups.Count -ne 1) { throw "backups after run $run = $($backups.Count) (want 1)" }
+        }
+        Pass
+    }
+}
+
 Test-Case 'zed default_model converges litellm to omniroute (zed routing)' {
     $realAppData = $env:APPDATA
     $scratch = Join-Path $env:TEMP "autoos-zeddm-$([Guid]::NewGuid().ToString('N'))"
