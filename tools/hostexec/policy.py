@@ -29,6 +29,8 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              does not resolve on the policy's FIXED PATH, or
                              an absolute path under a world-writable directory
                              (checked on every command head)
+    use-host-alias           on a local host, ssh/scp/sftp always and rsync
+                             with host:path (checked on every head)
     no-sudo                  sudo/su/doas/pkexec/run0 as any argv element's
                              basename, anywhere (accepted false positive:
                              `grep sudo file` denies); heads cover wrappers
@@ -233,6 +235,13 @@ def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str)
         hijack_problem = _path_hijack_problem(head[0], policy)
         if hijack_problem:
             return Decision(False, "path-hijack", (hijack_problem,))
+
+    for head in heads:
+        if not head:
+            continue
+        alias_problem = _use_host_alias_problem(head, host_entry)
+        if alias_problem:
+            return Decision(False, "use-host-alias", (alias_problem,))
 
     # no-sudo: any argv element whose basename is exactly sudo/su/doas/
     # pkexec/run0 denies, anywhere (review L1 high). Accepted false
@@ -820,6 +829,41 @@ def _path_hijack_problem(argv0: str, policy: Policy) -> str | None:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return None
     return f"argv[0] {argv0!r} does not resolve on the policy's fixed PATH"
+
+
+def _looks_like_rsync_remote(token: str) -> bool:
+    """host:path (incl. user@host:path). Excludes options (-*), local paths
+    (/...), and bare filenames without a colon. `a/b:c`? contains a slash
+    before the colon -- still remote if the host part has no slash."""
+    if not token or token.startswith("-") or token.startswith("/"):
+        return False
+    if ":" not in token:
+        return False
+    head, _, tail = token.partition(":")
+    if not head or not tail or "/" in head or " " in token:
+        return False
+    return True
+
+
+def _use_host_alias_problem(head: Sequence[str], host_entry: HostEntry) -> str | None:
+    """Brief D: on a local host, ssh/scp/sftp and rsync-with-remote always
+    bypass the policy's host table (forbid-hosts, audit host field) -- deny
+    with "call host_run with host=<alias>". Only local hosts: an ssh-kind
+    host already runs via `ssh -o BatchMode=yes -T <target>` in runner.py."""
+    if host_entry.kind != "local":
+        return None
+    if not head:
+        return None
+    base = _basename(head[0])
+    if base in ("ssh", "scp", "sftp"):
+        return (f"{base} on a local host bypasses the host table "
+                f"(forbid-host, audit host); call host_run with host=<alias>")
+    if base == "rsync":
+        for tok in head[1:]:
+            if _looks_like_rsync_remote(tok):
+                return (f"rsync with a remote spec {tok!r} on a local host bypasses "
+                        f"the host table; call host_run with host=<alias>")
+    return None
 
 
 _SHELL_NAMES = {"sh", "bash", "zsh", "dash", "fish",
