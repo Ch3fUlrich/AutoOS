@@ -53,6 +53,46 @@ class BasicExecTests(unittest.TestCase):
             self.assertFalse(result.truncated)
             self.assertGreaterEqual(result.duration_ms, 0)
 
+    def test_child_stdin_is_devnull(self):
+        # K/Qoder-11: the child must not inherit the broker's stdin.
+        import subprocess as _sp
+        seen: dict = {}
+        orig_popen = _sp.Popen
+
+        class _FakeStdout:
+            def fileno(self):
+                return 999999  # invalid -> os.read raises OSError -> EOF
+
+            def close(self):
+                pass
+
+        class _FakeProc:
+            pid = 123456
+            stdout = _FakeStdout()  # type: ignore[assignment]
+            returncode = 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        def _capture(*a, **k):
+            seen.update(k)
+            return _FakeProc()  # type: ignore[return-value]
+
+        _sp.Popen = _capture  # type: ignore[assignment]
+        try:
+            import os as _os
+            orig_set_blocking = _os.set_blocking
+            _os.set_blocking = lambda *a, **k: None  # type: ignore[assignment]
+            try:
+                runner.run_local(["cat"], cwd="/tmp",
+                                 path_dirs=_REAL_BIN_DIRS, timeout=1)
+            finally:
+                _os.set_blocking = orig_set_blocking
+        finally:
+            _sp.Popen = orig_popen
+        self.assertIs(seen.get("stdin"), _sp.DEVNULL,
+                      f"child stdin must be DEVNULL, got {seen.get('stdin')!r}")
+
     def test_nonzero_exit_code_is_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = runner.run_local(["sh", "-c", "exit 7"], cwd=tmp,

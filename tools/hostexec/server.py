@@ -80,8 +80,11 @@ def host_run(pol: policy.Policy, log: audit.AuditLog, *, actor: str, host: str,
              session: str | None = None, via: str = "http",
              run_fn: Callable | None = None) -> dict:
     """decide() -> fail-closed audit preflight -> (deny: log+raise) or
-    (allow: run, then log the outcome). Raises Refused on denial or on an
-    unwritable audit log (spec section 5: FAIL CLOSED, nothing runs)."""
+    (allow: run, then log the outcome). Preflight is fail-closed (nothing
+    runs when the log is unwritable). Post-run and deny writes are guarded:
+    on failure the tool errors saying the command RAN (or was denied) but
+    was not logged, plus one stderr line -- see README (fail-closed covers
+    the pre-run check only)."""
     cwd = cwd or "/"
     try:
         log.preflight()
@@ -90,19 +93,30 @@ def host_run(pol: policy.Policy, log: audit.AuditLog, *, actor: str, host: str,
 
     decision = policy.decide(pol, actor, host, argv, cwd)
     if not decision.allow:
-        log.write(actor=actor, session=session, via=via, host=host, argv=argv, cwd=cwd,
-                   run_as=actor, decision="deny", rule=decision.rule, reason=reason,
-                   exit_code=None, duration_ms=None, out_bytes=None, truncated=False)
+        try:
+            log.write(actor=actor, session=session, via=via, host=host, argv=argv, cwd=cwd,
+                       run_as=actor, decision="deny", rule=decision.rule, reason=reason,
+                       exit_code=None, duration_ms=None, out_bytes=None, truncated=False)
+        except audit.AuditWriteError as exc:
+            print(f"hostexec: denied by {decision.rule} but audit log failed: {exc}",
+                  file=sys.stderr)
+            raise Refused(decision.rule, list(decision.problems) + [
+                f"denied by {decision.rule} but was not logged: {exc}"]) from exc
         raise Refused(decision.rule, list(decision.problems))
 
     host_entry = pol.hosts[host]  # decide() already proved this exists and is not forbidden
     run = run_fn or _default_run
     result = run(pol, host_entry, argv, cwd)
 
-    log.write(actor=actor, session=session, via=via, host=host, argv=argv, cwd=cwd,
-              run_as=actor, decision="allow", rule=None, reason=reason,
-              exit_code=result.exit_code, duration_ms=result.duration_ms,
-              out_bytes=result.out_bytes, truncated=result.truncated)
+    try:
+        log.write(actor=actor, session=session, via=via, host=host, argv=argv, cwd=cwd,
+                  run_as=actor, decision="allow", rule=None, reason=reason,
+                  exit_code=result.exit_code, duration_ms=result.duration_ms,
+                  out_bytes=result.out_bytes, truncated=result.truncated)
+    except audit.AuditWriteError as exc:
+        print(f"hostexec: command RAN but audit log failed: {exc} argv={argv!r}",
+              file=sys.stderr)
+        raise Refused(None, [f"command RAN but was not logged: {exc}"]) from exc
     return {"exit": result.exit_code, "duration_ms": result.duration_ms,
             "out_bytes": result.out_bytes, "truncated": result.truncated,
             "output": result.output, "timed_out": result.timed_out}
@@ -142,7 +156,10 @@ def host_log_tail(state_dir: str, *, actor: str, n: int = 20) -> dict:
 # ─── bind address policy (spec section 4 item 4) ───────────────────────────
 
 def parse_bind(env_value: str | None) -> list[str]:
-    raw = env_value or "127.0.0.1"
+    if env_value is None:
+        raw = "127.0.0.1"
+    else:
+        raw = env_value
     return [b.strip() for b in raw.split(",") if b.strip()]
 
 
@@ -233,11 +250,15 @@ def serve(pol: policy.Policy, *, policy_path: str, state_dir: str | None = None)
     """Blocking: start the broker and serve until interrupted. Reads
     AUTOOS_EXEC_BIND (comma list, default 127.0.0.1) and AUTOOS_EXEC_PORT
     (default DEFAULT_PORT); refuses a non-loopback bind unless
-    AUTOOS_EXEC_ALLOW_LAN=1 (spec section 4 item 4)."""
+    AUTOOS_EXEC_ALLOW_LAN=1 (spec section 4 item 4). Exits non-zero when no
+    listener comes up (empty bind, bind failure)."""
+    addresses = parse_bind(os.environ.get("AUTOOS_EXEC_BIND"))
+    if not addresses:
+        print("refused to start: no listen addresses (empty AUTOOS_EXEC_BIND)",
+              file=sys.stderr)
+        return 2
     import asyncio
     import uvicorn
-
-    addresses = parse_bind(os.environ.get("AUTOOS_EXEC_BIND"))
     port = int(os.environ.get("AUTOOS_EXEC_PORT", str(DEFAULT_PORT)))
     allow_lan = os.environ.get("AUTOOS_EXEC_ALLOW_LAN") == "1"
     try:
@@ -263,6 +284,13 @@ def serve(pol: policy.Policy, *, policy_path: str, state_dir: str | None = None)
         asyncio.run(_serve_all(servers))
     except KeyboardInterrupt:
         pass
+    except OSError as exc:
+        print(f"broker failed to listen: {exc}", file=sys.stderr)
+        return 2
+    if any(not getattr(s, "started", False) for s in servers):
+        print("broker failed to listen: no server reached started",
+              file=sys.stderr)
+        return 2
     return 0
 
 

@@ -54,6 +54,7 @@ def _exec(argv: Sequence[str], *, cwd: str, path_dirs: Sequence[str],
     env = build_env(path_dirs, base_env)
     start = time.monotonic()
     proc = subprocess.Popen(list(argv), cwd=cwd, env=env, shell=False,
+                             stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              start_new_session=True)  # own process group: proc.pid == pgid
 

@@ -147,10 +147,17 @@ broker restart (it is re-derived from the file's own last line under the
 same lock as every write, never cached in memory); a gap in `seq` means
 loss or tampering, and the log is never silently renumbered.
 
-**Fail closed**: if a call's audit line cannot be written, for any
-reason -- including an otherwise-ALLOWED call -- the call is refused and
-nothing runs. A broker that cannot write its own audit log refuses to
-start at all.
+**Fail closed**: the pre-run check is fail-closed -- if `preflight()` fails,
+nothing runs. Deny and post-run writes are guarded: if a deny line cannot
+be written, the tool errors saying the call was denied but was not logged
+(plus one `stderr` line; the call never ran); if an allowed call's post-run
+line cannot be written, the tool errors saying the command RAN but was not
+logged (plus one `stderr` line). A broker that cannot write its own audit
+log refuses to start at all, and `serve()` exits non-zero when no listener
+comes up (empty `AUTOOS_EXEC_BIND`, bind failure).
+
+The child never inherits the broker's stdin (`stdin=DEVNULL`), so an
+allowed bare `sh`/`cat` cannot siphon the operator's keystrokes.
 
 Retention is 90 days (operator decision, 2026-09-26), pruned by filename
 date only, never by file mtime (so a touched or copied file cannot dodge

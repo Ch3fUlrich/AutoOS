@@ -93,6 +93,33 @@ class BindPolicyTests(unittest.TestCase):
         self.assertEqual(server.parse_bind("127.0.0.1, ::1 ,172.17.0.1"),
                           ["127.0.0.1", "::1", "172.17.0.1"])
 
+    def test_empty_or_whitespace_bind_parses_to_no_addresses(self):
+        # J: empty/whitespace bind must not silently become the default;
+        # serve() refuses it with a non-zero exit.
+        self.assertEqual(server.parse_bind(""), [])
+        self.assertEqual(server.parse_bind("   "), [])
+        self.assertEqual(server.parse_bind(" , "), [])
+
+    def test_serve_refuses_empty_bind_without_listening(self):
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as tmp:
+            bindir = _make_bindir(tmp)
+            pol = _policy(bindir)
+            policy_path = os.path.join(tmp, "policy.toml")
+            with open(policy_path, "w", encoding="utf-8") as fh:
+                fh.write("path = []\n")
+            old = os.environ.get("AUTOOS_EXEC_BIND")
+            os.environ["AUTOOS_EXEC_BIND"] = "   "
+            try:
+                rc = server.serve(pol, policy_path=policy_path,
+                                  state_dir=os.path.join(tmp, "state"))
+            finally:
+                if old is None:
+                    os.environ.pop("AUTOOS_EXEC_BIND", None)
+                else:
+                    os.environ["AUTOOS_EXEC_BIND"] = old
+            self.assertNotEqual(rc, 0)
+
     def test_loopback_addresses_are_always_allowed(self):
         server.check_bind_allowed(["127.0.0.1", "::1", "localhost"], allow_lan=False)  # no raise
 
@@ -156,6 +183,64 @@ class HostRunPlainFunctionTests(unittest.TestCase):
                                      argv=["echo", "hi"])
             finally:
                 os.chmod(locked_parent, 0o700)
+
+    def test_deny_log_failure_still_refuses_and_says_not_logged(self):
+        # J: deny-path audit write failure -> Refused saying denied but not
+        # logged, plus one stderr line (call never ran).
+        import io
+        from contextlib import redirect_stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pol = _policy(_make_bindir(tmp))
+            log = audit.AuditLog(os.path.join(tmp, "state"))
+            orig_write = log.write
+
+            def _fail_once(*a, **k):
+                # First write is the deny line (preflight already wrote start).
+                raise audit.AuditWriteError("disk full")
+
+            log.write = _fail_once  # type: ignore[method-assign]
+            err = io.StringIO()
+            with redirect_stderr(err):
+                with self.assertRaises(server.Refused) as ctx:
+                    server.host_run(pol, log, actor="claude", host="coding-host",
+                                     argv=["sudo", "id"], cwd=tmp)
+            log.close()
+            self.assertIn("not logged", " ".join(ctx.exception.problems).lower())
+            self.assertIn("denied", " ".join(ctx.exception.problems).lower())
+            self.assertTrue(err.getvalue().strip(), "expected one stderr line")
+
+    def test_post_run_log_failure_says_ran_but_not_logged(self):
+        # J: allowed call ran, then post-run log.write fails -> error says
+        # RAN but was not logged, plus one stderr line.
+        import io
+        from contextlib import redirect_stderr
+
+        def fake_run(pol, host_entry, argv, cwd):
+            return runner.RunResult(exit_code=0, duration_ms=1, out_bytes=2,
+                                     output="ok", truncated=False, timed_out=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pol = _policy(_make_bindir(tmp))
+            log = audit.AuditLog(os.path.join(tmp, "state"))
+            log.preflight()  # real preflight succeeds (start record written)
+            orig_write = log.write
+            calls = {"n": 0}
+
+            def _fail_post(*a, **k):
+                calls["n"] += 1
+                raise audit.AuditWriteError("disk full after run")
+
+            log.write = _fail_post  # type: ignore[method-assign]
+            err = io.StringIO()
+            with redirect_stderr(err):
+                with self.assertRaises(server.Refused) as ctx:
+                    server.host_run(pol, log, actor="claude", host="coding-host",
+                                     argv=["echo", "hi"], cwd=tmp, run_fn=fake_run)
+            log.close()
+            self.assertIn("ran", " ".join(ctx.exception.problems).lower())
+            self.assertIn("not logged", " ".join(ctx.exception.problems).lower())
+            self.assertTrue(err.getvalue().strip(), "expected one stderr line")
 
     def test_run_fn_is_injectable_for_testing_without_a_real_process(self):
         calls = []
