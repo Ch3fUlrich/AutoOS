@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import autoos_resolver as r  # noqa: E402
+import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
 
 # A full canonical ladder, so a rung the rule wants is always present unless a
 # test deliberately shortens the ladder.
@@ -297,8 +298,8 @@ class FilterTests(unittest.TestCase):
     def setUp(self):
         self.registry = {
             "providers": {
-                "clean": {"id": "clean", "trains_on_prompts": False},
-                "nosy": {"id": "nosy", "trains_on_prompts": True},
+                "clean": {"id": "clean", "tier": "paid", "trains_on_prompts": False},
+                "nosy": {"id": "nosy", "tier": "paid", "trains_on_prompts": True},
             },
             "models": {
                 "big": {"id": "big", "tool_calls": "proven",
@@ -386,38 +387,100 @@ class FilterTests(unittest.TestCase):
     # --- one test per filter reason ---------------------------------------
 
     def test_survivors_are_route_ids_in_registry_order(self):
+        # FT: r-mixed now survives -- its nosy/big leg is usable (review is
+        # not agentic, need 1000x1.3 <= big's 100000, no client_bound), even
+        # though its other two legs (clean/tiny, clean/bound) are not.
         survivors, removed = self.run_filters(overlay={})
-        self.assertEqual(survivors, ["r-ok"])
-        self.assertEqual(sorted(removed), ["r-mixed", "r-noleg", "r-retired"])
+        self.assertEqual(survivors, ["r-ok", "r-mixed"])
+        self.assertEqual(sorted(removed), ["r-noleg", "r-retired"])
 
     def test_retired_reason(self):
         _, removed = self.run_filters(overlay={})
         self.assertEqual(removed["r-retired"], ["retired"])
 
     def test_no_available_leg_reason(self):
+        # FT folds the old "no available leg" route-level check into the new
+        # "no usable leg" one: zero serving legs means usable_legs() has
+        # nothing to try and nothing to list after the colon.
         _, removed = self.run_filters(overlay={})
-        self.assertEqual(removed["r-noleg"], ["no available leg"])
+        self.assertEqual(removed["r-noleg"], ["no usable leg: "])
 
     def test_privacy_reason(self):
+        # Unchanged by FT: privacy stays route-level, checked regardless of
+        # any leg's own usability (the overlay here even makes clean/tiny
+        # usable too, so both legs *would* be usable -- privacy still wins).
         _, removed = self.run_filters(card=self.card(privacy="sensitive"),
                                       overlay=self.overlay)
         self.assertIn("privacy: nosy/big trains on prompts", removed["r-mixed"])
 
+    def test_privacy_checks_an_unavailable_leg_the_gateway_still_serves(self):
+        # close-priv 2026-09-26: unavailable_legs is registry-only; the gateway
+        # combo still lists the leg, so a sensitive card must not pass a route
+        # whose hidden leg is unsafe.
+        self.registry["providers"]["freepool"] = {
+            "id": "freepool", "tier": "free", "trains_on_prompts": False}
+        self.registry["models"]["free-model"] = {
+            "id": "free-model", "tool_calls": "proven",
+            "context_usable": {"tokens": 100000, "source": "default"}}
+        self.registry["routes"]["r-hidden"] = {
+            "id": "r-hidden", "legs": ["clean/big", "freepool/free-model"],
+            "unavailable_legs": {"freepool/free-model": {"available": False}}}
+        survivors, removed = self.run_filters(card=self.card(privacy="sensitive"))
+        self.assertNotIn("r-hidden", survivors)
+        self.assertTrue(any("freepool/free-model" in r for r in removed["r-hidden"]))
+
+    def test_privacy_removes_route_with_a_free_pool_leg_even_after_a_clean_leg(self):
+        # PRIV brief 2026-09-26 ("Free first, private never"): a free-tier
+        # leg is never private-safe, even one whose own trains_on_prompts is
+        # false, and even when it comes after an otherwise-clean first leg --
+        # the whole route is removed for a sensitive card (route-level, D-
+        # style, not per-leg fall-through).
+        self.registry["providers"]["freepool"] = {
+            "id": "freepool", "tier": "free", "trains_on_prompts": False}
+        self.registry["models"]["free-model"] = {
+            "id": "free-model", "tool_calls": "proven",
+            "context_usable": {"tokens": 100000, "source": "default"}}
+        self.registry["routes"]["r-freepool"] = {
+            "id": "r-freepool", "legs": ["clean/big", "freepool/free-model"]}
+        survivors, removed = self.run_filters(card=self.card(privacy="sensitive"))
+        self.assertNotIn("r-freepool", survivors)
+        self.assertTrue(
+            any("freepool/free-model" in reason for reason in removed["r-freepool"]),
+            removed.get("r-freepool"))
+
+    # --- per-leg filters (FT): usable_legs(), not a route removal ---------
+
     def test_context_reason(self):
-        _, removed = self.run_filters(overlay={})
+        # FT: a too-small-context leg no longer removes the whole route (see
+        # test_survivors_are_route_ids_in_registry_order) -- it is only
+        # skipped, in usable_legs()'s own per-leg reasons.
+        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+                                   self.card(), self.feats(), self.state(),
+                                   self.registry, {})
         self.assertIn("context: need 1000x1.3 > usable 100 on clean/tiny",
-                      removed["r-mixed"])
+                      skipped["clean/tiny"])
 
     def test_tool_calls_reason(self):
-        _, removed = self.run_filters(card=self.card(kind="implement"),
-                                      overlay=self.overlay)
-        self.assertIn("tool_calls: clean/bound is unproven", removed["r-mixed"])
+        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+                                   self.card(kind="implement"), self.feats(),
+                                   self.state(), self.registry, self.overlay)
+        self.assertIn("tool_calls: clean/bound is unproven",
+                      skipped["clean/bound"])
 
     def test_tool_calls_filter_is_skipped_for_a_non_agentic_kind(self):
-        _, removed = self.run_filters(card=self.card(kind="research"),
-                                      features=self.feats(need_tokens=10),
-                                      overlay={})
-        self.assertEqual(removed["r-mixed"],
+        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+                                   self.card(kind="research"),
+                                   self.feats(need_tokens=10), self.state(),
+                                   self.registry, {})
+        self.assertEqual(skipped["clean/bound"],
+                         ["client_bound: clean/bound needs claude"])
+
+    def test_client_bound_reason(self):
+        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+                                   self.card(kind="review"),
+                                   self.feats(need_tokens=10), self.state(),
+                                   self.registry, {})
+        self.assertEqual(skipped["clean/bound"],
                          ["client_bound: clean/bound needs claude"])
 
     def test_client_not_installed_reason(self):
@@ -438,23 +501,23 @@ class FilterTests(unittest.TestCase):
             overlay=self.overlay)
         self.assertIn("r-ok", survivors)
 
-    def test_client_bound_reason(self):
-        _, removed = self.run_filters(card=self.card(kind="review"),
-                                      features=self.feats(need_tokens=10),
-                                      overlay={})
-        self.assertEqual(removed["r-mixed"],
-                         ["client_bound: clean/bound needs claude"])
-
     def test_all_reasons_are_collected_never_stopping_at_the_first(self):
+        # A privacy-sensitive card whose every leg is *also* unusable (need
+        # is huge, so context fails everywhere): both the route-level
+        # privacy reason and the aggregate "no usable leg" reason show up,
+        # and the per-leg collection itself never stops at the first
+        # reason either -- clean/bound fails all three per-leg checks.
         _, removed = self.run_filters(
             card=self.card(kind="implement", privacy="sensitive"),
-            features=self.feats(need_tokens=1000), overlay={})
-        self.assertEqual(removed["r-mixed"], [
-            "privacy: nosy/big trains on prompts",
-            "context: need 1000x1.3 > usable 100 on clean/tiny",
-            "tool_calls: clean/bound is unproven",
-            "client_bound: clean/bound needs claude",
-        ])
+            features=self.feats(need_tokens=1_000_000), overlay={})
+        reasons = removed["r-mixed"]
+        self.assertEqual(reasons[0], "privacy: nosy/big trains on prompts")
+        self.assertEqual(len(reasons), 2)
+        no_usable = reasons[1]
+        self.assertTrue(no_usable.startswith("no usable leg: "))
+        self.assertIn("clean/bound: context:", no_usable)
+        self.assertIn("tool_calls: clean/bound is unproven", no_usable)
+        self.assertIn("client_bound: clean/bound needs claude", no_usable)
 
     def test_missing_need_tokens_fails_closed(self):
         with self.assertRaises(ValueError) as cm:
@@ -487,11 +550,15 @@ class FilterTests(unittest.TestCase):
             (None, "override r-nope: unknown route"))
 
     def test_override_cannot_resurrect_a_filtered_route(self):
+        # FT: r-mixed itself now survives under the default card/overlay
+        # (its nosy/big leg is usable) -- r-retired is still an actual
+        # route-level removal, so it is what exercises "an override never
+        # resurrects a filtered route" here.
         survivors, removed = self.run_filters(overlay={})
-        route, reason = r.apply_override({"override": {"route": "r-mixed"}},
+        route, reason = r.apply_override({"override": {"route": "r-retired"}},
                                          survivors, removed)
         self.assertIsNone(route)
-        self.assertTrue(reason.startswith("override r-mixed removed by filters: "))
+        self.assertTrue(reason.startswith("override r-retired removed by filters: "))
 
     # --- no_route ---------------------------------------------------------
 
@@ -572,9 +639,13 @@ class ToolCallsOverlayTests(unittest.TestCase):
                                self.registry, overlay)
 
     def test_overlay_proven_keeps_a_route_the_registry_alone_removes(self):
+        # FT: r-flaky has only the one leg, so an unusable leg is the whole
+        # route's only leg -- it still shows up removed, wrapped in the new
+        # "no usable leg" aggregate reason rather than as its own list item.
         survivors, removed = self.filt({})
         self.assertNotIn("r-flaky", survivors)
-        self.assertIn("tool_calls: clean/flaky is unproven", removed["r-flaky"])
+        self.assertEqual(len(removed["r-flaky"]), 1)
+        self.assertIn("tool_calls: clean/flaky is unproven", removed["r-flaky"][0])
 
         overlay = {"legs": {"clean/flaky": {"tool_calls": {"value": "proven",
                                                           "source": "probe"}}}}
@@ -590,7 +661,8 @@ class ToolCallsOverlayTests(unittest.TestCase):
                                                            "source": "probe"}}}}
         survivors, removed = self.filt(overlay)
         self.assertNotIn("r-solid", survivors)
-        self.assertIn("tool_calls: clean/solid is broken", removed["r-solid"])
+        self.assertEqual(len(removed["r-solid"]), 1)
+        self.assertIn("tool_calls: clean/solid is broken", removed["r-solid"][0])
 
     def test_overlay_matches_the_leg_exactly_as_written_omniroute_alias(self):
         self.registry["providers"]["clean"]["omniroute_id"] = "opencode-clean"
@@ -606,6 +678,198 @@ class ToolCallsOverlayTests(unittest.TestCase):
         overlay = {"legs": {"clean/solid": {"tool_calls_last_error": {"detail": "429s"}}}}
         survivors, _ = self.filt(overlay)
         self.assertIn("r-solid", survivors)
+
+
+class FallThroughTests(unittest.TestCase):
+    """FT (2026-09-26 operator decision, replacing the earlier "every leg
+    strict" answer): "a leg that is rate-limited or unproven makes the combo
+    fall through to the next proven leg; it does not block the route. A
+    route is blocked only when NO leg is available." OmniRoute's combos use
+    strategy "priority" -- legs are tried in order and an error falls
+    through to the next -- so the resolver's own per-leg filters must not be
+    stricter than that and block a whole route over one bad leg.
+    """
+
+    def two_leg_registry(self, leg_a=None, leg_b=None, route_class="cheap"):
+        """A route "r-ft" with two legs, "p/model-a" and "p/model-b", every
+        key ``plan()``'s scoring path reads present with a harmless default
+        (proven, ample context, no client_bound); `leg_a`/`leg_b` override
+        just the fields a test cares about.
+        """
+        model_a = {"id": "model-a", "family": "a", "reasoning": False,
+                  "effort_ladder": [], "tool_calls": "proven",
+                  "price_in": 1e-6, "price_out": 2e-6, "output_max": 32768,
+                  "context_usable": {"tokens": 100000, "source": "default"}}
+        model_b = {"id": "model-b", "family": "b", "reasoning": False,
+                  "effort_ladder": [], "tool_calls": "proven",
+                  "price_in": 2e-6, "price_out": 4e-6, "output_max": 32768,
+                  "context_usable": {"tokens": 100000, "source": "default"}}
+        model_a.update(leg_a or {})
+        model_b.update(leg_b or {})
+        return {
+            "providers": {"p": {"id": "p", "tier": "paid", "trains_on_prompts": False}},
+            "models": {
+                "model-a": model_a, "model-b": model_b,
+                "orch": {"id": "orch", "price_in": 5e-6, "price_out": 1e-5,
+                        "context_usable": {"tokens": 200000,
+                                           "source": "default"}},
+            },
+            "routes": {
+                "r-ft": {"id": "r-ft", "class": route_class,
+                        "legs": ["p/model-a", "p/model-b"]},
+            },
+            "policy": {
+                "modes": {"balanced": {"theta": {"value": 0.6},
+                                       "lambda": {"value": 0.01}}},
+                "verify_tokens": {"S0": {"tokens": 100}},
+                "latency_seed": {route_class: {"minutes": 5}},
+                "seed_priors": {route_class: {"S0": {"alpha": 8, "beta": 2}}},
+            },
+        }
+
+    def card(self, **overrides):
+        base = {"kind": "implement", "spec": "exact", "risk": "normal",
+               "mode": "balanced", "privacy": "public"}
+        base.update(overrides)
+        return base
+
+    def features(self, **overrides):
+        base = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+               "tests": True, "need_tokens": 10}
+        base.update(overrides)
+        return base
+
+    def state(self, installed=True, signed_in=True):
+        return {"opencode": {"installed": installed, "signed_in": signed_in,
+                             "reason": ""}}
+
+    def now(self):
+        return datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc)
+
+    # --- an unproven/too-small/bound first leg falls through --------------
+
+    def test_unproven_first_leg_falls_through_to_proven_second_leg(self):
+        registry = self.two_leg_registry(leg_a={"tool_calls": "unproven"})
+        card, features, client_state = self.card(), self.features(), self.state()
+
+        survivors, removed = r.filter_routes(card, features, client_state,
+                                             registry, {})
+        self.assertEqual(survivors, ["r-ft"])
+        self.assertEqual(removed, {})
+
+        result = r.plan(card, features, client_state, registry, {}, [],
+                        "orch", self.now())
+        self.assertEqual(result["route"], "r-ft")
+        self.assertEqual(result["leg"], "p/model-b")
+        self.assertEqual(result["skipped_legs"],
+                         {"p/model-a": ["tool_calls: p/model-a is unproven"]})
+        self.assertIn("falls through 1 skipped leg(s)", result["reason"])
+
+    def test_too_small_context_first_leg_falls_through_to_bigger_second_leg(self):
+        registry = self.two_leg_registry(
+            leg_a={"context_usable": {"tokens": 5, "source": "default"}})
+        card = self.card()
+        features = self.features(need_tokens=1000)  # x1.3 = 1300 > 5, <= 100000
+        client_state = self.state()
+
+        survivors, _ = r.filter_routes(card, features, client_state, registry, {})
+        self.assertEqual(survivors, ["r-ft"])
+
+        result = r.plan(card, features, client_state, registry, {}, [],
+                        "orch", self.now())
+        self.assertEqual(result["leg"], "p/model-b")
+        self.assertIn("p/model-a", result["skipped_legs"])
+        self.assertIn("context: need 1000x1.3 > usable 5 on p/model-a",
+                     result["skipped_legs"]["p/model-a"])
+        self.assertIn("falls through 1 skipped leg(s)", result["reason"])
+
+    def test_client_bound_leg_skipped_falls_through_to_open_leg(self):
+        registry = self.two_leg_registry(leg_a={"client_bound": "claude"})
+        card, features, client_state = self.card(), self.features(), self.state()
+
+        survivors, _ = r.filter_routes(card, features, client_state, registry, {})
+        self.assertEqual(survivors, ["r-ft"])
+
+        legs, skipped = r.usable_legs(registry["routes"]["r-ft"], card,
+                                      features, client_state, registry, {})
+        self.assertEqual(legs, [("p", "model-b")])
+        self.assertEqual(skipped,
+                         {"p/model-a": ["client_bound: p/model-a needs claude"]})
+
+    # --- all legs unusable: the route IS blocked ---------------------------
+
+    def test_all_legs_unproven_removed_with_no_usable_leg(self):
+        registry = self.two_leg_registry(leg_a={"tool_calls": "unproven"},
+                                         leg_b={"tool_calls": "unproven"})
+        card, features, client_state = self.card(), self.features(), self.state()
+
+        survivors, removed = r.filter_routes(card, features, client_state,
+                                             registry, {})
+        self.assertEqual(survivors, [])
+        reason = removed["r-ft"][0]
+        self.assertTrue(reason.startswith("no usable leg: "))
+        self.assertIn("p/model-a: tool_calls: p/model-a is unproven", reason)
+        self.assertIn("p/model-b: tool_calls: p/model-b is unproven", reason)
+
+    # --- privacy stays route-level, even with an otherwise-usable leg -----
+
+    def test_sensitive_card_removed_even_with_a_usable_leg(self):
+        registry = self.two_leg_registry()
+        registry["providers"]["p"]["trains_on_prompts"] = True
+        card = self.card(privacy="sensitive")
+        features, client_state = self.features(), self.state()
+
+        survivors, removed = r.filter_routes(card, features, client_state,
+                                             registry, {})
+        self.assertNotIn("r-ft", survivors)
+        self.assertEqual(removed["r-ft"], [
+            "privacy: p/model-a trains on prompts",
+            "privacy: p/model-b trains on prompts",
+        ])
+
+    # --- the overlay rate limit: unproven skipped, proven kept -------------
+
+    def test_rate_limited_unproven_leg_skipped_but_proven_leg_kept(self):
+        trials_429 = [{"status": 429, "single": "error", "round": "skipped",
+                      "note": "rate limited"}]
+        registry = self.two_leg_registry(leg_a={"tool_calls": "unproven"})
+        card, features, client_state = self.card(), self.features(), self.state()
+        overlay = {"legs": {
+            "p/model-a": {"tool_calls_last_error": {"trials": trials_429}},
+            "p/model-b": {"tool_calls_last_error": {"trials": trials_429}},
+        }}
+
+        legs, skipped = r.usable_legs(registry["routes"]["r-ft"], card,
+                                      features, client_state, registry, overlay)
+        # model-a: unproven AND rate-limited -- skipped, both reasons kept.
+        self.assertEqual(legs, [("p", "model-b")])
+        self.assertIn("rate_limited: p/model-a (429)", skipped["p/model-a"])
+        self.assertIn("tool_calls: p/model-a is unproven", skipped["p/model-a"])
+        # model-b: proven, so the *same* all-429 last error does not skip it
+        # -- OmniRoute itself falls through past a 429 at run time.
+        self.assertNotIn("p/model-b", skipped)
+
+    # --- the real catalog ---------------------------------------------
+
+    def test_real_registry_overlay_proven_leg_survives_for_implement(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        card = {"kind": "implement", "privacy": "public"}
+        features = {"need_tokens": 1000}
+        client_state = {"opencode": {"installed": True, "signed_in": True,
+                                     "reason": ""}}
+        # Every model in the real catalog is tool_calls unproven today (no
+        # probe has proven one yet); marking deepseek/deepseek-flash proven
+        # in the overlay is enough to keep t2-worker-clean alive, even
+        # though its other legs (mistral/mistral-small-latest included)
+        # stay unproven.
+        overlay = {"legs": {"deepseek/deepseek-flash": {
+            "tool_calls": {"value": "proven", "source": "test"}}}}
+        survivors, removed = r.filter_routes(card, features, client_state,
+                                             registry, overlay)
+        self.assertIn("t2-worker-clean", survivors)
+        self.assertNotIn("t2-worker-clean", removed)
 
 
 class ScoreTests(unittest.TestCase):
@@ -1266,8 +1530,11 @@ class PlanTests(unittest.TestCase):
             "route", "class", "client", "leg", "effort", "max_tokens",
             "context_budget", "bucket", "decompose", "p", "expected_cost",
             "reviewers", "escalation", "state", "defer_until", "reason",
-            "explain",
+            "explain", "skipped_legs",
         })
+        # Every model in this fixture is tool_calls "proven" with plenty of
+        # context: nothing is skipped, so FT's skipped_legs is empty here.
+        self.assertEqual(result["skipped_legs"], {})
         self.assertEqual(result["route"], "r-free")
         self.assertEqual(result["class"], "free")
         self.assertEqual(result["client"], "opencode")
@@ -1418,6 +1685,238 @@ class PlanTests(unittest.TestCase):
         self.assertIsNotNone(result["route"])
         self.assertEqual(result["state"], "ready")
         self.assertIn(result["route"], registry["routes"])
+
+    @staticmethod
+    def _inline_toolcalls_overlay(registry):
+        """Build a tool_calls overlay in-process (PRIV2, 2026-09-26): the
+        sensitive-routing regression below needs an agentic kind's
+        tool_calls proven for at least one private-safe leg, but
+        logs/routing/measured.json (the real probe's overlay) is
+        git-ignored and absent on a fresh clone or in CI. Marks
+        deepseek/deepseek-flash proven (deepseek-direct, private-safe: paid
+        tier, trains_on_prompts false, no model-level override) and every
+        other leg in the registry explicitly unproven -- same shape
+        tools/probe-toolcalls.py writes (``overlay["legs"][leg]["tool_calls"]
+        ["value"]``) -- so this test never depends on that file."""
+        overlay = {"legs": {}}
+        for route in registry["routes"].values():
+            for leg in route.get("legs") or []:
+                overlay["legs"].setdefault(leg, {"tool_calls": {"value": "unproven"}})
+        overlay["legs"]["deepseek/deepseek-flash"] = {"tool_calls": {"value": "proven"}}
+        return overlay
+
+    def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg(self):
+        # PRIV brief 2026-09-26, the found bug: `route --card
+        # kind=implement,paths=...,privacy=sensitive` chose t3-driver-free-
+        # only via groq/qwen/qwen3.8-27b, a free pool -- "Free first, private
+        # never" was violated. PRIV2 (2026-09-26): this must run in CI, so
+        # the tool_calls overlay is built inline (_inline_toolcalls_overlay)
+        # instead of reading the git-ignored logs/routing/measured.json --
+        # see
+        # test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay
+        # below for the real-probe-overlay variant, which may still skip.
+        registry_path = (Path(__file__).resolve().parent.parent
+                         / "catalog" / "ai-registry.json")
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        overlay = self._inline_toolcalls_overlay(registry)
+        card = {"kind": "implement", "spec": "exact", "risk": "normal",
+               "mode": "balanced", "privacy": "sensitive"}
+        features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                   "tests": True, "need_tokens": 1000}
+        client_state = {"opencode": {"installed": True, "signed_in": True,
+                                     "reason": ""}}
+        result = r.plan(card, features, client_state, registry, overlay, [],
+                        "muse-spark", self.dt(2026, 9, 29, 9, 0))
+        self.assertIsNotNone(result["route"], result)
+        route = registry["routes"][result["route"]]
+        for provider_id, model_id in r.serving_legs(route, registry):
+            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
+            self.assertTrue(
+                safe, "%s/%s on route %s is not private-safe: %s"
+                     % (provider_id, model_id, result["route"], reason))
+
+    def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay(self):
+        # Extra (PRIV2): the same regression against the real probe's
+        # overlay, when one happens to be on disk. logs/routing/measured.json
+        # is git-ignored, so this skips on a fresh clone or in CI rather than
+        # failing -- the inline-overlay test above is the one that must run.
+        overlay_path = (Path(__file__).resolve().parent.parent
+                        / "logs" / "routing" / "measured.json")
+        if not overlay_path.is_file():
+            self.skipTest("no logs/routing/measured.json overlay to probe with")
+        registry_path = (Path(__file__).resolve().parent.parent
+                         / "catalog" / "ai-registry.json")
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+        card = {"kind": "implement", "spec": "exact", "risk": "normal",
+               "mode": "balanced", "privacy": "sensitive"}
+        features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                   "tests": True, "need_tokens": 1000}
+        client_state = {"opencode": {"installed": True, "signed_in": True,
+                                     "reason": ""}}
+        result = r.plan(card, features, client_state, registry, overlay, [],
+                        "muse-spark", self.dt(2026, 9, 29, 9, 0))
+        self.assertIsNotNone(result["route"], result)
+        route = registry["routes"][result["route"]]
+        for provider_id, model_id in r.serving_legs(route, registry):
+            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
+            self.assertTrue(
+                safe, "%s/%s on route %s is not private-safe: %s"
+                     % (provider_id, model_id, result["route"], reason))
+
+
+class DecomposeTests(unittest.TestCase):
+    """decompose(): spec 5.3 step 3 / D7 -- S3/S4 only, one level deep.
+
+    A tiny inline registry (just the two things decompose() reads: the
+    orchestrator's price_in and policy.brief_tokens per bucket) keeps every
+    number hand-computable. `whole_plan` and `subtask_plans` are plain dicts
+    carrying only the keys decompose() reads (route, expected_cost, reason) --
+    exactly what plan()'s output shape provides.
+    """
+
+    def registry(self):
+        return {
+            "models": {"orch": {"price_in": 5e-6}},
+            "policy": {
+                "brief_tokens": {
+                    "S3": {"tokens": 2000, "source": "default"},
+                    "S4": {"tokens": 3000, "source": "default"},
+                },
+            },
+        }
+
+    def subtask(self, route="r1", expected_cost=0.02, reason="ok"):
+        return {"route": route, "expected_cost": expected_cost, "reason": reason}
+
+    # --- bucket filter: S3/S4 only -----------------------------------------
+
+    def test_s2_never_decomposes(self):
+        result = r.decompose({"route": "whole", "expected_cost": 1.0}, [],
+                             "S2", self.registry(), "orch")
+        self.assertEqual(result, {
+            "split": False,
+            "reason": "bucket S2: no decompose (S3/S4 only)",
+        })
+
+    def test_s0_and_s1_never_decompose_either(self):
+        for bucket_name in ("S0", "S1"):
+            with self.subTest(bucket=bucket_name):
+                result = r.decompose({"route": "whole", "expected_cost": 1.0},
+                                     [], bucket_name, self.registry(), "orch")
+                self.assertFalse(result["split"])
+                self.assertEqual(
+                    result["reason"],
+                    "bucket %s: no decompose (S3/S4 only)" % bucket_name)
+
+    # --- zero subtask_plans: never split into nothing (review-b5a4) ---------
+
+    def test_s3_with_no_subtasks_never_splits(self):
+        whole = {"route": "whole", "expected_cost": 1.0}
+        result = r.decompose(whole, [], "S3", self.registry(), "orch")
+        self.assertEqual(result, {
+            "split": False,
+            "reason": "no subtasks proposed",
+        })
+
+    def test_s4_with_no_subtasks_never_splits(self):
+        whole = {"route": "whole", "expected_cost": 1.0}
+        result = r.decompose(whole, [], "S4", self.registry(), "orch")
+        self.assertEqual(result, {
+            "split": False,
+            "reason": "no subtasks proposed",
+        })
+
+    # --- S3: split vs keep whole --------------------------------------------
+
+    def test_s3_splits_when_cheaper(self):
+        # overhead = 2 * 2000 * 5e-6 = 0.02; subtasks_cost = 0.02 + 0.02 = 0.04
+        # total = 0.06 < whole 0.5 -> split.
+        subtasks = [self.subtask("r1", 0.02), self.subtask("r2", 0.02)]
+        whole = {"route": "whole", "expected_cost": 0.5}
+        result = r.decompose(whole, subtasks, "S3", self.registry(), "orch")
+        self.assertTrue(result["split"])
+        self.assertAlmostEqual(result["overhead"], 0.02)
+        self.assertAlmostEqual(result["subtasks_cost"], 0.04)
+        self.assertAlmostEqual(result["whole_cost"], 0.5)
+        self.assertEqual(result["reason"], "split: 0.060000 < 0.500000")
+        self.assertEqual(result["subtasks"], ["r1", "r2"])
+
+    def test_s3_keeps_whole_when_not_cheaper(self):
+        # Same 0.06 total, whole is only 0.05 -> keep whole.
+        subtasks = [self.subtask("r1", 0.02), self.subtask("r2", 0.02)]
+        whole = {"route": "whole", "expected_cost": 0.05}
+        result = r.decompose(whole, subtasks, "S3", self.registry(), "orch")
+        self.assertFalse(result["split"])
+        self.assertAlmostEqual(result["overhead"], 0.02)
+        self.assertAlmostEqual(result["subtasks_cost"], 0.04)
+        self.assertAlmostEqual(result["whole_cost"], 0.05)
+        self.assertEqual(result["reason"], "keep whole: 0.060000 >= 0.050000")
+        self.assertEqual(result["subtasks"], ["r1", "r2"])
+
+    # --- whole plan has no route: infinite cost, D7 ------------------------
+
+    def test_whole_route_none_counts_as_infinite_cost(self):
+        # no_route()'s shape: no "expected_cost" key at all when route is None.
+        whole = {"route": None,
+                "reason": "no route survives the filters: sign in"}
+        subtasks = [self.subtask("r1", 0.02), self.subtask("r2", 0.02)]
+        result = r.decompose(whole, subtasks, "S3", self.registry(), "orch")
+        self.assertTrue(result["split"])
+        self.assertIsNone(result["whole_cost"])
+        self.assertEqual(result["reason"], "split: 0.060000 < inf")
+
+    # --- a subtask with no route fails the split closed ---------------------
+
+    def test_subtask_with_no_route_fails_closed_naming_it(self):
+        subtasks = [self.subtask("r1", 0.01),
+                   {"route": None,
+                    "reason": "no route survives the filters: sign in"}]
+        whole = {"route": "whole", "expected_cost": 1.0}
+        result = r.decompose(whole, subtasks, "S3", self.registry(), "orch")
+        self.assertEqual(result, {
+            "split": False,
+            "reason": "subtask 2 has no route: "
+                     "no route survives the filters: sign in",
+        })
+
+    def test_first_subtask_with_no_route_is_named_subtask_1(self):
+        subtasks = [{"route": None, "reason": "no route: narrow paths"},
+                   self.subtask("r2", 0.01)]
+        whole = {"route": "whole", "expected_cost": 1.0}
+        result = r.decompose(whole, subtasks, "S3", self.registry(), "orch")
+        self.assertEqual(result["reason"],
+                        "subtask 1 has no route: no route: narrow paths")
+
+    # --- overhead arithmetic, S4 ---------------------------------------------
+
+    def test_overhead_arithmetic_scales_with_subtask_count(self):
+        # overhead = 3 * 3000 * 5e-6 = 0.045; subtasks_cost = 3 * 0.001 = 0.003
+        subtasks = [self.subtask("r%d" % i, 0.001) for i in range(1, 4)]
+        whole = {"route": "whole", "expected_cost": 10.0}
+        result = r.decompose(whole, subtasks, "S4", self.registry(), "orch")
+        self.assertAlmostEqual(result["overhead"], 0.045)
+        self.assertAlmostEqual(result["subtasks_cost"], 0.003)
+        self.assertTrue(result["split"])
+
+    # --- fail closed on registry gaps ---------------------------------------
+
+    def test_missing_brief_tokens_bucket_fails_closed_naming_it(self):
+        reg = self.registry()
+        del reg["policy"]["brief_tokens"]["S3"]
+        subtasks = [self.subtask("r1", 0.01)]
+        whole = {"route": "whole", "expected_cost": 1.0}
+        with self.assertRaises(ValueError) as cm:
+            r.decompose(whole, subtasks, "S3", reg, "orch")
+        self.assertIn("brief_tokens", str(cm.exception))
+        self.assertIn("S3", str(cm.exception))
+
+    def test_unknown_orchestrator_fails_closed_naming_it(self):
+        subtasks = [self.subtask("r1", 0.01)]
+        whole = {"route": "whole", "expected_cost": 1.0}
+        with self.assertRaises(ValueError) as cm:
+            r.decompose(whole, subtasks, "S3", self.registry(), "ghost")
+        self.assertIn("ghost", str(cm.exception))
 
 
 if __name__ == "__main__":

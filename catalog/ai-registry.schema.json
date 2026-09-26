@@ -169,6 +169,14 @@
           "type": "string",
           "description": "e.g. 'opencode' for the Zen free contributor leg, which 403s proxied traffic."
         },
+        "trains_on_prompts": {
+          "type": "boolean",
+          "description": "Additive field, not in spec 3.1: an optional model-level override of providers.<id>.trains_on_prompts (PRIV brief, 2026-09-26), for a provider that hosts both a training and a non-training model (e.g. mistral-code-latest: true, on the otherwise non-training paid 'mistral' provider). Missing means inherit the provider's own value - see tools/registry.py's private_safe()."
+        },
+        "tier": {
+          "enum": ["free", "paid", "subscription"],
+          "description": "Additive field, not in spec 3.1: an optional model-level override of providers.<id>.tier (PRIV2 brief, 2026-09-26), for a provider that hosts both a free/training pool and a paid, direct-key model under the same provider tier (e.g. the zen provider's own tier is 'free', but its opencode-zen/deepseek-v4.1-flash leg bills past the pool on the same key - the model-level override marks that leg 'paid'). Missing means inherit the provider's own value - see tools/registry.py's private_safe()."
+        },
         "direct": { "$ref": "#/$defs/direct" },
         "$comment": { "$ref": "#/$defs/comment" }
       }

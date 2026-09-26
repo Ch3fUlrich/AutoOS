@@ -1,4 +1,4 @@
-# Registry field mapping — one model registry (tasks A1, A2)
+# Registry field mapping — one model registry (tasks A1, A2, A4a)
 
 Field-level mapping for [2026-09-25-routing-v2-spec.md](2026-09-25-routing-v2-spec.md) section 3
 (the registry) and section 3.2 (migration, phase 1). Every field of every entry type in the six old
@@ -6,10 +6,14 @@ files is listed below with where it lands: a `catalog/ai-registry.json` path, `d
 `derived: <how>`. The converter that implements this mapping is `tools/registry-convert.py`; its own
 tables (`PROVIDER_EXTRA`, `MODEL_EXTRA`, `EXTRA_MODELS`, `EXTRA_PROVIDERS`, `PROVIDER_WINDOWS`,
 `CLIENT_EXTRA`, `COMBO_CLASS`, `ROUTE_COMMENT`) are the executable form of the "small explicit table"
-parts of this mapping — read them alongside this document, not instead of it.
+parts of this mapping — read them alongside this document, not instead of it. §10 documents the
+reverse direction for `combos.json` (`tools/registry.py render omniroute`, task A4a).
 
 Phase 1 only (spec 3.2): this is the "add the registry, prove the mapping" step. Nothing here changes
-what `apply.sh`/`apply.ps1`/`sync-*.py` read yet — that is task A4/A5.
+what `apply.sh`/`apply.ps1`/`sync-*.py` read yet — that is task A4/A5 (rendering
+`configuration/omniroute/combos.json` and proving its render equals today's file, §10, is phase 1's
+own equality *proof*; actually pointing `apply.sh`/`apply.ps1` at the rendered file is still a later
+phase-2 step).
 
 ## 1. `catalog/llm-models.json` → `models.<id>`
 
@@ -152,6 +156,70 @@ Spec-silent decisions made while building the converter, one line each:
    current filter outcome (the training leg in each case is either never used in a `-clean` combo, or —
    for `t1-orchestrator-clean`'s openrouter contributor leg — the operator already accepted this
    exact trade-off on 2026-09-21, per `combos.json`'s own `$comment`).
+
+   PRIV finding, 2026-09-26: provider-level `trains_on_prompts` alone was never enough — a
+   privacy-sensitive card was routed onto `t3-driver-free-only` (groq/qwen, cerebras/qwen — both
+   `trains_on_prompts: false`, but `tier: "free"`), because the resolver's privacy filter checked only
+   `trains_on_prompts`, never `tier`. Fixed by a single `private_safe(provider_id, model_id, registry)`
+   predicate (`tools/registry.py`, imported by `tools/autoos_resolver.py`) that both `registry.py
+   check`'s rule 3 and the resolver's route-level privacy filter now call: a leg is private-safe only
+   when its provider's `tier` is not `"free"`, its `trains_on_prompts` is exactly `false`, *and* the
+   model does not carry its own `trains_on_prompts: true`. That third condition is the new, additive
+   `models.<id>.trains_on_prompts` field (optional; missing means inherit the provider) — needed
+   because `mistral` (paid, non-training) also serves `mistral-code-latest`, a free pool that trains
+   (`docs/models.md`: "FREE 1B/mo pool ... same key bills past it"); `tests/run-tests.sh`'s own
+   combos.json shell check already encodes this as a *-clean route invariant ("`mistral/mistral-code`"
+   counts as a free leg that must never appear in a `-clean` combo") — the model-level field lets the
+   registry express the same fact `registry.py check` can verify, without also marking
+   `mistral-small-latest` (same provider, does not train) unsafe. This changes no committed `-clean`
+   route's outcome: none of `t1-orchestrator-clean`/`t2-worker-clean`/`t3-driver-clean`'s *available*
+   legs are a free-tier provider or carry a model-level override (`t1-orchestrator-clean`'s only leg is
+   itself flagged `unavailable_legs` today; `t2-worker-clean`/`t3-driver-clean`'s zen leg is likewise
+   `unavailable_legs` — see Open choice above and `UnavailableLegTests`). It does change the resolver's
+   dynamic privacy filter, which applies to *any* route (not just `-clean` ones) whenever a card carries
+   `privacy: sensitive`: `t1-orchestrator`/`t2-worker`/`t3-driver`/`t3-driver-free-only` (main and
+   free-only variants) all now correctly lose their free-tier legs for a sensitive card, which is the
+   behaviour the finding asked for.
+
+   PRIV2 finding, 2026-09-26 (cross-family review of PRIV `d5281d1` by DeepSeek and qoder): three more
+   gaps in `private_safe()`/rule 3, all fixed together:
+   - **Model-level `tier` override**, mirroring the existing model-level `trains_on_prompts` override:
+     `models.<id>.tier` (optional; missing means inherit `providers.<id>.tier`) lets one paid, direct-key
+     leg on an otherwise-free provider be private-safe — the case `trains_on_prompts` alone cannot
+     express. `zen`'s own `tier` stays `"free"` (its promo pool), but `models.'deepseek-v4.1-flash'`
+     (the `opencode-zen/deepseek-v4.1-flash` leg used in `t2-worker-clean`/`t3-driver-clean`) now carries
+     `"tier": "paid"`, citing `tests/run-tests.sh`'s own combos.json policy line: "Direct-key legs
+     (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool on the same key, so they
+     stay." `private_safe()`'s "effective tier" is `models.<id>.tier` when present, else the provider's.
+   - **Model-level `trains_on_prompts: true`** is now set on both contributor models —
+     `models.'meta/muse-spark-1.3-contributor'` (OpenRouter, paid) and
+     `models.'muse-spark-1.3-contributor-free'` (Zen, free promo) — citing the same combos.json policy
+     line's other half: "-contributor (trains by contract) is banned in
+     t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries it deliberately since the 2026-09-21
+     contributor-only block (paid-only, trains)." Previously only the *provider*-level flags carried this
+     (Open choice above); the model-level flag is what `private_safe()` and rule 3 actually key on.
+   - **Fail closed, exactly**: `private_safe()` used `dict.get(...) is True` for the model-level
+     `trains_on_prompts` check, which let any non-`True` truthy value (`1`, `"no"`, an explicit `null`)
+     slip through as "safe". Rewritten so the *effective tier* must be exactly `"paid"` or
+     `"subscription"` (an unrecognised or missing value is unsafe, not a silent pass), and a *present*
+     `models.<id>.trains_on_prompts` key must be exactly `false` to be safe (only a genuinely *missing*
+     key inherits the provider) — `true`, `null`, `1`, `"no"`, `0`, ... are all unsafe.
+   - **Rule 3 now checks every leg of a `-clean` route**, including one flagged in
+     `unavailable_legs` or reached through a provider marked `available: false` — the OmniRoute gateway
+     does not consult that registry-only flag, and `combos.json`/`apply.sh` still push the leg verbatim,
+     so a leg an operator flagged down is still one the gateway may actually serve. This closes the gap
+     the original PRIV paragraph above relied on ("none of the committed `-clean` routes' *available*
+     legs are a free-tier provider or carry a model-level override" — true only because the *unavailable*
+     ones were never checked). The one deliberate exception is `tools/registry.py`'s
+     `CLEAN_ROUTE_EXEMPTIONS = {"t1-orchestrator-clean": "..."}`: its only leg
+     (`openrouter/meta/muse-spark-1.3-contributor`) now trains by the model-level flag above, and the
+     2026-09-21 operator decision to carry it anyway (paid-only, not trains-nothing;
+     `combos.json`'s own `$comment`) is preserved as a named, visible exemption — `registry.py check`/
+     `validate` print it as an `"info: ..."` line (`privacy_exemption_lines()`), always, never silently,
+     and never as a `check_registry()` failure. This exemption is **not** consulted by the resolver's own
+     privacy filter (`tools/autoos_resolver.py filter_routes()`): it calls `private_safe()` on every
+     *available* serving leg of *every* route regardless of id, and `t1-orchestrator-clean` has no
+     available leg at all today, so a `privacy: sensitive` card can never reach it either way.
 5. `routes.<id>.surfaces` is keyed by gateway (`omniroute`/`litellm`), matching
    `catalog/ide-models.json`'s own shape, with the UI surfaces that expose it (`opencode`/`zed`/
    `openhands`) nested as a `clients` array rather than flattened to five parallel top-level surface
@@ -259,7 +327,7 @@ For traceability, every field the schema defines beyond spec 3.1's literal list,
 topped up" decision (docs/plans/2026-09-25-routing-v2-plan.md, "Operator steps"): every openrouter
 provider and every openrouter leg stays in the registry, unchanged and in the same order (so the data
 still mirrors today's files for the phase-1 equality gate), each marked `available: false` with a
-`$comment` citing the decision (`tools/registry-convert.py`'s `mark_openrouter_unavailable()`). Single legs that are down while their provider still serves are listed in `UNAVAILABLE_LEGS` and flagged by `mark_legs_unavailable()` the same way (operator 2026-09-26: `opencode-zen/deepseek-v4.1-flash`, 402 in the tool-calling probe).
+`$comment` citing the decision (`tools/registry-convert.py`'s `mark_openrouter_unavailable()`). Single legs that are down while their provider still serves are listed in `UNAVAILABLE_LEGS` and flagged by `mark_legs_unavailable()` the same way (operator 2026-09-26: `opencode-zen/deepseek-v4.1-flash`, 402 in the tool-calling probe; L0 2026-09-26T11:44Z: `cerebras/gpt-oss-120b` 402 and `cerebras/qwen-3.8-27b` 401 credits exhausted, re-probed weekly).
 
 ## 9. Where every `$comment` prose piece landed
 
@@ -270,3 +338,145 @@ still mirrors today's files for the phase-1 equality gate), each marked `availab
 | `configuration/omniroute/combos.json` (role labels, free-first/fast-skip mechanism, per-family chain descriptions, 2026-09-21 privacy downgrade, effort-clamp warning, retry/cooldown settings, verification dates) | Split by fact: the privacy downgrade → `providers.openrouter.$comment` and `providers.zen.$comment` (Open choice §7.4); per-model chain/training facts → the relevant `models.<id>.$comment`; role labels/mechanism/retry settings → this document (no single registry field owns "how the gateway retries", since spec 3.1 has no such field — out of scope for the model registry itself). |
 | `configuration/openhands/tier-profiles.json` (rename history, `openai/`-prefix measurement, push-order rationale, `retired_ids` provenance) | This document §6; the `openai/`-prefix measurement is a code comment in `tools/registry-convert.py` next to `_strip_openhands_profile()`. |
 | `.agents/skills/unattended-orchestration/provider-windows.json` (re-verify-before-relying note) | This document §5 / §7.6 (process guidance for a future `registry.py recalibrate`/`probe`). |
+
+## 10. Task A4a — rendering `combos.json` back from the registry (phase 1 render)
+
+Spec 3.2 phase 1 ("render output equals today's generated files semantically") for
+`configuration/omniroute/combos.json`: `tools/registry.py render omniroute` reads
+`catalog/ai-registry.json` and produces the combos.json shape via the pure function
+`render_omniroute(registry) -> dict`. It is the reverse of §4 above (`build_routes()` in
+`tools/registry-convert.py`), restricted to the 15 routes that actually came from a
+combo (`legs` non-empty — the LiteLLM-only `*-paid` routes and the dynamic `auto*`
+routes carry `legs: []` per §4/Open choice 12 and have no combo). Field mapping back:
+
+| Registry path | `combos.json` path | Notes |
+|---|---|---|
+| `routes.<id>.id` | `combos[].name` | Unchanged. |
+| `routes.<id>.strategy` | `combos[].strategy` | Unchanged (`"priority"` for all 15). |
+| `routes.<id>.surfaces.omniroute.context_declared` | `combos[].context` | Unchanged (§4's own mapping, reversed). |
+| `routes.<id>.legs` | `combos[].models` | Unchanged, **in order** — a `strategy: "priority"` fallback chain, so leg order is real semantic data the render must preserve exactly (it does: `legs` is never reordered by `mark_openrouter_unavailable()`/`mark_legs_unavailable()`, only annotated via the sibling `unavailable_legs` key — see the next point). |
+
+Two intentional, documented exceptions to strict equality (never a silently dropped
+field — both are covered by `tests/test_registry_render.py` and by
+`tools/registry.py`'s own `omniroute_diff()`/`_canonical_omniroute()`):
+
+1. **`$comment` is not reproduced, not even partially.** combos.json's top-level
+   `$comment` (~190 lines: role-label glossary, free-first/fast-skip mechanism,
+   per-family chain descriptions, retry settings, verification dates) is pure human
+   documentation — neither `apply.sh` nor `apply.ps1` reads a `"$comment"`/`"comment"`
+   key anywhere (confirmed by reading both scripts, 2026-09-26: they only touch
+   `.name`/`.strategy`/`.models`/`.context` per combo and top-level `.retired`). Its
+   substance was already redistributed into per-entry `providers`/`models`/`routes`
+   `$comment` fields during the A1/A2 migration (§4 and §9 above document exactly
+   where each fact landed) — reproducing the whole block verbatim here would
+   duplicate that already-migrated prose with no consumer that reads it and two
+   copies to keep in sync. The render therefore emits only the spec-3.2 marker line
+   (`"generated from catalog/ai-registry.json - do not edit"`), and semantic equality
+   for this render ignores the entire `$comment` key, not only that one line — a
+   stricter reading than spec 3.2's literal "equality ignores that one line" wording,
+   justified by the "intentionally differs, already documented elsewhere" clause of
+   task A4a's brief.
+2. **`combos[]`/`retired` array order is not reproduced; `retired` itself is a
+   hardcoded constant, not derived from the registry.** `combos.json`'s `retired`
+   array (pre-2026-09-23-rename dead ids: `tier1`, `tier1-clean`, …) has no registry
+   entry at all — §4 above: "there is nothing to migrate". `tools/registry.py` carries
+   it as a literal constant, `OMNIROUTE_RETIRED_IDS`, the same convention
+   `registry-convert.py` uses for facts no source file carries (`PROVIDER_EXTRA`,
+   `MODEL_EXTRA`, `COMBO_CLASS`, …) — the values still match today's file exactly
+   (verified in `tests/test_registry_render.py`), only their origin is a hand-copied
+   table rather than a registry field. Separately, the order of both the `combos`
+   array and the `retired` array carries no semantics: `apply.sh` iterates
+   `for c in data.get("combos", [])` and builds `current = {c["name"] for c in
+   ...}`; `apply.ps1` does `foreach ($combo in $combos)` and filters retired names
+   with `-cnotcontains` — both look combos up by name and retired ids up by
+   membership, never by position. `render_omniroute()` therefore emits `combos` in a
+   canonical order (sorted by route id) rather than replicating today's hand-edited
+   order, and `omniroute_diff()` compares `combos` as a name-keyed map and `retired`
+   as a set, not as ordered lists — this is *not* an exception to array-order
+   equality inside a single combo's `models` list, which stays a real, ordered
+   fallback chain and is compared as such.
+
+Everything else — every leg, including ones an operator has since flagged
+`unavailable` (`routes.<id>.unavailable_legs`, `providers.openrouter.available:
+false`, 2026-09-25/26) — renders byte-for-byte equal to today's file: those
+operator decisions only add the sibling `unavailable_legs` annotation, they never
+remove or reorder anything in `legs` itself, and today's committed `combos.json`
+already lists those same dead legs unchanged. No new equality exception was needed
+for that case, confirming the brief's own example.
+
+## 11. Task A4b — rendering `configuration/litellm/config.yaml`'s managed blocks back from the registry (phase 1 render)
+
+Spec 3.2 phase 1 for `configuration/litellm/config.yaml`'s "model groups": `tools/
+registry.py render litellm` reads `catalog/ai-registry.json` and produces the exact
+text of each AUTOOS-MANAGED tier block `tools/sync-router-tiers.py` already owns
+(`# AUTOOS-MANAGED-START <tier>` … `# AUTOOS-MANAGED-END <tier>`), via the function
+`render_litellm_blocks(registry, config_text) -> {tier: block_text}`. It is the
+reverse of that tool's own `combos_refs()` + `provider_maps()` + `render_block()`
+pipeline, restricted to `SYNCED_TIERS` (today: `t2-worker`, `t3-driver` — `t1-
+orchestrator` and every `*-paid`/`*-free-only` group are hand-curated, never
+sync-managed, unchanged by this task).
+
+`render_litellm_blocks()` reuses `tools/sync-router-tiers.py`'s own `Leg`/
+`render_block()`/`locate_blocks()`/`parse_block()`/`leading_indent()` by importing
+that module by path (`importlib.util.spec_from_file_location`, the same technique
+`tools/registry.py`'s own `_build_fresh_registry()` already uses for
+`tools/registry-convert.py`) rather than copying any of it. The one piece of shared
+logic that genuinely needed factoring — the (prefix, api_base, env_key) map keyed by
+OmniRoute provider id, previously inlined in `sync-router-tiers.py`'s own
+`provider_maps()` — is now `provider_maps_from_dict(providers)`, and `provider_maps
+(path=None)` is a thin wrapper that loads `catalog/providers.json` and calls it.
+`tools/registry.py` calls `provider_maps_from_dict()` with the registry's own
+`providers` section instead. This is safe because the two sections share the exact
+same field names for every fact this needs — `omniroute_id`, `litellm_prefix`,
+`api_base`, `litellm_env` — confirmed field-for-field in §2 above (`catalog/
+providers.json` → `providers.<id>`: those four fields carry over unchanged). `tests/
+helpers/check-provider-registry.py`'s existing `sync.provider_maps()` call is
+untouched — its return value is unchanged since the wrapper still does exactly what
+the old inline code did.
+
+Field mapping back, per tier:
+
+| Registry path | `config.yaml` managed-block content | Notes |
+|---|---|---|
+| `routes.<tier>.legs` | one `- model_name: <tier>` entry per leg, in order | Unchanged, **in order** — same ordered-fallback-chain reasoning as `render_omniroute()`'s `legs` → `combos[].models` mapping (§10). A leg whose provider is gateway-only (`tools/sync-router-tiers.py`'s `GATEWAY_ONLY = {"antigravity", "cc"}` — OAuth/subscription bridges with no LiteLLM transport or key) is dropped, exactly as `combos_refs()` already drops it when reading `combos.json` today; `routes.t2-worker.legs` still carries `antigravity/gemini-3.7-flash-high` (a real leg), and the render must (and does) drop it, not silently keep it or silently omit it without a test noticing — `tests/test_registry_render.py::LitellmRenderMatchesTodayTests::test_gateway_only_leg_is_dropped_not_silently_kept_or_missing` pins exactly this leg. |
+| `providers.<id>.litellm_prefix` (when the leg's provider carries one) | the leg's `model:` line's LiteLLM-transport prefix | `Leg.prefix` (`tools/sync-router-tiers.py`), keyed by the leg's OmniRoute-id first segment — unchanged from today's `provider_maps()`-sourced value, only the source dict changed. |
+| `providers.<id>.api_base` (when present) | the leg's `api_base:` line | Same as above; absent for a leg whose provider passes straight through (no OpenAI-compatible gateway). |
+| `providers.<id>.litellm_env` (when present; else `<PROVIDER>_API_KEY`) | the leg's `api_key: os.environ/<name>` line | Same fallback rule `Leg.__init__` already applies today. |
+
+One documented input the render still needs that is **not** a registry fact, and is
+therefore **not** an equality exception (contrast `render_omniroute()`'s `$comment`/
+array-order exceptions in §10 — this render has none):
+
+- **A leg's hand-tuned extra `litellm_params` line(s)** — an `rpm` cap and its
+  trailing comment, for the two `t2-worker` legs (`gemini/gemini-3.8-flash`,
+  `groq/openai/gpt-oss-120b`) and one `t3-driver` leg (`mistral/mistral-small-
+  latest`) that carry one today. Grepping `catalog/ai-registry.json`, its schema,
+  `tools/registry-convert.py` and this document for `rpm` finds nothing: no
+  rate-limit field exists anywhere in the registry, and `tools/sync-router-tiers.py`
+  has never derived this value from `combos.json` either — `_MANAGED_PARAM_KEYS =
+  ("model", "api_key", "api_base")` in that tool names exactly what it regenerates,
+  and anything else present in an existing block (`parse_block()`) is carried across
+  a resync, never invented. `render_litellm_blocks(registry, config_text)` therefore
+  takes `config_text` — today's own `configuration/litellm/config.yaml` — as a
+  second argument for exactly this reason, purely to extract each leg's existing
+  extra lines the same way `tools/sync-router-tiers.py`'s own `rewrite()` already
+  does, and reproduces them unchanged. The function stays pure with respect to I/O
+  and the clock (the same two inputs always render the same text; no file is opened
+  inside it, matching `render_omniroute(registry)`'s own contract) — it simply takes
+  one more input than that function does, because this generated file, unlike
+  `combos.json`, carries one small piece of hand-tuned data no registry field owns.
+  Because this value is reproduced exactly rather than dropped, the render is
+  byte-for-byte identical to today's committed managed blocks with **zero** documented
+  equality exceptions — `tests/test_registry_render.py::LitellmRenderMatchesTodayTests
+  ::test_render_matches_committed_config_byte_for_byte` asserts this directly via
+  `registry.litellm_diff()`, and `python3 tools/registry.py render litellm --check`
+  confirms it against the real files.
+
+`tools/registry.py render litellm --check` never writes `configuration/litellm/
+config.yaml` itself (phase 1 proves equality only, exactly like `render omniroute`
+above — `tools/sync-router-tiers.py` keeps owning the actual rewrite until a later
+phase switches it to read the registry instead of `combos.json`). A leg changed only
+in the registry (not yet reflected in `config.yaml`) makes `--check` exit 1 naming
+the tier it belongs to, never silently passing — `tests/test_registry_render.py::
+ChangedLegFailsLitellmCheckTests::test_changed_leg_exits_one_and_names_the_tier`
+pins this for a mutated `t3-driver` leg.

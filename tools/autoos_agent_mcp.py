@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """MCP server (stdio) over tools/autoos-agent.py: spawn agents from any MCP client.
 
-Tools: list_clients, spawn, status, result, cancel. spawn is asynchronous: it
-validates the request (card -> combo through autoos_routing.select_combo, the
-same function the CLI uses; the depth budget; client rules), starts a
-detached runner and returns a run id at once. Each run lives in
-<repo>/logs/agents/<id>/ (git-ignored; AUTOOS_STATE_DIR overrides <repo>/logs):
+Tools: list_clients, spawn, status, result, cancel, route, list_agents,
+context (spec 6.2). spawn is asynchronous: it validates the request (card ->
+combo through autoos_routing.select_combo, the same function the CLI uses;
+the depth budget; client rules), starts a detached runner and returns a run
+id at once. Each run lives in <repo>/logs/agents/<id>/ (git-ignored;
+AUTOOS_STATE_DIR overrides <repo>/logs):
 
     job.json     the request, the autoos-agent.py argv, pid, route, start time
     output.log   the child's stdout + stderr (never contains a key)
     exit.json    {rc, ended} once the child exits; {"cancelled": true} on cancel
+
+route, list_agents and context (spec 6.1/6.2) are resolver v2: they import
+tools/autoos-agent.py as a module (its own hyphenated filename, loaded via
+importlib the way the test suite's load_agent() does) and call its
+route_plan_for/context_state directly, so this server and the CLI can never
+disagree on a plan. Nothing is spawned for them; they only read the registry,
+the git-ignored overlay/track-record and each client's own sign-in probe.
 
 Start it the way the registrations do (the `mcp` pin lives in
 catalog/agent-harness.json):
@@ -23,6 +31,7 @@ through it is policed like one that runs the CLI.
 from __future__ import annotations
 
 import datetime
+import importlib.util
 import io
 import json
 import os
@@ -37,9 +46,32 @@ AGENT = os.path.join(TOOLS_DIR, "autoos-agent.py")
 sys.path.insert(0, TOOLS_DIR)
 import autoos_clients as clients  # noqa: E402
 import autoos_routing as routing  # noqa: E402
+from registry import resolve_leg  # noqa: E402
 
 TAIL_CHARS = 6000
 _CHILDREN = {}  # pid -> Popen of runners this server started; poll() reaps them
+
+
+def _load_agent_cli():
+    """tools/autoos-agent.py as a module (its name has a hyphen, so import
+    cannot name it directly - the same trick tests/test_autoos_spawner.py's
+    load_agent() uses).
+
+    `route`, `context` and `list_agents` (spec 6.1/6.2) all reuse this
+    process's own logic - `route_plan_for`, `context_state`, ROOT,
+    REGISTRY_PATH, MEASURED_OVERLAY_PATH, TRACK_RECORD and the `clients`
+    module it probes - so the CLI and this server can never drift apart.
+    Executing the module only defines functions/constants (its own CLI runs
+    under ``if __name__ == "__main__"``), so loading it here has no side
+    effect.
+    """
+    spec = importlib.util.spec_from_file_location("autoos_agent_cli", AGENT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+agent = _load_agent_cli()
 
 
 def state_root() -> str:
@@ -92,6 +124,91 @@ def list_clients() -> dict:
                  "defaults": routing.CARD_DEFAULTS, "routing_version": routing.ROUTING_VERSION},
         "depth": depth,
     }
+
+
+def route_plan(card, brief: str = "", explain: bool = False) -> dict:
+    """The resolver v2 route_plan for `card` (spec 6.1/6.2), str or dict.
+
+    Calls tools/autoos-agent.py's own ``route_plan_for`` (same registry,
+    overlay, track record and client probes the CLI's `route` subcommand
+    reads) so the two can never compute a different plan for the same input.
+    explain=True adds ``explain_text``: the per-route explain lines plus the
+    final reason, joined - the same lines the CLI's --explain writes to
+    stderr - without disturbing the route_plan's own ``explain``/``reason``
+    keys. Never raises: a bad card, an unreadable registry/overlay or a
+    measure()/plan() ValueError all come back as ``{"error": msg}``.
+    """
+    try:
+        now = agent.parse_now(None)
+        registry = agent.load_registry(agent.REGISTRY_PATH)
+        overlay = agent.load_overlay(agent.MEASURED_OVERLAY_PATH)
+        track_record = agent.track.load(agent.TRACK_RECORD)
+        client_state = agent.measure_mod.client_state(agent.clients)
+        result = agent.route_plan_for(card, brief, agent.ROOT,
+                                      agent.DEFAULT_ORCHESTRATOR_MODEL, now,
+                                      registry, overlay, track_record, client_state)
+    except Exception as exc:  # noqa: BLE001 - an MCP tool returns errors, never raises
+        return {"error": "%s: %s" % (type(exc).__name__, exc)}
+    if explain:
+        lines = list(result.get("explain") or [])
+        lines.append(result.get("reason", ""))
+        result = dict(result, explain_text="\n".join(lines))
+    return result
+
+
+def list_agents() -> dict:
+    """Plain projection of the registry (spec 6.2): usable clients, routes and
+    their legs' availability.
+
+    ``clients``: ``[{id, installed, signed_in, reason}]`` from the same probes
+    ``route``'s filters read. ``routes``: ``[{id, class, legs: [{leg,
+    available}], retired}]`` - a leg is unavailable when it is named in the
+    route's own ``unavailable_legs`` or its provider is marked
+    ``available: false`` (the same rule the resolver's hard filter applies).
+    A broken registry (bad leg, unreadable file) is ``{"error": msg}``, never
+    a raise.
+    """
+    try:
+        registry = agent.load_registry(agent.REGISTRY_PATH)
+        state = agent.measure_mod.client_state(agent.clients)
+        client_rows = []
+        for client_id in registry.get("clients") or {}:
+            entry = state.get(client_id) or {"installed": False, "signed_in": None,
+                                             "reason": "not installed"}
+            client_rows.append({"id": client_id, "installed": entry["installed"],
+                                "signed_in": entry["signed_in"], "reason": entry["reason"]})
+        providers = registry.get("providers") or {}
+        route_rows = []
+        for route_id, route in (registry.get("routes") or {}).items():
+            unavailable = route.get("unavailable_legs") or {}
+            legs = []
+            for leg in route.get("legs") or []:
+                provider_id, _ = resolve_leg(leg, registry)
+                available = (leg not in unavailable
+                            and providers.get(provider_id, {}).get("available") is not False)
+                legs.append({"leg": leg, "available": available})
+            route_rows.append({"id": route_id, "class": route.get("class"),
+                               "legs": legs, "retired": bool(route.get("retired"))})
+    except (OSError, ValueError) as exc:
+        return {"error": str(exc)}
+    return {"clients": client_rows, "routes": route_rows}
+
+
+def context_info(transcript: str | None = None) -> dict:
+    """The same data `autoos-agent.py context` prints (spec 6.1), reused as data.
+
+    A ``transcript`` path that cannot be read is ``{"error": msg}``; no
+    transcript found or no usage record yet is a normal ``{"context":
+    "unknown", "reason": ...}`` result - there is simply nothing to report,
+    not a failure.
+    """
+    try:
+        data, rc = agent.context_state(transcript, None)
+    except Exception as exc:  # noqa: BLE001 - a vanished transcript is an error, not a crash
+        return {"error": "%s: %s" % (type(exc).__name__, exc)}
+    if data.get("context") == "unknown" and rc == 2:
+        return {"error": data["reason"]}
+    return data
 
 
 def build_argv(req: dict) -> tuple:
@@ -347,6 +464,31 @@ def serve() -> None:
     def _cancel(run_id: str) -> dict:
         """Stop a running agent (SIGTERM to its process group)."""
         return cancel(run_id)
+
+    @app.tool(name="route")
+    def _route(card: str | dict, brief: str = "", explain: bool = False) -> dict:
+        """The resolver v2 route_plan for `card` (spec 6.1/6.2).
+
+        card: a v1 or v2 task card, either `key=value,...`/JSON text (as `run
+        --card` accepts) or an object, e.g. {"kind": "review", "paths":
+        ["tools"]}. brief: the task text (counts toward need_tokens).
+        explain=True adds "explain_text": the per-route reasoning the CLI's
+        --explain prints to stderr. Real registry/track-record/client
+        probes; no network, no key."""
+        return route_plan(card, brief, explain)
+
+    @app.tool(name="list_agents")
+    def _list_agents() -> dict:
+        """The registry's clients (installed/signed-in/reason) and routes
+        (class, legs with availability, retired), spec 6.2."""
+        return list_agents()
+
+    @app.tool(name="context")
+    def _context(transcript: str | None = None) -> dict:
+        """This session's context fill: tokens, the model's cap and the
+        percentage (spec 6.1/8.3) - the same data `autoos-agent.py context`
+        prints."""
+        return context_info(transcript)
 
     app.run()
 

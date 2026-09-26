@@ -287,6 +287,18 @@ class UnavailableLegTests(unittest.TestCase):
                 self.assertIs(route["unavailable_legs"][leg]["available"], False)
         self.assertGreaterEqual(seen, 3)
 
+    def test_cerebras_legs_are_unavailable_everywhere_they_appear(self):
+        # L0 measurement 2026-09-26T11:44Z: gpt-oss-120b 402, qwen-3.8-27b 401
+        # "credits exhausted"; OmniRoute deactivated the connection itself.
+        for leg in ("cerebras/gpt-oss-120b", "cerebras/qwen-3.8-27b"):
+            seen = 0
+            for route_id, route in self.registry["routes"].items():
+                if leg in route["legs"]:
+                    seen += 1
+                    self.assertIs(route.get("unavailable_legs", {}).get(leg, {})
+                                  .get("available"), False, (leg, route_id))
+            self.assertGreaterEqual(seen, 1, leg)
+
     def test_openrouter_legs_stay_unavailable_beside_it(self):
         route = self.registry["routes"]["t2-worker-clean"]
         self.assertIn("openrouter/deepseek/deepseek-v4.1-flash", route["unavailable_legs"])
@@ -339,6 +351,85 @@ def _bucket_table_from_registry(policy_bucket_table: dict) -> dict:
         "kind": dict(table["kind"]),
         "buckets": buckets,
     }
+
+
+class MistralCodeTrainsOnPromptsTests(unittest.TestCase):
+    """PRIV brief 2026-09-26: mistral-code-latest is a free, training pool
+    served through the otherwise-clean paid `mistral` provider (docs/models.md:
+    "FREE 1B/mo pool ... same key bills past it"; tests/run-tests.sh's own
+    combos.json rule already treats `mistral/mistral-code` as a "free" leg
+    that must never appear in a `-clean` combo). Provider-level
+    trains_on_prompts alone cannot mark this one leg unsafe without also
+    marking every other mistral leg (mistral-small-latest, which does not
+    train) unsafe -- hence a model-level override."""
+
+    @classmethod
+    def setUpClass(cls):
+        rc, out, err = run_converter()
+        if rc != 0:
+            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
+        cls.registry = load_json(REGISTRY_PATH)
+
+    def test_mistral_code_latest_carries_a_true_override_with_a_comment(self):
+        model = self.registry["models"]["mistral-code-latest"]
+        self.assertIs(model.get("trains_on_prompts"), True)
+        self.assertIn("$comment", model)
+
+    def test_sibling_mistral_small_latest_has_no_override(self):
+        # The provider-level flag alone still governs every other mistral leg.
+        model = self.registry["models"]["mistral-small-latest"]
+        self.assertNotIn("trains_on_prompts", model)
+
+    def test_mistral_provider_itself_stays_clean(self):
+        # The provider-level flag is unchanged: mistral hosts both a training
+        # (mistral-code-latest) and a non-training (mistral-small-latest) leg,
+        # same documented shape as the openrouter/zen exceptions.
+        self.assertIs(self.registry["providers"]["mistral"]["trains_on_prompts"], False)
+
+
+class PRIV2ModelLevelOverrideTests(unittest.TestCase):
+    """PRIV2 brief 2026-09-26: optional model-level tier/trains_on_prompts
+    overrides, converted from small explicit tables (same EXTRA_MODELS
+    convention as MistralCodeTrainsOnPromptsTests above)."""
+
+    @classmethod
+    def setUpClass(cls):
+        rc, out, err = run_converter()
+        if rc != 0:
+            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
+        cls.registry = load_json(REGISTRY_PATH)
+        cls.schema = load_json(SCHEMA_PATH)
+
+    def test_schema_model_defines_an_optional_tier_override(self):
+        tier_schema = self.schema["$defs"]["model"]["properties"].get("tier")
+        self.assertIsNotNone(tier_schema, "schema $defs.model.properties has no 'tier'")
+        self.assertEqual(sorted(tier_schema.get("enum", [])), ["free", "paid", "subscription"])
+        self.assertNotIn("tier", self.schema["$defs"]["model"].get("required", []))
+
+    def test_zen_deepseek_v4_1_flash_carries_a_paid_tier_override(self):
+        model = self.registry["models"]["deepseek-v4.1-flash"]
+        self.assertEqual(model.get("tier"), "paid")
+        self.assertIn("$comment", model)
+
+    def test_zen_provider_itself_stays_free(self):
+        self.assertEqual(self.registry["providers"]["zen"]["tier"], "free")
+
+    def test_openrouter_contributor_model_carries_a_training_override(self):
+        model = self.registry["models"]["meta/muse-spark-1.3-contributor"]
+        self.assertIs(model.get("trains_on_prompts"), True)
+        self.assertIn("$comment", model)
+
+    def test_zen_free_contributor_model_carries_a_training_override(self):
+        model = self.registry["models"]["muse-spark-1.3-contributor-free"]
+        self.assertIs(model.get("trains_on_prompts"), True)
+        self.assertIn("$comment", model)
+
+    def test_sibling_models_have_no_unwanted_overrides(self):
+        # deepseek/deepseek-v4.1-flash (openrouter's spelling of the same
+        # real model as the zen leg above) and deepseek-flash (deepseek
+        # direct) are different legs and keep no tier override.
+        for mid in ("deepseek/deepseek-v4.1-flash", "deepseek-flash"):
+            self.assertNotIn("tier", self.registry["models"][mid])
 
 
 class BucketTableParityTests(unittest.TestCase):
