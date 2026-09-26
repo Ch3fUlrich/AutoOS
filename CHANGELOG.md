@@ -37,6 +37,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Save-AutoOSWebConfig` helpers. An unchanged save — identical or reorder-only — returns
   `unchanged` with no backup and no write; a changed save backs up under the standard
   `<file>.autoos-backup-YYYYmmdd-HHMMSS` name (`-1`, `-2`, ... on a clash, never overwrite).
+- `Set-AutoOSManagedFile` now uses `Copy-AutoOSBackup`, making shell-file backups rankable and preserving each same-second version with `-1`, `-2`, ... suffixes.
 
 ### Fixed — backups outside the installer never overwrite a same-second backup
 
