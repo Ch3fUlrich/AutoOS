@@ -130,6 +130,13 @@ function Import-AutoOSState {
 function Get-AutoOSBackups {
     <#
       .SYNOPSIS Newest backup per original file that AutoOS has written.
+      .DESCRIPTION
+        "Newest" is the backup taken last, and that is written in its name: the
+        stamp, then the -1, -2, ... Copy-AutoOSBackup appends on a same-second
+        clash. The suffix is compared as a number (as text, ...-10 sorts before
+        ...-2). The file's own LastWriteTimeUtc is no help: Copy-Item keeps the
+        ORIGINAL's time, so the backup of a just-restored old file looks old.
+        A name that carries no stamp ranks oldest, then by file time, then name.
     #>
     param([string]$SearchRoot = $env:USERPROFILE)
 
@@ -137,9 +144,21 @@ function Get-AutoOSBackups {
                              -Filter '*.autoos-backup-*' -ErrorAction SilentlyContinue)
     $groups = $found | Group-Object { ($_.FullName -replace '\.autoos-backup-.*$', '') }
     foreach ($g in $groups) {
+        $ranked = foreach ($f in $g.Group) {
+            $m = [regex]::Match($f.Name, '\.autoos-backup-(?<stamp>\d{8}-?\d{6})(?:-(?<n>\d+))?$')
+            [pscustomobject]@{
+                File  = $f
+                Stamp = if ($m.Success) { $m.Groups['stamp'].Value -replace '-', '' } else { '' }
+                N     = if ($m.Success -and $m.Groups['n'].Success) { [long]$m.Groups['n'].Value } else { 0 }
+            }
+        }
+        $newest = $ranked | Sort-Object Stamp, N,
+                                        @{ Expression = { $_.File.LastWriteTimeUtc } },
+                                        @{ Expression = { $_.File.Name } } |
+                            Select-Object -Last 1
         [pscustomobject]@{
             Original = $g.Name
-            Backup   = ($g.Group | Sort-Object Name | Select-Object -Last 1).FullName
+            Backup   = $newest.File.FullName
             Count    = $g.Count
         }
     }

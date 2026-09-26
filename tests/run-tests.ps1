@@ -686,6 +686,70 @@ Test-Case 'backups are grouped newest-per-original' {
     Assert-True ($b.Count -eq 1 -and $b[0].Backup -match '20260202') "got: $($b | ConvertTo-Json -Compress)"
 }
 
+# Get-AutoOSBackups: what "newest" means. Copy-AutoOSBackup appends -1, -2, ...
+# on a same-second clash, and Copy-Item keeps the ORIGINAL's LastWriteTime, so
+# neither a name sort (-10 lands before -2) nor the file time (a backup of a
+# just-restored old file looks old) picks the backup taken last.
+function New-BackupFixture {
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][DateTime]$When)
+    $path = Join-Path $Dir $Name
+    [IO.File]::WriteAllText($path, $Name)
+    (Get-Item -LiteralPath $path).LastWriteTimeUtc = $When
+}
+
+Test-Case 'Get-AutoOSBackups: the newest per original counts -10 after -2 (the suffix is a number)' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $t0 = [DateTime]::UtcNow.AddDays(-30)
+        $names = @('x.autoos-backup-20260101-000000', 'x.autoos-backup-20260101-000000-1', 'x.autoos-backup-20260101-000000-2', 'x.autoos-backup-20260101-000000-10')
+        for ($i = 0; $i -lt $names.Count; $i++) { New-BackupFixture -Dir $scratch -Name $names[$i] -When $t0.AddMinutes($i) }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1 -or $b[0].Count -ne 4) { throw "want one original with 4 backups, got: $($b | ConvertTo-Json -Compress)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260101-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want ...-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Get-AutoOSBackups: equal file times, the higher numeric suffix wins' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $when = [DateTime]::UtcNow.AddDays(-30)
+        foreach ($n in @('x.autoos-backup-20260101-000000', 'x.autoos-backup-20260101-000000-1', 'x.autoos-backup-20260101-000000-2', 'x.autoos-backup-20260101-000000-10')) {
+            New-BackupFixture -Dir $scratch -Name $n -When $when
+        }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1) { throw "want one original, got $($b.Count)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260101-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want ...-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Get-AutoOSBackups: the stamp in the name decides, not the copied file time' {
+    # Copy-Item keeps the original's LastWriteTime: the backup taken LAST of a
+    # file that was just restored from an old copy carries an OLD file time.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $old = [DateTime]::UtcNow.AddDays(-30)
+        New-BackupFixture -Dir $scratch -Name 'x.autoos-backup-20260101-000000' -When $old.AddDays(20)
+        foreach ($n in @('x.autoos-backup-20260202-000000', 'x.autoos-backup-20260202-000000-2', 'x.autoos-backup-20260202-000000-10')) {
+            New-BackupFixture -Dir $scratch -Name $n -When $old
+        }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1) { throw "want one original, got $($b.Count)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260202-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want 20260202-000000-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'undo never uninstalls anything' {
     # The safety property, asserted on the source rather than by removing software.
     $src = Get-Content (Join-Path $Lib 'AutoOS.State.psm1') -Raw
