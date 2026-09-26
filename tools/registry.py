@@ -8,6 +8,8 @@ Three subcommands:
     python3 tools/registry.py render omniroute [--registry PATH] [--out PATH] [--check]
     python3 tools/registry.py render litellm   [--registry PATH] [--config PATH] [--check] [--out PATH]
     python3 tools/registry.py render ide       [--registry PATH] [--ide-models PATH] [--check] [--out PATH]
+    python3 tools/registry.py render openhands   [--registry PATH] [--tier-profiles PATH] [--check] [--out PATH]
+    python3 tools/registry.py render models-doc  [--registry PATH] [--docs PATH] [--check] [--out PATH]
 
 `check` proves the registry obeys spec 3.1's rules:
 
@@ -77,6 +79,40 @@ default (unflagged) run now sources its model list from this same render
 instead of reading catalog/ide-models.json directly - its own --catalog flag
 still reads that file's shape for anyone who passes it explicitly.
 
+`render openhands` renders configuration/openhands/tier-profiles.json - the
+single source tools/sync-openhands-profiles.py projects into real OpenHands
+LLM profiles, and (via tools/sync-ide-models.py's own rewrite_tier_profiles())
+the max_input_tokens/max_output_tokens the `render ide` render above already
+keeps in sync there and in configuration/openhands/config.toml - from a
+loaded catalog/ai-registry.json (spec 3.2 phase 1, task A4d; docs/plans/
+2026-09-25-registry-mapping.md section 13 documents the mapping). It never
+writes configuration/openhands/tier-profiles.json itself: with no flag the
+render goes to stdout; --out PATH writes it elsewhere; --check compares a
+fresh render against --tier-profiles (default: the committed tier-
+profiles.json) and exits 1, naming each differing tier, when they are not
+semantically equal. tools/sync-openhands-profiles.py's default (unflagged)
+run now sources its spec from this same render instead of reading
+configuration/openhands/tier-profiles.json directly - its own --spec flag
+still reads that file's shape for anyone who passes it explicitly.
+
+`render models-doc` renders docs/models.md's own "Tier mapping" table between
+a pair of AUTOOS-MANAGED markers this task defines (spec 3.2 phase 1, task
+A4e; docs/plans/2026-09-25-registry-mapping.md section 14 documents the
+mapping) from a loaded catalog/ai-registry.json - every cell (route id,
+class, context promise, ordered legs with an unavailable one struck through)
+read from a registry field at render time, never a hand-copied constant of
+the table's text. It never writes docs/models.md itself, and unlike every
+other render target above there is no --write either (none of them have
+one): with no flag the render goes to stdout; --out PATH writes it
+elsewhere; --check compares a fresh render against --docs's own models-doc
+block (default: the committed docs/models.md) and exits 1, naming each
+differing route row, when they are not semantically equal. To update the
+committed file after a registry change: run `python3 tools/registry.py
+render models-doc --check` to see it fail, run `python3 tools/registry.py
+render models-doc` and replace the text between docs/models.md's own
+`<!-- AUTOOS-MANAGED-START models-doc -->` / `<!-- AUTOOS-MANAGED-END
+models-doc -->` markers with its output, then re-run --check to confirm.
+
 Stdlib only. Path-independent: everything is anchored on the repository root
 derived from this file's own location.
 """
@@ -98,6 +134,8 @@ DEFAULT_OMNIROUTE_COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.j
 SYNC_ROUTER_TIERS_PATH = ROOT / "tools" / "sync-router-tiers.py"
 DEFAULT_LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
 DEFAULT_IDE_MODELS_PATH = ROOT / "catalog" / "ide-models.json"
+DEFAULT_TIER_PROFILES_PATH = ROOT / "configuration" / "openhands" / "tier-profiles.json"
+DEFAULT_MODELS_DOC_PATH = ROOT / "docs" / "models.md"
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMMENT_KEYS = ("$comment", "comment")
@@ -979,6 +1017,520 @@ def ide_diff(rendered: dict, current: dict) -> list:
 
 
 # ===========================================================================
+# render - openhands tier-profiles.json (spec 3.2 phase 1, task A4d)
+# ===========================================================================
+
+# configuration/openhands/tier-profiles.json's own top-level $comment (rename
+# history, the openai/-prefix-stripping measurement, the push-order rationale,
+# retired_ids provenance) is pure human documentation, redistributed into
+# docs/plans/2026-09-25-registry-mapping.md section 6 and section 13 during
+# the A1-A3 migration - the same "derived, not reproduced" treatment
+# render_omniroute()/render_ide() give their own $comment (mapping doc
+# sections 10 and 12). This render emits only the spec-3.2 marker line;
+# openhands_diff() ignores the whole "$comment" key.
+OPENHANDS_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
+
+# gateway_base_url/litellm_base_url are container-side constants
+# (host.docker.internal) shared by every omniroute-*/litellm-* profile - a
+# Docker Desktop DNS convention, not a per-model registry fact (mapping doc
+# section 6: "out of scope for models/routes/providers"). Reproduced here as
+# literal constants, the same convention OMNIROUTE_RETIRED_IDS/IDE_MODEL_ORDER
+# use for a fact no registry field carries.
+OPENHANDS_GATEWAY_BASE_URL = "http://host.docker.internal:20128/v1"
+OPENHANDS_LITELLM_BASE_URL = "http://host.docker.internal:4000/v1"
+
+# tier-profiles.json's own "retired_ids" (profile ids the spec listed before
+# the 2026-09-23 rename) has no registry entry at all - same category as
+# OMNIROUTE_RETIRED_IDS (mapping doc section 4): "there is nothing to
+# migrate". Order carries no semantics here either (tools/sync-openhands-
+# profiles.py's push_profiles() immediately does `frozenset(legacy_owned)`),
+# so openhands_diff() below compares it as a set, not an ordered list.
+OPENHANDS_RETIRED_IDS = [
+    "omniroute-tier1", "omniroute-tier1-clean",
+    "omniroute-tier2", "omniroute-tier2-clean", "omniroute-tier2-credit",
+    "omniroute-tier3", "omniroute-tier3-clean", "omniroute-tier3-credit",
+    "omniroute-rag",
+    "litellm-tier1", "litellm-tier2", "litellm-tier3",
+]
+
+# The one standalone routes.<id>.surfaces.openhands.direct_profile tier
+# (mapping doc section 6: today only spark-1.3-contributor) is named after
+# the OpenRouter leg's own bare model spelling ("muse-spark-1.3-contributor"),
+# not the route id ("spark-1.3-contributor") - so, unlike every gateway tier
+# below, its tiers[].id cannot be computed as "<gateway>-<route id>". A
+# literal, hand-maintained {tier id: route id} table, the same convention as
+# OPENHANDS_RETIRED_IDS/OPENHANDS_TIER_ORDER for a fact no rule derives.
+OPENHANDS_DIRECT_PROFILE_IDS = {
+    "openrouter-muse-spark-1.3-contributor": "spark-1.3-contributor",
+}
+
+# tiers[] push order: tier-profiles.json's own $comment, "ORDER IS THE PUSH
+# PRIORITY (reordered 2026-09-25) ... a human decision" - not derivable from
+# any registry field (routes is a dict, and catalog/ai-registry.json's own
+# keys are alphabetical). A literal, hand-copied constant, the same
+# convention OMNIROUTE_RETIRED_IDS/IDE_MODEL_ORDER use; render_openhands()
+# raises, naming every id at once, if a future openhands profile is added or
+# removed without updating this list - never a silent reorder or drop.
+OPENHANDS_TIER_ORDER = (
+    "omniroute-t1-orchestrator",
+    "omniroute-t2-worker",
+    "omniroute-t3-driver",
+    "omniroute-t2-orchestrator",
+    "omniroute-t2-worker-clean",
+    "omniroute-t3-driver-clean",
+    "omniroute-t4-rag",
+    "omniroute-opus-4-6",
+    "omniroute-gemini-3.8-flash",
+    "omniroute-t2-worker-free-only",
+    "omniroute-deepseek-v4.1-flash",
+    "omniroute-t3-driver-free-only",
+    "omniroute-t1-orchestrator-clean",
+    "omniroute-spark-1.3-contributor",
+    "openrouter-muse-spark-1.3-contributor",
+    "litellm-t1-orchestrator",
+    "litellm-t2-worker",
+    "litellm-t3-driver",
+    "litellm-t2-worker-free-only",
+    "litellm-t3-driver-free-only",
+    "litellm-t1-orchestrator-free-only",
+    "omniroute-t1-orchestrator-free-only",
+)
+
+OPENHANDS_GATEWAYS = ("omniroute", "litellm")
+
+
+def _openhands_tier_membership(registry: dict) -> dict:
+    """{tier id: (gateway, route id)} for every routes.<id>.surfaces.<gw>.
+    openhands_profile in the registry, plus {tier id: None} for every
+    surfaces.openhands.direct_profile (looked up in OPENHANDS_DIRECT_PROFILE_
+    IDS) - the ground truth render_openhands() checks OPENHANDS_TIER_ORDER
+    against. Raises ValueError, naming the route, when a direct_profile
+    route has no entry in that table."""
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+
+    wanted = {}
+    for route_id in sorted(routes):
+        route = routes[route_id]
+        if not isinstance(route, dict):
+            continue
+        surfaces = route.get("surfaces")
+        surfaces = surfaces if isinstance(surfaces, dict) else {}
+        for gw in OPENHANDS_GATEWAYS:
+            surface = surfaces.get(gw)
+            if isinstance(surface, dict) and isinstance(surface.get("openhands_profile"), dict):
+                wanted["%s-%s" % (gw, route_id)] = (gw, route_id)
+        openhands_surface = surfaces.get("openhands")
+        if isinstance(openhands_surface, dict) and isinstance(openhands_surface.get("direct_profile"), dict):
+            tier_id = next(
+                (tid for tid, rid in OPENHANDS_DIRECT_PROFILE_IDS.items() if rid == route_id), None)
+            if tier_id is None:
+                raise ValueError(
+                    "routes.%s has a surfaces.openhands.direct_profile with no entry in "
+                    "OPENHANDS_DIRECT_PROFILE_IDS" % route_id)
+            wanted[tier_id] = None
+    return wanted
+
+
+def render_openhands(registry: dict) -> dict:
+    """Render configuration/openhands/tier-profiles.json's shape from a loaded
+    catalog/ai-registry.json document (spec 3.2 phase 1, task A4d). Pure: no
+    I/O, no clock, no randomness - the same registry always renders the same
+    dict.
+
+    Every routes.<id>.surfaces.<omniroute|litellm>.openhands_profile becomes
+    one tier (id "<gateway>-<route id>"; "gateway" itself is only present for
+    a litellm tier - an omniroute one carries none, matching today's file),
+    plus one tier per standalone surfaces.openhands.direct_profile (mapping
+    doc section 6: today only spark-1.3-contributor, named via OPENHANDS_
+    DIRECT_PROFILE_IDS). OPENHANDS_TIER_ORDER fixes the push-priority order
+    (a human decision, not a registry field - see its own comment above);
+    render_openhands() raises, naming every id at once, when the registry and
+    that constant disagree on which profiles exist.
+    """
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+
+    wanted = _openhands_tier_membership(registry)
+    have = set(OPENHANDS_TIER_ORDER)
+    missing = sorted(set(wanted) - have)
+    extra = sorted(have - set(wanted))
+    if missing or extra:
+        raise ValueError(
+            "OPENHANDS_TIER_ORDER is out of sync with the registry's openhands profiles - "
+            "missing: %s; unexpected: %s" % (", ".join(missing) or "none", ", ".join(extra) or "none"))
+
+    tiers = []
+    for tier_id in OPENHANDS_TIER_ORDER:
+        target = wanted[tier_id]
+        if target is None:
+            route_id = OPENHANDS_DIRECT_PROFILE_IDS[tier_id]
+            profile = routes[route_id]["surfaces"]["openhands"]["direct_profile"]
+            tier = {"id": tier_id, "gateway": profile.get("gateway")}
+            if "model" in profile:
+                tier["model"] = profile["model"]
+            if "base_url" in profile:
+                tier["base_url"] = profile["base_url"]
+            tier["max_input_tokens"] = profile.get("max_input_tokens")
+            tier["max_output_tokens"] = profile.get("max_output_tokens")
+            tier["reasoning"] = bool(profile.get("reasoning"))
+            tiers.append(tier)
+            continue
+
+        gw, route_id = target
+        profile = routes[route_id]["surfaces"][gw]["openhands_profile"]
+        tier = {"id": tier_id}
+        if gw == "litellm":
+            tier["gateway"] = "litellm"
+        tier["model"] = profile.get("model", "openai/%s" % route_id)
+        tier["max_input_tokens"] = profile.get("max_input_tokens")
+        tier["max_output_tokens"] = profile.get("max_output_tokens")
+        tier["reasoning"] = bool(profile.get("reasoning"))
+        tiers.append(tier)
+
+    return {
+        "$comment": OPENHANDS_GENERATED_COMMENT,
+        "gateway_base_url": OPENHANDS_GATEWAY_BASE_URL,
+        "litellm_base_url": OPENHANDS_LITELLM_BASE_URL,
+        "retired_ids": list(OPENHANDS_RETIRED_IDS),
+        "tiers": tiers,
+    }
+
+
+def _canonical_openhands(doc) -> dict:
+    """Normalize a tier-profiles.json-shaped dict for semantic-equality
+    comparison: drop "$comment" entirely (see OPENHANDS_GENERATED_COMMENT's
+    comment above) and treat "retired_ids" as unordered (push_profiles()
+    immediately turns it into a frozenset - see OPENHANDS_RETIRED_IDS's own
+    comment). Unlike _canonical_ide(), "tiers" stays an ordered list - order
+    is semantic here (OPENHANDS_TIER_ORDER's comment)."""
+    if not isinstance(doc, dict):
+        return {}
+    out = {k: v for k, v in doc.items() if k != "$comment"}
+    retired = out.get("retired_ids")
+    if isinstance(retired, list):
+        out["retired_ids"] = sorted(retired, key=str)
+    return out
+
+
+def openhands_diff(rendered: dict, current: dict) -> list:
+    """Return the keys where a fresh render_openhands() output and today's
+    parsed tier-profiles.json differ, ignoring $comment and the order of
+    "retired_ids" (see _canonical_openhands). Reports "tiers.<id>" for a
+    content difference and "tiers[] order" separately when the two lists
+    cover the same ids in a different order - empty means semantically equal,
+    the spec 3.2 phase-1 gate for configuration/openhands/tier-profiles.json."""
+    a = _canonical_openhands(rendered)
+    b = _canonical_openhands(current)
+
+    problems = []
+    a_tiers = {t["id"]: t for t in a.get("tiers") or [] if isinstance(t, dict) and "id" in t}
+    b_tiers = {t["id"]: t for t in b.get("tiers") or [] if isinstance(t, dict) and "id" in t}
+    for tier_id in sorted(set(a_tiers) | set(b_tiers)):
+        if a_tiers.get(tier_id) != b_tiers.get(tier_id):
+            problems.append("tiers.%s" % tier_id)
+
+    a_order = [t.get("id") for t in a.get("tiers") or []]
+    b_order = [t.get("id") for t in b.get("tiers") or []]
+    if not problems and a_order != b_order:
+        problems.append("tiers[] order")
+
+    for key in sorted((set(a) | set(b)) - {"tiers"}):
+        if a.get(key) != b.get(key):
+            problems.append(key)
+
+    return problems
+
+
+# ===========================================================================
+# render - docs/models.md "Tier mapping" table (spec 3.2 phase 1, task A4e)
+# ===========================================================================
+
+# docs/models.md carried no AUTOOS-MANAGED markers before task A4e. This
+# defines the Markdown-comment convention for its own generated block,
+# mirroring the "#" (sync-router-tiers.py) and "//" (sync-ide-models.py)
+# forms other generated files already use.
+MODELS_DOC_MARKER_NAME = "models-doc"
+MODELS_DOC_START_LINE = "<!-- AUTOOS-MANAGED-START %s -->" % MODELS_DOC_MARKER_NAME
+MODELS_DOC_END_LINE = "<!-- AUTOOS-MANAGED-END %s -->" % MODELS_DOC_MARKER_NAME
+
+# Same "generated from catalog/ai-registry.json - do not edit" notice every
+# other render_* function's own $comment carries (spec 3.2: "Generated files
+# start with a ... line where the format allows comments" - Markdown does,
+# via a line of prose rather than a JSON/YAML comment key).
+MODELS_DOC_GENERATED_NOTICE = (
+    "_Generated from `catalog/ai-registry.json` — do not edit by hand. "
+    "Run `python3 tools/registry.py render models-doc --check` after a "
+    "registry change; if it fails, run `python3 tools/registry.py render "
+    "models-doc` and replace the text between the two "
+    "`AUTOOS-MANAGED-START/END models-doc` markers below with its output._"
+)
+
+# Column order for the rendered table. Every cell is read from a registry
+# field at render time (see render_models_doc()'s own docstring) - unlike the
+# rejected first attempt at this task (commit 6a61052, never merged; see the
+# task brief), no column's text is a hand-copied constant.
+MODELS_DOC_HEADER = ("Route", "Class", "Context", "Legs")
+
+# Which of routes.<id>.surfaces.<gateway> carries the route's own "context
+# promise" (mapping doc sections 4/10: combos.json's display convention,
+# "1M"/"128k"/"200k", distinct from the model's real window) - omniroute
+# first, matching IDE_GATEWAYS'/OPENHANDS_GATEWAYS' own priority order above,
+# since every route that lists both surfaces carries the same figure on both
+# (verified 2026-09-26: zero disagreements across the 8 routes that list
+# both), so the pick is never actually exercised as a tie-break by real data.
+MODELS_DOC_CONTEXT_SURFACES = ("omniroute", "litellm")
+
+
+def _route_context_promise(route: dict, registry: dict) -> str:
+    """The "Context" cell for one route (task A4e): the first of
+    MODELS_DOC_CONTEXT_SURFACES's surfaces that carries "context_declared"
+    wins, verbatim (spec 3.1's own declared-context string, e.g. "1M"); else
+    the first such surface's own numeric "context" field (spec 3.1: "context/
+    output declared"), comma-grouped for readability; else - no
+    omniroute/litellm surface on this route carries either field at all, not
+    the case for any route today - the first leg's resolved model's
+    "context_advertised", else its "context_usable.tokens", both suffixed
+    "(leg model)"/"(leg model, usable)" so a reader can tell this figure
+    describes a leg's model rather than the route's own declared surface;
+    "n/a" only if none of the above resolves (a route with no surface context
+    figure and no resolvable leg model - not the case for any route today
+    either, but never silently blank)."""
+    surfaces = route.get("surfaces")
+    surfaces = surfaces if isinstance(surfaces, dict) else {}
+
+    for gw in MODELS_DOC_CONTEXT_SURFACES:
+        surface = surfaces.get(gw)
+        if isinstance(surface, dict) and surface.get("context_declared") is not None:
+            return str(surface["context_declared"])
+
+    for gw in MODELS_DOC_CONTEXT_SURFACES:
+        surface = surfaces.get(gw)
+        if isinstance(surface, dict) and surface.get("context") is not None:
+            return "{:,}".format(surface["context"])
+
+    for leg in route.get("legs") or []:
+        try:
+            _, model_id = resolve_leg(leg, registry)
+        except ValueError:
+            continue
+        model = _section(registry, "models").get(model_id)
+        if not isinstance(model, dict):
+            continue
+        if model.get("context_advertised") is not None:
+            return "{:,} (leg model)".format(model["context_advertised"])
+        usable = model.get("context_usable")
+        if isinstance(usable, dict) and usable.get("tokens") is not None:
+            return "{:,} (leg model, usable)".format(usable["tokens"])
+
+    return "n/a"
+
+
+def _leg_is_unavailable(leg: str, route: dict, registry: dict) -> bool:
+    """True when either of spec 3.1's two operator-facing unavailability
+    flags marks `leg` down: routes.<id>.unavailable_legs[leg].available is
+    false, or the leg's own provider carries providers.<id>.available:
+    false (today only openrouter). Both flags are registry-only signals the
+    OmniRoute gateway itself never consults (mapping doc's "PRIV2" note) -
+    this render surfaces them for a human reader, it does not change what a
+    caller is served."""
+    unavailable_legs = route.get("unavailable_legs")
+    if isinstance(unavailable_legs, dict):
+        entry = unavailable_legs.get(leg)
+        if isinstance(entry, dict) and entry.get("available") is False:
+            return True
+    try:
+        provider_id, _ = resolve_leg(leg, registry)
+    except ValueError:
+        return False
+    provider = _section(registry, "providers").get(provider_id)
+    return isinstance(provider, dict) and provider.get("available") is False
+
+
+def _leg_cell_text(leg: str, route: dict, registry: dict) -> str:
+    """One leg's "provider `model`" display text - routes.<id>.legs entries
+    are literal "<provider>/<model...>" strings, split at the FIRST "/", the
+    same parsing resolve_leg() itself does. Struck through and suffixed
+    "(unavailable)" when _leg_is_unavailable() says so - the render
+    reproduces the fact rather than dropping or silently hiding it, the same
+    contract every other render_* function above gives an operator-flagged
+    dead leg."""
+    prefix, sep, rest = leg.partition("/")
+    text = "%s `%s`" % (prefix, rest) if sep else "`%s`" % leg
+    if _leg_is_unavailable(leg, route, registry):
+        return "~~%s~~ (unavailable)" % text
+    return text
+
+
+def _route_legs_cell(route: dict, registry: dict) -> str:
+    """The "Legs" cell: routes.<id>.legs, in order, joined "->" - a
+    strategy: "priority" fallback chain, so order is real semantic data (same
+    reasoning render_omniroute()'s own "legs" -> "models" mapping gives it).
+    "(none)" for the LiteLLM-only *-paid routes and the dynamic auto* routes,
+    whose legs are genuinely `[]` (mapping doc section 4/10)."""
+    legs = route.get("legs") or []
+    if not legs:
+        return "(none)"
+    return " → ".join(_leg_cell_text(leg, route, registry) for leg in legs)
+
+
+def render_models_doc(registry: dict) -> str:
+    """Render the content of docs/models.md's AUTOOS-MANAGED "models-doc"
+    block (spec 3.2 phase 1, task A4e; docs/plans/2026-09-25-registry-
+    mapping.md section 14 documents the mapping). Pure: no I/O, no clock, no
+    randomness - the same registry always renders the same text.
+
+    One table row per `registry["routes"]` entry, sorted by id - unlike
+    render_ide()'s IDE_MODEL_ORDER / render_openhands()'s OPENHANDS_TIER_
+    ORDER, nothing in this repository says the doc table's row order is
+    semantic (it is new with this task - there is no "today's hand-curated
+    order" to preserve), so no hand-copied order constant is needed here.
+    Every column is read from the registry at render time:
+
+      - Route:   routes.<id>.id (the dict key)
+      - Class:   routes.<id>.class
+      - Context: the route's own declared context promise, see
+                 _route_context_promise()
+      - Legs:    routes.<id>.legs, in order; a leg routes.<id>.
+                 unavailable_legs or providers.<id>.available marks down is
+                 struck through, see _route_legs_cell()/_leg_is_unavailable()
+
+    Never writes docs/models.md itself - like every other render_* function,
+    this proves/produces the block's content only; a human (or --check
+    failing) decides when to paste it between the committed markers.
+    """
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+
+    lines = [
+        MODELS_DOC_GENERATED_NOTICE,
+        "",
+        "| %s |" % " | ".join(MODELS_DOC_HEADER),
+        "|%s|" % "|".join("---" for _ in MODELS_DOC_HEADER),
+    ]
+    for route_id in sorted(routes):
+        route = routes[route_id]
+        if not isinstance(route, dict):
+            continue
+        cells = (
+            "`%s`" % route_id,
+            str(route.get("class", "")),
+            _route_context_promise(route, registry),
+            _route_legs_cell(route, registry),
+        )
+        lines.append("| %s |" % " | ".join(cells))
+    return "\n".join(lines) + "\n"
+
+
+def _locate_managed_block(text: str, name: str) -> tuple:
+    """(start, end) 0-based line indices of the "<!-- AUTOOS-MANAGED-START
+    name -->" / "<!-- AUTOOS-MANAGED-END name -->" marker pair inside `text`
+    (the marker lines themselves; the block's own content runs
+    start+1..end, exclusive of `end`). Mirrors tools/sync-router-tiers.py's
+    own locate_blocks() / tools/sync-ide-models.py's own locate_blocks()
+    "never mask a gap" contract, applied to docs/models.md's `<!--
+    AUTOOS-MANAGED-START/END -->` Markdown-comment marker syntax. Raises
+    ValueError, never a partial match, on a missing, duplicated or unmatched
+    marker."""
+    start_line = "<!-- AUTOOS-MANAGED-START %s -->" % name
+    end_line = "<!-- AUTOOS-MANAGED-END %s -->" % name
+    lines = text.splitlines()
+    start = end = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == start_line:
+            if start is not None:
+                raise ValueError("duplicate %s" % start_line)
+            start = i
+        elif stripped == end_line:
+            if start is None:
+                raise ValueError("%s with no matching start marker" % end_line)
+            end = i
+            break
+    if start is None:
+        raise ValueError("no %s found" % start_line)
+    if end is None:
+        raise ValueError("%s has no matching %s" % (start_line, end_line))
+    return start, end
+
+
+def models_doc_block_text(docs_text: str) -> str:
+    """The text strictly between docs/models.md's models-doc markers (marker
+    lines excluded), no trailing newline - mirrors litellm_block_text()'s
+    single-named-block convention above. Raises ValueError (via
+    _locate_managed_block()) on a missing/malformed marker pair."""
+    start, end = _locate_managed_block(docs_text, MODELS_DOC_MARKER_NAME)
+    lines = docs_text.splitlines()
+    return "\n".join(lines[start + 1:end])
+
+
+_MODELS_DOC_ROW_ID_RE = re.compile(r"^\|\s*`([^`]+)`\s*\|")
+
+
+def _models_doc_rows(block_text: str) -> dict:
+    """{route id: row text} for every data row of a models-doc block's table
+    - a row whose first cell is a backtick-quoted id; the header/separator
+    lines above it carry no backticks and are excluded. Used by
+    models_doc_diff() below for per-route --check diagnostics; the render
+    itself (render_models_doc()) builds rows directly from the registry, not
+    by parsing its own output."""
+    rows = {}
+    for line in block_text.splitlines():
+        match = _MODELS_DOC_ROW_ID_RE.match(line)
+        if match:
+            rows[match.group(1)] = line
+    return rows
+
+
+def _models_doc_preamble(block_text: str) -> str:
+    """Every line of `block_text` above its first data row (the generated
+    notice, the blank line, the table header and separator) - used by
+    models_doc_diff() to report a non-route difference (a changed notice or
+    header) separately from a per-route one."""
+    lines = block_text.splitlines()
+    for i, line in enumerate(lines):
+        if _MODELS_DOC_ROW_ID_RE.match(line):
+            return "\n".join(lines[:i])
+    return block_text
+
+
+def models_doc_diff(rendered_block: str, current_block: str) -> list:
+    """Return the problems where a fresh render_models_doc() output and
+    docs/models.md's committed "models-doc" block differ (both taken as the
+    block's own content, marker lines excluded - see models_doc_block_text()):
+    "routes.<id>" for a route whose row differs, "routes[] membership: ..."
+    when the two blocks list different route ids outright, "preamble" when
+    the notice/header/separator lines above the first data row differ. []
+    means the two blocks are semantically equal - the spec 3.2 phase-1 gate
+    for docs/models.md, and the task's own acceptance test: a registry field
+    changed (e.g. a leg newly marked unavailable) with the doc not re-
+    rendered names that route here, it never passes silently."""
+    rendered_block = rendered_block.rstrip("\n")
+    current_block = current_block.rstrip("\n")
+    if rendered_block == current_block:
+        return []
+
+    a_rows = _models_doc_rows(rendered_block)
+    b_rows = _models_doc_rows(current_block)
+
+    problems = []
+    missing = sorted(set(a_rows) - set(b_rows))
+    extra = sorted(set(b_rows) - set(a_rows))
+    if missing or extra:
+        problems.append(
+            "routes[] membership: missing %s; unexpected %s"
+            % (", ".join(missing) or "none", ", ".join(extra) or "none"))
+    for route_id in sorted(set(a_rows) & set(b_rows)):
+        if a_rows[route_id] != b_rows[route_id]:
+            problems.append("routes.%s" % route_id)
+
+    if _models_doc_preamble(rendered_block) != _models_doc_preamble(current_block):
+        problems.append("preamble")
+
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -1132,6 +1684,68 @@ def _cmd_render_ide(args) -> int:
     return 0
 
 
+def _cmd_render_openhands(args) -> int:
+    registry_doc = load(args.registry)
+    try:
+        rendered = render_openhands(registry_doc)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
+    if args.check:
+        tier_profiles_path = Path(args.tier_profiles)
+        if not tier_profiles_path.exists():
+            print("no such file: %s" % tier_profiles_path)
+            return 1
+        current = load(tier_profiles_path)
+        problems = openhands_diff(rendered, current)
+        if problems:
+            for key in problems:
+                print("differs: %s" % key)
+            return 1
+        print("ok: render openhands matches %s" % tier_profiles_path)
+        return 0
+
+    text = render_json(rendered)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print("wrote %s" % args.out)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def _cmd_render_models_doc(args) -> int:
+    registry_doc = load(args.registry)
+    rendered = render_models_doc(registry_doc)
+
+    if args.check:
+        docs_path = Path(args.docs)
+        if not docs_path.exists():
+            print("no such file: %s" % docs_path)
+            return 1
+        docs_text = docs_path.read_text(encoding="utf-8")
+        try:
+            current = models_doc_block_text(docs_text)
+        except ValueError as exc:
+            print(str(exc))
+            return 1
+        problems = models_doc_diff(rendered, current)
+        if problems:
+            for key in problems:
+                print("differs: %s" % key)
+            return 1
+        print("ok: render models-doc matches %s" % docs_path)
+        return 0
+
+    if args.out:
+        Path(args.out).write_text(rendered, encoding="utf-8")
+        print("wrote %s" % args.out)
+    else:
+        sys.stdout.write(rendered)
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="registry.py",
@@ -1197,6 +1811,39 @@ def main(argv=None) -> int:
         "--ide-models", dest="ide_models", default=str(DEFAULT_IDE_MODELS_PATH),
         help="today's ide-models.json to compare against, --check only (default: %(default)s)")
 
+    openhands_parser = render_targets.add_parser(
+        "openhands", help="render configuration/openhands/tier-profiles.json")
+    openhands_parser.add_argument(
+        "--registry", default=str(DEFAULT_REGISTRY_PATH),
+        help="registry JSON to render from (default: %(default)s)")
+    openhands_parser.add_argument(
+        "--out", default=None,
+        help="write the render here instead of stdout (never the real tier-profiles.json)")
+    openhands_parser.add_argument(
+        "--check", action="store_true",
+        help="exit 1 if the render differs semantically from --tier-profiles")
+    openhands_parser.add_argument(
+        "--tier-profiles", dest="tier_profiles", default=str(DEFAULT_TIER_PROFILES_PATH),
+        help="today's tier-profiles.json to compare against, --check only (default: %(default)s)")
+
+    models_doc_parser = render_targets.add_parser(
+        "models-doc", help="render docs/models.md's AUTOOS-MANAGED models-doc table")
+    models_doc_parser.add_argument(
+        "--registry", default=str(DEFAULT_REGISTRY_PATH),
+        help="registry JSON to render from (default: %(default)s)")
+    models_doc_parser.add_argument(
+        "--out", default=None,
+        help="write the render here instead of stdout (never the real docs/models.md - "
+             "there is no --write; paste the output between the committed markers by hand, "
+             "or --check to confirm they already agree)")
+    models_doc_parser.add_argument(
+        "--check", action="store_true",
+        help="exit 1, naming each differing route row, if the render differs from --docs's "
+             "own models-doc block")
+    models_doc_parser.add_argument(
+        "--docs", default=str(DEFAULT_MODELS_DOC_PATH),
+        help="today's docs/models.md to compare against, --check only (default: %(default)s)")
+
     args = parser.parse_args(argv)
     if args.command == "check":
         return _cmd_check(args)
@@ -1209,6 +1856,10 @@ def main(argv=None) -> int:
             return _cmd_render_litellm(args)
         if args.target == "ide":
             return _cmd_render_ide(args)
+        if args.target == "openhands":
+            return _cmd_render_openhands(args)
+        if args.target == "models-doc":
+            return _cmd_render_models_doc(args)
         return 2
     return 2
 

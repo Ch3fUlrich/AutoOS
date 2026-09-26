@@ -136,12 +136,12 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 ### heartbeat
 
 - R-heartbeat-01: Create one recurring CronCreate heartbeat job (e.g. `7-59/10 * * * *`); recreate it on relaunch. (why: background loops die under load; source: common.md Waiting, 2026-09-25)
-- R-heartbeat-02: Every heartbeat, push every branch you own with new commits; WIP-commit anything older. (why: nothing may exist only locally; source: operator 2026-09-26T07:10:24Z)
-- R-heartbeat-03: Every heartbeat, check for a PAUSE and each child's context before acting on anything else. (why: a stale check missed two PAUSE lines; source: L0 pause note ~2026-09-26T12:35Z)
+- R-heartbeat-02: Every heartbeat, push every branch `autoos-agent.py heartbeat` reports unpushed; WIP-commit anything older. (why: nothing may exist only locally; source: test_autoos_heartbeat.py)
+- R-heartbeat-03: Every heartbeat, run `autoos-agent.py heartbeat`; its exit (3 pause, 4 over-cap) gates everything else. (why: a stale check missed two PAUSE lines; source: test_autoos_heartbeat.py)
 
 ### pause
 
-- R-pause-01: Treat an operator PAUSE as a hard stop, checked every heartbeat and before every launch. (why: two PAUSE lines were ignored; source: inbox/L1-routing.md 2026-09-26T11:19:41Z)
+- R-pause-01: Treat an operator PAUSE as a hard stop; `autoos-agent.py heartbeat`, `run` and MCP `spawn` all refuse on it. (why: two PAUSE lines were ignored; source: test_autoos_heartbeat.py)
 
 ### git
 
@@ -164,7 +164,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-handoff-04: At the cap, run l1_handoff.py --state/--out, append `handoff <name>` to the inbox, stop. (why: lets the parent relaunch you from that file; source: briefs/common.md, Always)
 - R-handoff-05: A handoff is done only once the parent inbox has its line; parents watch handoff mtimes. (why: a handoff with no line sat idle 1.5 h; source: inbox/L1-routing.md 21:45Z)
 - R-handoff-06: Only L0 asks the operator; everyone else appends question/answered to its inbox. (why: the operator was asked twice; source: operator 2026-09-26, L0 addendum 11:44:18Z)
-- R-handoff-07: A parent measures a child's context via autoos-agent.py context --transcript, relaunches it past cap. (why: two sessions ran past cap unhandled; source: status caps 2026-09-26)
+- R-handoff-07: A parent measures a child via `autoos-agent.py heartbeat --transcript --cap`, relaunching past its exit 4. (why: two sessions ran past cap unhandled; source: test_autoos_heartbeat.py)
 
 ### host
 
@@ -172,7 +172,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-host-02: Give every session its own Omnigraph stdio bridge rather than sharing one. (why: measured ~7 MB each, 22 MB for three; source: inbox/L1-main.md 20:34Z)
 - R-host-03: Read a "shellcheck is clean" failure at exit 137 as host OOM, not a lint finding. (why: reproduced on a loaded host across five lanes; source: 20260924-25 DONE notes, five lanes)
 - R-host-04: Keep the machine awake yourself before an overnight run. (why: the runner cannot change power settings; source: SKILL.md history, rule 6)
-- R-host-05: Start a client worker only at MemAvailable >= 1500 MB, max 2 per orchestrator; else use subagents. (why: one costs ~0.7 GB; source: ps 2026-09-26T07:34Z, common.md Host limits)
+- R-host-05: Per orchestrator: <= 4 worktree lanes + 4 read-only subagents, MemAvailable >= 2500 MB; parallel unless same files. (why: 16 GB host; source: operator 2026-09-26T15:03:37Z)
 
 ### safety
 
