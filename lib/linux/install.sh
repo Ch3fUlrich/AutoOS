@@ -3173,7 +3173,7 @@ phys_path() {
 # A link is ours only when it dangles AND its target ends with
 # /.agents/skills/<this skill's name> - the exact shape this function creates,
 # so a moved or renamed checkout is repaired. A live link is the user's, even
-# when it points inside the repo's own .agents directory (AGENTS.md rule 2).
+# when it points inside the repo's own .agents directory (AGENTS.md hard rule 4).
 # A DEST_DIR that is itself a symlink (the old whole-directory layout) is not
 # written through - that would create links inside the repo or a clone - it
 # is left with one warning that names the fix. Returns 0 unless a link failed.

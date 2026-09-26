@@ -4517,7 +4517,7 @@ Test-Case 'openhands skills: a dangling link into the repo is repaired and a for
     Pass
 }
 
-# Only a link this function made is ours (AGENTS.md hard rule 2): it dangles AND
+# Only a link this function made is ours (AGENTS.md hard rule 4): it dangles AND
 # has the exact shape ...\.agents\skills\<name> for the same skill. A live link,
 # or a dangling one of another shape, is the user's and stays as it is - even
 # when it points inside the repo's own .agents directory. (Here a symlink stands

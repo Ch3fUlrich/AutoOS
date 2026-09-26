@@ -2405,7 +2405,7 @@ function Sync-AutoOSSkillDirs {
         A link is ours only when its target no longer exists AND its path ends with
         \.agents\skills\<this skill's name> - the exact shape this function creates,
         so a moved or renamed checkout is repaired. A live link is the user's, even
-        when it points inside the repo's own .agents directory (AGENTS.md rule 2).
+        when it points inside the repo's own .agents directory (AGENTS.md hard rule 4).
         A -Destination that is itself a link (the old whole-directory junction
         layout) is not written through - that would create links inside the repo or a
         clone - it is left with one warning that names the fix. A link that cannot be
