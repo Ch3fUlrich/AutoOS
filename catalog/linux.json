@@ -589,8 +589,8 @@
           "profiles": [
             "workstation"
           ],
-          "notes": "Desktop IDE — hidden on headless and arm64 machines. Installs Google's 2.x tarball into ~/.local/opt/antigravity-ide (command: antigravity-ide), sha256-checked against Google's update endpoint; setup.sh --update checks for a newer build.",
-          "verify": "antigravity-ide --version",
+          "notes": "Antigravity Hub 2.x (Electron desktop app) — hidden on headless and arm64 machines. Newest version discovered from winget-pkgs (needs the GitHub API; GITHUB_TOKEN raises its rate limit), installed user-local from Google's Linux tarball into ~/.local/opt/antigravity (command: antigravity, no sudo). Google publishes no sha256 for it (no published sha256): size, gzip, member list, ELF and version are checked instead. setup.sh --update checks for a newer version.",
+          "verify": "test -x ~/.local/opt/antigravity/antigravity",
           "updatable": true,
           "homepage": "https://antigravity.google/"
         },

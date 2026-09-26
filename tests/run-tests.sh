@@ -3410,7 +3410,8 @@ EOF
 # serve/<build-id>.tar.gz: a tiny tarball with the real layout. variants: garbage
 # (not a tarball), corrupt (a damaged gzip stream), dotdot, absolute, symlink,
 # hardlink, fifo, setuid, setgid, wrongtop, nosandbox, sandboxlink, noasar, asarver,
-# noelf, noicon. Sets AG_SIZE and AG_SHA (the tarball's size and sha256).
+# noelf, noicon, nestedicon (icon.png under resources/ inside the asar), size and
+# sizehead (see antigravity_serve). Sets AG_SIZE and AG_SHA (the tarball's size and sha256).
 antigravity_build() {
     local sb="$1" id="$2" variant="${3:-}" tree top asarver="${2%%-*}" out
     local -a icon_arg=()
@@ -3422,7 +3423,7 @@ antigravity_build() {
     printf 'pak\n' >"$top/locales/en-US.pak"
     chmod 755 "$top/antigravity" "$top/chrome-sandbox"
     [[ "$variant" != asarver ]] || asarver="0.0.1"
-    [[ "$variant" != noicon ]] || icon_arg=(noicon)
+    [[ "$variant" != noicon && "$variant" != nestedicon ]] || icon_arg=("$variant")
     python3 "$ROOT/tests/helpers/fake_antigravity_asar.py" "$top/resources/app.asar" "$asarver" "${icon_arg[@]}"
     case "$variant" in
         nosandbox)   rm -f "$top/chrome-sandbox" ;;
@@ -3480,10 +3481,11 @@ antigravity_run() {
     local sb="$1"; shift
     AG_OUT="$(
         (
+            trap - EXIT INT TERM     # this subshell must not replay the harness's EXIT trap
             export TMPDIR="$sb/tmp"
             CATALOG_PATH="$ROOT/catalog/linux.json"
             AUTOOS_DRY_RUN=0; AUTOOS_UPDATE=0; AUTOOS_SUDO=sudo_rec; AG_ENTRY=component
-            AUTOOS_ANTIGRAVITY_MIN_BYTES=1000; SYS_IS_ROOT=0
+            AUTOOS_ANTIGRAVITY_MIN_BYTES=100; SYS_IS_ROOT=0
             unset GITHUB_TOKEN GH_TOKEN
             for kv in "$@"; do export "${kv?}"; done
             HOME="${AG_HOME:-$sb/home}"; SYS_HOME="$HOME"; export HOME SYS_HOME
@@ -3533,6 +3535,7 @@ antigravity_run() {
                             [[ ! -f "$sb/get.size" ]] || size="$(<"$sb/get.size")"
                             [[ ! -f "$sb/get.status" ]] || st="$(<"$sb/get.status")"
                             [[ ! -e "$sb/kill-on-download" ]] || kill -TERM "$BASHPID"
+                            [[ ! -e "$sb/exit-on-download" ]] || exit 5
                         fi
                         printf 'content-length: %s\ncontent-type: application/x-tar\nx-goog-hash: crc32c=AAAAAA==\n' "$size" >"$extra"
                         reply "$st" "$file" ;;
@@ -3662,6 +3665,25 @@ if it "antigravity fresh install: verified and installed into ~/.local/opt/antig
     if (( ok )); then pass; else fail "the Antigravity Hub install is not what the operator decision on 2026-09-26 describes"; fi
 fi
 
+if it "antigravity icon: taken from app.asar wherever icon.png sits; without one the desktop entry names the themed icon and the install stands"; then
+    ok=1
+    for variant in nestedicon noicon; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA" "$variant"
+        antigravity_run "$sb"
+        dir="$sb/home/.local/opt/antigravity"; dt="$sb/home/.local/share/applications/antigravity.desktop"
+        [[ "$AG_STATE" == installed ]] || { ok=0; echo "$variant: state=[$AG_STATE]: ${AG_OUT:0:500}" >&2; }
+        if [[ "$variant" == nestedicon ]]; then
+            [[ "$(head -c4 "$dir/icon.png" 2>/dev/null | od -An -tx1 | tr -d ' \n')" == 89504e47 ]] || { ok=0; echo "$variant: icon.png was not extracted as a PNG" >&2; }
+            grep -qxF "Icon=$dir/icon.png" "$dt" || { ok=0; echo "$variant: Icon line is [$(grep '^Icon' "$dt" 2>&1)]" >&2; }
+        else
+            [[ ! -e "$dir/icon.png" ]] || { ok=0; echo "$variant: an icon.png appeared from nowhere" >&2; }
+            grep -qxF 'Icon=antigravity' "$dt" || { ok=0; echo "$variant: Icon line is [$(grep '^Icon' "$dt" 2>&1)], not the themed fallback" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "the desktop entry's icon is not taken from app.asar, or has no fallback"; fi
+fi
+
 if it "antigravity sandbox: the SUID commands are printed once, verbatim, only when this kernel restricts user namespaces; the installer never runs them"; then
     ok=1
     for mode in restricted clone0 unreadable allowed; do
@@ -3760,6 +3782,50 @@ if it "antigravity discovery: a GITHUB_TOKEN reaches only the listing request, t
     if (( ok )); then pass; else fail "the GitHub token can leak, or the discovery ignores it"; fi
 fi
 
+if it "antigravity real run(): through process.py the token reaches curl's stdin and never its argv, and a rate-limited answer fails with the reset time"; then
+    ok=1; sb="$(antigravity_scratch)"; mkdir -p "$sb/shim"
+    # An inert curl on PATH: records argv and stdin, answers "rate limited" through the -D file, touches no network.
+    cat >"$sb/shim/curl" <<'SHIM'
+#!/bin/sh
+printf 'argv %s\n' "$*" >>"$AG_SHIM_LOG"
+hdr=""; prev=""; cfg=0
+for a in "$@"; do
+    [ "$prev" = -D ] && hdr="$a"
+    [ "$prev" = --config ] && [ "$a" = - ] && cfg=1
+    prev="$a"
+done
+if [ "$cfg" = 1 ]; then { echo "stdin:"; cat; } >>"$AG_SHIM_LOG"; fi
+if [ -n "$hdr" ]; then printf 'HTTP/2 403\r\nx-ratelimit-reset: 1790000000\r\n\r\n' >"$hdr"; fi
+exit 0
+SHIM
+    chmod +x "$sb/shim/curl"
+    tok="ghp_REALRUNTOKEN0123456789abcdefghij"
+    for mode in with-token no-token; do
+        : >"$sb/shim.log"
+        out="$( (
+            trap - EXIT
+            export HOME="$sb/home" SYS_HOME="$sb/home" PATH="$sb/shim:$PATH" AG_SHIM_LOG="$sb/shim.log" AUTOOS_INSTALL_TIMEOUT_SECONDS=60
+            unset GITHUB_TOKEN GH_TOKEN
+            [[ "$mode" != with-token ]] || export GITHUB_TOKEN="$tok"
+            AUTOOS_DRY_RUN=0; SYS_IS_ROOT=0
+            install_antigravity; echo "RC $?"
+        ) 2>&1 )"
+        [[ "$out" == *"RC 1"* ]] || { ok=0; echo "$mode: rc: ${out:0:600}" >&2; }
+        [[ "$out" == *"$(date -u -d '@1790000000' '+%Y-%m-%d %H:%M:%S UTC')"* ]] || { ok=0; echo "$mode: the reset time is not in the message: ${out:0:600}" >&2; }
+        [[ "$(grep -c '^argv' "$sb/shim.log")" == 1 ]] || { ok=0; echo "$mode: expected exactly the listing request: $(cat "$sb/shim.log")" >&2; }
+        [[ "$out" != *"$tok"* ]] && ! grep -q "^argv.*$tok" "$sb/shim.log" || { ok=0; echo "$mode: the token is on argv or in the output" >&2; }
+        if [[ "$mode" == with-token ]]; then
+            [[ "$(sed -n '/^stdin:/,$p' "$sb/shim.log")" == $'stdin:\nheader = "Authorization: Bearer '"$tok"'"' ]] || { ok=0; echo "with-token: curl's stdin is [$(sed -n '/^stdin:/,$p' "$sb/shim.log")]" >&2; }
+            grep -q -- '--config -' "$sb/shim.log" || { ok=0; echo "with-token: curl was not told to read its config from stdin" >&2; }
+        else
+            ! grep -q '^stdin:' "$sb/shim.log" || { ok=0; echo "no-token: curl was given a config on stdin" >&2; }
+        fi
+        [[ -z "$(find "$sb/home" -type f)" && -z "$(antigravity_debris "$sb")" ]] || { ok=0; echo "$mode: left $(find "$sb/home" -type f) $(antigravity_debris "$sb")" >&2; }
+    done
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the real run() path loses the token pipe, leaks the token, or does not stop on a rate limit"; fi
+fi
+
 if it "antigravity discovery: every unusable answer fails loudly naming its step - no fallback to another version or source, nothing installed"; then
     ok=1
     # name | what the message must contain | how to break the scenario
@@ -3785,7 +3851,7 @@ if it "antigravity discovery: every unusable answer fails loudly naming its step
         # the older 2.9.1 must never be the fallback: it has a working manifest and tarball
         antigravity_manifest "$sb" 2.9.1 2.9.1-1; antigravity_build "$sb" 2.9.1-1 >/dev/null
         eval "$how"
-        case "$name" in head-too-small|head-no-length) minb=52428800 ;; *) minb=1000 ;; esac
+        case "$name" in head-too-small|head-no-length) minb=52428800 ;; *) minb=100 ;; esac
         antigravity_run "$sb" AG_ENTRY=direct "AUTOOS_ANTIGRAVITY_MIN_BYTES=$minb"
         [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$name: state=[$AG_STATE] rc=[$AG_RC] (must fail)" >&2; }
         [[ "$AG_OUT" == *"$want"* ]] || { ok=0; echo "$name: the message does not name the step [$want]: ${AG_OUT:0:500}" >&2; }
@@ -4177,16 +4243,19 @@ if it "antigravity dry run and --dry-run --update: name the winget-pkgs source a
     if (( ok )); then pass; else fail "the Antigravity dry run asks the network, writes, or does not say what it would do"; fi
 fi
 
-if it "antigravity interrupted download: a SIGTERM removes the staging directory and leaves the existing install untouched"; then
-    ok=1; sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
-    antigravity_run "$sb" >/dev/null
-    antigravity_serve "$sb" "$AG_VB" "$AG_IDB"
-    before="$(antigravity_tree_state "$sb")"; : >"$sb/kill-on-download"
-    antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
-    [[ -z "$AG_STATE" ]] || { ok=0; echo "the run was not interrupted: state=[$AG_STATE]" >&2; }
-    [[ "$(antigravity_count "$sb" '^curl .* -o [^ ]*pkg\.tgz')" == 1 ]] || { ok=0; echo "the download was never started: $(grep '^curl' "$sb/calls.log" | tail -2)" >&2; }
-    [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "the interrupt left something behind: $(diff <(echo "$before") <(antigravity_tree_state "$sb") | head -5)" >&2; }
-    rm -rf "$sb"
+if it "antigravity interrupted download: a SIGTERM or an exit from underneath removes the staging directory and leaves the existing install untouched"; then
+    ok=1
+    for how in kill exit; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        antigravity_run "$sb" >/dev/null
+        antigravity_serve "$sb" "$AG_VB" "$AG_IDB"
+        before="$(antigravity_tree_state "$sb")"; : >"$sb/$how-on-download"; : >"$sb/calls.log"
+        antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+        [[ -z "$AG_STATE" ]] || { ok=0; echo "$how: the run was not interrupted: state=[$AG_STATE]" >&2; }
+        [[ "$(antigravity_count "$sb" '^curl .* -o [^ ]*pkg\.tgz')" == 1 ]] || { ok=0; echo "$how: the download was never started: $(grep '^curl' "$sb/calls.log" | tail -2)" >&2; }
+        [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "$how: the interrupt left something behind: $(diff <(echo "$before") <(antigravity_tree_state "$sb") | head -5)" >&2; }
+        rm -rf "$sb"
+    done
     if (( ok )); then pass; else fail "an interrupted install leaves a staging directory with a half-downloaded tarball"; fi
 fi
 

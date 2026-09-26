@@ -413,9 +413,26 @@ launch_hint() {
     return 1
 }
 
-# antigravity_dir: where install_antigravity unpacks the IDE tarball - one
-# definition, read by detection and by the installer.
-antigravity_dir() { printf '%s/.local/opt/antigravity-ide\n' "$SYS_HOME"; }
+# antigravity_dir: where install_antigravity puts the Antigravity Hub (Google's
+# Electron app, from the Linux tarball) - one definition, read by detection and
+# by the installer.
+antigravity_dir() { printf '%s/.local/opt/antigravity\n' "$SYS_HOME"; }
+
+# The first line of <dir>/.autoos-version. The directory is AutoOS's only with a
+# stamp that starts with exactly this line: an old IDE-era install, a directory
+# somebody made by hand and a symlink are none of ours.
+ANTIGRAVITY_STAMP_MARKER="autoos-antigravity-hub"
+
+# antigravity_stamp_id <dir>: prints the build id (line 2 of the stamp, e.g.
+# 2.17.0-5217732355031040) and returns 0 when <dir> holds a VALID stamp; returns 1
+# when it does not - no directory, a symlinked directory or stamp, a wrong marker.
+antigravity_stamp_id() {
+    local dir="$1" stamp="$1/.autoos-version" first="" id=""
+    [[ -d "$dir" && ! -L "$dir" && -f "$stamp" && ! -L "$stamp" ]] || return 1
+    { IFS= read -r first && IFS= read -r id; } <"$stamp" || true
+    [[ "$first" == "$ANTIGRAVITY_STAMP_MARKER" ]] || return 1
+    printf '%s\n' "$id"
+}
 
 script_is_installed() {
     # has_bin, not has_cmd: every one of these installs somewhere PATH does not
@@ -429,11 +446,11 @@ script_is_installed() {
         nodesource-lts)  has_bin node ;;
         docker)          has_bin docker ;;
         tailscale)       has_bin tailscale ;;
-        # The Antigravity IDE 2.x tarball: its version stamp (a finished install
-        # writes it last) or its command. The old apt package's `antigravity`
-        # command is a different layout and deliberately does not count, or a
-        # machine that still has the deb would never get the tarball.
-        antigravity)     [[ -f "$(antigravity_dir)/.autoos-version" ]] || has_bin antigravity-ide ;;
+        # The Antigravity Hub tarball: a VALID stamp in its install directory. The
+        # command name does not count - the old apt package (the 1.23.2 IDE) has the
+        # same `antigravity` command, and a machine that still has the deb would
+        # look installed forever and never get the Hub.
+        antigravity)     antigravity_stamp_id "$(antigravity_dir)" >/dev/null ;;
         xpipe)           has_bin xpipe ;;
         herdr)           has_bin herdr ;;
         handy)           has_bin handy ;;

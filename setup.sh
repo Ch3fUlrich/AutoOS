@@ -52,7 +52,7 @@ AutoOS — post-install provisioning for Linux
   --only <ids>       Comma-separated component ids; installs only these
   --dry-run          Print every command without changing anything
   --update           Also check installed components that can tell a newer version
-                     (Antigravity IDE) and update them; without it they are skipped
+                     (Antigravity Hub) and update them; without it they are skipped
   --yes, -y          Non-interactive: take profile defaults, skip confirmation
   --no-color         Disable ANSI colour
   --claude-sessions [status|snapshot|restore|configure]

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Write a minimal Electron asar archive for the Antigravity installer tests.
 
-usage: fake_antigravity_asar.py <out> <version> [noicon]
+usage: fake_antigravity_asar.py <out> <version> [noicon|nestedicon]
 
 The archive holds package.json (name antigravity, the given version) and, unless
-"noicon" is given, icon.png (the PNG signature plus filler). The layout is the
+"noicon" is given, icon.png (the PNG signature plus filler) - at the root of the
+archive, or under resources/ with "nestedicon". The layout is the
 one asar documents and the installer reads:
 
     <uint32 4> <uint32 header pickle size> <uint32 payload size> <uint32 json length>
@@ -23,14 +24,18 @@ def main(argv):
         print(__doc__, file=sys.stderr)
         return 2
     out, version = argv[1], argv[2]
-    with_icon = "noicon" not in argv[3:]
+    options = argv[3:]
     package = json.dumps({"name": "antigravity", "productName": "Antigravity", "version": version}).encode()
     files = [("package.json", package)]
-    if with_icon:
-        files.append(("icon.png", b"\x89PNG\r\n\x1a\n" + b"fake icon\n"))
+    if "noicon" not in options:
+        where = "resources/icon.png" if "nestedicon" in options else "icon.png"
+        files.append((where, b"\x89PNG\r\n\x1a\n" + b"fake icon\n"))
     header, blob, offset = {"files": {}}, b"", 0
-    for name, data in files:
-        header["files"][name] = {"size": len(data), "offset": str(offset)}
+    for path, data in files:
+        node, parts = header, path.split("/")
+        for part in parts[:-1]:
+            node = node["files"].setdefault(part, {"files": {}})
+        node["files"][parts[-1]] = {"size": len(data), "offset": str(offset)}
         blob += data
         offset += len(data)
     text = json.dumps(header, separators=(",", ":")).encode()
