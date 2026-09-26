@@ -826,3 +826,38 @@ such field and task A4e's own brief is "keep the *dated* prose that has no
 registry field" for exactly this kind of gap, the same choice A4b/A4c/A4d made
 for the litellm `rpm` lines, `catalog/ide-models.json`'s menu order and
 `tier-profiles.json`'s push-priority order respectively.
+
+## 15. Task A5c — consumers read the registry directly (spec 3.2 phase 2): two order changes
+
+Spec 3.2 phase 2 switched the remaining consumers off the old files and onto
+`catalog/ai-registry.json` itself: `apply.sh`/`apply.ps1` (task A5a — provider id and
+`provider_data` from the registry's `providers` section) and `tools/mirror-litellm-env.py`,
+`tools/sync-router-tiers.py` and `tools/audit-router.py` (task A5c). For what each
+consumer *contains* both swaps are source-only (the registry's field names match
+`catalog/providers.json`'s, §2 and §11). Two *order* changes fall out of them, both
+intentional and accepted here — the phase-2 counterpart of `render_omniroute()`'s own
+documented exceptions (§10):
+
+1. **`tools/mirror-litellm-env.py` emits `litellm/.env` lines in the registry's provider
+   order (alphabetical), not `catalog/providers.json`'s hand order.** The name → env
+   pairs are identical (both files carry the same 15 populated `litellm_env` values;
+   `cc`/`antigravity` are skipped for their null ones — `provider_field_map()`), but the
+   emitted line order changes. An existing `.env` written in the old order therefore
+   reports `DRIFT` once under `--check` and is rewritten by the default run: one-time
+   churn, then stable. `tests/helpers/check-provider-registry.py` section 3 pins the
+   pair set *and* the registry order, so a hand-reorder of either file fails loudly.
+2. **`tools/audit-router.py` lists combos sorted by route id**, because `repo_combos()`
+   renders via `render_omniroute()` (§10, exception 2: `combos` is emitted sorted by
+   route id) instead of reading `combos.json`'s hand-edited order. Verdicts are
+   unchanged: every comparison in the tool is by name or membership (sets, name-keyed
+   maps, the per-combo live-leg check), never by position, so the drift list's content
+   and the exit code are identical — only the order in which entries are listed changes.
+   `repo_combos()` additionally treats a registry with no `routes` key as unreadable
+   input (`SystemExit: ERROR: cannot read routes from <path>`) — the same loud failure
+   the old `combos.json` read gave a missing key, where `render_omniroute()` alone
+   would render an empty combo list silently.
+
+This supersedes §11's closing note: `provider_maps(path=None)`'s default source is
+`catalog/ai-registry.json` since A5c (an explicit `path` still accepts either file's
+shape), and `tests/helpers/check-provider-registry.py`'s sections 3/4 compare both
+tools against the registry now.

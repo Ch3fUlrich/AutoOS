@@ -96,6 +96,19 @@ class RegistrySourcedRepoCombosTests(unittest.TestCase):
         want = {c["name"] for c in json.loads(COMBOS_PATH.read_text(encoding="utf-8"))["combos"]}
         self.assertEqual(got, want)
 
+    def test_a_registry_with_no_routes_section_exits_with_an_error(self):
+        # A document with no `routes` key is unreadable input, not a repo with
+        # zero combos - render_omniroute() alone would render an empty list
+        # silently. The old combos.json read raised SystemExit on its missing
+        # key and this read must fail just as loudly.
+        audit = _load_module()
+        path = self.dir / "no-routes.json"
+        path.write_text(json.dumps({"version": "2026-09-25", "providers": {}, "models": {}}),
+                        encoding="utf-8")
+        with self.assertRaises(SystemExit) as caught:
+            audit.repo_combos(registry_path=path)
+        self.assertIn(f"cannot read routes from {path}", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

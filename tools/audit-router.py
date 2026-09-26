@@ -121,6 +121,10 @@ def repo_combos(registry_path=None, combos_path=None) -> list[dict]:
     combos_path is an explicit override reading a combos.json-shaped file
     directly (never deleted, spec 3.2's two-phase rule); unset, registry_path
     (default catalog/ai-registry.json) is rendered instead.
+
+    A registry with no `routes` key is unreadable input, not zero combos:
+    raise the loud SystemExit the old combos.json read gave a missing key
+    instead of letting render_omniroute() render an empty list silently.
     """
     if combos_path is not None:
         path = Path(combos_path)
@@ -132,6 +136,8 @@ def repo_combos(registry_path=None, combos_path=None) -> list[dict]:
     registry_tool = _load_registry_tool()
     try:
         doc = registry_tool.load(path)
+        if "routes" not in doc:
+            raise SystemExit(f"ERROR: cannot read routes from {path}")
         rendered = registry_tool.render_omniroute(doc)
     except (OSError, ValueError, KeyError) as exc:
         raise SystemExit(f"ERROR: cannot read {path}: {exc}")

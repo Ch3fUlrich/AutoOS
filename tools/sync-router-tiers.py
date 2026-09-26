@@ -136,7 +136,7 @@ def provider_maps(path=None):
     section 2, so an explicit `path` accepts either file's shape unchanged).
     apply.ps1/apply.sh and tools/mirror-litellm-env.py have their own reads
     (mirror-litellm-env.py switched to the registry too, task A5c; apply.*
-    have not, spec 3.2 phase 1). See provider_maps_from_dict() for the field
+    in task A5a). See provider_maps_from_dict() for the field
     meanings and the OmniRoute-id keying; this wrapper only adds the file
     read.
     """
