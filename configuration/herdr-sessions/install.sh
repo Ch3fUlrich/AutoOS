@@ -205,7 +205,11 @@ remove_unit() {  # $1=dest path
         echo "  would: disable $name, back it up, remove $dest"
         return 0
     fi
-    systemctl "${SYSTEMCTL_SCOPE[@]}" disable "$name" >/dev/null 2>&1 || true
+    # --now: stop a running service or timer (e.g. the snapshot timer, started
+    # with --now at install time) before removing its unit -- disable alone
+    # only stops it starting at the NEXT boot, leaving it running in memory
+    # until then.
+    systemctl "${SYSTEMCTL_SCOPE[@]}" disable --now "$name" >/dev/null 2>&1 || true
     back_up_or_die "$dest"
     rm -f "$dest"
     echo "    $name: disabled, backed up to $(basename "$BACKUP_PATH"), removed"

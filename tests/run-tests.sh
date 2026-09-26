@@ -7259,6 +7259,46 @@ STUB
     if (( ok )); then pass; else fail "remove_unit is not fail-closed on a backup failure"; fi
 fi
 
+# Finding 3 (qoder review, L1-backlog.review-herdr-qoder.md, medium):
+# remove_unit disabled but never stopped, and install starts the snapshot
+# timer with --now -- so --unregister left the timer active in memory,
+# still firing and writing snapshots, while detection now (correctly, after
+# finding 1/2's fixes) reports herdr-sessions gone -- letting claude-autostart
+# install and run concurrently.
+if it "herdr-sessions: --unregister disables --now (stops the timer) before removing, not disable alone"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; mkdir -p "$stub"
+    log="$tmp/systemctl.log"
+    cat > "$stub/systemctl" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+exit 0
+STUB
+    chmod +x "$stub/systemctl"
+    cat > "$stub/loginctl" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "show-user" ] && echo yes
+exit 0
+STUB
+    chmod +x "$stub/loginctl"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    run_hs3() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" "$@" >/dev/null 2>&1; }
+    run_hs3
+    : > "$log"
+    run_hs3 --unregister
+    n="$(grep -c '^--user disable --now ' "$log" 2>/dev/null || true)"
+    stale="$(grep -c '^--user disable [^-]' "$log" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [[ "$n" -ge 1 && "$stale" -eq 0 ]]; then
+        pass
+    else
+        fail "disable --now calls=$n, disable-without-now calls=$stale"
+    fi
+fi
+
 # Item 8 (L0): a single pane process killed by the kernel OOM killer must not
 # take the whole herdr-server unit down with it -- systemd's default
 # OOMPolicy=stop did exactly that, twice, ending every pane in the session.
