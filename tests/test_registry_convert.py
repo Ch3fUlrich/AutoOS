@@ -375,6 +375,51 @@ class MistralCodeTrainsOnPromptsTests(unittest.TestCase):
         self.assertIs(self.registry["providers"]["mistral"]["trains_on_prompts"], False)
 
 
+class PRIV2ModelLevelOverrideTests(unittest.TestCase):
+    """PRIV2 brief 2026-09-26: optional model-level tier/trains_on_prompts
+    overrides, converted from small explicit tables (same EXTRA_MODELS
+    convention as MistralCodeTrainsOnPromptsTests above)."""
+
+    @classmethod
+    def setUpClass(cls):
+        rc, out, err = run_converter()
+        if rc != 0:
+            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
+        cls.registry = load_json(REGISTRY_PATH)
+        cls.schema = load_json(SCHEMA_PATH)
+
+    def test_schema_model_defines_an_optional_tier_override(self):
+        tier_schema = self.schema["$defs"]["model"]["properties"].get("tier")
+        self.assertIsNotNone(tier_schema, "schema $defs.model.properties has no 'tier'")
+        self.assertEqual(sorted(tier_schema.get("enum", [])), ["free", "paid", "subscription"])
+        self.assertNotIn("tier", self.schema["$defs"]["model"].get("required", []))
+
+    def test_zen_deepseek_v4_1_flash_carries_a_paid_tier_override(self):
+        model = self.registry["models"]["deepseek-v4.1-flash"]
+        self.assertEqual(model.get("tier"), "paid")
+        self.assertIn("$comment", model)
+
+    def test_zen_provider_itself_stays_free(self):
+        self.assertEqual(self.registry["providers"]["zen"]["tier"], "free")
+
+    def test_openrouter_contributor_model_carries_a_training_override(self):
+        model = self.registry["models"]["meta/muse-spark-1.3-contributor"]
+        self.assertIs(model.get("trains_on_prompts"), True)
+        self.assertIn("$comment", model)
+
+    def test_zen_free_contributor_model_carries_a_training_override(self):
+        model = self.registry["models"]["muse-spark-1.3-contributor-free"]
+        self.assertIs(model.get("trains_on_prompts"), True)
+        self.assertIn("$comment", model)
+
+    def test_sibling_models_have_no_unwanted_overrides(self):
+        # deepseek/deepseek-v4.1-flash (openrouter's spelling of the same
+        # real model as the zen leg above) and deepseek-flash (deepseek
+        # direct) are different legs and keep no tier override.
+        for mid in ("deepseek/deepseek-v4.1-flash", "deepseek-flash"):
+            self.assertNotIn("tier", self.registry["models"][mid])
+
+
 class BucketTableParityTests(unittest.TestCase):
     """policy.bucket_table must equal tools/autoos_resolver.DEFAULT_BUCKET_TABLE (task brief)."""
 

@@ -298,8 +298,8 @@ class FilterTests(unittest.TestCase):
     def setUp(self):
         self.registry = {
             "providers": {
-                "clean": {"id": "clean", "trains_on_prompts": False},
-                "nosy": {"id": "nosy", "trains_on_prompts": True},
+                "clean": {"id": "clean", "tier": "paid", "trains_on_prompts": False},
+                "nosy": {"id": "nosy", "tier": "paid", "trains_on_prompts": True},
             },
             "models": {
                 "big": {"id": "big", "tool_calls": "proven",
@@ -691,7 +691,7 @@ class FallThroughTests(unittest.TestCase):
         model_a.update(leg_a or {})
         model_b.update(leg_b or {})
         return {
-            "providers": {"p": {"id": "p", "trains_on_prompts": False}},
+            "providers": {"p": {"id": "p", "tier": "paid", "trains_on_prompts": False}},
             "models": {
                 "model-a": model_a, "model-b": model_b,
                 "orch": {"id": "orch", "price_in": 5e-6, "price_out": 1e-5,
@@ -1670,15 +1670,60 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(result["state"], "ready")
         self.assertIn(result["route"], registry["routes"])
 
+    @staticmethod
+    def _inline_toolcalls_overlay(registry):
+        """Build a tool_calls overlay in-process (PRIV2, 2026-09-26): the
+        sensitive-routing regression below needs an agentic kind's
+        tool_calls proven for at least one private-safe leg, but
+        logs/routing/measured.json (the real probe's overlay) is
+        git-ignored and absent on a fresh clone or in CI. Marks
+        deepseek/deepseek-flash proven (deepseek-direct, private-safe: paid
+        tier, trains_on_prompts false, no model-level override) and every
+        other leg in the registry explicitly unproven -- same shape
+        tools/probe-toolcalls.py writes (``overlay["legs"][leg]["tool_calls"]
+        ["value"]``) -- so this test never depends on that file."""
+        overlay = {"legs": {}}
+        for route in registry["routes"].values():
+            for leg in route.get("legs") or []:
+                overlay["legs"].setdefault(leg, {"tool_calls": {"value": "unproven"}})
+        overlay["legs"]["deepseek/deepseek-flash"] = {"tool_calls": {"value": "proven"}}
+        return overlay
+
     def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg(self):
         # PRIV brief 2026-09-26, the found bug: `route --card
         # kind=implement,paths=...,privacy=sensitive` chose t3-driver-free-
         # only via groq/qwen/qwen3.8-27b, a free pool -- "Free first, private
-        # never" was violated. Needs a real tool_calls overlay (agentic
-        # kinds require tool_calls "proven", and every model in the real
-        # registry defaults to "unproven"): logs/routing/measured.json is
-        # git-ignored, so this test skips when it is absent (e.g. a fresh
-        # clone or CI) rather than failing.
+        # never" was violated. PRIV2 (2026-09-26): this must run in CI, so
+        # the tool_calls overlay is built inline (_inline_toolcalls_overlay)
+        # instead of reading the git-ignored logs/routing/measured.json --
+        # see
+        # test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay
+        # below for the real-probe-overlay variant, which may still skip.
+        registry_path = (Path(__file__).resolve().parent.parent
+                         / "catalog" / "ai-registry.json")
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        overlay = self._inline_toolcalls_overlay(registry)
+        card = {"kind": "implement", "spec": "exact", "risk": "normal",
+               "mode": "balanced", "privacy": "sensitive"}
+        features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                   "tests": True, "need_tokens": 1000}
+        client_state = {"opencode": {"installed": True, "signed_in": True,
+                                     "reason": ""}}
+        result = r.plan(card, features, client_state, registry, overlay, [],
+                        "muse-spark", self.dt(2026, 9, 29, 9, 0))
+        self.assertIsNotNone(result["route"], result)
+        route = registry["routes"][result["route"]]
+        for provider_id, model_id in r.serving_legs(route, registry):
+            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
+            self.assertTrue(
+                safe, "%s/%s on route %s is not private-safe: %s"
+                     % (provider_id, model_id, result["route"], reason))
+
+    def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay(self):
+        # Extra (PRIV2): the same regression against the real probe's
+        # overlay, when one happens to be on disk. logs/routing/measured.json
+        # is git-ignored, so this skips on a fresh clone or in CI rather than
+        # failing -- the inline-overlay test above is the one that must run.
         overlay_path = (Path(__file__).resolve().parent.parent
                         / "logs" / "routing" / "measured.json")
         if not overlay_path.is_file():

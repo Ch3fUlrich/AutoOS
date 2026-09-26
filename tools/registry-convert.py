@@ -424,21 +424,36 @@ EXTRA_MODELS = {
         "family": "meta", "context_advertised": 1048576, "output_max": 131072,
         "reasoning": True, "effort_ladder": ["minimal", "low", "medium", "high", "xhigh", "max"],
         "price_in": 0.0, "price_out": 0.0, "client_bound": "opencode",
+        "trains_on_prompts": True,
         "comment": "The Zen free contributor promo leg. Same real model as "
                    "models.muse-spark (llm-models.json) and "
                    "models.'meta/muse-spark-1.3-contributor', free while the promo "
                    "runs. client_bound follows spec 3.1's own example ('opencode for "
                    "Zen free legs'): combos.json documents this leg 403ing proxied "
                    "traffic ('OpenCode's free tier can only be used from within "
-                   "OpenCode').",
+                   "OpenCode'). Model-level trains_on_prompts override (PRIV2 brief, "
+                   "2026-09-26): a contributor leg trains by contract - "
+                   "tests/run-tests.sh's own combos.json policy comment: "
+                   "'-contributor (trains by contract) is banned in "
+                   "t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries "
+                   "it deliberately since the 2026-09-21 contributor-only block "
+                   "(paid-only, trains).'",
     },
     "meta/muse-spark-1.3-contributor": {
         "family": "meta", "context_advertised": 1048576, "output_max": 131072,
         "reasoning": True, "effort_ladder": ["minimal", "low", "medium", "high", "xhigh", "max"],
         "price_in": 1e-7, "price_out": 2e-7, "price_cache_read": 2e-9,
+        "trains_on_prompts": True,
         "comment": "The OpenRouter contributor (paid) leg of the same real model as "
                    "models.muse-spark; price reused from that llm-models.json entry - "
-                   "identical commercial arrangement, different provider path.",
+                   "identical commercial arrangement, different provider path. "
+                   "Model-level trains_on_prompts override (PRIV2 brief, 2026-09-26): "
+                   "a contributor leg trains by contract - tests/run-tests.sh's own "
+                   "combos.json policy comment: '-contributor (trains by contract) is "
+                   "banned in t2-worker-clean/t3-driver-clean; t1-orchestrator-clean "
+                   "carries it deliberately since the 2026-09-21 contributor-only "
+                   "block (paid-only, trains).' registry.py's CLEAN_ROUTE_EXEMPTIONS "
+                   "is the one place that deliberate trade-off is allowed through.",
     },
     "gemini-3.8-flash": {
         "family": "google", "context_advertised": 131072, "output_max": 32768,
@@ -512,10 +527,17 @@ EXTRA_MODELS = {
         "family": "deepseek", "context_advertised": 131072, "output_max": 32768,
         "reasoning": True, "effort_ladder": ["none", "low", "high", "max"],
         "price_in": 3e-7, "price_out": 1.2e-6, "price_cache_read": 6e-9,
+        "tier": "paid",
         "comment": "opencode-zen's bare spelling of the same real model as "
                    "'deepseek/deepseek-v4.1-flash' (openrouter's spelling); the paid "
                    "zen leg (used in t2-worker-clean/t3-driver-clean). Ladder from "
-                   "docs/models.md. " + _DEEPSEEK_FLASH_PRICE_NOTE,
+                   "docs/models.md. " + _DEEPSEEK_FLASH_PRICE_NOTE + " Model-level "
+                   "tier override (PRIV2 brief, 2026-09-26): the zen provider's own "
+                   "tier is 'free', but this is a direct-key leg billed past the "
+                   "pool on the same key - tests/run-tests.sh's own combos.json "
+                   "policy comment: 'Direct-key legs (mistral-small, deepseek, "
+                   "openrouter paid, zen paid) bill past the pool on the same key, "
+                   "so they stay.'",
     },
     "mistral-small-latest": {
         "family": "mistral", "context_advertised": 131072, "output_max": 32768,

@@ -60,8 +60,11 @@ class RealRegistryTests(unittest.TestCase):
             cwd=str(ROOT), capture_output=True, text=True, timeout=120,
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertRegex(proc.stdout,
-                         r"^ok: registry \d{4}-\d{2}-\d{2}, \d+ routes, \d+ models, \d+ providers\n$")
+        # PRIV2: any privacy_exemption_lines() "info:" line(s) print first
+        # (t1-orchestrator-clean today), then the ok line, always last.
+        self.assertRegex(
+            proc.stdout,
+            r"^(info: .*\n)*ok: registry \d{4}-\d{2}-\d{2}, \d+ routes, \d+ models, \d+ providers\n$")
 
     def test_cli_validate_succeeds_and_confirm_no_drift(self):
         proc = subprocess.run(
@@ -157,17 +160,21 @@ class RuleThreePrivacyTests(unittest.TestCase):
         problems = registry.check_registry(reg)
         self.assertTrue(any("privacy: t2-worker-clean" in p for p in problems), problems)
 
-    def test_unavailable_leg_is_not_checked(self):
-        # review-a3: the committed openrouter provider trains_on_prompts=false,
-        # so the real registry alone could not fail this; make it train.
+    def test_unavailable_leg_of_a_clean_route_is_still_checked(self):
+        # PRIV2, 2026-09-26 (supersedes the old review-a3 "not checked"
+        # behaviour): the gateway does not consult unavailable_legs/
+        # available:false, so rule 3 must not either. Use t2-worker-clean
+        # (not exempt, unlike t1-orchestrator-clean) and its
+        # unavailable_legs-flagged openrouter leg.
         reg = mutated()
         reg["providers"]["openrouter"]["trains_on_prompts"] = True
-        reg["providers"]["openrouter"].pop("available", None)
-        self.assertFalse(any("privacy: t1-orchestrator-clean" in p
-                             for p in registry.check_registry(reg)))
-        reg["routes"]["t1-orchestrator-clean"]["unavailable_legs"] = {}
-        self.assertTrue(any("privacy: t1-orchestrator-clean" in p
-                            for p in registry.check_registry(reg)))
+        self.assertIn("openrouter/deepseek/deepseek-v4.1-flash",
+                      reg["routes"]["t2-worker-clean"]["unavailable_legs"])
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy: t2-worker-clean" in p
+                and "openrouter/deepseek/deepseek-v4.1-flash" in p
+                for p in problems), problems)
 
     def test_unknown_trains_on_prompts_is_flagged(self):
         # review-a3: a null/missing trains_on_prompts is unverified, not clean.
@@ -391,6 +398,165 @@ class CliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("drift:", proc.stdout)
 
+
+
+class ModelLevelTierOverrideTests(unittest.TestCase):
+    """PRIV2 brief 2026-09-26: an optional models.<id>.tier overrides its
+    provider's tier in private_safe() -- needed for the zen provider (tier
+    "free") whose paid, direct-key opencode-zen/deepseek-v4.1-flash leg
+    (tests/run-tests.sh's own combos.json policy line: "Direct-key legs
+    (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
+    on the same key, so they stay") is not itself a free pool."""
+
+    def reg(self, provider_extra=None, model_extra=None):
+        provider = {"id": "p", "tier": "paid", "trains_on_prompts": False}
+        provider.update(provider_extra or {})
+        model = {"id": "m"}
+        model.update(model_extra or {})
+        return {"providers": {"p": provider}, "models": {"m": model}}
+
+    def test_model_tier_override_makes_a_free_provider_leg_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(provider_extra={"tier": "free"}, model_extra={"tier": "paid"}))
+        self.assertTrue(safe, reason)
+        self.assertIsNone(reason)
+
+    def test_model_tier_override_can_make_a_paid_provider_leg_unsafe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(model_extra={"tier": "free"}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_zen_deepseek_v4_1_flash_model_carries_a_paid_tier_override(self):
+        model = load_registry()["models"]["deepseek-v4.1-flash"]
+        self.assertEqual(model.get("tier"), "paid")
+        self.assertIn("$comment", model)
+
+    def test_zen_provider_itself_stays_free(self):
+        self.assertEqual(load_registry()["providers"]["zen"]["tier"], "free")
+
+    def test_zen_deepseek_leg_is_private_safe_via_the_model_override(self):
+        safe, reason = registry.private_safe("zen", "deepseek-v4.1-flash", load_registry())
+        self.assertTrue(safe, reason)
+
+
+class ModelLevelTrainingContributorTests(unittest.TestCase):
+    """PRIV2 brief 2026-09-26: the contributor model trains by contract
+    (tests/run-tests.sh's own combos.json policy line: "-contributor
+    (trains by contract) is banned in t2-worker-clean/t3-driver-clean") --
+    both the OpenRouter paid contributor leg and the Zen free
+    contributor-promo leg carry the model-level override, not just a
+    provider-level one."""
+
+    def test_openrouter_contributor_model_trains(self):
+        model = load_registry()["models"]["meta/muse-spark-1.3-contributor"]
+        self.assertIs(model.get("trains_on_prompts"), True)
+        self.assertIn("$comment", model)
+
+    def test_zen_free_contributor_model_trains(self):
+        model = load_registry()["models"]["muse-spark-1.3-contributor-free"]
+        self.assertIs(model.get("trains_on_prompts"), True)
+        self.assertIn("$comment", model)
+
+    def test_openrouter_contributor_leg_is_not_private_safe(self):
+        safe, reason = registry.private_safe(
+            "openrouter", "meta/muse-spark-1.3-contributor", load_registry())
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+
+class FailClosedPrivateSafeTests(unittest.TestCase):
+    """PRIV2 brief 2026-09-26: private_safe() fails closed on anything that
+    is not exactly the safe shape -- an unrecognised/missing effective tier,
+    or a model-level trains_on_prompts that is present but not exactly
+    `false` (null, 1, "no", 0, ...), is never treated as safe."""
+
+    def reg(self, provider_extra=None, model_extra=None):
+        provider = {"id": "p", "tier": "paid", "trains_on_prompts": False}
+        provider.update(provider_extra or {})
+        model = {"id": "m"}
+        model.update(model_extra or {})
+        return {"providers": {"p": provider}, "models": {"m": model}}
+
+    def test_effective_tier_missing_is_not_safe(self):
+        reg = self.reg()
+        del reg["providers"]["p"]["tier"]
+        safe, reason = registry.private_safe("p", "m", reg)
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_effective_tier_unrecognised_value_is_not_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(provider_extra={"tier": "beta"}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_model_trains_on_prompts_explicit_null_is_not_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(model_extra={"trains_on_prompts": None}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_model_trains_on_prompts_truthy_non_bool_is_not_safe(self):
+        for value in (1, "no", "false", 0):
+            with self.subTest(value=value):
+                safe, reason = registry.private_safe(
+                    "p", "m", self.reg(model_extra={"trains_on_prompts": value}))
+                self.assertFalse(safe, "value %r wrongly treated as safe" % (value,))
+
+    def test_model_trains_on_prompts_missing_key_is_still_safe(self):
+        safe, reason = registry.private_safe("p", "m", self.reg())
+        self.assertTrue(safe, reason)
+
+    def test_model_trains_on_prompts_exactly_false_is_still_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(model_extra={"trains_on_prompts": False}))
+        self.assertTrue(safe, reason)
+
+
+class CleanRouteExemptionTests(unittest.TestCase):
+    """PRIV2 brief 2026-09-26: rule 3 checks every leg of a -clean route,
+    including one flagged in unavailable_legs -- the OmniRoute gateway does
+    not consult that registry-only flag, and combos.json/apply.sh still
+    push the leg verbatim (tests/run-tests.sh's own "apply --dry-run" /
+    "provider registry drives apply" tests). The one documented exception is
+    registry.CLEAN_ROUTE_EXEMPTIONS -- t1-orchestrator-clean, which
+    deliberately carries the training OpenRouter contributor leg (the
+    spawner requires --allow-training to reach it) -- reported by
+    `check`/`validate` as an info line, never silently skipped and never a
+    check_registry() problem."""
+
+    def test_unavailable_leg_of_a_non_exempt_clean_route_is_now_checked(self):
+        reg = mutated()
+        reg["providers"]["openrouter"]["trains_on_prompts"] = True
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy: t2-worker-clean" in p
+                and "openrouter/deepseek/deepseek-v4.1-flash" in p
+                for p in problems), problems)
+
+    def test_t1_orchestrator_clean_is_in_the_exemption_table(self):
+        self.assertIn("t1-orchestrator-clean", registry.CLEAN_ROUTE_EXEMPTIONS)
+
+    def test_t1_orchestrator_clean_training_leg_is_not_a_check_registry_problem(self):
+        problems = registry.check_registry(load_registry())
+        self.assertFalse(any("t1-orchestrator-clean" in p for p in problems), problems)
+
+    def test_privacy_exemption_lines_names_the_route_and_a_reason(self):
+        lines = registry.privacy_exemption_lines(load_registry())
+        self.assertTrue(
+            any("t1-orchestrator-clean" in line and line.startswith("info:")
+                for line in lines), lines)
+
+    def test_check_cli_prints_the_exemption_info_line_and_still_exits_zero(self):
+        proc = subprocess.run(
+            [sys.executable, str(REGISTRY_TOOL), "check"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("t1-orchestrator-clean", proc.stdout)
+        self.assertIn("info:", proc.stdout)
+        self.assertIn("ok: registry", proc.stdout)
 
 
 class ReviewA3Tests(unittest.TestCase):

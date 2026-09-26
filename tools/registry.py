@@ -14,11 +14,17 @@ Three subcommands:
     2. ids are unique within and across providers/models/clients/routes; a
        route may share the id of a model one of its legs serves (a per-model
        fallback group, mapping doc Open choice 11);
-    3. a privacy-sensitive route (one whose id ends in "-clean") only uses
-       available legs whose provider has trains_on_prompts: false (a missing
-       or null value counts as training). A leg listed in
-       routes.<id>.unavailable_legs, or reached through a provider marked
-       available: false, is not checked; there is no per-route exemption;
+    3. a privacy-sensitive route (one whose id ends in "-clean") uses only
+       private-safe legs (private_safe(): effective tier exactly paid or
+       subscription, provider trains_on_prompts exactly false, model
+       trains_on_prompts missing or exactly false) - checked for EVERY leg
+       the route lists, including one flagged in unavailable_legs or reached
+       through a provider marked available: false (PRIV2, 2026-09-26: the
+       OmniRoute gateway does not consult that registry-only flag, and
+       combos.json/apply.sh still push the leg verbatim). CLEAN_ROUTE_
+       EXEMPTIONS names the one route (t1-orchestrator-clean) deliberately
+       exempted from this rule; `check`/`validate` still report it, as an
+       info line, never silently;
     4. providers.<id>.api_base and models.<id>.direct.base_url hold only a public
        vendor endpoint. Loopback (127.0.0.1 / localhost / ::1) is allowed ONLY in
        a model's direct.base_url; private IPv4 ranges, single-label hosts,
@@ -182,25 +188,36 @@ def private_safe(provider_id, model_id, registry) -> tuple:
     by the PRIV finding of 2026-09-26: `autoos-agent.py route --card
     kind=implement,...,privacy=sensitive` chose a FREE pool because only a
     provider's ``trains_on_prompts`` was ever checked -- "Free first, private
-    never" needs the pool's tier checked too). The single predicate both this
-    module's rule 3 (-clean routes) and tools/autoos_resolver.py's route-level
-    privacy filter use, so the two can never drift apart.
+    never" needs the pool's tier checked too -- and further tightened by PRIV2,
+    2026-09-26: fail CLOSED on anything that is not exactly the safe shape, and
+    let a model override its provider's ``tier`` too, not only its
+    ``trains_on_prompts``). The single predicate both this module's rule 3
+    (-clean routes) and tools/autoos_resolver.py's route-level privacy filter
+    use, so the two can never drift apart.
 
     Safe only when ALL of:
-      - the provider's ``tier`` is not ``"free"`` -- a free pool is never
-        private-safe, even one whose own ``trains_on_prompts`` is ``false``
-        (the found bug: groq/cerebras/sambanova free legs, and mistral's own
-        ``mistral-code-latest`` free pool, all carry ``trains_on_prompts:
-        false`` at the provider level and were wrongly treated as clean);
+      - the EFFECTIVE tier -- ``models.<id>.tier`` when present, else
+        ``providers.<id>.tier`` -- is exactly ``"paid"`` or ``"subscription"``.
+        A free pool is never private-safe, even one whose own
+        ``trains_on_prompts`` is ``false`` (the found bug: groq/cerebras/
+        sambanova free legs, and mistral's own ``mistral-code-latest`` free
+        pool, all carry ``trains_on_prompts: false`` at the provider level and
+        were wrongly treated as clean). The model-level override is additive
+        (PRIV2): a provider whose own tier is ``"free"`` (e.g. ``zen``) can
+        still serve one direct-key, paid leg (``deepseek-v4.1-flash``) that
+        bills past the pool -- and, symmetrically, a provider whose tier is
+        otherwise paid can serve one free leg that is not private-safe. An
+        unrecognised or missing effective tier is unsafe, not a pass-through;
       - the provider's ``trains_on_prompts`` is exactly ``False`` (``True`` or
         missing/``None`` both count as training -- unknown is unsafe, matching
         the original rule);
-      - the model does not carry its own ``trains_on_prompts: true`` (an
-        optional, additive model-level override for a provider that also
-        serves a free, training pool under an otherwise-clean paid tier --
-        e.g. ``mistral-code-latest`` on the paid, non-training ``mistral``
-        provider; missing means inherit the provider's value, already covered
-        by the check above).
+      - the model's ``trains_on_prompts``, when the key is present at all, is
+        exactly ``False`` -- a MISSING key is safe (inherit the provider,
+        already covered above), but a present key that is anything else
+        (``true``, an explicit ``null``, ``1``, ``"no"``, ...) is unsafe. This
+        is deliberately fail-closed (PRIV2): only ``dict.get(...) is True``
+        let a non-boolean truthy value (``1``, ``"no"``) slip through as
+        "safe" before this fix.
 
     Returns ``(True, None)`` when safe, or ``(False, reason)`` naming which
     check failed. `provider_id`/`model_id` are assumed already resolved (rule
@@ -216,13 +233,41 @@ def private_safe(provider_id, model_id, registry) -> tuple:
     if not isinstance(model, dict):
         return False, "unknown model %r" % (model_id,)
 
-    if provider.get("tier") == "free":
-        return False, "provider tier is free"
+    effective_tier = model["tier"] if "tier" in model else provider.get("tier")
+    if effective_tier not in ("paid", "subscription"):
+        return False, "effective tier %r is not paid or subscription" % (effective_tier,)
     if provider.get("trains_on_prompts") is not False:  # True or missing: unsafe
         return False, "trains on prompts"
-    if model.get("trains_on_prompts") is True:
+    if "trains_on_prompts" in model and model["trains_on_prompts"] is not False:
         return False, "model trains on prompts"
     return True, None
+
+
+# The one documented, deliberate exception to rule 3 (PRIV2, 2026-09-26):
+# t1-orchestrator-clean's only leg is the OpenRouter contributor model, which
+# trains by contract (see the meta/muse-spark-1.3-contributor $comment in
+# catalog/ai-registry.json). combos.json's own $comment already recorded this
+# trade-off on 2026-09-21 ("t1-orchestrator-clean ... no longer means
+# trains-nothing - it means paid-only"); tools/autoos-agent.py's spawner
+# requires an explicit --allow-training to route a sensitive card there
+# (tools/autoos_routing.py select_combo()). A route named here is never
+# evaluated by _check_privacy below - it is reported separately, as an
+# "info:" line (privacy_exemption_lines()), never silently and never as a
+# check_registry() problem. The resolver's own privacy filter
+# (tools/autoos_resolver.py filter_routes()) does NOT consult this table: it
+# calls private_safe() on every *available* serving leg of *every* route, and
+# t1-orchestrator-clean's only leg has no available leg at all, so a
+# privacy=sensitive card can never land there regardless.
+CLEAN_ROUTE_EXEMPTIONS = {
+    "t1-orchestrator-clean": (
+        "carries the OpenRouter contributor leg "
+        "(openrouter/meta/muse-spark-1.3-contributor) deliberately, since the "
+        "2026-09-21 contributor-only block made it paid-only rather than "
+        "trains-nothing (combos.json's own $comment); the spawner requires "
+        "--allow-training to route a privacy=sensitive card there "
+        "(tools/autoos-agent.py, tools/autoos_routing.py select_combo())."
+    ),
+}
 
 
 def _check_privacy(registry) -> list:
@@ -230,23 +275,36 @@ def _check_privacy(registry) -> list:
     for route_id, route in _section(registry, "routes").items():
         if not isinstance(route, dict) or not route_id.endswith(CLEAN_ROUTE_SUFFIX):
             continue
-        unavailable = route.get("unavailable_legs") or {}
-        for leg in route.get("legs") or []:
-            if leg in unavailable:
-                continue
+        if route_id in CLEAN_ROUTE_EXEMPTIONS:
+            continue  # reported separately by privacy_exemption_lines(), never here
+        for leg in dict.fromkeys(route.get("legs") or []):
             try:
                 provider_id, model_id = resolve_leg(leg, registry)
             except ValueError:
                 continue  # rule 1 already reports an unresolved leg
-            provider = _section(registry, "providers").get(provider_id, {})
-            if not isinstance(provider, dict):
-                continue
-            if provider.get("available") is False:
-                continue
+            # Every leg is checked, an unavailable_legs entry or a
+            # provider-wide available:false included (PRIV2, 2026-09-26): the
+            # OmniRoute gateway does not consult that registry-only flag, and
+            # combos.json/apply.sh push the leg verbatim regardless.
             safe, reason = private_safe(provider_id, model_id, registry)
             if not safe:
                 problems.append("privacy: %s leg %s %s" % (route_id, leg, reason))
     return problems
+
+
+def privacy_exemption_lines(registry) -> list:
+    """One ``"info: ..."`` line per routes.<id> in CLEAN_ROUTE_EXEMPTIONS that
+    exists in `registry` (PRIV2, 2026-09-26: "an exempt route is reported as
+    an info line by check, never silently skipped"). Always printed by
+    `check`/`validate`, regardless of whether the registry has any problem;
+    never counted in check_registry()'s own return value, so an exemption
+    never fails the check."""
+    lines = []
+    routes = _section(registry, "routes")
+    for route_id, reason in CLEAN_ROUTE_EXEMPTIONS.items():
+        if route_id in routes:
+            lines.append("info: %s exempt from privacy rule 3 - %s" % (route_id, reason))
+    return lines
 
 
 # ===========================================================================
@@ -611,6 +669,8 @@ def _build_fresh_registry() -> dict:
 
 def _cmd_check(args) -> int:
     registry = load(args.registry)
+    for line in privacy_exemption_lines(registry):
+        print(line)
     problems = check_registry(registry)
     if problems:
         for problem in problems:
@@ -622,6 +682,8 @@ def _cmd_check(args) -> int:
 
 def _cmd_validate(args) -> int:
     registry = load(args.registry)
+    for line in privacy_exemption_lines(registry):
+        print(line)
     problems = check_registry(registry)
     if problems:
         for problem in problems:

@@ -180,6 +180,46 @@ Spec-silent decisions made while building the converter, one line each:
    `privacy: sensitive`: `t1-orchestrator`/`t2-worker`/`t3-driver`/`t3-driver-free-only` (main and
    free-only variants) all now correctly lose their free-tier legs for a sensitive card, which is the
    behaviour the finding asked for.
+
+   PRIV2 finding, 2026-09-26 (cross-family review of PRIV `d5281d1` by DeepSeek and qoder): three more
+   gaps in `private_safe()`/rule 3, all fixed together:
+   - **Model-level `tier` override**, mirroring the existing model-level `trains_on_prompts` override:
+     `models.<id>.tier` (optional; missing means inherit `providers.<id>.tier`) lets one paid, direct-key
+     leg on an otherwise-free provider be private-safe — the case `trains_on_prompts` alone cannot
+     express. `zen`'s own `tier` stays `"free"` (its promo pool), but `models.'deepseek-v4.1-flash'`
+     (the `opencode-zen/deepseek-v4.1-flash` leg used in `t2-worker-clean`/`t3-driver-clean`) now carries
+     `"tier": "paid"`, citing `tests/run-tests.sh`'s own combos.json policy line: "Direct-key legs
+     (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool on the same key, so they
+     stay." `private_safe()`'s "effective tier" is `models.<id>.tier` when present, else the provider's.
+   - **Model-level `trains_on_prompts: true`** is now set on both contributor models —
+     `models.'meta/muse-spark-1.3-contributor'` (OpenRouter, paid) and
+     `models.'muse-spark-1.3-contributor-free'` (Zen, free promo) — citing the same combos.json policy
+     line's other half: "-contributor (trains by contract) is banned in
+     t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries it deliberately since the 2026-09-21
+     contributor-only block (paid-only, trains)." Previously only the *provider*-level flags carried this
+     (Open choice above); the model-level flag is what `private_safe()` and rule 3 actually key on.
+   - **Fail closed, exactly**: `private_safe()` used `dict.get(...) is True` for the model-level
+     `trains_on_prompts` check, which let any non-`True` truthy value (`1`, `"no"`, an explicit `null`)
+     slip through as "safe". Rewritten so the *effective tier* must be exactly `"paid"` or
+     `"subscription"` (an unrecognised or missing value is unsafe, not a silent pass), and a *present*
+     `models.<id>.trains_on_prompts` key must be exactly `false` to be safe (only a genuinely *missing*
+     key inherits the provider) — `true`, `null`, `1`, `"no"`, `0`, ... are all unsafe.
+   - **Rule 3 now checks every leg of a `-clean` route**, including one flagged in
+     `unavailable_legs` or reached through a provider marked `available: false` — the OmniRoute gateway
+     does not consult that registry-only flag, and `combos.json`/`apply.sh` still push the leg verbatim,
+     so a leg an operator flagged down is still one the gateway may actually serve. This closes the gap
+     the original PRIV paragraph above relied on ("none of the committed `-clean` routes' *available*
+     legs are a free-tier provider or carry a model-level override" — true only because the *unavailable*
+     ones were never checked). The one deliberate exception is `tools/registry.py`'s
+     `CLEAN_ROUTE_EXEMPTIONS = {"t1-orchestrator-clean": "..."}`: its only leg
+     (`openrouter/meta/muse-spark-1.3-contributor`) now trains by the model-level flag above, and the
+     2026-09-21 operator decision to carry it anyway (paid-only, not trains-nothing;
+     `combos.json`'s own `$comment`) is preserved as a named, visible exemption — `registry.py check`/
+     `validate` print it as an `"info: ..."` line (`privacy_exemption_lines()`), always, never silently,
+     and never as a `check_registry()` failure. This exemption is **not** consulted by the resolver's own
+     privacy filter (`tools/autoos_resolver.py filter_routes()`): it calls `private_safe()` on every
+     *available* serving leg of *every* route regardless of id, and `t1-orchestrator-clean` has no
+     available leg at all today, so a `privacy: sensitive` card can never reach it either way.
 5. `routes.<id>.surfaces` is keyed by gateway (`omniroute`/`litellm`), matching
    `catalog/ide-models.json`'s own shape, with the UI surfaces that expose it (`opencode`/`zed`/
    `openhands`) nested as a `clients` array rather than flattened to five parallel top-level surface
