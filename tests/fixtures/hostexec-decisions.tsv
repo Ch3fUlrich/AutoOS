@@ -188,3 +188,11 @@ claude	default	coding-host	["docker", "run", "-v", "/home/alice/code/proj:/app",
 claude	default	coding-host	["docker", "run", "-v/home/alice/code/proj:/app", "alpine"]	allow		docker run attached bind deep HOME project allowed (r2)
 claude	default	coding-host	["docker", "run", "--volume=/home/alice/code/proj:/app", "alpine"]	allow		docker run --volume= deep HOME project allowed (r2)
 claude	default	coding-host	["docker", "run", "--mount", "type=bind,src=/home/alice/code/proj,dst=/app", "alpine"]	allow		docker run --mount deep HOME project allowed (r2)
+claude	default	coding-host	["git","config","remote.origin.sshCommand","/tmp/evil-ssh"]	deny	git-option-injection	git config remote sshCommand r2
+claude	default	coding-host	["git","config","remote.origin.uploadpack","/tmp/evil"]	deny	git-option-injection	git config remote uploadpack r2
+claude	default	coding-host	["git","config","remote.origin.receivepack","/tmp/evil"]	deny	git-option-injection	git config remote receivepack r2
+claude	default	coding-host	["git","config","core.gitProxy","/tmp/evil-proxy"]	deny	git-option-injection	git config core gitProxy r2
+claude	default	coding-host	["git","submodule","foreach","id"]	deny	git-option-injection	git submodule foreach r2
+claude	default	coding-host	["git","bisect","run","id"]	deny	git-option-injection	git bisect run r2
+claude	default	coding-host	["git","rebase","--exec","id"]	deny	git-option-injection	git rebase exec r2
+claude	default	coding-host	["git","rebase","-x","id"]	deny	git-option-injection	git rebase -x r2

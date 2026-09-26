@@ -1236,15 +1236,73 @@ def _git_option_injection_problem(argv: Sequence[str]) -> str | None:
             if tok == flag or tok.startswith(flag + "="):
                 return (f"git {flag} can read .git/config or run an arbitrary program "
                          "even for a read verb (review F2)")
+    sub_problem = _git_exec_subcommand_problem(argv)
+    if sub_problem:
+        return sub_problem
     cfg_problem = _git_config_write_problem(argv)
     if cfg_problem:
         return cfg_problem
     return None
 
 
+def _git_exec_subcommand_problem(argv: Sequence[str]) -> str | None:
+    """Subcommands that execute argv via a shell (r2): `git submodule
+    foreach <cmd>`, `git bisect run <cmd>`, `git rebase --exec/-x <cmd>`."""
+    tail = list(argv[1:])
+    # submodule foreach <cmd>: deny when a non-flag command follows foreach.
+    if "submodule" in tail:
+        try:
+            si = tail.index("submodule")
+        except ValueError:
+            si = None
+        if si is not None and "foreach" in tail[si + 1:]:
+            fi = tail.index("foreach", si + 1)
+            for tok in tail[fi + 1:]:
+                if tok == "--":
+                    continue
+                if tok.startswith("-") and tok != "-":
+                    continue
+                return "git submodule foreach runs its command via a shell"
+    # bisect run <cmd>: deny when a non-flag command follows run.
+    if "bisect" in tail:
+        try:
+            bi = tail.index("bisect")
+        except ValueError:
+            bi = None
+        if bi is not None and "run" in tail[bi + 1:]:
+            ri = tail.index("run", bi + 1)
+            for tok in tail[ri + 1:]:
+                if tok == "--":
+                    continue
+                if tok.startswith("-") and tok != "-":
+                    continue
+                return "git bisect run runs its command via a shell"
+    # rebase --exec/-x <cmd>: first non-flag subcommand is rebase.
+    sub = None
+    for tok in tail:
+        if tok == "--":
+            continue
+        if tok.startswith("-") and tok != "-":
+            continue
+        sub = tok
+        break
+    if sub == "rebase":
+        for tok in tail:
+            if tok == "--exec" or tok.startswith("--exec="):
+                return "git rebase --exec runs its command via a shell"
+            if tok == "-x":
+                return "git rebase -x runs its command via a shell"
+            if tok.startswith("-") and not tok.startswith("--") and len(tok) > 2 \
+                    and "x" in tok[1:]:
+                return "git rebase -x runs its command via a shell"
+    return None
+
+
 def _is_dangerous_git_config_key(tok: str) -> bool:
     """Brief F: alias.*, core.pager/editor/sshCommand/fsmonitor/hooksPath,
-    *.helper, include.path, url.* (case-insensitive on the key)."""
+    *.helper, include.path, url.*, any *.sshcommand (incl.
+    remote.*.sshCommand), *uploadpack/*receivepack (incl. remote.*),
+    *gitproxy (core.gitProxy) -- case-insensitive on the key."""
     if not tok or tok.startswith("-"):
         return False
     key = tok.split("=", 1)[0].lower()
@@ -1252,6 +1310,12 @@ def _is_dangerous_git_config_key(tok: str) -> bool:
         return True
     if key in ("core.pager", "core.editor", "core.sshcommand",
                "core.fsmonitor", "core.hookspath", "include.path"):
+        return True
+    if key.endswith(".sshcommand") or key.endswith("sshcommand"):
+        return True
+    if key.endswith("uploadpack") or key.endswith("receivepack"):
+        return True
+    if key.endswith("gitproxy"):
         return True
     if key.endswith(".helper"):
         return True
