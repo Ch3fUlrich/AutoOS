@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Validator for catalog/ai-registry.json (routing v2 spec section 3.1).
 
-Two subcommands:
+Three subcommands:
 
     python3 tools/registry.py check    [--registry PATH]
     python3 tools/registry.py validate [--registry PATH]
+    python3 tools/registry.py render omniroute [--registry PATH] [--out PATH] [--check]
 
 `check` proves the registry obeys spec 3.1's rules:
 
@@ -33,6 +34,16 @@ tools/registry-convert.py's build_registry() and compares parsed JSON for
 equality - a committed file that no longer matches its sources is drift
 (spec 3.2 phase-1 gate).
 
+`render omniroute` renders configuration/omniroute/combos.json from a loaded
+catalog/ai-registry.json (spec 3.2 phase 1, task A4a; docs/plans/2026-09-25-
+registry-mapping.md section 10 documents the mapping and its two intentional
+equality exceptions). It never writes configuration/omniroute/combos.json itself
+(phase 1 proves equality only - apply.sh/apply.ps1 keep reading the committed file
+until phase 2 switches them over): with no flag the render goes to stdout; --out
+PATH writes it elsewhere; --check compares a fresh render against --combos
+(default: the committed combos.json) and exits 1, naming each differing key, when
+they are not semantically equal.
+
 Stdlib only. Path-independent: everything is anchored on the repository root
 derived from this file's own location.
 """
@@ -50,6 +61,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
 SCHEMA_PATH = ROOT / "catalog" / "ai-registry.schema.json"
 CONVERTER_PATH = ROOT / "tools" / "registry-convert.py"
+DEFAULT_OMNIROUTE_COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.json"
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMMENT_KEYS = ("$comment", "comment")
@@ -362,6 +374,151 @@ def _check_required_keys(registry, schema=None) -> list:
 
 
 # ===========================================================================
+# render - omniroute combos.json (spec 3.2 phase 1, task A4a)
+# ===========================================================================
+
+# combos.json's own top-level $comment (the ~190-line role-label glossary,
+# free-first/fast-skip mechanism, per-family chain descriptions, retry settings,
+# verification dates) is pure human documentation: neither apply.sh nor apply.ps1
+# ever read a "$comment"/"comment" key (checked both scripts, 2026-09-26). Its
+# substance was already redistributed into per-entry providers/models/routes
+# $comment fields during the A1/A2 registry migration, not kept as one block -
+# docs/plans/2026-09-25-registry-mapping.md section 4 and section 9 ("Where every
+# $comment landed") document exactly where each fact went. Reproducing the whole
+# block verbatim here would duplicate that already-migrated prose with nothing to
+# keep it in sync; the render therefore emits only the spec-3.2 generated-file
+# marker, and semantic equality (omniroute_diff, below) excludes the entire
+# $comment key, not only this one line - see the mapping doc section 10 for this
+# documented exception.
+OMNIROUTE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
+
+# combos.json's "retired" array (pre-2026-09-23-rename dead combo ids: tier1,
+# tier1-clean, ...) has no registry entry at all - docs/plans/2026-09-25-registry-
+# mapping.md section 4: "these are ... dead ids with no recoverable leg/class data
+# ... there is nothing to migrate". Reproduced here as a literal, hand-maintained
+# constant, the same convention tools/registry-convert.py uses for facts no source
+# file carries (PROVIDER_EXTRA, MODEL_EXTRA, COMBO_CLASS, ...): apply.sh/apply.ps1
+# still need this exact list once a later phase switches them onto a rendered file.
+OMNIROUTE_RETIRED_IDS = [
+    "tier1", "tier1-clean",
+    "tier2", "tier2-clean",
+    "tier3", "tier3-clean",
+    "rag",
+    "tier1-paid", "tier2-paid", "tier3-paid",
+    "tier2-credit", "tier3-credit",
+]
+
+
+def render_omniroute(registry: dict) -> dict:
+    """Render configuration/omniroute/combos.json's shape from a loaded
+    catalog/ai-registry.json document (spec 3.2 phase 1). Pure: no I/O, no clock,
+    no randomness - the same registry always renders the same dict.
+
+    A route becomes a combo iff it has at least one leg (`legs` non-empty): the
+    LiteLLM-only routes (t1-orchestrator-paid, t2-worker-paid, t3-driver-paid) and
+    the dynamic `auto`/`auto/smart`/`auto/cheap` routes carry `legs: []`
+    (tools/registry-convert.py's ROUTE_COMMENT / AUTO_IDS) and have no
+    combos.json counterpart at all - mapping doc section 4.
+
+    Legs an operator has since flagged unavailable (routes.<id>.unavailable_legs;
+    providers.openrouter.available: false) stay in `legs` unchanged - today's
+    committed combos.json already lists those same dead legs (the operator chose
+    to flag them in the registry rather than remove them, 2026-09-25/26), so no
+    special case is needed for the render to match.
+    """
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+
+    combos = []
+    for route_id in sorted(routes):
+        route = routes[route_id]
+        if not isinstance(route, dict):
+            continue
+        legs = route.get("legs") or []
+        if not legs:
+            continue
+        surfaces = route.get("surfaces")
+        omniroute_surface = surfaces.get("omniroute") if isinstance(surfaces, dict) else None
+        if not isinstance(omniroute_surface, dict) or "context_declared" not in omniroute_surface:
+            raise ValueError(
+                "routes.%s has legs but no surfaces.omniroute.context_declared - "
+                "every omniroute combo needs a declared context string" % route_id)
+        combos.append({
+            "name": route_id,
+            "strategy": route.get("strategy"),
+            "context": omniroute_surface["context_declared"],
+            "models": list(legs),
+        })
+
+    return {
+        "$comment": OMNIROUTE_GENERATED_COMMENT,
+        "retired": list(OMNIROUTE_RETIRED_IDS),
+        "combos": combos,
+    }
+
+
+def render_json(doc) -> str:
+    """Serialize a rendered document with today's combos.json formatting: 2-space
+    indent, insertion key order kept (no forced sort - render_omniroute already
+    builds each combo in name/strategy/context/models order to match), literal
+    UTF-8 (no \\uXXXX escapes), one trailing newline."""
+    return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+
+
+def _canonical_omniroute(doc) -> dict:
+    """Normalize a combos.json-shaped dict for semantic-equality comparison:
+
+    - drop "$comment" entirely (see OMNIROUTE_GENERATED_COMMENT's comment above -
+      a documented exception, not only its generated-marker line);
+    - treat "combos" and "retired" as unordered: apply.sh (`for c in
+      data.get("combos", [])`, `current = {c["name"] for c in ...}`) and apply.ps1
+      (`foreach ($combo in $combos)`, retired filtered by `-cnotcontains`) both
+      look combos up by name and retired ids up by membership, never by array
+      position (read both scripts, 2026-09-26) - so array order is not semantic
+      data here, unlike the ordered `models` list inside each combo (a fallback
+      priority order, which this function leaves untouched).
+    """
+    if not isinstance(doc, dict):
+        return {}
+    out = {k: v for k, v in doc.items() if k != "$comment"}
+    combos = out.get("combos")
+    if isinstance(combos, list):
+        out["combos"] = sorted(
+            (c for c in combos if isinstance(c, dict) and "name" in c),
+            key=lambda c: c["name"],
+        )
+    retired = out.get("retired")
+    if isinstance(retired, list):
+        out["retired"] = sorted(retired, key=str)
+    return out
+
+
+def omniroute_diff(rendered: dict, current: dict) -> list:
+    """Return the keys where a fresh render_omniroute() output and today's parsed
+    combos.json differ, ignoring $comment and the order of "combos"/"retired"
+    (see _canonical_omniroute). Empty means semantically equal - the spec 3.2
+    phase-1 gate."""
+    a = _canonical_omniroute(rendered)
+    b = _canonical_omniroute(current)
+
+    problems = []
+    if a.get("retired") != b.get("retired"):
+        problems.append("retired")
+
+    a_combos = {c["name"]: c for c in a.get("combos") or []}
+    b_combos = {c["name"]: c for c in b.get("combos") or []}
+    for name in sorted(set(a_combos) | set(b_combos)):
+        if a_combos.get(name) != b_combos.get(name):
+            problems.append("combos.%s" % name)
+
+    for key in sorted((set(a) | set(b)) - {"combos", "retired"}):
+        if a.get(key) != b.get(key):
+            problems.append(key)
+
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -420,6 +577,33 @@ def _cmd_validate(args) -> int:
     return 0
 
 
+def _cmd_render_omniroute(args) -> int:
+    registry_doc = load(args.registry)
+    rendered = render_omniroute(registry_doc)
+
+    if args.check:
+        combos_path = Path(args.combos)
+        if not combos_path.exists():
+            print("no such file: %s" % combos_path)
+            return 1
+        current = load(combos_path)
+        problems = omniroute_diff(rendered, current)
+        if problems:
+            for key in problems:
+                print("differs: %s" % key)
+            return 1
+        print("ok: render omniroute matches %s" % combos_path)
+        return 0
+
+    text = render_json(rendered)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print("wrote %s" % args.out)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="registry.py",
@@ -435,11 +619,33 @@ def main(argv=None) -> int:
         sub.add_argument("--registry", default=str(DEFAULT_REGISTRY_PATH),
                          help="registry JSON to inspect (default: %(default)s)")
 
+    render_parser = subparsers.add_parser(
+        "render", help="render a generated file from the registry (spec 3.2)")
+    render_targets = render_parser.add_subparsers(dest="target", required=True)
+    omniroute_parser = render_targets.add_parser(
+        "omniroute", help="render configuration/omniroute/combos.json")
+    omniroute_parser.add_argument(
+        "--registry", default=str(DEFAULT_REGISTRY_PATH),
+        help="registry JSON to render from (default: %(default)s)")
+    omniroute_parser.add_argument(
+        "--out", default=None,
+        help="write the render here instead of stdout (never the real combos.json)")
+    omniroute_parser.add_argument(
+        "--check", action="store_true",
+        help="exit 1 if the render differs semantically from --combos")
+    omniroute_parser.add_argument(
+        "--combos", default=str(DEFAULT_OMNIROUTE_COMBOS_PATH),
+        help="today's combos.json to compare against, --check only (default: %(default)s)")
+
     args = parser.parse_args(argv)
     if args.command == "check":
         return _cmd_check(args)
     if args.command == "validate":
         return _cmd_validate(args)
+    if args.command == "render":
+        if args.target == "omniroute":
+            return _cmd_render_omniroute(args)
+        return 2
     return 2
 
 

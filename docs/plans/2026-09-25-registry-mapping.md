@@ -1,4 +1,4 @@
-# Registry field mapping — one model registry (tasks A1, A2)
+# Registry field mapping — one model registry (tasks A1, A2, A4a)
 
 Field-level mapping for [2026-09-25-routing-v2-spec.md](2026-09-25-routing-v2-spec.md) section 3
 (the registry) and section 3.2 (migration, phase 1). Every field of every entry type in the six old
@@ -6,10 +6,14 @@ files is listed below with where it lands: a `catalog/ai-registry.json` path, `d
 `derived: <how>`. The converter that implements this mapping is `tools/registry-convert.py`; its own
 tables (`PROVIDER_EXTRA`, `MODEL_EXTRA`, `EXTRA_MODELS`, `EXTRA_PROVIDERS`, `PROVIDER_WINDOWS`,
 `CLIENT_EXTRA`, `COMBO_CLASS`, `ROUTE_COMMENT`) are the executable form of the "small explicit table"
-parts of this mapping — read them alongside this document, not instead of it.
+parts of this mapping — read them alongside this document, not instead of it. §10 documents the
+reverse direction for `combos.json` (`tools/registry.py render omniroute`, task A4a).
 
 Phase 1 only (spec 3.2): this is the "add the registry, prove the mapping" step. Nothing here changes
-what `apply.sh`/`apply.ps1`/`sync-*.py` read yet — that is task A4/A5.
+what `apply.sh`/`apply.ps1`/`sync-*.py` read yet — that is task A4/A5 (rendering
+`configuration/omniroute/combos.json` and proving its render equals today's file, §10, is phase 1's
+own equality *proof*; actually pointing `apply.sh`/`apply.ps1` at the rendered file is still a later
+phase-2 step).
 
 ## 1. `catalog/llm-models.json` → `models.<id>`
 
@@ -270,3 +274,68 @@ still mirrors today's files for the phase-1 equality gate), each marked `availab
 | `configuration/omniroute/combos.json` (role labels, free-first/fast-skip mechanism, per-family chain descriptions, 2026-09-21 privacy downgrade, effort-clamp warning, retry/cooldown settings, verification dates) | Split by fact: the privacy downgrade → `providers.openrouter.$comment` and `providers.zen.$comment` (Open choice §7.4); per-model chain/training facts → the relevant `models.<id>.$comment`; role labels/mechanism/retry settings → this document (no single registry field owns "how the gateway retries", since spec 3.1 has no such field — out of scope for the model registry itself). |
 | `configuration/openhands/tier-profiles.json` (rename history, `openai/`-prefix measurement, push-order rationale, `retired_ids` provenance) | This document §6; the `openai/`-prefix measurement is a code comment in `tools/registry-convert.py` next to `_strip_openhands_profile()`. |
 | `.agents/skills/unattended-orchestration/provider-windows.json` (re-verify-before-relying note) | This document §5 / §7.6 (process guidance for a future `registry.py recalibrate`/`probe`). |
+
+## 10. Task A4a — rendering `combos.json` back from the registry (phase 1 render)
+
+Spec 3.2 phase 1 ("render output equals today's generated files semantically") for
+`configuration/omniroute/combos.json`: `tools/registry.py render omniroute` reads
+`catalog/ai-registry.json` and produces the combos.json shape via the pure function
+`render_omniroute(registry) -> dict`. It is the reverse of §4 above (`build_routes()` in
+`tools/registry-convert.py`), restricted to the 15 routes that actually came from a
+combo (`legs` non-empty — the LiteLLM-only `*-paid` routes and the dynamic `auto*`
+routes carry `legs: []` per §4/Open choice 12 and have no combo). Field mapping back:
+
+| Registry path | `combos.json` path | Notes |
+|---|---|---|
+| `routes.<id>.id` | `combos[].name` | Unchanged. |
+| `routes.<id>.strategy` | `combos[].strategy` | Unchanged (`"priority"` for all 15). |
+| `routes.<id>.surfaces.omniroute.context_declared` | `combos[].context` | Unchanged (§4's own mapping, reversed). |
+| `routes.<id>.legs` | `combos[].models` | Unchanged, **in order** — a `strategy: "priority"` fallback chain, so leg order is real semantic data the render must preserve exactly (it does: `legs` is never reordered by `mark_openrouter_unavailable()`/`mark_legs_unavailable()`, only annotated via the sibling `unavailable_legs` key — see the next point). |
+
+Two intentional, documented exceptions to strict equality (never a silently dropped
+field — both are covered by `tests/test_registry_render.py` and by
+`tools/registry.py`'s own `omniroute_diff()`/`_canonical_omniroute()`):
+
+1. **`$comment` is not reproduced, not even partially.** combos.json's top-level
+   `$comment` (~190 lines: role-label glossary, free-first/fast-skip mechanism,
+   per-family chain descriptions, retry settings, verification dates) is pure human
+   documentation — neither `apply.sh` nor `apply.ps1` reads a `"$comment"`/`"comment"`
+   key anywhere (confirmed by reading both scripts, 2026-09-26: they only touch
+   `.name`/`.strategy`/`.models`/`.context` per combo and top-level `.retired`). Its
+   substance was already redistributed into per-entry `providers`/`models`/`routes`
+   `$comment` fields during the A1/A2 migration (§4 and §9 above document exactly
+   where each fact landed) — reproducing the whole block verbatim here would
+   duplicate that already-migrated prose with no consumer that reads it and two
+   copies to keep in sync. The render therefore emits only the spec-3.2 marker line
+   (`"generated from catalog/ai-registry.json - do not edit"`), and semantic equality
+   for this render ignores the entire `$comment` key, not only that one line — a
+   stricter reading than spec 3.2's literal "equality ignores that one line" wording,
+   justified by the "intentionally differs, already documented elsewhere" clause of
+   task A4a's brief.
+2. **`combos[]`/`retired` array order is not reproduced; `retired` itself is a
+   hardcoded constant, not derived from the registry.** `combos.json`'s `retired`
+   array (pre-2026-09-23-rename dead ids: `tier1`, `tier1-clean`, …) has no registry
+   entry at all — §4 above: "there is nothing to migrate". `tools/registry.py` carries
+   it as a literal constant, `OMNIROUTE_RETIRED_IDS`, the same convention
+   `registry-convert.py` uses for facts no source file carries (`PROVIDER_EXTRA`,
+   `MODEL_EXTRA`, `COMBO_CLASS`, …) — the values still match today's file exactly
+   (verified in `tests/test_registry_render.py`), only their origin is a hand-copied
+   table rather than a registry field. Separately, the order of both the `combos`
+   array and the `retired` array carries no semantics: `apply.sh` iterates
+   `for c in data.get("combos", [])` and builds `current = {c["name"] for c in
+   ...}`; `apply.ps1` does `foreach ($combo in $combos)` and filters retired names
+   with `-cnotcontains` — both look combos up by name and retired ids up by
+   membership, never by position. `render_omniroute()` therefore emits `combos` in a
+   canonical order (sorted by route id) rather than replicating today's hand-edited
+   order, and `omniroute_diff()` compares `combos` as a name-keyed map and `retired`
+   as a set, not as ordered lists — this is *not* an exception to array-order
+   equality inside a single combo's `models` list, which stays a real, ordered
+   fallback chain and is compared as such.
+
+Everything else — every leg, including ones an operator has since flagged
+`unavailable` (`routes.<id>.unavailable_legs`, `providers.openrouter.available:
+false`, 2026-09-25/26) — renders byte-for-byte equal to today's file: those
+operator decisions only add the sibling `unavailable_legs` annotation, they never
+remove or reorder anything in `legs` itself, and today's committed `combos.json`
+already lists those same dead legs unchanged. No new equality exception was needed
+for that case, confirming the brief's own example.
