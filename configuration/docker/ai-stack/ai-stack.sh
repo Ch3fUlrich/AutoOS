@@ -76,6 +76,24 @@ CMD="${CMD:-status}"
 . "$REPO/configuration/env-file.sh"
 
 # ─── Small helpers ──────────────────────────────────────────────────────────
+# autoos_backup_path <path> [stamp]: the name for a NEW backup of <path> -
+# <path>.autoos-backup-<stamp>, then -1, -2, ... while that name is taken.
+# The stamp has one-second resolution and a plain overwrite used to destroy
+# an earlier same-second backup; see lib/linux/install.sh backup_path for the
+# source of this rule. This script is standalone (does not source that lib),
+# so it gets its own copy. <stamp> defaults to now; a test can pin it.
+autoos_backup_path() {
+    local path="$1" stamp="${2:-}" base candidate n=0
+    [[ -n "$stamp" ]] || stamp="$(date +%Y%m%d-%H%M%S)"
+    base="$path.autoos-backup-$stamp"
+    candidate="$base"
+    while [[ -e "$candidate" || -L "$candidate" ]]; do
+        n=$((n + 1))
+        candidate="$base-$n"
+    done
+    printf '%s\n' "$candidate"
+}
+
 # The code tree: the main checkout's parent (…/code for …/code/AutoOS), so
 # every repo next to AutoOS is visible, from a lane worktree too.
 default_code_dir() {
@@ -143,8 +161,12 @@ ensure_env_file() {
     chmod 700 "$(dirname "$file")"
     local backup=""
     if [[ -f "$file" ]]; then
-        backup="$file.autoos-backup-$(date +%Y%m%d-%H%M%S)"
-        cp -p "$file" "$backup"
+        backup="$(autoos_backup_path "$file")"
+        if ! cp -p -- "$file" "$backup"; then
+            rm -f -- "$backup"
+            echo "  ! $file: could not back up - leaving it untouched" >&2
+            return 1
+        fi
         chmod 600 "$backup"
     fi
     (
@@ -704,11 +726,12 @@ backup_dir() {
 # what <src> holds. Copied into a fresh sibling first, then swapped in: an
 # overlay would keep files <src> lacks, e.g. a stale storage.sqlite-wal that
 # SQLite replays onto the restored database. A non-empty <dest> is moved
-# aside to <dest>.autoos-backup-<ts>, never deleted.
+# aside to <dest>.autoos-backup-<ts> (then -1, -2, ... via autoos_backup_path
+# if that name is taken - a PID-only fallback isn't safe against a second
+# collision), never deleted.
 replace_dir_with_copy() {
     local src="$1" dest="$2" ts="$3" stage aside
-    aside="$dest.autoos-backup-$ts"
-    [[ -e "$aside" ]] && aside="$aside-$$"
+    aside="$(autoos_backup_path "$dest" "$ts")"
     mkdir -p "$(dirname "$dest")" || return 1
     stage="$(mktemp -d "$dest.autoos-staging-XXXXXX")" || return 1
     if ! cp -a "$src/." "$stage/"; then

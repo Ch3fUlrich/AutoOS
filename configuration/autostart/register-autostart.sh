@@ -29,6 +29,29 @@ SYSTEMCTL="${AUTOOS_SYSTEMCTL:-systemctl}"
 LOGINCTL="${AUTOOS_LOGINCTL:-loginctl}"
 MARKER="# Managed by AutoOS configuration/autostart/register-autostart.sh"
 
+# autoos_backup <path>: copies <path> to a name that did not exist yet
+# (<path>.autoos-backup-<stamp>, then -1, -2, ... - the stamp has one-second
+# resolution and a plain overwrite used to destroy an earlier same-second
+# backup; see lib/linux/install.sh backup_path/backup_file for the source of
+# this rule). This script is standalone (does not source that lib), so it
+# gets its own copy. Prints the backup path and returns 0, or prints nothing
+# and returns non-zero with nothing left behind if the copy failed.
+autoos_backup() {
+    local path="$1" stamp base candidate n=0
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    base="$path.autoos-backup-$stamp"
+    candidate="$base"
+    while [[ -e "$candidate" || -L "$candidate" ]]; do
+        n=$((n + 1))
+        candidate="$base-$n"
+    done
+    if ! cp -p -- "$path" "$candidate"; then
+        rm -f -- "$candidate"
+        return 1
+    fi
+    printf '%s\n' "$candidate"
+}
+
 # Order matters: the gateway first, the oneshot resume unit last.
 ALL_UNITS=(autoos-omniroute autoos-litellm autoos-opencode autoos-stack)
 
@@ -203,8 +226,10 @@ while IFS= read -r u; do
     else
         mkdir -p "$UNIT_DIR"
         if [[ -f "$f" ]]; then
-            backup="$f.autoos-backup-$(date +%Y%m%d-%H%M%S)"
-            cp -p "$f" "$backup"
+            if ! backup="$(autoos_backup "$f")"; then
+                echo "  ! $u: could not back up $f - leaving it untouched"
+                continue
+            fi
             echo "  + $u: replaced $f (backup: $backup)"
         else
             echo "  + $u: wrote $f"
@@ -286,12 +311,13 @@ if [[ -z "$ONLY" || ",$ONLY," == *",autoos-omniroute,"* ]]; then
         echo "  - would append REQUIRE_API_KEY=true to $omni_env (backup first if it exists)"
     else
         mkdir -p "$(dirname "$omni_env")"
-        if [[ -f "$omni_env" ]]; then
-            cp -p "$omni_env" "$omni_env.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+        if [[ -f "$omni_env" ]] && ! autoos_backup "$omni_env" >/dev/null; then
+            echo "  ! could not back up $omni_env - leaving it untouched; /v1 may accept keyless requests."
+        else
+            printf '# AutoOS: /v1 is reachable from the LAN - every request must carry a client key.\nREQUIRE_API_KEY=true\n' >>"$omni_env"
+            chmod 600 "$omni_env"
+            echo "  + appended REQUIRE_API_KEY=true to $omni_env (restart the gateway to apply)"
         fi
-        printf '# AutoOS: /v1 is reachable from the LAN - every request must carry a client key.\nREQUIRE_API_KEY=true\n' >>"$omni_env"
-        chmod 600 "$omni_env"
-        echo "  + appended REQUIRE_API_KEY=true to $omni_env (restart the gateway to apply)"
     fi
 fi
 

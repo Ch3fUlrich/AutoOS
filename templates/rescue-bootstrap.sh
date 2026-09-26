@@ -111,14 +111,34 @@ require_root() {
 
 # ─── backups (AGENTS.md hard rule 5: never modify a file the user owns without
 # copying it to <file>.autoos-backup-<timestamp> first) ─────────────────────
+# backup_path <path> [stamp]: the name for a NEW backup of <path> -
+# <path>.autoos-backup-<stamp>, then -1, -2, ... while that name is taken. The
+# stamp has one-second resolution and a plain overwrite used to destroy an
+# earlier same-second backup; see lib/linux/install.sh backup_path for the
+# source of this rule. This script is standalone (does not source that lib),
+# so it gets its own copy. <stamp> defaults to now; a test can pin it.
+backup_path() {
+    local path="$1" stamp="${2:-}" base candidate n=0
+    [[ -n "$stamp" ]] || stamp="$(date -u +%Y%m%d%H%M%S)"
+    base="$path.autoos-backup-$stamp"
+    candidate="$base"
+    while [[ -e "$candidate" || -L "$candidate" ]]; do
+        n=$((n + 1))
+        candidate="$base-$n"
+    done
+    printf '%s\n' "$candidate"
+}
+
 backup_file() {
     local path="$1" backup
-    backup="$path.autoos-backup-$(date -u +%Y%m%d%H%M%S)"
+    backup="$(backup_path "$path" "${2:-}")"
     # shellcheck disable=SC2086
     if $AUTOOS_SUDO cp -p "$path" "$backup"; then
         ui_info "backed up $path -> $backup"
         return 0
     fi
+    # shellcheck disable=SC2086
+    $AUTOOS_SUDO rm -f "$backup"
     ui_warn "could not back up $path"
     return 1
 }
