@@ -301,12 +301,12 @@ Test-Case 'registry: no generated file drifts' {
     try {
         foreach ($t in @('omniroute', 'litellm', 'ide', 'openhands', 'models-doc')) {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render $t --check 2>&1 | Out-String; $rc = $LASTEXITCODE
-            Assert-Equal $rc 0 "render $t drift: $out"
+            Assert-True ($rc -eq 0) "render $t drift: $out"
         }
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
         try {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE
-            Assert-Equal $rc 0 "render ide --out failed: $out"
+            Assert-True ($rc -eq 0) "render ide --out failed: $out"
             $a = [IO.File]::ReadAllBytes($tmp)
             $b = [IO.File]::ReadAllBytes((Join-Path $Root 'catalog\ide-models.json'))
             $same = ($a.Length -eq $b.Length) -and (@(Compare-Object $a $b -SyncWindow 0).Length -eq 0)
@@ -6856,14 +6856,16 @@ Test-Case "audit-router's unit tests pass (registry-sourced, task A5c)" {
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { $out = & $py.Source (Join-Path $Root 'tests\test_audit_router_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
     finally { $ErrorActionPreference = $prev }
-    Assert-Equal $rc 0 "audit-router registry unit tests failed: $out"
+    Assert-True ($rc -eq 0) "audit-router registry unit tests failed: $out"
 }
 
 Test-Case 'the IDE model lists match catalog/ide-models.json (sync-ide-models --check)' {
-    # catalog/ide-models.json is the single source for the gateway model list
-    # (ids, names, windows, membership). opencode.jsonc and the OpenHands
-    # tier spec + config.toml carry generated copies; --check exits 1 with a
-    # diff when one drifted (fix: python tools/sync-ide-models.py).
+    # catalog/ide-models.json is rendered from catalog/ai-registry.json
+    # (python3 tools/registry.py render ide --out catalog/ide-models.json),
+    # not the single source. opencode.jsonc and the OpenHands tier spec +
+    # config.toml carry generated copies; --check exits 1 with a diff when
+    # one drifted (fix: edit ai-registry.json, re-render, then python3
+    # tools/sync-ide-models.py).
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     # A drift report goes to stderr; keep Windows PowerShell 5.1 from turning
@@ -6871,7 +6873,7 @@ Test-Case 'the IDE model lists match catalog/ide-models.json (sync-ide-models --
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { $out = & $py.Source (Join-Path $Root 'tools\sync-ide-models.py') --check 2>&1 | Out-String; $rc = $LASTEXITCODE }
     finally { $ErrorActionPreference = $prev }
-    Assert-Equal $rc 0 "sync-ide-models drift: $out"
+    Assert-True ($rc -eq 0) "sync-ide-models drift: $out"
 }
 
 Test-Case "the IDE model sync tool's unit tests pass (sync-ide-models)" {

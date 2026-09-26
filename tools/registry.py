@@ -166,6 +166,19 @@ def load(path) -> dict:
         return json.load(fh)
 
 
+def _write_lf(path, text) -> None:
+    """Write `text` to `path` as UTF-8 with LF line endings.
+
+    A Python 3.8-safe equivalent of ``Path(path).write_text(text,
+    encoding="utf-8", newline="\\n")``: ``Path.write_text``'s ``newline``
+    keyword is honored on 3.8+, but routing every render write through one
+    helper keeps the LF guarantee in one place (and avoids the subtle
+    text-mode translation ``open(..., "w")`` would do without an explicit
+    ``newline``). Accepts str or Path."""
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
 def provider_field_map(providers: dict, field: str) -> dict:
     """{provider id: providers.<id>.<field>} for every entry whose field is
     truthy, in registry order.
@@ -1742,7 +1755,7 @@ def _cmd_render_omniroute(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
+        _write_lf(args.out, text)
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1775,7 +1788,7 @@ def _cmd_render_litellm(args) -> int:
 
     text = "\n\n".join(rendered[tier] for tier in sorted(rendered)) + "\n"
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
+        _write_lf(args.out, text)
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1806,7 +1819,7 @@ def _cmd_render_ide(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
+        _write_lf(args.out, text)
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1837,7 +1850,7 @@ def _cmd_render_openhands(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
+        _write_lf(args.out, text)
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1868,7 +1881,7 @@ def _cmd_render_models_doc(args) -> int:
         return 0
 
     if args.out:
-        Path(args.out).write_text(rendered, encoding="utf-8", newline="\n")
+        _write_lf(args.out, rendered)
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(rendered)
