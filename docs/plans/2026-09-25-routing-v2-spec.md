@@ -156,7 +156,8 @@ boundary.
    only to other clean legs); client installed **and** signed in; retired; mode budget cap.
    Per-leg filters skip a leg and let the combo fall through to the next one (operator 2026-09-26):
    `need_tokens × 1.3 ≤ context_usable`; `tool_calls = proven` for agentic kinds; a rate-limited
-   unproven leg; `client_bound` legs only through their client. A route is removed only when no leg
+   unproven leg; a `client_bound` leg (never servable as `omniroute/<route>`, measured
+   2026-09-26 run 20260926-142228). A route is removed only when no leg
    is usable. The expected serving leg is the first usable one. Filters are never relaxed later.
    **No route survives** → `route_plan.route = null`, state `input_required`, and a reason naming each
    filter that removed a candidate (sign in, narrow `paths`, split the task, or override).
