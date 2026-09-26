@@ -12612,6 +12612,15 @@ if it "hostexec: server.py MCP-over-HTTP broker (unit tests; live HTTP round-tri
     fi
 fi
 
+if it "hostexec: install driver"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        hostexec_install_out="$(python3 tests/test_hostexec_install.py 2>&1)" \
+            && pass || fail "$(printf '%s\n' "$hostexec_install_out" | tail -n 30)"
+    fi
+fi
+
 # ─── shellcheck (optional) ──────────────────────────────────────────────────
 describe "static analysis"
 

@@ -75,8 +75,8 @@ cp configuration/hostexec/policy.example.toml ~/.config/autoos/exec/policy.toml 
        --actor claude --host coding-host -- git status
    ```
 
-5. **Start the broker** (foreground; this repository ships no live
-   systemd unit -- see "Out of scope"):
+5. **Start the broker** (foreground; for a systemd user unit see step
+   6 -- this repository never enables or starts it for you):
 
    ```bash
    AUTOOS_EXEC_PORT=8765 python3 tools/hostexec.py serve --policy ~/.config/autoos/exec/policy.toml
@@ -89,10 +89,30 @@ cp configuration/hostexec/policy.example.toml ~/.config/autoos/exec/policy.toml 
    once you understand the firewall state around that bridge (it is
    named "not loopback", not literally "the LAN").
 
-6. **Wire a client** by giving it the token file/env var and the
-   broker's URL. This repository does not perform that wiring yet
-   (installer/client config for OpenHands/opencode/claude/codex/qoder is
-   a separate, later change) -- see "Out of scope".
+6. **Wire clients and install the unit file** with the standalone
+   driver (it never enables or starts anything -- that stays your step):
+
+    ```bash
+    bash configuration/hostexec/install.sh --clients claude,codex
+    bash configuration/hostexec/install.sh --unit           # unit file only
+    bash configuration/hostexec/install.sh --dry-run --clients claude  # prints, writes nothing
+    bash configuration/hostexec/install.sh --unregister     # remove only what the driver wrote
+    ```
+
+    The driver renders `autoos-hostexec.service` with your checkout's
+    path into `~/.config/systemd/user/` (backed up before any replace; a
+    second run reports "already current") and sets only its own
+    `hostexec` entry in each client's config (backed up first, other keys
+    untouched). Tokens come from `~/.config/autoos/exec/<client>.token`
+    files (mode `0600`, refused otherwise; never on any argv or in
+    output). Codex stores only `bearer_token_env_var =
+    "AUTOOS_EXEC_TOKEN"`, so export that from the token file before
+    starting codex; qoder prints the `qodercli mcp add-json` command for
+    you to run yourself. Then, as the operator:
+
+    ```bash
+    systemctl --user daemon-reload && systemctl --user enable --now autoos-hostexec.service
+    ```
 
 ## The rules
 
@@ -200,17 +220,21 @@ surface.
 This package is generic, stdlib-only (except the MCP layer) and public.
 It does **not** ship, and this README is not asking you to build:
 
-- a live systemd unit, the real root-owned `/var/log/autoos-exec`, `chattr
-  +a`, or a root-owned retention timer -- those are host operations for a
-  private, root-owned playbook (the Server repo), not something a public
-  repo installs for you. This package uses `$XDG_STATE_HOME` instead, and
-  ships `hostexec.py log`'s own `prune()` as a plain function you (or a
-  root-owned caller) can invoke;
-- any client wiring -- OpenHands `agent_settings.mcp_config`,
-  `opencode.json` (host + container render), `claude mcp add --transport
-  http`, `~/.codex/config.toml`, qoder/agy `mcp add-json` -- that is a
-  separate, later lane (`lib/linux/install.sh` and friends, out of scope
-  for this one);
+- enabling or starting the systemd unit, the real root-owned
+  `/var/log/autoos-exec`, `chattr +a`, or a root-owned retention timer --
+  those are host operations for a private, root-owned playbook (the
+  Server repo), not something a public repo does for you. This package
+  ships the unit file (`configuration/hostexec/autoos-hostexec.service`)
+  and the wiring driver (step 6 above) but never enables or starts
+  anything. It uses `$XDG_STATE_HOME` instead, and ships `hostexec.py
+  log`'s own `prune()` as a plain function you (or a root-owned caller)
+  can invoke;
+- hand-writing client configs -- the driver (step 6 above) sets the
+  `hostexec` entry in each client's own file (OpenHands
+  `agent_settings.mcp_config`, `opencode.json`, `~/.claude.json`,
+  `~/.codex/config.toml`, qoder `mcp add-json`), backing each file up
+  first. Filling in real tokens and hosts stays an operator step, taken
+  outside this repository;
 - a real policy instance, or any real hostname, IP, username or token.
   `policy.example.toml` is a template only; every value in angle brackets
   is a placeholder, and the loader (`policy.load`) refuses to start on a
