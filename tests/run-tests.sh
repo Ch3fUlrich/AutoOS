@@ -5061,12 +5061,12 @@ except (OSError, ValueError):
 PY
 }
 
-# pw_run <tmp> <function> [args]: one installer function inside the sandbox. PW_DRY,
+# pw_run <tmp> <function> [args]: one installer function inside the sandbox. PW_DRY, PW_OS,
 # PW_CONFIG_DIR, PW_ADD_FAIL and PW_EXTRA_LIST steer it; the caller captures the output.
 pw_run() {
     local tmp="$1"; shift
     (
-        SYS_HOME="$tmp/home"; HOME="$tmp/home"; AUTOOS_DRY_RUN="${PW_DRY:-0}"
+        SYS_HOME="$tmp/home"; HOME="$tmp/home"; AUTOOS_DRY_RUN="${PW_DRY:-0}"; SYS_OS="${PW_OS:-linux}"
         PATH="$tmp/bin:$PATH"
         export PW_STUB_LOG="$tmp/claude.log" PW_STUB_DOCKER_LOG="$tmp/docker.log"
         export PW_STUB_CONFIG="${PW_CONFIG:-$tmp/home/.claude.json}"
@@ -5204,6 +5204,24 @@ if it "playwright lazy proxy installer: without docker today's npx registration 
     tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
     pw_seed "$cfg" "${PW_DOCKER_FORM[@]}"; cp "$cfg" "$tmp/seed.json"
     out="$(pw_run "$tmp" pw_without_docker 2>&1)"
+    same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+    [[ "$(pw_writes "$tmp")" == "0" && "$same" == "1" ]] || problems+=" existing entry was touched;"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: on macOS the npx registration is kept even with docker present"; then
+    problems=""
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; pw_seed "$tmp/home/.claude.json" -
+    out="$(PW_OS=macos pw_run "$tmp" install_mcp_playwright 2>&1)"
+    calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+    pkg="$(python3 -c "import json;print(json.load(open('catalog/agent-harness.json',encoding='utf-8'))['mcp_servers']['playwright']['package'])")"
+    [[ "$calls" == "mcp add --scope user playwright -- npx -y $pkg" ]] || problems+=" no-entry calls=[$calls];"
+    rm -rf "$tmp"
+    # and an existing docker-form entry is left alone there
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" "${PW_DOCKER_FORM[@]}"; cp "$cfg" "$tmp/seed.json"
+    out="$(PW_OS=macos pw_run "$tmp" install_mcp_playwright 2>&1)"
     same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
     [[ "$(pw_writes "$tmp")" == "0" && "$same" == "1" ]] || problems+=" existing entry was touched;"
     rm -rf "$tmp"

@@ -2257,18 +2257,20 @@ claude_user_config_file() {
     fi
 }
 
-# playwright_user_entry <config file> <proxy path>: classifies the user-scope
-# 'playwright' entry - none | proxy | docker | npx | custom. docker and npx are
-# only the two forms this installer used to write, EXACTLY (no extra argument,
-# env or key) and carry the command after a tab so the caller can put it back;
+# playwright_user_entry <config file> <proxy path> <package>: classifies the
+# user-scope 'playwright' entry - none | proxy | docker | npx | custom. docker and
+# npx are only the two forms this installer used to write, EXACTLY (no extra
+# argument, env or key; <package> is the catalog's pin, of which only the name
+# counts) and carry the command after a tab so the caller can put it back;
 # anything else is custom. The entry's own arguments are never printed as a
 # message: they may hold a token. The file is read, never written.
 playwright_user_entry() {
-    python3 - "$1" "$2" <<'PY'
+    python3 - "$1" "$2" "$3" <<'PY'
 import json, sys
 
 DOCKER = ["run", "-i", "--rm", "--init", "--network", "host", "mcr.microsoft.com/playwright/mcp:latest"]
-path, proxy = sys.argv[1], sys.argv[2]
+path, proxy, package = sys.argv[1], sys.argv[2], sys.argv[3]
+name = package.rsplit("@", 1)[0] if package.rfind("@") > 0 else package
 try:
     with open(path, encoding="utf-8") as fh:
         entry = (json.load(fh).get("mcpServers") or {}).get("playwright")
@@ -2287,7 +2289,7 @@ if (isinstance(entry, dict) and set(entry) <= {"type", "command", "args", "env"}
     if command == "docker" and args == DOCKER:
         kind = "docker"
     elif (command == "npx" and len(args) == 2 and args[0] == "-y"
-            and (args[1] == "@playwright/mcp" or args[1].startswith("@playwright/mcp@"))):
+            and (args[1] == name or args[1].startswith(name + "@"))):
         kind = "npx"
     elif command == "python3" and args == [proxy]:
         kind = "proxy"
@@ -2304,14 +2306,14 @@ PY
 # leaves everything else alone. It never stops a container: sessions that are running
 # keep the one they have until they end.
 register_playwright_lazy_proxy() {
-    local proxy="$AUTOOS_PLAYWRIGHT_PROXY" cfg entry kind backup
+    local package="$1" proxy="$AUTOOS_PLAYWRIGHT_PROXY" cfg entry kind backup
     local -a old=()
     if ! has_cmd claude; then
         ui_warn "claude is not on PATH — cannot register 'playwright'. Install claude-code first."
         return 0
     fi
     cfg="$(claude_user_config_file)"
-    entry="$(playwright_user_entry "$cfg" "$proxy" 2>/dev/null)" || entry="none"
+    entry="$(playwright_user_entry "$cfg" "$proxy" "$package" 2>/dev/null)" || entry="none"
     kind="${entry%%$'\t'*}"
     if [[ "$entry" == *$'\t'* ]]; then IFS=$'\t' read -r -a old <<<"${entry#*$'\t'}"; fi
 
@@ -2379,10 +2381,13 @@ install_mcp_playwright() {
     ui_info "Setting up Playwright MCP server (Claude Code + Antigravity)"
     local playwright_pkg
     playwright_pkg="$(mcp_package playwright)"
-    if has_cmd docker; then
-        register_playwright_lazy_proxy
+    # The proxy's default backend is the docker image with --network host, which is
+    # Linux behaviour (mcp-servers-setup says so); macOS keeps its npx entry until
+    # that is measured there.
+    if [[ "${SYS_OS:-linux}" != macos ]] && has_cmd docker; then
+        register_playwright_lazy_proxy "$playwright_pkg"
     else
-        # No docker, so no backend for the proxy: today's npx entry.
+        # No docker (or macOS), so no backend for the proxy: today's npx entry.
         register_mcp_server playwright user "$SYS_HOME" \
             npx -y "$playwright_pkg"
     fi
