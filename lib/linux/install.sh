@@ -12,6 +12,10 @@
 
 
 AUTOOS_DRY_RUN="${AUTOOS_DRY_RUN:-0}"
+# setup.sh --update: an installed component whose catalog entry says
+# "updatable": true runs its own installer again, and that installer decides
+# whether a newer version exists (see install_component).
+AUTOOS_UPDATE="${AUTOOS_UPDATE:-0}"
 declare -A AUTOOS_ANSWERS=()
 APT_UPDATED=0
 
@@ -258,18 +262,52 @@ catalog_installed_ids() {
     printf '%s' "${ids% }"
 }
 # ─── Provider dispatch ──────────────────────────────────────────────────────
+# component_is_updatable <provider> <package>: true when the catalog marks that
+# entry "updatable": true, i.e. its installer can tell a newer version from the
+# installed one. install_component gets provider and package, not the id, so the
+# catalog is read here; false (never an error) when there is no readable
+# catalog, so a missing file can only ever mean "skip", never "reinstall".
+component_is_updatable() {
+    local catalog="${CATALOG_PATH:-}"
+    [[ -n "$catalog" && -f "$catalog" ]] || return 1
+    has_cmd python3 || return 1
+    python3 - "$catalog" "$1" "$2" <<'PY'
+import json, sys
+
+path, provider, package = sys.argv[1:4]
+try:
+    doc = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    sys.exit(1)
+for group in doc.get("categories", []):
+    for comp in group.get("components", []):
+        if (comp.get("provider") == provider and comp.get("package") == package
+                and comp.get("updatable") is True):
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
 # install_component <provider> <package>
 # Result lands in INSTALL_STATE (installed|skipped|failed) rather than on stdout:
 # these functions also print progress, so a `$(...)` capture would swallow the UI
 # output into the status string and match none of the cases.
 INSTALL_STATE=""
+# A script installer that finds nothing to do (its own version check says it is
+# current) sets this to "skipped": install_component then reports skipped, not
+# installed. Reset on every call.
+INSTALL_SCRIPT_STATE=""
 install_component() {
     local provider="$1" package="$2" CASK_FLAG="${3:-0}"
-    INSTALL_STATE="failed"
+    INSTALL_STATE="failed"; INSTALL_SCRIPT_STATE=""
 
     if is_installed "$provider" "$package" "$CASK_FLAG"; then
-        ui_ok "✓ ${package} is already installed - skipping package"
-        INSTALL_STATE="skipped"; return 0
+        if [[ "$AUTOOS_UPDATE" == 1 ]] && component_is_updatable "$provider" "$package"; then
+            ui_muted "${package} is installed - checking for a newer version (--update)"
+        else
+            ui_ok "✓ ${package} is already installed - skipping package"
+            INSTALL_STATE="skipped"; return 0
+        fi
     fi
 
     local rc=0
@@ -297,7 +335,9 @@ install_component() {
         *)      ui_err "unknown provider '${provider}'"; rc=1 ;;
     esac
 
-    if (( rc != 0 )); then INSTALL_STATE="failed"; else INSTALL_STATE="installed"; fi
+    if (( rc != 0 )); then INSTALL_STATE="failed"
+    elif [[ "$INSTALL_SCRIPT_STATE" == skipped ]]; then INSTALL_STATE="skipped"
+    else INSTALL_STATE="installed"; fi
     if (( rc == 124 )); then return 124; fi
     return 0
 }
@@ -323,6 +363,7 @@ install_script() {
         uv)              install_uv ;;
         ollama)          install_ollama ;;
         claude-autostart) install_claude_autostart ;;
+        herdr-sessions)  install_herdr_sessions ;;
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
         zed)             install_zed ;;
@@ -429,51 +470,945 @@ install_tailscale() {
     ui_info "Run '${AUTOOS_SUDO} tailscale up' to authenticate this machine."
 }
 
-install_antigravity() {
-    # Google's own apt repository (antigravity.google/download/linux), so no
-    # download URL has to be pasted. Measured 2026-09-25: the repo is FROZEN at
-    # 1.23.2 (Release dated 2026-04-16); the 2.x apps are tarball-only. Google
-    # publishes no fingerprint for the signing key, so none is pinned here - a
-    # fingerprint written down now would be our own unverified assertion.
-    if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would add Google's signed apt repo (us-central1-apt.pkg.dev) and install antigravity (repo frozen at 1.23.2)"
+# ─── Antigravity Hub (Google's Electron desktop app, Linux tarball) ─────────
+# Decided 2026-09-26: Linux installs the Antigravity HUB ("Antigravity 2.0", an
+# Electron app), not the IDE; Windows keeps winget Google.Antigravity, which
+# already is the Hub. The command is `antigravity` on both. Google documents no
+# update API and the Hub's own updater endpoint is stale, so the newest version
+# is DISCOVERED at install time from the winget-pkgs manifests on GitHub (no
+# pin): the contents API lists the version directories, the raw manifest of the
+# newest one names the <version>-<build> segment of its Windows URL, and the
+# Linux tarball lives under the same segment. Everything fails CLOSED: a
+# rate-limited or unreachable API, an odd answer, a build without a Linux
+# tarball - nothing is installed, an existing install is untouched, and no
+# older version or other source is tried.
+#
+# PROVENANCE, plainly: Google publishes NO sha256 for the Linux tarball (the
+# bucket sends only a crc32c header). What stands behind it is TLS to
+# storage.googleapis.com and the winget-pkgs manifest that names the build. In
+# its place AutoOS checks size (against two Content-Length headers), gzip
+# integrity, the member list (every path under Antigravity-x64/, regular files
+# and directories only, no setuid/setgid), the ELF magic of the binary and the
+# version inside resources/app.asar, all BEFORE anything reaches the install
+# directory. The sha256 recorded in the stamp is computed here, not published.
+#
+# No sudo anywhere: the install is user-local. Electron's SUID sandbox helper
+# needs root only on kernels that restrict unprivileged user namespaces; then
+# the two commands are printed for the operator, never run here.
+antigravity_listing_url() {
+    printf '%s\n' "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/g/Google/Antigravity"
+}
+
+# antigravity_manifest_url <version>: the raw file host, not the API (no rate limit
+# worth mentioning, and the token never goes there).
+antigravity_manifest_url() {
+    printf 'https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/g/Google/Antigravity/%s/Google.Antigravity.installer.yaml\n' "$1"
+}
+
+# The ONLY place a download URL comes from: this constant plus a build id that
+# was checked against the pattern in antigravity_py manifest.
+antigravity_bucket_url() {
+    printf '%s\n' "https://storage.googleapis.com/antigravity-public/antigravity-hub"
+}
+
+# antigravity_min_bytes: a Linux tarball smaller than this is not the Hub (the
+# real 2.17.0 one is 179 MB). AUTOOS_ANTIGRAVITY_MIN_BYTES exists so tests can use
+# a tiny fake tarball; anything that is not a number falls back to 50 MB.
+antigravity_min_bytes() {
+    local v="${AUTOOS_ANTIGRAVITY_MIN_BYTES:-}"
+    [[ "$v" =~ ^[0-9]+$ ]] || v=52428800
+    printf '%s\n' "$v"
+}
+
+# antigravity_py <command> <args...>: the JSON, yaml-text, tar-listing and asar
+# handling, in python3 (bash cannot do it safely). Prints the result on success;
+# on failure exits 1 and prints ONE line saying why.
+#   listing  <file>            newest version directory (numeric, not string order)
+#   manifest <file> <version>  the build id from the x64 Windows InstallerUrl
+#   tarlist  <file>            checks a `tar -tvz` listing; prints the member count
+#   tree     <dir> <version>   checks the extracted tree; silent when fine
+#   icon     <dir> <dest>      extracts icon.png from resources/app.asar
+#   sha256   <file>            hex digest
+#   reset    <epoch>           an x-ratelimit-reset value as a UTC time
+antigravity_py() {
+    python3 - "$@" <<'PY'
+import datetime, hashlib, json, os, re, stat, struct, sys
+
+CONTENTS_API_LIMIT = 1000
+TOP = "Antigravity-x64/"
+REQUIRED = (TOP + "antigravity", TOP + "chrome-sandbox", TOP + "resources/app.asar")
+LISTING_LINE = re.compile(r"^(\S{10})\s+\S+\s+\S+\s+\d{4}-\d\d-\d\d\s+\d\d:\d\d(?::\d\d)?\s(.*)$")
+KIND_NAMES = {"l": "a symbolic link", "h": "a hard link", "p": "a FIFO",
+              "c": "a character device", "b": "a block device"}
+BUILD_URL = re.compile(r"https://storage\.googleapis\.com/antigravity-public/antigravity-hub/"
+                       r"([0-9]+\.[0-9]+\.[0-9]+-[0-9]+)/windows-x64/[^/]+")
+
+
+def fail(why):
+    print(why)
+    sys.exit(1)
+
+
+def cmd_listing(path):
+    try:
+        with open(path, "rb") as f:
+            doc = json.loads(f.read(4 * 1024 * 1024).decode("utf-8"))
+    except (OSError, ValueError):
+        fail("the answer is not JSON")
+    if not isinstance(doc, list):
+        fail("the answer is not a JSON list of directory entries")
+    # The contents API returns at most 1000 entries per directory and cannot be
+    # paginated: a list that long may be cut off, and the newest version could be in
+    # the part that is missing. No fallback: refuse.
+    if len(doc) >= CONTENTS_API_LIMIT:
+        fail("it lists %d entries and the GitHub contents API returns at most %d per directory (it cannot be paginated) - "
+             "listing may be truncated; refusing to pick a newest version" % (len(doc), CONTENTS_API_LIMIT))
+    best = None
+    for entry in doc:
+        if not isinstance(entry, dict) or entry.get("type") != "dir":
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"[0-9]+(\.[0-9]+){1,3}", name):
+            continue
+        try:
+            key = tuple(int(part) for part in name.split("."))
+        except ValueError:
+            continue
+        if best is None or key > best[0]:
+            best = (key, name)
+    if best is None:
+        fail("it lists no version directory named like 2.17.0")
+    print(best[1])
+
+
+def cmd_manifest(path, version):
+    try:
+        with open(path, "rb") as f:
+            text = f.read(1024 * 1024).decode("utf-8", "replace")
+    except OSError:
+        fail("the manifest cannot be read")
+    versions = re.findall(r"(?m)^PackageVersion:[ \t]*[\"']?([^\s\"']+)", text)
+    if len(set(versions)) != 1 or versions[0] != version:
+        fail("its PackageVersion is %s, not %s" % (", ".join(versions) or "missing", version))
+    ids = set()
+    for url in re.findall(r"(?m)^[ \t]*(?:-[ \t]+)?InstallerUrl:[ \t]*[\"']?([^\s\"']+)", text):
+        match = BUILD_URL.fullmatch(url)
+        if match:
+            ids.add(match.group(1))
+    if not ids:
+        fail("it has no windows-x64 InstallerUrl under https://storage.googleapis.com/antigravity-public/antigravity-hub/")
+    if len(ids) > 1:
+        fail("its windows-x64 InstallerUrl names several builds (%s)" % ", ".join(sorted(ids)))
+    build = ids.pop()
+    if not build.startswith(version + "-"):
+        fail("the build id %s does not belong to version %s" % (build, version))
+    print(build)
+
+
+def cmd_tarlist(path):
+    seen, count = set(), 0
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if not line:
+                continue
+            match = LISTING_LINE.match(line)
+            if not match:
+                fail("cannot parse the archive listing line: %s" % line[:100])
+            mode, name = match.groups()
+            count += 1
+            if mode[0] not in "-d":
+                fail("member %s is %s; only regular files and directories are allowed"
+                     % (name, KIND_NAMES.get(mode[0], "a special file")))
+            if mode[3] in "sS" or mode[6] in "sS":
+                fail("member %s has a setuid or setgid bit (%s)" % (name, mode))
+            if re.search(r"[\x00-\x1f\x7f\\]", name):
+                fail("member name %r has a control character or a backslash" % name)
+            if name.startswith("/"):
+                fail("member %s has an absolute path" % name)
+            if ".." in name.split("/"):
+                fail("member %s has a '..' component" % name)
+            if not name.startswith(TOP):
+                fail("member %s is outside %s" % (name, TOP))
+            if mode[0] == "-":
+                seen.add(name)
+    for required in REQUIRED:
+        if required not in seen:
+            fail("required member %s is missing" % required)
+    print(count)
+
+
+def open_asar(path):
+    """(header dict, offset where the file data starts) of an Electron asar archive."""
+    with open(path, "rb") as f:
+        head = f.read(16)
+        if len(head) < 16:
+            raise ValueError("app.asar is truncated")
+        marker, pickle_size, _payload, json_len = struct.unpack("<4I", head)
+        if marker != 4 or json_len > 16 * 1024 * 1024 or 8 + json_len > pickle_size:
+            raise ValueError("app.asar has an unexpected header")
+        raw = f.read(json_len)
+    if len(raw) != json_len:
+        raise ValueError("app.asar is truncated")
+    return json.loads(raw.decode("utf-8")), 8 + pickle_size
+
+
+def asar_node(header, rel):
+    node = header
+    for part in rel.split("/"):
+        node = node.get("files", {}).get(part) if isinstance(node, dict) else None
+        if node is None:
+            return None
+    return node if isinstance(node, dict) and "files" not in node and not node.get("link") else None
+
+
+def asar_find(header, filename, prefix="", depth=0):
+    """Every path of a file called <filename> inside the asar, as (depth, path)."""
+    found = []
+    if depth > 32 or not isinstance(header, dict):
+        return found
+    for name, node in sorted(header.get("files", {}).items()):
+        if not isinstance(node, dict):
+            continue
+        path = prefix + name
+        if "files" in node:
+            found += asar_find(node, filename, path + "/", depth + 1)
+        elif name == filename:
+            found.append((depth, path))
+    return found
+
+
+def asar_read(path, rel, limit):
+    """Bytes of <rel> inside the asar, "unpacked" when it lives beside it, None when absent."""
+    header, base = open_asar(path)
+    node = asar_node(header, rel)
+    if node is None:
+        return None
+    if node.get("unpacked"):
+        return "unpacked"
+    size, offset = int(node["size"]), int(node["offset"])
+    if not 0 <= size <= limit or offset < 0:
+        raise ValueError("%s has an implausible size or offset in app.asar" % rel)
+    with open(path, "rb") as f:
+        f.seek(base + offset)
+        data = f.read(size)
+    if len(data) != size:
+        raise ValueError("app.asar is truncated")
+    return data
+
+
+def regular_file(path, what):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        fail("%s is missing after extraction" % what)
+    if not stat.S_ISREG(st.st_mode):
+        fail("%s is not a regular file" % what)
+    return st
+
+
+def cmd_tree(tree, version):
+    binary = os.path.join(tree, "antigravity")
+    st = regular_file(binary, "antigravity")
+    if not st.st_mode & 0o111:
+        fail("antigravity is not executable")
+    with open(binary, "rb") as f:
+        magic = f.read(4)
+    if magic != b"\x7fELF":
+        fail("antigravity is not an ELF executable (it starts with %s)" % magic.hex())
+    st = regular_file(os.path.join(tree, "chrome-sandbox"), "chrome-sandbox")
+    if st.st_nlink != 1:
+        fail("chrome-sandbox has %d hard links" % st.st_nlink)
+    try:
+        data = asar_read(os.path.join(tree, "resources", "app.asar"), "package.json", 1 << 20)
+        meta = json.loads(data.decode("utf-8")) if isinstance(data, bytes) else None
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        fail("resources/app.asar cannot be read (%s)" % exc)
+    if not isinstance(meta, dict):
+        fail("resources/app.asar holds no package.json")
+    if meta.get("version") != version:
+        fail("resources/app.asar reports version %s, but the winget-pkgs manifest says %s" % (meta.get("version"), version))
+
+
+def cmd_icon(tree, dest):
+    asar = os.path.join(tree, "resources", "app.asar")
+    try:
+        # icon.png at the root of the asar, else the shallowest file of that name
+        rel = "icon.png"
+        if asar_node(open_asar(asar)[0], rel) is None:
+            candidates = sorted(asar_find(open_asar(asar)[0], "icon.png"))
+            rel = candidates[0][1] if candidates else rel
+        data = asar_read(asar, rel, 8 << 20)
+        if data == "unpacked":
+            # the key is the archive's, i.e. untrusted: never let it leave app.asar.unpacked
+            if rel.startswith("/") or ".." in rel.split("/"):
+                raise ValueError("%s is not a plain path inside app.asar" % rel)
+            with open(os.path.join(asar + ".unpacked", *rel.split("/")), "rb") as f:
+                data = f.read((8 << 20) + 1)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        fail("icon.png cannot be read (%s)" % exc)
+    if not isinstance(data, bytes) or not data.startswith(b"\x89PNG\r\n\x1a\n") or len(data) > 8 << 20:
+        fail("app.asar holds no usable icon.png")
+    with open(dest + ".tmp", "wb") as f:
+        f.write(data)
+    os.replace(dest + ".tmp", dest)
+
+
+def cmd_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    print(digest.hexdigest())
+
+
+def cmd_reset(epoch):
+    try:
+        when = datetime.datetime.fromtimestamp(int(epoch), datetime.timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        print("an unknown time")
+        return
+    print(when.strftime("%Y-%m-%d %H:%M:%S UTC"))
+
+
+COMMANDS = {"listing": (cmd_listing, 1), "manifest": (cmd_manifest, 2), "tarlist": (cmd_tarlist, 1),
+            "tree": (cmd_tree, 2), "icon": (cmd_icon, 2), "sha256": (cmd_sha256, 1), "reset": (cmd_reset, 1)}
+name, args = (sys.argv[1] if len(sys.argv) > 1 else ""), sys.argv[2:]
+if name not in COMMANDS or len(args) != COMMANDS[name][1]:
+    fail("usage: antigravity_py <listing|manifest|tarlist|tree|icon|sha256|reset> <args>")
+try:
+    COMMANDS[name][0](*args)
+except Exception as exc:  # an odd input must end as one line, not a traceback
+    fail("internal error: %s" % exc)
+PY
+}
+
+# antigravity_hdr_status <curl -D file>: the status code of the LAST response.
+antigravity_hdr_status() {
+    awk '{ sub(/\r$/, "") } toupper(substr($0, 1, 5)) == "HTTP/" { s = $2 } END { if (s != "") print s }' "$1" 2>/dev/null || true
+}
+
+# antigravity_hdr_value <curl -D file> <name>: a header of the LAST response
+# (case-insensitive name), nothing when absent.
+antigravity_hdr_value() {
+    awk -v want="$2" '
+        BEGIN { want = tolower(want) }
+        { sub(/\r$/, "") }
+        toupper(substr($0, 1, 5)) == "HTTP/" { val = ""; next }
+        { i = index($0, ":"); if (i > 0 && tolower(substr($0, 1, i - 1)) == want) { v = substr($0, i + 1); sub(/^[ \t]+/, "", v); val = v } }
+        END { if (val != "") print val }
+    ' "$1" 2>/dev/null || true
+}
+
+# antigravity_token: the GitHub token, when one is set AND plausible. Only
+# letters, digits, - and _ are accepted: the value goes into a curl config line,
+# and a quote or a newline in it would add lines of the sender's choosing.
+# Prints nothing otherwise. The value is never logged or printed by anything.
+antigravity_token() {
+    local t="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    if [[ "$t" =~ ^[A-Za-z0-9_-]{8,255}$ ]]; then printf '%s' "$t"; fi
+    return 0
+}
+
+# antigravity_fetch <url> <hdr-file> <body-file> <token|""> [curl args...]
+# One HTTPS request through run (so a dry run never gets here and the tests can
+# see it): https only, no redirect followed, headers to <hdr-file>, body to
+# <body-file>. A token goes ONLY through curl's stdin config (--config -), never
+# on the command line where ps and the run log would show it. Returns curl's
+# exit code.
+antigravity_fetch() {
+    local url="$1" hdr="$2" body="$3" token="$4" rc=0
+    shift 4
+    local -a args=(curl --silent --show-error --proto '=https' --proto-redir '=https' --max-redirs 0
+                   --connect-timeout 15 -D "$hdr" -o "$body")
+    if [[ -n "$token" ]]; then
+        printf 'header = "Authorization: Bearer %s"\n' "$token" | run "${args[@]}" "$@" --config - "$url" || rc=$?
+    else
+        run "${args[@]}" "$@" "$url" || rc=$?
+    fi
+    return "$rc"
+}
+
+# antigravity_hub_latest <workdir>: asks winget-pkgs for the newest Hub. Returns 0
+# and sets ANTIGRAVITY_VERSION (2.17.0), ANTIGRAVITY_ID (<version>-<build>) and
+# ANTIGRAVITY_URL (the Linux tarball, built only from the bucket constant and the
+# id); returns 1 after a ui_err naming the step. No fallback to any other source.
+ANTIGRAVITY_VERSION=""; ANTIGRAVITY_ID=""; ANTIGRAVITY_URL=""; ANTIGRAVITY_SIZE=""; ANTIGRAVITY_CRC=""
+antigravity_hub_latest() {
+    local work="$1" url hdr body status rc=0 token when reason tokstate="not set"
+    ANTIGRAVITY_VERSION=""; ANTIGRAVITY_ID=""; ANTIGRAVITY_URL=""
+    url="$(antigravity_listing_url)"; hdr="$work/listing.hdr"; body="$work/listing.json"
+    token="$(antigravity_token)"
+    if [[ -n "$token" ]]; then tokstate="set"
+    elif [[ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]]; then
+        tokstate="set but ignored, it does not look like a token"
+        ui_warn "GITHUB_TOKEN/GH_TOKEN is set but does not look like a GitHub token (letters, digits, - and _ only); it is ignored."
+    fi
+
+    antigravity_fetch "$url" "$hdr" "$body" "$token" --max-time 30 --max-filesize 4194304 || rc=$?
+    status="$(antigravity_hdr_status "$hdr")"
+    if [[ -z "$status" ]]; then
+        ui_err "Antigravity (winget-pkgs listing): could not reach ${url} (curl exit ${rc}); nothing was installed or changed, and no other source is tried."
+        return 1
+    fi
+    case "$status" in
+        200) ;;
+        403|429)
+            when="$(antigravity_hdr_value "$hdr" x-ratelimit-reset)"
+            if [[ "$when" =~ ^[0-9]{1,12}$ ]]; then when="$(antigravity_py reset "$when")"; else when="an unknown time"; fi
+            ui_err "Antigravity (winget-pkgs listing): GitHub answered HTTP ${status}, most likely its rate limit (60 requests per hour per IP without a token); it resets at ${when}. GITHUB_TOKEN is ${tokstate} - a token there raises the limit. Nothing was installed or changed, and no other source is tried."
+            return 1 ;;
+        401)
+            ui_err "Antigravity (winget-pkgs listing): GitHub rejected the request (HTTP 401)${token:+; the GITHUB_TOKEN/GH_TOKEN sent with it was rejected - unset or replace it}. Nothing was installed or changed, and no other source is tried."
+            return 1 ;;
+        *)
+            ui_err "Antigravity (winget-pkgs listing): ${url} answered HTTP ${status}; nothing was installed or changed, and no other source is tried."
+            return 1 ;;
+    esac
+    if (( rc != 0 )); then
+        ui_err "Antigravity (winget-pkgs listing): the answer from ${url} was cut short (curl exit ${rc}); nothing was installed or changed."
+        return 1
+    fi
+    if ! reason="$(antigravity_py listing "$body")"; then
+        ui_err "Antigravity (winget-pkgs listing): ${reason}; nothing was installed or changed, and no other source is tried."
+        return 1
+    fi
+    ANTIGRAVITY_VERSION="$reason"
+
+    local murl mhdr="$work/manifest.hdr" mfile="$work/manifest.yaml"
+    murl="$(antigravity_manifest_url "$ANTIGRAVITY_VERSION")"
+    rc=0
+    antigravity_fetch "$murl" "$mhdr" "$mfile" "" --fail --max-time 30 --max-filesize 1048576 || rc=$?
+    status="$(antigravity_hdr_status "$mhdr")"
+    if (( rc != 0 )) || [[ "$status" != 200 ]]; then
+        ui_err "Antigravity (winget-pkgs manifest): could not read ${murl} (${status:+HTTP ${status}, }curl exit ${rc}); nothing was installed or changed, and the older versions are not tried."
+        ANTIGRAVITY_VERSION=""
+        return 1
+    fi
+    if ! reason="$(antigravity_py manifest "$mfile" "$ANTIGRAVITY_VERSION")"; then
+        ui_err "Antigravity (winget-pkgs manifest): the manifest of ${ANTIGRAVITY_VERSION} is unusable - ${reason}; nothing was installed or changed."
+        ANTIGRAVITY_VERSION=""
+        return 1
+    fi
+    ANTIGRAVITY_ID="$reason"
+    ANTIGRAVITY_URL="$(antigravity_bucket_url)/${ANTIGRAVITY_ID}/linux-x64/Antigravity.tar.gz"
+    return 0
+}
+
+# antigravity_hub_head <workdir>: HEAD on the Linux tarball. Returns 0 and sets
+# ANTIGRAVITY_SIZE (its Content-Length) and ANTIGRAVITY_CRC (the x-goog-hash
+# header, informational: it is a crc32c, not a sha256); returns 1 after a ui_err
+# when no Linux build is published for this id. Never falls back to an older one.
+antigravity_hub_head() {
+    local hdr="$1/head.hdr" rc=0 status len min
+    ANTIGRAVITY_SIZE=""; ANTIGRAVITY_CRC=""
+    antigravity_fetch "$ANTIGRAVITY_URL" "$hdr" /dev/null "" --fail --head --max-time 30 || rc=$?
+    status="$(antigravity_hdr_status "$hdr")"
+    if (( rc != 0 )) || [[ "$status" != 200 ]]; then
+        ui_err "Antigravity (Linux build check): no Linux build is published for ${ANTIGRAVITY_ID} (${ANTIGRAVITY_URL}: ${status:+HTTP ${status}, }curl exit ${rc}). AutoOS does not fall back to an older version; nothing was installed or changed."
+        return 1
+    fi
+    len="$(antigravity_hdr_value "$hdr" content-length)"
+    min="$(antigravity_min_bytes)"
+    if [[ ! "$len" =~ ^[0-9]{1,15}$ ]]; then
+        ui_err "Antigravity (Linux build check): ${ANTIGRAVITY_URL} announces no numeric Content-Length; nothing was installed or changed."
+        return 1
+    fi
+    if (( 10#$len < min )); then
+        ui_err "Antigravity (Linux build check): the Linux build for ${ANTIGRAVITY_ID} announces only ${len} bytes, less than the ${min} bytes the Hub needs at least - that is not the Hub; nothing was installed or changed."
+        return 1
+    fi
+    ANTIGRAVITY_SIZE="$((10#$len))"
+    ANTIGRAVITY_CRC="$(antigravity_hdr_value "$hdr" x-goog-hash)"
+    return 0
+}
+
+# antigravity_num_cmp <digits> <digits>: prints -1, 0 or 1 (no size limit).
+antigravity_num_cmp() {
+    local x="${1#"${1%%[!0]*}"}" y="${2#"${2%%[!0]*}"}"
+    x="${x:-0}"; y="${y:-0}"
+    if (( ${#x} != ${#y} )); then
+        if (( ${#x} > ${#y} )); then echo 1; else echo -1; fi
         return 0
     fi
-    # AUTOOS_APT_PREFIX is a test seam (DESTDIR-style): where the two files are
-    # written. The source line keeps the /etc path apt itself will read.
-    local prefix="${AUTOOS_APT_PREFIX:-}"
-    local key=/etc/apt/keyrings/antigravity-repo-key.gpg
-    local list=/etc/apt/sources.list.d/antigravity.list
-    if [[ ! -f "${prefix}${key}" ]]; then
-        # The .gpg name is misleading: the key is served ASCII-armored, so it
-        # needs dearmoring before apt accepts it in signed-by. Each step is
-        # checked - a curl failure must never leave an empty key that the
-        # file guard above would then trust forever.
-        local armored dearmored
-        armored="$(mktemp)"; dearmored="$(mktemp)"
-        if curl -fsSL -o "$armored" https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg \
-            && gpg --dearmor <"$armored" >"$dearmored" \
-            && [[ -s "$dearmored" ]] \
-            && $AUTOOS_SUDO install -D -o root -g root -m 644 "$dearmored" "${prefix}${key}"; then
-            rm -f "$armored" "$dearmored"
+    if [[ "$x" == "$y" ]]; then echo 0; elif [[ "$x" > "$y" ]]; then echo 1; else echo -1; fi
+}
+
+# antigravity_compare_ids <candidate> <installed>: newer | same | older, on the
+# numeric (version, build) tuple of <version>-<build> ids. An installed id that is
+# not of that shape counts as older, so it gets replaced.
+antigravity_compare_ids() {
+    local a="$1" b="$2" re='^([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)$' i c
+    local -a pa pb
+    if [[ "$a" == "$b" ]]; then echo same; return 0; fi
+    [[ "$a" =~ $re ]] || { echo newer; return 0; }
+    pa=("${BASH_REMATCH[@]:1}")
+    [[ "$b" =~ $re ]] || { echo newer; return 0; }
+    pb=("${BASH_REMATCH[@]:1}")
+    for i in 0 1 2 3; do
+        c="$(antigravity_num_cmp "${pa[i]}" "${pb[i]}")"
+        if [[ "$c" == 1 ]]; then echo newer; return 0; fi
+        if [[ "$c" == -1 ]]; then echo older; return 0; fi
+    done
+    echo same
+}
+
+# ── the private staging directory ───────────────────────────────────────────
+# Everything that is downloaded, listed and extracted lives in ONE fresh
+# directory (mktemp -d, mode 700) beside the install, so the final move is a
+# rename on the same filesystem. Nothing is cached or reused between runs and
+# no path is predictable: the tarball that was verified is the tarball that is
+# extracted, with nobody able to swap it in between. It is removed on every way
+# out, and ONLY it is ever removed - the check below insists on the name.
+ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT=""
+antigravity_stage_make() {
+    local parent="$1"
+    # The parent is recorded BEFORE the directory exists and the stage only when
+    # mktemp has returned it: the cleanup (armed by the caller before this runs)
+    # does nothing while the stage is empty, and never sees a stage without a parent.
+    ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT="$parent"
+    mkdir -p "$parent" || { ANTIGRAVITY_STAGE_PARENT=""; return 1; }
+    ANTIGRAVITY_STAGE="$(mktemp -d "$parent/.antigravity-stage.XXXXXX")" || { ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT=""; return 1; }
+}
+
+antigravity_stage_cleanup() {
+    local stage="${ANTIGRAVITY_STAGE:-}" parent="${ANTIGRAVITY_STAGE_PARENT:-}"
+    [[ -n "$stage" && -n "$parent" ]] || return 0
+    if [[ "$stage" == "$parent"/.antigravity-stage.?* && "/$stage/" != */../* && -d "$stage" && ! -L "$stage" ]]; then
+        chmod -R u+rwX -- "$stage" 2>/dev/null || true    # an archive can hold read-only directories
+        rm -rf -- "$stage"
+    fi
+    ANTIGRAVITY_STAGE=""
+}
+
+# antigravity_on_signal <INT|TERM>: clean up, then die of the same signal.
+antigravity_on_signal() {
+    antigravity_stage_cleanup
+    trap - INT TERM
+    kill -s "$1" "$BASHPID"
+}
+
+# antigravity_download_verify <stage>: downloads the tarball into the stage and
+# runs every check that must pass before a single byte is extracted. Returns 1
+# after a ui_err. Google publishes no sha256, so these checks are the whole
+# defence (see the header above).
+antigravity_download_verify() {
+    local stage="$1" pkg="$1/pkg.tgz" ghdr="$1/get.hdr" list="$1/members.txt" rc=0 size getlen reason
+    # --max-filesize: the HEAD length (validated as a number by antigravity_hub_head)
+    # plus 1 MiB of slack, so a server that lies about its size cannot fill the disk
+    # before the size check below gets to say no (curl stops with exit 63).
+    antigravity_fetch "$ANTIGRAVITY_URL" "$ghdr" "$pkg" "" --fail --retry 3 --speed-limit 1024 --speed-time 60 \
+        --max-filesize "$(( ANTIGRAVITY_SIZE + 1048576 ))" || rc=$?
+    if (( rc != 0 )); then
+        ui_err "Antigravity (download): could not download ${ANTIGRAVITY_URL} (curl exit ${rc}); nothing was installed or changed."
+        return 1
+    fi
+    size="$(wc -c <"$pkg" | tr -d ' ')"
+    getlen="$(antigravity_hdr_value "$ghdr" content-length)"
+    if [[ ! "$getlen" =~ ^[0-9]{1,15}$ ]] || (( 10#$getlen != size )) || (( size != ANTIGRAVITY_SIZE )); then
+        ui_err "Antigravity (verification): the download is ${size} bytes, but Google announced ${ANTIGRAVITY_SIZE} bytes (HEAD) and ${getlen:-no} bytes (GET); it was discarded, nothing was installed or changed."
+        return 1
+    fi
+    if ! gzip -t -- "$pkg" 2>/dev/null; then
+        ui_err "Antigravity (verification): the download is not a valid gzip stream (gzip -t failed); it was discarded, nothing was installed or changed."
+        return 1
+    fi
+    if ! LC_ALL=C tar -tvzf "$pkg" >"$list" 2>/dev/null; then
+        ui_err "Antigravity (verification): the download cannot be read as a tar archive; it was discarded, nothing was installed or changed."
+        return 1
+    fi
+    if ! reason="$(antigravity_py tarlist "$list")"; then
+        ui_err "Antigravity (verification): the archive is not what the Hub tarball looks like - ${reason}; it was discarded, nothing was installed or changed."
+        return 1
+    fi
+    ui_muted "archive checked: ${size} bytes, valid gzip, ${reason} members, all regular files or directories under Antigravity-x64/"
+    return 0
+}
+
+# antigravity_extract_verify <stage> <version>: extracts into <stage>/tree (the
+# top directory stripped, no ownership, no permission bits beyond the umask, so
+# a setuid bit could not survive anyway) and checks what was extracted. It cds
+# into the tree instead of using tar -C: GNU tar unescapes backslashes in a -C
+# argument, so a home directory with a backslash in its name could not be reached.
+antigravity_extract_verify() {
+    local stage="$1" version="$2" tree="$1/tree" reason
+    if ! mkdir -p "$tree" \
+        || ! ( cd "$tree" && tar -xzf "$stage/pkg.tgz" --strip-components=1 --no-same-owner --no-same-permissions ) 2>"$stage/tar.err"; then
+        ui_err "Antigravity (verification): the archive could not be extracted (disk full? $(head -c 200 "$stage/tar.err" 2>/dev/null | tr '\n' ' ')); nothing was installed or changed."
+        return 1
+    fi
+    if ! reason="$(antigravity_py tree "$tree" "$version")"; then
+        ui_err "Antigravity (verification): the extracted tree fails its check - ${reason}; nothing was installed or changed."
+        return 1
+    fi
+    return 0
+}
+
+# antigravity_swap <dir> <tree> <suffix> <existing 0|1>: moves the verified tree
+# into place. An existing (stamped, so ours) install is first moved to
+# <dir>.old-<suffix> - the suffix is the random part of THIS run's stage name, so
+# an unrelated antigravity.new or antigravity.old-something of the user's is never
+# in the way - and removed only after the new tree is in place; a failure puts it
+# back.
+antigravity_swap() {
+    local dir="$1" tree="$2" suffix="$3" existing="$4" old="${1}.old-${3}"
+    if (( existing )); then
+        if [[ -e "$old" || -L "$old" ]]; then
+            ui_err "Antigravity not changed: ${old} already exists."
+            return 1
+        fi
+        if ! mv -- "$dir" "$old"; then
+            ui_err "Antigravity not changed: could not move ${dir} aside."
+            return 1
+        fi
+    elif [[ -e "$dir" || -L "$dir" ]]; then
+        ui_err "Antigravity not changed: ${dir} appeared while installing."
+        return 1
+    fi
+    if ! mv -- "$tree" "$dir"; then
+        if (( existing )) && ! mv -- "$old" "$dir"; then
+            ui_err "Antigravity: could not put ${old} back as ${dir} - the previous install is in ${old}."
+        fi
+        ui_err "Antigravity not changed: could not move the verified tree into ${dir}."
+        return 1
+    fi
+    if (( existing )); then
+        if [[ "$old" == "${dir}.old-"?* ]] && rm -rf -- "$old"; then ui_muted "removed the previous build (${old})"
+        else ui_warn "could not remove the previous build ${old} - delete it by hand"; fi
+    fi
+    return 0
+}
+
+# antigravity_link <dir>: ~/.local/bin/antigravity -> <dir>/antigravity. Created
+# when absent. An existing link is only ever "replaced" when it already points
+# EXACTLY at <dir>/antigravity (which includes a dangling one, that resolves once
+# the tree is in place). A regular file, a foreign symlink, or a link that merely
+# points somewhere inside <dir> is somebody else's and stays (hard rule 4).
+antigravity_link() {
+    local dir="$1" bindir="$SYS_HOME/.local/bin" link cur target
+    link="$bindir/antigravity"; target="$dir/antigravity"
+    if [[ -L "$link" ]]; then
+        cur="$(readlink "$link")"
+        if [[ "$cur" == "$target" ]]; then
+            ui_muted "command already linked: ${link} -> ${target}"
         else
-            rm -f "$armored" "$dearmored"
-            ui_err "Antigravity not installed: could not fetch and install Google's apt signing key."
-            ui_muted "    Needs curl, gpg and network access to us-central1-apt.pkg.dev; re-run once that works."
-            return 1
+            ui_warn "${link} is a symlink to ${cur}, not to ${target} - left alone. Start the Hub with ${target}."
+        fi
+        return 0
+    fi
+    if [[ -e "$link" ]]; then
+        ui_warn "${link} already exists and is not an AutoOS link - left alone. Start the Hub with ${target}."
+        return 0
+    fi
+    if mkdir -p "$bindir" && ln -s -- "$target" "$link"; then ui_ok "linked ${link} -> ${target}"
+    else ui_warn "could not link ${link}; start the Hub with ${target}"; fi
+    return 0
+}
+
+# antigravity_exec_quote <path>: the path as one Exec= argument, per the Desktop
+# Entry spec: in double quotes; " ` $ escaped with a backslash; a literal
+# backslash written as FOUR (the string escape applies first, then the quote
+# escape); % written %% (a field code otherwise).
+antigravity_exec_quote() {
+    local p="$1" out="" c i
+    for (( i = 0; i < ${#p}; i++ )); do
+        c="${p:i:1}"
+        case "$c" in
+            '\') out+='\\\\' ;;
+            '"'|'`'|'$') out+="\\${c}" ;;
+            '%') out+='%%' ;;
+            *) out+="$c" ;;
+        esac
+    done
+    printf '"%s"' "$out"
+}
+
+# antigravity_register_scheme: the Hub handles antigravity:// (the winget manifest
+# says Protocols: antigravity). Best effort and never fatal: only when nothing
+# handles it yet, and mimeapps.list - the file xdg-mime edits - is backed up first
+# (hard rule 5).
+antigravity_register_scheme() {
+    local current mimeapps
+    has_cmd xdg-mime || return 0
+    current="$(xdg-mime query default x-scheme-handler/antigravity 2>/dev/null || true)"
+    [[ -z "$current" ]] || return 0
+    mimeapps="${XDG_CONFIG_HOME:-$SYS_HOME/.config}/mimeapps.list"
+    if [[ -f "$mimeapps" ]] && ! backup_file "$mimeapps" >/dev/null; then
+        ui_warn "could not back up ${mimeapps} - the antigravity:// handler was not registered"
+        return 0
+    fi
+    run xdg-mime default antigravity.desktop x-scheme-handler/antigravity \
+        || ui_muted "could not register the antigravity:// handler; the desktop entry still works"
+    return 0
+}
+
+# antigravity_desktop_entry <dir>: the tarball ships no .desktop file, so this
+# writes the launcher and the antigravity:// handler. A symlink at the path is
+# refused (writing through it would edit whatever it points at); compare-first: an
+# identical file is not rewritten; a differing one is backed up, then replaced
+# through a temp file and mv (hard rule 5).
+antigravity_desktop_entry() {
+    local dir="$1" appdir="$SYS_HOME/.local/share/applications" file content icon tmp
+    file="$appdir/antigravity.desktop"
+    if [[ "$dir" == *[[:cntrl:]]* ]]; then
+        ui_warn "the install path has a control character, which a desktop entry cannot hold - no desktop entry was written; start the Hub with ${dir}/antigravity"
+        return 0
+    fi
+    if [[ -L "$file" ]]; then
+        ui_warn "${file} is a symlink - no desktop entry was written and its target was left alone. Start the Hub with ${dir}/antigravity."
+        return 0
+    fi
+    if [[ -e "$file" && ! -f "$file" ]]; then
+        ui_warn "${file} is not a regular file - no desktop entry was written."
+        return 0
+    fi
+    icon="antigravity"
+    if [[ -f "$dir/icon.png" ]]; then icon="$(printf '%s' "$dir/icon.png" | sed 's/\\/\\\\/g')"; fi
+    content="$(printf '%s\n' \
+        '[Desktop Entry]' \
+        'Type=Application' \
+        'Name=Antigravity' \
+        "Exec=$(antigravity_exec_quote "$dir/antigravity") %U" \
+        "Icon=${icon}" \
+        'Terminal=false' \
+        'Categories=Development;IDE;' \
+        'StartupWMClass=Antigravity' \
+        'MimeType=x-scheme-handler/antigravity;')"
+    if [[ -f "$file" ]]; then
+        if [[ "$(<"$file")" == "$content" ]]; then
+            ui_muted "desktop entry already up to date: ${file}"
+            return 0
+        fi
+        if ! backup_file "$file" >/dev/null; then
+            ui_warn "could not back up ${file} - left as it is"
+            return 0
         fi
     fi
-    if [[ ! -f "${prefix}${list}" ]]; then
-        if ! printf 'deb [signed-by=%s] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main\n' \
-            "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null; then
-            ui_err "Antigravity not installed: could not write ${list}."
+    # The temp file is mktemp's own (an unpredictable name, created exclusively): a file
+    # that already sits at some guessable name is never written through or removed. On a
+    # failure only what mktemp returned is removed. mktemp makes it 0600; the entry gets
+    # what a plain redirect would have given it, 0666 minus the umask.
+    tmp=""
+    if ! { mkdir -p "$appdir" && tmp="$(mktemp "${appdir}/.antigravity.desktop.XXXXXX")" \
+            && printf '%s\n' "$content" >"$tmp" \
+            && chmod "$(printf '%03o' "$(( 0666 & ~0$(umask) ))")" "$tmp" \
+            && mv -f -- "$tmp" "$file"; }; then
+        if [[ -n "$tmp" ]]; then rm -f -- "$tmp"; fi
+        ui_warn "could not write ${file}"
+        return 0
+    fi
+    ui_ok "wrote the desktop entry ${file}"
+    # Best effort: the launcher works without either step.
+    if has_cmd update-desktop-database; then run update-desktop-database "$appdir" || true; fi
+    antigravity_register_scheme
+    return 0
+}
+
+# antigravity_sysctl <key>: a kernel.* value; through sysctl when there is one (it
+# often lives in /usr/sbin, which a normal user's PATH may not have), else /proc.
+antigravity_sysctl() {
+    if has_cmd sysctl; then sysctl -n "$1" 2>/dev/null; return; fi
+    cat "/proc/sys/${1//./\/}" 2>/dev/null
+}
+
+# antigravity_sandbox_needed: true when this kernel restricts unprivileged user
+# namespaces (Ubuntu 24.04+ through AppArmor, or Debian's clone knob), which is
+# when Electron falls back to the SUID sandbox helper. When neither knob can be
+# read the answer is "assume it is needed".
+antigravity_sandbox_needed() {
+    local restrict clone seen=0
+    if restrict="$(antigravity_sysctl kernel.apparmor_restrict_unprivileged_userns)" && [[ -n "$restrict" ]]; then
+        seen=1
+        if [[ "$restrict" == 1 ]]; then return 0; fi
+    fi
+    if clone="$(antigravity_sysctl kernel.unprivileged_userns_clone)" && [[ -n "$clone" ]]; then
+        seen=1
+        if [[ "$clone" == 0 ]]; then return 0; fi
+    fi
+    (( seen )) || return 0
+    return 1
+}
+
+# antigravity_sandbox_note <dir>: the sandbox helper. NO sudo here and NEVER
+# --no-sandbox (it switches off the protection a browser engine renders web
+# content behind): when the kernel needs the SUID helper the two commands are
+# printed once for the operator; otherwise nothing is required.
+antigravity_sandbox_note() {
+    local box="$1/chrome-sandbox" sq="'" bs='\' esc
+    if ! antigravity_sandbox_needed; then
+        ui_muted "chrome-sandbox: nothing is required (this kernel allows unprivileged user namespaces, so Electron needs no SUID helper)"
+        return 0
+    fi
+    esc="${box//$sq/$sq$bs$sq$sq}"
+    ui_warn "chrome-sandbox: this kernel restricts unprivileged user namespaces (or AutoOS could not tell), so Electron needs its SUID sandbox helper, which must be root-owned. AutoOS never runs sudo itself; check the file first (it comes from the tarball), then run this once:"
+    ui_warn "    sudo chown root:root '${esc}' && sudo chmod 4755 '${esc}'"
+    return 0
+}
+
+# antigravity_path_check <dir>: the old apt package puts its own /usr/bin/antigravity
+# under the SAME command name; when that one wins on PATH, say so and name it.
+antigravity_path_check() {
+    local dir="$1" link="$SYS_HOME/.local/bin/antigravity" found real_found real_ours
+    found="$(command -v antigravity 2>/dev/null || true)"
+    [[ -n "$found" ]] || return 0
+    if [[ "$found" == "$link" || "$found" == "$dir/antigravity" ]]; then return 0; fi
+    real_found="$(readlink -f -- "$found" 2>/dev/null || true)"; real_ours="$(readlink -f -- "$dir/antigravity" 2>/dev/null || true)"
+    if [[ -n "$real_found" && "$real_found" == "$real_ours" ]]; then return 0; fi
+    ui_warn "the command 'antigravity' on your PATH resolves to ${found}, not to the Hub installed here. Start the Hub with ${link} (or ${dir}/antigravity), or put ${SYS_HOME}/.local/bin first on your PATH."
+    return 0
+}
+
+# antigravity_warn_old_apt: the pre-2.x apt package (the IDE, frozen at 1.23.2,
+# a different product with the SAME command name) stays where it is. Say how to
+# remove it; do nothing (hard rule 3).
+antigravity_warn_old_apt() {
+    if ! has_cmd dpkg || ! dpkg -s antigravity >/dev/null 2>&1; then return 0; fi
+    ui_warn "The old apt package 'antigravity' (the IDE, frozen at 1.23.2 - a different product with the same command name) is still installed. AutoOS does not remove it; when you no longer want it:"
+    ui_warn "    sudo apt-get remove antigravity"
+    ui_warn "    sudo rm -f /etc/apt/sources.list.d/antigravity.list /etc/apt/keyrings/antigravity-repo-key.gpg   # its apt repo leftovers"
+    return 0
+}
+
+# antigravity_root_refused: true when `sudo ./setup.sh` runs this as root with
+# SYS_HOME the invoking user's home; the files it made there would be root-owned and
+# a normal update could never replace them. Root in root's own home (a container, a
+# root login) is fine. Only the question: the caller words the answer (an error in a
+# real run, a "would refuse" line in a dry run).
+antigravity_root_refused() {
+    local root_home
+    (( ${SYS_IS_ROOT:-0} )) || return 1
+    root_home="$(getent passwd root 2>/dev/null | cut -d: -f6 || true)"
+    [[ -n "$root_home" ]] || root_home=/root
+    [[ "${SYS_HOME%/}" != "${root_home%/}" ]]
+}
+
+# antigravity_install_staged <dir> <existing 0|1> <installed-id>: everything from
+# discovery to the finished install, inside the private stage. The caller removes
+# the stage on every way out.
+antigravity_install_staged() {
+    local dir="$1" existing="$2" installed_id="$3" stage="$ANTIGRAVITY_STAGE" tree size sha suffix cmp reason
+    tree="$stage/tree"; suffix="${stage##*.}"
+
+    antigravity_hub_latest "$stage" || return 1
+    if (( existing )); then
+        cmp="$(antigravity_compare_ids "$ANTIGRAVITY_ID" "$installed_id")"
+        case "$cmp" in
+            same)
+                ui_ok "Antigravity Hub ${ANTIGRAVITY_ID} is already the newest build in winget-pkgs - nothing to do"
+                antigravity_warn_old_apt
+                INSTALL_SCRIPT_STATE=skipped
+                return 0 ;;
+            older)
+                ui_warn "Antigravity Hub ${installed_id} is installed; winget-pkgs' newest is the older ${ANTIGRAVITY_ID} - keeping what is installed."
+                INSTALL_SCRIPT_STATE=skipped
+                return 0 ;;
+        esac
+        ui_info "Antigravity Hub: ${installed_id:-an unstamped build} is installed, ${ANTIGRAVITY_ID} is the newest - updating"
+    fi
+
+    antigravity_hub_head "$stage" || return 1
+    size="$ANTIGRAVITY_SIZE"
+    ui_warn "Antigravity Hub ${ANTIGRAVITY_ID}: Google publishes no sha256 for the Linux tarball (no published sha256), so it cannot be checked against one. Its provenance is TLS to storage.googleapis.com plus the winget-pkgs manifest that names the build; AutoOS checks size, gzip, the member list, the ELF binary and the version inside app.asar instead."
+    ui_muted "downloading ${ANTIGRAVITY_URL} (${size} bytes${ANTIGRAVITY_CRC:+; ${ANTIGRAVITY_CRC}}) into a private staging directory"
+    antigravity_download_verify "$stage" || return 1
+    antigravity_extract_verify "$stage" "$ANTIGRAVITY_VERSION" || return 1
+
+    if ! sha="$(antigravity_py sha256 "$stage/pkg.tgz")"; then
+        ui_err "Antigravity (verification): could not hash the download (${sha}); nothing was installed or changed."
+        return 1
+    fi
+    if ! { printf '%s\n' "$ANTIGRAVITY_STAMP_MARKER" "$ANTIGRAVITY_ID" "size=${size}" "sha256=${sha}" >"$tree/.autoos-version"; }; then
+        ui_err "Antigravity not changed: could not write the version stamp."
+        return 1
+    fi
+    if ! reason="$(antigravity_py icon "$tree" "$tree/icon.png")"; then
+        ui_muted "no icon extracted (${reason}); the desktop entry will use the icon theme's 'antigravity'"
+    fi
+
+    antigravity_swap "$dir" "$tree" "$suffix" "$existing" || return 1
+    antigravity_link "$dir"
+    antigravity_desktop_entry "$dir"
+    antigravity_sandbox_note "$dir"
+    ui_ok "Antigravity Hub ${ANTIGRAVITY_VERSION} (${ANTIGRAVITY_ID}) installed in ${dir} (command: antigravity; recorded sha256 ${sha} was computed here, not published)"
+    antigravity_path_check "$dir"
+    antigravity_warn_old_apt
+    return 0
+}
+
+# antigravity_install_guarded <parent> <dir> <existing 0|1> <installed-id>: the
+# whole install from the staging directory on. It runs ONLY inside the subshell
+# install_antigravity opens around it, and that is the point: the subshell owns
+# the INT/TERM/EXIT traps, so the caller's traps are never saved, replaced or
+# put back (a `$(trap -p)` snapshot taken inside a subshell reports the PARENT's
+# traps, and re-arming them replays the parent's EXIT handler in the subshell).
+# The stage goes away on EVERY way out of it: a normal return, a signal, and an
+# exit from anywhere underneath (set -e, an unbound variable). The traps are
+# armed BEFORE the directory is made (the cleanup does nothing while there is no
+# stage), so a signal right after mktemp cannot leave it behind.
+# A subshell cannot set INSTALL_SCRIPT_STATE for its caller, so "finished on
+# purpose without changing anything" leaves as this exit status instead.
+ANTIGRAVITY_RC_SKIPPED=64
+antigravity_install_guarded() {
+    local parent="$1" dir="$2" existing="$3" installed_id="$4" rc=0
+    ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT=""
+    trap 'antigravity_on_signal INT' INT
+    trap 'antigravity_on_signal TERM' TERM
+    trap 'antigravity_stage_cleanup' EXIT
+    if antigravity_stage_make "$parent"; then
+        antigravity_install_staged "$dir" "$existing" "$installed_id" || rc=$?
+        if (( rc == 0 )) && [[ "$INSTALL_SCRIPT_STATE" == skipped ]]; then rc=$ANTIGRAVITY_RC_SKIPPED; fi
+    else
+        ui_err "Antigravity not installed: cannot create a private staging directory under ${parent}."
+        rc=1
+    fi
+    return "$rc"
+}
+
+install_antigravity() {
+    INSTALL_SCRIPT_STATE=""
+    local dir parent installed_id="" existing=0 rc=0 tool
+    if [[ "${SYS_ARCH:-x64}" != x64 ]]; then
+        ui_err "Antigravity is only wired up for x64 (this machine is ${SYS_ARCH}); nothing was installed."
+        return 1
+    fi
+    if [[ -z "${SYS_HOME:-}" || "$SYS_HOME" == / ]]; then
+        ui_err "Antigravity not installed: there is no usable home directory (SYS_HOME='${SYS_HOME:-}')."
+        return 1
+    fi
+    if antigravity_root_refused; then
+        # A dry run changes nothing, so it does not fail: it says what the real run would do.
+        if (( AUTOOS_DRY_RUN )); then
+            ui_muted "would refuse: run setup as your own user (without sudo) - setup is running as root but would install into ${SYS_HOME}, which is not root's home, so the files would be root-owned there; a real run changes nothing"
+            return 0
+        fi
+        ui_err "Antigravity not installed: setup is running as root but would install into ${SYS_HOME}, which is not root's home - it would leave root-owned files there that a normal update cannot replace. Please run setup as your own user (without sudo); nothing was changed."
+        return 1
+    fi
+    dir="$(antigravity_dir)"; parent="$(dirname "$dir")"
+    # The install directory is ours only with a valid stamp. Anything else -
+    # somebody's own directory, a symlink, an old IDE-era install - is left alone.
+    if [[ -e "$dir" || -L "$dir" ]]; then
+        if ! installed_id="$(antigravity_stamp_id "$dir")"; then
+            ui_warn "Antigravity: ${dir} exists but was not installed by AutoOS (it has no valid .autoos-version stamp) - left as it is. Move or remove it and run setup again."
             return 1
         fi
-        APT_UPDATED=0   # the new repo has to be fetched before install
+        existing=1
     fi
-    ui_warn "Antigravity: Google's apt repo is frozen at 1.23.2 (Release dated 2026-04-16); the 2.x apps are tarball-only, so apt will not bring them."
-    apt_update_once
-    run $AUTOOS_SUDO apt-get install -y antigravity
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would look up the newest Antigravity Hub in winget-pkgs ($(antigravity_listing_url)); a dry run asks nothing"
+        ui_muted "would download its Linux tarball from Google's bucket into a private staging directory beside ${dir}, check its size, gzip stream, member list, ELF binary and the version inside app.asar (Google publishes no sha256: no published sha256), and install it into ${dir}"
+        ui_muted "would link ${SYS_HOME}/.local/bin/antigravity and write ${SYS_HOME}/.local/share/applications/antigravity.desktop; an installed Hub is only replaced when winget-pkgs names a newer build (setup.sh --update)"
+        return 0
+    fi
+    catalog_require_python || return 1
+    for tool in curl tar gzip; do
+        if ! has_cmd "$tool"; then ui_err "Antigravity not installed: ${tool} was not found."; return 1; fi
+    done
+    # The install runs in a subshell of its own (see antigravity_install_guarded), so
+    # the caller's traps stay exactly as they are.
+    ( antigravity_install_guarded "$parent" "$dir" "$existing" "$installed_id" ) || rc=$?
+    if (( rc == ANTIGRAVITY_RC_SKIPPED )); then INSTALL_SCRIPT_STATE=skipped; rc=0; fi
+    return "$rc"
 }
 
 install_xpipe() {
@@ -492,8 +1427,8 @@ install_vscode() {
         ui_muted "would add Microsoft's signed apt repo and install code"
         return 0
     fi
-    # AUTOOS_APT_PREFIX is a test seam (DESTDIR-style), as in install_antigravity:
-    # where the files are written. The source line keeps the /etc path apt reads.
+    # AUTOOS_APT_PREFIX is a test seam (DESTDIR-style): where the files are
+    # written. The source line keeps the /etc path apt reads.
     local prefix="${AUTOOS_APT_PREFIX:-}"
     local key=/etc/apt/keyrings/packages.microsoft.gpg
     local list=/etc/apt/sources.list.d/vscode.list
@@ -662,7 +1597,26 @@ install_devin_cli() {
     return $rc
 }
 
+# autoos_conflict_present <other-id>: true when <other-id> is either already
+# installed on this machine (script_is_installed, detect.sh) or was selected
+# earlier in this run's plan (PLAN_IDS, filled by catalog_resolve before
+# execution starts - see setup.sh stage 4). claude-autostart and
+# herdr-sessions both restore Claude Code sessions across a reboot by
+# snapshotting and replaying panes; running both would double-restore the
+# same sessions, so each refuses to install while the other is present,
+# checked before either writes anything.
+autoos_conflict_present() {
+    local other="$1"
+    [[ " ${PLAN_IDS} " == *" ${other} "* ]] && return 0
+    script_is_installed "$other"
+}
+
 install_claude_autostart() {
+    if autoos_conflict_present herdr-sessions; then
+        ui_err "claude-autostart: herdr-sessions is already installed or selected - the two restore Claude Code sessions the same way and must not both run. Remove herdr-sessions first (its driver's --unregister) or leave claude-autostart unselected."
+        return 1
+    fi
+
     local appdir="${AUTOOS_ROOT}/lib/linux"
     local udest="${SYS_HOME}/.config/systemd/user"
     local units=(claude-sessions-snapshot.service claude-sessions-snapshot.timer claude-sessions-restore.service)
@@ -779,6 +1733,68 @@ claude_autostart_interval() {
              sed -n "s/^AUTOOS_CLAUDE_SNAPSHOT_INTERVAL_MINS='\(.*\)'$/\1/p")"
     [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 59 )) || value=5
     printf '%s' "$value"
+}
+
+# install_herdr_sessions: a thin dispatch to the herdr-sessions driver, on the
+# pattern of install_claude_autostart above - AutoOS's own job is answer
+# collection, mutual exclusion and the profile-path check; the driver
+# (imported separately to configuration/herdr-sessions/, see
+# logs/handoff-sessions/20260925/status/L1-backlog.herdr-home-proposal.md
+# section 1) owns the systemd units, the snapshot and the restore. This
+# function does not exist for that directory yet in every checkout - see the
+# "missing driver" branch below.
+#
+# AUTOOS_HERDR_SESSIONS_DIR overrides where the driver lives (test seam; a
+# real run always uses $AUTOOS_ROOT/configuration/herdr-sessions).
+install_herdr_sessions() {
+    INSTALL_SCRIPT_STATE=""
+
+    if autoos_conflict_present claude-autostart; then
+        ui_err "herdr-sessions: claude-autostart is already installed or selected - the two restore Claude Code sessions the same way and must not both run. Remove claude-autostart first (./setup.sh --undo restores any file it backed up; its systemd units still need disabling by hand) or leave herdr-sessions unselected."
+        return 1
+    fi
+
+    local profile; profile="$(answer herdr_sessions_profile '')"
+    if [[ -z "$profile" ]]; then
+        ui_info "herdr-sessions: skipped: no profile"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+    if [[ ! -f "$profile" ]]; then
+        ui_err "herdr-sessions: profile path does not exist or is not a regular file: $profile"
+        return 1
+    fi
+
+    local dir="${AUTOOS_HERDR_SESSIONS_DIR:-${AUTOOS_ROOT}/configuration/herdr-sessions}"
+    local driver="${dir}/install.sh"
+    if [[ ! -f "$driver" ]]; then
+        ui_err "herdr-sessions: driver not found at $driver - import configuration/herdr-sessions before installing this component"
+        return 1
+    fi
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would run: bash $driver --profile $profile --dry-run"
+        local dry_out; dry_out="$(bash "$driver" --profile "$profile" --dry-run 2>&1)"
+        [[ -n "$dry_out" ]] && ui_muted "$dry_out"
+        return 0
+    fi
+
+    local out rc=0
+    out="$(bash "$driver" --profile "$profile" 2>&1)" || rc=$?
+    [[ -n "$out" ]] && ui_muted "$out"
+    if (( rc != 0 )); then
+        ui_err "herdr-sessions: driver failed (rc=$rc) for profile $profile"
+        return 1
+    fi
+    # The driver prints this exact line only when no unit changed; a run that
+    # replaced one unit and left the rest current is still an install.
+    if grep -qx 'herdr-sessions: all units already current' <<<"$out"; then
+        ui_ok "herdr-sessions: already current"
+        INSTALL_SCRIPT_STATE=skipped
+    else
+        ui_ok "herdr-sessions: installed from profile $profile"
+    fi
+    return 0
 }
 
 install_google_chrome() {
@@ -2232,12 +3248,194 @@ print(json.dumps({"command": "uv", "args": ["--quiet", "run", "--with", sys.argv
     register_antigravity_mcp_server graphify "$spec"
 }
 
+# ─── Playwright MCP: the lazy proxy ─────────────────────────────────────────
+# A Playwright container registered directly lives as long as its Claude Code
+# session, browsing or not: Claude Code starts every stdio server at session start
+# and does not reconnect one that exited. tools/playwright_mcp_lazy.py is the entry
+# Claude Code talks to instead - it starts the docker backend on the first real
+# request and stops it when idle. Antigravity, Qoder, Zed, opencode and OpenHands
+# keep their own npx entries: they are other clients' stdio entries and not
+# touched here. Anchored like AUTOOS_HARNESS, so it is absolute and cwd-proof.
+AUTOOS_PLAYWRIGHT_PROXY="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/tools/playwright_mcp_lazy.py"
+
+# claude_user_config_file: the JSON file `claude mcp` keeps user-scope servers in.
+# Read from the strings of the Claude Code 2.1.283 binary, not from a live run:
+# <config dir>/.config.json when that legacy file exists, else
+# <config dir>/.claude.json - the config dir being $CLAUDE_CONFIG_DIR, else ~/.claude
+# for the legacy file and ~ for .claude.json. $HOME, not $SYS_HOME: it is the
+# environment the claude binary itself reads.
+claude_user_config_file() {
+    local legacy_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" main_dir="${CLAUDE_CONFIG_DIR:-$HOME}"
+    if [[ -f "$legacy_dir/.config.json" ]]; then
+        printf '%s\n' "$legacy_dir/.config.json"
+    else
+        printf '%s\n' "$main_dir/.claude.json"
+    fi
+}
+
+# playwright_user_entry <config file> <proxy path> <package>: classifies the
+# user-scope 'playwright' entry - none | proxy | stale-proxy | docker | npx | custom.
+# docker and npx are only the two forms this installer used to write, EXACTLY (no
+# extra argument, env or key; <package> is the catalog's pin, of which only the name
+# counts). stale-proxy is `python3 <path>` where <path> ends in
+# tools/playwright_mcp_lazy.py but is not <proxy path>: this proxy from a checkout that
+# has moved or been deleted, whose path is dead. Those three carry the command after
+# a tab so the caller can put it back; anything else is custom - a python3 entry for
+# any other script, or a path with a tab or newline in it, which that split could not
+# carry. The entry's own arguments are never printed as a message: they may hold a
+# token. The file is read, never written.
+playwright_user_entry() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import json, posixpath, sys
+
+DOCKER = ["run", "-i", "--rm", "--init", "--network", "host", "mcr.microsoft.com/playwright/mcp:latest"]
+path, proxy, package = sys.argv[1], sys.argv[2], sys.argv[3]
+name = package.rsplit("@", 1)[0] if package.rfind("@") > 0 else package
+
+
+def is_proxy_script(arg):
+    return (posixpath.basename(arg) == "playwright_mcp_lazy.py"
+            and posixpath.basename(posixpath.dirname(arg)) == "tools"
+            and "\t" not in arg and "\n" not in arg)
+
+
+try:
+    with open(path, encoding="utf-8") as fh:
+        entry = (json.load(fh).get("mcpServers") or {}).get("playwright")
+except (OSError, ValueError, AttributeError):
+    entry = None
+if entry is None:
+    print("none")
+    sys.exit(0)
+kind, argv = "custom", []
+if (isinstance(entry, dict) and set(entry) <= {"type", "command", "args", "env"}
+        and entry.get("type", "stdio") == "stdio" and not entry.get("env")
+        and isinstance(entry.get("command"), str)
+        and isinstance(entry.get("args", []), list)
+        and all(isinstance(a, str) for a in entry.get("args", []))):
+    command, args = entry["command"], entry.get("args", [])
+    if command == "docker" and args == DOCKER:
+        kind = "docker"
+    elif (command == "npx" and len(args) == 2 and args[0] == "-y"
+            and (args[1] == name or args[1].startswith(name + "@"))):
+        kind = "npx"
+    elif command == "python3" and args == [proxy]:
+        kind = "proxy"
+    elif command == "python3" and len(args) == 1 and is_proxy_script(args[0]):
+        kind = "stale-proxy"
+    if kind in ("docker", "npx", "stale-proxy"):
+        argv = [command] + args
+print("\t".join([kind] + argv))
+PY
+}
+
+# register_playwright_lazy_proxy: the Claude Code side of install_mcp_playwright when
+# docker is present. Registers the proxy when there is no playwright entry, replaces
+# an entry that is exactly one of the two forms this installer used to write, or this
+# proxy at the path of another checkout (putting the old entry back if the add fails),
+# and leaves everything else alone. Whatever it does, `claude mcp add|remove` rewrites
+# the config file the user owns, so that file is copied once first and no copy means no
+# write. It never stops a container: sessions that are running keep the one they have
+# until they end.
+register_playwright_lazy_proxy() {
+    local package="$1" proxy="$AUTOOS_PLAYWRIGHT_PROXY" cfg entry kind backup what restore
+    local -a old=()
+    if ! has_cmd claude; then
+        ui_warn "claude is not on PATH — cannot register 'playwright'. Install claude-code first."
+        return 0
+    fi
+    cfg="$(claude_user_config_file)"
+    entry="$(playwright_user_entry "$cfg" "$proxy" "$package" 2>/dev/null)" || entry="none"
+    kind="${entry%%$'\t'*}"
+    if [[ "$entry" == *$'\t'* ]]; then IFS=$'\t' read -r -a old <<<"${entry#*$'\t'}"; fi
+
+    case "$kind" in
+        proxy)
+            ui_muted "MCP server 'playwright' already uses the lazy proxy - skipped."
+            return 0
+            ;;
+        docker | npx | stale-proxy) ;;
+        none)
+            # No user-scope entry: a project, local or plugin server of that name
+            # still counts, as it does for every other server (register_mcp_server).
+            if (( ! AUTOOS_DRY_RUN )) && mcp_has_server playwright; then
+                ui_muted "MCP server 'playwright' is already registered outside user scope - left alone."
+                return 0
+            fi
+            ;;
+        *)
+            ui_warn "MCP server 'playwright' has a custom user-scope entry - left alone. To use the lazy proxy, remove it (claude mcp remove playwright --scope user) and run ./setup.sh --only mcp-playwright again."
+            return 0
+            ;;
+    esac
+
+    if (( AUTOOS_DRY_RUN )); then
+        if [[ "$kind" == none ]]; then
+            ui_muted "would run: claude mcp add --scope user playwright -- python3 ${proxy} (unless a 'playwright' server is registered already)"
+        else
+            what="the ${kind/-/ } entry"
+            [[ "$kind" != stale-proxy ]] || what="the stale proxy entry ${old[1]}"
+            ui_muted "would back up ${cfg}, run: claude mcp remove playwright --scope user, then claude mcp add --scope user playwright -- python3 ${proxy} (replacing ${what})"
+        fi
+        return 0
+    fi
+
+    # Never modify a file the user owns without a copy: no copy, no write - for the add
+    # into a config that has other servers and session data just as for the replace.
+    # (No file yet: claude creates it, and there is nothing to lose.)
+    backup=""
+    if [[ -f "$cfg" ]] && ! backup="$(backup_file "$cfg")"; then
+        if [[ "$kind" == none ]]; then
+            ui_warn "could not back up ${cfg} - 'playwright' was not registered"
+        else
+            ui_warn "could not back up ${cfg} - the ${kind/-/ } 'playwright' entry was left unchanged"
+        fi
+        return 0
+    fi
+
+    if [[ "$kind" != none ]]; then
+        ui_muted "run: claude mcp remove playwright --scope user"
+        if ! claude mcp remove playwright --scope user; then
+            ui_warn "could not remove the ${kind/-/ } 'playwright' entry - left unchanged"
+            return 0
+        fi
+    fi
+
+    ui_muted "run: claude mcp add --scope user playwright -- python3 ${proxy}"
+    if ( cd "$SYS_HOME" 2>/dev/null; claude mcp add --scope user playwright -- python3 "$proxy" ); then
+        if [[ "$kind" == none ]]; then
+            ui_ok "registered MCP server 'playwright' (user scope, lazy proxy)${backup:+ (config backup: ${backup})}"
+        elif [[ "$kind" == stale-proxy ]]; then
+            ui_ok "pointed the lazy proxy at this checkout: ${old[1]} -> ${proxy} (config backup: ${backup})"
+        else
+            ui_ok "replaced the ${kind} 'playwright' entry with the lazy proxy (config backup: ${backup})"
+            ui_muted "Sessions that are already running keep their current Playwright container until they end; AutoOS did not stop any. New sessions use the proxy."
+        fi
+    elif [[ "$kind" == none ]]; then
+        ui_warn "could not register 'playwright'"
+    elif ( cd "$SYS_HOME" 2>/dev/null; claude mcp add --scope user playwright -- "${old[@]}" ); then
+        ui_warn "could not add the lazy proxy - put back the previous ${kind/-/ } entry (config backup: ${backup})"
+    else
+        printf -v restore '%q ' "${old[@]}"      # quoted: a checkout path may hold a space
+        ui_err "could not add the lazy proxy and could not put back the previous ${kind/-/ } entry - restore it with: claude mcp add --scope user playwright -- ${restore}(config backup: ${backup})"
+    fi
+    return 0
+}
+
 install_mcp_playwright() {
     ui_info "Setting up Playwright MCP server (Claude Code + Antigravity)"
     local playwright_pkg
     playwright_pkg="$(mcp_package playwright)"
-    register_mcp_server playwright user "$SYS_HOME" \
-        npx -y "$playwright_pkg"
+    # The proxy's default backend is the docker image with --network host, which is
+    # Linux behaviour (mcp-servers-setup says so); macOS keeps its npx entry until
+    # that is measured there.
+    if [[ "${SYS_OS:-linux}" != macos ]] && has_cmd docker; then
+        register_playwright_lazy_proxy "$playwright_pkg"
+    else
+        # No docker (or macOS), so no backend for the proxy: today's npx entry.
+        register_mcp_server playwright user "$SYS_HOME" \
+            npx -y "$playwright_pkg"
+    fi
 
     local spec
     spec="$(python3 -c '

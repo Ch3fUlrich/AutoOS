@@ -79,6 +79,36 @@ def main(path):
             bad.append(name + ": needs no capability back")
     if not re.search(r'REQUIRE_API_KEY: "true"', om):
         bad.append("omniroute: REQUIRE_API_KEY must be pinned to true")
+    # The gateway runs qodercli for the Qoder PAT login: a derived image (the
+    # upstream one has none) and a writable HOME - qodercli crashes at start
+    # without one, and the rootfs is read-only.
+    if not re.search(r"^    build:\n      context: \.\n      dockerfile: omniroute\.Dockerfile$", om, re.M):
+        bad.append("omniroute: must build omniroute.Dockerfile (the qodercli layer)")
+    if not re.search(r"^    image: autoos/omniroute:\d+\.\d+\.\d+-autoos\d+$", om, re.M):
+        bad.append("omniroute: the local image must be autoos/omniroute:<upstream version>-autoos<n>")
+    if not re.search(r"^      CLI_QODER_BIN: /usr/local/bin/qodercli$", om, re.M):
+        bad.append("omniroute: CLI_QODER_BIN must be the absolute path /usr/local/bin/qodercli")
+    home = re.search(r"^      HOME: (/\S+)$", om, re.M)
+    if not home:
+        bad.append("omniroute: HOME must be set to the writable qoder home")
+    elif not re.search(r"^      - \$\{AUTOOS_STACK_DATA:\?[^}]*\}/qoder-home:%s$" % re.escape(home.group(1)), om, re.M):
+        bad.append("omniroute: HOME %s must be the mount of ${AUTOOS_STACK_DATA}/qoder-home" % home.group(1))
+    if not re.search(r"^      - \$\{AUTOOS_STACK_DATA:\?[^}]*\}/omniroute:/app/data$", om, re.M):
+        bad.append("omniroute: the gateway data dir must stay mounted at /app/data")
+    # The public URL (stack.env, never this file): passed through, empty when
+    # unset - the gateway treats an empty value as absent. While it is set the
+    # gateway's calls to itself stay on loopback (BASE_URL), or NEXT_PUBLIC_BASE_URL
+    # would become their base.
+    for var, want in (
+        ("NEXT_PUBLIC_BASE_URL", "${AUTOOS_OMNIROUTE_PUBLIC_URL:-}"),
+        ("OMNIROUTE_PUBLIC_BASE_URL", "${AUTOOS_OMNIROUTE_PUBLIC_URL:-}"),
+        ("BASE_URL", "${AUTOOS_OMNIROUTE_PUBLIC_URL:+http://localhost:20128}"),
+    ):
+        if not re.search(r"^      %s: %s$" % (var, re.escape(want)), om, re.M):
+            bad.append("omniroute: %s must be exactly %s" % (var, want))
+    for name, body in svc.items():
+        if name != "omniroute" and re.search(r"PUBLIC_URL|PUBLIC_BASE_URL|NEXT_PUBLIC_BASE_URL", body):
+            bad.append(name + ": the public URL belongs to the gateway only")
     if "docker.sock" in om or "docker.sock" in oc:
         bad.append("only openhands may mount the docker socket")
     code = "${AUTOOS_CODE_DIR:?"

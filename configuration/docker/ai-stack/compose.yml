@@ -23,9 +23,14 @@ networks:
 
 services:
   omniroute:
-    # Pinned by digest: a moved tag can never change the gateway underneath
-    # the encrypted provider credentials. Bump deliberately (docs page).
-    image: diegosouzapw/omniroute:3.8.50@sha256:085c57adf499a8aaa9f35ccde95c0df9c11bd9ecd18d6c9edbf3b68b8079ba9d
+    # Upstream image + qodercli (the Qoder PAT login spawns it; the bare image
+    # has none). The FROM is pinned by digest: a moved tag can never change the
+    # gateway underneath the encrypted provider credentials. Bump deliberately
+    # (docs page).
+    build:
+      context: .
+      dockerfile: omniroute.Dockerfile
+    image: autoos/omniroute:3.8.50-autoos1
     container_name: autoos-omniroute
     restart: unless-stopped
     # The image's own user is node (1000); the host user's ids keep the
@@ -44,10 +49,31 @@ services:
       REQUIRE_API_KEY: "true"
       DATA_DIR: /app/data
       OMNIROUTE_MEMORY_MB: ${OMNIROUTE_MEMORY_MB:-1536}
+      # The gateway's public origin, from stack.env (AUTOOS_OMNIROUTE_PUBLIC_URL;
+      # docs/web-services.md says what it does and does not change). Unset gives
+      # empty values, which are the same as absent: the image's launcher drops
+      # empty variables before it starts the server, and every reader treats ""
+      # as no value (measured, image 3.8.50).
+      NEXT_PUBLIC_BASE_URL: ${AUTOOS_OMNIROUTE_PUBLIC_URL:-}
+      OMNIROUTE_PUBLIC_BASE_URL: ${AUTOOS_OMNIROUTE_PUBLIC_URL:-}
+      # Only while a public URL is set: the gateway's own calls to itself (A2A
+      # skills, MCP tools, cloud sync) fall back to NEXT_PUBLIC_BASE_URL when
+      # BASE_URL is empty, and would then leave through the proxy. Pin them to
+      # loopback, the value they default to when nothing is set.
+      BASE_URL: ${AUTOOS_OMNIROUTE_PUBLIC_URL:+http://localhost:20128}
+      # The Qoder PAT login runs this binary (absolute, so PATH plays no part).
+      CLI_QODER_BIN: /usr/local/bin/qodercli
+      # qodercli crashes at start (even --version) when it cannot create
+      # $HOME/.qoder, and the root filesystem is read-only: a persistent HOME.
+      HOME: /home/qoder
     volumes:
       # OmniRoute's own state: storage.sqlite, and .env with the
       # STORAGE_ENCRYPTION_KEY the provider credentials are encrypted with.
       - ${AUTOOS_STACK_DATA:?run ai-stack.sh init}/omniroute:/app/data
+      # qodercli's HOME: its machine id, logs and cache. Persistent (a tmpfs
+      # would give the gateway a new machine id on every restart); the login
+      # itself lives in the gateway data above (--config-dir $DATA_DIR/qoder-cli).
+      - ${AUTOOS_STACK_DATA:?run ai-stack.sh init}/qoder-home:/home/qoder
     ports:
       - "${AUTOOS_STACK_BIND:-0.0.0.0}:20128:20128"
     mem_limit: ${OMNIROUTE_MEM_LIMIT:-2560m}
