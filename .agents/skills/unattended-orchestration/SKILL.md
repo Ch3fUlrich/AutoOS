@@ -55,7 +55,7 @@ run log `logs/handoff-sessions/<date>/` (default date 2026-09-25 unless the line
 - R-spawn-07: An isolation:worktree subagent can't run pwsh/bash; use a non-isolated agent for shell work. (why: 3 of 3 isolated agents stopped before any edit; source: inbox/L1-backlog.md 19:30Z)
 - R-spawn-08: The spawner reads configuration/api-keys.yml from the main checkout if a worktree lacks it. (why: it's git-ignored, absent in a fresh worktree; source: test_autoos_spawner.py KeyFileTests)
 - R-spawn-09: Use qoder only as a writer (you test and commit), agy only for read-only reviews. (why: headless denies qoder shell, agy shell+writes; source: work/L1-routing/B2fix.out, B3c1.out)
-- R-spawn-10: Start a fresh worktree subagent with `git checkout -B <its branch> origin/<your branch>`, not a ff merge. (why: main moves; the ff failed 3 times; source: inbox/L1-routing.md 2026-09-26)
+- R-spawn-10: Start a worktree subagent with `git merge origin/<branch>`, then check the diff to it is empty. (why: ff fails as main moves; checkout -B refused; source: inbox/L1-routing.md 2026-09-26)
 - R-spawn-11: Read your inbox right before every launch, not only while waiting. (why: 3 workers started against a 30-min-old stop order; source: inbox/L1-routing.md 21:44Z)
 - R-spawn-12: Omit `--lean` for `--client qoder|agy`; the spawner refuses it with exit 2. (why: those clients start their MCP servers anyway; source: work/L1-routing/review-a3.out, 2026-09-26)
 - R-spawn-13: Relaunch, never resume, a worktree subagent that stopped without changes. (why: its worktree is deleted; resumed, it works in yours; source: inbox/L1-routing.md, 2026-09-26 08:5xZ)
