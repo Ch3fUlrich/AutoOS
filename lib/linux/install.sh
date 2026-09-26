@@ -952,10 +952,12 @@ antigravity_compare_ids() {
 ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT=""
 antigravity_stage_make() {
     local parent="$1"
-    ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT=""
-    mkdir -p "$parent" || return 1
-    ANTIGRAVITY_STAGE="$(mktemp -d "$parent/.antigravity-stage.XXXXXX")" || { ANTIGRAVITY_STAGE=""; return 1; }
-    ANTIGRAVITY_STAGE_PARENT="$parent"
+    # The parent is recorded BEFORE the directory exists and the stage only when
+    # mktemp has returned it: the cleanup (armed by the caller before this runs)
+    # does nothing while the stage is empty, and never sees a stage without a parent.
+    ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT="$parent"
+    mkdir -p "$parent" || { ANTIGRAVITY_STAGE_PARENT=""; return 1; }
+    ANTIGRAVITY_STAGE="$(mktemp -d "$parent/.antigravity-stage.XXXXXX")" || { ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT=""; return 1; }
 }
 
 antigravity_stage_cleanup() {
@@ -1346,18 +1348,22 @@ install_antigravity() {
     for tool in curl tar gzip; do
         if ! has_cmd "$tool"; then ui_err "Antigravity not installed: ${tool} was not found."; return 1; fi
     done
-    if ! antigravity_stage_make "$parent"; then
-        ui_err "Antigravity not installed: cannot create a private staging directory under ${parent}."
-        return 1
-    fi
     # The stage goes away on EVERY way out: a normal return (below), a signal, and
-    # an exit from anywhere underneath (set -e, an unbound variable). The
-    # caller's own traps are put back afterwards.
+    # an exit from anywhere underneath (set -e, an unbound variable). The traps are
+    # armed BEFORE the directory is made (the cleanup does nothing while there is no
+    # stage), so a signal right after mktemp cannot leave it behind. The caller's own
+    # traps are put back afterwards.
+    ANTIGRAVITY_STAGE=""; ANTIGRAVITY_STAGE_PARENT=""
     old_traps="$(trap -p INT TERM EXIT)"
     trap 'antigravity_on_signal INT' INT
     trap 'antigravity_on_signal TERM' TERM
     trap 'antigravity_stage_cleanup' EXIT
-    antigravity_install_staged "$dir" "$existing" "$installed_id" || rc=$?
+    if antigravity_stage_make "$parent"; then
+        antigravity_install_staged "$dir" "$existing" "$installed_id" || rc=$?
+    else
+        ui_err "Antigravity not installed: cannot create a private staging directory under ${parent}."
+        rc=1
+    fi
     trap - INT TERM EXIT
     if [[ -n "$old_traps" ]]; then eval "$old_traps"; fi
     antigravity_stage_cleanup

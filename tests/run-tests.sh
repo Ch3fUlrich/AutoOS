@@ -3571,6 +3571,18 @@ antigravity_run() {
                 else command getent "$@"; fi
             }
             _extra_bin_dirs() { printf '%s\n' "$SYS_HOME/.local/bin"; }
+            if [[ -n "${AG_AFTER_STAGE:-}" ]]; then
+                # AG_AFTER_STAGE=term|exit: a SIGTERM or an exit right after the staging
+                # directory exists, before the first request or check runs.
+                eval "ag_orig_$(declare -f antigravity_stage_make)"
+                antigravity_stage_make() {
+                    ag_orig_antigravity_stage_make "$@" || return
+                    case "$AG_AFTER_STAGE" in
+                        term) kill -TERM "$BASHPID" ;;
+                        exit) exit 5 ;;
+                    esac
+                }
+            fi
             rc=0
             case "$AG_ENTRY" in
                 latest)
@@ -4265,6 +4277,31 @@ if it "antigravity interrupted download: a SIGTERM or an exit from underneath re
         rm -rf "$sb"
     done
     if (( ok )); then pass; else fail "an interrupted install leaves a staging directory with a half-downloaded tarball"; fi
+fi
+
+if it "antigravity staging: a SIGTERM or an exit right after the staging directory is made, before any request or check, still removes it (the cleanup is armed before the directory exists)"; then
+    ok=1
+    for how in term exit; do
+        for start in fresh update; do
+            sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+            if [[ "$start" == update ]]; then
+                antigravity_run "$sb" >/dev/null
+                antigravity_serve "$sb" "$AG_VB" "$AG_IDB"
+            fi
+            before="$(antigravity_tree_state "$sb")"; : >"$sb/calls.log"
+            antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1 "AG_AFTER_STAGE=$how"
+            [[ "$AG_STATE" != installed && "$AG_STATE" != skipped ]] || { ok=0; echo "$how/$start: the run was reported as [$AG_STATE]" >&2; }
+            [[ -z "$(antigravity_debris "$sb")" ]] || { ok=0; echo "$how/$start: left behind: $(antigravity_debris "$sb" | tr '\n' ' ')" >&2; }
+            [[ "$(antigravity_count "$sb" '^curl ')" == 0 ]] || { ok=0; echo "$how/$start: a request was made before the signal: $(grep '^curl' "$sb/calls.log")" >&2; }
+            if [[ "$start" == update ]]; then
+                [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "$how/$start: the existing install or its surroundings changed: $(diff <(echo "$before") <(antigravity_tree_state "$sb") | head -5)" >&2; }
+            else
+                [[ -z "$(find "$sb/home" -type f)" ]] || { ok=0; echo "$how/$start: files were left: $(find "$sb/home" -type f | tr '\n' ' ')" >&2; }
+            fi
+            rm -rf "$sb"
+        done
+    done
+    if (( ok )); then pass; else fail "a signal that arrives right after the staging directory is made leaves .antigravity-stage.XXXXXX behind"; fi
 fi
 
 if it "antigravity catalog entry: updatable, no prompt, x64-only, notes name the Hub, winget-pkgs, the command and that there is no published sha256"; then
