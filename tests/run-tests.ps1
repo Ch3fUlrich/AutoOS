@@ -290,6 +290,33 @@ Test-Case 'registry model reads match python legacy_models on the real catalog' 
     }
 }
 
+Test-Case 'registry: no generated file drifts' {
+    # Routing v2 spec 3.2 D11 (task A5f): every generated file must match a
+    # fresh `python3 tools/registry.py render <t> --check` (omniroute, litellm,
+    # ide, openhands, models-doc); catalog/ide-models.json is byte-exact, not
+    # only semantically (regenerate: python3 tools/registry.py render ide
+    # --out catalog/ide-models.json).
+    if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { Skip 'python3 absent'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        foreach ($t in @('omniroute', 'litellm', 'ide', 'openhands', 'models-doc')) {
+            $out = & python3 (Join-Path $Root 'tools\registry.py') render $t --check 2>&1 | Out-String; $rc = $LASTEXITCODE
+            Assert-Equal $rc 0 "render $t drift: $out"
+        }
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
+        try {
+            $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE
+            Assert-Equal $rc 0 "render ide --out failed: $out"
+            $a = [IO.File]::ReadAllBytes($tmp)
+            $b = [IO.File]::ReadAllBytes((Join-Path $Root 'catalog\ide-models.json'))
+            $same = ($a.Length -eq $b.Length) -and (@(Compare-Object $a $b -SyncWindow 0).Length -eq 0)
+            Assert-True $same 'catalog/ide-models.json differs byte-exact from render ide (run: python3 tools/registry.py render ide --out catalog/ide-models.json)'
+        } finally {
+            Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+        }
+    } finally { $ErrorActionPreference = $prev }
+}
+
 Test-Case 'every winget component has a non-empty package id' {
     $bad = @()
     foreach ($cat in $winCatalog.categories) {

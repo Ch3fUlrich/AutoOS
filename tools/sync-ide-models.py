@@ -5,8 +5,9 @@ catalog/ai-registry.json is the single hand-edited source of which gateway
 model ids each surface offers, their display names and their token windows
 (combos.json keeps owning leg ORDER). This tool's default model list is
 `tools/registry.py render ide`'s output (routing v2 spec 3.2 phase 1, task
-A4c) - the reverse of the mapping catalog/ide-models.json used to be built
-from directly. Before that file existed, the same list was hand-maintained
+A4c) - catalog/ide-models.json itself is rendered from catalog/ai-registry.json
+(do not edit; regenerate with `python3 tools/registry.py render ide
+--out catalog/ide-models.json`). Before that file existed, the same list was hand-maintained
 in about eight places and drifted: the 1M tier was 1000000 in opencode.jsonc,
 1048576 in the Zed writers and tier profiles, 128000 in
 configuration/openhands/config.toml, with three different output budgets.

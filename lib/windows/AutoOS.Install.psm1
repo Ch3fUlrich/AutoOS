@@ -858,8 +858,9 @@ function Get-AutoOSIdeModel {
     <#
       .SYNOPSIS The gateway models one client surface lists, in picker order.
       .DESCRIPTION
-        catalog/ide-models.json is the single source for the gateway model
-        list (ids, display names, token windows, per-surface membership).
+        catalog/ide-models.json (rendered from catalog/ai-registry.json -
+        do not edit) lists the gateway models (ids, display names,
+        token windows, per-surface membership).
         The Zed and OpenCode writers project it at run time instead of
         carrying a copy; tools/sync-ide-models.py keeps the static copies
         (opencode.jsonc, the OpenHands tier spec) in step.
@@ -2101,8 +2102,9 @@ function Set-AutoOSOpenCodeConfig {
         return
     }
 
-    # Gateway tiers from catalog/ide-models.json (single source; the same
-    # list tools/sync-ide-models.py writes into the repo opencode.jsonc),
+    # Gateway tiers from catalog/ide-models.json (rendered from
+    # catalog/ai-registry.json; the same list tools/sync-ide-models.py
+    # writes into the repo opencode.jsonc),
     # read first: a missing or broken catalog stops here, before any backup.
     $gatewayTiers = {
         param([string]$Gateway)
@@ -2841,7 +2843,8 @@ if _gw_key:
     llm['api_key'] = _gw_key
     _default_reasoning = True
     # The gateway default IS the t1 tier: its windows come from
-    # catalog/ide-models.json, like every other surface's. The installer
+    # catalog/ide-models.json (rendered from catalog/ai-registry.json),
+    # like every other surface's. The installer
     # passes the path only when the file checked out (it reported otherwise).
     _default_window = None
     try:
@@ -3498,7 +3501,8 @@ function Set-AutoOSZedProxy {
         return
     }
     # Model ids, display names, context windows and membership come from
-    # catalog/ide-models.json at run time (single source) - never inline
+    # catalog/ide-models.json at run time (rendered from catalog/ai-registry.json)
+    # - never inline
     # tiers here: the two Zed writers once drifted from every other surface.
     # Read first: a missing or broken catalog stops the writer here, in one
     # line naming the file, before any backup or write. max_tokens is Zed's

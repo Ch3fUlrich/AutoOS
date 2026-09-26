@@ -180,7 +180,8 @@ def opencode_litellm_models() -> set[str]:
 
 
 def ide_models(gateway: str, surface: str) -> list[str]:
-    """Ids catalog/ide-models.json offers to `surface` through `gateway`."""
+    """Ids catalog/ide-models.json (rendered from catalog/ai-registry.json)
+    offers to `surface` through `gateway`."""
     doc = json.loads((ROOT / "catalog" / "ide-models.json").read_text(encoding="utf-8"))
     return [m["id"] for m in doc["models"] if surface in m["surfaces"].get(gateway, [])]
 
