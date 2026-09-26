@@ -58,6 +58,7 @@ run log `logs/handoff-sessions/<date>/` (default date 2026-09-25 unless the line
 - R-spawn-10: An isolation:worktree subagent branches from main; have it `git merge --ff-only <branch>` first. (why: branch-only files are missing otherwise; source: inbox/L1-routing.md 21:38Z, A12)
 - R-spawn-11: Read your inbox right before every launch, not only while waiting. (why: 3 workers started against a 30-min-old stop order; source: inbox/L1-routing.md 21:44Z)
 - R-spawn-12: Omit `--lean` for `--client qoder|agy`; the spawner refuses it with exit 2. (why: those clients start their MCP servers anyway; source: work/L1-routing/review-a3.out, 2026-09-26)
+- R-spawn-13: Relaunch, never resume, a worktree subagent that stopped without changes. (why: its worktree is deleted; resumed, it works in yours; source: inbox/L1-routing.md, 2026-09-26 08:5xZ)
 
 ### review
 
