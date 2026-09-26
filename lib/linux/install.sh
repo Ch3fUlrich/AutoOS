@@ -1774,7 +1774,8 @@ install_herdr_sessions() {
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would run: bash $driver --profile $profile --dry-run"
-        bash "$driver" --profile "$profile" --dry-run
+        local dry_out; dry_out="$(bash "$driver" --profile "$profile" --dry-run 2>&1)"
+        [[ -n "$dry_out" ]] && ui_muted "$dry_out"
         return 0
     fi
 

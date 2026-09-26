@@ -7385,6 +7385,32 @@ if it "herdr-sessions: a dry run calls the driver with --dry-run and changes not
     if (( ok )); then pass; else fail "install_herdr_sessions dry run is not side-effect free"; fi
 fi
 
+# Finding 4 (qoder review, L1-backlog.review-herdr-qoder.md, low): the dry-run
+# branch ran the driver uncaptured, so its output bypassed the ui_* layer --
+# under NO_COLOR it printed the driver's raw ANSI escapes and none of its
+# would-lines reached the AutoOS log file, unlike the real (non-dry) path,
+# which captures and re-emits via ui_muted. Proven here via ui_muted's own
+# side effect (it also calls _log, which writes to AUTOOS_LOG) rather than by
+# stdout content alone, since stdout is captured either way by this test's
+# own subshell.
+if it "herdr-sessions: a dry run's driver output goes through ui_muted, reaching the AutoOS log like the real path"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile
+' >"$profile"
+    logfile="$sb/autoos.log"
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=1
+              AUTOOS_HERDR_SESSIONS_DIR="$drv"; PLAN_IDS=""; AUTOOS_LOG="$logfile"
+              AUTOOS_ANSWERS[herdr_sessions_profile]="$profile"
+              INSTALL_SCRIPT_STATE=""
+              install_herdr_sessions ) 2>&1 )"
+    [[ "$out" == *"would restore panes from $profile"* ]] || { ok=0; echo "driver dry-run line missing from stdout: ${out:0:300}" >&2; }
+    grep -q "would restore panes from $profile" "$logfile" 2>/dev/null \
+        || { ok=0; echo "driver dry-run line never reached the AutoOS log (ui_muted bypassed): $(cat "$logfile" 2>/dev/null)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions dry-run does not route the driver's output through ui_muted"; fi
+fi
+
 if it "herdr-sessions: an empty profile answer is skipped, never a guessed path"; then
     sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
     herdr_stub_driver "$drv" installed
