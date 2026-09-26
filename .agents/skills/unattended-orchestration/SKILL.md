@@ -53,7 +53,7 @@ A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date
 - R-spawn-06: Launch lane subagents with Agent isolation:worktree; never give one a raw worktree path. (why: a bare path made a subagent call EnterWorktree, stall; source: inbox/L1-routing.md 21:1xZ)
 - R-spawn-07: An isolation:worktree subagent can't run pwsh/bash; use a non-isolated agent for shell work. (why: 3 of 3 isolated agents stopped before any edit; source: inbox/L1-backlog.md 19:30Z)
 - R-spawn-08: The spawner reads configuration/api-keys.yml from the main checkout if a worktree lacks it. (why: it's git-ignored, absent in a fresh worktree; source: test_autoos_spawner.py KeyFileTests)
-- R-spawn-09: Route implement work to qoder/agy as writers only; the orchestrator tests and commits. (why: headless mode auto-denies every command tool; source: work/L1-routing/B2fix.out, MCPb.out)
+- R-spawn-09: Use qoder only as a writer (you test and commit), agy only for read-only reviews. (why: headless denies qoder shell, agy shell+writes; source: work/L1-routing/B2fix.out, B3c1.out)
 - R-spawn-10: An isolation:worktree subagent branches from main; have it `git merge --ff-only <branch>` first. (why: branch-only files are missing otherwise; source: inbox/L1-routing.md 21:38Z, A12)
 - R-spawn-11: Read your inbox right before every launch, not only while waiting. (why: 3 workers started against a 30-min-old stop order; source: inbox/L1-routing.md 21:44Z)
 - R-spawn-12: Omit `--lean` for `--client qoder|agy`; the spawner refuses it with exit 2. (why: those clients start their MCP servers anyway; source: work/L1-routing/review-a3.out, 2026-09-26)
