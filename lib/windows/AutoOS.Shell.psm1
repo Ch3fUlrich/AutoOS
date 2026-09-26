@@ -2,6 +2,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1') -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'AutoOS.Install.psm1') -DisableNameChecking
 
 function Set-AutoOSManagedFile {
     param([string]$Path, [string]$Content, [switch]$DryRun)
@@ -10,7 +11,7 @@ function Set-AutoOSManagedFile {
     if ($DryRun) { Write-AutoOSLine "would update with backup: $Path" -Level muted; return }
     $directory = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $directory)) { [void](New-Item -ItemType Directory -Path $directory -Force) }
-    if ($null -ne $existing) { Copy-Item -LiteralPath $Path -Destination "$Path.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss-fffffff')" }
+    if ($null -ne $existing) { $null = Copy-AutoOSBackup -Path $Path }
     [IO.File]::WriteAllText($Path, $Content, (New-Object Text.UTF8Encoding($true)))
     Write-AutoOSLine "updated: $Path" -Level ok
 }
