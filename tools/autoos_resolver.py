@@ -17,6 +17,9 @@ default: a silently mis-scored task is routed to a model that cannot do it.
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta, timezone
+
 import autoos_track as track  # tools/ is on sys.path for every caller
 from registry import resolve_leg  # tools/ is on sys.path for every caller
 
@@ -517,3 +520,160 @@ def pick(scores, mode, registry):
     chosen = best[1]
     return chosen, "theta %s missed: best p %s on %s" % (
         theta, chosen["p"], chosen["route"])
+
+
+# ---------------------------------------------------------------------------
+# Time tie-break and defer (spec sections 5.3 step 6 and 6.4). Pure: `now` is
+# passed in, never read from the clock; provider windows come from the
+# registry. Time never overrides a hard filter (D4) -- these functions only
+# order or delay candidates that already survived filtering and scoring.
+# Quota headroom (the other half of step 6's tie-break) is not measured
+# anywhere yet, so it plays no part here: this is price-window only, and a
+# route is never preferred on invented headroom data.
+# ---------------------------------------------------------------------------
+
+_WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+_DEADLINE_RE = re.compile(
+    r"^(?P<y>\d{4})-(?P<mo>\d{2})-(?P<d>\d{2})T"
+    r"(?P<h>\d{2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?Z$")
+
+
+def _minutes_of_day(hhmm):
+    """Minutes since 00:00 for an "HH:MM" string."""
+    hour, minute = hhmm.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def _window_contains(window, now):
+    """True when `now` falls in `window`'s days and [utc_from, utc_to).
+
+    "23:59" as `utc_to` means to midnight (1440), so 23:59 itself is inside.
+    """
+    if _WEEKDAY_NAMES[now.weekday()] not in window["days"]:
+        return False
+    start = _minutes_of_day(window["utc_from"])
+    end_str = window["utc_to"]
+    end = 1440 if end_str == "23:59" else _minutes_of_day(end_str)
+    minute = now.hour * 60 + now.minute
+    return start <= minute < end
+
+
+def price_factor(provider_id, registry, now):
+    """The price_factor of the first window of `provider_id` containing `now`.
+
+    1.0 when the provider has no windows, or none of its windows cover `now`.
+    """
+    windows = registry["providers"].get(provider_id, {}).get("windows") or []
+    for window in windows:
+        if _window_contains(window, now):
+            return float(window["price_factor"])
+    return 1.0
+
+
+def _next_quarter_hour(dt):
+    """The first quarter-hour mark strictly after `dt`."""
+    floored = dt.replace(minute=(dt.minute // 15) * 15, second=0, microsecond=0)
+    return floored + timedelta(minutes=15)
+
+
+def next_cheap_start(provider_id, registry, now, horizon_hours=48):
+    """The first time strictly after `now` where `provider_id` turns cheap.
+
+    Steps 15 minutes at a time from the next quarter hour. None when the
+    provider is already cheap at `now`, has no windows, or does not turn
+    cheap again within `horizon_hours`.
+    """
+    if price_factor(provider_id, registry, now) < 1.0:
+        return None
+    windows = registry["providers"].get(provider_id, {}).get("windows") or []
+    if not windows:
+        return None
+
+    deadline = now + timedelta(hours=horizon_hours)
+    candidate = _next_quarter_hour(now)
+    while candidate < deadline:
+        if price_factor(provider_id, registry, candidate) < 1.0:
+            return candidate
+        candidate += timedelta(minutes=15)
+    return None
+
+
+def _leg_provider(leg):
+    """The provider id half of a "<provider>/<model>" leg string."""
+    return leg.partition("/")[0]
+
+
+def _format_iso_z(dt):
+    """`dt` (always on a whole minute here) as "YYYY-MM-DDTHH:MMZ"."""
+    return dt.strftime("%Y-%m-%dT%H:%MZ")
+
+
+def tie_break(scores, registry, now):
+    """(score, reason) tie-break by provider price window, spec 5.3 step 6.
+
+    `best` is the score with the lowest `expected_cost`; `candidates` are the
+    scores within 10% of it (input order kept). The first candidate whose leg
+    provider is in a cheap window (`price_factor < 1.0`) at `now` wins; with
+    none, `best` is kept. Quota headroom (the other half of step 6) is not
+    measured anywhere yet, so it is not considered here -- this tie-break is
+    price-window only, never invented data. Empty `scores` raises ValueError.
+    """
+    if not scores:
+        raise ValueError("tie_break: no scores to choose from")
+
+    best = min(scores, key=lambda s: s["expected_cost"])
+    threshold = best["expected_cost"] * 1.10
+    candidates = [s for s in scores if s["expected_cost"] <= threshold]
+
+    for score in candidates:
+        factor = price_factor(_leg_provider(score["leg"]), registry, now)
+        if factor < 1.0:
+            reason = ("time: %s in cheap window (x%g) within 10%% of best"
+                      % (score["route"], factor))
+            return score, reason
+
+    return best, "time: no cheaper window within 10%"
+
+
+def defer_until(card, chosen_score, registry, now):
+    """(datetime or None, reason) opt-in defer for a chosen route, spec 5.3/6.4/D4.
+
+    Only considered when `card["deferrable"]` is true and `card["deadline"]`
+    is set; otherwise `(None, "not deferrable")`. Blocking work never waits
+    (D4): a card that is not marked deferrable is never delayed here. When
+    deferrable, `next_cheap_start` is asked about the chosen leg's provider;
+    if it returns a time before the deadline, that is the defer time, else
+    `(None, "no defer: ...")` names why (already cheap, no window in the
+    horizon, or the next window starts too late).
+    """
+    if not (card.get("deferrable") and card.get("deadline")):
+        return None, "not deferrable"
+
+    deadline_str = card["deadline"]
+    match = _DEADLINE_RE.match(deadline_str)
+    if not match:
+        raise ValueError(
+            "deadline %r: expected an ISO 8601 UTC string" % deadline_str)
+    groups = match.groupdict()
+    deadline = datetime(
+        int(groups["y"]), int(groups["mo"]), int(groups["d"]),
+        int(groups["h"]), int(groups["mi"]), int(groups["s"] or 0),
+        tzinfo=timezone.utc)
+
+    provider_id = _leg_provider(chosen_score["leg"])
+    start = next_cheap_start(provider_id, registry, now)
+
+    if start is not None and start < deadline:
+        return start, "defer: %s cheap from %s before deadline %s" % (
+            provider_id, _format_iso_z(start), deadline_str)
+
+    if start is None:
+        if price_factor(provider_id, registry, now) < 1.0:
+            why = "%s is already cheap" % provider_id
+        else:
+            why = "%s has no cheaper window within the horizon" % provider_id
+    else:
+        why = "%s's next cheap window (%s) is not before deadline %s" % (
+            provider_id, _format_iso_z(start), deadline_str)
+    return None, "no defer: %s" % why

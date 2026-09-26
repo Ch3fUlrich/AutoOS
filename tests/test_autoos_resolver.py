@@ -8,6 +8,7 @@ cwd once `tools/` is on sys.path, which is the first thing this file does.
 import json
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
@@ -862,6 +863,155 @@ class ScoreTests(unittest.TestCase):
             self.assertGreaterEqual(score["expected_cost"], 0.0)
             self.assertTrue(score["reason"].startswith("E="))
         self.assertIsInstance(reason, str)
+
+
+class TimeTests(unittest.TestCase):
+    """Time tie-break and defer by provider windows (spec 5.3 step 6, 6.4).
+
+    A small inline registry: provider "dsk" has a weekday cheap window and a
+    weekend cheap window (DeepSeek's real shape, without depending on its
+    exact catalog hours); provider "flat" carries no windows at all. One
+    smoke test then checks the real catalog/ai-registry.json's deepseek
+    windows at a fixed Saturday.
+    """
+
+    def registry(self):
+        return {
+            "providers": {
+                "dsk": {"id": "dsk", "windows": [
+                    {"days": ["mon", "tue", "wed", "thu", "fri"],
+                     "utc_from": "10:00", "utc_to": "23:59",
+                     "price_factor": 0.5, "kind": "price",
+                     "source": "test", "verified": "2026-09-25"},
+                    {"days": ["sat", "sun"],
+                     "utc_from": "00:00", "utc_to": "23:59",
+                     "price_factor": 0.5, "kind": "price",
+                     "source": "test", "verified": "2026-09-25"},
+                ]},
+                "flat": {"id": "flat"},
+            },
+        }
+
+    def dt(self, y, mo, d, h, mi):
+        return datetime(y, mo, d, h, mi, tzinfo=timezone.utc)
+
+    def score(self, route, leg, expected_cost):
+        return {"route": route, "leg": leg, "expected_cost": expected_cost}
+
+    # --- price_factor -------------------------------------------------
+
+    def test_price_factor_inside_window(self):
+        # Monday 2026-09-28 10:00 UTC is inside the weekday window.
+        self.assertEqual(
+            r.price_factor("dsk", self.registry(), self.dt(2026, 9, 28, 10, 0)),
+            0.5)
+
+    def test_price_factor_outside_window(self):
+        self.assertEqual(
+            r.price_factor("dsk", self.registry(), self.dt(2026, 9, 28, 9, 59)),
+            1.0)
+
+    def test_price_factor_at_the_2359_end_boundary(self):
+        # "23:59" as utc_to means to midnight: 23:59 itself is still inside.
+        self.assertEqual(
+            r.price_factor("dsk", self.registry(), self.dt(2026, 9, 28, 23, 59)),
+            0.5)
+
+    def test_price_factor_weekend_window(self):
+        # Saturday 2026-09-26 is covered all day.
+        self.assertEqual(
+            r.price_factor("dsk", self.registry(), self.dt(2026, 9, 26, 3, 0)),
+            0.5)
+
+    def test_price_factor_provider_without_windows_is_always_1(self):
+        self.assertEqual(
+            r.price_factor("flat", self.registry(), self.dt(2026, 9, 28, 10, 0)),
+            1.0)
+
+    # --- next_cheap_start -----------------------------------------------
+
+    def test_next_cheap_start_from_before_the_window(self):
+        self.assertEqual(
+            r.next_cheap_start("dsk", self.registry(),
+                               self.dt(2026, 9, 28, 9, 20)),
+            self.dt(2026, 9, 28, 10, 0))
+
+    def test_next_cheap_start_already_inside_is_none(self):
+        self.assertIsNone(
+            r.next_cheap_start("dsk", self.registry(),
+                               self.dt(2026, 9, 28, 10, 30)))
+
+    def test_next_cheap_start_no_windows_is_none(self):
+        self.assertIsNone(
+            r.next_cheap_start("flat", self.registry(),
+                               self.dt(2026, 9, 28, 9, 20)))
+
+    # --- tie_break --------------------------------------------------------
+
+    def test_tie_break_prefers_a_cheap_window_within_10_percent(self):
+        now = self.dt(2026, 9, 28, 10, 0)  # dsk is cheap now
+        best = self.score("r-best", "flat/model", 1.0)
+        cheap = self.score("r-cheap", "dsk/model", 1.09)  # 9% worse
+        chosen, reason = r.tie_break([best, cheap], self.registry(), now)
+        self.assertIs(chosen, cheap)
+        self.assertEqual(
+            reason, "time: r-cheap in cheap window (x0.5) within 10% of best")
+
+    def test_tie_break_keeps_the_best_when_the_cheap_one_is_11_percent_worse(self):
+        now = self.dt(2026, 9, 28, 10, 0)
+        best = self.score("r-best", "flat/model", 1.0)
+        cheap = self.score("r-cheap", "dsk/model", 1.11)  # outside 10%
+        chosen, reason = r.tie_break([best, cheap], self.registry(), now)
+        self.assertIs(chosen, best)
+        self.assertEqual(reason, "time: no cheaper window within 10%")
+
+    def test_tie_break_empty_scores_fails_closed(self):
+        with self.assertRaises(ValueError):
+            r.tie_break([], self.registry(), self.dt(2026, 9, 28, 10, 0))
+
+    # --- defer_until --------------------------------------------------------
+
+    def test_defer_until_returns_the_start_before_the_deadline(self):
+        now = self.dt(2026, 9, 28, 9, 20)
+        card = {"deferrable": True, "deadline": "2026-09-28T12:00Z"}
+        chosen = self.score("r-x", "dsk/model", 1.0)
+        t, reason = r.defer_until(card, chosen, self.registry(), now)
+        self.assertEqual(t, self.dt(2026, 9, 28, 10, 0))
+        self.assertTrue(
+            reason.startswith("defer: dsk cheap from 2026-09-28T10:00Z"))
+
+    def test_defer_until_none_after_the_deadline(self):
+        now = self.dt(2026, 9, 28, 9, 20)
+        card = {"deferrable": True, "deadline": "2026-09-28T09:30Z"}
+        chosen = self.score("r-x", "dsk/model", 1.0)
+        t, reason = r.defer_until(card, chosen, self.registry(), now)
+        self.assertIsNone(t)
+        self.assertTrue(reason.startswith("no defer"))
+
+    def test_defer_until_none_when_not_deferrable(self):
+        now = self.dt(2026, 9, 28, 9, 20)
+        card = {"deferrable": False, "deadline": "2026-09-28T12:00Z"}
+        chosen = self.score("r-x", "dsk/model", 1.0)
+        self.assertEqual(
+            r.defer_until(card, chosen, self.registry(), now),
+            (None, "not deferrable"))
+
+    def test_defer_until_none_when_already_cheap(self):
+        now = self.dt(2026, 9, 28, 10, 30)  # already inside the cheap window
+        card = {"deferrable": True, "deadline": "2026-09-28T12:00Z"}
+        chosen = self.score("r-x", "dsk/model", 1.0)
+        t, reason = r.defer_until(card, chosen, self.registry(), now)
+        self.assertIsNone(t)
+        self.assertTrue(reason.startswith("no defer"))
+
+    # --- the real catalog -------------------------------------------------
+
+    def test_real_registry_deepseek_weekend_factor(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        saturday = self.dt(2026, 9, 26, 12, 0)
+        self.assertEqual(r.price_factor("deepseek", registry, saturday), 0.5)
 
 
 if __name__ == "__main__":
