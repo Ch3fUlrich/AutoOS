@@ -1094,6 +1094,24 @@ Test-Case 'config save: an unchanged POST backs up and rewrites nothing' {
     }
 }
 
+Test-Case 'config save: an empty object in the config is compared, not a crash' {
+    # ConvertTo-AutoOSCanonicalJson once read $obj.PSObject.Properties.Name:
+    # member enumeration over zero properties throws under Set-StrictMode, so
+    # a config holding "answers": {} turned every save into a 500.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-cfgsave-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        $cfg = Join-Path $scratch 'autoos.config.json'
+        [IO.File]::WriteAllText($cfg, '{"version":1,"answers":{}}')
+        $result = Save-AutoOSWebConfig -Path $cfg -Updates ('{"version":1,"answers":{}}' | ConvertFrom-Json)
+        Assert-True $result.ContainsKey('unchanged') 'an identical save with an empty object was treated as a change'
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*').Count 0
+        Assert-Equal (ConvertTo-AutoOSCanonicalJson ('{}' | ConvertFrom-Json)) '{}'
+    } finally {
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'a page whose server has gone tears itself down' {
     if ($pageSource -notmatch 'function serverGone') { throw 'the page has no teardown path' }
     if ($pageSource -notmatch 'window\.close')       { throw 'the page never tries to close itself' }
