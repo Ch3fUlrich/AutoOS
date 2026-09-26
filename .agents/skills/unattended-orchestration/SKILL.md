@@ -84,6 +84,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-spawn-15: Verify the worktree a resumed subagent's report names; it may be the parent's, not its own. (why: a resumed subagent committed there; source: B3c-2a report 2026-09-26 07:4xZ)
 - R-spawn-16: A cancelled run's process can survive SIGTERM; verify its pid is gone, then SIGKILL. (why: a cancelled qodercli ran 115s more; source: run 20260926-074714-2b01d2)
 - R-spawn-17: If a worktree subagent's commit is refused by the classifier, commit its diff yourself. (why: shared .git triggers Modify Shared Resources; source: RUNV2 report 2026-09-26T11:5xZ)
+- R-spawn-18: Start a background worker via run_in_background, never `nohup … &`. (why: the nohup worker died silently with its shell; source: work/L1-routing/review-a4c-qd.out)
 
 ### review
 
@@ -106,6 +107,9 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-tests-09: Guard python path/symlink/mode assertions with os.name == "nt"; those tests run on Windows CI too. (why: a Windows path prefix broke one; source: CI job 108376529166, fixed 5b3b14e)
 - R-tests-10: A test needing a real installed client CLI skips when no client binary is on PATH. (why: it passed locally, failed on CI without one; source: CI 36241451890, fixed a9ffea8)
 - R-tests-11: The skill's own pytest suite is not wired into either CI suite; run it by hand first. (why: two failures sat unnoticed on HEAD; source: ci.yml/run-tests.* grep 2026-09-26)
+- R-tests-12: Prove a real docker build with --no-cache; a build after an identical one is cached. (why: a cached build proves nothing; source: status/L1-backlog.lane-omni.report.md)
+- R-tests-13: Make each guard test fail on its bug: seed state the bug changes, assert the reason line, reset per loop. (why: three guard tests passed vacuously; source: c4dd31a, 1d64a1e, 68e519d)
+- R-tests-14: Mutation-test a scratch copy (`tar --exclude=.git`), never the worktree. (why: a mutation must not touch the lane's tree; source: status/L1-backlog.lane-omni.report.md)
 
 ### gateway
 
@@ -121,6 +125,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-gateway-10: codex ignores model_providers.omniroute.model; pass -m <model> to codex exec or it sends its own default. (why: it 401s the gateway otherwise; source: L1-backlog 2026-09-26T07:20:39Z)
 - R-gateway-11: Don't treat agy as signed out on its 15s sign-in probe timing out; check host memory pressure first. (why: agy was signed in minutes earlier; source: review-b3c1.out 2026-09-26T07:33Z)
 - R-gateway-12: A 429 with retryable:true but a multi-day reset is not soon-retryable; mark the leg unavailable till reset. (why: agy quota read retryable, reset in 5d; source: 2026-09-26T07:47:05Z)
+- R-gateway-13: Size a request to its leg's per-minute token cap, not only its window. (why: groq gpt-oss-120b 413'd a review on TPM; source: work/L1-routing/review-l1own.out)
 
 ### brief
 
@@ -128,10 +133,11 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-brief-02: Write briefs/reports in the fixed BRIEF/REPORT fields, no prose; put bulky output in a file. (why: fixed fields parse and stay short; source: spec 2026-09-25 section 8.2, D9)
 - R-brief-03: Write agent-to-agent text as fixed fields: <what> <sha|path|number> <verdict>; evidence by pointer, no prose. (why: the reader has the brief; source: common.md, operator 2026-09-26)
 - R-brief-04: Name this skill in every brief; report a failure as a lesson line to the skill's owner. (why: keeps agents on the same rules; source: briefs/common.md, operator 2026-09-26T13:43:33Z)
+- R-brief-05: Brief a render as 'derive every cell from registry fields'; equality with today's file is the test only. (why: a subagent copied the file into code; source: 6a61052 rejected, d1763a8)
 
 ### level
 
-- R-level-01: A session whose prompt names no level asks which one (AskUserQuestion), then loads its rules. (why: level picks whose rules apply; source: inbox/L1-routing.md 2026-09-26T11:44:18Z)
+- R-level-01: A session with no level in its prompt takes it from its name; background sessions never AskUserQuestion. (why: it blocked L1-main 50 min; source: inbox/L1-routing.md 2026-09-26)
 
 ### heartbeat
 
@@ -163,7 +169,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-handoff-03: Write a successor's brief from the predecessor's DONE note, never from the plan alone. (why: eight re-cuts converged on the same shape; source: references/layers.md history, 2026-09-05)
 - R-handoff-04: At the cap, run l1_handoff.py --state/--out, append `handoff <name>` to the inbox, stop. (why: lets the parent relaunch you from that file; source: briefs/common.md, Always)
 - R-handoff-05: A handoff is done only once the parent inbox has its line; parents watch handoff mtimes. (why: a handoff with no line sat idle 1.5 h; source: inbox/L1-routing.md 21:45Z)
-- R-handoff-06: Only L0 asks the operator; everyone else appends question/answered to its inbox. (why: the operator was asked twice; source: operator 2026-09-26, L0 addendum 11:44:18Z)
+- R-handoff-06: Only L0 asks the operator: `question:` to inbox/L0.md, or inbox/L1-main.md if refused. (why: classifier refused L1-backlog's L0 appends; source: inbox/L1-routing.md 2026-09-26)
 - R-handoff-07: A parent measures a child via `autoos-agent.py heartbeat --transcript --cap`, relaunching past its exit 4. (why: two sessions ran past cap unhandled; source: test_autoos_heartbeat.py)
 
 ### host
@@ -172,7 +178,9 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-host-02: Give every session its own Omnigraph stdio bridge rather than sharing one. (why: measured ~7 MB each, 22 MB for three; source: inbox/L1-main.md 20:34Z)
 - R-host-03: Read a "shellcheck is clean" failure at exit 137 as host OOM, not a lint finding. (why: reproduced on a loaded host across five lanes; source: 20260924-25 DONE notes, five lanes)
 - R-host-04: Keep the machine awake yourself before an overnight run. (why: the runner cannot change power settings; source: SKILL.md history, rule 6)
-- R-host-05: Per orchestrator: <= 4 worktree lanes + 4 read-only subagents, MemAvailable >= 2500 MB; parallel unless same files. (why: 16 GB host; source: operator 2026-09-26T15:03:37Z)
+- R-host-05: Per orchestrator: <= 3 worktree lanes + 3 readers, MemAvailable >= 3000 MB. (why: daemon OOM-killed every session at 4+4; source: inbox/L1-routing.md 2026-09-26T15:27:16Z)
+- R-host-06: The Bash tool shell is zsh: run multi-step shell as `bash <<'EOF'`; never name a var `path`. (why: zsh clobbered PATH and broke globs; source: status/L1-backlog.lane-omni.report.md)
+- R-host-07: Tell a live Claude session by ~/.claude/sessions/<pid>.json procStart vs /proc. (why: a job's state field is not liveness; source: status/L1-backlog.herdr-home-proposal.md)
 
 ### safety
 
@@ -180,6 +188,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-safety-02: Treat a classifier refusal as a signal: record it verbatim and stop, never work around it. (why: a background session can't negotiate a denial; source: refusals measured 2026-09-24/25)
 - R-safety-03: A leaf role never spawns; only a spawning role lists the autoos-agent MCP. (why: a supervisor wanting to write code mis-decomposed; source: tests/test_agent_harness.py)
 - R-safety-04: Re-check privacy=sensitive on every served leg, not only the first route pick. (why: a live route sent sensitive work free; source: route smoke 2026-09-26T11:2xZ, fixed 36ac003)
+- R-safety-05: A trust-boundary reader catches Exception and keeps its own 0700 leaf dir under shared caches. (why: RecursionError escaped; shared parent had umask mode; source: 1d64a1e, 7588d5f)
 
 ## CAO quickstart
 
