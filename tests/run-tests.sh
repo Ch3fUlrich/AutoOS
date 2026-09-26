@@ -6895,6 +6895,26 @@ autostart_run() {
     ) 2>&1
 }
 
+# autostart_run_full <scratch> [dry:0|1] [plan_ids] [etc_dir]: one
+# install_claude_autostart run against a scratch SYS_HOME, printing a trailer
+# line for state+rc (the same pattern herdr_run uses, since
+# INSTALL_SCRIPT_STATE cannot cross the subshell boundary).
+autostart_run_full() {
+    local sbox="$1" dryflag="${2:-0}" planids="${3:-}" etcdir="${4:-}"
+    (
+        AUTOOS_ROOT="$ROOT"; SYS_HOME="$sbox/home"; AUTOOS_DRY_RUN="$dryflag"; AUTOOS_SUDO=""
+        PLAN_IDS="$planids"
+        if [[ -n "$etcdir" ]]; then AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$etcdir"; fi
+        systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
+        INSTALL_SCRIPT_STATE=""
+        rcode=0
+        install_claude_autostart || rcode=$?
+        printf 'AUTOSTART_RESULT %s %s\n' "${INSTALL_SCRIPT_STATE:-installed}" "$rcode"
+    ) 2>&1
+}
+autostart_state() { sed -n 's/^AUTOSTART_RESULT \([a-z]*\) [0-9]*$/\1/p' <<<"$1"; }
+autostart_rc() { sed -n 's/^AUTOSTART_RESULT [a-z]* \([0-9]*\)$/\1/p' <<<"$1"; }
+
 if it "claude-autostart: a changed unit is backed up before it is replaced"; then
     sb="$(mktemp -d)"; ud="$sb/home/.config/systemd/user"; u=claude-sessions-snapshot.service
     mkdir -p "$ud"; printf 'LOCAL EDIT: do not lose me\n' >"$ud/$u"
@@ -7544,39 +7564,35 @@ if it "herdr-sessions: refuses when claude-autostart was selected this run or is
     [[ "$out" == *"claude-autostart"* ]] || { ok=0; echo "no mention of claude-autostart: ${out:0:300}" >&2; }
     [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the conflict (selected)" >&2; }
 
-    mkdir -p "$sb/home2/.config/systemd/user"
-    touch "$sb/home2/.config/systemd/user/claude-sessions-restore.service"
-    out2="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home2"; AUTOOS_DRY_RUN=0
-               AUTOOS_HERDR_SESSIONS_DIR="$drv"; PLAN_IDS=""
-               AUTOOS_ANSWERS[herdr_sessions_profile]="$profile"
-               install_herdr_sessions ) 2>&1 )"; rc2=$?
-    (( rc2 != 0 )) || { ok=0; echo "rc=0 with claude-autostart already installed: ${out2:0:300}" >&2; }
-    [[ "$out2" == *"claude-autostart"* ]] || { ok=0; echo "no mention of claude-autostart (installed case): ${out2:0:300}" >&2; }
-    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the conflict (installed)" >&2; }
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/claude-sessions-restore.service"
+    out2="$(herdr_run "$sb" "$drv" "$profile" 0 "")"
+    state2="$(herdr_state "$out2")"; rc2="$(herdr_rc "$out2")"
+    (( rc2 == 0 )) || { ok=0; echo "rc=$rc2 want 0 with claude-autostart already installed: ${out2:0:300}" >&2; }
+    [[ "$state2" == skipped ]] || { ok=0; echo "state=[$state2] want skipped (installed case)" >&2; }
+    [[ "$out2" == *"claude-autostart"* && "$out2" == *"skipped"* ]] || { ok=0; echo "no skip naming claude-autostart (installed case): ${out2:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the skip (installed)" >&2; }
     rm -rf "$sb"
     if (( ok )); then pass; else fail "herdr-sessions installed alongside claude-autostart"; fi
 fi
 
 if it "herdr-sessions: claude-autostart refuses when herdr-sessions was selected this run or is already installed, writing nothing"; then
     sb="$(mktemp -d)"; ok=1
-    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home1"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
-              PLAN_IDS="herdr-sessions"
-              systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
-              install_claude_autostart ) 2>&1 )"; rc=$?
+    out="$(autostart_run_full "$sb" 0 "herdr-sessions")"
+    rc="$(autostart_rc "$out")"
     (( rc != 0 )) || { ok=0; echo "rc=0 with herdr-sessions selected: ${out:0:300}" >&2; }
     [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions: ${out:0:300}" >&2; }
-    [[ ! -d "$sb/home1/.config/systemd/user" ]] || { ok=0; echo "claude-autostart wrote units despite the conflict (selected)" >&2; }
+    [[ ! -d "$sb/home/.config/systemd/user" ]] || { ok=0; echo "claude-autostart wrote units despite the conflict (selected)" >&2; }
 
-    mkdir -p "$sb/home2/.config/systemd/user"
-    touch "$sb/home2/.config/systemd/user/herdr-sessions-restore.service"
-    out2="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home2"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
-               PLAN_IDS=""
-               systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
-               install_claude_autostart ) 2>&1 )"; rc2=$?
-    (( rc2 != 0 )) || { ok=0; echo "rc=0 with herdr-sessions already installed: ${out2:0:300}" >&2; }
-    [[ "$out2" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions (installed case): ${out2:0:300}" >&2; }
-    [[ -z "$(find "$sb/home2/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
-        || { ok=0; echo "claude-autostart wrote units despite the conflict (installed)" >&2; }
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    out2="$(autostart_run_full "$sb" 0 "")"
+    state2="$(autostart_state "$out2")"; rc2="$(autostart_rc "$out2")"
+    (( rc2 == 0 )) || { ok=0; echo "rc=$rc2 want 0 with herdr-sessions already installed: ${out2:0:300}" >&2; }
+    [[ "$state2" == skipped ]] || { ok=0; echo "state=[$state2] want skipped (installed case)" >&2; }
+    [[ "$out2" == *"herdr-sessions"* && "$out2" == *"skipped"* ]] || { ok=0; echo "no skip naming herdr-sessions (installed case): ${out2:0:300}" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "claude-autostart wrote units despite the skip (installed)" >&2; }
     rm -rf "$sb"
     if (( ok )); then pass; else fail "claude-autostart installed alongside herdr-sessions"; fi
 fi
@@ -7617,17 +7633,93 @@ if it "herdr-sessions: claude-autostart's mutual-exclusion gate sees a system-sc
     sb="$(mktemp -d)"; ok=1
     mkdir -p "$sb/home/.config/systemd/user" "$sb/etc"
     touch "$sb/etc/herdr-sessions-restore.service"
-    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
-              AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
-              PLAN_IDS=""
-              systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
-              install_claude_autostart ) 2>&1 )"; rc=$?
-    (( rc != 0 )) || { ok=0; echo "rc=0 with herdr-sessions installed system-scope only: ${out:0:300}" >&2; }
-    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions (system-scope case): ${out:0:300}" >&2; }
+    out="$(autostart_run_full "$sb" 0 "" "$sb/etc")"
+    state="$(autostart_state "$out")"; rc="$(autostart_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc want 0 with herdr-sessions installed system-scope only: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "state=[$state] want skipped (system-scope case)" >&2; }
+    [[ "$out" == *"herdr-sessions"* && "$out" == *"skipped"* ]] || { ok=0; echo "no skip naming herdr-sessions (system-scope case): ${out:0:300}" >&2; }
     [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
-        || { ok=0; echo "claude-autostart wrote units despite the system-scope conflict" >&2; }
+        || { ok=0; echo "claude-autostart wrote units despite the system-scope skip" >&2; }
     rm -rf "$sb"
     if (( ok )); then pass; else fail "claude-autostart installed alongside a system-scope-only herdr-sessions"; fi
+fi
+
+if it "herdr-sessions: claude-autostart skips when herdr-sessions is already installed (not selected)"; then
+    sb="$(mktemp -d)"; ok=1
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    out="$(autostart_run_full "$sb" 0 "")"
+    state="$(autostart_state "$out")"; rc="$(autostart_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc want 0: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "state=[$state] want skipped" >&2; }
+    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions: ${out:0:300}" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "claude-autostart wrote units despite the skip" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart did not skip when herdr-sessions is already installed"; fi
+fi
+
+if it "herdr-sessions: claude-autostart dry run skips when herdr-sessions is already installed"; then
+    sb="$(mktemp -d)"; ok=1
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    out="$(autostart_run_full "$sb" 1 "")"
+    state="$(autostart_state "$out")"; rc="$(autostart_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "dry-run rc=$rc want 0: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "dry-run state=[$state] want skipped" >&2; }
+    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "dry-run names nothing: ${out:0:300}" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "dry run wrote units despite the skip" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart dry run did not skip when herdr-sessions is already installed"; fi
+fi
+
+if it "herdr-sessions: herdr-sessions skips when claude-autostart is already installed (not selected)"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/claude-sessions-restore.service"
+    out="$(herdr_run "$sb" "$drv" "$profile" 0 "")"
+    state="$(herdr_state "$out")"; rc="$(herdr_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc want 0: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "state=[$state] want skipped" >&2; }
+    [[ "$out" == *"claude-autostart"* ]] || { ok=0; echo "no mention of claude-autostart: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the skip" >&2; }
+    outdry="$(herdr_run "$sb" "$drv" "$profile" 1 "")"
+    rcdry="$(herdr_rc "$outdry")"; statedry="$(herdr_state "$outdry")"
+    (( rcdry == 0 )) || { ok=0; echo "dry-run rc=$rcdry want 0: ${outdry:0:300}" >&2; }
+    [[ "$statedry" == skipped ]] || { ok=0; echo "dry-run state=[$statedry] want skipped" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions did not skip when claude-autostart is already installed"; fi
+fi
+
+if it "herdr-sessions: both selected in one plan is still refused"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$drv" "$profile" 0 "claude-autostart herdr-sessions")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "herdr rc=0 with both selected: ${out:0:300}" >&2; }
+    [[ "$out" == *"claude-autostart"* ]] || { ok=0; echo "herdr names nothing: ${out:0:300}" >&2; }
+    out2="$(autostart_run_full "$sb" 0 "claude-autostart herdr-sessions")"
+    rc2="$(autostart_rc "$out2")"
+    (( rc2 != 0 )) || { ok=0; echo "autostart rc=0 with both selected: ${out2:0:300}" >&2; }
+    [[ "$out2" == *"herdr-sessions"* ]] || { ok=0; echo "autostart names nothing: ${out2:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "both-selected plan was not refused"; fi
+fi
+
+if it "dry run with herdr-sessions installed still exits 0 (workstation selects claude-autostart)"; then
+    sb="$(mktemp -d)"; ok=1
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    out="$(SUDO_USER="autoos-no-such-user-excl-skip" HOME="$sb/home" bash setup.sh --profile workstation --dry-run --yes --no-color 2>&1)"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "rc=$rc want 0: $(printf '%s' "$out" | tail -n 5)" >&2; }
+    executed="$(printf '%s' "$out" | grep -c '^run:' || true)"
+    [[ "$executed" == 0 ]] || { ok=0; echo "executed=$executed want 0" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "workstation dry run fails when herdr-sessions is already installed"; fi
 fi
 
 if it "herdr-sessions: a driver run that replaced some units is installed, not skipped"; then
