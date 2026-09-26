@@ -32,7 +32,11 @@ Choices the spec left open (each is covered by a test):
   * the idle period restarts when the last in-flight request completes;
   * the cached `protocolVersion` is the newest version the backend has ever answered
     with, so a client asking for a version nobody has seen gets the backend's own latest;
-  * a `tools/list` carrying a cursor, and a result carrying `nextCursor`, bypass the cache.
+  * a `tools/list` carrying a cursor, and a result carrying `nextCursor`, bypass the cache;
+  * a request whose id is still in flight (queued, running, or being answered here) is
+    refused at once with -32600 "duplicate request id in flight" and never forwarded:
+    two answers under one id would leave the slower call untracked, and the idle stop
+    could kill it without an error reaching the client.
 
 Python 3.8+, standard library only. Linux and macOS (the backend gets its own session
 so a terminal Ctrl-C reaches the proxy, which then stops it in an orderly way).
@@ -56,6 +60,7 @@ EOF_WAIT_SECONDS = 5.0      # after closing the backend's stdin, before terminat
 TERM_WAIT_SECONDS = 3.0     # after terminate, before kill
 DOCKER_STOP_SECONDS = 30.0
 BACKEND_ERROR = -32000
+INVALID_REQUEST = -32600
 INTERNAL_ERROR = -32603
 FALLBACK_PROTOCOL = "2025-06-18"
 DEFAULT_CLIENT_PARAMS = {
@@ -293,6 +298,7 @@ class Proxy(object):
         self.backend = None
         self.asked = {}                     # proxy id -> (backend, the backend's own id)
         self.queue = []                     # Jobs waiting for a backend, oldest first
+        self.claimed = {}                   # id_key -> Job: queued or answered here, not yet in Backend.inflight
         self.starter = None                 # the thread that starts backends and serves the queue
         self.live = set()                   # backends whose stop has not finished
         self.sequence = 0
@@ -335,7 +341,7 @@ class Proxy(object):
             return
         if not isinstance(msg, dict):
             log("dropped a client message that is not a JSON-RPC object (batches are not supported)")
-            self.reply_error(None, -32600, "invalid request: batches are not supported")
+            self.reply_error(None, INVALID_REQUEST, "invalid request: batches are not supported")
             return
         try:
             method = msg.get("method")
@@ -354,6 +360,15 @@ class Proxy(object):
         rid = msg["id"]
         method = msg["method"]
         params = msg.get("params")
+        with self.lock:
+            duplicate = self.in_flight(id_key(rid))
+        if duplicate:
+            # Two answers under one id would leave nothing tracked for the slower call, and
+            # the idle stop could then kill it silently. Only this thread introduces ids,
+            # so the check here and the registration in `submit` cannot race each other.
+            log("refused a request whose id is already in flight")
+            self.reply_error(rid, INVALID_REQUEST, "duplicate request id in flight")
+            return
         if method == "initialize":
             self.on_initialize(rid, params)
             return
@@ -425,6 +440,18 @@ class Proxy(object):
 
     # -- starting and the queue -------------------------------------------------
 
+    def in_flight(self, key):
+        """True from the moment a request is accepted for a backend until its reply is written.
+        The caller holds self.lock."""
+        be = self.backend
+        return key in self.claimed or (be is not None and key in be.inflight)
+
+    def release(self, job):
+        """Give the job's id back. Always before the reply that ends it is written: a client
+        that retries the id the moment it sees the reply must not be refused."""
+        with self.lock:
+            self.claimed.pop(job.key, None)
+
     def submit(self, job):
         """Forward `job` at once when a backend is ready, else queue it for the starter.
 
@@ -440,6 +467,7 @@ class Proxy(object):
                 self.last_activity = time.monotonic()
                 direct = be
             else:
+                self.claimed[job.key] = job
                 self.queue.append(job)
                 if self.starter is None:
                     self.starter = threading.Thread(target=self.start_loop, daemon=True)
@@ -476,6 +504,7 @@ class Proxy(object):
         with self.lock:
             jobs, self.queue = self.queue, []
         for job in jobs:
+            self.release(job)
             self.reply_error(job.rid, code, message)
 
     def serve(self, be):
@@ -488,6 +517,7 @@ class Proxy(object):
                 forwards = job.kind == "forward" or (job.kind == "tools_list" and self.cache.tools is None)
                 usable = be is self.backend and be.alive and not be.stopping
                 if forwards and usable:
+                    self.claimed.pop(job.key, None)     # same section: the id is never untracked
                     be.inflight[job.key] = job.rid
                     self.last_activity = time.monotonic()
                 elif forwards:
@@ -500,10 +530,12 @@ class Proxy(object):
             elif usable:
                 self.send_job(be, job)
             else:
+                self.release(job)
                 self.reply_error(job.rid, BACKEND_ERROR, "playwright backend could not start: it kept stopping")
 
     def answer_locally(self, job):
         """A cold-cache initialize or tools/list, answered from the cache the start filled."""
+        self.release(job)
         if job.kind == "initialize":
             if self.cache.initialize is None:       # cannot happen after a successful start
                 self.reply_error(job.rid, BACKEND_ERROR, "playwright backend gave no initialize result")

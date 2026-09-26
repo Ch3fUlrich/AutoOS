@@ -224,6 +224,14 @@ def strict_loads(text):
     return json.loads(text, parse_constant=_not_json, parse_float=_finite)
 
 
+def load_proxy_module():
+    """The proxy module itself, for the tests that drive `Proxy` in-process."""
+    spec = importlib.util.spec_from_file_location("playwright_mcp_lazy", PROXY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def alive(pid):
     try:
         os.kill(pid, 0)
@@ -607,9 +615,7 @@ class StarterSurvivesBugs(unittest.TestCase):
     """The starter thread's own guard: a bug must fail the queue, not leave the proxy unable to start."""
 
     def test_an_unexpected_error_while_starting_fails_the_queue_and_frees_the_starter(self):
-        spec = importlib.util.spec_from_file_location("playwright_mcp_lazy", PROXY)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = load_proxy_module()
         tmp = tempfile.mkdtemp(prefix="pwlazy-")
         self.addCleanup(shutil.rmtree, tmp, True)
         out = io.BytesIO()
@@ -691,6 +697,132 @@ class BackendRequestIds(LazyProxyCase):
         self.assertTrue(wait_until(lambda: len(self.events("answer")) == 1, 5))
         time.sleep(0.3)
         self.assertEqual([a["result"] for a in self.events("answer")], [self.ROOTS_A])
+
+
+class DuplicateIds(LazyProxyCase):
+    """A client id that is still in flight cannot be used again.
+
+    Two calls under one id would leave the slower one untracked, and the idle stop
+    could then kill it without an error ever reaching the client."""
+
+    def slow_call(self, s, rid, seconds):
+        s.send({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                "params": {"name": "browser_navigate", "arguments": {"sleep": seconds}}})
+
+    def refusal(self, s, rid):
+        return s.wait_for(lambda m: m.get("id") == rid and "error" in m, 5)
+
+    def test_a_second_call_with_an_id_in_flight_is_refused_and_the_first_still_completes(self):
+        self.prime_cache()
+        s = self.session(idle=1)
+        s.initialize()
+        self.slow_call(s, 7, 3.5)
+        self.assertTrue(wait_until(lambda: len(self.events("call")) == 1, 10))
+        pid = self.starts()[0]
+        self.slow_call(s, 7, 0)        # the fast twin: its answer would end the tracking of the slow one
+        refusal = self.refusal(s, 7)
+        self.assertEqual(refusal["error"]["code"], -32600)
+        self.assertIn("duplicate request id in flight", refusal["error"]["message"])
+        time.sleep(2.6)     # the idle period is 1 s: only a call that is still tracked keeps the backend
+        self.assertTrue(alive(pid), "the backend was stopped under a call that was still running")
+        first = s.wait_for(lambda m: m.get("id") == 7 and "result" in m, 10)
+        self.assertEqual(first["result"]["pid"], pid)
+        self.assertEqual(len(self.events("call")), 1, "the duplicate was forwarded to the backend")
+        self.assertEqual(len([m for m in s.messages if m and m.get("id") == 7]), 2,
+                         "expected one refusal and one answer under the id")
+
+    def test_a_duplicate_of_a_request_that_still_waits_for_the_backend_is_refused_too(self):
+        self.prime_cache()
+        # a changed serverInfo makes the start fetch tools/list, held until the client answers roots/list
+        s = self.session(idle=30, FAKE_VERSION="2.0.0", FAKE_ROOTS="1", FAKE_HOLD_TOOLS="1",
+                         AUTOOS_PLAYWRIGHT_HANDSHAKE_SECONDS="8")
+        s.initialize()
+        self.slow_call(s, 5, 0)
+        ask = s.wait_for(lambda m: m.get("method") == "roots/list", 10)
+        self.slow_call(s, 5, 0)        # the first one is queued behind the start
+        self.assertEqual(self.refusal(s, 5)["error"]["code"], -32600)
+        s.send({"jsonrpc": "2.0", "id": ask["id"], "result": {"roots": []}})
+        self.assertNotIn("error", s.wait_for(lambda m: m.get("id") == 5 and "result" in m, 10))
+        self.assertEqual(len(self.events("call")), 1, "the duplicate was forwarded to the backend")
+
+    def test_a_ping_with_an_id_in_flight_is_refused_as_well(self):
+        self.prime_cache()
+        s = self.session(idle=30)
+        s.initialize()
+        self.slow_call(s, 7, 1.5)
+        self.assertTrue(wait_until(lambda: len(self.events("call")) == 1, 10))
+        s.send({"jsonrpc": "2.0", "id": 7, "method": "ping"})
+        self.assertEqual(self.refusal(s, 7)["error"]["code"], -32600)
+        self.assertIn("result", s.wait_for(lambda m: m.get("id") == 7 and "result" in m, 10))
+
+    def test_an_id_is_free_again_once_the_backend_has_answered(self):
+        self.prime_cache()
+        s = self.session(idle=30)
+        s.initialize()
+        for _ in range(2):
+            s.messages.clear()      # `response` returns the first message with the id: forget the last answer
+            self.assertNotIn("error", self.call(s, rid=7))
+
+    def test_an_id_is_free_again_once_a_cold_start_answered_locally(self):
+        s = self.session(idle=30)
+        for _ in range(2):      # the first initialize waits for the backend and is answered from the cache
+            reply = s.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                             "clientInfo": {"name": "c", "version": "1"}}, rid=1)
+            self.assertNotIn("error", reply)
+            s.messages.clear()
+
+    def test_an_id_is_free_again_after_a_failed_start(self):
+        self.prime_cache()
+        s = self.session(idle=30, FAKE_NO_INIT="1", AUTOOS_PLAYWRIGHT_HANDSHAKE_SECONDS="1")
+        s.initialize()
+        for _ in range(2):
+            s.messages.clear()
+            self.assertEqual(self.call(s, rid=21, timeout=10)["error"]["code"], -32000,
+                             "the id was refused as a duplicate after its request had failed")
+
+
+class IdIsFreeBeforeTheReply(unittest.TestCase):
+    """The id is given back before the reply that ends its request is written, so a client
+    that retries the same id the moment the reply arrives is never refused."""
+
+    def setUp(self):
+        self.module = load_proxy_module()
+        tmp = tempfile.mkdtemp(prefix="pwlazy-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch.dict(os.environ, {"AUTOOS_PLAYWRIGHT_MCP_CACHE": os.path.join(tmp, "c", "h.json")}):
+            self.proxy = self.module.Proxy(io.BytesIO(), io.BytesIO())
+        self.free_at_reply = []
+        self.replied = threading.Event()
+
+        def spy(raw):
+            message = json.loads(raw)
+            with self.proxy.lock:
+                self.free_at_reply.append((message["id"], not self.proxy.in_flight(self.module.id_key(message["id"]))))
+            self.replied.set()
+        self.proxy.write_client = spy
+        self.dead = self.module.Backend(1, ["unused"], False, "unused")     # alive is False: never usable
+
+    def ask(self, method, params, ensure_backend):
+        self.proxy.ensure_backend = ensure_backend
+        line = json.dumps({"jsonrpc": "2.0", "id": 31, "method": method, "params": params}).encode()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.proxy.on_client_line(line)
+            self.assertTrue(self.replied.wait(5), "request 31 was never answered")
+        self.assertEqual(self.free_at_reply, [(31, True)], "the id was still in flight when its reply was written")
+
+    def test_a_failed_start(self):
+        def refuse():
+            raise self.module.StartError("no backend today")
+        self.ask("tools/call", {"name": "browser_navigate"}, refuse)
+
+    def test_a_backend_that_kept_stopping(self):
+        self.ask("tools/call", {"name": "browser_navigate"}, lambda: self.dead)
+
+    def test_an_answer_from_the_cache_after_a_cold_start(self):
+        def cold_start():
+            self.proxy.cache.initialize = {"protocolVersion": "2025-06-18", "capabilities": {}}
+            return self.dead
+        self.ask("initialize", {"protocolVersion": "2025-06-18"}, cold_start)
 
 
 class Negotiation(LazyProxyCase):
@@ -1027,9 +1159,7 @@ class Concurrency(LazyProxyCase):
 
 class DefaultCommand(unittest.TestCase):
     def test_default_backend_command_is_the_documented_argv(self):
-        spec = importlib.util.spec_from_file_location("playwright_mcp_lazy", PROXY)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = load_proxy_module()
         self.assertEqual(module.default_backend_command("x"), DOCKER_DEFAULT)
         self.assertEqual(module.default_backend_command("autoos-pw-1-2")[-2], "autoos-pw-1-2")
 
