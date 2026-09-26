@@ -116,8 +116,8 @@ def _default_run(pol: policy.Policy, host_entry: policy.HostEntry, argv: list[st
 
 
 _RULE_IDS = ("unknown-actor", "empty-argv", "argv-caps", "forbid-host", "env-injection",
-             "path-hijack", "use-host-alias", "no-sudo", "no-inline-shell", "destructive",
-             "git-option-injection")
+             "path-hijack", "use-host-alias", "docker-root", "no-sudo", "no-inline-shell",
+             "destructive", "git-option-injection")
 
 
 def host_policy(pol: policy.Policy) -> dict:

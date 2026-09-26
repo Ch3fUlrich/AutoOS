@@ -100,6 +100,7 @@ class DecisionTableTests(unittest.TestCase):
             "unknown-actor", "empty-argv", "argv-caps", "forbid-host",
             "env-injection", "path-hijack", "no-sudo", "no-inline-shell",
             "destructive", "git-option-injection", "use-host-alias",
+            "docker-root",
         }
         seen = {r["rule"] for r in self.rows if r["rule"]}
         self.assertEqual(seen, rule_ids, f"missing rows for: {rule_ids - seen}")

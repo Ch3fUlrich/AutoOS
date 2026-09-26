@@ -31,6 +31,10 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              (checked on every command head)
     use-host-alias           on a local host, ssh/scp/sftp always and rsync
                              with host:path (checked on every head)
+    docker-root              docker/podman run|create binding / or a system
+                             dir, --privileged/--pid=host/--userns=host/
+                             --cap-add/--device; exec with --privileged or
+                             -u 0/root (checked on every head)
     no-sudo                  sudo/su/doas/pkexec/run0 as any argv element's
                              basename, anywhere (accepted false positive:
                              `grep sudo file` denies); heads cover wrappers
@@ -242,6 +246,13 @@ def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str)
         alias_problem = _use_host_alias_problem(head, host_entry)
         if alias_problem:
             return Decision(False, "use-host-alias", (alias_problem,))
+
+    for head in heads:
+        if not head:
+            continue
+        dock_problem = _docker_root_problem(head)
+        if dock_problem:
+            return Decision(False, "docker-root", (dock_problem,))
 
     # no-sudo: any argv element whose basename is exactly sudo/su/doas/
     # pkexec/run0 denies, anywhere (review L1 high). Accepted false
@@ -863,6 +874,121 @@ def _use_host_alias_problem(head: Sequence[str], host_entry: HostEntry) -> str |
             if _looks_like_rsync_remote(tok):
                 return (f"rsync with a remote spec {tok!r} on a local host bypasses "
                         f"the host table; call host_run with host=<alias>")
+    return None
+
+
+def _is_system_bind_src(src: str) -> bool:
+    if not src:
+        return False
+    if len(src) > 1 and src.endswith("/"):
+        src = src.rstrip("/")
+    if src == "/":
+        return True
+    for sysdir in ("/etc", "/root", "/var", "/usr", "/boot", "/home", "/run"):
+        if src == sysdir or src.startswith(sysdir + "/"):
+            return True
+    return False
+
+
+def _docker_root_problem(head: Sequence[str]) -> str | None:
+    """Brief E (L1 high docker-root): docker/podman run|create binding / or
+    a system dir, --privileged, --pid=host, --userns=host, --cap-add,
+    --device; docker exec with --privileged or -u 0/root."""
+    if not head:
+        return None
+    base = _basename(head[0])
+    if base not in ("docker", "podman"):
+        return None
+    # subcommand: first non-flag token (skip global -H/--config/...).
+    i, n = 1, len(head)
+    while i < n:
+        tok = head[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok.startswith("-") and tok != "-":
+            if tok in ("--config", "-H", "--host", "--context", "--log-level", "-c"):
+                i += 2
+                continue
+            if tok.startswith(("--config=", "--host=", "--context=", "--log-level=")):
+                i += 1
+                continue
+            if len(tok) > 2 and tok[1] == "H":
+                i += 1
+                continue
+            i += 1
+            continue
+        break
+    if i >= n:
+        return None
+    sub, rest = head[i], list(head[i + 1:])
+    if sub in ("run", "create"):
+        m = len(rest)
+        j = 0
+        while j < m:
+            tok = rest[j]
+            if tok == "--privileged" or tok.startswith("--privileged="):
+                return f"{base} {sub} --privileged is host root"
+            if (tok == "--pid" and j + 1 < m and rest[j + 1] == "host") or \
+                    (tok.startswith("--pid=") and tok.split("=", 1)[1] == "host"):
+                return f"{base} {sub} --pid=host"
+            if (tok == "--userns" and j + 1 < m and rest[j + 1] == "host") or \
+                    (tok.startswith("--userns=") and tok.split("=", 1)[1] == "host"):
+                return f"{base} {sub} --userns=host"
+            if tok == "--cap-add" or tok.startswith("--cap-add="):
+                return f"{base} {sub} --cap-add"
+            if tok == "--device" or tok.startswith("--device="):
+                return f"{base} {sub} --device"
+            vol_val = None
+            is_mount = False
+            if tok == "-v" and j + 1 < m:
+                vol_val = rest[j + 1]
+            elif tok == "--volume" and j + 1 < m:
+                vol_val = rest[j + 1]
+            elif tok.startswith("--volume="):
+                vol_val = tok.split("=", 1)[1]
+            elif tok == "--mount" and j + 1 < m:
+                vol_val, is_mount = rest[j + 1], True
+            elif tok.startswith("--mount="):
+                vol_val, is_mount = tok.split("=", 1)[1], True
+            if vol_val:
+                if is_mount:
+                    src = None
+                    for part in vol_val.split(","):
+                        if "=" in part:
+                            k, v = part.split("=", 1)
+                            if k in ("src", "source"):
+                                src = v
+                                break
+                    if src and _is_system_bind_src(src):
+                        return f"{base} {sub} bind of system path {src!r}"
+                else:
+                    src = vol_val.split(":")[0]
+                    if src and _is_system_bind_src(src):
+                        return f"{base} {sub} bind of system path {src!r}"
+            j += 1
+        return None
+    if sub == "exec":
+        m = len(rest)
+        j = 0
+        while j < m:
+            tok = rest[j]
+            if tok == "--privileged" or tok.startswith("--privileged="):
+                return f"{base} exec --privileged"
+            if tok == "-u" and j + 1 < m:
+                if rest[j + 1].split(":")[0] in ("0", "root"):
+                    return f"{base} exec -u 0/root"
+            elif tok.startswith("-u") and len(tok) > 2 and not tok.startswith("--"):
+                if tok[2:].lstrip("=").split(":")[0] in ("0", "root"):
+                    return f"{base} exec -u 0/root"
+            elif tok == "--user" and j + 1 < m:
+                if rest[j + 1].split(":")[0] in ("0", "root"):
+                    return f"{base} exec --user 0/root"
+            elif tok.startswith("--user="):
+                if tok.split("=", 1)[1].split(":")[0] in ("0", "root"):
+                    return f"{base} exec --user 0/root"
+            j += 1
+        return None
     return None
 
 
