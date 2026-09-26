@@ -1979,6 +1979,27 @@ if it "backup: backup_file never overwrites a same-second backup"; then
     if (( ok )); then pass; else fail "backup_file overwrote or misnamed a backup"; fi
 fi
 
+# A name that is a DANGLING symlink is taken: `-e` follows the link and calls it
+# free, and cp would then write through the link (GNU cp refuses; other cps
+# create the link's target). backup_path tests -L too, and skips it.
+if it "backup: backup_path skips a candidate name that is a dangling symlink"; then
+    d="$(mktemp -d)"; f="$d/settings.json"; ok=1
+    printf 'A\n' >"$f"
+    base="$f.autoos-backup-20260101-000000"
+    ln -s "$d/nowhere-0" "$base"; ln -s "$d/nowhere-1" "$base-1"
+    [[ ! -e "$base" && -L "$base" ]] || { ok=0; echo "the fixture link does not dangle" >&2; }
+    got="$(backup_path "$f" 20260101-000000)"
+    [[ "$got" == "$base-2" ]] || { ok=0; echo "the next backup name is [${got##*/}], expected [settings.json.autoos-backup-20260101-000000-2]" >&2; }
+    # End to end: the copy lands under the free name and touches neither link.
+    p="$(backup_file "$f" 20260101-000000)"; rc=$?
+    { (( rc == 0 )) && [[ "$p" == "$base-2" && -f "$p" && ! -L "$p" ]] && cmp -s "$f" "$p"; } \
+        || { ok=0; echo "backup_file: rc=$rc path=[${p##*/}]" >&2; }
+    [[ "$(readlink "$base")|$(readlink "$base-1")" == "$d/nowhere-0|$d/nowhere-1" ]] || { ok=0; echo "a dangling link was rewritten" >&2; }
+    [[ ! -e "$d/nowhere-0" && ! -e "$d/nowhere-1" ]] || { ok=0; echo "the copy wrote through a link and created its target" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "backup_path treats a dangling symlink as a free name"; fi
+fi
+
 if it "backup: backup_file fails and prints nothing when the copy cannot be made"; then
     d="$(mktemp -d)"; ok=1
     out="$(backup_file "$d/does-not-exist" 20260101-000000 2>/dev/null)"; rc=$?
