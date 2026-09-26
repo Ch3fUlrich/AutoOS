@@ -5,7 +5,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env python3 <repo>/tools/hostexec.py serve --policy %h/.config/autoos/exec/policy.toml
+ExecStart=/usr/bin/env python3 <script-quoted> serve --policy %h/.config/autoos/exec/policy.toml
 EnvironmentFile=-%h/.config/autoos/exec/hostexec.env
 Restart=on-failure
 OOMPolicy=continue

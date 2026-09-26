@@ -140,9 +140,11 @@ backup_file() {
 
 # render_unit_template <out>: render the unit template with the repo path.
 # Shared by install and remove so --unregister can compare to what the
-# driver would write (foreign units are left untouched).
+# driver would write (foreign units are left untouched). The checkout path
+# in ExecStart is systemd-quoted: wrapped in double quotes, with `"` and
+# `\` escaped and `%` as `%%` (%h specifiers elsewhere stay untouched).
 render_unit_template() {
-    local out="$1" esc
+    local out="$1"
     if [[ "${AUTOOS_HOSTEXEC_BREAK:-}" == "no-template" ]]; then
         err "install: refusing: unit template is unavailable (test hook)"
         return 1
@@ -151,14 +153,24 @@ render_unit_template() {
         err "install: refusing: unit template not found: ${TEMPLATE}"
         return 1
     fi
-    esc="$REPO"
-    esc="${esc//\\/\\\\}"
-    esc="${esc//&/\\&}"
-    esc="${esc//|/\\|}"
-    if ! sed "s|<repo>|${esc}|g" "$TEMPLATE" > "$out"; then
-        err "install: refusing: could not render unit template"
-        return 1
-    fi
+    REPO_PATH="$REPO" TEMPLATE_PATH="$TEMPLATE" OUT_PATH="$out" python3 <<'PYEOF' || return 1
+import os
+repo = os.environ["REPO_PATH"]
+template_path = os.environ["TEMPLATE_PATH"]
+out_path = os.environ["OUT_PATH"]
+with open(template_path, encoding="utf-8") as fh:
+    text = fh.read()
+esc = repo.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+script_quoted = '"%s/tools/hostexec.py"' % esc
+if "<script-quoted>" in text:
+    text = text.replace("<script-quoted>", script_quoted)
+else:
+    # Back-compat for templates predating <script-quoted>.
+    text = text.replace("<repo>/tools/hostexec.py", script_quoted)
+text = text.replace("<repo>", repo)
+with open(out_path, "w", encoding="utf-8") as fh:
+    fh.write(text)
+PYEOF
     return 0
 }
 

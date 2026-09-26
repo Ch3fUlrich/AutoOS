@@ -107,7 +107,8 @@ cp configuration/hostexec/policy.example.toml ~/.config/autoos/exec/policy.toml 
 
     The driver renders `autoos-hostexec.service` with your checkout's
     path into `~/.config/systemd/user/` (backed up before any replace; a
-    second run reports "already current") and sets only its own
+    second run reports "already current"; the `ExecStart` checkout path
+    is systemd-quoted) and sets only its own
     `hostexec` entry in each client's config (backed up first, other keys
     untouched). Tokens come from `~/.config/autoos/exec/<client>.token`
     files (mode `0600`, refused otherwise; never on any argv or in

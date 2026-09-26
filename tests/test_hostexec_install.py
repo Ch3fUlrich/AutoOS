@@ -138,7 +138,8 @@ class UnitInstallTests(_DriverCase):
         unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
         self.assertTrue(unit.is_file(), f"unit not installed\nstdout:\n{proc.stdout}")
         text = unit.read_text(encoding="utf-8")
-        self.assertIn("tools/hostexec.py serve --policy %h/.config/autoos/exec/policy.toml", text)
+        self.assertIn("tools/hostexec.py", text)
+        self.assertIn("serve --policy %h/.config/autoos/exec/policy.toml", text)
         self.assertIn("EnvironmentFile=-%h/.config/autoos/exec/hostexec.env", text)
         self.assertIn("Restart=on-failure", text)
         self.assertIn("NoNewPrivileges=yes", text)
@@ -152,6 +153,42 @@ class UnitInstallTests(_DriverCase):
         self.assertIn("already current", again.stdout + again.stderr)
         self.assertEqual(unit.read_bytes(), before, "second run rewrote an identical unit")
         self.assert_no_enable_or_start()
+
+    def test_unit_quotes_checkout_path_with_space_and_percent(self):
+        # install.sh:unit -- ExecStart must quote/escape the checkout path
+        # (wrap in double quotes, escape \" and \, % as %%).
+        import shutil
+        import subprocess
+
+        fake_repo = Path(self.tmp.name) / "fake repo%name"
+        (fake_repo / "configuration" / "hostexec").mkdir(parents=True)
+        (fake_repo / "tools" / "hostexec").mkdir(parents=True)
+        shutil.copy(str(DRIVER), str(fake_repo / "configuration" / "hostexec" / "install.sh"))
+        shutil.copy(str(TEMPLATE), str(fake_repo / "configuration" / "hostexec" / "autoos-hostexec.service"))
+        (fake_repo / "tools" / "hostexec" / "server.py").write_text(
+            "DEFAULT_PORT = 8765\n", encoding="utf-8"
+        )
+        fake_driver = fake_repo / "configuration" / "hostexec" / "install.sh"
+        env = dict(self.env)
+        # Keep TEST_PORT out so the unit render path is exercised plainly.
+        proc = subprocess.run(
+            ["bash", str(fake_driver), "--unit"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(fake_repo),
+        )
+        self.assertEqual(proc.returncode, 0, f"fake repo install failed\n{proc.stdout}\n{proc.stderr}")
+        unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
+        text = unit.read_text(encoding="utf-8")
+        # % in the checkout path must be %% in the unit, %h specifiers stay.
+        self.assertIn("%%", text)
+        self.assertIn("%h/.config/autoos/exec/policy.toml", text)
+        self.assertNotIn("%%h", text)
+        # The script path argument must be quoted (space in checkout).
+        exec_line = next(l for l in text.splitlines() if l.startswith("ExecStart="))
+        self.assertIn('"', exec_line)
+        self.assertIn("fake repo%%name/tools/hostexec.py", exec_line)
 
     def test_differing_unit_is_backed_up_before_replace(self):
         unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
