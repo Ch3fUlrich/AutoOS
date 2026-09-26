@@ -177,6 +177,7 @@ Test-Case 'registry model reads project a fixture with no llm-models.json presen
                 context_advertised = 1048576; output_max = 131072
                 reasoning = $true; price_in = 1e-07; price_out = 2e-07
                 price_cache_read = 2e-09
+                default_for = 'muse_key'
             }
             'openrouter-nemotron-ultra' = [ordered]@{
                 id = 'openrouter-nemotron-ultra'; display_name = 'Nemotron 3 Ultra (Free)'
@@ -189,58 +190,102 @@ Test-Case 'registry model reads project a fixture with no llm-models.json presen
                 paid_price_in = 6e-07; paid_price_out = 2.4e-06
                 price_cache_read = 1.2e-07
             }
+            'ollama-qwen2.5-coder' = [ordered]@{
+                id = 'ollama-qwen2.5-coder'; display_name = 'Qwen 2.5 Coder 7B (Local)'
+                direct = [ordered]@{
+                    provider = 'ollama'; base_url = 'http://127.0.0.1:11434/v1'
+                    model = 'ollama/qwen2.5-coder:7b'
+                    npm = '@ai-sdk/openai-compatible'
+                }
+                context_advertised = 32768; output_max = 8192
+                reasoning = $false; price_in = 0; price_out = 0
+                default_for = 'fallback'
+            }
+            'command-a-03-2025' = [ordered]@{
+                id = 'command-a-03-2025'; display_name = 'Command A'
+                context_advertised = 131072; output_max = 16384
+                reasoning = $false; price_in = 0.0; price_out = 0.0
+            }
         }
     }
     $fixture | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $fixtureCatalog 'ai-registry.json') -Encoding UTF8
     try {
         Assert-True (-not (Test-Path (Join-Path $fixtureCatalog 'llm-models.json'))) 'fixture must run with no llm-models.json present'
-        # The read under test: the psm1 model block loads the registry map
-        # (keyed by id) and projects the legacy field shape from registry
+        # The REAL psm1 function (not an inlined copy): it loads the registry
+        # map (keyed by id) and projects the legacy field shape from registry
         # fields (mapping doc section 1), never from llm-models.json.
         $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
         Assert-True ($src -match 'catalog\\ai-registry\.json') 'psm1 model read is not on the registry'
+        Assert-True ($src -match 'legacy_models') 'psm1 does not call the shared legacy_models helper'
+        Assert-True ($src -notmatch 'def _legacy_model') 'psm1 still carries a local _legacy_model copy'
         $reg = (Get-Content -Path (Join-Path $fixtureCatalog 'ai-registry.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models
+        $got = @(Get-AutoOSLegacyModels -RegistryModels $reg)
         $repoById = @{}
-        foreach ($modelProp in $reg.PSObject.Properties) {
-            $entryId = $modelProp.Name
-            $entryData = $modelProp.Value
-            $entryProps = $entryData.PSObject.Properties
-            $legacy = [pscustomobject]@{
-                id = $entryId
-                name = if ($null -ne $entryProps['display_name']) { $entryData.display_name } else { $entryId }
-                context = $entryData.context_advertised
-                output = $entryData.output_max
-                reasoning = [bool]$entryData.reasoning
-                input_price = $entryData.price_in
-                output_price = $entryData.price_out
-                openrouter_id = $null
-                direct = $null
-            }
-            if ($null -ne $entryProps['direct'] -and $null -ne $entryProps['direct'].Value) {
-                $directVal = $entryProps['direct'].Value
-                $providerProp = $directVal.PSObject.Properties['provider']
-                $providerName = if ($null -ne $providerProp) { $providerProp.Value } else { $null }
-                if ($providerName -eq 'openrouter') {
-                    $modelProp2 = $directVal.PSObject.Properties['model']
-                    if ($null -ne $modelProp2) { $legacy.openrouter_id = $modelProp2.Value }
-                } else {
-                    $legacy.direct = $directVal
-                }
-            }
-            if ($null -ne $entryProps['price_cache_read']) { Add-Member -InputObject $legacy -NotePropertyName 'cache_read_price' -NotePropertyValue $entryData.price_cache_read }
-            if ($null -ne $entryProps['paid_price_in']) { Add-Member -InputObject $legacy -NotePropertyName 'paid_input_price' -NotePropertyValue $entryData.paid_price_in }
-            if ($null -ne $entryProps['paid_price_out']) { Add-Member -InputObject $legacy -NotePropertyName 'paid_output_price' -NotePropertyValue $entryData.paid_price_out }
-            $repoById[$entryId] = $legacy
-        }
+        foreach ($m in $got) { $repoById[$m.id] = $m }
+        Assert-True ($repoById.Count -eq 3) "expected 3 projected models, got $($repoById.Count)"
+        Assert-True (-not $repoById.ContainsKey('command-a-03-2025')) 'a model without a direct block must be skipped'
         Assert-True ($repoById['muse-spark'].name -eq 'Muse Spark 1.3 Contributor') 'muse-spark name wrong'
         Assert-True ($repoById['muse-spark'].context -eq 1048576 -and $repoById['muse-spark'].output -eq 131072) 'muse-spark windows wrong'
         Assert-True ($repoById['muse-spark'].direct.provider -eq 'meta') 'muse-spark direct wrong'
-        Assert-True ($null -eq $repoById['muse-spark'].openrouter_id) 'muse-spark must have no openrouter_id'
-        Assert-True ($repoById['openrouter-nemotron-ultra'].openrouter_id -eq 'nvidia/nemotron-3-ultra-550b-a55b:free') 'openrouter_id not derived from direct.model'
-        Assert-True ($null -eq $repoById['openrouter-nemotron-ultra'].direct) 'openrouter entry must have no direct'
-        Assert-True ($repoById['openrouter-nemotron-ultra'].paid_input_price -eq 6e-07) 'paid price not mapped'
+        Assert-True ($null -eq $repoById['muse-spark'].PSObject.Properties['openrouter_id']) 'muse-spark must have no openrouter_id'
+        Assert-True ($repoById['muse-spark'].PSObject.Properties['default_for'].Value -eq 'muse_key') 'muse-spark default_for wrong'
+        Assert-True ($repoById['openrouter-nemotron-ultra'].PSObject.Properties['openrouter_id'].Value -eq 'nvidia/nemotron-3-ultra-550b-a55b:free') 'openrouter_id not derived from direct.model'
+        Assert-True ($null -eq $repoById['openrouter-nemotron-ultra'].PSObject.Properties['direct']) 'openrouter entry must have no direct'
+        Assert-True ($repoById['openrouter-nemotron-ultra'].PSObject.Properties['paid_input_price'].Value -eq 6e-07) 'paid price not mapped'
+        Assert-True ($repoById['ollama-qwen2.5-coder'].direct.model -eq 'ollama/qwen2.5-coder:7b') 'ollama direct wrong'
+        Assert-True ($repoById['ollama-qwen2.5-coder'].PSObject.Properties['default_for'].Value -eq 'fallback') 'ollama default_for wrong'
+        Assert-True ($null -eq $repoById['ollama-qwen2.5-coder'].PSObject.Properties['reasoning']) 'falsy reasoning must stay absent'
     } finally {
         Remove-Item -Recurse -Force -Path $fixtureDir -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'registry model reads match python legacy_models on the real catalog' {
+    if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { Skip 'python3 absent'; return }
+    $tool = Join-Path $Root 'tools\registry.py'
+    $catalog = Join-Path $Root 'catalog\ai-registry.json'
+    $pyJson = & python3 -c "import importlib.util,json,sys;spec=importlib.util.spec_from_file_location('r',sys.argv[1]);r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r);print(json.dumps(r.legacy_models(json.load(open(sys.argv[2],encoding='utf-8')))))" $tool $catalog
+    Assert-True ($LASTEXITCODE -eq 0) 'python3 legacy_models failed'
+    $pyModels = @($pyJson | ConvertFrom-Json)
+    $regModels = (Get-Content -Path $catalog -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    $psModels = @(Get-AutoOSLegacyModels -RegistryModels $regModels)
+    $pyById = @{}
+    foreach ($m in $pyModels) { $pyById[$m.id] = $m }
+    $psById = @{}
+    foreach ($m in $psModels) { $psById[$m.id] = $m }
+    $missing = @(@($pyById.Keys) | Where-Object { -not $psById.ContainsKey($_) })
+    $extra = @(@($psById.Keys) | Where-Object { -not $pyById.ContainsKey($_) })
+    Assert-True ($missing.Count -eq 0 -and $extra.Count -eq 0) ("id sets differ: missing [$($missing -join ',')] extra [$($extra -join ',')]")
+    foreach ($id in $pyById.Keys) {
+        $py = $pyById[$id]
+        $ps = $psById[$id]
+        Assert-True ($ps.name -eq $py.name) "$id name"
+        Assert-True ($ps.context -eq $py.context -and $ps.output -eq $py.output) "$id windows"
+        Assert-True ($ps.input_price -eq $py.input_price -and $ps.output_price -eq $py.output_price) "$id prices"
+        $psReason = $ps.PSObject.Properties['reasoning']
+        $pyReason = $py.PSObject.Properties['reasoning']
+        Assert-True (([bool]($psReason -and $psReason.Value)) -eq ([bool]($pyReason -and $pyReason.Value))) "$id reasoning"
+        $psOr = $ps.PSObject.Properties['openrouter_id']
+        $pyOr = $py.PSObject.Properties['openrouter_id']
+        $psOrVal = if ($psOr) { $psOr.Value } else { $null }
+        $pyOrVal = if ($pyOr) { $pyOr.Value } else { $null }
+        Assert-True ($psOrVal -eq $pyOrVal) "$id openrouter_id"
+        $psDirect = $ps.PSObject.Properties['direct']
+        $pyDirect = $py.PSObject.Properties['direct']
+        if ($null -eq $psDirect -and $null -eq $pyDirect) {
+            Assert-True $true "$id direct both absent"
+        } elseif ($null -ne $psDirect -and $null -ne $pyDirect) {
+            Assert-True (($psDirect.Value | ConvertTo-Json -Depth 10 -Compress) -eq ($pyDirect.Value | ConvertTo-Json -Depth 10 -Compress)) "$id direct"
+        } else {
+            throw "$id direct presence differs"
+        }
+        foreach ($opt in @('cache_read_price', 'paid_input_price', 'paid_output_price', 'default_for')) {
+            $psOpt = $ps.PSObject.Properties[$opt]
+            $pyOpt = $py.PSObject.Properties[$opt]
+            $psOptVal = if ($psOpt) { $psOpt.Value } else { $null }
+            $pyOptVal = if ($pyOpt) { $pyOpt.Value } else { $null }
+            Assert-True ($psOptVal -eq $pyOptVal) "$id $opt"
+        }
     }
 }
 
