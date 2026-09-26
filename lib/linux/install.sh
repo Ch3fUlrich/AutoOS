@@ -5081,8 +5081,12 @@ setup_wsl_agent_home() {
             done
             ui_info "CAO home $cao_legacy is on drvfs (no FIFO support) - relocating live state to $cao_native"
             if ! cp -a "$cao_legacy" "$backup"; then
+                # A partial copy would pass for a good backup later. Return 0:
+                # this runs as a postInstall step under set -e, and a failed
+                # relocation must not abort the rest of the install queue.
+                rm -rf -- "$backup"
                 ui_err "could not back up legacy CAO home $cao_legacy - not relocating it"
-                return 1
+                return 0
             fi
             for sub in agent-context agent-store db workflows skills profiles; do
                 [[ -d "$cao_legacy/$sub" ]] && cp -a "$cao_legacy/$sub/." "$cao_native/$sub/"

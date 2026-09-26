@@ -874,3 +874,29 @@ if it "backup collision: CAO relocation preserves existing same-second backups";
     if (( ok )); then pass; else fail "CAO relocation overwrote or nested a same-second backup"; fi
 fi
 
+if it "backup collision: a failed CAO backup copy leaves no partial backup and does not abort the install"; then
+    tmp="$(mktemp -d)"
+    legacy="$tmp/.aws/cli-agent-orchestrator"
+    mkdir -p "$legacy/db" "$tmp/bin"
+    printf 'live\n' >"$legacy/db/state"
+    printf '#!/bin/sh\nprintf "%%s\\n" 20260101-000000\n' >"$tmp/bin/date"
+    printf '#!/bin/sh\nexit 1\n' >"$tmp/bin/python3"
+    # cp stand-in: leaves a partial destination behind, then fails.
+    printf '#!/bin/sh\nfor a; do last="$a"; done\nmkdir -p "$last/partial"\nexit 1\n' >"$tmp/bin/cp"
+    chmod +x "$tmp/bin/date" "$tmp/bin/python3" "$tmp/bin/cp"
+    (
+        PATH="$tmp/bin:$PATH"
+        SYS_HOME="$tmp"
+        SYS_IS_WSL=1
+        AUTOOS_DRY_RUN=0
+        setup_wsl_agent_home >/dev/null 2>&1
+    )
+    rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "rc=$rc (a failed backup must not abort the install queue)" >&2; }
+    [[ ! -e "$legacy.backup-20260101-000000" ]] || { ok=0; echo "partial backup left behind" >&2; }
+    [[ "$(cat "$legacy/db/state" 2>/dev/null)" == live ]] || { ok=0; echo "legacy state changed" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "failed CAO backup left a partial copy or aborted"; fi
+fi
+
