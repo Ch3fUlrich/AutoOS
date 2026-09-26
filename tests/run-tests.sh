@@ -7080,6 +7080,113 @@ if it "no inline onclick handler is introduced in the web UI"; then
     if [ "$n" = "0" ]; then pass; else fail "$n inline onclick handler(s) left"; fi
 fi
 
+describe "herdr-sessions"
+
+# Boot-restore engine for Claude Code sessions in Herdr
+# (configuration/herdr-sessions/, imported from the Server repo's
+# Applications/herdr-sessions at 12f0ff7). Not wired into the catalog yet
+# (separate lane). Dry-run only: no live systemctl, no live herdr --
+# install.sh --dry-run never execs either (its `run()` wrapper only echoes
+# "would: ...", it never calls systemctl or herdr for real), so nothing here
+# needs an env/PATH stub the way a live-call test would.
+if it "herdr-sessions: smoke (bash -n, py_compile, install --dry-run)"; then
+    out="$(bash configuration/herdr-sessions/tests/test_smoke.sh 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# Bug (b) from the proposal doc: which uuid a restored pane resumes, when a
+# background job's transcript shares the pane's own directory (unit tests).
+if it "herdr-sessions: uuid picking excludes background sessions (unit tests)"; then
+    out="$(python3 tests/test_herdr_sessions.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# ADDENDUM item 7: --profile accepts a path as well as a name under profiles/,
+# a re-run reports "already current" (cmp) or backs up a differing unit before
+# replacing it, and --unregister removes exactly what was installed. These
+# ARE real (non-dry-run) installs -- into a throwaway HOME, with systemctl and
+# loginctl stubbed via PATH so no live systemd is ever touched.
+hs_stub_bin() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/systemctl" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    cat > "$dir/loginctl" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "show-user" ] && echo yes
+exit 0
+STUB
+    chmod +x "$dir/systemctl" "$dir/loginctl"
+}
+
+if it "herdr-sessions: install.sh accepts an absolute-path profile, not only a name"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"; rc=$?
+    got="$(grep -h HERDR_PROFILE "$tmp/home/.config/systemd/user/herdr-sessions-restore.service" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=$tmp/site.conf" ]; then
+        pass
+    else
+        fail "rc=$rc got=[$got] out=$out"
+    fi
+fi
+
+if it "herdr-sessions: re-run reports already current; a drifted unit is backed up before replacing"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    rerun="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"
+    echo "# hand edit" >> "$unit"
+    drift="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"
+    backups="$(ls "$tmp/home/.config/systemd/user" | grep -c autoos-backup || true)"
+    rm -rf "$tmp"
+    ok=1
+    printf '%s\n' "$rerun" | grep -q "herdr-sessions-restore.service: already current" || ok=0
+    printf '%s\n' "$drift" | grep -q "herdr-sessions-restore.service: differs from the installed copy -- backed up" || ok=0
+    [ "$backups" = "1" ] || ok=0
+    if [ "$ok" = "1" ]; then pass; else fail "rerun=[$rerun] drift=[$drift] backups=$backups"; fi
+fi
+
+if it "herdr-sessions: --unregister removes what it installed, twice is 'nothing to remove'"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    first="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"
+    left="$(ls "$tmp/home/.config/systemd/user" 2>/dev/null | grep -vc autoos-backup || true)"
+    second="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"
+    rm -rf "$tmp"
+    if printf '%s\n' "$first" | grep -q "removed 5 unit(s)" && [ "$left" = "0" ] && printf '%s\n' "$second" | grep -q "nothing to remove"; then
+        pass
+    else
+        fail "first=[$first] left=$left second=[$second]"
+    fi
+fi
+
+# Item 8 (L0): a single pane process killed by the kernel OOM killer must not
+# take the whole herdr-server unit down with it -- systemd's default
+# OOMPolicy=stop did exactly that, twice, ending every pane in the session.
+if it "herdr-sessions: both server unit templates set OOMPolicy=continue so an OOM-killed pane doesn't stop the whole service"; then
+    ok=1
+    for f in configuration/herdr-sessions/systemd/user/herdr-server.service configuration/herdr-sessions/systemd/system/herdr-server.service; do
+        grep -q '^OOMPolicy=continue$' "$f" || { ok=0; echo "missing OOMPolicy=continue in $f" >&2; }
+    done
+    if (( ok )); then pass; else fail "OOMPolicy=continue missing from one or both server unit templates"; fi
+fi
+
 describe "wsl detection"
 
 if it "WSL is detected when running under it"; then

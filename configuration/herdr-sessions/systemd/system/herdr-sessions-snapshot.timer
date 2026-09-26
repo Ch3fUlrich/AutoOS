@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodic snapshot of the live Claude Code session
+Documentation=file://@APPDIR@/README.md
+
+[Timer]
+# Wall-clock OnCalendar, NOT monotonic OnUnitActiveSec: a monotonic-only timer
+# stops scheduling once boot+interval passes without the service running in the
+# current boot, which silently ends the snapshots.
+OnBootSec=3min
+OnCalendar=*:0/5
+Persistent=true
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

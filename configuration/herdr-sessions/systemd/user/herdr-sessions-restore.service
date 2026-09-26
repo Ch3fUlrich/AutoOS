@@ -1,0 +1,33 @@
+# Restore the Claude sessions that were live before the last shutdown, into the
+# same panes and directories, resuming the FULL conversation (never a summary).
+#
+# Ordering: herdr-server must own the panes before anything can be started in
+# them; the script additionally waits for the socket, because "unit started" and
+# "socket accepting calls" are not the same instant.
+#
+# @PROFILE_PATH@ below is substituted by install.sh at install time (--profile
+# flag, resolved to an absolute path); the checked-in file is a template, not
+# something to edit and copy by hand.
+# Install: see ../../install.sh --profile <yours>
+[Unit]
+Description=Restore Claude Code sessions into Herdr after boot
+Documentation=file://@APPDIR@/README.md
+After=herdr-server.service network-online.target
+Requires=herdr-server.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=HERDR_PROFILE=@PROFILE_PATH@
+ExecStart=@APPDIR@/herdr-sessions.sh restore
+# Several sessions, each waiting for its resume prompt, on a box that has just
+# booted: give it room rather than half-restoring.
+TimeoutStartSec=900
+# Without these the script output does not reach the journal, and the
+# troubleshooting commands in the README show nothing.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
