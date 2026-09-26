@@ -1,13 +1,14 @@
 {
   "clients": {
     "agy": {
-      "$comment": "skills_dir unmeasured - see clients.qwen's comment. signin_check is filled from tools/autoos_clients.py's own signin_probe below, not this table.",
+      "$comment": "skills_dir unmeasured - see clients.qwen's comment. signin_check is filled from tools/autoos_clients.py's own signin_probe below, not this table. unavailable_until 'agy 429 Individual quota reached, resets 110h47m at 2026-09-26T19:17Z (work/L1-routing/review-isofix.out)'.",
       "binary": "agy",
       "gateway_mode": "none",
       "id": "agy",
       "signin_check": "agy models",
       "skills_dir": null,
-      "supports_effort": false
+      "supports_effort": false,
+      "unavailable_until": "2026-10-01T09:05:00Z"
     },
     "claude": {
       "$comment": "No signin probe exists in tools/autoos_clients.py yet (auth is interactive 'claude login'); signin_check stays null until one does. supports_effort=false: no effort/reasoning flag in CLIENTS['claude'].modes.",

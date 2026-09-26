@@ -217,41 +217,58 @@ AGENTIC_KINDS = ("implement", "debug", "bulk")
 _NO_ROUTE_HINTS = ["sign in", "narrow paths", "split the task", "override"]
 
 
-def _serving_legs_raw(route, registry):
+def _now_or_default(now):
+    """`now` when the caller gave one, else the current UTC clock reading.
+
+    The resolver core is pure: only the entry points default ``now``, and only
+    so a caller that never knew about ``unavailable_until`` keeps working. One
+    reading is threaded down the whole call chain (filter -> usable legs ->
+    score -> tie-break), so every leg of one plan is judged at the same
+    instant.
+    """
+    return datetime.now(timezone.utc) if now is None else now
+
+
+def _serving_legs_raw(route, registry, now=None):
     """Serving legs of `route`, keeping each leg exactly as written in ``legs``.
 
     Same filtering as `serving_legs` (an ``unavailable_legs`` entry or a
-    provider-wide ``available: false`` drops it; an unresolvable leg raises
-    ValueError). Returns ``(leg, provider_id, model_id)`` so a caller that
-    needs the raw leg string too -- e.g. to look it up in the tool_calls
+    provider-wide entry that is unavailable at `now` drops it; an unresolvable
+    leg raises ValueError). ``now`` defaults to the clock through
+    `_now_or_default`. Returns ``(leg, provider_id, model_id)`` so a caller
+    that needs the raw leg string too -- e.g. to look it up in the tool_calls
     overlay, an omniroute_id alias included -- does not have to re-derive it
     from the resolved ids (which would lose that alias).
     """
+    now = _now_or_default(now)
     providers = registry["providers"]
     unavailable = route.get("unavailable_legs") or {}
     out = []
     for leg in route.get("legs") or []:
         # One leg-resolution rule for the validator and the resolver.
         provider_id, model_id = resolve_leg(leg, registry)
-        if leg in unavailable:
+        # `unavailable_now` is the one place that reads `available` and
+        # `unavailable_until` (rule R-gateway-12): an entry with a future
+        # until is down, one whose until has passed is up again.
+        if unavailable_now(unavailable.get(leg), now):
             continue
-        if providers[provider_id].get("available") is False:
+        if unavailable_now(providers[provider_id], now):
             continue
         out.append((leg, provider_id, model_id))
     return out
 
 
-def serving_legs(route, registry):
+def serving_legs(route, registry, now=None):
     """Available ``(provider_id, model_id)`` legs of `route`, in leg order.
 
     A leg resolves through its provider id (or that provider's omniroute_id)
-    and its model id; an ``unavailable_legs`` entry or a provider-wide
-    ``available: false`` drops it. A leg that resolves to nothing raises
-    ValueError: a broken registry must fail closed, never silently drop a
-    candidate.
+    and its model id; an ``unavailable_legs`` entry or a provider-wide entry
+    that is unavailable at `now` drops it. A leg that resolves to nothing
+    raises ValueError: a broken registry must fail closed, never silently drop
+    a candidate. ``now`` defaults to the clock through `_now_or_default`.
     """
     return [(provider_id, model_id)
-           for _, provider_id, model_id in _serving_legs_raw(route, registry)]
+           for _, provider_id, model_id in _serving_legs_raw(route, registry, now)]
 
 
 def _tool_calls_value(leg, model_id, registry, overlay):
@@ -300,23 +317,94 @@ def usable_context(model_id, registry, overlay):
     return int(registry["models"][model_id]["context_usable"]["tokens"])
 
 
-def _client_reason(client_state, client):
-    """The sign-in filter's reason for `client`, or None when it passes.
+def _client_reason(client_state, client, registry=None, now=None):
+    """The client filter's reason for `client`, or None when it passes.
 
     A client absent from `client_state` is not installed; an installed client
     whose ``signed_in`` is explicitly False is not signed in. ``signed_in``
     None (no probe) does not remove a route -- only a measured False does.
+
+    `registry`'s ``clients.<id>`` entry adds the time-aware outage (brief
+    UNTIL, 2026-09-26; rule R-gateway-12):
+
+    - a future ``unavailable_until`` removes the client with the date named
+      (``client: <id> unavailable until <date>``);
+    - ``available: false`` with no until removes it forever
+      (``client: <id> unavailable``);
+    - ``available: false`` whose until has passed *stays removed*, but the
+      reason says ``re-probe: <id> unavailable_until passed`` -- unlike a
+      provider, an own-account client does not come back without a fresh
+      sign-in probe, so the operator is told to re-probe rather than the
+      route silently returning.
+
+    `now` defaults to the clock through `_now_or_default`.
     """
     entry = (client_state or {}).get(client) or {}
     if not entry.get("installed"):
         return "client: %s not installed" % client
     if entry.get("signed_in") is False:
         return "client: %s not signed in" % client
+
+    now = _now_or_default(now)
+    client_entry = ((registry or {}).get("clients") or {}).get(client) or {}
+    if unavailable_now(client_entry, now):
+        until = client_entry.get("unavailable_until")
+        if until is not None:
+            return "client: %s unavailable until %s" % (client, until)
+        return "client: %s unavailable" % client
+    if (client_entry.get("available") is False
+            and client_entry.get("unavailable_until") is not None):
+        return "re-probe: %s unavailable_until passed" % client
     return None
 
 
+def _unavailable_reason(entry, name):
+    """The hard "unavailable" reason for `entry`, naming `name` and any date.
+
+    ``name`` is the leg string for a route's own ``unavailable_legs`` entry
+    and the provider id for a provider-wide entry, so a reader can tell which
+    surface dropped the leg. An entry that carries an ``unavailable_until``
+    names it (``unavailable: <name> until <date>``); an entry that only says
+    ``available: false`` stays down forever (bare ``unavailable``).
+    """
+    until = entry.get("unavailable_until") if isinstance(entry, dict) else None
+    if until is not None:
+        return "unavailable: %s until %s" % (name, until)
+    return "unavailable"
+
+
+def _leg_availability(leg, provider_id, unavailable, registry, now):
+    """``(hard_reason, re_probe_notes)`` for `leg` at `now`.
+
+    A hard reason drops the leg: its own ``unavailable_legs`` entry or its
+    provider is unavailable at `now` (`registry.unavailable_now`). The leg's
+    own entry is checked first because it names the leg (``unavailable:
+    cheap/fast until ...``); a provider-wide entry names the provider
+    (``unavailable: quota until ...``).
+
+    An entry whose ``unavailable_until`` has passed is available again and
+    yields no hard reason, only a ``re-probe: <name> unavailable_until passed``
+    note for the caller to surface -- a temporary outage that timed out comes
+    back on its own, but a probe should confirm it (R-gateway-12).
+    """
+    entry = unavailable.get(leg)
+    if unavailable_now(entry, now):
+        return _unavailable_reason(entry, leg), []
+
+    notes = []
+    if isinstance(entry, dict) and entry.get("unavailable_until") is not None:
+        notes.append("re-probe: %s unavailable_until passed" % leg)
+
+    provider = registry["providers"][provider_id]
+    if unavailable_now(provider, now):
+        return _unavailable_reason(provider, provider_id), notes
+    if provider.get("unavailable_until") is not None:
+        notes.append("re-probe: %s unavailable_until passed" % provider_id)
+    return None, notes
+
+
 def usable_legs(route, card, features, client_state, registry, overlay,
-               client="opencode"):
+               client="opencode", now=None):
     """``(legs, skipped)`` -- FT (fall-through, spec 2026-09-26 operator
     decision): the serving legs of `route` that also pass every *per-leg*
     filter, and why each rejected leg did not.
@@ -343,20 +431,45 @@ def usable_legs(route, card, features, client_state, registry, overlay,
       through to the next leg of the route at run time on a 429; the
       resolver does not need to pre-empt that for a leg it already trusts.
 
+    Availability (brief UNTIL, 2026-09-26) is a *per-leg* filter too, and this
+    iterates every leg as written in ``route["legs"]`` -- not the
+    `serving_legs` output -- precisely so an unavailable leg can be named in
+    ``skipped`` instead of vanishing. A leg whose own ``unavailable_legs``
+    entry or whose provider is unavailable at `now`
+    (`registry.unavailable_now`) is skipped with reason ``unavailable: <name>
+    until <date>`` (or a bare ``unavailable`` when it stays down forever). A
+    leg that comes back because its ``unavailable_until`` has passed carries a
+    ``re-probe: <name> unavailable_until passed`` note -- informational, it is
+    still usable and is appended to ``legs``.
+
     None of these remove the *route* by themselves -- ``filter_routes`` does
     that only when every leg is unusable (``legs`` comes back empty).
     ``client_state`` is accepted for symmetry with ``filter_routes`` (the
     client installed/signed-in check stays route-level, spec FT point 2; it
-    plays no part in a per-leg reason here).
+    plays no part in a per-leg reason here). `now` defaults to the clock
+    through `_now_or_default`.
     """
+    now = _now_or_default(now)
     if "need_tokens" not in features:
         raise ValueError("missing feature 'need_tokens' in features")
     need = features["need_tokens"]
     agentic = card.get("kind") in AGENTIC_KINDS
+    unavailable = route.get("unavailable_legs") or {}
 
     legs = []
     skipped = {}
-    for leg, provider_id, model_id in _serving_legs_raw(route, registry):
+    for leg in route.get("legs") or []:
+        # One leg-resolution rule for the validator and the resolver. Every
+        # leg is resolved, unavailable or not, so a broken registry fails
+        # closed here exactly as it does through `serving_legs`.
+        provider_id, model_id = resolve_leg(leg, registry)
+
+        hard, notes = _leg_availability(leg, provider_id, unavailable,
+                                        registry, now)
+        if hard is not None:
+            skipped[leg] = [hard]
+            continue
+
         reasons = []
 
         usable = usable_context(model_id, registry, overlay)
@@ -379,15 +492,17 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             reasons.append("rate_limited: %s/%s (429)" % (provider_id, model_id))
 
         if reasons:
-            skipped[leg] = reasons
+            skipped[leg] = notes + reasons
         else:
             legs.append((provider_id, model_id))
+            if notes:
+                skipped[leg] = notes
 
     return legs, skipped
 
 
 def filter_routes(card, features, client_state, registry, overlay,
-                  client="opencode"):
+                  client="opencode", now=None):
     """Split routes into ``(survivors, removed)`` per spec 5.3 step 1, as
     amended by FT (2026-09-26 operator decision): "a leg that is
     rate-limited or unproven makes the combo fall through to the next proven
@@ -408,11 +523,14 @@ def filter_routes(card, features, client_state, registry, overlay,
     "Free first, private never": a free pool must never be a fallback for a
     private prompt either, so it disqualifies the whole route even when
     another leg of it would otherwise be perfectly usable); client
-    installed/signed in.
+    installed/signed in (a client marked ``unavailable_until``/``available:
+    false`` in ``registry["clients"]`` is folded into that same reason by
+    ``_client_reason``).
 
     Every other filter (context, tool_calls, client_bound, the rate-limit
-    overlay) is now per-leg (``usable_legs``): it no longer removes the
-    route by itself. The route is removed only when ``usable_legs`` comes
+    overlay, an unavailable leg/provider) is now per-leg (``usable_legs``): it
+    no longer removes the route by itself. The route is removed only when
+    ``usable_legs`` comes
     back with no usable leg at all, with reason ``"no usable leg: " +
     "<leg>: <reasons>" for each skipped leg, joined by "; "`` -- the same
     "no usable leg" reason covers a route with zero serving legs to begin
@@ -421,13 +539,13 @@ def filter_routes(card, features, client_state, registry, overlay,
     """
     if "need_tokens" not in features:
         raise ValueError("missing feature 'need_tokens' in features")
+    now = _now_or_default(now)
     privacy_sensitive = card.get("privacy") == "sensitive"
-    client_reason = _client_reason(client_state, client)
+    client_reason = _client_reason(client_state, client, registry, now)
 
     survivors = []
     removed = {}
     for route_id, route in registry["routes"].items():
-        legs = serving_legs(route, registry)
         reasons = []
 
         if route.get("retired"):
@@ -447,7 +565,7 @@ def filter_routes(card, features, client_state, registry, overlay,
             reasons.append(client_reason)
 
         usable, skipped = usable_legs(route, card, features, client_state,
-                                      registry, overlay, client)
+                                      registry, overlay, client, now)
         if not usable:
             reasons.append("no usable leg: " + "; ".join(
                 "%s: %s" % (leg, "; ".join(leg_reasons))
@@ -945,7 +1063,7 @@ def _next_rung(ladder, current):
 
 def _score_candidates(route_ids, bucket_name, card, features, client_state,
                       registry, overlay, track_record, orchestrator_model,
-                      mode, client="opencode"):
+                      mode, client="opencode", now=None):
     """``score_route`` (with ``effort`` kept on it) for each id, in order.
 
     Mirrors spec 5.3 step 4 as amended by FT: for every route, its first
@@ -959,7 +1077,7 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
     for route_id in route_ids:
         route = registry["routes"][route_id]
         legs, _ = usable_legs(route, card, features, client_state, registry,
-                              overlay, client)
+                              overlay, client, now)
         if not legs:
             raise ValueError("route %r has no usable leg to score" % route_id)
         leg = legs[0]
@@ -977,7 +1095,7 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
 
 def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
                       client_state, registry, overlay, track_record,
-                      orchestrator_model, mode, client="opencode"):
+                      orchestrator_model, mode, client="opencode", now=None):
     """``{"routes": [...], "reason": ...}`` reviewer routes, spec 5.7 / D2.
 
     Candidates come from the already-scored routes when there is more than
@@ -997,7 +1115,7 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
 
     pool = scores if len(scores) > 1 else _score_candidates(
         survivors, bucket_name, card, features, client_state, registry,
-        overlay, track_record, orchestrator_model, mode, client)
+        overlay, track_record, orchestrator_model, mode, client, now)
 
     chosen_family = _model_family(chosen["leg"], registry)
     ranked = sorted(
@@ -1061,10 +1179,13 @@ def _escalation(chosen, scores, registry):
 
 
 def plan(card, features, client_state, registry, overlay, track_record,
-        orchestrator_model, now, client="opencode"):
+        orchestrator_model, now=None, client="opencode"):
     """The resolver v2 entry point: compose the pure functions into a ``route_plan``.
 
-    Pure -- no I/O, no clock of its own; `now` is the caller's clock reading.
+    Pure -- no I/O, no clock of its own; `now` is the caller's clock reading,
+    defaulting to the current UTC time when omitted. One reading is threaded
+    through filtering, scoring, the tie-break and the defer, so every
+    ``unavailable_until`` in the plan is judged at the same instant.
     Spec 5 (intro), 5.3 steps 1-7, 5.5, 5.7:
 
     1. filter, 2. bucket, 3. an override scores only its route (fail closed on
@@ -1079,8 +1200,9 @@ def plan(card, features, client_state, registry, overlay, track_record,
         if key not in card:
             raise ValueError("missing card key %r" % key)
 
+    now = _now_or_default(now)
     survivors, removed = filter_routes(card, features, client_state, registry,
-                                       overlay, client)
+                                       overlay, client, now)
     bucket_name, _ = bucket(features, card)
 
     if not survivors:
@@ -1100,7 +1222,7 @@ def plan(card, features, client_state, registry, overlay, track_record,
     route_ids = [override_route] if override_route else survivors
     scores = _score_candidates(route_ids, bucket_name, card, features,
                                client_state, registry, overlay, track_record,
-                               orchestrator_model, card["mode"], client)
+                               orchestrator_model, card["mode"], client, now)
 
     chosen, pick_reason = pick(scores, card["mode"], registry)
     reason_parts = [pick_reason]
@@ -1115,7 +1237,7 @@ def plan(card, features, client_state, registry, overlay, track_record,
     # legs, so a caller can see which legs it fell through past.
     _, skipped_legs = usable_legs(registry["routes"][chosen["route"]], card,
                                   features, client_state, registry, overlay,
-                                  client)
+                                  client, now)
     if skipped_legs:
         reason_parts.append(
             "falls through %d skipped leg(s)" % len(skipped_legs))
@@ -1130,7 +1252,7 @@ def plan(card, features, client_state, registry, overlay, track_record,
     reviewers = _select_reviewers(scores, survivors, chosen, card, bucket_name,
                                   features, client_state, registry, overlay,
                                   track_record, orchestrator_model,
-                                  card["mode"], client)
+                                  card["mode"], client, now)
     escalation = _escalation(chosen, scores, registry)
 
     return {
