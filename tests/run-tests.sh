@@ -3405,6 +3405,26 @@ for _k in vscode chrome gh; do
         if (( ok )); then pass; else fail "an empty key from an earlier bad run is trusted forever"; fi
     fi
 
+    # The suite's install() stub only copies, so a key installed without the
+    # ownership and mode would pass every other test here. The stub logs its argv;
+    # install(1) without -m gives 0755, and the key must be root-owned and 0644
+    # for apt (sandboxed as _apt) to read it.
+    if it "apt keys: $_k the key is installed root-owned with mode 644"; then
+        apt_key_case "$_k"
+        sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
+        out="$(apt_key_run "$sb" "$AK_FN")"; rc=$?
+        ok=1
+        (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:200}" >&2; }
+        inst="$(grep '^install ' "$sb/calls.log" 2>/dev/null)"
+        [[ "$(grep -c . <<<"$inst")" == 1 ]] || { ok=0; echo "expected exactly one install call, got: [$inst]" >&2; }
+        for want in " -D " " -o root " " -g root " " -m 644 "; do
+            [[ " $inst " == *"$want"* ]] || { ok=0; echo "the key install lacks [${want//[[:space:]]/}]: [$inst]" >&2; }
+        done
+        [[ "${inst##* }" == "$sb$AK_KEY" ]] || { ok=0; echo "the key was not installed to $AK_KEY: [$inst]" >&2; }
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "the $_k apt key is not installed root-owned with mode 644"; fi
+    fi
+
     if it "apt keys: $_k a second successful run is unchanged"; then
         apt_key_case "$_k"
         sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
