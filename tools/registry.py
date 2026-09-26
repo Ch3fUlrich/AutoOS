@@ -1742,7 +1742,7 @@ def _cmd_render_omniroute(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1775,7 +1775,7 @@ def _cmd_render_litellm(args) -> int:
 
     text = "\n\n".join(rendered[tier] for tier in sorted(rendered)) + "\n"
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1806,7 +1806,7 @@ def _cmd_render_ide(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1837,7 +1837,7 @@ def _cmd_render_openhands(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1868,7 +1868,7 @@ def _cmd_render_models_doc(args) -> int:
         return 0
 
     if args.out:
-        Path(args.out).write_text(rendered, encoding="utf-8")
+        Path(args.out).write_text(rendered, encoding="utf-8", newline="\n")
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(rendered)
