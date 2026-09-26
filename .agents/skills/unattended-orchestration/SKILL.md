@@ -113,7 +113,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 
 ### gateway
 
-- R-gateway-01: Route to free pools first, then qoder/agy, before paid DeepSeek. (why: every OpenRouter paid leg is down; source: operator 2026-09-25 20:07Z, 47% of 797 calls went paid)
+- R-gateway-01: Leg order per bucket is R-cost-03; the resolver enforces it (Q1 lane). (why: one home per rule; source: briefs/common.md "Claude budget", operator 2026-09-26)
 - R-gateway-02: Give a reasoning-model reviewer a real output budget (`max_tokens` ~48000, low effort). (why: 16k tokens is eaten by reasoning first; source: L1-HANDOFF.md, Known traps)
 - R-gateway-03: Route opencode's free zen/spark legs through an opencode-launched agent, not a bare API call. (why: that leg 403s any non-opencode caller; source: done/R-merge.md, item 5)
 - R-gateway-04: After a combo/id rename, confirm the live gateway's combos match the code before routing. (why: a stale gateway 400s every card/--tier route; source: done/R-merge.md, item 1)
@@ -126,6 +126,15 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-gateway-11: Don't treat agy as signed out on its 15s sign-in probe timing out; check host memory pressure first. (why: agy was signed in minutes earlier; source: review-b3c1.out 2026-09-26T07:33Z)
 - R-gateway-12: A 429 with retryable:true but a multi-day reset is not soon-retryable; mark the leg unavailable till reset. (why: agy quota read retryable, reset in 5d; source: 2026-09-26T07:47:05Z)
 - R-gateway-13: Size a request to its leg's per-minute token cap, not only its window. (why: groq gpt-oss-120b 413'd a review on TPM; source: work/L1-routing/review-l1own.out)
+
+### cost
+
+- R-cost-01: Claude sessions only orchestrate: plan, brief, gate, merge, decide. (why: a Claude rate-limit stop halts the whole run; source: briefs/common.md "Claude budget", operator 2026-09-26)
+- R-cost-02: No Claude Agent-tool subagent to implement, read or review unless all external legs failed; log why. (why: same Claude budget; source: briefs/common.md "Claude budget")
+- R-cost-03: Spawn by bucket: free/Zen S0, then credit legs (samba, cheaperinference, OpenRouter), qoder/agy, native DeepSeek. (why: credits sat unused; source: briefs/common.md "Claude budget" table)
+- R-cost-04: Before each ready: gateway review on cheaperinference/claude-sonnet-5 + a cross-family one. (why: keeps the gate off the Claude budget; source: briefs/common.md "Claude budget")
+- R-cost-05: Verify every cheap worker's "done" yourself: tests, diff vs brief. (why: a cheap done is unproven; source: work/L1-routing/review-a8.out)
+- R-cost-06: Count a client worker as ~0.7 GB; run at most 3 per orchestrator while MemAvailable >= 3000. (why: measured per client worker; source: briefs/common.md "Claude budget")
 
 ### brief
 
