@@ -115,7 +115,7 @@ The table below describes the native (workstation) layout.
 | Name | Upstream | Websocket / streaming paths | May bypass SSO | Headers |
 |---|---|---|---|---|
 | `omniroute.<domain>` | `<coding-host>:20128` | `/live-ws`, `/v1/*` (SSE + Responses websocket) | `/v1/*` only - API clients cannot do an SSO login; the client key guards it | `Host`, `X-Forwarded-For`, `X-Forwarded-Proto` |
-| `opencode.<domain>` | `<coding-host>:4096` | `/api/event` (SSE, no buffering), `/api/pty/*` (websocket) | nothing | pass `Authorization` through untouched (the app's Basic auth) |
+| `opencode.<domain>` | `<coding-host>:4096` | `/api/event` (SSE, no buffering), `/api/pty/*` (websocket) | nothing | replace `Authorization` with the app's Basic credentials after the SSO gate, so the browser shows one login (`header_up Authorization "Basic <base64 opencode:password>"`; the value exists only in the proxy's live config, never in git) |
 | `openhands.<domain>` | `<coding-host>:3000` | `/socket.io/*`; plus `/sbx/<port>/*` → `<coding-host>:<port>` (sandbox API + `/sockets/*` websockets) when `AUTOOS_OPENHANDS_SANDBOX_URL` uses that pattern | nothing - the app has no login | `Host`, `X-Forwarded-Proto`; keep `X-Session-API-Key` |
 
 Every service above is listed in the web UI's router card (live up/down,
