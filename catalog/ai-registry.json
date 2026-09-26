@@ -1772,6 +1772,10 @@
         }
       },
       "unavailable_legs": {
+        "opencode-zen/deepseek-v4.1-flash": {
+          "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
+          "available": false
+        },
         "openrouter/deepseek/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
           "available": false
@@ -2113,6 +2117,10 @@
         }
       },
       "unavailable_legs": {
+        "opencode-zen/deepseek-v4.1-flash": {
+          "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
+          "available": false
+        },
         "openrouter/deepseek/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
           "available": false
@@ -2148,6 +2156,10 @@
         }
       },
       "unavailable_legs": {
+        "opencode-zen/deepseek-v4.1-flash": {
+          "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
+          "available": false
+        },
         "openrouter/deepseek/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
           "available": false
@@ -2267,6 +2279,12 @@
           },
           "output": 16384
         }
+      },
+      "unavailable_legs": {
+        "opencode-zen/deepseek-v4.1-flash": {
+          "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
+          "available": false
+        }
       }
     },
     "t3-driver-clean": {
@@ -2294,6 +2312,12 @@
             "reasoning": false
           },
           "output": 16384
+        }
+      },
+      "unavailable_legs": {
+        "opencode-zen/deepseek-v4.1-flash": {
+          "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
+          "available": false
         }
       }
     },
