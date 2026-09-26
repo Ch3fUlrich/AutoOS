@@ -402,6 +402,9 @@ def refuse(msg: str, rc: int = 2) -> int:
 # line agy's own harness prints ("jetski: ...") counts: a worker whose brief or
 # report quotes the marker must not fail. Matched case-insensitively.
 HEADLESS_REFUSAL_PREFIX = "jetski:"
+# Only these clients are piped (to spot the refusal); every other client keeps
+# the spawner's own stdout/stderr, so a terminal stays a terminal for it.
+CAPTURE_CLIENTS = ("agy",)
 HEADLESS_REFUSAL_MARKERS = ("no output produced", "headless mode cannot prompt")
 
 
@@ -525,19 +528,23 @@ class ClientExit(int):
     stdout+stderr, decoded (bug 2 needs it to spot a headless refusal).
     """
     tail = ""
+    refusal = None
 
-    def __new__(cls, rc: int, tail: str = ""):
+    def __new__(cls, rc: int, tail: str = "", refusal: str | None = None):
         obj = super().__new__(cls, rc)
         obj.tail = tail
+        obj.refusal = refusal
         return obj
 
 
-def run_client(cmd, cwd: str, env: dict, reap: bool = True) -> int:
+def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
 
-    The child's stdout+stderr are merged, streamed to our stdout line by line
-    (unbuffered), and the last TAIL_LIMIT bytes are kept on the returned
-    ClientExit.tail. Returns the client's exit code; KeyboardInterrupt is
+    capture=True (CAPTURE_CLIENTS only): the child's stdout+stderr are merged,
+    streamed to our stdout line by line (unbuffered), the last TAIL_LIMIT bytes
+    are kept on ClientExit.tail, and the first headless-refusal line seen
+    anywhere in the stream on ClientExit.refusal. capture=False: the child
+    inherits our stdout/stderr, as before. Returns the client's exit code; KeyboardInterrupt is
     re-raised after cleanup. reap=False (a --joinable `claude --bg` session)
     leaves the group alone after exit code 0: that session is meant to outlive
     this spawner. A failed start is reaped.
@@ -546,17 +553,19 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True) -> int:
     # `opencode run` waits to read it as extra prompt text and never starts
     # (measured 2026-09-24: 150 s hang vs 6 s with /dev/null).
     # leftovers (private Serena, language servers) survived a cancelled worker, measured 2026-09-25.
+    pipe, merge = (subprocess.PIPE, subprocess.STDOUT) if capture else (None, None)
     if os.name == "nt":
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                stdout=pipe, stderr=merge,
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
         pgid = None
     else:
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                stdout=pipe, stderr=merge,
                                 start_new_session=True)
         pgid = proc.pid  # start_new_session makes the client its own group leader
     tail = bytearray()
+    found = []
 
     def pump():
         try:
@@ -566,6 +575,10 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True) -> int:
                     sys.stdout.flush()
                 except (OSError, ValueError):  # a closed/odd stdout must not kill the run
                     pass
+                if not found:
+                    hit = headless_refusal(raw.decode("utf-8", "replace"))
+                    if hit:
+                        found.append(hit)
                 tail.extend(raw)
                 if len(tail) > TAIL_LIMIT:
                     del tail[:len(tail) - TAIL_LIMIT]
@@ -573,26 +586,29 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True) -> int:
             pass
 
     reader = threading.Thread(target=pump, daemon=True)
-    reader.start()
+    if capture:
+        reader.start()
     try:
         rc = proc.wait()
     except BaseException:  # KeyboardInterrupt included: clean up, then re-raise
         _terminate_group(proc, pgid)
-        reader.join(timeout=5)
+        if capture:
+            reader.join(timeout=5)
         raise
     if reap or rc != 0:
         _terminate_group(proc, pgid)
-        reader.join(timeout=5)
-    else:
+        if capture:
+            reader.join(timeout=5)
+    elif capture:
         # A joinable session's background child may hold the pipe open; do not
         # block the spawner waiting on output that is not this run's anyway.
         reader.join(timeout=0.5)
-    if not reader.is_alive():  # a joinable session's background child owns the pipe
+    if capture and not reader.is_alive():  # a joinable session's background child owns the pipe
         try:
             proc.stdout.close()
         except (OSError, ValueError):
             pass
-    return ClientExit(rc, tail.decode("utf-8", "replace"))
+    return ClientExit(rc, tail.decode("utf-8", "replace"), found[0] if found else None)
 
 
 def cmd_run(args, cfg: dict) -> int:
@@ -671,8 +687,9 @@ def cmd_run(args, cfg: dict) -> int:
                                     capture_output=True, text=True, check=True).stdout.strip()
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
     start = time.time()
-    rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable)
-    rc, refusal = refusal_exit(int(rc), getattr(rc, "tail", ""))
+    rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
+                    capture=client.name in CAPTURE_CLIENTS)
+    rc, refusal = refusal_exit(int(rc), getattr(rc, "refusal", None) or "")
     if refusal is not None:
         print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
     log_run(plan, rc, time.time() - start, args.free)
