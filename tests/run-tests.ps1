@@ -5338,6 +5338,45 @@ Test-Case 'start-stack.ps1 parses without syntax errors' {
     Assert-Equal (@($errors)).Count 0
 }
 
+Test-Case 'start-stack.ps1: a settings backup never overwrites an earlier one taken in the same second' {
+    # The launcher is standalone (no module import, so no Copy-AutoOSBackup) and
+    # cannot run here (gateway, docker): pull its backup function out of the AST
+    # and run that in a scratch dir. Its two call sites are pinned by text. The
+    # stamp has whole-second resolution, so the same-second case is forced with
+    # -Stamp, as the module's test does.
+    $script = Join-Path $Root 'configuration\start-stack.ps1'
+    $tokens = $null; $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
+    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-FileBackup' }, $true))
+    if ($fn.Count -ne 1) { throw "want exactly one function New-FileBackup in start-stack.ps1, found $($fn.Count)" }
+    . ([scriptblock]::Create($fn[0].Extent.Text))
+
+    $text = Get-Content -LiteralPath $script -Raw
+    if (([regex]::Matches($text, [regex]::Escape('New-FileBackup -Path $ohSettings'))).Count -ne 2) { throw 'both OpenHands settings backups must go through New-FileBackup' }
+    if ($text -match [regex]::Escape('Copy-Item $ohSettings $backup')) { throw 'a settings backup still copies straight to a second-resolution name' }
+
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-stackbak-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $settings = Join-Path $scratch 'settings.json'
+        $stamp = '20260101-000000'
+        $made = @()
+        foreach ($v in 'v0', 'v1', 'v2') {
+            [IO.File]::WriteAllText($settings, $v)
+            $made += New-FileBackup -Path $settings -Stamp $stamp
+        }
+        $want = @("settings.json.autoos-backup-$stamp", "settings.json.autoos-backup-$stamp-1", "settings.json.autoos-backup-$stamp-2")
+        if ((@($made | ForEach-Object { Split-Path -Leaf $_ }) -join ',') -cne ($want -join ',')) { throw "backup names: [$(@($made | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')], want [$($want -join ', ')]" }
+        for ($i = 0; $i -lt 3; $i++) {
+            $got = [IO.File]::ReadAllText($made[$i])
+            if ($got -cne "v$i") { throw "$($want[$i]) holds [$got], want [v$i] (an earlier backup was overwritten)" }
+        }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'openhands launch is detached, probed and stale-settings safe' {
     # -it fails without a TTY and foreground never returns (the old script
     # printed the URL even when nothing started); schema_version 6 settings
