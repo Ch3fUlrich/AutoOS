@@ -99,17 +99,18 @@ if it "python heredoc checks capture stderr"; then
     # assert passed on empty stdout. Every heredoc opener feeding an
     # assert_eq "" must carry 2>&1 on the command line (this test included).
     bad="$(python3 - 2>&1 <<'PY'
-import re, io
-lines = io.open("tests/run-tests.sh", encoding="utf-8").read().splitlines()
+import re, io, glob
 bare = []
-for i, l in enumerate(lines):
-    m = re.match(r"""\s*(\w+)="\$\(python3\b(.*)<<'PY'\s*$""", l)
-    if m and "2>&1" not in m.group(2):
-        var = m.group(1)
-        for j in range(i + 1, min(i + 60, len(lines))):
-            if re.match(r"""\s*assert_eq "\$%s" ""$""" % var, lines[j]):
-                bare.append(str(i + 1))
-                break
+for path in ["tests/run-tests.sh"] + sorted(glob.glob("tests/linux/*.sh")):
+    lines = io.open(path, encoding="utf-8").read().splitlines()
+    for i, l in enumerate(lines):
+        m = re.match(r"""\s*(\w+)="\$\(python3\b(.*)<<'PY'\s*$""", l)
+        if m and "2>&1" not in m.group(2):
+            var = m.group(1)
+            for j in range(i + 1, min(i + 60, len(lines))):
+                if re.match(r"""\s*assert_eq "\$%s" ""$""" % var, lines[j]):
+                    bare.append("%s:%d" % (path, i + 1))
+                    break
 print(" ".join(bare))
 PY
 )"

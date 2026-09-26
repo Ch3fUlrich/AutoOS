@@ -2239,7 +2239,7 @@ _aistack_verify_sandbox() {
 # wins and no match means nothing answered. Logs its argv to curl-argv.log.
 # The Authorization header is read from `-H @-` (stdin) or an inline -H and
 # compared with <state>/curl-key; it is never logged, only the verdict is.
-S="$(cd "$(dirname "$0")/.." && pwd)"
+S="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 printf '%s\n' "$*" >>"$S/curl-argv.log"
 args=("$@"); url=""; body=""; hdrs=""; want_code=0
 for ((i = 0; i < ${#args[@]}; i++)); do
