@@ -861,3 +861,10 @@ This supersedes §11's closing note: `provider_maps(path=None)`'s default source
 `catalog/ai-registry.json` since A5c (an explicit `path` still accepts either file's
 shape), and `tests/helpers/check-provider-registry.py`'s sections 3/4 compare both
 tools against the registry now.
+
+A5a also grows the apply scripts' provider set by two: `antigravity` and `cc` exist only in
+the registry (OAuth/subscription bridges, no `catalog/providers.json` row) and carry an
+`omniroute_id` with at least one live leg, so `apply.sh`/`apply.ps1` now list them in the
+registration plan. With no `api-keys.yml` entry they report "no key in api-keys.yml,
+skipped", so nothing new is registered; `tests/run-tests.sh` and `tests/run-tests.ps1` pin
+their first appearance and compare only the shared providers field for field.
