@@ -1006,6 +1006,26 @@ class TimeTests(unittest.TestCase):
 
     # --- the real catalog -------------------------------------------------
 
+    def test_a_non_utc_now_is_read_in_utc(self):
+        # review-b3c2: Monday 15:00+05:00 is Monday 10:00 UTC, inside dsk's
+        # weekday 10:00-23:59 window.
+        from datetime import timedelta as _td
+        reg = self.registry()
+        now = datetime(2026, 9, 28, 15, 0, tzinfo=timezone(_td(hours=5)))
+        self.assertEqual(r.price_factor("dsk", reg, now), 0.5)
+        start = r.next_cheap_start(
+            "dsk", reg, datetime(2026, 9, 28, 14, 20, tzinfo=timezone(_td(hours=5))))
+        self.assertEqual(start, datetime(2026, 9, 28, 10, 0, tzinfo=timezone.utc))
+
+    def test_a_window_off_the_quarter_hour_is_found(self):
+        # review-b3c2: 15-minute sampling missed a 09:05-09:10 window.
+        reg = {"providers": {"p": {"id": "p", "windows": [
+            {"days": ["mon"], "utc_from": "09:05", "utc_to": "09:10",
+             "price_factor": 0.5}]}}}
+        now = datetime(2026, 9, 28, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(r.next_cheap_start("p", reg, now),
+                         datetime(2026, 9, 28, 9, 5, tzinfo=timezone.utc))
+
     def test_real_registry_deepseek_weekend_factor(self):
         path = (Path(__file__).resolve().parent.parent
                 / "catalog" / "ai-registry.json")
@@ -1196,7 +1216,7 @@ class PlanTests(unittest.TestCase):
         # chosen r-free is family "alpha"; the cheapest non-alpha survivor is
         # r-cheap ("beta").
         self.assertEqual(result["reviewers"],
-                         {"routes": ["r-cheap"],
+                         {"routes": ["r-cheap"], "closer": None,
                           "reason": "cross-family reviewer(s): r-cheap"})
 
     def test_escalation_none_when_effort_is_none_and_class_moves_up(self):
@@ -1266,7 +1286,8 @@ class PlanTests(unittest.TestCase):
         # ("alpha") and r-cheap ("beta") -- r-frontier is skipped, same
         # family ("alpha") as the already-picked r-free.
         self.assertEqual(result["reviewers"], {
-            "routes": ["r-free", "r-cheap", "claude-sonnet"],
+            "routes": ["r-free", "r-cheap"],
+            "closer": {"client": "claude", "model": "sonnet"},
             "reason": "cross-family reviewer(s): r-free, r-cheap",
         })
 

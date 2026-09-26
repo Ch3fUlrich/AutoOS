@@ -564,6 +564,7 @@ def price_factor(provider_id, registry, now):
 
     1.0 when the provider has no windows, or none of its windows cover `now`.
     """
+    now = now.astimezone(timezone.utc)  # windows are UTC (spec 6.4)
     windows = registry["providers"].get(provider_id, {}).get("windows") or []
     for window in windows:
         if _window_contains(window, now):
@@ -571,19 +572,16 @@ def price_factor(provider_id, registry, now):
     return 1.0
 
 
-def _next_quarter_hour(dt):
-    """The first quarter-hour mark strictly after `dt`."""
-    floored = dt.replace(minute=(dt.minute // 15) * 15, second=0, microsecond=0)
-    return floored + timedelta(minutes=15)
-
-
 def next_cheap_start(provider_id, registry, now, horizon_hours=48):
     """The first time strictly after `now` where `provider_id` turns cheap.
 
-    Steps 15 minutes at a time from the next quarter hour. None when the
-    provider is already cheap at `now`, has no windows, or does not turn
-    cheap again within `horizon_hours`.
+    Exact, not sampled: the candidates are the start minutes of the
+    provider's windows on each day within `horizon_hours`; the earliest one
+    whose price_factor (first matching window wins) is below 1.0 is it. None
+    when the provider is already cheap at `now`, has no windows, or does not
+    turn cheap again within the horizon. `now` is read in UTC.
     """
+    now = now.astimezone(timezone.utc)
     if price_factor(provider_id, registry, now) < 1.0:
         return None
     windows = registry["providers"].get(provider_id, {}).get("windows") or []
@@ -591,12 +589,20 @@ def next_cheap_start(provider_id, registry, now, horizon_hours=48):
         return None
 
     deadline = now + timedelta(hours=horizon_hours)
-    candidate = _next_quarter_hour(now)
-    while candidate < deadline:
-        if price_factor(provider_id, registry, candidate) < 1.0:
-            return candidate
-        candidate += timedelta(minutes=15)
-    return None
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    best = None
+    for day in range(int(horizon_hours // 24) + 2):
+        base = midnight + timedelta(days=day)
+        for window in windows:
+            if _WEEKDAY_NAMES[base.weekday()] not in window["days"]:
+                continue
+            start = base + timedelta(minutes=_minutes_of_day(window["utc_from"]))
+            if not (now < start < deadline):
+                continue
+            if price_factor(provider_id, registry, start) < 1.0:
+                if best is None or start < best:
+                    best = start
+    return best
 
 
 def _leg_provider(leg):
@@ -605,8 +611,8 @@ def _leg_provider(leg):
 
 
 def _format_iso_z(dt):
-    """`dt` (always on a whole minute here) as "YYYY-MM-DDTHH:MMZ"."""
-    return dt.strftime("%Y-%m-%dT%H:%MZ")
+    """`dt` (always on a whole minute here) as "YYYY-MM-DDTHH:MMZ" in UTC."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
 
 
 def tie_break(scores, registry, now):
@@ -695,7 +701,9 @@ _CLASS_ORDER = ("free", "cheap", "mid", "frontier")
 # D2: normal risk gets 1 cross-family API review, high risk gets 2 plus a
 # Sonnet close.
 _REVIEW_COUNTS = {"normal": 1, "high": 2}
-_CLOSER_MODEL = "claude-sonnet"
+# The high-risk closer is a Claude client run (Agent-tool Sonnet), not a
+# registry route, so it has its own key beside the reviewer routes.
+_CLOSER = {"client": "claude", "model": "sonnet"}
 
 
 def _leg_model_id(leg):
@@ -787,11 +795,8 @@ def _select_reviewers(scores, survivors, chosen, risk, bucket_name, kind,
     else:
         reason = "cross-family reviewer(s): %s" % ", ".join(picked)
 
-    routes = list(picked)
-    if risk == "high":
-        routes.append(_CLOSER_MODEL)
-
-    return {"routes": routes, "reason": reason}
+    closer = dict(_CLOSER) if risk == "high" else None
+    return {"routes": list(picked), "closer": closer, "reason": reason}
 
 
 def _escalation(chosen, scores, registry):
