@@ -2014,5 +2014,178 @@ class McpRouteTests(unittest.TestCase):
         self.assertEqual(set(out), {"error"})
 
 
+_FAKE_ISOLATE_AGY_SRC = '''
+import os, subprocess, sys
+root = os.environ["AUTOOS_FAKE_ROOT"]
+mode = os.environ.get("AUTOOS_FAKE_MODE", "noop")
+def git(*a):
+    subprocess.run(["git", "-C", root, *a], check=True,
+                   capture_output=True, text=True)
+if mode == "commit-worker":
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    print("fake: committed as worker")
+elif mode == "modify":
+    with open(os.path.join(root, "tracked.txt"), "a") as fh:
+        fh.write("dirty\\n")
+    print("fake: modified a tracked file")
+elif mode == "commit-other":
+    with open(os.path.join(root, "other-file.txt"), "w") as fh:
+        fh.write("other\\n")
+    git("add", "other-file.txt")
+    git("-c", "user.name=someone-else",
+        "-c", "user.email=someone@example.invalid",
+        "commit", "-q", "-m", "other change")
+    print("fake: committed as someone else")
+sys.exit(0)
+'''
+
+
+class IsolateContainmentTests(unittest.TestCase):
+    """ISOfix (rule->code: --isolate containment leak). Measured 2026-09-26:
+    an --isolate worker given absolute parent paths edited and committed in
+    the parent checkout; outside_fence only fenced opencode's file tools and
+    sandbox_verdict only diffed the sandbox, so the spawner reported NO-OP
+    (exit 5) instead of a leak."""
+
+    WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def make_root(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(git + ["init", "-q", tmp], check=True)
+        with open(os.path.join(tmp, "tracked.txt"), "w", encoding="utf-8") as fh:
+            fh.write("base\n")
+        subprocess.run(git + ["-C", tmp, "add", "tracked.txt"], check=True)
+        subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "init"], check=True)
+        return tmp
+
+    def make_fake_agy(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        py = os.path.join(d, "fake_client.py")
+        with open(py, "w", encoding="utf-8") as fh:
+            fh.write(_FAKE_ISOLATE_AGY_SRC)
+        sh = os.path.join(d, "agy")
+        with open(sh, "w", encoding="utf-8") as fh:
+            fh.write('#!/bin/sh\nif [ "$1" = "models" ]; then echo fake; exit 0; fi\n'
+                     'exec python3 "%s" "$@"\n' % py)
+        os.chmod(sh, 0o755)
+        return d
+
+    def make_state(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        return d
+
+    def run_isolated(self, root, stubdir, statedir, mode):
+        agent = self.agent
+        old_root, old_track = agent.ROOT, agent.TRACK_RECORD
+        agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
+        try:
+            args = argparse.Namespace(
+                client="agy", tier=2, card=None, task="do the thing",
+                free=False, free_model=agent.DEFAULT_FREE_MODEL,
+                isolate=True, auto=True, joinable=False, model=None,
+                clean=False, allow_training=False, max_depth=None, lean=False,
+                title=None, dry_run=False, no_defer=False)
+            cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+                   "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+            env = dict(os.environ)
+            env["PATH"] = stubdir + os.pathsep + env.get("PATH", "")
+            env["AUTOOS_STATE_DIR"] = statedir
+            env["AUTOOS_FAKE_ROOT"] = root
+            env["AUTOOS_FAKE_MODE"] = mode
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, env, clear=True):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = agent.cmd_run(args, cfg)
+        finally:
+            agent.ROOT, agent.TRACK_RECORD = old_root, old_track
+        return rc, out.getvalue(), err.getvalue()
+
+    def lone_sandbox(self, statedir):
+        base = os.path.join(statedir, "sandboxes")
+        names = os.listdir(base)
+        self.assertEqual(len(names), 1, names)
+        return os.path.join(base, names[0])
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_worker_commit_in_the_parent_is_a_leak_exit_7_naming_the_sha(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "commit-worker")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_modified_tracked_file_in_the_parent_is_a_leak(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "modify")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn("tracked.txt", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_commit_by_another_author_is_not_a_leak(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "commit-other")
+        self.assertNotIn("LEAK", out + err)
+        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_push_from_the_sandbox_to_the_parent_fails(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        self.run_isolated(root, stub, state, "noop")
+        sb = self.lone_sandbox(state)
+        push_url = subprocess.run(["git", "-C", sb, "remote", "get-url", "--push", "origin"],
+                                  capture_output=True, text=True).stdout.strip()
+        self.assertIn("DISABLED-autoos-isolate", push_url)
+        branch = subprocess.run(["git", "-C", sb, "branch", "--show-current"],
+                                capture_output=True, text=True).stdout.strip()
+        push = subprocess.run(["git", "-C", sb, "push", "origin", branch],
+                              capture_output=True, text=True)
+        self.assertNotEqual(push.returncode, 0, push.stdout + push.stderr)
+
+    def test_the_isolate_prompt_line_names_sandbox_and_root(self):
+        agent = self.agent
+        cfg = agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+        state = self.make_state()
+
+        def args(isolate):
+            return argparse.Namespace(
+                client="opencode", tier=2, card=None, task="do the thing",
+                free=False, free_model=agent.DEFAULT_FREE_MODEL,
+                isolate=isolate, auto=True, joinable=False, model=None,
+                clean=False, allow_training=False, max_depth=None, lean=False, title=None)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state}):
+            plan = agent.build_plan(args(True), cfg)
+        line = ("Your working directory %s is your only writable checkout; "
+                "never cd, git -C or write into %s or any other path outside it."
+                % (plan["sandbox"]["path"], agent.ROOT))
+        self.assertEqual(plan["cmd"][-1], line + "\n" + "do the thing")
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state}):
+            plain = agent.build_plan(args(False), cfg)
+        self.assertEqual(plain["cmd"][-1], "do the thing")
+        self.assertNotIn("only writable checkout", plain["cmd"][-1])
+
+    def test_track_entry_maps_exit_7_to_containment(self):
+        plan = {"client": "opencode", "free": False,
+                "route": {"combo": "t2-worker", "card": {}}}
+        entry = self.agent.track_entry(plan, 7, 1.0)
+        self.assertEqual(entry["failure_class"], "containment")
+        self.assertEqual(entry["gate"], "fail")
+
+
 if __name__ == "__main__":
     unittest.main()
