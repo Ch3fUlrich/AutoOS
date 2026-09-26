@@ -2475,6 +2475,52 @@ class IsolateContainmentTests(unittest.TestCase):
             agent.provider_stop("working\nError: Rate limit exceeded.\n"),
             "Error: Rate limit exceeded.")
 
+    # WIPfix3 (measured 2026-09-26, work/L1-routing/WIPfix2.out): a run that
+    # finished normally was reported PROVIDER-STOP because its last lines had
+    # the spawner's own printed `CODE` line quoting
+    # 'print("Error: Rate limit exceeded. Please try again later.")'. A real
+    # provider stop is an error-prefixed LINE, so the line must both carry a
+    # marker AND start (after lstrip + ANSI-strip) with an error prefix.
+
+    def test_provider_stop_matches_the_measured_client_stop_lines(self):
+        # The four shapes real clients print when the provider stops them
+        # (brief WIPfix3): opencode rate limit and capacity, agy AGY_ERROR
+        # 429 JSON, agy quota line. Each must match.
+        agent = self.agent
+        cases = [
+            "Error: Rate limit exceeded. Please try again later.",
+            "Error: Chat admission capacity is temporarily unavailable. Retry shortly.",
+            'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached',
+            "error: Individual quota reached. Please upgrade your plan.",
+        ]
+        for line in cases:
+            with self.subTest(line=line):
+                self.assertEqual(agent.provider_stop("working\n" + line + "\n"),
+                                 line)
+
+    def test_provider_stop_ignores_a_marker_in_code_or_prose(self):
+        # WIPfix3: the WIPfix2 false positive and its neighbours - a marker
+        # quoted in a code line, a list entry, or a grep command must NOT
+        # count as a provider stop.
+        agent = self.agent
+        cases = [
+            'CODE: print("Error: Rate limit exceeded.")',
+            '+    "rate limit exceeded",',
+            'grep -n " 429" x',
+        ]
+        for line in cases:
+            with self.subTest(line=line):
+                self.assertIsNone(agent.provider_stop("working\n" + line + "\n"))
+
+    def test_provider_stop_matches_through_ansi_colour(self):
+        # Clients colourise stderr: the prefix check must see past the ANSI
+        # colour/bold codes wrapping the prefix (the returned line is the
+        # cleaned text, so the WIP subject stays readable).
+        agent = self.agent
+        line = "\x1b[91m\x1b[1mError: \x1b[0mRate limit exceeded"
+        self.assertEqual(agent.provider_stop("working\n" + line + "\n"),
+                         "Error: Rate limit exceeded")
+
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_sandbox_changes_without_a_stop_wip_commit_and_keep_rc_0(self):
         root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()

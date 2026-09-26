@@ -860,20 +860,36 @@ PROVIDER_STOP_MARKERS = (
 # lines from the end of the tail are scanned.
 PROVIDER_STOP_WINDOW = 8
 
+# WIPfix3 (measured 2026-09-26, work/L1-routing/WIPfix2.out): the window alone
+# still false-positived - a normal run whose last lines contained a CODE line
+# quoting 'print("Error: Rate limit exceeded.")' was reported PROVIDER-STOP. A
+# real stop is an error-prefixed LINE, so the stripped line must also START
+# with one of these prefixes (case-insensitive); it covers "error: ... 429"
+# status lines as clients print them, so the bare " 429"/" 402" markers go.
+PROVIDER_STOP_PREFIXES = ("error", "agy_error", "fatal")
+
+# ANSI colour/bold sequences a client wraps its stderr prefix in.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 
 def provider_stop(tail: str) -> str | None:
     """The provider-stop line among the client's last lines, or None.
 
     Only the last PROVIDER_STOP_WINDOW non-empty lines of `tail` are scanned:
     a real provider stop is the client's last output before it exits, so a
-    marker quoted earlier in the run must not match. Returns the matching line
-    nearest the end when several are in the window.
+    marker quoted earlier in the run must not match. Inside the window a line
+    only when, after lstrip() and removing ANSI colour codes, it STARTS with
+    an error prefix (PROVIDER_STOP_PREFIXES, case-insensitive) AND contains a
+    PROVIDER_STOP_MARKERS entry (WIPfix3). Returns the matching line nearest
+    the end when several are in the window.
     """
     lines = [line for line in (tail or "").splitlines() if line.strip()]
     for line in reversed(lines[-PROVIDER_STOP_WINDOW:]):
-        low = line.lower()
-        if any(marker in low for marker in PROVIDER_STOP_MARKERS):
-            return line.strip()
+        clean = _ANSI_RE.sub("", line).lstrip()
+        low = clean.lower()
+        if low.startswith(PROVIDER_STOP_PREFIXES) and any(
+                marker in low for marker in PROVIDER_STOP_MARKERS):
+            return clean
     return None
 
 
