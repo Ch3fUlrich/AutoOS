@@ -185,6 +185,24 @@ class UnitInstallTests(_DriverCase):
         self.assertNotEqual(proc.returncode, 0, "broken template must fail the install")
         self.assertEqual(unit.read_text(encoding="utf-8"), "# keep me\n")
 
+    def test_failed_backup_stops_install_and_leaves_unit_untouched(self):
+        # install.sh:170 -- a failed unit backup must stop, leaving the
+        # existing unit untouched (cp stub on PATH that fails only backups).
+        unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text("# keep me\n", encoding="utf-8")
+        cp_stub = self.bindir / "cp"
+        cp_stub.write_text(
+            "#!/bin/sh\n"
+            'for a in \"$@\"; do case \"$a\" in *.autoos-backup-*) exit 1;; esac; done\n'
+            'if [ -x /bin/cp ]; then exec /bin/cp \"$@\"; else exec /usr/bin/cp \"$@\"; fi\n',
+            encoding="utf-8",
+        )
+        cp_stub.chmod(0o755)
+        proc = self.run_driver("--unit")
+        self.assertNotEqual(proc.returncode, 0, "failed backup must fail the install")
+        self.assertEqual(unit.read_text(encoding="utf-8"), "# keep me\n")
+
 
 class ClientWriterTests(_DriverCase):
     def test_openhands_keeps_unrelated_keys_and_writes_no_enabled(self):

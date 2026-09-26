@@ -134,7 +134,7 @@ backup_file() {
         say "dry-run: would back up ${path} to ${dest}"
         return 0
     fi
-    cp -p "$path" "$dest"
+    cp -p "$path" "$dest" || return 1
     say "backup: ${path} -> ${dest}"
 }
 
@@ -167,7 +167,7 @@ install_unit() {
         if (( DRY_RUN )); then
             say "dry-run: would install unit: ${dest}"
         else
-            backup_file "$dest"
+            backup_file "$dest" || return 1
             mkdir -p "$(dirname "$dest")"
             stage="$(dirname "$dest")/.${UNIT_NAME}.tmp.$$"
             TMP_FILES+=("$stage")
