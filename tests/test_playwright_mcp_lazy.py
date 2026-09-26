@@ -115,7 +115,7 @@ def call(rid, params):
     reply(rid, result, **{"x-extra": {"k": [1, 2, 3]}})
 
 
-def handle(msg):
+def handle(msg, text):
     method = msg.get("method")
     rid = msg.get("id")
     params = msg.get("params") or {}
@@ -142,7 +142,7 @@ def handle(msg):
             result["echoCursor"] = params["cursor"]
         reply(rid, result)
     elif method == "tools/call":
-        log("call", id=rid)
+        log("call", id=rid, raw=text)
         threading.Thread(target=call, args=(rid, params), daemon=True).start()
     elif method == "ping":
         reply(rid, {})
@@ -158,7 +158,7 @@ if os.environ.get("FAKE_GARBAGE") == "1":
 for raw in sys.stdin.buffer:
     line = raw.decode("utf-8").strip()
     if line:
-        handle(json.loads(line))
+        handle(json.loads(line), line)
 log("eof")
 if os.environ.get("FAKE_IGNORE_EOF") == "1":
     while True:
@@ -209,6 +209,7 @@ class Session(object):
         self.raw = []          # every stdout line, as bytes
         self.messages = []     # parsed stdout lines (None when not JSON)
         self.stderr = []
+        self.closed = False
         self.pumps = [threading.Thread(target=self._pump_stdout, daemon=True),
                       threading.Thread(target=self._pump_stderr, daemon=True)]
         for pump in self.pumps:
@@ -295,6 +296,9 @@ class Session(object):
                 self.messages.append(None)
 
     def close(self, timeout=15.0):
+        if self.closed:
+            return self.proc.returncode
+        self.closed = True
         try:
             self.proc.stdin.close()
         except (OSError, ValueError):
@@ -306,6 +310,8 @@ class Session(object):
             self.proc.wait()
             code = None
         self.drain()
+        self.proc.stdout.close()
+        self.proc.stderr.close()
         return code
 
 
@@ -325,8 +331,7 @@ class LazyProxyCase(unittest.TestCase):
 
     def _reap(self):
         for s in self.sessions:
-            if s.proc.poll() is None:
-                s.close(timeout=8)
+            s.close(timeout=8)
         # a broken proxy must not leave fake backends behind
         for rec in self.events():
             if rec.get("event") == "start" and alive(rec["pid"]):
@@ -456,6 +461,16 @@ class CacheAndLazyStart(LazyProxyCase):
                     ' "id":"r-1","jsonrpc":"2.0"}').encode("utf-8")
         self.assertIn(expected, s.raw)
 
+    def test_a_request_reaches_the_backend_byte_for_byte(self):
+        self.prime_cache()
+        s = self.session(idle=30)
+        s.initialize()
+        line = ('{"params" : {"name":"browser_navigate","arguments":{"u":"caf\\u00e9 é \U0001f600"}} ,'
+                ' "method":"tools/call", "id" : 12, "jsonrpc":"2.0"}')
+        s.send(line.encode("utf-8"))
+        s.response(12)
+        self.assertEqual([r["raw"] for r in self.events("call")], [line])
+
     def test_a_tools_list_with_a_cursor_goes_to_the_backend(self):
         self.prime_cache()
         s = self.session(idle=30)
@@ -515,12 +530,16 @@ class Negotiation(LazyProxyCase):
         s.close()
         self.assertEqual(self.events("tools_list"), [], "an unchanged server must not be asked for tools again")
         open(self.log, "w").close()
+        inode = os.stat(self.cache).st_ino
         s = self.session(FAKE_VERSION="2.0.0", FAKE_EXTRA_TOOL="1")
         s.initialize()
         self.assertEqual(len(s.request("tools/list", {})["result"]["tools"]), 3)  # cache first
         self.call(s)
         s.close()
         self.assertEqual(len(self.events("tools_list")), 1)
+        self.assertNotEqual(os.stat(self.cache).st_ino, inode, "the cache was rewritten in place, not replaced")
+        self.assertEqual(stat.S_IMODE(os.stat(self.cache).st_mode), 0o600)
+        self.assertEqual(os.listdir(os.path.dirname(self.cache)), [os.path.basename(self.cache)])
         s = self.session()
         s.initialize()
         self.assertEqual(len(s.request("tools/list", {})["result"]["tools"]), 4)
@@ -612,9 +631,14 @@ class Idle(LazyProxyCase):
         pid = self.call(s)["result"]["pid"]
         name = "autoos-pw-%d-1" % s.proc.pid
         self.assertTrue(self.gone(pid, 20), "the lingering backend was never terminated")
-        self.assertTrue(wait_until(lambda: os.path.exists(dlog) and "stop " in open(dlog).read(), 10))
-        with open(dlog) as fh:
-            lines = [l.strip() for l in fh if l.strip()]
+        def docker_lines():
+            try:
+                with open(dlog) as fh:
+                    return [l.strip() for l in fh if l.strip()]
+            except IOError:
+                return []
+        self.assertTrue(wait_until(lambda: any(l.startswith("stop ") for l in docker_lines()), 10))
+        lines = docker_lines()
         self.assertEqual(lines[0], "run -i --rm --init --network host --name %s "
                                    "mcr.microsoft.com/playwright/mcp:latest" % name)
         self.assertIn("stop %s" % name, lines)
@@ -672,31 +696,34 @@ class Failures(LazyProxyCase):
 
 
 class Shutdown(LazyProxyCase):
+    # The fake ignores EOF here, as a lingering container would: only an explicit stop
+    # (5 s of grace after the EOF, then terminate) can end it, so an exit that merely
+    # closes the pipes does not pass.
     def test_stdin_eof_stops_the_backend_and_exits_zero(self):
         self.prime_cache()
-        s = self.session(idle=30)
+        s = self.session(idle=30, FAKE_IGNORE_EOF="1")
         s.initialize()
         pid = self.call(s)["result"]["pid"]
         self.assertEqual(s.close(), 0)
-        self.assertTrue(self.gone(pid, 5), "the backend outlived the session")
+        self.assertTrue(self.gone(pid, 2), "the backend outlived the session")
 
     def test_sigterm_stops_the_backend_and_exits_zero(self):
         self.prime_cache()
-        s = self.session(idle=30)
+        s = self.session(idle=30, FAKE_IGNORE_EOF="1")
         s.initialize()
         pid = self.call(s)["result"]["pid"]
         s.proc.send_signal(signal.SIGTERM)
-        self.assertEqual(s.proc.wait(15), 0)
-        self.assertTrue(self.gone(pid, 5))
+        self.assertEqual(s.proc.wait(20), 0)
+        self.assertTrue(self.gone(pid, 2), "the backend outlived the session")
 
     def test_sigint_stops_the_backend_and_exits_zero(self):
         self.prime_cache()
-        s = self.session(idle=30)
+        s = self.session(idle=30, FAKE_IGNORE_EOF="1")
         s.initialize()
         pid = self.call(s)["result"]["pid"]
         s.proc.send_signal(signal.SIGINT)
-        self.assertEqual(s.proc.wait(15), 0)
-        self.assertTrue(self.gone(pid, 5))
+        self.assertEqual(s.proc.wait(20), 0)
+        self.assertTrue(self.gone(pid, 2), "the backend outlived the session")
 
 
 class Streams(LazyProxyCase):
@@ -704,7 +731,7 @@ class Streams(LazyProxyCase):
         self.prime_cache()
         s = self.session(idle=30, FAKE_GARBAGE="1", AUTOOS_SECRET_PROBE="hunter2-unique-value")
         s.initialize()
-        self.call(s, rid=1)
+        self.call(s, rid=41)
         s.request("tools/list", {})
         s.close()
         self.assertTrue(s.raw)
@@ -744,10 +771,10 @@ class Concurrency(LazyProxyCase):
         s = self.session(idle=30)
         s.initialize()
         started = time.time()
-        for rid in (1, 2, 3):
+        for rid in (61, 62, 63):
             s.send({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
                     "params": {"name": "browser_navigate", "arguments": {"sleep": 1.5, "n": rid}}})
-        for rid in (1, 2, 3):
+        for rid in (61, 62, 63):
             reply = s.response(rid, 20)
             self.assertEqual(reply["result"]["content"][0]["text"], json.dumps({"n": rid, "sleep": 1.5}, sort_keys=True))
         self.assertLess(time.time() - started, 3.8, "the calls ran one after the other")
@@ -761,7 +788,7 @@ class Concurrency(LazyProxyCase):
         time.sleep(0.5)
         self.assertEqual(self.starts(), [], "a notification must not start the backend")
         self.assertEqual(self.events("cancelled"), [])
-        self.call(s, {"notify": "hello"}, rid=1)
+        self.call(s, {"notify": "hello"}, rid=31)
         note = s.wait_for(lambda m: m.get("method") == "notifications/message")
         self.assertEqual(note, {"jsonrpc": "2.0", "method": "notifications/message",
                                 "params": {"level": "info", "data": "hello"}})
@@ -774,7 +801,7 @@ class Concurrency(LazyProxyCase):
         s = self.session(idle=30)
         s.initialize()
         mib = 1024 * 1024
-        reply = self.call(s, {"big": mib, "blob": "y" * mib}, rid=1, timeout=30)
+        reply = self.call(s, {"big": mib, "blob": "y" * mib}, rid=51, timeout=30)
         self.assertEqual(reply["result"]["content"][0]["text"], "x" * mib)
         self.assertEqual(reply["result"]["blob_len"], mib)
 
