@@ -10525,6 +10525,36 @@ if it "svc: register-autostart twice: the second run skips, a changed unit is ba
     if (( ok )); then pass; else fail "register-autostart is not idempotent"; fi
 fi
 
+# Same class as lib/linux/install.sh backup_path/backup_file (main fixed
+# this there): register-autostart.sh's own unit backup used a plain
+# <unit>.autoos-backup-<stamp> name with a bare cp, so two changed units in
+# the same second let the second cp overwrite the first backup and destroy
+# it. Pin `date` on PATH so both runs land in the same "second".
+if it "backup residual: register-autostart backs up a unit twice in one second without overwriting"; then
+    d="$(_svc_reg_sandbox)"
+    printf '#!/bin/sh\necho 20260101-000000\n' >"$d/bin/date"; chmod +x "$d/bin/date"
+    _svc_reg "$d" --only autoos-omniroute >/dev/null
+    printf '# hand-edit-1\n' >>"$d/units/autoos-omniroute.service"
+    contentA="$(cat "$d/units/autoos-omniroute.service")"
+    second="$(_svc_reg "$d" --only autoos-omniroute)"
+    printf '# hand-edit-2\n' >>"$d/units/autoos-omniroute.service"
+    contentB="$(cat "$d/units/autoos-omniroute.service")"
+    third="$(_svc_reg "$d" --only autoos-omniroute)"
+    ok=1
+    base="$d/units/autoos-omniroute.service.autoos-backup-20260101-000000"
+    [[ "$second" == *"+ autoos-omniroute: replaced"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$third" == *"+ autoos-omniroute: replaced"* ]] || { ok=0; echo "third: $third" >&2; }
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup lost the hand edit" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d/units" -name 'autoos-omniroute.service.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    grep -q 'hand-edit' "$d/units/autoos-omniroute.service" && { ok=0; echo "final unit still holds a hand edit" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart overwrote a same-second unit backup"; fi
+fi
+
 if it "svc: register-autostart appends REQUIRE_API_KEY=true once, with a backup"; then
     d="$(_svc_reg_sandbox)"
     printf 'STORAGE_ENCRYPTION_KEY=keep-me\n' >"$d/omniroute.env"
@@ -10541,6 +10571,32 @@ if it "svc: register-autostart appends REQUIRE_API_KEY=true once, with a backup"
     [[ "$third" == *"left alone"* ]] || { ok=0; echo "third: $third" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "REQUIRE_API_KEY handling is wrong"; fi
+fi
+
+# Same class, the omni_env append site: two backups of ~/.omniroute/.env in
+# the same second must not collide either.
+if it "backup residual: register-autostart backs up omniroute.env twice in one second without overwriting"; then
+    d="$(_svc_reg_sandbox)"
+    printf '#!/bin/sh\necho 20260101-000000\n' >"$d/bin/date"; chmod +x "$d/bin/date"
+    printf 'SOME=1\n' >"$d/omniroute.env"
+    contentA="$(cat "$d/omniroute.env")"
+    first="$(_svc_reg "$d" --only autoos-omniroute)"
+    sed -i '/^REQUIRE_API_KEY=/d' "$d/omniroute.env"
+    contentB="$(cat "$d/omniroute.env")"
+    second="$(_svc_reg "$d" --only autoos-omniroute)"
+    ok=1
+    base="$d/omniroute.env.autoos-backup-20260101-000000"
+    [[ "$first" == *"+ appended REQUIRE_API_KEY=true"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ "$second" == *"+ appended REQUIRE_API_KEY=true"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup content wrong" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d" -maxdepth 1 -name 'omniroute.env.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    grep -q '^REQUIRE_API_KEY=true$' "$d/omniroute.env" || { ok=0; echo "final file lost the key" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart overwrote a same-second omniroute.env backup"; fi
 fi
 
 if it "svc: register-autostart never runs a second gateway next to omniroute autostart"; then
