@@ -1862,6 +1862,10 @@ class RunCardV2AcceptanceTests(unittest.TestCase):
     measurement)."""
 
     def test_run_card_kind_review_dry_run_prints_a_plan_on_the_real_repo(self):
+        # CI runners install no client, so every route is removed there
+        # (CI 36241451890); the faked-client cmd_run tests above cover the logic.
+        if not any(shutil.which(c.binary) for c in clients.CLIENTS.values()):
+            self.skipTest("no agent client installed on this host")
         r = run_agent("run", "--card", "kind=review,paths=tools/registry.py",
                       "--dry-run", "x")
         self.assertEqual(r.returncode, 0, r.stderr)
