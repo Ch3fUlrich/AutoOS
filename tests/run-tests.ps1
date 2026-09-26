@@ -6105,6 +6105,15 @@ Test-Case 'litellm fallback config is internally consistent' {
     Pass
 }
 
+Test-Case "sync-router-tiers's unit tests pass (registry-sourced, task A5c)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_sync_router_tiers_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "sync-router-tiers registry unit tests failed: $out"
+}
+
 Test-Case 'start scripts exist and name the client key' {
     Assert-True (Test-Path (Join-Path $Root 'configuration\start-stack.ps1')) 'ps1 missing'
     Assert-True (Test-Path (Join-Path $Root 'configuration\start-stack.sh')) 'sh missing'

@@ -3790,6 +3790,10 @@ PY
     assert_eq "$report" ""
 fi
 
+if it "sync-router-tiers's unit tests pass (registry-sourced, task A5c)"; then
+    out="$(python3 tests/test_sync_router_tiers_registry.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "free-only litellm groups mirror combos minus gateway-only legs"; then
     # The *-free-only groups are hand-curated (not sync-managed), so this
     # pins them to combos.json with hardcoded expectations: same legs in the
