@@ -650,22 +650,5 @@ class LegacyModelsTests(unittest.TestCase):
                          "fallback")
 
 
-class ValidateIgnoresCommentTests(unittest.TestCase):
-    """strip_comments() ignores "$comment" keys at any depth (hand-edited
-    prose); structure, routes, legs, models and providers still match
-    exactly."""
-
-    def test_docs_differing_only_in_a_nested_comment_compare_equal(self):
-        left = {"routes": {"r": {"legs": ["p/m"], "$comment": "one"}},
-                "models": {"m": {"id": "m", "$comment": "old prose"}}}
-        right = {"routes": {"r": {"legs": ["p/m"], "$comment": "two"}},
-                 "models": {"m": {"id": "m", "$comment": "new prose"}}}
-        self.assertEqual(registry.strip_comments(left), registry.strip_comments(right))
-
-    def test_docs_differing_in_a_leg_do_not_compare_equal(self):
-        left = {"routes": {"r": {"legs": ["p/m"], "$comment": "one"}}}
-        right = {"routes": {"r": {"legs": ["p/other"], "$comment": "one"}}}
-        self.assertNotEqual(registry.strip_comments(left), registry.strip_comments(right))
-
 if __name__ == "__main__":
     unittest.main()

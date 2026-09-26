@@ -1475,7 +1475,7 @@
     "cc": {
       "$comment": [
         "Claude Code subscription overflow leg (opus-4-6, t2-orchestrator). docs/models.md: 'subscription terms, never API-logged' / '$0 marginal (seat-metered)'; Anthropic's public consumer/subscription policy is not to train on these conversations by default. audit-router.py bans any other anthropic/claude API reference, so this is the only Claude provider entry the registry needs.",
-        "windows folded in from provider-windows.json's 'anthropic' key - see the module docstring in tools/registry-convert.py and the mapping doc's Open choices."
+        "windows folded in from provider-windows.json's 'anthropic' key - see docs/plans/2026-09-25-registry-mapping.md Open choices."
       ],
       "api_base": null,
       "id": "cc",
@@ -2206,7 +2206,7 @@
       }
     },
     "t1-orchestrator-paid": {
-      "$comment": "LiteLLM-only fallback chain with no OmniRoute equivalent (tools/sync-router-tiers.py SYNCED_TIERS comment). Its legs are hand-curated in configuration/litellm/config.yaml, which is not one of the old files this converter reads (out of scope for this migration) - legs stays empty until a later phase folds config.yaml in.",
+      "$comment": "LiteLLM-only fallback chain with no OmniRoute equivalent (tools/sync-router-tiers.py SYNCED_TIERS comment). Its legs are hand-curated in configuration/litellm/config.yaml, which is not one of the files this registry reads (out of scope for this migration) - legs stays empty until a later phase folds config.yaml in. See docs/plans/2026-09-25-registry-mapping.md Open choices.",
       "class": "cheap",
       "id": "t1-orchestrator-paid",
       "legs": [],

@@ -26,7 +26,7 @@ subshell-scoped env), so shards run concurrently from separate worktrees:
 
 ```bash
 bash tests/run-tests.sh --filter usb,cache,fetch,imagecache  # L1: usb + image cache
-bash tests/run-tests.sh --filter catalog,image,engine,llm-models  # L2: catalogs
+bash tests/run-tests.sh --filter catalog,image,engine,registry  # L2: catalogs
 bash tests/run-tests.sh --filter openhands,litellm,zed,router,combo,opencode,tier,serena,mcp,gateway,apply,healthcheck  # L3: ai/router
 bash tests/run-tests.sh --filter profile,state,undo,verify,web,menu,template,rescue,docs,shellcheck  # L4: core/web
 ```

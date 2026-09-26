@@ -3,11 +3,12 @@
 `catalog/windows.json`, `catalog/linux.json` and `catalog/macos.json` describe
 **what** can be installed. `lib/` describes **how**.
 
-The same folder holds three catalogs of other types: `images.json` (bootable
-images for the [USB creator](usb-creator.md)), `engines.json` (USB write engines)
-and `ai-registry.json` (with `ai-registry.schema.json`). `--check-catalog` validates
-every file in `catalog/`, dispatched by its top-level shape; an unrecognised shape
-fails.
+The same folder holds six catalogs of other types: `images.json` (bootable
+images for the [USB creator](usb-creator.md)), `engines.json` (USB write engines),
+`ai-registry.json` (with `ai-registry.schema.json`), `ide-models.json` (IDE model
+metadata), and `agent-harness.json` (agent harness configuration). `--check-catalog`
+validates every file in `catalog/`, dispatched by its top-level shape; an
+unrecognised shape fails.
 
 Adding software must never require touching `setup.ps1` or `setup.sh`. If you
 find yourself editing an entry point to add a package, the schema is missing

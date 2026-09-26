@@ -1,7 +1,7 @@
 """Tests for tools/sync-router-tiers.py sourcing its provider maps and tier
-leg lists from catalog/ai-registry.json instead of catalog/providers.json
-and configuration/omniroute/combos.json (routing v2 spec 3.2 phase 2, task
-A5c).
+leg lists from catalog/ai-registry.json instead of the deleted
+catalog/providers.json and configuration/omniroute/combos.json (routing v2
+spec 3.2 phase 2, task A5c).
 
 Run from the repo root:
 
@@ -54,10 +54,10 @@ MINIMAL_REGISTRY = {
 
 class ProviderMapsReadTheRegistryTests(unittest.TestCase):
     """provider_maps(path) already returns the same shape for a registry-
-    shaped `{"providers": {...}}` file as for the old catalog/providers.json
-    (both share the same field names, mapping doc section 2) - this pins
-    that the tool's DEFAULT (no path) now targets catalog/ai-registry.json,
-    not catalog/providers.json."""
+    shaped `{"providers": {...}}` file as for the deleted
+    catalog/providers.json (both share the same field names, mapping doc
+    section 2) - this pins that the tool's DEFAULT (no path) now targets
+    catalog/ai-registry.json, not the deleted catalog/providers.json."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -111,7 +111,8 @@ class RegistryRefsTests(unittest.TestCase):
 class RegistrySandbox:
     """Temp copies of ai-registry.json, combos.json and config.yaml, plus a
     runner pointed at them - proves the tool's default (unflagged --combos)
-    run needs neither catalog/providers.json nor combos.json present."""
+    run needs neither the deleted catalog/providers.json nor combos.json
+    present."""
 
     def __init__(self, with_combos=False):
         self._tmp = tempfile.TemporaryDirectory()
