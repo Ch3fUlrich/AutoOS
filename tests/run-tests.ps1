@@ -6100,7 +6100,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $oc = $stripped | ConvertFrom-Json
     Assert-Equal $oc.model 'omniroute/t1-orchestrator'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,cheaperinference/glm-5.2,cheaperinference/kimi-k3,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,samba/gpt-oss-120b,samba/MiniMax-M3,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -6847,7 +6847,7 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
-    Assert-Equal ($names -join ',') 't1-orchestrator,spark-1.3-contributor,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,deepseek-v4.1-flash,opus-4-6'
+    Assert-Equal ($names -join ',') 't1-orchestrator,spark-1.3-contributor,t1-orchestrator-clean,t1-orchestrator-free-only,t2-worker,cheaperinference/kimi-k3,cheaperinference/glm-5.2,samba/gpt-oss-120b,samba/MiniMax-M3,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,deepseek-v4.1-flash,opus-4-6'
     # "retired" is the one home of the ids a rename left behind: apply prunes
     # them from the store, so a retired id must never also be a current combo.
     $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -6862,6 +6862,7 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         't1-orchestrator' = '1M'; 'spark-1.3-contributor' = '1M'; 't1-orchestrator-clean' = '1M'; 't1-orchestrator-free-only' = '1M'; 't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
         'gemini-3.8-flash' = '128k'; 'deepseek-v4.1-flash' = '128k'; 'opus-4-6' = '200k'
+        'cheaperinference/kimi-k3' = '128k'; 'cheaperinference/glm-5.2' = '128k'; 'samba/gpt-oss-120b' = '128k'; 'samba/MiniMax-M3' = '128k'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
