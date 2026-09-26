@@ -533,6 +533,7 @@ antigravity_py() {
     python3 - "$@" <<'PY'
 import datetime, hashlib, json, os, re, stat, struct, sys
 
+CONTENTS_API_LIMIT = 1000
 TOP = "Antigravity-x64/"
 REQUIRED = (TOP + "antigravity", TOP + "chrome-sandbox", TOP + "resources/app.asar")
 LISTING_LINE = re.compile(r"^(\S{10})\s+\S+\s+\S+\s+\d{4}-\d\d-\d\d\s+\d\d:\d\d(?::\d\d)?\s(.*)$")
@@ -555,6 +556,12 @@ def cmd_listing(path):
         fail("the answer is not JSON")
     if not isinstance(doc, list):
         fail("the answer is not a JSON list of directory entries")
+    # The contents API returns at most 1000 entries per directory and cannot be
+    # paginated: a list that long may be cut off, and the newest version could be in
+    # the part that is missing. No fallback: refuse.
+    if len(doc) >= CONTENTS_API_LIMIT:
+        fail("it lists %d entries and the GitHub contents API returns at most %d per directory (it cannot be paginated) - "
+             "listing may be truncated; refusing to pick a newest version" % (len(doc), CONTENTS_API_LIMIT))
     best = None
     for entry in doc:
         if not isinstance(entry, dict) or entry.get("type") != "dir":

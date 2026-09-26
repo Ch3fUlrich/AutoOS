@@ -3763,6 +3763,33 @@ EOF
     if (( ok )); then pass; else fail "the version was picked by string order, or the tarball URL was built from something the manifest controls"; fi
 fi
 
+if it "antigravity discovery: a listing of 1000 or more entries may be truncated (the contents API returns at most 1000 and cannot be paginated), so it fails loudly and picks no version; 999 entries work"; then
+    ok=1
+    for shape in dirs-999 dirs-1000 dirs-1001 mixed-1000; do
+        n="${shape#*-}"; sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        names=()
+        if [[ "$shape" == mixed-* ]]; then for (( i = 1; i < n; i++ )); do names+=("notes-$i.md:file"); done
+        else for (( i = 1; i < n; i++ )); do names+=("0.0.$i"); done; fi
+        names+=("$AG_VA")                       # $n entries in all, 2.17.0 the newest directory
+        antigravity_listing "$sb" "${names[@]}"
+        antigravity_run "$sb" AG_ENTRY=latest
+        if (( n < 1000 )); then
+            [[ "$AG_OUT" == *"AGLATEST $AG_VA $AG_IDA $AG_BUCKET/$AG_IDA/linux-x64/Antigravity.tar.gz"* && "$AG_RC" == 0 ]] \
+                || { ok=0; echo "$shape: a listing below the limit must work: rc=[$AG_RC] ${AG_OUT:0:400}" >&2; }
+        else
+            [[ "$AG_RC" != 0 && "$AG_OUT" == *"listing may be truncated; refusing to pick a newest version"* ]] \
+                || { ok=0; echo "$shape: rc=[$AG_RC], no loud 'listing may be truncated; refusing to pick a newest version': ${AG_OUT:0:500}" >&2; }
+            [[ "$AG_OUT" == *"AGLATEST   "* ]] || { ok=0; echo "$shape: a version was picked from a listing that may be truncated: ${AG_OUT:0:500}" >&2; }
+            [[ "$(antigravity_count "$sb" '^curl ')" == 1 ]] || { ok=0; echo "$shape: something was requested after the listing: $(grep '^curl' "$sb/calls.log")" >&2; }
+            antigravity_run "$sb" AG_ENTRY=direct
+            [[ "$AG_STATE" == failed && "$AG_RC" != 0 && -z "$(find "$sb/home" -type f)" && -z "$(antigravity_debris "$sb")" ]] \
+                || { ok=0; echo "$shape: the install must fail and leave nothing: state=[$AG_STATE] rc=[$AG_RC]" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "a listing that the GitHub API may have cut off is trusted to name the newest version"; fi
+fi
+
 if it "antigravity discovery: a rate-limited listing (403 or 429) fails loudly with the reset time, installs nothing and tries no other source"; then
     ok=1
     reset_txt="$(date -u -d "@$AG_RESET" '+%Y-%m-%d %H:%M:%S UTC')"
