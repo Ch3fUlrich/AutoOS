@@ -85,6 +85,10 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-spawn-16: A cancelled run's process can survive SIGTERM; verify its pid is gone, then SIGKILL. (why: a cancelled qodercli ran 115s more; source: run 20260926-074714-2b01d2)
 - R-spawn-17: If a worktree subagent's commit is refused by the classifier, commit its diff yourself. (why: shared .git triggers Modify Shared Resources; source: RUNV2 report 2026-09-26T11:5xZ)
 - R-spawn-18: Start a background worker via run_in_background, never `nohup … &`. (why: the nohup worker died silently with its shell; source: work/L1-routing/review-a4c-qd.out)
+- R-spawn-19: Merge main into your branch and push before dispatching lanes; a lane cut from newer main fails the empty-diff setup check. (why: A5c stopped at setup; source: 88cc475, aee6857)
+- R-spawn-20: Check a resumed WIP commit against the current brief before building on it. (why: a WIP drifted out of scope; source: 5a90ef4, A5a report)
+- R-spawn-21: Gate an --isolate worker on the parent branch too: it can commit there via absolute paths while the spawner says NO-OP. (why: isolation leaked; source: 8f72409, work/L1-routing/Q1doc.out)
+- R-spawn-22: Pass brief inputs to an --isolate worker inline or by absolute read-only path; its clone has no git-ignored logs/. (why: relative logs/ paths were empty; source: work/L1-routing/Q1doc.out)
 
 ### review
 
@@ -93,6 +97,9 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-review-03: Never let a reviewer share the writer's model family; pair across families. (why: same-family reviewers repeat the writer's blind spots; source: cao/dispatch.py, review_degraded tag)
 - R-review-04: Inline run-log files into a qoder/agy task; under --isolate it cannot read outside its clone. (why: qoder asked for access, then NO-OP; source: work/L1-routing/review-c2.out, 2026-09-26)
 - R-review-05: Start every review run with `--card role=review`, or a clean sandbox exits 5 (NO-OP). (why: a full 8-finding review exited 5; source: work/L1-routing/review-a3.out, 2026-09-26)
+- R-review-06: A qoder reviewer reads only inside its cwd, no Bash: copy inputs into the worktree logs/. (why: it could not read RUN/; source: work/L1-routing/review-a8-qd.out)
+- R-review-07: A review must open with the files it read; a bare "none / ship" is unproven. (why: qoder returned 4 lines, no reads; source: work/L1-routing/review-a5a.out)
+- R-review-08: Never accept a t3-driver review: it checked the diff against constants copied from the diff. (why: tautological ship; source: work/L1-routing/review-a8.out)
 
 ### tests
 
@@ -111,6 +118,9 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-tests-13: Make each guard test fail on its bug: seed state the bug changes, assert the reason line, reset per loop. (why: three guard tests passed vacuously; source: c4dd31a, 1d64a1e, 68e519d)
 - R-tests-14: Mutation-test a scratch copy (`tar --exclude=.git`), never the worktree. (why: a mutation must not touch the lane's tree; source: status/L1-backlog.lane-omni.report.md)
 - R-tests-15: A test that fakes a user via USER/HOME must also unset SUDO_USER. (why: detect.sh prefers it and CI's sudo unshare+setpriv leaks SUDO_USER=runner; source: CI 36250221249, fix 854be02)
+- R-tests-16: Run the filtered pwsh suite yourself before merging an Agent-tool lane that touched .ps1/.psm1; the lane cannot run pwsh. (why: $pid bug shipped untested; source: 2c6a3d2)
+- R-tests-17: A lane migrating a tool must list tests/helpers/*.py in its paths; helpers assert tool internals. (why: helper broke outside scope; source: ec0e12d, A5c report)
+- R-tests-18: In tests/run-tests.sh name test arrays *_argv; reusing a string name as an array fails CI shellcheck SC2178. (why: filters passed, CI failed; source: CI 36252318777)
 
 ### gateway
 
@@ -127,6 +137,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-gateway-11: Don't treat agy as signed out on its 15s sign-in probe timing out; check host memory pressure first. (why: agy was signed in minutes earlier; source: review-b3c1.out 2026-09-26T07:33Z)
 - R-gateway-12: A 429 with retryable:true but a multi-day reset is not soon-retryable; mark the leg unavailable till reset. (why: agy quota read retryable, reset in 5d; source: 2026-09-26T07:47:05Z)
 - R-gateway-13: Size a request to its leg's per-minute token cap, not only its window. (why: groq gpt-oss-120b 413'd a review on TPM; source: work/L1-routing/review-l1own.out)
+- R-gateway-14: qoder as a non-review worker denies every Bash call; use it to write or review, never to run tests. (why: 6 denials incl. tests; source: inbox/L1-routing.md 2026-09-26T16:49:00Z)
 
 ### cost
 
