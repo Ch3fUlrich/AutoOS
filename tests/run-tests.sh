@@ -2099,9 +2099,10 @@ backup_holds() {
 
 if it "backup: append_line_once leaves the file alone and fails when its backup cannot be made"; then
     d="$(mktemp -d)"; f="$d/.zshrc"; bin="$(backup_fail_bin)"; ok=1
-    printf 'ORIGINAL\n' >"$f"
+    printf 'ORIGINAL\n' >"$f"; cp "$f" "$f.orig"
     out="$( ( PATH="$bin:$PATH"; AUTOOS_DRY_RUN=0; append_line_once "$f" "AutoOS:t" "export T=1  # AutoOS:t" ) 2>&1 )"; rc=$?
-    [[ "$(cat "$f")" == ORIGINAL ]] || { ok=0; echo "the file was modified without a backup: [$(cat "$f")]" >&2; }
+    # cmp, not $(cat): command substitution strips trailing newlines, so a rewrite that only dropped the last one would pass.
+    cmp -s "$f" "$f.orig" || { ok=0; echo "the file was modified without a backup: [$(cat "$f")]" >&2; }
     [[ "$out" == *"could not back up $f"* ]] || { ok=0; echo "no warning naming the file: [$out]" >&2; }
     (( rc != 0 )) || { ok=0; echo "rc=0 for a write that did not happen" >&2; }
     [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
@@ -2116,6 +2117,7 @@ fi
 if it "backup: install_agy does not run the vendor installer when a profile cannot be backed up"; then
     home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
     printf 'original zshrc\n' >"$home/.zshrc"; printf 'original profile\n' >"$home/.profile"
+    cp "$home/.zshrc" "$home/.zshrc.orig"; cp "$home/.profile" "$home/.profile.orig"
     _agy_run() {   # _agy_run [stub-dir]
         (
             HOME="$home"; AUTOOS_DRY_RUN=0; [[ -z "${1:-}" ]] || PATH="$1:$PATH"
@@ -2128,7 +2130,7 @@ if it "backup: install_agy does not run the vendor installer when a profile cann
         ) 2>&1
     }
     out="$(_agy_run "$bin")"; rc=$?
-    [[ "$(cat "$home/.zshrc")|$(cat "$home/.profile")" == "original zshrc|original profile" ]] \
+    { cmp -s "$home/.zshrc" "$home/.zshrc.orig" && cmp -s "$home/.profile" "$home/.profile.orig"; } \
         || { ok=0; echo "a profile was edited without a backup: [$(cat "$home/.zshrc")] [$(cat "$home/.profile")]" >&2; }
     [[ ! -e "$home/vendor-ran" ]] || { ok=0; echo "the vendor installer ran although a profile could not be backed up" >&2; }
     [[ "$out" == *"could not back up $home/"* ]] || { ok=0; echo "no warning naming the profile: [${out:0:300}]" >&2; }
@@ -2145,6 +2147,7 @@ fi
 if it "backup: the Qwen Code routing does not run when settings.json cannot be backed up"; then
     home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
     mkdir -p "$home/.qwen"; printf '{"mine": true}\n' >"$home/.qwen/settings.json"
+    cp "$home/.qwen/settings.json" "$home/.qwen/settings.json.orig"
     _qwen_run() {   # _qwen_run [stub-dir]
         (
             SYS_HOME="$home"; AUTOOS_DRY_RUN=0; OMNIROUTE_API_KEY=k1; AUTOOS_OMNIROUTE_KEY=k2
@@ -2155,7 +2158,7 @@ if it "backup: the Qwen Code routing does not run when settings.json cannot be b
         ) 2>&1
     }
     out="$(_qwen_run "$bin")"
-    [[ "$(cat "$home/.qwen/settings.json")" == '{"mine": true}' ]] || { ok=0; echo "settings.json was modified without a backup: [$(cat "$home/.qwen/settings.json")]" >&2; }
+    cmp -s "$home/.qwen/settings.json" "$home/.qwen/settings.json.orig" || { ok=0; echo "settings.json was modified without a backup: [$(cat "$home/.qwen/settings.json")]" >&2; }
     [[ ! -e "$home/omniroute-ran" ]] || { ok=0; echo "omniroute setup-qwen ran although settings.json could not be backed up" >&2; }
     [[ "$out" == *"could not back up $home/.qwen/settings.json"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
     [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
@@ -2171,8 +2174,9 @@ fi
 if it "backup: route_zed_to_proxy leaves settings.json alone and fails when its backup cannot be made"; then
     home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
     mkdir -p "$home/.config/zed"; printf '{"theme":"mine"}' >"$home/.config/zed/settings.json"
+    cp "$home/.config/zed/settings.json" "$home/.config/zed/settings.json.orig"   # no final newline: a rewrite that ADDS one must fail too
     out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; route_zed_to_proxy ) 2>&1 )"; rc=$?
-    [[ "$(cat "$home/.config/zed/settings.json")" == '{"theme":"mine"}' ]] || { ok=0; echo "settings.json was modified without a backup: [$(cat "$home/.config/zed/settings.json")]" >&2; }
+    cmp -s "$home/.config/zed/settings.json" "$home/.config/zed/settings.json.orig" || { ok=0; echo "settings.json was modified without a backup: [$(cat "$home/.config/zed/settings.json")]" >&2; }
     [[ "$out" == *"could not back up $home/.config/zed/settings.json"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
     (( rc != 0 )) || { ok=0; echo "rc=0 for a routing that did not happen" >&2; }
     [[ "$out" != *"routed to OmniRoute"* ]] || { ok=0; echo "reported success" >&2; }
@@ -2190,9 +2194,9 @@ if it "backup: register_antigravity_mcp_server leaves the config alone when its 
     home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
     cfg="$home/.gemini/config/mcp_config.json"
     mkdir -p "${cfg%/*}"; printf '{"mcpServers": {"keep": {"command": "x"}}}\n' >"$cfg"
-    before="$(cat "$cfg")"
+    before="$(cat "$cfg")"; cp "$cfg" "$cfg.orig"
     out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; register_antigravity_mcp_server newone '{"command":"npx"}' ) 2>&1 )"
-    [[ "$(cat "$cfg")" == "$before" ]] || { ok=0; echo "the config was modified without a backup: [$(cat "$cfg")]" >&2; }
+    cmp -s "$cfg" "$cfg.orig" || { ok=0; echo "the config was modified without a backup: [$(cat "$cfg")]" >&2; }
     [[ "$out" == *"could not back up $cfg"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
     [[ "$out" != *"configured MCP server"* ]] || { ok=0; echo "reported success" >&2; }
     [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
@@ -2206,9 +2210,9 @@ fi
 if it "backup: enable_project_mcp_server leaves settings.local.json alone when its backup cannot be made"; then
     repo="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
     f="$repo/.claude/settings.local.json"
-    mkdir -p "${f%/*}"; printf '{"theme":"mine"}\n' >"$f"
+    mkdir -p "${f%/*}"; printf '{"theme":"mine"}\n' >"$f"; cp "$f" "$f.orig"
     out="$( ( AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; enable_project_mcp_server "$repo" omnigraph ) 2>&1 )"
-    [[ "$(cat "$f")" == '{"theme":"mine"}' ]] || { ok=0; echo "the file was modified without a backup: [$(cat "$f")]" >&2; }
+    cmp -s "$f" "$f.orig" || { ok=0; echo "the file was modified without a backup: [$(cat "$f")]" >&2; }
     [[ "$out" == *"could not back up $f"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
     [[ "$out" != *"approved project MCP server"* ]] || { ok=0; echo "reported success" >&2; }
     [[ "$(backup_count "$repo")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
@@ -2251,6 +2255,7 @@ if it "backup: setup_opencode_config leaves a config alone when its backup canno
     oc="$home/.config/opencode"; mkdir -p "$oc"
     printf '{"model": "anthropic/mine"}\n' >"$oc/opencode.json"
     printf '{"model": "anthropic/mine"}\n' >"$oc/config.json"
+    for f in opencode.json config.json; do cp "$oc/$f" "$home/$f.orig"; done   # outside $oc: the stray-entries check lists it
     _oc_fail_run() {   # _oc_fail_run [stub-dir]
         ( SYS_HOME="$home" AUTOOS_DRY_RUN=0 AUTOOS_ROOT="$ROOT"
           [[ -z "${1:-}" ]] || PATH="$1:$PATH"
@@ -2261,7 +2266,7 @@ if it "backup: setup_opencode_config leaves a config alone when its backup canno
     }
     out="$(_oc_fail_run "$bin")"
     for f in opencode.json config.json; do
-        [[ "$(cat "$oc/$f")" == '{"model": "anthropic/mine"}' ]] || { ok=0; echo "$f was modified without a backup: [$(head -c 120 "$oc/$f")]" >&2; }
+        cmp -s "$oc/$f" "$home/$f.orig" || { ok=0; echo "$f was modified without a backup: [$(head -c 120 "$oc/$f")]" >&2; }
     done
     [[ "$out" == *"could not back up $oc/config.json"* && "$out" == *"could not back up $oc/opencode.json"* ]] \
         || { ok=0; echo "no warning naming both files: [${out:0:500}]" >&2; }
