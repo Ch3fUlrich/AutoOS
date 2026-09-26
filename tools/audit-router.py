@@ -15,8 +15,14 @@ This tool checks all four, plus one footgun that produced a misleading
 a PROVIDER-QUALIFIED bare model ref (`gemini/…`) bypasses every combo and has
 no fallback chain, so it binds straight to the throttled free tier.
 
+repo_combos() sources its combo list from catalog/ai-registry.json's
+render_omniroute() (task A5c, spec 3.2 phase 2) instead of reading
+configuration/omniroute/combos.json directly - --combos is an explicit
+override onto that old file's own shape (spec 3.2's two-phase rule: no old
+catalog is deleted before every consumer has moved off it).
+
 Usage:
-    python3 tools/audit-router.py [--offline] [--json]
+    python3 tools/audit-router.py [--offline] [--json] [--registry PATH | --combos PATH]
 
     (default)   probe the live gateway (:20128) and LiteLLM proxy (:4000)
     --offline   only compare files; skip the network
@@ -33,6 +39,7 @@ Never prints or reads a key value: only key *names* and model ids.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -43,6 +50,17 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+REGISTRY_TOOL_PATH = ROOT / "tools" / "registry.py"
+
+
+def _load_registry_tool():
+    """Import tools/registry.py by path - the same importlib-by-path
+    technique tools/sync-ide-models.py's _load_registry_tool() and
+    tools/registry.py's own _load_sync_router_tiers() already use."""
+    spec = importlib.util.spec_from_file_location("autoos_registry", REGISTRY_TOOL_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def litellm_key(env_path=None):
@@ -92,12 +110,38 @@ FORBIDDEN_DIRECT_REFS = (
 )
 
 
-def repo_combos() -> list[dict]:
-    path = ROOT / "configuration" / "omniroute" / "combos.json"
+def repo_combos(registry_path=None, combos_path=None) -> list[dict]:
+    """The repo's declared combos ('name'/'strategy'/'context'/'models' per
+    entry), sourced from catalog/ai-registry.json's render_omniroute()
+    (task A5c, spec 3.2 phase 2) - this used to read configuration/omniroute/
+    combos.json directly; tools/registry.py's render_omniroute() is already
+    proven semantically equal to that file (task A4a, `registry.py render
+    omniroute --check`), so this is a source change only.
+
+    combos_path is an explicit override reading a combos.json-shaped file
+    directly (never deleted, spec 3.2's two-phase rule); unset, registry_path
+    (default catalog/ai-registry.json) is rendered instead.
+
+    A registry with no `routes` key is unreadable input, not zero combos:
+    raise the loud SystemExit the old combos.json read gave a missing key
+    instead of letting render_omniroute() render an empty list silently.
+    """
+    if combos_path is not None:
+        path = Path(combos_path)
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))["combos"]
+        except (OSError, ValueError, KeyError) as exc:
+            raise SystemExit(f"ERROR: cannot read {path}: {exc}")
+    path = Path(registry_path) if registry_path else ROOT / "catalog" / "ai-registry.json"
+    registry_tool = _load_registry_tool()
     try:
-        return json.loads(path.read_text(encoding="utf-8"))["combos"]
+        doc = registry_tool.load(path)
+        if "routes" not in doc:
+            raise SystemExit(f"ERROR: cannot read routes from {path}")
+        rendered = registry_tool.render_omniroute(doc)
     except (OSError, ValueError, KeyError) as exc:
         raise SystemExit(f"ERROR: cannot read {path}: {exc}")
+    return rendered["combos"]
 
 
 def live_combos() -> dict[str, list] | None:
@@ -244,9 +288,13 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Audit router declarations against the live gateways.")
     ap.add_argument("--offline", action="store_true", help="skip all network probes")
     ap.add_argument("--json", action="store_true", help="machine-readable report")
+    ap.add_argument("--registry", default=None,
+                     help="path to catalog/ai-registry.json (default: catalog/ai-registry.json)")
+    ap.add_argument("--combos", default=None,
+                     help="explicit override: read combos from a combos.json-shaped file instead of --registry")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
 
-    combos = repo_combos()
+    combos = repo_combos(registry_path=args.registry, combos_path=args.combos)
     names = [c["name"] for c in combos]
     drift: list[str] = []
     probes: list[dict] = []

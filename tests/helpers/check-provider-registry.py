@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Fail when a provider map drifts from catalog/providers.json.
+"""Fail when a provider map drifts from catalog/providers.json or
+catalog/ai-registry.json.
 
-catalog/providers.json is the single source of truth that apply.ps1,
-apply.sh, tools/mirror-litellm-env.py and tools/sync-router-tiers.py all read.
-This asserts each tool's in-memory map equals what the registry says, so a
-hand-edited copy - or a registry edit that forgets a consumer - fails loudly
-instead of silently routing a provider to the wrong name.
+catalog/providers.json is still read by this checker itself (sections 1/2:
+schema completeness, the SambaNova/meta/omniroute contracts) and still named
+by docs/api-keys.md (section 6) - but no consumer tool reads it any more.
+apply.sh/apply.ps1 read catalog/ai-registry.json's own `providers` section
+(task A5a) and section 5 below checks exactly that; tools/mirror-litellm-env.py
+and tools/sync-router-tiers.py read the same registry section (task A5c,
+spec 3.2 phase 2) - sections 3/4 below compare each tool's in-memory map
+against THAT file now, so a hand-edited copy - or a registry edit that
+forgets a consumer - fails loudly instead of silently routing a provider to
+the wrong name.
 
 Run from the repository root (the suites do)::
 
@@ -24,12 +30,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "catalog" / "providers.json"
+REGISTRY = ROOT / "catalog" / "ai-registry.json"
 
 REQUIRED_FIELDS = ("omniroute_id", "litellm_env", "litellm_prefix", "api_base", "provider_data")
 
 
 def load_catalog() -> dict:
     return json.loads(CATALOG.read_text(encoding="utf-8"))["providers"]
+
+
+def load_registry_providers() -> dict:
+    return json.loads(REGISTRY.read_text(encoding="utf-8"))["providers"]
 
 
 def load_module(relative_path: str, name: str):
@@ -94,16 +105,22 @@ def main() -> int:
             problems.append(f"{name} provider_data must carry the Cloudflare UA fix")
 
     # 3. mirror tool: name -> env, in registry order (the .env line order).
+    #    Sourced from catalog/ai-registry.json now (task A5c), not the
+    #    catalog/providers.json `providers` loaded above - both must still
+    #    agree, but this is the file the tool actually reads.
+    registry_providers = load_registry_providers()
     mirror = load_module("tools/mirror-litellm-env.py", "mirror_litellm_env")
-    want_env = {name: entry["litellm_env"] for name, entry in providers.items()}
+    want_env = {name: entry["litellm_env"] for name, entry in registry_providers.items()
+                if entry.get("litellm_env")}
     if mirror.KEY_MAP != want_env:
         problems.append(f"mirror KEY_MAP != registry: {mirror.KEY_MAP}")
     elif list(mirror.KEY_MAP) != list(want_env):
         problems.append("mirror KEY_MAP order != registry order (would reorder litellm/.env)")
 
-    # 4. tier sync tool: its three maps, keyed by OmniRoute id.
+    # 4. tier sync tool: its three maps, keyed by OmniRoute id - also sourced
+    #    from catalog/ai-registry.json now (task A5c).
     sync = load_module("tools/sync-router-tiers.py", "sync_router_tiers")
-    want_prefix, want_api_base, want_env_key, _ = expected_by_omni(providers)
+    want_prefix, want_api_base, want_env_key, _ = expected_by_omni(registry_providers)
     got_prefix, got_api_base, got_env_key = sync.provider_maps()
     if got_prefix != want_prefix:
         problems.append("sync-router PROVIDER_PREFIX != registry")
@@ -114,10 +131,17 @@ def main() -> int:
 
     # 5. apply scripts read the registry (shell/PowerShell, so asserted from
     #    source; the Windows suite executes Get-AutoOSProviderMap for real).
+    #    Task A5a (routing v2 spec 3.2, D11) moved their provider source from
+    #    catalog/providers.json to catalog/ai-registry.json's `providers`
+    #    section; the two tools checked above (mirror-litellm-env.py,
+    #    sync-router-tiers.py) moved to that same registry section in task
+    #    A5c. No consumer tool reads catalog/providers.json any more - this
+    #    checker itself (sections 1/2) and docs/api-keys.md (section 6) are
+    #    all that still touch it.
     for rel in ("configuration/omniroute/apply.sh", "configuration/omniroute/apply.ps1"):
         text = (ROOT / rel).read_text(encoding="utf-8")
-        if "providers.json" not in text:
-            problems.append(f"{rel} does not read catalog/providers.json")
+        if "ai-registry.json" not in text:
+            problems.append(f"{rel} does not read catalog/ai-registry.json")
 
     # 6. the docs table names the registry as its source.
     docs = (ROOT / "docs" / "api-keys.md").read_text(encoding="utf-8")

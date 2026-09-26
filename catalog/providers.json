@@ -31,10 +31,13 @@
     "                 error 1010 to Node's default User-Agent; a plain client",
     "                 UA is accepted.",
     "",
-    "Order is the order tools/mirror-litellm-env.py emits lines into",
-    "litellm/.env. Reordering this file rewrites that file's line order, which",
-    "shows up as --check drift, so change it deliberately (see",
-    "tests/helpers/check-provider-registry.py, which pins the order)."
+    "Retired as a source: tools/mirror-litellm-env.py and apply.ps1/apply.sh",
+    "read catalog/ai-registry.json's `providers` section since A5a/A5c",
+    "(spec 3.2 phase 2), so the order below is no longer a contract - the",
+    "mirror tool emits litellm/.env lines in that registry's alphabetical",
+    "provider order now. This file stays in the repo (no old catalog is",
+    "deleted before every consumer has moved off it) and is still read by",
+    "tests/helpers/check-provider-registry.py's own schema/null-row checks."
   ],
   "providers": {
     "groq": {

@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Keep the LiteLLM fallback's tier legs in sync with OmniRoute's combos.
+"""Keep the LiteLLM fallback's tier legs in sync with the registry's routes.
 
-configuration/omniroute/combos.json is the single source of truth for the
-model-list order of each tier (docs/models.md). configuration/litellm/config.yaml
-is the manual fallback and carries a static copy of those legs -- a copy that
-drifts the moment someone re-curates a combo (that already happened once:
-t2-worker led with a 2-RPM Mistral leg while OmniRoute led with Gemini, and
-t3-driver listed model ids OmniRoute no longer had).
+catalog/ai-registry.json's `routes.<tier>.legs` is the single source of truth
+for the model-list order of each tier (docs/models.md) - this tool used to
+read configuration/omniroute/combos.json directly; same field, same order,
+one field-for-field verified in docs/plans/2026-09-25-registry-mapping.md
+section 4 (task A5c, routing v2 spec 3.2 phase 2). --combos stays as an
+explicit override onto combos.json's own shape (spec 3.2's two-phase rule:
+no old catalog is deleted before every consumer has moved off it).
+configuration/litellm/config.yaml is the manual fallback and carries a static
+copy of those legs -- a copy that drifts the moment someone re-curates a
+route (that already happened once: t2-worker led with a 2-RPM Mistral leg
+while OmniRoute led with Gemini, and t3-driver listed model ids OmniRoute no
+longer had).
 
 This tool removes the drift by regenerating ONLY the block between the two
 markers in config.yaml:
@@ -24,7 +30,8 @@ reordering, adding or dropping a leg is exactly the drift this tool exists to
 remove.
 
 Usage:
-    python3 tools/sync-router-tiers.py [--check] [--combos PATH] [--config PATH]
+    python3 tools/sync-router-tiers.py [--check]
+        [--registry PATH | --combos PATH] [--config PATH]
 
     (default)   rewrite the managed blocks in place; report what changed
     --check     change nothing; exit 1 with a unified diff when drifted
@@ -50,7 +57,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PROVIDERS_FILE = ROOT / "catalog" / "providers.json"
+REGISTRY_FILE = ROOT / "catalog" / "ai-registry.json"
 # Tiers mirrored from combos.json. t1-orchestrator / *-paid are deliberately
 # absent: combos.json has no t1-orchestrator-paid, and docs/models.md keeps
 # t1-orchestrator a hand-curated spark-only chain with an explicit xhigh note.
@@ -124,16 +131,20 @@ def provider_maps_from_dict(providers: dict):
 
 def provider_maps(path=None):
     """(prefix, api_base, env_key) keyed by OmniRoute provider id, read from
-    catalog/providers.json - the single source of truth shared with
-    apply.ps1/apply.sh and tools/mirror-litellm-env.py. See
-    provider_maps_from_dict() for the field meanings and the OmniRoute-id
-    keying; this wrapper only adds the file read.
+    catalog/ai-registry.json's `providers` section by default (task A5c -
+    this used to read catalog/providers.json; same field names, mapping doc
+    section 2, so an explicit `path` accepts either file's shape unchanged).
+    apply.ps1/apply.sh and tools/mirror-litellm-env.py have their own reads
+    (mirror-litellm-env.py switched to the registry too, task A5c; apply.*
+    in task A5a). See provider_maps_from_dict() for the field
+    meanings and the OmniRoute-id keying; this wrapper only adds the file
+    read.
     """
     try:
-        doc = json.loads(Path(path or PROVIDERS_FILE).read_text(encoding="utf-8"))
+        doc = json.loads(Path(path or REGISTRY_FILE).read_text(encoding="utf-8"))
         providers = doc["providers"]
     except (OSError, ValueError, KeyError) as exc:
-        raise ConfigError(f"cannot read {path or PROVIDERS_FILE}: {exc}") from exc
+        raise ConfigError(f"cannot read {path or REGISTRY_FILE}: {exc}") from exc
     return provider_maps_from_dict(providers)
 
 
@@ -236,6 +247,31 @@ def combos_refs(combos_path, tiers=SYNCED_TIERS):
     if missing:
         raise ConfigError(f"{combos_path} has no combo(s): {', '.join(missing)}")
     return {t: by_name[t] for t in tiers}
+
+
+def registry_refs(registry_path, tiers=SYNCED_TIERS):
+    """Ordered model refs per tier, read from catalog/ai-registry.json's
+    `routes.<tier>.legs` - this tool's default leg source (task A5c),
+    replacing combos.json's combos[].models (docs/plans/
+    2026-09-25-registry-mapping.md section 4: unchanged, in order). Same
+    GATEWAY_ONLY drop as combos_refs() above (kept for the explicit --combos
+    override onto the old file's own shape): a leg whose provider is an
+    OAuth/subscription bridge with no LiteLLM transport or key never enters a
+    managed mirror block.
+    """
+    try:
+        doc = json.loads(Path(registry_path).read_text(encoding="utf-8"))
+        routes = doc["routes"]
+    except (OSError, ValueError, KeyError) as exc:
+        raise ConfigError(f"cannot read {registry_path}: {exc}") from exc
+    missing = [t for t in tiers if t not in routes]
+    if missing:
+        raise ConfigError(f"{registry_path} has no route(s): {', '.join(missing)}")
+    return {
+        t: [m for m in (routes[t].get("legs") or [])
+            if m.split("/", 1)[0] not in GATEWAY_ONLY]
+        for t in tiers
+    }
 
 
 def render_block(tier, refs, indent="", extras=None):
@@ -350,7 +386,7 @@ def _utf8_streams():
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description="Sync LiteLLM tier legs from the OmniRoute combos (single source of truth).",
+        description="Sync LiteLLM tier legs from the registry's routes (single source of truth).",
     )
     parser.add_argument(
         "--check",
@@ -358,9 +394,14 @@ def parse_args(argv):
         help="exit 1 with a diff when the managed blocks have drifted; change nothing",
     )
     parser.add_argument(
+        "--registry",
+        default=None,
+        help="path to catalog/ai-registry.json (default: catalog/ai-registry.json)",
+    )
+    parser.add_argument(
         "--combos",
         default=None,
-        help="path to combos.json (default: configuration/omniroute/combos.json)",
+        help="explicit override: read leg order from a combos.json-shaped file instead of --registry",
     )
     parser.add_argument(
         "--config",
@@ -378,11 +419,15 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     _utf8_streams()
-    combos_path = (
-        Path(args.combos)
-        if args.combos
-        else ROOT / "configuration" / "omniroute" / "combos.json"
-    )
+    # --combos is the explicit, old-shape override for leg order; unset, this
+    # tool's default run sources legs from the registry instead (task A5c).
+    # Providers always come from --registry (or its default) - apply.ps1/
+    # apply.sh have no combos.json-only provider source to fall back to
+    # either, and none ever existed as a CLI flag here (provider_maps() was
+    # always the hardcoded catalog/providers.json before this task).
+    combos_path = Path(args.combos) if args.combos else None
+    registry_path = Path(args.registry) if args.registry else ROOT / "catalog" / "ai-registry.json"
+    source_path = combos_path if combos_path is not None else registry_path
     config_path = (
         Path(args.config)
         if args.config
@@ -390,10 +435,10 @@ def main(argv=None):
     )
 
     try:
-        # Populate the module maps Leg reads, from the shared registry.
+        # Populate the module maps Leg reads, from the registry.
         global PROVIDER_PREFIX, API_BASE, ENV_KEY
-        PROVIDER_PREFIX, API_BASE, ENV_KEY = provider_maps()
-        combos = combos_refs(combos_path)
+        PROVIDER_PREFIX, API_BASE, ENV_KEY = provider_maps(registry_path)
+        combos = combos_refs(combos_path) if combos_path is not None else registry_refs(registry_path)
         original = config_path.read_text(encoding="utf-8")
         updated, changed = rewrite(original, combos)
     except (OSError, ConfigError) as exc:
@@ -404,13 +449,13 @@ def main(argv=None):
         if changed:
             print(diff_text(original, updated, str(config_path)), end="")
             print(
-                f"DRIFT: {', '.join(changed)} out of sync with {combos_path}",
+                f"DRIFT: {', '.join(changed)} out of sync with {source_path}",
                 file=sys.stderr,
             )
             return 1
         if not args.quiet:
             print(
-                f"OK: {', '.join(combos)} match {combos_path.name} "
+                f"OK: {', '.join(combos)} match {source_path.name} "
                 f"(gateway-only excluded: {', '.join(sorted(GATEWAY_ONLY))})"
             )
         return 0

@@ -97,7 +97,7 @@ kept a Graphify container on their worktree (stopped by hand).
    end-to-end checks after.
 4. After the migration: Semaphore template 61 for ports 4096 and 20128.
 5. OmniRoute dashboard: connect Qoder and Antigravity (D13) and the Claude Code account.
-6. A8 upstream PR: on hold until the operator decides; not prepared.
+6. A8 upstream PR: approved by the operator 2026-09-26; opened as diegosouzapw/OmniRoute#14900 (model table) and #14901 (qodercli in the image) from the fork Ch3fUlrich/OmniRoute; follow the upstream review.
 
 ## Done when
 

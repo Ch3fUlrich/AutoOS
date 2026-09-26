@@ -72,34 +72,94 @@ if [[ -f "$KEYS_FILE" ]]; then
     done <"$KEYS_FILE"
 fi
 
-# Provider registry: catalog/providers.json is the single source of truth for
-# which api-keys.yml name maps to which OmniRoute provider id and for the
-# provider-specific connection data (the Cloudflare UA quirk on groq/cerebras).
-# apply.ps1 and the two Python tools read the same file, so the copies these
-# maps used to carry cannot drift. Only providers with an omniroute_id are
-# registered: meta (unregistered 2026-09-23, openrouter-first, no combo leg)
-# and the omniroute client key carry none and are skipped, exactly as before.
-PROVIDERS_FILE="$ROOT/catalog/providers.json"
-[[ -f "$PROVIDERS_FILE" ]] || { echo "Missing $PROVIDERS_FILE" >&2; exit 1; }
-provider_rows="$(python3 - "$PROVIDERS_FILE" <<'PY'
+# Provider registry: catalog/ai-registry.json's `providers` section is the
+# single source of truth for which api-keys.yml name maps to which OmniRoute
+# provider id and for the provider-specific connection data (the Cloudflare
+# UA quirk on groq/cerebras). catalog/providers.json is retired as apply's
+# source as of task A5a (routing v2 spec 3.2, D11) - it still exists (a later
+# task deletes it) but is no longer read here. apply.ps1 reads the same
+# registry file, so the two scripts cannot drift. Only providers with an
+# omniroute_id are registered: meta (unregistered 2026-09-23, openrouter-
+# first, no combo leg) and the omniroute client key carry none and are
+# skipped, exactly as before. A provider every one of whose route legs the
+# registry marks unavailable (routes.<id>.unavailable_legs,
+# providers.<id>.available: false) is skipped too - registering a connection
+# nothing can ever route to proves nothing and just leaves a dead entry.
+REGISTRY_FILE="${AUTOOS_REGISTRY_FILE:-$ROOT/catalog/ai-registry.json}"
+[[ -f "$REGISTRY_FILE" ]] || { echo "Missing $REGISTRY_FILE" >&2; exit 1; }
+provider_rows="$(python3 - "$REGISTRY_FILE" <<'PY'
 import json, sys
 
-providers = json.load(open(sys.argv[1], encoding="utf-8"))["providers"]
+registry = json.load(open(sys.argv[1], encoding="utf-8"))
+providers = registry.get("providers") or {}
+routes = registry.get("routes") or {}
+
+
+def resolve_provider_id(prefix):
+    """A route leg's prefix names a providers key or any provider's
+    omniroute_id (mirrors tools/registry.py's resolve_leg two-step match)."""
+    if prefix in providers:
+        return prefix
+    for pid, entry in providers.items():
+        if isinstance(entry, dict) and entry.get("omniroute_id") == prefix:
+            return pid
+    return None
+
+
+def leg_is_unavailable(leg, route):
+    """Mirrors tools/registry.py's _leg_is_unavailable(): a route's own
+    unavailable_legs entry, or the leg's provider carrying available: false
+    registry-wide (both are spec 3.1's two operator-facing "this is down"
+    flags)."""
+    unavailable_legs = route.get("unavailable_legs") or {}
+    entry = unavailable_legs.get(leg)
+    if isinstance(entry, dict) and entry.get("available") is False:
+        return True
+    pid = resolve_provider_id(leg.split("/", 1)[0])
+    if pid is None:
+        return False
+    return (providers.get(pid) or {}).get("available") is False
+
+
+# Every leg any route lists, grouped by the provider id it resolves to - used
+# only to find a provider none of whose legs can ever be served.
+legs_by_provider = {}
+for route in routes.values():
+    if not isinstance(route, dict):
+        continue
+    for leg in route.get("legs") or []:
+        pid = resolve_provider_id(leg.split("/", 1)[0])
+        if pid is not None:
+            legs_by_provider.setdefault(pid, []).append((leg, route))
+
 for name, entry in providers.items():
     provider_id = entry.get("omniroute_id")
     if not provider_id:
         continue  # meta (unregistered) and the omniroute client key
+    legs = legs_by_provider.get(name) or []
+    # A provider with no leg anywhere is not "every leg unavailable" (it is
+    # simply unused elsewhere) - only a used provider whose every leg is down
+    # is skipped here.
+    if legs and all(leg_is_unavailable(leg, route) for leg, route in legs):
+        print("SKIP\t%s" % provider_id)
+        continue
     data = entry.get("provider_data")
     # One compact JSON string per provider: the exact argv value the CLI wants.
     data_json = json.dumps(data, separators=(",", ":")) if data else ""
     # api-keys.yml keys are lower-cased when parsed above, so match that.
-    print("%s\t%s\t%s" % (name.lower(), provider_id, data_json))
+    print("ROW\t%s\t%s\t%s" % (name.lower(), provider_id, data_json))
 PY
-)" || { echo "apply.sh: cannot read $PROVIDERS_FILE" >&2; exit 1; }
+)" || { echo "apply.sh: cannot read $REGISTRY_FILE" >&2; exit 1; }
 PROVIDER_MAP=()
+PROVIDER_SKIPPED=()
 declare -A PROVIDER_DATA=()
-while IFS=$'\t' read -r key_name provider_id data_json; do
-    [[ -z "$key_name" ]] && continue
+while IFS=$'\t' read -r tag a b c; do
+    [[ -z "$tag" ]] && continue
+    if [[ "$tag" == SKIP ]]; then
+        PROVIDER_SKIPPED+=("$a")
+        continue
+    fi
+    key_name="$a" provider_id="$b" data_json="$c"
     PROVIDER_MAP+=("$key_name:$provider_id")
     if [[ -n "$data_json" ]]; then
         PROVIDER_DATA["$provider_id"]="$data_json"
@@ -180,6 +240,13 @@ register_provider() {
 }
 
 echo "Providers:"
+# A provider whose every route leg is registry-unavailable (task A5a) is
+# reported here and never touched below - no key lookup, no existing-id
+# check, no register_provider call.
+for provider_id in "${PROVIDER_SKIPPED[@]:-}"; do
+    [[ -z "$provider_id" ]] && continue
+    echo "  - $provider_id: all legs unavailable (skipped)"
+done
 # Connections that already exist are left alone: re-adding would either fail
 # or duplicate them, and neither proves the pipeline works.
 # A down gateway (dry run) has no list to read; the plan then comes from the
