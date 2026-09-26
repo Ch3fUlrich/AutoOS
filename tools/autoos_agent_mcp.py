@@ -47,7 +47,7 @@ AGENT = os.path.join(TOOLS_DIR, "autoos-agent.py")
 sys.path.insert(0, TOOLS_DIR)
 import autoos_clients as clients  # noqa: E402
 import autoos_routing as routing  # noqa: E402
-from registry import resolve_leg  # noqa: E402
+from registry import resolve_leg, unavailable_now  # noqa: E402
 
 TAIL_CHARS = 6000
 _CHILDREN = {}  # pid -> Popen of runners this server started; poll() reaps them
@@ -163,11 +163,12 @@ def list_agents() -> dict:
 
     ``clients``: ``[{id, installed, signed_in, reason}]`` from the same probes
     ``route``'s filters read. ``routes``: ``[{id, class, legs: [{leg,
-    available}], retired}]`` - a leg is unavailable when it is named in the
-    route's own ``unavailable_legs`` or its provider is marked
-    ``available: false`` (the same rule the resolver's hard filter applies).
-    A broken registry (bad leg, unreadable file) is ``{"error": msg}``, never
-    a raise.
+    available}], retired}]`` - a leg is unavailable when its own
+    ``unavailable_legs`` entry or its provider is unavailable now, read through
+    ``registry.unavailable_now`` against the current UTC clock (the same rule
+    the resolver's hard filter applies, so operator-facing availability cannot
+    disagree with a plan during an ``unavailable_until`` window). A broken
+    registry (bad leg, unreadable file) is ``{"error": msg}``, never a raise.
     """
     try:
         registry = agent.load_registry(agent.REGISTRY_PATH)
@@ -179,14 +180,16 @@ def list_agents() -> dict:
             client_rows.append({"id": client_id, "installed": entry["installed"],
                                 "signed_in": entry["signed_in"], "reason": entry["reason"]})
         providers = registry.get("providers") or {}
+        now = datetime.datetime.now(datetime.timezone.utc)
         route_rows = []
         for route_id, route in (registry.get("routes") or {}).items():
             unavailable = route.get("unavailable_legs") or {}
             legs = []
             for leg in route.get("legs") or []:
                 provider_id, _ = resolve_leg(leg, registry)
-                available = (leg not in unavailable
-                            and providers.get(provider_id, {}).get("available") is not False)
+                available = not (
+                    unavailable_now(unavailable.get(leg), now)
+                    or unavailable_now(providers.get(provider_id), now))
                 legs.append({"leg": leg, "available": available})
             route_rows.append({"id": route_id, "class": route.get("class"),
                                "legs": legs, "retired": bool(route.get("retired"))})

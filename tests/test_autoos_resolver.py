@@ -2161,6 +2161,27 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertIn("unavailable: cheap/fast until 2026-10-01T09:05:00Z",
                       removed["r-plain"][0])
 
+    def test_an_unparsable_provider_until_does_not_say_passed(self):
+        # UNTILfix: the "unavailable_until passed" note needs a *parsable*
+        # until at or before now. An unparsable value falls through to the
+        # available flag in unavailable_now, so nothing "passed" and the
+        # reason line must not claim it did (rule 7 reports the value).
+        self.registry["providers"]["quota"]["unavailable_until"] = (
+            "next tuesday")
+        _, skipped = r.usable_legs(self.registry["routes"]["r-quota"],
+                                   self.card, self.features, self.state,
+                                   self.registry, {}, now=self.dt(2026, 9, 26))
+        self.assertNotIn("quota/slow", skipped)
+
+    def test_an_unparsable_leg_until_does_not_say_passed(self):
+        # Same on the leg's own unavailable_legs entry.
+        self.registry["routes"]["r-plain"]["unavailable_legs"] = {
+            "cheap/fast": {"unavailable_until": "next tuesday"}}
+        _, skipped = r.usable_legs(self.registry["routes"]["r-plain"],
+                                   self.card, self.features, self.state,
+                                   self.registry, {}, now=self.dt(2026, 9, 26))
+        self.assertNotIn("cheap/fast", skipped)
+
     def test_an_unavailable_leg_with_no_until_stays_unavailable_forever(self):
         self.registry["routes"]["r-plain"]["unavailable_legs"] = {
             "cheap/fast": {"available": False}}

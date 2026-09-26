@@ -99,6 +99,21 @@ class LegsToProbeTests(unittest.TestCase):
         reasons = dict(self.mod.legs_to_probe(self.registry))
         self.assertIn("available false", reasons["flaky/small"])
 
+    def test_provider_with_a_future_until_is_skipped(self):
+        # UNTILfix: _skip_reason uses registry.unavailable_now, so a provider
+        # in a known multi-day until window is not probed at all.
+        self.registry["providers"]["clean"]["unavailable_until"] = (
+            "2999-01-01T00:00:00Z")
+        reasons = dict(self.mod.legs_to_probe(self.registry))
+        self.assertIn("clean", reasons["clean/big"])
+
+    def test_provider_whose_until_passed_is_probed_again(self):
+        # A passed until self-heals: probe it again even with available: false.
+        self.registry["providers"]["flaky"]["unavailable_until"] = (
+            "2000-01-01T00:00:00Z")
+        reasons = dict(self.mod.legs_to_probe(self.registry))
+        self.assertIsNone(reasons["flaky/small"])
+
     def test_client_bound_leg_is_skipped_naming_the_client(self):
         reasons = dict(self.mod.legs_to_probe(self.registry))
         self.assertEqual(reasons["clean/zen"], "client_bound: probe through opencode")

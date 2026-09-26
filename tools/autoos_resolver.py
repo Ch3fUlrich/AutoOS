@@ -21,7 +21,8 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import autoos_track as track  # tools/ is on sys.path for every caller
-from registry import resolve_leg, private_safe, unavailable_now  # tools/ is on sys.path for every caller
+from registry import (resolve_leg, private_safe, unavailable_now,  # tools/ is on sys.path
+                      _parse_until)
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
@@ -373,6 +374,26 @@ def _unavailable_reason(entry, name):
     return "unavailable"
 
 
+def _until_passed(entry, now):
+    """True when `entry` carries a *parsable* ``unavailable_until`` at or
+    before ``now`` -- the "an outage timed out, re-probe it" condition.
+
+    A missing, unparsable or still-future until yields False, so a
+    check-failed registry never claims a date "passed" on the strength of a
+    value nothing could read (rule 7 reports that value itself; until then
+    ``unavailable_now`` falls through to the plain ``available`` flag). A
+    naive ``now`` is read as UTC.
+    """
+    if not isinstance(entry, dict):
+        return False
+    moment = _parse_until(entry.get("unavailable_until"))
+    if moment is None:
+        return False
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now >= moment
+
+
 def _leg_availability(leg, provider_id, unavailable, registry, now):
     """``(hard_reason, re_probe_notes)`` for `leg` at `now`.
 
@@ -392,13 +413,13 @@ def _leg_availability(leg, provider_id, unavailable, registry, now):
         return _unavailable_reason(entry, leg), []
 
     notes = []
-    if isinstance(entry, dict) and entry.get("unavailable_until") is not None:
+    if _until_passed(entry, now):
         notes.append("re-probe: %s unavailable_until passed" % leg)
 
     provider = registry["providers"][provider_id]
     if unavailable_now(provider, now):
         return _unavailable_reason(provider, provider_id), notes
-    if provider.get("unavailable_until") is not None:
+    if _until_passed(provider, now):
         notes.append("re-probe: %s unavailable_until passed" % provider_id)
     return None, notes
 

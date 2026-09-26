@@ -752,6 +752,17 @@ class RuleSevenUnavailableUntilTests(unittest.TestCase):
         self.assertFalse(any(p.startswith("bad unavailable_until")
                              for p in problems), problems)
 
+    def test_an_explicit_zero_offset_is_rejected_too(self):
+        # UNTILfix: the schema's until_tag pattern is Z-only, so an explicit
+        # +00:00 must fail check even though it names the same instant. This
+        # was the one offset rule 7 used to let through.
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = (
+            "2026-10-01T09:05:00+00:00")
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(p.startswith("bad unavailable_until: clients.agy")
+                            for p in problems), problems)
+
     def test_offsets_and_naive_timestamps_are_rejected(self):
         # UTC only ("...Z"): an offset or a naive timestamp is ambiguous
         # about which clock it means on a machine in another zone.

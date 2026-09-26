@@ -172,7 +172,9 @@ def _parse_until(value):
     Accepts a trailing ``Z`` or an explicit ``+00:00``; anything else (a
     non-string, a naive timestamp, another offset, a calendar that does not
     exist) returns None -- parseability is rule 7's job, the helper never
-    raises into a live resolver.
+    raises into a live resolver. This stays permissive on purpose: rule 7 is
+    the gate that enforces the schema's ``Z``-only shape, while a resolver
+    must degrade gracefully on a hand-edited value rather than crash.
     """
     if not isinstance(value, str):
         return None
@@ -661,12 +663,15 @@ def _check_dated_values(registry) -> list:
 
 
 def _check_until_values(registry) -> list:
-    """Every ``unavailable_until`` value anywhere in the registry parses as an
-    ISO-8601 UTC timestamp (``...Z`` or an explicit zero offset -- a naive or
-    offset value is ambiguous about which clock it means). A value that does
-    not parse would quietly read as available forever (see unavailable_now),
-    which is exactly the hand-edit-forgot-to-undo failure the field exists to
-    remove -- so it fails check loudly, naming the dotted path."""
+    """Every ``unavailable_until`` value anywhere in the registry is an
+    ISO-8601 UTC timestamp ending in ``Z``.
+
+    The schema's ``until_tag`` pattern is ``Z``-only, and any offset (even an
+    explicit ``+00:00``) or naive value is ambiguous about which clock it
+    means. A value that does not parse would quietly read as available forever
+    (see unavailable_now), which is exactly the hand-edit-forgot-to-undo
+    failure the field exists to remove -- so it fails check loudly, naming the
+    dotted path."""
     problems = []
 
     def walk(node, path):
@@ -676,10 +681,8 @@ def _check_until_values(registry) -> list:
                     continue
                 child = "%s.%s" % (path, key) if path else key
                 if key == "unavailable_until":
-                    if _parse_until(value) is None or (
-                            isinstance(value, str)
-                            and not value.strip().endswith("Z")
-                            and not value.strip().endswith("+00:00")):
+                    text = value.strip() if isinstance(value, str) else ""
+                    if not text.endswith("Z") or _parse_until(value) is None:
                         problems.append(
                             "bad unavailable_until: %s %r" % (path, value))
                     continue
