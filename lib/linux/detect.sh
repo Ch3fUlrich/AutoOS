@@ -462,7 +462,14 @@ script_is_installed() {
         uv)              has_bin uv ;;
         ollama)          has_bin ollama ;;
         claude-autostart) [[ -f "$SYS_HOME/.config/systemd/user/claude-sessions-restore.service" ]] ;;
-        herdr-sessions)  [[ -f "$SYS_HOME/.config/systemd/user/herdr-sessions-restore.service" ]] ;;
+        # A HS_SCOPE=system install (configuration/herdr-sessions/install.sh, the
+        # headless-root branch) puts its restore unit in /etc/systemd/system, never
+        # under $SYS_HOME - check both, or a system-scope herdr-sessions is invisible
+        # here and to autoos_conflict_present's mutual-exclusion gate
+        # (lib/linux/install.sh), letting claude-autostart install beside a live
+        # restore. Injectable for tests, same seam pattern as SYS_HOME.
+        herdr-sessions)  [[ -f "$SYS_HOME/.config/systemd/user/herdr-sessions-restore.service" ]] || \
+                         [[ -f "${AUTOOS_ETC_SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/herdr-sessions-restore.service" ]] ;;
         google-chrome)   has_bin google-chrome || has_bin google-chrome-stable ;;
         bitwarden-chrome) [[ -f /opt/google/chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
                          [[ -f /usr/share/google-chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \

@@ -7403,14 +7403,53 @@ if it "herdr-sessions: claude-autostart refuses when herdr-sessions was selected
     if (( ok )); then pass; else fail "claude-autostart installed alongside herdr-sessions"; fi
 fi
 
-if it "herdr-sessions detect: true only when the restore service unit exists"; then
+if it "herdr-sessions detect: true only when the restore service unit exists (user scope)"; then
     sb="$(mktemp -d)"; ok=1
-    ( SYS_HOME="$sb/home"; ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with no unit file present" >&2; }
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/no-etc"
+      ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with no unit file present" >&2; }
     mkdir -p "$sb/home/.config/systemd/user"
     touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
-    ( SYS_HOME="$sb/home"; script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the unit file exists" >&2; }
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/no-etc"
+      script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the user-scope unit file exists" >&2; }
     rm -rf "$sb"
-    if (( ok )); then pass; else fail "herdr-sessions detection does not match the unit file's presence"; fi
+    if (( ok )); then pass; else fail "herdr-sessions detection does not match the user-scope unit file's presence"; fi
+fi
+
+# Finding 1 (qoder review, L1-backlog.review-herdr-qoder.md): a SYSTEM-scope
+# install (HS_SCOPE=system, units in /etc/systemd/system - see
+# configuration/herdr-sessions/install.sh) was invisible here, so a later
+# claude-autostart install passed autoos_conflict_present's mutual-exclusion
+# gate and ran beside a live herdr restore. /etc/systemd/system is injectable
+# via AUTOOS_ETC_SYSTEMD_SYSTEM_DIR, the same seam pattern as SYS_HOME, so
+# this never needs a real /etc write to test.
+if it "herdr-sessions detect: also true for a system-scope unit, independent of the user-scope path"; then
+    sb="$(mktemp -d)"; ok=1
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+      ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with neither path present" >&2; }
+    mkdir -p "$sb/etc"
+    touch "$sb/etc/herdr-sessions-restore.service"
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+      script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the system-scope unit file exists" >&2; }
+    [[ ! -d "$sb/home" ]] || { ok=0; echo "the user-scope dir was touched by a system-scope check" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions detection does not see a system-scope install"; fi
+fi
+
+if it "herdr-sessions: claude-autostart's mutual-exclusion gate sees a system-scope herdr-sessions install too"; then
+    sb="$(mktemp -d)"; ok=1
+    mkdir -p "$sb/home/.config/systemd/user" "$sb/etc"
+    touch "$sb/etc/herdr-sessions-restore.service"
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+              AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+              PLAN_IDS=""
+              systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
+              install_claude_autostart ) 2>&1 )"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 with herdr-sessions installed system-scope only: ${out:0:300}" >&2; }
+    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions (system-scope case): ${out:0:300}" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "claude-autostart wrote units despite the system-scope conflict" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart installed alongside a system-scope-only herdr-sessions"; fi
 fi
 
 if it "herdr-sessions: a driver run that replaced some units is installed, not skipped"; then
