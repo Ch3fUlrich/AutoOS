@@ -986,6 +986,8 @@ def _use_host_alias_problem(head: Sequence[str], host_entry: HostEntry) -> str |
                         f"the host table; call host_run with host=<alias>")
     if base == "parallel":
         for tok in head[1:]:
+            if tok in (":::", "::::", "--"):
+                break  # flags end here; the rest are the command and inputs
             if tok in ("--sshlogin", "--sshloginfile", "--transfer", "--return",
                        "--ssh", "-S"):
                 return (f"parallel {tok} on a local host bypasses the host table "
@@ -997,7 +999,7 @@ def _use_host_alias_problem(head: Sequence[str], host_entry: HostEntry) -> str |
             if tok.startswith("--sshlogin"):
                 return ("parallel --sshlogin on a local host bypasses the host table; "
                         "call host_run with host=<alias>")
-            if tok.startswith("-S") and len(tok) > 2 and not tok.startswith("--"):
+            if tok.startswith("-") and not tok.startswith("--") and "S" in tok[1:]:
                 return ("parallel -S on a local host bypasses the host table; "
                         "call host_run with host=<alias>")
     return None
@@ -1371,35 +1373,7 @@ def _git_exec_subcommand_problem(argv: Sequence[str]) -> str | None:
     """Subcommands that execute argv via a shell (r2): `git submodule
     foreach <cmd>`, `git bisect run <cmd>`, `git rebase --exec/-x <cmd>`."""
     tail = list(argv[1:])
-    # submodule foreach <cmd>: deny when a non-flag command follows foreach.
-    if "submodule" in tail:
-        try:
-            si = tail.index("submodule")
-        except ValueError:
-            si = None
-        if si is not None and "foreach" in tail[si + 1:]:
-            fi = tail.index("foreach", si + 1)
-            for tok in tail[fi + 1:]:
-                if tok == "--":
-                    continue
-                if tok.startswith("-") and tok != "-":
-                    continue
-                return "git submodule foreach runs its command via a shell"
-    # bisect run <cmd>: deny when a non-flag command follows run.
-    if "bisect" in tail:
-        try:
-            bi = tail.index("bisect")
-        except ValueError:
-            bi = None
-        if bi is not None and "run" in tail[bi + 1:]:
-            ri = tail.index("run", bi + 1)
-            for tok in tail[ri + 1:]:
-                if tok == "--":
-                    continue
-                if tok.startswith("-") and tok != "-":
-                    continue
-                return "git bisect run runs its command via a shell"
-    # rebase --exec/-x <cmd>: first non-flag subcommand is rebase.
+    # First non-flag token is the subcommand (globals like --no-pager skipped).
     sub = None
     for tok in tail:
         if tok == "--":
@@ -1408,6 +1382,25 @@ def _git_exec_subcommand_problem(argv: Sequence[str]) -> str | None:
             continue
         sub = tok
         break
+    # submodule foreach <cmd>: deny when a non-flag command follows foreach.
+    if sub == "submodule" and "foreach" in tail:
+        fi = tail.index("foreach")
+        for tok in tail[fi + 1:]:
+            if tok == "--":
+                continue
+            if tok.startswith("-") and tok != "-":
+                continue
+            return "git submodule foreach runs its command via a shell"
+    # bisect run <cmd>: deny when a non-flag command follows run.
+    if sub == "bisect" and "run" in tail:
+        ri = tail.index("run")
+        for tok in tail[ri + 1:]:
+            if tok == "--":
+                continue
+            if tok.startswith("-") and tok != "-":
+                continue
+            return "git bisect run runs its command via a shell"
+    # rebase --exec/-x <cmd>.
     if sub == "rebase":
         for tok in tail:
             if tok == "--exec" or tok.startswith("--exec="):
