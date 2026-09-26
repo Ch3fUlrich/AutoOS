@@ -310,6 +310,16 @@ class AuditLog:
         self._journald(line.rstrip("\n"))
         return seq
 
+    def journald_advisory(self, text: str) -> None:
+        """Best-effort journald copy when the file write failed (r2 L-12):
+        an executed-but-unlogged call must still leave an advisory trace
+        even when stderr is unwatched. Never raises -- the caller is already
+        handling a failure."""
+        try:
+            self._journald(text)
+        except Exception:
+            pass
+
     def write(self, *, actor: str, session: str | None, via: str, host: str,
               argv: Sequence[str], cwd: str, run_as: str, decision: str, rule: str | None,
               reason: str | None, exit_code: int | None, duration_ms: int | None,

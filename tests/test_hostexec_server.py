@@ -242,6 +242,101 @@ class HostRunPlainFunctionTests(unittest.TestCase):
             self.assertIn("not logged", " ".join(ctx.exception.problems).lower())
             self.assertTrue(err.getvalue().strip(), "expected one stderr line")
 
+    def test_post_run_log_failure_still_attempts_journald_advisory(self):
+        # r2 L-12: executed-but-unlogged must still leave a journald trace.
+        import io
+        from contextlib import redirect_stderr
+
+        def fake_run(pol, host_entry, argv, cwd):
+            return runner.RunResult(exit_code=0, duration_ms=1, out_bytes=2,
+                                     output="ok", truncated=False, timed_out=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pol = _policy(_make_bindir(tmp))
+            seen: list[str] = []
+            log = audit.AuditLog(os.path.join(tmp, "state"), journald=seen.append)
+            log.preflight()
+            calls = {"advisory": 0}
+            orig_advisory = log.journald_advisory
+
+            def _counting_advisory(text: str) -> None:
+                calls["advisory"] += 1
+                return orig_advisory(text)
+
+            log.journald_advisory = _counting_advisory  # type: ignore[method-assign]
+
+            def _fail_post(*a, **k):
+                raise audit.AuditWriteError("disk full after run")
+
+            log.write = _fail_post  # type: ignore[method-assign]
+            err = io.StringIO()
+            with redirect_stderr(err):
+                with self.assertRaises(server.Refused):
+                    server.host_run(pol, log, actor="claude", host="coding-host",
+                                     argv=["echo", "hi"], cwd=tmp, run_fn=fake_run)
+            log.close()
+            self.assertEqual(calls["advisory"], 1)
+            self.assertTrue(any("RAN" in ln for ln in seen),
+                            f"expected an advisory journald line, got {seen!r}")
+
+    def test_serve_systemexit_bind_failure_returns_nonzero_with_message(self):
+        # r2 L-11: uvicorn startup failure raises SystemExit inside
+        # asyncio.run -- serve() must return non-zero with a clear message,
+        # not an unhandled traceback. No real uvicorn/mcp needed: both are stubbed.
+        import asyncio
+        import io
+        import sys as _sys
+        import types as _types
+        from contextlib import redirect_stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = _make_bindir(tmp)
+            pol = _policy(bindir)
+            policy_path = os.path.join(tmp, "policy.toml")
+            with open(policy_path, "w", encoding="utf-8") as fh:
+                fh.write("path = []\n")
+            state_dir = os.path.join(tmp, "state")
+
+            fake_uvicorn = _types.ModuleType("uvicorn")
+
+            class _FakeConfig:
+                def __init__(self, *a, **k):
+                    pass
+
+            class _FakeServer:
+                def __init__(self, *a, **k):
+                    self.started = False
+
+            fake_uvicorn.Config = _FakeConfig  # type: ignore[attr-defined]
+            fake_uvicorn.Server = _FakeServer  # type: ignore[attr-defined]
+            orig_build = server.build_asgi_app
+            server.build_asgi_app = lambda *a, **k: object()  # type: ignore[assignment]
+            _sys.modules["uvicorn"] = fake_uvicorn
+            orig_run = asyncio.run
+            asyncio.run = lambda *a, **k: (_ for _ in ()).throw(SystemExit(1))  # type: ignore[assignment]
+            old_bind = os.environ.get("AUTOOS_EXEC_BIND")
+            old_port = os.environ.get("AUTOOS_EXEC_PORT")
+            os.environ.pop("AUTOOS_EXEC_BIND", None)
+            os.environ["AUTOOS_EXEC_PORT"] = "1"
+            try:
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    rc = server.serve(pol, policy_path=policy_path, state_dir=state_dir)
+            finally:
+                asyncio.run = orig_run  # type: ignore[assignment]
+                server.build_asgi_app = orig_build  # type: ignore[assignment]
+                _sys.modules.pop("uvicorn", None)
+                if old_bind is None:
+                    os.environ.pop("AUTOOS_EXEC_BIND", None)
+                else:
+                    os.environ["AUTOOS_EXEC_BIND"] = old_bind
+                if old_port is None:
+                    os.environ.pop("AUTOOS_EXEC_PORT", None)
+                else:
+                    os.environ["AUTOOS_EXEC_PORT"] = old_port
+            self.assertNotEqual(rc, 0)
+            self.assertIn("failed to listen", err.getvalue().lower())
+
     def test_run_fn_is_injectable_for_testing_without_a_real_process(self):
         calls = []
 

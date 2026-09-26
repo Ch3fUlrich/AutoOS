@@ -114,6 +114,12 @@ def host_run(pol: policy.Policy, log: audit.AuditLog, *, actor: str, host: str,
                   exit_code=result.exit_code, duration_ms=result.duration_ms,
                   out_bytes=result.out_bytes, truncated=result.truncated)
     except audit.AuditWriteError as exc:
+        try:
+            log.journald_advisory(
+                f"hostexec: command RAN but audit log failed: {exc} "
+                f"actor={actor} host={host} argv={argv!r}")
+        except Exception:
+            pass
         print(f"hostexec: command RAN but audit log failed: {exc} argv={argv!r}",
               file=sys.stderr)
         raise Refused(None, [f"command RAN but was not logged: {exc}"]) from exc
@@ -284,6 +290,12 @@ def serve(pol: policy.Policy, *, policy_path: str, state_dir: str | None = None)
         asyncio.run(_serve_all(servers))
     except KeyboardInterrupt:
         pass
+    except SystemExit as exc:
+        # uvicorn startup failure (e.g. port in use) raises SystemExit inside
+        # asyncio.run -- not OSError -- so name it plainly instead of an
+        # unhandled traceback (r2 L-11). Exit stays non-zero either way.
+        print(f"broker failed to listen: startup failed ({exc})", file=sys.stderr)
+        return 2
     except OSError as exc:
         print(f"broker failed to listen: {exc}", file=sys.stderr)
         return 2

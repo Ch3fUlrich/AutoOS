@@ -32,21 +32,34 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              or a symlink outside the fixed PATH (resolved
                              targets re-enter basename rules)
                              (checked on every command head)
-    use-host-alias           on a local host, ssh/scp/sftp always and rsync
-                             with host:path (checked on every head)
+    use-host-alias           on a local host, ssh/scp/sftp always, rsync
+                             with host:path, and parallel with --sshlogin/-S/
+                             --sshloginfile/--transfer/--return
+                             (checked on every head)
     docker-root              docker/podman run|create binding / or a system
-                             dir, --privileged/--pid=host/--userns=host/
+                             dir (/etc, /root, /var, /usr, /boot, /run,
+                             /home itself or a bare /home/<user>) in any
+                             spelling (-v, attached -v, --volume[=],
+                             --mount[=]; deeper HOME projects allowed),
+                             --privileged/--pid=host/--userns=host/
                              --cap-add/--device; exec with --privileged or
                              -u 0/root (checked on every head)
-    no-sudo                  sudo/su/doas/pkexec/run0 as any argv element's
-                             basename, anywhere (accepted false positive:
-                             `grep sudo file` denies); heads cover wrappers
+    no-sudo                  sudo/sudo-rs/su/doas/pkexec/run0 as any argv
+                             element's basename, anywhere (accepted false
+                             positive: `grep sudo file` denies); heads cover
+                             wrappers
     no-inline-shell          sh/bash/ksh/mksh/csh/tcsh/ash/dash/zsh/fish/
                              busybox -c, python* -c, perl -e/-E,
-                             node -e/-p, ruby -e, awk with "system(" in a
-                             program argument, bare shell via a wrapper,
-                             script/systemd-run/at/batch/setpriv/chroot/
-                             unshare/nsenter/runuser/sg always -- scripts by
+                             node -e/-p, ruby -e, php -r, lua -e,
+                             Rscript -e, julia -e/-E, awk with "system(" or
+                             a pipe to a command, tar exec hooks
+                             (--checkpoint-action=exec, --to-command,
+                             --use-compress-program, -I), editors/pagers
+                             with argv commands (vim/vi/nvim/view/ex -c/+!
+                             with `!`, less/more +!, man -P/--pager), a bare
+                             shell via a wrapper, script/systemd-run/at/
+                             batch/setpriv/chroot/unshare/nsenter/runuser/sg/
+                             tmux/screen/dtach always -- scripts by
                              path are allowed (checked on every head)
     destructive              rm -r/-f on a root-ish path or glob of one,
                              mkfs*/wipefs, dd of=/dev/*, shred /dev/*,
@@ -55,14 +68,20 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              git push --force/-f/--mirror/--delete/
                              --force-with-lease/--force-if-includes or a
                              +refspec, docker system prune, docker volume
-                             rm/prune, iptables -F, nft flush, crontab -r
+                             rm/prune, iptables -F, nft flush, crontab
+                             anything but a pure list (-l)
                              (checked on every command head)
     git-option-injection     git -c/-C/--git-dir/--work-tree/--exec-path/
                              --output/--upload-pack/--receive-pack/
                              --config-env/--exec (review F2) plus git config
                              writing alias.*/core.pager/editor/sshCommand/
-                             fsmonitor/hooksPath/*.helper/include.path/url.*
-                             (checked on every command head)
+                             fsmonitor/hooksPath/*.sshcommand/*uploadpack/
+                             *receivepack/*gitproxy/*.helper/include.path/
+                             url.* plus submodule foreach, bisect run,
+                             rebase --exec/-x (checked on every command head)
+
+A deny-list can never be complete: every new exec-capable tool is a
+bypass until listed here. hostexec is an audit + guard boundary.
 
 Command heads (brief A): argv[0], then recursively the command after any
 transparent launcher (env, nice, nohup, timeout, xargs, ionice, stdbuf,
