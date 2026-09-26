@@ -3847,6 +3847,60 @@ if it "openhands: a dry run links nothing"; then
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
+if it "openhands: second run of the settings writer takes no backup and reports unchanged"; then
+    tmp="$(mktemp -d)"
+    oh="$tmp/home/.openhands"
+    # Name, size and mtime of every backup: a bare count cannot tell a skipped
+    # second run from one that overwrote a same-second backup.
+    oh_backups() { find "$oh" -maxdepth 1 -name 'settings.json.autoos-backup-*' -printf '%f %s %T@\n' | sort; }
+    oh_setup_run "$tmp/home" "" >/dev/null
+    b1="$(oh_backups)"
+    sum1="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    prof1="$(stat -c '%y' "$oh/profiles/openrouter-free.json")"
+    out="$(oh_setup_run "$tmp/home" "")"
+    b2="$(oh_backups)"
+    sum2="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    prof2="$(stat -c '%y' "$oh/profiles/openrouter-free.json")"
+    problems=""
+    [[ "$b1" == "$b2" ]] || problems+="[the second run took or overwrote a settings.json backup: {$b1} -> {$b2}] "
+    [[ "$sum1" == "$sum2" ]] || problems+="[the second run rewrote settings.json] "
+    [[ "$prof1" == "$prof2" ]] || problems+="[the second run rewrote an identical profile] "
+    [[ "$out" == *unchanged* ]] || problems+="[the second run never says unchanged] "
+    [[ "$out" != *"written to"* ]] || problems+="[the second run still says 'written to'] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a BOM'd settings.json keeps the user's keys"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home/.openhands"
+    printf '\xef\xbb\xbf{"custom_user_key": "keep-me", "schema_version": 2}' >"$tmp/home/.openhands/settings.json"
+    oh_setup_run "$tmp/home" "" >/dev/null
+    got="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8-sig")); print(d.get("custom_user_key"), "agent_settings" in d)' "$tmp/home/.openhands/settings.json" 2>&1)"
+    rm -rf "$tmp"
+    assert_eq "$got" "keep-me True"
+fi
+
+if it "openhands: a backup of settings.json never overwrites an earlier one"; then
+    tmp="$(mktemp -d)"
+    oh="$tmp/home/.openhands"; mkdir -p "$oh"
+    seed1='{"user_key": "first original"}'
+    seed2='{"user_key": "second original"}'
+    printf '%s' "$seed1" >"$oh/settings.json"
+    oh_setup_run "$tmp/home" "" >/dev/null
+    printf '%s' "$seed2" >"$oh/settings.json"
+    oh_setup_run "$tmp/home" "" >/dev/null
+    have1=0; have2=0; b=""
+    for b in "$oh"/settings.json.autoos-backup-*; do
+        [[ -f "$b" ]] || continue
+        [[ "$(cat "$b")" == "$seed1" ]] && have1=1
+        [[ "$(cat "$b")" == "$seed2" ]] && have2=1
+    done
+    rm -rf "$tmp"
+    if (( have1 && have2 )); then pass
+    else fail "a backup holding the user's file was overwritten (first original kept: $have1, second original kept: $have2)"; fi
+fi
+
 if it "custom_is_installed detects agent-skills under Documents/code or Documents/Code"; then
     tmp="$(mktemp -d)"
     (
