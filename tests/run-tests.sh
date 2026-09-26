@@ -3519,7 +3519,7 @@ if it "mirror-litellm-env projects keys without printing them"; then
     grep -q '^COHERE_API_KEY=dummy-cohere-3$' "$tmp/.env" || { ok=0; echo "cohere" >&2; }
     grep -q '^SAMBANOVA_API_KEY=dummy-samba-4$' "$tmp/.env" || { ok=0; echo "SambaNova case" >&2; }
     grep -q '^OPENCODE_ZEN_API_KEY=REPLACE' "$tmp/.env" || { ok=0; echo "zen placeholder" >&2; }
-    grep -qE '^LITELLM_MASTER_KEY=[^R]' "$tmp/.env" || { ok=0; echo "master" >&2; }
+    grep -q '^LITELLM_MASTER_KEY=.' "$tmp/.env" && ! grep -q '^LITELLM_MASTER_KEY=REPLACE_' "$tmp/.env" || { ok=0; echo "master" >&2; }
     python3 tools/mirror-litellm-env.py --check --keys "$tmp/api-keys.yml" --env "$tmp/.env" >/dev/null 2>&1
     [[ $? -eq 0 ]] || { ok=0; echo "fresh check failed" >&2; }
     rm -rf "$tmp"
