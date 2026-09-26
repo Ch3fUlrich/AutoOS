@@ -49,16 +49,17 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              mkfs*/wipefs, dd of=/dev/*, shred /dev/*,
                              shutdown/reboot/poweroff/halt, init 0|6,
                              systemctl poweroff/reboot/halt, chmod/chown -R /,
-                             git push --force/-f/--mirror/--delete or a
+                             git push --force/-f/--mirror/--delete/
+                             --force-with-lease/--force-if-includes or a
                              +refspec, docker system prune, docker volume
                              rm/prune, iptables -F, nft flush, crontab -r
                              (checked on every command head)
     git-option-injection     git -c/-C/--git-dir/--work-tree/--exec-path/
                              --output/--upload-pack/--receive-pack/
-                             --config-env/--exec (review F2: these read
-                             .git/config or run arbitrary programs even for
-                             "read" verbs like status/log/diff;
-                             checked on every command head)
+                             --config-env/--exec (review F2) plus git config
+                             writing alias.*/core.pager/editor/sshCommand/
+                             fsmonitor/hooksPath/*.helper/include.path/url.*
+                             (checked on every command head)
 
 Command heads (brief A): argv[0], then recursively the command after any
 transparent launcher (env, nice, nohup, timeout, xargs, ionice, stdbuf,
@@ -1101,9 +1102,12 @@ def _destructive_problem(argv: Sequence[str]) -> str | None:
     if base == "git" and "push" in tail:
         idx = tail.index("push")
         after = tail[idx + 1:]
-        if any(a in ("--force", "-f", "--mirror", "--delete") for a in after) or \
+        if any(a in ("--force", "-f", "--mirror", "--delete",
+                     "--force-with-lease", "--force-if-includes") for a in after) or \
+                any(a.startswith("--force-with-lease") or a.startswith("--force-if-includes")
+                    for a in after) or \
                 any(a.startswith("+") for a in after if not a.startswith("--")):
-            return "git push --force/-f/--mirror/--delete or a +refspec"
+            return "git push --force/-f/--mirror/--delete/--force-with-lease/--force-if-includes or a +refspec"
     if base == "docker":
         if "system" in tail and "prune" in tail:
             return "docker system prune"
@@ -1131,4 +1135,55 @@ def _git_option_injection_problem(argv: Sequence[str]) -> str | None:
             if tok == flag or tok.startswith(flag + "="):
                 return (f"git {flag} can read .git/config or run an arbitrary program "
                          "even for a read verb (review F2)")
+    cfg_problem = _git_config_write_problem(argv)
+    if cfg_problem:
+        return cfg_problem
+    return None
+
+
+def _is_dangerous_git_config_key(tok: str) -> bool:
+    """Brief F: alias.*, core.pager/editor/sshCommand/fsmonitor/hooksPath,
+    *.helper, include.path, url.* (case-insensitive on the key)."""
+    if not tok or tok.startswith("-"):
+        return False
+    key = tok.split("=", 1)[0].lower()
+    if key.startswith("alias."):
+        return True
+    if key in ("core.pager", "core.editor", "core.sshcommand",
+               "core.fsmonitor", "core.hookspath", "include.path"):
+        return True
+    if key.endswith(".helper"):
+        return True
+    if key.startswith("url."):
+        return True
+    return False
+
+
+def _git_config_write_problem(argv: Sequence[str]) -> str | None:
+    # Find the `config` subcommand (first non-flag token after `git`,
+    # skipping safe globals like --no-pager). `git -c ...` already denied
+    # above, so any remaining -c is not reached here.
+    tail = list(argv[1:])
+    idx = None
+    for i, tok in enumerate(tail):
+        if tok == "--":
+            continue
+        if tok.startswith("-") and tok != "-":
+            continue
+        idx = i
+        break
+    if idx is None or tail[idx] != "config":
+        return None
+    after = tail[idx + 1:]
+    # Read-only modes stay allowed: --get/--get-all/--get-regexp/--list/-l.
+    for tok in after:
+        if tok in ("--get", "--get-all", "--get-regexp", "--list", "-l",
+                   "--get-color", "--print", "--get-urlmatch"):
+            return None
+        if tok.startswith("--get=") or tok.startswith("--get-all="):
+            return None
+    for tok in after:
+        if _is_dangerous_git_config_key(tok):
+            return (f"git config writes dangerous key {tok!r} "
+                    "(alias/core.pager/editor/sshCommand/fsmonitor/hooksPath/helper/include/url)")
     return None
