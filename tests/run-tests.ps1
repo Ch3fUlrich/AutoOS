@@ -4430,6 +4430,9 @@ Test-Case 'openhands skills: Set-AutoOSOpenHandsConfig links every repo skill in
         param($ctx)
         $expected = @(Get-RepoSkillName)
         if ($expected.Count -eq 0) { throw 'this repo has no skills under .agents/skills' }
+        # A symlink needs administrator rights on Windows (a CI runner has them, a
+        # user often does not), so there the link must be a Junction, not just "a link".
+        $onWindows = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
         $out = & $ctx.Run
         $dest = Get-Item -LiteralPath $ctx.Skills -Force -ErrorAction SilentlyContinue
         if (-not $dest) { throw "$($ctx.Skills) was not created" }
@@ -4439,6 +4442,7 @@ Test-Case 'openhands skills: Set-AutoOSOpenHandsConfig links every repo skill in
             $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
             if (-not $item) { throw "skill '$name' was not linked" }
             if (@('Junction', 'SymbolicLink') -notcontains [string]$item.LinkType) { throw "skill '$name' is not a junction (LinkType: [$($item.LinkType)])" }
+            if ($onWindows -and [string]$item.LinkType -cne 'Junction') { throw "skill '$name' is a $($item.LinkType), not a Junction (a symlink needs administrator rights, so the writer must make a junction on Windows)" }
             $want = [IO.Path]::GetFullPath((Join-Path $Root ".agents\skills\$name")).TrimEnd('\', '/')
             $got = Get-TestLinkTarget -Path $link
             if ($got -ne $want) { throw "skill '$name' points at [$got], want [$want]" }
@@ -4680,10 +4684,29 @@ Test-Case "openhands settings: a BOM'd settings.json keeps the user's keys" {
         $null = New-Item -ItemType Directory -Path $ctx.OhDir -Force
         $json = '{"custom_user_key": "keep-me", "schema_version": 2}'
         [IO.File]::WriteAllText($ctx.Settings, $json, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($seedBytes.Length -lt 3 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191) { throw 'the seed must start with a BOM, or the rewrite has none to drop' }
         $null = & $ctx.Run
         $written = Get-Content -LiteralPath $ctx.Settings -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($null -eq $written.PSObject.Properties['custom_user_key'] -or $written.custom_user_key -ne 'keep-me') { throw "the user's key was lost from a BOM'd settings.json" }
         if ($null -eq $written.PSObject.Properties['agent_settings']) { throw 'the writer did not merge its own settings' }
+        # "Written back plain" (the embedded script) and the agent generator both write
+        # UTF-8 without a BOM: the rewritten file must not start with EF BB BF.
+        $rewritten = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($rewritten.Length -ge 3 -and $rewritten[0] -eq 239 -and $rewritten[1] -eq 187 -and $rewritten[2] -eq 191) { throw "the rewritten settings.json still starts with the BOM (239,187,191): the user's BOM'd file was not written back plain" }
+
+        # The agent generator rewrites this file as well (it adds enable_sub_agents),
+        # so the check above cannot say which writer dropped the BOM. With
+        # enable_sub_agents already set the generator has nothing to change, and only
+        # the embedded settings script rewrites the file.
+        $json2 = '{"custom_user_key": "keep-me-too", "schema_version": 2, "agent_settings": {"enable_sub_agents": true}}'
+        [IO.File]::WriteAllText($ctx.Settings, $json2, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $null = & $ctx.Run
+        $written2 = Get-Content -LiteralPath $ctx.Settings -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $written2.PSObject.Properties['custom_user_key'] -or $written2.custom_user_key -ne 'keep-me-too') { throw "the user's key was lost from a BOM'd settings.json that the generator leaves alone" }
+        if ($null -eq $written2.agent_settings.PSObject.Properties['llm']) { throw 'the settings script did not rewrite the file, so the BOM check below proves nothing' }
+        $rewritten2 = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($rewritten2.Length -ge 3 -and $rewritten2[0] -eq 239 -and $rewritten2[1] -eq 187 -and $rewritten2[2] -eq 191) { throw "the settings script kept the BOM (239,187,191) when it rewrote a BOM'd settings.json" }
     }
     if (-not $ran) { return }
     Pass
@@ -4715,13 +4738,30 @@ Test-Case 'openhands settings: the user original survives the writer and the age
 Test-Case 'openhands settings: the final line says written only when something was written' {
     $ran = Invoke-WithOpenHandsScratch -Body {
         param($ctx)
+        # Every file under ~/.openhands as name=SHA-256, sorted. The skills directory
+        # holds links into the repo (not files of this tree) and is left out.
+        $snapshot = {
+            $skillsPrefix = $ctx.Skills + [IO.Path]::DirectorySeparatorChar
+            $lines = @()
+            foreach ($f in @(Get-ChildItem -LiteralPath $ctx.OhDir -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+                if ($f.FullName.StartsWith($skillsPrefix, [StringComparison]::Ordinal)) { continue }
+                $lines += ($f.FullName.Substring($ctx.OhDir.Length) + '=' + (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash)
+            }
+            @($lines | Sort-Object)
+        }
         $out1 = & $ctx.Run
+        $before = @(& $snapshot)
+        if (@($before | Where-Object { $_ -like '*settings.json=*' }).Count -ne 1 -or $before.Count -lt 5) { throw "the snapshot of the first run's files is too thin to prove anything: [$($before -join '; ')]" }
         $out2 = & $ctx.Run
+        $after = @(& $snapshot)
         if ($out1 -notmatch 'OpenHands configuration and profiles written to') { throw "the first run never says written: [$out1]" }
         if ($out1 -match 'already up to date') { throw "the first run also says it is up to date: [$out1]" }
         if ($out2 -notmatch 'openhands settings: skipped') { throw "the second run did not skip the settings writer, so this test proves nothing: [$out2]" }
         if ($out2 -match 'OpenHands configuration and profiles written to') { throw "the second run still says written although nothing changed: [$out2]" }
         if ($out2 -notmatch 'OpenHands configuration already up to date') { throw "the second run does not say it is up to date: [$out2]" }
+        # The log lines are only what the writers say; the files are what they did.
+        $changed = @(Compare-Object -ReferenceObject $before -DifferenceObject $after | ForEach-Object { $_.InputObject.Substring(0, $_.InputObject.LastIndexOf('=')) } | Select-Object -Unique)
+        if ($changed.Count -gt 0) { throw "the second run changed, added or removed $($changed.Count) file(s) under .openhands (a second run must neither rewrite a file nor take a backup), first: $(@($changed | Select-Object -First 4) -join '; ')" }
     }
     if (-not $ran) { return }
     Pass
