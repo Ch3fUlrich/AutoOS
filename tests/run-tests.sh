@@ -2320,6 +2320,37 @@ if it "backup: undo says restored only when the copy worked, and fails when it d
     if (( ok )); then pass; else fail "autoos_undo reports a restore that did not happen"; fi
 fi
 
+# Several originals, ONE restore failing (a read-only or vanished destination):
+# the others are still restored, the failing one is named and stays as it was,
+# the return code says the undo was not complete, and no line claims the failed
+# file (or "everything") was restored. autoos_undo prints no summary line - the
+# per-file "restored <file>" lines are the only claim, so they are counted.
+if it "backup: undo restores the other files when one restore fails, names the failure and returns non-zero"; then
+    scratch="$(mktemp -d)"; bin="$(mktemp -d)"; ok=1
+    # A cp that refuses one destination (its last operand) and delegates for the rest.
+    printf '#!/bin/sh\nfor a in "$@"; do last="$a"; done\ncase "$last" in\n    */.bashrc) echo "cp: cannot create regular file $last: Permission denied (test stub)" >&2; exit 1 ;;\nesac\nexec %s "$@"\n' "$(command -v cp)" >"$bin/cp"
+    chmod +x "$bin/cp"
+    # Sorted, the failing one sits in the middle: one restore comes before it, one after.
+    for n in .aliases .bashrc .zshrc; do
+        printf 'NOW\n' >"$scratch/$n"; printf 'BEFORE\n' >"$scratch/$n.autoos-backup-20260101-000000"
+    done
+    out="$( ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; autoos_undo 1 ) 2>&1 )"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 for an undo in which a restore failed: [${out:0:300}]" >&2; }
+    cmp -s "$scratch/.aliases" <(printf 'BEFORE\n') || { ok=0; echo ".aliases (before the failure) was not restored: [$(cat "$scratch/.aliases")]" >&2; }
+    cmp -s "$scratch/.zshrc" <(printf 'BEFORE\n') || { ok=0; echo ".zshrc (after the failure) was not restored: [$(cat "$scratch/.zshrc")]" >&2; }
+    cmp -s "$scratch/.bashrc" <(printf 'NOW\n') || { ok=0; echo "the failing file changed: [$(cat "$scratch/.bashrc")]" >&2; }
+    [[ "$out" == *"could not restore $scratch/.bashrc"* ]] || { ok=0; echo "no message naming the failed file: [${out:0:400}]" >&2; }
+    [[ "$out" != *"restored $scratch/.bashrc"* ]] || { ok=0; echo "claimed a restore that did not happen: [${out:0:400}]" >&2; }
+    [[ "$out" == *"restored $scratch/.aliases"* && "$out" == *"restored $scratch/.zshrc"* ]] || { ok=0; echo "the restores that worked are not reported: [${out:0:400}]" >&2; }
+    [[ "$(grep -c 'restored /' <<<"$out")" == 2 ]] || { ok=0; echo "expected exactly two restored lines, got $(grep -c 'restored /' <<<"$out")" >&2; }
+    # Control: with a working cp the same undo restores all three and succeeds.
+    out="$( ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; autoos_undo 1 ) 2>&1 )"; rc=$?
+    { (( rc == 0 )) && [[ "$(grep -c 'restored /' <<<"$out")" == 3 ]] && cmp -s "$scratch/.bashrc" <(printf 'BEFORE\n'); } \
+        || { ok=0; echo "control run: rc=$rc restored=$(grep -c 'restored /' <<<"$out") .bashrc=[$(cat "$scratch/.bashrc")]" >&2; }
+    rm -rf "$scratch" "$bin"
+    if (( ok )); then pass; else fail "autoos_undo stops at, or hides, a restore that failed"; fi
+fi
+
 if it "undo never uninstalls anything"; then
     # The safety property, asserted on the source rather than by removing software.
     if grep -qE '(apt-get remove|brew uninstall|npm uninstall)' lib/linux/install.sh; then
