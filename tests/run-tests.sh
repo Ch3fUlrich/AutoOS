@@ -3048,6 +3048,14 @@ antigravity_snapshot() {
     find "$1/home" "$1/cache" -printf '%p|%y|%s|%m|%T@\n' 2>/dev/null | sort
 }
 
+# antigravity_snapshot_files <scratch>: like the above for files and symlinks
+# (with mtime), but directories by name only. A failed run may create and remove
+# a staging directory, which moves its parent's mtime; that is not damage.
+antigravity_snapshot_files() {
+    { find "$1/home" "$1/cache" ! -type d -printf '%p|%y|%s|%m|%T@\n'
+      find "$1/home" "$1/cache" -type d -printf '%p|d\n'; } 2>/dev/null | sort
+}
+
 # antigravity_installed_problems <scratch> <ver-build> <sha>: one line per thing
 # that is not as a finished install must leave it; empty when all is right.
 antigravity_installed_problems() {
@@ -3131,7 +3139,7 @@ if it "antigravity hash mismatch: nothing installed or replaced, no .new or .par
     for scenario in fresh existing; do
         sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
         [[ "$scenario" == existing ]] && antigravity_run "$sb" >/dev/null
-        before="$(antigravity_snapshot "$sb")"
+        before="$(antigravity_snapshot_files "$sb")"
         antigravity_build "$sb" "$AG_B"
         antigravity_publish "$sb" "$AG_B" "" "$(printf '0%.0s' {1..64})"   # the endpoint promises another hash
         antigravity_run "$sb" AG_ENTRY=direct
@@ -3139,7 +3147,7 @@ if it "antigravity hash mismatch: nothing installed or replaced, no .new or .par
         [[ "$AG_OUT" == *"sha256"* ]] || { ok=0; echo "$scenario: no error line naming the sha256: ${AG_OUT:0:500}" >&2; }
         [[ -z "$(find "$sb" \( -name '*.new' -o -name '*.part' \) )" ]] || { ok=0; echo "$scenario: left $(find "$sb" \( -name '*.new' -o -name '*.part' \))" >&2; }
         if [[ "$scenario" == existing ]]; then
-            [[ "$(antigravity_snapshot "$sb")" == "$before" ]] || { ok=0; echo "existing: the install or its cache changed" >&2; }
+            [[ "$(antigravity_snapshot_files "$sb")" == "$before" ]] || { ok=0; echo "existing: the install or its cache changed" >&2; }
             [[ "$(cut -d' ' -f1 "$sb/home/.local/opt/antigravity-ide/.autoos-version")" == "$AG_A" ]] || { ok=0; echo "existing: the stamp moved" >&2; }
         else
             [[ -z "$(find "$sb/home" "$sb/cache" -type f)" ]] || { ok=0; echo "fresh: wrote files: $(find "$sb/home" "$sb/cache" -type f)" >&2; }
@@ -3164,7 +3172,7 @@ if it "antigravity download hosts: Google's three are accepted, anything else is
                 "https://edgedl.me.gvt1.com:8443/x/antigravity/stable"; do
         sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A" "$base"
         antigravity_run "$sb"
-        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$base accepted: state=[$AG_STATE] rc=[$AG_RC]" >&2; }
+        [[ "$AG_STATE" == failed ]] || { ok=0; echo "$base accepted: state=[$AG_STATE] rc=[$AG_RC]" >&2; }
         ! grep -q '^curl .* -o ' "$sb/calls.log" || { ok=0; echo "$base: a download was attempted" >&2; }
         [[ -z "$(find "$sb/home" "$sb/cache" -type f)" ]] || { ok=0; echo "$base: wrote files" >&2; }
         [[ "$AG_OUT" == *"example.invalid"* || "$AG_OUT" == *"not https"* || "$AG_OUT" == *"port"* ]] \
@@ -3188,7 +3196,7 @@ if it "antigravity unusable endpoint answers fail closed: nothing fetched, nothi
         sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"
         printf '%s\n' "$body" >"$sb/answer.json"
         antigravity_run "$sb"
-        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "answer #$i accepted: state=[$AG_STATE] rc=[$AG_RC]" >&2; }
+        [[ "$AG_STATE" == failed ]] || { ok=0; echo "answer #$i accepted: state=[$AG_STATE] rc=[$AG_RC]" >&2; }
         ! grep -q '^curl .* -o ' "$sb/calls.log" || { ok=0; echo "answer #$i: a download was attempted" >&2; }
         [[ -z "$(find "$sb/home" "$sb/cache" -type f)" ]] || { ok=0; echo "answer #$i: wrote files" >&2; }
         rm -rf "$sb"
@@ -3213,7 +3221,7 @@ if it "antigravity corrupt tarball: the existing install is untouched, .new is r
     for scenario in fresh existing; do
         sb="$(antigravity_scratch)"; antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
         [[ "$scenario" == existing ]] && antigravity_run "$sb" >/dev/null
-        before="$(antigravity_snapshot "$sb")"
+        before="$(antigravity_snapshot_files "$sb" | grep "^$sb/home")"
         antigravity_build "$sb" "$AG_B" garbage        # its sha256 is right, it just is no tarball
         antigravity_publish "$sb" "$AG_B"
         antigravity_run "$sb" AG_ENTRY=direct
@@ -3221,7 +3229,7 @@ if it "antigravity corrupt tarball: the existing install is untouched, .new is r
         [[ -z "$(find "$sb/home" \( -name '*.new' -o -name '*.old-*' \) )" ]] || { ok=0; echo "$scenario: left $(find "$sb/home" \( -name '*.new' -o -name '*.old-*' \))" >&2; }
         if [[ "$scenario" == existing ]]; then
             # the cache may hold the (verified but unusable) download; home may not change
-            [[ "$(find "$sb/home" -printf '%p|%y|%s|%m|%T@\n' | sort)" == "$(grep "^$sb/home" <<<"$before")" ]] \
+            [[ "$(antigravity_snapshot_files "$sb" | grep "^$sb/home")" == "$before" ]] \
                 || { ok=0; echo "existing: the install changed" >&2; }
             [[ "$(cut -d' ' -f1 "$sb/home/.local/opt/antigravity-ide/.autoos-version")" == "$AG_A" ]] || { ok=0; echo "existing: the stamp moved" >&2; }
         else

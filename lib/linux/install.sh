@@ -239,9 +239,13 @@ catalog_installed_ids() {
 # these functions also print progress, so a `$(...)` capture would swallow the UI
 # output into the status string and match none of the cases.
 INSTALL_STATE=""
+# A script installer that finds nothing to do (its own version check says it is
+# current) sets this to "skipped": install_component then reports skipped, not
+# installed. Reset on every call.
+INSTALL_SCRIPT_STATE=""
 install_component() {
     local provider="$1" package="$2" CASK_FLAG="${3:-0}"
-    INSTALL_STATE="failed"
+    INSTALL_STATE="failed"; INSTALL_SCRIPT_STATE=""
 
     if is_installed "$provider" "$package" "$CASK_FLAG"; then
         ui_ok "✓ ${package} is already installed - skipping package"
@@ -273,7 +277,9 @@ install_component() {
         *)      ui_err "unknown provider '${provider}'"; rc=1 ;;
     esac
 
-    if (( rc != 0 )); then INSTALL_STATE="failed"; else INSTALL_STATE="installed"; fi
+    if (( rc != 0 )); then INSTALL_STATE="failed"
+    elif [[ "$INSTALL_SCRIPT_STATE" == skipped ]]; then INSTALL_STATE="skipped"
+    else INSTALL_STATE="installed"; fi
     if (( rc == 124 )); then return 124; fi
     return 0
 }
@@ -405,51 +411,329 @@ install_tailscale() {
     ui_info "Run '${AUTOOS_SUDO} tailscale up' to authenticate this machine."
 }
 
-install_antigravity() {
-    # Google's own apt repository (antigravity.google/download/linux), so no
-    # download URL has to be pasted. Measured 2026-09-25: the repo is FROZEN at
-    # 1.23.2 (Release dated 2026-04-16); the 2.x apps are tarball-only. Google
-    # publishes no fingerprint for the signing key, so none is pinned here - a
-    # fingerprint written down now would be our own unverified assertion.
-    if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would add Google's signed apt repo (us-central1-apt.pkg.dev) and install antigravity (repo frozen at 1.23.2)"
+# ─── Antigravity IDE 2.x (Google's vendor tarball) ──────────────────────────
+# Decided 2026-09-26: Google's apt repo is frozen at 1.23.2 (and publishes no
+# key fingerprint) while the 2.x IDE ships only as a tarball, so this installs
+# that tarball. Google documents no update API; this endpoint is the one the
+# IDE's own updater asks (found through a third-party issue, confirmed with curl
+# 2026-09-26): unauthenticated, ~500 bytes, never cached. It answers the
+# tarball's URL and its sha256, which equals the real file's. Endpoint and
+# tarball are both Google hosts over TLS, so the sha256 guards against
+# corruption and a wrong mirror, NOT against a compromised Google. Everything
+# else fails CLOSED: an unreachable or unusable answer, a hash mismatch or a URL
+# outside Google's hosts installs and replaces nothing. There is no "latest"
+# redirect, so a URL is never built from a version number.
+antigravity_endpoint() {
+    printf '%s\n' "https://antigravity-ide-auto-updater-974169037036.us-central1.run.app/api/update/linux-x64/stable/latest"
+}
+
+# antigravity_stamp_target <dir>: the <version>-<build> recorded in
+# <dir>/.autoos-version ("<target> <sha256>", written last by a finished
+# install); nothing when there is no stamp. The IDE's own --version prints the
+# VS Code base version, so it cannot say which build is installed.
+antigravity_stamp_target() {
+    local t=""
+    if [[ -f "$1/.autoos-version" ]]; then read -r t _ <"$1/.autoos-version" || true; fi
+    printf '%s\n' "$t"
+}
+
+# antigravity_resolve <endpoint>: asks the endpoint for the current build.
+# Returns 0 and sets ANTIGRAVITY_TARGET (<version>-<build>, the segment of the
+# URL path that follows /stable/), ANTIGRAVITY_SHA (lower-case hex) and
+# ANTIGRAVITY_URL (the space in it encoded as %20, as curl needs it); returns 2
+# when the endpoint cannot be reached and 1 - ANTIGRAVITY_REFUSAL says why -
+# when the answer is unusable.
+ANTIGRAVITY_TARGET=""; ANTIGRAVITY_SHA=""; ANTIGRAVITY_URL=""; ANTIGRAVITY_REFUSAL=""
+antigravity_resolve() {
+    local endpoint="$1" body parsed rc=0
+    ANTIGRAVITY_TARGET=""; ANTIGRAVITY_SHA=""; ANTIGRAVITY_URL=""; ANTIGRAVITY_REFUSAL=""
+    body="$(curl -fsSL --max-time 20 --max-filesize 65536 "$endpoint" 2>/dev/null)" || return 2
+    parsed="$(python3 - "$body" <<'PY'
+import json, re, sys
+from urllib.parse import urlsplit
+
+ALLOWED = ("edgedl.me.gvt1.com", "dl.google.com", "storage.googleapis.com")
+
+
+def refuse(why):
+    print(why)
+    sys.exit(1)
+
+
+body = sys.argv[1]
+if not body.strip():
+    refuse("the answer is empty")
+try:
+    doc = json.loads(body)
+except ValueError:
+    refuse("the answer is not valid JSON")
+if not isinstance(doc, dict):
+    refuse("the answer is not a JSON object")
+sha, url = doc.get("sha256hash"), doc.get("url")
+if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha):
+    refuse("sha256hash is missing or is not 64 hex digits")
+if not isinstance(url, str) or not url:
+    refuse("url is missing")
+url = url.replace(" ", "%20")   # the real answer carries an unencoded space
+if re.search(r"[\x00-\x20\x7f]", url):
+    refuse("the download URL contains control characters")
+try:
+    parts = urlsplit(url)
+    host, port = (parts.hostname or "").lower(), parts.port
+except ValueError:
+    refuse("the download URL cannot be parsed")
+if parts.scheme != "https":
+    refuse("the download URL is not https")
+if host not in ALLOWED:
+    refuse("the download host %s is not one of Google's (%s)" % (host or "(none)", ", ".join(ALLOWED)))
+if port not in (None, 443):
+    refuse("the download URL uses port %s" % port)
+if parts.username is not None or parts.password is not None:
+    refuse("the download URL carries credentials")
+m = re.search(r"/stable/([0-9][0-9A-Za-z._-]*)/linux-", parts.path)
+if not m:
+    refuse("the download URL has no /stable/<version>-<build>/linux-... segment")
+print(m.group(1))
+print(sha.lower())
+print(url)
+PY
+)" || rc=$?
+    if (( rc != 0 )); then ANTIGRAVITY_REFUSAL="$parsed"; return 1; fi
+    { IFS= read -r ANTIGRAVITY_TARGET; IFS= read -r ANTIGRAVITY_SHA; IFS= read -r ANTIGRAVITY_URL; } <<<"$parsed"
+    return 0
+}
+
+# antigravity_fix_sandbox <dir>: Electron's sandbox needs chrome-sandbox
+# root-owned and setuid 4755 (or unprivileged user namespaces, which Ubuntu
+# 24.04+ restricts through AppArmor). A normal-user extract cannot keep the
+# root ownership the archive records. NEVER --no-sandbox: it switches off the
+# protection a browser engine renders web content behind. When this cannot be
+# done here it warns with the two exact commands - the install still counts.
+antigravity_fix_sandbox() {
+    local box="$1/chrome-sandbox"
+    [[ -e "$box" ]] || return 0
+    if (( ${SYS_CAN_SUDO:-1} )) \
+        && run $AUTOOS_SUDO chown root:root "$box" \
+        && run $AUTOOS_SUDO chmod 4755 "$box"; then
+        ui_ok "chrome-sandbox is root-owned and setuid, as Electron's sandbox needs"
         return 0
     fi
-    # AUTOOS_APT_PREFIX is a test seam (DESTDIR-style): where the two files are
-    # written. The source line keeps the /etc path apt itself will read.
-    local prefix="${AUTOOS_APT_PREFIX:-}"
-    local key=/etc/apt/keyrings/antigravity-repo-key.gpg
-    local list=/etc/apt/sources.list.d/antigravity.list
-    if [[ ! -f "${prefix}${key}" ]]; then
-        # The .gpg name is misleading: the key is served ASCII-armored, so it
-        # needs dearmoring before apt accepts it in signed-by. Each step is
-        # checked - a curl failure must never leave an empty key that the
-        # file guard above would then trust forever.
-        local armored dearmored
-        armored="$(mktemp)"; dearmored="$(mktemp)"
-        if curl -fsSL -o "$armored" https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg \
-            && gpg --dearmor <"$armored" >"$dearmored" \
-            && [[ -s "$dearmored" ]] \
-            && $AUTOOS_SUDO install -D -o root -g root -m 644 "$dearmored" "${prefix}${key}"; then
-            rm -f "$armored" "$dearmored"
+    ui_warn "Antigravity's chrome-sandbox could not be set up here, so the IDE may refuse to start. Run these two commands, then start it again:"
+    ui_warn "    sudo chown root:root $(printf '%q' "$box")"
+    ui_warn "    sudo chmod 4755 $(printf '%q' "$box")"
+    return 0
+}
+
+# antigravity_link <dir>: ~/.local/bin/antigravity-ide -> <dir>/bin/antigravity-ide.
+# Created when absent; replaced only when it already is a symlink into <dir>;
+# a regular file or a foreign symlink is somebody else's and stays (hard rule 4).
+antigravity_link() {
+    local dir="$1" bindir="$SYS_HOME/.local/bin" link cur target
+    link="$bindir/antigravity-ide"; target="$dir/bin/antigravity-ide"
+    if [[ -L "$link" ]]; then
+        cur="$(readlink "$link")"
+        if [[ "$cur" == "$target" ]]; then
+            ui_muted "command already linked: ${link}"
+        elif [[ "$cur" == "$dir/"* ]]; then
+            if ln -sfn -- "$target" "$link"; then ui_ok "relinked ${link} -> ${target}"
+            else ui_warn "could not relink ${link}; start the IDE with ${target}"; fi
         else
-            rm -f "$armored" "$dearmored"
-            ui_err "Antigravity not installed: could not fetch and install Google's apt signing key."
-            ui_muted "    Needs curl, gpg and network access to us-central1-apt.pkg.dev; re-run once that works."
+            ui_warn "${link} is a symlink to ${cur}, not into ${dir} - left alone. Start the IDE with ${target}."
+        fi
+        return 0
+    fi
+    if [[ -e "$link" ]]; then
+        ui_warn "${link} already exists and is not an AutoOS link - left alone. Start the IDE with ${target}."
+        return 0
+    fi
+    if mkdir -p "$bindir" && ln -s -- "$target" "$link"; then ui_ok "linked ${link} -> ${target}"
+    else ui_warn "could not link ${link}; start the IDE with ${target}"; fi
+    return 0
+}
+
+# antigravity_desktop_entry <dir>: the tarball ships no .desktop file, so this
+# writes the launcher and the antigravity-ide:// scheme handler. Compare-first:
+# an identical file is not rewritten; a differing one is backed up before it is
+# replaced (hard rule 5).
+antigravity_desktop_entry() {
+    local dir="$1" appdir="$SYS_HOME/.local/share/applications" file content exec_path
+    file="$appdir/antigravity-ide.desktop"
+    exec_path="$dir/antigravity-ide"
+    [[ "$exec_path" != *[[:space:]]* ]] || exec_path="\"$exec_path\""
+    content="$(printf '%s\n' \
+        '[Desktop Entry]' \
+        'Type=Application' \
+        'Name=Antigravity IDE' \
+        "Comment=Google's agent-first IDE" \
+        "Exec=${exec_path} %U" \
+        "Icon=${dir}/resources/app/resources/linux/code.png" \
+        'Terminal=false' \
+        'Categories=Development;IDE;' \
+        'MimeType=x-scheme-handler/antigravity-ide;')"
+    if [[ -f "$file" ]]; then
+        if [[ "$(<"$file")" == "$content" ]]; then
+            ui_muted "desktop entry already up to date: ${file}"
+            return 0
+        fi
+        if ! backup_file "$file" >/dev/null; then
+            ui_warn "could not back up ${file} - left as it is"
+            return 0
+        fi
+    fi
+    if ! { mkdir -p "$appdir" && printf '%s\n' "$content" >"$file"; }; then
+        ui_warn "could not write ${file}"
+        return 0
+    fi
+    ui_ok "wrote the desktop entry ${file}"
+    # Best effort: the launcher works without the cache refresh.
+    if has_cmd update-desktop-database; then run update-desktop-database "$appdir" || true; fi
+    return 0
+}
+
+# antigravity_warn_old_apt: the pre-2.x apt package (command `antigravity`) is
+# a different layout that this install neither uses nor removes. Say how to
+# remove it; do nothing (hard rule 3).
+antigravity_warn_old_apt() {
+    if ! has_cmd dpkg || ! dpkg -s antigravity >/dev/null 2>&1; then return 0; fi
+    ui_warn "The old apt package 'antigravity' (frozen at 1.23.2) is still installed. AutoOS does not remove it; when you no longer want it:"
+    ui_warn "    sudo apt-get remove antigravity"
+    ui_warn "    sudo rm -f /etc/apt/sources.list.d/antigravity.list /etc/apt/keyrings/antigravity-repo-key.gpg   # its apt repo leftovers"
+    return 0
+}
+
+# antigravity_rollback <dir> <new> <old>: puts the previous install back in
+# place of a half-finished one.
+antigravity_rollback() {
+    local dir="$1" new="$2" old="$3"
+    if mv -- "$dir" "$new" 2>/dev/null; then rm -rf -- "$new"; fi
+    [[ -z "$old" ]] || mv -- "$old" "$dir"
+}
+
+install_antigravity() {
+    INSTALL_SCRIPT_STATE=""
+    local endpoint dir stamp new old="" existing=0 installed_target rc=0
+    endpoint="$(antigravity_endpoint)"
+    if [[ "${SYS_ARCH:-x64}" != x64 ]]; then
+        ui_err "Antigravity IDE is only wired up for x64 (this machine is ${SYS_ARCH}); nothing was installed."
+        return 1
+    fi
+    if [[ -z "${SYS_HOME:-}" || "$SYS_HOME" == / ]]; then
+        ui_err "Antigravity not installed: there is no usable home directory (SYS_HOME='${SYS_HOME:-}')."
+        return 1
+    fi
+    dir="$(antigravity_dir)"; stamp="$dir/.autoos-version"; new="${dir}.new"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would ask ${endpoint} for the current Antigravity IDE build (a dry run asks nothing)"
+        ui_muted "would download that tarball, check its sha256 against the answer, unpack it into ${dir}, link ${SYS_HOME}/.local/bin/antigravity-ide and write the desktop entry"
+        ui_muted "would make chrome-sandbox root-owned and setuid 4755 with sudo; an installed build is only replaced when the endpoint names a different one (setup.sh --update)"
+        return 0
+    fi
+    catalog_require_python || return 1
+    if ! has_cmd tar; then ui_err "Antigravity not installed: tar was not found."; return 1; fi
+    if [[ -f "$stamp" || -x "$dir/bin/antigravity-ide" ]]; then existing=1; fi
+    installed_target="$(antigravity_stamp_target "$dir")"
+
+    antigravity_resolve "$endpoint" || rc=$?
+    case "$rc" in
+        0) ;;
+        2)
+            if (( existing )); then
+                ui_warn "Antigravity: could not reach ${endpoint} - keeping the installed build${installed_target:+ (${installed_target})}; no update check was possible."
+                INSTALL_SCRIPT_STATE=skipped
+                return 0
+            fi
+            ui_err "Antigravity not installed: could not reach the update endpoint ${endpoint}."
+            ui_muted "    Needs curl and network access; re-run once that works. No download URL is guessed."
+            return 1 ;;
+        *)
+            ui_err "Antigravity: the update endpoint's answer was refused (${ANTIGRAVITY_REFUSAL}); nothing was installed or replaced."
+            return 1 ;;
+    esac
+
+    if [[ -n "$installed_target" && "$installed_target" == "$ANTIGRAVITY_TARGET" ]]; then
+        ui_ok "Antigravity IDE ${ANTIGRAVITY_TARGET} is already the current build - nothing to do"
+        antigravity_warn_old_apt
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+    if (( existing )); then
+        ui_info "Antigravity IDE: ${installed_target:-an unstamped build} is installed, ${ANTIGRAVITY_TARGET} is current - updating"
+    fi
+
+    # Download (fetch_verified: .part file, checksum, atomic move, a cache hit
+    # is not fetched again). The cache keeps the verified tarball, so a re-run
+    # after a failed unpack costs no second 240 MB.
+    local cache archive frc=0
+    cache="$(download_cache_dir)"
+    archive="${cache}/antigravity-ide-${ANTIGRAVITY_TARGET}-linux-x64.tar.gz"
+    if ! mkdir -p "$cache"; then ui_err "Antigravity not changed: cannot create the download cache ${cache}."; return 1; fi
+    ui_muted "downloading Antigravity IDE ${ANTIGRAVITY_TARGET} from ${ANTIGRAVITY_URL}"
+    fetch_verified "$ANTIGRAVITY_URL" "$archive" "$ANTIGRAVITY_SHA" - - || frc=$?
+    case "$frc" in
+        0) ;;
+        2) ui_err "Antigravity: the download does not match the sha256 the update endpoint published (${ANTIGRAVITY_SHA}); it was discarded and nothing was installed or replaced."
+           return 1 ;;
+        *) ui_err "Antigravity not changed: could not download ${ANTIGRAVITY_URL}."
+           return 1 ;;
+    esac
+
+    # Unpack beside the install, never into it: a failed or interrupted unpack
+    # leaves the existing install alone. <dir>.new is this installer's own
+    # staging directory, so one left by an interrupted run is cleared first.
+    rm -rf -- "$new"
+    if ! mkdir -p "$new" \
+        || ! tar -xzf "$archive" -C "$new" --strip-components=1 --no-same-owner; then
+        rm -rf -- "$new"
+        ui_err "Antigravity not changed: ${archive} could not be unpacked (disk full? damaged file?). Delete it to download it again."
+        return 1
+    fi
+    if [[ ! -x "$new/bin/antigravity-ide" || ! -x "$new/antigravity-ide" || ! -f "$new/resources/app/product.json" ]]; then
+        rm -rf -- "$new"
+        ui_err "Antigravity not changed: the tarball does not have the expected layout (antigravity-ide, bin/antigravity-ide, resources/app/product.json)."
+        return 1
+    fi
+
+    # Swap: the existing directory is moved aside first and removed only after
+    # the new one carries its stamp; any failure puts it back.
+    if [[ -e "$dir" || -L "$dir" ]]; then
+        local n=0 old_base
+        old_base="${dir}.old-$(date +%Y%m%d-%H%M%S)"; old="$old_base"
+        while [[ -e "$old" || -L "$old" ]]; do n=$((n + 1)); old="${old_base}-${n}"; done
+        if ! mv -- "$dir" "$old"; then
+            rm -rf -- "$new"
+            ui_err "Antigravity not changed: could not move ${dir} aside."
             return 1
         fi
     fi
-    if [[ ! -f "${prefix}${list}" ]]; then
-        if ! printf 'deb [signed-by=%s] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main\n' \
-            "$key" | $AUTOOS_SUDO tee "${prefix}${list}" >/dev/null; then
-            ui_err "Antigravity not installed: could not write ${list}."
-            return 1
-        fi
-        APT_UPDATED=0   # the new repo has to be fetched before install
+    if ! mv -- "$new" "$dir"; then
+        [[ -z "$old" ]] || mv -- "$old" "$dir"
+        rm -rf -- "$new"
+        ui_err "Antigravity not changed: could not move the unpacked tree into ${dir}."
+        return 1
     fi
-    ui_warn "Antigravity: Google's apt repo is frozen at 1.23.2 (Release dated 2026-04-16); the 2.x apps are tarball-only, so apt will not bring them."
-    apt_update_once
-    run $AUTOOS_SUDO apt-get install -y antigravity
+
+    antigravity_fix_sandbox "$dir"
+    antigravity_link "$dir"
+    antigravity_desktop_entry "$dir"
+
+    # The stamp goes last: its presence means "complete".
+    if ! { printf '%s %s\n' "$ANTIGRAVITY_TARGET" "$ANTIGRAVITY_SHA" >"${stamp}.tmp" && mv -f "${stamp}.tmp" "$stamp"; }; then
+        rm -f "${stamp}.tmp"
+        antigravity_rollback "$dir" "$new" "$old"
+        ui_err "Antigravity not changed: could not write ${stamp}; the previous state was restored."
+        return 1
+    fi
+    if [[ -n "$old" ]]; then
+        if [[ -f "$old/.autoos-version" ]]; then
+            if rm -rf -- "$old"; then ui_muted "removed the previous build (${old})"
+            else ui_warn "could not remove the previous build ${old} - delete it by hand"; fi
+        else
+            ui_warn "${dir} was not created by AutoOS (no .autoos-version), so it was kept as ${old} - delete it when you no longer need it."
+        fi
+    fi
+    ui_ok "Antigravity IDE ${ANTIGRAVITY_TARGET} installed in ${dir} (command: antigravity-ide)"
+    antigravity_warn_old_apt
+    return 0
 }
 
 install_xpipe() {
@@ -468,8 +752,8 @@ install_vscode() {
         ui_muted "would add Microsoft's signed apt repo and install code"
         return 0
     fi
-    # AUTOOS_APT_PREFIX is a test seam (DESTDIR-style), as in install_antigravity:
-    # where the files are written. The source line keeps the /etc path apt reads.
+    # AUTOOS_APT_PREFIX is a test seam (DESTDIR-style): where the files are
+    # written. The source line keeps the /etc path apt reads.
     local prefix="${AUTOOS_APT_PREFIX:-}"
     local key=/etc/apt/keyrings/packages.microsoft.gpg
     local list=/etc/apt/sources.list.d/vscode.list

@@ -410,6 +410,10 @@ launch_hint() {
     return 1
 }
 
+# antigravity_dir: where install_antigravity unpacks the IDE tarball - one
+# definition, read by detection and by the installer.
+antigravity_dir() { printf '%s/.local/opt/antigravity-ide\n' "$SYS_HOME"; }
+
 script_is_installed() {
     # has_bin, not has_cmd: every one of these installs somewhere PATH does not
     # necessarily reach - ~/.local/bin, /snap/bin or a flatpak export - and a
@@ -422,7 +426,11 @@ script_is_installed() {
         nodesource-lts)  has_bin node ;;
         docker)          has_bin docker ;;
         tailscale)       has_bin tailscale ;;
-        antigravity)     has_bin antigravity ;;
+        # The Antigravity IDE 2.x tarball: its version stamp (a finished install
+        # writes it last) or its command. The old apt package's `antigravity`
+        # command is a different layout and deliberately does not count, or a
+        # machine that still has the deb would never get the tarball.
+        antigravity)     [[ -f "$(antigravity_dir)/.autoos-version" ]] || has_bin antigravity-ide ;;
         xpipe)           has_bin xpipe ;;
         herdr)           has_bin herdr ;;
         handy)           has_bin handy ;;

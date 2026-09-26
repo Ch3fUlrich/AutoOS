@@ -589,8 +589,8 @@
           "profiles": [
             "workstation"
           ],
-          "notes": "Desktop IDE — hidden on headless and arm64 machines. Adds Google's signed apt repo, which is frozen at 1.23.2.",
-          "verify": "antigravity --version",
+          "notes": "Desktop IDE — hidden on headless and arm64 machines. Installs Google's 2.x tarball into ~/.local/opt/antigravity-ide, sha256-checked against Google's update endpoint (command: antigravity-ide).",
+          "verify": "antigravity-ide --version",
           "homepage": "https://antigravity.google/"
         },
         {
