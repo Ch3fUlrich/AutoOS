@@ -3533,6 +3533,34 @@ Test-Case 'backup-once: Copy-AutoOSBackup never overwrites a same-second backup'
     Pass
 }
 
+Test-Case 'shell: managed files keep rankable same-second backups' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-shell-backup-" + [Guid]::NewGuid().ToString('N'))
+    $file = Join-Path $scratch 'profile.ps1'
+    $null = New-Item -ItemType Directory -Path $scratch -Force
+    try {
+        Import-Module (Join-Path $Lib 'AutoOS.Shell.psm1') -DisableNameChecking
+        [IO.File]::WriteAllText($file, 'original')
+        while ((Get-Date).Millisecond -gt 100) { Start-Sleep -Milliseconds 10 }
+        Set-AutoOSManagedFile -Path $file -Content 'first'
+        Set-AutoOSManagedFile -Path $file -Content 'second'
+        Set-AutoOSManagedFile -Path $file -Content 'second'
+
+        $backups = @(Get-ChildItem -LiteralPath $scratch -Filter 'profile.ps1.autoos-backup-*')
+        if ($backups.Count -ne 2) { throw "expected two backups after two changed writes, got $($backups.Count)" }
+        foreach ($backup in $backups) {
+            if ($backup.Name -notmatch '^profile\.ps1\.autoos-backup-\d{8}-\d{6}(?:-\d{1,3})?$') {
+                throw "backup name is not rankable: $($backup.Name)"
+            }
+        }
+        $contents = @($backups | ForEach-Object { [IO.File]::ReadAllText($_.FullName) })
+        if (@($contents | Where-Object { $_ -ceq 'original' }).Count -ne 1) { throw 'the original content was overwritten' }
+        if (@($contents | Where-Object { $_ -ceq 'first' }).Count -ne 1) { throw 'the intermediate content was overwritten' }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case "backup-once: five Antigravity MCP writes in one second keep the user's original" {
     # One setup pass writes mcp_config.json five times (Set-AutoOSAntigravityMcp,
     # then Register-AutoOSAntigravityMcpServer for serena, graphify, playwright
