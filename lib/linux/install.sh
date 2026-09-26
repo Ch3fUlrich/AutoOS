@@ -1597,23 +1597,6 @@ install_devin_cli() {
     return $rc
 }
 
-# autoos_conflict_present <other-id>: true when <other-id> is either already
-# installed on this machine (script_is_installed, detect.sh) or was selected
-# earlier in this run's plan (PLAN_IDS, filled by catalog_resolve before
-# execution starts - see setup.sh stage 4). claude-autostart and
-# herdr-sessions both restore Claude Code sessions across a reboot by
-# snapshotting and replaying panes; running both would double-restore the
-# same sessions. Kept for callers that treat both cases as a conflict; the
-# two installers below split them (AGENTS.md hard rule 3): the other selected
-# in this plan is still an error, the other merely already installed is a
-# skip so a re-run reports skipped, never fails. Checked before either
-# writes anything.
-autoos_conflict_present() {
-    local other="$1"
-    [[ " ${PLAN_IDS} " == *" ${other} "* ]] && return 0
-    script_is_installed "$other"
-}
-
 install_claude_autostart() {
     if [[ " ${PLAN_IDS} " == *" herdr-sessions "* ]]; then
         ui_err "claude-autostart: herdr-sessions is selected in this plan - the two restore Claude Code sessions the same way and must not both run. Remove herdr-sessions first (its driver's --unregister) or leave claude-autostart unselected."
