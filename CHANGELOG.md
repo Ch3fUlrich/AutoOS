@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — hostexec: one logged, policy-checked path for agents to run host commands (nothing enabled)
+
+- **`tools/hostexec.py` + `tools/hostexec/`**: an MCP server over HTTP (`host_run`, `host_policy`, `host_log_tail`) that runs argv
+  (never a shell string) on this host or, through a policy host alias, over ssh on another VM. Every call is checked against a
+  deny-list policy (`configuration/hostexec/policy.example.toml`: no sudo in any position, no inline shells or interpreters, destructive
+  commands, docker host-root, git option/config injection, env injection, PATH hijack, ssh outside the host table, forbidden hosts)
+  and written to a JSONL audit log (90-day retention, secrets redacted, fail-closed before the run) plus journald.
+  **It is a guard and an audit trail, not containment**: a deny-list is never complete (README). Bearer token per actor.
+- **`configuration/hostexec/install.sh`**: installs the systemd USER unit (never enables or starts it) and writes the `hostexec`
+  entry for OpenHands, Claude Code, codex and opencode (own key only, backup first, second run "already current"; the token is
+  never on argv or in output). qoder wiring is manual for now.
+- **Operator step (not run):** create the policy and 0600 token files, then `configuration/hostexec/install.sh --unit --clients ...`
+  and the printed `systemctl --user enable --now autoos-hostexec.service`. OpenHands needs `AUTOOS_EXEC_BIND` set to the docker
+  bridge address.
+
 ### Fixed — backups outside the installer never overwrite a same-second backup
 
 - `configuration/autostart/register-autostart.sh`, `configuration/docker/ai-stack/ai-stack.sh` (config backups and the
