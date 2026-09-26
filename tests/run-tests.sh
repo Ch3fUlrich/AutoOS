@@ -9241,6 +9241,45 @@ if it "rescue-bootstrap keeps the operator's API key and extra AI backend on a s
     fi
 fi
 
+# Same class as lib/linux/install.sh backup_path/backup_file (main fixed
+# this there): rescue-bootstrap.sh's own backup_file used a plain
+# <file>.autoos-backup-<stamp> name with a bare cp, so two edits backed up in
+# the same second let the second cp overwrite the first backup and destroy
+# it. Pin `date` on PATH (both call shapes it uses) so two runs land in the
+# same "second".
+if it "backup residual: rescue-bootstrap backs up the operator's profile twice in one second without overwriting (template)"; then
+    bootstrap_sandbox_setup
+    cat > "$BS_BIN/date" <<'EOS'
+#!/usr/bin/env bash
+case "$2" in
+    '+%Y%m%d%H%M%S') echo '20260101000000' ;;
+    *) echo '2026-01-01T00:00:00Z' ;;
+esac
+EOS
+    chmod +x "$BS_BIN/date"
+
+    bootstrap_sandbox_run >/dev/null   # first run: creates the profile fresh, no backup yet
+    printf '# edit-1\n' >> "$BS_PROFILE"
+    contentA="$(cat "$BS_PROFILE")"
+    bootstrap_sandbox_run >/dev/null   # second run: profile differs from rendered -> first backup
+    printf '# edit-2\n' >> "$BS_PROFILE"
+    contentB="$(cat "$BS_PROFILE")"
+    out3="$(bootstrap_sandbox_run)"    # third run, same pinned second -> must not clobber the first backup
+
+    ok=1
+    base="$BS_PROFILE.autoos-backup-20260101000000"
+    [[ "$out3" == *"kept your edits"* ]] || { ok=0; echo "third run: $out3" >&2; }
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup content wrong" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$(dirname "$BS_PROFILE")" -maxdepth 1 -name 'autoos-ai.sh.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    [[ "$(cat "$BS_PROFILE")" == "$contentB" ]] || { ok=0; echo "the operator's file itself was rewritten" >&2; }
+    rm -rf "$BS_STICK"
+    if (( ok )); then pass; else fail "rescue-bootstrap overwrote a same-second profile backup"; fi
+fi
+
 if it "ai dispatcher --list names all three backends, including local (template)"; then
     out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" bash templates/ai-dispatcher.sh --list 2>&1)"
     rc=$?
