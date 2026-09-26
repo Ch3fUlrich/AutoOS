@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
 COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.json"
 LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
+IDE_MODELS_PATH = ROOT / "catalog" / "ide-models.json"
 SYNC_ROUTER_TIERS_TOOL = ROOT / "tools" / "sync-router-tiers.py"
 CHECK_PROVIDER_REGISTRY_HELPER = ROOT / "tests" / "helpers" / "check-provider-registry.py"
 REGISTRY_TOOL = ROOT / "tools" / "registry.py"
@@ -55,6 +56,10 @@ def real_registry() -> dict:
 
 def real_combos() -> dict:
     return load_json(COMBOS_PATH)
+
+
+def real_ide_models() -> dict:
+    return load_json(IDE_MODELS_PATH)
 
 
 def real_litellm_config() -> str:
@@ -289,6 +294,126 @@ class ExistingSyncRouterTiersStillWorkTests(unittest.TestCase):
     def test_provider_registry_consistency_helper_still_passes(self):
         proc = run_helper(CHECK_PROVIDER_REGISTRY_HELPER)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+
+class IdeRenderMatchesTodayTests(unittest.TestCase):
+    """Render of the real registry equals today's catalog/ide-models.json
+    semantically (task A4c; docs/plans/2026-09-25-registry-mapping.md section 12
+    documents the mapping and its one intentional equality exception: $comment,
+    same as render omniroute's - section 10). Unlike combos.json's `combos`/
+    `retired` arrays, `models[]` order IS semantic here (catalog/ide-models.json's
+    own top-level comment: "List order = picker order on every surface"), so
+    render_ide() reproduces it via IDE_MODEL_ORDER rather than treating it as an
+    exception."""
+
+    def test_render_matches_committed_ide_models_semantically(self):
+        problems = registry.ide_diff(registry.render_ide(real_registry()), real_ide_models())
+        self.assertEqual(problems, [])
+
+    def test_render_carries_the_spec_3_2_generated_marker(self):
+        rendered = registry.render_ide(real_registry())
+        self.assertIn("generated from catalog/ai-registry.json", rendered["$comment"])
+        self.assertIn("do not edit", rendered["$comment"])
+
+    def test_generated_marker_is_new_not_borrowed_from_the_committed_file(self):
+        self.assertNotIn("generated from catalog/ai-registry.json",
+                         json.dumps(real_ide_models()["$comment"]))
+
+    def test_render_order_matches_todays_picker_order(self):
+        rendered = registry.render_ide(real_registry())
+        self.assertEqual([m["id"] for m in rendered["models"]],
+                         [m["id"] for m in real_ide_models()["models"]])
+
+    def test_every_registry_route_is_covered_by_ide_model_order(self):
+        self.assertEqual(set(registry.IDE_MODEL_ORDER), set(real_registry()["routes"]))
+
+    def test_a_route_with_no_omniroute_or_litellm_surface_is_out_of_scope(self):
+        # spark-1.3-contributor's surfaces.openhands.direct_profile (mapping doc
+        # section 6) is not an omniroute/litellm surface - render_ide must not
+        # choke on it, and must still render the route from its omniroute surface.
+        rendered = registry.render_ide(real_registry())
+        by_id = {m["id"]: m for m in rendered["models"]}
+        self.assertEqual(by_id["spark-1.3-contributor"]["surfaces"], {"omniroute": ["opencode", "zed", "openhands"]})
+
+
+class IdeRenderDeterminismTests(unittest.TestCase):
+    """A second render changes nothing (spec 11: idempotence)."""
+
+    def test_two_in_process_renders_are_byte_for_byte_equal(self):
+        first = registry.render_json(registry.render_ide(real_registry()))
+        second = registry.render_json(registry.render_ide(real_registry()))
+        self.assertEqual(first, second)
+
+    def test_cli_two_runs_write_identical_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            out1, out2 = Path(d) / "a.json", Path(d) / "b.json"
+            for out in (out1, out2):
+                proc = run_cli("render", "ide", "--out", str(out))
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(out1.read_bytes(), out2.read_bytes())
+            self.assertTrue(out1.read_bytes().endswith(b"\n"))
+
+
+class ChangedFieldFailsIdeCheckTests(unittest.TestCase):
+    """--check exits 1 and names the model when a field differs from
+    catalog/ide-models.json."""
+
+    def test_changed_context_exits_one_and_names_the_model(self):
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["context"] = 1
+        path = write_registry(reg)
+        try:
+            proc = run_cli("render", "ide", "--registry", path, "--check")
+        finally:
+            Path(path).unlink()
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("models.t3-driver", proc.stdout)
+
+    def test_reordered_registry_render_still_matches_by_content(self):
+        # routes is a dict, so registry key order never drives render_ide()'s
+        # output order (IDE_MODEL_ORDER does) - reordering the dict on disk
+        # must not itself count as drift.
+        reg = copy.deepcopy(real_registry())
+        reordered = dict(reversed(list(reg["routes"].items())))
+        reg["routes"] = reordered
+        path = write_registry(reg)
+        try:
+            proc = run_cli("render", "ide", "--registry", path, "--check")
+        finally:
+            Path(path).unlink()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_unmodified_registry_check_exits_zero_on_the_real_files(self):
+        proc = run_cli("render", "ide", "--check")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ok:", proc.stdout)
+
+    def test_missing_ide_models_file_exits_one(self):
+        proc = run_cli("render", "ide", "--check",
+                       "--ide-models", "/nonexistent/ide-models.json")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+
+
+class MissingRouteFailsIdeRenderTests(unittest.TestCase):
+    """render_ide() fails loudly, naming the id, when a registry route
+    IDE_MODEL_ORDER expects is missing - never silently drops it from the
+    render (the same 'never mask a real gap' rule as render_omniroute()'s
+    surfaces.omniroute.context_declared check)."""
+
+    def test_a_route_missing_from_the_registry_raises_and_names_it(self):
+        reg = copy.deepcopy(real_registry())
+        del reg["routes"]["t3-driver"]
+        with self.assertRaises(ValueError) as ctx:
+            registry.render_ide(reg)
+        self.assertIn("t3-driver", str(ctx.exception))
+
+    def test_an_unexpected_extra_route_raises_and_names_it(self):
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["brand-new-route"] = copy.deepcopy(reg["routes"]["t3-driver"])
+        reg["routes"]["brand-new-route"]["id"] = "brand-new-route"
+        with self.assertRaises(ValueError) as ctx:
+            registry.render_ide(reg)
+        self.assertIn("brand-new-route", str(ctx.exception))
 
 
 if __name__ == "__main__":

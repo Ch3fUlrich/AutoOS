@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""Keep every client's gateway model list in sync with catalog/ide-models.json.
+"""Keep every client's gateway model list in sync with catalog/ai-registry.json.
 
-catalog/ide-models.json is the single source of truth for which gateway
+catalog/ai-registry.json is the single hand-edited source of which gateway
 model ids each surface offers, their display names and their token windows
-(combos.json keeps owning leg ORDER). Before it existed the same list was
-hand-maintained in about eight places and drifted: the 1M tier was 1000000
-in opencode.jsonc, 1048576 in the Zed writers and tier profiles, 128000 in
+(combos.json keeps owning leg ORDER). This tool's default model list is
+`tools/registry.py render ide`'s output (routing v2 spec 3.2 phase 1, task
+A4c) - the reverse of the mapping catalog/ide-models.json used to be built
+from directly. Before that file existed, the same list was hand-maintained
+in about eight places and drifted: the 1M tier was 1000000 in opencode.jsonc,
+1048576 in the Zed writers and tier profiles, 128000 in
 configuration/openhands/config.toml, with three different output budgets.
+--catalog reads catalog/ide-models.json's own shape directly instead (an
+explicit override kept for anyone still relying on that file rather than the
+registry) - the Zed and V1 OpenCode writers in lib/ still read catalog/ide-
+models.json directly at run time on the target machine and need no sync
+either way.
 
-This tool regenerates the static copies; the Zed and V1 OpenCode writers in
-lib/ read the catalog at run time and need no sync:
+This tool regenerates the static copies:
 
   opencode.jsonc
       ONLY the lines between two whole-line markers inside each gateway
@@ -41,7 +48,8 @@ is left byte-for-byte untouched, and the newline style is preserved, so a
 re-run is byte-identical.
 
 Usage:
-    python3 tools/sync-ide-models.py [--check] [--quiet] [--catalog PATH]
+    python3 tools/sync-ide-models.py [--check] [--quiet]
+        [--registry PATH | --catalog PATH]
         [--opencode PATH] [--tier-profiles PATH] [--openhands-toml PATH]
 
     (default)   rewrite the managed parts in place; report what changed
@@ -63,12 +71,14 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import importlib.util
 import json
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+REGISTRY_TOOL_PATH = ROOT / "tools" / "registry.py"
 GATEWAYS = ("omniroute", "litellm")
 SURFACES = ("opencode", "zed", "openhands")
 REQUIRED = {"id": str, "name": str, "context": int, "output": int, "surfaces": dict}
@@ -86,44 +96,88 @@ class ConfigError(RuntimeError):
 # --------------------------------------------------------------------- catalog
 
 
+def _validate_models(models, label):
+    """The same shape checks load_catalog() has always run, factored out so
+    load_from_registry() below can apply them to a render_ide() output too -
+    both feed the exact same REQUIRED/GATEWAYS/SURFACES rules to the rest of
+    this tool, whichever source produced the list."""
+    if not isinstance(models, list) or not models:
+        raise ConfigError(f"{label}: models must be a non-empty list")
+    seen = set()
+    for m in models:
+        if not isinstance(m, dict):
+            raise ConfigError(f"{label}: every model must be an object")
+        model_label = m.get("id", "<no id>")
+        for key, kind in REQUIRED.items():
+            value = m.get(key)
+            # bool is an int subclass; a true/false window is still a typo.
+            if not isinstance(value, kind) or isinstance(value, bool):
+                raise ConfigError(f"{label}: {model_label}: {key} must be a {kind.__name__}")
+        if m["context"] <= 0 or m["output"] <= 0:
+            raise ConfigError(f"{label}: {model_label}: context and output must be positive")
+        if model_label in seen:
+            raise ConfigError(f"{label}: duplicate id {model_label}")
+        seen.add(model_label)
+        effort = m.get("reasoning_effort")
+        if effort is not None and not isinstance(effort, str):
+            raise ConfigError(f"{label}: {model_label}: reasoning_effort must be a string")
+        if not m["surfaces"]:
+            raise ConfigError(f"{label}: {model_label}: surfaces is empty")
+        for gateway, surfaces in m["surfaces"].items():
+            if gateway not in GATEWAYS:
+                raise ConfigError(f"{label}: {model_label}: unknown gateway {gateway!r} (known: {', '.join(GATEWAYS)})")
+            if not isinstance(surfaces, list) or not surfaces:
+                raise ConfigError(f"{label}: {model_label}: surfaces.{gateway} must be a non-empty list")
+            for surface in surfaces:
+                if surface not in SURFACES:
+                    raise ConfigError(f"{label}: {model_label}: unknown surface {surface!r} (known: {', '.join(SURFACES)})")
+    return models
+
+
 def load_catalog(path):
-    """The validated model list, in picker order."""
+    """The validated model list, in picker order - read from an ide-models.json-
+    shaped file directly. Kept as the explicit --catalog code path (task A4c's
+    brief: never delete an old file's own reader before a later phase); the
+    default, unflagged run below no longer calls this - see load_from_registry()."""
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
         models = doc["models"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
-    if not isinstance(models, list) or not models:
-        raise ConfigError(f"{path}: models must be a non-empty list")
-    seen = set()
-    for m in models:
-        if not isinstance(m, dict):
-            raise ConfigError(f"{path}: every model must be an object")
-        label = m.get("id", "<no id>")
-        for key, kind in REQUIRED.items():
-            value = m.get(key)
-            # bool is an int subclass; a true/false window is still a typo.
-            if not isinstance(value, kind) or isinstance(value, bool):
-                raise ConfigError(f"{path}: {label}: {key} must be a {kind.__name__}")
-        if m["context"] <= 0 or m["output"] <= 0:
-            raise ConfigError(f"{path}: {label}: context and output must be positive")
-        if label in seen:
-            raise ConfigError(f"{path}: duplicate id {label}")
-        seen.add(label)
-        effort = m.get("reasoning_effort")
-        if effort is not None and not isinstance(effort, str):
-            raise ConfigError(f"{path}: {label}: reasoning_effort must be a string")
-        if not m["surfaces"]:
-            raise ConfigError(f"{path}: {label}: surfaces is empty")
-        for gateway, surfaces in m["surfaces"].items():
-            if gateway not in GATEWAYS:
-                raise ConfigError(f"{path}: {label}: unknown gateway {gateway!r} (known: {', '.join(GATEWAYS)})")
-            if not isinstance(surfaces, list) or not surfaces:
-                raise ConfigError(f"{path}: {label}: surfaces.{gateway} must be a non-empty list")
-            for surface in surfaces:
-                if surface not in SURFACES:
-                    raise ConfigError(f"{path}: {label}: unknown surface {surface!r} (known: {', '.join(SURFACES)})")
-    return models
+    return _validate_models(models, str(path))
+
+
+def _load_registry_tool():
+    """Import tools/registry.py by path (its name is not a valid module
+    identifier) - the same importlib-by-path technique that tool's own
+    _load_sync_router_tiers() uses for tools/sync-router-tiers.py."""
+    spec = importlib.util.spec_from_file_location("autoos_registry", REGISTRY_TOOL_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_from_registry(path):
+    """The validated model list, in picker order - sourced from catalog/ai-
+    registry.json via tools/registry.py's render_ide() (routing v2 spec 3.2
+    phase 1, task A4c: "retarget tools/sync-ide-models.py to take its data
+    from the registry render"), instead of catalog/ide-models.json directly.
+    `tools/registry.py render ide --check` proves render_ide() reproduces
+    today's catalog/ide-models.json semantically, so this is the same data,
+    only sourced one hop earlier - the default, unflagged run of this tool
+    (what tests/run-tests.sh/.ps1 and the installers behind it actually
+    exercise) now goes through this function; --catalog stays available as
+    an explicit override onto the old file's own shape (load_catalog() above)."""
+    try:
+        registry_doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    registry = _load_registry_tool()
+    try:
+        rendered = registry.render_ide(registry_doc)
+    except ValueError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+    return _validate_models(rendered.get("models"), str(path))
 
 
 def offered(models, gateway, surface):
@@ -378,12 +432,17 @@ def _utf8_streams():
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description="Sync every client's gateway model list from catalog/ide-models.json.")
+        description="Sync every client's gateway model list from catalog/ai-registry.json "
+                    "(render ide) - or, with --catalog, from catalog/ide-models.json directly.")
     parser.add_argument("--check", action="store_true",
                         help="exit 1 with a diff when a surface has drifted; change nothing")
     parser.add_argument("--quiet", action="store_true",
                         help="print nothing on success (errors and a --check diff still print)")
-    parser.add_argument("--catalog", default=None, help="default: catalog/ide-models.json")
+    parser.add_argument("--registry", default=None,
+                        help="default: catalog/ai-registry.json; ignored when --catalog is given")
+    parser.add_argument("--catalog", default=None,
+                        help="an ide-models.json-shaped file to read directly instead of "
+                             "rendering --registry (default: not used)")
     parser.add_argument("--opencode", default=None, help="default: opencode.jsonc")
     parser.add_argument("--tier-profiles", default=None,
                         help="default: configuration/openhands/tier-profiles.json")
@@ -395,7 +454,11 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     _utf8_streams()
-    catalog = Path(args.catalog) if args.catalog else ROOT / "catalog" / "ide-models.json"
+    # --catalog is the explicit, old-shape override; unset, this tool's default
+    # run sources its model list from the registry render instead (task A4c).
+    catalog = Path(args.catalog) if args.catalog else None
+    registry_path = Path(args.registry) if args.registry else ROOT / "catalog" / "ai-registry.json"
+    source = catalog if catalog is not None else registry_path
     paths = {
         "opencode": Path(args.opencode) if args.opencode else ROOT / "opencode.jsonc",
         "tier_profiles": Path(args.tier_profiles) if args.tier_profiles
@@ -407,7 +470,7 @@ def main(argv=None):
     # leaves all of them untouched.
     results, warnings = [], []
     try:
-        models = load_catalog(catalog)
+        models = load_catalog(catalog) if catalog is not None else load_from_registry(registry_path)
         for key, label, rewrite in TARGETS:
             # newline="" keeps \r\n visible, so the newline style survives.
             with open(paths[key], encoding="utf-8", newline="") as fh:
@@ -431,10 +494,10 @@ def main(argv=None):
             for path, _, original, updated, _ in drifted:
                 print(diff_text(original, updated, str(path)), end="")
             print("DRIFT: %s out of sync with %s (run python3 tools/sync-ide-models.py)"
-                  % (", ".join(r[1] for r in drifted), catalog.name), file=sys.stderr)
+                  % (", ".join(r[1] for r in drifted), source.name), file=sys.stderr)
             return 1
         if not args.quiet:
-            print(f"OK: {', '.join(r[1] for r in results)} match {catalog.name}")
+            print(f"OK: {', '.join(r[1] for r in results)} match {source.name}")
         return 0
 
     for path, _, _, updated, _ in drifted:
@@ -444,7 +507,7 @@ def main(argv=None):
             fh.write(updated)
     if not args.quiet:
         if drifted:
-            print(f"Synced {', '.join(r[1] for r in drifted)} from {catalog.name}")
+            print(f"Synced {', '.join(r[1] for r in drifted)} from {source.name}")
         else:
             print(f"Already in sync ({', '.join(r[1] for r in results)})")
     return 0
