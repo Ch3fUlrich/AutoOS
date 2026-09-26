@@ -67,7 +67,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 
 ### spawn
 
-- R-spawn-01: After a lane's DONE note, `claude stop <id>` it and remove the merged, clean worktree. (why: a finished session can idle for hours; source: test_l1_handoff.py, 2026-09-25)
+- R-spawn-01: After a lane merges, `claude stop <id>`, remove its clean worktree and delete its logs/sandboxes/ clone. (why: finished sessions idle for hours; source: test_l1_handoff.py, 2026-09-25)
 - R-spawn-02: Run the client in its own process group; reap leftovers after it exits. (why: Serena/language servers survive a cancelled worker; source: test_autoos_spawner.py ProcessGroupTests)
 - R-spawn-03: `--mcp-config`/`--allowedTools` are variadic: add another option before the prompt. (why: the prompt is silently eaten as an argument; source: daemon.log, test_autoos_spawner.py)
 - R-spawn-04: Give lane Claude sessions trust_worktree.py --lane-mcp's strict per-worktree MCP config. (why: each worktree gets a private Serena; source: test_trust_worktree.py, 20:50Z)
@@ -121,6 +121,10 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-tests-16: Run the filtered pwsh suite yourself before merging an Agent-tool lane that touched .ps1/.psm1; the lane cannot run pwsh. (why: $pid bug shipped untested; source: 2c6a3d2)
 - R-tests-17: A lane migrating a tool must list tests/helpers/*.py in its paths; helpers assert tool internals. (why: helper broke outside scope; source: ec0e12d, A5c report)
 - R-tests-18: In tests/run-tests.sh name test arrays *_argv; reusing a string name as an array fails CI shellcheck SC2178. (why: filters passed, CI failed; source: CI 36252318777)
+- R-tests-19: Wrap a JSON-array read for Windows PowerShell 5.1: @($x | ConvertFrom-Json | ForEach-Object { $_ }). (why: 5.1 emits one object; pwsh 7 hides it; source: CI 36260488947, f3e955a)
+- R-tests-20: Keep --filter words specific; a broad word (clean, free) also runs the shellcheck of run-tests.sh. (why: it was OOM-killed at MemoryMax; source: inbox/L1-routing.md 2026-09-26T18:31:19Z)
+- R-tests-21: A local red CI lacks may be host state, not a flake; test host-state guards with a fake SYS_HOME. (why: CI runners have no installed units; source: main 6220a04, l1/backlog 67ba6c1)
+- R-tests-22: Under bash >= 5.2 `${v/pat/repl}` expands & in repl; split-and-concatenate, or shopt -u patsub_replacement. (why: path &-injection survived a sed rewrite; source: 784a108)
 
 ### gateway
 
@@ -183,6 +187,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-merge-03: Merge with no fast-forward, under a global mutex, so lanes can't interleave a merge. (why: guard-gated serial merges need no hand reconciling; source: PROPOSALS-2026-09-05.md, what worked)
 - R-merge-04: Merge in two stages: a lane into its orchestrator's branch, then that branch into main. (why: keeps a half-finished orchestrator run off main; source: briefs/common.md, Merge path)
 - R-merge-05: After a branch's CI is green, append ready <branch> <sha> to the coordinator's inbox; it alone merges to main. (why: one merger avoids interleaved merges; source: common.md, Merge path)
+- R-merge-06: Only the coordinator commits in the main checkout; everyone else works in their own worktree. (why: one writer on main; source: briefs/common.md Worktrees)
 
 ### handoff
 
@@ -193,6 +198,8 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-handoff-05: A handoff is done only once the parent inbox has its line; parents watch handoff mtimes. (why: a handoff with no line sat idle 1.5 h; source: inbox/L1-routing.md 21:45Z)
 - R-handoff-06: Only L0 asks the operator: `question:` to inbox/L0.md, or inbox/L1-main.md if refused. (why: classifier refused L1-backlog's L0 appends; source: inbox/L1-routing.md 2026-09-26)
 - R-handoff-07: A parent measures a child via `autoos-agent.py heartbeat --transcript --cap`, relaunching past its exit 4. (why: two sessions ran past cap unhandled; source: test_autoos_heartbeat.py)
+- R-handoff-08: One writer per run file: briefs/<n> by the parent, status/<n> by n, inbox/<n> append-only (n replies `→ done: …`). (why: no write conflicts; source: briefs/common.md Communication)
+- R-handoff-09: Answer `ping <text>` in your inbox with `pong <text>` in your status at your next decision point. (why: parents probe liveness cheaply; source: briefs/common.md Communication)
 
 ### host
 
@@ -204,6 +211,8 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-host-06: The Bash tool shell is zsh: run multi-step shell as `bash <<'EOF'`; never name a var `path`. (why: zsh clobbered PATH and broke globs; source: status/L1-backlog.lane-omni.report.md)
 - R-host-07: Tell a live Claude session by ~/.claude/sessions/<pid>.json procStart vs /proc. (why: a job's state field is not liveness; source: status/L1-backlog.herdr-home-proposal.md)
 - R-host-08: Never shellcheck tests/run-tests.sh locally; CI gates it. (why: its OOM stopped herdr, killing all sessions twice; source: herdr-server.log 2026-09-26T15:25Z)
+- R-host-09: Run anything that may exceed ~2 GB as `systemd-run --user --scope -p MemoryMax=2G <cmd>`. (why: the cap killed a runaway suite, not the host; source: inbox/L1-routing.md 16:22:31Z)
+- R-host-10: Never call Serena activate_project from a worktree; the one shared server has one active project. (why: it re-points every session; source: briefs/common.md MCP, 2026-09-26)
 
 ### safety
 
