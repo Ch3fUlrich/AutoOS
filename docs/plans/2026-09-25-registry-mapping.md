@@ -480,3 +480,109 @@ in the registry (not yet reflected in `config.yaml`) makes `--check` exit 1 nami
 the tier it belongs to, never silently passing — `tests/test_registry_render.py::
 ChangedLegFailsLitellmCheckTests::test_changed_leg_exits_one_and_names_the_tier`
 pins this for a mutated `t3-driver` leg.
+
+## 12. Task A4c — rendering `catalog/ide-models.json` back from the registry, and retargeting `tools/sync-ide-models.py`
+
+Spec 3.2 phase 1 for `catalog/ide-models.json` (the file §3 above maps *into* the
+registry): `tools/registry.py render ide` reads `catalog/ai-registry.json` and
+produces that file's own shape via the pure function `render_ide(registry) ->
+dict`. It is the reverse of §3's mapping (`_build_surfaces()` /
+`build_routes()` in `tools/registry-convert.py`), and covers every route — unlike
+`render omniroute`, there is no legs-non-empty filter, because §3 already
+established that every `ide-models.json` id gets a route even when `combos.json`
+has none (the `*-paid` and `auto*` routes).
+
+Field mapping back, per route:
+
+| Registry path | `ide-models.json` path | Notes |
+|---|---|---|
+| `routes.<id>.id` | `models[].id` | Unchanged; also the dict key. |
+| `routes.<id>.surfaces.<gateway>.display_name` (first of `omniroute`/`litellm` present) | `models[].name` | §3's forward mapping copied the *same* name into every gateway the id lists — reversing it just reads it back from whichever gateway is present. Verified field-for-field equal across every route that lists both gateways in today's registry (2026-09-26: zero disagreements), so the omniroute-first pick is never actually exercised as a tie-break by real data; `IDE_GATEWAYS = ("omniroute", "litellm")` names the priority order explicitly rather than leaving it to whichever key a dict happens to iterate first. |
+| `routes.<id>.surfaces.<gateway>.context` (same pick) | `models[].context` | Same reasoning. |
+| `routes.<id>.surfaces.<gateway>.output` (same pick) | `models[].output` | Same reasoning. |
+| `routes.<id>.surfaces.<gateway>.effort_default`? (same pick) | `models[].reasoning_effort`? | Same reasoning; omitted from the render when absent, exactly like the field itself in today's file. |
+| `routes.<id>.surfaces.<gateway>.clients` for every gateway present with one | `models[].surfaces.<gateway>` | Rebuilt as `{gateway: clients}` for every `omniroute`/`litellm` surface the route has — `openhands` is never a key here (see below). |
+
+One documented equality exception (the same one `render omniroute` needed, §10
+exception 1 — nothing new):
+
+1. **`$comment` is not reproduced.** `catalog/ide-models.json`'s top-level
+   `$comment` (the surfaces/gateway glossary, the operator's 2026-09-25 "1M tier
+   is 1000000 everywhere" ruling, the opencode `variants` warning) was already
+   redistributed into this document (§3, §9) and into schema/converter
+   descriptions during the A1/A2 migration — `tools/sync-ide-models.py`'s own
+   `load_catalog()` never reads a `"$comment"` key either (only `doc["models"]`).
+   The render emits only the spec-3.2 marker line, and `ide_diff()` ignores the
+   whole `$comment` key, mirroring `omniroute_diff()`'s own treatment exactly.
+
+One thing that is **not** an equality exception, because the render reproduces it
+exactly rather than dropping it — contrast the point above:
+
+- **`models[]` array order.** Unlike `combos.json`'s `combos`/`retired` arrays
+  (§10 exception 2, proven insignificant by reading `apply.sh`/`apply.ps1`),
+  nothing in this repository shows that `ide-models.json`'s list order is
+  insignificant — its own top-level comment says the opposite: *"List order =
+  picker order on every surface."* No registry field carries this order (`routes`
+  is a dict, and `catalog/ai-registry.json` itself stores every key
+  alphabetically — `tools/registry-convert.py`'s `build_registry()` calls
+  `json.dumps(..., sort_keys=True)`), so `render_ide()` carries it as a literal,
+  hand-copied constant, `IDE_MODEL_ORDER` — the same convention `render_omniroute()`
+  uses for `OMNIROUTE_RETIRED_IDS` (§10) and `tools/registry-convert.py` uses for
+  `PROVIDER_EXTRA`/`MODEL_EXTRA`/`COMBO_CLASS`. `render_ide()` raises, naming every
+  id at once, if a future route is added or removed without updating that
+  constant (`tests/test_registry_render.py::MissingRouteFailsIdeRenderTests`) —
+  never a silent reorder or drop. **Follow-up**: a registry field such as
+  `routes.<id>.surfaces.ide_order` would let this render drop the constant; not
+  added here, since spec 3.1 lists no such field and task A4c's brief is "keep
+  today's value via the render" for exactly this kind of gap (the same choice
+  A4b made for the litellm `rpm` lines it cannot derive either, §11). Because
+  order is reproduced exactly (not just each entry's content), `render_ide()`
+  achieves the same "zero exceptions beyond `$comment`" result `render_litellm_
+  blocks()` achieved in §11 — `tests/test_registry_render.py::
+  IdeRenderMatchesTodayTests::test_render_matches_committed_ide_models_
+  semantically` asserts this against the real files.
+
+**`surfaces.openhands` is out of scope for this render.** A route's *standalone*
+`surfaces.openhands` entry (§6's last rows — today only
+`spark-1.3-contributor`'s `direct_profile`) is never a gateway key in
+`ide-models.json`'s own `surfaces` field (that field is `{gateway: [client,
+...]}`, and `openhands` is one of the *clients*, not a gateway) — `IDE_GATEWAYS`
+deliberately excludes it, so `render_ide()` neither reads nor reproduces it. It
+belongs to a `tools/registry.py render tier-profiles`-shaped task (task A4d, not
+this one), same as `openhands_profile` sub-fields already excluded from this
+mapping.
+
+### Retargeting `tools/sync-ide-models.py` (spec 3.2's own "existing `sync-ide-
+models.py` retargeted" row)
+
+`tools/sync-ide-models.py`'s default, unflagged run now sources its model list
+from `load_from_registry()`, which calls `tools/registry.py`'s `render_ide()` on
+`catalog/ai-registry.json` (default path) instead of parsing `catalog/ide-
+models.json` directly — the exact retarget spec 3.2's table names for
+`opencode.jsonc`'s `AUTOOS-MANAGED` blocks and the Zed lists that same tool feeds
+into `configuration/openhands/tier-profiles.json`/`config.toml`. Because
+`render ide --check` proves `render_ide(catalog/ai-registry.json)` is
+semantically identical to `catalog/ide-models.json` today, this changes nothing
+about what gets written to any of the three generated files on an unmodified
+checkout — `tests/test_sync_ide_models.py::RepoTests::test_the_checkout_is_in_
+sync` (unchanged, no flags) still passes, proving it.
+
+`--catalog PATH` stays as an explicit, lower-level override that reads an
+`ide-models.json`-shaped file directly via the pre-existing `load_catalog()`
+(now sharing its validation with the new path through a factored-out
+`_validate_models()`, so neither path can silently diverge on what counts as a
+valid model list) — every test in `tests/test_sync_ide_models.py` written before
+this task always passes `--catalog` explicitly and is therefore completely
+unaffected by the retarget; the new coverage for the retarget itself
+(`RegistrySourcedTests`) uses temp copies of `catalog/ai-registry.json` and the
+new `--registry` flag instead, mirroring `render_ide()`'s own gateway-priority
+behaviour (mutating only `surfaces.omniroute` on a route that also lists
+`litellm` still flows through to both gateways' entries in `opencode.jsonc`,
+since `models[].context`/`.output` are single shared fields — mutating a
+`litellm`-only route like `t3-driver-paid` exercises the litellm-only fallback
+of the same priority pick). **Follow-up**: `catalog/ide-models.json` itself is
+not deleted by this task (spec 3.2's own two-phase rule — no old file is removed
+before every consumer has moved off it; the Zed and V1 OpenCode writers in
+`lib/` still read it directly at install time on the target machine, unaffected
+by this repo-internal tool's retarget) — that is a later phase-2 step, together
+with whatever also retargets those `lib/` writers.

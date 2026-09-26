@@ -783,6 +783,18 @@ class FallThroughTests(unittest.TestCase):
                      result["skipped_legs"]["p/model-a"])
         self.assertIn("falls through 1 skipped leg(s)", result["reason"])
 
+    def test_client_bound_leg_is_skipped_even_for_its_own_client(self):
+        # A route is served through the gateway (omniroute/<route>), never from
+        # inside the bound client: run 20260926-142228 got 403 "OpenCode's free
+        # tier can only be used from within OpenCode" on client=opencode.
+        registry = self.two_leg_registry(leg_a={"client_bound": "opencode"})
+        legs, skipped = r.usable_legs(registry["routes"]["r-ft"], self.card(),
+                                      self.features(), self.state(), registry, {},
+                                      client="opencode")
+        self.assertEqual(legs, [("p", "model-b")])
+        self.assertEqual(skipped,
+                         {"p/model-a": ["client_bound: p/model-a needs opencode"]})
+
     def test_client_bound_leg_skipped_falls_through_to_open_leg(self):
         registry = self.two_leg_registry(leg_a={"client_bound": "claude"})
         card, features, client_state = self.card(), self.features(), self.state()
