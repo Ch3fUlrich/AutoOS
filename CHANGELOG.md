@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the Linux test suite is split into one file per describe block
+
+- `tests/run-tests.sh` keeps the harness and summary and sources `tests/linux/NN-<describe>.sh` in order; test names
+  and `--filter` are unchanged (all 719 names in the same order). CI and the suite shellcheck each part in its own
+  process: one shellcheck over the 14k-line file needed more than 2.5 GB and OOM-killed a 16 GB host twice; a part
+  peaks near 1.2 GB. `docs/testing.md` says how to lint and where a new block goes.
+
 ### Added — hostexec: one logged, policy-checked path for agents to run host commands (nothing enabled)
 
 - **`tools/hostexec.py` + `tools/hostexec/`**: an MCP server over HTTP (`host_run`, `host_policy`, `host_log_tail`) that runs argv
