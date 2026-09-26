@@ -19,7 +19,11 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
     argv-caps               too many args, or one argument too long
     forbid-host              host not declared, or declared with forbid=true
     env-injection            argv[0] is a NAME=value assignment, or
-                             LD_PRELOAD/LD_LIBRARY_PATH/BASH_ENV appear anywhere
+                             a dangerous NAME=value anywhere (LD_*, DYLD_*,
+                             BASH_ENV, ENV, PROMPT_COMMAND, NODE_OPTIONS,
+                             PYTHONPATH/STARTUP/HOME, PERL5OPT/LIB,
+                             RUBYOPT/LIB, GIT_SSH_COMMAND/EXTERNAL_DIFF/
+                             PAGER/EDITOR/CONFIG_*/EXEC_PATH)
                              (checked on every command head)
     path-hijack              argv[0] is a relative path, or a bare name that
                              does not resolve on the policy's FIXED PATH, or
@@ -765,13 +769,30 @@ def _command_heads(argv: Sequence[str]) -> list[list[str]]:
 _DANGEROUS_ENV_VARS = ("LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV")
 
 
+def _is_dangerous_env_name(name: str) -> bool:
+    """Brief C: LD_*, DYLD_*, BASH_ENV, ENV, PROMPT_COMMAND, NODE_OPTIONS,
+    PYTHONPATH/STARTUP/HOME, PERL5OPT/LIB, RUBYOPT/LIB, GIT_SSH_COMMAND,
+    GIT_EXTERNAL_DIFF, GIT_PAGER/EDITOR, GIT_CONFIG_*, GIT_EXEC_PATH."""
+    if name.startswith("LD_") or name.startswith("DYLD_"):
+        return True
+    if name.startswith("GIT_CONFIG_"):
+        return True
+    return name in {
+        "BASH_ENV", "ENV", "PROMPT_COMMAND", "NODE_OPTIONS",
+        "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+        "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+        "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_PAGER",
+        "GIT_EDITOR", "GIT_EXEC_PATH",
+    }
+
+
 def _env_injection_problem(argv: Sequence[str]) -> str | None:
     if argv and _looks_like_assignment(argv[0]):
         return f"argv[0] is an environment assignment, not a command: {argv[0]!r}"
     for tok in argv:
         if "=" in tok:
             name = tok.split("=", 1)[0]
-            if name in _DANGEROUS_ENV_VARS:
+            if name in _DANGEROUS_ENV_VARS or _is_dangerous_env_name(name):
                 return f"dangerous environment assignment: {name}"
     return None
 
