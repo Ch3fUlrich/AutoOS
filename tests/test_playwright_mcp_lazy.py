@@ -1337,6 +1337,17 @@ class Streams(LazyProxyCase):
                         s.stderr)
         self.assertEqual(s.invalid, [])
 
+    def test_a_batch_is_rejected_with_invalid_request_and_the_session_goes_on(self):
+        self.prime_cache()
+        s = self.session(idle=30)
+        s.initialize()
+        s.send(b'[{"jsonrpc":"2.0","id":9,"method":"ping"},{"jsonrpc":"2.0","id":10,"method":"ping"}]')
+        error = s.wait_for(lambda m: m.get("id") is None and "error" in m, 5)
+        self.assertEqual(error["error"]["code"], -32600)
+        self.assertEqual(s.request("ping")["result"], {})
+        self.assertEqual([m for m in s.messages if m and m.get("id") in (9, 10)], [], "a batch member was answered")
+        self.assertEqual(self.starts(), [])
+
     def test_the_backend_command_env_takes_a_json_list_or_a_quoted_string(self):
         spaced = os.path.join(self.tmp, "with space")
         os.makedirs(spaced)

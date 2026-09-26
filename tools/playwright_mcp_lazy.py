@@ -45,6 +45,15 @@ Choices the spec left open (each is covered by a test):
     two answers under one id would leave the slower call untracked, and the idle stop
     could kill it without an error reaching the client.
 
+Left as it is on purpose (reviewed 2026-09-26; each is a decision, not an oversight):
+  * a JSON-RPC batch (an array on one line) is rejected with -32600: MCP >= 2025-06
+    removed batching, so no conforming client sends one;
+  * a client that stops reading our stdout is a broken client: nothing here works around
+    it, and a failed write to it ends the session;
+  * SIGKILL of the proxy leaves no container behind: the backend's stdin closes with the
+    proxy, the docker client exits and `--rm` removes the container within about a
+    second (measured 2026-09-25).
+
 Python 3.8+, standard library only. Linux and macOS (the backend gets its own session
 so a terminal Ctrl-C reaches the proxy, which then stops it in an orderly way).
 """
