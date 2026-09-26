@@ -3773,6 +3773,12 @@ if it "antigravity discovery: a GITHUB_TOKEN reaches only the listing request, t
     [[ "$AG_OUT" != *"$tok"* ]] || { ok=0; echo "403: the token is in the output" >&2; }
     [[ "$AG_STATE" == failed && "$AG_OUT" == *"GITHUB_TOKEN"* && "$AG_OUT" == *" set"* ]] || { ok=0; echo "403 with a token: ${AG_OUT:0:500}" >&2; }
     rm -rf "$sb"
+    # GitHub rejecting the token (401) is named as such, still without printing it
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"; printf '401' >"$sb/listing.status"
+    antigravity_run "$sb" AG_ENTRY=direct "GITHUB_TOKEN=$tok"
+    [[ "$AG_STATE" == failed && "$AG_OUT" == *"HTTP 401"* && "$AG_OUT" == *"GITHUB_TOKEN"* && "$AG_OUT" == *"rejected"* && "$AG_OUT" != *"$tok"* ]] \
+        || { ok=0; echo "401 with a token: ${AG_OUT:0:500}" >&2; }
+    rm -rf "$sb"
     # a value that could inject curl config lines is never sent, and the output does not repeat it
     sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
     antigravity_run "$sb" $'GITHUB_TOKEN=abc"\noutput = "/tmp/pwned'

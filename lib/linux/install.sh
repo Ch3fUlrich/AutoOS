@@ -847,6 +847,9 @@ antigravity_hub_latest() {
             if [[ "$when" =~ ^[0-9]{1,12}$ ]]; then when="$(antigravity_py reset "$when")"; else when="an unknown time"; fi
             ui_err "Antigravity (winget-pkgs listing): GitHub answered HTTP ${status}, most likely its rate limit (60 requests per hour per IP without a token); it resets at ${when}. GITHUB_TOKEN is ${tokstate} - a token there raises the limit. Nothing was installed or changed, and no other source is tried."
             return 1 ;;
+        401)
+            ui_err "Antigravity (winget-pkgs listing): GitHub rejected the request (HTTP 401)${token:+; the GITHUB_TOKEN/GH_TOKEN sent with it was rejected - unset or replace it}. Nothing was installed or changed, and no other source is tried."
+            return 1 ;;
         *)
             ui_err "Antigravity (winget-pkgs listing): ${url} answered HTTP ${status}; nothing was installed or changed, and no other source is tried."
             return 1 ;;
