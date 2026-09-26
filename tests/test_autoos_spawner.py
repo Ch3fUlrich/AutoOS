@@ -647,7 +647,7 @@ class McpStdioTests(unittest.TestCase):
             self.assertEqual(replies[1]["result"]["serverInfo"]["name"], "autoos-agent")
             names = {t["name"] for t in replies[2]["result"]["tools"]}
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
-                                     "route", "list_agents", "context"})
+                                     "route", "list_agents", "context", "heartbeat"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "t3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])
@@ -1785,6 +1785,17 @@ class RunCardV2Tests(unittest.TestCase):
                                                 "class": "free", "card": {}}}
         self.assertEqual(self.agent.track_entry(plan, 0, 1.0)["class"], "free")
 
+    def test_track_entry_skips_a_keyless_free_run(self):
+        # review-l1own (qoder): --free swaps in a promo model outside the gateway
+        # route, so the run is no observation of that route.
+        plan = {"client": "opencode", "free": True,
+                "route": {"combo": "gemini-3.8-flash", "class": "cheap", "card": {}}}
+        self.assertIsNone(self.agent.track_entry(plan, 0, 1.0))
+
+    def test_build_plan_marks_a_free_run(self):
+        plan = self.agent.build_plan(self.args(free=True), self.cfg())
+        self.assertTrue(plan["free"])
+
     def test_track_entry_records_a_route_without_a_tier_prefix(self):
         plan = {"client": "opencode", "route": {"combo": "gemini-3.8-flash",
                                                 "class": "cheap", "card": {}}}
@@ -1887,8 +1898,10 @@ class RunCardV2AcceptanceTests(unittest.TestCase):
     def test_run_card_kind_review_dry_run_prints_a_plan_on_the_real_repo(self):
         # CI runners install no client, so every route is removed there
         # (CI 36241451890); the faked-client cmd_run tests above cover the logic.
-        if not any(shutil.which(c.binary) for c in clients.CLIENTS.values()):
-            self.skipTest("no agent client installed on this host")
+        # the resolver plans for opencode, so only opencode on PATH counts
+        # (review-l1own: another installed client did not help)
+        if shutil.which(clients.CLIENTS["opencode"].binary) is None:
+            self.skipTest("opencode is not installed on this host")
         r = run_agent("run", "--card", "kind=review,paths=tools/registry.py",
                       "--dry-run", "x")
         self.assertEqual(r.returncode, 0, r.stderr)

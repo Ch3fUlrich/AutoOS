@@ -64,6 +64,7 @@ Usage:
     python3 tools/autoos-agent.py run --tier 3 --dry-run "..."     # print the plan only
     python3 tools/autoos-agent.py context                          # this session's fill
     python3 tools/autoos-agent.py context --transcript s.jsonl --json
+    python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
 
 --free maps every tier agent to one of opencode's own free models (default
@@ -78,7 +79,13 @@ logs/orch-<date>.log (git-ignored), which the watchdog protocol reads.
 
 Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); 6 = a headless client auto-denied a tool and
 exited 0 (HEADLESS-REFUSAL); the child's exit code; 2 bad arguments, card or route refused;
-3 gateway, key or client binary missing; 4 depth budget exhausted.
+3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
+PAUSE (R-pause-01); 4 depth budget exhausted.
+
+`heartbeat` (R-heartbeat-02/03, R-pause-01, R-handoff-07) is read-only - it never pushes,
+commits or writes anything. Exit codes of its own: 3 an inbox PAUSE is active (takes
+precedence over everything else), 4 the context fill is at or past its cap, 1 some repo has an
+unpushed branch or a dirty working tree, 0 all clear.
 
 `route` (spec 6.1) has its own exit codes: 0 a route was chosen (ready or
 deferred), 5 input_required (no route survived the filters, or a removed
@@ -106,6 +113,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
+import autoos_heartbeat as heartbeat  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
@@ -460,7 +468,7 @@ def build_plan(args, cfg: dict) -> dict:
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
-            "route": route, "depth": (depth, max_depth),
+            "route": route, "depth": (depth, max_depth), "free": bool(args.free),
             "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd()}
 
 
@@ -558,6 +566,85 @@ def cmd_context(args) -> int:
         print("context: %d / %d (%d%%) model=%s transcript=%s"
               % (data["tokens"], data["cap"], data["pct"], data["model"],
                  data["transcript"]))
+    return rc
+
+
+def heartbeat_state(inbox: str | None, transcript: str | None, repos: list | None,
+                    cap: int | None) -> tuple:
+    """(data, rc): the same facts `autoos-agent.py heartbeat --json` prints and
+    the MCP `heartbeat` tool returns (R-heartbeat-02/03, R-pause-01,
+    R-handoff-07 migrated into code).
+
+    Read-only: computes ``heartbeat.pause_state`` on `inbox`, ``heartbeat.
+    repo_branch_state`` on every path in `repos` (``[os.getcwd()]`` when
+    `repos` is empty/None), and reuses ``context_state`` on `transcript` -
+    nothing here pushes, commits or writes. `cap` overrides the model's
+    looked-up hand-off cap (same table ``context_state``/``ctx.cap_for`` use)
+    with an exact token count, the way `context --model` overrides which
+    table row applies; "over cap" is `tokens >= cap`.
+
+    Exit code: 3 when the pause is active (takes precedence over everything
+    else), else 4 when over cap, else 1 when any repo has an unpushed branch
+    or a dirty working tree, else 0.
+    """
+    pause = heartbeat.pause_state(inbox, since=heartbeat.session_start(transcript))
+    repo_list = list(repos) if repos else [os.getcwd()]
+    repo_rows = []
+    any_problem = False
+    for repo in repo_list:
+        state = heartbeat.repo_branch_state(repo)
+        row = {"repo": repo,
+               "unpushed": [{"branch": b, "ahead": n} for b, n in state["unpushed"]],
+               "dirty": state["dirty"]}
+        if state["unpushed"] or state["dirty"]:
+            any_problem = True
+        repo_rows.append(row)
+    ctx_data, _ = context_state(transcript, None)
+    over_cap = False
+    if ctx_data.get("context") != "unknown":
+        ctx_data = dict(ctx_data)
+        if cap is not None:
+            ctx_data["cap"] = cap
+            ctx_data["pct"] = int(round(100 * ctx_data["tokens"] / cap)) if cap else 0
+        over_cap = bool(ctx_data["cap"]) and ctx_data["tokens"] >= ctx_data["cap"]
+    if pause["active"]:
+        rc = 3
+    elif over_cap:
+        rc = 4
+    elif any_problem:
+        rc = 1
+    else:
+        rc = 0
+    data = {"pause": pause, "repos": repo_rows, "context": ctx_data, "over_cap": over_cap,
+            "exit_code": rc}
+    return data, rc
+
+
+def cmd_heartbeat(args) -> int:
+    """Print the read-only heartbeat report (spec: R-heartbeat-02/03,
+    R-pause-01, R-handoff-07). Never pushes, commits or writes anything - see
+    tools/autoos_heartbeat.py's own docstring."""
+    data, rc = heartbeat_state(args.inbox, args.transcript, args.repos, args.cap)
+    if args.json:
+        print(json.dumps({k: data[k] for k in
+                          ("pause", "repos", "context", "over_cap", "exit_code")}))
+        return rc
+    pause = data["pause"]
+    if pause["active"]:
+        print("pause: active %s %s" % (pause["at"], pause["text"]))
+    else:
+        print("pause: none")
+    for row in data["repos"]:
+        for u in row["unpushed"]:
+            print("unpushed: %s %s %d" % (row["repo"], u["branch"], u["ahead"]))
+        if row["dirty"]:
+            print("dirty: %s %d files" % (row["repo"], row["dirty"]))
+    ctx_data = data["context"]
+    if ctx_data.get("context") == "unknown":
+        print("context: unknown (%s)" % ctx_data["reason"])
+    else:
+        print("context: %d/%d %d%%%s" % (ctx_data["tokens"], ctx_data["cap"], ctx_data["pct"],
+                                         " over-cap" if data["over_cap"] else ""))
     return rc
 
 
@@ -759,6 +846,8 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     client = clients.CLIENTS.get(plan.get("client"))
     if client is not None and not client.gateway:
         return None  # an own-account client never ran the gateway route it names
+    if plan.get("free"):
+        return None  # --free ran a keyless promo model, not the route it names
     klass = route.get("class") or track_class(route.get("combo"))
     if not klass:
         return None
@@ -1025,6 +1114,17 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
 
 
 def cmd_run(args, cfg: dict) -> int:
+    # R-pause-01/R-heartbeat-03: a hard stop, checked before every launch. Only
+    # when the caller names an inbox - a run with no AUTOOS_AGENT_INBOX set is
+    # not policed here (e.g. an interactive, watched run). AUTOOS_AGENT_TRANSCRIPT
+    # (the caller's session transcript) makes a PAUSE older than that session
+    # history: the relaunch after a pause is its resume.
+    inbox = os.environ.get("AUTOOS_AGENT_INBOX")
+    if inbox:
+        pause = heartbeat.pause_state(inbox, since=heartbeat.session_start(
+            os.environ.get("AUTOOS_AGENT_TRANSCRIPT")))
+        if pause["active"]:
+            return refuse("PAUSE active (%s): %s" % (pause["at"], pause["text"]), 3)
     client = clients.CLIENTS[args.client]
     if args.free and args.clean:
         return refuse("--free uses promo models that may train on prompts; it cannot be --clean.")
@@ -1171,6 +1271,14 @@ def main(argv=None) -> int:
     context.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
     context.add_argument("--model", help="override the model the cap is looked up for")
     context.add_argument("--json", action="store_true", help="print the fill as JSON")
+    heartbeat_p = sub.add_parser("heartbeat", help="read-only pause/branch/context check "
+                                 "(R-heartbeat-02/03, R-pause-01, R-handoff-07)")
+    heartbeat_p.add_argument("--inbox", help="an inbox file to scan for the newest PAUSE/RESUME line")
+    heartbeat_p.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
+    heartbeat_p.add_argument("--repo", dest="repos", action="append",
+                             help="a git repo to check for unpushed/dirty state (default: cwd); repeatable")
+    heartbeat_p.add_argument("--cap", type=int, help="override the model's hand-off cap (tokens)")
+    heartbeat_p.add_argument("--json", action="store_true", help="print the report as one JSON object")
     route = sub.add_parser("route", help="print the resolver v2 route_plan for a task card")
     route.add_argument("--card", required=True,
                        help="task card, e.g. kind=review,paths=tools/registry.py (or JSON)")
@@ -1185,6 +1293,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if args.cmd == "context":
         return cmd_context(args)
+    if args.cmd == "heartbeat":
+        return cmd_heartbeat(args)
     if args.cmd == "route":
         return cmd_route(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))

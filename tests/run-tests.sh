@@ -8151,6 +8151,12 @@ if it "autoos-agent context: fill from the session transcript (unit tests)"; the
     out="$(python3 tests/test_autoos_context.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# heartbeat (R-heartbeat-02/03, R-pause-01, R-handoff-07 migrated into code): pause,
+# unpushed/dirty branches, context fill - read-only, plus the run/spawn PAUSE refusal.
+if it "autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)"; then
+    out="$(python3 tests/test_autoos_heartbeat.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # catalog/ai-registry.json (routing v2 spec section 3): converter, schema keys, idempotence.
 if it "ai-registry converter: schema keys, legs resolve, idempotent (unit tests)"; then
     out="$(python3 tests/test_registry_convert.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
