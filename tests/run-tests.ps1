@@ -4700,6 +4700,83 @@ Test-Case 'openhands settings: the user original survives the writer and the age
     Pass
 }
 
+# The closing line must say what happened. "written" only when a file was
+# written; a run that changed nothing says it is up to date; a run whose script
+# failed (or that had no python) says so and prints neither.
+Test-Case 'openhands settings: the final line says written only when something was written' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $out1 = & $ctx.Run
+        $out2 = & $ctx.Run
+        if ($out1 -notmatch 'OpenHands configuration and profiles written to') { throw "the first run never says written: [$out1]" }
+        if ($out1 -match 'already up to date') { throw "the first run also says it is up to date: [$out1]" }
+        if ($out2 -notmatch 'openhands settings: skipped') { throw "the second run did not skip the settings writer, so this test proves nothing: [$out2]" }
+        if ($out2 -match 'OpenHands configuration and profiles written to') { throw "the second run still says written although nothing changed: [$out2]" }
+        if ($out2 -notmatch 'OpenHands configuration already up to date') { throw "the second run does not say it is up to date: [$out2]" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: a profile file that had to be recreated counts as written' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $null = & $ctx.Run
+        $profile = Join-Path $ctx.OhDir 'profiles\openrouter-free.json'
+        if (-not (Test-Path -LiteralPath $profile)) { throw 'the first run did not write profiles\openrouter-free.json' }
+        Remove-Item -LiteralPath $profile -Force
+        $out = & $ctx.Run
+        if (-not (Test-Path -LiteralPath $profile)) { throw 'the second run did not recreate the profile' }
+        if ($out -notmatch 'OpenHands configuration and profiles written to') { throw "a recreated profile file is not reported as written: [$out]" }
+        if ($out -match 'already up to date') { throw "a run that recreated a file says it is up to date: [$out]" }
+        if ($out -notmatch 'openhands profiles: 1 written') { throw "the writer does not report the one profile it wrote: [$out]" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: a failing settings script is reported, not called written' {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { Skip 'the stub is a POSIX shell script'; return }
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $real = @(Get-Command python3, python -All -ErrorAction SilentlyContinue | Where-Object { $_.Source -and -not $_.Source.StartsWith($ctx.Scratch) })
+        if ($real.Count -eq 0) { Skip 'no real python to pass the other calls through to'; return }
+        # First on PATH: fail the embedded settings script (python -c ...), pass
+        # everything else (the agent generator runs a script file) through.
+        $stub = Join-Path $ctx.Scratch 'bin/python'
+        [IO.File]::WriteAllText($stub, "#!/bin/sh`nif [ `"`$1`" = `"-c`" ]; then echo `"stub: the settings script failed`" >&2; exit 1; fi`nexec '$($real[0].Source)' `"`$@`"`n")
+        & chmod +x $stub
+        $null = New-Item -ItemType Directory -Path $ctx.OhDir -Force
+        $seed = '{"custom_user_key": "keep-me", "schema_version": 2}'
+        [IO.File]::WriteAllText($ctx.Settings, $seed)
+        $out = & $ctx.Run
+        if ([IO.File]::ReadAllText($ctx.Settings) -ne $seed) { throw 'settings.json changed although its writer failed' }
+        if (@(Get-ChildItem -LiteralPath $ctx.OhDir -Filter 'settings.json.autoos-backup-*').Count -ne 0) { throw 'a backup was taken for a file that was not written' }
+        if ($out -notmatch 'not written to [^\r\n]*settings\.json') { throw "no warning naming settings.json: [$out]" }
+        if ($out -match 'OpenHands configuration and profiles written to') { throw "the success line was printed after the writer failed: [$out]" }
+        if ($out -match 'already up to date') { throw "the up-to-date line was printed after the writer failed: [$out]" }
+        if ($out -match 'agent-harness openhands:') { throw "the agent generator ran after the writer failed: [$out]" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: a missing python is reported, not called written' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        # Nothing on PATH but an empty directory: no python, no py.
+        Remove-Item -LiteralPath (Join-Path $ctx.Scratch 'bin/python') -Force -ErrorAction SilentlyContinue
+        $env:PATH = Join-Path $ctx.Scratch 'bin'
+        $out = & $ctx.Run
+        if ($out -notmatch 'python was not found') { throw "no warning that python is missing: [$out]" }
+        if ($out -match 'OpenHands configuration and profiles written to') { throw "the success line was printed without python: [$out]" }
+        if ($out -match 'already up to date') { throw "the up-to-date line was printed without python: [$out]" }
+        if (Test-Path -LiteralPath $ctx.Settings) { throw 'settings.json exists although python never ran' }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
 # --- AI routing stack (omniroute / litellm / zed / opencode) ---
 Describe-Group 'ai routing'
 

@@ -2563,6 +2563,14 @@ function Set-AutoOSOpenHandsConfig {
         $pythonCmd = (Get-Command py -ErrorAction SilentlyContinue)
     }
 
+    # What the closing line may claim: $ohChanged when a sub-writer reports a
+    # file written (the settings script's status lines, the agent generator's),
+    # $ohFailed when the settings script did not run or died (already warned),
+    # $ohHarnessFailed when only the role profiles are missing.
+    $ohChanged = $false
+    $ohFailed = $false
+    $ohHarnessFailed = $false
+
     if ($pythonCmd) {
         # Literal (single-quoted) here-string: the embedded Python contains
         # $-expressions for bash ($HOME/$PATH) and Python comments ($0) that
@@ -2698,6 +2706,21 @@ def _save_settings():
     with open(settings_file, 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=2)
     _settings_written = True
+
+# A profile file is written only when its JSON differs from what is on disk, so
+# a second run touches nothing; the names written are counted for the summary.
+_files_written = []
+
+def _put_json(path, obj):
+    try:
+        with open(path, 'r', encoding='utf-8-sig') as _cf:
+            if json.dumps(json.load(_cf), sort_keys=True) == json.dumps(obj, sort_keys=True):
+                return
+    except (OSError, ValueError):
+        pass
+    with open(path, 'w', encoding='utf-8') as _wf:
+        json.dump(obj, _wf, indent=2)
+    _files_written.append(os.path.basename(path))
 
 settings.setdefault('schema_version', 2)
 agent_settings = settings.setdefault('agent_settings', {})
@@ -2877,8 +2900,7 @@ profiles = dict([
     _profile_for('ollama-qwen2.5-coder', None),
 ])
 for name, p_data in profiles.items():
-    with open(os.path.join(profiles_dir, name), 'w', encoding='utf-8') as f:
-        json.dump(p_data, f, indent=2)
+    _put_json(os.path.join(profiles_dir, name), p_data)
 gw_key = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] != 'null' else None
 # LiteLLM master key for the litellm-tier* fallback profiles: env first
 # (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
@@ -2938,8 +2960,7 @@ if (gw_key or _lit_key or _or_key) and _spec_file and os.path.isfile(_spec_file)
                 _gp['reasoning_effort'] = 'none'
                 _gp['enable_encrypted_reasoning'] = False
                 _gp['extended_thinking_budget'] = None
-            with open(os.path.join(profiles_dir, '%s.json' % _t['id']), 'w', encoding='utf-8') as _ff:
-                json.dump(_gp, _ff, indent=2)
+            _put_json(os.path.join(profiles_dir, '%s.json' % _t['id']), _gp)
     except Exception:
         pass
 
@@ -2990,11 +3011,12 @@ if _vendored_agents and os.path.isdir(_vendored_agents):
         try:
             with open(os.path.join(_vendored_agents, _fn), 'r', encoding='utf-8') as _af:
                 _a_data = json.load(_af)
-            with open(os.path.join(agent_profiles_dir, _fn), 'w', encoding='utf-8') as _of:
-                json.dump(_a_data, _of, indent=2)
+            _put_json(os.path.join(agent_profiles_dir, _fn), _a_data)
         except Exception:
             pass
 print('openhands settings: %s %s' % (('updated' if _settings_existed else 'installed') if _settings_written else 'skipped', settings_file))
+if _files_written:
+    print('openhands profiles: %d written' % len(_files_written))
 '@
         $argMuse = if ($museKey) { $museKey } else { 'null' }
         $argDeepseek = if ($deepseekKey) { $deepseekKey } else { 'null' }
@@ -3033,18 +3055,38 @@ print('openhands settings: %s %s' % (('updated' if _settings_existed else 'insta
             $setupOut = & $pythonCmd.Source -c $setupScript $openhandsDir $argMuse $argDeepseek $argOpenrouter $argContext7 $script:RepoRoot $argOmni
         }
         finally { $env:OLLAMA_BASE_URL = $savedOllama; $env:AUTOOS_IDE_MODELS = $savedIde }
-        foreach ($line in $setupOut) { Write-AutoOSLine "$line" -Level muted }
-
-        # The role agent profiles are the generator's job: it merges the
-        # harness into whatever the embedded script left, so the roles stay in
-        # one place. Judge by exit code only; no 2>&1, since under 'Stop' Windows
-        # PowerShell 5.1 turns a native stderr line into a terminating error.
-        $harnessOut = & $pythonCmd.Source (Join-Path $script:RepoRoot 'lib\agent_harness.py') openhands --openhands-dir $openhandsDir --repo-root $script:RepoRoot
-        if ($LASTEXITCODE -ne 0) {
-            Write-AutoOSLine "agent harness not applied to OpenHands (exit $LASTEXITCODE)" -Level warn
-        } else {
-            foreach ($line in $harnessOut) { Write-AutoOSLine $line -Level muted }
+        $setupRc = $LASTEXITCODE
+        foreach ($line in $setupOut) {
+            Write-AutoOSLine "$line" -Level muted
+            if ("$line" -match '^openhands (settings: (updated|installed)|profiles: [1-9][0-9]* written)') { $ohChanged = $true }
         }
+
+        if ($setupRc -ne 0) {
+            # A script that died wrote nothing (or only part) and must never be
+            # reported as written. The generator is skipped too: it would add
+            # enable_sub_agents to a settings.json the script never got to merge.
+            Write-AutoOSLine "OpenHands configuration not written to $(Join-Path $openhandsDir 'settings.json') (settings script exit $setupRc)" -Level warn
+            Write-AutoOSLine "    The profiles under $openhandsDir may be incomplete and the agent generator was skipped; fix the error above and re-run." -Level muted
+            $ohFailed = $true
+        } else {
+            # The role agent profiles are the generator's job: it merges the
+            # harness into whatever the embedded script left, so the roles stay in
+            # one place. Judge by exit code only; no 2>&1, since under 'Stop' Windows
+            # PowerShell 5.1 turns a native stderr line into a terminating error.
+            $harnessOut = & $pythonCmd.Source (Join-Path $script:RepoRoot 'lib\agent_harness.py') openhands --openhands-dir $openhandsDir --repo-root $script:RepoRoot
+            if ($LASTEXITCODE -ne 0) {
+                Write-AutoOSLine "agent harness not applied to OpenHands (exit $LASTEXITCODE)" -Level warn
+                $ohHarnessFailed = $true
+            } else {
+                foreach ($line in $harnessOut) {
+                    Write-AutoOSLine $line -Level muted
+                    if ("$line" -match '^agent-harness openhands: (updated|installed) ') { $ohChanged = $true }
+                }
+            }
+        }
+    } else {
+        Write-AutoOSLine "python was not found - OpenHands settings and profiles not written to $openhandsDir (install Python, then re-run)" -Level warn
+        $ohFailed = $true
     }
 
     # OpenHands probes PowerShell with a 5 s timeout and without -NoProfile
@@ -3061,7 +3103,15 @@ print('openhands settings: %s %s' % (('updated' if _settings_existed else 'insta
         }
     }
 
-    Write-AutoOSLine "OpenHands configuration and profiles written to $openhandsDir" -Level ok
+    # Say what happened, and only that (the warnings above already covered a failure).
+    if ($ohFailed) { return }
+    if ($ohHarnessFailed) {
+        Write-AutoOSLine "OpenHands configuration only partly applied (the role profiles are missing): $openhandsDir" -Level warn
+    } elseif ($ohChanged) {
+        Write-AutoOSLine "OpenHands configuration and profiles written to $openhandsDir" -Level ok
+    } else {
+        Write-AutoOSLine "OpenHands configuration already up to date (skipped): $openhandsDir" -Level muted
+    }
 }
 
 function Install-AutoOSLitellm {
