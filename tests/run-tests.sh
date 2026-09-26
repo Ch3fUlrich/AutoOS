@@ -11018,6 +11018,25 @@ if it "backup residual: register-autostart backs up omniroute.env twice in one s
     if (( ok )); then pass; else fail "register-autostart overwrote a same-second omniroute.env backup"; fi
 fi
 
+# register-autostart.sh keeps the old unit when its backup copy fails
+# (continue at the unit-replace site): the file must be unchanged.
+if it "backup residual: register-autostart leaves the unit in place when its backup copy fails"; then
+    d="$(_svc_reg_sandbox)"
+    _svc_reg "$d" --only autoos-omniroute >/dev/null
+    printf '# hand-edit\n' >>"$d/units/autoos-omniroute.service"
+    cp "$d/units/autoos-omniroute.service" "$d/units/autoos-omniroute.service.orig"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" _svc_reg "$d" --only autoos-omniroute 2>&1)"; rc=$?
+    ok=1
+    cmp -s "$d/units/autoos-omniroute.service" "$d/units/autoos-omniroute.service.orig" \
+        || { ok=0; echo "the unit was replaced without a backup" >&2; }
+    [[ "$out" == *"could not back up $d/units/autoos-omniroute.service"* ]] \
+        || { ok=0; echo "no warning naming the unit: ${out:0:300}" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "register-autostart replaces a unit it could not back up"; fi
+fi
+
 if it "svc: register-autostart never runs a second gateway next to omniroute autostart"; then
     d="$(_svc_reg_sandbox)"
     echo "[Service]" >"$d/units/omniroute.service"
@@ -11942,6 +11961,24 @@ if it "backup residual: aistack up fails before docker when init cannot back up 
     [[ ! -e "$d/docker.log" ]] || { ok=0; echo "docker was driven although init had failed" >&2; }
     rm -rf "$d" "$bin"
     if (( ok )); then pass; else fail "a failed init backup does not stop up"; fi
+fi
+
+# ai-stack.sh ensure_env_file returns 1 when its backup copy fails: init
+# must stop there and leave the env file alone.
+if it "backup residual: aistack init leaves the env file in place when its backup copy fails"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf '# operator\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
+    cp "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" _aistack "$d" init 2>&1)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "init succeeded without a backup: rc=$rc" >&2; }
+    [[ "$out" == *"could not back up $d/cfg/opencode.env"* ]] || { ok=0; echo "no warning naming the file: ${out:0:300}" >&2; }
+    cmp -s "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig" || { ok=0; echo "the env file was modified without a backup" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "aistack init edits an env file it could not back up"; fi
 fi
 
 # replace_dir_with_copy's own aside= (moving a non-empty dest out of the way
