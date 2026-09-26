@@ -57,25 +57,40 @@ def _exec(argv: Sequence[str], *, cwd: str, path_dirs: Sequence[str],
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              start_new_session=True)  # own process group: proc.pid == pgid
 
+    os.set_blocking(proc.stdout.fileno(), False)
     q: "queue.Queue[object]" = queue.Queue()
+    stop_reading = threading.Event()
 
     def _pump() -> None:
+        # Non-blocking reads only: this loop is GUARANTEED to notice
+        # stop_reading within ~10ms, so it can never block the main
+        # thread's cleanup indefinitely -- not even if a grandchild that
+        # os.killpg somehow missed (an escaped/re-parented process, or a
+        # bug) keeps the pipe's write end open forever. A purely blocking
+        # read() here once let a killed-but-not-fully-reaped tree hang
+        # run_local() for the wayward process's entire remaining lifetime
+        # (caught by mutation testing: killing only the direct child, not
+        # the group, made close() itself block on the reader thread's
+        # in-flight read -- see the report).
+        fd = proc.stdout.fileno()
         total = 0
         truncated = False
-        try:
-            while True:
-                if total >= output_cap:
-                    truncated = True
-                    break
-                chunk = proc.stdout.read(min(65536, output_cap - total))
-                if not chunk:
-                    break
-                q.put(chunk)
-                total += len(chunk)
-        except (OSError, ValueError):
-            pass
-        finally:
-            q.put(("__EOF__", truncated, total))
+        while not stop_reading.is_set():
+            if total >= output_cap:
+                truncated = True
+                break
+            try:
+                chunk = os.read(fd, min(65536, output_cap - total))
+            except BlockingIOError:
+                time.sleep(0.01)
+                continue
+            except OSError:
+                break  # fd closed/invalid: nothing more to read
+            if not chunk:
+                break  # real EOF: every writer closed the pipe
+            q.put(chunk)
+            total += len(chunk)
+        q.put(("__EOF__", truncated, total))
 
     reader = threading.Thread(target=_pump, daemon=True)
     reader.start()
@@ -94,7 +109,14 @@ def _exec(argv: Sequence[str], *, cwd: str, path_dirs: Sequence[str],
         except subprocess.TimeoutExpired:
             pass
 
-    reader.join(timeout=5)
+    # Give the pump thread a couple of seconds to reach a NATURAL EOF (the
+    # common, fast case); if the pipe still has an open writer after that
+    # (killpg failed to reach everyone, or this call never times out and
+    # something else is holding it), force it to give up instead of
+    # blocking cleanup indefinitely.
+    reader.join(timeout=2)
+    stop_reading.set()
+    reader.join(timeout=2)  # by now the thread is guaranteed to have exited
     try:
         proc.stdout.close()
     except OSError:
