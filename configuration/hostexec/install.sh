@@ -184,6 +184,60 @@ install_unit() {
     return 0
 }
 
+# token_file_for <client>: the token file path -- env
+# AUTOOS_EXEC_TOKEN_FILE_<CLIENT> (uppercased) wins, else the
+# ~/.config/autoos/exec/<client>.token default.
+token_file_for() {
+    local client="$1" varname="AUTOOS_EXEC_TOKEN_FILE_${client^^}"
+    if [[ -n "${!varname:-}" ]]; then
+        printf '%s' "${!varname}"
+    else
+        printf '%s' "$HOME/.config/autoos/exec/${client}.token"
+    fi
+}
+
+# token_mode <file>: numeric mode (600), portable GNU/BSD stat.
+token_mode() {
+    local mode
+    mode="$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null \
+        || printf 'unknown')"
+    printf '%s' "$mode"
+}
+
+# token_file_ok <client>: the token file exists and is mode 0600. The
+# value is never printed -- neither here nor by any caller.
+token_file_ok() {
+    local client="$1" path mode
+    path="$(token_file_for "$client")"
+    if [[ ! -f "$path" ]]; then
+        err "install: refusing: token file not found for ${client}: ${path}"
+        err "install: create it first, e.g.: python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > ${path} && chmod 600 ${path}"
+        return 1
+    fi
+    mode="$(token_mode "$path")"
+    if [[ "$mode" != "600" ]]; then
+        err "install: refusing: token file for ${client} has mode ${mode}, need 0600: ${path}"
+        return 1
+    fi
+    return 0
+}
+
+# read_token <client> <varname>: read the token into the named shell
+# variable. Callers must never print it, log it, or place it on any argv
+# (pass it to helpers through the environment, never as an argument).
+read_token() {
+    local client="$1" outvar="$2" path tok
+    token_file_ok "$client" || return 1
+    path="$(token_file_for "$client")"
+    tok="$(<"$path")"
+    if [[ -z "$tok" ]]; then
+        err "install: refusing: token file is empty: ${path}"
+        return 1
+    fi
+    printf -v "$outvar" '%s' "$tok"
+    return 0
+}
+
 # wire_client <client>: implemented under item 3 (client writers).
 wire_client() {
     err "install: client wiring is not implemented yet: $1"
