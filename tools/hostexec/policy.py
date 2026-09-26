@@ -974,9 +974,18 @@ def _is_system_bind_src(src: str) -> bool:
         src = src.rstrip("/")
     if src == "/":
         return True
-    for sysdir in ("/etc", "/root", "/var", "/usr", "/boot", "/home", "/run"):
+    for sysdir in ("/etc", "/root", "/var", "/usr", "/boot", "/run"):
         if src == sysdir or src.startswith(sysdir + "/"):
             return True
+    # /home itself and a bare top-level entry (/home/<user>) stay denied;
+    # deeper project dirs (/home/<user>/code/...) are allowed (r2).
+    if src == "/home":
+        return True
+    if src.startswith("/home/"):
+        rest = src[len("/home/"):]
+        if "/" not in rest:
+            return True
+        return False
     return False
 
 
@@ -1033,6 +1042,9 @@ def _docker_root_problem(head: Sequence[str]) -> str | None:
             is_mount = False
             if tok == "-v" and j + 1 < m:
                 vol_val = rest[j + 1]
+            elif tok.startswith("-v") and len(tok) > 2 and not tok.startswith("--"):
+                # Attached short form: -v/src:dst, -vX (r2 high).
+                vol_val = tok[2:].lstrip("=")
             elif tok == "--volume" and j + 1 < m:
                 vol_val = rest[j + 1]
             elif tok.startswith("--volume="):

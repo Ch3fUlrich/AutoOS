@@ -178,3 +178,13 @@ claude	default	coding-host	["git","config","credential.helper","evil"]	deny	git-
 claude	default	coding-host	["git","config","include.path","/tmp/inc"]	deny	git-option-injection	git config include.path (F)
 claude	default	coding-host	["git","config","url.https://evil.insteadOf","https://github.com/"]	deny	git-option-injection	git config url.* (F)
 claude	default	coding-host	["git","config","--list"]	allow		git config read-only still works (F allow)
+claude	default	coding-host	["docker", "run", "-v/:/h", "alpine"]	deny	docker-root	docker run attached -v/:/h binds / (r2 high)
+claude	default	coding-host	["docker", "run", "-v/etc:/etc", "alpine"]	deny	docker-root	docker run attached -v/etc binds /etc (r2 high)
+claude	default	coding-host	["docker", "run", "--volume=/:/h", "alpine"]	deny	docker-root	docker run --volume=/:/h binds / (r2)
+claude	default	coding-host	["docker", "run", "--mount=type=bind,src=/etc,dst=/etc", "alpine"]	deny	docker-root	docker run --mount= src=/etc (r2)
+claude	default	coding-host	["docker", "run", "-v", "/home:/h", "alpine"]	deny	docker-root	docker run bind /home itself denied
+claude	default	coding-host	["docker", "run", "-v", "/home/alice:/h", "alpine"]	deny	docker-root	docker run bind /home/alice top level denied
+claude	default	coding-host	["docker", "run", "-v", "/home/alice/code/proj:/app", "alpine"]	allow		docker run bind deep HOME project allowed (r2)
+claude	default	coding-host	["docker", "run", "-v/home/alice/code/proj:/app", "alpine"]	allow		docker run attached bind deep HOME project allowed (r2)
+claude	default	coding-host	["docker", "run", "--volume=/home/alice/code/proj:/app", "alpine"]	allow		docker run --volume= deep HOME project allowed (r2)
+claude	default	coding-host	["docker", "run", "--mount", "type=bind,src=/home/alice/code/proj,dst=/app", "alpine"]	allow		docker run --mount deep HOME project allowed (r2)
