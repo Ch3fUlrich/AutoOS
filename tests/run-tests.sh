@@ -4081,6 +4081,30 @@ if it "zed: the omnigraph entry uses the omnigraph_url answer"; then
     if (( ok )); then pass; else fail "the Zed omnigraph entry ignores the omnigraph_url answer"; fi
 fi
 
+# The contract is "no trailing slash", not "one slash off": consumers append
+# /paths to the base, and the Windows side does .TrimEnd('/') (every trailing
+# slash). A pasted "http://host//" must not survive as "http://host/".
+if it "omnigraph: omnigraph_base_url strips every trailing slash and nothing else"; then
+    ok=1
+    while IFS='|' read -r given want; do
+        got="$( ( AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="$given"; omnigraph_base_url ) 2>&1)"
+        [[ "$got" == "$want" ]] || { ok=0; echo "omnigraph_url [$given]: the helper says [$got], expected [$want]" >&2; }
+    done <<'CASES'
+http://host|http://host
+http://host/|http://host
+http://host//|http://host
+http://host:8080///|http://host:8080
+http://host/graph//|http://host/graph
+http://host//graph/|http://host//graph
+/|http://localhost:8080
+//|http://localhost:8080
+CASES
+    # ...and the Zed writer, the other consumer, writes the same stripped value.
+    got="$(zed_omni_url "https://graph.example.invalid:9000//")"
+    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got] for a doubled trailing slash" >&2; }
+    if (( ok )); then pass; else fail "omnigraph_base_url leaves a trailing slash on the base URL"; fi
+fi
+
 if it "zed: the omnigraph entry defaults to localhost:8080"; then
     ok=1
     got="$(zed_omni_url "")"
