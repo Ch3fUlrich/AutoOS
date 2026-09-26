@@ -93,7 +93,9 @@ function ConvertTo-AutoOSCanonicalJson {
     if ($Value -is [System.Collections.IDictionary]) {
         '{' + ((@($Value.Keys) | Sort-Object | ForEach-Object { "$_=" + (ConvertTo-AutoOSCanonicalJson $Value[$_]) }) -join ',') + '}'
     } elseif ($Value -is [System.Management.Automation.PSCustomObject]) {
-        '{' + ((@($Value.PSObject.Properties.Name) | Sort-Object | ForEach-Object { "$_=" + (ConvertTo-AutoOSCanonicalJson $Value.PSObject.Properties[$_].Value) }) -join ',') + '}'
+        # ForEach-Object Name, not .Properties.Name: member enumeration over
+        # zero properties throws under Set-StrictMode (an empty {} crashed).
+        '{' + ((@($Value.PSObject.Properties | ForEach-Object Name) | Sort-Object | ForEach-Object { "$_=" + (ConvertTo-AutoOSCanonicalJson $Value.PSObject.Properties[$_].Value) }) -join ',') + '}'
     } elseif ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
         '[' + ((@($Value) | ForEach-Object { ConvertTo-AutoOSCanonicalJson $_ }) -join ',') + ']'
     } else {
