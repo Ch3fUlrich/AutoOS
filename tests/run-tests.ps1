@@ -5861,15 +5861,94 @@ Test-Case 'backup-once: Set-AutoOSOpenCodeConfig backs up a foreign APPDATA conf
         $now = (Get-Content -LiteralPath $c.AppDataFile -Raw -Encoding UTF8).TrimEnd()
         $want = (Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8).TrimEnd()
         if ($now -cne $want) { throw 'run 1 did not put the OpenCode config into the APPDATA config.json' }
+        $appDataSha1 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
 
-        # Runs 2 and 3 change nothing, so they back nothing up. The pause keeps a
-        # wrongly repeated backup from hiding behind a same-second name.
+        # Runs 2 and 3 change nothing, so they back nothing up and leave the file
+        # alone. The pause keeps a wrongly repeated backup from hiding behind a
+        # same-second name; the hash catches a rewrite that takes no backup.
         foreach ($run in 2, 3) {
             Start-Sleep -Milliseconds 1200
             $null = & $c.Run
             $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
             if ($backups.Count -ne 1) { throw "backups after run $run = $($backups.Count) (want 1)" }
+            $appDataSha = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+            if ($appDataSha -cne $appDataSha1) { throw "run $run changed the APPDATA config.json (SHA256 differs from run 1)" }
         }
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig treats an APPDATA config.json that differs only by a BOM or a final newline as unchanged' {
+    # The APPDATA copy is compared as text: the encoding Out-File writes (BOM or not)
+    # is the host's, so a copy that differs only in it or in its final newline is
+    # the same config and must be neither rewritten nor backed up.
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        [IO.File]::WriteAllText($c.CfgFile, '{"theme":"mine"}')
+        $null = & $c.Run
+        if (-not (Test-Path -LiteralPath $c.AppDataFile)) { throw 'run 1 did not write the APPDATA config.json' }
+        $canonicalB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+        $written = [IO.File]::ReadAllBytes($c.AppDataFile)
+        $hasBom = ($written.Length -ge 3 -and $written[0] -eq 239 -and $written[1] -eq 187 -and $written[2] -eq 191)
+        $text = [IO.File]::ReadAllText($c.AppDataFile)      # without the BOM
+        $trimmed = $text.TrimEnd("`r", "`n")
+        $variants = [ordered]@{
+            'the BOM'                       = @{ Bom = (-not $hasBom); Text = $text }
+            'the final newline (removed)'   = @{ Bom = $hasBom; Text = $trimmed }
+            'the final newline (repeated)'  = @{ Bom = $hasBom; Text = $trimmed + "`r`n`n`r`n" }
+            'the BOM and the final newline' = @{ Bom = (-not $hasBom); Text = $trimmed }
+        }
+        foreach ($label in $variants.Keys) {
+            $v = $variants[$label]
+            [IO.File]::WriteAllText($c.AppDataFile, $v.Text, (New-Object Text.UTF8Encoding([bool]$v.Bom)))
+            $variantB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+            if ($variantB64 -ceq $canonicalB64) { throw "the variant that differs by $label equals the file the writer makes, so it proves nothing" }
+            $null = & $c.Run
+            $nowB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+            $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+            if ($nowB64 -cne $variantB64) { throw "an APPDATA config.json that differs only by $label was rewritten" }
+            if ($backups.Count -ne 0) { throw "an APPDATA config.json that differs only by $label got $($backups.Count) backup(s)" }
+        }
+
+        # Control: a file whose CONTENT differs is still backed up once and rewritten,
+        # so the checks above are not just a writer that never touches the file.
+        [IO.File]::WriteAllText($c.AppDataFile, '{"theme":"someone else"}' + "`n")
+        $null = & $c.Run
+        $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "control: an APPDATA config.json with other content got $($backups.Count) backup(s) (want 1)" }
+        if ((Get-Content -LiteralPath $c.AppDataFile -Raw -Encoding UTF8).TrimEnd() -cne (Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8).TrimEnd()) { throw 'control: an APPDATA config.json with other content was not rewritten' }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: an invalid repo opencode.jsonc leaves the user opencode.json byte-identical and takes no backup' {
+    # The writer reads the repo file up front, like the model catalog, so an
+    # unreadable one must stop it before any backup or write.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    $userConfig = '{"$schema":"https://opencode.ai/config.json","theme":"@THEME@","model":"custom/mine"}'.Replace('@THEME@', $theme)
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Body {
+        param($c)
+        [IO.File]::WriteAllText($c.CfgFile, $userConfig, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $userB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.CfgFile))
+        # A scratch repo root: the real catalog, an (empty) skills directory so that a
+        # writer that wrongly carried on would run to the end and fail the checks below
+        # instead of dying on a missing directory, and an opencode.jsonc cut off mid-file.
+        $repo = Join-Path $c.Scratch 'repo'
+        $null = New-Item -ItemType Directory -Path $repo, (Join-Path $repo '.agents\skills') -Force
+        Copy-Item -LiteralPath (Join-Path $Root 'catalog') -Destination (Join-Path $repo 'catalog') -Recurse
+        [IO.File]::WriteAllText((Join-Path $repo 'opencode.jsonc'), "{`n  // cut off mid-file`n  `"providers`": {`n    `"omniroute`": ")
+        try {
+            Initialize-AutoOSInstaller -DryRun $false -RepoRoot $repo
+            if (-not (Test-AutoOSOpenCodeV2)) { throw 'the stand-in opencode 2.1.0 was not taken for a V2 CLI, so the invalid repo file is never read' }
+            $out = & $c.Run
+        } finally {
+            Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        }
+        if ($out -notmatch 'is not valid JSONC' -or $out -notmatch 'left unchanged') { throw "the run did not say the repo opencode.jsonc is invalid and that the config was left unchanged: [$out]" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($c.CfgFile)) -cne $userB64) { throw "the user's opencode.json changed although the repo opencode.jsonc is invalid" }
+        $files = @(Get-ChildItem -LiteralPath $c.CfgDir -Force | ForEach-Object { $_.Name })
+        if ($files.Count -ne 1) { throw "the config directory holds [$($files -join ', ')], want only opencode.json (no backup, nothing written)" }
+        if (Test-Path -LiteralPath $c.AppDataFile) { throw 'the APPDATA config.json was written although the run stopped early' }
         Pass
     }
 }
