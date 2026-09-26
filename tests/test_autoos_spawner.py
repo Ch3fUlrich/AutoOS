@@ -647,7 +647,7 @@ class McpStdioTests(unittest.TestCase):
             self.assertEqual(replies[1]["result"]["serverInfo"]["name"], "autoos-agent")
             names = {t["name"] for t in replies[2]["result"]["tools"]}
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
-                                     "route", "list_agents", "context"})
+                                     "route", "list_agents", "context", "heartbeat"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "t3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])

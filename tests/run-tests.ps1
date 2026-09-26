@@ -3931,6 +3931,16 @@ Test-Case 'autoos-agent spawner unit tests: card routing, clients, depth' {
     Assert-Equal $rc 0 "spawner unit tests failed: $out"
 }
 
+Test-Case 'autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_heartbeat.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "heartbeat unit tests failed: $out"
+}
+
 Test-Case 'mirror-litellm-env projects keys without printing them' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }

@@ -2,7 +2,8 @@
 """MCP server (stdio) over tools/autoos-agent.py: spawn agents from any MCP client.
 
 Tools: list_clients, spawn, status, result, cancel, route, list_agents,
-context (spec 6.2). spawn is asynchronous: it validates the request (card ->
+context, heartbeat (spec 6.2; heartbeat: R-heartbeat-02/03, R-pause-01,
+R-handoff-07). spawn is asynchronous: it validates the request (card ->
 combo through autoos_routing.select_combo, the same function the CLI uses;
 the depth budget; client rules), starts a detached runner and returns a run
 id at once. Each run lives in <repo>/logs/agents/<id>/ (git-ignored;
@@ -194,6 +195,27 @@ def list_agents() -> dict:
     return {"clients": client_rows, "routes": route_rows}
 
 
+def heartbeat_info(inbox: str | None = None, transcript: str | None = None,
+                   repos: list | None = None, cap: int | None = None) -> dict:
+    """The same json object `autoos-agent.py heartbeat --json` prints
+    (R-heartbeat-02/03, R-pause-01, R-handoff-07 migrated into code):
+    pause state, every repo's unpushed/dirty branches, this session's
+    context fill, and the exit code the CLI would use.
+
+    Calls this process's own ``heartbeat_state`` (loaded via ``agent``, same
+    trick as ``route_plan``/``context_info``), so the CLI and this tool can
+    never disagree. Read-only - see tools/autoos_heartbeat.py's own
+    docstring. Never raises: a bad repo path or an unreadable transcript
+    degrades to that field's own unknown/zero state inside ``heartbeat_state``
+    already; this only guards against something unexpected.
+    """
+    try:
+        data, _ = agent.heartbeat_state(inbox, transcript, repos, cap)
+    except Exception as exc:  # noqa: BLE001 - an MCP tool returns errors, never raises
+        return {"error": "%s: %s" % (type(exc).__name__, exc)}
+    return data
+
+
 def context_info(transcript: str | None = None) -> dict:
     """The same data `autoos-agent.py context` prints (spec 6.1), reused as data.
 
@@ -283,6 +305,13 @@ def _write_exit(path: str, data: dict) -> bool:
 
 def spawn(req: dict) -> dict:
     _reap()
+    # R-pause-01/R-heartbeat-03: a hard stop, checked before every launch. Only
+    # when the caller names an inbox - no AUTOOS_AGENT_INBOX means no check.
+    inbox = os.environ.get("AUTOOS_AGENT_INBOX")
+    if inbox:
+        pause = agent.heartbeat.pause_state(inbox)
+        if pause["active"]:
+            return {"error": "PAUSE active (%s): %s" % (pause["at"], pause["text"])}
     try:
         argv, route = build_argv(req)
     except (ValueError, clients.DepthError) as exc:
@@ -489,6 +518,16 @@ def serve() -> None:
         percentage (spec 6.1/8.3) - the same data `autoos-agent.py context`
         prints."""
         return context_info(transcript)
+
+    @app.tool(name="heartbeat")
+    def _heartbeat(inbox: str | None = None, transcript: str | None = None,
+                   repos: list[str] | None = None, cap: int | None = None) -> dict:
+        """Read-only heartbeat (R-heartbeat-02/03, R-pause-01, R-handoff-07):
+        PAUSE state from an inbox, every repo's unpushed/dirty branches, and
+        this session's context fill - the same facts and exit code
+        `autoos-agent.py heartbeat --json` reports. Never pushes, commits or
+        writes anything."""
+        return heartbeat_info(inbox, transcript, repos, cap)
 
     app.run()
 
