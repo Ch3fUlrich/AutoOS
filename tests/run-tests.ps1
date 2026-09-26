@@ -6679,6 +6679,15 @@ Test-Case 'the router declarations do not drift from each other' {
     Assert-Equal $LASTEXITCODE 0 "audit-router drift: $out"
 }
 
+Test-Case "audit-router's unit tests pass (registry-sourced, task A5c)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_audit_router_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "audit-router registry unit tests failed: $out"
+}
+
 Test-Case 'the IDE model lists match catalog/ide-models.json (sync-ide-models --check)' {
     # catalog/ide-models.json is the single source for the gateway model list
     # (ids, names, windows, membership). opencode.jsonc and the OpenHands

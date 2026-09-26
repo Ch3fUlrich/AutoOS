@@ -8204,6 +8204,10 @@ if it "audit-router live probes retry a 503 with backoff and never a drift statu
     out="$(python3 tests/test_audit_router_probe_retry.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "audit-router's unit tests pass (registry-sourced, task A5c)"; then
+    out="$(python3 tests/test_audit_router_registry.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "autoos-agent outside-path fence denies first and re-allows only opencode scratch"; then
     report="$(python3 - 2>&1 <<'PY'
 import importlib.util
