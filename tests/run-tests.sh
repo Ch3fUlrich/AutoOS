@@ -3384,6 +3384,140 @@ PY
     assert_eq "$problems" ""
 fi
 
+# ─── The version check: setup.sh --update ───────────────────────────────────
+# There is no general update mechanism. --update (AUTOOS_UPDATE=1) makes an
+# already-installed component run its own installer again - but only when its
+# catalog entry says "updatable": true - and that installer decides. Without the
+# flag a second run is `skipped` (AGENTS.md section 4).
+
+if it "antigravity update: a newer build is left alone without --update; with it the directory is swapped and the old one is removed"; then
+    sb="$(antigravity_scratch)"; ok=1
+    antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
+    antigravity_run "$sb" >/dev/null
+    antigravity_build "$sb" "$AG_B"; shaB="$AG_SHA"; antigravity_publish "$sb" "$AG_B"
+    dir="$sb/home/.local/opt/antigravity-ide"; link="$sb/home/.local/bin/antigravity-ide"
+    : >"$sb/calls.log"
+    antigravity_run "$sb"
+    [[ "$AG_STATE" == skipped && "$AG_RC" == 0 ]] || { ok=0; echo "without --update: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    [[ ! -s "$sb/calls.log" ]] || { ok=0; echo "without --update something was called: $(cat "$sb/calls.log")" >&2; }
+    [[ "$(cut -d' ' -f1 "$dir/.autoos-version")" == "$AG_A" ]] || { ok=0; echo "without --update the stamp moved" >&2; }
+    antigravity_run "$sb" AUTOOS_UPDATE=1
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "with --update: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:600}" >&2; }
+    probs="$(antigravity_installed_problems "$sb" "$AG_B" "$shaB")"
+    [[ -z "$probs" ]] || { ok=0; echo "$probs" >&2; }
+    grep -q '"ideVersion":"2.6.0"' "$dir/resources/app/product.json" 2>/dev/null || { ok=0; echo "the new build is not in $dir" >&2; }
+    [[ -z "$(find "$sb/home/.local/opt" -maxdepth 1 -name 'antigravity-ide.old-*' -o -maxdepth 1 -name '*.new')" ]] \
+        || { ok=0; echo "the old or staging directory is still there: $(ls -A "$sb/home/.local/opt")" >&2; }
+    [[ -x "$link" ]] || { ok=0; echo "the command link no longer resolves" >&2; }
+    grep -qx "sudo chown root:root $dir/chrome-sandbox" "$sb/calls.log" || { ok=0; echo "the new chrome-sandbox was not fixed" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "--update does not replace an older Antigravity build, or replaces it without --update"; fi
+fi
+
+if it "antigravity update: the current build is skipped and only the endpoint is asked; offline is skipped with a warning, not a failure"; then
+    sb="$(antigravity_scratch)"; ok=1
+    antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
+    antigravity_run "$sb" >/dev/null
+    before="$(antigravity_snapshot "$sb")"; : >"$sb/calls.log"
+    antigravity_run "$sb" AUTOOS_UPDATE=1
+    [[ "$AG_STATE" == skipped && "$AG_RC" == 0 ]] || { ok=0; echo "current: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    [[ "$(grep -c '^curl' "$sb/calls.log")" == 1 && "$(grep '^curl' "$sb/calls.log")" == *"$AG_ENDPOINT" ]] \
+        || { ok=0; echo "current: expected exactly the endpoint call: $(grep '^curl' "$sb/calls.log")" >&2; }
+    [[ "$(antigravity_snapshot "$sb")" == "$before" ]] || { ok=0; echo "current: the tree changed" >&2; }
+    : >"$sb/offline"; : >"$sb/calls.log"
+    antigravity_run "$sb" AUTOOS_UPDATE=1
+    [[ "$AG_STATE" == skipped && "$AG_RC" == 0 ]] || { ok=0; echo "offline: state=[$AG_STATE] rc=[$AG_RC] (an install that cannot be checked is skipped): ${AG_OUT:0:400}" >&2; }
+    [[ "$AG_OUT" == *"$AG_ENDPOINT"* && "$AG_OUT" == *"could not reach"* ]] || { ok=0; echo "offline: no warning naming the endpoint: ${AG_OUT:0:400}" >&2; }
+    [[ "$(antigravity_snapshot "$sb")" == "$before" ]] || { ok=0; echo "offline: the tree changed" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the Antigravity version check writes when there is nothing newer, or fails when it cannot look"; fi
+fi
+
+if it "antigravity update dry run (--dry-run --update): says what it would do, asks nothing, writes nothing"; then
+    sb="$(antigravity_scratch)"; ok=1
+    antigravity_build "$sb" "$AG_A"; antigravity_publish "$sb" "$AG_A"
+    antigravity_run "$sb" >/dev/null
+    before="$(antigravity_snapshot "$sb")"; : >"$sb/calls.log"
+    antigravity_run "$sb" AUTOOS_DRY_RUN=1 AUTOOS_UPDATE=1
+    [[ "$AG_RC" == 0 && "$AG_OUT" == *"$AG_ENDPOINT"* && "$AG_OUT" == *"$sb/home/.local/opt/antigravity-ide"* ]] \
+        || { ok=0; echo "update dry run: rc=[$AG_RC], does not name the endpoint and the directory: ${AG_OUT:0:500}" >&2; }
+    [[ ! -s "$sb/calls.log" ]] || { ok=0; echo "an update dry run made calls: $(cat "$sb/calls.log")" >&2; }
+    [[ "$(antigravity_snapshot "$sb")" == "$before" ]] || { ok=0; echo "an update dry run changed the tree" >&2; }
+    antigravity_run "$sb" AUTOOS_DRY_RUN=1
+    [[ "$AG_STATE" == skipped && "$AG_OUT" != *"would ask"* ]] || { ok=0; echo "a plain dry run of an installed IDE is not a skip: ${AG_OUT:0:400}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "--dry-run --update is not a pure preview"; fi
+fi
+
+if it "antigravity update flag: AUTOOS_UPDATE=1 re-runs only installed components the catalog marks updatable"; then
+    ok=1
+    # update_probe <update 0|1> <package> [catalog-path]: state and whether the installer ran.
+    update_probe() {
+        ( CATALOG_PATH="${3-$ROOT/catalog/linux.json}"; AUTOOS_UPDATE="$1"; AUTOOS_DRY_RUN=0; RAN=0
+          is_installed() { return 0; }
+          install_script() { RAN=1; [[ "${PROBE_SKIP:-0}" == 1 ]] && INSTALL_SCRIPT_STATE=skipped; return 0; }
+          install_component script "$2" 0 >/dev/null 2>&1
+          printf '%s ran=%s' "$INSTALL_STATE" "$RAN" )
+    }
+    [[ "$(update_probe 0 antigravity)" == "skipped ran=0" ]] || { ok=0; echo "without --update: [$(update_probe 0 antigravity)]" >&2; }
+    [[ "$(update_probe 1 antigravity)" == "installed ran=1" ]] || { ok=0; echo "--update, updatable: [$(update_probe 1 antigravity)]" >&2; }
+    [[ "$(update_probe 1 uv)" == "skipped ran=0" ]] || { ok=0; echo "--update, a component that is not updatable: [$(update_probe 1 uv)]" >&2; }
+    [[ "$(update_probe 1 no-such-package)" == "skipped ran=0" ]] || { ok=0; echo "--update, an unknown package: [$(update_probe 1 no-such-package)]" >&2; }
+    [[ "$(update_probe 1 antigravity /no/such/catalog.json)" == "skipped ran=0" ]] || { ok=0; echo "--update without a readable catalog must skip: [$(update_probe 1 antigravity /no/such/catalog.json)]" >&2; }
+    [[ "$(PROBE_SKIP=1 update_probe 1 antigravity)" == "skipped ran=1" ]] || { ok=0; echo "an installer's own 'skipped' is reported as [$(PROBE_SKIP=1 update_probe 1 antigravity)]" >&2; }
+    if (( ok )); then pass; else fail "install_component's update gate does not follow the catalog"; fi
+fi
+
+if it "antigravity catalog entry is the only updatable one, and its notes name the version check"; then
+    problems="$(python3 - 2>&1 <<'PY'
+import json
+for p in ("catalog/linux.json", "catalog/macos.json", "catalog/windows.json"):
+    doc = json.load(open(p, encoding="utf-8"))
+    for g in doc["categories"]:
+        for c in g["components"]:
+            if "updatable" in c and not (p == "catalog/linux.json" and c["id"] == "antigravity"):
+                print(p + ": " + c["id"] + " is marked updatable but has no version check")
+            if p == "catalog/linux.json" and c["id"] == "antigravity":
+                if c.get("updatable") is not True: print("antigravity: updatable is %r, not true" % c.get("updatable"))
+                if "--update" not in c.get("notes", ""): print("antigravity: notes do not mention --update")
+PY
+)"
+    assert_eq "$problems" ""
+fi
+
+if it "antigravity update flag: setup.sh knows --update, lists it in --help and still rejects unknown options"; then
+    ok=1
+    out="$(bash setup.sh --help 2>&1)"
+    [[ "$out" == *"--update"* ]] || { ok=0; echo "--help does not list --update" >&2; }
+    out="$(bash setup.sh --update --list --no-color 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$out" != *"Unknown option"* ]] || { ok=0; echo "--update --list: rc=$rc: ${out:0:200}" >&2; }
+    out="$(bash setup.sh --updat --list --no-color 2>&1)"; rc=$?
+    [[ $rc -eq 2 && "$out" == *"Unknown option: --updat"* ]] || { ok=0; echo "--updat was not rejected: rc=$rc: ${out:0:200}" >&2; }
+    if (( ok )); then pass; else fail "the --update flag is not wired into setup.sh's argument parsing"; fi
+fi
+
+if it "antigravity update flag: the plan says 'checking for a newer version' only with --update, a dry run asks nothing and writes nothing"; then
+    if [[ "$(uname -m)" != x86_64 ]]; then skip "Antigravity is x64-only and hidden on this machine"
+    else
+        sb="$(antigravity_scratch)"; ok=1
+        mkdir -p "$sb/home/.local/opt/antigravity-ide"; printf '2.5.5-1 abc\n' >"$sb/home/.local/opt/antigravity-ide/.autoos-version"
+        # USER names nobody, so detection falls back to HOME: the scratch home is the machine.
+        run_setup() { USER=agy-test-nobody HOME="$sb/home" DISPLAY=:0 AUTOOS_CACHE_DIR="$sb/cache" \
+            bash setup.sh --only antigravity --dry-run --yes --no-color "$@" 2>&1; }
+        before="$(find "$sb/home/.local" -printf '%p|%T@\n' | sort)"
+        out="$(run_setup)"; rc=$?
+        [[ $rc -eq 0 && "$out" == *"Already installed - package will be skipped"* && "$out" != *"checking for a newer version"* ]] \
+            || { ok=0; echo "without --update: rc=$rc: $(grep -i 'installed\|newer' <<<"$out" | head -5)" >&2; }
+        out="$(run_setup --update)"; rc=$?
+        [[ $rc -eq 0 && "$out" == *"checking for a newer version"* ]] || { ok=0; echo "--update: rc=$rc: $(grep -i 'installed\|newer' <<<"$out" | head -5)" >&2; }
+        [[ "$out" == *"would ask https://antigravity-ide-auto-updater"* ]] || { ok=0; echo "--update: the dry run does not say it would ask the endpoint" >&2; }
+        [[ "$(grep -c '^run:' <<<"$out")" == 0 ]] || { ok=0; echo "--update: a dry run executed a command" >&2; }
+        [[ "$(find "$sb/home/.local" -printf '%p|%T@\n' | sort)" == "$before" ]] || { ok=0; echo "the dry run wrote under ~/.local" >&2; }
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "setup.sh --update does not reach the Antigravity version check"; fi
+    fi
+fi
+
 # VS Code, Google Chrome and the GitHub CLI share the pattern Antigravity was
 # fixed for: guard on the key file, fetch, install, write the apt source line.
 # install_component runs an installer with errexit OFF, so an unchecked failed
