@@ -178,3 +178,51 @@ claude	default	coding-host	["git","config","credential.helper","evil"]	deny	git-
 claude	default	coding-host	["git","config","include.path","/tmp/inc"]	deny	git-option-injection	git config include.path (F)
 claude	default	coding-host	["git","config","url.https://evil.insteadOf","https://github.com/"]	deny	git-option-injection	git config url.* (F)
 claude	default	coding-host	["git","config","--list"]	allow		git config read-only still works (F allow)
+claude	default	coding-host	["docker", "run", "-v/:/h", "alpine"]	deny	docker-root	docker run attached -v/:/h binds / (r2 high)
+claude	default	coding-host	["docker", "run", "-v/etc:/etc", "alpine"]	deny	docker-root	docker run attached -v/etc binds /etc (r2 high)
+claude	default	coding-host	["docker", "run", "--volume=/:/h", "alpine"]	deny	docker-root	docker run --volume=/:/h binds / (r2)
+claude	default	coding-host	["docker", "run", "--mount=type=bind,src=/etc,dst=/etc", "alpine"]	deny	docker-root	docker run --mount= src=/etc (r2)
+claude	default	coding-host	["docker", "run", "-v", "/home:/h", "alpine"]	deny	docker-root	docker run bind /home itself denied
+claude	default	coding-host	["docker", "run", "-v", "/home/alice:/h", "alpine"]	deny	docker-root	docker run bind /home/alice top level denied
+claude	default	coding-host	["docker", "run", "-v", "/home/alice/code/proj:/app", "alpine"]	allow		docker run bind deep HOME project allowed (r2)
+claude	default	coding-host	["docker", "run", "-v/home/alice/code/proj:/app", "alpine"]	allow		docker run attached bind deep HOME project allowed (r2)
+claude	default	coding-host	["docker", "run", "--volume=/home/alice/code/proj:/app", "alpine"]	allow		docker run --volume= deep HOME project allowed (r2)
+claude	default	coding-host	["docker", "run", "--mount", "type=bind,src=/home/alice/code/proj,dst=/app", "alpine"]	allow		docker run --mount deep HOME project allowed (r2)
+claude	default	coding-host	["git","config","remote.origin.sshCommand","/tmp/evil-ssh"]	deny	git-option-injection	git config remote sshCommand r2
+claude	default	coding-host	["git","config","remote.origin.uploadpack","/tmp/evil"]	deny	git-option-injection	git config remote uploadpack r2
+claude	default	coding-host	["git","config","remote.origin.receivepack","/tmp/evil"]	deny	git-option-injection	git config remote receivepack r2
+claude	default	coding-host	["git","config","core.gitProxy","/tmp/evil-proxy"]	deny	git-option-injection	git config core gitProxy r2
+claude	default	coding-host	["git","submodule","foreach","id"]	deny	git-option-injection	git submodule foreach r2
+claude	default	coding-host	["git","bisect","run","id"]	deny	git-option-injection	git bisect run r2
+claude	default	coding-host	["git","rebase","--exec","id"]	deny	git-option-injection	git rebase exec r2
+claude	default	coding-host	["git","rebase","-x","id"]	deny	git-option-injection	git rebase -x r2
+claude	default	coding-host	["awk","BEGIN{print \"x\" | \"id\"}"]	deny	no-inline-shell	awk print pipe runs a command (r2)
+claude	default	coding-host	["awk","{ \"id\" | getline x; print x }"]	deny	no-inline-shell	awk getline pipe runs a command (r2)
+claude	default	coding-host	["tar","-cf","/tmp/x.tar","--checkpoint=1","--checkpoint-action=exec=id","/etc"]	deny	no-inline-shell	tar checkpoint-action exec runs via shell (r2)
+claude	default	coding-host	["tar","-cf","/tmp/x.tar","--to-command=id","/etc"]	deny	no-inline-shell	tar to-command runs via shell (r2)
+claude	default	coding-host	["tar","-cf","/tmp/x.tar","--use-compress-program=id","/etc"]	deny	no-inline-shell	tar use-compress-program runs a program (r2)
+claude	default	coding-host	["tar","-cf","/tmp/x.tar","-I","id","/etc"]	deny	no-inline-shell	tar -I runs a program (r2)
+claude	default	coding-host	["crontab","/tmp/jobs"]	deny	destructive	crontab file install escapes audit window (r2)
+claude	default	coding-host	["crontab","-"]	deny	destructive	crontab stdin dash install (r2)
+claude	default	coding-host	["crontab","-e"]	deny	destructive	crontab edit escapes audit window (r2)
+claude	default	coding-host	["tmux","new-session","-d","id"]	deny	no-inline-shell	tmux detached session escapes audit window (r2)
+claude	default	coding-host	["tmux","new","-d","id"]	deny	no-inline-shell	tmux new detached (r2)
+claude	default	coding-host	["tmux","send-keys","-t","0","id"]	deny	no-inline-shell	tmux send-keys runs outside audit (r2)
+claude	default	coding-host	["tmux","run-shell","id"]	deny	no-inline-shell	tmux run-shell runs via shell (r2)
+claude	default	coding-host	["screen","-d","-m","id"]	deny	no-inline-shell	screen detached session escapes audit window (r2)
+claude	default	coding-host	["parallel","--sshlogin","other","id",":::","x"]	deny	use-host-alias	parallel sshlogin bypasses host table (r2)
+claude	default	coding-host	["parallel","-S","other","id",":::","x"]	deny	use-host-alias	parallel -S bypasses host table (r2)
+claude	default	coding-host	["parallel","--sshloginfile","/tmp/hosts","id",":::","x"]	deny	use-host-alias	parallel sshloginfile bypasses host table (r2)
+claude	default	coding-host	["sudo-rs","id"]	deny	no-sudo	sudo-rs family member (r2)
+claude	default	coding-host	["php","-r","echo 1;"]	deny	no-inline-shell	php -r runs inline code (r2)
+claude	default	coding-host	["lua","-e","print(1)"]	deny	no-inline-shell	lua -e runs inline code (r2)
+claude	default	coding-host	["Rscript","-e","1"]	deny	no-inline-shell	Rscript -e runs inline code (r2)
+claude	default	coding-host	["julia","-e","1"]	deny	no-inline-shell	julia -e runs inline code (r2)
+claude	default	coding-host	["julia","-E","1"]	deny	no-inline-shell	julia -E runs inline code (r2)
+claude	default	coding-host	["vim","-c","!id"]	deny	no-inline-shell	vim -c shell escape (r2)
+claude	default	coding-host	["vi","-c","!id"]	deny	no-inline-shell	vi -c shell escape (r2)
+claude	default	coding-host	["nvim","-c","!id"]	deny	no-inline-shell	nvim -c shell escape (r2)
+claude	default	coding-host	["vim","+!id"]	deny	no-inline-shell	vim +cmd shell escape (r2)
+claude	default	coding-host	["ex","-c","!id"]	deny	no-inline-shell	ex -c shell escape (r2)
+claude	default	coding-host	["less","+!id","/etc/passwd"]	deny	no-inline-shell	less +! runs a shell command (r2)
+claude	default	coding-host	["more","+!id"]	deny	no-inline-shell	more +! runs a shell command (r2)

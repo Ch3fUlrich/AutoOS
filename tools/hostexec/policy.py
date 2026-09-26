@@ -32,21 +32,34 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              or a symlink outside the fixed PATH (resolved
                              targets re-enter basename rules)
                              (checked on every command head)
-    use-host-alias           on a local host, ssh/scp/sftp always and rsync
-                             with host:path (checked on every head)
+    use-host-alias           on a local host, ssh/scp/sftp always, rsync
+                             with host:path, and parallel with --sshlogin/-S/
+                             --sshloginfile/--transfer/--return
+                             (checked on every head)
     docker-root              docker/podman run|create binding / or a system
-                             dir, --privileged/--pid=host/--userns=host/
+                             dir (/etc, /root, /var, /usr, /boot, /run,
+                             /home itself or a bare /home/<user>) in any
+                             spelling (-v, attached -v, --volume[=],
+                             --mount[=]; deeper HOME projects allowed),
+                             --privileged/--pid=host/--userns=host/
                              --cap-add/--device; exec with --privileged or
                              -u 0/root (checked on every head)
-    no-sudo                  sudo/su/doas/pkexec/run0 as any argv element's
-                             basename, anywhere (accepted false positive:
-                             `grep sudo file` denies); heads cover wrappers
+    no-sudo                  sudo/sudo-rs/su/doas/pkexec/run0 as any argv
+                             element's basename, anywhere (accepted false
+                             positive: `grep sudo file` denies); heads cover
+                             wrappers
     no-inline-shell          sh/bash/ksh/mksh/csh/tcsh/ash/dash/zsh/fish/
                              busybox -c, python* -c, perl -e/-E,
-                             node -e/-p, ruby -e, awk with "system(" in a
-                             program argument, bare shell via a wrapper,
-                             script/systemd-run/at/batch/setpriv/chroot/
-                             unshare/nsenter/runuser/sg always -- scripts by
+                             node -e/-p, ruby -e, php -r, lua -e,
+                             Rscript -e, julia -e/-E, awk with "system(" or
+                             a pipe to a command, tar exec hooks
+                             (--checkpoint-action=exec, --to-command,
+                             --use-compress-program, -I), editors/pagers
+                             with argv commands (vim/vi/nvim/view/ex -c/+!
+                             with `!`, less/more +!, man -P/--pager), a bare
+                             shell via a wrapper, script/systemd-run/at/
+                             batch/setpriv/chroot/unshare/nsenter/runuser/sg/
+                             tmux/screen/dtach always -- scripts by
                              path are allowed (checked on every head)
     destructive              rm -r/-f on a root-ish path or glob of one,
                              mkfs*/wipefs, dd of=/dev/*, shred /dev/*,
@@ -55,14 +68,20 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              git push --force/-f/--mirror/--delete/
                              --force-with-lease/--force-if-includes or a
                              +refspec, docker system prune, docker volume
-                             rm/prune, iptables -F, nft flush, crontab -r
+                             rm/prune, iptables -F, nft flush, crontab
+                             anything but a pure list (-l)
                              (checked on every command head)
     git-option-injection     git -c/-C/--git-dir/--work-tree/--exec-path/
                              --output/--upload-pack/--receive-pack/
                              --config-env/--exec (review F2) plus git config
                              writing alias.*/core.pager/editor/sshCommand/
-                             fsmonitor/hooksPath/*.helper/include.path/url.*
-                             (checked on every command head)
+                             fsmonitor/hooksPath/*.sshcommand/*uploadpack/
+                             *receivepack/*gitproxy/*.helper/include.path/
+                             url.* plus submodule foreach, bisect run,
+                             rebase --exec/-x (checked on every command head)
+
+A deny-list can never be complete: every new exec-capable tool is a
+bypass until listed here. hostexec is an audit + guard boundary.
 
 Command heads (brief A): argv[0], then recursively the command after any
 transparent launcher (env, nice, nohup, timeout, xargs, ionice, stdbuf,
@@ -319,7 +338,7 @@ def _basename(token: str) -> str:
 
 
 _WRAPPERS = {"env", "nice", "nohup", "timeout", "xargs", "ionice", "stdbuf", "setsid"}
-_SUDO_FAMILY = {"sudo", "su", "doas", "pkexec", "run0"}
+_SUDO_FAMILY = {"sudo", "su", "doas", "pkexec", "run0", "sudo-rs"}
 # Exec wrappers that are always denied as no-inline-shell (L1 high):
 # script allocates a pty, systemd-run/at/batch create scheduled/transient
 # jobs that outlive the audited call, setpriv/chroot/unshare/nsenter change
@@ -328,7 +347,8 @@ _SUDO_FAMILY = {"sudo", "su", "doas", "pkexec", "run0"}
 # their wrapped command ("head") is checked instead, so `find . -name x`
 # and `xargs -a f echo` still allow while `find -exec sh -c` denies.
 _ALWAYS_DENY_WRAPPERS = {"script", "systemd-run", "at", "batch", "setpriv",
-                         "chroot", "unshare", "nsenter", "runuser", "sg"}
+                         "chroot", "unshare", "nsenter", "runuser", "sg",
+                         "tmux", "screen", "dtach"}
 
 
 def _looks_like_duration(token: str) -> bool:
@@ -964,6 +984,24 @@ def _use_host_alias_problem(head: Sequence[str], host_entry: HostEntry) -> str |
             if _looks_like_rsync_remote(tok):
                 return (f"rsync with a remote spec {tok!r} on a local host bypasses "
                         f"the host table; call host_run with host=<alias>")
+    if base == "parallel":
+        for tok in head[1:]:
+            if tok in (":::", "::::", "--"):
+                break  # flags end here; the rest are the command and inputs
+            if tok in ("--sshlogin", "--sshloginfile", "--transfer", "--return",
+                       "--ssh", "-S"):
+                return (f"parallel {tok} on a local host bypasses the host table "
+                        f"(forbid-host, audit host); call host_run with host=<alias>")
+            if tok.startswith(("--sshlogin=", "--sshloginfile=", "--transfer=",
+                               "--return=", "--ssh=")):
+                return (f"parallel {tok.split('=', 1)[0]} on a local host bypasses the host table; "
+                        f"call host_run with host=<alias>")
+            if tok.startswith("--sshlogin"):
+                return ("parallel --sshlogin on a local host bypasses the host table; "
+                        "call host_run with host=<alias>")
+            if tok.startswith("-") and not tok.startswith("--") and "S" in tok[1:]:
+                return ("parallel -S on a local host bypasses the host table; "
+                        "call host_run with host=<alias>")
     return None
 
 
@@ -974,9 +1012,18 @@ def _is_system_bind_src(src: str) -> bool:
         src = src.rstrip("/")
     if src == "/":
         return True
-    for sysdir in ("/etc", "/root", "/var", "/usr", "/boot", "/home", "/run"):
+    for sysdir in ("/etc", "/root", "/var", "/usr", "/boot", "/run"):
         if src == sysdir or src.startswith(sysdir + "/"):
             return True
+    # /home itself and a bare top-level entry (/home/<user>) stay denied;
+    # deeper project dirs (/home/<user>/code/...) are allowed (r2).
+    if src == "/home":
+        return True
+    if src.startswith("/home/"):
+        rest = src[len("/home/"):]
+        if "/" not in rest:
+            return True
+        return False
     return False
 
 
@@ -1033,6 +1080,9 @@ def _docker_root_problem(head: Sequence[str]) -> str | None:
             is_mount = False
             if tok == "-v" and j + 1 < m:
                 vol_val = rest[j + 1]
+            elif tok.startswith("-v") and len(tok) > 2 and not tok.startswith("--"):
+                # Attached short form: -v/src:dst, -vX (r2 high).
+                vol_val = tok[2:].lstrip("=")
             elif tok == "--volume" and j + 1 < m:
                 vol_val = rest[j + 1]
             elif tok.startswith("--volume="):
@@ -1085,6 +1135,12 @@ def _docker_root_problem(head: Sequence[str]) -> str | None:
 _SHELL_NAMES = {"sh", "bash", "zsh", "dash", "fish",
                 "busybox", "ksh", "mksh", "csh", "tcsh", "ash"}
 _PYTHON_RE = re.compile(r"^python[0-9.]*$")
+_LUA_RE = re.compile(r"^lua[0-9.]*$")
+# awk pipe-to-command: print | "cmd" and "cmd" | getline (r2). Single-pipe
+# only ((?<!\|)\|(?!\|)) so logical-or `||` never matches.
+_AWK_PIPE_QUOTE_RE = re.compile(r"(?<!\|)\|(?!\|)\s*[\"']")
+_AWK_PIPE_GETLINE_RE = re.compile(r"(?<!\|)\|(?!\|)\s*getline\b")
+_AWK_QUOTE_PIPE_RE = re.compile(r"[\"']\s*(?<!\|)\|(?!\|)")
 
 
 def _is_wrapped_bare_shell(head: Sequence[str]) -> bool:
@@ -1137,8 +1193,64 @@ def _inline_shell_problem(argv: Sequence[str]) -> str | None:
         return "node -e/-p runs inline code, not a script path"
     if base == "ruby" and _short_opt_cluster_has(tail, "e"):
         return "ruby -e runs inline code, not a script path"
-    if base in ("awk", "gawk", "mawk", "nawk") and any("system(" in a for a in tail):
-        return "awk program calls system(); argv only, no shell escape"
+    if base == "php" and _short_opt_cluster_has(tail, "r"):
+        return "php -r runs inline code, not a script path"
+    if (base == "lua" or base == "luajit" or _LUA_RE.match(base)) \
+            and _short_opt_cluster_has(tail, "e"):
+        return "lua -e runs inline code, not a script path"
+    if base.lower() == "rscript" and _short_opt_cluster_has(tail, "e"):
+        return "Rscript -e runs inline code, not a script path"
+    if base == "julia" and _short_opt_cluster_has(tail, "eE"):
+        return "julia -e/-E runs inline code, not a script path"
+    if base in ("awk", "gawk", "mawk", "nawk"):
+        for prog in tail:
+            if "system(" in prog:
+                return "awk program calls system(); argv only, no shell escape"
+            if _AWK_PIPE_QUOTE_RE.search(prog) or _AWK_PIPE_GETLINE_RE.search(prog) \
+                    or _AWK_QUOTE_PIPE_RE.search(prog):
+                return "awk program pipes to a command; argv only, no shell escape"
+    if base in ("vim", "vi", "nvim", "view", "ex"):
+        for idx, tok in enumerate(tail):
+            if tok == "-c":
+                nxt = tail[idx + 1] if idx + 1 < len(tail) else ""
+                if "!" in nxt:
+                    return f"{base} -c with '!' runs a shell command"
+                continue
+            if tok.startswith("-c") and len(tok) > 2:
+                if "!" in tok[2:]:
+                    return f"{base} -c with '!' runs a shell command"
+                continue
+            if tok.startswith("+") and len(tok) > 1 and "!" in tok:
+                return f"{base} +cmd with '!' runs a shell command"
+    if base in ("less", "more"):
+        for tok in tail:
+            if tok.startswith("+") and "!" in tok:
+                return f"{base} +! runs a shell command"
+    if base == "man":
+        for tok in tail:
+            if tok == "-P" or tok.startswith("--pager"):
+                return "man -P/--pager runs a pager command"
+            if tok.startswith("-P") and len(tok) > 2:
+                return "man -P/--pager runs a pager command"
+    if base == "tar":
+        for idx, tok in enumerate(tail):
+            if tok.startswith("--checkpoint-action"):
+                rest_val = tok.split("=", 1)[1] if "=" in tok else (
+                    tail[idx + 1] if idx + 1 < len(tail) else "")
+                if "exec" in rest_val.lower():
+                    return "tar --checkpoint-action=exec runs a command via a shell"
+                if tok == "--checkpoint-action":
+                    # Bare --checkpoint-action with a separate exec= value is
+                    # still an exec hook; fail closed on the flag itself when
+                    # the value is missing (git would error, but deny first).
+                    continue
+            if tok == "--to-command" or tok.startswith("--to-command="):
+                return "tar --to-command runs a command via a shell"
+            if tok == "--use-compress-program" or tok.startswith("--use-compress-program="):
+                return "tar --use-compress-program runs a program"
+            if tok.startswith("-") and not tok.startswith("--") and len(tok) > 1 \
+                    and "I" in tok[1:]:
+                return "tar -I runs a program"
     return None
 
 
@@ -1206,8 +1318,32 @@ def _destructive_problem(argv: Sequence[str]) -> str | None:
         return "iptables -F flushes the firewall"
     if base == "nft" and "flush" in tail:
         return "nft flush"
-    if base == "crontab" and "-r" in tail:
-        return "crontab -r deletes the crontab"
+    if base == "crontab":
+        # r2: a crontab file install (or `-`/edit) schedules commands outside
+        # the audited call window, like at/batch. Only a pure list stays allowed.
+        if "-r" in tail:
+            return "crontab -r deletes the crontab"
+        asking_list = "-l" in tail or "--list" in tail
+        # Strip flag values (-u user) before looking for a positional file.
+        tmp = list(tail)
+        i = 0
+        while i < len(tmp):
+            if tmp[i] in ("-u", "--user") and i + 1 < len(tmp):
+                del tmp[i:i + 2]
+                continue
+            if tmp[i].startswith("--user="):
+                del tmp[i]
+                continue
+            i += 1
+        has_positional = any(t == "-" or not t.startswith("-") for t in tmp
+                             if t not in ("-l", "--list"))
+        # Remove the list flags themselves from the positional test above;
+        # anything else positional (a file, `-`, a username without -u) denies.
+        if has_positional:
+            return "crontab installs a file that runs outside the audited call"
+        if asking_list:
+            return None
+        return "crontab installs a file that runs outside the audited call"
     return None
 
 
@@ -1224,15 +1360,64 @@ def _git_option_injection_problem(argv: Sequence[str]) -> str | None:
             if tok == flag or tok.startswith(flag + "="):
                 return (f"git {flag} can read .git/config or run an arbitrary program "
                          "even for a read verb (review F2)")
+    sub_problem = _git_exec_subcommand_problem(argv)
+    if sub_problem:
+        return sub_problem
     cfg_problem = _git_config_write_problem(argv)
     if cfg_problem:
         return cfg_problem
     return None
 
 
+def _git_exec_subcommand_problem(argv: Sequence[str]) -> str | None:
+    """Subcommands that execute argv via a shell (r2): `git submodule
+    foreach <cmd>`, `git bisect run <cmd>`, `git rebase --exec/-x <cmd>`."""
+    tail = list(argv[1:])
+    # First non-flag token is the subcommand (globals like --no-pager skipped).
+    sub = None
+    for tok in tail:
+        if tok == "--":
+            continue
+        if tok.startswith("-") and tok != "-":
+            continue
+        sub = tok
+        break
+    # submodule foreach <cmd>: deny when a non-flag command follows foreach.
+    if sub == "submodule" and "foreach" in tail:
+        fi = tail.index("foreach")
+        for tok in tail[fi + 1:]:
+            if tok == "--":
+                continue
+            if tok.startswith("-") and tok != "-":
+                continue
+            return "git submodule foreach runs its command via a shell"
+    # bisect run <cmd>: deny when a non-flag command follows run.
+    if sub == "bisect" and "run" in tail:
+        ri = tail.index("run")
+        for tok in tail[ri + 1:]:
+            if tok == "--":
+                continue
+            if tok.startswith("-") and tok != "-":
+                continue
+            return "git bisect run runs its command via a shell"
+    # rebase --exec/-x <cmd>.
+    if sub == "rebase":
+        for tok in tail:
+            if tok == "--exec" or tok.startswith("--exec="):
+                return "git rebase --exec runs its command via a shell"
+            if tok == "-x":
+                return "git rebase -x runs its command via a shell"
+            if tok.startswith("-") and not tok.startswith("--") and len(tok) > 2 \
+                    and "x" in tok[1:]:
+                return "git rebase -x runs its command via a shell"
+    return None
+
+
 def _is_dangerous_git_config_key(tok: str) -> bool:
     """Brief F: alias.*, core.pager/editor/sshCommand/fsmonitor/hooksPath,
-    *.helper, include.path, url.* (case-insensitive on the key)."""
+    *.helper, include.path, url.*, any *.sshcommand (incl.
+    remote.*.sshCommand), *uploadpack/*receivepack (incl. remote.*),
+    *gitproxy (core.gitProxy) -- case-insensitive on the key."""
     if not tok or tok.startswith("-"):
         return False
     key = tok.split("=", 1)[0].lower()
@@ -1240,6 +1425,12 @@ def _is_dangerous_git_config_key(tok: str) -> bool:
         return True
     if key in ("core.pager", "core.editor", "core.sshcommand",
                "core.fsmonitor", "core.hookspath", "include.path"):
+        return True
+    if key.endswith(".sshcommand") or key.endswith("sshcommand"):
+        return True
+    if key.endswith("uploadpack") or key.endswith("receivepack"):
+        return True
+    if key.endswith("gitproxy"):
         return True
     if key.endswith(".helper"):
         return True

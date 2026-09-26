@@ -243,6 +243,23 @@ class AuditLogWriteTests(unittest.TestCase):
         self.assertGreaterEqual(len(seen), 2)  # start + the write
         self.assertIn('"decision": "allow"', seen[-1])
 
+    def test_journald_advisory_never_raises_and_forwards(self):
+        # r2 L-12: advisory copy after a failed file write must not raise,
+        # even when the journald backend itself raises.
+        with tempfile.TemporaryDirectory() as tmp:
+            seen: list[str] = []
+            log = audit.AuditLog(os.path.join(tmp, "state"), journald=seen.append)
+            log.journald_advisory("advisory: RAN but not logged")
+            self.assertEqual(seen, ["advisory: RAN but not logged"])
+
+            def _exploding(line: str) -> None:
+                raise OSError("logger gone")
+
+            log2 = audit.AuditLog(os.path.join(tmp, "state"), journald=_exploding)
+            log2.journald_advisory("advisory: must not raise")  # no raise
+            log.close()
+            log2.close()
+
     def test_seq_survives_a_very_long_line(self):
         # I/Qoder-6: a legal 8KB+ record must not make the next write reuse seq=1.
         with tempfile.TemporaryDirectory() as tmp:
