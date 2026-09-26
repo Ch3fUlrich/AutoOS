@@ -5436,6 +5436,24 @@ if it "playwright lazy proxy installer: without claude on PATH it warns and call
     else fail "rc=$rc calls=[$calls] out=$(printf '%s' "$out" | tail -2)"; fi
 fi
 
+if it "playwright lazy proxy: the agent skills doc (mcp-servers-setup) records the live observation and no longer says it was never observed"; then
+    got="$(python3 - "$ROOT/.agents/skills/mcp-servers-setup/SKILL.md" <<'PY'
+import re, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    text = re.sub(r"\s+", " ", fh.read())       # the sentence wraps across lines
+problems = []
+if re.search(r"not yet observed|never (?:been )?observed", text):
+    problems.append("it still says the proxy was not observed")
+if "observed 2026-09-26 in a real Claude Code session" not in text:
+    problems.append("no dated live observation")
+if "advertises only `tools`" not in text:
+    problems.append("the backend's advertised capabilities are missing")
+print("; ".join(problems))
+PY
+)"
+    if [[ -z "$got" ]]; then pass; else fail "$got"; fi
+fi
+
 describe "claude autostart"
 
 # A fixture transcript tree shaped exactly like ~/.claude/projects: one directory

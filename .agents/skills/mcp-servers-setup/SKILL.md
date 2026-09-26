@@ -457,7 +457,11 @@ claude mcp add -s user playwright -- python3 "$PWD/tools/playwright_mcp_lazy.py"
 - The proxy's default backend is `docker run -i --rm --init --network host --name
   autoos-pw-<pid>-<n> mcr.microsoft.com/playwright/mcp:latest`; `AUTOOS_PLAYWRIGHT_MCP_CMD`
   replaces it. The very first session on a machine has no handshake cache and starts one
-  container to fill it (`~/.cache/autoos/playwright-mcp-handshake.json`).
+  container to fill it (`~/.cache/autoos/playwright-mcp-handshake.json`). The proxy reads
+  that file only if it is a regular file of at most 4 MiB, owned by you and not writable
+  by group or others, in a directory that is too (never through a symlink); otherwise it
+  logs one line to stderr and starts the backend as on a cold cache. An existing
+  group-writable directory (say from a umask of 002) is refused: `chmod go-w` it.
 - **`--network host`** (Linux) lets the containerized browser reach dev servers on
   the host's `localhost:PORT`, so an agent tests the site it just built with the URL
   it would naturally type. Trade-off: less network isolation; fine on a single-user
@@ -466,11 +470,17 @@ claude mcp add -s user playwright -- python3 "$PWD/tools/playwright_mcp_lazy.py"
 - **`--rm`** → ephemeral browser profile per run; **`--init`** reaps zombie browser
   processes.
 - On Linux with docker the installer registers the proxy, and replaces an existing
-  entry only when it is exactly the old docker form or `npx -y @playwright/mcp…`
-  (after a backup of the Claude config); macOS and hosts without docker keep the npx
-  entry. Sessions that are already running keep their current container until they end.
-- Status: tested against a fake backend (`tests/test_playwright_mcp_lazy.py`); not yet
-  observed in a live Claude Code session or against the real image.
+  entry only when it is exactly the old docker form, `npx -y @playwright/mcp…`, or this
+  proxy at the path of another (moved) checkout; every registration or replacement is
+  preceded by a backup of the Claude config, and a failed backup stops it. macOS and
+  hosts without docker keep the npx entry. Sessions that are already running keep their
+  current container until they end.
+- Status: tested against a fake backend (`tests/test_playwright_mcp_lazy.py`) and observed
+  2026-09-26 in a real Claude Code session against the real image: with a warm cache no
+  container started, the first browsing call started one (~1.5 s cold), and with
+  `AUTOOS_PLAYWRIGHT_IDLE_SECONDS=20` it stopped ~20 s after the last call (default 900 s).
+  The backend advertises only `tools` (no `prompts` or `resources` to force a start); the
+  proxy itself holds ~13 MB RSS.
 
 Verify — authoritative client health check, then a real browser drive:
 ```bash
