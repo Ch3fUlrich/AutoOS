@@ -5,6 +5,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the OmniRoute gateway can log in to Qoder, and knows its public origin
+
+- **The gateway image carries `qodercli`**: `configuration/docker/ai-stack/omniroute.Dockerfile` builds
+  `autoos/omniroute:3.8.50-autoos1` from the digest compose pinned, plus `@qoder-ai/qodercli@1.1.63`
+  (`CLI_QODER_BIN=/usr/local/bin/qodercli`). The Qoder PAT login in the dashboard failed with
+  `spawn qodercli ENOENT`. `qodercli` needs a writable HOME even for `--version`, so the read-only container gets
+  `HOME=/home/qoder` on a persistent bind mount `${AUTOOS_STACK_DATA}/qoder-home` (a tmpfs would give a new
+  machine id per restart); the login itself stays in the gateway data dir that backup and migrate cover.
+- **`ai-stack.sh up` builds every service with a `build:` stanza** and rebuilds it when the Dockerfile changed
+  (a source-hash label), and **creates missing data directories itself**; before, `up` on an initialised host
+  left a new bind-mount source for dockerd to create as root.
+- **`AUTOOS_OMNIROUTE_PUBLIC_URL`** (in `~/.config/autoos/ai-stack/stack.env`, placeholder in `stack.env.example`,
+  no hostname in git) sets `NEXT_PUBLIC_BASE_URL` and `OMNIROUTE_PUBLIC_BASE_URL`, pinning `BASE_URL` to loopback
+  while it is set. OmniRoute exits at startup on an invalid value (a crash loop under `restart: unless-stopped`),
+  so `up` and `migrate` refuse one first. Google logins (Antigravity) keep the loopback callback by design:
+  `docs/web-services.md` explains the host browser, `ssh -L 20128:127.0.0.1:20128 <host>`, or pasting the
+  failed callback URL.
+- **`ai-stack.sh verify`** checks `omniroute has qodercli` and prints the public URL as the gateway normalizes it
+  (skip when unset). It is no longer strictly read-only: `qodercli --version` writes its log files under the
+  qoder-home mount.
+- **Operator step:** `ai-stack.sh up omniroute` (try `--dry-run` first) recreates the gateway: a short gap on
+  :20128. Then `verify`, then retry the Qoder PAT login.
+- **Unverified:** the live PAT login, anything with the public URL set beyond the env plumbing (dashboard origin,
+  links, a remote Google login), and `up` against the live gateway. Measured: a `--no-cache` build, `qodercli
+  --version` = 1.1.63 as 1000:1000 on a read-only rootfs, and the whole gateway booting healthy in a scratch run.
+
+### Added — Playwright MCP starts its container only when a session browses, and stops it when idle
+
+- **`tools/playwright_mcp_lazy.py`**, a per-session stdio proxy: it answers the session-start handshake and
+  `tools/list` from a cache, starts the Playwright container on the first real call, stops it after 15 minutes
+  idle (`AUTOOS_PLAYWRIGHT_IDLE_SECONDS`) and starts it again on demand; the proxy itself stays up, because Claude
+  Code does not reconnect a stdio server that exits. The containers left running were held by live but idle
+  sessions that had started them eagerly; an owner's exit already stopped its container.
+- **Measured live** (Claude Code 2.1.283, the real image, 2026-09-26): a warm cache and no browsing start no
+  container; a cold start takes ~1.5 s; the idle stop came 20 s after the last call at an idle of 20 s; the proxy
+  uses ~13 MB RSS.
+- **Hardened after a cross-family review:** the backend starts on its own thread; backend-initiated request ids
+  carry a generation so a stopped backend's late answer never reaches the next one; a duplicate in-flight id is
+  refused (`-32600`); `NaN`/`Infinity` are parse errors. The cache is believed only as a regular file (no
+  symlink, no FIFO hang) of at most 4 MiB, owned by the user and not writable by group or others, in a directory
+  that is too; it lives in `~/.cache/autoos/playwright-mcp/` (0700), apart from the shared `~/.cache/autoos`,
+  which the image cache creates group-writable under umask 002.
+- **Installer switch:** `./setup.sh --only mcp-playwright` replaces only the two known Playwright entry forms
+  and a proxy entry from another checkout path, after backing up the Claude config; a failed backup stops the
+  write. Sessions started before keep their old containers until they end.
+- **Residuals:** JSON-RPC batches are rejected (MCP 2025-06 and later has none).
+
 ### Changed — Linux installs the Antigravity Hub 2.x in user space and can update it
 
 - **`./setup.sh --only antigravity` installs the Antigravity Hub** (2.17.0 today) into `~/.local/opt/antigravity`
