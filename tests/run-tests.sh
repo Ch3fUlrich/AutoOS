@@ -3725,6 +3725,128 @@ if it "repo skills link into project .claude/skills and win as skills source"; t
     if (( ok )); then pass; else fail "vendored skills did not win or were not linked"; fi
 fi
 
+# ─── OpenHands: repo skills mirrored per skill, idempotent settings writer ──
+# oh_setup_run <home> <repo>: setup_openhands_config in a hermetic subshell -
+# scratch HOME and AUTOOS_ROOT, no gateway or provider key, no network - with
+# stdout and stderr merged. AUTOOS_KEYS_FILE points at a file that does not
+# exist so the repo's own keys file is never consulted.
+oh_setup_run() {
+    local home="$1" repo="$2"
+    mkdir -p "$home"
+    (
+        SYS_HOME="$home"; AUTOOS_DRY_RUN=0
+        if [[ -n "$repo" ]]; then AUTOOS_ROOT="$repo"; else unset AUTOOS_ROOT; fi
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY OMNIGRAPH_TOKEN
+        unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY
+        export AUTOOS_KEYS_FILE="$home/no-keys.yml"
+        curl() { return 6; }
+        setup_openhands_config
+    ) 2>&1
+}
+
+# oh_skill_repo <repo>: a scratch AUTOOS_ROOT with two skills (alpha, beta) and
+# one directory without a SKILL.md (nofile) that is not a skill.
+oh_skill_repo() {
+    local repo="$1" n
+    for n in alpha beta; do
+        mkdir -p "$repo/.agents/skills/$n"
+        printf -- '---\nname: %s\ndescription: demo\n---\n' "$n" >"$repo/.agents/skills/$n/SKILL.md"
+    done
+    mkdir -p "$repo/.agents/skills/nofile"
+    printf 'not a skill\n' >"$repo/.agents/skills/nofile/README.md"
+}
+
+if it "openhands: links every repo skill into ~/.openhands/skills"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    dest="$tmp/home/.openhands/skills"; problems=""
+    { [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is not a real directory] "; }
+    for n in alpha beta; do
+        [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
+            || problems+="[$n is not a link to the repo skill (got: $(readlink "$dest/$n" 2>/dev/null || echo none))] "
+        [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
+        [[ "$out" == *"linked $n"* ]] || problems+="[no 'linked $n' line] "
+    done
+    { [[ ! -e "$dest/nofile" && ! -L "$dest/nofile" ]] || problems+="[nofile (no SKILL.md) was linked] "; }
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a second run reports skipped and changes nothing"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    oh_setup_run "$tmp/home" "$tmp/repo" >/dev/null
+    dest="$tmp/home/.openhands/skills"
+    before="$(stat -c '%y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    after="$(stat -c '%y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
+    problems=""
+    [[ "$before" == "$after" ]] || problems+="[the skills directory or a link changed: $before -> $after] "
+    grep -Eq '(^|[^[:alnum:]])(linked|repointed) [a-z]' <<<"$out" && problems+="[second run printed a linked/repointed line] "
+    [[ "$out" == *skipped* ]] || problems+="[second run never says skipped] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: keeps a user's own skill"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"
+    mkdir -p "$dest/alpha" "$dest/mine"
+    printf 'my own alpha\n' >"$dest/alpha/SKILL.md"
+    printf 'my own skill\n'  >"$dest/mine/SKILL.md"
+    ln -s /nonexistent-user-skill "$dest/foreign"
+    snap() { ( cd "$dest" && find alpha mine -type f -exec sha256sum {} + | sort; readlink foreign; ls -A ) ; }
+    before="$(snap)"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    after="$(snap)"
+    problems=""
+    [[ -d "$dest/alpha" && ! -L "$dest/alpha" ]] || problems+="[the user's own alpha is no longer a real directory] "
+    [[ "$(readlink "$dest/beta" 2>/dev/null)" == "$tmp/repo/.agents/skills/beta" ]] || problems+="[beta was not linked next to the user's skills] "
+    # beta is the one new entry: nothing else may differ from before.
+    [[ "$(grep -v '^beta$' <<<"$after")" == "$before" ]] || problems+="[the user's skills changed: $before -> $after] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: repairs a dangling link into the repo"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    ln -s "$tmp/repo/.agents/skills/alpha-renamed" "$dest/alpha"   # ours (into the repo), dangling
+    ln -s /nonexistent-elsewhere/beta "$dest/beta"                 # not ours, dangling: hands off
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/skills/alpha" ]] || problems+="[alpha still points at $(readlink "$dest/alpha")] "
+    [[ -f "$dest/alpha/SKILL.md" ]] || problems+="[alpha does not resolve after the repair] "
+    [[ "$(readlink "$dest/beta")" == "/nonexistent-elsewhere/beta" ]] || problems+="[a foreign dangling link was rewritten to $(readlink "$dest/beta")] "
+    [[ "$out" == *"repointed alpha"* ]] || problems+="[no 'repointed alpha' line] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: an existing whole-dir symlink is not written through"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/clone-skills" "$tmp/home/.openhands"
+    ln -s "$tmp/clone-skills" "$tmp/home/.openhands/skills"     # the old whole-dir layout
+    repo_before="$(ls -A "$tmp/repo/.agents/skills")"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$tmp/home/.openhands/skills")" == "$tmp/clone-skills" ]] || problems+="[the whole-dir link was changed] "
+    [[ -z "$(ls -A "$tmp/clone-skills")" ]] || problems+="[links were written through it into the clone: $(ls -A "$tmp/clone-skills" | tr '\n' ' ')] "
+    [[ "$(ls -A "$tmp/repo/.agents/skills")" == "$repo_before" ]] || problems+="[the repo's skills directory gained entries] "
+    [[ "$(grep -c 'rm ' <<<"$out")" == 1 ]] || problems+="[expected one warning naming the rm command, got $(grep -c 'rm ' <<<"$out")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a dry run links nothing"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    out="$( ( AUTOOS_DRY_RUN=1; link_skill_dirs "$tmp/repo/.agents/skills" "$tmp/home/.openhands/skills" ) 2>&1 )"
+    problems=""
+    [[ ! -e "$tmp/home" ]] || problems+="[a dry run created $tmp/home] "
+    [[ "$out" == *"would link"* ]] || problems+="[no 'would link' line: $out] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
 if it "custom_is_installed detects agent-skills under Documents/code or Documents/Code"; then
     tmp="$(mktemp -d)"
     (
