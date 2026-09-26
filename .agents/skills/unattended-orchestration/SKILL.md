@@ -54,12 +54,16 @@ A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date
 - R-spawn-07: An isolation:worktree subagent can't run pwsh/bash; use a non-isolated agent for shell work. (why: 3 of 3 isolated agents stopped before any edit; source: inbox/L1-backlog.md 19:30Z)
 - R-spawn-08: The spawner reads configuration/api-keys.yml from the main checkout if a worktree lacks it. (why: it's git-ignored, absent in a fresh worktree; source: test_autoos_spawner.py KeyFileTests)
 - R-spawn-09: Route implement work to qoder/agy as writers only; the orchestrator tests and commits. (why: headless mode auto-denies every command tool; source: work/L1-routing/B2fix.out, MCPb.out)
+- R-spawn-10: An isolation:worktree subagent branches from main; have it `git merge --ff-only <branch>` first. (why: branch-only files are missing otherwise; source: inbox/L1-routing.md 21:38Z, A12)
+- R-spawn-11: Read your inbox right before every launch, not only while waiting. (why: 3 workers started against a 30-min-old stop order; source: inbox/L1-routing.md 21:44Z)
+- R-spawn-12: Omit `--lean` for `--client qoder|agy`; the spawner refuses it with exit 2. (why: those clients start their MCP servers anyway; source: work/L1-routing/review-a3.out, 2026-09-26)
 
 ### review
 
 - R-review-01: Gate a worker's sandbox diff, not its report; a NO-OP (nothing changed) exits 5. (why: workers reported completed with uncommitted files; source: work/L1-routing/C1.out, NoOpGuardTests)
 - R-review-02: Treat a cheap/free reviewer's "no findings" as unproven; self-review often finds real defects. (why: measured across five lanes' DONE notes; source: 20260924/done, 20260925/done)
 - R-review-03: Never let a reviewer share the writer's model family; pair across families. (why: same-family reviewers repeat the writer's blind spots; source: cao/dispatch.py, review_degraded tag)
+- R-review-04: Inline run-log files into a qoder/agy task; under --isolate it cannot read outside its clone. (why: qoder asked for access, then NO-OP; source: work/L1-routing/review-c2.out, 2026-09-26)
 
 ### tests
 
@@ -75,6 +79,7 @@ A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date
 - R-gateway-03: Route opencode's free zen/spark legs through an opencode-launched agent, not a bare API call. (why: that leg 403s any non-opencode caller; source: done/R-merge.md, item 5)
 - R-gateway-04: After a combo/id rename, confirm the live gateway's combos match the code before routing. (why: a stale gateway 400s every card/--tier route; source: done/R-merge.md, item 1)
 - R-gateway-05: Match a tool-allowlist entry to its MCP wiring: `mcp__<name>__*`, plugin form otherwise. (why: the wrong prefix leaves the tool silently missing; source: mcp-servers-setup skill)
+- R-gateway-06: Keep a Qwen (t3-driver-free-only) request under 7000 input tokens; send one file. (why: larger requests fail 413 at its ITPM limit; source: work/L1-routing/review-b4b5.out)
 
 ### brief
 
@@ -99,6 +104,7 @@ A bare `<file>` source is this project's run log at `logs/handoff-sessions/<date
 - R-handoff-02: Delegate reading DONE notes, plans and drafts to a subagent; don't read them all yourself. (why: a 200k orchestrator hit its 150k cap in 7 min; source: inbox/L1-main.md 19:21Z)
 - R-handoff-03: Write a successor's brief from the predecessor's DONE note, never from the plan alone. (why: eight re-cuts converged on the same shape; source: references/layers.md history, 2026-09-05)
 - R-handoff-04: At the cap, run l1_handoff.py --state/--out, append `handoff <name>` to the inbox, stop. (why: lets the parent relaunch you from that file; source: briefs/common.md, Always)
+- R-handoff-05: A handoff is done only once the parent inbox has its line; parents watch handoff mtimes. (why: a handoff with no line sat idle 1.5 h; source: inbox/L1-routing.md 21:45Z)
 
 ### host
 
