@@ -616,7 +616,17 @@ fi
 
 if it "registry model reads project a fixture with no llm-models.json present"; then
     if python3 - <<'PY'
-import json, os, re, sys, tempfile
+import importlib.util, json, os, tempfile
+
+def load_registry_tool():
+    # The real read path: the installers import tools/registry.py by path
+    # (as tools/audit-router.py does) and call legacy_models(); this test
+    # loads the same module the same way, never a copy of its logic.
+    spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+registry = load_registry_tool()
 fixture = {"models": {
     "muse-spark": {
         "id": "muse-spark", "display_name": "Muse Spark 1.3 Contributor",
@@ -625,7 +635,7 @@ fixture = {"models": {
                    "npm": "@ai-sdk/openai", "reasoning_effort": "high"},
         "context_advertised": 1048576, "output_max": 131072,
         "reasoning": True, "price_in": 1e-07, "price_out": 2e-07,
-        "price_cache_read": 2e-09},
+        "price_cache_read": 2e-09, "default_for": "muse_key"},
     "openrouter-nemotron-ultra": {
         "id": "openrouter-nemotron-ultra", "display_name": "Nemotron 3 Ultra (Free)",
         "direct": {"provider": "openrouter",
@@ -640,7 +650,12 @@ fixture = {"models": {
                    "model": "ollama/qwen2.5-coder:7b",
                    "npm": "@ai-sdk/openai-compatible"},
         "context_advertised": 32768, "output_max": 8192,
-        "reasoning": False, "price_in": 0, "price_out": 0},
+        "reasoning": False, "price_in": 0, "price_out": 0,
+        "default_for": "fallback"},
+    "command-a-03-2025": {
+        "id": "command-a-03-2025", "display_name": "Command A",
+        "context_advertised": 131072, "output_max": 16384,
+        "reasoning": False, "price_in": 0.0, "price_out": 0.0},
 }}
 tmp = tempfile.mkdtemp(prefix="a5d-")
 os.makedirs(os.path.join(tmp, "catalog"), exist_ok=True)
@@ -648,54 +663,42 @@ with open(os.path.join(tmp, "catalog", "ai-registry.json"), "w", encoding="utf-8
     json.dump(fixture, fh)
 assert not os.path.exists(os.path.join(tmp, "catalog", "llm-models.json")), \
     "fixture must run with no llm-models.json present"
-# Run each read's own loader: the _legacy_model helper each embedded python
-# read carries (two in lib/linux/install.sh, one in AutoOS.Install.psm1).
-for path, want in (("lib/linux/install.sh", 2),
-                   ("lib/windows/AutoOS.Install.psm1", 1)):
+# The real read path: ai-registry.json from disk, projected by the one
+# helper the installers call -- never a copy of its logic, and a model
+# without a direct block is skipped, never listed.
+with open(os.path.join(tmp, "catalog", "ai-registry.json"), encoding="utf-8") as fh:
+    by_id = {m["id"]: m for m in registry.legacy_models(json.load(fh))}
+assert set(by_id) == {"muse-spark", "openrouter-nemotron-ultra", "ollama-qwen2.5-coder"}, \
+    set(by_id)
+# The installers call the one helper; no local copies remain.
+for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
     src = open(path, encoding="utf-8").read()
-    found = re.findall(r"^def _legacy_model\(.*?\n((?:    .*\n)+)",
-                       src, re.MULTILINE)
-    assert len(found) == want, \
-        f"{path}: expected {want} _legacy_model loader(s), found {len(found)}"
-    ns = {}
-    exec("def _legacy_model" + src.split("def _legacy_model", 1)[1].split(
-        "\nREPO_MODELS", 1)[0].split("\nREPO_BY_ID", 1)[0], ns)
-    by_id = {mid: ns["_legacy_model"](mid, e)
-             for mid, e in fixture["models"].items()}
-    muse = by_id["muse-spark"]
-    assert muse["name"] == "Muse Spark 1.3 Contributor", muse
-    assert (muse["context"], muse["output"]) == (1048576, 131072), muse
-    assert muse["direct"]["provider"] == "meta", muse
-    assert "openrouter_id" not in muse, muse
-    ultra = by_id["openrouter-nemotron-ultra"]
-    assert ultra["openrouter_id"] == "nvidia/nemotron-3-ultra-550b-a55b:free", ultra
-    assert "direct" not in ultra, ultra
-    assert (ultra["paid_input_price"], ultra["paid_output_price"]) == (6e-07, 2.4e-06), ultra
-    assert ultra["cache_read_price"] == 1.2e-07, ultra
-    local = by_id["ollama-qwen2.5-coder"]
-    assert local["direct"]["model"] == "ollama/qwen2.5-coder:7b", local
-    assert (local["context"], local["output"]) == (32768, 8192), local
+    assert "legacy_models" in src, path
+    assert "def _legacy_model" not in src, path
+muse = by_id["muse-spark"]
+assert muse["name"] == "Muse Spark 1.3 Contributor", muse
+assert (muse["context"], muse["output"]) == (1048576, 131072), muse
+assert muse["direct"]["provider"] == "meta", muse
+assert "openrouter_id" not in muse, muse
+assert muse.get("default_for") == "muse_key", muse
+ultra = by_id["openrouter-nemotron-ultra"]
+assert ultra["openrouter_id"] == "nvidia/nemotron-3-ultra-550b-a55b:free", ultra
+assert "direct" not in ultra, ultra
+assert (ultra["paid_input_price"], ultra["paid_output_price"]) == (6e-07, 2.4e-06), ultra
+assert ultra["cache_read_price"] == 1.2e-07, ultra
+local = by_id["ollama-qwen2.5-coder"]
+assert local["direct"]["model"] == "ollama/qwen2.5-coder:7b", local
+assert (local["context"], local["output"]) == (32768, 8192), local
+assert local.get("default_for") == "fallback", local
+assert "reasoning" not in local, local
 # The projection keeps the output identical on the real catalogs too.
 llm = {m["id"]: m for m in
        json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]}
-reg = json.load(open("catalog/ai-registry.json", encoding="utf-8"))["models"]
-ns = {}
-ish = open("lib/linux/install.sh", encoding="utf-8").read()
-exec("def _legacy_model" + ish.split("def _legacy_model", 1)[1].split(
-    "\nREPO_MODELS", 1)[0].split("\nREPO_BY_ID", 1)[0], ns)
+with open("catalog/ai-registry.json", encoding="utf-8") as _rf:
+    new = {m["id"]: m for m in registry.legacy_models(json.load(_rf))}
+assert set(new) == set(llm), (set(new) ^ set(llm))
 for mid, old in sorted(llm.items()):
-    new = ns["_legacy_model"](mid, reg[mid])
-    assert new["name"] == old["name"], (mid, new["name"], old["name"])
-    assert (new["context"], new["output"]) == (old["context"], old["output"]), mid
-    assert bool(new.get("reasoning")) == bool(old.get("reasoning")), mid
-    assert (new["input_price"], new["output_price"]) == \
-        (old["input_price"], old["output_price"]), mid
-    for opt in ("cache_read_price", "paid_input_price", "paid_output_price"):
-        assert new.get(opt) == old.get(opt), (mid, opt)
-    if old.get("openrouter_id"):
-        assert new.get("openrouter_id") == old["openrouter_id"], mid
-    else:
-        assert new.get("direct") == old["direct"], (mid, new.get("direct"))
+    assert new[mid] == old, mid
 PY
     then pass; else fail "registry fixture does not project to the legacy model shape (see above)"; fi
 fi

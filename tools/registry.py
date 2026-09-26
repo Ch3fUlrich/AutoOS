@@ -187,6 +187,74 @@ def provider_field_map(providers: dict, field: str) -> dict:
     }
 
 
+def _legacy_sort_key(mid: str) -> tuple:
+    """Order key for legacy_models(): the registry is alphabetical
+    (tools/registry-convert.py's build_registry() sorts every key on write)
+    and carries no trace of catalog/llm-models.json's hand-curated order, so
+    that order cannot be derived -- sort instead, with `openrouter-free`
+    pinned first among the openrouter entries so the generated openrouter map
+    (which filters this list in order) keeps it first."""
+    if mid == "openrouter-free":
+        return (1, "")
+    if mid.startswith("openrouter-"):
+        return (2, mid)
+    return (0, mid)
+
+
+def legacy_models(doc) -> list:
+    """Project registry `models` into the old catalog/llm-models.json entry
+    shape (A5dfix: the one home for the legacy model projection every
+    installer read calls instead of carrying its own copy).
+
+    Selected, never listed: the old file's 19 entries are exactly the models
+    carrying a `direct` block, so anything with one is projected and anything
+    without one is skipped. Each entry maps registry fields to the old shape
+    (mapping doc section 1): display_name->name, context_advertised->context,
+    output_max->output, price_in/out->input/output_price,
+    price_cache_read->cache_read_price, paid_price_in/out->paid_input/
+    paid_output_price, a direct block with provider "openrouter" becoming
+    openrouter_id (from direct.model) instead of direct -- plus default_for,
+    which models.muse-spark (muse_key) and models.ollama-qwen2.5-coder
+    (fallback) carry. `reasoning` is present only when truthy, matching the
+    old file (which omits it otherwise); every other absent optional stays
+    absent rather than becoming an explicit null.
+
+    Pure: no I/O, no clock. `doc` is a loaded catalog/ai-registry.json
+    document (or a {"models": ...} mapping holding the same entries)."""
+    models = doc.get("models") if isinstance(doc, dict) else {}
+    models = models if isinstance(models, dict) else {}
+    out = []
+    for mid, entry in models.items():
+        if not isinstance(entry, dict):
+            continue
+        direct = entry.get("direct")
+        if not isinstance(direct, dict):
+            continue
+        model = {"id": mid, "name": entry.get("display_name", mid)}
+        direct = dict(direct)
+        if direct.get("provider") == "openrouter":
+            model["openrouter_id"] = direct.get("model")
+        elif direct:
+            model["direct"] = direct
+        model["context"] = entry.get("context_advertised")
+        model["output"] = entry.get("output_max")
+        if entry.get("reasoning"):
+            model["reasoning"] = True
+        model["input_price"] = entry.get("price_in")
+        model["output_price"] = entry.get("price_out")
+        if entry.get("price_cache_read") is not None:
+            model["cache_read_price"] = entry["price_cache_read"]
+        if entry.get("paid_price_in") is not None:
+            model["paid_input_price"] = entry["paid_price_in"]
+        if entry.get("paid_price_out") is not None:
+            model["paid_output_price"] = entry["paid_price_out"]
+        if entry.get("default_for") is not None:
+            model["default_for"] = entry["default_for"]
+        out.append(model)
+    out.sort(key=lambda model: _legacy_sort_key(model["id"]))
+    return out
+
+
 # ===========================================================================
 # rule 1 - leg resolution
 # ===========================================================================

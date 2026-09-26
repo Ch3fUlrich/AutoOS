@@ -2914,6 +2914,7 @@ _opencode_merge_config() {
     ide_file="$(ide_models_file)"
 
     OLLAMA_BASE_URL="$ollama_url" python3 -c "
+import importlib.util as _ilu
 import json, os, sys
 
 config_path = sys.argv[1]
@@ -2923,32 +2924,17 @@ ide_file = sys.argv[4]
 
 # Model data lives in catalog/ai-registry.json models (single source of truth).
 # Everything below projects it into OpenCode's shape; nothing here
-# duplicates an id, a context window or a price. The registry's models is a
-# map keyed by id (the old catalog file was a list); _legacy_model derives the old
-# field shape from registry fields (mapping doc section 1), so the output is
-# identical.
+# duplicates an id, a context window or a price. The legacy entry shape comes
+# from tools/registry.py legacy_models() -- the one home for it, loaded by
+# path off the repo root (as tools/audit-router.py does), never derived here
+# and never from the retired llm catalog file.
 with open(models_file, 'r', encoding='utf-8') as _mf:
-    _REG_MODELS = json.load(_mf)['models']
-def _legacy_model(_mid, _e):
-    _m = {'id': _mid, 'name': _e.get('display_name', _mid)}
-    _d = dict(_e.get('direct') or {})
-    if _d.get('provider') == 'openrouter':
-        _m['openrouter_id'] = _d.get('model')
-    elif _d:
-        _m['direct'] = _d
-    _m['context'] = _e.get('context_advertised')
-    _m['output'] = _e.get('output_max')
-    _m['reasoning'] = bool(_e.get('reasoning', False))
-    _m['input_price'] = _e.get('price_in')
-    _m['output_price'] = _e.get('price_out')
-    if _e.get('price_cache_read') is not None:
-        _m['cache_read_price'] = _e['price_cache_read']
-    if _e.get('paid_price_in') is not None:
-        _m['paid_input_price'] = _e['paid_price_in']
-    if _e.get('paid_price_out') is not None:
-        _m['paid_output_price'] = _e['paid_price_out']
-    return _m
-REPO_MODELS = [_legacy_model(_mid, _e) for _mid, _e in _REG_MODELS.items()]
+    _REG_DOC = json.load(_mf)
+_REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools', 'registry.py')
+_spec = _ilu.spec_from_file_location('autoos_registry', _REG_TOOL)
+_registry = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_registry)
+REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
 # MCP package specs live in catalog/agent-harness.json, never inline.
 _harness_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'catalog', 'agent-harness.json')
@@ -3408,27 +3394,16 @@ secrets_file = sys.argv[2] if len(sys.argv) > 2 else ""
 models_file = sys.argv[3] if len(sys.argv) > 3 else ""
 
 with open(models_file, "r", encoding="utf-8") as _mf:
-    _REG_MODELS = json.load(_mf)["models"]
-def _legacy_model(_mid, _e):
-    _m = {"id": _mid, "name": _e.get("display_name", _mid)}
-    _d = dict(_e.get("direct") or {})
-    if _d.get("provider") == "openrouter":
-        _m["openrouter_id"] = _d.get("model")
-    elif _d:
-        _m["direct"] = _d
-    _m["context"] = _e.get("context_advertised")
-    _m["output"] = _e.get("output_max")
-    _m["reasoning"] = bool(_e.get("reasoning", False))
-    _m["input_price"] = _e.get("price_in")
-    _m["output_price"] = _e.get("price_out")
-    if _e.get("price_cache_read") is not None:
-        _m["cache_read_price"] = _e["price_cache_read"]
-    if _e.get("paid_price_in") is not None:
-        _m["paid_input_price"] = _e["paid_price_in"]
-    if _e.get("paid_price_out") is not None:
-        _m["paid_output_price"] = _e["paid_price_out"]
-    return _m
-REPO_MODELS = [_legacy_model(_mid, _e) for _mid, _e in _REG_MODELS.items()]
+    _REG_DOC = json.load(_mf)
+# The legacy entry shape comes from tools/registry.py legacy_models() -- the
+# one home for it, loaded by path off the repo root (as tools/audit-router.py
+# does), never derived here and never from the retired llm catalog file.
+import importlib.util as _ilu
+_REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), "tools", "registry.py")
+_spec = _ilu.spec_from_file_location("autoos_registry", _REG_TOOL)
+_registry = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_registry)
+REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
 # resolve_ollama_base_url's answer; empty keeps the catalog default. Applied to
 # the catalog entry so the profiles and the settings.json fallback agree.

@@ -618,6 +618,48 @@ class ReviewA3Tests(unittest.TestCase):
             self.assertIsInstance(registry.check_registry(reg), list)
 
 
+class LegacyModelsTests(unittest.TestCase):
+    """tools/registry.py legacy_models(): the one projection of registry
+    models into the old catalog/llm-models.json entry shape (A5dfix) --
+    every installer read (lib/linux/install.sh x2, AutoOS.Install.psm1
+    embedded python) calls this instead of carrying its own copy."""
+
+    def test_legacy_models_match_llm_models_json_field_for_field(self):
+        with (ROOT / "catalog" / "llm-models.json").open(encoding="utf-8") as fh:
+            old = {m["id"]: m for m in json.load(fh)["models"]}
+        new = {m["id"]: m for m in registry.legacy_models(load_registry())}
+        self.assertEqual(set(new), set(old))
+        for mid, old_entry in sorted(old.items()):
+            self.assertEqual(new[mid], old_entry, mid)
+
+    def test_models_without_a_direct_block_are_excluded(self):
+        doc = {"models": {
+            "with-direct": {"id": "with-direct", "display_name": "D",
+                            "direct": {"provider": "meta", "model": "m"},
+                            "context_advertised": 1, "output_max": 1,
+                            "price_in": 0, "price_out": 0},
+            "no-direct": {"id": "no-direct", "display_name": "N",
+                          "context_advertised": 1, "output_max": 1,
+                          "price_in": 0, "price_out": 0},
+        }}
+        self.assertEqual([m["id"] for m in registry.legacy_models(doc)],
+                         ["with-direct"])
+
+    def test_openrouter_free_stays_first_in_the_generated_openrouter_map(self):
+        by_id = {m["id"]: m for m in registry.legacy_models(load_registry())}
+        openrouter_map = {m["openrouter_id"]: m for m in by_id.values()
+                          if m.get("openrouter_id")}
+        self.assertTrue(openrouter_map)
+        self.assertEqual(next(iter(openrouter_map.values()))["id"],
+                         "openrouter-free")
+
+    def test_default_for_is_projected(self):
+        by_id = {m["id"]: m for m in registry.legacy_models(load_registry())}
+        self.assertEqual(by_id["muse-spark"].get("default_for"), "muse_key")
+        self.assertEqual(by_id["ollama-qwen2.5-coder"].get("default_for"),
+                         "fallback")
+
+
 class ValidateIgnoresCommentTests(unittest.TestCase):
     """`validate`'s fresh-render comparison ignores "$comment" keys at any
     depth (hand-edited prose); structure, routes, legs, models and providers
