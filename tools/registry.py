@@ -64,13 +64,15 @@ a fresh render against --config's own current managed blocks (default: the
 committed config.yaml) and exits 1, naming each differing tier, when they are not
 byte-for-byte equal.
 
-`render ide` renders catalog/ide-models.json - the single source that feeds
+`render ide` renders catalog/ide-models.json - the generated client list
+(rendered from catalog/ai-registry.json - do not edit) that feeds
 opencode.jsonc's AUTOOS-MANAGED blocks and Zed's own model lists (both via
 tools/sync-ide-models.py) - from a loaded catalog/ai-registry.json (spec 3.2
 phase 1, task A4c; docs/plans/2026-09-25-registry-mapping.md section 12
-documents the mapping and its one intentional equality exception, the same
-$comment exception render omniroute above uses). It never writes catalog/
-ide-models.json itself: with no flag the render goes to stdout; --out PATH
+documents the mapping; task A5f made the committed file byte-exact, so the old
+$comment exception no longer applies to it). To update the committed file after
+a registry change: `python3 tools/registry.py render ide
+--out catalog/ide-models.json`; with no flag the render goes to stdout; --out PATH
 writes it elsewhere; --check compares a fresh render against --ide-models
 (default: the committed ide-models.json) and exits 1, naming each differing
 model, when they are not semantically equal. tools/sync-ide-models.py's
@@ -1723,7 +1725,7 @@ def _cmd_render_omniroute(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1756,7 +1758,7 @@ def _cmd_render_litellm(args) -> int:
 
     text = "\n\n".join(rendered[tier] for tier in sorted(rendered)) + "\n"
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1787,7 +1789,7 @@ def _cmd_render_ide(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1818,7 +1820,7 @@ def _cmd_render_openhands(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        Path(args.out).write_text(text, encoding="utf-8", newline="\n")
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1849,7 +1851,7 @@ def _cmd_render_models_doc(args) -> int:
         return 0
 
     if args.out:
-        Path(args.out).write_text(rendered, encoding="utf-8")
+        Path(args.out).write_text(rendered, encoding="utf-8", newline="\n")
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(rendered)
@@ -1913,7 +1915,7 @@ def main(argv=None) -> int:
         help="registry JSON to render from (default: %(default)s)")
     ide_parser.add_argument(
         "--out", default=None,
-        help="write the render here instead of stdout (never the real ide-models.json)")
+        help="write the render here instead of stdout (to update the committed file: --out catalog/ide-models.json)")
     ide_parser.add_argument(
         "--check", action="store_true",
         help="exit 1 if the render differs semantically from --ide-models")

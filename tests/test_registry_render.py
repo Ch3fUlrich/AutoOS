@@ -346,9 +346,28 @@ class IdeRenderMatchesTodayTests(unittest.TestCase):
         self.assertIn("generated from catalog/ai-registry.json", rendered["$comment"])
         self.assertIn("do not edit", rendered["$comment"])
 
-    def test_generated_marker_is_new_not_borrowed_from_the_committed_file(self):
-        self.assertNotIn("generated from catalog/ai-registry.json",
-                         json.dumps(real_ide_models()["$comment"]))
+    def test_committed_file_carries_the_generated_marker(self):
+        # A5f: catalog/ide-models.json is now the renderer's byte-exact output,
+        # so its $comment IS the generated marker (phase 1 kept the hand-written
+        # glossary; the mapping doc sections 3/9 own that prose now).
+        self.assertIn("generated from catalog/ai-registry.json",
+                      json.dumps(real_ide_models()["$comment"]))
+
+    def test_committed_file_is_byte_identical_to_a_fresh_render(self):
+        # A5f (spec 3.2 D11): catalog/ide-models.json is generated, not
+        # hand-written. The committed bytes must equal a fresh
+        # `python3 tools/registry.py render ide --out <tmp>` render exactly
+        # (not only semantically); regenerate with
+        # `python3 tools/registry.py render ide --out catalog/ide-models.json`.
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "ide-render.json"
+            proc = run_cli("render", "ide", "--out", str(out))
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(
+                out.read_bytes(), IDE_MODELS_PATH.read_bytes(),
+                "catalog/ide-models.json drifts from a fresh render ide "
+                "(run: python3 tools/registry.py render ide "
+                "--out catalog/ide-models.json)")
 
     def test_render_order_matches_todays_picker_order(self):
         rendered = registry.render_ide(real_registry())

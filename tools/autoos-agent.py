@@ -78,7 +78,10 @@ child through its environment only. One line per run is appended to
 logs/orch-<date>.log (git-ignored), which the watchdog protocol reads.
 
 Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); 6 = a headless client auto-denied a tool and
-exited 0 (HEADLESS-REFUSAL); the child's exit code; 2 bad arguments, card or route refused;
+exited 0 (HEADLESS-REFUSAL); 7 = an --isolate run wrote to the parent checkout (LEAK: a commit by
+autoos-worker@users.noreply.github.com in HEAD_before..HEAD_after, or a tracked file outside logs/ whose
+porcelain state changed - the shas and paths are printed, nothing is reverted, the track record carries
+failure class "containment"; overrides exit 5); the child's exit code; 2 bad arguments, card or route refused;
 3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
 PAUSE (R-pause-01); 4 depth budget exhausted.
 
@@ -152,6 +155,20 @@ _TIER_PREFIX_RE = re.compile(r"^t([123])-")
 # (516 MB with graphify off too).
 # The graph lookups stay: research and review agents navigate with them.
 LEAN_DROP = ("serena", "playwright", "context7")
+
+# --isolate containment (ISOfix, measured 2026-09-26): a worker given absolute
+# parent paths edited and committed there; outside_fence only fenced opencode's
+# file tools and sandbox_verdict only diffed the sandbox, so the spawner
+# reported NO-OP (exit 5) instead of a leak.
+WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
+ISOLATE_PUSH_DISABLED = "DISABLED-autoos-isolate"
+
+
+def isolate_task_prefix(sandbox_path: str, root: str) -> str:
+    """The one line prepended to the task text of an --isolate run."""
+    return ("Your working directory %s is your only writable checkout; "
+            "never cd, git -C or write into %s or any other path outside it."
+            % (sandbox_path, root))
 
 
 def load_jsonc(path: str) -> dict:
@@ -465,6 +482,14 @@ def build_plan(args, cfg: dict) -> dict:
             # main checkout's recorded root.
             env["XDG_DATA_HOME"] = sandbox["path"] + ".opencode-data"
             overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"])
+    if sandbox is not None:
+        # The fence denies opencode's file tools outside the clone, but a
+        # worker told (or shown) an absolute parent path can still cd, git -C
+        # or shell-write into it (live 2026-09-26) - say so in the task
+        # itself. Every client takes the task as its last argv
+        # (clients.build_command puts it there; opencode appends it above),
+        # and the brief follows the line verbatim.
+        cmd[-1] = isolate_task_prefix(sandbox["path"], ROOT) + "\n" + cmd[-1]
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
@@ -806,6 +831,74 @@ def refusal_exit(rc: int, tail: str) -> tuple:
     return rc, None
 
 
+def _filtered_parent_status(root: str) -> dict:
+    """{path-part: XY} of `git status --porcelain --untracked-files=no`, logs/ excluded.
+
+    The --isolate clone and every run log live under logs/ (clients.state_dir),
+    so logs/ paths are the spawner's own, never a worker's leak.
+    """
+    r = subprocess.run(["git", "-C", root, "status", "--porcelain",
+                        "--untracked-files=no"], capture_output=True, text=True)
+    out = {}
+    if r.returncode != 0:
+        return out
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        rest = line[3:] if len(line) > 3 else ""
+        paths = [p.strip().strip('"') for p in rest.split(" -> ")]
+        if any(p == "logs" or p.startswith("logs/") for p in paths):
+            continue
+        out[rest] = line[:2]
+    return out
+
+
+def parent_snapshot(root=None):
+    """(HEAD sha or None, filtered porcelain status) of the parent checkout."""
+    if root is None:
+        root = ROOT
+    head = None
+    r = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                       capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip():
+        head = r.stdout.strip()
+    return head, _filtered_parent_status(root)
+
+
+def parent_leak(before_head, before_status, root=None):
+    """(worker-commit shas, changed tracked paths) since a parent_snapshot.
+
+    A LEAK is a first-parent commit in before_head..HEAD_after authored by
+    WORKER_EMAIL (commits by anyone else, and worker commits a --no-ff merge
+    brings in as a second parent - the orchestrator merging a lane - are not),
+    or any tracked path outside logs/ whose porcelain state changed.
+    """
+    if root is None:
+        root = ROOT
+    after_head = None
+    r = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                       capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip():
+        after_head = r.stdout.strip()
+    shas = []
+    if before_head and after_head and before_head != after_head:
+        # --first-parent: a worker lane the orchestrator merged meanwhile
+        # (--no-ff) brings autoos-worker commits in as a second parent - not
+        # a leak; a leaked commit lands on the parent branch itself.
+        r = subprocess.run(["git", "-C", root, "log", "--first-parent", "--format=%H%x00%ae",
+                            before_head + ".." + after_head],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                sha, _, email = line.partition("\x00")
+                if sha and email.strip() == WORKER_EMAIL:
+                    shas.append(sha)
+    after_status = _filtered_parent_status(root)
+    changed = sorted(p for p in set(before_status) | set(after_status)
+                     if before_status.get(p) != after_status.get(p))
+    return shas, changed
+
+
 def sandbox_verdict(route: dict, changed: str, ahead: str):
     """(rc override or None, message) for an --isolate run.
 
@@ -835,7 +928,8 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     Only a card or --tier run carries a combo (--free is keyless); a gateway
     run's served leg, effort and tokens are unknown to this process, so they
     are recorded as unknown/0 until the resolver measures them. rc is the same
-    value the run exits with, the NO-OP override included.
+    value the run exits with, the NO-OP (5) and LEAK (7, failure class
+    "containment") overrides included.
 
     ``bucket`` is the resolver's own bucket (RUNV2: ``route["bucket"]``, set
     only for a v2-routed run) when there is one, else the v1 compat card's
@@ -863,7 +957,8 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
         "cost": 0,
         "latency_s": secs,
         "gate": "pass" if rc == 0 else "fail",
-        "failure_class": None if rc == 0 else ("capability" if rc == 5 else "logic"),
+        "failure_class": (None if rc == 0 else ("capability" if rc == 5 else
+                          ("containment" if rc == 7 else "logic"))),
     }
 
 
@@ -1193,10 +1288,19 @@ def cmd_run(args, cfg: dict) -> int:
                   "(or use --free)." % GATEWAY, file=sys.stderr)
             return 3
         env["AUTOOS_OMNIROUTE_KEY"] = key
+    parent_head, parent_status = None, {}
     if plan["sandbox"]:
         sb = plan["sandbox"]
+        # Snapshot the parent checkout before the run: a worker that writes
+        # outside its clone (live 2026-09-26) must fail as a leak, not a NO-OP.
+        parent_head, parent_status = parent_snapshot()
         os.makedirs(os.path.dirname(sb["path"]), exist_ok=True)
         subprocess.run(["git", "clone", "-q", "--local", ROOT, sb["path"]], check=True)
+        # The orchestrator still fetches from the sandbox path (unchanged);
+        # only the push URL is disabled, so `git push` from the sandbox
+        # cannot update the parent's branches.
+        subprocess.run(["git", "-C", sb["path"], "remote", "set-url", "--push",
+                        "origin", ISOLATE_PUSH_DISABLED], check=True)
         subprocess.run(["git", "-C", sb["path"], "switch", "-q", "-c", sb["branch"]], check=True)
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
@@ -1225,7 +1329,19 @@ def cmd_run(args, cfg: dict) -> int:
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
         override, message = sandbox_verdict(plan["route"], changed, ahead)
-        if override is not None and rc == 0:
+        leak_shas, leak_paths = parent_leak(parent_head, parent_status)
+        if leak_shas or leak_paths:
+            # A LEAK overrides the NO-OP verdict: the run did change
+            # something, just in the wrong checkout. Never reverts anything.
+            bits = []
+            if leak_shas:
+                bits.append("worker commits in the parent checkout: %s" % ", ".join(leak_shas))
+            if leak_paths:
+                bits.append("changed tracked paths in the parent checkout: %s" % ", ".join(leak_paths))
+            print("LEAK: the --isolate run wrote outside its sandbox "
+                  "(containment failure, exit 7): %s" % "; ".join(bits), file=sys.stderr)
+            rc = 7
+        elif override is not None and rc == 0:
             print(message)
             rc = override
         # Every finished --isolate run is a track-record observation (spec §5.6).

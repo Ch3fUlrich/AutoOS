@@ -187,8 +187,8 @@
         "baseURL": "http://127.0.0.1:20128/v1"
       },
       // Model ids, display names and limits come from catalog/ide-models.json
-      // (single source): edit the catalog, then run
-      // `python3 tools/sync-ide-models.py`. Lines between the markers are
+      // (rendered from catalog/ai-registry.json - do not edit): edit the
+      // registry, then run `python3 tools/sync-ide-models.py`. Lines between the markers are
       // regenerated; hand entries above START / below END are kept.
       "models": {
         // AUTOOS-MANAGED-START omniroute
@@ -327,7 +327,7 @@
       "settings": {
         "baseURL": "http://127.0.0.1:4000/v1"
       },
-      // Generated from catalog/ide-models.json, like the omniroute models.
+      // Generated from catalog/ide-models.json (rendered from catalog/ai-registry.json), like the omniroute models.
       "models": {
         // AUTOOS-MANAGED-START litellm
         "t1-orchestrator": {
