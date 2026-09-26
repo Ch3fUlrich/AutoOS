@@ -7,7 +7,11 @@ Run from the repo root (optionally one class, e.g. RoutingTableTests):
 
     python3 tests/test_autoos_spawner.py [ClassName]
 """
+import argparse
+import contextlib
+import datetime
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -15,6 +19,7 @@ import sys
 import shutil
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -814,6 +819,137 @@ class ProcessGroupTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertEqual(rc, 1)
             self.assertTrue(self.gone(pid), "a failed joinable start left %d running" % pid)
+
+
+class SandboxUniquenessTests(unittest.TestCase):
+    """Measured 2026-09-25: two spawns in the same second whose tasks start
+    with the same words named the same --isolate clone, and `git clone` failed
+    with "fatal: destination path ... already exists" (rc 1). The clone dir and
+    its branch must be unique while keeping the readable prefix."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("autoos_agent_unique", str(TOOLS / "autoos-agent.py"))
+        cls.cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.cli)
+
+    def _args(self, task):
+        return argparse.Namespace(
+            client="opencode", tier=2, card=None, task=task, free=False,
+            free_model=self.cli.DEFAULT_FREE_MODEL, lean=False, auto=True,
+            joinable=False, model=None, isolate=True, clean=False,
+            allow_training=False, max_depth=None, title=None)
+
+    def _two_plans(self, task):
+        fixed = datetime.datetime(2026, 9, 26, 12, 0, 0)
+        frozen = types.SimpleNamespace(datetime=type(
+            "FrozenDatetime", (), {"now": staticmethod(lambda: fixed)}))
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            cfg = self.cli.load_jsonc(str(ROOT / "opencode.jsonc"))
+            with mock.patch.object(self.cli, "datetime", frozen):
+                return (self.cli.build_plan(self._args(task), cfg),
+                        self.cli.build_plan(self._args(task), cfg))
+
+    def test_two_spawns_in_the_same_second_get_different_sandboxes(self):
+        first, second = self._two_plans("fix the spawner twice")
+        self.assertNotEqual(first["sandbox"]["path"], second["sandbox"]["path"])
+        self.assertNotEqual(first["sandbox"]["branch"], second["sandbox"]["branch"])
+
+    def test_the_readable_prefix_is_kept_and_a_short_suffix_added(self):
+        first, second = self._two_plans("fix the spawner twice")
+        stamp, slug = "20260926-120000", "fix-the-spawner-twice"
+        base = "%s-%s-%s" % (os.path.basename(self.cli.ROOT), stamp, slug)
+        self.assertTrue(os.path.basename(first["sandbox"]["path"]).startswith(base + "-"),
+                        first["sandbox"]["path"])
+        self.assertTrue(first["sandbox"]["branch"].startswith("agent/%s-%s-" % (stamp, slug)),
+                        first["sandbox"]["branch"])
+        for name in (os.path.basename(first["sandbox"]["path"]),
+                     first["sandbox"]["branch"].split("/", 1)[1]):
+            self.assertRegex(name.rsplit("-", 1)[1], r"^[0-9a-f]{6}$", name)
+        self.assertNotEqual(os.path.basename(first["sandbox"]["path"]).rsplit("-", 1)[1],
+                            os.path.basename(second["sandbox"]["path"]).rsplit("-", 1)[1])
+
+
+class HeadlessRefusalTests(unittest.TestCase):
+    """Measured 2026-09-25 (run 20260925-215048-85ba11): agy auto-denied a tool
+    headless mode cannot prompt for, printed a refusal and still exited 0. A
+    zero exit for a refused tool is not a success."""
+
+    AGY_REFUSAL = ('jetski: no output produced - a tool required the "command" '
+                   'permission that headless mode cannot prompt for, so it was '
+                   'auto-denied\n')
+
+    def setUp(self):
+        self.cli = load_agent()
+
+    def test_the_agy_refusal_is_recognised_case_insensitively(self):
+        for tail in (self.AGY_REFUSAL, "HEADLESS MODE CANNOT PROMPT",
+                     "No Output Produced"):
+            msg = self.cli.headless_refusal(tail)
+            self.assertIsNotNone(msg, tail)
+            self.assertEqual(len(msg.splitlines()), 1, msg)
+
+    def test_an_ordinary_run_is_not_a_refusal(self):
+        self.assertIsNone(self.cli.headless_refusal("done\n"))
+        self.assertIsNone(self.cli.headless_refusal(""))
+
+    def test_a_zero_exit_refusal_maps_to_six_and_a_message(self):
+        rc, msg = self.cli.refusal_exit(0, self.AGY_REFUSAL)
+        self.assertEqual(rc, 6)
+        self.assertIn("no output produced", msg.lower())
+        self.assertEqual(self.cli.refusal_exit(0, "done\n"), (0, None))
+        self.assertEqual(self.cli.refusal_exit(1, self.AGY_REFUSAL), (1, None))
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_cmd_run_exits_six_when_the_client_refused(self):
+        stub = ("#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  models) echo 'gemini-3.8-flash'; exit 0;;\n"
+                "esac\n"
+                "echo 'jetski: no output produced - a tool required the \"command\" "
+                "permission that headless mode cannot prompt for, so it was auto-denied'\n"
+                "exit 0\n")
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "agy")
+        with open(path, "w") as fh:
+            fh.write(stub)
+        os.chmod(path, 0o755)
+        env = clean_env(PATH=d + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+                        AUTOOS_STATE_DIR=d)
+        r = run_agent("run", "--client", "agy", "t", env=env)
+        self.assertEqual(r.returncode, 6, r.stdout + r.stderr)
+        self.assertIn("autoos-agent: HEADLESS-REFUSAL:", r.stderr)
+        self.assertIn("no output produced", r.stderr)
+        # The child's own output still reached our stdout (streamed, not swallowed).
+        self.assertIn("no output produced", r.stdout)
+
+    def test_run_client_keeps_the_tail_and_still_prints_the_output(self):
+        code = ("import sys\n"
+                "sys.stdout.write(%r)\n"
+                "sys.stdout.flush()\n" % self.AGY_REFUSAL)
+        with tempfile.TemporaryDirectory() as tmp:
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                rc = self.cli.run_client([sys.executable, "-c", code], tmp,
+                                         dict(os.environ))
+        self.assertEqual(rc, 0)
+        self.assertIn("no output produced", captured.getvalue())
+        self.assertIn("no output produced", rc.tail)
+        self.assertIsNotNone(self.cli.headless_refusal(rc.tail))
+
+    def test_the_tail_keeps_only_the_last_64_kib(self):
+        code = ("import sys\n"
+                "sys.stdout.write('a' * 70000 + 'THE-END')\n"
+                "sys.stdout.flush()\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = self.cli.run_client([sys.executable, "-c", code], tmp,
+                                         dict(os.environ))
+        self.assertEqual(rc, 0)
+        self.assertLessEqual(len(rc.tail.encode("utf-8")), 64 * 1024)
+        self.assertTrue(rc.tail.endswith("THE-END"))
 
 
 class KeyFileTests(unittest.TestCase):

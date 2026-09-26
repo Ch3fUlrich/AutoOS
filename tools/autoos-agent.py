@@ -68,7 +68,8 @@ or the `omniroute:` line of configuration/api-keys.yml and is handed to the
 child through its environment only. One line per run is appended to
 logs/orch-<date>.log (git-ignored), which the watchdog protocol reads.
 
-Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); the child's exit code; 2 bad arguments, card or route refused;
+Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); 6 = a headless client auto-denied a tool and
+exited 0 (HEADLESS-REFUSAL); the child's exit code; 2 bad arguments, card or route refused;
 3 gateway, key or client binary missing; 4 depth budget exhausted.
 """
 from __future__ import annotations
@@ -84,6 +85,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
@@ -97,6 +99,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
 GATEWAY = "http://127.0.0.1:20128"
 DEFAULT_FREE_MODEL = "opencode/big-pickle"
+# run_client re-emits a child's output as it arrives and keeps this much of it
+# so cmd_run can spot a headless refusal that still exited 0 (bug 2).
+TAIL_LIMIT = 64 * 1024
 # Track record class per route family (spec §5.6). Provisional until the
 # registry supplies route.class: t1 frontier, t2 cheap, t3 free.
 TRACK_CLASS = {"t1": "frontier", "t2": "cheap", "t3": "free"}
@@ -206,6 +211,16 @@ def slugify(text: str) -> str:
     return slug or "task"
 
 
+def unique_suffix() -> str:
+    """Six random hex chars that keep a sandbox name and branch unique.
+
+    Measured 2026-09-25: two spawns in the same second whose tasks started with
+    the same words named the same --isolate clone, and the second `git clone
+    --local` died with "fatal: destination path ... already exists" (rc 1).
+    """
+    return os.urandom(3).hex()
+
+
 def resolve_route(args, cfg: dict, client) -> dict:
     """Tier/model/combo for this run: an explicit --tier, or the card through select_combo."""
     # --model names a gateway combo for opencode and the gateway clients; for
@@ -260,11 +275,15 @@ def build_plan(args, cfg: dict) -> dict:
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     sandbox = None
     if args.isolate:
-        name = "%s-%s-%s" % (os.path.basename(ROOT), stamp, slugify(args.task))
+        # The readable prefix stays; the random suffix keeps two spawns in the
+        # same second (same task) from naming the same clone (bug 1).
+        slug = slugify(args.task)
+        uniq = unique_suffix()
+        name = "%s-%s-%s-%s" % (os.path.basename(ROOT), stamp, slug, uniq)
         # Inside the repo's git-ignored logs/ (clients.state_dir). The clone has
         # its own .git, so opencode resolves it as its own project root.
         sandbox = {"path": os.path.join(clients.state_dir(), "sandboxes", name),
-                   "branch": "agent/%s-%s" % (stamp, slugify(args.task))}
+                   "branch": "agent/%s-%s-%s" % (stamp, slug, uniq)}
         if client.name == "opencode":
             # opencode keys a project by its root commit and remembers the root it
             # saw first; a private data dir keeps the clone from inheriting the
@@ -378,6 +397,44 @@ def refuse(msg: str, rc: int = 2) -> int:
     return rc
 
 
+# A headless client that hits a tool it cannot prompt for prints one of these
+# and still exits 0 (measured 2026-09-25, run 20260925-215048-85ba11). Matched
+# case-insensitively so the wording can drift.
+HEADLESS_REFUSAL_MARKERS = ("no output produced", "headless mode cannot prompt")
+
+
+def headless_refusal(tail: str) -> str | None:
+    """The one-line refusal a headless client printed, or None.
+
+    Measured 2026-09-25: agy printed "no output produced - a tool required the
+    \"command\" permission that headless mode cannot prompt for, so it was
+    auto-denied" and exited 0. The agent's report is not evidence, but its own
+    refusal line is.
+    """
+    low = tail.lower()
+    if not any(m in low for m in HEADLESS_REFUSAL_MARKERS):
+        return None
+    for line in tail.splitlines():
+        if any(m in line.lower() for m in HEADLESS_REFUSAL_MARKERS):
+            return line.strip()
+    # A marker split across lines is still a refusal; report it as one line.
+    collapsed = " ".join(tail.split())
+    return collapsed[:240] or "the client refused a tool headless mode cannot prompt for"
+
+
+def refusal_exit(rc: int, tail: str) -> tuple:
+    """(exit code, stderr message) for a finished client.
+
+    rc 0 plus a refusal in the tail is a failure, not a success: exit 6 and
+    print the refusal. Any other rc passes through untouched.
+    """
+    if rc == 0:
+        msg = headless_refusal(tail)
+        if msg is not None:
+            return 6, msg
+    return rc, None
+
+
 def sandbox_verdict(route: dict, changed: str, ahead: str):
     """(rc override or None, message) for an --isolate run.
 
@@ -461,12 +518,30 @@ def _terminate_group(proc, pgid) -> None:
         pass
 
 
+class ClientExit(int):
+    """A client's exit code, carrying the tail run_client captured.
+
+    An int subclass, so every existing caller still compares it to a plain exit
+    code; `.tail` is the last TAIL_LIMIT bytes of the client's merged
+    stdout+stderr, decoded (bug 2 needs it to spot a headless refusal).
+    """
+    tail = ""
+
+    def __new__(cls, rc: int, tail: str = ""):
+        obj = super().__new__(cls, rc)
+        obj.tail = tail
+        return obj
+
+
 def run_client(cmd, cwd: str, env: dict, reap: bool = True) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
 
-    Returns the client's exit code; KeyboardInterrupt is re-raised after cleanup.
-    reap=False (a --joinable `claude --bg` session) leaves the group alone after exit
-    code 0: that session is meant to outlive this spawner. A failed start is reaped.
+    The child's stdout+stderr are merged, streamed to our stdout line by line
+    (unbuffered), and the last TAIL_LIMIT bytes are kept on the returned
+    ClientExit.tail. Returns the client's exit code; KeyboardInterrupt is
+    re-raised after cleanup. reap=False (a --joinable `claude --bg` session)
+    leaves the group alone after exit code 0: that session is meant to outlive
+    this spawner. A failed start is reaped.
     """
     # stdin closed: when it is an open pipe (cron, CI, an agent's shell)
     # `opencode run` waits to read it as extra prompt text and never starts
@@ -474,20 +549,51 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True) -> int:
     # leftovers (private Serena, language servers) survived a cancelled worker, measured 2026-09-25.
     if os.name == "nt":
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
         pgid = None
     else:
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 start_new_session=True)
         pgid = proc.pid  # start_new_session makes the client its own group leader
+    tail = bytearray()
+
+    def pump():
+        try:
+            for raw in proc.stdout:
+                try:
+                    sys.stdout.write(raw.decode("utf-8", "replace"))
+                    sys.stdout.flush()
+                except (OSError, ValueError):  # a closed/odd stdout must not kill the run
+                    pass
+                tail.extend(raw)
+                if len(tail) > TAIL_LIMIT:
+                    del tail[:len(tail) - TAIL_LIMIT]
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
     try:
         rc = proc.wait()
     except BaseException:  # KeyboardInterrupt included: clean up, then re-raise
         _terminate_group(proc, pgid)
+        reader.join(timeout=5)
         raise
     if reap or rc != 0:
         _terminate_group(proc, pgid)
-    return rc
+        reader.join(timeout=5)
+    else:
+        # A joinable session's background child may hold the pipe open; do not
+        # block the spawner waiting on output that is not this run's anyway.
+        reader.join(timeout=0.5)
+    if not reader.is_alive():  # a joinable session's background child owns the pipe
+        try:
+            proc.stdout.close()
+        except (OSError, ValueError):
+            pass
+    return ClientExit(rc, tail.decode("utf-8", "replace"))
 
 
 def cmd_run(args, cfg: dict) -> int:
@@ -567,6 +673,9 @@ def cmd_run(args, cfg: dict) -> int:
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
     start = time.time()
     rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable)
+    rc, refusal = refusal_exit(int(rc), getattr(rc, "tail", ""))
+    if refusal is not None:
+        print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
     log_run(plan, rc, time.time() - start, args.free)
     if rc == 0 and client.promo:
         clients.record_probe(client.name)
