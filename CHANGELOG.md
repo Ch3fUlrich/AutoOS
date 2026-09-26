@@ -5,6 +5,100 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — backups outside the installer never overwrite a same-second backup
+
+- `configuration/autostart/register-autostart.sh`, `configuration/docker/ai-stack/ai-stack.sh` (config backups and the
+  migrate `aside` directory) and `templates/rescue-bootstrap.sh` named backups `<file>.autoos-backup-<second>` and
+  overwrote an earlier backup taken in the same second. They now pick a name that did not exist yet (`-1`, `-2`, ...,
+  the rule of `lib/linux/install.sh` `backup_path`), and a failed copy leaves the file untouched.
+
+### Added — herdr-sessions: Claude Code panes come back after a reboot (opt-in, Linux)
+
+- **`configuration/herdr-sessions/`**, imported from the Server repo's `Applications/herdr-sessions` at 12f0ff7 and
+  scrubbed for a public repo (only `profiles/example.conf`, `/home/youruser` placeholders): systemd units snapshot
+  the live Claude Code sessions every 5 minutes and restore them into Herdr panes at boot (full resume).
+  `install.sh --profile` takes a profile name or an absolute path to a site profile kept outside AutoOS,
+  `--unregister` removes exactly the installed units (backup first; a second run says "nothing to remove"), and
+  a re-run with unchanged units prints `herdr-sessions: all units already current`.
+- **Fixes in the engine:** background (`claude --bg`) sessions are no longer picked as a pane's session (T1-T4),
+  and the pid registry wins over the newest transcript (T5-T7); `tests/test_herdr_sessions.py`.
+- **`herdr-server.service` sets `OOMPolicy=continue`** (user and system templates): one process killed by the
+  kernel OOM killer no longer stops the whole unit and every pane with it (happened twice on 2026-09-26).
+- **Catalog component `herdr-sessions`** (opt-in, in no profile): prompt `herdr_sessions_profile` = absolute
+  path of a site profile; empty => `skipped: no profile`. It and `claude-autostart` refuse each other. Detected
+  by `~/.config/systemd/user/herdr-sessions-restore.service`. The component reports `skipped` only when every
+  unit was already current, and a drifted unit's backup never overwrites a same-second earlier one.
+- **Operator step (not run):** on the herdr host, `./setup.sh --only herdr-sessions` with the site profile path;
+  it replaces the units installed from the Server repo copy (backed up first).
+
+### Added — the OmniRoute gateway can log in to Qoder, and knows its public origin
+
+- **The gateway image carries `qodercli`**: `configuration/docker/ai-stack/omniroute.Dockerfile` builds
+  `autoos/omniroute:3.8.50-autoos1` from the digest compose pinned, plus `@qoder-ai/qodercli@1.1.63`
+  (`CLI_QODER_BIN=/usr/local/bin/qodercli`). The Qoder PAT login in the dashboard failed with
+  `spawn qodercli ENOENT`. `qodercli` needs a writable HOME even for `--version`, so the read-only container gets
+  `HOME=/home/qoder` on a persistent bind mount `${AUTOOS_STACK_DATA}/qoder-home` (a tmpfs would give a new
+  machine id per restart); the login itself stays in the gateway data dir that backup and migrate cover.
+- **`ai-stack.sh up` builds every service with a `build:` stanza** and rebuilds it when the Dockerfile changed
+  (a source-hash label), and **creates missing data directories itself**; before, `up` on an initialised host
+  left a new bind-mount source for dockerd to create as root.
+- **`AUTOOS_OMNIROUTE_PUBLIC_URL`** (in `~/.config/autoos/ai-stack/stack.env`, placeholder in `stack.env.example`,
+  no hostname in git) sets `NEXT_PUBLIC_BASE_URL` and `OMNIROUTE_PUBLIC_BASE_URL`, pinning `BASE_URL` to loopback
+  while it is set. OmniRoute exits at startup on an invalid value (a crash loop under `restart: unless-stopped`),
+  so `up` and `migrate` refuse one first. Google logins (Antigravity) keep the loopback callback by design:
+  `docs/web-services.md` explains the host browser, `ssh -L 20128:127.0.0.1:20128 <host>`, or pasting the
+  failed callback URL.
+- **`ai-stack.sh verify`** checks `omniroute has qodercli` and prints the public URL as the gateway normalizes it
+  (skip when unset). It is no longer strictly read-only: `qodercli --version` writes its log files under the
+  qoder-home mount.
+- **Operator step:** `ai-stack.sh up omniroute` (try `--dry-run` first) recreates the gateway: a short gap on
+  :20128. Then `verify`, then retry the Qoder PAT login.
+- **Unverified:** the live PAT login, anything with the public URL set beyond the env plumbing (dashboard origin,
+  links, a remote Google login), and `up` against the live gateway. Measured: a `--no-cache` build, `qodercli
+  --version` = 1.1.63 as 1000:1000 on a read-only rootfs, and the whole gateway booting healthy in a scratch run.
+
+### Added — Playwright MCP starts its container only when a session browses, and stops it when idle
+
+- **`tools/playwright_mcp_lazy.py`**, a per-session stdio proxy: it answers the session-start handshake and
+  `tools/list` from a cache, starts the Playwright container on the first real call, stops it after 15 minutes
+  idle (`AUTOOS_PLAYWRIGHT_IDLE_SECONDS`) and starts it again on demand; the proxy itself stays up, because Claude
+  Code does not reconnect a stdio server that exits. The containers left running were held by live but idle
+  sessions that had started them eagerly; an owner's exit already stopped its container.
+- **Measured live** (Claude Code 2.1.283, the real image, 2026-09-26): a warm cache and no browsing start no
+  container; a cold start takes ~1.5 s; the idle stop came 20 s after the last call at an idle of 20 s; the proxy
+  uses ~13 MB RSS.
+- **Hardened after a cross-family review:** the backend starts on its own thread; backend-initiated request ids
+  carry a generation so a stopped backend's late answer never reaches the next one; a duplicate in-flight id is
+  refused (`-32600`); `NaN`/`Infinity` are parse errors. The cache is believed only as a regular file (no
+  symlink, no FIFO hang) of at most 4 MiB, owned by the user and not writable by group or others, in a directory
+  that is too; it lives in `~/.cache/autoos/playwright-mcp/` (0700), apart from the shared `~/.cache/autoos`,
+  which the image cache creates group-writable under umask 002.
+- **Installer switch:** `./setup.sh --only mcp-playwright` replaces only the two known Playwright entry forms
+  and a proxy entry from another checkout path, after backing up the Claude config; a failed backup stops the
+  write. Sessions started before keep their old containers until they end.
+- **Residuals:** JSON-RPC batches are rejected (MCP 2025-06 and later has none).
+
+### Changed — Linux installs the Antigravity Hub 2.x in user space and can update it
+
+- **`./setup.sh --only antigravity` installs the Antigravity Hub** (2.17.0 today) into `~/.local/opt/antigravity`
+  with a command link `~/.local/bin/antigravity` and a desktop entry. No sudo, no apt, nothing root-owned. The
+  vendor publishes no Linux feed, so the newest version is read from the `microsoft/winget-pkgs` manifest: highest
+  numeric version, download URL built only from a constant host plus the version id (nothing taken from the manifest
+  text), a rate-limited GitHub API (403/429) reported with its reset time, a `GITHUB_TOKEN`/`GH_TOKEN` passed on stdin
+  only.
+- **Verified before anything is replaced:** size against `Content-Length` and a floor, gzip, tar members (no `..`,
+  absolute path, link, device or setuid entry), an ELF main binary, `chrome-sandbox`, and the `app.asar` version equal
+  to the manifest's. A failed check leaves the current install byte-identical; install and update are staged and
+  swapped; a directory or link AutoOS did not create (stamp-based ownership) is never touched.
+- **`./setup.sh --update`** (or `--only antigravity --update`) replaces the install only when the discovered version is
+  newer; `--dry-run` names the lookup and the target directory. The old apt package `antigravity` (IDE 1.23.2) is not
+  removed: a warning names the removal commands and the PATH order.
+- **Electron sandbox:** when the kernel restricts unprivileged user namespaces, the installer prints the two sudo
+  commands for `chrome-sandbox`; it never runs sudo.
+- **Unverified, on purpose stated:** the Linux download has no published sha256 (the checks above, TLS and winget-pkgs
+  are the only provenance); the sandbox step on this kernel and the Hub's MCP-config location were not exercised
+  (the MCP writers are unchanged).
+
 ### Added — the Windows OpenCode writer knows the V2 CLI
 
 - **`Set-AutoOSOpenCodeConfig` writes the V2 `providers` block** when `opencode --version` reports 2.x (the same

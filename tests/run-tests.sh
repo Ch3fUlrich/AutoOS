@@ -1233,6 +1233,14 @@ if it "agent harness: the generator's unit tests pass"; then
     fi
 fi
 
+if it "playwright lazy proxy: the stdio proxy's unit tests pass (fake backend, no docker)"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_playwright_mcp_lazy.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
+fi
+
 if it "serena memory tools off from harness field (serena)"; then
     report="$(python3 - 2>&1 <<'PY'
 import json, re, io
@@ -2445,7 +2453,9 @@ fi
 
 if it "undo never uninstalls anything"; then
     # The safety property, asserted on the source rather than by removing software.
-    if grep -qE '(apt-get remove|brew uninstall|npm uninstall)' lib/linux/install.sh; then
+    # Lines that only PRINT a command for the operator (ui_warn/ui_muted/... messages, e.g. the
+    # old-apt-package hint) are not commands the installer runs.
+    if grep -vE '^[[:space:]]*ui_[a-z_]+[[:space:]]' lib/linux/install.sh | grep -qE '(apt-get remove|brew uninstall|npm uninstall)'; then
         fail "undo path contains an uninstall command"
     else pass; fi
 fi
@@ -3343,113 +3353,1310 @@ if it "install_devin_cli announces in dry run and writes nothing"; then
     else fail "dry run wrote or stayed silent"; fi
 fi
 
-# Operator 2026-09-25: the Antigravity app "was not available" on Linux, yet
-# the run said installed - a blank pasted .deb URL returned 0, so
-# install_package counted it installed. F7 removed the cause: Google publishes
-# a signed apt repo (antigravity.google/download/linux), so there is no URL
-# to ask for and nothing to leave blank. The repo is frozen at 1.23.2 (the 2.x
-# apps are tarball-only) and the installer says so.
+# Antigravity on Linux is the HUB (Antigravity 2.x, an Electron app), not the IDE
+# (operator decision 2026-09-26). Windows keeps winget Google.Antigravity, which
+# already is the Hub. The newest version is DISCOVERED at install time from the
+# winget-pkgs manifests on GitHub (no pin); the Linux tarball hangs off the same
+# <version>-<build> segment the manifest's windows-x64 URL carries. Facts measured
+# 2026-09-26 that these fixtures mirror: the contents API lists 28 version
+# directories in STRING order (2.17.0 sorts before 2.4.2), the tarball has NO
+# published sha256 (only a crc32c header), every member sits under
+# Antigravity-x64/, the ELF binary is Antigravity-x64/antigravity, chrome-sandbox
+# is a plain 755 file and app.asar carries package.json and icon.png.
 #
-# antigravity_run <scratch> <dry 0|1> [fail-curl] [stale-answer]
-# One install_antigravity run in its own subshell (a fresh APT_UPDATED, like a
-# fresh process) against a scratch apt tree via the AUTOOS_APT_PREFIX test
-# seam. Everything that could touch the machine is a recording stub in
-# <scratch>/calls.log, so this can neither install, write to /etc nor reach
-# the network (AGENTS.md section 5).
-antigravity_run() {
-    local sb="$1" dry="$2" mode="${3:-}" stale="${4:-}"
-    (
-        AUTOOS_DRY_RUN="$dry"; AUTOOS_SUDO=""; AUTOOS_APT_PREFIX="$sb"; APT_UPDATED=0
-        [[ -n "$stale" ]] && AUTOOS_ANSWERS['antigravity_url']=https://example.invalid/stale.deb
-        log="$sb/calls.log"
-        curl() {
-            printf 'curl %s\n' "$*" >>"$log"
-            [[ "$mode" == fail-curl ]] && return 22
-            local o="" p="" a
-            for a in "$@"; do [[ "$p" == "-o" ]] && o="$a"; p="$a"; done
-            if [[ -n "$o" ]]; then printf 'ARMORED-KEY\n' >"$o"; else printf 'ARMORED-KEY\n'; fi
-        }
-        gpg() { printf 'gpg %s\n' "$*" >>"$log"; sed 's/^/DEARMORED:/'; }
-        install() {
-            printf 'install %s\n' "$*" >>"$log"
-            local src="${*: -2:1}" dst="${*: -1}"
-            mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
-        }
-        tee() { printf 'tee %s\n' "$*" >>"$log"; command tee "$@"; }
-        # shellcheck disable=SC2120  # stub: install_antigravity (sourced, not visible here) calls it with arguments
-        run() { printf 'run %s\n' "$*" >>"$log"; }
-        install_antigravity
-    ) 2>&1
+# Every test runs against a scratch tree with a curl stub that serves the listing,
+# the manifest and a tiny fake tarball with the real layout, and that RECORDS the
+# argv and stdin of every call. None reaches the network, the real HOME or sudo
+# (AGENTS.md section 5).
+AG_LISTING_URL="https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/g/Google/Antigravity"
+AG_MANIFEST_BASE="https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/g/Google/Antigravity"
+AG_BUCKET="https://storage.googleapis.com/antigravity-public/antigravity-hub"
+AG_MARKER="autoos-antigravity-hub"
+AG_VA="2.17.0"; AG_IDA="2.17.0-5217732355031040"
+AG_VB="2.18.0"; AG_IDB="2.18.0-5300000000000001"
+AG_RESET=1790000000
+
+# antigravity_scratch: prints a fresh scratch dir (home/ tmp/ serve/ manifest/ oldbin/).
+antigravity_scratch() {
+    local sb; sb="$(mktemp -d)"
+    mkdir -p "$sb/home" "$sb/tmp" "$sb/serve" "$sb/manifest" "$sb/oldbin"
+    printf '%s\n' "$sb"
 }
 
-AG_KEY_URL="https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg"
-AG_LIST_LINE="deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main"
-
-if it "install_antigravity dry run names Google's apt repo and package, asks for no URL, writes nothing"; then
-    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
-    out="$(antigravity_run "$sb" 1 "" stale)"; rc=$?
-    ok=1
-    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
-    [[ "$out" == *"us-central1-apt.pkg.dev"* && "$out" == *"antigravity"* ]] \
-        || { ok=0; echo "does not name the apt repo and package: $out" >&2; }
-    for bad in ".deb" "download URL" "antigravity_url" "example.invalid"; do
-        [[ "$out" != *"$bad"* ]] || { ok=0; echo "mentions '$bad': $out" >&2; }
+# antigravity_listing <scratch> [name[:type] ...]: the contents-API answer, in the
+# string order GitHub returns (type defaults to dir).
+antigravity_listing() {
+    local sb="$1" e out="[" sep=""; shift
+    for e in "$@"; do
+        [[ "$e" == *:* ]] || e="$e:dir"
+        out+="$sep{\"name\":\"${e%%:*}\",\"type\":\"${e#*:}\"}"; sep=","
     done
-    [[ ! -s "$sb/calls.log" ]] || { ok=0; echo "a dry run ran commands: $(cat "$sb/calls.log")" >&2; }
-    [[ -z "$(find "$sb/etc" -type f)" ]] || { ok=0; echo "a dry run wrote files" >&2; }
-    rm -rf "$sb"
-    if (( ok )); then pass; else fail "the Antigravity dry run still asks for a .deb URL or touches the machine"; fi
-fi
+    printf '%s]\n' "$out" >"$sb/listing.json"
+}
 
-if it "install_antigravity real run adds Google's signed apt repo, installs the package, warns the repo is frozen"; then
-    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
-    out="$(antigravity_run "$sb" 0 "" stale)"; rc=$?
+# antigravity_manifest <scratch> <version> <build-id>: the raw installer manifest,
+# in the shape measured on 2026-09-26 (an x64 and an arm64 Windows installer).
+antigravity_manifest() {
+    local sb="$1" ver="$2" id="$3"
+    cat >"$sb/manifest/$ver.yaml" <<EOF
+PackageIdentifier: Google.Antigravity
+PackageVersion: $ver
+InstallerType: nullsoft
+Protocols:
+- antigravity
+Installers:
+- Architecture: x64
+  InstallerUrl: $AG_BUCKET/$id/windows-x64/Antigravity-x64.exe
+  InstallerSha256: 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
+- Architecture: arm64
+  InstallerUrl: $AG_BUCKET/$id/windows-arm64/Antigravity-arm64.exe
+  InstallerSha256: FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210
+ManifestType: installer
+ManifestVersion: 1.6.0
+EOF
+}
+
+# antigravity_build <scratch> <build-id> [variant]
+# serve/<build-id>.tar.gz: a tiny tarball with the real layout. variants: garbage
+# (not a tarball), corrupt (a damaged gzip stream), dotdot, absolute, symlink,
+# hardlink, fifo, setuid, setgid, wrongtop, nosandbox, sandboxlink, noasar, asarver,
+# noelf, noicon, nestedicon (icon.png under resources/ inside the asar), unpackedicon
+# (the icon lives in resources/app.asar.unpacked/), dotdoticon (the asar names the icon
+# "../icon.png", unpacked, and a decoy PNG sits at resources/icon.png), size and
+# sizehead (see antigravity_serve). Sets AG_SIZE and AG_SHA (the tarball's size and sha256).
+antigravity_build() {
+    local sb="$1" id="$2" variant="${3:-}" tree top asarver="${2%%-*}" out
+    local -a icon_arg=()
+    tree="$sb/pkg/$id"; top="$tree/Antigravity-x64"; out="$sb/serve/$id.tar.gz"
+    rm -rf "$tree"; mkdir -p "$top/resources" "$top/locales"
+    printf '\177ELF\002\001\001\000fake electron binary %s\n' "$id" >"$top/antigravity"
+    [[ "$variant" != noelf ]] || printf '#!/bin/sh\necho not an ELF\n' >"$top/antigravity"
+    printf 'sandbox %s\n' "$id" >"$top/chrome-sandbox"
+    printf 'pak\n' >"$top/locales/en-US.pak"
+    chmod 755 "$top/antigravity" "$top/chrome-sandbox"
+    [[ "$variant" != asarver ]] || asarver="0.0.1"
+    case "$variant" in noicon|nestedicon|unpackedicon|dotdoticon) icon_arg=("$variant") ;; esac
+    python3 "$ROOT/tests/helpers/fake_antigravity_asar.py" "$top/resources/app.asar" "$asarver" "${icon_arg[@]}"
+    case "$variant" in
+        nosandbox)   rm -f "$top/chrome-sandbox" ;;
+        sandboxlink) rm -f "$top/chrome-sandbox"; ln -s /usr/bin/true "$top/chrome-sandbox" ;;
+        noasar)      rm -f "$top/resources/app.asar" ;;
+        setuid)      chmod 4755 "$top/chrome-sandbox" ;;
+        setgid)      chmod 2755 "$top/antigravity" ;;
+        symlink)     ln -s /etc/passwd "$top/resources/link" ;;
+        hardlink)    printf 'pak\n' >"$top/locales/en-GB.pak"; ln -f "$top/locales/en-GB.pak" "$top/locales/en-AU.pak" ;;
+        fifo)        mkfifo "$top/resources/pipe" ;;
+        dotdot|absolute) printf 'evil\n' >"$top/extra" ;;
+        unpackedicon)    mkdir -p "$top/resources/app.asar.unpacked"; printf '\211PNG\r\n\032\nunpacked icon\n' >"$top/resources/app.asar.unpacked/icon.png" ;;
+        dotdoticon)      mkdir -p "$top/resources/app.asar.unpacked"; printf '\211PNG\r\n\032\nOUTSIDE the unpacked dir\n' >"$top/resources/icon.png" ;;
+    esac
+    case "$variant" in
+        garbage)  head -c 2000 /dev/zero >"$out" ;;
+        dotdot)   tar -czf "$out" --transform 's,^Antigravity-x64/extra$,../extra,' -C "$tree" Antigravity-x64 2>/dev/null ;;
+        absolute) tar -czf "$out" --transform 's,^Antigravity-x64/extra$,/tmp/autoos-extra,' -C "$tree" Antigravity-x64 2>/dev/null ;;
+        wrongtop) tar -czf "$out" --transform 's,^Antigravity-x64,Antigravity,' -C "$tree" Antigravity-x64 ;;
+        *)        tar -czf "$out" -C "$tree" Antigravity-x64 ;;
+    esac
+    if [[ "$variant" == corrupt ]]; then
+        printf '\377\377\377\377\377\377\377\377' | dd of="$out" bs=1 seek=48 conv=notrunc 2>/dev/null
+        ! gzip -t "$out" 2>/dev/null || echo "fixture: the corrupt tarball still passes gzip -t" >&2
+    fi
+    AG_SIZE="$(wc -c <"$out" | tr -d ' ')"
+    AG_SHA="$(sha256sum "$out" | awk '{print $1}')"
+}
+
+# antigravity_serve <scratch> <version> <build-id> [variant]: publishes that version
+# (its manifest, its tarball) and lists it next to three older ones, in string order.
+# Calling it again for a newer version leaves the older one in the listing.
+antigravity_serve() {
+    local sb="$1" ver="$2" id="$3" variant="${4:-}" v
+    printf '%s\n' "$ver" >>"$sb/versions"
+    antigravity_build "$sb" "$id" "$variant"
+    antigravity_manifest "$sb" "$ver" "$id"
+    case "$variant" in
+        size)     printf '%s' "$((AG_SIZE + 7))" >"$sb/get.size" ;;
+        sizehead) printf '%s' "$((AG_SIZE + 7))" >"$sb/head.size" ;;
+    esac
+    local -a names=()
+    while IFS= read -r v; do names+=("$v"); done < <({ printf '%s\n' 2.4.2 2.4.3 2.9.1; cat "$sb/versions"; } | LC_ALL=C sort -u)
+    antigravity_listing "$sb" "${names[@]}"
+}
+
+# antigravity_run <scratch> [VAR=value ...]
+# One run in its own subshell (fresh globals, like a fresh process). The entry is
+# install_component script antigravity (what setup.sh calls) unless AG_ENTRY=direct
+# (install_antigravity itself, past the is_installed gate - which is where --update
+# lands) or AG_ENTRY=latest (antigravity_hub_latest alone). Sets AG_OUT, AG_STATE
+# (installed|skipped|failed) and AG_RC. Everything that could touch the machine is
+# a stub that logs to <scratch>/calls.log; VAR=value arguments are exported into
+# the subshell (AUTOOS_DRY_RUN=1, AUTOOS_UPDATE=1, GITHUB_TOKEN=..., AG_OLD_APT=1,
+# AG_SYSCTL=restricted|clone0|unreadable|allowed, AG_HOME=<other home>, ...).
+antigravity_run() {
+    local sb="$1"; shift
+    AG_OUT="$(
+        (
+            export TMPDIR="$sb/tmp"
+            CATALOG_PATH="$ROOT/catalog/linux.json"
+            AUTOOS_DRY_RUN=0; AUTOOS_UPDATE=0; AUTOOS_SUDO=sudo_rec; AG_ENTRY=component
+            AUTOOS_ANTIGRAVITY_MIN_BYTES=100; SYS_IS_ROOT=0
+            unset GITHUB_TOKEN GH_TOKEN
+            for kv in "$@"; do export "${kv?}"; done
+            # AG_TRAPS: clear (default) - this subshell must not replay the harness's EXIT trap;
+            # own - a caller trap set in the very shell that runs the install; inherited -
+            # the caller's traps stay as this subshell got them (the traps test wraps the
+            # call in a shell of its own that has one)
+            case "${AG_TRAPS:-clear}" in
+                clear)     trap - EXIT INT TERM ;;
+                own)       trap - EXIT INT TERM; trap 'echo CALLER_EXIT' EXIT ;;
+                inherited) ;;
+            esac
+            HOME="${AG_HOME:-$sb/home}"; SYS_HOME="$HOME"; export HOME SYS_HOME
+            XDG_CONFIG_HOME="$HOME/.config"; export XDG_CONFIG_HOME
+            PATH="${AG_PATH_FIRST:+$AG_PATH_FIRST:}$HOME/.local/bin:$PATH"; export PATH
+            log="$sb/calls.log"
+            # reply <status> <file|->: what one curl answer looks like - the -D file,
+            # the -o file, and curl's exit 22 for --fail on an error status.
+            reply() {
+                local status="$1" file="$2"
+                if [[ -n "$hdr" ]]; then
+                    { printf 'HTTP/2 %s\r\n' "$status"; sed 's/$/\r/' "$extra"; printf '\r\n'; } >"$hdr"
+                fi
+                if (( fail && status >= 400 )); then return 22; fi
+                if (( ! head )) && [[ -n "$body" && "$file" != - ]]; then cp -- "$file" "$body"; fi
+                return 0
+            }
+            curl() {
+                local a prev="" url="" hdr="" body="" cfg=0 head=0 fail=0 maxsize="" n extra size ver id file st
+                n="$(( $(cat "$sb/ncalls" 2>/dev/null || echo 0) + 1 ))"; printf '%s' "$n" >"$sb/ncalls"
+                printf 'curl %s\n' "$*" >>"$log"
+                for a in "$@"; do
+                    case "$prev" in -D) hdr="$a" ;; -o) body="$a" ;; --max-filesize) maxsize="$a" ;; --config) [[ "$a" != - ]] || cfg=1 ;; esac
+                    case "$a" in --head) head=1 ;; --fail) fail=1 ;; esac
+                    prev="$a"; url="$a"
+                done
+                if (( cfg )); then { printf '=== call %s %s\n' "$n" "$url"; cat; } >>"$sb/stdin.log"; fi
+                [[ -z "$body" || "$body" == /dev/null ]] || stat -c %a "$(dirname "$body")" >>"$sb/stagemode.log"
+                [[ ! -e "$sb/offline" ]] || return 6
+                extra="$sb/extra.$n"; : >"$extra"
+                case "$url" in
+                    "$AG_LISTING_URL")
+                        [[ ! -e "$sb/listing.offline" ]] || return 6
+                        cp "$sb/listing.headers" "$extra" 2>/dev/null || true
+                        reply "$(cat "$sb/listing.status" 2>/dev/null || echo 200)" "$sb/listing.json" ;;
+                    "$AG_MANIFEST_BASE"/*/Google.Antigravity.installer.yaml)
+                        ver="${url#"$AG_MANIFEST_BASE"/}"; ver="${ver%%/*}"
+                        if [[ -f "$sb/manifest/$ver.yaml" ]]; then reply 200 "$sb/manifest/$ver.yaml"; else reply 404 -; fi ;;
+                    "$AG_BUCKET"/*/linux-x64/Antigravity.tar.gz)
+                        id="${url#"$AG_BUCKET"/}"; id="${id%%/*}"; file="$sb/serve/$id.tar.gz"
+                        if [[ ! -f "$file" ]]; then reply 404 -; return; fi
+                        size="$(wc -c <"$file" | tr -d ' ')"; st=200
+                        if (( head )); then
+                            [[ ! -f "$sb/head.size" ]] || size="$(<"$sb/head.size")"
+                            [[ ! -f "$sb/head.status" ]] || st="$(<"$sb/head.status")"
+                        else
+                            [[ ! -f "$sb/get.size" ]] || size="$(<"$sb/get.size")"
+                            [[ ! -f "$sb/get.status" ]] || st="$(<"$sb/get.status")"
+                            # a file at the OLD predictable desktop temp name (.antigravity.desktop.<pid>)
+                            [[ ! -e "$sb/plant-desktop-tmp" ]] || { mkdir -p "$HOME/.local/share/applications"; printf 'victim\n' >"$HOME/.local/share/applications/.antigravity.desktop.$BASHPID"; }
+                            [[ ! -e "$sb/kill-on-download" ]] || kill -TERM "$BASHPID"
+                            [[ ! -e "$sb/exit-on-download" ]] || exit 5
+                            # like curl: a body announced as bigger than --max-filesize is refused
+                            # (exit 63) after its headers, before any of it is written
+                            if [[ -n "$maxsize" ]] && (( size > maxsize )); then
+                                printf 'content-length: %s\n' "$size" >"$extra"; head=1; reply 200 -; return 63
+                            fi
+                        fi
+                        printf 'content-length: %s\ncontent-type: application/x-tar\nx-goog-hash: crc32c=AAAAAA==\n' "$size" >"$extra"
+                        reply "$st" "$file" ;;
+                    *) printf 'unexpected URL %s\n' "$url" >>"$sb/unexpected.log"; return 22 ;;
+                esac
+            }
+            # run() executes through python3 in real life, which no function stub can
+            # see; here it logs and runs the stub function by name.
+            run() { printf 'run %s\n' "$*" >>"$log"; "$@"; }
+            sudo() { printf 'sudo %s\n' "$*" >>"$log"; }
+            sudo_rec() { printf 'sudo %s\n' "$*" >>"$log"; }
+            chown() { printf 'chown %s\n' "$*" >>"$log"; }
+            # AG_MV_FAIL_DESKTOP=1: the final rename of the desktop entry's temp file fails
+            mv() { if [[ "${AG_MV_FAIL_DESKTOP:-0}" == 1 && "$*" == *.antigravity.desktop.* ]]; then return 1; fi; command mv "$@"; }
+            update-desktop-database() { printf 'update-desktop-database %s\n' "$*" >>"$log"; }
+            xdg-mime() {
+                printf 'xdg-mime %s\n' "$*" >>"$log"
+                if [[ "$1 $2" == "query default" ]]; then printf '%s\n' "${AG_MIME_DEFAULT:-}"; fi
+                return 0
+            }
+            dpkg() { [[ "${AG_OLD_APT:-0}" == 1 && "$1" == -s && "$2" == antigravity ]]; }
+            sysctl() {
+                case "$2:${AG_SYSCTL:-allowed}" in
+                    kernel.apparmor_restrict_unprivileged_userns:restricted) echo 1 ;;
+                    kernel.apparmor_restrict_unprivileged_userns:allowed) echo 0 ;;
+                    kernel.unprivileged_userns_clone:clone0) echo 0 ;;
+                    kernel.unprivileged_userns_clone:allowed|kernel.unprivileged_userns_clone:restricted) echo 1 ;;
+                    *) return 1 ;;
+                esac
+            }
+            getent() {
+                if [[ "$1 $2" == "passwd root" ]]; then printf 'root:x:0:0:root:%s:/bin/sh\n' "${AG_ROOT_HOME:-/root}"
+                else command getent "$@"; fi
+            }
+            _extra_bin_dirs() { printf '%s\n' "$SYS_HOME/.local/bin"; }
+            if [[ -n "${AG_AFTER_STAGE:-}" ]]; then
+                # AG_AFTER_STAGE=term|exit: a SIGTERM or an exit right after the staging
+                # directory exists, before the first request or check runs.
+                eval "ag_orig_$(declare -f antigravity_stage_make)"
+                antigravity_stage_make() {
+                    ag_orig_antigravity_stage_make "$@" || return
+                    case "$AG_AFTER_STAGE" in
+                        term) kill -TERM "$BASHPID" ;;
+                        exit) exit 5 ;;
+                    esac
+                }
+            fi
+            rc=0
+            case "$AG_ENTRY" in
+                latest)
+                    antigravity_hub_latest "$sb/tmp" || rc=$?
+                    printf 'AGLATEST %s %s %s\n' "${ANTIGRAVITY_VERSION:-}" "${ANTIGRAVITY_ID:-}" "${ANTIGRAVITY_URL:-}"
+                    st=installed; (( rc == 0 )) || st=failed ;;
+                direct)
+                    INSTALL_SCRIPT_STATE=""
+                    install_antigravity || rc=$?
+                    st="${INSTALL_SCRIPT_STATE:-installed}"; (( rc == 0 )) || st=failed ;;
+                *)
+                    install_component script antigravity 0 || rc=$?
+                    st="$INSTALL_STATE" ;;
+            esac
+            printf 'AGRESULT %s %s\n' "$st" "$rc"
+            [[ "${AG_TRAPS:-clear}" != own ]] || printf 'AGTRAPS %s\n' "$(trap -p EXIT | tr '\n' ' ')"
+        ) 2>&1
+    )"
+    AG_STATE="$(sed -n 's/^AGRESULT \([a-z]*\) [0-9]*$/\1/p' <<<"$AG_OUT")"
+    AG_RC="$(sed -n 's/^AGRESULT [a-z]* \([0-9]*\)$/\1/p' <<<"$AG_OUT")"
+}
+
+# antigravity_count <scratch> <ERE>: how many recorded calls match (0 when none).
+antigravity_count() {
+    local n
+    n="$(grep -cE -- "$2" "$1/calls.log" 2>/dev/null || true)"
+    printf '%s\n' "${n:-0}"
+}
+
+# antigravity_tree_state <scratch> [home]: every file (sha256 and mode), symlink
+# (target) and directory under the home - equal before and after means "nothing
+# was written, nothing was left behind" (a stage or .old directory shows up).
+antigravity_tree_state() {
+    (
+        cd "${2:-$1/home}" || exit 1
+        find . -type f -exec sha256sum {} +
+        find . -type f -printf 'mode %p %m\n'
+        find . -type l -printf 'link %p -> %l\n'
+        find . -type d -printf 'dir %p\n'
+    ) | LC_ALL=C sort
+}
+
+# antigravity_debris <scratch> [home]: leftovers of an install attempt.
+antigravity_debris() {
+    find "${2:-$1/home}" \( -name '.antigravity-stage.*' -o -name 'antigravity.old-*' -o -name 'antigravity.new' \
+        -o -name '*.part' -o -name '.antigravity.desktop.*' -o -name 'pkg.tgz' \) -print 2>/dev/null
+}
+
+# antigravity_problems <scratch> <build-id> [home]: one line per thing that is not as
+# a finished install of that build must leave it; empty when all is right.
+antigravity_problems() {
+    local sb="$1" id="$2" home="${3:-$1/home}" dir link dt magic want_size want_sha
+    dir="$home/.local/opt/antigravity"; link="$home/.local/bin/antigravity"
+    dt="$home/.local/share/applications/antigravity.desktop"
+    want_size="$(wc -c <"$sb/serve/$id.tar.gz" | tr -d ' ')"; want_sha="$(sha256sum "$sb/serve/$id.tar.gz" | awk '{print $1}')"
+    magic="$(head -c4 "$dir/antigravity" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    [[ "$magic" == 7f454c46 ]] || printf 'antigravity in %s is not the ELF binary (magic [%s])\n' "$dir" "$magic"
+    [[ -f "$dir/chrome-sandbox" && ! -L "$dir/chrome-sandbox" ]] || printf 'chrome-sandbox is missing or a link\n'
+    [[ -f "$dir/resources/app.asar" ]] || printf 'resources/app.asar is missing (top dir not stripped?)\n'
+    [[ "$(sed -n 1p "$dir/.autoos-version" 2>/dev/null)" == "$AG_MARKER" ]] || printf 'stamp line 1 is [%s]\n' "$(sed -n 1p "$dir/.autoos-version" 2>&1)"
+    [[ "$(sed -n 2p "$dir/.autoos-version" 2>/dev/null)" == "$id" ]] || printf 'stamp line 2 is [%s], not %s\n' "$(sed -n 2p "$dir/.autoos-version" 2>&1)" "$id"
+    [[ "$(sed -n 3p "$dir/.autoos-version" 2>/dev/null)" == "size=$want_size" ]] || printf 'stamp line 3 is [%s], not size=%s\n' "$(sed -n 3p "$dir/.autoos-version" 2>&1)" "$want_size"
+    [[ "$(sed -n 4p "$dir/.autoos-version" 2>/dev/null)" == "sha256=$want_sha" ]] || printf 'stamp line 4 is [%s], not sha256=%s\n' "$(sed -n 4p "$dir/.autoos-version" 2>&1)" "$want_sha"
+    [[ "$(readlink "$link" 2>/dev/null)" == "$dir/antigravity" ]] || printf 'command link is [%s], not %s\n' "$(readlink "$link" 2>&1)" "$dir/antigravity"
+    grep -qxF 'Type=Application' "$dt" 2>/dev/null || printf 'desktop entry has no Type=Application\n'
+    grep -qxF 'Name=Antigravity' "$dt" 2>/dev/null || printf 'desktop entry has no Name=Antigravity\n'
+    grep -qxF 'Terminal=false' "$dt" 2>/dev/null || printf 'desktop entry has no Terminal=false\n'
+    grep -qxF 'Categories=Development;IDE;' "$dt" 2>/dev/null || printf 'desktop entry has no Categories\n'
+    grep -qxF 'StartupWMClass=Antigravity' "$dt" 2>/dev/null || printf 'desktop entry has no StartupWMClass\n'
+    grep -qxF 'MimeType=x-scheme-handler/antigravity;' "$dt" 2>/dev/null || printf 'desktop entry has no scheme handler\n'
+    grep -qxF "Exec=\"$dir/antigravity\" %U" "$dt" 2>/dev/null || printf 'desktop Exec line wrong: %s\n' "$(grep '^Exec' "$dt" 2>&1)"
+    grep -qxF "Icon=$dir/icon.png" "$dt" 2>/dev/null || printf 'desktop Icon line wrong: %s\n' "$(grep '^Icon' "$dt" 2>&1)"
+    [[ -f "$dir/icon.png" ]] || printf '%s/icon.png was not extracted from app.asar\n' "$dir"
+    [[ -z "$(antigravity_debris "$sb" "$home")" ]] || printf 'left behind: %s\n' "$(antigravity_debris "$sb" "$home" | tr '\n' ' ')"
+}
+
+if it "antigravity fresh install: verified and installed into ~/.local/opt/antigravity with stamp, command link and desktop entry, and no sudo, chown or chmod"; then
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb"
     ok=1
-    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
-    grep -qF -- "$AG_KEY_URL" "$sb/calls.log" || { ok=0; echo "key not fetched from $AG_KEY_URL" >&2; }
-    grep -q '^gpg .*--dearmor' "$sb/calls.log" || { ok=0; echo "key not dearmored" >&2; }
-    [[ "$(cat "$sb/etc/apt/keyrings/antigravity-repo-key.gpg" 2>/dev/null)" == "DEARMORED:ARMORED-KEY" ]] \
-        || { ok=0; echo "dearmored key not installed at the keyring path" >&2; }
-    [[ "$(cat "$sb/etc/apt/sources.list.d/antigravity.list" 2>/dev/null)" == "$AG_LIST_LINE" ]] \
-        || { ok=0; echo "source line differs from Google's: $(cat "$sb/etc/apt/sources.list.d/antigravity.list" 2>&1)" >&2; }
-    [[ "$(grep '^run ' "$sb/calls.log")" == $'run apt-get update -y\nrun apt-get install -y antigravity' ]] \
-        || { ok=0; echo "apt commands: $(grep '^run ' "$sb/calls.log" | tr '\n' '|')" >&2; }
-    [[ "$out" == *"frozen"* && "$out" == *"1.23.2"* ]] || { ok=0; echo "no frozen-repo warning: $out" >&2; }
-    ! grep -q 'example.invalid' "$sb/calls.log" || { ok=0; echo "a stale antigravity_url answer was used" >&2; }
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:900}" >&2; }
+    probs="$(antigravity_problems "$sb" "$AG_IDA")"
+    [[ -z "$probs" ]] || { ok=0; echo "$probs" >&2; }
+    [[ "$(antigravity_count "$sb" '^(sudo|chown|chmod|run (sudo|chown|chmod)) ')" == 0 ]] \
+        || { ok=0; echo "the installer privileged or re-moded something: $(grep -E '^(sudo|chown|chmod|run (sudo|chown|chmod)) ' "$sb/calls.log")" >&2; }
+    [[ "$(stat -c %A "$sb/home/.local/opt/antigravity/chrome-sandbox" 2>/dev/null)" =~ ^-rwxr.xr.x$ ]] \
+        || { ok=0; echo "chrome-sandbox is [$(stat -c %A "$sb/home/.local/opt/antigravity/chrome-sandbox" 2>&1)]: not a plain executable file, or setuid" >&2; }
+    [[ "$AG_OUT" == *"no published sha256"* ]] || { ok=0; echo "the output does not say plainly that there is no published sha256: ${AG_OUT:0:600}" >&2; }
+    [[ "$AG_OUT" != *"--no-sandbox"* ]] || { ok=0; echo "the output mentions --no-sandbox" >&2; }
+    [[ "$AG_OUT" != *"apt-get remove"* ]] || { ok=0; echo "warned about an old apt package that is not installed" >&2; }
+    [[ "$(antigravity_count "$sb" '^update-desktop-database ')" == 1 ]] \
+        || { ok=0; echo "update-desktop-database was not run once: [$(grep '^update' "$sb/calls.log" 2>&1)]" >&2; }
+    [[ -s "$sb/unexpected.log" ]] && { ok=0; echo "unexpected URLs: $(cat "$sb/unexpected.log")" >&2; }
     rm -rf "$sb"
-    if (( ok )); then pass; else fail "the Antigravity apt repo route is not what Google's download page prescribes"; fi
+    if (( ok )); then pass; else fail "the Antigravity Hub install is not what the operator decision on 2026-09-26 describes"; fi
 fi
 
-if it "install_antigravity is idempotent: a second run with key and source present writes nothing"; then
-    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
-    antigravity_run "$sb" 0 >/dev/null
-    before="$(cksum "$sb/etc/apt/sources.list.d/antigravity.list" "$sb/etc/apt/keyrings/antigravity-repo-key.gpg")"
+if it "antigravity icon: taken from app.asar wherever icon.png sits; without one the desktop entry names the themed icon and the install stands"; then
+    ok=1
+    for variant in nestedicon noicon; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA" "$variant"
+        antigravity_run "$sb"
+        dir="$sb/home/.local/opt/antigravity"; dt="$sb/home/.local/share/applications/antigravity.desktop"
+        [[ "$AG_STATE" == installed ]] || { ok=0; echo "$variant: state=[$AG_STATE]: ${AG_OUT:0:500}" >&2; }
+        if [[ "$variant" == nestedicon ]]; then
+            [[ "$(head -c4 "$dir/icon.png" 2>/dev/null | od -An -tx1 | tr -d ' \n')" == 89504e47 ]] || { ok=0; echo "$variant: icon.png was not extracted as a PNG" >&2; }
+            grep -qxF "Icon=$dir/icon.png" "$dt" || { ok=0; echo "$variant: Icon line is [$(grep '^Icon' "$dt" 2>&1)]" >&2; }
+        else
+            [[ ! -e "$dir/icon.png" ]] || { ok=0; echo "$variant: an icon.png appeared from nowhere" >&2; }
+            grep -qxF 'Icon=antigravity' "$dt" || { ok=0; echo "$variant: Icon line is [$(grep '^Icon' "$dt" 2>&1)], not the themed fallback" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "the desktop entry's icon is not taken from app.asar, or has no fallback"; fi
+fi
+
+if it "antigravity icon: an unpacked icon is read from app.asar.unpacked, but an asar key with a '..' component is never joined onto it (no icon is taken from outside)"; then
+    ok=1
+    for variant in unpackedicon dotdoticon; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA" "$variant"
+        antigravity_run "$sb"
+        dir="$sb/home/.local/opt/antigravity"; dt="$sb/home/.local/share/applications/antigravity.desktop"
+        [[ "$AG_STATE" == installed ]] || { ok=0; echo "$variant: state=[$AG_STATE]: ${AG_OUT:0:500}" >&2; }
+        if [[ "$variant" == unpackedicon ]]; then
+            grep -q 'unpacked icon' "$dir/icon.png" 2>/dev/null || { ok=0; echo "$variant: the icon in app.asar.unpacked was not used" >&2; }
+            grep -qxF "Icon=$dir/icon.png" "$dt" || { ok=0; echo "$variant: Icon line is [$(grep '^Icon' "$dt" 2>&1)]" >&2; }
+        else
+            [[ ! -e "$dir/icon.png" ]] || { ok=0; echo "$variant: an icon.png was taken from outside app.asar.unpacked through a '..' key: $(head -c 60 "$dir/icon.png" | tr -c '[:print:]' '.')" >&2; }
+            grep -qxF 'Icon=antigravity' "$dt" || { ok=0; echo "$variant: Icon line is [$(grep '^Icon' "$dt" 2>&1)], not the themed fallback" >&2; }
+            [[ "$AG_OUT" == *"no icon extracted"* ]] || { ok=0; echo "$variant: the refusal is not reported: ${AG_OUT:0:500}" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "an asar key can steer the icon lookup out of app.asar.unpacked"; fi
+fi
+
+if it "antigravity sandbox: the SUID commands are printed once, verbatim, only when this kernel restricts user namespaces; the installer never runs them"; then
+    ok=1
+    for mode in restricted clone0 unreadable allowed; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        antigravity_run "$sb" "AG_SYSCTL=$mode"
+        dir="$sb/home/.local/opt/antigravity"
+        want="sudo chown root:root '$dir/chrome-sandbox' && sudo chmod 4755 '$dir/chrome-sandbox'"
+        [[ "$AG_STATE" == installed ]] || { ok=0; echo "$mode: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:500}" >&2; }
+        n="$(grep -cF -- "$want" <<<"$AG_OUT")"
+        if [[ "$mode" == allowed ]]; then
+            [[ "$n" == 0 && "$AG_OUT" != *"sudo chown"* ]] || { ok=0; echo "$mode: the SUID commands were printed although nothing is needed" >&2; }
+            [[ "$AG_OUT" == *"nothing is required"* ]] || { ok=0; echo "$mode: it does not say that nothing is required: ${AG_OUT:0:500}" >&2; }
+        else
+            [[ "$n" == 1 ]] || { ok=0; echo "$mode: the verbatim command line appeared $n times, not once: ${AG_OUT:0:900}" >&2; }
+        fi
+        [[ "$(antigravity_count "$sb" '(^|run )(sudo|chown|chmod)')" == 0 ]] || { ok=0; echo "$mode: a privileged call was made" >&2; }
+        [[ "$AG_OUT" != *"--no-sandbox"* ]] || { ok=0; echo "$mode: suggests --no-sandbox" >&2; }
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "the sandbox step is printed when it is not needed, missing when it is, or run by the installer"; fi
+fi
+
+if it "antigravity discovery: the newest version is the numeric maximum (2.17.0 beats 2.9.1 and 2.4.3) and the Linux URL is built only from the constant and the build id"; then
+    ok=1; sb="$(antigravity_scratch)"
+    # string order, as GitHub returns it; a file, a non-version dir and a pre-release are not candidates
+    antigravity_listing "$sb" 2.10.0:file 2.17.0 2.18.0-beta 2.4.2 2.4.3 2.9.1 3.0.0:file latest v2.20 README.md:file
+    antigravity_manifest "$sb" "$AG_VA" "$AG_IDA"
+    # decoys the manifest must not be able to steer the URL with
+    cat >>"$sb/manifest/$AG_VA.yaml" <<EOF
+  InstallerUrl: https://evil.example/antigravity-public/antigravity-hub/2.17.0-999/windows-x64/Antigravity-x64.exe
+  InstallerUrl: $AG_BUCKET/2.17.0-999/windows-arm64/Antigravity-arm64.exe
+ReleaseNotesUrl: $AG_BUCKET/2.17.0-999/windows-x64/notes.txt/extra
+EOF
+    antigravity_run "$sb" AG_ENTRY=latest
+    want="AGLATEST $AG_VA $AG_IDA $AG_BUCKET/$AG_IDA/linux-x64/Antigravity.tar.gz"
+    [[ "$AG_OUT" == *"$want"* && "$AG_RC" == 0 ]] || { ok=0; echo "expected [$want], got: ${AG_OUT:0:700}" >&2; }
+    grep -qF "$AG_MANIFEST_BASE/$AG_VA/Google.Antigravity.installer.yaml" "$sb/calls.log" || { ok=0; echo "the manifest of $AG_VA was not read: $(grep '^curl' "$sb/calls.log")" >&2; }
+    [[ "$(antigravity_count "$sb" '^curl ')" == 2 ]] || { ok=0; echo "expected the listing and one manifest, got: $(grep '^curl' "$sb/calls.log")" >&2; }
+    # two-level numbers: 1.10.0 beats 1.9.10 (string order would say 1.9.10)
+    antigravity_listing "$sb" 1.10.0 1.9.10 1.9.9
+    antigravity_manifest "$sb" 1.10.0 1.10.0-77
+    antigravity_run "$sb" AG_ENTRY=latest
+    [[ "$AG_OUT" == *"AGLATEST 1.10.0 1.10.0-77 $AG_BUCKET/1.10.0-77/linux-x64/Antigravity.tar.gz"* ]] || { ok=0; echo "1.10.0 was not picked over 1.9.10: ${AG_OUT:0:500}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the version was picked by string order, or the tarball URL was built from something the manifest controls"; fi
+fi
+
+if it "antigravity discovery: a listing of 1000 or more entries may be truncated (the contents API returns at most 1000 and cannot be paginated), so it fails loudly and picks no version; 999 entries work"; then
+    ok=1
+    for shape in dirs-999 dirs-1000 dirs-1001 mixed-1000; do
+        n="${shape#*-}"; sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        names=()
+        if [[ "$shape" == mixed-* ]]; then for (( i = 1; i < n; i++ )); do names+=("notes-$i.md:file"); done
+        else for (( i = 1; i < n; i++ )); do names+=("0.0.$i"); done; fi
+        names+=("$AG_VA")                       # $n entries in all, 2.17.0 the newest directory
+        antigravity_listing "$sb" "${names[@]}"
+        antigravity_run "$sb" AG_ENTRY=latest
+        if (( n < 1000 )); then
+            [[ "$AG_OUT" == *"AGLATEST $AG_VA $AG_IDA $AG_BUCKET/$AG_IDA/linux-x64/Antigravity.tar.gz"* && "$AG_RC" == 0 ]] \
+                || { ok=0; echo "$shape: a listing below the limit must work: rc=[$AG_RC] ${AG_OUT:0:400}" >&2; }
+        else
+            [[ "$AG_RC" != 0 && "$AG_OUT" == *"listing may be truncated; refusing to pick a newest version"* ]] \
+                || { ok=0; echo "$shape: rc=[$AG_RC], no loud 'listing may be truncated; refusing to pick a newest version': ${AG_OUT:0:500}" >&2; }
+            [[ "$AG_OUT" == *"AGLATEST   "* ]] || { ok=0; echo "$shape: a version was picked from a listing that may be truncated: ${AG_OUT:0:500}" >&2; }
+            [[ "$(antigravity_count "$sb" '^curl ')" == 1 ]] || { ok=0; echo "$shape: something was requested after the listing: $(grep '^curl' "$sb/calls.log")" >&2; }
+            antigravity_run "$sb" AG_ENTRY=direct
+            [[ "$AG_STATE" == failed && "$AG_RC" != 0 && -z "$(find "$sb/home" -type f)" && -z "$(antigravity_debris "$sb")" ]] \
+                || { ok=0; echo "$shape: the install must fail and leave nothing: state=[$AG_STATE] rc=[$AG_RC]" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "a listing that the GitHub API may have cut off is trusted to name the newest version"; fi
+fi
+
+if it "antigravity discovery: a rate-limited listing (403 or 429) fails loudly with the reset time, installs nothing and tries no other source"; then
+    ok=1
+    reset_txt="$(date -u -d "@$AG_RESET" '+%Y-%m-%d %H:%M:%S UTC')"
+    for status in 403 429; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        printf '%s' "$status" >"$sb/listing.status"
+        printf 'x-ratelimit-limit: 60\nx-ratelimit-remaining: 0\nx-ratelimit-reset: %s\n' "$AG_RESET" >"$sb/listing.headers"
+        antigravity_run "$sb" AG_ENTRY=direct
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$status: state=[$AG_STATE] rc=[$AG_RC] (must fail)" >&2; }
+        [[ "$AG_OUT" == *"$reset_txt"* ]] || { ok=0; echo "$status: the reset time [$reset_txt] is not in the message: ${AG_OUT:0:700}" >&2; }
+        [[ "$AG_OUT" == *"GITHUB_TOKEN"* && "$AG_OUT" == *"not set"* ]] || { ok=0; echo "$status: no hint about GITHUB_TOKEN (not set): ${AG_OUT:0:700}" >&2; }
+        [[ "$AG_OUT" == *"listing"* ]] || { ok=0; echo "$status: the message does not name the step (listing): ${AG_OUT:0:400}" >&2; }
+        [[ "$(antigravity_count "$sb" '^curl ')" == 1 && "$(grep '^curl' "$sb/calls.log")" == *"$AG_LISTING_URL" ]] \
+            || { ok=0; echo "$status: another source was tried: $(grep '^curl' "$sb/calls.log")" >&2; }
+        [[ -z "$(find "$sb/home" -type f)" && -z "$(antigravity_debris "$sb")" ]] || { ok=0; echo "$status: left files: $(find "$sb/home" -type f) $(antigravity_debris "$sb")" >&2; }
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "a rate-limited GitHub API is not a loud, clean failure"; fi
+fi
+
+if it "antigravity discovery: a GITHUB_TOKEN reaches only the listing request, through curl's stdin, and never appears on argv, in the output or in the calls log"; then
+    ok=1
+    tok="ghp_TESTTOKEN0123456789abcdefghijklmnop"
+    for var in GITHUB_TOKEN GH_TOKEN; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        antigravity_run "$sb" "$var=$tok"
+        [[ "$AG_STATE" == installed ]] || { ok=0; echo "$var: state=[$AG_STATE]: ${AG_OUT:0:500}" >&2; }
+        grep -qF "$tok" "$sb/calls.log" && { ok=0; echo "$var: the token is in the recorded argv" >&2; }
+        [[ "$AG_OUT" != *"$tok"* ]] || { ok=0; echo "$var: the token is in the output" >&2; }
+        grep -qF "$tok" "$sb/stdin.log" 2>/dev/null || { ok=0; echo "$var: the token never reached curl's stdin" >&2; }
+        grep -qF "Authorization: Bearer $tok" "$sb/stdin.log" 2>/dev/null || { ok=0; echo "$var: stdin has no bearer header" >&2; }
+        [[ "$(grep -c '^=== call' "$sb/stdin.log" 2>/dev/null)" == 1 && "$(grep '^=== call' "$sb/stdin.log")" == *"$AG_LISTING_URL" ]] \
+            || { ok=0; echo "$var: the token went somewhere other than the listing: $(grep '^=== call' "$sb/stdin.log")" >&2; }
+        grep -E -- '--config[ =]' "$sb/calls.log" | grep -qv -- '--config -' && { ok=0; echo "$var: curl read its config from somewhere but stdin" >&2; }
+        rm -rf "$sb"
+    done
+    # a rate-limited answer with a token set says so, still without printing it
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"; printf '403' >"$sb/listing.status"
+    antigravity_run "$sb" AG_ENTRY=direct "GITHUB_TOKEN=$tok"
+    [[ "$AG_OUT" != *"$tok"* ]] || { ok=0; echo "403: the token is in the output" >&2; }
+    [[ "$AG_STATE" == failed && "$AG_OUT" == *"GITHUB_TOKEN"* && "$AG_OUT" == *" set"* ]] || { ok=0; echo "403 with a token: ${AG_OUT:0:500}" >&2; }
+    rm -rf "$sb"
+    # GitHub rejecting the token (401) is named as such, still without printing it
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"; printf '401' >"$sb/listing.status"
+    antigravity_run "$sb" AG_ENTRY=direct "GITHUB_TOKEN=$tok"
+    [[ "$AG_STATE" == failed && "$AG_OUT" == *"HTTP 401"* && "$AG_OUT" == *"GITHUB_TOKEN"* && "$AG_OUT" == *"rejected"* && "$AG_OUT" != *"$tok"* ]] \
+        || { ok=0; echo "401 with a token: ${AG_OUT:0:500}" >&2; }
+    rm -rf "$sb"
+    # a value that could inject curl config lines is never sent, and the output does not repeat it
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb" $'GITHUB_TOKEN=abc"\noutput = "/tmp/pwned'
+    ! grep -q 'pwned' "$sb/stdin.log" 2>/dev/null || { ok=0; echo "a token with a newline and a quote reached curl's config" >&2; }
+    [[ "$AG_STATE" == installed && "$AG_OUT" != *"pwned"* ]] || { ok=0; echo "implausible token: state=[$AG_STATE]: ${AG_OUT:0:400}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the GitHub token can leak, or the discovery ignores it"; fi
+fi
+
+if it "antigravity real run(): through process.py the token reaches curl's stdin and never its argv, and a rate-limited answer fails with the reset time"; then
+    ok=1; sb="$(antigravity_scratch)"; mkdir -p "$sb/shim"
+    # An inert curl on PATH: records argv and stdin, answers "rate limited" through the -D file, touches no network.
+    cat >"$sb/shim/curl" <<'SHIM'
+#!/bin/sh
+printf 'argv %s\n' "$*" >>"$AG_SHIM_LOG"
+hdr=""; prev=""; cfg=0
+for a in "$@"; do
+    [ "$prev" = -D ] && hdr="$a"
+    [ "$prev" = --config ] && [ "$a" = - ] && cfg=1
+    prev="$a"
+done
+if [ "$cfg" = 1 ]; then { echo "stdin:"; cat; } >>"$AG_SHIM_LOG"; fi
+if [ -n "$hdr" ]; then printf 'HTTP/2 403\r\nx-ratelimit-reset: 1790000000\r\n\r\n' >"$hdr"; fi
+exit 0
+SHIM
+    chmod +x "$sb/shim/curl"
+    tok="ghp_REALRUNTOKEN0123456789abcdefghij"
+    for mode in with-token no-token; do
+        : >"$sb/shim.log"
+        out="$( (
+            trap - EXIT
+            export HOME="$sb/home" SYS_HOME="$sb/home" PATH="$sb/shim:$PATH" AG_SHIM_LOG="$sb/shim.log" AUTOOS_INSTALL_TIMEOUT_SECONDS=60
+            unset GITHUB_TOKEN GH_TOKEN
+            [[ "$mode" != with-token ]] || export GITHUB_TOKEN="$tok"
+            AUTOOS_DRY_RUN=0; SYS_IS_ROOT=0
+            install_antigravity; echo "RC $?"
+        ) 2>&1 )"
+        [[ "$out" == *"RC 1"* ]] || { ok=0; echo "$mode: rc: ${out:0:600}" >&2; }
+        [[ "$out" == *"$(date -u -d '@1790000000' '+%Y-%m-%d %H:%M:%S UTC')"* ]] || { ok=0; echo "$mode: the reset time is not in the message: ${out:0:600}" >&2; }
+        [[ "$(grep -c '^argv' "$sb/shim.log")" == 1 ]] || { ok=0; echo "$mode: expected exactly the listing request: $(cat "$sb/shim.log")" >&2; }
+        [[ "$out" != *"$tok"* ]] && ! grep -q "^argv.*$tok" "$sb/shim.log" || { ok=0; echo "$mode: the token is on argv or in the output" >&2; }
+        if [[ "$mode" == with-token ]]; then
+            [[ "$(sed -n '/^stdin:/,$p' "$sb/shim.log")" == $'stdin:\nheader = "Authorization: Bearer '"$tok"'"' ]] || { ok=0; echo "with-token: curl's stdin is [$(sed -n '/^stdin:/,$p' "$sb/shim.log")]" >&2; }
+            grep -q -- '--config -' "$sb/shim.log" || { ok=0; echo "with-token: curl was not told to read its config from stdin" >&2; }
+        else
+            ! grep -q '^stdin:' "$sb/shim.log" || { ok=0; echo "no-token: curl was given a config on stdin" >&2; }
+        fi
+        [[ -z "$(find "$sb/home" -type f)" && -z "$(antigravity_debris "$sb")" ]] || { ok=0; echo "$mode: left $(find "$sb/home" -type f) $(antigravity_debris "$sb")" >&2; }
+    done
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the real run() path loses the token pipe, leaks the token, or does not stop on a rate limit"; fi
+fi
+
+if it "antigravity discovery: every unusable answer fails loudly naming its step - no fallback to another version or source, nothing installed"; then
+    ok=1
+    # name | what the message must contain | how to break the scenario
+    scenarios=(
+        "unreachable-listing|listing|touch \"\$sb/listing.offline\""
+        "non-json|listing|printf '<html>rate limited</html>' >\"\$sb/listing.json\""
+        "no-versions|listing|antigravity_listing \"\$sb\" latest 2.10.0:file"
+        "http-500|listing|printf 500 >\"\$sb/listing.status\""
+        "manifest-404|manifest|rm \"\$sb/manifest/$AG_VA.yaml\""
+        "manifest-no-x64|manifest|sed -i '/windows-x64/d' \"\$sb/manifest/$AG_VA.yaml\""
+        "manifest-foreign-host|manifest|sed -i 's,https://storage.googleapis.com,https://evil.example,' \"\$sb/manifest/$AG_VA.yaml\""
+        "manifest-id-of-another-version|manifest|antigravity_manifest \"\$sb\" $AG_VA 2.9.1-5"
+        "manifest-two-builds|manifest|printf '  InstallerUrl: $AG_BUCKET/2.17.0-6/windows-x64/Antigravity-x64.exe\n' >>\"\$sb/manifest/$AG_VA.yaml\""
+        "manifest-other-version|manifest|sed -i 's/^PackageVersion: .*/PackageVersion: 2.16.0/' \"\$sb/manifest/$AG_VA.yaml\""
+        "head-404|Linux build|printf 404 >\"\$sb/head.status\""
+        "head-403|Linux build|printf 403 >\"\$sb/head.status\""
+        "head-too-small|Linux build|printf 52428799 >\"\$sb/head.size\""
+        "head-no-length|Linux build|printf '' >\"\$sb/head.size\""
+    )
+    for row in "${scenarios[@]}"; do
+        name="${row%%|*}"; rest="${row#*|}"; want="${rest%%|*}"; how="${rest#*|}"
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        # the older 2.9.1 must never be the fallback: it has a working manifest and tarball
+        antigravity_manifest "$sb" 2.9.1 2.9.1-1; antigravity_build "$sb" 2.9.1-1 >/dev/null
+        eval "$how"
+        case "$name" in head-too-small|head-no-length) minb=52428800 ;; *) minb=100 ;; esac
+        antigravity_run "$sb" AG_ENTRY=direct "AUTOOS_ANTIGRAVITY_MIN_BYTES=$minb"
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$name: state=[$AG_STATE] rc=[$AG_RC] (must fail)" >&2; }
+        [[ "$AG_OUT" == *"$want"* ]] || { ok=0; echo "$name: the message does not name the step [$want]: ${AG_OUT:0:500}" >&2; }
+        [[ "$(antigravity_count "$sb" ' -o [^ ]*pkg\.tgz')" == 0 ]] || { ok=0; echo "$name: a download was attempted" >&2; }
+        ! grep -q '2\.9\.1' <<<"$(grep -E '(linux-x64|installer\.yaml)' "$sb/calls.log")" || { ok=0; echo "$name: fell back to 2.9.1: $(grep '2.9.1' "$sb/calls.log")" >&2; }
+        [[ "$(antigravity_count "$sb" "^curl .*$AG_LISTING_URL")" -le 1 ]] || { ok=0; echo "$name: the listing was requested more than once" >&2; }
+        [[ -z "$(find "$sb/home" -type f)" && -z "$(antigravity_debris "$sb")" ]] || { ok=0; echo "$name: left $(find "$sb/home" -type f) $(antigravity_debris "$sb")" >&2; }
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "an unusable winget-pkgs or bucket answer was acted on, or the failure does not name its step"; fi
+fi
+
+if it "antigravity discovery: the minimum size defaults to 50 MB, and the HEAD and download requests are pinned to https with no redirects"; then
+    ok=1
+    [[ "$( ( unset AUTOOS_ANTIGRAVITY_MIN_BYTES; antigravity_min_bytes ) )" == 52428800 ]] || { ok=0; echo "the default minimum is [$( ( unset AUTOOS_ANTIGRAVITY_MIN_BYTES; antigravity_min_bytes ) )], not 52428800" >&2; }
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb"
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "state=[$AG_STATE]: ${AG_OUT:0:400}" >&2; }
+    for what in '--head' ' -o [^ ]*pkg\.tgz'; do
+        line="$(grep -E -- "^curl .*$what" "$sb/calls.log" | grep -F 'Antigravity.tar.gz' | head -1)"
+        [[ -n "$line" ]] || { ok=0; echo "no call for [$what]" >&2; continue; }
+        for flag in '--fail' '--proto =https' '--proto-redir =https' '--max-redirs 0'; do
+            [[ "$line" == *"$flag"* ]] || { ok=0; echo "[$what] call lacks [$flag]: $line" >&2; }
+        done
+    done
+    grep -E -- ' -o [^ ]*pkg\.tgz' "$sb/calls.log" | grep -q -- '--retry 3' || { ok=0; echo "the download does not retry 3 times" >&2; }
+    grep -E -- ' -o [^ ]*pkg\.tgz' "$sb/calls.log" | grep -q -- ' -D ' || { ok=0; echo "the download does not record its headers (-D)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the size bound or the transport hardening is not what the design says"; fi
+fi
+
+if it "antigravity download bound: the tarball GET carries --max-filesize (the HEAD length plus 1 MiB), and a server announcing more stops the download with nothing left behind"; then
+    ok=1
+    # (1) the bound is in the argv, computed from the length the HEAD announced
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb"
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "state=[$AG_STATE]: ${AG_OUT:0:400}" >&2; }
+    line="$(grep -E -- ' -o [^ ]*pkg\.tgz' "$sb/calls.log")"
+    [[ "$line" =~ --max-filesize\ ([0-9]+)($|\ ) ]] || { ok=0; echo "the download has no --max-filesize: $line" >&2; }
+    [[ "${BASH_REMATCH[1]:-}" == "$((AG_SIZE + 1048576))" ]] || { ok=0; echo "--max-filesize is [${BASH_REMATCH[1]:-none}], expected $((AG_SIZE + 1048576)) (the $AG_SIZE bytes of the HEAD plus 1 MiB)" >&2; }
+    rm -rf "$sb"
+    # (2) the number comes from the HEAD, not from the file that happens to be served
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    printf '%s' "$((AG_SIZE + 1000))" >"$sb/head.size"
+    antigravity_run "$sb" AG_ENTRY=direct
+    line="$(grep -E -- ' -o [^ ]*pkg\.tgz' "$sb/calls.log")"
+    [[ "$line" =~ --max-filesize\ ([0-9]+)($|\ ) && "${BASH_REMATCH[1]}" == "$((AG_SIZE + 1000 + 1048576))" ]] \
+        || { ok=0; echo "the HEAD said $((AG_SIZE + 1000)) bytes, so --max-filesize must be $((AG_SIZE + 1000 + 1048576)): $line" >&2; }
+    rm -rf "$sb"
+    # (3) a server that announces more than the bound is stopped by curl: a failed download, nothing left
+    for start in fresh update; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        if [[ "$start" == update ]]; then
+            antigravity_run "$sb" >/dev/null
+            antigravity_serve "$sb" "$AG_VB" "$AG_IDB"
+        fi
+        printf '%s' "$((AG_SIZE + 1048576 + 1))" >"$sb/get.size"
+        before="$(antigravity_tree_state "$sb")"
+        antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$start: state=[$AG_STATE] rc=[$AG_RC] (must fail)" >&2; }
+        [[ "$AG_OUT" == *"(download)"* && "$AG_OUT" == *"curl exit 63"* ]] || { ok=0; echo "$start: the failure is not the download being stopped by --max-filesize (curl exit 63): ${AG_OUT:0:500}" >&2; }
+        [[ -z "$(antigravity_debris "$sb")" ]] || { ok=0; echo "$start: left behind: $(antigravity_debris "$sb" | tr '\n' ' ')" >&2; }
+        if [[ "$start" == update ]]; then
+            [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "$start: the existing install or its surroundings changed" >&2; }
+        else
+            [[ -z "$(find "$sb/home" -type f)" ]] || { ok=0; echo "$start: files were left: $(find "$sb/home" -type f | tr '\n' ' ')" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "a server that lies about the size can fill the disk before the size check"; fi
+fi
+
+if it "antigravity verification failures: each one leaves an existing install untouched and no staging directory behind"; then
+    ok=1
+    # variant | what the message must contain
+    for row in "size|bytes" "sizehead|bytes" "corrupt|gzip" "garbage|gzip" "dotdot|'..'" "absolute|absolute" "symlink|symbolic link" \
+               "hardlink|hard link" "fifo|FIFO" "setuid|setuid" "setgid|setuid" "wrongtop|Antigravity-x64/" \
+               "nosandbox|chrome-sandbox" "sandboxlink|chrome-sandbox" "noasar|app.asar" "asarver|0.0.1" "noelf|ELF"; do
+        variant="${row%%|*}"; want="${row#*|}"
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        antigravity_run "$sb" >/dev/null
+        antigravity_serve "$sb" "$AG_VB" "$AG_IDB" "$variant"
+        before="$(antigravity_tree_state "$sb")"
+        antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$variant: state=[$AG_STATE] rc=[$AG_RC] (must fail): ${AG_OUT:0:500}" >&2; }
+        [[ "$AG_OUT" == *"verification"* && "$AG_OUT" == *"$want"* ]] || { ok=0; echo "$variant: no 'verification' error naming [$want]: ${AG_OUT:0:600}" >&2; }
+        [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "$variant: the existing install or its surroundings changed: $(diff <(echo "$before") <(antigravity_tree_state "$sb") | head -5)" >&2; }
+        [[ "$(sed -n 2p "$sb/home/.local/opt/antigravity/.autoos-version")" == "$AG_IDA" ]] || { ok=0; echo "$variant: the stamp moved" >&2; }
+        [[ -z "$(antigravity_debris "$sb")" ]] || { ok=0; echo "$variant: left $(antigravity_debris "$sb")" >&2; }
+        rm -rf "$sb"
+    done
+    # on a fresh machine the same failures leave nothing at all
+    for variant in size corrupt dotdot symlink noelf; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA" "$variant"
+        antigravity_run "$sb" AG_ENTRY=direct
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "fresh $variant: state=[$AG_STATE] rc=[$AG_RC]" >&2; }
+        [[ -z "$(find "$sb/home" -type f)" && -z "$(antigravity_debris "$sb")" && ! -e "$sb/home/.local/opt/antigravity" ]] \
+            || { ok=0; echo "fresh $variant: left $(find "$sb/home" -type f) $(antigravity_debris "$sb")" >&2; }
+        [[ "$(antigravity_count "$sb" '^(sudo|chown|chmod) ')" == 0 ]] || { ok=0; echo "fresh $variant: a privileged call was made" >&2; }
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "a tarball that fails verification damaged the machine, was extracted, or left debris"; fi
+fi
+
+if it "antigravity ownership: a directory AutoOS did not stamp is refused and left byte-identical; unrelated .new and .antigravity-stage.* directories are never touched"; then
+    ok=1
+    for kind in plain old-marker symlink-dir symlink-stamp; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        opt="$sb/home/.local/opt"; dir="$opt/antigravity"; mkdir -p "$opt"
+        case "$kind" in
+            plain)          mkdir -p "$dir"; printf 'user data\n' >"$dir/notes.txt" ;;
+            old-marker)     mkdir -p "$dir"; printf 'autoos-antigravity-ide\n2.5.5-1\n' >"$dir/.autoos-version" ;;
+            symlink-dir)    mkdir -p "$sb/elsewhere"; printf '%s\n%s\n' "$AG_MARKER" "$AG_IDA" >"$sb/elsewhere/.autoos-version"; ln -s "$sb/elsewhere" "$dir" ;;
+            symlink-stamp)  mkdir -p "$dir" "$sb/elsewhere"; printf '%s\n%s\n' "$AG_MARKER" "$AG_IDA" >"$sb/elsewhere/stamp"; ln -s "$sb/elsewhere/stamp" "$dir/.autoos-version" ;;
+        esac
+        before="$(antigravity_tree_state "$sb")"
+        antigravity_run "$sb" AG_ENTRY=direct
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$kind: state=[$AG_STATE] rc=[$AG_RC] (must refuse)" >&2; }
+        [[ "$AG_OUT" == *"not installed by AutoOS"* && "$AG_OUT" == *"$dir"* ]] || { ok=0; echo "$kind: no warning naming $dir: ${AG_OUT:0:500}" >&2; }
+        [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "$kind: the directory changed" >&2; }
+        [[ "$(antigravity_count "$sb" '^curl ')" == 0 ]] || { ok=0; echo "$kind: the network was asked about a directory that is not ours" >&2; }
+        # detection agrees: it is not an installed AutoOS component
+        [[ "$(SYS_HOME="$sb/home" script_is_installed antigravity && echo installed || echo not-installed)" == not-installed ]] \
+            || { ok=0; echo "$kind: detection calls it installed" >&2; }
+        rm -rf "$sb"
+    done
+    # the user's own look-alike directories survive a fresh install, a failed one and an update
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    opt="$sb/home/.local/opt"; mkdir -p "$opt/antigravity.new" "$opt/.antigravity-stage.userdata" "$opt/antigravity.old-keep"
+    printf 'mine 1\n' >"$opt/antigravity.new/keep"; printf 'mine 2\n' >"$opt/.antigravity-stage.userdata/pkg.tgz"; printf 'mine 3\n' >"$opt/antigravity.old-keep/keep"
+    mine_before="$(antigravity_tree_state "$sb" "$opt" | grep -E 'antigravity\.new|antigravity-stage\.userdata|antigravity\.old-keep')"
+    antigravity_run "$sb"
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "fresh with look-alikes: state=[$AG_STATE]: ${AG_OUT:0:500}" >&2; }
+    [[ "$(antigravity_tree_state "$sb" "$opt" | grep -E 'antigravity\.new|antigravity-stage\.userdata|antigravity\.old-keep')" == "$mine_before" ]] || { ok=0; echo "fresh: a look-alike directory was touched" >&2; }
+    antigravity_serve "$sb" "$AG_VB" "$AG_IDB" corrupt
+    antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+    [[ "$AG_STATE" == failed ]] || { ok=0; echo "corrupt update: state=[$AG_STATE]" >&2; }
+    [[ "$(antigravity_tree_state "$sb" "$opt" | grep -E 'antigravity\.new|antigravity-stage\.userdata|antigravity\.old-keep')" == "$mine_before" ]] || { ok=0; echo "failed update: a look-alike directory was touched" >&2; }
+    antigravity_serve "$sb" "$AG_VB" "$AG_IDB"
+    antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "update: state=[$AG_STATE]: ${AG_OUT:0:500}" >&2; }
+    [[ "$(antigravity_tree_state "$sb" "$opt" | grep -E 'antigravity\.new|antigravity-stage\.userdata|antigravity\.old-keep')" == "$mine_before" ]] || { ok=0; echo "update: a look-alike directory was touched" >&2; }
+    # the staging directory is private (mode 700) and named .antigravity-stage.*, and the tarball never lands in a look-alike
+    [[ -s "$sb/stagemode.log" && "$(sort -u "$sb/stagemode.log")" == 700 ]] || { ok=0; echo "the staging directory was not mode 700: [$(sort -u "$sb/stagemode.log" 2>&1)]" >&2; }
+    grep -E -- ' -o [^ ]*pkg\.tgz' "$sb/calls.log" | grep -qF -- "-o $opt/.antigravity-stage.userdata/" && { ok=0; echo "a download went into the user's look-alike stage directory" >&2; }
+    grep -E -- ' -o [^ ]*pkg\.tgz' "$sb/calls.log" | grep -qE -- " -o $opt/\.antigravity-stage\.[A-Za-z0-9]{6}/pkg\.tgz" || { ok=0; echo "the download did not go to a fresh .antigravity-stage.XXXXXX: $(grep ' -o ' "$sb/calls.log" | head -2)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "AutoOS replaced or touched a directory it does not own, or its staging directory is not private"; fi
+fi
+
+if it "antigravity second run: skipped with no network call; --update on the same build is skipped; a newer build is swapped in; an older one is never installed"; then
+    sb="$(antigravity_scratch)"; ok=1
+    antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb" >/dev/null
+    dir="$sb/home/.local/opt/antigravity"; link="$sb/home/.local/bin/antigravity"; dt="$sb/home/.local/share/applications/antigravity.desktop"
+    : >"$sb/calls.log"; before="$(antigravity_tree_state "$sb")"
+    antigravity_run "$sb"
+    [[ "$AG_STATE" == skipped && "$AG_RC" == 0 ]] || { ok=0; echo "plain second run: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:500}" >&2; }
+    [[ ! -s "$sb/calls.log" ]] || { ok=0; echo "a plain second run made calls: $(cat "$sb/calls.log")" >&2; }
+    [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "a plain second run changed the tree" >&2; }
+    # --update on the same build: asks the listing and the manifest, downloads and writes nothing
+    antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+    [[ "$AG_STATE" == skipped && "$AG_RC" == 0 ]] || { ok=0; echo "--update, same build: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:500}" >&2; }
+    [[ "$(antigravity_count "$sb" ' -o [^ ]*pkg\.tgz')" == 0 && "$(antigravity_count "$sb" '^curl ')" == 2 ]] \
+        || { ok=0; echo "--update, same build: expected the listing and the manifest only: $(grep '^curl' "$sb/calls.log")" >&2; }
+    [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "--update on the current build changed the tree" >&2; }
+    # a newer build exists: without --update nothing happens, with it the directory is swapped
+    antigravity_serve "$sb" "$AG_VB" "$AG_IDB"
     : >"$sb/calls.log"
-    out="$(antigravity_run "$sb" 0)"; rc=$?
-    after="$(cksum "$sb/etc/apt/sources.list.d/antigravity.list" "$sb/etc/apt/keyrings/antigravity-repo-key.gpg")"
-    ok=1
-    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
-    writes="$(grep -E '^(curl|gpg|install|tee) ' "$sb/calls.log" || true)"
-    [[ -z "$writes" ]] || { ok=0; echo "the second run wrote again: $writes" >&2; }
-    [[ "$before" == "$after" ]] || { ok=0; echo "key or source list changed on the second run" >&2; }
-    [[ "$(wc -l <"$sb/etc/apt/sources.list.d/antigravity.list")" == 1 ]] || { ok=0; echo "source list grew" >&2; }
-    grep -qx 'run apt-get install -y antigravity' "$sb/calls.log" \
-        || { ok=0; echo "apt's own no-op install was skipped: $(cat "$sb/calls.log")" >&2; }
+    antigravity_run "$sb"
+    [[ "$AG_STATE" == skipped && ! -s "$sb/calls.log" && "$(sed -n 2p "$dir/.autoos-version")" == "$AG_IDA" ]] || { ok=0; echo "a newer build without --update: state=[$AG_STATE]" >&2; }
+    t_dt="$(find "$dt" -printf '%T@')"
+    antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "--update, newer build: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:600}" >&2; }
+    probs="$(antigravity_problems "$sb" "$AG_IDB")"
+    [[ -z "$probs" ]] || { ok=0; echo "$probs" >&2; }
+    [[ -x "$link" && "$(readlink "$link")" == "$dir/antigravity" ]] || { ok=0; echo "the command link no longer resolves after the update" >&2; }
+    [[ "$(find "$dt" -printf '%T@')" == "$t_dt" ]] || { ok=0; echo "an identical desktop entry was rewritten by the update" >&2; }
+    [[ -z "$(find "$sb/home/.local/opt" -maxdepth 1 -name 'antigravity.old-*')" ]] || { ok=0; echo "the previous build is still there: $(ls -A "$sb/home/.local/opt")" >&2; }
+    # the winget-pkgs latest is OLDER than what is installed (listing lags): not a downgrade
+    rm -f "$sb/versions"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    before="$(antigravity_tree_state "$sb")"
+    antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+    [[ "$AG_STATE" == skipped && "$AG_RC" == 0 && "$(sed -n 2p "$dir/.autoos-version")" == "$AG_IDB" ]] || { ok=0; echo "an older latest: state=[$AG_STATE], stamp [$(sed -n 2p "$dir/.autoos-version")]: ${AG_OUT:0:400}" >&2; }
+    [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "an older latest changed the tree" >&2; }
     rm -rf "$sb"
-    if (( ok )); then pass; else fail "a second Antigravity run is not a no-op"; fi
+    if (( ok )); then pass; else fail "the second run, --update, or the swap does not behave"; fi
 fi
 
-if it "install_antigravity writes no key and no source list when the key fetch fails"; then
-    sb="$(mktemp -d)"; mkdir -p "$sb/etc/apt/sources.list.d"
-    out="$(antigravity_run "$sb" 0 fail-curl)"; rc=$?
+if it "antigravity update with the API down fails loudly (non-zero) and leaves the install intact - it is never reported as current"; then
     ok=1
-    (( rc != 0 )) || { ok=0; echo "rc=0 counts a failed key fetch as installed" >&2; }
-    [[ -z "$(find "$sb/etc" -type f)" ]] || { ok=0; echo "left files behind: $(find "$sb/etc" -type f | tr '\n' ' ')" >&2; }
-    grep -qF -- "$AG_KEY_URL" "$sb/calls.log" 2>/dev/null || { ok=0; echo "the key fetch was never attempted" >&2; }
-    ! grep -q 'apt-get install' "$sb/calls.log" 2>/dev/null || { ok=0; echo "went on to apt-get install" >&2; }
-    [[ "$out" == *"Antigravity not installed"* ]] || { ok=0; echo "no reason given: $out" >&2; }
+    for mode in offline 403 non-json; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        antigravity_run "$sb" >/dev/null
+        before="$(antigravity_tree_state "$sb")"; : >"$sb/calls.log"
+        case "$mode" in
+            offline)  : >"$sb/offline" ;;
+            403)      printf 403 >"$sb/listing.status"; printf 'x-ratelimit-reset: %s\n' "$AG_RESET" >"$sb/listing.headers" ;;
+            non-json) printf 'nope' >"$sb/listing.json" ;;
+        esac
+        antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+        [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "$mode: state=[$AG_STATE] rc=[$AG_RC] (must fail)" >&2; }
+        [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "$mode: the install changed" >&2; }
+        [[ "$AG_OUT" == *"listing"* ]] || { ok=0; echo "$mode: the failure does not name the step: ${AG_OUT:0:400}" >&2; }
+        antigravity_run "$sb" AUTOOS_UPDATE=1
+        [[ "$AG_STATE" == failed ]] || { ok=0; echo "$mode: through install_component the state is [$AG_STATE], not failed" >&2; }
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "an update check that cannot look is reported as success"; fi
+fi
+
+if it "antigravity command link: created when absent; a regular file, a foreign symlink and a link merely pointing inside the install dir are kept with a warning; a dangling own link is kept and resolves"; then
+    ok=1
+    for kind in absent file foreign inside dangling-own; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        dir="$sb/home/.local/opt/antigravity"; link="$sb/home/.local/bin/antigravity"
+        mkdir -p "$sb/home/.local/bin"
+        case "$kind" in
+            file)         printf 'mine\n' >"$link" ;;
+            foreign)      ln -s "$sb/elsewhere" "$link" ;;
+            inside)       ln -s "$dir/resources/app.asar" "$link" ;;
+            dangling-own) ln -s "$dir/antigravity" "$link" ;;
+        esac
+        antigravity_run "$sb" AG_ENTRY=direct
+        [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "$kind: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+        case "$kind" in
+            absent|dangling-own)
+                [[ "$(readlink "$link")" == "$dir/antigravity" && -x "$link" ]] || { ok=0; echo "$kind: link is [$(readlink "$link")] or does not resolve" >&2; } ;;
+            file)
+                [[ ! -L "$link" && "$(cat "$link")" == mine ]] || { ok=0; echo "file: a regular file was overwritten" >&2; } ;;
+            foreign)
+                [[ "$(readlink "$link")" == "$sb/elsewhere" ]] || { ok=0; echo "foreign: a foreign symlink was replaced: [$(readlink "$link")]" >&2; } ;;
+            inside)
+                [[ "$(readlink "$link")" == "$dir/resources/app.asar" ]] || { ok=0; echo "inside: a link pointing elsewhere inside the dir was replaced: [$(readlink "$link")]" >&2; } ;;
+        esac
+        if [[ "$kind" == file || "$kind" == foreign || "$kind" == inside ]]; then
+            [[ "$AG_OUT" == *"$link"* && "$AG_OUT" == *"left alone"* ]] || { ok=0; echo "$kind: no warning naming $link: ${AG_OUT:0:500}" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "the antigravity command link clobbers something that is not AutoOS's, or is not created"; fi
+fi
+
+if it "antigravity desktop entry: a symlink is refused, a differing file is backed up byte-exact before it is replaced, an identical one is left untouched"; then
+    ok=1
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    apps="$sb/home/.local/share/applications"; dt="$apps/antigravity.desktop"; mkdir -p "$apps"
+    printf '[Desktop Entry]\nName=mine\n' >"$dt"
+    antigravity_run "$sb" AG_ENTRY=direct
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "differing: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    bak=("$dt".autoos-backup-*)
+    [[ ${#bak[@]} == 1 && -f "${bak[0]}" && "$(cat "${bak[0]}")" == $'[Desktop Entry]\nName=mine' ]] || { ok=0; echo "the differing entry was not backed up first: ${bak[*]}" >&2; }
+    grep -qxF 'MimeType=x-scheme-handler/antigravity;' "$dt" || { ok=0; echo "the entry was not replaced" >&2; }
+    [[ -z "$(find "$apps" -name '.antigravity.desktop.*')" ]] || { ok=0; echo "a temp file was left in $apps" >&2; }
+    t1="$(find "$dt" -printf '%T@')"
+    antigravity_serve "$sb" "$AG_VB" "$AG_IDB"       # a new build; the launcher does not change
+    antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "update: state=[$AG_STATE]: ${AG_OUT:0:400}" >&2; }
+    [[ "$(find "$dt" -printf '%T@')" == "$t1" ]] || { ok=0; echo "an identical desktop entry was rewritten" >&2; }
+    bak=("$dt".autoos-backup-*)
+    [[ ${#bak[@]} == 1 ]] || { ok=0; echo "an identical entry got a backup: ${bak[*]}" >&2; }
     rm -rf "$sb"
-    if (( ok )); then pass; else fail "a failed Antigravity key fetch leaves a half-configured apt"; fi
+    # a symlink at the desktop path is refused; whatever it points at is untouched
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    apps="$sb/home/.local/share/applications"; dt="$apps/antigravity.desktop"; mkdir -p "$apps"
+    printf 'victim\n' >"$sb/victim"; ln -s "$sb/victim" "$dt"
+    antigravity_run "$sb" AG_ENTRY=direct
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "symlink: the install itself must still succeed: state=[$AG_STATE]: ${AG_OUT:0:400}" >&2; }
+    [[ -L "$dt" && "$(readlink "$dt")" == "$sb/victim" && "$(cat "$sb/victim")" == victim ]] || { ok=0; echo "symlink: the desktop path or its target was changed" >&2; }
+    [[ "$AG_OUT" == *"$dt"* && "$AG_OUT" == *"symlink"* ]] || { ok=0; echo "symlink: no warning naming $dt: ${AG_OUT:0:500}" >&2; }
+    [[ -z "$(find "$apps" -name '*.autoos-backup-*')" ]] || { ok=0; echo "symlink: a backup was made" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the desktop entry is not written compare-first with a backup, or follows a symlink"; fi
+fi
+
+if it "antigravity desktop entry: the temp file comes from mktemp, so a file at the old predictable name (.antigravity.desktop.<pid>) is never overwritten or removed, not even when the write fails"; then
+    ok=1; old_umask="$(umask)"; umask 022
+    for mode in ok mv-fails; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        apps="$sb/home/.local/share/applications"; dt="$apps/antigravity.desktop"
+        : >"$sb/plant-desktop-tmp"
+        if [[ "$mode" == mv-fails ]]; then antigravity_run "$sb" AG_ENTRY=direct AG_MV_FAIL_DESKTOP=1; else antigravity_run "$sb" AG_ENTRY=direct; fi
+        [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "$mode: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+        planted=("$apps"/.antigravity.desktop.*)
+        [[ ${#planted[@]} == 1 && -f "${planted[0]}" && "$(cat "${planted[0]}")" == victim ]] \
+            || { ok=0; echo "$mode: the file at the old predictable name was removed or changed (left: ${planted[*]})" >&2; }
+        if [[ "$mode" == ok ]]; then
+            grep -qxF 'MimeType=x-scheme-handler/antigravity;' "$dt" 2>/dev/null || { ok=0; echo "$mode: the desktop entry was not written: ${AG_OUT:0:500}" >&2; }
+            [[ "$(stat -c %a "$dt" 2>/dev/null)" == 644 ]] || { ok=0; echo "$mode: the desktop entry has mode [$(stat -c %a "$dt" 2>&1)], not 644 (umask 022)" >&2; }
+        else
+            [[ ! -e "$dt" && "$AG_OUT" == *"could not write"* ]] || { ok=0; echo "$mode: a failed write must warn and leave no desktop entry: ${AG_OUT:0:500}" >&2; }
+        fi
+        rm -rf "$sb"
+    done
+    umask "$old_umask"
+    if (( ok )); then pass; else fail "the desktop entry's temp file name is predictable, or a failed write removes a file AutoOS did not create"; fi
+fi
+
+if it "antigravity desktop entry: the install path is quoted for the Desktop Entry spec (space, quote, dollar, percent, backslash) and the sandbox command is single-quoted"; then
+    ok=1; sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    odd="$sb"'/h m"e$x%u\b`t'"'"'s'; mkdir -p "$odd"
+    antigravity_run "$sb" "AG_HOME=$odd" AG_SYSCTL=restricted
+    dir="$odd/.local/opt/antigravity"; dt="$odd/.local/share/applications/antigravity.desktop"
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "state=[$AG_STATE]: ${AG_OUT:0:600}" >&2; }
+    # expected by hand: " ` $ escaped with one backslash, \ written as four (string escape, then quote escape), % doubled
+    want_exec='Exec="'"$sb"'/h m\"e\$x%%u\\\\b\`t'"'"'s/.local/opt/antigravity/antigravity" %U'
+    grep -qxF "$want_exec" "$dt" || { ok=0; echo "Exec line is [$(grep '^Exec' "$dt" 2>&1)], expected [$want_exec]" >&2; }
+    want_icon='Icon='"$sb"'/h m"e$x%u\\b`t'"'"'s/.local/opt/antigravity/icon.png'
+    grep -qxF "$want_icon" "$dt" || { ok=0; echo "Icon line is [$(grep '^Icon' "$dt" 2>&1)], expected [$want_icon]" >&2; }
+    [[ "$(grep -c '^Exec=' "$dt")" == 1 && "$(grep -c '^\[Desktop Entry\]' "$dt")" == 1 ]] || { ok=0; echo "the entry has stray lines: $(cat "$dt")" >&2; }
+    # single quotes in the path are closed, escaped and reopened
+    sq="'"; bs='\'; esc="${dir//$sq/$sq$bs$sq$sq}"
+    want_sb="sudo chown root:root '$esc/chrome-sandbox' && sudo chmod 4755 '$esc/chrome-sandbox'"
+    [[ "$AG_OUT" == *"$want_sb"* ]] || { ok=0; echo "the sandbox command is not shell-safe for $dir: ${AG_OUT:0:900}" >&2; }
+    rm -rf "$sb"
+    # a newline in the path cannot be put in a desktop entry: it is skipped with a warning, the install stands
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    odd="$sb/line"$'\n'"break"; mkdir -p "$odd"
+    antigravity_run "$sb" "AG_HOME=$odd" AG_ENTRY=direct
+    [[ "$AG_STATE" == installed && ! -e "$odd/.local/share/applications/antigravity.desktop" && "$AG_OUT" == *"desktop entry"* ]] \
+        || { ok=0; echo "newline path: state=[$AG_STATE]: ${AG_OUT:0:500}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a path with special characters breaks the desktop entry or the printed sandbox command"; fi
+fi
+
+if it "antigravity desktop registration: update-desktop-database runs on the applications dir; xdg-mime sets the scheme handler only when none is set, after backing up mimeapps.list"; then
+    ok=1
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    mkdir -p "$sb/home/.config"; printf '[Default Applications]\ntext/x-foo=foo.desktop\n' >"$sb/home/.config/mimeapps.list"
+    antigravity_run "$sb"
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "state=[$AG_STATE]: ${AG_OUT:0:400}" >&2; }
+    grep -qxF "update-desktop-database $sb/home/.local/share/applications" "$sb/calls.log" || { ok=0; echo "update-desktop-database was not run on the applications dir: $(grep '^update' "$sb/calls.log" 2>&1)" >&2; }
+    grep -qxF 'xdg-mime query default x-scheme-handler/antigravity' "$sb/calls.log" || { ok=0; echo "the current handler was not asked" >&2; }
+    grep -qxF 'xdg-mime default antigravity.desktop x-scheme-handler/antigravity' "$sb/calls.log" || { ok=0; echo "the scheme handler was not registered: $(grep '^xdg' "$sb/calls.log")" >&2; }
+    bak=("$sb/home/.config/mimeapps.list".autoos-backup-*)
+    [[ ${#bak[@]} == 1 && "$(cat "${bak[0]}" 2>/dev/null)" == $'[Default Applications]\ntext/x-foo=foo.desktop' ]] || { ok=0; echo "mimeapps.list was not backed up byte-exact before xdg-mime ran: ${bak[*]}" >&2; }
+    rm -rf "$sb"
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    mkdir -p "$sb/home/.config"; printf '[Default Applications]\n' >"$sb/home/.config/mimeapps.list"
+    antigravity_run "$sb" AG_MIME_DEFAULT=other.desktop
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "handler set: state=[$AG_STATE]" >&2; }
+    ! grep -q '^xdg-mime default' "$sb/calls.log" || { ok=0; echo "an existing scheme handler was overwritten" >&2; }
+    [[ -z "$(find "$sb/home/.config" -name '*.autoos-backup-*')" ]] || { ok=0; echo "mimeapps.list was backed up although it was not touched" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the desktop registration overrides the user's handler, skips the backup, or is not attempted"; fi
+fi
+
+if it "antigravity refuses to run as root when the home is not root's own (sudo ./setup.sh would leave root-owned files in the user's home)"; then
+    ok=1
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb" AG_ENTRY=direct SYS_IS_ROOT=1 "AG_ROOT_HOME=$sb/rootshome"
+    [[ "$AG_STATE" == failed && "$AG_RC" != 0 ]] || { ok=0; echo "root in a user's home: state=[$AG_STATE] rc=[$AG_RC] (must refuse)" >&2; }
+    [[ "$AG_OUT" == *"run setup as your own user"* ]] || { ok=0; echo "root: the refusal does not say what to do: ${AG_OUT:0:400}" >&2; }
+    [[ ! -s "$sb/calls.log" && -z "$(find "$sb/home" -mindepth 1)" ]] || { ok=0; echo "root: something was called or written: $(cat "$sb/calls.log" 2>&1)" >&2; }
+    antigravity_run "$sb" SYS_IS_ROOT=1 "AG_ROOT_HOME=$sb/rootshome"
+    [[ "$AG_STATE" == failed ]] || { ok=0; echo "root via install_component: state=[$AG_STATE]" >&2; }
+    rm -rf "$sb"
+    # root in its own home (a container, a real root login) is fine
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb" AG_ENTRY=direct SYS_IS_ROOT=1 "AG_ROOT_HOME=$sb/home"
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "root in its own home: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:500}" >&2; }
+    rm -rf "$sb"
+    # not root: the home is the user's, no matter which
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb" AG_ENTRY=direct SYS_IS_ROOT=0 "AG_ROOT_HOME=$sb/rootshome"
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "a normal user was refused: ${AG_OUT:0:400}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "root can write a user's home through the Antigravity installer"; fi
+fi
+
+if it "antigravity dry run as root in a home that is not root's: says what would be refused and succeeds (a dry run changes nothing); the real run still refuses"; then
+    ok=1
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    for entry in direct component; do
+        antigravity_run "$sb" AG_ENTRY="$entry" AUTOOS_DRY_RUN=1 SYS_IS_ROOT=1 "AG_ROOT_HOME=$sb/rootshome"
+        [[ "$AG_STATE" != failed && "$AG_RC" == 0 ]] || { ok=0; echo "$entry: a dry run as root reported state=[$AG_STATE] rc=[$AG_RC] (must succeed): ${AG_OUT:0:400}" >&2; }
+        [[ "$AG_OUT" == *"would refuse: run setup as your own user"* ]] || { ok=0; echo "$entry: the dry run does not say what would be refused (would refuse: run setup as your own user): ${AG_OUT:0:400}" >&2; }
+        [[ "$AG_OUT" != *"would look up"* && "$AG_OUT" != *"would download"* ]] || { ok=0; echo "$entry: the dry run previews an install that the real run would refuse: ${AG_OUT:0:400}" >&2; }
+        [[ ! -s "$sb/calls.log" && -z "$(find "$sb/home" -mindepth 1)" ]] || { ok=0; echo "$entry: a dry run called or wrote something: $(cat "$sb/calls.log" 2>&1)" >&2; }
+    done
+    # the same machine without --dry-run still refuses, and says what to do
+    antigravity_run "$sb" AG_ENTRY=direct SYS_IS_ROOT=1 "AG_ROOT_HOME=$sb/rootshome"
+    [[ "$AG_STATE" == failed && "$AG_RC" != 0 && "$AG_OUT" == *"run setup as your own user"* && "$AG_OUT" != *"would refuse"* ]] \
+        || { ok=0; echo "the real run as root in a user's home: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    [[ -z "$(find "$sb/home" -mindepth 1)" ]] || { ok=0; echo "the refused real run wrote: $(find "$sb/home" -mindepth 1 | tr '\n' ' ')" >&2; }
+    # root in ITS OWN home gets the normal preview, not a refusal
+    antigravity_run "$sb" AG_ENTRY=direct AUTOOS_DRY_RUN=1 SYS_IS_ROOT=1 "AG_ROOT_HOME=$sb/home"
+    [[ "$AG_RC" == 0 && "$AG_OUT" == *"winget-pkgs"* && "$AG_OUT" != *"would refuse"* ]] || { ok=0; echo "root in its own home: rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a dry run as root in another user's home reports Antigravity as failed, or the real run stopped refusing"; fi
+fi
+
+if it "antigravity detection: a valid stamp counts as installed, the old apt command /usr/bin/antigravity does not, and neither do a wrong marker or a stamp behind a symlink"; then
+    sb="$(antigravity_scratch)"; ok=1
+    dir="$sb/home/.local/opt/antigravity"; mkdir -p "$sb/bin" "$dir"
+    printf '#!/bin/sh\n' >"$sb/bin/antigravity"; chmod +x "$sb/bin/antigravity"      # what the old deb put on PATH
+    # PATH holds only the scratch bin dir, so nothing real can answer.
+    probe() { ( PATH="$sb/bin"; SYS_HOME="$sb/home"; _extra_bin_dirs() { printf '%s\n' "$SYS_HOME/.local/bin" "$sb/bin"; }
+                script_is_installed antigravity && echo installed || echo not-installed ); }
+    [[ "$(probe)" == not-installed ]] || { ok=0; echo "the old apt command /usr/bin/antigravity still counts as installed" >&2; }
+    printf '%s\n%s\nsize=1\nsha256=abc\n' "$AG_MARKER" "$AG_IDA" >"$dir/.autoos-version"
+    [[ "$(probe)" == installed ]] || { ok=0; echo "a valid stamp does not count as installed" >&2; }
+    st="$( ( PATH="$sb/bin"; SYS_HOME="$sb/home"; detect_installed_status script antigravity 0; echo "$INSTALLED_STATUS" ) )"
+    [[ "$st" == installed ]] || { ok=0; echo "detect_installed_status says [$st]" >&2; }
+    printf 'autoos-antigravity-ide\n2.5.5-1\n' >"$dir/.autoos-version"
+    [[ "$(probe)" == not-installed ]] || { ok=0; echo "the IDE-era marker counts as installed" >&2; }
+    printf '%s x\n%s\n' "$AG_MARKER" "$AG_IDA" >"$dir/.autoos-version"
+    [[ "$(probe)" == not-installed ]] || { ok=0; echo "a marker with trailing text counts as installed" >&2; }
+    rm -f "$dir/.autoos-version"; printf '%s\n%s\n' "$AG_MARKER" "$AG_IDA" >"$sb/stamp"; ln -s "$sb/stamp" "$dir/.autoos-version"
+    [[ "$(probe)" == not-installed ]] || { ok=0; echo "a stamp behind a symlink counts as installed" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "Antigravity detection keys on the old apt command, or accepts a stamp that is not AutoOS's"; fi
+fi
+
+if it "antigravity old apt package: one warning with the removal commands, nothing removed, the Hub is still installed; no warning when it is absent"; then
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb" AG_OLD_APT=1
+    ok=1
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    probs="$(antigravity_problems "$sb" "$AG_IDA")"
+    [[ -z "$probs" ]] || { ok=0; echo "$probs" >&2; }
+    for want in "sudo apt-get remove antigravity" "/etc/apt/sources.list.d/antigravity.list" "/etc/apt/keyrings/antigravity-repo-key.gpg"; do
+        [[ "$AG_OUT" == *"$want"* ]] || { ok=0; echo "the warning lacks '$want': ${AG_OUT:0:700}" >&2; }
+    done
+    [[ "$(grep -c 'sudo apt-get remove antigravity' <<<"$AG_OUT")" == 1 ]] || { ok=0; echo "the warning was not printed exactly once" >&2; }
+    [[ "$AG_OUT" == *"1.23.2"* || "$AG_OUT" == *"IDE"* ]] || { ok=0; echo "the warning does not say what the old package is: ${AG_OUT:0:500}" >&2; }
+    [[ "$(antigravity_count "$sb" 'apt-get|^sudo |^run sudo ')" == 0 ]] || { ok=0; echo "apt or sudo was run: $(grep -E 'apt-get|sudo' "$sb/calls.log")" >&2; }
+    rm -rf "$sb"
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb"
+    [[ "$AG_OUT" != *"apt-get remove"* ]] || { ok=0; echo "warned about an old apt package that is not installed" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the old apt package is not reported, or something was removed automatically"; fi
+fi
+
+if it "antigravity PATH check: warns naming the command that shadows ours (the old /usr/bin/antigravity first on PATH), says nothing when ours resolves"; then
+    ok=1
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    printf '#!/bin/sh\n' >"$sb/oldbin/antigravity"; chmod +x "$sb/oldbin/antigravity"
+    antigravity_run "$sb" "AG_PATH_FIRST=$sb/oldbin"
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "state=[$AG_STATE]: ${AG_OUT:0:400}" >&2; }
+    [[ "$AG_OUT" == *"$sb/oldbin/antigravity"* && "$AG_OUT" == *"$sb/home/.local/bin/antigravity"* ]] || { ok=0; echo "no warning naming the shadowing command and ours: ${AG_OUT:0:700}" >&2; }
+    [[ -x "$sb/home/.local/bin/antigravity" ]] || { ok=0; echo "our link was not created" >&2; }
+    rm -rf "$sb"
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb"
+    [[ "$AG_OUT" != *"shadow"* && "$AG_OUT" != *"resolves to"* ]] || { ok=0; echo "a warning although our link resolves first: ${AG_OUT:0:500}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a shadowing antigravity command goes unnoticed, or a correct PATH is warned about"; fi
+fi
+
+if it "antigravity dry run and --dry-run --update: name the winget-pkgs source and the target directory, make no call and write nothing"; then
+    sb="$(antigravity_scratch)"; ok=1
+    antigravity_run "$sb" AUTOOS_DRY_RUN=1
+    [[ "$AG_RC" == 0 ]] || { ok=0; echo "rc=[$AG_RC]: ${AG_OUT:0:400}" >&2; }
+    [[ "$AG_OUT" == *"winget-pkgs"* && "$AG_OUT" == *"$sb/home/.local/opt/antigravity"* ]] || { ok=0; echo "the dry run does not name winget-pkgs and the target directory: ${AG_OUT:0:600}" >&2; }
+    [[ "$AG_OUT" == *"no published sha256"* ]] || { ok=0; echo "the dry run does not say the tarball has no published sha256" >&2; }
+    [[ ! -s "$sb/calls.log" ]] || { ok=0; echo "a dry run made calls: $(cat "$sb/calls.log")" >&2; }
+    [[ -z "$(find "$sb/home" -mindepth 1)" ]] || { ok=0; echo "a dry run wrote: $(find "$sb/home" -mindepth 1 | tr '\n' ' ')" >&2; }
+    for bad in ".deb" "apt-get" "us-central1" "auto-updater" "sudo"; do
+        [[ "$AG_OUT" != *"$bad"* ]] || { ok=0; echo "the dry run still mentions '$bad'" >&2; }
+    done
+    rm -rf "$sb"
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb" >/dev/null
+    before="$(antigravity_tree_state "$sb")"; : >"$sb/calls.log"
+    antigravity_run "$sb" AUTOOS_DRY_RUN=1 AUTOOS_UPDATE=1
+    [[ "$AG_RC" == 0 && "$AG_OUT" == *"winget-pkgs"* && "$AG_OUT" == *"$sb/home/.local/opt/antigravity"* ]] \
+        || { ok=0; echo "update dry run: rc=[$AG_RC], does not name winget-pkgs and the directory: ${AG_OUT:0:500}" >&2; }
+    [[ ! -s "$sb/calls.log" ]] || { ok=0; echo "an update dry run made calls: $(cat "$sb/calls.log")" >&2; }
+    [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "an update dry run changed the tree" >&2; }
+    antigravity_run "$sb" AUTOOS_DRY_RUN=1
+    [[ "$AG_STATE" == skipped && "$AG_OUT" != *"would look up"* ]] || { ok=0; echo "a plain dry run of an installed Hub is not a skip: ${AG_OUT:0:400}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the Antigravity dry run asks the network, writes, or does not say what it would do"; fi
+fi
+
+if it "antigravity interrupted download: a SIGTERM or an exit from underneath removes the staging directory and leaves the existing install untouched"; then
+    ok=1
+    for how in kill exit; do
+        sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+        antigravity_run "$sb" >/dev/null
+        antigravity_serve "$sb" "$AG_VB" "$AG_IDB"
+        before="$(antigravity_tree_state "$sb")"; : >"$sb/$how-on-download"; : >"$sb/calls.log"
+        antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1
+        # the install runs in a subshell of its own: that one dies of the TERM (143) or exits
+        # (5) - and the caller is told the install failed and carries on
+        want_rc=143; if [[ "$how" == exit ]]; then want_rc=5; fi
+        [[ "$AG_STATE" == failed && "$AG_RC" == "$want_rc" ]] || { ok=0; echo "$how: state=[$AG_STATE] rc=[$AG_RC], expected failed with rc $want_rc: ${AG_OUT:0:300}" >&2; }
+        [[ "$(antigravity_count "$sb" '^curl .* -o [^ ]*pkg\.tgz')" == 1 ]] || { ok=0; echo "$how: the download was never started: $(grep '^curl' "$sb/calls.log" | tail -2)" >&2; }
+        [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "$how: the interrupt left something behind: $(diff <(echo "$before") <(antigravity_tree_state "$sb") | head -5)" >&2; }
+        rm -rf "$sb"
+    done
+    if (( ok )); then pass; else fail "an interrupted install leaves a staging directory with a half-downloaded tarball"; fi
+fi
+
+if it "antigravity traps: a caller's EXIT trap does not run inside the install and is still armed afterwards (the install neither replays nor drops it)"; then
+    ok=1
+    # (1) the caller's trap lives in the shell AROUND the one that runs the install (the test
+    # suite itself is like that): it must not be re-armed in the install's own shell, where it
+    # would run at that shell's exit - inside a $(...) it lands in the captured output
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    ( trap 'echo CALLER_EXIT' EXIT
+      antigravity_run "$sb" AG_ENTRY=direct AG_TRAPS=inherited
+      printf '%s\n' "$AG_STATE" >"$sb/h.state"; printf '%s\n' "$AG_OUT" >"$sb/h.out"
+      echo H_AFTER_INSTALL
+      trap -p EXIT >"$sb/h.traps" ) >"$sb/h.stdout" 2>&1
+    [[ "$(<"$sb/h.state")" == installed ]] || { ok=0; echo "inherited: state=[$(<"$sb/h.state")]: $(head -c 500 "$sb/h.out")" >&2; }
+    ! grep -qx CALLER_EXIT "$sb/h.out" || { ok=0; echo "inherited: the caller's EXIT trap ran inside the install: $(grep -n CALLER_EXIT "$sb/h.out")" >&2; }
+    [[ "$(<"$sb/h.stdout")" == $'H_AFTER_INSTALL\nCALLER_EXIT' ]] || { ok=0; echo "inherited: the caller's own trap did not run exactly once, after the install: [$(tr '\n' '|' <"$sb/h.stdout")]" >&2; }
+    [[ "$(<"$sb/h.traps")" == "trap -- 'echo CALLER_EXIT' EXIT" ]] || { ok=0; echo "inherited: the caller's trap is [$(<"$sb/h.traps")] afterwards" >&2; }
+    rm -rf "$sb"
+    # (2) the caller's trap is set in the very shell that runs the install: not run during it, still there after it
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb" AG_ENTRY=direct AG_TRAPS=own
+    [[ "$AG_STATE" == installed ]] || { ok=0; echo "own: state=[$AG_STATE]: ${AG_OUT:0:500}" >&2; }
+    [[ "$AG_OUT" == *"AGTRAPS trap -- 'echo CALLER_EXIT' EXIT"* ]] || { ok=0; echo "own: the caller's trap is not armed after the install: $(grep '^AGTRAPS' <<<"$AG_OUT")" >&2; }
+    [[ "$(grep -c CALLER_EXIT <<<"$AG_OUT")" == 2 && "${AG_OUT##*$'\n'}" == CALLER_EXIT ]] \
+        || { ok=0; echo "own: CALLER_EXIT must appear once in the AGTRAPS line and once at the very end, after the install: $(grep -n CALLER_EXIT <<<"$AG_OUT")" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the Antigravity install runs a caller's EXIT trap early or loses it"; fi
+fi
+
+if it "antigravity staging: a SIGTERM or an exit right after the staging directory is made, before any request or check, still removes it (the cleanup is armed before the directory exists)"; then
+    ok=1
+    for how in term exit; do
+        for start in fresh update; do
+            sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+            if [[ "$start" == update ]]; then
+                antigravity_run "$sb" >/dev/null
+                antigravity_serve "$sb" "$AG_VB" "$AG_IDB"
+            fi
+            before="$(antigravity_tree_state "$sb")"; : >"$sb/calls.log"
+            antigravity_run "$sb" AG_ENTRY=direct AUTOOS_UPDATE=1 "AG_AFTER_STAGE=$how"
+            [[ "$AG_STATE" != installed && "$AG_STATE" != skipped ]] || { ok=0; echo "$how/$start: the run was reported as [$AG_STATE]" >&2; }
+            [[ -z "$(antigravity_debris "$sb")" ]] || { ok=0; echo "$how/$start: left behind: $(antigravity_debris "$sb" | tr '\n' ' ')" >&2; }
+            [[ "$(antigravity_count "$sb" '^curl ')" == 0 ]] || { ok=0; echo "$how/$start: a request was made before the signal: $(grep '^curl' "$sb/calls.log")" >&2; }
+            if [[ "$start" == update ]]; then
+                [[ "$(antigravity_tree_state "$sb")" == "$before" ]] || { ok=0; echo "$how/$start: the existing install or its surroundings changed: $(diff <(echo "$before") <(antigravity_tree_state "$sb") | head -5)" >&2; }
+            else
+                [[ -z "$(find "$sb/home" -type f)" ]] || { ok=0; echo "$how/$start: files were left: $(find "$sb/home" -type f | tr '\n' ' ')" >&2; }
+            fi
+            rm -rf "$sb"
+        done
+    done
+    if (( ok )); then pass; else fail "a signal that arrives right after the staging directory is made leaves .antigravity-stage.XXXXXX behind"; fi
+fi
+
+if it "antigravity catalog entry: updatable, no prompt, x64-only, notes name the Hub, winget-pkgs, the command and that there is no published sha256"; then
+    problems="$(python3 - 2>&1 <<'PY'
+import json
+doc = json.load(open("catalog/linux.json", encoding="utf-8"))
+ent = [c for g in doc["categories"] for c in g["components"] if c["id"] == "antigravity"]
+if len(ent) != 1:
+    print("expected exactly one antigravity entry, found %d" % len(ent))
+else:
+    c = ent[0]
+    notes = c.get("notes", "")
+    if "frozen" in notes.lower() or "1.23.2" in notes: print("notes still describe the frozen apt repo: " + notes)
+    if "antigravity-ide" in notes or c.get("verify", "").startswith("antigravity-ide"): print("the IDE command antigravity-ide is still named")
+    if "Hub" not in notes: print("notes do not say this is the Hub")
+    if "winget-pkgs" not in notes: print("notes do not say the version is discovered from winget-pkgs")
+    if "no published sha256" not in notes: print("notes do not say there is no published sha256")
+    if "`antigravity`" not in notes and "command: antigravity" not in notes: print("notes do not name the command antigravity")
+    if "--update" not in notes: print("notes do not mention --update")
+    if "antigravity" not in c.get("verify", ""): print("verify %r does not name the antigravity install" % c.get("verify"))
+    if "--version" in c.get("verify", "") or "--help" in c.get("verify", ""): print("verify %r would start the Electron app (it has no CLI wrapper)" % c.get("verify"))
+    if c.get("updatable") is not True: print("updatable is %r, not true" % c.get("updatable"))
+    if c.get("arch") != ["x64"]: print("arch is %r, must stay x64-only" % c.get("arch"))
+    if c.get("prompt"): print("carries prompt %r" % c["prompt"])
+    if (c.get("provider"), c.get("package"), c.get("id"), c.get("name")) != ("script", "antigravity", "antigravity", "Antigravity"):
+        print("id/name/provider/package changed: %r" % ((c.get("provider"), c.get("package"), c.get("id"), c.get("name")),))
+PY
+)"
+    stale="$(grep -rIl 'antigravity_url' lib catalog setup.sh setup.ps1 README.md docs 2>/dev/null | tr '\n' ' ')"
+    [[ -z "$stale" ]] || problems+="antigravity_url is still referenced in: $stale"
+    assert_eq "$problems" ""
+fi
+
+if it "antigravity catalog text: describes the Hub, not the IDE, and claims to be hidden on headless machines only when its category needs a display"; then
+    problems="$(python3 - 2>&1 <<'PY'
+import json
+doc = json.load(open("catalog/linux.json", encoding="utf-8"))
+found = [(g, c) for g in doc["categories"] for c in g["components"] if c["id"] == "antigravity"]
+if len(found) != 1:
+    print("expected exactly one antigravity entry, found %d" % len(found))
+else:
+    grp, c = found[0]
+    desc, notes = c.get("description", ""), c.get("notes", "")
+    # the display requirement is a property of the CATEGORY (lib/linux/catalog.sh hides
+    # a requiresDisplay category on a headless machine); a claim without it is false
+    for field, text in (("description", desc), ("notes", notes)):
+        if "headless" in text.lower() and not grp.get("requiresDisplay"):
+            print("%s says 'headless' but category %r has no requiresDisplay, so the entry is shown there: %s" % (field, grp.get("id"), text[:120]))
+    if "IDE" in desc or "agent-first" in desc:
+        print("description still describes the IDE: %r" % desc)
+    if "Antigravity 2" not in desc or "desktop app" not in desc:
+        print("description does not describe the Hub (Antigravity 2.x, a desktop app): %r" % desc)
+    if len(desc) > 70:
+        print("description is %d characters, the catalog convention is <= 70: %r" % (len(desc), desc))
+    if "Hub" not in notes:
+        print("notes do not name the Hub: %r" % notes[:120])
+    if "arm64" not in notes:
+        print("notes lost the true part of the hiding claim (the entry is x64-only, so it is hidden on arm64): %r" % notes[:160])
+PY
+)"
+    assert_eq "$problems" ""
+fi
+
+if it "antigravity launch hint: a verify command that is not the app (test -x ...) does not make 'Where to find them' say 'run test'"; then
+    ok=1
+    for verify in "test -x ~/.local/opt/antigravity/antigravity" "test -d ~/.cao" "[ -x /opt/x ]"; do
+        if launch_hint "Antigravity" "antigravity" "$verify"; then
+            [[ "$LAUNCH_HOW" != *"run  test"* && "$LAUNCH_HOW" != *"run  ["* ]] || { ok=0; echo "verify [$verify] gives the hint [$LAUNCH_HOW]" >&2; }
+        fi
+    done
+    if (( ok )); then pass; else fail "the launch hint names the shell builtin that verifies the install instead of the app"; fi
+fi
+
+
+# ─── The version check: setup.sh --update ───────────────────────────────────
+# There is no general update mechanism. --update (AUTOOS_UPDATE=1) makes an
+# already-installed component run its own installer again - but only when its
+# catalog entry says "updatable": true - and that installer decides. Without the
+# flag a second run is `skipped` (AGENTS.md section 4).
+
+if it "antigravity update flag: AUTOOS_UPDATE=1 re-runs only installed components the catalog marks updatable"; then
+    ok=1
+    # update_probe <update 0|1> <package> [catalog-path]: state and whether the installer ran.
+    update_probe() {
+        ( CATALOG_PATH="${3-$ROOT/catalog/linux.json}"; AUTOOS_UPDATE="$1"; AUTOOS_DRY_RUN=0; RAN=0
+          is_installed() { return 0; }
+          install_script() { RAN=1; [[ "${PROBE_SKIP:-0}" == 1 ]] && INSTALL_SCRIPT_STATE=skipped; return 0; }
+          install_component script "$2" 0 >/dev/null 2>&1
+          printf '%s ran=%s' "$INSTALL_STATE" "$RAN" )
+    }
+    [[ "$(update_probe 0 antigravity)" == "skipped ran=0" ]] || { ok=0; echo "without --update: [$(update_probe 0 antigravity)]" >&2; }
+    [[ "$(update_probe 1 antigravity)" == "installed ran=1" ]] || { ok=0; echo "--update, updatable: [$(update_probe 1 antigravity)]" >&2; }
+    [[ "$(update_probe 1 uv)" == "skipped ran=0" ]] || { ok=0; echo "--update, a component that is not updatable: [$(update_probe 1 uv)]" >&2; }
+    [[ "$(update_probe 1 no-such-package)" == "skipped ran=0" ]] || { ok=0; echo "--update, an unknown package: [$(update_probe 1 no-such-package)]" >&2; }
+    [[ "$(update_probe 1 antigravity /no/such/catalog.json)" == "skipped ran=0" ]] || { ok=0; echo "--update without a readable catalog must skip: [$(update_probe 1 antigravity /no/such/catalog.json)]" >&2; }
+    [[ "$(PROBE_SKIP=1 update_probe 1 antigravity)" == "skipped ran=1" ]] || { ok=0; echo "an installer's own 'skipped' is reported as [$(PROBE_SKIP=1 update_probe 1 antigravity)]" >&2; }
+    if (( ok )); then pass; else fail "install_component's update gate does not follow the catalog"; fi
+fi
+
+if it "antigravity catalog entry is the only updatable one, and its notes name the version check"; then
+    problems="$(python3 - 2>&1 <<'PY'
+import json
+for p in ("catalog/linux.json", "catalog/macos.json", "catalog/windows.json"):
+    doc = json.load(open(p, encoding="utf-8"))
+    for g in doc["categories"]:
+        for c in g["components"]:
+            if "updatable" in c and not (p == "catalog/linux.json" and c["id"] == "antigravity"):
+                print(p + ": " + c["id"] + " is marked updatable but has no version check")
+            if p == "catalog/linux.json" and c["id"] == "antigravity":
+                if c.get("updatable") is not True: print("antigravity: updatable is %r, not true" % c.get("updatable"))
+                if "--update" not in c.get("notes", ""): print("antigravity: notes do not mention --update")
+PY
+)"
+    assert_eq "$problems" ""
+fi
+
+# antigravity_inert_clients <dir>: stand-ins for the agent CLIs. setup.sh's
+# detection asks them which MCP servers they know (`claude mcp list`,
+# `qodercli mcp list`, `ollama list`), and that starts a real client process;
+# a test about a flag or a plan line has no business doing that.
+antigravity_inert_clients() {
+    local c
+    mkdir -p "$1"
+    for c in claude qodercli opencode codex qwen agy gemini ollama; do printf '#!/bin/sh\nexit 0\n' >"$1/$c"; chmod +x "$1/$c"; done
+}
+
+if it "antigravity update flag: setup.sh knows --update, lists it in --help and still rejects unknown options"; then
+    ok=1; sb="$(antigravity_scratch)"; antigravity_inert_clients "$sb/bin"
+    out="$(bash setup.sh --help 2>&1)"
+    [[ "$out" == *"--update"* ]] || { ok=0; echo "--help does not list --update" >&2; }
+    out="$(PATH="$sb/bin:$PATH" HOME="$sb/home" bash setup.sh --update --list --no-color 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$out" != *"Unknown option"* ]] || { ok=0; echo "--update --list: rc=$rc: ${out:0:200}" >&2; }
+    out="$(bash setup.sh --updat --list --no-color 2>&1)"; rc=$?
+    [[ $rc -eq 2 && "$out" == *"Unknown option: --updat"* ]] || { ok=0; echo "--updat was not rejected: rc=$rc: ${out:0:200}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the --update flag is not wired into setup.sh's argument parsing"; fi
+fi
+
+if it "antigravity update flag: the plan says 'checking for a newer version' only with --update, a dry run asks nothing and writes nothing"; then
+    if [[ "$(uname -m)" != x86_64 ]]; then skip "Antigravity is x64-only and hidden on this machine"
+    elif [[ "$(id -u)" == 0 ]]; then skip "root refuses a scratch HOME on purpose (see the root test above)"
+    else
+        sb="$(antigravity_scratch)"; ok=1
+        mkdir -p "$sb/home/.local/opt/antigravity"; printf '%s\n%s\nsize=1\nsha256=abc\n' "$AG_MARKER" "$AG_IDA" >"$sb/home/.local/opt/antigravity/.autoos-version"
+        antigravity_inert_clients "$sb/bin"
+        # USER names nobody, so detection falls back to HOME: the scratch home is the machine.
+        # SUDO_USER wins over USER in detect.sh: CI's setpriv runner inherits it from
+        # `sudo unshare`, which pointed the install at the runner's real home.
+        run_setup() { env -u SUDO_USER PATH="$sb/bin:$PATH" USER=agy-test-nobody HOME="$sb/home" DISPLAY=:0 AUTOOS_CACHE_DIR="$sb/cache" \
+            bash setup.sh --only antigravity --dry-run --yes --no-color "$@" 2>&1; }
+        before="$(find "$sb/home/.local" -printf '%p|%T@\n' | sort)"
+        out="$(run_setup)"; rc=$?
+        [[ $rc -eq 0 && "$out" == *"Already installed - package will be skipped"* && "$out" != *"checking for a newer version"* ]] \
+            || { ok=0; echo "without --update: rc=$rc: $(grep -i 'installed\|newer' <<<"$out" | head -5)" >&2; }
+        out="$(run_setup --update)"; rc=$?
+        [[ $rc -eq 0 && "$out" == *"checking for a newer version"* ]] || { ok=0; echo "--update: rc=$rc: $(grep -i 'installed\|newer' <<<"$out" | head -5)" >&2; }
+        [[ "$out" == *"winget-pkgs"* ]] || { ok=0; echo "--update: the dry run does not say it would look in winget-pkgs" >&2; }
+        [[ "$(grep -c '^run:' <<<"$out")" == 0 ]] || { ok=0; echo "--update: a dry run executed a command" >&2; }
+        [[ "$(find "$sb/home/.local" -printf '%p|%T@\n' | sort)" == "$before" ]] || { ok=0; echo "the dry run wrote under ~/.local" >&2; }
+        rm -rf "$sb"
+        if (( ok )); then pass; else fail "setup.sh --update does not reach the Antigravity version check"; fi
+    fi
 fi
 
 # VS Code, Google Chrome and the GitHub CLI share the pattern Antigravity was
@@ -4949,6 +6156,503 @@ EOS
     else fail "expected 0 add-json calls when every server already exists, got $adds"; fi
 fi
 
+# ─── Playwright MCP: the lazy proxy registration ────────────────────────────
+describe "playwright lazy proxy"
+
+# A sandbox for install_mcp_playwright: a scratch HOME, a stub `claude` that records
+# every call and edits the scratch user config the way `claude mcp add|remove --scope
+# user` does, and a stub `docker` that records its calls (the installer must never
+# stop a container, so its log has to stay empty). Nothing here touches the real
+# HOME, the real claude or the real docker.
+pw_setup() {
+    local tmp="$1"
+    mkdir -p "$tmp/bin" "$tmp/home"
+    cat >"$tmp/bin/claude" <<'EOS'
+#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+with open(os.environ["PW_STUB_LOG"], "a") as fh:
+    fh.write(" ".join(argv) + "\n")
+cfg = os.environ["PW_STUB_CONFIG"]
+
+def load():
+    try:
+        with open(cfg, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+def save(data):
+    with open(cfg, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+
+if argv[:2] == ["mcp", "list"]:
+    for name, entry in (load().get("mcpServers") or {}).items():
+        print("%s: %s %s - Connected" % (name, entry.get("command", ""), " ".join(entry.get("args", []))))
+    for line in filter(None, os.environ.get("PW_STUB_EXTRA_LIST", "").split("|")):
+        print(line)
+elif argv[:2] == ["mcp", "add"]:
+    name = argv[argv.index("--scope") + 2]
+    command = argv[argv.index("--") + 1:]
+    if os.environ.get("PW_STUB_ADD_FAIL_MATCH") and os.environ["PW_STUB_ADD_FAIL_MATCH"] in " ".join(command):
+        sys.exit(1)
+    data = load()
+    data.setdefault("mcpServers", {})[name] = {"type": "stdio", "command": command[0], "args": command[1:], "env": {}}
+    save(data)
+elif argv[:2] == ["mcp", "remove"]:
+    data = load()
+    (data.get("mcpServers") or {}).pop(argv[2], None)
+    save(data)
+EOS
+    cat >"$tmp/bin/docker" <<'EOS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$PW_STUB_DOCKER_LOG"
+EOS
+    chmod +x "$tmp/bin/claude" "$tmp/bin/docker"
+}
+
+# pw_seed <config> <command|-> [args...]: a user config with a serena server and
+# (unless the command is "-") a playwright stdio entry.
+pw_seed() {
+    python3 - "$@" <<'PY'
+import json, sys
+path, command, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+data = {"numStartups": 42, "mcpServers": {"serena": {"type": "stdio", "command": "uvx", "args": ["serena"], "env": {}}}}
+if command != "-":
+    data["mcpServers"]["playwright"] = {"type": "stdio", "command": command, "args": args, "env": {}}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+PY
+}
+
+# pw_seed_json <config> <json>: the playwright entry verbatim, for the odd shapes.
+pw_seed_json() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+data = {"numStartups": 42, "mcpServers": {"playwright": json.loads(sys.argv[2])}}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+PY
+}
+
+# pw_entry <config>: the playwright entry as "command arg arg", "-" when absent.
+pw_entry() {
+    python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entry = (json.load(fh).get("mcpServers") or {}).get("playwright")
+except (OSError, ValueError):
+    entry = None
+print("-" if entry is None else " ".join([entry.get("command", "")] + entry.get("args", [])))
+PY
+}
+
+# pw_argv_json <config>: the playwright entry's command and args as one JSON list, "-" when absent
+# (pw_entry joins with spaces, so it cannot tell "a b" from "a" "b").
+pw_argv_json() {
+    python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entry = (json.load(fh).get("mcpServers") or {}).get("playwright")
+except (OSError, ValueError):
+    entry = None
+print("-" if entry is None else json.dumps([entry.get("command", "")] + entry.get("args", [])))
+PY
+}
+
+# pw_servers <config>: the user-scope server names, sorted and comma-joined.
+pw_servers() {
+    python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        print(",".join(sorted((json.load(fh).get("mcpServers") or {}))))
+except (OSError, ValueError):
+    print("-")
+PY
+}
+
+# pw_run <tmp> <function> [args]: one installer function inside the sandbox. PW_DRY, PW_OS,
+# PW_CONFIG_DIR, PW_ADD_FAIL and PW_EXTRA_LIST steer it; the caller captures the output.
+pw_run() {
+    local tmp="$1"; shift
+    (
+        SYS_HOME="$tmp/home"; HOME="$tmp/home"; AUTOOS_DRY_RUN="${PW_DRY:-0}"; SYS_OS="${PW_OS:-linux}"
+        PATH="$tmp/bin:$PATH"
+        export PW_STUB_LOG="$tmp/claude.log" PW_STUB_DOCKER_LOG="$tmp/docker.log"
+        export PW_STUB_CONFIG="${PW_CONFIG:-$tmp/home/.claude.json}"
+        export PW_STUB_ADD_FAIL_MATCH="${PW_ADD_FAIL:-}" PW_STUB_EXTRA_LIST="${PW_EXTRA_LIST:-}"
+        unset CLAUDE_CONFIG_DIR
+        [[ -z "${PW_CONFIG_DIR:-}" ]] || export CLAUDE_CONFIG_DIR="$PW_CONFIG_DIR"
+        register_antigravity_mcp_server() { printf '%s %s\n' "$1" "$2" >>"$tmp/antigravity.log"; }
+        "$@"
+    )
+}
+
+pw_without_docker() {
+    has_cmd() { [[ "$1" != docker ]] && command -v "$1" >/dev/null 2>&1; }
+    install_mcp_playwright
+}
+
+pw_without_claude() {
+    has_cmd() { [[ "$1" != claude ]] && command -v "$1" >/dev/null 2>&1; }
+    install_mcp_playwright
+}
+
+pw_backup_fails() {
+    backup_file() { return 1; }
+    install_mcp_playwright
+}
+
+# pw_writes <tmp>: how many claude calls changed something (add or remove).
+pw_writes() {
+    local n
+    n="$(grep -cE '^mcp (add|remove)' "$1/claude.log" 2>/dev/null)" || n=0
+    printf '%s\n' "${n:-0}"
+}
+
+PW_DOCKER_FORM=(docker run -i --rm --init --network host mcr.microsoft.com/playwright/mcp:latest)
+
+if it "playwright lazy proxy installer: no entry and docker present registers the proxy by absolute path"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; pw_seed "$tmp/home/.claude.json" -
+    out="$(cd / && pw_run "$tmp" install_mcp_playwright 2>&1)"
+    calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+    got="$(pw_entry "$tmp/home/.claude.json")"
+    ag="$(cat "$tmp/antigravity.log" 2>/dev/null)"
+    dk="$(cat "$tmp/docker.log" 2>/dev/null)"
+    rm -rf "$tmp"
+    problems=""
+    [[ "$calls" == "mcp add --scope user playwright -- python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" calls=[$calls]"
+    [[ "$got" == "python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" entry=[$got]"
+    [[ "$ag" == 'playwright {"command": "npx", "args": ["-y", "@playwright/mcp@'* ]] || problems+=" antigravity=[$ag]"
+    [[ -z "$dk" ]] || problems+=" docker was called: [$dk]"
+    [[ "$out" == *"registered"* ]] || problems+=" the registration was not reported"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: an exact docker or npx entry is replaced after a backup, a second run skips"; then
+    problems=""
+    for form in docker npx npx-bare npx-latest; do
+        tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+        case "$form" in
+            docker)     pw_seed "$cfg" "${PW_DOCKER_FORM[@]}" ;;
+            npx)        pw_seed "$cfg" npx -y @playwright/mcp@0.0.81 ;;
+            npx-bare)   pw_seed "$cfg" npx -y @playwright/mcp ;;
+            npx-latest) pw_seed "$cfg" npx -y @playwright/mcp@latest ;;
+        esac
+        cp "$cfg" "$tmp/seed.json"
+        out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+        calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+        got="$(pw_entry "$cfg")"
+        backups=( "$cfg".autoos-backup-* )
+        if [[ ! -f "${backups[0]}" ]] || ! cmp -s "${backups[0]}" "$tmp/seed.json"; then problems+=" [$form] no byte-identical backup;"; fi
+        [[ "$calls" == "mcp remove playwright --scope user|mcp add --scope user playwright -- python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" [$form] calls=[$calls];"
+        [[ "$got" == "python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" [$form] entry=[$got];"
+        [[ "$out" == *"replaced"* ]] || problems+=" [$form] the replace was not reported;"
+        notices="$(printf '%s\n' "$out" | grep -c 'keep their current' || true)"
+        [[ "$notices" == "1" ]] || problems+=" [$form] the running-sessions notice appeared $notices times;"
+        [[ "$(pw_servers "$cfg")" == "playwright,serena" ]] || problems+=" [$form] the other servers changed: $(pw_servers "$cfg");"
+        : >"$tmp/claude.log"
+        out2="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+        again=( "$cfg".autoos-backup-* )
+        [[ "$(pw_writes "$tmp")" == "0" && "$out2" == *"skipped"* && "${#again[@]}" == "1" ]] \
+            || problems+=" [$form] the second run wrote or made another backup: $(pw_writes "$tmp") ${#again[@]};"
+        [[ ! -s "$tmp/docker.log" ]] || problems+=" [$form] docker was called: $(cat "$tmp/docker.log");"
+        rm -rf "$tmp"
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: an entry that already is the proxy is skipped without a write"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" python3 "$ROOT/tools/playwright_mcp_lazy.py"
+    cp "$cfg" "$tmp/seed.json"
+    out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+    writes="$(pw_writes "$tmp")"
+    same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+    backups=( "$cfg".autoos-backup-* )
+    nbackups=0; [[ -e "${backups[0]}" ]] && nbackups="${#backups[@]}"
+    rm -rf "$tmp"
+    if [[ "$writes" == "0" && "$same" == "1" && "$nbackups" == "0" && "$out" == *"skipped"* ]]; then pass
+    else fail "writes=$writes unchanged=$same backups=$nbackups out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: any other custom entry is left alone with a warning that names it"; then
+    problems=""
+    n=0
+    while IFS= read -r entry; do
+        n=$((n + 1))
+        tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+        pw_seed_json "$cfg" "$entry"
+        cp "$cfg" "$tmp/seed.json"
+        out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+        backups=( "$cfg".autoos-backup-* )
+        same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+        [[ "$(pw_writes "$tmp")" == "0" && "$same" == "1" && ! -e "${backups[0]}" ]] || problems+=" [$n] the entry was touched;"
+        [[ "$out" == *"'playwright'"* && "$out" == *"custom"* ]] || problems+=" [$n] no warning naming it;"
+        [[ "$out" != *"sekret-marker"* ]] || problems+=" [$n] the warning printed the entry's own arguments;"
+        rm -rf "$tmp"
+    done <<EOF
+{"type":"stdio","command":"docker","args":["run","-i","--rm","mcr.microsoft.com/playwright/mcp:v9.9.9"],"env":{}}
+{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless"],"env":{}}
+{"type":"stdio","command":"docker","args":["run","-i","--rm","--init","--network","host","mcr.microsoft.com/playwright/mcp:latest"],"env":{"TOKEN":"sekret-marker"}}
+{"type":"stdio","command":"node","args":["/opt/pw/cli.js","--marker","sekret-marker"],"env":{}}
+{"type":"stdio","command":"python3","args":["/elsewhere/tools/other_script.py"],"env":{}}
+{"type":"http","url":"http://localhost:1/sekret-marker"}
+{"type":"stdio","command":"python3","args":["/elsewhere/bin/playwright_mcp_lazy.py"],"env":{}}
+{"type":"stdio","command":"python3","args":["-u","/elsewhere/tools/playwright_mcp_lazy.py"],"env":{}}
+{"type":"stdio","command":"python","args":["/elsewhere/tools/playwright_mcp_lazy.py"],"env":{}}
+{"type":"stdio","command":"python3","args":["/elsewhere/tools/playwright_mcp_lazy.py"],"env":{"TOKEN":"sekret-marker"}}
+{"type":"stdio","command":"python3","args":["/else\twhere/tools/playwright_mcp_lazy.py"],"env":{}}
+EOF
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: without docker today's npx registration is unchanged"; then
+    problems=""
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; pw_seed "$tmp/home/.claude.json" -
+    out="$(pw_run "$tmp" pw_without_docker 2>&1)"
+    calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+    pkg="$(python3 -c "import json;print(json.load(open('catalog/agent-harness.json',encoding='utf-8'))['mcp_servers']['playwright']['package'])")"
+    [[ "$calls" == "mcp add --scope user playwright -- npx -y $pkg" ]] || problems+=" no-entry calls=[$calls];"
+    rm -rf "$tmp"
+    # an existing docker-form entry is not this installer's to replace when there is no docker
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" "${PW_DOCKER_FORM[@]}"; cp "$cfg" "$tmp/seed.json"
+    out="$(pw_run "$tmp" pw_without_docker 2>&1)"
+    same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+    [[ "$(pw_writes "$tmp")" == "0" && "$same" == "1" ]] || problems+=" existing entry was touched;"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: on macOS the npx registration is kept even with docker present"; then
+    problems=""
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; pw_seed "$tmp/home/.claude.json" -
+    out="$(PW_OS=macos pw_run "$tmp" install_mcp_playwright 2>&1)"
+    calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+    pkg="$(python3 -c "import json;print(json.load(open('catalog/agent-harness.json',encoding='utf-8'))['mcp_servers']['playwright']['package'])")"
+    [[ "$calls" == "mcp add --scope user playwright -- npx -y $pkg" ]] || problems+=" no-entry calls=[$calls];"
+    rm -rf "$tmp"
+    # and an existing docker-form entry is left alone there
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" "${PW_DOCKER_FORM[@]}"; cp "$cfg" "$tmp/seed.json"
+    out="$(PW_OS=macos pw_run "$tmp" install_mcp_playwright 2>&1)"
+    same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+    [[ "$(pw_writes "$tmp")" == "0" && "$same" == "1" ]] || problems+=" existing entry was touched;"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: a dry run prints the plan and calls nothing"; then
+    problems=""
+    for form in none docker stale; do
+        tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+        case "$form" in
+            none) pw_seed "$cfg" - ;;
+            docker) pw_seed "$cfg" "${PW_DOCKER_FORM[@]}" ;;
+            stale) pw_seed "$cfg" python3 /old/AutoOS/tools/playwright_mcp_lazy.py ;;
+        esac
+        cp "$cfg" "$tmp/seed.json"
+        out="$(PW_DRY=1 pw_run "$tmp" install_mcp_playwright 2>&1)"
+        same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+        backups=( "$cfg".autoos-backup-* )
+        [[ ! -s "$tmp/claude.log" && "$same" == "1" && ! -e "${backups[0]}" && ! -s "$tmp/docker.log" ]] || problems+=" [$form] a dry run called or wrote something;"
+        [[ "$out" == *"would"* && "$out" == *"$ROOT/tools/playwright_mcp_lazy.py"* ]] || problems+=" [$form] no plan naming the proxy: $(printf '%s' "$out" | tail -3);"
+        [[ "$form" != stale || "$out" == *"/old/AutoOS/tools/playwright_mcp_lazy.py"* ]] || problems+=" [stale] the plan does not name the old path;"
+        rm -rf "$tmp"
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: a failed backup stops the replace with a warning"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" "${PW_DOCKER_FORM[@]}"; cp "$cfg" "$tmp/seed.json"
+    out="$(pw_run "$tmp" pw_backup_fails 2>&1)"
+    same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+    writes="$(pw_writes "$tmp")"
+    rm -rf "$tmp"
+    if [[ "$writes" == "0" && "$same" == "1" && "$out" == *"could not back up"* ]]; then pass
+    else fail "writes=$writes unchanged=$same out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: with no entry the config is backed up before the add, a second run makes no backup and no add"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" -; chmod 666 "$cfg"; cp "$cfg" "$tmp/seed.json"   # 666: a plain cp would change it under any umask
+    printf 'an earlier backup' >"$cfg.autoos-backup-20200101-000000"
+    out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+    problems=""; fresh=0; kept=0
+    for b in "$cfg".autoos-backup-*; do
+        if [[ "$b" == *-20200101-000000 ]]; then
+            [[ "$(cat "$b")" == "an earlier backup" ]] && kept=1
+        elif cmp -s "$b" "$tmp/seed.json"; then
+            fresh=$((fresh + 1))
+            [[ "$(_file_mode "$b")" == 666 ]] || problems+=" the backup lost the file mode ($(_file_mode "$b"));"
+        fi
+    done
+    [[ "$fresh" == 1 ]] || problems+=" $fresh byte-identical new backups, want 1;"
+    [[ "$kept" == 1 ]] || problems+=" the earlier backup was touched;"
+    [[ "$out" == *"config backup: $cfg.autoos-backup-"* ]] || problems+=" the backup was not named in the report;"
+    calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+    [[ "$calls" == "mcp add --scope user playwright -- python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" calls=[$calls];"
+    [[ "$(pw_entry "$cfg")" == "python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" the proxy was not registered;"
+    [[ "$(pw_servers "$cfg")" == "playwright,serena" ]] || problems+=" other servers changed: $(pw_servers "$cfg");"
+    # the second run finds the proxy: nothing to do, so nothing to back up either
+    : >"$tmp/claude.log"
+    out2="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+    again=( "$cfg".autoos-backup-* )
+    [[ "$(pw_writes "$tmp")" == "0" && "$out2" == *"skipped"* && "${#again[@]}" == "2" ]] \
+        || problems+=" the second run wrote or made a backup: writes=$(pw_writes "$tmp") backups=${#again[@]};"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: with no entry a failed backup stops the add with a warning"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"; bin="$(backup_fail_bin)"
+    pw_seed "$cfg" -; cp "$cfg" "$tmp/seed.json"
+    out="$(PATH="$bin:$PATH" pw_run "$tmp" install_mcp_playwright 2>&1)"
+    same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
+    adds="$(grep -c '^mcp add' "$tmp/claude.log" 2>/dev/null)" || adds=0
+    partial="$(backup_count "$tmp/home")"
+    rm -rf "$tmp" "$bin"
+    if [[ "$adds" == "0" && "$same" == "1" && "$partial" == "0" && "$out" == *"could not back up"* ]]; then pass
+    else fail "adds=$adds unchanged=$same partial backups=$partial out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: with no config file yet there is nothing to back up and the proxy is still registered"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"
+    out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+    calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+    got="$(pw_entry "$tmp/home/.claude.json")"
+    left="$(backup_count "$tmp/home")"
+    rm -rf "$tmp"
+    if [[ "$calls" == "mcp add --scope user playwright -- python3 $ROOT/tools/playwright_mcp_lazy.py" && "$got" == "python3 $ROOT/tools/playwright_mcp_lazy.py" && "$left" == "0" && "$out" != *"could not back up"* ]]; then pass
+    else fail "calls=[$calls] entry=[$got] backups=$left out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: a proxy entry from another checkout is replaced with this checkout's path after a backup"; then
+    problems=""
+    for old in "/old/AutoOS/tools/playwright_mcp_lazy.py" "/old checkout/AutoOS/tools/playwright_mcp_lazy.py"; do
+        tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+        pw_seed "$cfg" python3 "$old"; cp "$cfg" "$tmp/seed.json"
+        out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+        calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
+        backups=( "$cfg".autoos-backup-* )
+        if [[ ! -f "${backups[0]}" ]] || ! cmp -s "${backups[0]}" "$tmp/seed.json"; then problems+=" [$old] no byte-identical backup;"; fi
+        [[ "$calls" == "mcp remove playwright --scope user|mcp add --scope user playwright -- python3 $ROOT/tools/playwright_mcp_lazy.py" ]] || problems+=" [$old] calls=[$calls];"
+        [[ "$(pw_argv_json "$cfg")" == "[\"python3\", \"$ROOT/tools/playwright_mcp_lazy.py\"]" ]] || problems+=" [$old] entry=[$(pw_argv_json "$cfg")];"
+        [[ "$out" == *"$old"* && "$out" == *"$ROOT/tools/playwright_mcp_lazy.py"* ]] || problems+=" [$old] the report names no old and new path;"
+        [[ "$(pw_servers "$cfg")" == "playwright,serena" ]] || problems+=" [$old] the other servers changed: $(pw_servers "$cfg");"
+        [[ ! -s "$tmp/docker.log" ]] || problems+=" [$old] docker was called;"
+        : >"$tmp/claude.log"
+        out2="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
+        again=( "$cfg".autoos-backup-* )
+        [[ "$(pw_writes "$tmp")" == "0" && "$out2" == *"skipped"* && "${#again[@]}" == "1" ]] \
+            || problems+=" [$old] the second run wrote or made another backup: $(pw_writes "$tmp") ${#again[@]};"
+        rm -rf "$tmp"
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: an add that fails after the remove puts the old entry back"; then
+    problems=""
+    for form in docker npx stale-proxy; do
+        tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+        case "$form" in
+            docker) old_argv=("${PW_DOCKER_FORM[@]}") ;;
+            npx) old_argv=(npx -y @playwright/mcp@0.0.81) ;;
+            stale-proxy) old_argv=(python3 "/old checkout/AutoOS/tools/playwright_mcp_lazy.py") ;;
+        esac
+        pw_seed "$cfg" "${old_argv[@]}"
+        out="$(PW_ADD_FAIL="$ROOT/tools/playwright_mcp_lazy.py" pw_run "$tmp" install_mcp_playwright 2>&1)"
+        got="$(pw_argv_json "$cfg")"
+        want="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "${old_argv[@]}")"
+        [[ "$got" == "$want" ]] || problems+=" [$form] entry after the failed add=[$got], want [$want];"
+        [[ "$out" == *"put back"* ]] || problems+=" [$form] the rollback was not reported;"
+        rm -rf "$tmp"
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "playwright lazy proxy installer: when the put-back fails as well the restore command is printed with its path quoted"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    old="/old checkout/AutoOS/tools/playwright_mcp_lazy.py"
+    pw_seed "$cfg" python3 "$old"
+    out="$(PW_ADD_FAIL=playwright_mcp_lazy pw_run "$tmp" install_mcp_playwright 2>&1)"
+    quoted="$(printf '%q' "$old")"
+    rm -rf "$tmp"
+    if [[ "$out" == *"restore it with: claude mcp add --scope user playwright -- python3 $quoted (config backup: "* ]]; then pass
+    else fail "the restore command does not survive a copy and paste: $(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: a playwright server from another scope is left alone"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
+    pw_seed "$cfg" -
+    out="$(PW_EXTRA_LIST='playwright: node /somewhere/cli.js - Connected' pw_run "$tmp" install_mcp_playwright 2>&1)"
+    writes="$(pw_writes "$tmp")"
+    rm -rf "$tmp"
+    if [[ "$writes" == "0" && "$out" == *"already registered"* ]]; then pass
+    else fail "writes=$writes out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: the user config is CLAUDE_CONFIG_DIR/.claude.json, else HOME/.claude.json, a legacy .config.json first"; then
+    tmp="$(mktemp -d)"
+    a="$(HOME="$tmp/h"; unset CLAUDE_CONFIG_DIR; claude_user_config_file)"
+    b="$(HOME="$tmp/h" CLAUDE_CONFIG_DIR="$tmp/c" claude_user_config_file)"
+    mkdir -p "$tmp/h/.claude" "$tmp/c"; : >"$tmp/h/.claude/.config.json"
+    c="$(HOME="$tmp/h"; unset CLAUDE_CONFIG_DIR; claude_user_config_file)"
+    : >"$tmp/c/.config.json"
+    d="$(HOME="$tmp/h" CLAUDE_CONFIG_DIR="$tmp/c" claude_user_config_file)"
+    got="$a|$b|$c|$d"
+    want="$tmp/h/.claude.json|$tmp/c/.claude.json|$tmp/h/.claude/.config.json|$tmp/c/.config.json"
+    rm -rf "$tmp"
+    assert_eq "$got" "$want"
+fi
+
+if it "playwright lazy proxy installer: the backup is of the file claude reads when CLAUDE_CONFIG_DIR is set"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; mkdir -p "$tmp/cfgdir"
+    pw_seed "$tmp/cfgdir/.claude.json" "${PW_DOCKER_FORM[@]}"
+    pw_seed "$tmp/home/.claude.json" -
+    cp "$tmp/cfgdir/.claude.json" "$tmp/seed.json"
+    out="$(PW_CONFIG_DIR="$tmp/cfgdir" PW_CONFIG="$tmp/cfgdir/.claude.json" pw_run "$tmp" install_mcp_playwright 2>&1)"
+    backups=( "$tmp/cfgdir/.claude.json".autoos-backup-* )
+    homebackups=( "$tmp/home/.claude.json".autoos-backup-* )
+    ok=0
+    [[ -f "${backups[0]}" ]] && cmp -s "${backups[0]}" "$tmp/seed.json" && [[ ! -e "${homebackups[0]}" ]] \
+        && [[ "$(pw_entry "$tmp/cfgdir/.claude.json")" == "python3 $ROOT/tools/playwright_mcp_lazy.py" ]] && ok=1
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "the backup or the replace went to the wrong file: $(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy installer: without claude on PATH it warns and calls nothing"; then
+    tmp="$(mktemp -d)"; pw_setup "$tmp"; pw_seed "$tmp/home/.claude.json" -
+    out="$(pw_run "$tmp" pw_without_claude 2>&1)"; rc=$?
+    calls="$(cat "$tmp/claude.log" 2>/dev/null)"
+    rm -rf "$tmp"
+    if [[ "$rc" == "0" && -z "$calls" && "$out" == *"claude is not on PATH"* ]]; then pass
+    else fail "rc=$rc calls=[$calls] out=$(printf '%s' "$out" | tail -2)"; fi
+fi
+
+if it "playwright lazy proxy: the agent skills doc (mcp-servers-setup) records the live observation and no longer says it was never observed"; then
+    got="$(python3 - "$ROOT/.agents/skills/mcp-servers-setup/SKILL.md" <<'PY'
+import re, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    text = re.sub(r"\s+", " ", fh.read())       # the sentence wraps across lines
+problems = []
+if re.search(r"not yet observed|never (?:been )?observed", text):
+    problems.append("it still says the proxy was not observed")
+if "observed 2026-09-26 in a real Claude Code session" not in text:
+    problems.append("no dated live observation")
+if "advertises only `tools`" not in text:
+    problems.append("the backend's advertised capabilities are missing")
+print("; ".join(problems))
+PY
+)"
+    if [[ -z "$got" ]]; then pass; else fail "$got"; fi
+fi
+
 describe "claude autostart"
 
 # A fixture transcript tree shaped exactly like ~/.claude/projects: one directory
@@ -5374,6 +7078,558 @@ if it "no inline onclick handler is introduced in the web UI"; then
     # is the wrong escaper; the page uses delegated listeners everywhere else.
     n="$(grep -c 'onclick="' web/index.html || true)"
     if [ "$n" = "0" ]; then pass; else fail "$n inline onclick handler(s) left"; fi
+fi
+
+describe "herdr-sessions"
+
+# Boot-restore engine for Claude Code sessions in Herdr
+# (configuration/herdr-sessions/, imported from the Server repo's
+# Applications/herdr-sessions at 12f0ff7; the catalog component and its
+# dispatch are tested further down). Dry-run only: no live systemctl, no live herdr --
+# install.sh --dry-run never execs either (its `run()` wrapper only echoes
+# "would: ...", it never calls systemctl or herdr for real), so nothing here
+# needs an env/PATH stub the way a live-call test would.
+if it "herdr-sessions: smoke (bash -n, py_compile, install --dry-run)"; then
+    out="$(bash configuration/herdr-sessions/tests/test_smoke.sh 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# Finding 6 (qoder review, L1-backlog.review-herdr-qoder.md, low): prof_key's
+# `tr -d '[:space:]'` deleted whitespace INSIDE the value too, not just around
+# it -- HS_WORKDIR=/opt/My Files parsed as /opt/MyFiles, the units installed
+# cleanly, and the service would fail at boot with a nonexistent
+# WorkingDirectory, nothing at install time saying so. prof_key also parses
+# HERDR_BIN (used only for the system-scope dry-run precondition message,
+# which is safe to run with no root and no stubs), so that key -- not
+# HS_WORKDIR, which render_unit only ever splices into the system-scope
+# herdr-server.service and a REAL system-scope install needs root and writes
+# to a real /etc, disallowed for this suite -- is what exercises prof_key's
+# trimming here without live systemctl or a real /etc write.
+if it "herdr-sessions: prof_key trims only leading/trailing whitespace, not spaces inside the value"; then
+    tmp="$(mktemp -d)"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=system
+HERDR_BIN=$tmp/My Herdr/bin/herdr
+FALLBACK=none
+EOF
+    out="$(bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --dry-run 2>&1)"; rc=$?
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [[ "$out" == *"herdr at $tmp/My Herdr/bin/herdr"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=${out:0:400}"
+    fi
+fi
+
+# Bug (b) from the proposal doc: which uuid a restored pane resumes, when a
+# background job's transcript shares the pane's own directory (unit tests).
+if it "herdr-sessions: uuid picking excludes background sessions (unit tests)"; then
+    out="$(python3 tests/test_herdr_sessions.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# ADDENDUM item 7: --profile accepts a path as well as a name under profiles/,
+# a re-run reports "already current" (cmp) or backs up a differing unit before
+# replacing it, and --unregister removes exactly what was installed. These
+# ARE real (non-dry-run) installs -- into a throwaway HOME, with systemctl and
+# loginctl stubbed via PATH so no live systemd is ever touched.
+hs_stub_bin() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/systemctl" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    cat > "$dir/loginctl" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "show-user" ] && echo yes
+exit 0
+STUB
+    chmod +x "$dir/systemctl" "$dir/loginctl"
+}
+
+if it "herdr-sessions: install.sh accepts an absolute-path profile, not only a name"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"; rc=$?
+    got="$(grep -h HERDR_PROFILE "$tmp/home/.config/systemd/user/herdr-sessions-restore.service" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=$tmp/site.conf" ]; then
+        pass
+    else
+        fail "rc=$rc got=[$got] out=$out"
+    fi
+fi
+
+# Finding 5 (qoder review, L1-backlog.review-herdr-qoder.md, low): render_unit
+# spliced user-supplied paths into sed replacement text with no escaping -- a
+# profile at /srv/a&b/hs.conf rendered HERDR_PROFILE=/srv/a@PROFILE_PATH@b/hs.conf
+# (& expands to the matched token in sed's replacement), the install reported
+# success, and restore would fail at the next boot with a bogus profile path.
+if it "herdr-sessions: render_unit renders a profile path containing '&' literally, not as a sed backreference"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    site_dir="$tmp/a&b"; mkdir -p "$site_dir"
+    conf="$site_dir/hs.conf"
+    cat > "$conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$conf" 2>&1)"; rc=$?
+    got="$(grep -h HERDR_PROFILE "$tmp/home/.config/systemd/user/herdr-sessions-restore.service" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=$conf" ]; then
+        pass
+    else
+        fail "rc=$rc got=[$got] out=${out:0:300}"
+    fi
+fi
+
+if it "herdr-sessions: re-run reports already current; a drifted unit is backed up before replacing"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    rerun="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"
+    echo "# hand edit" >> "$unit"
+    drift="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"
+    n_bak="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name '*autoos-backup*' | wc -l | tr -d ' ')"
+    rm -rf "$tmp"
+    ok=1
+    printf '%s\n' "$rerun" | grep -q "herdr-sessions-restore.service: already current" || ok=0
+    printf '%s\n' "$drift" | grep -q "herdr-sessions-restore.service: differs from the installed copy -- backed up" || ok=0
+    [ "$n_bak" = "1" ] || ok=0
+    if [ "$ok" = "1" ]; then pass; else fail "rerun=[$rerun] drift=[$drift] backups=$n_bak"; fi
+fi
+
+if it "herdr-sessions: install.sh prints the all-current summary only when no unit changed"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    printf 'HS_SCOPE=user\nHS_WORKDIR=%s/proj\nFALLBACK=none\n' "$tmp" > "$tmp/site.conf"
+    run_hs() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1; }
+    first="$(run_hs)"; rerun="$(run_hs)"
+    echo "# hand edit" >> "$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    drift="$(run_hs)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$first" != *"herdr-sessions: all units already current"* ]] || { ok=0; echo "fresh install claims all current" >&2; }
+    [[ "$rerun" == *"herdr-sessions: all units already current"* ]] || { ok=0; echo "unchanged re-run lacks the summary" >&2; }
+    [[ "$drift" != *"herdr-sessions: all units already current"* ]] || { ok=0; echo "a run that replaced a unit claims all current" >&2; }
+    if (( ok )); then pass; else fail "first=[${first:0:200}] rerun=[${rerun:0:200}] drift=[${drift:0:300}]"; fi
+fi
+
+if it "herdr-sessions: two drifted re-runs in the same second keep two distinct backups"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    printf '#!/usr/bin/env bash\necho 20260926120000\n' > "$stub/date"; chmod +x "$stub/date"
+    printf 'HS_SCOPE=user\nHS_WORKDIR=%s/proj\nFALLBACK=none\n' "$tmp" > "$tmp/site.conf"
+    run_hs() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1; }
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    run_hs
+    echo "# edit one" >> "$unit"; run_hs
+    echo "# edit two" >> "$unit"; run_hs
+    n="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name 'herdr-sessions-restore.service.autoos-backup*' | wc -l | tr -d ' ')"
+    one="$(grep -l '# edit one' "$tmp"/home/.config/systemd/user/herdr-sessions-restore.service.autoos-backup* 2>/dev/null | wc -l)"
+    rm -rf "$tmp"
+    if [[ "$n" == 2 && "$one" -ge 1 ]]; then pass; else fail "backups=$n, backups holding the first edit=$one (a same-second backup overwrote the earlier one)"; fi
+fi
+
+if it "herdr-sessions: --unregister removes what it installed, twice is 'nothing to remove'"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    first="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"
+    left="$(find "$tmp/home/.config/systemd/user" -mindepth 1 -maxdepth 1 ! -name '*autoos-backup*' 2>/dev/null | wc -l | tr -d ' ')"
+    second="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"
+    rm -rf "$tmp"
+    if printf '%s\n' "$first" | grep -q "removed 5 unit(s)" && [ "$left" = "0" ] && printf '%s\n' "$second" | grep -q "nothing to remove"; then
+        pass
+    else
+        fail "first=[$first] left=$left second=[$second]"
+    fi
+fi
+
+# Finding 2 (qoder review, L1-backlog.review-herdr-qoder.md, medium):
+# remove_unit's backup had no taken-suffix loop, and cp -p overwrites -- an
+# --unregister backup in the same second as a drifted install's own backup
+# silently destroyed the only copy of the user's original unit. Both paths
+# now share one helper (unique_backup_path + back_up_or_die) instead of
+# drifting apart.
+if it "herdr-sessions: remove_unit's backup uses install_unit's collision loop -- a same-second unregister keeps both backups"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    printf '#!/usr/bin/env bash\necho 20260926130000\n' > "$stub/date"; chmod +x "$stub/date"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    run_hs2() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" "$@" >/dev/null 2>&1; }
+    run_hs2   # fresh install: no backup yet
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    echo "# original edit" >> "$unit"
+    run_hs2   # drift, same stubbed second: backs up "# original edit" content
+    run_hs2 --unregister   # same stubbed second: must not overwrite that backup
+    n="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name 'herdr-sessions-restore.service.autoos-backup*' 2>/dev/null | wc -l | tr -d ' ')"
+    original_kept="$(grep -l '# original edit' "$tmp"/home/.config/systemd/user/herdr-sessions-restore.service.autoos-backup* 2>/dev/null | wc -l)"
+    rm -rf "$tmp"
+    if [[ "$n" == 2 && "$original_kept" -ge 1 ]]; then
+        pass
+    else
+        fail "backups=$n, backups holding the original edit=$original_kept (unregister overwrote the install backup)"
+    fi
+fi
+
+if it "herdr-sessions: remove_unit is fail-closed -- a backup that cannot be written leaves the unit in place"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    cat > "$stub/cp" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$stub/cp"
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "rc=0 although the backup copy failed: ${out:0:300}" >&2; }
+    [[ "$out" == *"FATAL"*"back up"* ]] || { ok=0; echo "no FATAL backup message: ${out:0:300}" >&2; }
+    [[ -f "$unit" ]] || { ok=0; echo "the unit was removed although its backup failed" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "remove_unit is not fail-closed on a backup failure"; fi
+fi
+
+# Finding 3 (qoder review, L1-backlog.review-herdr-qoder.md, medium):
+# remove_unit disabled but never stopped, and install starts the snapshot
+# timer with --now -- so --unregister left the timer active in memory,
+# still firing and writing snapshots, while detection now (correctly, after
+# finding 1/2's fixes) reports herdr-sessions gone -- letting claude-autostart
+# install and run concurrently.
+if it "herdr-sessions: --unregister disables --now (stops the timer) before removing, not disable alone"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; mkdir -p "$stub"
+    log="$tmp/systemctl.log"
+    cat > "$stub/systemctl" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+exit 0
+STUB
+    chmod +x "$stub/systemctl"
+    cat > "$stub/loginctl" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "show-user" ] && echo yes
+exit 0
+STUB
+    chmod +x "$stub/loginctl"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    run_hs3() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" "$@" >/dev/null 2>&1; }
+    run_hs3
+    : > "$log"
+    run_hs3 --unregister
+    n="$(grep -c '^--user disable --now ' "$log" 2>/dev/null || true)"
+    stale="$(grep -c '^--user disable [^-]' "$log" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [[ "$n" -ge 1 && "$stale" -eq 0 ]]; then
+        pass
+    else
+        fail "disable --now calls=$n, disable-without-now calls=$stale"
+    fi
+fi
+
+# Item 8 (L0): a single pane process killed by the kernel OOM killer must not
+# take the whole herdr-server unit down with it -- systemd's default
+# OOMPolicy=stop did exactly that, twice, ending every pane in the session.
+if it "herdr-sessions: both server unit templates set OOMPolicy=continue so an OOM-killed pane doesn't stop the whole service"; then
+    ok=1
+    for f in configuration/herdr-sessions/systemd/user/herdr-server.service configuration/herdr-sessions/systemd/system/herdr-server.service; do
+        grep -q '^OOMPolicy=continue$' "$f" || { ok=0; echo "missing OOMPolicy=continue in $f" >&2; }
+    done
+    if (( ok )); then pass; else fail "OOMPolicy=continue missing from one or both server unit templates"; fi
+fi
+
+# herdr_stub_driver <dir> [mode]: writes a fake configuration/herdr-sessions/
+# driver (the interface herdr-a imports separately - see spec.herdr-b.md's
+# PARALLEL note: `install.sh --profile <path> [--dry-run]`) into
+# <dir>/install.sh. --dry-run always prints a "would" line and NEVER touches
+# <dir>/installed-marker, regardless of mode - that is exactly what "dry run
+# changes nothing" checks. A real run's behaviour depends on mode:
+#   installed (default) - touches the marker, prints "installed from <profile>"
+#   current             - prints "already current", touches no marker (the
+#                         driver's OWN idempotency, as on a second call)
+#   fail                - exits 1
+herdr_stub_driver() {
+    local dir="$1" mode="${2:-installed}"
+    mkdir -p "$dir"
+    cat >"$dir/install.sh" <<STUB
+#!/usr/bin/env bash
+set -euo pipefail
+profile=""; dry=0
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        --profile) profile="\$2"; shift 2 ;;
+        --dry-run) dry=1; shift ;;
+        *) shift ;;
+    esac
+done
+if (( dry )); then
+    printf 'would restore panes from %s\n' "\$profile"
+    exit 0
+fi
+case "$mode" in
+    fail) printf 'driver: boom\n' >&2; exit 1 ;;
+    current) printf '    x.service: already current\nherdr-sessions: all units already current\n'; exit 0 ;;
+    partial) printf '    x.service: already current\n    y.service: installed\n'; exit 0 ;;
+    *) printf 'installed\n' >"$dir/installed-marker"; printf 'installed from %s\n' "\$profile"; exit 0 ;;
+esac
+STUB
+    chmod +x "$dir/install.sh"
+}
+
+# herdr_run <scratch> <driver-dir> <profile-or-empty> [dry:0|1] [plan_ids]
+# One install_herdr_sessions call against a scratch SYS_HOME, with
+# AUTOOS_HERDR_SESSIONS_DIR pointed at the stub driver (the test seam
+# lib/linux/install.sh adds next to install_herdr_sessions for exactly this).
+# INSTALL_SCRIPT_STATE cannot cross the subshell boundary back to the caller
+# (lib/linux/install.sh's own note on that global), so it is printed as a
+# trailer line and parsed back out - the pattern the antigravity tests use.
+herdr_run() {
+    local sb="$1" drv="$2" profile="$3" dry="${4:-0}" plan="${5:-}"
+    (
+        AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN="$dry"
+        AUTOOS_HERDR_SESSIONS_DIR="$drv"; PLAN_IDS="$plan"
+        if [[ -n "$profile" ]]; then AUTOOS_ANSWERS[herdr_sessions_profile]="$profile"
+        else unset 'AUTOOS_ANSWERS[herdr_sessions_profile]'; fi
+        INSTALL_SCRIPT_STATE=""
+        rc=0
+        install_herdr_sessions || rc=$?
+        printf 'HERDR_RESULT %s %s\n' "${INSTALL_SCRIPT_STATE:-installed}" "$rc"
+    ) 2>&1
+}
+herdr_state() { sed -n 's/^HERDR_RESULT \([a-z]*\) [0-9]*$/\1/p' <<<"$1"; }
+herdr_rc()    { sed -n 's/^HERDR_RESULT [a-z]* \([0-9]*\)$/\1/p' <<<"$1"; }
+
+if it "herdr-sessions: a dry run calls the driver with --dry-run and changes nothing"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$drv" "$profile" 1)"
+    rc="$(herdr_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:300}" >&2; }
+    [[ "$out" == *"would run: bash"* && "$out" == *"--dry-run"* ]] || { ok=0; echo "no 'would run ... --dry-run' line: ${out:0:300}" >&2; }
+    [[ "$out" == *"would restore panes from $profile"* ]] || { ok=0; echo "the driver's own dry-run output is missing: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "a dry run touched the driver's marker file" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions dry run is not side-effect free"; fi
+fi
+
+# Finding 4 (qoder review, L1-backlog.review-herdr-qoder.md, low): the dry-run
+# branch ran the driver uncaptured, so its output bypassed the ui_* layer --
+# under NO_COLOR it printed the driver's raw ANSI escapes and none of its
+# would-lines reached the AutoOS log file, unlike the real (non-dry) path,
+# which captures and re-emits via ui_muted. Proven here via ui_muted's own
+# side effect (it also calls _log, which writes to AUTOOS_LOG) rather than by
+# stdout content alone, since stdout is captured either way by this test's
+# own subshell.
+if it "herdr-sessions: a dry run's driver output goes through ui_muted, reaching the AutoOS log like the real path"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile
+' >"$profile"
+    logfile="$sb/autoos.log"
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=1
+              AUTOOS_HERDR_SESSIONS_DIR="$drv"; PLAN_IDS=""; AUTOOS_LOG="$logfile"
+              AUTOOS_ANSWERS[herdr_sessions_profile]="$profile"
+              INSTALL_SCRIPT_STATE=""
+              install_herdr_sessions ) 2>&1 )"
+    [[ "$out" == *"would restore panes from $profile"* ]] || { ok=0; echo "driver dry-run line missing from stdout: ${out:0:300}" >&2; }
+    grep -q "would restore panes from $profile" "$logfile" 2>/dev/null \
+        || { ok=0; echo "driver dry-run line never reached the AutoOS log (ui_muted bypassed): $(cat "$logfile" 2>/dev/null)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions dry-run does not route the driver's output through ui_muted"; fi
+fi
+
+if it "herdr-sessions: an empty profile answer is skipped, never a guessed path"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    out="$(herdr_run "$sb" "$drv" "")"
+    state="$(herdr_state "$out")"; rc="$(herdr_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "state=[$state] want skipped" >&2; }
+    [[ "$out" == *"skipped: no profile"* ]] || { ok=0; echo "no 'skipped: no profile' line: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran although no profile was given" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions guessed at a profile instead of skipping"; fi
+fi
+
+if it "herdr-sessions: a profile path that is not a regular file fails, naming the path"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/does-not-exist.conf"
+    out="$(herdr_run "$sb" "$drv" "$profile")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "rc=0 for a missing profile: ${out:0:300}" >&2; }
+    [[ "$out" == *"$profile"* ]] || { ok=0; echo "the error does not name the path: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran against a missing profile" >&2; }
+    # A directory is not a regular file either.
+    mkdir -p "$sb/adir"
+    out2="$(herdr_run "$sb" "$drv" "$sb/adir")"; rc2="$(herdr_rc "$out2")"
+    (( rc2 != 0 )) || { ok=0; echo "rc=0 for a directory given as the profile: ${out2:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions did not refuse a bad profile path"; fi
+fi
+
+if it "herdr-sessions: a missing driver directory is a clear error, not a silent success"; then
+    sb="$(mktemp -d)"; ok=1
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$sb/no-such-driver-dir" "$profile")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "rc=0 with no driver present: ${out:0:300}" >&2; }
+    [[ "$out" == *"driver not found"* && "$out" == *"$sb/no-such-driver-dir"* ]] || { ok=0; echo "no clear error naming the driver dir: ${out:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions silently accepted a missing driver"; fi
+fi
+
+if it "herdr-sessions: the driver reporting already current is skipped, never installed a second time"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out1="$(herdr_run "$sb" "$drv" "$profile")"
+    state1="$(herdr_state "$out1")"; rc1="$(herdr_rc "$out1")"
+    (( rc1 == 0 )) || { ok=0; echo "first run rc=$rc1: ${out1:0:300}" >&2; }
+    [[ "$state1" != skipped ]] || { ok=0; echo "the FIRST run already reports skipped - the test is not isolating the second run" >&2; }
+    [[ -e "$drv/installed-marker" ]] || { ok=0; echo "the driver never ran on the first call" >&2; }
+    # AGENTS.md hard rule 3: safe to run twice, second run reports skipped. Here
+    # the DRIVER is the one deciding it is current (its own idempotency) - the
+    # dispatch must pass that straight through, not report installed again.
+    herdr_stub_driver "$drv" current
+    out2="$(herdr_run "$sb" "$drv" "$profile")"
+    state2="$(herdr_state "$out2")"; rc2="$(herdr_rc "$out2")"
+    (( rc2 == 0 )) || { ok=0; echo "second run rc=$rc2: ${out2:0:300}" >&2; }
+    [[ "$state2" == skipped ]] || { ok=0; echo "second run state=[$state2] want skipped" >&2; }
+    [[ "$out2" == *"already current"* ]] || { ok=0; echo "no 'already current' line: ${out2:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a second herdr-sessions run reported installed instead of skipped"; fi
+fi
+
+if it "herdr-sessions: refuses when claude-autostart was selected this run or is already installed, writing nothing"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+
+    out="$(herdr_run "$sb" "$drv" "$profile" 0 "claude-autostart")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "rc=0 with claude-autostart selected: ${out:0:300}" >&2; }
+    [[ "$out" == *"claude-autostart"* ]] || { ok=0; echo "no mention of claude-autostart: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the conflict (selected)" >&2; }
+
+    mkdir -p "$sb/home2/.config/systemd/user"
+    touch "$sb/home2/.config/systemd/user/claude-sessions-restore.service"
+    out2="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home2"; AUTOOS_DRY_RUN=0
+               AUTOOS_HERDR_SESSIONS_DIR="$drv"; PLAN_IDS=""
+               AUTOOS_ANSWERS[herdr_sessions_profile]="$profile"
+               install_herdr_sessions ) 2>&1 )"; rc2=$?
+    (( rc2 != 0 )) || { ok=0; echo "rc=0 with claude-autostart already installed: ${out2:0:300}" >&2; }
+    [[ "$out2" == *"claude-autostart"* ]] || { ok=0; echo "no mention of claude-autostart (installed case): ${out2:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the conflict (installed)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions installed alongside claude-autostart"; fi
+fi
+
+if it "herdr-sessions: claude-autostart refuses when herdr-sessions was selected this run or is already installed, writing nothing"; then
+    sb="$(mktemp -d)"; ok=1
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home1"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+              PLAN_IDS="herdr-sessions"
+              systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
+              install_claude_autostart ) 2>&1 )"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 with herdr-sessions selected: ${out:0:300}" >&2; }
+    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions: ${out:0:300}" >&2; }
+    [[ ! -d "$sb/home1/.config/systemd/user" ]] || { ok=0; echo "claude-autostart wrote units despite the conflict (selected)" >&2; }
+
+    mkdir -p "$sb/home2/.config/systemd/user"
+    touch "$sb/home2/.config/systemd/user/herdr-sessions-restore.service"
+    out2="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home2"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+               PLAN_IDS=""
+               systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
+               install_claude_autostart ) 2>&1 )"; rc2=$?
+    (( rc2 != 0 )) || { ok=0; echo "rc=0 with herdr-sessions already installed: ${out2:0:300}" >&2; }
+    [[ "$out2" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions (installed case): ${out2:0:300}" >&2; }
+    [[ -z "$(find "$sb/home2/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "claude-autostart wrote units despite the conflict (installed)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart installed alongside herdr-sessions"; fi
+fi
+
+if it "herdr-sessions detect: true only when the restore service unit exists (user scope)"; then
+    sb="$(mktemp -d)"; ok=1
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/no-etc"
+      ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with no unit file present" >&2; }
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/no-etc"
+      script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the user-scope unit file exists" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions detection does not match the user-scope unit file's presence"; fi
+fi
+
+# Finding 1 (qoder review, L1-backlog.review-herdr-qoder.md): a SYSTEM-scope
+# install (HS_SCOPE=system, units in /etc/systemd/system - see
+# configuration/herdr-sessions/install.sh) was invisible here, so a later
+# claude-autostart install passed autoos_conflict_present's mutual-exclusion
+# gate and ran beside a live herdr restore. /etc/systemd/system is injectable
+# via AUTOOS_ETC_SYSTEMD_SYSTEM_DIR, the same seam pattern as SYS_HOME, so
+# this never needs a real /etc write to test.
+if it "herdr-sessions detect: also true for a system-scope unit, independent of the user-scope path"; then
+    sb="$(mktemp -d)"; ok=1
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+      ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with neither path present" >&2; }
+    mkdir -p "$sb/etc"
+    touch "$sb/etc/herdr-sessions-restore.service"
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+      script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the system-scope unit file exists" >&2; }
+    [[ ! -d "$sb/home" ]] || { ok=0; echo "the user-scope dir was touched by a system-scope check" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions detection does not see a system-scope install"; fi
+fi
+
+if it "herdr-sessions: claude-autostart's mutual-exclusion gate sees a system-scope herdr-sessions install too"; then
+    sb="$(mktemp -d)"; ok=1
+    mkdir -p "$sb/home/.config/systemd/user" "$sb/etc"
+    touch "$sb/etc/herdr-sessions-restore.service"
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""
+              AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+              PLAN_IDS=""
+              systemctl() { return 0; }; loginctl() { printf 'yes\n'; }
+              install_claude_autostart ) 2>&1 )"; rc=$?
+    (( rc != 0 )) || { ok=0; echo "rc=0 with herdr-sessions installed system-scope only: ${out:0:300}" >&2; }
+    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions (system-scope case): ${out:0:300}" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "claude-autostart wrote units despite the system-scope conflict" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart installed alongside a system-scope-only herdr-sessions"; fi
+fi
+
+if it "herdr-sessions: a driver run that replaced some units is installed, not skipped"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"
+    herdr_stub_driver "$drv" partial
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$drv" "$profile")"
+    state="$(herdr_state "$out")"
+    rm -rf "$sb"
+    if [[ "$state" != skipped ]]; then pass; else fail "one unit changed but the component reports skipped: ${out:0:300}"; fi
 fi
 
 describe "wsl detection"
@@ -7537,6 +9793,45 @@ if it "rescue-bootstrap keeps the operator's API key and extra AI backend on a s
     fi
 fi
 
+# Same class as lib/linux/install.sh backup_path/backup_file (main fixed
+# this there): rescue-bootstrap.sh's own backup_file used a plain
+# <file>.autoos-backup-<stamp> name with a bare cp, so two edits backed up in
+# the same second let the second cp overwrite the first backup and destroy
+# it. Pin `date` on PATH (both call shapes it uses) so two runs land in the
+# same "second".
+if it "backup residual: rescue-bootstrap backs up the operator's profile twice in one second without overwriting (template)"; then
+    bootstrap_sandbox_setup
+    cat > "$BS_BIN/date" <<'EOS'
+#!/usr/bin/env bash
+case "$2" in
+    '+%Y%m%d%H%M%S') echo '20260101000000' ;;
+    *) echo '2026-01-01T00:00:00Z' ;;
+esac
+EOS
+    chmod +x "$BS_BIN/date"
+
+    bootstrap_sandbox_run >/dev/null   # first run: creates the profile fresh, no backup yet
+    printf '# edit-1\n' >> "$BS_PROFILE"
+    contentA="$(cat "$BS_PROFILE")"
+    bootstrap_sandbox_run >/dev/null   # second run: profile differs from rendered -> first backup
+    printf '# edit-2\n' >> "$BS_PROFILE"
+    contentB="$(cat "$BS_PROFILE")"
+    out3="$(bootstrap_sandbox_run)"    # third run, same pinned second -> must not clobber the first backup
+
+    ok=1
+    base="$BS_PROFILE.autoos-backup-20260101000000"
+    [[ "$out3" == *"kept your edits"* ]] || { ok=0; echo "third run: $out3" >&2; }
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup content wrong" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$(dirname "$BS_PROFILE")" -maxdepth 1 -name 'autoos-ai.sh.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    [[ "$(cat "$BS_PROFILE")" == "$contentB" ]] || { ok=0; echo "the operator's file itself was rewritten" >&2; }
+    rm -rf "$BS_STICK"
+    if (( ok )); then pass; else fail "rescue-bootstrap overwrote a same-second profile backup"; fi
+fi
+
 if it "ai dispatcher --list names all three backends, including local (template)"; then
     out="$(AUTOOS_AI_REGISTRY="$PWD/templates/ai-clients.conf" bash templates/ai-dispatcher.sh --list 2>&1)"
     rc=$?
@@ -8788,6 +11083,36 @@ if it "svc: register-autostart twice: the second run skips, a changed unit is ba
     if (( ok )); then pass; else fail "register-autostart is not idempotent"; fi
 fi
 
+# Same class as lib/linux/install.sh backup_path/backup_file (main fixed
+# this there): register-autostart.sh's own unit backup used a plain
+# <unit>.autoos-backup-<stamp> name with a bare cp, so two changed units in
+# the same second let the second cp overwrite the first backup and destroy
+# it. Pin `date` on PATH so both runs land in the same "second".
+if it "backup residual: register-autostart backs up a unit twice in one second without overwriting"; then
+    d="$(_svc_reg_sandbox)"
+    printf '#!/bin/sh\necho 20260101-000000\n' >"$d/bin/date"; chmod +x "$d/bin/date"
+    _svc_reg "$d" --only autoos-omniroute >/dev/null
+    printf '# hand-edit-1\n' >>"$d/units/autoos-omniroute.service"
+    contentA="$(cat "$d/units/autoos-omniroute.service")"
+    second="$(_svc_reg "$d" --only autoos-omniroute)"
+    printf '# hand-edit-2\n' >>"$d/units/autoos-omniroute.service"
+    contentB="$(cat "$d/units/autoos-omniroute.service")"
+    third="$(_svc_reg "$d" --only autoos-omniroute)"
+    ok=1
+    base="$d/units/autoos-omniroute.service.autoos-backup-20260101-000000"
+    [[ "$second" == *"+ autoos-omniroute: replaced"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$third" == *"+ autoos-omniroute: replaced"* ]] || { ok=0; echo "third: $third" >&2; }
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup lost the hand edit" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d/units" -name 'autoos-omniroute.service.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    grep -q 'hand-edit' "$d/units/autoos-omniroute.service" && { ok=0; echo "final unit still holds a hand edit" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart overwrote a same-second unit backup"; fi
+fi
+
 if it "svc: register-autostart appends REQUIRE_API_KEY=true once, with a backup"; then
     d="$(_svc_reg_sandbox)"
     printf 'STORAGE_ENCRYPTION_KEY=keep-me\n' >"$d/omniroute.env"
@@ -8804,6 +11129,32 @@ if it "svc: register-autostart appends REQUIRE_API_KEY=true once, with a backup"
     [[ "$third" == *"left alone"* ]] || { ok=0; echo "third: $third" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "REQUIRE_API_KEY handling is wrong"; fi
+fi
+
+# Same class, the omni_env append site: two backups of ~/.omniroute/.env in
+# the same second must not collide either.
+if it "backup residual: register-autostart backs up omniroute.env twice in one second without overwriting"; then
+    d="$(_svc_reg_sandbox)"
+    printf '#!/bin/sh\necho 20260101-000000\n' >"$d/bin/date"; chmod +x "$d/bin/date"
+    printf 'SOME=1\n' >"$d/omniroute.env"
+    contentA="$(cat "$d/omniroute.env")"
+    first="$(_svc_reg "$d" --only autoos-omniroute)"
+    sed -i '/^REQUIRE_API_KEY=/d' "$d/omniroute.env"
+    contentB="$(cat "$d/omniroute.env")"
+    second="$(_svc_reg "$d" --only autoos-omniroute)"
+    ok=1
+    base="$d/omniroute.env.autoos-backup-20260101-000000"
+    [[ "$first" == *"+ appended REQUIRE_API_KEY=true"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ "$second" == *"+ appended REQUIRE_API_KEY=true"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup content wrong" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d" -maxdepth 1 -name 'omniroute.env.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    grep -q '^REQUIRE_API_KEY=true$' "$d/omniroute.env" || { ok=0; echo "final file lost the key" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart overwrote a same-second omniroute.env backup"; fi
 fi
 
 if it "svc: register-autostart never runs a second gateway next to omniroute autostart"; then
@@ -9569,7 +11920,7 @@ _aistack() {
     while (( $# )) && [[ "$1" == [A-Z]*=* ]]; do extra+=("$1"); shift; done
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
-        -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES \
+        -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
         AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
         AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
@@ -9676,6 +12027,73 @@ if it "aistack: init twice: 0600 env files, the second run skips, user values su
     [[ "$first$second" == *"sk-test-client-key"* ]] && { ok=0; echo "printed a key" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "init is not idempotent read-modify-write"; fi
+fi
+
+# Same class as lib/linux/install.sh backup_path/backup_file (main fixed
+# this there): ensure_env_file's own backup used a plain <file>.autoos-
+# backup-<stamp> name with a bare cp, so two changed writes to the same env
+# file in the same second let the second cp overwrite the first backup and
+# destroy it. Pin `date` on PATH so both writes land in the same "second".
+if it "backup residual: aistack backs up stack.env twice in one second without overwriting"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf '#!/bin/sh\necho 20260101-000000\n' >"$d/bin/date"; chmod +x "$d/bin/date"
+    printf '# mine\nMY_EXTRA=keep\n' >"$d/cfg/stack.env"
+    contentA="$(cat "$d/cfg/stack.env")"
+    _aistack "$d" init >/dev/null
+    sed -i '/^AUTOOS_UID=/d' "$d/cfg/stack.env"
+    contentB="$(cat "$d/cfg/stack.env")"
+    _aistack "$d" init >/dev/null
+    ok=1
+    base="$d/cfg/stack.env.autoos-backup-20260101-000000"
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup content wrong" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d/cfg" -maxdepth 1 -name 'stack.env.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    grep -q '^AUTOOS_UID=' "$d/cfg/stack.env" || { ok=0; echo "final file missing the re-added key" >&2; }
+    grep -q '^MY_EXTRA=keep$' "$d/cfg/stack.env" || { ok=0; echo "user's extra line lost" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "ai-stack overwrote a same-second stack.env backup"; fi
+fi
+
+# replace_dir_with_copy's own aside= (moving a non-empty dest out of the way
+# before the swap) used <dest>.autoos-backup-<ts>, then a single -$$ escape
+# if that name was taken - safe against a second SEPARATE process (a
+# different PID) but not against a second PRE-EXISTING collision at that
+# exact name. Extracted in isolation (sourcing the whole script would run its
+# case-driven CLI dispatch and exit this test shell): pre-seed both names an
+# old run could have left and confirm the previous dest still lands under a
+# genuinely free name, never inside either.
+if it "backup residual: aistack replace_dir_with_copy never lands inside a taken aside name"; then
+    d="$(mktemp -d)"
+    src="$d/src"; dest="$d/dest"
+    mkdir -p "$src" "$dest"
+    printf 'new\n' >"$src/data"
+    printf 'old\n' >"$dest/data"
+    ts="20260101-000000"
+    base="$dest.autoos-backup-$ts"
+    mkdir -p "$base"; printf 'sentinelA\n' >"$base/marker"
+    mkdir -p "$base-$$"; printf 'sentinelB\n' >"$base-$$/marker"
+    fn="$d/fn.sh"
+    sed -n '/^autoos_backup_path()/,/^}/p;/^replace_dir_with_copy()/,/^}/p' "$AISTACK/ai-stack.sh" >"$fn"
+    # shellcheck disable=SC1090  # $fn is a scratch fixture generated above, not a repo file
+    ( . "$fn"; replace_dir_with_copy "$src" "$dest" "$ts" ) >/dev/null 2>&1; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "replace_dir_with_copy failed, rc=$rc" >&2; }
+    [[ "$(cat "$dest/data" 2>/dev/null)" == "new" ]] || { ok=0; echo "dest not swapped to the new content" >&2; }
+    [[ "$(cat "$base/marker" 2>/dev/null)" == "sentinelA" ]] || { ok=0; echo "the first taken aside name was overwritten" >&2; }
+    [[ "$(cat "$base-$$/marker" 2>/dev/null)" == "sentinelB" ]] || { ok=0; echo "the second taken aside name (this process's PID) was overwritten" >&2; }
+    aside_dir=""
+    for cand in "$d"/dest.autoos-backup-"$ts"*; do
+        [[ "$cand" == "$base" || "$cand" == "$base-$$" ]] && continue
+        [[ -f "$cand/data" ]] && aside_dir="$cand"
+    done
+    [[ -n "$aside_dir" && "$(cat "$aside_dir/data" 2>/dev/null)" == "old" ]] \
+        || { ok=0; echo "the previous dest did not land under a third, genuinely free name" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "replace_dir_with_copy's aside collided with an existing name"; fi
 fi
 
 if it "aistack: init reuses the pinned opencode-serve password so phone logins survive"; then
@@ -10159,13 +12577,186 @@ if it "aistack: the guard and compose agree on the bind when the shell exports A
     if (( ok )); then pass; else fail "the guarded bind and the published bind can differ"; fi
 fi
 
-if it "aistack: every FROM in opencode.Dockerfile is digest-pinned, or the rebuild hash is blind"; then
+if it "aistack: every FROM in opencode.Dockerfile and omniroute.Dockerfile is digest-pinned, or the rebuild hash is blind"; then
     # The rebuild label hashes the Dockerfile text: a tag-only FROM could move
     # underneath an unchanged text and the stale layer would never rebuild.
-    f="$AISTACK/opencode.Dockerfile"
-    froms="$(grep -ciE '^[[:space:]]*FROM[[:space:]]' "$f")"
-    pinned="$(grep -cE '^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]{64}([[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+)?[[:space:]]*$' "$f")"
-    if (( froms >= 1 && froms == pinned )); then pass; else fail "$pinned of $froms FROM lines are @sha256:-pinned in $f"; fi
+    ok=1
+    for f in "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile"; do
+        froms="$(grep -ciE '^[[:space:]]*FROM[[:space:]]' "$f" 2>/dev/null || true)"
+        pinned="$(grep -cE '^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]{64}([[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+)?[[:space:]]*$' "$f" 2>/dev/null || true)"
+        (( froms >= 1 && froms == pinned )) || { ok=0; echo "${pinned:-0} of ${froms:-0} FROM lines are @sha256:-pinned in $f" >&2; }
+    done
+    if (( ok )); then pass; else fail "a FROM is not digest-pinned"; fi
+fi
+
+# ─── The gateway image: OmniRoute + qodercli (omniroute.Dockerfile) ─────────
+# The Qoder PAT login runs `qodercli` inside the gateway container. The
+# upstream image has none (`spawn qodercli ENOENT`), so a derived layer adds
+# it - built like the opencode one, from a digest-pinned base.
+
+if it "aistack: the omniroute layer adds qodercli at an exact version on a digest-pinned base, no vendor binary"; then
+    ok=1
+    f="$AISTACK/omniroute.Dockerfile"
+    [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
+    base="$(sed -n 's/^FROM diegosouzapw\/omniroute:\([0-9][0-9.]*\)@sha256:[0-9a-f]\{64\}$/\1/p' "$f" 2>/dev/null)"
+    [[ -n "$base" ]] || { ok=0; echo "FROM is not diegosouzapw/omniroute:<version>@sha256:<digest>" >&2; }
+    # The local tag names the upstream version it is built on: bumped together.
+    grep -qxE "    image: autoos/omniroute:${base//./\\.}-autoos[0-9]+" "$AISTACK/compose.yml" \
+        || { ok=0; echo "compose.yml's image tag does not carry the FROM version [$base]" >&2; }
+    grep -qxE 'RUN npm install -g @qoder-ai/qodercli@[0-9]+\.[0-9]+\.[0-9]+ && npm cache clean --force' "$f" 2>/dev/null \
+        || { ok=0; echo "qodercli is not installed at an exact version, cache cleaned in the same layer" >&2; }
+    grep -qx 'USER root' "$f" 2>/dev/null || { ok=0; echo "no USER root for the install" >&2; }
+    [[ "$(grep -E '^USER ' "$f" 2>/dev/null | tail -n1)" == "USER node" ]] || { ok=0; echo "the image must end as USER node" >&2; }
+    grep -qiE '^(COPY|ADD)[[:space:]]' "$f" 2>/dev/null && { ok=0; echo "COPY/ADD: a vendor binary would be committed; npm fetches at build" >&2; }
+    if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned qodercli"; fi
+fi
+
+if it "aistack: init creates the qoder home, private and the operator's, and leaves the gateway data alone"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    mkdir -p "$d/data/omniroute"
+    printf 'db\n' >"$d/data/omniroute/storage.sqlite"; printf 'k=v\n' >"$d/data/omniroute/.env"
+    before="$(cd "$d/data/omniroute" && cksum storage.sqlite .env)"
+    out="$(_aistack "$d" --dry-run init)"
+    [[ "$out" == *"would create $d/data/qoder-home"* ]] || { ok=0; echo "the dry run does not announce the qoder home" >&2; }
+    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "the dry run created it" >&2; }
+    _aistack "$d" init >/dev/null
+    got="$(stat -c '%a %U' "$d/data/qoder-home" 2>&1)"
+    [[ "$got" == "700 $(id -un)" ]] || { ok=0; echo "qoder home is not 700 and the operator's: $got" >&2; }
+    out="$(_aistack "$d" init)"
+    [[ "$out" == *qoder-home* ]] && { ok=0; echo "a second init touched it again: $out" >&2; }
+    [[ "$(cd "$d/data/omniroute" && cksum storage.sqlite .env)" == "$before" ]] || { ok=0; echo "the gateway data changed" >&2; }
+    [[ "$(LC_ALL=C ls -A "$d/data/omniroute" | tr '\n' ' ')" == ".env storage.sqlite " ]] || { ok=0; echo "files appeared in the gateway data dir" >&2; }
+    # One that already exists with looser rights (made by hand) is tightened.
+    chmod 755 "$d/data/qoder-home"
+    _aistack "$d" init >/dev/null
+    got="$(stat -c '%a' "$d/data/qoder-home" 2>&1)"
+    [[ "$got" == 700 ]] || { ok=0; echo "an existing qoder home stays $got" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the qoder home is not created private, or init touched the gateway data"; fi
+fi
+
+if it "aistack: up creates the qoder home before compose starts the gateway, on a host init ran on long ago"; then
+    ok=1
+    # init ran long ago (stack.env exists), so up does not run it again: docker
+    # would create the missing mount source as root and the gateway (host uid)
+    # could not write its HOME.
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/data/omniroute" "$d/data/opencode-home"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed" >&2; }
+    [[ "$(cat "$d/qoder-home-at-up.log" 2>/dev/null)" == present ]] || { ok=0; echo "compose up saw: [$(cat "$d/qoder-home-at-up.log" 2>&1)]" >&2; }
+    got="$(stat -c '%a %U' "$d/data/qoder-home" 2>&1)"
+    [[ "$got" == "700 $(id -un)" ]] || { ok=0; echo "qoder home: $got" >&2; }
+    rm -rf "$d"
+    # compose mounts AUTOOS_STACK_DATA from stack.env: that is where it is made.
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/elsewhere/omniroute"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_STACK_DATA='%s'\n" "$d/elsewhere" >"$d/cfg/stack.env"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up (stack.env data dir) failed" >&2; }
+    [[ -d "$d/elsewhere/qoder-home" ]] || { ok=0; echo "not created under the AUTOOS_STACK_DATA of stack.env" >&2; }
+    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "created under the default data dir, which compose does not mount" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "compose can be the one to create the qoder home"; fi
+fi
+
+if it "aistack: the omniroute image is rebuilt when its label, base digest or Dockerfile changes, and only then"; then
+    d="$(_aistack_sandbox)"
+    t="$d/tree/configuration"
+    mkdir -p "$t/docker/ai-stack" "$d/cfg"
+    cp "$AISTACK/ai-stack.sh" "$AISTACK/compose.yml" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
+    cp "$ROOT/configuration/env-file.sh" "$t/"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    _omni_up() { rm -f "$d/docker.log" "$d/run-autoos-omniroute"; _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up omniroute >/dev/null; }
+    _omni_builds() { grep -c '^build' "$d/docker.log" 2>/dev/null || true; }
+    ok=1
+    : >"$d/image-exists"; printf 'stale\n' >"$d/omniroute-label"
+    _omni_up
+    grep -qE "^build --label org\.autoos\.omniroute\.source=[0-9a-f]{64} -t autoos/omniroute:[^ ]+ -f $t/docker/ai-stack/omniroute\.Dockerfile " "$d/docker.log" \
+        || { ok=0; echo "a stale label was not rebuilt: $(cat "$d/docker.log")" >&2; }
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "up omniroute built something else too" >&2; }
+    [[ -e "$d/opencode-label" ]] && { ok=0; echo "the omniroute build wrote the opencode label" >&2; }
+    first="$(cat "$d/omniroute-label")"
+    _omni_up
+    [[ "$(_omni_builds)" == 0 ]] || { ok=0; echo "rebuilt an up-to-date image" >&2; }
+    # A bumped base digest, the Dockerfile text unchanged otherwise.
+    sed -i -E "s/^(FROM [^ ]+@sha256:)[0-9a-f]{64}/\1$(printf '%064d' 0)/" "$t/docker/ai-stack/omniroute.Dockerfile"
+    _omni_up
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a bumped base digest was not rebuilt" >&2; }
+    second="$(cat "$d/omniroute-label")"
+    [[ "$second" != "$first" ]] || { ok=0; echo "label did not change with the digest" >&2; }
+    _omni_up
+    [[ "$(_omni_builds)" == 0 ]] || { ok=0; echo "rebuilt after the digest bump was built" >&2; }
+    printf '# a changed layer\n' >>"$t/docker/ai-stack/omniroute.Dockerfile"
+    _omni_up
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a changed Dockerfile was not rebuilt" >&2; }
+    [[ "$(cat "$d/omniroute-label")" != "$second" ]] || { ok=0; echo "label did not change with the text" >&2; }
+    # No local image at all: built, not pulled.
+    : >"$d/noimage-omniroute"
+    _omni_up
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a missing image was not built" >&2; }
+    grep -qE '(^| )pull( |$)' "$d/docker.log" && { ok=0; echo "the image was pulled: $(cat "$d/docker.log")" >&2; }
+    unset -f _omni_up _omni_builds
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the omniroute image does not track its Dockerfile and base"; fi
+fi
+
+if it "aistack: --dry-run up says would build or rebuild the omniroute image and builds nothing"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    ok=1
+    out="$(_aistack "$d" --dry-run up omniroute)"
+    [[ "$out" == *"would build autoos/omniroute:"*" (omniroute.Dockerfile)"* ]] || { ok=0; echo "no image: $out" >&2; }
+    : >"$d/image-exists"; printf 'stale\n' >"$d/omniroute-label"
+    out="$(_aistack "$d" --dry-run up omniroute)"
+    [[ "$out" == *"would rebuild autoos/omniroute:"*" (omniroute.Dockerfile or its base image changed)"* ]] || { ok=0; echo "stale label: $out" >&2; }
+    grep -q '^build' "$d/docker.log" 2>/dev/null && { ok=0; echo "a dry run built: $(cat "$d/docker.log")" >&2; }
+    # Up to date (label from a real build): nothing to announce.
+    _aistack "$d" up omniroute >/dev/null
+    rm -f "$d/docker.log"
+    out="$(_aistack "$d" --dry-run up omniroute)"
+    [[ "$out" == *"would build"* || "$out" == *"would rebuild"* ]] && { ok=0; echo "an up-to-date image is announced: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the dry-run wording for the omniroute image is wrong"; fi
+fi
+
+if it "aistack: migrate builds the omniroute image before it stops anything, up before it starts the gateway"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    ok=1
+    _aistack "$d" migrate --yes >/dev/null || { ok=0; echo "migrate failed" >&2; }
+    _aistack_seq "$d/events.log" "docker: build --label org.autoos.omniroute.source=" "-t autoos/omniroute:" \
+        "systemctl: --user stop autoos-omniroute.service" "up -d --no-deps omniroute" \
+        || { ok=0; echo "the build did not come first: $(cat "$d/events.log")" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"; : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed" >&2; }
+    _aistack_seq "$d/events.log" "docker: build --label org.autoos.omniroute.source=" "up -d --no-deps omniroute" \
+        || { ok=0; echo "up started the gateway before building it: $(cat "$d/events.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the gateway can start from a stale or missing image"; fi
+fi
+
+if it "aistack: a failed omniroute build stops nothing and starts nothing"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/fail-build-omniroute"
+    ok=1
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "migrate stopped a unit before the image existed" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran" >&2; }
+    [[ "$out" == *"building autoos/omniroute:"*"failed"* ]] || { ok=0; echo "not explained: $out" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"; : >"$d/image-exists"; : >"$d/fail-build-omniroute"
+    _aistack "$d" up omniroute >/dev/null && { ok=0; echo "up reported success" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "up started the gateway from a failed build" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed image build does not stop the run"; fi
 fi
 
 if it "aistack: a failed backup leaves no partial archive and hands the service back"; then
@@ -10201,6 +12792,87 @@ STUB
     [[ -e "$d2/run-autoos-omniroute" && -e "$d2/cfg/stack.active" ]] || { ok=0; echo "stack or marker gone" >&2; }
     rm -rf "$d" "$d2"
     if (( ok )); then pass; else fail "a failed backup leaves a partial archive"; fi
+fi
+
+# ─── The public URL (AUTOOS_OMNIROUTE_PUBLIC_URL) ───────────────────────────
+# stack.env's AUTOOS_OMNIROUTE_PUBLIC_URL reaches the gateway as
+# NEXT_PUBLIC_BASE_URL + OMNIROUTE_PUBLIC_BASE_URL (compose.yml). Unset must
+# change nothing - and image 3.8.50 exits at startup on a value that is not an
+# http(s) URL, so a bad one must not reach `compose up`.
+
+if it "aistack: stack.env.example documents the public URL as a commented placeholder, nothing real"; then
+    ok=1
+    f="$AISTACK/stack.env.example"
+    line="$(grep -nxF '# AUTOOS_OMNIROUTE_PUBLIC_URL=https://<your-omniroute-host>' "$f" | cut -d: -f1)"
+    [[ -n "$line" ]] || { ok=0; echo "the commented placeholder line is missing" >&2; }
+    if [[ -n "$line" ]]; then
+        sed -n "$((line - 1))p" "$f" | grep -q '^# .*[Pp]ublic' || { ok=0; echo "no one-line description directly above it" >&2; }
+    fi
+    grep -qE '^[[:space:]]*AUTOOS_OMNIROUTE_PUBLIC_URL=' "$f" && { ok=0; echo "an active AUTOOS_OMNIROUTE_PUBLIC_URL line: the example would turn it on" >&2; }
+    if (( ok )); then pass; else fail "the public URL is not a commented placeholder"; fi
+fi
+
+if it "aistack: init never invents the public URL and keeps the operator's value"; then
+    # A guard: green before the feature, it fails if init ever starts writing the key.
+    d="$(_aistack_sandbox)"
+    ok=1
+    _aistack "$d" init >/dev/null
+    grep -q 'AUTOOS_OMNIROUTE_PUBLIC_URL' "$d/cfg/stack.env" && { ok=0; echo "init wrote the key: $(grep AUTOOS_OMNIROUTE_PUBLIC_URL "$d/cfg/stack.env")" >&2; }
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL='https://gw.example.invalid/'\n" >>"$d/cfg/stack.env"
+    _aistack "$d" init >/dev/null
+    [[ "$(grep -c '^AUTOOS_OMNIROUTE_PUBLIC_URL=' "$d/cfg/stack.env")" == 1 ]] || { ok=0; echo "the key is not there exactly once" >&2; }
+    grep -qxF "AUTOOS_OMNIROUTE_PUBLIC_URL='https://gw.example.invalid/'" "$d/cfg/stack.env" || { ok=0; echo "the operator's value changed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "init touches the public URL"; fi
+fi
+
+if it "aistack: up and migrate refuse an invalid public URL before anything starts or stops"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_OMNIROUTE_PUBLIC_URL='https://opuser:oppw-secret@gw.example.invalid'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up omniroute)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "up accepted a URL with credentials" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran" >&2; }
+    [[ "$out" == *AUTOOS_OMNIROUTE_PUBLIC_URL* ]] || { ok=0; echo "the refusal does not name the variable: $out" >&2; }
+    [[ "$out" == *oppw-secret* ]] && { ok=0; echo "the credentials were echoed" >&2; }
+    # A dry run explains and carries on, like the bind guard.
+    out="$(_aistack "$d" --dry-run up omniroute)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "dry run: exit $rc, not 0" >&2; }
+    [[ "$out" == *"refusing"*AUTOOS_OMNIROUTE_PUBLIC_URL* || "$out" == *AUTOOS_OMNIROUTE_PUBLIC_URL*"refusing"* ]] || { ok=0; echo "dry run does not explain: $out" >&2; }
+    rm -rf "$d"
+    for bad in 'gw.example.invalid' 'ftp://gw.example.invalid' 'https://gw example.invalid'; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"; : >"$d/image-exists"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL="$bad" up omniroute >/dev/null && { ok=0; echo "up accepted [$bad] from the environment" >&2; }
+        grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran for [$bad]" >&2; }
+        rm -rf "$d"
+    done
+    # What the gateway accepts (and nothing at all) goes through.
+    for good in '' 'https://gw.example.invalid' 'https://gw.example.invalid/' 'http://gw.example.invalid:20128' 'https://gw.example.invalid/omniroute/'; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"; : >"$d/image-exists"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL="$good" up omniroute >/dev/null || { ok=0; echo "up refused [$good]" >&2; }
+        rm -rf "$d"
+    done
+    # migrate: refused before a native unit stops.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL=gw.example.invalid migrate --yes >/dev/null && { ok=0; echo "migrate accepted an invalid URL" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "migrate stopped a unit first" >&2; }
+    [[ -e "$d/active-autoos-omniroute" ]] || { ok=0; echo "the native gateway is gone" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an invalid public URL reaches compose"; fi
+fi
+
+if it "aistack: the docs explain the loopback callback and what the public URL does and does not change"; then
+    ok=1
+    f="$ROOT/docs/web-services.md"
+    for needle in 'AUTOOS_OMNIROUTE_PUBLIC_URL' 'NEXT_PUBLIC_BASE_URL' 'OMNIROUTE_PUBLIC_BASE_URL' 'ANTIGRAVITY_OAUTH_CLIENT_ID' \
+                  'ssh -L 20128:127.0.0.1:20128' 'http://127.0.0.1:20128/callback' 'BASE_URL: http://localhost:20128' 'INVALID_ORIGIN'; do
+        grep -qF -- "$needle" "$f" || { ok=0; echo "docs/web-services.md does not mention: $needle" >&2; }
+    done
+    if (( ok )); then pass; else fail "the OAuth / public URL docs are incomplete"; fi
 fi
 
 # ─── ai-stack.sh verify ─────────────────────────────────────────────────────
@@ -10296,11 +12968,11 @@ if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
         AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "exit $rc, not 0" >&2; }
-    grep -qx 'verify: 12 ok, 0 failed, 1 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
+    grep -qx 'verify: 13 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
     grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
     for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
                 'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
-                'combo t2-worker-free-only' 'combo t3-driver-free-only' 'combo t2-worker-clean' \
+                'combo t2-worker-free-only' 'combo t3-driver-free-only' 'combo t2-worker-clean' 'omniroute has qodercli' \
                 'public URL http://127.0.0.1:18081/' 'public URL http://127.0.0.1:18082/'; do
         grep -qx "  ok    $name" <<<"$out" || { ok=0; echo "no ok line for: $name" >&2; }
     done
@@ -10460,6 +13132,91 @@ if it "aistack: verify checks the code dir in opencode and in the OpenHands sand
     if (( ok )); then pass; else fail "the code dir check misbehaves"; fi
 fi
 
+if it "aistack: verify checks the gateway container has qodercli: ok, FAIL, or skip with a reason"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "healthy: exit $rc, not 0" >&2; }
+    grep -qx '  ok    omniroute has qodercli' <<<"$out" || { ok=0; echo "healthy: no ok line" >&2; }
+    grep -qx 'exec autoos-omniroute qodercli --version' "$d/docker.log" || { ok=0; echo "the check did not run qodercli --version in the gateway container" >&2; }
+    # The image without the layer: the exec cannot find the binary.
+    : >"$d/noqoder-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "no qodercli: exit $rc, not 1" >&2; }
+    grep -qE '^  FAIL  omniroute has qodercli - ' <<<"$out" || { ok=0; echo "no qodercli: no FAIL line: $out" >&2; }
+    [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "no qodercli: not exactly one FAIL" >&2; }
+    # A command that answers, but not with a version.
+    rm -f "$d/noqoder-autoos-omniroute"; printf 'not a version\n' >"$d/qoder-version-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "no version: exit $rc, not 1" >&2; }
+    grep -qE '^  FAIL  omniroute has qodercli - ' <<<"$out" || { ok=0; echo "no version: no FAIL line" >&2; }
+    rm -f "$d/qoder-version-autoos-omniroute"
+    # A stopped gateway is the container check's FAIL; this one skips, and does not exec.
+    rm -f "$d/run-autoos-omniroute" "$d/docker.log"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    grep -qx '  skip  omniroute has qodercli - autoos-omniroute is not running' <<<"$out" || { ok=0; echo "stopped: no skip line: $(grep qodercli <<<"$out")" >&2; }
+    grep -q 'qodercli' "$d/docker.log" 2>/dev/null && { ok=0; echo "stopped: docker was asked to exec qodercli" >&2; }
+    rm -rf "$d"
+    # The gateway service is not enabled: skipped, and docker is not asked.
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    t="$d/tree/configuration"
+    mkdir -p "$t/docker/ai-stack"
+    cp "$AISTACK/ai-stack.sh" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
+    cp "$ROOT/configuration/env-file.sh" "$t/"
+    sed 's/^    container_name: autoos-omniroute$/&\n    profiles: ["gateway"]/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
+    out="$(_AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack_verify "$d" verify)" && rc=0 || rc=$?
+    grep -qx '  skip  omniroute has qodercli - the omniroute service is not enabled' <<<"$out" || { ok=0; echo "profile off: no skip line: $(grep qodercli <<<"$out")" >&2; }
+    grep -q 'qodercli' "$d/docker.log" 2>/dev/null && { ok=0; echo "profile off: docker was asked about qodercli" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the qodercli check is not ok/FAIL/skip as specified"; fi
+fi
+
+if it "aistack: verify prints the public URL as the app normalizes it, skips it when unset or empty, FAILs one the gateway would refuse"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    skipline='  skip  omniroute public URL - AUTOOS_OMNIROUTE_PUBLIC_URL is not set'
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "unset: exit $rc, not 0" >&2; }
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "unset: no skip line: $(grep 'public URL' <<<"$out")" >&2; }
+    # Empty - in the environment, in stack.env, or blanks only - is the same as unset.
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_PUBLIC_URL= verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "empty env: no skip line" >&2; }
+    out="$(_aistack_verify "$d" 'AUTOOS_OMNIROUTE_PUBLIC_URL=   ' verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "blank env: no skip line" >&2; }
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL=''\n" >>"$d/cfg/stack.env"
+    out="$(_aistack_verify "$d" verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "empty in stack.env: no skip line" >&2; }
+    # Printed the way the app normalizes it: trimmed, trailing slashes dropped, a path kept.
+    for pair in 'https://gw.example.invalid|https://gw.example.invalid' 'https://gw.example.invalid/|https://gw.example.invalid' \
+                'https://gw.example.invalid///|https://gw.example.invalid' '  https://gw.example.invalid/  |https://gw.example.invalid' \
+                'https://gw.example.invalid/omniroute/|https://gw.example.invalid/omniroute' 'http://gw.example.invalid:20128/|http://gw.example.invalid:20128'; do
+        out="$(_aistack_verify "$d" "AUTOOS_OMNIROUTE_PUBLIC_URL=${pair%%|*}" verify)" && rc=0 || rc=$?
+        (( rc == 0 )) || { ok=0; echo "[${pair%%|*}]: exit $rc, not 0" >&2; }
+        grep -qxF "  ok    omniroute public URL ${pair#*|}" <<<"$out" || { ok=0; echo "[${pair%%|*}]: no ok line for ${pair#*|}: $(grep 'public URL' <<<"$out")" >&2; }
+    done
+    # The environment beats stack.env, as it does in compose's interpolation.
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL='https://from-file.example.invalid/'\n" >>"$d/cfg/stack.env"
+    out="$(_aistack_verify "$d" verify)" || true
+    grep -qxF '  ok    omniroute public URL https://from-file.example.invalid' <<<"$out" || { ok=0; echo "stack.env value not shown" >&2; }
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_PUBLIC_URL=https://from-env.example.invalid verify)" || true
+    grep -qxF '  ok    omniroute public URL https://from-env.example.invalid' <<<"$out" || { ok=0; echo "the environment value does not win" >&2; }
+    # Printing is not probing: it may be a plain LAN address, not the proxy's 302.
+    grep -q 'example.invalid' "$d/curl-argv.log" 2>/dev/null && { ok=0; echo "verify requested the public URL" >&2; }
+    # What the gateway would refuse at startup: FAIL, and the value is not echoed.
+    for bad in 'gw.example.invalid' 'ftp://gw.example.invalid' 'https://opuser:oppw-secret@gw.example.invalid' 'https://gw example.invalid'; do
+        out="$(_aistack_verify "$d" "AUTOOS_OMNIROUTE_PUBLIC_URL=$bad" verify)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "[$bad]: exit $rc, not 1" >&2; }
+        grep -qE '^  FAIL  omniroute public URL - ' <<<"$out" || { ok=0; echo "[$bad]: no FAIL line" >&2; }
+        [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "[$bad]: not exactly one FAIL" >&2; }
+        [[ "$out" == *oppw-secret* || "$out" == *"gw example"* ]] && { ok=0; echo "[$bad]: the value is echoed" >&2; }
+    done
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the public URL line of verify misbehaves"; fi
+fi
+
 if it "aistack: verify follows the compose profiles: a disabled openhands is skipped, an enabled one is checked"; then
     ok=1
     for style in inline block; do
@@ -10502,7 +13259,7 @@ if it "aistack: verify is read-only: only inspect and exec reach docker, nothing
     [[ "$(grep -cE '^(start|stop|restart|rm|up|down|run|create|compose|build|pull|network|kill|pause|unpause|cp|update)( |$)' "$d/docker.log" || true)" == 0 ]] \
         || { ok=0; echo "a mutating docker verb: $(grep -E '^(start|stop|restart|rm|up|down|run|create|compose)' "$d/docker.log" | head -3)" >&2; }
     grep -vE '^(inspect|exec) ' "$d/docker.log" | grep -q . && { ok=0; echo "docker verbs beyond inspect/exec: $(grep -vE '^(inspect|exec) ' "$d/docker.log" | head -3)" >&2; }
-    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ test -d ' | grep -q . && { ok=0; echo "an exec that is not test -d" >&2; }
+    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |qodercli --version$)' | grep -q . && { ok=0; echo "an exec that is neither test -d nor qodercli --version" >&2; }
     # Nothing but docker inspect/exec: not systemctl, not ss, not the plain curl on PATH.
     grep -vE '^docker: (inspect|exec) ' "$d/events.log" | grep -q . && { ok=0; echo "another tool was called: $(grep -vE '^docker: (inspect|exec) ' "$d/events.log" | head -3)" >&2; }
     rm -rf "$d"

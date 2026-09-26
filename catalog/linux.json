@@ -348,6 +348,22 @@
           "launcher": "none"
         },
         {
+          "id": "herdr-sessions",
+          "name": "Herdr sessions",
+          "description": "Snapshots and restores Herdr panes across a reboot",
+          "provider": "script",
+          "package": "herdr-sessions",
+          "requires": [
+            "herdr",
+            "claude-code"
+          ],
+          "profiles": [],
+          "prompt": "herdr_sessions_profile",
+          "launcher": "none",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/tree/main/configuration/herdr-sessions",
+          "notes": "Snapshots every Herdr pane every 5 minutes and restores them at boot, on machines that run Herdr as their terminal host. Mutually exclusive with Claude autostart - only one session-restore mechanism may be installed at a time; remove the other first."
+        },
+        {
           "id": "agy",
           "name": "Antigravity CLI",
           "description": "Google's terminal coding agent",
@@ -577,7 +593,7 @@
         {
           "id": "antigravity",
           "name": "Antigravity",
-          "description": "Google's agent-first IDE",
+          "description": "Antigravity 2.0, Google's agentic desktop app (Electron)",
           "provider": "script",
           "package": "antigravity",
           "arch": [
@@ -589,8 +605,9 @@
           "profiles": [
             "workstation"
           ],
-          "notes": "Desktop IDE — hidden on headless and arm64 machines. Adds Google's signed apt repo, which is frozen at 1.23.2.",
-          "verify": "antigravity --version",
+          "notes": "Antigravity Hub 2.x (Electron desktop app) — x64 only, so hidden on arm64 machines. Newest version discovered from winget-pkgs (needs the GitHub API; GITHUB_TOKEN raises its rate limit), installed user-local from Google's Linux tarball into ~/.local/opt/antigravity (command: antigravity, no sudo). Google publishes no sha256 for it (no published sha256): size, gzip, member list, ELF and version are checked instead. setup.sh --update checks for a newer version.",
+          "verify": "test -x ~/.local/opt/antigravity/antigravity",
+          "updatable": true,
           "homepage": "https://antigravity.google/"
         },
         {
@@ -1634,6 +1651,11 @@
       "question": "Herdr install source",
       "default": "npm:herdr",
       "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in apt, so AutoOS needs to be told where it lives."
+    },
+    "herdr_sessions_profile": {
+      "question": "Absolute path to a herdr-sessions site profile (.conf), blank to skip",
+      "default": "",
+      "help": "Site-specific (hosts, paths) and never shipped in this public repo. Leave blank and the component reports 'skipped: no profile' rather than guessing one."
     },
     "git_user_name": {
       "question": "Git commit author name (e.g. Jane Doe)",

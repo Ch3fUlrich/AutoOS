@@ -1,0 +1,64 @@
+[Unit]
+# The herdr multiplexer that owns the Claude session on this host.
+#
+# WHY THIS UNIT EXISTS: herdr was started by hand from an interactive SSH shell,
+# with nothing to bring it back — so every reboot silently ended the session and
+# the Remote Control channel with it. herdr restores its own workspaces from
+# /root/.config/herdr/session.json; it just needed something to start it.
+#
+# It restores PANES, not the agents inside them — herdr-sessions-restore.service
+# is what puts Claude back into the pane.
+#
+# SYSTEMD MUST OWN HERDR, not a Claude session: a herdr server inherits the
+# environment of whatever launched it and hands it to every pane, so one started
+# from inside Claude passes CLAUDE_CODE_* down and transcript saving is silently
+# disabled — after which nothing can be resumed at all.
+Description=Herdr agent multiplexer (headless server)
+Documentation=file://@APPDIR@/README.md
+# The update unit runs first so a fresh herdr/claude binary is what this server
+# and every pane it spawns pick up. Wants= (not Requires=): a failed or skipped
+# update must never keep the session from coming back.
+After=network-online.target herdr-sessions-update.service
+Wants=network-online.target herdr-sessions-update.service
+# The driver lives in this checkout; keep the dependency explicit so a future
+# split-out dataset does not turn into a silent empty-directory start.
+RequiresMountsFor=@APPDIR@
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# A pane process killed by the kernel OOM killer must not take this whole
+# unit (and every other pane) down with it; systemd's default OOMPolicy=stop
+# did exactly that, twice.
+OOMPolicy=continue
+User=root
+Environment=HOME=/root
+Environment=SHELL=/usr/bin/zsh
+Environment=LANG=en_US.UTF-8
+# /root/.local/bin first: claude, herdr, uv/uvx (serena, graphify) all live
+# there, and panes inherit this PATH rather than an interactive .zshrc.
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Rendered by install.sh from the profile's HS_WORKDIR (default: this checkout).
+# This is the cwd every pane herdr spawns inherits, so it is also the project key
+# `claude --continue` resolves against -- changing it changes which conversation
+# comes back.
+WorkingDirectory=@WORKDIR@
+# A hand-started herdr already holds the socket? Then this unit's job is already
+# done. ExecCondition exiting 1-254 SKIPS the unit without marking it failed,
+# which is the only way to say that in systemd.
+#
+# Without this, `herdr server` exits 1 ("herdr server is already running") and
+# Restart=on-failure retries forever. StartLimitBurst does NOT stop it — it only
+# pauses the burst until the interval rolls over, then systemd tries again.
+ExecCondition=/bin/sh -c 'if /root/.local/bin/herdr pane list >/dev/null 2>&1; then exit 1; fi; exit 0'
+ExecStart=/root/.local/bin/herdr server
+
+Restart=on-failure
+RestartSec=10
+# If the binary daemonises itself the foreground process exits 0; keep the unit
+# active in that case rather than flapping.
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

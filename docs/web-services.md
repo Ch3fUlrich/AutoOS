@@ -51,6 +51,44 @@ The table below describes the native (workstation) layout.
   `autoos-omniroute` unit (Type=notify, watchdog). By hand:
   `omniroute --no-open --port 20128` from `$HOME`.
 
+#### OAuth logins and the public URL
+
+- **Google logins (Antigravity, Agy) use a loopback callback by design.** The
+  dashboard asks Google to redirect to `http://127.0.0.1:20128/callback`, and
+  Google's consent for the bundled client only completes when that address is
+  reachable from the browser that approves it. Do the login from a browser **on
+  the host**, or forward the port and browse through it:
+  `ssh -L 20128:127.0.0.1:20128 <host>`, then `http://127.0.0.1:20128`. If the
+  redirect fails anyway, copy the `http://127.0.0.1:20128/callback?...` address
+  from the failed page's address bar and paste it into the dialog.
+- **`AUTOOS_OMNIROUTE_PUBLIC_URL`** (the docker stack's `stack.env`; unset by
+  default, and an empty value is the same as unset) is handed to the gateway as
+  `NEXT_PUBLIC_BASE_URL` and `OMNIROUTE_PUBLIC_BASE_URL`. Use the exact origin
+  you browse the dashboard from, e.g. `https://omniroute.<domain>`. Read from
+  the image's source (3.8.50), it changes **server-side** behaviour only:
+  - the origin the gateway accepts for browser writes to the dashboard. With a
+    public URL set that origin is accepted and forwarded headers no longer
+    derive one, so browsing from a different name can be refused with
+    `INVALID_ORIGIN` (direct loopback and LAN-IP access keeps working);
+  - the host of links the server generates (image URLs and the like);
+  - the `redirect_uri` of an Antigravity/Agy login becomes `<url>/callback`
+    **only if you also set your own Google OAuth client** (`ANTIGRAVITY_OAUTH_CLIENT_ID`
+    and `ANTIGRAVITY_OAUTH_CLIENT_SECRET`, different from the bundled ones).
+    With the bundled client the redirect stays on loopback: the variable alone
+    does **not** make Google logins work from a remote browser.
+- **What it does not change.** The dashboard's browser code is compiled into the
+  image and cannot read the container's environment, so the OAuth dialog still
+  builds its redirect from the address you browse from. Logins that need no
+  browser redirect (the Qoder PAT, API keys) do not depend on it.
+- **Two more things the stack does with it.** While it is set, `compose.yml`
+  also pins `BASE_URL: http://localhost:20128`: without that the gateway's calls
+  to itself (A2A skills, MCP tools, cloud sync) would take
+  `NEXT_PUBLIC_BASE_URL` as their base and leave through the proxy. And the
+  gateway **exits at startup** on a value that is not an `http(s)` URL, which
+  `restart: unless-stopped` turns into a crash loop, so `ai-stack.sh up` and
+  `migrate` refuse one before compose runs; `verify` prints the value as the
+  app normalizes it (trailing slashes dropped) or `skip - ... is not set`.
+
 ### opencode serve (:4096)
 
 - V2 (`@opencode/cli` 2.x) serves its web UI to anyone and guards `/api/*`
@@ -115,7 +153,7 @@ The table below describes the native (workstation) layout.
 | Name | Upstream | Websocket / streaming paths | May bypass SSO | Headers |
 |---|---|---|---|---|
 | `omniroute.<domain>` | `<coding-host>:20128` | `/live-ws`, `/v1/*` (SSE + Responses websocket) | `/v1/*` only - API clients cannot do an SSO login; the client key guards it | `Host`, `X-Forwarded-For`, `X-Forwarded-Proto` |
-| `opencode.<domain>` | `<coding-host>:4096` | `/api/event` (SSE, no buffering), `/api/pty/*` (websocket) | nothing | pass `Authorization` through untouched (the app's Basic auth) |
+| `opencode.<domain>` | `<coding-host>:4096` | `/api/event` (SSE, no buffering), `/api/pty/*` (websocket) | nothing | replace `Authorization` with the app's Basic credentials after the SSO gate, so the browser shows one login (`header_up Authorization "Basic <base64 opencode:password>"`; the value exists only in the proxy's live config, never in git) |
 | `openhands.<domain>` | `<coding-host>:3000` | `/socket.io/*`; plus `/sbx/<port>/*` → `<coding-host>:<port>` (sandbox API + `/sockets/*` websockets) when `AUTOOS_OPENHANDS_SANDBOX_URL` uses that pattern | nothing - the app has no login | `Host`, `X-Forwarded-Proto`; keep `X-Session-API-Key` |
 
 Every service above is listed in the web UI's router card (live up/down,
@@ -129,7 +167,7 @@ compose stack instead of host processes: the OmniRoute gateway (`:20128`),
 keeps the native installs (the sections above).
 
 Files: [`configuration/docker/ai-stack/`](../configuration/docker/ai-stack/) -
-`compose.yml`, `opencode.Dockerfile`, `stack.env.example` and `ai-stack.sh`,
+`compose.yml`, `omniroute.Dockerfile`, `opencode.Dockerfile`, `stack.env.example` and `ai-stack.sh`,
 the one entry point (`init`, `up`, `down`, `status`, `is-active`, `migrate`,
 `rollback`, `verify`; `--dry-run` with any of them). Catalog id: `ai-stack-docker`,
 pre-ticked in `server`, requires `docker`.
@@ -151,7 +189,7 @@ pre-ticked in `server`, requires `docker`.
 
 | Service | Image | Container | Runs as | Published | State |
 |---|---|---|---|---|---|
-| `omniroute` | `diegosouzapw/omniroute:3.8.50@sha256:085c…` | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data` |
+| `omniroute` | local `autoos/omniroute:3.8.50-autoos1` (FROM `diegosouzapw/omniroute:3.8.50@sha256:085c…`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> `/home/qoder` (`HOME`) |
 | `opencode` | local `autoos/opencode:2.0.16-autoos1` (FROM `ghcr.io/anomalyco/opencode:2.0.16@sha256:1644…`) | `autoos-opencode` | host uid:gid | `${AUTOOS_STACK_BIND}:4096` | `…/ai-stack/opencode-home` -> `/home/opencode`; the code tree at the same path |
 | `openhands` | `docker.openhands.dev/openhands/openhands@sha256:17d0…` | `openhands-app` | root entrypoint -> `enduser` (host uid) | `${AUTOOS_STACK_BIND}:3000` | `~/.openhands` -> `/.openhands` |
 
@@ -166,7 +204,7 @@ file for opencode, OpenHands, the serena container and the host CLIs.
 
 | Flag | Where | Why |
 |---|---|---|
-| image `@sha256:` digest | all | a tag can move; the gateway holds encrypted credentials and a changed schema must be a deliberate bump |
+| image `@sha256:` digest (the `FROM` of the two local layers) | all | a tag can move; the gateway holds encrypted credentials and a changed schema must be a deliberate bump |
 | `restart: unless-stopped` | all | docker resumes the stack at boot; a hand `docker stop` sticks |
 | `security_opt: no-new-privileges:true` | all | no setuid binary inside can raise privileges |
 | `cap_drop: [ALL]` | all | none of the three needs a capability to serve HTTP |
@@ -249,7 +287,7 @@ the image cannot replace this: it fails to start (`tsx` is not in the image).
 is one `KEY=value` per line and docker's format has no escape for it, so the
 rest of the value would become a key of its own. Such a key is skipped with a
 warning that names the key, never the value. The data directory, its
-`omniroute/` and `opencode-home/` are mode `700`.
+`omniroute/`, `opencode-home/` and `qoder-home/` are mode `700`.
 
 ### opencode in the container
 
@@ -272,6 +310,42 @@ Why a local layer at all: the upstream image is V2 (`opencode --version` ->
 `v2.0.16`, the same as the host) but bare Alpine - no `git` (an agent could
 not commit), no `bash`, no `node`/`npx`, no `uv`. `opencode.Dockerfile` adds
 exactly those plus `curl` for the healthcheck (image 225 MB -> 382 MB).
+
+### OmniRoute with qodercli
+
+The gateway's Qoder provider signs in with a personal access token (PAT), and
+OmniRoute drives that through the `qodercli` binary inside its own container.
+The upstream image has none, so the login failed with `spawn qodercli ENOENT`.
+`omniroute.Dockerfile` adds exactly that binary on the digest-pinned upstream
+image (`npm install -g @qoder-ai/qodercli@<version>`, the version the host
+runs; npm fetches it at build, no binary is kept in git; image 4.14 GB ->
+4.24 GB) and compose builds it as `autoos/omniroute:<upstream>-autoos<n>`.
+
+Two measurements decide the rest of the service:
+
+- **`qodercli` needs a writable `HOME`, even for `--version`.** It creates
+  `$HOME/.qoder` on start and crashes (`ENOENT ... mkdir '/home/node/.qoder'`)
+  when it cannot; the root filesystem is read-only. OmniRoute runs
+  `qodercli --version` itself to find out whether the CLI is usable, so the
+  gateway needs a `HOME` it can write. `compose.yml` sets `HOME=/home/qoder` and
+  mounts `~/.local/share/autoos/ai-stack/qoder-home` there (a tmpfs would give
+  the gateway a new machine id on every restart). `ai-stack.sh init` creates it
+  (`0700`, the operator's) - and so does `up`, because on a host initialised
+  before this mount existed docker would create the missing source as root.
+- **The PAT login itself is not stored there.** OmniRoute passes
+  `--config-dir $DATA_DIR/qoder-cli`, so the CLI's auth, cache, logs and
+  sessions land in the gateway data directory, which is backed up and migrated
+  with everything else. `qoder-home` holds only what the CLI writes to `HOME`
+  regardless (`~/.qoder/entry`, a git ignore file, and the logs of a plain
+  `qodercli --version`).
+
+`CLI_QODER_BIN=/usr/local/bin/qodercli` names the binary by its absolute path.
+The remaining hardening (`read_only`, `cap_drop`, `no-new-privileges`, the
+tmpfs, the limits) is unchanged. OmniRoute resolves the config paths of the
+CLI tools it manages under `HOME`, so any such config it writes now lands in
+that mount instead of failing on the read-only root; nothing reaches the image.
+`ai-stack.sh verify` checks `qodercli --version` in the running gateway
+(`omniroute has qodercli`).
 
 ### RAM budget (this host: 9.9 GB, ~3 GB free)
 
@@ -358,9 +432,11 @@ at):
 
 `ai-stack.sh verify` is the checklist to run after `migrate --yes` (or any
 `up`), as one repeatable command. It is **read-only**: docker is only asked
-`inspect` and `exec <opencode> test -d`, curl only probes the loopback ports
-(and the public URLs you list), nothing is started, stopped, restarted or
-written, and the gateway key is never printed (`--dry-run` changes nothing
+`inspect`, `exec <opencode> test -d` and `exec <omniroute> qodercli --version`
+(the one command that writes anything: qodercli leaves its usual log files in
+its `HOME`, the `qoder-home` mount), curl only probes the loopback ports (and
+the public URLs you list), nothing is started, stopped, restarted or written
+otherwise, and the gateway key is never printed (`--dry-run` changes nothing
 either, there is nothing to change). Each check prints one line - `ok`,
 `FAIL - <reason>`, or `skip - <why>` when its input is not configured - and the
 command ends with `verify: N ok, M failed, K skipped`. **Exit status: 0 only
@@ -372,14 +448,16 @@ when M is 0**, 1 otherwise.
 | 2 | keyless refusal | `GET /v1/models` on `:20128` and `GET /api/session` on `:4096`, without an `Authorization` header, answer 401 | that service is not enabled |
 | 3 | keyed combos | `POST /v1/chat/completions` with a one-word prompt and `max_tokens` 16 answers 200 for each combo | `AUTOOS_OMNIROUTE_KEY` is unset |
 | 4 | code dir | `AUTOOS_CODE_DIR` (environment, then `stack.env`) is a directory inside the opencode container, and the OpenHands container's `SANDBOX_VOLUMES` has a `<dir>:<dir>` entry | that service is not enabled |
-| 5 | public URLs | each URL answers 302 (the auth proxy's redirect) without credentials | `AUTOOS_VERIFY_PUBLIC_URLS` is unset |
-| 6 | healthcheck | - | always: `configuration/healthcheck.sh` appends to `logs/healthcheck-<date>.log` on every run and exits 0 whatever it finds, so it is neither read-only nor a verdict; its docker probes are checks 1 and 2 |
+| 5 | gateway CLI | `docker exec autoos-omniroute qodercli --version` prints a version, run as the gateway runs it (same user and `HOME`): the image has the qodercli layer and its `HOME` is writable | the omniroute service is not enabled, or its container is not running (check 1 already FAILs that) |
+| 6 | public URLs | each URL answers 302 (the auth proxy's redirect) without credentials | `AUTOOS_VERIFY_PUBLIC_URLS` is unset |
+| 7 | gateway public URL | `AUTOOS_OMNIROUTE_PUBLIC_URL` (environment, then `stack.env`) is an `http(s)` URL without credentials or blanks; printed as the app normalizes it, **not requested** (it may be a plain LAN address; reachability is check 6's job) | it is unset or empty |
+| 8 | healthcheck | - | always: `configuration/healthcheck.sh` appends to `logs/healthcheck-<date>.log` on every run and exits 0 whatever it finds, so it is neither read-only nor a verdict; its docker probes are checks 1 and 2 |
 
 The two variables `verify` reads besides the ones above:
 
 - `AUTOOS_VERIFY_COMBOS` - space separated combo names for check 3
   (default `t2-worker-free-only t3-driver-free-only t2-worker-clean`).
-- `AUTOOS_VERIFY_PUBLIC_URLS` - space separated public URLs for check 5. Keep
+- `AUTOOS_VERIFY_PUBLIC_URLS` - space separated public URLs for check 6. Keep
   them in your shell environment, not in a file that is committed. A URL with
   credentials in it is refused, and a query string is never echoed.
 
@@ -390,12 +468,16 @@ that `ps` shows, and no line of the output contains it.
 ### Bumping an image
 
 Resolve the new digest (`docker buildx imagetools inspect <image>:<tag>`),
-change the `image:` line (or the `FROM` line and the local tag for opencode),
-run `ai-stack.sh up`. For OmniRoute keep a backup of the data dir first; for
-OpenHands check the settings schema note in `start-stack.sh`.
+change the `image:` line (for opencode and OmniRoute the `FROM` line of their
+Dockerfile and the local tag in `compose.yml`, which names the upstream version;
+for OmniRoute the pinned qodercli version moves with them), run
+`ai-stack.sh up`. For OmniRoute keep a backup of the data dir first; for
+OpenHands check the settings schema note in `start-stack.sh`. `up` recreates a
+running gateway whose image changed (a short gap on `:20128`).
 
-The local opencode image carries the label `org.autoos.opencode.source`: a
-hash of `opencode.Dockerfile` plus the base image digest in its `FROM` line.
-`up` and `migrate` rebuild it whenever that no longer matches, so an edited
-Dockerfile or a bumped base never keeps serving the old layer under the
-unchanged local tag.
+Each locally built image (`opencode`, `omniroute`: the services with a `build:`
+in `compose.yml`) carries the label `org.autoos.<service>.source`: a hash of
+its Dockerfile plus the base image digest in its `FROM` line. `up` and
+`migrate` rebuild it whenever that no longer matches, so an edited Dockerfile
+or a bumped base never keeps serving the old layer under the unchanged local
+tag; `--dry-run` says `would build` / `would rebuild`.

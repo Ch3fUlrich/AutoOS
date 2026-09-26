@@ -14,7 +14,10 @@
 #   exists-<container>   container exists outside compose (start-stack.sh docker run)
 #   container-exists     legacy: `docker inspect autoos-omniroute` succeeds
 #   image-exists         every `image inspect` succeeds
-#   opencode-label       the org.autoos.opencode.source label of the built image
+#   <name>-label         the org.autoos.<name>.source label of the built image
+#                        autoos/<name>:<tag> (opencode-label, omniroute-label)
+#   noimage-<name>       `image inspect` of autoos/<name>:<tag> fails (never built)
+#   fail-build-<name>    `docker build` of autoos/<name>:<tag> fails
 #   fail-up-<service>    `compose up` of that service fails
 #   unhealthy-<service>  the container runs but its HTTP probe fails (docker
 #                        inspect then reports "running (unhealthy)")
@@ -22,10 +25,15 @@
 #                        (one NAME=value per line; nothing when the file is absent)
 #   nocode-<container>   `docker exec <container> test -d <dir>` fails: the code
 #                        tree is not mounted in that container
+#   noqoder-<container>  `docker exec <container> qodercli --version` fails: the
+#                        image has no qodercli layer
+#   qoder-version-<container>  what that command prints instead of 1.1.63
 #   omni-key-fails       the omniroute CLI cannot create the manage key
 #   fail-register        register-autostart.sh fails (register.log also
 #                        records marker=yes|no: ai-stack.sh's marker at the call)
 #   compose-bind.log     AUTOOS_STACK_BIND as every `docker compose` call saw it
+#   qoder-home-at-up.log "present"/"absent": whether <state-dir>/data/qoder-home
+#                        (the sandbox's data dir) existed at each `compose up`
 # Every call is appended to <tool>.log and, as "<tool>: <args>", to events.log
 # (the cross-tool order). Arguments only - the environment is never logged;
 # saw-manage-key only records WHICH tool had OMNIROUTE_API_KEY set.
@@ -56,21 +64,42 @@ service_of() {
     esac
 }
 
+# image_name autoos/omniroute:3.8.50-autoos1 -> omniroute (the file-name stem
+# of that image's state); any other reference keeps its last path element.
+image_name() {
+    local n="${1##*/}"
+    printf '%s' "${n%%[:@]*}"
+}
+
 fake_docker() {
     local fmt="" c svc sub
     case "$1" in
         info|network|pull) return 0 ;;
         exec)
-            # exec <container> test -d <dir>: the only exec ai-stack.sh makes.
-            # True while the container runs and mounts the tree.
+            # exec <container> qodercli --version: the gateway's CLI check.
+            if [[ "${3:-}" == qodercli ]]; then
+                [[ -e "$S/run-$2" ]] || return 1
+                if [[ -e "$S/noqoder-$2" ]]; then
+                    echo 'OCI runtime exec failed: exec: "qodercli": executable file not found in $PATH: unknown' >&2
+                    return 126
+                fi
+                if [[ -s "$S/qoder-version-$2" ]]; then cat "$S/qoder-version-$2"; else echo 1.1.63; fi
+                return 0
+            fi
+            # exec <container> test -d <dir>: the code tree check. True while
+            # the container runs and mounts the tree.
             [[ -e "$S/run-$2" && ! -e "$S/nocode-$2" ]]
             return ;;
         build)
-            local prev=""
+            local prev="" tag="" label=""
             for a in "$@"; do
-                if [[ "$prev" == --label ]]; then printf '%s\n' "${a#*=}" >"$S/opencode-label"; fi
+                if [[ "$prev" == --label ]]; then label="${a#*=}"; fi
+                if [[ "$prev" == -t ]]; then tag="$a"; fi
                 prev="$a"
             done
+            svc="$(image_name "$tag")"
+            [[ -e "$S/fail-build-$svc" ]] && return 1
+            printf '%s\n' "$label" >"$S/$svc-label"
             : >"$S/image-exists"
             return 0 ;;
         rm)
@@ -80,8 +109,10 @@ fake_docker() {
         image)
             [[ "${3:-}" == -f ]] && fmt="$4"
             [[ -e "$S/image-exists" ]] || return 1
+            svc="$(image_name "${*: -1}")"
+            [[ -e "$S/noimage-$svc" ]] && return 1
             if [[ "$fmt" == *Labels* ]]; then
-                if [[ -s "$S/opencode-label" ]]; then cat "$S/opencode-label"; else echo '<no value>'; fi
+                if [[ -s "$S/$svc-label" ]]; then cat "$S/$svc-label"; else echo '<no value>'; fi
             fi
             return 0 ;;
         inspect)
@@ -114,6 +145,7 @@ fake_docker() {
             case "$sub" in
                 version) echo "Docker Compose version v2.99.0" ;;
                 up)
+                    if [[ -d "$S/data/qoder-home" ]]; then echo present; else echo absent; fi >>"$S/qoder-home-at-up.log"
                     local svcs=()
                     for a in "$@"; do [[ "$a" == -* ]] || svcs+=("$a"); done
                     (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands)
