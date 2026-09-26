@@ -3485,14 +3485,25 @@ PY
     assert_eq "$problems" ""
 fi
 
+# antigravity_inert_clients <dir>: stand-ins for the agent CLIs. setup.sh's
+# detection asks them which MCP servers they know (`claude mcp list`,
+# `qodercli mcp list`, `ollama list`), and that starts a real client process;
+# a test about a flag or a plan line has no business doing that.
+antigravity_inert_clients() {
+    local c
+    mkdir -p "$1"
+    for c in claude qodercli opencode codex qwen agy gemini ollama; do printf '#!/bin/sh\nexit 0\n' >"$1/$c"; chmod +x "$1/$c"; done
+}
+
 if it "antigravity update flag: setup.sh knows --update, lists it in --help and still rejects unknown options"; then
-    ok=1
+    ok=1; sb="$(antigravity_scratch)"; antigravity_inert_clients "$sb/bin"
     out="$(bash setup.sh --help 2>&1)"
     [[ "$out" == *"--update"* ]] || { ok=0; echo "--help does not list --update" >&2; }
-    out="$(bash setup.sh --update --list --no-color 2>&1)"; rc=$?
+    out="$(PATH="$sb/bin:$PATH" HOME="$sb/home" bash setup.sh --update --list --no-color 2>&1)"; rc=$?
     [[ $rc -eq 0 && "$out" != *"Unknown option"* ]] || { ok=0; echo "--update --list: rc=$rc: ${out:0:200}" >&2; }
     out="$(bash setup.sh --updat --list --no-color 2>&1)"; rc=$?
     [[ $rc -eq 2 && "$out" == *"Unknown option: --updat"* ]] || { ok=0; echo "--updat was not rejected: rc=$rc: ${out:0:200}" >&2; }
+    rm -rf "$sb"
     if (( ok )); then pass; else fail "the --update flag is not wired into setup.sh's argument parsing"; fi
 fi
 
@@ -3501,8 +3512,9 @@ if it "antigravity update flag: the plan says 'checking for a newer version' onl
     else
         sb="$(antigravity_scratch)"; ok=1
         mkdir -p "$sb/home/.local/opt/antigravity-ide"; printf '2.5.5-1 abc\n' >"$sb/home/.local/opt/antigravity-ide/.autoos-version"
+        antigravity_inert_clients "$sb/bin"
         # USER names nobody, so detection falls back to HOME: the scratch home is the machine.
-        run_setup() { USER=agy-test-nobody HOME="$sb/home" DISPLAY=:0 AUTOOS_CACHE_DIR="$sb/cache" \
+        run_setup() { PATH="$sb/bin:$PATH" USER=agy-test-nobody HOME="$sb/home" DISPLAY=:0 AUTOOS_CACHE_DIR="$sb/cache" \
             bash setup.sh --only antigravity --dry-run --yes --no-color "$@" 2>&1; }
         before="$(find "$sb/home/.local" -printf '%p|%T@\n' | sort)"
         out="$(run_setup)"; rc=$?

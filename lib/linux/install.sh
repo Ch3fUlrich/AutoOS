@@ -12,6 +12,10 @@
 
 
 AUTOOS_DRY_RUN="${AUTOOS_DRY_RUN:-0}"
+# setup.sh --update: an installed component whose catalog entry says
+# "updatable": true runs its own installer again, and that installer decides
+# whether a newer version exists (see install_component).
+AUTOOS_UPDATE="${AUTOOS_UPDATE:-0}"
 declare -A AUTOOS_ANSWERS=()
 APT_UPDATED=0
 
@@ -234,6 +238,32 @@ catalog_installed_ids() {
     printf '%s' "${ids% }"
 }
 # ─── Provider dispatch ──────────────────────────────────────────────────────
+# component_is_updatable <provider> <package>: true when the catalog marks that
+# entry "updatable": true, i.e. its installer can tell a newer version from the
+# installed one. install_component gets provider and package, not the id, so the
+# catalog is read here; false (never an error) when there is no readable
+# catalog, so a missing file can only ever mean "skip", never "reinstall".
+component_is_updatable() {
+    local catalog="${CATALOG_PATH:-}"
+    [[ -n "$catalog" && -f "$catalog" ]] || return 1
+    has_cmd python3 || return 1
+    python3 - "$catalog" "$1" "$2" <<'PY'
+import json, sys
+
+path, provider, package = sys.argv[1:4]
+try:
+    doc = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    sys.exit(1)
+for group in doc.get("categories", []):
+    for comp in group.get("components", []):
+        if (comp.get("provider") == provider and comp.get("package") == package
+                and comp.get("updatable") is True):
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
 # install_component <provider> <package>
 # Result lands in INSTALL_STATE (installed|skipped|failed) rather than on stdout:
 # these functions also print progress, so a `$(...)` capture would swallow the UI
@@ -248,8 +278,12 @@ install_component() {
     INSTALL_STATE="failed"; INSTALL_SCRIPT_STATE=""
 
     if is_installed "$provider" "$package" "$CASK_FLAG"; then
-        ui_ok "✓ ${package} is already installed - skipping package"
-        INSTALL_STATE="skipped"; return 0
+        if [[ "$AUTOOS_UPDATE" == 1 ]] && component_is_updatable "$provider" "$package"; then
+            ui_muted "${package} is installed - checking for a newer version (--update)"
+        else
+            ui_ok "✓ ${package} is already installed - skipping package"
+            INSTALL_STATE="skipped"; return 0
+        fi
     fi
 
     local rc=0
