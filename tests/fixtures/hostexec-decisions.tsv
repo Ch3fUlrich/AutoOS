@@ -1,0 +1,108 @@
+actor	tier	host	argv	expected	rule	note
+claude	default	coding-host	["echo","hi"]	allow		baseline allow
+claude	default	coding-host	["id"]	allow		baseline allow
+claude	default	coding-host	["git","status"]	allow		read verb, no flags
+claude	default	coding-host	["git","log","--oneline"]	allow		read verb
+claude	default	coding-host	["git","push","origin","main"]	allow		plain push, no force
+claude	default	coding-host	["docker","ps"]	allow		read-only docker
+claude	default	coding-host	["systemctl","status","docker"]	allow		read-only systemctl
+claude	default	coding-host	["chmod","644","/tmp/file"]	allow		non-recursive chmod
+claude	default	coding-host	["rm","-f","/etc/passwd"]	allow		rm -f but target is not a root path itself
+claude	default	coding-host	["rm","-rf","/tmp/scratch"]	allow		rm -rf but target is not a root path
+claude	default	coding-host	["dd","if=/dev/zero","of=/tmp/testfile"]	allow		dd writing to a plain file
+claude	default	coding-host	["iptables","-L"]	allow		read-only iptables
+claude	default	coding-host	["crontab","-l"]	allow		read-only crontab
+claude	default	coding-host	["nft","list","ruleset"]	allow		read-only nft
+bogus-actor	default	coding-host	["echo","hi"]	deny	unknown-actor	token/actor not in policy
+	default	coding-host	["echo","hi"]	deny	unknown-actor	blank actor name
+claude	default	coding-host	[]	deny	empty-argv	no argv at all
+claude	default	coding-host	[""]	deny	empty-argv	one blank element
+claude	default	coding-host	["","",""]	deny	empty-argv	all blank elements
+claude	default	coding-host	["echo","a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z","a1","b1","c1","d1","e1","f1","g1","h1","i1","j1","k1","l1","m1","n1","o1","p1","q1","r1","s1","t1","u1","v1","w1","x1","y1","z1","a2","b2","c2","d2","e2","f2","g2","h2","i2","j2","k2","l2","m2","n2","o2","p2","q2"]	deny	argv-caps	over max_args (64) for the test policy
+claude	default	coding-host	["echo","AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]	deny	argv-caps	one argument over max_arg_length (64) for the test policy
+claude	default	storage	["echo","hi"]	deny	forbid-host	host declared forbid=true
+claude	default	firewall	["echo","hi"]	deny	forbid-host	host declared forbid=true
+claude	default	not-a-declared-host	["echo","hi"]	deny	forbid-host	host missing from policy entirely
+claude	default	coding-host	["FOO=bar","id"]	deny	env-injection	argv[0] is a NAME=value assignment
+claude	default	coding-host	["LD_PRELOAD=/tmp/x.so","id"]	deny	env-injection	argv[0] is a dangerous assignment
+claude	default	coding-host	["env","LD_PRELOAD=/tmp/x.so","id"]	deny	env-injection	dangerous var anywhere in argv
+claude	default	coding-host	["env","LD_LIBRARY_PATH=/tmp","id"]	deny	env-injection	dangerous var anywhere in argv
+claude	default	coding-host	["env","BASH_ENV=/tmp/evil","id"]	deny	env-injection	dangerous var anywhere in argv
+claude	default	coding-host	["./sudo","id"]	deny	path-hijack	relative path with a slash
+claude	default	coding-host	["sub/dir/cmd"]	deny	path-hijack	relative path with a slash, no leading dot
+claude	default	coding-host	["not-a-real-command-xyz"]	deny	path-hijack	bare name not on the policy's fixed PATH
+claude	default	coding-host	["/usr/bin/sudo","id"]	deny	no-sudo	direct absolute sudo
+claude	default	coding-host	["sudo","id"]	deny	no-sudo	direct bare sudo
+claude	default	coding-host	["su","-","root"]	deny	no-sudo	su family member
+claude	default	coding-host	["doas","id"]	deny	no-sudo	doas family member
+claude	default	coding-host	["pkexec","id"]	deny	no-sudo	pkexec family member
+claude	default	coding-host	["run0","id"]	deny	no-sudo	run0 family member
+claude	default	coding-host	["env","sudo","id"]	deny	no-sudo	bypass via env wrapper
+claude	default	coding-host	["timeout","5","sudo","id"]	deny	no-sudo	bypass via timeout wrapper with a duration
+claude	default	coding-host	["nice","-n","10","sudo","id"]	deny	no-sudo	bypass via nice wrapper with flags
+claude	default	coding-host	["nohup","sudo","id"]	deny	no-sudo	bypass via nohup wrapper
+claude	default	coding-host	["setsid","sudo","id"]	deny	no-sudo	bypass via setsid wrapper
+claude	default	coding-host	["stdbuf","-oL","sudo","id"]	deny	no-sudo	bypass via stdbuf wrapper with a flag
+claude	default	coding-host	["timeout","5m","env","-i","sudo","id"]	deny	no-sudo	chained wrappers: timeout then env -i
+claude	default	coding-host	["bash","-lc","id"]	deny	no-inline-shell	bash -lc bypass (combined short opts)
+claude	default	coding-host	["sh","-ec","true"]	deny	no-inline-shell	sh -ec bypass (combined short opts)
+claude	default	coding-host	["bash","-c","id"]	deny	no-inline-shell	bash -c
+claude	default	coding-host	["zsh","-c","id"]	deny	no-inline-shell	zsh -c
+claude	default	coding-host	["dash","-c","id"]	deny	no-inline-shell	dash -c
+claude	default	coding-host	["fish","-c","id"]	deny	no-inline-shell	fish -c
+claude	default	coding-host	["python3","-Ic","print(1)"]	deny	no-inline-shell	python3 -Ic bypass (combined short opts)
+claude	default	coding-host	["python3","-c","print(1)"]	deny	no-inline-shell	python3 -c
+claude	default	coding-host	["perl","-e","print 1"]	deny	no-inline-shell	perl -e
+claude	default	coding-host	["perl","-E","say 1"]	deny	no-inline-shell	perl -E
+claude	default	coding-host	["node","-e","1"]	deny	no-inline-shell	node -e
+claude	default	coding-host	["node","-p","1"]	deny	no-inline-shell	node -p
+claude	default	coding-host	["ruby","-e","1"]	deny	no-inline-shell	ruby -e
+claude	default	coding-host	["awk","BEGIN{system(\"id\")}"]	deny	no-inline-shell	awk program calling system(
+claude	default	coding-host	["bash","/opt/scripts/deploy.sh"]	allow		script by path is fine, no -c
+claude	default	coding-host	["python3","/opt/scripts/tool.py","--flag"]	allow		script by path is fine, no -c
+claude	default	coding-host	["rm","-rf","/"]	deny	destructive	rm -rf on /
+claude	default	coding-host	["rm","-rf","/*"]	deny	destructive	rm -rf on a glob of /
+claude	default	coding-host	["rm","-rf","~"]	deny	destructive	rm -rf on ~
+claude	default	coding-host	["rm","-rf","/home"]	deny	destructive	rm -rf on /home
+claude	default	coding-host	["rm","-rf","/home/*"]	deny	destructive	rm -rf on a glob of /home
+claude	default	coding-host	["rm","-rf","/etc"]	deny	destructive	rm -rf on /etc
+claude	default	coding-host	["rm","-rf","/var"]	deny	destructive	rm -rf on /var
+claude	default	coding-host	["rm","-rf","/usr"]	deny	destructive	rm -rf on /usr
+claude	default	coding-host	["rm","-rf","/boot"]	deny	destructive	rm -rf on /boot
+claude	default	coding-host	["rm","-fr","/"]	deny	destructive	flag order reversed (-fr)
+claude	default	coding-host	["mkfs.ext4","/dev/sda1"]	deny	destructive	mkfs* always denied
+claude	default	coding-host	["mkfs","-t","ext4","/dev/sda1"]	deny	destructive	mkfs* always denied
+claude	default	coding-host	["wipefs","/dev/sda1"]	deny	destructive	wipefs always denied
+claude	default	coding-host	["dd","if=/dev/zero","of=/dev/sda"]	deny	destructive	dd writing to a /dev/* device
+claude	default	coding-host	["shred","/dev/sda"]	deny	destructive	shred targeting a /dev/* device
+claude	default	coding-host	["shutdown","-h","now"]	deny	destructive	shutdown
+claude	default	coding-host	["reboot"]	deny	destructive	reboot
+claude	default	coding-host	["poweroff"]	deny	destructive	poweroff
+claude	default	coding-host	["halt"]	deny	destructive	halt
+claude	default	coding-host	["init","0"]	deny	destructive	init 0
+claude	default	coding-host	["init","6"]	deny	destructive	init 6
+claude	default	coding-host	["systemctl","poweroff"]	deny	destructive	systemctl poweroff
+claude	default	coding-host	["systemctl","reboot"]	deny	destructive	systemctl reboot
+claude	default	coding-host	["systemctl","halt"]	deny	destructive	systemctl halt
+claude	default	coding-host	["chmod","-R","777","/"]	deny	destructive	chmod -R on /
+claude	default	coding-host	["chown","-R","user:user","/"]	deny	destructive	chown -R on /
+claude	default	coding-host	["git","push","--force","origin","main"]	deny	destructive	git push --force
+claude	default	coding-host	["git","push","-f","origin","main"]	deny	destructive	git push -f
+claude	default	coding-host	["git","push","--mirror","origin"]	deny	destructive	git push --mirror
+claude	default	coding-host	["git","push","--delete","origin","branch"]	deny	destructive	git push --delete
+claude	default	coding-host	["git","push","origin","+main:main"]	deny	destructive	git push with a +refspec
+claude	default	coding-host	["docker","system","prune"]	deny	destructive	docker system prune
+claude	default	coding-host	["docker","system","prune","-f"]	deny	destructive	docker system prune -f
+claude	default	coding-host	["docker","volume","rm","myvol"]	deny	destructive	docker volume rm
+claude	default	coding-host	["docker","volume","prune"]	deny	destructive	docker volume prune
+claude	default	coding-host	["iptables","-F"]	deny	destructive	iptables -F
+claude	default	coding-host	["nft","flush","ruleset"]	deny	destructive	nft flush
+claude	default	coding-host	["crontab","-r"]	deny	destructive	crontab -r
+claude	default	coding-host	["git","-c","core.pager=cat","status"]	deny	git-option-injection	git -c on a read verb
+claude	default	coding-host	["git","-C","/tmp","status"]	deny	git-option-injection	git -C on a read verb
+claude	default	coding-host	["git","status","--git-dir=/tmp/.git"]	deny	git-option-injection	git --git-dir=
+claude	default	coding-host	["git","log","--upload-pack=/tmp/evil"]	deny	git-option-injection	git --upload-pack=
+claude	default	coding-host	["git","diff","--output=/tmp/out"]	deny	git-option-injection	git --output= writes a file
+claude	default	coding-host	["git","status","--exec-path=/tmp"]	deny	git-option-injection	git --exec-path=
+openhands	default	coding-host	["echo","hi"]	allow		another declared actor, same tier
+opencode	default	coding-host	["echo","hi"]	allow		another declared actor, same tier
