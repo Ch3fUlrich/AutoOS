@@ -32,7 +32,7 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              or a symlink outside the fixed PATH (resolved
                              targets re-enter basename rules)
                              (checked on every command head)
-    use-host-alias           on a local host, ssh/scp/sftp always, rsync
+    use-host-alias           on every host kind, ssh/scp/sftp always, rsync
                              with host:path, and parallel with --sshlogin/-S/
                              --sshloginfile/--transfer/--return
                              (checked on every head)
@@ -967,22 +967,22 @@ def _looks_like_rsync_remote(token: str) -> bool:
 
 
 def _use_host_alias_problem(head: Sequence[str], host_entry: HostEntry) -> str | None:
-    """Brief D: on a local host, ssh/scp/sftp and rsync-with-remote always
-    bypass the policy's host table (forbid-hosts, audit host field) -- deny
-    with "call host_run with host=<alias>". Only local hosts: an ssh-kind
-    host already runs via `ssh -o BatchMode=yes -T <target>` in runner.py."""
-    if host_entry.kind != "local":
-        return None
+    """Brief D + hop: on EVERY host kind, ssh/scp/sftp and rsync-with-remote
+    always bypass the policy's host table (forbid-hosts, audit host field) --
+    deny with "call host_run with host=<alias>". A second hop from an
+    ssh-kind host must go through the policy's host table instead of a raw
+    ssh/scp/sftp/rsync/parallel command."""
+    _ = host_entry
     if not head:
         return None
     base = _basename(head[0])
     if base in ("ssh", "scp", "sftp"):
-        return (f"{base} on a local host bypasses the host table "
+        return (f"{base} bypasses the host table "
                 f"(forbid-host, audit host); call host_run with host=<alias>")
     if base == "rsync":
         for tok in head[1:]:
             if _looks_like_rsync_remote(tok):
-                return (f"rsync with a remote spec {tok!r} on a local host bypasses "
+                return (f"rsync with a remote spec {tok!r} bypasses "
                         f"the host table; call host_run with host=<alias>")
     if base == "parallel":
         for tok in head[1:]:
@@ -990,17 +990,17 @@ def _use_host_alias_problem(head: Sequence[str], host_entry: HostEntry) -> str |
                 break  # flags end here; the rest are the command and inputs
             if tok in ("--sshlogin", "--sshloginfile", "--transfer", "--return",
                        "--ssh", "-S"):
-                return (f"parallel {tok} on a local host bypasses the host table "
+                return (f"parallel {tok} bypasses the host table "
                         f"(forbid-host, audit host); call host_run with host=<alias>")
             if tok.startswith(("--sshlogin=", "--sshloginfile=", "--transfer=",
                                "--return=", "--ssh=")):
-                return (f"parallel {tok.split('=', 1)[0]} on a local host bypasses the host table; "
+                return (f"parallel {tok.split('=', 1)[0]} bypasses the host table; "
                         f"call host_run with host=<alias>")
             if tok.startswith("--sshlogin"):
-                return ("parallel --sshlogin on a local host bypasses the host table; "
+                return ("parallel --sshlogin bypasses the host table; "
                         "call host_run with host=<alias>")
             if tok.startswith("-") and not tok.startswith("--") and "S" in tok[1:]:
-                return ("parallel -S on a local host bypasses the host table; "
+                return ("parallel -S bypasses the host table; "
                         "call host_run with host=<alias>")
     return None
 
