@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import autoos_resolver as r  # noqa: E402
+import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
 
 # A full canonical ladder, so a rung the rule wants is always present unless a
 # test deliberately shortens the ladder.
@@ -411,6 +412,25 @@ class FilterTests(unittest.TestCase):
         _, removed = self.run_filters(card=self.card(privacy="sensitive"),
                                       overlay=self.overlay)
         self.assertIn("privacy: nosy/big trains on prompts", removed["r-mixed"])
+
+    def test_privacy_removes_route_with_a_free_pool_leg_even_after_a_clean_leg(self):
+        # PRIV brief 2026-09-26 ("Free first, private never"): a free-tier
+        # leg is never private-safe, even one whose own trains_on_prompts is
+        # false, and even when it comes after an otherwise-clean first leg --
+        # the whole route is removed for a sensitive card (route-level, D-
+        # style, not per-leg fall-through).
+        self.registry["providers"]["freepool"] = {
+            "id": "freepool", "tier": "free", "trains_on_prompts": False}
+        self.registry["models"]["free-model"] = {
+            "id": "free-model", "tool_calls": "proven",
+            "context_usable": {"tokens": 100000, "source": "default"}}
+        self.registry["routes"]["r-freepool"] = {
+            "id": "r-freepool", "legs": ["clean/big", "freepool/free-model"]}
+        survivors, removed = self.run_filters(card=self.card(privacy="sensitive"))
+        self.assertNotIn("r-freepool", survivors)
+        self.assertTrue(
+            any("freepool/free-model" in reason for reason in removed["r-freepool"]),
+            removed.get("r-freepool"))
 
     # --- per-leg filters (FT): usable_legs(), not a route removal ---------
 
@@ -1650,6 +1670,39 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(result["state"], "ready")
         self.assertIn(result["route"], registry["routes"])
 
+    def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg(self):
+        # PRIV brief 2026-09-26, the found bug: `route --card
+        # kind=implement,paths=...,privacy=sensitive` chose t3-driver-free-
+        # only via groq/qwen/qwen3.8-27b, a free pool -- "Free first, private
+        # never" was violated. Needs a real tool_calls overlay (agentic
+        # kinds require tool_calls "proven", and every model in the real
+        # registry defaults to "unproven"): logs/routing/measured.json is
+        # git-ignored, so this test skips when it is absent (e.g. a fresh
+        # clone or CI) rather than failing.
+        overlay_path = (Path(__file__).resolve().parent.parent
+                        / "logs" / "routing" / "measured.json")
+        if not overlay_path.is_file():
+            self.skipTest("no logs/routing/measured.json overlay to probe with")
+        registry_path = (Path(__file__).resolve().parent.parent
+                         / "catalog" / "ai-registry.json")
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+        card = {"kind": "implement", "spec": "exact", "risk": "normal",
+               "mode": "balanced", "privacy": "sensitive"}
+        features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                   "tests": True, "need_tokens": 1000}
+        client_state = {"opencode": {"installed": True, "signed_in": True,
+                                     "reason": ""}}
+        result = r.plan(card, features, client_state, registry, overlay, [],
+                        "muse-spark", self.dt(2026, 9, 29, 9, 0))
+        self.assertIsNotNone(result["route"], result)
+        route = registry["routes"][result["route"]]
+        for provider_id, model_id in r.serving_legs(route, registry):
+            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
+            self.assertTrue(
+                safe, "%s/%s on route %s is not private-safe: %s"
+                     % (provider_id, model_id, result["route"], reason))
+
 
 class DecomposeTests(unittest.TestCase):
     """decompose(): spec 5.3 step 3 / D7 -- S3/S4 only, one level deep.
@@ -1694,6 +1747,24 @@ class DecomposeTests(unittest.TestCase):
                 self.assertEqual(
                     result["reason"],
                     "bucket %s: no decompose (S3/S4 only)" % bucket_name)
+
+    # --- zero subtask_plans: never split into nothing (review-b5a4) ---------
+
+    def test_s3_with_no_subtasks_never_splits(self):
+        whole = {"route": "whole", "expected_cost": 1.0}
+        result = r.decompose(whole, [], "S3", self.registry(), "orch")
+        self.assertEqual(result, {
+            "split": False,
+            "reason": "no subtasks proposed",
+        })
+
+    def test_s4_with_no_subtasks_never_splits(self):
+        whole = {"route": "whole", "expected_cost": 1.0}
+        result = r.decompose(whole, [], "S4", self.registry(), "orch")
+        self.assertEqual(result, {
+            "split": False,
+            "reason": "no subtasks proposed",
+        })
 
     # --- S3: split vs keep whole --------------------------------------------
 

@@ -156,6 +156,30 @@ Spec-silent decisions made while building the converter, one line each:
    current filter outcome (the training leg in each case is either never used in a `-clean` combo, or —
    for `t1-orchestrator-clean`'s openrouter contributor leg — the operator already accepted this
    exact trade-off on 2026-09-21, per `combos.json`'s own `$comment`).
+
+   PRIV finding, 2026-09-26: provider-level `trains_on_prompts` alone was never enough — a
+   privacy-sensitive card was routed onto `t3-driver-free-only` (groq/qwen, cerebras/qwen — both
+   `trains_on_prompts: false`, but `tier: "free"`), because the resolver's privacy filter checked only
+   `trains_on_prompts`, never `tier`. Fixed by a single `private_safe(provider_id, model_id, registry)`
+   predicate (`tools/registry.py`, imported by `tools/autoos_resolver.py`) that both `registry.py
+   check`'s rule 3 and the resolver's route-level privacy filter now call: a leg is private-safe only
+   when its provider's `tier` is not `"free"`, its `trains_on_prompts` is exactly `false`, *and* the
+   model does not carry its own `trains_on_prompts: true`. That third condition is the new, additive
+   `models.<id>.trains_on_prompts` field (optional; missing means inherit the provider) — needed
+   because `mistral` (paid, non-training) also serves `mistral-code-latest`, a free pool that trains
+   (`docs/models.md`: "FREE 1B/mo pool ... same key bills past it"); `tests/run-tests.sh`'s own
+   combos.json shell check already encodes this as a *-clean route invariant ("`mistral/mistral-code`"
+   counts as a free leg that must never appear in a `-clean` combo") — the model-level field lets the
+   registry express the same fact `registry.py check` can verify, without also marking
+   `mistral-small-latest` (same provider, does not train) unsafe. This changes no committed `-clean`
+   route's outcome: none of `t1-orchestrator-clean`/`t2-worker-clean`/`t3-driver-clean`'s *available*
+   legs are a free-tier provider or carry a model-level override (`t1-orchestrator-clean`'s only leg is
+   itself flagged `unavailable_legs` today; `t2-worker-clean`/`t3-driver-clean`'s zen leg is likewise
+   `unavailable_legs` — see Open choice above and `UnavailableLegTests`). It does change the resolver's
+   dynamic privacy filter, which applies to *any* route (not just `-clean` ones) whenever a card carries
+   `privacy: sensitive`: `t1-orchestrator`/`t2-worker`/`t3-driver`/`t3-driver-free-only` (main and
+   free-only variants) all now correctly lose their free-tier legs for a sensitive card, which is the
+   behaviour the finding asked for.
 5. `routes.<id>.surfaces` is keyed by gateway (`omniroute`/`litellm`), matching
    `catalog/ide-models.json`'s own shape, with the UI surfaces that expose it (`opencode`/`zed`/
    `openhands`) nested as a `clients` array rather than flattened to five parallel top-level surface

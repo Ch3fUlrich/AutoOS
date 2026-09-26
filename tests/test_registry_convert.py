@@ -341,6 +341,40 @@ def _bucket_table_from_registry(policy_bucket_table: dict) -> dict:
     }
 
 
+class MistralCodeTrainsOnPromptsTests(unittest.TestCase):
+    """PRIV brief 2026-09-26: mistral-code-latest is a free, training pool
+    served through the otherwise-clean paid `mistral` provider (docs/models.md:
+    "FREE 1B/mo pool ... same key bills past it"; tests/run-tests.sh's own
+    combos.json rule already treats `mistral/mistral-code` as a "free" leg
+    that must never appear in a `-clean` combo). Provider-level
+    trains_on_prompts alone cannot mark this one leg unsafe without also
+    marking every other mistral leg (mistral-small-latest, which does not
+    train) unsafe -- hence a model-level override."""
+
+    @classmethod
+    def setUpClass(cls):
+        rc, out, err = run_converter()
+        if rc != 0:
+            raise AssertionError("registry-convert.py exited %d\n%s\n%s" % (rc, out, err))
+        cls.registry = load_json(REGISTRY_PATH)
+
+    def test_mistral_code_latest_carries_a_true_override_with_a_comment(self):
+        model = self.registry["models"]["mistral-code-latest"]
+        self.assertIs(model.get("trains_on_prompts"), True)
+        self.assertIn("$comment", model)
+
+    def test_sibling_mistral_small_latest_has_no_override(self):
+        # The provider-level flag alone still governs every other mistral leg.
+        model = self.registry["models"]["mistral-small-latest"]
+        self.assertNotIn("trains_on_prompts", model)
+
+    def test_mistral_provider_itself_stays_clean(self):
+        # The provider-level flag is unchanged: mistral hosts both a training
+        # (mistral-code-latest) and a non-training (mistral-small-latest) leg,
+        # same documented shape as the openrouter/zen exceptions.
+        self.assertIs(self.registry["providers"]["mistral"]["trains_on_prompts"], False)
+
+
 class BucketTableParityTests(unittest.TestCase):
     """policy.bucket_table must equal tools/autoos_resolver.DEFAULT_BUCKET_TABLE (task brief)."""
 

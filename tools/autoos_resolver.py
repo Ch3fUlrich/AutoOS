@@ -21,7 +21,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import autoos_track as track  # tools/ is on sys.path for every caller
-from registry import resolve_leg  # tools/ is on sys.path for every caller
+from registry import resolve_leg, private_safe  # tools/ is on sys.path for every caller
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
@@ -399,10 +399,14 @@ def filter_routes(card, features, client_state, registry, overlay,
 
     Route-level filters (unchanged by FT -- these remove the route outright,
     regardless of any leg's own usability): retired; privacy (a
-    privacy-sensitive card removed by *any* serving leg that trains on
-    prompts -- a training leg must never be a fallback for a private
-    prompt, so it disqualifies the whole route even when another leg of it
-    would otherwise be perfectly usable); client installed/signed in.
+    privacy-sensitive card removed by *any* serving leg that is not
+    registry.private_safe -- not just one that trains, but also a free-tier
+    pool, per the 2026-09-26 11:05Z operator decision "a training leg is
+    never a fallback for sensitive work" as amended by the PRIV finding
+    "Free first, private never": a free pool must never be a fallback for a
+    private prompt either, so it disqualifies the whole route even when
+    another leg of it would otherwise be perfectly usable); client
+    installed/signed in.
 
     Every other filter (context, tool_calls, client_bound, the rate-limit
     overlay) is now per-leg (``usable_legs``): it no longer removes the
@@ -429,9 +433,9 @@ def filter_routes(card, features, client_state, registry, overlay,
 
         if privacy_sensitive:
             for provider_id, model_id in legs:
-                if registry["providers"][provider_id].get("trains_on_prompts"):
-                    reasons.append("privacy: %s/%s trains on prompts"
-                                   % (provider_id, model_id))
+                safe, why = private_safe(provider_id, model_id, registry)
+                if not safe:
+                    reasons.append("privacy: %s/%s %s" % (provider_id, model_id, why))
 
         if client_reason:
             reasons.append(client_reason)
@@ -847,6 +851,13 @@ def decompose(whole_plan, subtask_plans, bucket_name, registry, orchestrator_mod
     if bucket_name not in ("S3", "S4"):
         return {"split": False,
                 "reason": "bucket %s: no decompose (S3/S4 only)" % bucket_name}
+
+    if not subtask_plans:
+        # review-b5a4: zero proposed subtasks previously fell through to the
+        # arithmetic below, where overhead and subtasks_cost are both 0 --
+        # cheaper than any positive whole_cost -- and returned split: True
+        # into nothing. No subtasks proposed is not a cheaper split.
+        return {"split": False, "reason": "no subtasks proposed"}
 
     for index, subtask in enumerate(subtask_plans, start=1):
         if subtask.get("route") is None:

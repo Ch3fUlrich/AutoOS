@@ -177,6 +177,54 @@ def _check_unique_ids(registry) -> list:
 # ===========================================================================
 
 
+def private_safe(provider_id, model_id, registry) -> tuple:
+    """Whether `provider_id`/`model_id` is private-safe (spec 3.1 rule 3, tightened
+    by the PRIV finding of 2026-09-26: `autoos-agent.py route --card
+    kind=implement,...,privacy=sensitive` chose a FREE pool because only a
+    provider's ``trains_on_prompts`` was ever checked -- "Free first, private
+    never" needs the pool's tier checked too). The single predicate both this
+    module's rule 3 (-clean routes) and tools/autoos_resolver.py's route-level
+    privacy filter use, so the two can never drift apart.
+
+    Safe only when ALL of:
+      - the provider's ``tier`` is not ``"free"`` -- a free pool is never
+        private-safe, even one whose own ``trains_on_prompts`` is ``false``
+        (the found bug: groq/cerebras/sambanova free legs, and mistral's own
+        ``mistral-code-latest`` free pool, all carry ``trains_on_prompts:
+        false`` at the provider level and were wrongly treated as clean);
+      - the provider's ``trains_on_prompts`` is exactly ``False`` (``True`` or
+        missing/``None`` both count as training -- unknown is unsafe, matching
+        the original rule);
+      - the model does not carry its own ``trains_on_prompts: true`` (an
+        optional, additive model-level override for a provider that also
+        serves a free, training pool under an otherwise-clean paid tier --
+        e.g. ``mistral-code-latest`` on the paid, non-training ``mistral``
+        provider; missing means inherit the provider's value, already covered
+        by the check above).
+
+    Returns ``(True, None)`` when safe, or ``(False, reason)`` naming which
+    check failed. `provider_id`/`model_id` are assumed already resolved (rule
+    1 / the resolver's own ``resolve_leg`` already reject anything that does
+    not resolve); an id absent from the registry is reported as not safe
+    rather than raising, so a caller never needs its own guard before calling
+    this.
+    """
+    provider = _section(registry, "providers").get(provider_id)
+    if not isinstance(provider, dict):
+        return False, "unknown provider %r" % (provider_id,)
+    model = _section(registry, "models").get(model_id)
+    if not isinstance(model, dict):
+        return False, "unknown model %r" % (model_id,)
+
+    if provider.get("tier") == "free":
+        return False, "provider tier is free"
+    if provider.get("trains_on_prompts") is not False:  # True or missing: unsafe
+        return False, "trains on prompts"
+    if model.get("trains_on_prompts") is True:
+        return False, "model trains on prompts"
+    return True, None
+
+
 def _check_privacy(registry) -> list:
     problems = []
     for route_id, route in _section(registry, "routes").items():
@@ -187,7 +235,7 @@ def _check_privacy(registry) -> list:
             if leg in unavailable:
                 continue
             try:
-                provider_id, _ = resolve_leg(leg, registry)
+                provider_id, model_id = resolve_leg(leg, registry)
             except ValueError:
                 continue  # rule 1 already reports an unresolved leg
             provider = _section(registry, "providers").get(provider_id, {})
@@ -195,8 +243,9 @@ def _check_privacy(registry) -> list:
                 continue
             if provider.get("available") is False:
                 continue
-            if provider.get("trains_on_prompts") is not False:  # unknown = unsafe
-                problems.append("privacy: %s leg %s trains on prompts" % (route_id, leg))
+            safe, reason = private_safe(provider_id, model_id, registry)
+            if not safe:
+                problems.append("privacy: %s leg %s %s" % (route_id, leg, reason))
     return problems
 
 

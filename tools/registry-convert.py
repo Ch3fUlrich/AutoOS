@@ -545,8 +545,16 @@ EXTRA_MODELS = {
         "family": "mistral", "context_advertised": 131072, "output_max": 16384,
         "reasoning": False, "effort_ladder": [],
         "price_in": 0.0, "price_out": 0.0,
+        "trains_on_prompts": True,
         "comment": "Leads t3-driver; same-key free pool then billed past it "
-                   "(docs/models.md). " + _UNPRICED,
+                   "(docs/models.md). " + _UNPRICED + " Model-level "
+                   "trains_on_prompts override (PRIV brief, 2026-09-26): this "
+                   "free pool trains, but the mistral provider is otherwise "
+                   "paid/non-training (mistral-small-latest does not train) - "
+                   "tests/run-tests.sh's own combos.json rule already treats "
+                   "'mistral/mistral-code' as a free leg that must never "
+                   "appear in a -clean combo ('*-clean = paid legs only: no "
+                   "free pool may train on private prompts').",
     },
     "qwen/qwen3.8-27b": {
         "family": "qwen", "context_advertised": 131072, "output_max": 16384,

@@ -393,7 +393,7 @@
       "tool_calls": "unproven"
     },
     "mistral-code-latest": {
-      "$comment": "Leads t3-driver; same-key free pool then billed past it (docs/models.md). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "$comment": "Leads t3-driver; same-key free pool then billed past it (docs/models.md). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups). Model-level trains_on_prompts override (PRIV brief, 2026-09-26): this free pool trains, but the mistral provider is otherwise paid/non-training (mistral-small-latest does not train) - tests/run-tests.sh's own combos.json rule already treats 'mistral/mistral-code' as a free leg that must never appear in a -clean combo ('*-clean = paid legs only: no free pool may train on private prompts').",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -406,7 +406,8 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": false,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "trains_on_prompts": true
     },
     "mistral-small-latest": {
       "$comment": "mistral direct, keyed/billed account (docs/models.md: 'same key bills past the free pool'). output_max uses t2-worker-clean's 32768 (its larger use site) as the model's own ceiling; t3-driver's surface still declares its own clamped 16384. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",

@@ -176,6 +176,83 @@ class RuleThreePrivacyTests(unittest.TestCase):
         problems = registry.check_registry(reg)
         self.assertTrue(any("privacy: t2-worker-clean" in p for p in problems), problems)
 
+    def test_clean_route_with_a_free_tier_leg_is_flagged(self):
+        # PRIV brief 2026-09-26: a free-tier provider is never private-safe,
+        # even one whose own trains_on_prompts is false (the found bug: a
+        # free pool was treated as "clean" because only trains_on_prompts
+        # was checked, never tier).
+        reg = mutated()
+        reg["providers"]["mistral"]["tier"] = "free"
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy: t2-worker-clean" in p and "mistral/mistral-small-latest" in p
+               for p in problems), problems)
+
+    def test_clean_route_with_a_training_model_override_is_flagged(self):
+        # A model-level trains_on_prompts: true overrides an otherwise-clean
+        # paid provider (mistral-code-latest's real-world case).
+        reg = mutated()
+        reg["models"]["mistral-small-latest"]["trains_on_prompts"] = True
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy: t2-worker-clean" in p and "mistral/mistral-small-latest" in p
+               for p in problems), problems)
+
+
+class PrivateSafeTests(unittest.TestCase):
+    """private_safe(): the single predicate rule 3 and the resolver's privacy
+    filter both use (PRIV brief, 2026-09-26 operator finding "Free first,
+    private never"). A leg is private-safe only when its provider tier is
+    not "free", the provider's trains_on_prompts is exactly False, and the
+    model does not carry its own trains_on_prompts: true (missing means
+    inherit the provider)."""
+
+    def reg(self, provider_extra=None, model_extra=None):
+        provider = {"id": "p", "tier": "paid", "trains_on_prompts": False}
+        provider.update(provider_extra or {})
+        model = {"id": "m"}
+        model.update(model_extra or {})
+        return {"providers": {"p": provider}, "models": {"m": model}}
+
+    def test_free_provider_is_not_safe(self):
+        safe, reason = registry.private_safe("p", "m", self.reg(provider_extra={"tier": "free"}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_training_provider_is_not_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(provider_extra={"trains_on_prompts": True}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_training_model_on_a_clean_provider_is_not_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(model_extra={"trains_on_prompts": True}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_clean_paid_leg_is_safe(self):
+        safe, reason = registry.private_safe("p", "m", self.reg())
+        self.assertTrue(safe)
+        self.assertIsNone(reason)
+
+    def test_missing_provider_trains_on_prompts_is_not_safe(self):
+        reg = self.reg()
+        del reg["providers"]["p"]["trains_on_prompts"]
+        safe, reason = registry.private_safe("p", "m", reg)
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_unknown_provider_is_not_safe(self):
+        safe, reason = registry.private_safe("ghost", "m", self.reg())
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_unknown_model_is_not_safe(self):
+        safe, reason = registry.private_safe("p", "ghost", self.reg())
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
 
 class RuleFourPrivateHostTests(unittest.TestCase):
     """Rule 4: api_base / direct.base_url hold only public vendor endpoints."""
