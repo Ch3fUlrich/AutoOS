@@ -297,13 +297,16 @@ class ClientWriterTests(_DriverCase):
         self.assertIn("qodercli mcp add-json", proc.stdout)
         self.assertIn(f"$(cat {token_file})", proc.stdout)
         self.assert_token_nowhere(proc)
-        self.assertEqual(self.home_files(), before, "qoder wiring must not write files")
+        after = self.home_files() - {
+            ".config/systemd/user/autoos-hostexec.service",  # unit install is expected
+        }
+        self.assertEqual(after, before, "qoder wiring must not write client files")
 
     def test_default_port_comes_from_server_py(self):
         self.write_token("claude")
-        env = dict(self.env)
-        del env["AUTOOS_EXEC_PORT"]
-        proc = self.run_driver_ok("--clients", "claude", env_extra=env)
+        proc = self.run_driver_ok(
+            "--clients", "claude", env_extra={"AUTOOS_EXEC_PORT": ""}
+        )
         import json
 
         claude_json = self.home / ".claude.json"
