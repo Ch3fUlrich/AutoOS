@@ -27,6 +27,8 @@ import autoos_measure as m  # noqa: E402
 #   pkg/test_alpha.py   test_*.py outside tests/: name-only match for "alpha"
 #   pkg/Widget.Tests.ps1  *.Tests.ps1 outside tests/: content mentions lib/b.sh
 #   blob.bin            a tracked binary the token estimate must skip
+#   tests/c.Tests.ps1, tests/test_c_extra.py  whole-token name match for "c"
+#   tests/test_maintenance.py, tests/test_utility.py  substrings, never tokens
 FIXTURE = {
     "lib/a.sh": "shared_func one\nother\nshared_func two\n",
     "lib/b.sh": "nothing here\n",
@@ -37,6 +39,10 @@ FIXTURE = {
                         "    assert c.shared_func == 1\n"),
     "pkg/test_alpha.py": "# name-only test file, deliberately outside tests/\n",
     "pkg/Widget.Tests.ps1": "# checks lib/b.sh\n",
+    "tests/test_c_extra.py": "# extra tests for c\n",
+    "tests/c.Tests.ps1": "# c suite\n",
+    "tests/test_maintenance.py": "# maintenance suite\n",
+    "tests/test_utility.py": "# utility suite\n",
 }
 BLOB = b"\x00\x01\x02\x03\x00"
 
@@ -118,6 +124,30 @@ class LinesTests(RepoTestCase):
         self.assertEqual(f["sources"]["lines"], "declared")
 
 
+class DeclaredValuesTests(RepoTestCase):
+    def test_malformed_declarations_fail_closed(self):
+        # Declared files must be a list of strings and declared lines a
+        # non-negative int; strings that int() could coerce and bools are
+        # rejected, and the ValueError names the offending field.
+        repo = str(self.repo)
+        bad = [
+            ({"paths": ["lib"], "files": "lib/a.sh"}, "files"),
+            ({"paths": ["lib"], "files": ("lib/a.sh",)}, "files"),
+            ({"paths": ["lib"], "files": ["lib/a.sh", 3]}, "files"),
+            ({"paths": ["lib"], "files": [None]}, "files"),
+            ({"paths": ["lib"], "files": "x", "lines": 3}, "files"),
+            ({"paths": ["lib"], "lines": "7"}, "lines"),
+            ({"paths": ["lib"], "lines": -1}, "lines"),
+            ({"paths": ["lib"], "lines": True}, "lines"),
+            ({"paths": ["lib"], "lines": 2.5}, "lines"),
+        ]
+        for card, field in bad:
+            with self.subTest(card=card):
+                with self.assertRaises(ValueError) as ctx:
+                    m.measure(card, repo, "brief")
+                self.assertIn(field, str(ctx.exception))
+
+
 class TestsFeatureTests(RepoTestCase):
     def test_covered_by_a_test_under_tests(self):
         f = m.measure({"paths": ["tools"]}, str(self.repo), "brief")
@@ -141,6 +171,22 @@ class TestsFeatureTests(RepoTestCase):
         self.assertFalse(f["tests"])
         self.assertEqual(f["sources"]["tests"], "none")
 
+    def test_name_match_is_whole_token_not_substring(self):
+        # stem "c" is a whole token of test_c.py, c.Tests.ps1 and
+        # test_c_extra.py; "i" and "util" are mere substrings inside
+        # test_maintenance.py / test_utility.py and must not count.
+        repo = str(self.repo)
+        for candidate in ("tests/test_c.py", "tests/c.Tests.ps1",
+                          "tests/test_c_extra.py"):
+            with self.subTest(covers=candidate):
+                self.assertEqual(m._covered(repo, ["lib/c.py"], [candidate]),
+                                 candidate)
+        f = m.measure({"paths": ["lib"], "files": ["lib/i.py"]}, repo, "brief")
+        self.assertFalse(f["tests"])
+        self.assertEqual(f["sources"]["tests"], "none")
+        self.assertIsNone(m._covered(repo, ["lib/util.py"],
+                                     ["tests/test_utility.py"]))
+
 
 class FanoutTests(RepoTestCase):
     def test_no_symbols_is_zero(self):
@@ -160,6 +206,13 @@ class FanoutTests(RepoTestCase):
 
     def test_grep_fanout_absent_symbol_is_zero(self):
         self.assertEqual(m.grep_fanout(str(self.repo), "no_such_symbol_zzz"), 0)
+
+    def test_git_error_is_none_not_zero(self):
+        # git grep exit 1 means "no matches"; any other non-zero exit (bad
+        # repo, index lock) must read as None so measure() can fall through
+        # and report "unmeasured" instead of a false zero. The tempdir root
+        # that holds the fixture repo is itself not a repository.
+        self.assertIsNone(m.grep_fanout(str(self.repo.parent), "shared_func"))
 
     def test_first_non_none_backend_wins(self):
         def first(repo, symbol):

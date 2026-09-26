@@ -147,6 +147,11 @@ Rules:
 - End-to-end tests run `--dry-run` only, and one of them asserts that a dry run leaves
   the filesystem untouched.
 - The Linux suite must pass under WSL2, since that is where it will usually be run from.
+- **Write the failing test first, then the fix.** A fix with no test that failed before it
+  proves nothing about the bug it claims to close.
+- The Linux `pwsh` run carries a baseline of Windows-only failures (about 80 on
+  2026-09-25). Compare your count against the one at your branch point and report only
+  new failures — CI's Windows PowerShell 5.1 run is the real gate, not a Linux `pwsh` count.
 
 `shellcheck` and `PSScriptAnalyzer` are used when present. **A skip is not a pass** —
 a shellcheck failure once reached CI precisely because the local run was skipped for a
@@ -190,6 +195,9 @@ only skips when neither that nor the binary is available. Install them where you
   under `$ErrorActionPreference = 'Stop'` (`& python ... *> $null` included); PowerShell
   7 does not. CI runs the Windows suite under 5.1, so a pwsh pass on Linux proves
   nothing about it. Wrap such calls in a local `$ErrorActionPreference = 'Continue'`.
+- `.ps1`/`.psm1` files keep the UTF-8 BOM **and CRLF** line endings in the working copy;
+  `.gitattributes` normalises them to LF in git's own storage, so the diff you read and
+  the bytes on disk legitimately differ.
 
 ## 7. Definition of done
 

@@ -10,12 +10,12 @@
 > | 1 | finished on evidence (DONE note + quiet branch; never resume a finished session; merged-elsewhere) | **built** — `quietMinutes`, `Test-HandoffDoneQuiet`, `finished_by`, the ancestor check |
 > | 2 | lanes addable / stoppable while running; successor sessions | **built** — `<stateDir>/queue/lane-*.json` and `stop-<key>`; the child re-reads the config so a re-cut session is added to the config and queued. Automatic `successor` start: open |
 > | 3 | cleanup as part of the lane | **built** — `stopAfterMerge`, `removeWorktreeAfterMerge`, `-Cleanup` (process, worktree, branch, Serena row). `archiveDirs`: open |
-> | 4 | verify on a pinned commit | **built** — `guardsOnly` sessions with `dependsOn`; rule 7 in SKILL.md |
+> | 4 | verify on a pinned commit | **built** — `guardsOnly` sessions with `dependsOn`; rule R-tests-02 in SKILL.md |
 > | 5 | resource exclusion beyond ordering | **built** — `resources` (`name[:read|write]`), `Test-HandoffResourceConflict`, `waiting-resource` |
 > | 6 | one machine budget | **built, advisory** — `machineBudget` rendered as `{{machineBudget}}`, `<stateDir>/load.json` refreshed every poll. Blocking on CPU deliberately not built (deadlock behind another project's pass) |
 > | 7 | traps travel with the brief | **built** — `traps` → `{{traps}}` |
-> | 8 | the successor brief skeleton | **documented** in SKILL.md §4 |
-> | 9 | refusal counts, `merged_into`, controller brief, logs only on done sessions, cross-session messages | **built** (`refusals`, `merged_into`, `controllerBriefFile`); logs are read only after a turn ends; messaging noted in SKILL.md §4 |
+> | 8 | the successor brief skeleton | **documented** in references/layers.md |
+> | 9 | refusal counts, `merged_into`, controller brief, logs only on done sessions, cross-session messages | **built** (`refusals`, `merged_into`, `controllerBriefFile`); logs are read only after a turn ends; messaging noted in references/layers.md |
 > | 10 | keep resume-never-restart and guard-gated merges | unchanged |
 
 
@@ -100,7 +100,7 @@ commit: 9 red, two real roots. Separately, every lane's DONE note recorded "a co
   cuts a worktree at the merged base HEAD, runs the full suite there with the venv the
   `postWorktree` step built, and writes the result beside `state.json`. Nothing else ever runs the
   full suite.
-- Document the failure mode in `SKILL.md` §7: "never run a long suite in the main checkout while
+- Document the failure mode in SKILL.md rule R-tests-02: "never run a long suite in the main checkout while
   lanes merge into it."
 
 ## 5. Shared resources need exclusion, not only ordering
@@ -177,7 +177,7 @@ a file both were told to append to.
   lived outside the config; if the runner emitted it with the same variables (`stateDir`,
   `runnerLog`, the attach names), the controller could be restarted from the same source of truth.
 - **Cross-session messages worked** (`SendMessage` to a lane by its `--remote-control` name,
-  `notify_when_idle`). Say so in §4 of `SKILL.md`: the brief should give every session the
+  `notify_when_idle`). Say so in references/layers.md: the brief should give every session the
   controller's name and the two events to report — DONE written, shared resource released.
 - **The auto-mode classifier refused nothing today in seven lanes** and refused `Stop-Process`,
   a repair dry run and one read in the controller. Record per-session refusal counts in

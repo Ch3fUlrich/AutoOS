@@ -16,6 +16,7 @@ on PATH; the reason line is the probe's own error text, never a key.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -53,12 +54,16 @@ def grep_fanout(repo, symbol):
     """Whole-word reference count of `symbol` across tracked files (git grep).
 
     `git grep -c` prints `path:count` per matching file; the counts are summed.
-    No match is exit 1, which means zero references, not an error. `-e` keeps a
-    symbol that starts with `-` from being read as an option.
+    Exit 1 means zero references; any other non-zero exit (bad repo, index
+    lock) is an error and reads as None, so measure() can fall through to the
+    next backend instead of reporting a false zero. `-e` keeps a symbol that
+    starts with `-` from being read as an option.
     """
     proc = _run_git(repo, ["grep", "-w", "-c", "-F", "-e", symbol])
-    if proc.returncode != 0:
+    if proc.returncode == 1:
         return 0
+    if proc.returncode != 0:
+        return None
     total = 0
     for line in proc.stdout.decode("utf-8", "replace").splitlines():
         _, sep, count = line.rpartition(":")
@@ -90,17 +95,20 @@ def _module_of(path):
 def _covered(repo, touched, tracked):
     """The first tracked test file that covers a touched file, else None.
 
-    A test file covers a touched path when its own name contains the touched
-    file's stem, or its text contains the touched file's repo path (a suite
-    reference). Text is read with errors="replace" so one odd byte cannot hide a
-    reference.
+    A test file covers a touched path when the touched file's stem equals a
+    whole token of the test file's name (split on "_", "." and "-"), or its
+    text contains the touched file's repo path (a suite reference). The
+    whole-token rule keeps lib/i.py from reading as covered by
+    tests/test_maintenance.py. Text is read with errors="replace" so one odd
+    byte cannot hide a reference.
     """
     stems = {Path(p).stem for p in touched}
     for candidate in tracked:
         if not _is_test_file(candidate):
             continue
         name = candidate.rsplit("/", 1)[-1]
-        if any(stem and stem in name for stem in stems):
+        tokens = set(re.split(r"[_.\-]", name))
+        if any(stem and stem in tokens for stem in stems):
             return candidate
         try:
             text = (Path(repo) / candidate).read_text(encoding="utf-8",
@@ -133,7 +141,9 @@ def measure(card, repo, brief, symbols=(), schema_tokens=0, fanout_backends=None
     `card` is a normalized v2 card: ``paths`` (repo-relative files/dirs) and the
     optional orchestrator declarations ``files`` and ``lines``. Declarations win
     over measurement - they are the operator's knowledge, and a test pins both
-    branches. An empty ``paths`` raises ValueError (fail closed).
+    branches - but a malformed declaration (files not a list of strings, lines
+    not a non-negative int, bools rejected) raises ValueError naming the field.
+    An empty ``paths`` raises ValueError (fail closed).
     """
     if not isinstance(card, dict):
         raise ValueError("card must be a dict, got %s" % type(card).__name__)
@@ -145,7 +155,11 @@ def measure(card, repo, brief, symbols=(), schema_tokens=0, fanout_backends=None
     sources = {}
     declared_files = card.get("files")
     if declared_files is not None:
-        files = [str(p) for p in declared_files]
+        if not isinstance(declared_files, list) or any(
+                not isinstance(p, str) for p in declared_files):
+            raise ValueError("files=%r: expected a list of strings"
+                             % (declared_files,))
+        files = list(declared_files)
         sources["files"] = "declared"
     else:
         files = tracked_files(repo, paths)
@@ -157,7 +171,12 @@ def measure(card, repo, brief, symbols=(), schema_tokens=0, fanout_backends=None
 
     declared_lines = card.get("lines")
     if declared_lines is not None:
-        lines = int(declared_lines)
+        if (isinstance(declared_lines, bool)
+                or not isinstance(declared_lines, int)
+                or declared_lines < 0):
+            raise ValueError("lines=%r: expected a non-negative integer"
+                             % (declared_lines,))
+        lines = declared_lines
         sources["lines"] = "declared"
     else:
         lines = 20 * n_files

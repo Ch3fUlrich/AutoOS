@@ -160,6 +160,8 @@ try:
         data = json.load(fh)
 except Exception:
     print("invalid"); sys.exit(0)
+if "routes" in data and "clients" in data:
+    print("registry"); sys.exit(0)
 for key in ("categories", "images", "engines", "models", "roles", "providers"):
     if key in data:
         print(key); sys.exit(0)
@@ -209,6 +211,13 @@ if ok:
             seen.add(oid)
 sys.exit(0 if ok else 1)
 ' "$cat"; then ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            registry)
+                # The AI registry (catalog/ai-registry.json): it also has a
+                # "models" key (a map, not llm-models.json's list), so it is
+                # matched first; its one validator is tools/registry.py.
+                if python3 "$AUTOOS_ROOT/tools/registry.py" check --registry "$cat" >/dev/null; then
+                    ui_ok "$(basename "$cat") is valid."
                 else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
             roles)
                 # The agent harness (catalog/agent-harness.json): its one

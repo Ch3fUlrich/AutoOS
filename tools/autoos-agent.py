@@ -55,6 +55,8 @@ Usage:
     python3 tools/autoos-agent.py run --tier 2 --model omniroute/t2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
     python3 tools/autoos-agent.py run --tier 3 --dry-run "..."     # print the plan only
+    python3 tools/autoos-agent.py context                          # this session's fill
+    python3 tools/autoos-agent.py context --transcript s.jsonl --json
 
 --free maps every tier agent to one of opencode's own free models (default
 opencode/big-pickle) through OPENCODE_CONFIG_CONTENT: no gateway, no key, no
@@ -87,12 +89,18 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
+import autoos_context as ctx  # noqa: E402
 import autoos_routing as routing  # noqa: E402
+import autoos_track as track  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
 GATEWAY = "http://127.0.0.1:20128"
 DEFAULT_FREE_MODEL = "opencode/big-pickle"
+# Track record class per route family (spec §5.6). Provisional until the
+# registry supplies route.class: t1 frontier, t2 cheap, t3 free.
+TRACK_CLASS = {"t1": "frontier", "t2": "cheap", "t3": "free"}
+TRACK_RECORD = os.path.join(ROOT, "logs", "routing", "track-record.jsonl")
 # --lean drops these MCP servers. Measured 2026-09-24, one --free opencode run,
 # peak process-tree RSS: 1406 MB with every server, 678 MB with these off
 # (516 MB with graphify off too).
@@ -305,6 +313,51 @@ def cmd_list(cfg: dict) -> int:
     return 0
 
 
+def cmd_context(args) -> int:
+    """Print the calling session's context fill (spec 6.1, caps 8.3).
+
+    The fill comes from the Claude Code transcript's latest assistant usage
+    record. `--model` overrides only the model the cap is looked up for; the
+    tokens still come from the transcript. `--json` prints the same numbers as
+    an object (its `source` is the cap's provenance, `default` until a probe
+    measures one).
+    """
+    if args.transcript:
+        path = args.transcript
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError as exc:
+            print("context: unknown (cannot read %s: %s)"
+                  % (path, exc.strerror or exc), file=sys.stderr)
+            return 2
+    else:
+        path = ctx.discover_transcript(os.getcwd())
+        if path is None:
+            print("context: unknown (no transcript)")
+            return 0
+        with io.open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+
+    fill = ctx.fill_from_transcript(lines)
+    if fill is None:
+        print("context: unknown (no usage)")
+        return 0
+
+    model = args.model or fill.get("model") or "unknown"
+    cap = ctx.cap_for(model)
+    tokens = fill["tokens"]
+    pct = int(round(100 * tokens / cap)) if cap else 0
+    if args.json:
+        print(json.dumps({"tokens": tokens, "cap": cap, "pct": pct,
+                          "model": model, "transcript": path,
+                          "source": "default"}))
+    else:
+        print("context: %d / %d (%d%%) model=%s transcript=%s"
+              % (tokens, cap, pct, model, path))
+    return 0
+
+
 def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:
     logs = os.path.join(ROOT, "logs")
     os.makedirs(logs, exist_ok=True)
@@ -336,6 +389,53 @@ def sandbox_verdict(route: dict, changed: str, ahead: str):
         return None, ""
     return 5, ("NO-OP: the agent changed nothing in its sandbox - treat its report as "
                "unverified and the run as failed (exit 5)")
+
+
+def track_class(combo: str | None) -> str | None:
+    """The track-record class for a combo, or None when it is not a tier combo."""
+    if not combo:
+        return None
+    return TRACK_CLASS.get(combo.split("-", 1)[0])
+
+
+def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
+    """The track-record line for a finished run, or None when it has no combo.
+
+    Only a card or --tier run carries a combo (--free is keyless); a gateway
+    run's served leg, effort and tokens are unknown to this process, so they
+    are recorded as unknown/0 until the resolver measures them. rc is the same
+    value the run exits with, the NO-OP override included.
+    """
+    route = plan["route"]
+    klass = track_class(route.get("combo"))
+    if not klass:
+        return None
+    card = route.get("card") or {}
+    return {
+        "route": route["combo"],
+        "class": klass,
+        "served_leg": "unknown",
+        "bucket": card.get("bucket_hint") or "unknown",
+        "effort": "unknown",
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost": 0,
+        "latency_s": secs,
+        "gate": "pass" if rc == 0 else "fail",
+        "failure_class": None if rc == 0 else ("capability" if rc == 5 else "logic"),
+    }
+
+
+def record_run(path: str, entry: dict) -> bool:
+    """Append one track record; failing to record never changes the run's exit code."""
+    try:
+        track.record(path, entry)
+        return True
+    except (OSError, ValueError) as exc:  # a bad entry must not fail a finished run either
+        print("autoos-agent: track record not written (%s): %s"
+              % (path, getattr(exc, "strerror", None) or exc), file=sys.stderr)
+        return False
+
 
 
 def _terminate_group(proc, pgid) -> None:
@@ -488,6 +588,10 @@ def cmd_run(args, cfg: dict) -> int:
         if override is not None and rc == 0:
             print(message)
             rc = override
+        # Every finished --isolate run is a track-record observation (spec §5.6).
+        tracked = track_entry(plan, rc, time.time() - start)
+        if tracked is not None:
+            record_run(TRACK_RECORD, tracked)
     return rc
 
 
@@ -518,7 +622,13 @@ def main(argv=None) -> int:
     run.add_argument("--title")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")
+    context = sub.add_parser("context", help="print this session's context fill")
+    context.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
+    context.add_argument("--model", help="override the model the cap is looked up for")
+    context.add_argument("--json", action="store_true", help="print the fill as JSON")
     args = ap.parse_args(argv)
+    if args.cmd == "context":
+        return cmd_context(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
     return cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)
 

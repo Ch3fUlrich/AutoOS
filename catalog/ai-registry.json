@@ -1,0 +1,2400 @@
+{
+  "clients": {
+    "agy": {
+      "$comment": "skills_dir unmeasured - see clients.qwen's comment. signin_check is filled from tools/autoos_clients.py's own signin_probe below, not this table.",
+      "binary": "agy",
+      "gateway_mode": "none",
+      "id": "agy",
+      "signin_check": "agy models",
+      "skills_dir": null,
+      "supports_effort": false
+    },
+    "claude": {
+      "$comment": "No signin probe exists in tools/autoos_clients.py yet (auth is interactive 'claude login'); signin_check stays null until one does. supports_effort=false: no effort/reasoning flag in CLIENTS['claude'].modes.",
+      "binary": "claude",
+      "gateway_mode": "none",
+      "id": "claude",
+      "signin_check": null,
+      "skills_dir": ".claude/skills",
+      "supports_effort": false
+    },
+    "codex": {
+      "$comment": "skills_dir unmeasured - see clients.qwen's comment.",
+      "binary": "codex",
+      "gateway_mode": "omniroute-run",
+      "id": "codex",
+      "signin_check": "env:AUTOOS_OMNIROUTE_KEY",
+      "skills_dir": null,
+      "supports_effort": true
+    },
+    "gemini": {
+      "$comment": "skills_dir unmeasured - see clients.qwen's comment.",
+      "binary": "gemini",
+      "gateway_mode": "omniroute-run",
+      "id": "gemini",
+      "signin_check": "env:AUTOOS_OMNIROUTE_KEY",
+      "skills_dir": null,
+      "supports_effort": true
+    },
+    "opencode": {
+      "binary": "opencode",
+      "gateway_mode": "native",
+      "id": "opencode",
+      "signin_check": "env:AUTOOS_OMNIROUTE_KEY",
+      "skills_dir": ".agents/skills",
+      "supports_effort": true
+    },
+    "qoder": {
+      "$comment": "Own-account auth (qodercli login) but tools/autoos_clients.py defines no signin_probe for it (only agy has one) - a real gap, not fixed by this migration. skills_dir unmeasured - see clients.qwen's comment.",
+      "binary": "qodercli",
+      "gateway_mode": "none",
+      "id": "qoder",
+      "signin_check": null,
+      "skills_dir": null,
+      "supports_effort": false
+    },
+    "qwen": {
+      "$comment": "skills_dir unmeasured: plan.md Phase C5 spikes each client's native skills directory; not done as of this migration.",
+      "binary": "qwen",
+      "gateway_mode": "omniroute-run",
+      "id": "qwen",
+      "signin_check": "env:AUTOOS_OMNIROUTE_KEY",
+      "skills_dir": null,
+      "supports_effort": true
+    }
+  },
+  "models": {
+    "claude-opus-4-6": {
+      "$comment": "cc (Claude Code subscription) overflow leg; same sourced $0 marginal cost and conservative ladder as claude-opus-4-6-thinking.",
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-opus-4-6",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "claude-opus-4-6-thinking": {
+      "$comment": "Antigravity OAuth pool leg. price is sourced, not a placeholder: docs/models.md 'Claude family ... $0 marginal (seat-metered)'. Ladder is a conservative default (no measured Claude ladder here).",
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-opus-4-6-thinking",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "command-a-03-2025": {
+      "$comment": "t4-rag head; tier-profiles.json calls its keys 'trial keys' - a temporary free trial, not a published free tier. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "cohere",
+      "id": "command-a-03-2025",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "command-r-plus-08-2024": {
+      "$comment": "t4-rag overflow leg; same trial-key note as command-a-03-2025. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "cohere",
+      "id": "command-r-plus-08-2024",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "deepseek-flash": {
+      "$comment": "deepseek-direct leg. docs/models.md is explicit that this is a *different snapshot* from deepseek-v4.1-flash ('no v4-flash or deepseek-flash legs' in the v4.1-flash pinned route) - reasoning/ladder are not assumed from that sibling. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "deepseek",
+      "id": "deepseek-flash",
+      "output_max": 32768,
+      "price_cache_read": 6e-09,
+      "price_in": 3e-07,
+      "price_out": 1.2e-06,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "deepseek-v4-flash": {
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "direct": {
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek/deepseek-v4-flash",
+        "npm": "@ai-sdk/openai",
+        "provider": "deepseek"
+      },
+      "display_name": "DeepSeek V4 Flash",
+      "effort_ladder": [],
+      "family": "deepseek",
+      "id": "deepseek-v4-flash",
+      "output_max": 393216,
+      "price_cache_read": 6e-09,
+      "price_in": 3e-07,
+      "price_out": 1.2e-06,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "deepseek-v4.1-flash": {
+      "$comment": "opencode-zen's bare spelling of the same real model as 'deepseek/deepseek-v4.1-flash' (openrouter's spelling); the paid zen leg (used in t2-worker-clean/t3-driver-clean). Ladder from docs/models.md. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [
+        "none",
+        "low",
+        "high",
+        "max"
+      ],
+      "family": "deepseek",
+      "id": "deepseek-v4.1-flash",
+      "output_max": 32768,
+      "price_cache_read": 6e-09,
+      "price_in": 3e-07,
+      "price_out": 1.2e-06,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "$comment": "openrouter's vendor-prefixed spelling. Ladder from docs/models.md ('none, low, high, max only'). price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [
+        "none",
+        "low",
+        "high",
+        "max"
+      ],
+      "family": "deepseek",
+      "id": "deepseek/deepseek-v4.1-flash",
+      "output_max": 32768,
+      "price_cache_read": 6e-09,
+      "price_in": 3e-07,
+      "price_out": 1.2e-06,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "gemini-3.7-flash-high": {
+      "$comment": "Antigravity OAuth pool leg inside the t2-worker combo, no pinned route of its own; context/output are t2-worker's declared numbers used as a proxy.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "google",
+      "id": "gemini-3.7-flash-high",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "gemini-3.7-flash-medium": {
+      "$comment": "Antigravity OAuth pool leg inside the t2-worker-free-only combo; same proxy-numbers note as gemini-3.7-flash-high.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "google",
+      "id": "gemini-3.7-flash-medium",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "gemini-3.8-flash": {
+      "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only').",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "google",
+      "id": "gemini-3.8-flash",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "glm-4.5-air": {
+      "$comment": "cheaperinference resale leg (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "zhipu",
+      "id": "glm-4.5-air",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "google/gemini-3.8-flash": {
+      "$comment": "openrouter's paid twin of the native gemini-3.8-flash free head (docs/models.md: the bare 'openrouter/gemini-3.8-flash' spelling 400s - only this google-scoped spelling ships). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "google",
+      "id": "google/gemini-3.8-flash",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "gpt-oss-120b": {
+      "$comment": "cerebras's and sambanova's shared bare spelling of the same free GPT-OSS-120B model as 'openai/gpt-oss-120b' (groq's spelling); one entry covers both providers' legs.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "openai-oss",
+      "id": "gpt-oss-120b",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "kimi-k3": {
+      "$comment": "cheaperinference resale leg (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "moonshot",
+      "id": "kimi-k3",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "meta/muse-spark-1.3-contributor": {
+      "$comment": "The OpenRouter contributor (paid) leg of the same real model as models.muse-spark; price reused from that llm-models.json entry - identical commercial arrangement, different provider path.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "effort_ladder": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "family": "meta",
+      "id": "meta/muse-spark-1.3-contributor",
+      "output_max": 131072,
+      "price_cache_read": 2e-09,
+      "price_in": 1e-07,
+      "price_out": 2e-07,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "minimax-m2.7": {
+      "$comment": "cheaperinference resale leg inside t3-driver (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "minimax",
+      "id": "minimax-m2.7",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "mistral-code-latest": {
+      "$comment": "Leads t3-driver; same-key free pool then billed past it (docs/models.md). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "mistral",
+      "id": "mistral-code-latest",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "mistral-small-latest": {
+      "$comment": "mistral direct, keyed/billed account (docs/models.md: 'same key bills past the free pool'). output_max uses t2-worker-clean's 32768 (its larger use site) as the model's own ceiling; t3-driver's surface still declares its own clamped 16384. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "mistral",
+      "id": "mistral-small-latest",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "muse-spark": {
+      "$comment": "Ladder from docs/models.md 'Proven effort ladders & costs': 'minimal, low, medium, high, xhigh, max (advertised; max = heaviest)'.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "default_for": "muse_key",
+      "direct": {
+        "base_url": "https://api.meta.ai/v1",
+        "model": "openai/muse-spark-1.3-contributor",
+        "npm": "@ai-sdk/openai",
+        "provider": "meta",
+        "reasoning_effort": "high"
+      },
+      "display_name": "Muse Spark 1.3 Contributor",
+      "effort_ladder": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "family": "meta",
+      "id": "muse-spark",
+      "output_max": 131072,
+      "price_cache_read": 2e-09,
+      "price_in": 1e-07,
+      "price_out": 2e-07,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "muse-spark-1.3-contributor-free": {
+      "$comment": "The Zen free contributor promo leg. Same real model as models.muse-spark (llm-models.json) and models.'meta/muse-spark-1.3-contributor', free while the promo runs. client_bound follows spec 3.1's own example ('opencode for Zen free legs'): combos.json documents this leg 403ing proxied traffic ('OpenCode's free tier can only be used from within OpenCode').",
+      "client_bound": "opencode",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "effort_ladder": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "family": "meta",
+      "id": "muse-spark-1.3-contributor-free",
+      "output_max": 131072,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "ollama-qwen2.5-coder": {
+      "$comment": "family is the underlying model's lineage (Qwen), not the hosting provider (Ollama, direct.provider).",
+      "context_advertised": 32768,
+      "context_usable": {
+        "source": "default",
+        "tokens": 16384
+      },
+      "default_for": "fallback",
+      "direct": {
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "ollama/qwen2.5-coder:7b",
+        "npm": "@ai-sdk/openai-compatible",
+        "provider": "ollama"
+      },
+      "display_name": "Qwen 2.5 Coder 7B (Local)",
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "ollama-qwen2.5-coder",
+      "output_max": 8192,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openai/gpt-oss-120b": {
+      "$comment": "groq's vendor-prefixed spelling of GPT-OSS-120B (free tier). GPT-OSS is publicly documented as a reasoning model with a low/medium/high effort control; context/output are t2-worker's declared numbers.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "openai-oss",
+      "id": "openai/gpt-oss-120b",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "openrouter-dots3-note": {
+      "$comment": "Same conservative default as openrouter-nemotron-ultra.",
+      "context_advertised": 512000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 256000
+      },
+      "direct": {
+        "model": "dots-studio/dots-3-note-preview:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Dots3-Note Preview (Free)",
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "dots-studio",
+      "id": "openrouter-dots3-note",
+      "output_max": 32768,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "openrouter-free": {
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "direct": {
+        "model": "free",
+        "provider": "openrouter"
+      },
+      "display_name": "OpenRouter Free Auto-Router",
+      "effort_ladder": [],
+      "family": "openrouter",
+      "id": "openrouter-free",
+      "output_max": 32768,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-inkling": {
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "direct": {
+        "model": "thinkingmachines/inkling:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Inkling (Free)",
+      "effort_ladder": [],
+      "family": "thinkingmachines",
+      "id": "openrouter-inkling",
+      "output_max": 32768,
+      "paid_price_in": 1e-06,
+      "paid_price_out": 4.05e-06,
+      "price_cache_read": 1.7e-07,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-inkling-small": {
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "direct": {
+        "model": "thinkingmachines/inkling-small:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Inkling Small (Free)",
+      "effort_ladder": [],
+      "family": "thinkingmachines",
+      "id": "openrouter-inkling-small",
+      "output_max": 32768,
+      "paid_price_in": 4.5e-07,
+      "paid_price_out": 1.2e-06,
+      "price_cache_read": 1e-07,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-laguna": {
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "direct": {
+        "model": "poolside/laguna-s-2.1:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Laguna S 2.1 (Free)",
+      "effort_ladder": [],
+      "family": "poolside",
+      "id": "openrouter-laguna",
+      "output_max": 32768,
+      "paid_price_in": 9e-08,
+      "paid_price_out": 1.8e-07,
+      "price_cache_read": 9e-09,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-laguna-xs": {
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "direct": {
+        "model": "poolside/laguna-xs-2.1:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Laguna XS 2.1 (Free)",
+      "effort_ladder": [],
+      "family": "poolside",
+      "id": "openrouter-laguna-xs",
+      "output_max": 32768,
+      "paid_price_in": 6e-08,
+      "paid_price_out": 1.2e-07,
+      "price_cache_read": 3e-08,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-ling-fin": {
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "direct": {
+        "model": "inclusionai/ling-3.0-flash-fin:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Ling 3.0 Flash Fin (Free)",
+      "effort_ladder": [],
+      "family": "inclusionai",
+      "id": "openrouter-ling-fin",
+      "output_max": 32768,
+      "paid_price_in": 6e-08,
+      "paid_price_out": 1.8e-07,
+      "price_cache_read": 1.2e-08,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-ling-sante": {
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "direct": {
+        "model": "inclusionai/ling-3.0-flash-sante:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Ling 3.0 Flash Sante (Free)",
+      "effort_ladder": [],
+      "family": "inclusionai",
+      "id": "openrouter-ling-sante",
+      "output_max": 32768,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-ling-vl": {
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "direct": {
+        "model": "inclusionai/ling-3.0-flash-vl:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Ling 3.0 Flash VL (Free)",
+      "effort_ladder": [],
+      "family": "inclusionai",
+      "id": "openrouter-ling-vl",
+      "output_max": 32768,
+      "paid_price_in": 6e-08,
+      "paid_price_out": 1.8e-07,
+      "price_cache_read": 1.2e-08,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-nemotron-lightning": {
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "direct": {
+        "model": "nvidia/nemotron-3.5-lightning:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Nemotron 3.5 Lightning (Free)",
+      "effort_ladder": [],
+      "family": "nvidia",
+      "id": "openrouter-nemotron-lightning",
+      "output_max": 32768,
+      "paid_price_in": 8e-08,
+      "paid_price_out": 2e-07,
+      "price_cache_read": 4e-08,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-nemotron-nano-omni": {
+      "$comment": "Same conservative default as openrouter-nemotron-ultra.",
+      "context_advertised": 256000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 128000
+      },
+      "direct": {
+        "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Nemotron 3 Nano Omni (Free)",
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "nvidia",
+      "id": "openrouter-nemotron-nano-omni",
+      "output_max": 32768,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "openrouter-nemotron-super": {
+      "$comment": "Same conservative default as openrouter-nemotron-ultra.",
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "direct": {
+        "model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Nemotron 3 Super (Free)",
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "nvidia",
+      "id": "openrouter-nemotron-super",
+      "output_max": 32768,
+      "paid_price_in": 8e-08,
+      "paid_price_out": 4.5e-07,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "openrouter-nemotron-ultra": {
+      "$comment": "reasoning=true but no measured ladder; conservative three-rung default (see mapping doc Open choices).",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "direct": {
+        "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Nemotron 3 Ultra (Free)",
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "nvidia",
+      "id": "openrouter-nemotron-ultra",
+      "output_max": 32768,
+      "paid_price_in": 6e-07,
+      "paid_price_out": 2.4e-06,
+      "price_cache_read": 1.2e-07,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "openrouter-nex-mini": {
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "direct": {
+        "model": "nex-agi/nex-n2.5-mini:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Nex-N2.5-Mini (Free)",
+      "effort_ladder": [],
+      "family": "nex-agi",
+      "id": "openrouter-nex-mini",
+      "output_max": 32768,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-nex-pro": {
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "direct": {
+        "model": "nex-agi/nex-n2.5-pro:free",
+        "provider": "openrouter"
+      },
+      "display_name": "Nex-N2.5-Pro (Free)",
+      "effort_ladder": [],
+      "family": "nex-agi",
+      "id": "openrouter-nex-pro",
+      "output_max": 32768,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openrouter-north-mini-code": {
+      "context_advertised": 256000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 128000
+      },
+      "direct": {
+        "model": "cohere/north-mini-code:free",
+        "provider": "openrouter"
+      },
+      "display_name": "North Mini Code (Free)",
+      "effort_ladder": [],
+      "family": "cohere",
+      "id": "openrouter-north-mini-code",
+      "output_max": 32768,
+      "price_in": 0,
+      "price_out": 0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "qwen-3.8-27b": {
+      "$comment": "cerebras's bare spelling; docs/models.md: 'qwen3.8 free (groq) -> cerebras credit overflow' - this is the PAID overflow leg, not a free tier. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "qwen-3.8-27b",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "qwen/qwen3.8-27b": {
+      "$comment": "groq's vendor-prefixed spelling; true free tier (t3-driver-free-only).",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "qwen/qwen3.8-27b",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    }
+  },
+  "policy": {
+    "brief_tokens": {
+      "S0": {
+        "source": "default",
+        "tokens": 500
+      },
+      "S1": {
+        "source": "default",
+        "tokens": 800
+      },
+      "S2": {
+        "source": "default",
+        "tokens": 1200
+      },
+      "S3": {
+        "source": "default",
+        "tokens": 2000
+      },
+      "S4": {
+        "source": "default",
+        "tokens": 3000
+      }
+    },
+    "bucket_table": {
+      "source": "default",
+      "table": {
+        "buckets": [
+          {
+            "max": 1,
+            "name": "S0"
+          },
+          {
+            "max": 3,
+            "name": "S1"
+          },
+          {
+            "max": 6,
+            "name": "S2"
+          },
+          {
+            "max": 9,
+            "name": "S3"
+          },
+          {
+            "max": null,
+            "name": "S4"
+          }
+        ],
+        "features": {
+          "fanout": [
+            {
+              "max": 4,
+              "points": 0
+            },
+            {
+              "max": 20,
+              "points": 1
+            },
+            {
+              "max": null,
+              "points": 2
+            }
+          ],
+          "files": [
+            {
+              "max": 1,
+              "points": 0
+            },
+            {
+              "max": 2,
+              "points": 1
+            },
+            {
+              "max": 5,
+              "points": 2
+            },
+            {
+              "max": 10,
+              "points": 3
+            },
+            {
+              "max": null,
+              "points": 4
+            }
+          ],
+          "lines": [
+            {
+              "max": 29,
+              "points": 0
+            },
+            {
+              "max": 150,
+              "points": 1
+            },
+            {
+              "max": 500,
+              "points": 2
+            },
+            {
+              "max": null,
+              "points": 3
+            }
+          ],
+          "modules": [
+            {
+              "max": 1,
+              "points": 0
+            },
+            {
+              "max": 2,
+              "points": 1
+            },
+            {
+              "max": null,
+              "points": 2
+            }
+          ]
+        },
+        "kind": {
+          "bulk": 0,
+          "debug": 2,
+          "implement": 0,
+          "plan": 3,
+          "research": 0,
+          "review": 0
+        },
+        "spec": {
+          "exact": 0,
+          "partial": 1,
+          "vague": 2
+        },
+        "tests": {
+          "false": 1,
+          "true": 0
+        }
+      }
+    },
+    "effort_rules": {
+      "max_tokens_floor": {
+        "default": {
+          "source": "default",
+          "value": 48000
+        },
+        "high_and_above": {
+          "source": "default",
+          "value": 64000
+        }
+      },
+      "rows": [
+        {
+          "condition": "leg is not a reasoning model",
+          "effort": null
+        },
+        {
+          "condition": "kind in (plan, debug)",
+          "effort": "high"
+        },
+        {
+          "condition": "bucket == S4 and class == frontier",
+          "effort": "top_rung"
+        },
+        {
+          "condition": "bucket in (S3, S4)",
+          "effort": "high"
+        },
+        {
+          "condition": "bucket in (S1, S2)",
+          "effort": "medium"
+        },
+        {
+          "condition": "bucket == S0 or kind == bulk",
+          "effort": "low"
+        }
+      ]
+    },
+    "handoff_caps": {
+      "200k-class": {
+        "cap_fraction": 0.75,
+        "cap_tokens": 150000,
+        "source": "2026-09-25"
+      },
+      "claude-opus-1m": {
+        "cap_fraction": 0.4,
+        "cap_tokens": 400000,
+        "source": "2026-09-25"
+      },
+      "gemini-1m": {
+        "cap_fraction": 0.2,
+        "cap_tokens": 200000,
+        "source": "2026-09-25"
+      },
+      "muse-spark-1m": {
+        "cap_fraction": 0.3,
+        "cap_tokens": 300000,
+        "source": "2026-09-25"
+      }
+    },
+    "latency_seed": {
+      "cheap": {
+        "minutes": 8,
+        "source": "default"
+      },
+      "free": {
+        "minutes": 5,
+        "source": "default"
+      },
+      "frontier": {
+        "minutes": 30,
+        "source": "default"
+      },
+      "mid": {
+        "minutes": 15,
+        "source": "default"
+      }
+    },
+    "modes": {
+      "balanced": {
+        "lambda": {
+          "source": "default",
+          "value": 0.01
+        },
+        "theta": {
+          "source": "default",
+          "value": 0.8
+        }
+      },
+      "cost-first": {
+        "lambda": {
+          "source": "default",
+          "value": 0.0
+        },
+        "theta": {
+          "source": "default",
+          "value": 0.6
+        }
+      },
+      "quality-first": {
+        "lambda": {
+          "source": "default",
+          "value": 0.05
+        },
+        "theta": {
+          "source": "default",
+          "value": 0.95
+        }
+      }
+    },
+    "risk_rules": [
+      {
+        "pattern": "configuration/api-keys.yml",
+        "reason": "secrets handling",
+        "source": "default",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "configuration/**/*.env",
+        "reason": "secrets handling",
+        "source": "default",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/*.vault.yml",
+        "reason": "secrets handling",
+        "source": "default",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "setup.sh",
+        "reason": "user PATH/profile/config writers",
+        "source": "default",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "setup.ps1",
+        "reason": "user PATH/profile/config writers",
+        "source": "default",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "lib/**/*.psm1",
+        "reason": "user PATH/profile/config writers",
+        "source": "default",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "lib/**/*.sh",
+        "reason": "user PATH/profile/config writers",
+        "source": "default",
+        "type": "path_glob"
+      },
+      {
+        "reason": "deletion paths",
+        "source": "default",
+        "type": "diff_deletion"
+      },
+      {
+        "pattern": ".github/workflows/**",
+        "reason": "CI workflows",
+        "source": "default",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/*settings*.json",
+        "reason": "security settings",
+        "source": "default",
+        "type": "path_glob"
+      }
+    ],
+    "seed_priors": {
+      "cheap": {
+        "S0": {
+          "alpha": 2,
+          "beta": 1,
+          "source": "2026-09-25"
+        },
+        "S1": {
+          "alpha": 2,
+          "beta": 1,
+          "source": "2026-09-25"
+        },
+        "S2": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25"
+        },
+        "S3": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25"
+        },
+        "S4": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25"
+        }
+      },
+      "free": {
+        "S0": {
+          "alpha": 2,
+          "beta": 1,
+          "source": "2026-09-25"
+        },
+        "S1": {
+          "alpha": 2,
+          "beta": 1,
+          "source": "2026-09-25"
+        },
+        "S2": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25"
+        },
+        "S3": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25"
+        },
+        "S4": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25"
+        }
+      },
+      "frontier": {
+        "S0": {
+          "alpha": 1,
+          "beta": 1,
+          "source": "default"
+        },
+        "S1": {
+          "alpha": 1,
+          "beta": 1,
+          "source": "default"
+        },
+        "S2": {
+          "alpha": 1,
+          "beta": 1,
+          "source": "default"
+        },
+        "S3": {
+          "alpha": 1,
+          "beta": 1,
+          "source": "default"
+        },
+        "S4": {
+          "alpha": 1,
+          "beta": 1,
+          "source": "default"
+        }
+      },
+      "mid": {
+        "S0": {
+          "alpha": 1,
+          "beta": 1,
+          "source": "default"
+        },
+        "S1": {
+          "alpha": 1,
+          "beta": 1,
+          "source": "default"
+        },
+        "S2": {
+          "alpha": 1,
+          "beta": 1,
+          "source": "default"
+        },
+        "S3": {
+          "alpha": 1,
+          "beta": 1,
+          "source": "default"
+        },
+        "S4": {
+          "alpha": 1,
+          "beta": 1,
+          "source": "default"
+        }
+      }
+    },
+    "verify_tokens": {
+      "S0": {
+        "source": "default",
+        "tokens": 2000
+      },
+      "S1": {
+        "source": "default",
+        "tokens": 4000
+      },
+      "S2": {
+        "source": "default",
+        "tokens": 8000
+      },
+      "S3": {
+        "source": "default",
+        "tokens": 16000
+      },
+      "S4": {
+        "source": "default",
+        "tokens": 32000
+      }
+    }
+  },
+  "providers": {
+    "SambaNova": {
+      "api_base": null,
+      "id": "SambaNova",
+      "litellm_env": "SAMBANOVA_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "sambanova",
+      "provider_data": null,
+      "tier": "free",
+      "trains_on_prompts": false
+    },
+    "antigravity": {
+      "$comment": "Google Antigravity OAuth bridge (agy CLI): hosts both Gemini and Claude legs (gemini-3.7-flash-high/medium, claude-opus-4-6-thinking). No published data-training policy found for this consumer surface (checked docs/ and .agents/skills/unattended-orchestration/, 2026-09-25); trains_on_prompts defaults conservatively to true (unmeasured, D8's 'assume the less private option' pattern). Never referenced by a -clean route today, so this default changes no filter outcome.",
+      "api_base": null,
+      "id": "antigravity",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "omniroute_id": "antigravity",
+      "provider_data": null,
+      "tier": "free",
+      "trains_on_prompts": true
+    },
+    "cc": {
+      "$comment": [
+        "Claude Code subscription overflow leg (opus-4-6, t2-orchestrator). docs/models.md: 'subscription terms, never API-logged' / '$0 marginal (seat-metered)'; Anthropic's public consumer/subscription policy is not to train on these conversations by default. audit-router.py bans any other anthropic/claude API reference, so this is the only Claude provider entry the registry needs.",
+        "windows folded in from provider-windows.json's 'anthropic' key - see the module docstring in tools/registry-convert.py and the mapping doc's Open choices."
+      ],
+      "api_base": null,
+      "id": "cc",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "omniroute_id": "cc",
+      "provider_data": null,
+      "tier": "subscription",
+      "trains_on_prompts": false,
+      "windows": [
+        {
+          "days": [
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri",
+            "sat",
+            "sun"
+          ],
+          "kind": "load",
+          "note": "quiet 21:00-12:00 UTC; throttling risk while busy",
+          "price_factor": 1.0,
+          "source": "operator observation, 2026-09-18 (no published schedule): high load 14:00-23:00 CEST",
+          "utc_from": "12:00",
+          "utc_to": "21:00",
+          "verified": null
+        }
+      ]
+    },
+    "cerebras": {
+      "api_base": null,
+      "id": "cerebras",
+      "litellm_env": "CEREBRAS_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "cerebras",
+      "provider_data": {
+        "customUserAgent": "curl/8.7.1"
+      },
+      "tier": "free",
+      "trains_on_prompts": false
+    },
+    "cheapinference": {
+      "api_base": "https://api.cheaperinference.com/v1",
+      "id": "cheapinference",
+      "litellm_env": "CHEAPINFERENCE_API_KEY",
+      "litellm_prefix": "openai",
+      "omniroute_id": "cheaperinference",
+      "provider_data": null,
+      "tier": "paid",
+      "trains_on_prompts": false
+    },
+    "cloudflare_workers_ai": {
+      "$comment": "Unverified default: not registered with any Account ID yet (combos.json $comment) and no combo references this provider.",
+      "api_base": null,
+      "id": "cloudflare_workers_ai",
+      "litellm_env": "CLOUDFLARE_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "cloudflare-ai",
+      "provider_data": null,
+      "tier": "free",
+      "trains_on_prompts": false
+    },
+    "cohere": {
+      "$comment": "tier=free reflects tier-profiles.json's own description ('t4-rag cohere RAG ... trial keys') - a temporary free trial, not a published free tier.",
+      "api_base": null,
+      "id": "cohere",
+      "litellm_env": "COHERE_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "cohere",
+      "provider_data": null,
+      "tier": "free",
+      "trains_on_prompts": false
+    },
+    "deepseek": {
+      "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either.",
+      "api_base": null,
+      "id": "deepseek",
+      "litellm_env": "DEEPSEEK_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "deepseek",
+      "provider_data": null,
+      "tier": "paid",
+      "trains_on_prompts": false,
+      "windows": [
+        {
+          "days": [
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri"
+          ],
+          "kind": "price",
+          "price_factor": 1.0,
+          "source": "https://api-docs.deepseek.com/quick_start/pricing",
+          "utc_from": "01:00",
+          "utc_to": "04:00",
+          "verified": "2026-09-18"
+        },
+        {
+          "days": [
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri"
+          ],
+          "kind": "price",
+          "price_factor": 1.0,
+          "source": "https://api-docs.deepseek.com/quick_start/pricing",
+          "utc_from": "06:00",
+          "utc_to": "10:00",
+          "verified": "2026-09-18"
+        },
+        {
+          "days": [
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri"
+          ],
+          "kind": "price",
+          "price_factor": 0.5,
+          "source": "https://api-docs.deepseek.com/quick_start/pricing",
+          "utc_from": "00:00",
+          "utc_to": "01:00",
+          "verified": "2026-09-18"
+        },
+        {
+          "days": [
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri"
+          ],
+          "kind": "price",
+          "price_factor": 0.5,
+          "source": "https://api-docs.deepseek.com/quick_start/pricing",
+          "utc_from": "04:00",
+          "utc_to": "06:00",
+          "verified": "2026-09-18"
+        },
+        {
+          "days": [
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri"
+          ],
+          "kind": "price",
+          "price_factor": 0.5,
+          "source": "https://api-docs.deepseek.com/quick_start/pricing",
+          "utc_from": "10:00",
+          "utc_to": "23:59",
+          "verified": "2026-09-18"
+        },
+        {
+          "days": [
+            "sat",
+            "sun"
+          ],
+          "kind": "price",
+          "price_factor": 0.5,
+          "source": "https://api-docs.deepseek.com/quick_start/pricing",
+          "utc_from": "00:00",
+          "utc_to": "23:59",
+          "verified": "2026-09-18"
+        }
+      ]
+    },
+    "devin": {
+      "$comment": "Unverified default for trains_on_prompts: no combo references this provider. tier=subscription: Devin is sold as a subscription product.",
+      "api_base": null,
+      "id": "devin",
+      "litellm_env": "DEVIN_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "devin",
+      "provider_data": null,
+      "tier": "subscription",
+      "trains_on_prompts": false
+    },
+    "google_ai_studio": {
+      "$comment": "Measured, not a default: docs/models.md 'Proven effort ladders & costs' records 'free head trains (AI Studio); paid twin per terms' for gemini-3.8-flash. The paid twin is reached through the openrouter provider (trains_on_prompts=false there), never through this one.",
+      "api_base": null,
+      "id": "google_ai_studio",
+      "litellm_env": "GEMINI_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "gemini",
+      "provider_data": null,
+      "tier": "free",
+      "trains_on_prompts": true
+    },
+    "groq": {
+      "api_base": null,
+      "id": "groq",
+      "litellm_env": "GROQ_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "groq",
+      "provider_data": {
+        "customUserAgent": "curl/8.7.1"
+      },
+      "tier": "free",
+      "trains_on_prompts": false
+    },
+    "hugging_face": {
+      "$comment": "Unverified default: no combo references this provider.",
+      "api_base": null,
+      "id": "hugging_face",
+      "litellm_env": "HUGGINGFACE_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "huggingface",
+      "provider_data": null,
+      "tier": "free",
+      "trains_on_prompts": false
+    },
+    "meta": {
+      "$comment": "Its only leg (models.muse-spark, llm-models.json's own 'muse-spark' entry) is the contributor model, which trains by contract (configuration/omniroute/combos.json $comment) - unlike openrouter/zen it hosts no non-training sibling, so the provider-level flag is exact here, not a simplification.",
+      "api_base": null,
+      "id": "meta",
+      "litellm_env": "META_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": null,
+      "provider_data": null,
+      "tier": "paid",
+      "trains_on_prompts": true,
+      "windows": [
+        {
+          "days": [
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri",
+            "sat",
+            "sun"
+          ],
+          "kind": "load",
+          "note": "Muse Spark; same pattern as Claude per the operator",
+          "price_factor": 1.0,
+          "source": "operator observation, 2026-09-18 (no published schedule): high load 14:00-23:00 CEST",
+          "utc_from": "12:00",
+          "utc_to": "21:00",
+          "verified": null
+        }
+      ]
+    },
+    "mistral": {
+      "api_base": null,
+      "id": "mistral",
+      "litellm_env": "MISTRAL_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "mistral",
+      "provider_data": null,
+      "tier": "paid",
+      "trains_on_prompts": false
+    },
+    "omniroute": {
+      "$comment": "Not a model provider: providers.json's own $comment calls this 'the client key apps send', with omniroute_id null. tier/trains_on_prompts are placeholders - nothing routes through it as a leg.",
+      "api_base": null,
+      "id": "omniroute",
+      "litellm_env": "AUTOOS_OMNIROUTE_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": null,
+      "provider_data": null,
+      "tier": "paid",
+      "trains_on_prompts": false
+    },
+    "openrouter": {
+      "$comment": [
+        "KNOWN EXCEPTION (provider-level trains_on_prompts cannot express this): the meta/muse-spark-1.3-contributor leg reached through this provider trains by contract; combos.json's own $comment documents the 2026-09-21 operator downgrade this caused - 't1-orchestrator-clean ... no longer means trains-nothing - it means paid-only'. Every other leg reached through openrouter (deepseek, mistral, google twins) does not train.",
+        "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg."
+      ],
+      "api_base": null,
+      "available": false,
+      "id": "openrouter",
+      "litellm_env": "OPENROUTER_API_KEY",
+      "litellm_prefix": null,
+      "omniroute_id": "openrouter",
+      "provider_data": null,
+      "tier": "paid",
+      "trains_on_prompts": false
+    },
+    "zen": {
+      "$comment": "KNOWN EXCEPTION: the free 'muse-spark-1.3-contributor-free' promo leg trains by contract like its contributor siblings, but no -clean combo ever references it - only the paid opencode-zen/deepseek-v4.1-flash leg does, which does not train (see models.'muse-spark-1.3-contributor-free').",
+      "api_base": "https://opencode.ai/zen/v1",
+      "id": "zen",
+      "litellm_env": "OPENCODE_ZEN_API_KEY",
+      "litellm_prefix": "openai",
+      "omniroute_id": "opencode-zen",
+      "provider_data": null,
+      "tier": "free",
+      "trains_on_prompts": false
+    }
+  },
+  "routes": {
+    "auto": {
+      "$comment": "OmniRoute's own built-in dynamic 'auto' strategy across every registered connection (catalog/ide-models.json: 'bootstrap: auto balanced (no combo needed)') - not a static combo, so it has no legs to enumerate.",
+      "class": "mid",
+      "id": "auto",
+      "legs": [],
+      "strategy": "auto",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "display_name": "bootstrap: auto balanced",
+          "output": 32768
+        }
+      }
+    },
+    "auto/cheap": {
+      "$comment": "Dynamic strategy, no static legs - see routes.auto for the full note.",
+      "class": "cheap",
+      "id": "auto/cheap",
+      "legs": [],
+      "strategy": "auto",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "display_name": "bootstrap: auto cheapest",
+          "output": 16384
+        }
+      }
+    },
+    "auto/smart": {
+      "$comment": "Dynamic strategy, no static legs - see routes.auto for the full note.",
+      "class": "mid",
+      "id": "auto/smart",
+      "legs": [],
+      "strategy": "auto",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "display_name": "bootstrap: auto smart (no combo needed)",
+          "effort_default": "xhigh",
+          "output": 32768
+        }
+      }
+    },
+    "deepseek-v4.1-flash": {
+      "class": "cheap",
+      "id": "deepseek-v4.1-flash",
+      "legs": [
+        "openrouter/deepseek/deepseek-v4.1-flash",
+        "opencode-zen/deepseek-v4.1-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "deepseek-v4.1-flash — paid cheapest-first",
+          "openhands_profile": {
+            "max_input_tokens": 131072,
+            "max_output_tokens": 32768,
+            "reasoning": false
+          },
+          "output": 32768
+        }
+      },
+      "unavailable_legs": {
+        "openrouter/deepseek/deepseek-v4.1-flash": {
+          "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
+          "available": false
+        }
+      }
+    },
+    "gemini-3.8-flash": {
+      "class": "cheap",
+      "id": "gemini-3.8-flash",
+      "legs": [
+        "gemini/gemini-3.8-flash",
+        "openrouter/google/gemini-3.8-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "gemini-3.8-flash — gemini free → paid",
+          "openhands_profile": {
+            "max_input_tokens": 131072,
+            "max_output_tokens": 32768,
+            "reasoning": false
+          },
+          "output": 32768
+        }
+      },
+      "unavailable_legs": {
+        "openrouter/google/gemini-3.8-flash": {
+          "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
+          "available": false
+        }
+      }
+    },
+    "opus-4-6": {
+      "class": "frontier",
+      "id": "opus-4-6",
+      "legs": [
+        "antigravity/claude-opus-4-6-thinking",
+        "cc/claude-opus-4-6"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 200000,
+          "context_declared": "200k",
+          "display_name": "opus-4-6 — agy free → cc subscription (200k)",
+          "openhands_profile": {
+            "max_input_tokens": 200000,
+            "max_output_tokens": 32768,
+            "reasoning": true
+          },
+          "output": 32768
+        }
+      }
+    },
+    "spark-1.3-contributor": {
+      "class": "cheap",
+      "id": "spark-1.3-contributor",
+      "legs": [
+        "opencode-zen/muse-spark-1.3-contributor-free",
+        "openrouter/meta/muse-spark-1.3-contributor"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 1000000,
+          "context_declared": "1M",
+          "display_name": "spark-1.3-contributor — zen free → openrouter paid (1M)",
+          "openhands_profile": {
+            "max_input_tokens": 1000000,
+            "max_output_tokens": 32768,
+            "reasoning": true
+          },
+          "output": 32768
+        },
+        "openhands": {
+          "direct_profile": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "gateway": "openrouter",
+            "max_input_tokens": 1048576,
+            "max_output_tokens": 131072,
+            "model": "openrouter/meta/muse-spark-1.3-contributor",
+            "reasoning": true
+          }
+        }
+      },
+      "unavailable_legs": {
+        "openrouter/meta/muse-spark-1.3-contributor": {
+          "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
+          "available": false
+        }
+      }
+    },
+    "t1-orchestrator": {
+      "class": "cheap",
+      "id": "t1-orchestrator",
+      "legs": [
+        "opencode-zen/muse-spark-1.3-contributor-free",
+        "openrouter/meta/muse-spark-1.3-contributor"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 1000000,
+          "display_name": "t1 orchestrator-1M — 1M ctx (free-first)",
+          "effort_default": "xhigh",
+          "openhands_profile": {
+            "gateway": "litellm",
+            "max_input_tokens": 1000000,
+            "max_output_tokens": 32768,
+            "model": "openai/t1-orchestrator",
+            "reasoning": true
+          },
+          "output": 32768
+        },
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 1000000,
+          "context_declared": "1M",
+          "display_name": "t1 orchestrator-1M — 1M ctx (free-first)",
+          "effort_default": "xhigh",
+          "openhands_profile": {
+            "max_input_tokens": 1000000,
+            "max_output_tokens": 32768,
+            "reasoning": true
+          },
+          "output": 32768
+        }
+      },
+      "unavailable_legs": {
+        "openrouter/meta/muse-spark-1.3-contributor": {
+          "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
+          "available": false
+        }
+      }
+    },
+    "t1-orchestrator-clean": {
+      "class": "cheap",
+      "id": "t1-orchestrator-clean",
+      "legs": [
+        "openrouter/meta/muse-spark-1.3-contributor"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 1000000,
+          "context_declared": "1M",
+          "display_name": "t1 orchestrator-1M — paid legs only (contributor: trains)",
+          "openhands_profile": {
+            "max_input_tokens": 1000000,
+            "max_output_tokens": 32768,
+            "reasoning": true
+          },
+          "output": 32768
+        }
+      },
+      "unavailable_legs": {
+        "openrouter/meta/muse-spark-1.3-contributor": {
+          "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
+          "available": false
+        }
+      }
+    },
+    "t1-orchestrator-free-only": {
+      "class": "free",
+      "id": "t1-orchestrator-free-only",
+      "legs": [
+        "opencode-zen/muse-spark-1.3-contributor-free"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 1000000,
+          "display_name": "t1 orchestrator-1M — zero spend (free legs only)",
+          "openhands_profile": {
+            "gateway": "litellm",
+            "max_input_tokens": 1000000,
+            "max_output_tokens": 32768,
+            "model": "openai/t1-orchestrator-free-only",
+            "reasoning": true
+          },
+          "output": 32768
+        },
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 1000000,
+          "context_declared": "1M",
+          "display_name": "t1 orchestrator-1M — zero spend (free legs only)",
+          "openhands_profile": {
+            "max_input_tokens": 1000000,
+            "max_output_tokens": 32768,
+            "reasoning": true
+          },
+          "output": 32768
+        }
+      }
+    },
+    "t1-orchestrator-paid": {
+      "$comment": "LiteLLM-only fallback chain with no OmniRoute equivalent (tools/sync-router-tiers.py SYNCED_TIERS comment). Its legs are hand-curated in configuration/litellm/config.yaml, which is not one of the old files this converter reads (out of scope for this migration) - legs stays empty until a later phase folds config.yaml in.",
+      "class": "cheap",
+      "id": "t1-orchestrator-paid",
+      "legs": [],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 1000000,
+          "display_name": "t1 orchestrator-1M — openrouter first (paid)",
+          "output": 32768
+        }
+      }
+    },
+    "t2-orchestrator": {
+      "class": "frontier",
+      "id": "t2-orchestrator",
+      "legs": [
+        "antigravity/claude-opus-4-6-thinking",
+        "cc/claude-opus-4-6",
+        "openrouter/deepseek/deepseek-v4.1-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 200000,
+          "context_declared": "200k",
+          "display_name": "t2 orchestrator-200k — small-scope orchestration",
+          "openhands_profile": {
+            "max_input_tokens": 200000,
+            "max_output_tokens": 32768,
+            "reasoning": true
+          },
+          "output": 32768
+        }
+      },
+      "unavailable_legs": {
+        "openrouter/deepseek/deepseek-v4.1-flash": {
+          "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
+          "available": false
+        }
+      }
+    },
+    "t2-worker": {
+      "class": "mid",
+      "id": "t2-worker",
+      "legs": [
+        "gemini/gemini-3.8-flash",
+        "antigravity/gemini-3.7-flash-high",
+        "groq/openai/gpt-oss-120b",
+        "cerebras/gpt-oss-120b",
+        "sambanova/gpt-oss-120b",
+        "cheaperinference/deepseek-v4-flash",
+        "cheaperinference/glm-4.5-air",
+        "cheaperinference/kimi-k3",
+        "openrouter/deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-flash",
+        "opencode-zen/deepseek-v4.1-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "display_name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
+          "openhands_profile": {
+            "gateway": "litellm",
+            "max_input_tokens": 131072,
+            "max_output_tokens": 32768,
+            "model": "openai/t2-worker",
+            "reasoning": false
+          },
+          "output": 32768
+        },
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
+          "openhands_profile": {
+            "max_input_tokens": 131072,
+            "max_output_tokens": 32768,
+            "reasoning": false
+          },
+          "output": 32768
+        }
+      },
+      "unavailable_legs": {
+        "openrouter/deepseek/deepseek-v4.1-flash": {
+          "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
+          "available": false
+        }
+      }
+    },
+    "t2-worker-clean": {
+      "class": "mid",
+      "id": "t2-worker-clean",
+      "legs": [
+        "deepseek/deepseek-flash",
+        "openrouter/deepseek/deepseek-v4.1-flash",
+        "opencode-zen/deepseek-v4.1-flash",
+        "mistral/mistral-small-latest"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "t2 smart-reasoning-128k — no training (sensitive data)",
+          "openhands_profile": {
+            "max_input_tokens": 131072,
+            "max_output_tokens": 32768,
+            "reasoning": false
+          },
+          "output": 32768
+        }
+      },
+      "unavailable_legs": {
+        "openrouter/deepseek/deepseek-v4.1-flash": {
+          "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
+          "available": false
+        }
+      }
+    },
+    "t2-worker-free-only": {
+      "class": "free",
+      "id": "t2-worker-free-only",
+      "legs": [
+        "gemini/gemini-3.8-flash",
+        "antigravity/gemini-3.7-flash-medium",
+        "groq/openai/gpt-oss-120b",
+        "cerebras/gpt-oss-120b",
+        "sambanova/gpt-oss-120b"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "display_name": "t2 smart-reasoning-128k — zero spend (free legs only)",
+          "openhands_profile": {
+            "gateway": "litellm",
+            "max_input_tokens": 131072,
+            "max_output_tokens": 32768,
+            "model": "openai/t2-worker-free-only",
+            "reasoning": false
+          },
+          "output": 32768
+        },
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "t2 smart-reasoning-128k — zero spend (free legs only)",
+          "openhands_profile": {
+            "max_input_tokens": 131072,
+            "max_output_tokens": 32768,
+            "reasoning": false
+          },
+          "output": 32768
+        }
+      }
+    },
+    "t2-worker-paid": {
+      "$comment": "LiteLLM-only, config.yaml out of scope for this migration - see routes.'t1-orchestrator-paid' for the full note. legs stays empty.",
+      "class": "mid",
+      "id": "t2-worker-paid",
+      "legs": [],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "display_name": "t2 smart-reasoning-128k — paid legs (escalation)",
+          "output": 32768
+        }
+      }
+    },
+    "t3-driver": {
+      "class": "cheap",
+      "id": "t3-driver",
+      "legs": [
+        "mistral/mistral-code-latest",
+        "groq/qwen/qwen3.8-27b",
+        "cerebras/qwen-3.8-27b",
+        "cheaperinference/glm-4.5-air",
+        "cheaperinference/minimax-m2.7",
+        "mistral/mistral-small-latest",
+        "deepseek/deepseek-flash",
+        "opencode-zen/deepseek-v4.1-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "display_name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
+          "openhands_profile": {
+            "gateway": "litellm",
+            "max_input_tokens": 131072,
+            "max_output_tokens": 16384,
+            "model": "openai/t3-driver",
+            "reasoning": false
+          },
+          "output": 16384
+        },
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
+          "openhands_profile": {
+            "max_input_tokens": 131072,
+            "max_output_tokens": 16384,
+            "reasoning": false
+          },
+          "output": 16384
+        }
+      }
+    },
+    "t3-driver-clean": {
+      "class": "cheap",
+      "id": "t3-driver-clean",
+      "legs": [
+        "deepseek/deepseek-flash",
+        "mistral/mistral-small-latest",
+        "opencode-zen/deepseek-v4.1-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "t3 cheap-driver-128k — no training (sensitive data)",
+          "openhands_profile": {
+            "max_input_tokens": 131072,
+            "max_output_tokens": 16384,
+            "reasoning": false
+          },
+          "output": 16384
+        }
+      }
+    },
+    "t3-driver-free-only": {
+      "class": "free",
+      "id": "t3-driver-free-only",
+      "legs": [
+        "groq/qwen/qwen3.8-27b",
+        "cerebras/qwen-3.8-27b"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "display_name": "t3 cheap-driver-128k — zero spend (free legs only)",
+          "openhands_profile": {
+            "gateway": "litellm",
+            "max_input_tokens": 131072,
+            "max_output_tokens": 16384,
+            "model": "openai/t3-driver-free-only",
+            "reasoning": false
+          },
+          "output": 16384
+        },
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "t3 cheap-driver-128k — zero spend (free legs only)",
+          "openhands_profile": {
+            "max_input_tokens": 131072,
+            "max_output_tokens": 16384,
+            "reasoning": false
+          },
+          "output": 16384
+        }
+      }
+    },
+    "t3-driver-paid": {
+      "$comment": "LiteLLM-only, config.yaml out of scope for this migration - see routes.'t1-orchestrator-paid' for the full note. legs stays empty.",
+      "class": "cheap",
+      "id": "t3-driver-paid",
+      "legs": [],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "display_name": "t3 cheap-driver-128k — paid legs (escalation)",
+          "output": 16384
+        }
+      }
+    },
+    "t4-rag": {
+      "class": "cheap",
+      "id": "t4-rag",
+      "legs": [
+        "cohere/command-a-03-2025",
+        "cohere/command-r-plus-08-2024"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "display_name": "t4-rag cohere RAG — 128k ctx (trial keys)",
+          "output": 16384
+        },
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "t4-rag cohere RAG — 128k ctx (trial keys)",
+          "openhands_profile": {
+            "max_input_tokens": 131072,
+            "max_output_tokens": 16384,
+            "reasoning": false
+          },
+          "output": 16384
+        }
+      }
+    }
+  },
+  "version": "2026-09-25"
+}

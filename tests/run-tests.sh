@@ -1825,7 +1825,7 @@ if it "--check-catalog validates all five catalogs by type, not just component c
     out="$(bash setup.sh --check-catalog 2>&1)"; rc=$?
     if [[ $rc -eq 0 && "$out" == *"engines.json is valid"* && "$out" == *"images.json is valid"* \
         && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"*         && "$out" == *"agent-harness.json is valid"* \
-        && "$out" == *"providers.json is valid"* ]]; then
+        && "$out" == *"providers.json is valid"* && "$out" == *"ai-registry.json is valid"* ]]; then
         pass
     else
         fail "rc=$rc out=$out"
@@ -7035,10 +7035,29 @@ if it "resolver v2: measure() features and client_state (unit tests)"; then
     out="$(python3 tests/test_autoos_measure.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "resolver v2: track record and Beta success estimate (unit tests)"; then
+    out="$(python3 tests/test_autoos_track.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "autoos-agent context: fill from the session transcript (unit tests)"; then
+    out="$(python3 tests/test_autoos_context.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# catalog/ai-registry.json (routing v2 spec section 3): converter, schema keys, idempotence.
+if it "ai-registry converter: schema keys, legs resolve, idempotent (unit tests)"; then
+    out="$(python3 tests/test_registry_convert.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "registry.py: check rules (unit tests) and the committed registry has no drift"; then
+    out="$(python3 tests/test_registry.py 2>&1 && python3 tools/registry.py validate 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/skill-rules.py: the linter for one-line skill rules (routing v2 spec 8.1).
 if it "skill-rules check: ids, length, source, near-duplicates (unit tests)"; then
     out="$(python3 tests/test_skill_rules.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
+
+if it "orchestration skill rules pass skill-rules check"; then out="$(python3 tools/skill-rules.py check 2>&1)" && pass || fail "$out"; fi
 
 if it "render-opencode-container-config survives a malformed port (unit tests)"; then
     out="$(python3 tests/test_render_opencode_config.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
