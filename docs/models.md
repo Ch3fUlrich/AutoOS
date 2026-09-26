@@ -35,21 +35,33 @@ paid legs from the providers whose credit tiers are sanctioned
 (cerebras, sambanova, deepseek, openrouter, zen) after them. Meta bills only
 through the direct opencode `meta` provider, never through the gateway.
 
-| Tier | Context promise | Chain (verified against the live catalogs) |
-|---|---|---|
-| `t1-orchestrator` orchestrator | **1M only, spark-only, contributor-only** | zen `muse-spark-1.3-contributor-free` → openrouter `meta/muse-spark-1.3-contributor` (paid). Plain `muse-spark-1.3` is blocked operator policy 2026-09-21 — no combo may reference it. Callers add xhigh effort via `#high` variant (`omniroute/t1-orchestrator#high`, ack-proven 2026-09-20). No `gemini-3.1-pro`: it reasons worse than `gemini-3.8-flash` while costing a 1M slot. |
-| `t1-orchestrator-clean` | 1M, **paid legs only** | openrouter `meta/muse-spark-1.3-contributor` (paid). Privacy note: contributor legs train by contract, so clean now means paid-only, not trains-nothing — the plain paid spark was removed with the contributor-only block. |
-| `t2-worker` smart | **no context gate** — cost/quality decide, any window | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` (OAuth free, ack 3.6s) → groq `gpt-oss-120b` → cerebras `gpt-oss-120b` → sambanova `gpt-oss-120b` → cheap-inference `deepseek-v4-flash` / `glm-4.5-air` / `kimi-k3` → openrouter `deepseek/deepseek-v4.1-flash` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
-| `t2-orchestrator` | 200k, **small-scope orchestration** | antigravity `claude-opus-4-6-thinking` (OAuth free, ack 3.4s) → `cc/claude-opus-4-6` (subscription overflow) → openrouter `deepseek/deepseek-v4.1-flash` (cheap smart tail). For small parts; `t1-orchestrator` stays the 1M owner. |
-| `t2-worker-clean` | **no context gate**, no training, **paid legs only** | deepseek `deepseek-flash` (direct) → openrouter `deepseek/deepseek-v4.1-flash` → zen `deepseek-v4.1-flash` → mistral `mistral-small-latest` (direct). No groq/cerebras/sambanova free legs. |
-| `t3-driver` driver | ≤128k | mistral `mistral-code-latest` → groq `qwen3.8-27b` → cerebras `qwen-3.8-27b` → cheap-inference `glm-4.5-air` / `minimax-m2.7` → mistral `mistral-small-latest` → deepseek `deepseek-flash` → zen `deepseek-v4.1-flash` |
-| `t3-driver-clean` | ≤128k, no training, **paid legs only** | deepseek `deepseek-flash` (direct) → mistral `mistral-small-latest` (direct) → zen `deepseek-v4.1-flash`. No qwen free legs — lightweight paid review duty only. |
-| `gemini-3.8-flash` pinned | ≤128k, free-first | gemini `gemini-3.8-flash` (free pooled) → openrouter `google/gemini-3.8-flash` (paid). Probe-falsified 2026-09-22: the bare `openrouter/gemini-3.8-flash` spelling 400s ("not available in the active live catalog"), so only the google-scoped twin ships. No 3.7 legs in this pinned combo or the native gemini head — version mixing is a defect there. The `antigravity/gemini-3.7-flash-medium` leg in `t2-worker` is a separate OAuth pool with its own quota (ack 1.6s), not the throttled native 3.7 free tier — allowed as t2 overflow. |
-| `deepseek-v4.1-flash` pinned | ≤128k, paid cheapest-first | openrouter `deepseek/deepseek-v4.1-flash` → zen `deepseek-v4.1-flash`. Probe-falsified 2026-09-22: the deepseek-*direct* leg 400s (unknown to the live catalog) and was dropped; the zen leg 402s until its balance is topped up (chain hops by design). Exact model only — no `v4-flash` or `deepseek-flash` legs (different snapshots). |
-| `opus-4-6` pinned | 200k (conservative standard window), frontier reasoning | antigravity `claude-opus-4-6-thinking` (OAuth free, ack 3.4s) → `cc/claude-opus-4-6` (subscription, 429-quota-1h at probe = overflow-only). Lives pinned ON PURPOSE: `t1-orchestrator` stays spark-only — Opus is addressable directly, not smuggled into the orchestrator chain. |
-| `t1-orchestrator-free-only` | 1M, **zero spend (free legs only)** | zen `muse-spark-1.3-contributor-free` alone (the agy Opus leg stays out: a 200k model in a 1M-declared combo would 400 instead of degrading). Answers 429/402 when the promo is exhausted — step up to `t1-orchestrator` instead; it never degrades to paid by design. |
-| `t2-worker-free-only` | **zero spend (free legs only)** | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-medium` → groq `gpt-oss-120b` → cerebras → sambanova. Same heads as `t2-worker` minus every paid leg. |
-| `t3-driver-free-only` | ≤128k, **zero spend (free legs only)** | groq `qwen3.8-27b` → cerebras `qwen-3.8-27b`. The only true-free qwen legs; `mistral-code` is keyed (paid) and stays out. |
+<!-- AUTOOS-MANAGED-START models-doc -->
+_Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3 tools/registry.py render models-doc --check` after a registry change; if it fails, run `python3 tools/registry.py render models-doc` and replace the text between the two `AUTOOS-MANAGED-START/END models-doc` markers below with its output._
+
+| Route | Class | Context | Legs |
+|---|---|---|---|
+| `auto` | mid | 131,072 | (none) |
+| `auto/cheap` | cheap | 131,072 | (none) |
+| `auto/smart` | mid | 131,072 | (none) |
+| `deepseek-v4.1-flash` | cheap | 128k | ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `gemini-3.8-flash` | cheap | 128k | gemini `gemini-3.8-flash` → ~~openrouter `google/gemini-3.8-flash`~~ (unavailable) |
+| `opus-4-6` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → cc `claude-opus-4-6` |
+| `spark-1.3-contributor` | cheap | 1M | opencode-zen `muse-spark-1.3-contributor-free` → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
+| `t1-orchestrator` | cheap | 1M | opencode-zen `muse-spark-1.3-contributor-free` → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
+| `t1-orchestrator-clean` | cheap | 1M | ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
+| `t1-orchestrator-free-only` | free | 1M | opencode-zen `muse-spark-1.3-contributor-free` |
+| `t1-orchestrator-paid` | cheap | 1,000,000 | (none) |
+| `t2-orchestrator` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → cc `claude-opus-4-6` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) |
+| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → groq `openai/gpt-oss-120b` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → sambanova `gpt-oss-120b` → cheaperinference `deepseek-v4-flash` → cheaperinference `glm-4.5-air` → cheaperinference `kimi-k3` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `t2-worker-clean` | mid | 128k | deepseek `deepseek-flash` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → mistral `mistral-small-latest` |
+| `t2-worker-free-only` | free | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-medium` → groq `openai/gpt-oss-120b` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → sambanova `gpt-oss-120b` |
+| `t2-worker-paid` | mid | 131,072 | (none) |
+| `t3-driver` | cheap | 128k | mistral `mistral-code-latest` → groq `qwen/qwen3.8-27b` → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → cheaperinference `glm-4.5-air` → cheaperinference `minimax-m2.7` → mistral `mistral-small-latest` → deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `t3-driver-clean` | cheap | 128k | deepseek `deepseek-flash` → mistral `mistral-small-latest` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `t3-driver-free-only` | free | 128k | groq `qwen/qwen3.8-27b` → ~~cerebras `qwen-3.8-27b`~~ (unavailable) |
+| `t3-driver-paid` | cheap | 131,072 | (none) |
+| `t4-rag` | cheap | 128k | cohere `command-a-03-2025` → cohere `command-r-plus-08-2024` |
+<!-- AUTOOS-MANAGED-END models-doc -->
 
 **t2-worker is not context-capped at 128k.** 128k is a display convention inherited
 from `opencode.jsonc`, not a curation rule: cost and quality decide what enters
@@ -58,6 +70,58 @@ The 1M gate applies to `t1-orchestrator` only, because long-horizon orchestratio
 one role where window size is the requirement. `combos.json` carries
 `"context": "128k"` on t2-worker/t3-driver purely to keep the picker's compaction
 threshold conservative — do not read it as "models above 128k are excluded".
+
+### Notes per route
+
+The dated, probe-verified prose the old hand-written "Chain" column used to carry —
+spec 3.1 has no registry field for an ack time or a probe date — lives here now,
+deduplicated to one mention per fact and corrected against the current registry
+where something has since changed (an unavailable leg is not repeated here; the
+generated table above already shows it):
+
+- **`t1-orchestrator`**: plain `muse-spark-1.3` is blocked by operator policy
+  2026-09-21 — no combo may reference it. Callers add xhigh effort via the `#high`
+  variant (`omniroute/t1-orchestrator#high`, ack-proven 2026-09-20). No
+  `gemini-3.1-pro` leg: it reasons worse than `gemini-3.8-flash` while costing a
+  1M slot.
+- **`t1-orchestrator-clean`**: contributor legs train by contract, so "clean" here
+  means paid-only, not trains-nothing — the plain paid spark leg was removed with
+  the contributor-only block (2026-09-21).
+- **`t1-orchestrator-free-only`**: answers 429/402 when the promo is exhausted —
+  step up to `t1-orchestrator` instead; it never degrades to paid by design. The
+  agy Opus leg stays out on purpose: a 200k model in a 1M-declared route would 400
+  instead of degrading.
+- **`t2-worker`**: the `antigravity/gemini-3.7-flash-high` leg is a separate OAuth
+  pool with its own quota (ack 3.6s), not the throttled native 3.7 free tier.
+- **`t2-worker-free-only`**: same OAuth pool as `t2-worker`, but the `-medium`
+  variant (`antigravity/gemini-3.7-flash-medium`, ack 1.6s) — a different quota
+  bucket, not a downgrade of the `-high` leg above.
+- **`t2-orchestrator`**: for small-scope orchestration only; `t1-orchestrator`
+  stays the 1M owner. The trailing `openrouter/deepseek/deepseek-v4.1-flash` tail
+  leg is currently unavailable (OpenRouter credits exhausted — see the generated
+  table above).
+- **`t3-driver-clean`**: no qwen free legs by design — paid review duty only, not
+  a downgrade path.
+- **`t3-driver-free-only`**: the only true-free qwen legs; `mistral-code-latest`
+  is keyed (paid) and deliberately stays out.
+- **`gemini-3.8-flash`**: probe-falsified 2026-09-22 — the bare
+  `openrouter/gemini-3.8-flash` spelling 400s ("not available in the active live
+  catalog"), so only the google-scoped twin (`openrouter/google/gemini-3.8-flash`)
+  ever shipped; as of 2026-09-25 that twin is also unavailable (OpenRouter credits
+  exhausted), leaving the free `gemini/gemini-3.8-flash` head as this route's only
+  currently-usable leg. No 3.7 legs in this pinned route or the native gemini head
+  — version mixing is a defect here.
+- **`deepseek-v4.1-flash`**: probe-falsified 2026-09-22 — a direct
+  `deepseek/deepseek-flash` leg 400s (unknown to the live catalog) and was never
+  added; exact model only, no `v4-flash`/`deepseek-flash` legs (different
+  snapshots). As of 2026-09-26 both remaining legs are unavailable
+  (`openrouter`: credits exhausted; `opencode-zen`: tool-calling probe got
+  402/429) — this route currently has no usable leg at all.
+- **`opus-4-6`**: pinned on purpose — `t1-orchestrator` stays spark-only, Opus is
+  addressable directly rather than smuggled into the orchestrator chain.
+  `antigravity/claude-opus-4-6-thinking` acks in 3.4s (OAuth free);
+  `cc/claude-opus-4-6` is the subscription overflow leg (429-quota-1h at probe
+  time).
 
 ### Per-model fallback chains (single-model routes, cheapest-first)
 

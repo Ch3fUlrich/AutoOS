@@ -712,3 +712,117 @@ is what every existing case exercises). A new `--registry PATH` flag (default
 `catalog/ai-registry.json`) names the render source when `--spec` is not
 given, ignored otherwise — the same pairing `tools/sync-ide-models.py`'s
 `--registry`/`--catalog` flags give that tool.
+
+## 14. Task A4e — rendering docs/models.md's "Tier mapping" table back from the registry
+
+Spec 3.2's own row for this file — "model tables in `docs/models.md` |
+generated section between markers; prose stays hand-written" — had never
+been acted on: before this task, docs/models.md carried no AUTOOS-MANAGED
+markers at all, and its "Tier mapping" table (the file's own heading) was
+100% hand-written prose that had already drifted from the registry (its
+Chain column still implied every `cerebras`/`opencode-zen deepseek-v4.1-flash`
+leg was live, when `routes.<id>.unavailable_legs` already recorded several of
+them as down). `tools/registry.py render models-doc` reads `catalog/
+ai-registry.json` and produces that table via the pure function
+`render_models_doc(registry) -> str`, and this task defines the marker pair
+itself — `<!-- AUTOOS-MANAGED-START models-doc -->` / `<!-- AUTOOS-MANAGED-
+END models-doc -->` — as docs/models.md's own Markdown-comment convention,
+mirroring the `#` (`tools/sync-router-tiers.py`) and `//`
+(`tools/sync-ide-models.py`) forms the other generated files already use.
+
+**A rejected first attempt at this task exists in this repository's history
+(commit `6a61052`, never merged onto `l1/routing`).** It defined the same
+marker pair and wrapped the *existing* hand-written table unchanged, but its
+`render_models_doc(registry)` never read `registry` at all — the table's text
+lived as a literal Python tuple constant
+(`MODELS_DOC_TIER_TABLE_LINES`) and `--check` therefore always passed,
+including against a registry with a leg newly marked unavailable. That is a
+second, silently-stale home for the same facts the registry already owns —
+exactly the anti-pattern spec 3.2 exists to remove — not a render, and this
+task's own brief named it as the thing not to repeat. The mapping below is
+what this task builds instead: every cell of every row read from a registry
+field at render time, with no table text held as a constant anywhere in
+`tools/registry.py`.
+
+One table row per `registry["routes"]` entry (all 21 today — unlike `render
+omniroute`'s legs-non-empty filter or `render ide`'s "every route with a
+clients-carrying surface" rule, this render has no membership filter at all:
+every route gets a row, including the dynamic `auto`/`auto/cheap`/`auto/smart`
+routes and the LiteLLM-only `*-paid` routes that carry `legs: []` and were
+never in the old hand-written table), sorted by id. Unlike `render_ide()`'s
+`IDE_MODEL_ORDER` or `render_openhands()`'s `OPENHANDS_TIER_ORDER`, no
+hand-copied order constant is needed: this table is new with this task, so
+there is no "today's hand-curated order" to preserve, and nothing in this
+repository claims the doc's row order carries meaning the way `catalog/
+ide-models.json`'s picker order or `tier-profiles.json`'s push-priority order
+do (sections 12/13 above).
+
+Field mapping, per column:
+
+| Column | Registry path | Notes |
+|---|---|---|
+| Route | `routes.<id>.id` | Unchanged; also the dict key. |
+| Class | `routes.<id>.class` | Unchanged (`free`/`cheap`/`mid`/`frontier`, spec 3.1). |
+| Context | `routes.<id>.surfaces.omniroute.context_declared`, else `routes.<id>.surfaces.litellm.context_declared` | The route's own declared context promise (mapping doc section 4/10: combos.json's coarser picker/compaction display convention, e.g. `"1M"`/`"128k"`/`"200k"`, distinct from a model's real window) — `_route_context_promise()`'s first branch, `MODELS_DOC_CONTEXT_SURFACES = ("omniroute", "litellm")` naming the priority order explicitly (the same convention `IDE_GATEWAYS`/`OPENHANDS_GATEWAYS` use), verified 2026-09-26: every route that lists both surfaces carries the same declared string on both, so the pick is never actually exercised as a tie-break by real data (the same "never actually exercised" note render_ide()'s own gateway pick carries, section 12). |
+| Context (fallback 1) | `routes.<id>.surfaces.omniroute.context` / `.litellm.context` | Used, comma-grouped, when the surface has no `context_declared` at all — the 7 routes with no combos.json/hand-curated counterpart (`auto`, `auto/cheap`, `auto/smart`, `t1-orchestrator-paid`, `t2-worker-paid`, `t3-driver-paid`, `t4-rag`) never had one to declare. |
+| Context (fallback 2) | the route's first leg's `models.<id>.context_advertised`, else `.context_usable.tokens` | Used only when no omniroute/litellm surface on the route carries either field — not exercised by any route in today's registry (every route has at least a numeric `context` on one surface), covered instead by a synthetic-registry test (`tests/test_registry_render.py::ModelsDocCellsComeFromTheRegistryTests::test_context_column_falls_back_to_a_legs_model_when_no_surface_carries_one`) that strips both fields from a real route's surfaces to force the branch. Suffixed `(leg model)`/`(leg model, usable)` so a reader can tell the figure describes a leg's model, not the route's own declared surface. |
+| Legs | `routes.<id>.legs`, in order | Unchanged, **in order** — the same "a `strategy: priority` fallback chain is real semantic data" reasoning `render_omniroute()`'s own `legs` → `combos[].models` mapping gives it (section 10). `(none)` for the 7 routes named above, whose `legs` is genuinely `[]`. |
+| Legs, per-leg unavailability | `routes.<id>.unavailable_legs[leg].available` / `providers.<id>.available` | A leg is struck through and suffixed `(unavailable)` when either flag is `false` — spec 3.1's two places an operator can flag a dead leg (the same two `render_omniroute()`'s own docstring names), checked by `_leg_is_unavailable()`. Today the two flags never disagree (every `providers.openrouter.available: false` leg is also individually flagged in its own route's `unavailable_legs`), so the provider-level check is a defensive second path, not one exercised by real data yet — covered by a synthetic-registry test that clears a route's `unavailable_legs` and relies on the provider flag alone (`test_leg_whose_provider_is_globally_unavailable_is_marked`). |
+
+The `$comment`-equivalent notice (`MODELS_DOC_GENERATED_NOTICE`) is a fixed
+string, not a registry field — the same "process metadata, not table data"
+treatment every other render's own generated-marker line gets (section 10/12/
+13's own exception 1) — and explains how to update the committed file
+(there is no `--write`; see below), since this render, unlike the other four,
+has no third-party sync tool that ever calls it programmatically today.
+
+**No `--write` flag.** Every other `render <target>` command (`omniroute`/
+`litellm`/`ide`/`openhands`) only ever offers `--out PATH`/`--check`, never a
+flag that rewrites the real committed file in place — phase 1 (spec 3.2)
+proves equality, it does not switch a consumer over. `render models-doc`
+follows the same convention for consistency, even though (unlike the other
+four) nothing else in this repository writes docs/models.md today, so there
+is no consumer to "switch over" in a later phase either. Updating the
+committed block after a registry change is therefore a documented manual
+step (this section's own opening paragraph and the CLI's own `--help`/
+docstring text): run `render models-doc --check` to see it fail, run `render
+models-doc` (no flags) and replace the text between the two markers in
+docs/models.md with its output, then re-run `--check` to confirm.
+
+**Dated/probe-verified prose the old Chain column carried, but no registry
+field owns, moved to a new "Notes per route" list** immediately after the
+`<!-- AUTOOS-MANAGED-END models-doc -->` marker (outside the generated
+block, so it is never compared by `--check` and never overwritten by a
+future render) — ack times, probe-falsified spellings, and operator policy
+lines, one bullet per route that carried one, deduplicated (a fact repeated
+across several old rows, such as "OpenRouter credits are exhausted", is
+never restated here at all: the generated table's own `(unavailable)`
+markers already carry it, and the registry's own `unavailable_legs.
+$comment` values already carry *why* — a third home for the same fact would
+recreate exactly the problem this task exists to close). Design commentary
+that added no fact beyond what the generated table already shows verbatim
+(`t2-worker-clean`'s old "No groq/cerebras/sambanova free legs", `t2-worker-
+free-only`'s old "Same heads as t2-worker minus every paid leg") was dropped
+rather than moved — the Legs column already lists exactly which legs a route
+does and does not carry. Two claims were corrected against the current
+registry rather than carried forward unchanged: the `gemini-3.8-flash` note's
+"`antigravity/gemini-3.7-flash-medium` leg in `t2-worker`" (today's registry
+has `-high` in `t2-worker` and `-medium` in `t2-worker-free-only` — the note
+now attributes each variant to its real route), and the `deepseek-v4.1-flash`
+note (its own old "cheapest-first" framing no longer describes a working
+chain — both of its remaining legs are individually flagged unavailable in
+today's registry, openrouter for exhausted credits and opencode-zen for a
+failed tool-calling probe, so the note now says so explicitly instead of
+implying a live cheapest-first path).
+
+**Follow-up, same shape as `render_ide()`'s `IDE_MODEL_ORDER` and
+`render_openhands()`'s `OPENHANDS_TIER_ORDER`/`OPENHANDS_RETIRED_IDS`
+follow-ups (sections 12/13):** the "Notes per route" list itself is still
+hand-maintained prose, not derived — a future `routes.<id>.$comment` (already
+a schema-legal field on every section, per `COMMENT_KEYS`) that named which of
+its lines belong in this doc's per-route notes would let a later render grow
+past the four-column table above; not attempted here, since spec 3.1 lists no
+such field and task A4e's own brief is "keep the *dated* prose that has no
+registry field" for exactly this kind of gap, the same choice A4b/A4c/A4d made
+for the litellm `rpm` lines, `catalog/ide-models.json`'s menu order and
+`tier-profiles.json`'s push-priority order respectively.

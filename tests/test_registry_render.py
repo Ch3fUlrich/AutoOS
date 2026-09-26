@@ -31,6 +31,7 @@ COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.json"
 LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
 IDE_MODELS_PATH = ROOT / "catalog" / "ide-models.json"
 TIER_PROFILES_PATH = ROOT / "configuration" / "openhands" / "tier-profiles.json"
+MODELS_DOC_PATH = ROOT / "docs" / "models.md"
 SYNC_ROUTER_TIERS_TOOL = ROOT / "tools" / "sync-router-tiers.py"
 SYNC_OPENHANDS_PROFILES_TOOL = ROOT / "tools" / "sync-openhands-profiles.py"
 CHECK_PROVIDER_REGISTRY_HELPER = ROOT / "tests" / "helpers" / "check-provider-registry.py"
@@ -81,6 +82,19 @@ def real_litellm_config() -> str:
 
 def real_tier_profiles() -> dict:
     return load_json(TIER_PROFILES_PATH)
+
+
+def real_models_doc() -> str:
+    return MODELS_DOC_PATH.read_text(encoding="utf-8")
+
+
+def row_for(block_text: str, route_id: str) -> str:
+    """The one models-doc table row whose first cell is `` `<route_id>` ``,
+    or fails the calling test loudly if there is none/more than one."""
+    marker = "| `%s`" % route_id
+    matches = [line for line in block_text.splitlines() if line.startswith(marker)]
+    assert len(matches) == 1, "expected exactly one row for %r, found %d" % (route_id, len(matches))
+    return matches[0]
 
 
 def run_helper(path: Path, *args, timeout=60):
@@ -592,6 +606,204 @@ class SyncOpenhandsProfilesSourcesFromRegistryTests(unittest.TestCase):
             written = Path(d) / "profiles" / "omniroute-t1-orchestrator.json"
             self.assertTrue(written.exists())
             self.assertEqual(json.loads(written.read_text())["model"], "openai/t1-orchestrator")
+
+
+class ModelsDocRenderMatchesTodayTests(unittest.TestCase):
+    """Render of the real registry equals docs/models.md's committed
+    "models-doc" block, byte for byte (task A4e; docs/plans/2026-09-25-
+    registry-mapping.md section 14 documents the mapping). Unlike the
+    rejected first attempt at this task (commit 6a61052, never merged - see
+    the task brief), every cell comes from a registry field: there is no
+    hand-copied constant of the table's text anywhere in tools/registry.py."""
+
+    def test_render_matches_committed_models_doc_block(self):
+        rendered = registry.render_models_doc(real_registry())
+        current = registry.models_doc_block_text(real_models_doc())
+        self.assertEqual(registry.models_doc_diff(rendered, current), [])
+
+    def test_render_carries_the_spec_3_2_generated_notice(self):
+        rendered = registry.render_models_doc(real_registry())
+        self.assertIn("catalog/ai-registry.json", rendered)
+        self.assertIn("do not edit", rendered)
+
+    def test_one_row_per_registry_route(self):
+        rendered = registry.render_models_doc(real_registry())
+        rendered_ids = set(registry._models_doc_rows(rendered))
+        self.assertEqual(rendered_ids, set(real_registry()["routes"]))
+
+
+class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
+    """Every column is read straight from a registry field - no table text is
+    a hand-held constant in tools/registry.py (the task's own hard
+    requirement). Each test below mutates one field in a copy of the
+    registry and checks the rendered cell follows it."""
+
+    def test_class_column_reflects_routes_class(self):
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t4-rag"]["class"] = "frontier"
+        rendered = registry.render_models_doc(reg)
+        self.assertIn("frontier", row_for(rendered, "t4-rag"))
+
+    def test_context_column_prefers_context_declared(self):
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["context_declared"] = "999k"
+        rendered = registry.render_models_doc(reg)
+        self.assertIn("999k", row_for(rendered, "t3-driver"))
+
+    def test_context_column_falls_back_to_the_surfaces_numeric_context(self):
+        reg = copy.deepcopy(real_registry())
+        del reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["context_declared"]
+        rendered = registry.render_models_doc(reg)
+        self.assertIn("131,072", row_for(rendered, "t3-driver"))
+
+    def test_context_column_falls_back_to_a_legs_model_when_no_surface_carries_one(self):
+        reg = copy.deepcopy(real_registry())
+        for gw in ("omniroute", "litellm"):
+            surface = reg["routes"]["t4-rag"]["surfaces"].get(gw)
+            if isinstance(surface, dict):
+                surface.pop("context_declared", None)
+                surface.pop("context", None)
+        rendered = registry.render_models_doc(reg)
+        row = row_for(rendered, "t4-rag")
+        # t4-rag's first leg is cohere/command-a-03-2025, context_advertised 131072.
+        self.assertIn("131,072", row)
+        self.assertIn("leg model", row)
+
+    def test_legs_column_lists_every_leg_in_order(self):
+        rendered = registry.render_models_doc(real_registry())
+        row = row_for(rendered, "t3-driver")
+        legs = real_registry()["routes"]["t3-driver"]["legs"]
+        positions = [row.index("`%s`" % leg.split("/", 1)[1]) for leg in legs]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_empty_legs_render_as_none(self):
+        rendered = registry.render_models_doc(real_registry())
+        self.assertIn("(none)", row_for(rendered, "auto"))
+
+    def test_leg_flagged_unavailable_in_its_own_route_is_marked(self):
+        # routes.deepseek-v4.1-flash.unavailable_legs flags both its legs today.
+        rendered = registry.render_models_doc(real_registry())
+        row = row_for(rendered, "deepseek-v4.1-flash")
+        self.assertEqual(row.count("(unavailable)"), 2)
+
+    def test_leg_whose_provider_is_globally_unavailable_is_marked(self):
+        # providers.openrouter.available is false today, independent of any
+        # per-route unavailable_legs annotation.
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t2-orchestrator"]["unavailable_legs"] = {}
+        rendered = registry.render_models_doc(reg)
+        row = row_for(rendered, "t2-orchestrator")
+        self.assertIn("~~openrouter", row)
+        self.assertIn("(unavailable)", row)
+
+    def test_available_leg_is_not_marked(self):
+        rendered = registry.render_models_doc(real_registry())
+        row = row_for(rendered, "opus-4-6")
+        self.assertNotIn("(unavailable)", row)
+
+
+class ModelsDocRenderDeterminismTests(unittest.TestCase):
+    """A second render changes nothing (same convention as every other
+    render_* function's own determinism test above)."""
+
+    def test_two_in_process_renders_are_identical(self):
+        first = registry.render_models_doc(real_registry())
+        second = registry.render_models_doc(real_registry())
+        self.assertEqual(first, second)
+
+    def test_cli_two_runs_write_identical_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            out1, out2 = Path(d) / "a.md", Path(d) / "b.md"
+            for out in (out1, out2):
+                proc = run_cli("render", "models-doc", "--out", str(out))
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(out1.read_bytes(), out2.read_bytes())
+            self.assertTrue(out1.read_bytes().endswith(b"\n"))
+
+
+class ChangedLegAvailabilityFailsModelsDocCheckTests(unittest.TestCase):
+    """The task's own acceptance test: mark a leg unavailable in a copy of
+    the registry and --check must exit 1, naming the route - never silently
+    pass because the doc's prose (now generated) does not actually read the
+    field."""
+
+    def test_marking_a_leg_unavailable_exits_one_and_names_the_route(self):
+        reg = copy.deepcopy(real_registry())
+        # opus-4-6 has no unavailable legs today - flip one off.
+        reg["routes"]["opus-4-6"]["unavailable_legs"] = {
+            "antigravity/claude-opus-4-6-thinking": {"available": False},
+        }
+        path = write_registry(reg)
+        try:
+            proc = run_cli("render", "models-doc", "--registry", path, "--check")
+        finally:
+            Path(path).unlink()
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("routes.opus-4-6", proc.stdout)
+
+    def test_a_class_change_exits_one_and_names_the_route(self):
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t4-rag"]["class"] = "frontier"
+        path = write_registry(reg)
+        try:
+            proc = run_cli("render", "models-doc", "--registry", path, "--check")
+        finally:
+            Path(path).unlink()
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("routes.t4-rag", proc.stdout)
+
+    def test_unmodified_registry_check_exits_zero_on_the_real_files(self):
+        proc = run_cli("render", "models-doc", "--check")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ok:", proc.stdout)
+
+    def test_missing_docs_file_exits_one(self):
+        proc = run_cli("render", "models-doc", "--check",
+                       "--docs", "/nonexistent/models.md")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+
+
+class ModelsDocMarkerLocationTests(unittest.TestCase):
+    """_locate_managed_block() never returns a partial/wrong match on a
+    missing, duplicated or unmatched marker - mirrors tools/sync-router-
+    tiers.py's own locate_blocks() "never mask a gap" contract for its `#
+    AUTOOS-MANAGED-START/END` syntax, applied to docs/models.md's `<!--
+    AUTOOS-MANAGED-START/END -->` Markdown-comment convention."""
+
+    def test_missing_start_marker_raises(self):
+        with self.assertRaises(ValueError):
+            registry.models_doc_block_text("no markers here\n")
+
+    def test_missing_end_marker_raises(self):
+        text = "%s\nrow\n" % registry.MODELS_DOC_START_LINE
+        with self.assertRaises(ValueError):
+            registry.models_doc_block_text(text)
+
+    def test_duplicate_start_marker_raises(self):
+        text = "%s\nrow\n%s\nrow\n%s\n" % (
+            registry.MODELS_DOC_START_LINE, registry.MODELS_DOC_START_LINE, registry.MODELS_DOC_END_LINE)
+        with self.assertRaises(ValueError):
+            registry.models_doc_block_text(text)
+
+    def test_stray_end_marker_with_no_start_raises(self):
+        text = "row\n%s\n" % registry.MODELS_DOC_END_LINE
+        with self.assertRaises(ValueError):
+            registry.models_doc_block_text(text)
+
+    def test_well_formed_block_round_trips(self):
+        text = "before\n%s\nrow one\nrow two\n%s\nafter\n" % (
+            registry.MODELS_DOC_START_LINE, registry.MODELS_DOC_END_LINE)
+        self.assertEqual(registry.models_doc_block_text(text), "row one\nrow two")
+
+
+class UnknownModelsDocDocsFlagStillGoesThroughRenderTargetsTests(unittest.TestCase):
+    """models-doc is wired into the same `render <target>` subparser tree as
+    omniroute/litellm/ide/openhands - it must not disturb them."""
+
+    def test_existing_render_targets_still_work(self):
+        for target in ("omniroute", "litellm", "ide", "openhands"):
+            proc = run_cli("render", target, "--check")
+            self.assertEqual(proc.returncode, 0, "%s: %s" % (target, proc.stdout + proc.stderr))
 
 
 if __name__ == "__main__":
