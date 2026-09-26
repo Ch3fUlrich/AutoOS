@@ -10443,7 +10443,7 @@ import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
+if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "cheaperinference/kimi-k3", "cheaperinference/glm-5.2", "samba/gpt-oss-120b", "samba/MiniMax-M3", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
     problems.append("names")
 # "retired" is the one home of the ids a rename left behind: apply prunes
 # them from the store, so a retired id must never also be a current combo.

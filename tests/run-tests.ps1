@@ -246,7 +246,8 @@ Test-Case 'registry model reads match python legacy_models on the real catalog' 
     $catalog = Join-Path $Root 'catalog\ai-registry.json'
     $pyJson = & python3 -c "import importlib.util,json,sys;spec=importlib.util.spec_from_file_location('r',sys.argv[1]);r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r);print(json.dumps(r.legacy_models(json.load(open(sys.argv[2],encoding='utf-8')))))" $tool $catalog
     Assert-True ($LASTEXITCODE -eq 0) 'python3 legacy_models failed'
-    $pyModels = @($pyJson | ConvertFrom-Json)
+    # Windows PowerShell 5.1 emits a parsed JSON array as ONE object; enumerate it.
+    $pyModels = @($pyJson | ConvertFrom-Json | ForEach-Object { $_ })
     $regModels = (Get-Content -Path $catalog -Raw -Encoding UTF8 | ConvertFrom-Json).models
     $psModels = @(Get-AutoOSLegacyModels -RegistryModels $regModels)
     $pyById = @{}
