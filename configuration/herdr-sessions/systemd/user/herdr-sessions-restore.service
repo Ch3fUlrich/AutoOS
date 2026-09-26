@@ -5,8 +5,9 @@
 # them; the script additionally waits for the socket, because "unit started" and
 # "socket accepting calls" are not the same instant.
 #
-# @PROFILE@ below is substituted by install.sh at install time (--profile flag);
-# the checked-in file is a template, not something to edit and copy by hand.
+# @PROFILE_PATH@ below is substituted by install.sh at install time (--profile
+# flag, resolved to an absolute path); the checked-in file is a template, not
+# something to edit and copy by hand.
 # Install: see ../../install.sh --profile <yours>
 [Unit]
 Description=Restore Claude Code sessions into Herdr after boot
@@ -18,7 +19,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Environment=HERDR_PROFILE=@APPDIR@/profiles/@PROFILE@.conf
+Environment=HERDR_PROFILE=@PROFILE_PATH@
 ExecStart=@APPDIR@/herdr-sessions.sh restore
 # Several sessions, each waiting for its resume prompt, on a box that has just
 # booted: give it room rather than half-restoring.

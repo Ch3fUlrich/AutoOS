@@ -3,8 +3,9 @@
 #
 # One script, two scopes, because "user units on a login host" and "system
 # units as root on a headless host" used to be two forked scripts that drifted
-# before being merged into this one. Idempotent: re-running just refreshes the
-# unit files.
+# before being merged into this one. Idempotent: re-running with an unchanged
+# profile reports "already current" for every unit; re-running with a changed
+# profile backs up the differing unit before replacing it.
 #
 # Scope    Runs as   Units live in
 # -------  --------  --------------------------
@@ -25,18 +26,32 @@
 # needed. (The user branch enables herdr-server too, for the same reason: it is
 # not started here either — only enabled.)
 #
-# Usage:  ./install.sh --profile <name> [--dry-run]
-#         <name> is any profiles/<name>.conf. Start from profiles/example.conf.
+# --profile takes either a name under profiles/ (profiles/<name>.conf) or an
+# absolute/relative PATH to a .conf anywhere else (any value containing a "/").
+# Site-specific profiles live outside this repository (host paths, display
+# names never belong in a public tracked file), so the path form is how a site
+# points this installer at its own profile without copying it in here. The
+# rendered units always carry the resolved absolute path, never a relative one
+# a later `cd` could invalidate.
+#
+# --unregister disables and removes exactly the units this script would have
+# installed for the given profile's scope, backing up each one first. A second
+# --unregister (nothing left to remove) reports that and changes nothing.
+#
+# Usage:  ./install.sh --profile <name|path> [--dry-run] [--unregister]
+#         A name is any profiles/<name>.conf; start from profiles/example.conf.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PROFILE=""
 DRY=0
+UNREGISTER=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --profile) PROFILE="${2:-}"; shift 2 ;;
         --dry-run) DRY=1; shift ;;
+        --unregister) UNREGISTER=1; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -44,13 +59,26 @@ done
 avail() { ls -1 "$HERE/profiles/" 2>/dev/null | sed 's/\.conf$//' | paste -sd, - ; }
 
 if [ -z "$PROFILE" ]; then
-    echo "usage: $0 --profile {$(avail)} [--dry-run]" >&2
+    echo "usage: $0 --profile {$(avail)|/path/to/your.conf} [--dry-run] [--unregister]" >&2
     exit 2
 fi
 
-PROFILE_CONF="$HERE/profiles/$PROFILE.conf"
-[ -f "$PROFILE_CONF" ] || {
-    echo "FATAL: no profile at $PROFILE_CONF (have: $(avail))" >&2; exit 1; }
+# A profile is either a name under profiles/, or a path (anything containing a
+# "/") to a .conf anywhere else -- typically a site's own private checkout.
+# Resolved to an absolute path either way, since the rendered units must never
+# carry a path a later `cd` could invalidate.
+case "$PROFILE" in
+    */*)
+        [ -f "$PROFILE" ] || {
+            echo "FATAL: no profile at $PROFILE (must be an existing regular file)" >&2; exit 1; }
+        PROFILE_CONF="$(cd "$(dirname "$PROFILE")" && pwd)/$(basename "$PROFILE")"
+        ;;
+    *)
+        PROFILE_CONF="$HERE/profiles/$PROFILE.conf"
+        [ -f "$PROFILE_CONF" ] || {
+            echo "FATAL: no profile at $PROFILE_CONF (have: $(avail))" >&2; exit 1; }
+        ;;
+esac
 
 # A profile declares its own scope with HS_SCOPE={system,user}. There is no
 # default to guess from the profile's name: that only ever worked for the
@@ -76,36 +104,98 @@ WORKDIR="$(prof_key HS_WORKDIR)"
 say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 run() { if [ "$DRY" = 1 ]; then echo "  would: $*"; else "$@"; fi; }
 
-# Render a unit template into a real unit file. The checked-in units are
-# templates carrying three literal tokens -- @PROFILE@ (which profile), @APPDIR@
-# (where this checkout lives) and @WORKDIR@ (the cwd panes inherit). "#" is the
-# sed delimiter because every replacement is a path.
+if [ "$SCOPE" = user ]; then
+    DEST="$HOME/.config/systemd/user"
+    SRC_DIR="$HERE/systemd/user"
+    SYSTEMCTL_SCOPE=(--user)
+else
+    DEST="/etc/systemd/system"
+    SRC_DIR="$HERE/systemd/system"
+    SYSTEMCTL_SCOPE=()
+fi
+
+# Render a unit template into a real unit file. The checked-in units carry
+# four literal tokens -- @PROFILE@ (the --profile argument as given, informational
+# only), @APPDIR@ (where this checkout lives), @WORKDIR@ (the cwd panes
+# inherit) and @PROFILE_PATH@ (the resolved absolute profile path, what
+# HERDR_PROFILE is actually set to). "#" is the sed delimiter because every
+# replacement is a path.
 render_unit() {
-    sed -e "s#@PROFILE@#$PROFILE#g" -e "s#@APPDIR@#$APPDIR#g" -e "s#@WORKDIR@#$WORKDIR#g" "$1"
+    sed -e "s#@PROFILE@#$PROFILE#g" -e "s#@APPDIR@#$APPDIR#g" \
+        -e "s#@WORKDIR@#$WORKDIR#g" -e "s#@PROFILE_PATH@#$PROFILE_CONF#g" "$1"
 }
 
+# Idempotent: an unchanged render is left alone ("already current"); a changed
+# one is backed up before being replaced, same as AGENTS.md rule 5 for any file
+# this repository did not create from nothing.
 install_unit() {  # $1=src template  $2=dest path
+    local name; name="$(basename "$2")"
     if [ "$DRY" = 1 ]; then
         echo "  would: install -m 0644 (rendered $1) $2"
         return
     fi
     local tmp; tmp="$(mktemp)"
     render_unit "$1" >"$tmp"
+    if [ -f "$2" ] && cmp -s "$tmp" "$2"; then
+        echo "    $name: already current"
+        rm -f "$tmp"
+        return
+    fi
+    if [ -f "$2" ]; then
+        local backup; backup="$2.autoos-backup-$(date +%Y%m%d%H%M%S)"
+        cp -p "$2" "$backup"
+        echo "    $name: differs from the installed copy -- backed up to $(basename "$backup")"
+    fi
     install -m 0644 "$tmp" "$2"
     rm -f "$tmp"
+    echo "    $name: installed"
+}
+
+# --unregister: disable + back up + remove exactly the units this scope would
+# install. Never errors on a unit that is not there (or not loaded) -- that is
+# "nothing to remove", not a failure, and a second run must say exactly that.
+remove_unit() {  # $1=dest path
+    local dest="$1" name; name="$(basename "$dest")"
+    [ -e "$dest" ] || return 1
+    if [ "$DRY" = 1 ]; then
+        echo "  would: disable $name, back it up, remove $dest"
+        return 0
+    fi
+    systemctl "${SYSTEMCTL_SCOPE[@]}" disable "$name" >/dev/null 2>&1 || true
+    local backup; backup="$dest.autoos-backup-$(date +%Y%m%d%H%M%S)"
+    cp -p "$dest" "$backup"
+    rm -f "$dest"
+    echo "    $name: disabled, backed up to $(basename "$backup"), removed"
+    return 0
 }
 
 UNITS=(herdr-sessions-update.service herdr-server.service herdr-sessions-restore.service
        herdr-sessions-snapshot.service herdr-sessions-snapshot.timer)
 
+if [ "$UNREGISTER" = 1 ]; then
+    if [ "$SCOPE" = system ] && [ "$DRY" != 1 ] && [ "$(id -u)" -ne 0 ]; then
+        echo "must run as root" >&2; exit 1
+    fi
+    say "unregistering from $DEST"
+    removed=0
+    for u in "${UNITS[@]}"; do
+        if remove_unit "$DEST/$u"; then removed=$((removed + 1)); fi
+    done
+    if [ "$removed" -eq 0 ]; then
+        echo "nothing to remove"
+    elif [ "$DRY" != 1 ]; then
+        systemctl "${SYSTEMCTL_SCOPE[@]}" daemon-reload
+        echo "removed $removed unit(s)"
+    fi
+    exit 0
+fi
+
 if [ "$SCOPE" = user ]; then
     # ── user scope: no root ─────────────────────────────────────────────────
-    DEST="$HOME/.config/systemd/user"
     say "systemd user units -> $DEST"
     run mkdir -p "$DEST"
     for u in "${UNITS[@]}"; do
-        install_unit "$HERE/systemd/user/$u" "$DEST/$u"
-        echo "    $u"
+        install_unit "$SRC_DIR/$u" "$DEST/$u"
     done
 
     say "checking linger (needed for start-at-boot without login)"
@@ -130,6 +220,8 @@ if [ "$SCOPE" = user ]; then
     echo
     echo "Deliberately NOT started here: herdr-server (enabled only — starting it now"
     echo "would race a hand-launched one holding the herdr socket)."
+    echo
+    echo "Undo: ./install.sh --profile $PROFILE --unregister"
 else
     # ── system scope: root required ──────────────────────────────────────────
     # These preconditions only gate a REAL install. --dry-run must work from any
@@ -148,11 +240,9 @@ else
             echo "FATAL: herdr is not installed at $HERDR_BIN_CHECK" >&2; exit 1; }
     fi
 
-    DEST="/etc/systemd/system"
     say "systemd system units -> $DEST"
     for u in "${UNITS[@]}"; do
-        install_unit "$HERE/systemd/system/$u" "$DEST/$u"
-        echo "    $u"
+        install_unit "$SRC_DIR/$u" "$DEST/$u"
     done
 
     say "systemd daemon-reload"
@@ -186,4 +276,6 @@ else
     echo
     echo "Deliberately NOT started: herdr-server (one is already running by hand;"
     echo "the unit takes over at the next reboot)."
+    echo
+    echo "Undo: ./install.sh --profile $PROFILE --unregister"
 fi

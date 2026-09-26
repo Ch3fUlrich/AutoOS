@@ -2,7 +2,8 @@
 # Cheap (a process list + one herdr call) and refuses to overwrite a good
 # snapshot with an empty one, so running it often is safe.
 #
-# @PROFILE@ below is substituted by install.sh at install time.
+# @PROFILE_PATH@ below is substituted by install.sh at install time
+# (resolved to an absolute path).
 # Install: see ../../install.sh --profile <yours>
 [Unit]
 Description=Snapshot live Claude Code sessions for reboot restore
@@ -11,7 +12,7 @@ After=herdr-server.service
 
 [Service]
 Type=oneshot
-Environment=HERDR_PROFILE=@APPDIR@/profiles/@PROFILE@.conf
+Environment=HERDR_PROFILE=@PROFILE_PATH@
 ExecStart=@APPDIR@/herdr-sessions.sh snapshot
 Nice=15
 # Without these the script output does not reach the journal, and the

@@ -7,8 +7,9 @@
 # them; the driver additionally waits for the socket, because "unit started" and
 # "socket accepting calls" are not the same instant.
 #
-# @PROFILE@ below is substituted by install.sh at install time (--profile flag);
-# the checked-in file is a template, not something to edit and copy by hand.
+# @PROFILE_PATH@ below is substituted by install.sh at install time (--profile
+# flag, resolved to an absolute path); the checked-in file is a template, not
+# something to edit and copy by hand.
 # Install: see ../../install.sh --profile <yours>
 Description=Restore the Claude Code session into Herdr after boot
 Documentation=file://@APPDIR@/README.md
@@ -22,7 +23,7 @@ Type=oneshot
 RemainAfterExit=yes
 Environment=HOME=/root
 Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=HERDR_PROFILE=@APPDIR@/profiles/@PROFILE@.conf
+Environment=HERDR_PROFILE=@PROFILE_PATH@
 ExecStart=@APPDIR@/herdr-sessions.sh restore
 # Must exceed the profile's own wait budget (WAIT_SOCKET_SEC + WAIT_PROMPT_SEC =
 # 240s), or systemd kills the unit mid-restore and the pane is left sitting on an

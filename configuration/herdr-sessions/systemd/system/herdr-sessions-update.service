@@ -20,7 +20,7 @@ Type=oneshot
 RemainAfterExit=yes
 Environment=HOME=/root
 Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=HERDR_PROFILE=@APPDIR@/profiles/@PROFILE@.conf
+Environment=HERDR_PROFILE=@PROFILE_PATH@
 ExecStart=@APPDIR@/herdr-sessions.sh update
 # Two downloads at UPDATE_TIMEOUT_SEC (180 s) each, plus slack.
 TimeoutStartSec=420

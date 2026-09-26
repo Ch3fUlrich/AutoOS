@@ -7097,6 +7097,83 @@ if it "herdr-sessions: uuid picking excludes background sessions (unit tests)"; 
     out="$(python3 tests/test_herdr_sessions.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# ADDENDUM item 7: --profile accepts a path as well as a name under profiles/,
+# a re-run reports "already current" (cmp) or backs up a differing unit before
+# replacing it, and --unregister removes exactly what was installed. These
+# ARE real (non-dry-run) installs -- into a throwaway HOME, with systemctl and
+# loginctl stubbed via PATH so no live systemd is ever touched.
+hs_stub_bin() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/systemctl" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    cat > "$dir/loginctl" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "show-user" ] && echo yes
+exit 0
+STUB
+    chmod +x "$dir/systemctl" "$dir/loginctl"
+}
+
+if it "herdr-sessions: install.sh accepts an absolute-path profile, not only a name"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"; rc=$?
+    got="$(grep -h HERDR_PROFILE "$tmp/home/.config/systemd/user/herdr-sessions-restore.service" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=$tmp/site.conf" ]; then
+        pass
+    else
+        fail "rc=$rc got=[$got] out=$out"
+    fi
+fi
+
+if it "herdr-sessions: re-run reports already current; a drifted unit is backed up before replacing"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    rerun="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"
+    echo "# hand edit" >> "$unit"
+    drift="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"
+    backups="$(ls "$tmp/home/.config/systemd/user" | grep -c autoos-backup || true)"
+    rm -rf "$tmp"
+    ok=1
+    printf '%s\n' "$rerun" | grep -q "herdr-sessions-restore.service: already current" || ok=0
+    printf '%s\n' "$drift" | grep -q "herdr-sessions-restore.service: differs from the installed copy -- backed up" || ok=0
+    [ "$backups" = "1" ] || ok=0
+    if [ "$ok" = "1" ]; then pass; else fail "rerun=[$rerun] drift=[$drift] backups=$backups"; fi
+fi
+
+if it "herdr-sessions: --unregister removes what it installed, twice is 'nothing to remove'"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    first="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"
+    left="$(ls "$tmp/home/.config/systemd/user" 2>/dev/null | grep -vc autoos-backup || true)"
+    second="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"
+    rm -rf "$tmp"
+    if printf '%s\n' "$first" | grep -q "removed 5 unit(s)" && [ "$left" = "0" ] && printf '%s\n' "$second" | grep -q "nothing to remove"; then
+        pass
+    else
+        fail "first=[$first] left=$left second=[$second]"
+    fi
+fi
+
 describe "wsl detection"
 
 if it "WSL is detected when running under it"; then

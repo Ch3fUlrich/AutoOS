@@ -19,7 +19,7 @@ RequiresMountsFor=@APPDIR@
 Type=oneshot
 RemainAfterExit=yes
 
-Environment=HERDR_PROFILE=@APPDIR@/profiles/@PROFILE@.conf
+Environment=HERDR_PROFILE=@PROFILE_PATH@
 ExecStart=@APPDIR@/herdr-sessions.sh update
 # Two downloads at UPDATE_TIMEOUT_SEC (180 s) each, plus slack.
 TimeoutStartSec=420

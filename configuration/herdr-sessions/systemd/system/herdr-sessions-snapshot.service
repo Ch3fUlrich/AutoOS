@@ -10,7 +10,8 @@
 # System unit, not a --user unit: everything here runs as root and there is no
 # user session at boot.
 #
-# @PROFILE@ below is substituted by install.sh at install time.
+# @PROFILE_PATH@ below is substituted by install.sh at install time
+# (resolved to an absolute path).
 Description=Snapshot the live Claude Code session for reboot restore
 Documentation=file://@APPDIR@/README.md
 After=herdr-server.service
@@ -21,7 +22,7 @@ RequiresMountsFor=@APPDIR@
 Type=oneshot
 Environment=HOME=/root
 Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=HERDR_PROFILE=@APPDIR@/profiles/@PROFILE@.conf
+Environment=HERDR_PROFILE=@PROFILE_PATH@
 ExecStart=@APPDIR@/herdr-sessions.sh snapshot
 Nice=15
 StandardOutput=journal
