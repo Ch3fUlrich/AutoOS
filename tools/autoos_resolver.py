@@ -677,3 +677,239 @@ def defer_until(card, chosen_score, registry, now):
         why = "%s's next cheap window (%s) is not before deadline %s" % (
             provider_id, _format_iso_z(start), deadline_str)
     return None, "no defer: %s" % why
+
+
+# ---------------------------------------------------------------------------
+# plan(): the resolver v2 entry point (spec sections 5 intro, 5.3 steps 1-7,
+# 5.5, 5.7). Pure: it only composes the functions above, no I/O, no clock of
+# its own -- `now` is passed in. A missing `card["kind"/"mode"/"risk"]` fails
+# closed here; every other required key is checked by the function that reads
+# it (filter_routes, bucket, pick, ...).
+# ---------------------------------------------------------------------------
+
+_REQUIRED_CARD_KEYS = ("kind", "mode", "risk")
+
+# free < cheap < mid < frontier (spec 3.1); used to find "the next class up".
+_CLASS_ORDER = ("free", "cheap", "mid", "frontier")
+
+# D2: normal risk gets 1 cross-family API review, high risk gets 2 plus a
+# Sonnet close.
+_REVIEW_COUNTS = {"normal": 1, "high": 2}
+_CLOSER_MODEL = "claude-sonnet"
+
+
+def _leg_model_id(leg):
+    """The model id half of a "<provider>/<model>" leg string."""
+    return leg.partition("/")[2]
+
+
+def _model_family(leg, registry):
+    """The ``family`` of the model half of a "<provider>/<model>" leg string."""
+    return registry["models"][_leg_model_id(leg)].get("family")
+
+
+def _next_rung(ladder, current):
+    """The rung immediately above `current` on `ladder`; None at or past the top."""
+    if current is None or current not in ladder:
+        return None
+    index = ladder.index(current)
+    if index + 1 >= len(ladder):
+        return None
+    return ladder[index + 1]
+
+
+def _score_candidates(route_ids, bucket_name, kind, features, registry,
+                      track_record, orchestrator_model, mode):
+    """``score_route`` (with ``effort`` kept on it) for each id, in order.
+
+    Mirrors spec 5.3 step 4: for every route, its expected serving leg decides
+    the effort rung, then the route is scored at that rung.
+    """
+    out = []
+    for route_id in route_ids:
+        route = registry["routes"][route_id]
+        leg = expected_leg(route, registry)
+        if leg is None:
+            raise ValueError("route %r has no serving leg to score" % route_id)
+        _, model_id = leg
+        model = registry["models"][model_id]
+        eff = effort(bucket_name, kind, route["class"], model["effort_ladder"],
+                     model["reasoning"])
+        score = dict(score_route(route_id, bucket_name, eff, features, registry,
+                                 track_record, orchestrator_model, mode))
+        score["effort"] = eff
+        out.append(score)
+    return out
+
+
+def _select_reviewers(scores, survivors, chosen, risk, bucket_name, kind,
+                      features, registry, track_record, orchestrator_model,
+                      mode):
+    """``{"routes": [...], "reason": ...}`` reviewer routes, spec 5.7 / D2.
+
+    Candidates come from the already-scored routes when there is more than
+    the chosen one to pick from; an override that scored only the chosen
+    route falls back to scoring every survivor, so a pinned route never
+    starves review of candidates. Reviewers are picked cheapest-first, each
+    one's serving leg family differing from the chosen leg's and from every
+    reviewer already picked -- a reviewer is never the writer's family twice
+    over. Too few distinct families still returns what was found, naming the
+    shortfall in ``reason`` rather than silently reviewing with fewer eyes.
+    """
+    try:
+        needed = _REVIEW_COUNTS[risk]
+    except KeyError:
+        raise ValueError("unknown card risk %r" % (risk,))
+
+    pool = scores if len(scores) > 1 else _score_candidates(
+        survivors, bucket_name, kind, features, registry, track_record,
+        orchestrator_model, mode)
+
+    chosen_family = _model_family(chosen["leg"], registry)
+    ranked = sorted(
+        (s for s in pool if s["route"] != chosen["route"]),
+        key=lambda s: s["expected_cost"])
+
+    picked = []
+    excluded = {chosen_family}
+    for score in ranked:
+        family = _model_family(score["leg"], registry)
+        if family in excluded:
+            continue
+        picked.append(score["route"])
+        excluded.add(family)
+        if len(picked) == needed:
+            break
+
+    if len(picked) < needed:
+        reason = "only %d of %d distinct-family reviewer(s) available: %s" % (
+            len(picked), needed, ", ".join(picked) if picked else "none")
+    else:
+        reason = "cross-family reviewer(s): %s" % ", ".join(picked)
+
+    routes = list(picked)
+    if risk == "high":
+        routes.append(_CLOSER_MODEL)
+
+    return {"routes": routes, "reason": reason}
+
+
+def _escalation(chosen, scores, registry):
+    """The two escalation steps, spec 5.7.
+
+    ``logic`` raises effort one rung on the chosen leg's ladder; ``capability``
+    moves up a route class. Both look only at the routes actually scored in
+    this plan (never at unscored survivors): an override that narrowed
+    scoring to one route correctly reports no capability escalation rather
+    than inventing one from routes nobody costed.
+    """
+    model = registry["models"][_leg_model_id(chosen["leg"])]
+    ladder = model["effort_ladder"]
+    logic_step = {
+        "on": "logic",
+        "route": chosen["route"],
+        "effort": _next_rung(ladder, chosen["effort"]),
+    }
+
+    chosen_class = registry["routes"][chosen["route"]]["class"]
+    next_class = None
+    if chosen_class in _CLASS_ORDER:
+        index = _CLASS_ORDER.index(chosen_class)
+        if index + 1 < len(_CLASS_ORDER):
+            next_class = _CLASS_ORDER[index + 1]
+
+    capability_route = None
+    if next_class is not None:
+        up = [s for s in scores
+              if registry["routes"][s["route"]]["class"] == next_class]
+        if up:
+            capability_route = min(up, key=lambda s: s["expected_cost"])["route"]
+
+    capability_step = {"on": "capability", "route": capability_route}
+    return [logic_step, capability_step]
+
+
+def plan(card, features, client_state, registry, overlay, track_record,
+        orchestrator_model, now, client="opencode"):
+    """The resolver v2 entry point: compose the pure functions into a ``route_plan``.
+
+    Pure -- no I/O, no clock of its own; `now` is the caller's clock reading.
+    Spec 5 (intro), 5.3 steps 1-7, 5.5, 5.7:
+
+    1. filter, 2. bucket, 3. an override scores only its route (fail closed on
+    a removed/unknown one), 4. score every remaining route, 5. pick the
+    cheapest above theta (tie-broken by time when theta was met -- time never
+    beats reliability), 6. an opt-in defer by provider window, 7. emit the
+    plan with reviewers, escalation and one explain line per scored route.
+
+    A missing ``card["kind"/"mode"/"risk"]`` raises ValueError naming it.
+    """
+    for key in _REQUIRED_CARD_KEYS:
+        if key not in card:
+            raise ValueError("missing card key %r" % key)
+
+    survivors, removed = filter_routes(card, features, client_state, registry,
+                                       overlay, client)
+    bucket_name, _ = bucket(features, card)
+
+    if not survivors:
+        result = no_route(removed)
+        result["bucket"] = bucket_name
+        return result
+
+    override_route, override_reason = apply_override(card, survivors, removed)
+    if override_route is None and override_reason != "no override":
+        return {
+            "route": None,
+            "state": "input_required",
+            "reason": override_reason,
+            "bucket": bucket_name,
+        }
+
+    route_ids = [override_route] if override_route else survivors
+    scores = _score_candidates(route_ids, bucket_name, card["kind"], features,
+                               registry, track_record, orchestrator_model,
+                               card["mode"])
+
+    chosen, pick_reason = pick(scores, card["mode"], registry)
+    reason_parts = [pick_reason]
+
+    theta = _policy_value(registry, "modes", card["mode"], "theta", "value")
+    eligible = [s for s in scores if s["p"] >= theta]
+    if eligible:
+        chosen, time_reason = tie_break(eligible, registry, now)
+        reason_parts.append(time_reason)
+
+    defer_time, defer_reason = defer_until(card, chosen, registry, now)
+    reason_parts.append(defer_reason)
+
+    model_id = _leg_model_id(chosen["leg"])
+    model = registry["models"][model_id]
+    route_class = registry["routes"][chosen["route"]]["class"]
+
+    reviewers = _select_reviewers(scores, survivors, chosen, card["risk"],
+                                  bucket_name, card["kind"], features,
+                                  registry, track_record, orchestrator_model,
+                                  card["mode"])
+    escalation = _escalation(chosen, scores, registry)
+
+    return {
+        "route": chosen["route"],
+        "class": route_class,
+        "client": client,
+        "leg": chosen["leg"],
+        "effort": chosen["effort"],
+        "max_tokens": max_tokens(chosen["effort"], model["reasoning"],
+                                 model["output_max"]),
+        "context_budget": usable_context(model_id, registry, overlay),
+        "bucket": bucket_name,
+        "decompose": bucket_name in ("S3", "S4"),
+        "p": chosen["p"],
+        "expected_cost": chosen["expected_cost"],
+        "reviewers": reviewers,
+        "escalation": escalation,
+        "state": "deferred" if defer_time is not None else "ready",
+        "defer_until": _format_iso_z(defer_time) if defer_time is not None else None,
+        "reason": "; ".join(reason_parts),
+        "explain": [s["reason"] for s in scores],
+    }
