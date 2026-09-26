@@ -1037,6 +1037,19 @@ Test-Case 'the server answers a heartbeat the page can poll' {
     Pass
 }
 
+Test-Case 'config save: an unchanged POST backs up and rewrites nothing' {
+    # Every save used to back up and rewrite autoos.config.json, so identical
+    # saves piled up backups of identical bytes, and the old backup name
+    # (-yyyyMMdd-HHmmss-fffffff) is not rankable by Get-AutoOSBackups. The
+    # route must compare first and only a changed save may call the shared
+    # never-overwrite backup helper. Source-level guard: the route is inline
+    # in the listener scriptblock and no test here starts the real server.
+    if ($serveSource -notmatch 'unchanged = \$true')                 { throw 'the config route never answers unchanged' }
+    if ($serveSource -notmatch 'Copy-AutoOSBackup -Path \$cfgPath')  { throw 'the config route does not use the shared never-overwrite backup' }
+    if ($serveSource -match "autoos-backup-\`$\(Get-Date -Format 'yyyyMMdd-HHmmss-fffffff'\)") { throw 'the unrankable 7-digit backup name is back' }
+    Pass
+}
+
 Test-Case 'a page whose server has gone tears itself down' {
     if ($pageSource -notmatch 'function serverGone') { throw 'the page has no teardown path' }
     if ($pageSource -notmatch 'window\.close')       { throw 'the page never tries to close itself' }
