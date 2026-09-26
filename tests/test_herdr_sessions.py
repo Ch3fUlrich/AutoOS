@@ -182,5 +182,88 @@ class T4MalformedStateFilesAreIgnored(HerdrSessionsTestCase):
         self.assertEqual((uuid, source), ("A", "newest-transcript"))
 
 
+class T5RegistryWinsOverTranscriptMtime(HerdrSessionsTestCase):
+    """T5: the live pid's own registry entry says kind=interactive,
+    sessionId=A -- it must win even though B is the newer transcript in the
+    same directory. Before the fix, only mtime was ever consulted."""
+
+    def test_registry_uuid_wins_over_a_newer_transcript(self):
+        cwd = "/tmp/w/AutoOS"
+        write_transcript(self.home, cwd, "A", self.now - 600)
+        write_transcript(self.home, cwd, "B", self.now)
+        proc_root = os.path.join(self.home, "fake-proc")
+        write_proc_stat(proc_root, 9001, start_time=111)
+        write_session_registry(self.home, 9001, {
+            "sessionId": "A", "kind": "interactive",
+            "name": "autoos-L0", "cwd": cwd, "procStart": 111})
+
+        uuid, kind = cs.registry_uuid(9001, proc_root=proc_root)
+        self.assertEqual((uuid, kind), ("A", "interactive"))
+
+        # And the mtime-only path would still have picked B, confirming the
+        # registry result is not simply what newest_transcript() already gave.
+        mtime_uuid, _ = cs.newest_transcript(cwd, exclude=cs.bg_ids())
+        self.assertEqual(mtime_uuid, "B")
+
+
+class T6StaleRegistryIgnoredOnPidReuse(HerdrSessionsTestCase):
+    """T6: the registry's procStart no longer matches /proc (the pid was
+    reused by a different, later process) -- the entry must be ignored
+    entirely, not trusted for either the uuid or the kind."""
+
+    def test_procstart_mismatch_ignores_the_registry_entry(self):
+        proc_root = os.path.join(self.home, "fake-proc")
+        write_proc_stat(proc_root, 9002, start_time=222)  # the REAL start
+        write_session_registry(self.home, 9002, {
+            "sessionId": "A", "kind": "interactive",
+            "name": "stale", "cwd": "/tmp/w/AutoOS", "procStart": 999})
+
+        uuid, kind = cs.registry_uuid(9002, proc_root=proc_root)
+        self.assertEqual((uuid, kind), (None, None))
+
+    def test_missing_proc_entry_ignores_the_registry_entry(self):
+        proc_root = os.path.join(self.home, "fake-proc")  # no pid dir made
+        write_session_registry(self.home, 9003, {
+            "sessionId": "A", "kind": "interactive",
+            "name": "gone", "cwd": "/tmp/w/AutoOS", "procStart": 111})
+        self.assertEqual(cs.registry_uuid(9003, proc_root=proc_root), (None, None))
+
+
+class T7BgProcessFilteredBeforeCwdFallback(HerdrSessionsTestCase):
+    """T7: a pid that is itself a background process (registry kind=bg, or
+    argv[1] naming a bg helper) must never be treated as a session
+    candidate -- not matched by name, not by the cwd fallback, and its uuid
+    never attributed to a real pane."""
+
+    def test_bg_argv_is_filtered_with_no_io_at_all(self):
+        for argv in (["claude", "daemon"], ["claude", "bg-pty-host"],
+                     ["claude", "bg-spare", "--foo"]):
+            self.assertTrue(cs.is_bg_argv(argv), argv)
+            self.assertTrue(cs.is_bg_process(pid=1, argv=argv), argv)
+        self.assertFalse(cs.is_bg_argv(["claude", "--resume", "x"]))
+
+    def test_registry_kind_bg_is_filtered(self):
+        proc_root = os.path.join(self.home, "fake-proc")
+        write_proc_stat(proc_root, 9004, start_time=111)
+        write_session_registry(self.home, 9004, {
+            "sessionId": "Z", "kind": "bg",
+            "name": "autoos-L1-main", "cwd": "/tmp/w/AutoOS", "procStart": 111})
+
+        self.assertTrue(cs.is_bg_process(9004, ["claude"], proc_root=proc_root))
+
+    def test_interactive_registry_kind_is_not_filtered(self):
+        proc_root = os.path.join(self.home, "fake-proc")
+        write_proc_stat(proc_root, 9005, start_time=111)
+        write_session_registry(self.home, 9005, {
+            "sessionId": "A", "kind": "interactive",
+            "name": "autoos-L0", "cwd": "/tmp/w/AutoOS", "procStart": 111})
+
+        self.assertFalse(cs.is_bg_process(9005, ["claude"], proc_root=proc_root))
+
+    def test_a_pid_with_no_registry_entry_at_all_is_not_filtered(self):
+        proc_root = os.path.join(self.home, "fake-proc")
+        self.assertFalse(cs.is_bg_process(9006, ["claude"], proc_root=proc_root))
+
+
 if __name__ == "__main__":
     unittest.main()
