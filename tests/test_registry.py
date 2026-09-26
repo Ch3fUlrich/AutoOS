@@ -148,19 +148,33 @@ class RuleThreePrivacyTests(unittest.TestCase):
         self.assertIn("privacy: t2-worker-clean leg mistral/mistral-small-latest trains on prompts",
                       problems)
 
-    def test_allow_training_exempts_the_route(self):
+    def test_allow_training_does_not_exempt_the_route(self):
+        # review-a3: spec 3.1 has no allow_training escape; a clean route that
+        # carries one is still checked (fail closed).
         reg = mutated()
         reg["providers"]["mistral"]["trains_on_prompts"] = True
         reg["routes"]["t2-worker-clean"]["allow_training"] = True
         problems = registry.check_registry(reg)
-        self.assertFalse(any("t2-worker-clean" in p for p in problems), problems)
+        self.assertTrue(any("privacy: t2-worker-clean" in p for p in problems), problems)
 
     def test_unavailable_leg_is_not_checked(self):
-        # openrouter's t1-orchestrator-clean leg is in unavailable_legs, and the
-        # provider is available:false - neither may be reported even though the
-        # registry documents that leg as training by contract.
-        problems = registry.check_registry(load_registry())
-        self.assertFalse(any("t1-orchestrator-clean" in p for p in problems), problems)
+        # review-a3: the committed openrouter provider trains_on_prompts=false,
+        # so the real registry alone could not fail this; make it train.
+        reg = mutated()
+        reg["providers"]["openrouter"]["trains_on_prompts"] = True
+        reg["providers"]["openrouter"].pop("available", None)
+        self.assertFalse(any("privacy: t1-orchestrator-clean" in p
+                             for p in registry.check_registry(reg)))
+        reg["routes"]["t1-orchestrator-clean"]["unavailable_legs"] = {}
+        self.assertTrue(any("privacy: t1-orchestrator-clean" in p
+                            for p in registry.check_registry(reg)))
+
+    def test_unknown_trains_on_prompts_is_flagged(self):
+        # review-a3: a null/missing trains_on_prompts is unverified, not clean.
+        reg = mutated()
+        reg["providers"]["mistral"]["trains_on_prompts"] = None
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("privacy: t2-worker-clean" in p for p in problems), problems)
 
 
 class RuleFourPrivateHostTests(unittest.TestCase):
@@ -300,6 +314,65 @@ class CliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("drift:", proc.stdout)
 
+
+
+class ReviewA3Tests(unittest.TestCase):
+    """Findings of the cross-family review of A3 (agy, 2026-09-26)."""
+
+    def test_route_id_colliding_with_a_provider_is_flagged(self):
+        reg = mutated()
+        route = copy.deepcopy(reg["routes"]["t2-worker-clean"])
+        route["id"] = "mistral"
+        reg["routes"]["mistral"] = route
+        self.assertTrue(any(p.startswith("duplicate id: mistral")
+                            for p in registry.check_registry(reg)))
+
+    def test_route_named_after_a_model_it_serves_is_allowed(self):
+        self.assertIn("deepseek-v4.1-flash", load_registry()["routes"])
+        self.assertIn("deepseek-v4.1-flash", load_registry()["models"])
+        self.assertEqual(registry.check_registry(load_registry()), [])
+
+    def test_route_named_after_a_model_it_does_not_serve_is_flagged(self):
+        reg = mutated()
+        route = copy.deepcopy(reg["routes"]["t2-worker-clean"])
+        route["id"] = "claude-opus-4-6"
+        reg["routes"]["claude-opus-4-6"] = route
+        self.assertTrue(any(p.startswith("duplicate id: claude-opus-4-6")
+                            for p in registry.check_registry(reg)))
+
+    def test_unresolved_unavailable_leg_is_flagged(self):
+        reg = mutated()
+        reg["routes"]["t1-orchestrator-clean"]["unavailable_legs"]["nope/nothing"] = {
+            "available": False}
+        self.assertIn("unresolved leg: routes.t1-orchestrator-clean leg nope/nothing",
+                      registry.check_registry(reg))
+
+    def test_single_label_host_is_private(self):
+        reg = mutated()
+        reg["providers"]["zen"]["api_base"] = "https://gpu-box/v1"
+        self.assertIn("private host: providers.zen.api_base https://gpu-box/v1",
+                      registry.check_registry(reg))
+
+    def test_ip_before_query_or_fragment_is_private(self):
+        for url in ("https://10.0.0.1?v1", "https://10.0.0.1#x"):
+            reg = mutated()
+            reg["providers"]["zen"]["api_base"] = url
+            self.assertIn("private host: providers.zen.api_base %s" % url,
+                          registry.check_registry(reg))
+
+    def test_dated_key_is_flagged(self):
+        reg = mutated()
+        reg["policy"]["latency_seed"]["2026-09-25"] = {"minutes": 1, "source": "default"}
+        self.assertTrue(any("dated key: policy.latency_seed.2026-09-25" in p
+                            for p in registry.check_registry(reg)))
+
+    def test_null_sections_report_instead_of_crashing(self):
+        for mutate in (lambda r: r["routes"]["t2-worker"].__setitem__("legs", None),
+                       lambda r: r.__setitem__("providers", None),
+                       lambda r: r.__setitem__("models", None)):
+            reg = mutated()
+            mutate(reg)
+            self.assertIsInstance(registry.check_registry(reg), list)
 
 if __name__ == "__main__":
     unittest.main()
