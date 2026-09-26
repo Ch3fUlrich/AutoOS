@@ -94,6 +94,7 @@ import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_track as track  # noqa: E402
+from registry import resolve_leg  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
@@ -106,6 +107,11 @@ TAIL_LIMIT = 64 * 1024
 # registry supplies route.class: t1 frontier, t2 cheap, t3 free.
 TRACK_CLASS = {"t1": "frontier", "t2": "cheap", "t3": "free"}
 TRACK_RECORD = os.path.join(ROOT, "logs", "routing", "track-record.jsonl")
+# operator request 2026-09-26: propose a tool-calling re-probe whenever a real
+# run's gate contradicts the recorded status of its route's legs.
+REGISTRY_PATH = os.path.join(ROOT, "catalog", "ai-registry.json")
+MEASURED_OVERLAY_PATH = os.path.join(ROOT, "logs", "routing", "measured.json")
+PROBE_PROPOSALS_LOG = os.path.join(ROOT, "logs", "routing", "probe-proposals.jsonl")
 # --lean drops these MCP servers. Measured 2026-09-24, one --free opencode run,
 # peak process-tree RSS: 1406 MB with every server, 678 MB with these off
 # (516 MB with graphify off too).
@@ -496,6 +502,126 @@ def record_run(path: str, entry: dict) -> bool:
         return False
 
 
+def _available_legs(route: dict, registry: dict) -> list:
+    """Leg strings of `route` that are actually available.
+
+    Drops a leg named in `unavailable_legs` and a leg whose provider is
+    `available: false` -- the same rule autoos_resolver.serving_legs applies,
+    kept local so this module carries no dependency on the resolver. Order is
+    the route's own leg order (the priority strategy needs the first one).
+    """
+    unavailable = route.get("unavailable_legs") or {}
+    providers = registry.get("providers") or {}
+    out = []
+    for leg in route.get("legs") or []:
+        if leg in unavailable:
+            continue
+        provider_id, _ = resolve_leg(leg, registry)
+        if providers.get(provider_id, {}).get("available") is False:
+            continue
+        out.append(leg)
+    return out
+
+
+def _leg_tool_calls(leg: str, registry: dict, overlay: dict):
+    """The recorded tool-calling status of `leg`: the overlay's probed value
+    (`legs[leg].tool_calls.value`) wins over the registry's declared
+    `models[<model>].tool_calls`."""
+    measured = (((overlay or {}).get("legs") or {}).get(leg) or {}).get("tool_calls") or {}
+    if "value" in measured:
+        return measured["value"]
+    _, model_id = resolve_leg(leg, registry)
+    return (registry.get("models") or {}).get(model_id, {}).get("tool_calls")
+
+
+def probe_proposal(route_id, gate, failure_class, registry: dict, overlay: dict):
+    """A re-probe proposal when a finished run contradicts the recorded
+    tool-calling status of its route's legs, or None. Pure.
+
+    gate == "pass" with a non-"proven" leg among the route's available legs
+    proposes promoting it (kind "unexpected-pass"). gate == "fail" whose
+    failure_class is "capability" (the class record_run gives the NO-OP guard)
+    on a route whose FIRST available leg is already "proven" proposes
+    re-probing a possible regression (kind "unexpected-fail"). An unknown
+    route (not in the registry, e.g. a client-only run) is None, and so is
+    every other gate/failure_class combination.
+    """
+    route = (registry.get("routes") or {}).get(route_id)
+    if route is None:
+        return None
+    legs = _available_legs(route, registry)
+    if not legs:
+        return None
+    command = "python3 tools/probe-toolcalls.py --route %s" % route_id
+    if gate == "pass":
+        unproven = [leg for leg in legs if _leg_tool_calls(leg, registry, overlay) != "proven"]
+        if not unproven:
+            return None
+        return {"route": route_id, "legs": unproven, "kind": "unexpected-pass",
+                "reason": "gated run passed on unproven tool calling: re-probe to promote",
+                "command": command}
+    if gate == "fail" and failure_class == "capability":
+        first = legs[0]
+        if _leg_tool_calls(first, registry, overlay) == "proven":
+            return {"route": route_id, "legs": [first], "kind": "unexpected-fail",
+                    "reason": "proven leg failed a run: re-probe (tool calling may have regressed)",
+                    "command": command}
+    return None
+
+
+def record_probe_proposal(path: str, entry: dict) -> bool:
+    """Append one probe-proposal JSON line; a write failure is printed and ignored
+    (same contract as record_run)."""
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with io.open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+        return True
+    except OSError as exc:
+        print("autoos-agent: probe proposal not written (%s): %s"
+              % (path, getattr(exc, "strerror", None) or exc), file=sys.stderr)
+        return False
+
+
+def propose_reprobe(entry: dict, registry_path: str, overlay_path: str,
+                    proposals_path: str, sandbox_path: str) -> None:
+    """Compute and log a probe proposal for a finished run's track entry.
+
+    Never raises and never touches the run's exit code: a registry that
+    cannot be loaded, or an overlay file present but unreadable, is a one-line
+    stderr note and no proposal; a write failure is record_probe_proposal's
+    own concern. `entry` is a track_entry()-shaped dict (route/gate/failure_class).
+    """
+    try:
+        with io.open(registry_path, encoding="utf-8") as fh:
+            registry = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print("autoos-agent: probe proposal skipped (cannot load %s): %s"
+              % (registry_path, getattr(exc, "strerror", None) or exc), file=sys.stderr)
+        return
+    overlay = {}
+    if os.path.isfile(overlay_path):
+        try:
+            with io.open(overlay_path, encoding="utf-8") as fh:
+                overlay = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print("autoos-agent: probe proposal skipped (cannot load %s): %s"
+                  % (overlay_path, getattr(exc, "strerror", None) or exc), file=sys.stderr)
+            return
+    try:
+        proposal = probe_proposal(entry["route"], entry["gate"], entry["failure_class"], registry, overlay)
+    except ValueError as exc:  # a leg in the registry itself does not resolve
+        print("autoos-agent: probe proposal skipped (%s)" % exc, file=sys.stderr)
+        return
+    if proposal is None:
+        return
+    at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    proposal = dict(proposal, at=at, sandbox=sandbox_path)
+    if record_probe_proposal(proposals_path, proposal):
+        print("autoos-agent: PROBE-PROPOSAL: %s %s: %s"
+              % (proposal["kind"], proposal["route"], proposal["command"]), file=sys.stderr)
+
+
 
 def _terminate_group(proc, pgid) -> None:
     """Stop whatever is left of the client's process group (best effort)."""
@@ -717,6 +843,8 @@ def cmd_run(args, cfg: dict) -> int:
         tracked = track_entry(plan, rc, time.time() - start)
         if tracked is not None:
             record_run(TRACK_RECORD, tracked)
+            propose_reprobe(tracked, REGISTRY_PATH, MEASURED_OVERLAY_PATH,
+                            PROBE_PROPOSALS_LOG, sb["path"])
     return rc
 
 
