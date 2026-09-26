@@ -5121,9 +5121,14 @@ fi
 
 if it "playwright lazy proxy installer: an exact docker or npx entry is replaced after a backup, a second run skips"; then
     problems=""
-    for form in docker npx; do
+    for form in docker npx npx-bare npx-latest; do
         tmp="$(mktemp -d)"; pw_setup "$tmp"; cfg="$tmp/home/.claude.json"
-        if [[ "$form" == docker ]]; then pw_seed "$cfg" "${PW_DOCKER_FORM[@]}"; else pw_seed "$cfg" npx -y @playwright/mcp@0.0.81; fi
+        case "$form" in
+            docker)     pw_seed "$cfg" "${PW_DOCKER_FORM[@]}" ;;
+            npx)        pw_seed "$cfg" npx -y @playwright/mcp@0.0.81 ;;
+            npx-bare)   pw_seed "$cfg" npx -y @playwright/mcp ;;
+            npx-latest) pw_seed "$cfg" npx -y @playwright/mcp@latest ;;
+        esac
         cp "$cfg" "$tmp/seed.json"
         out="$(pw_run "$tmp" install_mcp_playwright 2>&1)"
         calls="$(grep -v '^mcp list$' "$tmp/claude.log" | paste -sd'|' -)"
