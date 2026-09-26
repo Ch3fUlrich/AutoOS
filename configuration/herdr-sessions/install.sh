@@ -125,6 +125,38 @@ render_unit() {
         -e "s#@WORKDIR@#$WORKDIR#g" -e "s#@PROFILE_PATH@#$PROFILE_CONF#g" "$1"
 }
 
+# unique_backup_path <path>: the next "<path>.autoos-backup-<ts>[-N]" name that
+# is not already taken (file or symlink) -- the "two drifted runs in the same
+# second must not overwrite the first backup" loop, shared by install_unit and
+# remove_unit so the two cannot drift apart (qoder review finding 2: they once
+# had two separate implementations and only one had the loop).
+unique_backup_path() {
+    local target="$1" backup base n=0
+    backup="$target.autoos-backup-$(date +%Y%m%d%H%M%S)"
+    base="$backup"
+    while [ -e "$backup" ] || [ -L "$backup" ]; do
+        n=$((n + 1)); backup="$base-$n"
+    done
+    printf '%s\n' "$backup"
+}
+
+# back_up_or_die <path>: copies <path> to unique_backup_path's next free name.
+# Fail-closed, same as install_unit always was: a copy failure prints FATAL
+# and exits the whole script, rather than letting a caller (remove_unit, in
+# particular) carry on as though the only copy of the file had been saved.
+# Success leaves the path it used in BACKUP_PATH -- a global, not a command
+# substitution, so the exit above stops the real script, not just a $(...)
+# subshell.
+back_up_or_die() {
+    local target="$1"
+    BACKUP_PATH="$(unique_backup_path "$target")"
+    if ! cp -p "$target" "$BACKUP_PATH"; then
+        rm -f "$BACKUP_PATH"
+        echo "FATAL: could not back up $target -- left it unchanged" >&2
+        exit 1
+    fi
+}
+
 # Idempotent: an unchanged render is left alone ("already current"); a changed
 # one is backed up before being replaced, same as AGENTS.md rule 5 for any file
 # this repository did not create from nothing.
@@ -142,19 +174,8 @@ install_unit() {  # $1=src template  $2=dest path
         return
     fi
     if [ -f "$2" ]; then
-        # A name that did not exist yet: two drifted re-runs in the same second
-        # must not overwrite the first backup (lib/linux/install.sh backup_path).
-        local backup n=0; backup="$2.autoos-backup-$(date +%Y%m%d%H%M%S)"
-        local base="$backup"
-        while [ -e "$backup" ] || [ -L "$backup" ]; do
-            n=$((n + 1)); backup="$base-$n"
-        done
-        if ! cp -p "$2" "$backup"; then
-            rm -f "$backup" "$tmp"
-            echo "FATAL: could not back up $2 -- left it unchanged" >&2
-            exit 1
-        fi
-        echo "    $name: differs from the installed copy -- backed up to $(basename "$backup")"
+        back_up_or_die "$2"
+        echo "    $name: differs from the installed copy -- backed up to $(basename "$BACKUP_PATH")"
     fi
     install -m 0644 "$tmp" "$2"
     rm -f "$tmp"
@@ -185,10 +206,9 @@ remove_unit() {  # $1=dest path
         return 0
     fi
     systemctl "${SYSTEMCTL_SCOPE[@]}" disable "$name" >/dev/null 2>&1 || true
-    local backup; backup="$dest.autoos-backup-$(date +%Y%m%d%H%M%S)"
-    cp -p "$dest" "$backup"
+    back_up_or_die "$dest"
     rm -f "$dest"
-    echo "    $name: disabled, backed up to $(basename "$backup"), removed"
+    echo "    $name: disabled, backed up to $(basename "$BACKUP_PATH"), removed"
     return 0
 }
 

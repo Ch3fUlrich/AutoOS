@@ -7206,6 +7206,59 @@ EOF
     fi
 fi
 
+# Finding 2 (qoder review, L1-backlog.review-herdr-qoder.md, medium):
+# remove_unit's backup had no taken-suffix loop, and cp -p overwrites -- an
+# --unregister backup in the same second as a drifted install's own backup
+# silently destroyed the only copy of the user's original unit. Both paths
+# now share one helper (unique_backup_path + back_up_or_die) instead of
+# drifting apart.
+if it "herdr-sessions: remove_unit's backup uses install_unit's collision loop -- a same-second unregister keeps both backups"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    printf '#!/usr/bin/env bash\necho 20260926130000\n' > "$stub/date"; chmod +x "$stub/date"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    run_hs2() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" "$@" >/dev/null 2>&1; }
+    run_hs2   # fresh install: no backup yet
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    echo "# original edit" >> "$unit"
+    run_hs2   # drift, same stubbed second: backs up "# original edit" content
+    run_hs2 --unregister   # same stubbed second: must not overwrite that backup
+    n="$(ls "$tmp/home/.config/systemd/user" 2>/dev/null | grep -c 'herdr-sessions-restore.service.autoos-backup' || true)"
+    original_kept="$(grep -l '# original edit' "$tmp"/home/.config/systemd/user/herdr-sessions-restore.service.autoos-backup* 2>/dev/null | wc -l)"
+    rm -rf "$tmp"
+    if [[ "$n" == 2 && "$original_kept" -ge 1 ]]; then
+        pass
+    else
+        fail "backups=$n, backups holding the original edit=$original_kept (unregister overwrote the install backup)"
+    fi
+fi
+
+if it "herdr-sessions: remove_unit is fail-closed -- a backup that cannot be written leaves the unit in place"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    cat > "$stub/cp" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$stub/cp"
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "rc=0 although the backup copy failed: ${out:0:300}" >&2; }
+    [[ "$out" == *"FATAL"*"back up"* ]] || { ok=0; echo "no FATAL backup message: ${out:0:300}" >&2; }
+    [[ -f "$unit" ]] || { ok=0; echo "the unit was removed although its backup failed" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "remove_unit is not fail-closed on a backup failure"; fi
+fi
+
 # Item 8 (L0): a single pane process killed by the kernel OOM killer must not
 # take the whole herdr-server unit down with it -- systemd's default
 # OOMPolicy=stop did exactly that, twice, ending every pane in the session.
