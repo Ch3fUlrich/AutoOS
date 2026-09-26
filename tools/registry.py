@@ -8,6 +8,7 @@ Three subcommands:
     python3 tools/registry.py render omniroute [--registry PATH] [--out PATH] [--check]
     python3 tools/registry.py render litellm   [--registry PATH] [--config PATH] [--check] [--out PATH]
     python3 tools/registry.py render ide       [--registry PATH] [--ide-models PATH] [--check] [--out PATH]
+    python3 tools/registry.py render openhands [--registry PATH] [--tier-profiles PATH] [--check] [--out PATH]
 
 `check` proves the registry obeys spec 3.1's rules:
 
@@ -77,6 +78,22 @@ default (unflagged) run now sources its model list from this same render
 instead of reading catalog/ide-models.json directly - its own --catalog flag
 still reads that file's shape for anyone who passes it explicitly.
 
+`render openhands` renders configuration/openhands/tier-profiles.json - the
+single source tools/sync-openhands-profiles.py projects into real OpenHands
+LLM profiles, and (via tools/sync-ide-models.py's own rewrite_tier_profiles())
+the max_input_tokens/max_output_tokens the `render ide` render above already
+keeps in sync there and in configuration/openhands/config.toml - from a
+loaded catalog/ai-registry.json (spec 3.2 phase 1, task A4d; docs/plans/
+2026-09-25-registry-mapping.md section 13 documents the mapping). It never
+writes configuration/openhands/tier-profiles.json itself: with no flag the
+render goes to stdout; --out PATH writes it elsewhere; --check compares a
+fresh render against --tier-profiles (default: the committed tier-
+profiles.json) and exits 1, naming each differing tier, when they are not
+semantically equal. tools/sync-openhands-profiles.py's default (unflagged)
+run now sources its spec from this same render instead of reading
+configuration/openhands/tier-profiles.json directly - its own --spec flag
+still reads that file's shape for anyone who passes it explicitly.
+
 Stdlib only. Path-independent: everything is anchored on the repository root
 derived from this file's own location.
 """
@@ -98,6 +115,7 @@ DEFAULT_OMNIROUTE_COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.j
 SYNC_ROUTER_TIERS_PATH = ROOT / "tools" / "sync-router-tiers.py"
 DEFAULT_LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
 DEFAULT_IDE_MODELS_PATH = ROOT / "catalog" / "ide-models.json"
+DEFAULT_TIER_PROFILES_PATH = ROOT / "configuration" / "openhands" / "tier-profiles.json"
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMMENT_KEYS = ("$comment", "comment")
@@ -979,6 +997,232 @@ def ide_diff(rendered: dict, current: dict) -> list:
 
 
 # ===========================================================================
+# render - openhands tier-profiles.json (spec 3.2 phase 1, task A4d)
+# ===========================================================================
+
+# configuration/openhands/tier-profiles.json's own top-level $comment (rename
+# history, the openai/-prefix-stripping measurement, the push-order rationale,
+# retired_ids provenance) is pure human documentation, redistributed into
+# docs/plans/2026-09-25-registry-mapping.md section 6 and section 13 during
+# the A1-A3 migration - the same "derived, not reproduced" treatment
+# render_omniroute()/render_ide() give their own $comment (mapping doc
+# sections 10 and 12). This render emits only the spec-3.2 marker line;
+# openhands_diff() ignores the whole "$comment" key.
+OPENHANDS_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
+
+# gateway_base_url/litellm_base_url are container-side constants
+# (host.docker.internal) shared by every omniroute-*/litellm-* profile - a
+# Docker Desktop DNS convention, not a per-model registry fact (mapping doc
+# section 6: "out of scope for models/routes/providers"). Reproduced here as
+# literal constants, the same convention OMNIROUTE_RETIRED_IDS/IDE_MODEL_ORDER
+# use for a fact no registry field carries.
+OPENHANDS_GATEWAY_BASE_URL = "http://host.docker.internal:20128/v1"
+OPENHANDS_LITELLM_BASE_URL = "http://host.docker.internal:4000/v1"
+
+# tier-profiles.json's own "retired_ids" (profile ids the spec listed before
+# the 2026-09-23 rename) has no registry entry at all - same category as
+# OMNIROUTE_RETIRED_IDS (mapping doc section 4): "there is nothing to
+# migrate". Order carries no semantics here either (tools/sync-openhands-
+# profiles.py's push_profiles() immediately does `frozenset(legacy_owned)`),
+# so openhands_diff() below compares it as a set, not an ordered list.
+OPENHANDS_RETIRED_IDS = [
+    "omniroute-tier1", "omniroute-tier1-clean",
+    "omniroute-tier2", "omniroute-tier2-clean", "omniroute-tier2-credit",
+    "omniroute-tier3", "omniroute-tier3-clean", "omniroute-tier3-credit",
+    "omniroute-rag",
+    "litellm-tier1", "litellm-tier2", "litellm-tier3",
+]
+
+# The one standalone routes.<id>.surfaces.openhands.direct_profile tier
+# (mapping doc section 6: today only spark-1.3-contributor) is named after
+# the OpenRouter leg's own bare model spelling ("muse-spark-1.3-contributor"),
+# not the route id ("spark-1.3-contributor") - so, unlike every gateway tier
+# below, its tiers[].id cannot be computed as "<gateway>-<route id>". A
+# literal, hand-maintained {tier id: route id} table, the same convention as
+# OPENHANDS_RETIRED_IDS/OPENHANDS_TIER_ORDER for a fact no rule derives.
+OPENHANDS_DIRECT_PROFILE_IDS = {
+    "openrouter-muse-spark-1.3-contributor": "spark-1.3-contributor",
+}
+
+# tiers[] push order: tier-profiles.json's own $comment, "ORDER IS THE PUSH
+# PRIORITY (reordered 2026-09-25) ... a human decision" - not derivable from
+# any registry field (routes is a dict, and catalog/ai-registry.json's own
+# keys are alphabetical). A literal, hand-copied constant, the same
+# convention OMNIROUTE_RETIRED_IDS/IDE_MODEL_ORDER use; render_openhands()
+# raises, naming every id at once, if a future openhands profile is added or
+# removed without updating this list - never a silent reorder or drop.
+OPENHANDS_TIER_ORDER = (
+    "omniroute-t1-orchestrator",
+    "omniroute-t2-worker",
+    "omniroute-t3-driver",
+    "omniroute-t2-orchestrator",
+    "omniroute-t2-worker-clean",
+    "omniroute-t3-driver-clean",
+    "omniroute-t4-rag",
+    "omniroute-opus-4-6",
+    "omniroute-gemini-3.8-flash",
+    "omniroute-t2-worker-free-only",
+    "omniroute-deepseek-v4.1-flash",
+    "omniroute-t3-driver-free-only",
+    "omniroute-t1-orchestrator-clean",
+    "omniroute-spark-1.3-contributor",
+    "openrouter-muse-spark-1.3-contributor",
+    "litellm-t1-orchestrator",
+    "litellm-t2-worker",
+    "litellm-t3-driver",
+    "litellm-t2-worker-free-only",
+    "litellm-t3-driver-free-only",
+    "litellm-t1-orchestrator-free-only",
+    "omniroute-t1-orchestrator-free-only",
+)
+
+OPENHANDS_GATEWAYS = ("omniroute", "litellm")
+
+
+def _openhands_tier_membership(registry: dict) -> dict:
+    """{tier id: (gateway, route id)} for every routes.<id>.surfaces.<gw>.
+    openhands_profile in the registry, plus {tier id: None} for every
+    surfaces.openhands.direct_profile (looked up in OPENHANDS_DIRECT_PROFILE_
+    IDS) - the ground truth render_openhands() checks OPENHANDS_TIER_ORDER
+    against. Raises ValueError, naming the route, when a direct_profile
+    route has no entry in that table."""
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+
+    wanted = {}
+    for route_id in sorted(routes):
+        route = routes[route_id]
+        if not isinstance(route, dict):
+            continue
+        surfaces = route.get("surfaces")
+        surfaces = surfaces if isinstance(surfaces, dict) else {}
+        for gw in OPENHANDS_GATEWAYS:
+            surface = surfaces.get(gw)
+            if isinstance(surface, dict) and isinstance(surface.get("openhands_profile"), dict):
+                wanted["%s-%s" % (gw, route_id)] = (gw, route_id)
+        openhands_surface = surfaces.get("openhands")
+        if isinstance(openhands_surface, dict) and isinstance(openhands_surface.get("direct_profile"), dict):
+            tier_id = next(
+                (tid for tid, rid in OPENHANDS_DIRECT_PROFILE_IDS.items() if rid == route_id), None)
+            if tier_id is None:
+                raise ValueError(
+                    "routes.%s has a surfaces.openhands.direct_profile with no entry in "
+                    "OPENHANDS_DIRECT_PROFILE_IDS" % route_id)
+            wanted[tier_id] = None
+    return wanted
+
+
+def render_openhands(registry: dict) -> dict:
+    """Render configuration/openhands/tier-profiles.json's shape from a loaded
+    catalog/ai-registry.json document (spec 3.2 phase 1, task A4d). Pure: no
+    I/O, no clock, no randomness - the same registry always renders the same
+    dict.
+
+    Every routes.<id>.surfaces.<omniroute|litellm>.openhands_profile becomes
+    one tier (id "<gateway>-<route id>"; "gateway" itself is only present for
+    a litellm tier - an omniroute one carries none, matching today's file),
+    plus one tier per standalone surfaces.openhands.direct_profile (mapping
+    doc section 6: today only spark-1.3-contributor, named via OPENHANDS_
+    DIRECT_PROFILE_IDS). OPENHANDS_TIER_ORDER fixes the push-priority order
+    (a human decision, not a registry field - see its own comment above);
+    render_openhands() raises, naming every id at once, when the registry and
+    that constant disagree on which profiles exist.
+    """
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+
+    wanted = _openhands_tier_membership(registry)
+    have = set(OPENHANDS_TIER_ORDER)
+    missing = sorted(set(wanted) - have)
+    extra = sorted(have - set(wanted))
+    if missing or extra:
+        raise ValueError(
+            "OPENHANDS_TIER_ORDER is out of sync with the registry's openhands profiles - "
+            "missing: %s; unexpected: %s" % (", ".join(missing) or "none", ", ".join(extra) or "none"))
+
+    tiers = []
+    for tier_id in OPENHANDS_TIER_ORDER:
+        target = wanted[tier_id]
+        if target is None:
+            route_id = OPENHANDS_DIRECT_PROFILE_IDS[tier_id]
+            profile = routes[route_id]["surfaces"]["openhands"]["direct_profile"]
+            tier = {"id": tier_id, "gateway": profile.get("gateway")}
+            if "model" in profile:
+                tier["model"] = profile["model"]
+            if "base_url" in profile:
+                tier["base_url"] = profile["base_url"]
+            tier["max_input_tokens"] = profile.get("max_input_tokens")
+            tier["max_output_tokens"] = profile.get("max_output_tokens")
+            tier["reasoning"] = bool(profile.get("reasoning"))
+            tiers.append(tier)
+            continue
+
+        gw, route_id = target
+        profile = routes[route_id]["surfaces"][gw]["openhands_profile"]
+        tier = {"id": tier_id}
+        if gw == "litellm":
+            tier["gateway"] = "litellm"
+        tier["model"] = profile.get("model", "openai/%s" % route_id)
+        tier["max_input_tokens"] = profile.get("max_input_tokens")
+        tier["max_output_tokens"] = profile.get("max_output_tokens")
+        tier["reasoning"] = bool(profile.get("reasoning"))
+        tiers.append(tier)
+
+    return {
+        "$comment": OPENHANDS_GENERATED_COMMENT,
+        "gateway_base_url": OPENHANDS_GATEWAY_BASE_URL,
+        "litellm_base_url": OPENHANDS_LITELLM_BASE_URL,
+        "retired_ids": list(OPENHANDS_RETIRED_IDS),
+        "tiers": tiers,
+    }
+
+
+def _canonical_openhands(doc) -> dict:
+    """Normalize a tier-profiles.json-shaped dict for semantic-equality
+    comparison: drop "$comment" entirely (see OPENHANDS_GENERATED_COMMENT's
+    comment above) and treat "retired_ids" as unordered (push_profiles()
+    immediately turns it into a frozenset - see OPENHANDS_RETIRED_IDS's own
+    comment). Unlike _canonical_ide(), "tiers" stays an ordered list - order
+    is semantic here (OPENHANDS_TIER_ORDER's comment)."""
+    if not isinstance(doc, dict):
+        return {}
+    out = {k: v for k, v in doc.items() if k != "$comment"}
+    retired = out.get("retired_ids")
+    if isinstance(retired, list):
+        out["retired_ids"] = sorted(retired, key=str)
+    return out
+
+
+def openhands_diff(rendered: dict, current: dict) -> list:
+    """Return the keys where a fresh render_openhands() output and today's
+    parsed tier-profiles.json differ, ignoring $comment and the order of
+    "retired_ids" (see _canonical_openhands). Reports "tiers.<id>" for a
+    content difference and "tiers[] order" separately when the two lists
+    cover the same ids in a different order - empty means semantically equal,
+    the spec 3.2 phase-1 gate for configuration/openhands/tier-profiles.json."""
+    a = _canonical_openhands(rendered)
+    b = _canonical_openhands(current)
+
+    problems = []
+    a_tiers = {t["id"]: t for t in a.get("tiers") or [] if isinstance(t, dict) and "id" in t}
+    b_tiers = {t["id"]: t for t in b.get("tiers") or [] if isinstance(t, dict) and "id" in t}
+    for tier_id in sorted(set(a_tiers) | set(b_tiers)):
+        if a_tiers.get(tier_id) != b_tiers.get(tier_id):
+            problems.append("tiers.%s" % tier_id)
+
+    a_order = [t.get("id") for t in a.get("tiers") or []]
+    b_order = [t.get("id") for t in b.get("tiers") or []]
+    if not problems and a_order != b_order:
+        problems.append("tiers[] order")
+
+    for key in sorted((set(a) | set(b)) - {"tiers"}):
+        if a.get(key) != b.get(key):
+            problems.append(key)
+
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -1132,6 +1376,37 @@ def _cmd_render_ide(args) -> int:
     return 0
 
 
+def _cmd_render_openhands(args) -> int:
+    registry_doc = load(args.registry)
+    try:
+        rendered = render_openhands(registry_doc)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
+    if args.check:
+        tier_profiles_path = Path(args.tier_profiles)
+        if not tier_profiles_path.exists():
+            print("no such file: %s" % tier_profiles_path)
+            return 1
+        current = load(tier_profiles_path)
+        problems = openhands_diff(rendered, current)
+        if problems:
+            for key in problems:
+                print("differs: %s" % key)
+            return 1
+        print("ok: render openhands matches %s" % tier_profiles_path)
+        return 0
+
+    text = render_json(rendered)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print("wrote %s" % args.out)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="registry.py",
@@ -1197,6 +1472,21 @@ def main(argv=None) -> int:
         "--ide-models", dest="ide_models", default=str(DEFAULT_IDE_MODELS_PATH),
         help="today's ide-models.json to compare against, --check only (default: %(default)s)")
 
+    openhands_parser = render_targets.add_parser(
+        "openhands", help="render configuration/openhands/tier-profiles.json")
+    openhands_parser.add_argument(
+        "--registry", default=str(DEFAULT_REGISTRY_PATH),
+        help="registry JSON to render from (default: %(default)s)")
+    openhands_parser.add_argument(
+        "--out", default=None,
+        help="write the render here instead of stdout (never the real tier-profiles.json)")
+    openhands_parser.add_argument(
+        "--check", action="store_true",
+        help="exit 1 if the render differs semantically from --tier-profiles")
+    openhands_parser.add_argument(
+        "--tier-profiles", dest="tier_profiles", default=str(DEFAULT_TIER_PROFILES_PATH),
+        help="today's tier-profiles.json to compare against, --check only (default: %(default)s)")
+
     args = parser.parse_args(argv)
     if args.command == "check":
         return _cmd_check(args)
@@ -1209,6 +1499,8 @@ def main(argv=None) -> int:
             return _cmd_render_litellm(args)
         if args.target == "ide":
             return _cmd_render_ide(args)
+        if args.target == "openhands":
+            return _cmd_render_openhands(args)
         return 2
     return 2
 
