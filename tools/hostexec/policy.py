@@ -319,7 +319,7 @@ def _basename(token: str) -> str:
 
 
 _WRAPPERS = {"env", "nice", "nohup", "timeout", "xargs", "ionice", "stdbuf", "setsid"}
-_SUDO_FAMILY = {"sudo", "su", "doas", "pkexec", "run0"}
+_SUDO_FAMILY = {"sudo", "su", "doas", "pkexec", "run0", "sudo-rs"}
 # Exec wrappers that are always denied as no-inline-shell (L1 high):
 # script allocates a pty, systemd-run/at/batch create scheduled/transient
 # jobs that outlive the audited call, setpriv/chroot/unshare/nsenter change
@@ -1114,6 +1114,7 @@ def _docker_root_problem(head: Sequence[str]) -> str | None:
 _SHELL_NAMES = {"sh", "bash", "zsh", "dash", "fish",
                 "busybox", "ksh", "mksh", "csh", "tcsh", "ash"}
 _PYTHON_RE = re.compile(r"^python[0-9.]*$")
+_LUA_RE = re.compile(r"^lua[0-9.]*$")
 # awk pipe-to-command: print | "cmd" and "cmd" | getline (r2). Single-pipe
 # only ((?<!\|)\|(?!\|)) so logical-or `||` never matches.
 _AWK_PIPE_QUOTE_RE = re.compile(r"(?<!\|)\|(?!\|)\s*[\"']")
@@ -1171,6 +1172,15 @@ def _inline_shell_problem(argv: Sequence[str]) -> str | None:
         return "node -e/-p runs inline code, not a script path"
     if base == "ruby" and _short_opt_cluster_has(tail, "e"):
         return "ruby -e runs inline code, not a script path"
+    if base == "php" and _short_opt_cluster_has(tail, "r"):
+        return "php -r runs inline code, not a script path"
+    if (base == "lua" or base == "luajit" or _LUA_RE.match(base)) \
+            and _short_opt_cluster_has(tail, "e"):
+        return "lua -e runs inline code, not a script path"
+    if base.lower() == "rscript" and _short_opt_cluster_has(tail, "e"):
+        return "Rscript -e runs inline code, not a script path"
+    if base == "julia" and _short_opt_cluster_has(tail, "eE"):
+        return "julia -e/-E runs inline code, not a script path"
     if base in ("awk", "gawk", "mawk", "nawk"):
         for prog in tail:
             if "system(" in prog:
@@ -1178,6 +1188,29 @@ def _inline_shell_problem(argv: Sequence[str]) -> str | None:
             if _AWK_PIPE_QUOTE_RE.search(prog) or _AWK_PIPE_GETLINE_RE.search(prog) \
                     or _AWK_QUOTE_PIPE_RE.search(prog):
                 return "awk program pipes to a command; argv only, no shell escape"
+    if base in ("vim", "vi", "nvim", "view", "ex"):
+        for idx, tok in enumerate(tail):
+            if tok == "-c":
+                nxt = tail[idx + 1] if idx + 1 < len(tail) else ""
+                if "!" in nxt:
+                    return f"{base} -c with '!' runs a shell command"
+                continue
+            if tok.startswith("-c") and len(tok) > 2:
+                if "!" in tok[2:]:
+                    return f"{base} -c with '!' runs a shell command"
+                continue
+            if tok.startswith("+") and len(tok) > 1 and "!" in tok:
+                return f"{base} +cmd with '!' runs a shell command"
+    if base in ("less", "more"):
+        for tok in tail:
+            if tok.startswith("+") and "!" in tok:
+                return f"{base} +! runs a shell command"
+    if base == "man":
+        for tok in tail:
+            if tok == "-P" or tok.startswith("--pager"):
+                return "man -P/--pager runs a pager command"
+            if tok.startswith("-P") and len(tok) > 2:
+                return "man -P/--pager runs a pager command"
     if base == "tar":
         for idx, tok in enumerate(tail):
             if tok.startswith("--checkpoint-action"):
