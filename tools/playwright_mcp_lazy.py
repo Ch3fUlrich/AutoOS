@@ -22,7 +22,14 @@ Environment (all optional):
   AUTOOS_PLAYWRIGHT_IDLE_SECONDS     idle period before the backend is stopped (900)
   AUTOOS_PLAYWRIGHT_MCP_CACHE        handshake cache file (default
                                      $XDG_CACHE_HOME/autoos/playwright-mcp-handshake.json,
-                                     else ~/.cache/autoos/...); written atomically, mode 600
+                                     else ~/.cache/autoos/...); written atomically, mode 600,
+                                     in a directory created with mode 700. It is read only
+                                     if it is a regular file (never through a symlink) of at
+                                     most 4 MiB, owned by the proxy's user and not writable by
+                                     group or others, in a directory that is too: otherwise it
+                                     is ignored with one stderr line, as a cold cache (an
+                                     existing group-writable directory, e.g. from a umask of
+                                     002, is refused: chmod go-w it)
   AUTOOS_PLAYWRIGHT_HANDSHAKE_SECONDS  how long the backend may take to answer the
                                      replayed handshake (60)
 
@@ -41,12 +48,14 @@ Choices the spec left open (each is covered by a test):
 Python 3.8+, standard library only. Linux and macOS (the backend gets its own session
 so a terminal Ctrl-C reaches the proxy, which then stops it in an orderly way).
 """
+import errno
 import json
 import math
 import os
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -59,6 +68,7 @@ DEFAULT_HANDSHAKE_SECONDS = 60.0
 EOF_WAIT_SECONDS = 5.0      # after closing the backend's stdin, before terminate
 TERM_WAIT_SECONDS = 3.0     # after terminate, before kill
 DOCKER_STOP_SECONDS = 30.0
+MAX_CACHE_BYTES = 4 * 1024 * 1024   # a handshake cache is a few KiB: anything larger is not one
 BACKEND_ERROR = -32000
 INVALID_REQUEST = -32600
 INTERNAL_ERROR = -32603
@@ -162,8 +172,28 @@ def parse_line(raw):
         return _MISSING
 
 
+def untrusted(st, what):
+    """Why the cache file or its directory cannot be believed, or None.
+
+    The cache decides which tool definitions the model is shown: whoever can write it can
+    put text in front of the model. So it must belong to the user the proxy runs as, and
+    nobody else may be able to write it."""
+    if st.st_uid != os.geteuid():
+        return "%s belongs to another user" % what
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return "%s is writable by group or others" % what
+    return None
+
+
+def ignore_cache(why):
+    log("ignoring the handshake cache: %s" % why)
+
+
 class Cache(object):
-    """The backend's last `initialize` result and `tools/list` result, on disk."""
+    """The backend's last `initialize` result and `tools/list` result, on disk.
+
+    A cache that cannot be trusted or read is treated as missing: the proxy then starts
+    the backend for the handshake, as on a cold start, and says why once on stderr."""
 
     def __init__(self, path):
         self.path = path
@@ -171,16 +201,61 @@ class Cache(object):
         self.tools = None
         self.accepted = []      # protocol versions the backend has answered with
         self._saved = None      # the text last read or written: identical saves are skipped
+        self.writable = True    # False when the directory itself is not trusted: nothing is written into it
         self._load()
 
-    def _load(self):
+    def _read(self):
+        """The file's bytes, or None: missing, or not something to believe (already reported)."""
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
         try:
-            with open(self.path, encoding="utf-8") as fh:
-                data = loads(fh.read())
-        except (OSError, ValueError):
+            fd = os.open(self.path, flags)      # NOFOLLOW: a symlink is refused; NONBLOCK: a FIFO cannot hang us
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            ignore_cache("the file is a symbolic link" if exc.errno == errno.ELOOP
+                         else "the file cannot be opened (%s)" % type(exc).__name__)
+            return None
+        try:
+            st = os.fstat(fd)                   # of the opened file: nothing can be swapped in after the check
+            why = None if stat.S_ISREG(st.st_mode) else "the file is not a regular file"
+            why = why or untrusted(st, "the file")
+            if why:
+                ignore_cache(why)
+                return None
+            with os.fdopen(fd, "rb", closefd=False) as fh:
+                data = fh.read(MAX_CACHE_BYTES + 1)
+        except OSError as exc:
+            ignore_cache("the file cannot be read (%s)" % type(exc).__name__)
+            return None
+        finally:
+            os.close(fd)
+        if len(data) > MAX_CACHE_BYTES:
+            ignore_cache("the file is larger than %d MiB" % (MAX_CACHE_BYTES // (1024 * 1024)))
+            return None
+        return data
+
+    def _load(self):
+        directory = os.path.dirname(self.path) or "."
+        try:
+            found = os.stat(directory)          # follows a symlinked directory: the target is what counts
+        except OSError:
+            found = None                        # no directory yet: a cold cache, `save` creates it
+        why = untrusted(found, "the cache directory") if found is not None else None
+        if why:
+            self.writable = False
+            ignore_cache(why)
+            return
+        raw = self._read()
+        if raw is None:
+            return
+        try:
+            data = loads(raw.decode("utf-8"))
+        except Exception:   # bad UTF-8, bad JSON, absurd nesting (RecursionError): not a cache
+            ignore_cache("the file is not valid JSON")
             return
         init = data.get("initialize") if isinstance(data, dict) else None
         if not (isinstance(init, dict) and isinstance(init.get("protocolVersion"), str)):
+            ignore_cache("the file holds no handshake")
             return
         self.initialize = init
         tools = data.get("tools")
@@ -213,6 +288,8 @@ class Cache(object):
         return result
 
     def save(self):
+        if not self.writable:
+            return
         data = {"version": 1, "initialize": self.initialize, "accepted": self.accepted}
         if self.tools is not None:
             data["tools"] = self.tools
