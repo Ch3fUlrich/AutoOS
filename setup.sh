@@ -51,6 +51,8 @@ AutoOS — post-install provisioning for Linux
   --profile <name>   workstation | ai-coding | light | server | custom
   --only <ids>       Comma-separated component ids; installs only these
   --dry-run          Print every command without changing anything
+  --update           Also check installed components that can tell a newer version
+                     (Antigravity Hub) and update them; without it they are skipped
   --yes, -y          Non-interactive: take profile defaults, skip confirmation
   --no-color         Disable ANSI colour
   --claude-sessions [status|snapshot|restore|configure]
@@ -99,6 +101,7 @@ while [[ $# -gt 0 ]]; do
         --profile) PROFILE="${2:-}"; shift 2 ;;
         --only)    ONLY="${2:-}"; shift 2 ;;
         --dry-run) AUTOOS_DRY_RUN=1; shift ;;
+        --update)  AUTOOS_UPDATE=1; export AUTOOS_UPDATE; shift ;;
         --yes|-y)  ASSUME_YES=1; shift ;;
         --no-color) AUTOOS_NO_COLOR=1; shift ;;
         --serve)   DO_SERVE=1; shift ;;
@@ -609,7 +612,13 @@ for id in $PLAN_IDS; do
     tag=""
     if [[ " $PLAN_AUTO " == *" $id "* ]]; then tag="$(_c muted)(dependency)$(_c reset)"; fi
     printf '  %2d. %-22s %-8s %s %s\n' "$n" "${CAT_NAME[i]}" "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "$tag"
-    if (( CAT_INSTALLED[i] )); then ui_ok "✓ Already installed - package will be skipped"; fi
+    if (( CAT_INSTALLED[i] )); then
+        if [[ "$AUTOOS_UPDATE" == 1 ]] && component_is_updatable "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}"; then
+            ui_ok "✓ Already installed - checking for a newer version (--update)"
+        else
+            ui_ok "✓ Already installed - package will be skipped"
+        fi
+    fi
     if [[ "${CAT_PROVIDER[i]}" == manual ]]; then ui_warn "Action required: ${CAT_HOMEPAGE[i]}"; fi
     if [[ -n "${CAT_NOTES[i]}" ]]; then ui_muted "      ${CAT_NOTES[i]}"; fi
 done

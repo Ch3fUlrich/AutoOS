@@ -577,7 +577,7 @@
         {
           "id": "antigravity",
           "name": "Antigravity",
-          "description": "Google's agent-first IDE",
+          "description": "Antigravity 2.0, Google's agentic desktop app (Electron)",
           "provider": "script",
           "package": "antigravity",
           "arch": [
@@ -589,8 +589,9 @@
           "profiles": [
             "workstation"
           ],
-          "notes": "Desktop IDE — hidden on headless and arm64 machines. Adds Google's signed apt repo, which is frozen at 1.23.2.",
-          "verify": "antigravity --version",
+          "notes": "Antigravity Hub 2.x (Electron desktop app) — x64 only, so hidden on arm64 machines. Newest version discovered from winget-pkgs (needs the GitHub API; GITHUB_TOKEN raises its rate limit), installed user-local from Google's Linux tarball into ~/.local/opt/antigravity (command: antigravity, no sudo). Google publishes no sha256 for it (no published sha256): size, gzip, member list, ELF and version are checked instead. setup.sh --update checks for a newer version.",
+          "verify": "test -x ~/.local/opt/antigravity/antigravity",
+          "updatable": true,
           "homepage": "https://antigravity.google/"
         },
         {
