@@ -33,6 +33,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   migrate `aside` directory) and `templates/rescue-bootstrap.sh` named backups `<file>.autoos-backup-<second>` and
   overwrote an earlier backup taken in the same second. They now pick a name that did not exist yet (`-1`, `-2`, ...,
   the rule of `lib/linux/install.sh` `backup_path`), and a failed copy leaves the file untouched.
+- `ai-stack.sh` now gives migration and rollback archives an unused `-N.tar.gz` name, while WSL CAO relocation uses a free `-N` directory and leaves native state untouched if it cannot be backed up.
 - `ai-stack.sh init` (also run by `up` and `migrate`) now stops when a config backup fails instead of continuing with
   a stack.env it could not update. `configuration/start-stack.sh` moves an unparseable OpenHands `settings.json` aside
   under a unique name and deletes it only after the copy succeeded.

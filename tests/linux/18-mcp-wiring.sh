@@ -838,3 +838,39 @@ if it "setup_wsl_agent_home is a no-op off WSL and dry-runnable on WSL"; then
     else fail "rc_off=$rc_off rc_dry=$rc_dry"; fi
 fi
 
+if it "backup collision: CAO relocation preserves existing same-second backups"; then
+    tmp="$(mktemp -d)"
+    legacy="$tmp/.aws/cli-agent-orchestrator"
+    base="$legacy.backup-20260101-000000"
+    mkdir -p "$legacy/db" "$base" "$tmp/bin"
+    printf 'first\n' >"$legacy/db/state"
+    printf 'original backup\n' >"$base/marker"
+    printf '#!/bin/sh\nprintf "%%s\\n" 20260101-000000\n' >"$tmp/bin/date"
+    printf '#!/bin/sh\nexit 1\n' >"$tmp/bin/python3"
+    chmod +x "$tmp/bin/date" "$tmp/bin/python3"
+    (
+        PATH="$tmp/bin:$PATH"
+        SYS_HOME="$tmp"
+        SYS_IS_WSL=1
+        AUTOOS_DRY_RUN=0
+        setup_wsl_agent_home >/dev/null
+    )
+    rc_first=$?
+    printf 'second\n' >"$legacy/db/state"
+    (
+        PATH="$tmp/bin:$PATH"
+        SYS_HOME="$tmp"
+        SYS_IS_WSL=1
+        AUTOOS_DRY_RUN=0
+        setup_wsl_agent_home >/dev/null
+    )
+    rc_second=$?
+    ok=1
+    [[ $rc_first -eq 0 && $rc_second -eq 0 ]] || { ok=0; echo "relocation failed: first=$rc_first second=$rc_second" >&2; }
+    [[ "$(cat "$base/marker" 2>/dev/null)" == 'original backup' ]] || { ok=0; echo "existing backup was changed" >&2; }
+    [[ "$(cat "$base-1/db/state" 2>/dev/null)" == first ]] || { ok=0; echo "first backup is missing or wrong" >&2; }
+    [[ "$(cat "$base-2/db/state" 2>/dev/null)" == second ]] || { ok=0; echo "second backup is missing or wrong" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "CAO relocation overwrote or nested a same-second backup"; fi
+fi
+
