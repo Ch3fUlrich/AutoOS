@@ -178,7 +178,7 @@ shellcheck_limit_kb() {
 # subshell whose `ulimit -v` is shellcheck_limit_kb. Sets, for the caller:
 #   SHELLCHECK_OUT         everything shellcheck printed (stdout + stderr)
 #   SHELLCHECK_OOM         1 when it ran out of memory, else 0
-#   SHELLCHECK_LIMIT_DESC  the limit that was in force, e.g. "4608 MiB"
+#   SHELLCHECK_LIMIT_MIB   the limit that was in force, empty when there was none
 # and returns shellcheck's own status, EXCEPT out-of-memory, which returns 3
 # (test SHELLCHECK_OOM, not the 3: shellcheck itself uses 3 for a usage error).
 # Out of memory is: rc 251 (the GHC runtime's heap overflow), rc 137 (SIGKILL
@@ -191,10 +191,10 @@ run_shellcheck() {
     SHELLCHECK_OOM=0
     limit_kb="$(shellcheck_limit_kb)"
     if [[ "$limit_kb" =~ ^[1-9][0-9]*$ ]]; then
-        SHELLCHECK_LIMIT_DESC="$(( limit_kb / 1024 )) MiB"
+        SHELLCHECK_LIMIT_MIB="$(( limit_kb / 1024 ))"
         SHELLCHECK_OUT="$( ( ulimit -v "$limit_kb" 2>/dev/null; shellcheck -S warning "$@" ) 2>&1 )"; rc=$?
     else
-        SHELLCHECK_LIMIT_DESC="unlimited"
+        SHELLCHECK_LIMIT_MIB=""
         SHELLCHECK_OUT="$(shellcheck -S warning "$@" 2>&1)"; rc=$?
     fi
     case "$rc" in
@@ -204,6 +204,29 @@ run_shellcheck() {
     esac
     if (( SHELLCHECK_OOM )); then return 3; fi
     return "$rc"
+}
+
+# report_shellcheck RC
+# Turns the result of a run_shellcheck (RC, SHELLCHECK_OOM, SHELLCHECK_OUT) into
+# ONE pass / fail / skip for the case that is running. A finding is a failure with
+# its first lines. Out of memory is a LOUD skip that names the limit and the way
+# to make it a failure (AUTOOS_SHELLCHECK_REQUIRED=1, for a host or CI job that is
+# supposed to have the memory); it is never a silent pass and never an empty fail.
+report_shellcheck() {
+    local rc="$1" msg
+    if (( SHELLCHECK_OOM )); then
+        if [[ -n "$SHELLCHECK_LIMIT_MIB" ]]; then
+            msg="shellcheck ran out of memory at a limit of ${SHELLCHECK_LIMIT_MIB} MiB"
+        else
+            msg="shellcheck ran out of memory with no limit of its own (the host ran short)"
+        fi
+        msg+=" - run it in CI or on a host with more free memory (AUTOOS_SHELLCHECK_REQUIRED=1 makes this a failure)"
+        if [[ "${AUTOOS_SHELLCHECK_REQUIRED:-}" == 1 ]]; then fail "$msg"; else skip "$msg"; fi
+    elif (( rc == 0 )); then
+        pass
+    else
+        fail "$(printf '%s' "$SHELLCHECK_OUT" | head -20)"
+    fi
 }
 
 # ─── Load the libraries under test ──────────────────────────────────────────
@@ -6648,8 +6671,7 @@ fi
 if it "the rescue bootstrap template is shellcheck clean"; then
     files=(templates/rescue-bootstrap.sh templates/ai-dispatcher.sh)
     if has_cmd shellcheck; then
-        out="$(shellcheck -S warning "${files[@]}" 2>&1)"; rc=$?
-        if [[ $rc -eq 0 ]]; then pass; else fail "$(printf '%s' "$out" | head -20)"; fi
+        run_shellcheck "${files[@]}"; report_shellcheck "$?"
     elif has_cmd docker && docker info >/dev/null 2>&1; then
         # MSYS_NO_PATHCONV: on Windows Git Bash, MSYS mangles the bare "/mnt"
         # argument into a host path before docker ever sees it. A no-op
@@ -9957,8 +9979,7 @@ if it "shellcheck is clean"; then
     # CI unnoticed, so "no binary" should not silently mean "no check".
     files=(setup.sh lib/linux/*.sh tests/run-tests.sh)
     if has_cmd shellcheck; then
-        out="$(shellcheck -S warning "${files[@]}" 2>&1)"; rc=$?
-        if [[ $rc -eq 0 ]]; then pass; else fail "$(printf '%s' "$out" | head -20)"; fi
+        run_shellcheck "${files[@]}"; report_shellcheck "$?"
     elif has_cmd docker && docker info >/dev/null 2>&1; then
         # MSYS_NO_PATHCONV: same Windows Git Bash trap as the answer-file
         # template lint above — MSYS rewrites the bare "/mnt" into a host path
@@ -10066,6 +10087,102 @@ if it "shellcheck helper: any other rc is out-of-memory only when the output say
     rm -rf "$d"
     exp=$'rc=3 oom=1\nrc=3 oom=1\nrc=2 oom=0\nrc=1 oom=0\n'
     assert_eq "$res" "$exp"
+fi
+
+# _sc_case_run <sandbox> <stub-rc> <stub-stdout> <case-filter> [NAME=value...]
+# Runs THIS suite in a child process, filtered to one shellcheck case, with the
+# stub first on PATH and the fake meminfo, and prints everything the child said.
+# AUTOOS_SHELLCHECK_REQUIRED is cleared first so the caller's shell cannot leak
+# into the verdict; pass it as a NAME=value argument when a test wants it.
+_sc_case_run() {
+    local d="$1" rc="$2" text="$3" filter="$4"
+    shift 4
+    rm -f "$d/log"
+    env -u AUTOOS_SHELLCHECK_REQUIRED NO_COLOR=1 PATH="$d/bin:$PATH" AUTOOS_MEMINFO="$d/meminfo" \
+        STUB_RC="$rc" STUB_OUT="$text" STUB_LOG="$d/log" "$@" \
+        bash "$ROOT/tests/run-tests.sh" --filter="$filter" 2>&1
+}
+
+# _sc_verdict_is <child-output> <case-name> pass|fail|skip [text]
+# True when the child reported exactly ONE result, of that kind, for that case,
+# and (when given) the text appears in what it printed.
+_sc_verdict_is() {
+    local out="$1" name="$2" kind="$3" text="${4:-}" mark counts
+    case "$kind" in
+        pass) mark='✓'; counts='passed 1   failed 0   skipped 0' ;;
+        fail) mark='✗'; counts='passed 0   failed 1   skipped 0' ;;
+        skip) mark='-'; counts='passed 0   failed 0   skipped 1' ;;
+    esac
+    grep -qF -- "  $mark $name" <<<"$out" || return 1
+    grep -qF -- "$counts" <<<"$out" || return 1
+    [[ -z "$text" ]] || grep -qF -- "$text" <<<"$out"
+}
+
+# _sc_seen <child-output>: the result lines of a child run on one line, for failure messages.
+_sc_seen() { grep -E '^ +[-✓✗] |^      |passed' <<<"$1" | tr '\n' '|'; }
+
+_sc_oom_msg='shellcheck ran out of memory at a limit of 4608 MiB - run it in CI or on a host with more free memory (AUTOOS_SHELLCHECK_REQUIRED=1 makes this a failure)'
+
+if it "shellcheck helper: the case SKIPS loudly, with the memory message, when shellcheck runs out of memory (rc 251)"; then
+    d="$(_sc_sandbox)"
+    out="$(_sc_case_run "$d" 251 'shellcheck: out of memory' 'shellcheck is clean')"
+    rm -rf "$d"
+    if _sc_verdict_is "$out" 'shellcheck is clean' skip "($_sc_oom_msg)"; then pass
+    else fail "wanted one skip carrying the memory message, got: $(_sc_seen "$out")"; fi
+fi
+
+if it "shellcheck helper: AUTOOS_SHELLCHECK_REQUIRED=1 turns that out-of-memory skip into a failure with the same text"; then
+    d="$(_sc_sandbox)"
+    out="$(_sc_case_run "$d" 251 'shellcheck: out of memory' 'shellcheck is clean' AUTOOS_SHELLCHECK_REQUIRED=1)"
+    rm -rf "$d"
+    if _sc_verdict_is "$out" 'shellcheck is clean' fail "$_sc_oom_msg"; then pass
+    else fail "wanted one failure carrying the memory message, got: $(_sc_seen "$out")"; fi
+fi
+
+if it "shellcheck helper: rc 137 with no output (the OOM killer) is the same out-of-memory skip, not an empty failure"; then
+    d="$(_sc_sandbox)"
+    ok=1
+    out="$(_sc_case_run "$d" 137 '' 'shellcheck is clean')"
+    _sc_verdict_is "$out" 'shellcheck is clean' skip "($_sc_oom_msg)" \
+        || { ok=0; echo "not required: $(_sc_seen "$out")" >&2; }
+    out="$(_sc_case_run "$d" 137 '' 'shellcheck is clean' AUTOOS_SHELLCHECK_REQUIRED=1)"
+    _sc_verdict_is "$out" 'shellcheck is clean' fail "$_sc_oom_msg" \
+        || { ok=0; echo "required: $(_sc_seen "$out")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an OOM kill is not reported as an out-of-memory verdict"; fi
+fi
+
+if it "shellcheck helper: a real finding (rc 1) FAILS with the finding, even when its source line says 'out of memory'"; then
+    d="$(_sc_sandbox)"
+    finding=$'In lib/linux/x.sh line 3:\necho "out of memory" $unquoted\n                     ^-- SC2086 (info): Double quote to prevent globbing and word splitting.'
+    out="$(_sc_case_run "$d" 1 "$finding" 'shellcheck is clean')"
+    rm -rf "$d"
+    if _sc_verdict_is "$out" 'shellcheck is clean' fail 'In lib/linux/x.sh line 3:' && grep -qF 'SC2086' <<<"$out"; then pass
+    else fail "wanted one failure that shows the finding, got: $(_sc_seen "$out")"; fi
+fi
+
+if it "shellcheck helper: a clean shellcheck run (rc 0) PASSES the case"; then
+    d="$(_sc_sandbox)"
+    out="$(_sc_case_run "$d" 0 '' 'shellcheck is clean')"
+    rm -rf "$d"
+    if _sc_verdict_is "$out" 'shellcheck is clean' pass; then pass
+    else fail "wanted one pass, got: $(_sc_seen "$out")"; fi
+fi
+
+if it "shellcheck helper: the rescue-bootstrap case runs its own two files through the same helper and verdict"; then
+    d="$(_sc_sandbox)"
+    ok=1
+    name='the rescue bootstrap template is shellcheck clean'
+    out="$(_sc_case_run "$d" 0 '' 'template is shellcheck clean')"
+    _sc_verdict_is "$out" "$name" pass \
+        || { ok=0; echo "clean: $(_sc_seen "$out")" >&2; }
+    grep -qx 'argv: -S warning templates/rescue-bootstrap.sh templates/ai-dispatcher.sh' "$d/log" 2>/dev/null \
+        || { ok=0; echo "argv: $(grep '^argv' "$d/log" 2>&1 | tr '\n' '|')" >&2; }
+    out="$(_sc_case_run "$d" 251 'shellcheck: out of memory' 'template is shellcheck clean')"
+    _sc_verdict_is "$out" "$name" skip "($_sc_oom_msg)" \
+        || { ok=0; echo "oom: $(_sc_seen "$out")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the rescue-bootstrap lint does not share the bounded helper and verdict"; fi
 fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────
