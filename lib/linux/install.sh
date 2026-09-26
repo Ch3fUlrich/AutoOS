@@ -74,19 +74,38 @@ backup_file() {
     printf '%s\n' "$dest"
 }
 
+# backup_name_key <path> <backup>: a string that sorts the backups of <path> in
+# the order backup_path named them - the stamp first, then the -N counter zero-
+# padded, so -10 follows -2 under plain string comparison. Done in bash: BSD and
+# macOS sort have no -V, and plain sort ranks -2 above -10. A stamp that is not
+# YYYYmmdd-HHMMSS (a test can pin any) still splits at its last -<digits>.
+backup_name_key() {
+    local rest="${2#"$1".autoos-backup-}" stamp n=0
+    local std='^([0-9]{8}-[0-9]{6})(-([0-9]+))?$' any='^(.+)-([0-9]+)$'
+    if [[ "$rest" =~ $std ]]; then
+        stamp="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[3]:-0}"
+    elif [[ "$rest" =~ $any ]]; then
+        stamp="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[2]}"
+    else
+        stamp="$rest"
+    fi
+    printf '%s.%010d\n' "$stamp" "$((10#$n))"
+}
+
 # backup_newest <path>: prints the most recent backup of <path>, nothing when
 # there is none. Newest = latest modification time, NOT the last name: ...-10
 # sorts before ...-2. (cp -p keeps the source's mtime, which still orders the
 # backups of one file: each is a copy of a later state.) Equal mtimes fall back
-# to a version sort so -10 still beats -2.
+# to the name (backup_name_key) so -10 still beats -2.
 backup_newest() {
-    local path="$1" f best=""
+    local path="$1" f best="" LC_COLLATE=C
     for f in "${path}".autoos-backup-*; do
         [[ -f "$f" ]] || continue
         if [[ -z "$best" || "$f" -nt "$best" ]]; then
             best="$f"
-        elif ! [[ "$best" -nt "$f" ]]; then
-            best="$(printf '%s\n%s\n' "$best" "$f" | { sort -V 2>/dev/null || sort; } | tail -n 1)"
+        elif ! [[ "$best" -nt "$f" ]] \
+             && [[ "$(backup_name_key "$path" "$f")" > "$(backup_name_key "$path" "$best")" ]]; then
+            best="$f"
         fi
     done
     [[ -z "$best" ]] || printf '%s\n' "$best"
@@ -106,8 +125,11 @@ append_line_once() {
         return 0
     fi
     mkdir -p "$(dirname "$file")"
-    # Never modify a user's file without a copy of the original.
-    [[ -f "$file" ]] && backup_file "$file" >/dev/null
+    # Never modify a user's file without a copy of the original: no copy, no write.
+    if [[ -f "$file" ]] && ! backup_file "$file" >/dev/null; then
+        ui_warn "could not back up ${file} - nothing was changed"
+        return 1
+    fi
     printf '\n# added by AutoOS\n%s\n' "$content" >>"$file"
     ui_ok "updated ${file}"
 }
@@ -567,7 +589,12 @@ install_agy() {
     # these profiles (measured 2026-09-25) - keep the originals.
     local rc=0 f stamp; stamp="$(date +%Y%m%d-%H%M%S)"
     for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
-        [[ -f "$f" ]] && backup_file "$f" "$stamp" >/dev/null
+        if [[ -f "$f" ]] && ! backup_file "$f" "$stamp" >/dev/null; then
+            # The vendor script edits these files blind: no copy, no run.
+            ui_err "could not back up ${f} - Antigravity CLI installer not run, nothing was changed"
+            rm -f "$tmp"
+            return 1
+        fi
     done
     bash "$tmp" || rc=$?
     rm -f "$tmp"
@@ -1455,10 +1482,9 @@ PY
         elif (( AUTOOS_DRY_RUN )); then
             ui_muted "would route Qwen Code at OmniRoute (model t2-worker)"
         else
-            if [[ -f "$SYS_HOME/.qwen/settings.json" ]]; then
-                backup_file "$SYS_HOME/.qwen/settings.json" >/dev/null
-            fi
-            if ! omniroute setup-qwen --model t2-worker --yes >/dev/null 2>&1; then
+            if [[ -f "$SYS_HOME/.qwen/settings.json" ]] && ! backup_file "$SYS_HOME/.qwen/settings.json" >/dev/null; then
+                ui_warn "could not back up $SYS_HOME/.qwen/settings.json - Qwen Code routing skipped, nothing was changed"
+            elif ! omniroute setup-qwen --model t2-worker --yes >/dev/null 2>&1; then
                 ui_warn "Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)"
             else
                 ui_ok "Qwen Code routed at OmniRoute (model t2-worker)"
@@ -1513,8 +1539,9 @@ route_zed_to_proxy() {
     ide="$(ide_models_file)"
     ide_models_readable "$ide" "Zed settings left unchanged" || return 1
     mkdir -p "$cfg_dir"
-    if [[ -f "$cfg" ]]; then
-        backup_file "$cfg" >/dev/null
+    if [[ -f "$cfg" ]] && ! backup_file "$cfg" >/dev/null; then
+        ui_err "could not back up $cfg - Zed settings left unchanged"
+        return 1
     fi
     OMNI_BASE="$(omnigraph_base_url)" python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
 import json, os, sys
@@ -1733,8 +1760,9 @@ register_antigravity_mcp_server() {
     fi
 
     mkdir -p "$cfg_dir"
-    if [[ -f "$cfg_path" && -s "$cfg_path" ]]; then
-        backup_file "$cfg_path" >/dev/null
+    if [[ -f "$cfg_path" && -s "$cfg_path" ]] && ! backup_file "$cfg_path" >/dev/null; then
+        ui_warn "could not back up ${cfg_path} - Antigravity MCP config left unchanged"
+        return 0
     fi
 
     local out
@@ -2367,7 +2395,10 @@ enable_project_mcp_server() {
         return 0
     fi
     mkdir -p "$repo/.claude"
-    [[ -f "$path" ]] && backup_file "$path" >/dev/null
+    if [[ -f "$path" ]] && ! backup_file "$path" >/dev/null; then
+        ui_warn "could not back up ${path} - left unchanged"
+        return 0
+    fi
     if ! python3 - "$path" "$name" <<'PY'; then
 import json, pathlib, sys
 path, name = pathlib.Path(sys.argv[1]), sys.argv[2]
@@ -2556,7 +2587,10 @@ replace_or_append_marked_line() {
                 ui_muted "would remove the stale '${old_marker}' line from ${file}"
                 return 0
             fi
-            backup_file "$file" >/dev/null
+            if ! backup_file "$file" >/dev/null; then
+                ui_warn "could not back up ${file} - left unchanged"
+                return 0
+            fi
             AUTOOS_OLD="$old_marker" AUTOOS_NEW="$new_marker" python3 - "$file" <<'PY'
 import os, sys
 path = sys.argv[1]
@@ -2581,7 +2615,10 @@ PY
         ui_muted "would replace the '${old_marker}' line in ${file}"
         return 0
     fi
-    backup_file "$file" >/dev/null
+    if ! backup_file "$file" >/dev/null; then
+        ui_warn "could not back up ${file} - left unchanged"
+        return 0
+    fi
     AUTOOS_OLD="$old_marker" AUTOOS_LINE="$line" python3 - "$file" <<'PY'
 import os, sys
 path = sys.argv[1]
@@ -2637,17 +2674,19 @@ install_agent_skills() {
 
     local omni_pkg omni_spec
     omni_pkg="$(mcp_package omnigraph)"
-    omni_spec="$(python3 -c "
+    # The base URL is the user's omnigraph_url answer: it reaches python through
+    # the environment (as in the Zed writer), never spliced into the source.
+    omni_spec="$(OMNI_BASE="$base" OMNI_PKG="$omni_pkg" python3 -c "
 import json, os
 # bridge 0.8 refuses to start without a graph id (there is no fallback graph
 # any more), so an unset one pins this repo's graph like the other clients.
-env_vars = {'OMNIGRAPH_BASE_URL': '$base',
+env_vars = {'OMNIGRAPH_BASE_URL': os.environ['OMNI_BASE'],
             'OMNIGRAPH_GRAPH_ID': os.environ.get('OMNIGRAPH_GRAPH_ID') or 'autoos'}
 if os.environ.get('OMNIGRAPH_TOKEN'):
     env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
 print(json.dumps({
     'command': 'npx',
-    'args': ['-y', '$omni_pkg'],
+    'args': ['-y', os.environ['OMNI_PKG']],
     'env': env_vars
 }))
 ")"
@@ -2760,7 +2799,8 @@ autoos_skills_source() {
 # works in every cwd. Both files are merged in place, never replaced: V2
 # (@opencode/cli) reads opencode.json, V1 also config.json. Each file is read
 # JSONC-tolerantly (comments, trailing commas); one that still does not parse
-# is left untouched. A file is backed up only when this run changes it, so a
+# is left untouched. A file is backed up before it is written and left alone
+# when that backup fails; a run that changes nothing keeps no backup, so a
 # second run changes nothing. Keys are {env:NAME} references, never values.
 setup_opencode_config() {
     local config_dir="$SYS_HOME/.config/opencode"
@@ -2776,7 +2816,7 @@ setup_opencode_config() {
     if [[ -f "$config_dir/opencode.jsonc" ]]; then
         ui_muted "$config_dir/opencode.jsonc is yours and stays as is; AutoOS merges into opencode.json"
     fi
-    local config_file snapshot merge_rc merged_first=0
+    local config_file backup merge_rc merged_first=0
     for config_file in "$config_dir/config.json" "$config_dir/opencode.json"; do
         # First V2 run on a V1 machine: opencode.json starts as a copy of the
         # merged config.json, as the old writer's cp did - but never replaces
@@ -2786,10 +2826,15 @@ setup_opencode_config() {
             cp -p "$config_dir/config.json" "$config_file"
             seeded=1
         fi
-        snapshot=""
+        backup=""
         if [[ -f "$config_file" ]] && (( ! seeded )); then
-            snapshot="$(mktemp)"
-            cp -p "$config_file" "$snapshot"
+            # The backup is taken BEFORE anything is written (hard rule 5: no
+            # copy, no write) and dropped again below when this run turns out to
+            # change nothing, so a second run still leaves no backup behind.
+            if ! backup="$(backup_file "$config_file")"; then
+                ui_warn "could not back up $config_file - left unchanged"
+                continue
+            fi
         fi
         # V2 reads opencode.json's `providers` block; V1 reads config.json.
         local v2_source=""
@@ -2801,11 +2846,11 @@ setup_opencode_config() {
         AUTOOS_OPENCODE_V2_SOURCE="$v2_source" _opencode_merge_config "$config_file" || merge_rc=$?
         if (( merge_rc == 3 )); then
             ui_warn "$config_file is not valid JSON or JSONC - left alone (fix it, then re-run)"
-            [[ -n "$snapshot" ]] && rm -f "$snapshot"
+            [[ -n "$backup" ]] && rm -f "$backup"
             continue
         elif (( merge_rc != 0 )); then
             ui_warn "OpenCode configuration not written to $config_file (exit $merge_rc)"
-            [[ -n "$snapshot" ]] && rm -f "$snapshot"
+            [[ -n "$backup" ]] && rm -f "$backup"
             continue
         fi
 
@@ -2829,15 +2874,12 @@ setup_opencode_config() {
         fi
 
         [[ "$config_file" == */config.json ]] && merged_first=1
-        if [[ -z "$snapshot" ]]; then
+        if [[ -z "$backup" ]]; then
             ui_ok "OpenCode configuration written to $config_file"
-        elif cmp -s "$snapshot" "$config_file"; then
-            rm -f "$snapshot"
+        elif cmp -s "$backup" "$config_file"; then
+            rm -f "$backup"
             ui_muted "$config_file already current"
         else
-            local backup
-            backup="$(backup_path "$config_file")"
-            mv "$snapshot" "$backup"
             ui_ok "OpenCode configuration merged into $config_file (backup: $backup)"
         fi
     done
@@ -3957,9 +3999,14 @@ autoos_undo() {
             return 0
         fi
     fi
-    local i
+    local i failed=0
     for i in "${!originals[@]}"; do
-        cp "${newest[i]}" "${originals[i]}"
-        ui_ok "restored ${originals[i]}"
+        if cp "${newest[i]}" "${originals[i]}"; then
+            ui_ok "restored ${originals[i]}"
+        else
+            ui_err "could not restore ${originals[i]} from ${newest[i]}"
+            failed=1
+        fi
     done
+    return "$failed"
 }

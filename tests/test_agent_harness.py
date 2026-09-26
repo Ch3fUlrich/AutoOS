@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -153,6 +154,28 @@ class BackupTests(unittest.TestCase):
             module._backup_and_write(str(target), "new", stamp=self.STAMP)
             self.assertEqual(target.read_text(encoding="utf-8"), "new")
             self.assertEqual(list(target.parent.glob("*.autoos-backup-*")), [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits do not exist on Windows")
+    def test_the_backup_keeps_the_mode_of_the_file_it_copies(self):
+        # A 0600 config may hold a key: shutil.copyfile makes the backup with
+        # the umask's mode (0644 here), so the copy was more readable than the
+        # original. The bash helper (cp -p) keeps 0600; so must this one. The
+        # umask is pinned so the old behaviour cannot pass by accident.
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            os.chmod(target, 0o600)
+            old_umask = os.umask(0o022)
+            try:
+                module._backup_and_write(str(target), "changed", stamp=self.STAMP)
+            finally:
+                os.umask(old_umask)
+            # The first backup keeps the plain name the Windows installer expects.
+            backup = Path("%s.autoos-backup-%s" % (target, self.STAMP))
+            self.assertEqual(backup.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+            self.assertEqual(target.read_text(encoding="utf-8"), "changed")
 
 
 class OpencodeMergeTests(unittest.TestCase):

@@ -2035,6 +2035,265 @@ if it "backup: undo restores the newest backup, not the last name (-10 sorts bef
     if (( ok )); then pass; else fail "undo restored a backup that is not the newest"; fi
 fi
 
+# backup_newest broke a tie between equal mtimes with `sort -V`, which BSD and
+# macOS sort do not have (the plain-sort fallback ranks -2 above -10). A `sort`
+# that rejects -V the way BSD sort does must not change the answer, so the
+# suffix is compared in bash. The stamp decides first: a later second beats an
+# earlier second's higher counter.
+if it "backup: backup_newest picks -10 over -2 on equal mtimes without sort -V"; then
+    d="$(mktemp -d)"; bin="$(mktemp -d)"; ok=1
+    real_sort="$(command -v sort)"
+    printf '#!/bin/sh\nfor a in "$@"; do\n    case "$a" in\n        -V|--version-sort) echo "sort: invalid option -- V (test stub: a sort without version sort)" >&2; exit 2 ;;\n    esac\ndone\nexec %s "$@"\n' "$real_sort" >"$bin/sort"
+    chmod +x "$bin/sort"
+    for stamp in 20260101-000000 S; do
+        f="$d/x-$stamp"; : >"$f"
+        for sfx in "" -1 -2 -10; do
+            : >"$f.autoos-backup-$stamp$sfx"; touch -d "2026-01-01 00:00:00" "$f.autoos-backup-$stamp$sfx"
+        done
+        got="$( PATH="$bin:$PATH"; backup_newest "$f" 2>&1 )"
+        [[ "$got" == "$f.autoos-backup-$stamp-10" ]] || { ok=0; echo "stamp $stamp: the newest is [${got##*/}], expected [x-$stamp.autoos-backup-$stamp-10]" >&2; }
+    done
+    # A later stamp with no counter beats an earlier stamp's -10 (same mtime).
+    f="$d/y"; : >"$f"
+    for n in 20260101-000000 20260101-000000-10 20260101-000001; do
+        : >"$f.autoos-backup-$n"; touch -d "2026-01-01 00:00:00" "$f.autoos-backup-$n"
+    done
+    got="$( PATH="$bin:$PATH"; backup_newest "$f" 2>&1 )"
+    [[ "$got" == "$f.autoos-backup-20260101-000001" ]] || { ok=0; echo "mixed stamps: the newest is [${got##*/}], expected [y.autoos-backup-20260101-000001]" >&2; }
+    # No backup at all: prints nothing, still succeeds.
+    got="$( backup_newest "$d/none" 2>&1 )"; rc=$?
+    { [[ -z "$got" ]] && (( rc == 0 )); } || { ok=0; echo "no backup: printed [$got] rc=$rc" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "backup_newest depends on sort -V to rank equal mtimes"; fi
+fi
+
+# backup_file returns non-zero when the copy fails (full disk, read-only
+# directory). Nine call sites moved onto it and eight ignored that answer, so
+# the file was then modified with NO backup - AGENTS.md hard rule 5 broken in
+# exactly the case the helper detects. install_claude_autostart is the model:
+# a failed backup leaves the file alone, says so, and reports failure.
+#
+# backup_fail_bin: prints a scratch dir holding a `cp` that refuses any
+# operand named *.autoos-backup-* (creating a backup, or reading one for a
+# restore) and delegates to the real cp for everything else. The copy fails
+# deterministically, with no root tricks. The caller puts the dir first on PATH
+# inside a subshell and removes it afterwards.
+backup_fail_bin() {
+    local d real; d="$(mktemp -d)"; real="$(command -v cp)"
+    printf '#!/bin/sh\nfor a in "$@"; do\n    case "$a" in\n        *.autoos-backup-*) echo "cp: cannot copy $a: No space left on device (test stub)" >&2; exit 1 ;;\n    esac\ndone\nexec %s "$@"\n' "$real" >"$d/cp"
+    chmod +x "$d/cp"
+    printf '%s\n' "$d"
+}
+
+# backup_count <dir>: how many backups sit anywhere under <dir>.
+backup_count() { find "$1" -name '*.autoos-backup-*' 2>/dev/null | wc -l | tr -d ' '; }
+
+# backup_holds <file> <bytes>: some backup of <file> holds exactly <bytes>.
+backup_holds() {
+    local b
+    for b in "$1".autoos-backup-*; do
+        [[ -f "$b" && "$(cat "$b")" == "$2" ]] && return 0
+    done
+    return 1
+}
+
+if it "backup: append_line_once leaves the file alone and fails when its backup cannot be made"; then
+    d="$(mktemp -d)"; f="$d/.zshrc"; bin="$(backup_fail_bin)"; ok=1
+    printf 'ORIGINAL\n' >"$f"
+    out="$( ( PATH="$bin:$PATH"; AUTOOS_DRY_RUN=0; append_line_once "$f" "AutoOS:t" "export T=1  # AutoOS:t" ) 2>&1 )"; rc=$?
+    [[ "$(cat "$f")" == ORIGINAL ]] || { ok=0; echo "the file was modified without a backup: [$(cat "$f")]" >&2; }
+    [[ "$out" == *"could not back up $f"* ]] || { ok=0; echo "no warning naming the file: [$out]" >&2; }
+    (( rc != 0 )) || { ok=0; echo "rc=0 for a write that did not happen" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: the same call with a working cp does write, and backs up first.
+    out="$( ( AUTOOS_DRY_RUN=0; append_line_once "$f" "AutoOS:t" "export T=1  # AutoOS:t" ) 2>&1 )"; rc=$?
+    { grep -q 'AutoOS:t' "$f" && (( rc == 0 )) && [[ "$(backup_count "$d")" == 1 ]]; } \
+        || { ok=0; echo "control run: rc=$rc backups=$(backup_count "$d") out=[$out]" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "append_line_once edits a file it could not back up"; fi
+fi
+
+if it "backup: install_agy does not run the vendor installer when a profile cannot be backed up"; then
+    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    printf 'original zshrc\n' >"$home/.zshrc"; printf 'original profile\n' >"$home/.profile"
+    _agy_run() {   # _agy_run [stub-dir]
+        (
+            HOME="$home"; AUTOOS_DRY_RUN=0; [[ -z "${1:-}" ]] || PATH="$1:$PATH"
+            curl() {
+                local o="" p="" a
+                for a in "$@"; do [[ "$p" == "-o" ]] && o="$a"; p="$a"; done
+                printf '#!/usr/bin/env bash\ntouch "$HOME/vendor-ran"\necho "export PATH=x" >>"$HOME/.zshrc"\necho "export PATH=x" >>"$HOME/.profile"\n' >"$o"
+            }
+            install_agy
+        ) 2>&1
+    }
+    out="$(_agy_run "$bin")"; rc=$?
+    [[ "$(cat "$home/.zshrc")|$(cat "$home/.profile")" == "original zshrc|original profile" ]] \
+        || { ok=0; echo "a profile was edited without a backup: [$(cat "$home/.zshrc")] [$(cat "$home/.profile")]" >&2; }
+    [[ ! -e "$home/vendor-ran" ]] || { ok=0; echo "the vendor installer ran although a profile could not be backed up" >&2; }
+    [[ "$out" == *"could not back up $home/"* ]] || { ok=0; echo "no warning naming the profile: [${out:0:300}]" >&2; }
+    (( rc != 0 )) || { ok=0; echo "rc=0 for an installer that did not run" >&2; }
+    [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: with a working cp the vendor installer runs and both profiles are kept.
+    out="$(_agy_run)"; rc=$?
+    { (( rc == 0 )) && [[ -e "$home/vendor-ran" && "$(backup_count "$home")" == 2 ]]; } \
+        || { ok=0; echo "control run: rc=$rc backups=$(backup_count "$home") out=[${out:0:300}]" >&2; }
+    rm -rf "$home" "$bin"
+    if (( ok )); then pass; else fail "install_agy lets its vendor installer edit profiles it could not back up"; fi
+fi
+
+if it "backup: the Qwen Code routing does not run when settings.json cannot be backed up"; then
+    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    mkdir -p "$home/.qwen"; printf '{"mine": true}\n' >"$home/.qwen/settings.json"
+    _qwen_run() {   # _qwen_run [stub-dir]
+        (
+            SYS_HOME="$home"; AUTOOS_DRY_RUN=0; OMNIROUTE_API_KEY=k1; AUTOOS_OMNIROUTE_KEY=k2
+            [[ -z "${1:-}" ]] || PATH="$1:$PATH"
+            has_cmd() { [[ "$1" == qwen || "$1" == omniroute ]]; }
+            omniroute() { touch "$home/omniroute-ran"; printf '{"routed": true}\n' >"$SYS_HOME/.qwen/settings.json"; }
+            route_detected_clis_to_gateway
+        ) 2>&1
+    }
+    out="$(_qwen_run "$bin")"
+    [[ "$(cat "$home/.qwen/settings.json")" == '{"mine": true}' ]] || { ok=0; echo "settings.json was modified without a backup: [$(cat "$home/.qwen/settings.json")]" >&2; }
+    [[ ! -e "$home/omniroute-ran" ]] || { ok=0; echo "omniroute setup-qwen ran although settings.json could not be backed up" >&2; }
+    [[ "$out" == *"could not back up $home/.qwen/settings.json"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
+    [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: with a working cp the routing runs, after a backup of the original.
+    out="$(_qwen_run)"
+    { [[ -e "$home/omniroute-ran" && "$(backup_count "$home")" == 1 ]] \
+        && [[ "$(cat "$home"/.qwen/settings.json.autoos-backup-*)" == '{"mine": true}' ]]; } \
+        || { ok=0; echo "control run: backups=$(backup_count "$home") out=[${out:0:300}]" >&2; }
+    rm -rf "$home" "$bin"
+    if (( ok )); then pass; else fail "Qwen Code routing edits a settings.json it could not back up"; fi
+fi
+
+if it "backup: route_zed_to_proxy leaves settings.json alone and fails when its backup cannot be made"; then
+    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    mkdir -p "$home/.config/zed"; printf '{"theme":"mine"}' >"$home/.config/zed/settings.json"
+    out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; route_zed_to_proxy ) 2>&1 )"; rc=$?
+    [[ "$(cat "$home/.config/zed/settings.json")" == '{"theme":"mine"}' ]] || { ok=0; echo "settings.json was modified without a backup: [$(cat "$home/.config/zed/settings.json")]" >&2; }
+    [[ "$out" == *"could not back up $home/.config/zed/settings.json"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
+    (( rc != 0 )) || { ok=0; echo "rc=0 for a routing that did not happen" >&2; }
+    [[ "$out" != *"routed to OmniRoute"* ]] || { ok=0; echo "reported success" >&2; }
+    [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: with a working cp the merge lands and the original is kept.
+    out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; route_zed_to_proxy ) 2>&1 )"; rc=$?
+    { (( rc == 0 )) && grep -q 'autoos-omniroute' "$home/.config/zed/settings.json" \
+        && [[ "$(cat "$home"/.config/zed/settings.json.autoos-backup-*)" == '{"theme":"mine"}' ]]; } \
+        || { ok=0; echo "control run: rc=$rc out=[${out:0:300}]" >&2; }
+    rm -rf "$home" "$bin"
+    if (( ok )); then pass; else fail "route_zed_to_proxy edits a settings.json it could not back up"; fi
+fi
+
+if it "backup: register_antigravity_mcp_server leaves the config alone when its backup cannot be made"; then
+    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    cfg="$home/.gemini/config/mcp_config.json"
+    mkdir -p "${cfg%/*}"; printf '{"mcpServers": {"keep": {"command": "x"}}}\n' >"$cfg"
+    before="$(cat "$cfg")"
+    out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; register_antigravity_mcp_server newone '{"command":"npx"}' ) 2>&1 )"
+    [[ "$(cat "$cfg")" == "$before" ]] || { ok=0; echo "the config was modified without a backup: [$(cat "$cfg")]" >&2; }
+    [[ "$out" == *"could not back up $cfg"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
+    [[ "$out" != *"configured MCP server"* ]] || { ok=0; echo "reported success" >&2; }
+    [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; register_antigravity_mcp_server newone '{"command":"npx"}' ) 2>&1 )"
+    { grep -q '"newone"' "$cfg" && [[ "$(cat "$cfg".autoos-backup-*)" == "$before" ]]; } \
+        || { ok=0; echo "control run: out=[${out:0:300}]" >&2; }
+    rm -rf "$home" "$bin"
+    if (( ok )); then pass; else fail "register_antigravity_mcp_server edits a config it could not back up"; fi
+fi
+
+if it "backup: enable_project_mcp_server leaves settings.local.json alone when its backup cannot be made"; then
+    repo="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    f="$repo/.claude/settings.local.json"
+    mkdir -p "${f%/*}"; printf '{"theme":"mine"}\n' >"$f"
+    out="$( ( AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; enable_project_mcp_server "$repo" omnigraph ) 2>&1 )"
+    [[ "$(cat "$f")" == '{"theme":"mine"}' ]] || { ok=0; echo "the file was modified without a backup: [$(cat "$f")]" >&2; }
+    [[ "$out" == *"could not back up $f"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
+    [[ "$out" != *"approved project MCP server"* ]] || { ok=0; echo "reported success" >&2; }
+    [[ "$(backup_count "$repo")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    out="$( ( AUTOOS_DRY_RUN=0; enable_project_mcp_server "$repo" omnigraph ) 2>&1 )"
+    { grep -q 'omnigraph' "$f" && [[ "$(cat "$f".autoos-backup-*)" == '{"theme":"mine"}' ]]; } \
+        || { ok=0; echo "control run: out=[${out:0:300}]" >&2; }
+    rm -rf "$repo" "$bin"
+    if (( ok )); then pass; else fail "enable_project_mcp_server edits a file it could not back up"; fi
+fi
+
+if it "backup: replace_or_append_marked_line leaves the file alone when its backup cannot be made"; then
+    d="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    # Branch 1: the current line is there and a stale old-marker line must go.
+    printf 'keep me\nstale line  # AutoOS:old\ncurrent line  # AutoOS:new\n' >"$d/purge"
+    # Branch 2: only the old-marker line is there and it must be replaced in place.
+    printf 'keep me\nstale line  # AutoOS:old\n' >"$d/replace"
+    cp "$d/purge" "$d/purge.orig"; cp "$d/replace" "$d/replace.orig"
+    out="$( ( PATH="$bin:$PATH"; AUTOOS_DRY_RUN=0
+              replace_or_append_marked_line "$d/purge" "AutoOS:old" "AutoOS:new" "fresh line  # AutoOS:new"
+              replace_or_append_marked_line "$d/replace" "AutoOS:old" "AutoOS:new" "fresh line  # AutoOS:new" ) 2>&1 )"
+    cmp -s "$d/purge" "$d/purge.orig" || { ok=0; echo "the stale-line purge modified the file without a backup: [$(cat "$d/purge")]" >&2; }
+    cmp -s "$d/replace" "$d/replace.orig" || { ok=0; echo "the replace modified the file without a backup: [$(cat "$d/replace")]" >&2; }
+    [[ "$out" == *"could not back up $d/purge"* && "$out" == *"could not back up $d/replace"* ]] \
+        || { ok=0; echo "no warning naming both files: [${out:0:500}]" >&2; }
+    [[ "$out" != *"removed the stale"* && "$out" != *"replaced the"* ]] || { ok=0; echo "reported success" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    # Control: with a working cp both edits land, each after a backup.
+    ( AUTOOS_DRY_RUN=0
+      replace_or_append_marked_line "$d/purge" "AutoOS:old" "AutoOS:new" "fresh line  # AutoOS:new"
+      replace_or_append_marked_line "$d/replace" "AutoOS:old" "AutoOS:new" "fresh line  # AutoOS:new" ) >/dev/null 2>&1
+    { ! grep -q 'AutoOS:old' "$d/purge" "$d/replace" && [[ "$(backup_count "$d")" == 2 ]]; } \
+        || { ok=0; echo "control run: purge=[$(cat "$d/purge")] replace=[$(cat "$d/replace")]" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "replace_or_append_marked_line edits a file it could not back up"; fi
+fi
+
+if it "backup: setup_opencode_config leaves a config alone when its backup cannot be made"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    oc="$home/.config/opencode"; mkdir -p "$oc"
+    printf '{"model": "anthropic/mine"}\n' >"$oc/opencode.json"
+    printf '{"model": "anthropic/mine"}\n' >"$oc/config.json"
+    _oc_fail_run() {   # _oc_fail_run [stub-dir]
+        ( SYS_HOME="$home" AUTOOS_DRY_RUN=0 AUTOOS_ROOT="$ROOT"
+          [[ -z "${1:-}" ]] || PATH="$1:$PATH"
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          opencode_is_v2() { return 1; }
+          OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config 2>&1 )
+    }
+    out="$(_oc_fail_run "$bin")"
+    for f in opencode.json config.json; do
+        [[ "$(cat "$oc/$f")" == '{"model": "anthropic/mine"}' ]] || { ok=0; echo "$f was modified without a backup: [$(head -c 120 "$oc/$f")]" >&2; }
+    done
+    [[ "$out" == *"could not back up $oc/config.json"* && "$out" == *"could not back up $oc/opencode.json"* ]] \
+        || { ok=0; echo "no warning naming both files: [${out:0:500}]" >&2; }
+    [[ "$(ls -A "$oc" | tr '\n' ' ')" == "config.json opencode.json " ]] || { ok=0; echo "stray entries: [$(ls -A "$oc" | tr '\n' ' ')]" >&2; }
+    # Control: with a working cp both files are merged and the originals kept.
+    out="$(_oc_fail_run)"
+    { grep -q 'omniroute' "$oc/config.json" "$oc/opencode.json" \
+        && backup_holds "$oc/config.json" '{"model": "anthropic/mine"}' \
+        && backup_holds "$oc/opencode.json" '{"model": "anthropic/mine"}'; } \
+        || { ok=0; echo "control run: backups=$(backup_count "$oc") out=[${out:0:300}]" >&2; }
+    rm -rf "$home" "$bin"
+    if (( ok )); then pass; else fail "setup_opencode_config edits a config it could not back up"; fi
+    fi
+fi
+
+if it "backup: undo says restored only when the copy worked, and fails when it did not"; then
+    scratch="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
+    target="$scratch/.zshrc"; printf 'NOW\n' >"$target"
+    printf 'BEFORE\n' >"$target.autoos-backup-20260101-000000"
+    out="$( ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; autoos_undo 1 ) 2>&1 )"; rc=$?
+    [[ "$(cat "$target")" == NOW ]] || { ok=0; echo "the file changed although the restore failed: [$(cat "$target")]" >&2; }
+    [[ "$out" != *"restored $target"* ]] || { ok=0; echo "claimed a restore that did not happen: [${out:0:400}]" >&2; }
+    [[ "$out" == *"could not restore $target"* ]] || { ok=0; echo "no message naming the file: [${out:0:400}]" >&2; }
+    (( rc != 0 )) || { ok=0; echo "rc=0 for an undo that restored nothing" >&2; }
+    # Control: with a working cp it restores, says so, and succeeds.
+    out="$( ( SYS_HOME="$scratch"; AUTOOS_DRY_RUN=0; autoos_undo 1 ) 2>&1 )"; rc=$?
+    { [[ "$(cat "$target")" == BEFORE && "$out" == *"restored $target"* ]] && (( rc == 0 )); } \
+        || { ok=0; echo "control run: rc=$rc body=[$(cat "$target")] out=[${out:0:300}]" >&2; }
+    rm -rf "$scratch" "$bin"
+    if (( ok )); then pass; else fail "autoos_undo reports a restore that did not happen"; fi
+fi
+
 if it "undo never uninstalls anything"; then
     # The safety property, asserted on the source rather than by removing software.
     if grep -qE '(apt-get remove|brew uninstall|npm uninstall)' lib/linux/install.sh; then
@@ -3871,6 +4130,51 @@ if it "antigravity's omnigraph entry pins a graph id (the bridge refuses to star
     rm -rf "$tmp"
     got="$(printf '%s' "$spec" | python3 -c "import json,sys;e=json.load(sys.stdin)['env'];print(e.get('OMNIGRAPH_GRAPH_ID'),'OMNIGRAPH_TOKEN' in e)" 2>&1)"
     assert_eq "$got" "autoos False"
+fi
+
+# The omnigraph_url answer is user input. install_agent_skills used to splice it
+# into the SOURCE of a `python3 -c "..."` string, so a quote, a backslash or
+# Python code in the answer broke the literal or ran (`' + os.system(...) + '`).
+# It travels in the environment now (like the Zed writer's OMNI_BASE) and must
+# arrive byte for byte. Every marker file below is what a payload would create.
+if it "omnigraph: a hostile omnigraph_url answer is data, never python source"; then
+    scratch="$(mktemp -d)"; ok=1
+    payloads=(
+        "http://x/\"; touch $scratch/pwned1; echo \""
+        "http://x/'\$(touch $scratch/pwned2)"
+        "http://x/'\`touch $scratch/pwned3\`"
+        "http://x/' + str(__import__('os').system('touch $scratch/pwned4')) + '"
+        'http://x/a\nb\\c\x41'
+    )
+    i=0
+    for url in "${payloads[@]}"; do
+        i=$((i + 1))
+        (
+            # AUTOOS_ROOT is an empty scratch dir: the repo's own .claude/skills
+            # links are never touched.
+            SYS_HOME="$scratch/home$i"; AUTOOS_ROOT="$scratch/root$i"; AUTOOS_DRY_RUN=0
+            mkdir -p "$SYS_HOME/Documents/code/agent-skills" "$AUTOOS_ROOT"
+            unset OMNIGRAPH_GRAPH_ID OMNIGRAPH_TOKEN
+            AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="$url"
+            clone_or_update() { :; }
+            install_mcp_graphify() { :; }; install_mcp_serena() { :; }
+            install_mcp_playwright() { :; }; install_mcp_context7() { :; }
+            mcp_has_server() { return 1; }; enable_project_mcp_server() { :; }
+            write_omnigraph_env() { :; }
+            register_antigravity_mcp_server() { [[ "$1" == omnigraph ]] && printf '%s' "$2" >"$scratch/spec-$i.json"; return 0; }
+            omnigraph_readiness() { return 0; }
+            install_agent_skills >/dev/null 2>&1
+        )
+        if [[ ! -s "$scratch/spec-$i.json" ]]; then
+            ok=0; echo "payload $i [$url]: no omnigraph spec was produced (the python source broke)" >&2
+        else
+            got="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["env"]["OMNIGRAPH_BASE_URL"])' "$scratch/spec-$i.json")"
+            [[ "$got" == "$url" ]] || { ok=0; echo "payload $i: the config holds [$got], not [$url]" >&2; }
+        fi
+    done
+    compgen -G "$scratch/pwned*" >/dev/null && { ok=0; echo "a payload ran: $(cd "$scratch" && ls -d pwned* | tr '\n' ' ')" >&2; }
+    rm -rf "$scratch"
+    if (( ok )); then pass; else fail "the omnigraph_url answer is interpolated into python source"; fi
 fi
 
 if it "Antigravity MCP config is merged, not replaced"; then
