@@ -327,7 +327,7 @@ For traceability, every field the schema defines beyond spec 3.1's literal list,
 topped up" decision (docs/plans/2026-09-25-routing-v2-plan.md, "Operator steps"): every openrouter
 provider and every openrouter leg stays in the registry, unchanged and in the same order (so the data
 still mirrors today's files for the phase-1 equality gate), each marked `available: false` with a
-`$comment` citing the decision (`tools/registry-convert.py`'s `mark_openrouter_unavailable()`). Single legs that are down while their provider still serves are listed in `UNAVAILABLE_LEGS` and flagged by `mark_legs_unavailable()` the same way (operator 2026-09-26: `opencode-zen/deepseek-v4.1-flash`, 402 in the tool-calling probe).
+`$comment` citing the decision (`tools/registry-convert.py`'s `mark_openrouter_unavailable()`). Single legs that are down while their provider still serves are listed in `UNAVAILABLE_LEGS` and flagged by `mark_legs_unavailable()` the same way (operator 2026-09-26: `opencode-zen/deepseek-v4.1-flash`, 402 in the tool-calling probe; L0 2026-09-26T11:44Z: `cerebras/gpt-oss-120b` 402 and `cerebras/qwen-3.8-27b` 401 credits exhausted, re-probed weekly).
 
 ## 9. Where every `$comment` prose piece landed
 

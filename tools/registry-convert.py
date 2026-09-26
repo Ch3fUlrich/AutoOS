@@ -318,6 +318,12 @@ UNAVAILABLE_LEGS = {
         "Operator decision 2026-09-26: the tool-calling probe "
         "(tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; "
         "marked available: false so the strict tool_calls filter and callers skip it."),
+    "cerebras/gpt-oss-120b": (
+        "L0 decision 2026-09-26T11:44Z (measured): 402 billing_error payment_required; "
+        "OmniRoute deactivated the cerebras connection itself. Re-probe weekly."),
+    "cerebras/qwen-3.8-27b": (
+        "L0 decision 2026-09-26T11:44Z (measured): 401 credits exhausted; "
+        "OmniRoute deactivated the cerebras connection itself. Re-probe weekly."),
 }
 
 

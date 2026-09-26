@@ -287,6 +287,18 @@ class UnavailableLegTests(unittest.TestCase):
                 self.assertIs(route["unavailable_legs"][leg]["available"], False)
         self.assertGreaterEqual(seen, 3)
 
+    def test_cerebras_legs_are_unavailable_everywhere_they_appear(self):
+        # L0 measurement 2026-09-26T11:44Z: gpt-oss-120b 402, qwen-3.8-27b 401
+        # "credits exhausted"; OmniRoute deactivated the connection itself.
+        for leg in ("cerebras/gpt-oss-120b", "cerebras/qwen-3.8-27b"):
+            seen = 0
+            for route_id, route in self.registry["routes"].items():
+                if leg in route["legs"]:
+                    seen += 1
+                    self.assertIs(route.get("unavailable_legs", {}).get(leg, {})
+                                  .get("available"), False, (leg, route_id))
+            self.assertGreaterEqual(seen, 1, leg)
+
     def test_openrouter_legs_stay_unavailable_beside_it(self):
         route = self.registry["routes"]["t2-worker-clean"]
         self.assertIn("openrouter/deepseek/deepseek-v4.1-flash", route["unavailable_legs"])
