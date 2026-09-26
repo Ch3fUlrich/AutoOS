@@ -4132,6 +4132,51 @@ if it "antigravity's omnigraph entry pins a graph id (the bridge refuses to star
     assert_eq "$got" "autoos False"
 fi
 
+# The omnigraph_url answer is user input. install_agent_skills used to splice it
+# into the SOURCE of a `python3 -c "..."` string, so a quote, a backslash or
+# Python code in the answer broke the literal or ran (`' + os.system(...) + '`).
+# It travels in the environment now (like the Zed writer's OMNI_BASE) and must
+# arrive byte for byte. Every marker file below is what a payload would create.
+if it "omnigraph: a hostile omnigraph_url answer is data, never python source"; then
+    scratch="$(mktemp -d)"; ok=1
+    payloads=(
+        "http://x/\"; touch $scratch/pwned1; echo \""
+        "http://x/'\$(touch $scratch/pwned2)"
+        "http://x/'\`touch $scratch/pwned3\`"
+        "http://x/' + str(__import__('os').system('touch $scratch/pwned4')) + '"
+        'http://x/a\nb\\c\x41'
+    )
+    i=0
+    for url in "${payloads[@]}"; do
+        i=$((i + 1))
+        (
+            # AUTOOS_ROOT is an empty scratch dir: the repo's own .claude/skills
+            # links are never touched.
+            SYS_HOME="$scratch/home$i"; AUTOOS_ROOT="$scratch/root$i"; AUTOOS_DRY_RUN=0
+            mkdir -p "$SYS_HOME/Documents/code/agent-skills" "$AUTOOS_ROOT"
+            unset OMNIGRAPH_GRAPH_ID OMNIGRAPH_TOKEN
+            AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="$url"
+            clone_or_update() { :; }
+            install_mcp_graphify() { :; }; install_mcp_serena() { :; }
+            install_mcp_playwright() { :; }; install_mcp_context7() { :; }
+            mcp_has_server() { return 1; }; enable_project_mcp_server() { :; }
+            write_omnigraph_env() { :; }
+            register_antigravity_mcp_server() { [[ "$1" == omnigraph ]] && printf '%s' "$2" >"$scratch/spec-$i.json"; return 0; }
+            omnigraph_readiness() { return 0; }
+            install_agent_skills >/dev/null 2>&1
+        )
+        if [[ ! -s "$scratch/spec-$i.json" ]]; then
+            ok=0; echo "payload $i [$url]: no omnigraph spec was produced (the python source broke)" >&2
+        else
+            got="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["env"]["OMNIGRAPH_BASE_URL"])' "$scratch/spec-$i.json")"
+            [[ "$got" == "$url" ]] || { ok=0; echo "payload $i: the config holds [$got], not [$url]" >&2; }
+        fi
+    done
+    compgen -G "$scratch/pwned*" >/dev/null && { ok=0; echo "a payload ran: $(cd "$scratch" && ls -d pwned* | tr '\n' ' ')" >&2; }
+    rm -rf "$scratch"
+    if (( ok )); then pass; else fail "the omnigraph_url answer is interpolated into python source"; fi
+fi
+
 if it "Antigravity MCP config is merged, not replaced"; then
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/.gemini/config"

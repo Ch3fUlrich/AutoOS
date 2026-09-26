@@ -2674,17 +2674,19 @@ install_agent_skills() {
 
     local omni_pkg omni_spec
     omni_pkg="$(mcp_package omnigraph)"
-    omni_spec="$(python3 -c "
+    # The base URL is the user's omnigraph_url answer: it reaches python through
+    # the environment (as in the Zed writer), never spliced into the source.
+    omni_spec="$(OMNI_BASE="$base" OMNI_PKG="$omni_pkg" python3 -c "
 import json, os
 # bridge 0.8 refuses to start without a graph id (there is no fallback graph
 # any more), so an unset one pins this repo's graph like the other clients.
-env_vars = {'OMNIGRAPH_BASE_URL': '$base',
+env_vars = {'OMNIGRAPH_BASE_URL': os.environ['OMNI_BASE'],
             'OMNIGRAPH_GRAPH_ID': os.environ.get('OMNIGRAPH_GRAPH_ID') or 'autoos'}
 if os.environ.get('OMNIGRAPH_TOKEN'):
     env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
 print(json.dumps({
     'command': 'npx',
-    'args': ['-y', '$omni_pkg'],
+    'args': ['-y', os.environ['OMNI_PKG']],
     'env': env_vars
 }))
 ")"
