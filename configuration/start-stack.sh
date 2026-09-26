@@ -25,6 +25,42 @@ gateway_ok() {
     curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1
 }
 
+# ss_backup_path <path>: the name for a NEW backup of <path> -
+# <path>.autoos-backup-<stamp>, then -1, -2, ... while that name is taken.
+# The stamp has one-second resolution and a plain overwrite used to destroy
+# an earlier same-second backup; see lib/linux/install.sh backup_path for
+# the source of this rule. This launcher is standalone (does not source
+# that lib), so it gets its own copy.
+ss_backup_path() {
+    local path="$1" stamp="${2:-}" base candidate n=0
+    [[ -n "$stamp" ]] || stamp="$(date +%Y%m%d-%H%M%S)"
+    base="$path.autoos-backup-$stamp"
+    candidate="$base"
+    while [[ -e "$candidate" || -L "$candidate" ]]; do
+        n=$((n + 1))
+        candidate="$base-$n"
+    done
+    printf '%s\n' "$candidate"
+}
+
+# ss_move_aside <path>: move an unparseable file aside to a fresh backup
+# name, printing where it went. Returns non-zero - with the original left
+# in place and nothing left behind - when the copy failed, so callers keep
+# a file OpenHands regenerates rather than deleting one with no backup
+# (AGENTS.md hard rule 5).
+ss_move_aside() {
+    local path="$1" backup
+    backup="$(ss_backup_path "$path")" || return 1
+    if cp -p -- "$path" "$backup"; then
+        rm -f -- "$path"
+        echo "Unparseable OpenHands settings moved aside to $backup (OpenHands regenerates)."
+    else
+        rm -f -- "$backup"
+        echo "  ! could not back up $path - leaving it untouched."
+        return 1
+    fi
+}
+
 # Docker AI stack (server profile, configuration/docker/ai-stack): the
 # gateway, opencode serve and OpenHands are compose services there.
 AI_STACK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker/ai-stack/ai-stack.sh"
@@ -74,7 +110,7 @@ case "$APP" in
         if [[ -f "$oh_settings" ]]; then
             oh_repair_rc=0
             python3 - "$oh_settings" <<'PY' || oh_repair_rc=$?
-import json, shutil, sys, datetime
+import json, os, shutil, sys, datetime
 path = sys.argv[1]
 try:
     doc = json.load(open(path, encoding="utf-8"))
@@ -85,8 +121,20 @@ agent = doc.get("agent_settings") if isinstance(doc.get("agent_settings"), dict)
 ver = agent.get("schema_version")
 has_enabled = any(isinstance(s, dict) and "enabled" in s for s in (agent.get("mcp_config") or {}).values())
 if (isinstance(ver, int) and ver > 4) or has_enabled:
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    shutil.copy2(path, path + ".autoos-backup-" + ts)
+    # AUTOOS_BACKUP_STAMP pins the stamp so a test can force the clash;
+    # otherwise the stamp is now (one-second resolution, like the bash site).
+    ts = os.environ.get("AUTOOS_BACKUP_STAMP") or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = path + ".autoos-backup-" + ts
+    backup = base
+    n = 0
+    while os.path.lexists(backup):
+        n += 1
+        backup = "%s-%d" % (base, n)
+    try:
+        shutil.copy2(path, backup)
+    except OSError as exc:
+        print("Could not back up %s: %s - leaving it untouched." % (path, exc))
+        sys.exit(1)
     if isinstance(ver, int) and ver > 4:
         agent["schema_version"] = 4
     for srv in (agent.get("mcp_config") or {}).values():
@@ -97,9 +145,8 @@ if (isinstance(ver, int) and ver > 4) or has_enabled:
 sys.exit(0)
 PY
             if [[ $oh_repair_rc -eq 2 ]]; then
-                cp "$oh_settings" "$oh_settings.autoos-backup-$(date +%Y%m%d-%H%M%S)"
-                rm -f "$oh_settings"
-                echo "Unparseable OpenHands settings moved aside (OpenHands regenerates)."
+                # Best-effort: a failed copy keeps the file, never deletes it.
+                ss_move_aside "$oh_settings" || true
             elif [[ $oh_repair_rc -ne 0 ]]; then
                 echo "OpenHands settings repair reported a problem (exit $oh_repair_rc) - continuing anyway."
             fi
