@@ -1207,10 +1207,10 @@
     },
     "handoff_caps": {
       "claude-opus-1m": {
-        "cap_fraction": 0.4,
-        "cap_tokens": 400000,
+        "cap_fraction": 0.6,
+        "cap_tokens": 600000,
         "match": ["opus", "fable"],
-        "source": "2026-09-25",
+        "source": "operator 2026-09-27T10:4xZ (common.md 'Operator direction 10:4xZ': Opus orchestrators hand off at 600k, 60% of 1M; was 400k 2026-09-25)",
         "window": 1000000
       },
       "muse-spark-1m": {

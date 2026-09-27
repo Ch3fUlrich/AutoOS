@@ -26,11 +26,11 @@ import os
 from pathlib import Path
 
 # Spec 8.3, exactly: (lowercased substring, window, hand off at).
-# Opus 400k/1M, Fable 400k/1M, Muse Spark 300k/1M, Gemini 200k/1M,
+# Opus 600k/1M, Fable 600k/1M (operator 2026-09-27, was 400k), Muse Spark 300k/1M, Gemini 200k/1M,
 # 200k-class default 150k.
 DEFAULT_CAPS = [
-    ("opus", 1000000, 400000),
-    ("fable", 1000000, 400000),
+    ("opus", 1000000, 600000),
+    ("fable", 1000000, 600000),
     ("spark", 1000000, 300000),
     ("gemini", 1000000, 200000),
     ("*", 200000, 150000),

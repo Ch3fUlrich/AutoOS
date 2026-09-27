@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — Opus/Fable orchestrator hand-off cap 600k (operator 2026-09-27)
+
+- **`catalog/ai-registry.json`** `policy.handoff_caps.claude-opus-1m`: 0.6 × 1M = 600000 (was 400000), sourced; `tools/autoos_context.py` DEFAULT_CAPS fallback follows so a registry-less run agrees.
+
 ### Fixed — "omitted" holds only orphaned routes; Windows apply prunes it too (OR1g)
 
 - **`tools/registry.py`**, **`configuration/omniroute/combos.json`**, **`configuration/omniroute/apply.ps1`**: `render_omniroute` names a route in `"omitted"` only when it declared legs but `gateway_legs` serves none (orphaned) — a deliberately legless route (`legs: []`: `auto`, `auto/cheap`, `auto/smart`, `t1-orchestrator-paid`, `t2-worker-paid`, `t3-driver-paid`) is no longer listed, so apply can never delete a live combo with one of those ids. `apply.ps1` now prunes `retired` + `omitted` like `apply.sh` (`<id>: omitted, would delete`/`deleted`), removing the platform divergence. Tests: `tests/test_registry_render.py::OmittedRoutesListTests`, `tests/linux/34-ai-services.sh`, Pester `apply prune…` / `combos.json is valid…`.
