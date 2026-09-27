@@ -369,7 +369,7 @@ done
 # key file alone instead of from whatever else answers the CLI.
 existing_ids=""
 if gateway_up; then
-    existing_ids="$(omni providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9-]+' | grep -oE '[a-z0-9-]+$' || true)"
+    existing_ids="$(omni providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9_-]+' | grep -oE '[a-z0-9_-]+$' || true)"
 fi
 for entry in "${PROVIDER_MAP[@]}"; do
     if grep -qxF "${entry#*:}" <<<"$existing_ids"; then

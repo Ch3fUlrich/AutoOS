@@ -210,8 +210,7 @@
     "cheaperinference/kimi-k3",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
-    "t1-orchestrator-free-only",
-    "t3-driver-free-only"
+    "t1-orchestrator-free-only"
   ],
   "combos": [
     {
@@ -265,7 +264,8 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
-        "agy/gemini-3.7-flash-medium"
+        "agy/gemini-3.7-flash-medium",
+        "free_ai/qwen7b"
       ]
     },
     {
@@ -294,6 +294,14 @@
       "models": [
         "deepseek/deepseek-flash",
         "mistral/mistral-small-latest"
+      ]
+    },
+    {
+      "name": "t3-driver-free-only",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "free_ai/qwen7b"
       ]
     },
     {
