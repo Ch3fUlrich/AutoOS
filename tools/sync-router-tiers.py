@@ -58,16 +58,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_FILE = ROOT / "catalog" / "ai-registry.json"
-# Tiers mirrored from combos.json. t1-orchestrator / *-paid are deliberately
-# absent: combos.json has no t1-orchestrator-paid, and docs/models.md keeps
-# t1-orchestrator a hand-curated spark-only chain with an explicit xhigh note.
-# t2-worker-paid / t3-driver-paid are LiteLLM-only fallback chains with no
-# OmniRoute equivalent. Regenerating any of those here would lose information
-# rather than remove drift.
-SYNCED_TIERS = ("t2-worker", "t3-driver")
 
 # Providers LiteLLM has no transport or key for (OAuth/subscription bridges).
-# Their legs never enter a managed mirror block — see combos_refs().
+# Their legs never enter a managed mirror block — see litellm_servable_refs().
 GATEWAY_ONLY = frozenset({"antigravity", "cc"})
 
 # Filled from the registry providers by main(); Leg reads them at call time.
@@ -221,7 +214,65 @@ def locate_blocks(lines):
     return blocks
 
 
-def combos_refs(combos_path, tiers=SYNCED_TIERS):
+def _gateway_legs(route, registry):
+    """tools/registry.py's gateway_legs(route, registry), imported lazily:
+    registry.py loads THIS module by path (see its _load_sync_router_tiers),
+    so a module-level import would be circular. The drop rules
+    (unavailable/denied/client_bound) have one home - registry.py - and this
+    tool reuses them rather than copying them."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from registry import gateway_legs  # noqa: E402
+    return gateway_legs(route, registry)
+
+
+def litellm_servable_refs(route, registry):
+    """The ordered refs a managed LiteLLM block mirrors for one route.
+
+    Exactly tools/registry.py's gateway_legs(route) (OR1a: unavailable,
+    policy-denied and client-bound legs dropped) minus the GATEWAY_ONLY
+    providers LiteLLM has no transport or key for - the same two drops
+    registry_refs() has always applied, now with one definition shared by
+    this tool and registry.py's render_litellm_blocks(), so the file that
+    writes config.yaml and the render that checks it cannot disagree about
+    which legs survive.
+
+    A leg whose provider is gateway-only (OAuth/subscription bridges with no
+    LiteLLM transport and no env key) is dropped: mirroring it would emit an
+    unset os.environ/* var and break whole-group validation at startup — the
+    META_API_KEY lesson. Docs rule 1 calls this set out ("minus the legs
+    LiteLLM cannot address"); the suite test pins the dropped set so nothing
+    else ever goes missing silently. Pure: (route, registry) -> list."""
+    return [
+        m for m in _gateway_legs(route, registry)
+        if isinstance(m, str) and m.split("/", 1)[0] not in GATEWAY_ONLY
+    ]
+
+
+def managed_tiers(registry):
+    """Every route id that gets an AUTOOS-MANAGED block, in registry order:
+    a route that declares at least one leg (`routes.<id>.legs` non-empty) and
+    keeps at least one LiteLLM-servable leg (litellm_servable_refs).
+
+    The set is derived from the registry, not hand-kept. A route with no
+    declared legs (the LiteLLM-only *-paid fallback chains and the dynamic
+    auto* routes) is hand-curated and deliberately untouched here, and a
+    route whose every leg is unavailable, policy-denied, client-bound or
+    gateway-only gets no block at all - an absent group is a valid config,
+    exactly like render_omniroute()'s all-dead route, and never an empty
+    model list. This replaced the old hand-kept SYNCED_TIERS = ("t2-worker",
+    "t3-driver") pair, which needed editing the moment a route was
+    re-curated and silently missed every other servable route."""
+    routes = registry.get("routes") if isinstance(registry, dict) else None
+    routes = routes if isinstance(routes, dict) else {}
+    return tuple(
+        tier for tier, route in routes.items()
+        if isinstance(route, dict)
+        and (route.get("legs") or [])
+        and litellm_servable_refs(route, registry)
+    )
+
+
+def combos_refs(combos_path, tiers=None):
     """Ordered model refs per tier, read from combos.json.
 
     Legs whose provider is gateway-only (OAuth/subscription bridges with no
@@ -230,6 +281,12 @@ def combos_refs(combos_path, tiers=SYNCED_TIERS):
     the META_API_KEY lesson. Docs rule 1 calls this set out ("minus the
     legs LiteLLM cannot address"); the suite test pins the dropped set so
     nothing else ever goes missing silently.
+
+    `tiers=None` (the default) derives the set the same way the registry
+    default does: every combo name whose gateway-only-filtered model list is
+    non-empty, so the explicit --combos override onto the old file's own
+    shape covers exactly the routes the registry would (a combo that is only
+    gateway-only legs, e.g. opus-4-6, gets no managed block either way).
     """
     try:
         data = json.loads(Path(combos_path).read_text(encoding="utf-8"))
@@ -243,41 +300,37 @@ def combos_refs(combos_path, tiers=SYNCED_TIERS):
                 m for m in combo.get("models", [])
                 if m.split("/", 1)[0] not in GATEWAY_ONLY
             ]
+    if tiers is None:
+        tiers = tuple(name for name, refs in by_name.items() if refs)
     missing = [t for t in tiers if t not in by_name]
     if missing:
         raise ConfigError(f"{combos_path} has no combo(s): {', '.join(missing)}")
     return {t: by_name[t] for t in tiers}
 
 
-def registry_refs(registry_path, tiers=SYNCED_TIERS):
+def registry_refs(registry_path, tiers=None):
     """Ordered model refs per tier, read from catalog/ai-registry.json's
-    `routes.<tier>.legs` filtered by registry.gateway_legs (OR1a) - this
-    tool's default leg source (task A5c),
+    `routes.<tier>.legs` filtered by litellm_servable_refs() (gateway_legs
+    plus the GATEWAY_ONLY drop) - this tool's default leg source (task A5c),
     replacing combos.json's combos[].models (docs/plans/
-    2026-09-25-registry-mapping.md section 4: unchanged, in order). Same
-    GATEWAY_ONLY drop as combos_refs() above (kept for the explicit --combos
-    override onto the old file's own shape): a leg whose provider is an
-    OAuth/subscription bridge with no LiteLLM transport or key never enters a
-    managed mirror block.
+    2026-09-25-registry-mapping.md section 4: unchanged, in order).
+
+    `tiers=None` (the default) manages managed_tiers(registry): every route
+    that declares legs and keeps a LiteLLM-servable leg. An explicit `tiers`
+    is still validated - a tier the registry has no route for is a
+    ConfigError, not a silently empty block.
     """
     try:
         doc = json.loads(Path(registry_path).read_text(encoding="utf-8"))
         routes = doc["routes"]
     except (OSError, ValueError, KeyError) as exc:
         raise ConfigError(f"cannot read {registry_path}: {exc}") from exc
+    if tiers is None:
+        tiers = managed_tiers(doc)
     missing = [t for t in tiers if t not in routes]
     if missing:
         raise ConfigError(f"{registry_path} has no route(s): {', '.join(missing)}")
-    # OR1a: mirror exactly the legs render_omniroute() writes into combos.json
-    # (registry.gateway_legs drops unavailable, policy-denied and client-bound
-    # legs), then the LiteLLM-only GATEWAY_ONLY drop.
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from registry import gateway_legs  # noqa: E402
-    return {
-        t: [m for m in gateway_legs(routes[t], doc)
-            if m.split("/", 1)[0] not in GATEWAY_ONLY]
-        for t in tiers
-    }
+    return {t: litellm_servable_refs(routes[t], doc) for t in tiers}
 
 
 def render_block(tier, refs, indent="", extras=None):

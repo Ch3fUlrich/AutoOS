@@ -7,12 +7,18 @@
 # "Missing credentials". This starter reads the flat KEY=VALUE file WITHOUT
 # shell evaluation (no `. ./.env`: a value like $(...) stays a literal), skips
 # empty and REPLACE_WITH_* placeholders, sets PYTHONUTF8=1 and starts the
-# proxy on loopback only - it carries LITELLM_MASTER_KEY, but nothing off-host
-# needs it (OmniRoute is the proxied gateway).
+# proxy - by default on loopback only, since it carries LITELLM_MASTER_KEY and
+# nothing off-host needs it (OmniRoute is the proxied gateway).
 #
 # Safe to run twice: a proxy that already runs with the current keys is left
 # alone; one running with stale keys (the .env changed since it started) is
 # restarted. Values are never printed, only key names.
+#
+# Env overrides: AUTOOS_LITELLM_HOST (bind address, default 127.0.0.1),
+# AUTOOS_LITELLM_PORT (default 4000), AUTOOS_LITELLM_STATE_DIR (where
+# litellm.log lives) and AUTOOS_LITELLM_MASTER_KEY_FILE (a private file whose
+# single line overrides any LITELLM_MASTER_KEY from .env; unreadable or empty
+# is a hard error).
 #
 #   ./configuration/litellm/start-litellm.sh              # start / converge, detached
 #   ./configuration/litellm/start-litellm.sh --dry-run    # say what would happen
@@ -25,8 +31,11 @@ set -euo pipefail
 
 LIT_DIR="${AUTOOS_LITELLM_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 PORT="${AUTOOS_LITELLM_PORT:-4000}"
+HOST="${AUTOOS_LITELLM_HOST:-127.0.0.1}"
 ENV_FILE="$LIT_DIR/.env"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/autoos"
+# AUTOOS_LITELLM_STATE_DIR overrides where the log lives (a systemd unit or a
+# container usually wants a path it owns, not $HOME/.local/state).
+STATE_DIR="${AUTOOS_LITELLM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/autoos}"
 LOG="$STATE_DIR/litellm.log"
 UNIT="autoos-litellm.service"
 
@@ -54,6 +63,31 @@ fi
 autoos_read_env_file "$ENV_FILE"
 NAMES=("${ENV_NAMES[@]}")
 VALUES=("${ENV_VALUES[@]}")
+
+# An operator can keep the master key out of .env altogether: point
+# AUTOOS_LITELLM_MASTER_KEY_FILE at a private file holding only the key. It
+# overrides any LITELLM_MASTER_KEY from .env. The value is never printed.
+KEY_FILE="${AUTOOS_LITELLM_MASTER_KEY_FILE:-}"
+if [[ -n "$KEY_FILE" ]]; then
+    if [[ ! -r "$KEY_FILE" ]]; then
+        echo "AUTOOS_LITELLM_MASTER_KEY_FILE is set but not a readable file: $KEY_FILE"
+        exit 1
+    fi
+    MASTER_KEY="$(<"$KEY_FILE")"
+    if [[ -z "$MASTER_KEY" ]]; then
+        echo "AUTOOS_LITELLM_MASTER_KEY_FILE is set but the file is empty: $KEY_FILE"
+        exit 1
+    fi
+    replaced=0
+    for i in "${!NAMES[@]}"; do
+        if [[ "${NAMES[$i]}" == LITELLM_MASTER_KEY ]]; then
+            VALUES[i]="$MASTER_KEY"
+            replaced=1
+        fi
+    done
+    (( replaced )) || { NAMES+=("LITELLM_MASTER_KEY"); VALUES+=("$MASTER_KEY"); }
+fi
+
 if (( ${#NAMES[@]} == 0 )); then
     echo "Keys loaded into proxy env: (none - every entry is empty or a REPLACE_WITH_* placeholder)"
 else
@@ -124,7 +158,7 @@ unit_active() {
     command -v systemctl >/dev/null && systemctl --user is-active --quiet "$UNIT" 2>/dev/null
 }
 
-PLANNED="PYTHONUTF8=1 litellm --config config.yaml --host 127.0.0.1 --port $PORT"
+PLANNED="PYTHONUTF8=1 litellm --config config.yaml --host $HOST --port $PORT"
 
 # ─── Decide ─────────────────────────────────────────────────────────────────
 if [[ $RUNNING -eq 1 && $FOREGROUND -eq 0 ]]; then
@@ -178,11 +212,11 @@ if [[ $FOREGROUND -eq 1 ]]; then
         for _ in $(seq 1 10); do [[ -z "$(listener_pid)" ]] && break; sleep 1; done
     fi
     # Last line of the script: exec hands the unit's main PID to litellm.
-    exec litellm --config config.yaml --host 127.0.0.1 --port "$PORT"
+    exec litellm --config config.yaml --host "$HOST" --port "$PORT"
 fi
 
 mkdir -p "$STATE_DIR"
-nohup litellm --config config.yaml --host 127.0.0.1 --port "$PORT" >>"$LOG" 2>&1 &
+nohup litellm --config config.yaml --host "$HOST" --port "$PORT" >>"$LOG" 2>&1 &
 echo "litellm start issued from $LIT_DIR (log: $LOG)"
 for _ in $(seq 1 24); do proxy_ok && break; sleep 5; done
 if ! proxy_ok; then

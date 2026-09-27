@@ -108,6 +108,49 @@ if it "svc: start-litellm.sh binds loopback with PYTHONUTF8 and starts nothing i
     if (( ok )); then pass; else fail "start-litellm.sh plan is wrong"; fi
 fi
 
+if it "svc: start-litellm.sh honors AUTOOS_LITELLM_HOST in the planned bind"; then
+    d="$(_svc_litellm_fixture)"
+    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_LITELLM_HOST=0.0.0.0 \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    rm -rf "$d"
+    if [[ "$out" == *"litellm --config config.yaml --host 0.0.0.0 --port 1"* ]]; then pass
+    else fail "host override ignored: $out"; fi
+fi
+
+if it "svc: start-litellm.sh reads the master key from AUTOOS_LITELLM_MASTER_KEY_FILE without printing it"; then
+    d="$(_svc_litellm_fixture)"
+    printf 'sk-file-do-not-print\n' >"$d/master.key"
+    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_LITELLM_MASTER_KEY_FILE="$d/master.key" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    rm -rf "$d"
+    ok=1
+    [[ "$out" == *"LITELLM_MASTER_KEY"* ]] || { ok=0; echo "key file not loaded: $out" >&2; }
+    [[ "$out" == *"do-not-print"* || "$out" == *"sk-file"* ]] && { ok=0; echo "the key was printed" >&2; }
+    if (( ok )); then pass; else fail "master-key-file wiring wrong"; fi
+fi
+
+if it "svc: start-litellm.sh fails loudly on an unreadable or empty master-key file"; then
+    d="$(_svc_litellm_fixture)"
+    missing="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_LITELLM_MASTER_KEY_FILE="$d/nope.key" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"; rc_missing=$?
+    : >"$d/empty.key"
+    empty="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_LITELLM_MASTER_KEY_FILE="$d/empty.key" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"; rc_empty=$?
+    rm -rf "$d"
+    ok=1
+    [[ $rc_missing -ne 0 && "$missing" == *"AUTOOS_LITELLM_MASTER_KEY_FILE"* ]] \
+        || { ok=0; echo "missing: rc=$rc_missing $missing" >&2; }
+    [[ $rc_empty -ne 0 && "$empty" == *"AUTOOS_LITELLM_MASTER_KEY_FILE"* ]] \
+        || { ok=0; echo "empty: rc=$rc_empty $empty" >&2; }
+    if (( ok )); then pass; else fail "an unusable key file must be a hard error"; fi
+fi
+
+if it "svc: start-litellm.sh puts its log under AUTOOS_LITELLM_STATE_DIR"; then
+    src="$(cat "$ROOT/configuration/litellm/start-litellm.sh")"
+    if [[ "$src" == *'AUTOOS_LITELLM_STATE_DIR'* && "$src" == *'litellm.log'* ]]; then pass
+    else fail "state-dir override or log name missing"; fi
+fi
+
 if it "svc: start-litellm.sh restarts a proxy with stale keys and no-ops a current one"; then
     d="$(_svc_litellm_fixture)"
     env_now="$(mktemp)"; env_old="$(mktemp)"

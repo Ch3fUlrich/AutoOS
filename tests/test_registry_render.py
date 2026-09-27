@@ -284,10 +284,35 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
         self.assertEqual(registry.litellm_diff(rendered, real_litellm_config()), [])
 
-    def test_synced_tiers_are_rendered(self):
-        rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+    def test_every_registry_managed_tier_is_rendered(self):
+        # The managed set is derived from the registry, not a hand-kept pair:
+        # every route that declares legs and keeps at least one LiteLLM-servable
+        # leg after gateway_legs()/GATEWAY_ONLY gets a block. t1-orchestrator
+        # used to be hand-kept; t4-rag and t2-worker-clean never had markers.
+        reg = real_registry()
+        rendered = registry.render_litellm_blocks(reg, real_litellm_config())
         sync = registry._load_sync_router_tiers()
-        self.assertEqual(set(rendered), set(sync.SYNCED_TIERS))
+        self.assertEqual(set(rendered), set(sync.managed_tiers(reg)))
+        for managed in ("t1-orchestrator", "t2-worker-clean", "t4-rag"):
+            self.assertIn(managed, rendered)
+
+    def test_a_route_with_no_litellm_servable_leg_gets_no_block(self):
+        # An all-gateway-only route (opus-4-6) and a route whose every leg is
+        # unavailable/denied (the *-free-only and samba one-leg routes) render
+        # no block at all - the same shape render_omniroute() gives an all-dead
+        # route, not an empty model list.
+        rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        for gone in ("opus-4-6", "t1-orchestrator-free-only", "t3-driver-free-only",
+                     "samba/gpt-oss-120b", "samba/MiniMax-M3"):
+            self.assertNotIn(gone, rendered)
+
+    def test_a_legless_hand_group_is_never_rendered(self):
+        # t1-orchestrator-paid/t2-worker-paid/t3-driver-paid declare no legs;
+        # they are hand-curated fallback chains and must stay outside the
+        # AUTOOS-MANAGED markers.
+        rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        for paid in ("t1-orchestrator-paid", "t2-worker-paid", "t3-driver-paid"):
+            self.assertNotIn(paid, rendered)
 
     def test_gateway_only_leg_is_dropped_not_silently_kept_or_missing(self):
         # routes.t2-worker.legs carries antigravity/gemini-3.7-flash-high (a
@@ -995,15 +1020,23 @@ class GatewayLegsFilterTests(unittest.TestCase):
         rendered = registry.render_omniroute(reg)
         self.assertEqual([c["name"] for c in rendered["combos"]], [])
 
-    def test_all_gateway_legs_dropped_raises_naming_the_route(self):
-        # A synced litellm tier with no servable leg would render an empty
-        # model list into config.yaml - a hard error, not a silent empty block.
+    def test_all_gateway_legs_dropped_gets_no_block_not_a_raise(self):
+        # A tier whose every leg is unavailable/denied/gateway-only renders no
+        # block at all rather than raising: an absent group is a valid config
+        # and the same shape render_omniroute() gives an all-dead route.
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t2-worker"]["legs"] = ["groq/anything"]
+        reg["routes"]["t2-worker"]["legs"] = ["groq/any-model"]
+        rendered = registry.render_litellm_blocks(
+            reg, real_litellm_config(), tiers=("t2-worker",))
+        self.assertEqual(rendered, {})
+
+    def test_an_explicit_tier_absent_from_the_registry_still_raises(self):
+        # An explicit tier is still validated: a tier the registry does not
+        # have at all is a caller error, unlike one that renders empty.
         with self.assertRaises(ValueError) as ctx:
             registry.render_litellm_blocks(
-                reg, real_litellm_config(), tiers=("t2-worker",))
-        self.assertIn("t2-worker", str(ctx.exception))
+                real_registry(), real_litellm_config(), tiers=("no-such-tier",))
+        self.assertIn("no-such-tier", str(ctx.exception))
 
     def test_real_omniroute_drops_gated_legs_and_keeps_live_order(self):
         combos = {c["name"]: c for c in
