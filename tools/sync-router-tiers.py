@@ -251,7 +251,8 @@ def combos_refs(combos_path, tiers=SYNCED_TIERS):
 
 def registry_refs(registry_path, tiers=SYNCED_TIERS):
     """Ordered model refs per tier, read from catalog/ai-registry.json's
-    `routes.<tier>.legs` - this tool's default leg source (task A5c),
+    `routes.<tier>.legs` filtered by registry.gateway_legs (OR1a) - this
+    tool's default leg source (task A5c),
     replacing combos.json's combos[].models (docs/plans/
     2026-09-25-registry-mapping.md section 4: unchanged, in order). Same
     GATEWAY_ONLY drop as combos_refs() above (kept for the explicit --combos
@@ -267,8 +268,13 @@ def registry_refs(registry_path, tiers=SYNCED_TIERS):
     missing = [t for t in tiers if t not in routes]
     if missing:
         raise ConfigError(f"{registry_path} has no route(s): {', '.join(missing)}")
+    # OR1a: mirror exactly the legs render_omniroute() writes into combos.json
+    # (registry.gateway_legs drops unavailable, policy-denied and client-bound
+    # legs), then the LiteLLM-only GATEWAY_ONLY drop.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from registry import gateway_legs  # noqa: E402
     return {
-        t: [m for m in (routes[t].get("legs") or [])
+        t: [m for m in gateway_legs(routes[t], doc)
             if m.split("/", 1)[0] not in GATEWAY_ONLY]
         for t in tiers
     }

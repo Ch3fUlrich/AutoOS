@@ -347,18 +347,12 @@ class ChangedLegFailsLitellmCheckTests(unittest.TestCase):
 
 class ExistingSyncRouterTiersStillWorkTests(unittest.TestCase):
     """tools/sync-router-tiers.py must stay a working tool - the brief's own 'it
-    stays a working tool, its tests must pass' rule. OR1a changed what
-    config.yaml's managed blocks mirror: only gateway-servable legs, the same
-    set render_omniroute() writes into combos.json. The tool's default leg
-    source is the registry's raw routes.<tier>.legs, which still carry the
-    operator-flagged dead legs, so its default --check now wants to re-add them
-    - a tool defect outside this brief's paths and tracked in open:. Against the
-    filtered source it exists to mirror, combos.json, it still exits 0. The
-    provider-consistency helper below is unaffected by the leg filter."""
+    stays a working tool, its tests must pass' rule. Since OR1a its default
+    source (the registry) mirrors the same gateway_legs() render_omniroute()
+    writes, so --check with no override exits 0 on the committed files."""
 
-    def test_sync_router_tiers_check_against_the_filtered_source_exits_zero(self):
-        proc = run_helper(SYNC_ROUTER_TIERS_TOOL, "--check",
-                          "--combos", str(COMBOS_PATH))
+    def test_sync_router_tiers_check_still_exits_zero(self):
+        proc = run_helper(SYNC_ROUTER_TIERS_TOOL, "--check")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_provider_registry_consistency_helper_still_passes(self):
