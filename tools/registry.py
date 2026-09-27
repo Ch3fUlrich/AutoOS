@@ -42,7 +42,12 @@ Three subcommands:
     7. every ``unavailable_until`` value (clients/providers/unavailable_legs,
        brief UNTIL 2026-09-26) parses as an ISO-8601 UTC timestamp -- the
        resolver reads it via unavailable_now(), the renders never do (they
-       stay time-independent so the CI drift gates do not move with the date).
+       stay time-independent so the CI drift gates do not move with the date);
+    8. an entry with ``unavailable_until`` MUST ALSO carry ``available:
+       false`` -- the resolver reads ``available`` to decide whether to
+       emit a re-probe note after the until passes (FUP 2026-09-27,
+       measured on ``clients.agy`` which had ``unavailable_until`` without
+       ``available: false`` and silently lost the re-probe on expiry).
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -689,6 +694,44 @@ def _check_until_values(registry) -> list:
                         problems.append(
                             "bad unavailable_until: %s %r" % (path, value))
                     continue
+                walk(value, child)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, "%s[%d]" % (path, index))
+
+    walk(registry, "")
+    return problems
+
+
+# ===========================================================================
+# rule 8 - unavailable_until entries must also carry available: false
+# ===========================================================================
+
+
+def _check_unavailable_until_pairs_available(registry) -> list:
+    """Every dict that has ``unavailable_until`` MUST also have ``available:
+    false``.
+
+    The resolver's ``_client_reason`` uses the ``available`` flag to detect
+    when a self-healed ``unavailable_until`` has passed (``available`` is
+    False but the until is past -> emit a re-probe note). Without the flag
+    the entry silently switches back to available with no note, which is
+    wrong for own-account clients (FUP 2026-09-27, measured on
+    ``clients.agy``).
+
+    This rule recursively walks the whole registry so it catches the
+    pattern everywhere, not just on the three named surfaces.
+    """
+    problems = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            if "unavailable_until" in node and node.get("available") is not False:
+                problems.append("entry with unavailable_until but no available: false: %s" % path)
+            for key, value in node.items():
+                if key in COMMENT_KEYS:
+                    continue
+                child = "%s.%s" % (path, key) if path else key
                 walk(value, child)
         elif isinstance(node, list):
             for index, value in enumerate(node):
@@ -1801,6 +1844,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_dated_values(registry))
     problems.extend(_check_required_keys(registry))
     problems.extend(_check_until_values(registry))
+    problems.extend(_check_unavailable_until_pairs_available(registry))
     return problems
 
 

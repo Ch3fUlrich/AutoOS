@@ -2121,6 +2121,63 @@ class RouteCliTests(unittest.TestCase):
         self.assertEqual(data["state"], "input_required")
 
 
+    # --- record_probe after provider_stop (FUP 2026-09-27) -----------------
+
+    def test_promo_client_with_provider_stop_skips_record_probe(self):
+        """A promo client (qoder) whose tail contains a provider-stop marker
+        must NOT record a probe: the record_probe call happens AFTER the
+        provider-stop upgrade, so rc=8 never reaches rc==0."""
+        # Set up overlay/track paths (like isolate()) but keep the real
+        # clients module so qoder is available.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        # Build a minimal fake plan so cmd_run does not need the real
+        # route-resolution machinery.
+        fake_plan = {
+            "agent": "t2-worker",
+            "client": "qoder",
+            "model": "qoder-model",
+            "cmd": ["qodercli", "do the thing"],
+            "env": {},
+            "route": {"combo": "qoder-model", "reason": "test",
+                      "privacy": "public", "review": False, "tier": 2,
+                      "card": None},
+            "depth": (1, 3),
+            "free": False,
+            "sandbox": None,
+            "cwd": os.getcwd(),
+        }
+        ns = argparse.Namespace(
+            client="qoder", task="do the thing",
+            free=False, dry_run=False, card=None,
+            clean=False, tier=2, joinable=False,
+            lean=False, isolate=False, auto=False,
+            title=None, model=None, free_model=None,
+            max_depth=None, plan=None, allow_training=False,
+        )
+        with mock.patch.object(self.agent, "build_plan", return_value=fake_plan):
+            with mock.patch.object(self.agent, "run_client") as mock_run:
+                mock_run.return_value = self.agent.ClientExit(
+                    0, tail="working...\n"
+                    "Error: your personal credits have been exhausted\n")
+                with mock.patch.object(
+                        self.agent.clients, "record_probe") as mock_record:
+                    with mock.patch.object(
+                            self.agent.clients, "signin_state",
+                            return_value=(None, "")):
+                        with mock.patch(
+                                "shutil.which",
+                                return_value="/usr/bin/qodercli"):
+                            out, err = io.StringIO(), io.StringIO()
+                            with contextlib.redirect_stdout(out), \
+                                    contextlib.redirect_stderr(err):
+                                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 8, "provider stop must upgrade rc to 8")
+        mock_record.assert_not_called()
+
+
 class RunCardV2Tests(unittest.TestCase):
     """`run --card` v2 routes through the resolver (RUNV2, spec 6.1 "run takes
     card v2"). No network, no real clients: MEASURED_OVERLAY_PATH/TRACK_RECORD
@@ -2211,6 +2268,17 @@ class RunCardV2Tests(unittest.TestCase):
         self.assertEqual(self.agent._tier_for_route("t3-driver-clean"), 3)
 
     # --- input_required / deferred / --no-defer -----------------------------
+
+    # FUP (2026-09-27): refuse empty or whitespace-only task before any
+    # clone or client start (measured: $(cat missing-file) produced '' and
+    # a worker chatted twice before the route planner caught it).
+
+    def test_empty_task_is_refused_with_exit_2(self):
+        for task in ("", "   ", "\t\n"):
+            with self.subTest(task=repr(task)):
+                rc, out, err = self.run_cmd_run(task=task)
+                self.assertEqual(rc, 2, "task=%r: rc=%d err=%s" % (task, rc, err))
+                self.assertIn("empty", err)
 
     def test_input_required_state_refuses_with_exit_2_and_the_plans_reason(self):
         fake = {"route": None, "state": "input_required",
@@ -3084,12 +3152,14 @@ class IsolateContainmentTests(unittest.TestCase):
         # The four shapes real clients print when the provider stops them
         # (brief WIPfix3): opencode rate limit and capacity, agy AGY_ERROR
         # 429 JSON, agy quota line. Each must match.
+        # FUP (2026-09-27): qoder CLI credits-exhausted marker added.
         agent = self.agent
         cases = [
             "Error: Rate limit exceeded. Please try again later.",
             "Error: Chat admission capacity is temporarily unavailable. Retry shortly.",
             'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached',
             "error: Individual quota reached. Please upgrade your plan.",
+            "error: your personal credits have been exhausted",
         ]
         for line in cases:
             with self.subTest(line=line):

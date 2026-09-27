@@ -454,21 +454,21 @@ class FilterTests(unittest.TestCase):
         # FT: a too-small-context leg no longer removes the whole route (see
         # test_survivors_are_route_ids_in_registry_order) -- it is only
         # skipped, in usable_legs()'s own per-leg reasons.
-        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-mixed"],
                                    self.card(), self.feats(), self.state(),
                                    self.registry, {})
         self.assertIn("context: need 1000x1.3 > usable 100 on clean/tiny",
                       skipped["clean/tiny"])
 
     def test_tool_calls_reason(self):
-        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-mixed"],
                                    self.card(kind="implement"), self.feats(),
                                    self.state(), self.registry, self.overlay)
         self.assertIn("tool_calls: clean/bound is unproven",
                       skipped["clean/bound"])
 
     def test_tool_calls_filter_is_skipped_for_a_non_agentic_kind(self):
-        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-mixed"],
                                    self.card(kind="research"),
                                    self.feats(need_tokens=10), self.state(),
                                    self.registry, {})
@@ -476,7 +476,7 @@ class FilterTests(unittest.TestCase):
                          ["client_bound: clean/bound needs claude"])
 
     def test_client_bound_reason(self):
-        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-mixed"],
                                    self.card(kind="review"),
                                    self.feats(need_tokens=10), self.state(),
                                    self.registry, {})
@@ -788,7 +788,7 @@ class FallThroughTests(unittest.TestCase):
         # inside the bound client: run 20260926-142228 got 403 "OpenCode's free
         # tier can only be used from within OpenCode" on client=opencode.
         registry = self.two_leg_registry(leg_a={"client_bound": "opencode"})
-        legs, skipped = r.usable_legs(registry["routes"]["r-ft"], self.card(),
+        legs, skipped, _ = r.usable_legs(registry["routes"]["r-ft"], self.card(),
                                       self.features(), self.state(), registry, {},
                                       client="opencode")
         self.assertEqual(legs, [("p", "model-b")])
@@ -802,7 +802,7 @@ class FallThroughTests(unittest.TestCase):
         survivors, _ = r.filter_routes(card, features, client_state, registry, {})
         self.assertEqual(survivors, ["r-ft"])
 
-        legs, skipped = r.usable_legs(registry["routes"]["r-ft"], card,
+        legs, skipped, _ = r.usable_legs(registry["routes"]["r-ft"], card,
                                       features, client_state, registry, {})
         self.assertEqual(legs, [("p", "model-b")])
         self.assertEqual(skipped,
@@ -851,7 +851,7 @@ class FallThroughTests(unittest.TestCase):
             "p/model-b": {"tool_calls_last_error": {"trials": trials_429}},
         }}
 
-        legs, skipped = r.usable_legs(registry["routes"]["r-ft"], card,
+        legs, skipped, _ = r.usable_legs(registry["routes"]["r-ft"], card,
                                       features, client_state, registry, overlay)
         # model-a: unproven AND rate-limited -- skipped, both reasons kept.
         self.assertEqual(legs, [("p", "model-b")])
@@ -1542,7 +1542,7 @@ class PlanTests(unittest.TestCase):
             "route", "class", "client", "leg", "effort", "max_tokens",
             "context_budget", "bucket", "decompose", "p", "expected_cost",
             "reviewers", "escalation", "state", "defer_until", "reason",
-            "explain", "skipped_legs",
+            "explain", "skipped_legs", "re_probe_notes",
         })
         # Every model in this fixture is tool_calls "proven" with plenty of
         # context: nothing is skipped, so FT's skipped_legs is empty here.
@@ -1600,6 +1600,27 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(result["bucket"], "S0")
         self.assertIn("hints", result)
         self.assertIn("no route survives the filters", result["reason"])
+
+    # FUP (2026-09-27): re-probe notes must not inflate "falls through"
+    # count -- a leg whose provider's unavailable_until just passed is
+    # usable again, and the informational note is separate from skipped.
+
+    def test_re_probe_note_does_not_say_falls_through(self):
+        reg = self.registry()
+        reg["providers"]["free-p"]["available"] = False
+        reg["providers"]["free-p"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        now = self.dt(2026, 10, 1, 9, 5)
+        result = r.plan(self.card(), self.features(),
+                        self.state(), reg, {}, [],
+                        "orch", now=now)
+        self.assertIsNotNone(result["route"], "a self-healed route must be picked")
+        self.assertEqual(result["skipped_legs"], {},
+                         "a leg whose only note is re-probe must not be in skipped")
+        notes = result.get("re_probe_notes", {}).get("free-p/free-model", [])
+        self.assertTrue(notes and "re-probe" in notes[0],
+                        "%s: %s" % (result.get("route", "?"), notes))
+        self.assertNotIn("falls through", result["reason"],
+                         "re-probe notes must not inflate the falls-through count")
 
     # --- override ------------------------------------------------------
 
@@ -2146,10 +2167,14 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         now = self.dt(2026, 10, 1, 9, 5, 0)
         survivors, removed = self.filter(now=now)
         self.assertIn("r-quota", survivors)
-        _, skipped = r.usable_legs(self.registry["routes"]["r-quota"],
-                                   self.card, self.features, self.state,
-                                   self.registry, {}, now=now)
-        self.assertEqual(skipped["quota/slow"],
+        _, skipped, re_probe_notes = r.usable_legs(
+            self.registry["routes"]["r-quota"],
+            self.card, self.features, self.state,
+            self.registry, {}, now=now)
+        # The re-probe note is no longer in skipped for a usable leg; it
+        # lives in re_probe_notes instead (FUP 2026-09-27).
+        self.assertNotIn("quota/slow", skipped)
+        self.assertEqual(re_probe_notes["quota/slow"],
                          ["re-probe: quota unavailable_until passed"])
 
     def test_an_unavailable_leg_with_a_future_until_names_the_date(self):
@@ -2168,7 +2193,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # reason line must not claim it did (rule 7 reports the value).
         self.registry["providers"]["quota"]["unavailable_until"] = (
             "next tuesday")
-        _, skipped = r.usable_legs(self.registry["routes"]["r-quota"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-quota"],
                                    self.card, self.features, self.state,
                                    self.registry, {}, now=self.dt(2026, 9, 26))
         self.assertNotIn("quota/slow", skipped)
@@ -2177,7 +2202,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # Same on the leg's own unavailable_legs entry.
         self.registry["routes"]["r-plain"]["unavailable_legs"] = {
             "cheap/fast": {"unavailable_until": "next tuesday"}}
-        _, skipped = r.usable_legs(self.registry["routes"]["r-plain"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-plain"],
                                    self.card, self.features, self.state,
                                    self.registry, {}, now=self.dt(2026, 9, 26))
         self.assertNotIn("cheap/fast", skipped)
@@ -2190,7 +2215,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
             self.assertNotIn("r-plain", survivors)
             self.assertEqual(removed["r-plain"],
                              ["no usable leg: cheap/fast: unavailable"])
-            _, skipped = r.usable_legs(self.registry["routes"]["r-plain"],
+            _, skipped, _ = r.usable_legs(self.registry["routes"]["r-plain"],
                                        self.card, self.features, self.state,
                                        self.registry, {}, now=now)
             self.assertEqual(skipped["cheap/fast"], ["unavailable"])

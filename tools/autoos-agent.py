@@ -854,6 +854,9 @@ PROVIDER_STOP_MARKERS = (
     "quota reached",
     "payment required",
     " 402",
+    # FUP (2026-09-27, measured as the whole last line of a qoder run):
+    # qodercli stops when no credits remain.
+    "your personal credits have been exhausted",
 )
 
 # WIPfix2 (measured 2026-09-26 20:2xZ): a worker that merely READS or prints
@@ -1485,6 +1488,11 @@ def cmd_run(args, cfg: dict) -> int:
             os.environ.get("AUTOOS_AGENT_TRANSCRIPT")))
         if pause["active"]:
             return refuse("PAUSE active (%s): %s" % (pause["at"], pause["text"]), 3)
+    # FUP (2026-09-27): refuse an empty or whitespace-only task before any
+    # clone or client start (measured: $(cat missing-file) produced '' and
+    # a worker chatted twice before the route planner caught it).
+    if not args.task or not args.task.strip():
+        return refuse("task is empty or whitespace-only", 2)
     client = clients.CLIENTS[args.client]
     if args.free and args.clean:
         return refuse("--free uses promo models that may train on prompts; it cannot be --clean.")
@@ -1585,18 +1593,20 @@ def cmd_run(args, cfg: dict) -> int:
     child_rc = rc  # the WIP message names the client's own rc, not a verdict override
     if refusal is not None:
         print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
-    if rc == 0 and client.promo:
-        clients.record_probe(client.name)
     # A provider stop is a failure even though the client exited 0: it was cut
     # off mid-task (WIPfix, 2026-09-26). Only rc 0 and 6 upgrade to 8; a LEAK
     # (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
     # Exit precedence 7 > 8 > 5 > 6: a HEADLESS-REFUSAL (6) run that is then
     # provider-stopped exits 8 with failure_class "provider" (agy measured:
     # jetski refusal + AGY_ERROR 429, R-gateway-12).
+    # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
+    # a promo client whose tail is a provider stop does not get a false probe.
     stop = provider_stop(client_tail)
     if stop is not None and rc in (0, 6):
         print("autoos-agent: PROVIDER-STOP: %s" % stop, file=sys.stderr)
         rc = 8
+    if rc == 0 and client.promo:
+        clients.record_probe(client.name)
     if plan["sandbox"] and not args.joinable:
         sb = plan["sandbox"]
         branch = sb["branch"]
