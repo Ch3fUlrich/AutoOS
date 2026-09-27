@@ -384,6 +384,17 @@ def _generated_wrapper_cases():
         for spelling in spellings:
             for child, rule in _FORBIDDEN_CHILDREN:
                 cases.append(([wrapper, *spelling, *child], rule))
+    # Nest one level: a wrapper wrapping another wrapper must still expose
+    # the innermost command head. The outer walker must find the inner
+    # wrapper as the child, and the inner walker the forbidden child -- so a
+    # value-option disagreement at either layer is a bypass. One
+    # representative spelling per inner wrapper keeps the matrix bounded.
+    for outer, outer_spellings in _WRAPPER_OPTION_SPELLINGS.items():
+        for inner, inner_spellings in _WRAPPER_OPTION_SPELLINGS.items():
+            inner_option = inner_spellings[0]
+            for outer_option in outer_spellings:
+                for child, rule in _FORBIDDEN_CHILDREN:
+                    cases.append(([outer, *outer_option, inner, *inner_option, *child], rule))
     for spelling in (["-u", "x"], ["-ux"], ["-C", "/tmp"], ["-a", "M"],
                      ["--unset", "x"], ["--unset=x"]):
         for split in _ENV_SPLIT_OPTIONS:
@@ -413,7 +424,9 @@ class WrapperOptionBypassMatrixTests(unittest.TestCase):
 
     def test_generated_matrix_denies_every_hidden_forbidden_child(self):
         cases = _generated_wrapper_cases()
-        self.assertGreater(len(cases), 150)
+        # flat spellings + one level of nesting must both be present, so the
+        # bound proves the nested matrix was generated, not silently dropped.
+        self.assertGreater(len(cases), 2000)
         for argv, rule in cases:
             with self.subTest(argv=argv, rule=rule):
                 decision = self._decide(argv)

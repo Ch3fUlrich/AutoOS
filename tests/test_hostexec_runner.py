@@ -256,10 +256,10 @@ class RemoteSshTests(unittest.TestCase):
             argv = ["echo", "a b", "$(evil)", "; rm -rf /", 'quote"in', "back`tick`", "a|b>c<d"]
             result = runner.run_remote(argv, alias="myhost", cwd=tmp, path_dirs=[bindir], timeout=5)
             self.assertEqual(result.exit_code, 0, result.output)
-            # item 3: the remote command is prefixed with `cd <cwd> &&` so it
-            # runs where the audit line says it did; the argv elements
+            # item 3: the remote command is prefixed with `cd -- <cwd> &&` so
+            # it runs where the audit line says it did; the argv elements
             # themselves still round-trip as exactly one literal arg each.
-            self.assertEqual(result.output.splitlines(), ["cd", tmp, "&&"] + argv)
+            self.assertEqual(result.output.splitlines(), ["cd", "--", tmp, "&&"] + argv)
 
     def test_remote_command_is_cd_prefixed_to_the_audited_cwd(self):
         # item 3: without the prefix the audit line says cwd=/ but the
@@ -277,7 +277,24 @@ class RemoteSshTests(unittest.TestCase):
                               cwd="/srv/remote work", path_dirs=[bindir], timeout=5)
             with open(marker, encoding="utf-8") as fh:
                 seen = fh.read()
-            self.assertEqual(seen, "cd '/srv/remote work' && id")
+            self.assertEqual(seen, "cd -- '/srv/remote work' && id")
+
+    def test_remote_cd_uses_dashdash_for_a_leading_dash_cwd(self):
+        # hx3: shlex.quote leaves a leading '-' unquoted ("-evil"), so a bare
+        # `cd -evil` is parsed by cd as options (-e, -l, ...) and never
+        # changes directory. `cd --` makes the path literal.
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            marker = os.path.join(tmp, "remote.txt")
+            _write_script(os.path.join(bindir, "ssh"), f"#!{sys.executable}\n"
+                          "import sys\n"
+                          f"open({marker!r}, 'w').write(sys.argv[-1])\n")
+            runner.run_remote(["id"], alias="myhost",
+                              cwd="-evil", path_dirs=[bindir], timeout=5)
+            with open(marker, encoding="utf-8") as fh:
+                seen = fh.read()
+            self.assertEqual(seen, "cd -- -evil && id")
 
     def test_ssh_invoked_with_batchmode_and_dash_capital_t(self):
         with tempfile.TemporaryDirectory() as tmp:

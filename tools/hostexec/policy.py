@@ -503,7 +503,11 @@ _NOHUP_LONGS = {
 class _WrapperSpec:
     """How one transparent launcher's leading options parse. ``stops`` holds
     short chars (e.g. env "S", flock "c") *and* canonical long names that
-    make the wrapped command statically unknowable; a stop yields no head."""
+    make the wrapped command statically unknowable; a stop yields no head.
+    ``lone_dash_is_flag`` marks env, whose bare ``-`` means -i. A wrapper
+    that takes positional arguments *before* its command (only flock, whose
+    lockfile comes first) sets ``positionals_before_command`` so the walker
+    keeps scanning for options that GNU getopt permutes after it."""
 
     label: str
     longs: Mapping[str, str]
@@ -511,12 +515,14 @@ class _WrapperSpec:
     short_optional: frozenset[str] = frozenset()
     stops: frozenset[str] = frozenset()
     trailing: str = "none"  # none | assignments | duration | file
+    lone_dash_is_flag: bool = False
+    positionals_before_command: int = 0
 
 
 _ENV_SPEC = _WrapperSpec("env", _ENV_LONGS,
                          short_value=frozenset("uCa"),
                          stops=frozenset(("S", "split-string")),
-                         trailing="assignments")
+                         trailing="assignments", lone_dash_is_flag=True)
 _NICE_SPEC = _WrapperSpec("nice", _NICE_LONGS, short_value=frozenset("n"))
 _TIMEOUT_SPEC = _WrapperSpec("timeout", _TIMEOUT_LONGS, short_value=frozenset("sk"),
                              trailing="duration")
@@ -527,7 +533,8 @@ _XARGS_SPEC = _WrapperSpec("xargs", _XARGS_LONGS,
                            short_value=frozenset("adEeILnsP"),
                            short_optional=frozenset("il"))
 _FLOCK_SPEC = _WrapperSpec("flock", _FLOCK_LONGS, short_value=frozenset("wE"),
-                           stops=frozenset(("c", "command")), trailing="file")
+                           stops=frozenset(("c", "command")), trailing="file",
+                           positionals_before_command=1)
 _SETSID_SPEC = _WrapperSpec("setsid", _SETSID_LONGS)
 _NOHUP_SPEC = _WrapperSpec("nohup", _NOHUP_LONGS)
 
@@ -556,22 +563,44 @@ def _resolve_long_option(name: str, longs: Mapping[str, str]) -> tuple[str | Non
     return matches[0], None
 
 
-def _scan_wrapper_options(cur: Sequence[str], spec: _WrapperSpec) -> tuple[int | None, str | None]:
-    """Walk one launcher's leading options. Returns (index_of_command,
-    problem): index is None when no wrapped command is statically derivable
-    (a stop like env -S or flock -c, or options ran off the end); problem is
-    set for an unknown/ambiguous long option so decide() denies instead of
-    guessing which token is the command."""
+def _walk_wrapper_options(
+        cur: Sequence[str], spec: _WrapperSpec,
+) -> tuple[int | None, list[str], str | None]:
+    """The one walk of a launcher's leading options. Returns
+    ``(index_of_command, options_seen, problem)``.
+
+    ``index_of_command`` is None when no wrapped command is statically
+    derivable (a stop such as env -S or flock -c, or options ran off the
+    end). ``options_seen`` holds a normalized name for every option met
+    before the command -- the short char for a short option, the canonical
+    long name for a long one (so ``-S``, ``--split-string`` and ``-vS`` all
+    surface) -- and is what the split-string / flock-command predicates read
+    instead of re-walking the options with their own rules. ``problem`` is
+    set for an unknown/ambiguous long option so decide() denies rather than
+    guessing which token is the command.
+
+    Handles short clusters, attached (``-ux``) and detached (``-u x``)
+    values, unique-prefix long options with ``=value`` or a next-token
+    value, ``--``, env's bare ``-`` and NAME=VALUE assignments, and flock's
+    lockfile positional (which getopt may leave before later options)."""
     i, n = 1, len(cur)
     problem: str | None = None
+    options: list[str] = []
+    positionals = 0
+    saw_dashdash = False
     while i < n:
         tok = cur[i]
         if not isinstance(tok, str):
             i += 1
             continue
         if tok == "--":
+            saw_dashdash = True
             i += 1
             break
+        if tok == "-" and spec.lone_dash_is_flag:
+            options.append("-")
+            i += 1
+            continue
         if tok.startswith("--"):
             name, eq, _val = tok[2:].partition("=")
             canonical, prob = _resolve_long_option(name, spec.longs)
@@ -581,25 +610,42 @@ def _scan_wrapper_options(cur: Sequence[str], spec: _WrapperSpec) -> tuple[int |
                                "the wrapped command")
                 i += 1
                 continue
+            options.append(canonical)
             if canonical in spec.stops:
-                return None, problem
+                return None, options, problem
             mode = spec.longs[canonical]
             i += 1 if (eq or mode != _LONG_REQUIRED) else 2
             continue
         if tok.startswith("-") and len(tok) > 1 and tok != "-":
             rest = tok[1:]
             consumed_next = False
+            stopped = False
             for k, ch in enumerate(rest):
                 if ch in spec.stops:
-                    return None, problem
+                    options.append(ch)
+                    stopped = True
+                    break
                 if ch in spec.short_value:
+                    options.append(ch)
                     consumed_next = k == len(rest) - 1
                     break
                 if ch in spec.short_optional:
+                    options.append(ch)
                     break
                 # An unrecognised short flag does not end the cluster; env
                 # -vS must keep scanning past -v to reach -S.
+                options.append(ch)
+            if stopped:
+                return None, options, problem
             i += 2 if consumed_next else 1
+            continue
+        # A positional. flock's lockfile is the one a wrapper takes before
+        # its command; consume it and keep walking, because getopt permutes
+        # options that follow it (flock /tmp/l -c cmd) into the option
+        # region. Any later positional is the wrapped command.
+        if positionals < spec.positionals_before_command:
+            positionals += 1
+            i += 1
             continue
         break
     if spec.trailing == "assignments":
@@ -609,9 +655,13 @@ def _scan_wrapper_options(cur: Sequence[str], spec: _WrapperSpec) -> tuple[int |
         if i < n and not cur[i].startswith("-") and _looks_like_duration(cur[i]):
             i += 1
     elif spec.trailing == "file":
-        if i < n and not cur[i].startswith("-"):
+        # flock: `--` ends option parsing, so the very next token is the
+        # lockfile even when it starts with '-' (flock -- -c rm -rf / locks
+        # on -c and runs rm). Without `--`, the lockfile was the positional
+        # consumed above and a leading-dash token is an unparsed option.
+        if saw_dashdash and i < n and isinstance(cur[i], str):
             i += 1
-    return (i if i < n else None), problem
+    return (i if i < n else None), options, problem
 
 
 def _wrapper_option_problem(head: Sequence[str]) -> str | None:
@@ -622,11 +672,11 @@ def _wrapper_option_problem(head: Sequence[str]) -> str | None:
     spec = _WRAPPER_SPECS.get(_basename(head[0]))
     if spec is None:
         return None
-    return _scan_wrapper_options(head, spec)[1]
+    return _walk_wrapper_options(head, spec)[2]
 
 
 def _idx_after_env(s: Sequence[str]) -> int | None:
-    return _scan_wrapper_options(s, _ENV_SPEC)[0]
+    return _walk_wrapper_options(s, _ENV_SPEC)[0]
 
 
 def _env_split_string_problem(argv: Sequence[str]) -> str | None:
@@ -634,46 +684,20 @@ def _env_split_string_problem(argv: Sequence[str]) -> str | None:
     and execs the result, e.g. ["env","-S","sudo id"] runs sudo. decide()
     only sees one opaque token, so no wrapper-transparency head exists and
     the real command is invisible to every other rule. Deny it outright
-    (same fail-closed posture as _ALWAYS_DENY_WRAPPERS)."""
+    (same fail-closed posture as _ALWAYS_DENY_WRAPPERS). The walker saw the
+    option even when a value-taking option preceded it (-u foo -S), which is
+    the bypass this reads the shared option list to close."""
     if not argv or _basename(argv[0]) != "env":
         return None
-    i, n = 1, len(argv)
-    while i < n:
-        tok = argv[i]
-        if not isinstance(tok, str):
-            i += 1
-            continue
-        if tok == "--":
-            break
-        if tok.startswith("--"):
-            name, eq, _val = tok[2:].partition("=")
-            canonical, prob = _resolve_long_option(name, _ENV_LONGS)
-            if canonical == "split-string":
-                return ("env --split-string splits a string into argv and hides the "
-                        "real command; run the command directly")
-            if prob is not None or canonical in _ENV_SPEC.stops:
-                return None  # unknown/ambiguous is _wrapper_option_problem's job
-            mode = _ENV_LONGS[canonical]
-            i += 1 if (eq or mode != _LONG_REQUIRED) else 2
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            # Scan the whole cluster left to right. A value-taking char
-            # (u/C/a) ends it; an unrecognised flag (-v, -0, ...) does not
-            # stop the scan, so -vS and -0vS still reach their -S.
-            for ch in tok[1:]:
-                if ch == "S":
-                    return ("env -S splits a string into argv and hides the "
-                            "real command; run the command directly")
-                if ch in "uCa":
-                    break  # the rest of the token is this option's value
-            i += 1
-            continue
-        break
+    options = _walk_wrapper_options(argv, _ENV_SPEC)[1]
+    if "S" in options or "split-string" in options:
+        return ("env --split-string splits a string into argv and hides the "
+                "real command; run the command directly")
     return None
 
 
 def _idx_after_nice(s: Sequence[str]) -> int | None:
-    return _scan_wrapper_options(s, _NICE_SPEC)[0]
+    return _walk_wrapper_options(s, _NICE_SPEC)[0]
 
 
 def _idx_after_simple_flags(s: Sequence[str]) -> int | None:
@@ -691,19 +715,19 @@ def _idx_after_simple_flags(s: Sequence[str]) -> int | None:
 
 
 def _idx_after_timeout(s: Sequence[str]) -> int | None:
-    return _scan_wrapper_options(s, _TIMEOUT_SPEC)[0]
+    return _walk_wrapper_options(s, _TIMEOUT_SPEC)[0]
 
 
 def _idx_after_xargs(s: Sequence[str]) -> int | None:
-    return _scan_wrapper_options(s, _XARGS_SPEC)[0]
+    return _walk_wrapper_options(s, _XARGS_SPEC)[0]
 
 
 def _idx_after_ionice(s: Sequence[str]) -> int | None:
-    return _scan_wrapper_options(s, _IONICE_SPEC)[0]
+    return _walk_wrapper_options(s, _IONICE_SPEC)[0]
 
 
 def _idx_after_stdbuf(s: Sequence[str]) -> int | None:
-    return _scan_wrapper_options(s, _STDBUF_SPEC)[0]
+    return _walk_wrapper_options(s, _STDBUF_SPEC)[0]
 
 
 def _idx_after_chrt(s: Sequence[str]) -> int | None:
@@ -731,30 +755,20 @@ def _idx_after_chrt(s: Sequence[str]) -> int | None:
 
 
 def _idx_after_flock(s: Sequence[str]) -> int | None:
-    return _scan_wrapper_options(s, _FLOCK_SPEC)[0]
+    return _walk_wrapper_options(s, _FLOCK_SPEC)[0]
 
 
 def _flock_runs_shell(head: Sequence[str]) -> bool:
     """flock -c/--command (and any unambiguous abbreviation) runs its argument
-    through a shell, so no transparent head exists and decide() denies it."""
+    through a shell, so no transparent head exists and decide() denies it.
+    Reads the walker's option list rather than re-scanning: a -c/--command
+    seen before the wrapped command is a shell string, whether it was
+    written as -c, --command or --comm, and a -c consumed as the lockfile
+    after `--` is not."""
     if not head or _basename(head[0]) != "flock":
         return False
-    for tok in head[1:]:
-        if not isinstance(tok, str):
-            continue
-        if tok == "--":
-            return False
-        if tok.startswith("--"):
-            name = tok[2:].split("=", 1)[0]
-            canonical, _prob = _resolve_long_option(name, _FLOCK_LONGS)
-            if canonical == "command":
-                return True
-        elif tok.startswith("-") and len(tok) > 1 and tok != "-":
-            if "c" in tok[1:]:
-                return True
-        else:
-            return False
-    return False
+    options = _walk_wrapper_options(head, _FLOCK_SPEC)[1]
+    return "c" in options or "command" in options
 
 
 def _idx_after_taskset(s: Sequence[str]) -> int | None:

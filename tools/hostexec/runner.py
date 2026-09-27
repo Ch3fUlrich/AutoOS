@@ -171,15 +171,17 @@ _SSH_LOCAL_CWD = "/"
 def run_remote(argv: Sequence[str], *, alias: str, cwd: str, path_dirs: Sequence[str],
                timeout: float = 30.0, output_cap: int = 65536,
                base_env: dict | None = None) -> RunResult:
-    """`ssh -o BatchMode=yes -T <alias> -- "cd <cwd> && <shlex.join(argv)>"`.
+    """`ssh -o BatchMode=yes -T <alias> -- "cd -- <cwd> && <shlex.join(argv)>"`.
 
     `cwd` is the remote working directory and is enforced with a leading
-    `cd` (shlex.quoted, so it cannot inject a second command) rather than
+    `cd --` (shlex.quoted, so it cannot inject a second command) rather than
     assumed: the command then runs exactly where the audit line says it
-    does. If the remote `cd` fails the `&&` keeps the wrapped command from
-    running. `ssh` itself is resolved on `path_dirs` like any other command
+    does. `--` stops `cd` reading a directory that begins with '-' as an
+    option (cwd "-evil" is otherwise a `cd -e`/`cd -l` style parse). If the
+    remote `cd` fails the `&&` keeps the wrapped command from running.
+    `ssh` itself is resolved on `path_dirs` like any other command
     (tests point it at a fake stub)."""
-    remote_cmd = f"cd {shlex.quote(cwd)} && {shlex.join(list(argv))}"
+    remote_cmd = f"cd -- {shlex.quote(cwd)} && {shlex.join(list(argv))}"
     ssh_argv = ["ssh", "-o", "BatchMode=yes", "-T", alias, "--", remote_cmd]
     return _exec(ssh_argv, cwd=_SSH_LOCAL_CWD, path_dirs=path_dirs, timeout=timeout,
                  output_cap=output_cap, base_env=base_env)
