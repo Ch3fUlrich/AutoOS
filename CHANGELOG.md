@@ -101,6 +101,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added — usage report (OR4)
 
 - `autoos-agent.py usage --since <ISO-8601 UTC | 30m | 6h | 2d> [--by provider,combo,lane,model] [--json]`: pages the OmniRoute gateway's `/api/usage/call-logs` with the manage-scoped key and prints calls, ok/errors and tokens per group.
+### Added — tool-calling probe feeds the resolver; spawner proposes a re-probe (d86711d)
+
+- **New `tools/probe-toolcalls.py`**: probes each leg's tool-calling support and writes the verdicts into the `logs/routing/measured.json` overlay, which **`tools/autoos_resolver.py`** now reads; **`tools/autoos-agent.py`** proposes a re-probe when a run contradicts the record (an own-account client run is not counted as a gateway-route observation).
+- **Resolver review fixes** in `tools/autoos_resolver.py`: UTC provider windows, the exact next cheap start, and closer kept as its own key.
+
+### Added — resolver v2 hard filters and expected-cost scoring (0ff2879)
+
+- **`tools/autoos_resolver.py`**: B3b hard filters with `no_route` and override applied after filtering, plus B3c-1 expected-cost scoring and theta pick.
+- **`tools/registry.py`** review fixes: route ids, unavailable legs, unknown training, hosts, dated keys; **`tools/autoos-agent.py`** spawner fixes: unique sandbox names and exit 6 on a headless tool refusal.
+
+### Added — resolver v2 time tie-break and `plan()` (12c4624)
+
+- **`tools/autoos_resolver.py`**: B3c-2a time tie-break that defers by provider windows, and B3c-2b `plan()` composing filters, bucket, score, pick and time into one `route_plan`; **`tools/autoos-agent.py`** spawner review fixes.
+
+### Fixed — a 401/403 probe answer is no verdict, not unproven (2bc52ee)
+
+- **`tools/probe-toolcalls.py`**: a 401/403 (no gateway credentials) keeps the previous value instead of scoring the leg unproven.
+- **`catalog/ai-registry.json`**: the `opencode-zen`/`deepseek-v4.1-flash` leg is marked unavailable (402 in the tool-calling probe).
+
+### Changed — a privacy=sensitive task can no longer reach a leg that trains on prompts (c55f16c)
+
+- A `privacy=sensitive` task can no longer reach a leg that trains on prompts via `--model` or `--free`: an explicit `--model` on a sensitive run must land on private-safe legs only, and `--free` is refused for sensitive work (the promo model may train on prompts). Fail closed throughout; `--allow-training` keeps its documented, logged escape.
+- **`tools/autoos-agent.py`** routes `--card` v2 runs through resolver v2 (RUNV2) and records each run's route registry class in the track record; **`tools/registry.py`** renders `configuration/omniroute/combos.json` (A4a) and the `AUTOOS-MANAGED` blocks of `configuration/litellm/config.yaml` (A4b).
+
+### Added — the registry renders the IDE model lists; the resolver skips client-bound legs (8611bbd)
+
+- **`tools/registry.py render ide`** writes `catalog/ide-models.json` (the opencode/Zed model lists); **`tools/sync-ide-models.py`** is retargeted onto it.
+- **`tools/autoos_resolver.py`**: a client-bound leg never serves a gateway route.
+
+### Added — the registry renders OpenHands profiles and the models doc; heartbeat rules are code (a759555)
+
+- **`tools/registry.py render openhands`** writes `configuration/openhands/tier-profiles.json` (via `tools/sync-openhands-profiles.py`) and **`render models-doc`** writes the `AUTOOS-MANAGED` table in `docs/models.md`.
+- **New `tools/autoos_heartbeat.py`**: the heartbeat/pause rules previously carried as skill prose now run as code (a relaunch is the resume; a `PAUSE` older than the session is history).
+
+### Changed — the omniroute apply scripts and router tools read the registry (3a3157f)
+
+- **`configuration/omniroute/apply.sh` / `apply.ps1`** read providers from `catalog/ai-registry.json` instead of carrying their own map.
+- **`tools/audit-router.py`**, **`tools/mirror-litellm-env.py`** and **`tools/sync-router-tiers.py`** read the registry (A5c); `catalog/providers.json` ordering is no longer a contract.
+
+### Changed — installers read model lists from the registry; operator model policy is registry data (95ba955)
+
+- **`lib/linux/install.sh`** and **`lib/windows/AutoOS.Install.psm1`** read model lists from `catalog/ai-registry.json` through one `legacy_models()` helper in `tools/registry.py` (A5d).
+- **`catalog/ai-registry.json`** carries the Q1 operator model policy as data: Claude-budget credit legs by bucket, with `opencode.jsonc`, `configuration/omniroute/combos.json` and `configuration/litellm/config.yaml` updated to match.
+
+### Removed — one-shot catalog files deleted; `catalog/ai-registry.json` is the source (1a146c4)
+
+- Deleted, replaced by `catalog/ai-registry.json` (read via `tools/registry.py`): `catalog/providers.json`, `catalog/llm-models.schema.json`, `tools/registry-convert.py`, `tests/test_registry_convert.py`. `catalog/llm-models.json` is gone from the catalog: it survives only as the test fixture `tests/fixtures/legacy-models.golden.json`.
+- Also in this merge: registry `unavailable_until` honoured by every consumer, an unpinned OpenRouter BYOK `gpt-oss-120b` leg on `t2-worker` gated until operator BYOK setup, a spawner WIP-commit at exit with `PROVIDER-STOP` exit 8, and the leak check no longer flags a sibling lane's own worktree branch move.
+
+### Changed — test suite polish (589f116, 7b6f7ea, d73fda5, 58506cb)
+
+- `tests/run-tests.ps1` judges settings backups byte-exact and pins the skill junction, BOM-free rewrite and no-op second run; `tests/run-tests.sh` bounds `shellcheck` memory (an out-of-memory run skips loudly) behind one `SHELLCHECK_FILES` list checked against CI, compares untouched files byte-exact, and covers autostart, apt keys, dangling symlinks and undo; skill-link repair repoints only dangling `.agents/skills/<name>`-shaped links and a failing settings writer is reported, not called written.
+
 ### Added — Linux catches Windows-only test failures first (K1)
 
 - **`tests/test_windows_portability.py`** (in `tests/linux/36-static-analysis.sh`): an AST lint fails when a Python test writes a `#!/bin/sh` stub or uses `os.chmod`/`os.killpg`/`os.setsid`/`signal.SIGKILL`/`fcntl`/`pwd`/`grp` without an `os.name`/`sys.platform` skip guard, and every tracked `.ps1`/`.psm1` must start with a UTF-8 BOM. Both classes had failed the Windows CI job repeatedly (measured over 300 runs) while Linux stayed green; the 26 unguarded functions it found now carry the guard (a skip counts only in the branch taken on Windows).
@@ -270,7 +323,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`herdr-server.service` sets `OOMPolicy=continue`** (user and system templates): one process killed by the
   kernel OOM killer no longer stops the whole unit and every pane with it (happened twice on 2026-09-26).
 - **Catalog component `herdr-sessions`** (opt-in, in no profile): prompt `herdr_sessions_profile` = absolute
-  path of a site profile; empty => `skipped: no profile`. It and `claude-autostart` refuse each other. Detected
+  path of a site profile; empty => `skipped: no profile`. Selecting both in one plan is refused (error); when the other is already installed the installer skips with rc 0 instead of failing, so a re-run reports `skipped`. Detected
   by `~/.config/systemd/user/herdr-sessions-restore.service`. The component reports `skipped` only when every
   unit was already current, and a drifted unit's backup never overwrites a same-second earlier one.
 - **Operator step (not run):** on the herdr host, `./setup.sh --only herdr-sessions` with the site profile path;
@@ -465,7 +518,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed — one source for the gateway model list (`catalog/ide-models.json`)
 
-- **The tier/model list was hand-kept in about eight places and had drifted**: the 1M
+- **`catalog/ai-registry.json` is now the source and `catalog/ide-models.json` is rendered from it** (`python3 tools/registry.py render ide`): the tier/model list was hand-kept in about eight places and had drifted. the 1M
   tier was `1000000` in `opencode.jsonc`, `1048576` in the Zed writers, the OpenHands
   tier profiles and the installers, `128000` in `configuration/openhands/config.toml`,
   with three different output budgets. `catalog/ide-models.json` now owns ids, display
