@@ -3691,7 +3691,7 @@ if it "aistack: failover off when the port stays busy starts nothing, rc 1, and 
     d="$(_aistack_sandbox)"
     _aistack_failover_on "$d"
     standby="$(_aistack_standby_pid "$d")"
-    sleep 300 </dev/null >/dev/null 2>&1 &
+    sleep 300 >/dev/null 2>&1 &
     other=$!
     printf 'LISTEN 0 511 0.0.0.0:20128 0.0.0.0:* users:(("busy-holder",pid=%s,fd=3))\n' "$other" >"$d/ss-hold-20128"
     rm -f "$d/docker.log" "$d/events.log"
@@ -3749,7 +3749,7 @@ if it "aistack: failover off never kills a foreign listener on the gateway port"
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     rm -f "$d/run-autoos-omniroute"   # the gateway is down; something else holds its port
-    sleep 300 </dev/null >/dev/null 2>&1 &
+    sleep 300 >/dev/null 2>&1 &
     other=$!
     mkdir -p "$d/cfg/failover"
     printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$other" >"$d/cfg/failover.state"
@@ -3948,7 +3948,7 @@ if it "aistack: failover off waits its TERM grace only on pids it accepted"; the
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     rm -f "$d/run-autoos-omniroute"
-    sleep 300 </dev/null >/dev/null 2>&1 &
+    sleep 300 >/dev/null 2>&1 &
     other=$!
     mkdir -p "$d/cfg/failover"
     printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$other" >"$d/cfg/failover.state"
