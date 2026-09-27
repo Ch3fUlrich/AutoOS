@@ -1891,6 +1891,44 @@ Test-Case 'test http server stops promptly instead of hanging the suite for 120 
     }
 }
 
+Test-Case 'download timeout helper defaults, honors and clamps AUTOOS_HTTP_TIMEOUT_SEC (http timeout)' {
+    # The one knob for every Windows HTTP wait: production default 30 s,
+    # overridable per run; garbage and out-of-range values cannot wedge a
+    # download into a 0 s or week-long timeout.
+    $saved = $env:AUTOOS_HTTP_TIMEOUT_SEC
+    try {
+        Remove-Item Env:\AUTOOS_HTTP_TIMEOUT_SEC -ErrorAction SilentlyContinue
+        $d = Get-AutoOSHttpTimeoutSec
+        $env:AUTOOS_HTTP_TIMEOUT_SEC = '2'
+        $t = Get-AutoOSHttpTimeoutSec
+        $env:AUTOOS_HTTP_TIMEOUT_SEC = 'not-a-number'
+        $g = Get-AutoOSHttpTimeoutSec
+        $env:AUTOOS_HTTP_TIMEOUT_SEC = '9999'
+        $h = Get-AutoOSHttpTimeoutSec
+        Assert-Equal $d 30
+        Assert-Equal $t 2
+        Assert-Equal $g 30
+        Assert-Equal $h 600
+    } finally {
+        if ($null -eq $saved) { Remove-Item Env:\AUTOOS_HTTP_TIMEOUT_SEC -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_HTTP_TIMEOUT_SEC = $saved }
+    }
+}
+
+Test-Case 'every Windows HTTP download path carries an explicit, overridable timeout (http timeout)' {
+    # curl.exe takes it as --connect-timeout (connection setup only, so a
+    # multi-gigabyte ISO is never capped mid-transfer); the curl-less
+    # fallback, the Ventoy release fetch and the gateway probe take it as
+    # -TimeoutSec through the same helper/knob.
+    $dl = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Download.psm1') -Raw
+    $usb = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Usb.psm1') -Raw
+    $apply = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
+    Assert-True ($dl -match '--connect-timeout') 'curl path has no connect timeout'
+    Assert-True ($dl -match 'Get-AutoOSHttpTimeoutSec') 'download module never calls its timeout helper'
+    Assert-True ($usb -match 'Get-AutoOSHttpTimeoutSec') 'ventoy fetch has no overridable timeout'
+    Assert-True ($apply -match 'AUTOOS_HTTP_TIMEOUT_SEC') 'gateway probe ignores the timeout knob'
+}
+
 Test-Case 'verified download: an http URL is streamed to disk through curl.exe and verifies (http)' {
     # Windows PowerShell 5.1's Invoke-WebRequest -OutFile buffers the whole
     # response in memory - unusable for a 6 GB ISO (found on the first real
@@ -3035,10 +3073,13 @@ Test-Case 'usb: Invoke-AutoOSUsbFetchImage uses a healthy mirror before the cano
 
 Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips an unreachable mirror with a warning and uses the canonical source (fetch mirror)' {
     $fx = New-AutoOSUsbFetchFixture -Mode good -Mirrors @('http://127.0.0.1:1/1.0/')
+    # A dead mirror must fail on the 2 s budget, never on a 100 s default.
+    $env:AUTOOS_HTTP_TIMEOUT_SEC = '2'
     try {
         $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog }
         Assert-True ((Test-Path -LiteralPath $fx.Dest) -and $text -like '*http://127.0.0.1:1/1.0/testos-1.0-amd64.iso failed*' -and $text -like '*trying the next source*' -and $text -like '*verified image*') "out=$text"
     } finally {
+        Remove-Item Env:\AUTOOS_HTTP_TIMEOUT_SEC -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
     }
 }
@@ -7609,6 +7650,9 @@ Test-Case 'apply prune: --dry-run names the omitted combo and never names a live
 # the store file directly, which is how a test would reach the live store.
 Test-Case 'apply prune: a down gateway is never listed and nothing is pruned' {
     $d = New-AutoOSPruneSandbox
+    # The child apply.ps1 probes a dead port: give it the 2 s budget, never
+    # a 100 s default (production default stays 5 s).
+    $env:AUTOOS_HTTP_TIMEOUT_SEC = '2'
     try {
         Set-AutoOSPruneList $d @('tier2')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway 'http://127.0.0.1:1' -DryRun
@@ -7616,6 +7660,7 @@ Test-Case 'apply prune: a down gateway is never listed and nothing is pruned' {
         Assert-Equal (@(Get-AutoOSPruneCalls $d | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
         Assert-True ($out -like '*Prune:*gateway down - the store is not read, nothing pruned*') "out: $out"
     } finally {
+        Remove-Item Env:\AUTOOS_HTTP_TIMEOUT_SEC -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

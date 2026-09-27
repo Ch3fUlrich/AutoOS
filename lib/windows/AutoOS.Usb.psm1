@@ -1549,20 +1549,20 @@ function Install-AutoOSUsbVentoy {
         if ($env:AUTOOS_FAKE_VENTOY_RELEASE) {
             $release = $env:AUTOOS_FAKE_VENTOY_RELEASE | ConvertFrom-Json
         } else {
-            $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/ventoy/Ventoy/releases/latest'
+            $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/ventoy/Ventoy/releases/latest' -TimeoutSec (Get-AutoOSHttpTimeoutSec)
         }
         $asset = $release.assets | Where-Object { $_.name -like '*-windows.zip' } | Select-Object -First 1
         $shaAsset = $release.assets | Where-Object { $_.name -eq 'sha256.txt' } | Select-Object -First 1
         if (-not $asset) { throw "Install-AutoOSUsbVentoy: no windows.zip asset in the latest Ventoy release" }
 
         $zipPath = Join-Path $cacheDir $asset.name
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing -TimeoutSec (Get-AutoOSHttpTimeoutSec)
 
         if (-not $shaAsset) {
             Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
             throw "Install-AutoOSUsbVentoy: no published sha256 found for $($asset.name) - refusing to install an unverified Ventoy"
         }
-        $shaText = (Invoke-WebRequest -Uri $shaAsset.browser_download_url -UseBasicParsing).Content
+        $shaText = (Invoke-WebRequest -Uri $shaAsset.browser_download_url -UseBasicParsing -TimeoutSec (Get-AutoOSHttpTimeoutSec)).Content
         $wantLine = ($shaText -split "`r?`n") | Where-Object { $_ -match [regex]::Escape($asset.name) } | Select-Object -First 1
         $want = if ($wantLine) { ($wantLine.Trim() -split '\s+')[0] } else { $null }
         $have = Get-AutoOSFileSha256 -Path $zipPath

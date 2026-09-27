@@ -75,8 +75,16 @@ if (-not (Get-Command omniroute -ErrorAction SilentlyContinue)) {
 }
 
 # --- Gateway up? --- ---
+# Same knob as Get-AutoOSHttpTimeoutSec in lib\windows\AutoOS.Download.psm1
+# (read inline: apply.ps1 is standalone and imports no modules):
+# $env:AUTOOS_HTTP_TIMEOUT_SEC overrides the probe, default 5 s, so the
+# suite aims the probe at a dead port with a 2 s budget.
+$ProbeTimeoutSec = 5
+if ($env:AUTOOS_HTTP_TIMEOUT_SEC -match '^\s*\d+\s*$') {
+    $ProbeTimeoutSec = [Math]::Max(1, [Math]::Min(600, [int]$env:AUTOOS_HTTP_TIMEOUT_SEC.Trim()))
+}
 function Test-Gateway {
-    try { (Invoke-WebRequest -Uri "$Gateway/api/health" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 }
+    try { (Invoke-WebRequest -Uri "$Gateway/api/health" -UseBasicParsing -TimeoutSec $ProbeTimeoutSec).StatusCode -eq 200 }
     catch { $false }
 }
 if (-not (Test-Gateway)) {

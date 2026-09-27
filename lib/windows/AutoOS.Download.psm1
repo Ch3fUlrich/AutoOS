@@ -29,6 +29,23 @@ $ErrorActionPreference = 'Stop'
 # session (same rule AutoOS.Install.psm1 documents at its own top).
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1') -DisableNameChecking
 
+# One home for every HTTP wait in the Windows stack, so a dead endpoint
+# fails fast instead of sitting on a 100 s+ default. $env:AUTOOS_HTTP_TIMEOUT_SEC
+# overrides it (the suite sets it low where it deliberately hits a dead
+# endpoint); the production default is 30 s. Download TOTALS are never
+# capped: curl gets it as --connect-timeout only, so a multi-gigabyte ISO
+# still takes as long as it takes once connected.
+function Get-AutoOSHttpTimeoutSec {
+    $default = 30
+    $raw = $env:AUTOOS_HTTP_TIMEOUT_SEC
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $default }
+    $parsed = 0
+    if (-not [int]::TryParse($raw.Trim(), [ref]$parsed)) { return $default }
+    if ($parsed -lt 1) { return 1 }
+    if ($parsed -gt 600) { return 600 }
+    return $parsed
+}
+
 # Prints the resolved AutoOS download cache directory (plan ruling P6):
 # $env:AUTOOS_CACHE_DIR, else $env:LOCALAPPDATA\AutoOS\images - always
 # outside the repository. Pure: does not create the directory. Callers
@@ -241,7 +258,10 @@ function Get-AutoOSRawDownload {
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
-            $errText = & $curl.Source -fsSL --retry 3 --retry-delay 2 -o $OutFile -- $Uri 2>&1 | Out-String
+            # --connect-timeout, not --max-time: only connection setup is
+            # capped (Get-AutoOSHttpTimeoutSec), a large download is never
+            # capped mid-transfer.
+            $errText = & $curl.Source -fsSL --connect-timeout (Get-AutoOSHttpTimeoutSec) --retry 3 --retry-delay 2 -o $OutFile -- $Uri 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0) {
                 throw "curl exited $LASTEXITCODE downloading ${Uri}: $($errText.Trim())"
             }
@@ -260,7 +280,10 @@ function Get-AutoOSRawDownload {
     # function: $ProgressPreference is dynamically scoped, so callers'
     # own setting is untouched once we return.
     $ProgressPreference = 'SilentlyContinue'
-    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10
+    # The curl-less fallback (curl.exe ships with Windows 10 1803+, so this
+    # is effectively test-only): previously the 100 s default, now explicit
+    # and overridable through Get-AutoOSHttpTimeoutSec.
+    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10 -TimeoutSec (Get-AutoOSHttpTimeoutSec)
 }
 
 # Verifies <Path> against the detached signature at <SignatureUri>, trusting
@@ -666,4 +689,4 @@ function Resolve-AutoOSImageUrl {
 
 Export-ModuleMember -Function `
     Get-AutoOSDownloadCacheDir, Get-AutoOSVerifiedFile, Test-AutoOSSha256Match, Get-AutoOSFileSha256, `
-    Get-AutoOSUncachedFileSha256, Test-AutoOSGpgSignature, Resolve-AutoOSImageUrl
+    Get-AutoOSUncachedFileSha256, Test-AutoOSGpgSignature, Resolve-AutoOSImageUrl, Get-AutoOSHttpTimeoutSec
