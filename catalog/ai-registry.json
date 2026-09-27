@@ -540,7 +540,7 @@
       "trains_on_prompts": true
     },
     "muse-spark-1.3-contributor": {
-      "$comment": "Meta Model API direct (not via OpenRouter), contributor tier. L0 measured 2026-09-27T17:25:11Z: GET /models 200 lists muse-spark-1.3-contributor; POST /chat/completions model muse-spark-1.3-contributor reasoning_effort minimal 200 1.3s, xhigh 200 3.9s. Context 1,048,576 in / 131,072 out; tools supported. reasoning_effort minimal|low|medium|high|xhigh (no 'none', no 'max' on contributor). Contributor pricing: $0.10 in / $0.20 out per 1M tokens (https://dev.meta.ai/docs/pricing-rate-limits). trains_on_prompts true (contributor contract). tool_calls promoted to proven from L0 measurement (non-probe: live gateway call logged in OmniRoute call_logs, not a synthetic probe).",
+      "$comment": "Meta Model API direct (not via OpenRouter), contributor tier. L0 measured 2026-09-27T17:25:11Z: GET /models 200 lists muse-spark-1.3-contributor; POST /chat/completions model muse-spark-1.3-contributor reasoning_effort minimal 200 1.3s, xhigh 200 3.9s. Context 1,048,576 in / 131,072 out. reasoning_effort minimal|low|medium|high|xhigh (no 'none' -> 400, no 'max' on contributor). Contributor pricing: $0.10 in / $0.20 out per 1M tokens (https://dev.meta.ai/docs/pricing-rate-limits). trains_on_prompts true (contributor contract). tool_calls stays 'unproven': the L0 call measured reasoning_effort only, and 'tools supported' is a docs claim (dev.meta.ai/docs/quickstart), not a tool-calling probe - registry rule (docs/plans/2026-09-25-registry-mapping.md section 3) promotes this field only from a probe, so it stays the conservative unknown until tools/probe-toolcalls.py says otherwise.",
       "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
@@ -559,7 +559,7 @@
       "price_in": 1e-07,
       "price_out": 2e-07,
       "reasoning": true,
-      "tool_calls": "proven"
+      "tool_calls": "unproven"
     },
     "ollama-qwen2.5-coder": {
       "$comment": "family is the underlying model's lineage (Qwen), not the hosting provider (Ollama, direct.provider).",
@@ -2006,9 +2006,10 @@
       ]
     },
     "meta_api": {
-      "$comment": "Meta Model API direct (not via OpenRouter), OpenAI-compatible at https://api.meta.ai/v1. Provider key is 'meta' in api-keys.yml (same pattern as free_ai). Contributor tier: $0.10 in / $0.20 out per 1M tokens (dev.meta.ai/docs/pricing-rate-limits), 100 RPM, 3M TPM, trains on prompts. reasoning_effort minimal|low|medium|high|xhigh (no 'none', no 'max' on contributor); context 1,048,576 in / 131,072 out; tools supported. L0 measured 2026-09-27T17:25:11Z: GET /models 200 lists muse-spark-1.3-contributor; POST /chat/completions model muse-spark-1.3-contributor reasoning_effort minimal 200 1.3s, xhigh 200 3.9s. This provider registers as a custom OpenAI-compatible endpoint (litellm_prefix openai + api_base) like free_ai, so LiteLLM never falls back to api.openai.com. omniroute_id 'meta-api' is the OmniRoute connection id; model_prefix 'meta' makes gateway_ref() emit meta/muse-spark-1.3-contributor in combos while the registry leg stays meta_api/muse-spark-1.3-contributor.",
+      "$comment": "Meta Model API direct (not via OpenRouter), OpenAI-compatible at https://api.meta.ai/v1 (Bearer). Contributor tier: $0.10 in / $0.20 out per 1M tokens (https://dev.meta.ai/docs/pricing-rate-limits), 100 RPM, 3M TPM, trains on prompts. reasoning_effort minimal|low|medium|high|xhigh (no 'none' -> 400, no 'max' on contributor); context 1,048,576 in / 131,072 out. L0 measured 2026-09-27T17:25:11Z: GET /models 200 lists muse-spark-1.3-contributor; POST /chat/completions reasoning_effort minimal 200 1.3s, xhigh 200 3.9s. Registers as an OpenAI-compatible endpoint (litellm_prefix openai + its own api_base) exactly like free_ai, so LiteLLM never falls back to api.openai.com. KEY NAME: providers.<id> is normally the api-keys.yml name (that is what tools/mirror-litellm-env.py and apply.sh look up); Meta's key already lives under the name 'meta' (providers.meta, the direct opencode-only record), so this entry carries key_name 'meta' and the two share one vendor key rather than asking the operator for a second one. omniroute_id 'meta-api' is the gateway connection id apply registers; model_prefix 'meta' makes gateway_ref() emit meta/muse-spark-1.3-contributor in combos while the registry leg stays meta_api/muse-spark-1.3-contributor. Unlike free-ai, 'meta-api' is NOT a built-in OmniRoute connection: the first apply against a live gateway creates it, so verify the registration there before trusting a meta_api leg.",
       "api_base": "https://api.meta.ai/v1",
       "id": "meta_api",
+      "key_name": "meta",
       "litellm_env": "META_API_KEY",
       "litellm_prefix": "openai",
       "limits": {
@@ -2501,7 +2502,7 @@
       }
     },
     "t1-orchestrator-paid": {
-      "$comment": "LiteLLM-only fallback chain; meta_api/muse-spark-1.3-contributor added as first leg (MUSEAPI 2026-09-27). config.yaml is the source of truth for litellm, this registry entry mirrors it for visibility. omniroute surface added for render_omniroute() which requires context_declared for routes with legs.",
+      "$comment": "Was the LiteLLM-only fallback chain with legs: [] and its chain hand-curated in configuration/litellm/config.yaml - which meant 404, because that hand group was never written (docs/plans/2026-09-25-registry-mapping.md Open choices). MUSEAPI 2026-09-27 gives it a leg: meta_api/muse-spark-1.3-contributor, so the route is registry-managed now and renders an AUTOOS-MANAGED block in config.yaml. A route with a servable leg also renders a combo (render_omniroute() requires surfaces.omniroute.context_declared for every legged route), so this one is reachable through the gateway as well - it is no longer one of the 'LiteLLM-only routes with no combos.json counterpart' in render_omniroute()'s docstring. t2-worker-paid and t3-driver-paid are still legless and hand-curated; they keep that old meaning.",
       "class": "cheap",
       "id": "t1-orchestrator-paid",
       "legs": [
@@ -2515,7 +2516,7 @@
             "zed"
           ],
           "context": 1000000,
-          "display_name": "t1 orchestrator-1M — openrouter first (paid)",
+          "display_name": "t1 orchestrator-1M — meta_api paid",
           "output": 32768
         },
         "omniroute": {
@@ -2565,7 +2566,6 @@
       "legs": [
         "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-high",
-        "meta_api/muse-spark-1.3-contributor",
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b",
@@ -2575,7 +2575,8 @@
         "cheaperinference/kimi-k3",
         "openrouter/deepseek/deepseek-v4.1-flash",
         "deepseek/deepseek-flash",
-        "opencode-zen/deepseek-v4.1-flash"
+        "opencode-zen/deepseek-v4.1-flash",
+        "meta_api/muse-spark-1.3-contributor"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -2756,7 +2757,6 @@
       "id": "t3-driver",
       "legs": [
         "mistral/mistral-code-latest",
-        "meta_api/muse-spark-1.3-contributor",
         "groq/qwen/qwen3.8-27b",
         "samba/gpt-oss-120b",
         "cheaperinference/glm-5.2",
@@ -2767,7 +2767,8 @@
         "cheaperinference/glm-4.5-air",
         "cheaperinference/minimax-m2.7",
         "mistral/mistral-small-latest",
-        "opencode-zen/deepseek-v4.1-flash"
+        "opencode-zen/deepseek-v4.1-flash",
+        "meta_api/muse-spark-1.3-contributor"
       ],
       "strategy": "priority",
       "surfaces": {

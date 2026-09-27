@@ -1381,5 +1381,127 @@ class FreeAiProviderTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
+class MetaApiProviderTests(unittest.TestCase):
+    """BRIEF MUSEAPI (2026-09-27): the Meta Model API joins as the paid provider
+    `meta_api` (OpenAI-compatible at api.meta.ai/v1, key 'meta'), its
+    `muse-spark-1.3-contributor` model heading t1-orchestrator,
+    t1-orchestrator-paid and spark-1.3-contributor. It trains on prompts by
+    contributor contract, so it is never private-safe and never enters a
+    -clean route; on t2-worker/t3-driver it is a paid escalation placed AFTER
+    that route's free legs."""
+
+    LEG = "meta_api/muse-spark-1.3-contributor"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_provider_entry_shape(self):
+        provider = self.reg["providers"]["meta_api"]
+        self.assertEqual(provider["api_base"], "https://api.meta.ai/v1")
+        self.assertEqual(provider["omniroute_id"], "meta-api")
+        self.assertEqual(provider["model_prefix"], "meta")
+        self.assertEqual(provider["litellm_prefix"], "openai")
+        self.assertEqual(provider["litellm_env"], "META_API_KEY")
+        self.assertEqual(provider["tier"], "paid")
+        self.assertIs(provider["trains_on_prompts"], True)
+
+    def test_the_key_name_is_the_existing_meta_entry(self):
+        # The operator's Meta key is api-keys.yml's 'meta' (providers.meta's
+        # name). key_name says so instead of asking for a second key; every
+        # other provider's api-keys.yml name is its own id, so at most one
+        # provider may ever point at another one's name.
+        providers = self.reg["providers"]
+        self.assertEqual(providers["meta_api"]["key_name"], "meta")
+        self.assertIn("meta", providers)
+        for name, entry in providers.items():
+            claimed = entry.get("key_name")
+            if claimed is None:
+                continue
+            self.assertIn(claimed, providers,
+                          "%s claims key_name %r, which is no provider's name"
+                          % (name, claimed))
+            self.assertNotEqual(claimed, name,
+                                "%s repeats its own name as key_name" % name)
+
+    def test_gateway_ref_translates_through_the_model_prefix(self):
+        self.assertEqual(registry.gateway_ref(self.LEG, self.reg),
+                         "meta/muse-spark-1.3-contributor")
+
+    def test_limits_are_the_published_contributor_ceilings(self):
+        entry = self.reg["providers"]["meta_api"]["limits"]["muse-spark-1.3-contributor"]
+        self.assertEqual(entry["rpm"], 100)
+        self.assertEqual(entry["tpm"], 3000000)
+        self.assertTrue(entry["source"].startswith("https://"))
+
+    def test_model_entry_matches_the_l0_measurement(self):
+        model = self.reg["models"]["muse-spark-1.3-contributor"]
+        self.assertEqual(model["context_advertised"], 1048576)
+        self.assertEqual(model["output_max"], 131072)
+        self.assertIs(model["reasoning"], True)
+        # $0.10 / $0.20 per 1M tokens, stored per token like every other entry.
+        self.assertAlmostEqual(model["price_in"], 0.10 / 1_000_000)
+        self.assertAlmostEqual(model["price_out"], 0.20 / 1_000_000)
+        self.assertEqual(model["effort_ladder"],
+                         ["minimal", "low", "medium", "high", "xhigh"])
+        self.assertNotIn("none", model["effort_ladder"])
+        self.assertNotIn("max", model["effort_ladder"])
+
+    def test_tool_calls_stays_the_conservative_unknown(self):
+        # Only tools/probe-toolcalls.py promotes this field (mapping doc
+        # section 3); the L0 call measured reasoning_effort, not a tool call.
+        self.assertEqual(self.reg["models"]["muse-spark-1.3-contributor"]["tool_calls"],
+                         "unproven")
+
+    def test_the_leg_heads_the_three_routes(self):
+        for route_id in ("t1-orchestrator", "t1-orchestrator-paid",
+                         "spark-1.3-contributor"):
+            self.assertEqual(self.reg["routes"][route_id]["legs"][0], self.LEG,
+                             route_id)
+
+    def test_the_leg_follows_the_free_legs_on_t2_and_t3(self):
+        providers = self.reg["providers"]
+
+        def tier_of(leg):
+            provider_id = registry.resolve_leg(leg, self.reg)[0]
+            return providers[provider_id]["tier"]
+
+        for route_id in ("t2-worker", "t3-driver"):
+            legs = self.reg["routes"][route_id]["legs"]
+            self.assertIn(self.LEG, legs, route_id)
+            last_free = max(i for i, leg in enumerate(legs)
+                            if leg != self.LEG and tier_of(leg) == "free")
+            self.assertGreater(legs.index(self.LEG), last_free, route_id)
+
+    def test_no_clean_route_carries_the_leg(self):
+        for route_id, route in self.reg["routes"].items():
+            if not route_id.endswith("-clean"):
+                continue
+            self.assertFalse(
+                [leg for leg in route.get("legs") or []
+                 if leg.startswith(("meta_api/", "meta/"))],
+                "clean route %s carries the contributor leg" % route_id)
+
+    def test_it_is_never_private_safe(self):
+        safe, reason = registry.private_safe("meta_api", "muse-spark-1.3-contributor",
+                                             self.reg)
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_the_three_headed_routes_are_servable_again(self):
+        ids = registry.servable_route_ids(self.reg)
+        for route_id in ("t1-orchestrator", "t1-orchestrator-paid",
+                         "spark-1.3-contributor"):
+            self.assertIn(route_id, ids, route_id)
+
+    def test_gateway_legs_keep_the_contributor_first(self):
+        kept = registry.gateway_legs(self.reg["routes"]["spark-1.3-contributor"],
+                                     self.reg)
+        self.assertEqual(kept[0], self.LEG)
+
+    def test_real_registry_passes_check_with_meta_api(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
 if __name__ == "__main__":
     unittest.main()
