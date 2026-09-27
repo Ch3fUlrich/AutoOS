@@ -71,14 +71,54 @@ class ProviderMapsReadTheRegistryTests(unittest.TestCase):
     def test_reads_a_registry_fixture_with_no_old_catalog_anywhere(self):
         sync = _load_module()
         prefix, api_base, env_key = sync.provider_maps(self.registry_path)
-        self.assertEqual(prefix, {"opencode-zen": "openai"})
-        self.assertEqual(api_base, {"opencode-zen": "https://opencode-zen.example/v1"})
-        self.assertEqual(env_key, {"groq": "GROQ_API_KEY", "opencode-zen": "OPENCODE_ZEN_API_KEY"})
+        # Both valid leg spellings key the transport: the providers key ("zen")
+        # and the omniroute_id ("opencode-zen") - resolve_leg accepts either,
+        # so provider_maps_from_dict mirrors that (free_ai/free-ai, D 2026-09-27).
+        self.assertEqual(prefix, {"zen": "openai", "opencode-zen": "openai"})
+        self.assertEqual(api_base, {"zen": "https://opencode-zen.example/v1",
+                                    "opencode-zen": "https://opencode-zen.example/v1"})
+        self.assertEqual(env_key, {"groq": "GROQ_API_KEY", "zen": "OPENCODE_ZEN_API_KEY",
+                                   "opencode-zen": "OPENCODE_ZEN_API_KEY"})
 
     def test_default_source_is_the_registry_not_the_old_catalog(self):
         sync = _load_module()
         self.assertEqual(sync.REGISTRY_FILE, REGISTRY_PATH)
         self.assertEqual(sync.provider_maps(), sync.provider_maps(REGISTRY_PATH))
+
+    def test_a_name_key_beats_another_providers_omniroute_id(self):
+        """PROV finding 4: name keys are written first and an omniroute_id key
+        is added only when no provider name already owns it, mirroring
+        resolve_leg()'s name-first precedence. Here provider "alpha" declares
+        omniroute_id "beta", which is also provider "beta"'s own name - beta's
+        name key must keep beta's transport, not be stolen by alpha (last
+        writer would otherwise win)."""
+        sync = _load_module()
+        providers = {
+            "beta": {"omniroute_id": "beta-live", "litellm_prefix": "beta-prefix",
+                     "litellm_env": "BETA_KEY"},
+            "alpha": {"omniroute_id": "beta", "litellm_prefix": "alpha-prefix",
+                      "litellm_env": "ALPHA_KEY"},
+        }
+        prefix, _, env_key = sync.provider_maps_from_dict(providers)
+        self.assertEqual(prefix["alpha"], "alpha-prefix")
+        self.assertEqual(prefix["beta"], "beta-prefix")
+        self.assertEqual(prefix["beta-live"], "beta-prefix")
+        self.assertEqual(env_key["beta"], "BETA_KEY")
+
+    def test_real_registry_has_no_name_colliding_with_another_omniroute_id(self):
+        """The dual-keying hazard cannot fire on today's data: no provider name
+        equals another provider's omniroute_id (the invariant the helper also
+        enforces)."""
+        doc = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+        providers = doc["providers"]
+        problems = [
+            "%r is %r's omniroute_id" % (entry.get("omniroute_id"), name)
+            for name, entry in providers.items()
+            if entry.get("omniroute_id")
+            and entry["omniroute_id"] != name
+            and entry["omniroute_id"] in providers
+        ]
+        self.assertEqual(problems, [])
 
 
 class RegistryRefsTests(unittest.TestCase):
@@ -245,6 +285,68 @@ class CliDefaultsToRegistryTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         finally:
             box.close()
+
+
+class StaleManagedBlockTests(unittest.TestCase):
+    """PROV review: the tool only ever checked "a rendered tier is missing or
+    differs". A managed block for a tier the registry no longer produces (every
+    leg died, or the route was removed) stayed in config.yaml - still served by
+    LiteLLM - with every gate green. rewrite() must prune it and --check must
+    name it as drift."""
+
+    STALE = (
+        "  # AUTOOS-MANAGED-START dead-tier\n"
+        "  - model_name: dead-tier\n"
+        "    litellm_params:\n"
+        "      model: groq/ghost\n"
+        "      api_key: os.environ/GROQ_API_KEY\n"
+        "  # AUTOOS-MANAGED-END dead-tier\n"
+    )
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.registry_path = self.dir / "ai-registry.json"
+        self.registry_path.write_text(json.dumps({
+            "providers": {"groq": {"omniroute_id": "groq",
+                                   "litellm_env": "GROQ_API_KEY"}},
+            "routes": {"t2-worker": {"legs": ["groq/openai/gpt-oss-120b"]}},
+        }), encoding="utf-8")
+        self.config_path = self.dir / "config.yaml"
+        self.config_path.write_text(
+            "model_list:\n"
+            "  # AUTOOS-MANAGED-START t2-worker\n"
+            "  - model_name: t2-worker\n"
+            "    litellm_params:\n"
+            "      model: groq/openai/gpt-oss-120b\n"
+            "      api_key: os.environ/GROQ_API_KEY\n"
+            "  # AUTOOS-MANAGED-END t2-worker\n"
+            "\n" + self.STALE,
+            encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, *extra):
+        return subprocess.run(
+            [sys.executable, str(TOOL), "--registry", str(self.registry_path),
+             "--config", str(self.config_path)] + list(extra),
+            capture_output=True, text=True, cwd=str(self.dir))
+
+    def test_check_flags_a_stale_managed_block(self):
+        result = self._run("--check", "--quiet")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("dead-tier", result.stderr)
+
+    def test_rewrite_prunes_a_stale_managed_block_and_keeps_the_rest(self):
+        result = self._run("--quiet")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        text = self.config_path.read_text(encoding="utf-8")
+        self.assertNotIn("AUTOOS-MANAGED-START dead-tier", text)
+        self.assertNotIn("model_name: dead-tier", text)
+        self.assertIn("AUTOOS-MANAGED-START t2-worker", text)
+        # The pruned file is clean on the next check: prune is idempotent.
+        self.assertEqual(self._run("--check", "--quiet").returncode, 0)
 
 
 class GatewayLegsNoPathGrowthTests(unittest.TestCase):

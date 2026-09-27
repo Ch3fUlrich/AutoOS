@@ -28,8 +28,9 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
 Routing: without --tier the model comes from a task card. A v1 card
 (role/complexity/ctx/spend, or empty) goes through autoos_routing.select_combo
 (ADR 0006) - the one decision point, shared with the MCP server. An empty card
-is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed unless
---allow-training. A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
+is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed (the only
+sensitive 1M leg is off, so --allow-training is accepted for
+compatibility but inert). A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
 paths/override, spec 6.1 "run takes card v2") instead goes through the
 resolver (route_plan_for/autoos_resolver.plan, the same core the `route`
 subcommand uses): `state` input_required refuses with exit 2 and the plan's
@@ -556,7 +557,9 @@ def sensitive_combo_refusal(combo: str, registry: dict):
 def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None) -> dict:
     """resolve_route_unchecked plus the PRIV3 check: a sensitive run whose
     explicit --model replaced the card's combo must still land on private-safe
-    legs only (--allow-training keeps its documented, logged escape)."""
+    legs only (--allow-training keeps its compatibility escape, which now only
+    waives that explicit-override check - it no longer unlocks a trainable leg,
+    since 2026-09-27)."""
     route = resolve_route_unchecked(args, cfg, client, exclude_routes)
     if args.free and route.get("privacy") == "sensitive":
         # close-priv 2026-09-26: --free replaces the combo with the promo
@@ -2108,9 +2111,6 @@ def cmd_run(args, cfg: dict) -> int:
     route = plan["route"]
     if client.promo and route["privacy"] != "public":
         return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
-    if route["reason"].endswith("allow-training"):
-        print("autoos-agent: --allow-training: sensitive work goes to %s, whose leg trains on "
-              "prompts (logged)." % route["combo"], file=sys.stderr)
     uses_key = client.gateway and not args.free
     env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
@@ -2352,7 +2352,7 @@ def main(argv=None) -> int:
                      help="a v2 card (RUNV2): ignore the resolver's deferral (state=deferred) "
                           "and run now instead of refusing with exit 2")
     run.add_argument("--allow-training", action="store_true",
-                     help="let privacy=sensitive,ctx=1m use t1-orchestrator-clean, whose leg trains on prompts (logged)")
+                     help="accepted for compatibility; since 2026-09-27 the only 1M leg is off, so this no longer unlocks a route")
     run.add_argument("--client", choices=sorted(clients.CLIENTS), default=None,
                      help="agent CLI to spawn (default: the first client that declares the "
                           "capabilities the task needs, opencode when it needs none)")
