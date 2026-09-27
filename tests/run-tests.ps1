@@ -5128,7 +5128,7 @@ Test-Case 'agent-skills targets: second run reports skipped for ~/.agents\skills
             if ($afterMtime -ne $before["$n-mtime"]) { throw "skill '$n' was touched (mtime changed)" }
         }
         if ($out -notmatch 'skipped') { throw "second run never says skipped: [$out]" }
-        if ($out -match '(?i)(^|[^[:alnum:]])(linked|repointed) (alpha|beta)') { throw "second run printed a linked/repointed line: [$out]" }
+        if ($out -match '(?i)\b(linked|repointed) (alpha|beta)\b') { throw "second run printed a linked/repointed line: [$out]" }
     } finally {
         Remove-TestDirLinks -Directory $dest
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
