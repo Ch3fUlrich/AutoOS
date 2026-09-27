@@ -666,9 +666,18 @@ function Save-AutoOSWebConfig {
         return @{ ok = $true; saved = $Path; unchanged = $true }
     }
     if ($exists) { $null = Copy-AutoOSBackup -Path $Path }
-    $tmpPath = "$Path.tmp"
-    [System.IO.File]::WriteAllText($tmpPath, ($merged | ConvertTo-Json -Depth 100), [System.Text.Encoding]::UTF8)
-    Move-Item -Path $tmpPath -Destination $Path -Force
+    # The temp name carries a GUID. A fixed "$Path.tmp" is a target anyone can
+    # pre-plant as a symlink: the bytes land in their file, and the rename then
+    # moves the link itself onto the config path - the config becomes their file.
+    $tmpPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [System.IO.File]::WriteAllText($tmpPath, ($merged | ConvertTo-Json -Depth 100), [System.Text.Encoding]::UTF8)
+        Move-Item -Path $tmpPath -Destination $Path -Force
+    } catch {
+        # never leave a stray temp beside the config; the caller sees the error
+        Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+        throw
+    }
     @{ ok = $true; saved = $Path }
 }
 
