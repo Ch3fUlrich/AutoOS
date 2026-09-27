@@ -6,6 +6,8 @@
 #   ai-stack.sh up [service...]   build/pull what is missing, start, wait healthy
 #   ai-stack.sh down [service...] stop the containers (kept; `up` resumes)
 #   ai-stack.sh restart <service> restart one service (page-cache relief: verify says when)
+#   ai-stack.sh failover on|off|status  standby router: LiteLLM serves the
+#                                     gateway port, then hands it back
 #   ai-stack.sh status            containers + a probe per port
 #   ai-stack.sh is-active         exit 0 when the stack owns the services (marker below)
 #   ai-stack.sh migrate [--yes]   native units -> containers (plan without --yes)
@@ -18,6 +20,10 @@
 #   ~/.config/autoos/ai-stack/opencode.env   OPENCODE_PASSWORD + {env:...} keys
 #   ~/.config/autoos/ai-stack/openhands.env  LLM_API_KEY (+ remote-browser pair)
 #   ~/.config/autoos/ai-stack/manage.key     manage-scoped gateway key, host only
+#   ~/.config/autoos/ai-stack/client.key     gateway client key (0600): the standby
+#                                            router serves it as its master key
+#   ~/.config/autoos/ai-stack/failover.state standby state (since + pid);
+#                                            failover/ is the standby's own state dir
 #   ~/.config/autoos/ai-stack/stack.active   ownership marker: written only when a
 #                                            migrate completed (or a fresh host's
 #                                            first `up`), removed by rollback
@@ -48,10 +54,23 @@ OC_HOST_CFG="${AUTOOS_OPENCODE_HOST_CONFIG:-$USER_CFG/opencode/opencode.json}"
 OMNIGRAPH_ENV="${AUTOOS_OMNIGRAPH_ENV:-$HOME/.autoos-omnigraph.env}"
 STACK_ENV="$CONFIG_DIR/stack.env"
 MANAGE_KEY_FILE="$CONFIG_DIR/manage.key"
+# The standby router's own files (failover): client.key holds just the gateway
+# client key (0600) so start-litellm.sh can serve it as its master key without
+# ai-stack.sh ever printing the value; failover.state records the standby
+# (since + pid); FAILOVER_DIR is the standby's own STATE_DIR, keeping the
+# always-on :4000 unit untouched.
+CLIENT_KEY_FILE="$CONFIG_DIR/client.key"
+FAILOVER_DIR="$CONFIG_DIR/failover"
+FAILOVER_STATE="$CONFIG_DIR/failover.state"
 MARKER="$CONFIG_DIR/stack.active"
 # Tests point both at logging stand-ins (tests/helpers/aistack_fake.sh).
 REGISTER="${AUTOOS_REGISTER_AUTOSTART:-$REPO/configuration/autostart/register-autostart.sh}"
 START_STACK="${AUTOOS_START_STACK:-$REPO/configuration/start-stack.sh}"
+# The LiteLLM starter the standby runs through (env-only interface: the four
+# AUTOOS_LITELLM_* names; never argv, never a printed value).
+START_LITELLM="${AUTOOS_START_LITELLM:-$REPO/configuration/litellm/start-litellm.sh}"
+# The port the liveliness probe uses while a failover command runs.
+FAILOVER_PORT=""
 # Filled by migrate; read by migrate_abort / restore_native.
 MOVED=()
 UNITS_BEFORE=()
@@ -65,7 +84,7 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY=1 ;;
         --yes)     YES=1 ;;
-        -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,34p' "${BASH_SOURCE[0]}"; exit 0 ;;
         -*) echo "Unknown option: $arg"; exit 2 ;;
         *) if [[ -z "$CMD" ]]; then CMD="$arg"; else SERVICES+=("$arg"); fi ;;
     esac
@@ -1056,6 +1075,203 @@ cmd_rollback() {
     bash "$START_STACK" openhands || true
 }
 
+# ─── failover: the LiteLLM standby router ────────────────────────────────
+# One command moves the gateway PORT between the omniroute container and a
+# LiteLLM standby, and back - clients keep their base URL (the gateway's
+# published port), their key (the gateway CLIENT key) and their model names
+# (combo ids: LiteLLM's rendered config.yaml names every model after the
+# servable combo id). The standby binds the gateway's own bind and port with
+# the client key as its master key, from its own state dir, so the always-on
+# :4000 unit is untouched. The key VALUE never appears here: it travels from
+# its source straight into client.key (0600) and from there only as a PATH in
+# the starter's environment - never argv, never output.
+failover_port() { service_port omniroute; }
+
+# The standby answers for clients while this is 200.
+failover_litellm_ok() {
+    [[ "$(http_code "http://127.0.0.1:$FAILOVER_PORT/health/liveliness")" == 200 ]]
+}
+
+# Materialize client.key (0600) from the current gateway client key.
+# The value is redirected, never echoed: no log or output line can carry it.
+ensure_client_key_file() {
+    # Rebuilt from the current key on every call: a rotated key must not leave
+    # the standby serving the old one. Replaced only when it differs.
+    if [[ $DRY -eq 1 ]]; then echo "  - would write the gateway client key to $CLIENT_KEY_FILE (0600)"; return 0; fi
+    mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" || return 1
+    local tmp="$CLIENT_KEY_FILE.tmp-$$"
+    rm -f "$tmp"
+    if [[ -n "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
+        ( umask 077; printf '%s\n' "${AUTOOS_OMNIROUTE_KEY}" >"$tmp" ) || { rm -f "$tmp"; return 1; }
+    else
+        ( umask 077; omniroute_client_key >"$tmp" ) || { rm -f "$tmp"; return 1; }
+    fi
+    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+    if [[ ! -s "$tmp" ]]; then
+        rm -f "$tmp"
+        echo "  ! no omniroute client key (configuration/api-keys.yml) - failover needs the key the clients use"
+        return 1
+    fi
+    if [[ -f "$CLIENT_KEY_FILE" ]] && cmp -s "$tmp" "$CLIENT_KEY_FILE"; then
+        rm -f "$tmp"; chmod 600 "$CLIENT_KEY_FILE"; return 0
+    fi
+    mv "$tmp" "$CLIENT_KEY_FILE" || { rm -f "$tmp"; return 1; }
+    chmod 600 "$CLIENT_KEY_FILE"
+    echo "  + wrote the gateway client key to $CLIENT_KEY_FILE (0600)"
+}
+
+# Every pid the standby may have left: the state file's, plus any pid file in
+# its own state dir. Only numbers - anything else is ignored - each once (a
+# duplicate would SIGPIPE a `| head -n1` reader under pipefail + errexit).
+failover_pids() {
+    local p f
+    local -A seen=()
+    if [[ -f "$FAILOVER_STATE" ]]; then
+        p="$(sed -n 's/^pid=//p' "$FAILOVER_STATE")"
+        p="${p%%$'\n'*}"
+        p="$(printf '%s' "$p" | tr -d '\r[:space:]')"
+        if [[ "$p" =~ ^[0-9]+$ && -z "${seen[$p]:-}" ]]; then seen[$p]=1; printf '%s\n' "$p"; fi
+    fi
+    for f in "$FAILOVER_DIR/litellm.pid" "$FAILOVER_DIR"/*.pid; do
+        [[ -f "$f" ]] || continue
+        p="$(tr -d '\r[:space:]' <"$f")"
+        p="${p%%$'\n'*}"
+        if [[ "$p" =~ ^[0-9]+$ && -z "${seen[$p]:-}" ]]; then seen[$p]=1; printf '%s\n' "$p"; fi
+    done
+    return 0
+}
+
+# Stop the standby and nothing else: only a pid from above is ever signalled,
+# and only while it still looks like litellm (a reused pid belongs to someone
+# else) - the :4000 unit's processes can never match. Missing pids are already
+# gone. Afterwards only the standby's own pid files are removed.
+failover_stop_litellm() {
+    local p cmdline i alive
+    for p in $(failover_pids); do
+        if [[ -d "/proc/$p" ]]; then
+            cmdline="$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null || true)"
+            if [[ "$cmdline" == *litellm* ]]; then
+                kill "$p" 2>/dev/null || true
+            else
+                echo "  ! pid $p is not litellm any more - leaving it alone"
+            fi
+        fi
+    done
+    for i in $(seq 1 10); do
+        alive=0
+        for p in $(failover_pids); do
+            [[ -d "/proc/$p" ]] && alive=1
+        done
+        (( alive )) || break
+        sleep 1
+    done
+    rm -f "$FAILOVER_DIR"/litellm.pid "$FAILOVER_DIR"/*.pid 2>/dev/null || true
+}
+
+cmd_failover_on() {
+    local port host since pid
+    port="$(failover_port)"
+    host="$(effective_bind)"
+    FAILOVER_PORT="$port"
+    if [[ -f "$FAILOVER_STATE" ]]; then
+        since="$(sed -n 's/^since=//p' "$FAILOVER_STATE" | head -n1)" || true
+        echo "  ! failover is already on (since ${since:-unknown}) - nothing was changed; hand back first: $0 failover off"
+        return 2
+    fi
+    if [[ $DRY -eq 1 ]]; then
+        echo "  - would write the gateway client key to $CLIENT_KEY_FILE (0600)"
+        echo "  - would run: docker compose -p autoos-ai stop omniroute"
+        printf '  - would run: AUTOOS_LITELLM_HOST=%s AUTOOS_LITELLM_PORT=%s AUTOOS_LITELLM_MASTER_KEY_FILE=%s AUTOOS_LITELLM_STATE_DIR=%s %s\n' \
+            "$host" "$port" "$CLIENT_KEY_FILE" "$FAILOVER_DIR" "$START_LITELLM"
+        echo "  - would wait: http://127.0.0.1:$port/health/liveliness (60 s)"
+        echo "  - would write: $FAILOVER_STATE"
+        return 0
+    fi
+    ensure_client_key_file || return 1
+    dc stop omniroute || { echo "  ! could not stop the omniroute container"; return 1; }
+    # From here the gateway is down: an interrupt (ctrl-C, TERM) must hand the
+    # port back instead of leaving a stateless standby on it. Cleared on every
+    # return below.
+    trap 'echo "  ! interrupted - handing the port back to the gateway"; failover_stop_litellm; dc start omniroute || true; trap - INT TERM; exit 130' INT TERM
+    if ! AUTOOS_LITELLM_HOST="$host" AUTOOS_LITELLM_PORT="$port" \
+        AUTOOS_LITELLM_MASTER_KEY_FILE="$CLIENT_KEY_FILE" AUTOOS_LITELLM_STATE_DIR="$FAILOVER_DIR" \
+        "$START_LITELLM"; then
+        echo "  ! the standby router did not start - starting the gateway again (the port is never left empty)"
+        dc start omniroute || true
+        wait_for gateway_ok && echo "  = omniroute answers on :$port again" || echo "  ! omniroute did not answer - docker logs autoos-omniroute"
+        trap - INT TERM
+        return 1
+    fi
+    if wait_for failover_litellm_ok 12; then
+        since="$(date +%Y-%m-%dT%H:%M:%S%z)"
+        pid="$(failover_pids | head -n1)" || true
+        [[ -n "$pid" ]] || pid="unknown"
+        # No state file = a later `off` could not find the standby: roll back.
+        if ! { mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" && printf 'since=%s\npid=%s\n' "$since" "$pid" >"$FAILOVER_STATE"; }; then
+            echo "  ! could not record the failover state - handing the port back to the gateway"
+            failover_stop_litellm; dc start omniroute || true
+            trap - INT TERM
+            return 1
+        fi
+        echo "  + failover on: LiteLLM serves :$port (since $since, litellm pid $pid)"
+        trap - INT TERM
+        return 0
+    fi
+    echo "  ! the standby router did not answer /health/liveliness on :$port - starting the gateway again (the port is never left empty)"
+    failover_stop_litellm
+    dc start omniroute || true
+    wait_for gateway_ok && echo "  = omniroute answers on :$port again" || echo "  ! omniroute did not answer - docker logs autoos-omniroute"
+    trap - INT TERM
+    return 1
+}
+
+cmd_failover_off() {
+    local port
+    port="$(failover_port)"
+    if [[ ! -f "$FAILOVER_STATE" ]]; then
+        echo "  = failover is off (skipped)"
+        return 0
+    fi
+    if [[ $DRY -eq 1 ]]; then
+        echo "  - would stop the standby LiteLLM (only its pid from $FAILOVER_DIR)"
+        echo "  - would run: docker compose -p autoos-ai start omniroute"
+        echo "  - would wait: the gateway on :$port (/api/health)"
+        echo "  - would remove: $FAILOVER_STATE"
+        return 0
+    fi
+    failover_stop_litellm
+    dc start omniroute || echo "  ! docker compose start omniroute failed"
+    if ! wait_for gateway_ok; then
+        rm -f "$FAILOVER_STATE"
+        echo "  ! omniroute did not answer - docker logs autoos-omniroute"
+        echo "  - removed $FAILOVER_STATE: failover is off, the gateway needs attention"
+        return 1
+    fi
+    rm -f "$FAILOVER_STATE"
+    echo "  + failover off: omniroute serves :$port again"
+    return 0
+}
+
+cmd_failover_status() {
+    local since pid
+    if [[ ! -f "$FAILOVER_STATE" ]]; then echo "failover off"; return 0; fi
+    since="$(sed -n 's/^since=//p' "$FAILOVER_STATE" | head -n1)" || true
+    pid="$(sed -n 's/^pid=//p' "$FAILOVER_STATE" | head -n1)" || true
+    echo "failover on since ${since:-unknown} (litellm pid ${pid:-unknown})"
+    return 0
+}
+
+cmd_failover() {
+    local sub="${SERVICES[0]:-}"
+    case "$sub" in
+        on)     cmd_failover_on ;;
+        off)    cmd_failover_off ;;
+        status) cmd_failover_status ;;
+        "")     echo "  ! failover needs on, off or status"; return 2 ;;
+        *)      echo "  ! unknown failover command: $sub (on, off, status)"; return 2 ;;
+    esac
+}
+
 # ─── verify ─────────────────────────────────────────────────────────────────
 # The by-hand checklist after `migrate --yes`, as one command. READ-ONLY: docker
 # is only asked `inspect`, `exec <opencode> test -d` and `exec <omniroute>
@@ -1388,6 +1604,16 @@ verify_omniroute_memory() {
     fi
 }
 
+# The standby router holds the gateway port through the same client key, so
+# clients notice nothing but slower/limited models. Informational, never a
+# FAIL - the container checks above already judge the stopped gateway.
+verify_failover() {
+    if [[ -f "$FAILOVER_STATE" ]]; then
+        echo "  = failover ON: LiteLLM serves the gateway port"
+    fi
+    return 0
+}
+
 cmd_verify() {
     V_OK=0; V_FAIL=0; V_SKIP=0
     verify_load_services
@@ -1402,6 +1628,7 @@ cmd_verify() {
     verify_healthcheck
     verify_omniroute_admission
     verify_omniroute_memory
+    verify_failover
     printf 'verify: %d ok, %d failed, %d skipped\n' "$V_OK" "$V_FAIL" "$V_SKIP"
     [[ $V_FAIL -eq 0 ]]
 }
@@ -1415,6 +1642,7 @@ case "$CMD" in
     is-active) cmd_is_active ;;
     migrate)   cmd_migrate ;;
     rollback)  cmd_rollback ;;
+    failover)  cmd_failover ;;
     verify)    cmd_verify ;;
-    *) echo "Unknown command: $CMD (init, up, down, restart, status, is-active, migrate, rollback, verify)"; exit 2 ;;
+    *) echo "Unknown command: $CMD (init, up, down, restart, status, failover, is-active, migrate, rollback, verify)"; exit 2 ;;
 esac

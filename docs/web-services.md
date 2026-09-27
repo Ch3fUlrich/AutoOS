@@ -148,6 +148,37 @@ The table below describes the native (workstation) layout.
   `start-litellm.sh` reads `configuration/litellm/.env` literally and restarts
   a proxy that runs with stale keys.
 
+### Standby router (LiteLLM)
+
+When the OmniRoute gateway itself is the problem (a bad upgrade, a wedged
+process, the pressure guard stuck on), the standby router keeps clients
+answering: one command moves the gateway port (`:20128`) from the omniroute
+container to a LiteLLM proxy, and one moves it back. Nothing client-side
+changes - same base URL, same client key, same model names (the rendered
+`configuration/litellm/config.yaml` names every model after the servable
+combo id).
+
+- `ai-stack.sh failover on` - stop the gateway container, start LiteLLM on
+  the gateway's bind and port with the gateway client key
+  (`~/.config/autoos/ai-stack/client.key`, mode 600, never printed), wait for
+  `/health/liveliness`, then record `failover.state`. Already on refuses
+  (rc 2); a standby that never turns live hands the port back to the gateway
+  and exits 1 - the port is never left empty.
+- `ai-stack.sh failover off` - stop only the standby (its own state dir, only
+  its pid - the `:4000` unit below is never touched), start the gateway
+  again, wait for `/api/health`, remove the state file. Already off is a
+  no-op (rc 0).
+- `ai-stack.sh failover status` - `failover on since <time> (litellm pid N)`
+  or `failover off`. `--dry-run` prints every step and changes nothing;
+  `verify` names the standby (`failover ON: LiteLLM serves the gateway port`)
+  while it holds the port.
+
+What clients notice: nothing to reconfigure, but slower answers and a limited
+model set - LiteLLM serves the legs directly, without the gateway's combos,
+admission gate or pressure guard. The always-on `:4000` fallback unit is
+separate and untouched: the standby runs from its own state dir
+(`~/.config/autoos/ai-stack/failover/`).
+
 ## What the proxy needs
 
 | Name | Upstream | Websocket / streaming paths | May bypass SSO | Headers |
