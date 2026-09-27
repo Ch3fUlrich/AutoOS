@@ -274,7 +274,6 @@
       "context": "200k",
       "models": [
         "antigravity/claude-opus-4-6-thinking",
-        "cc/claude-opus-4-6",
         "openrouter/deepseek/deepseek-v4.1-flash"
       ]
     },
@@ -327,8 +326,7 @@
       "strategy": "priority",
       "context": "200k",
       "models": [
-        "antigravity/claude-opus-4-6-thinking",
-        "cc/claude-opus-4-6"
+        "antigravity/claude-opus-4-6-thinking"
       ]
     }
   ]

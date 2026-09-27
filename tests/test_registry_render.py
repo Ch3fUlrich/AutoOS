@@ -834,8 +834,11 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         self.assertIn("(unavailable)", row)
 
     def test_available_leg_is_not_marked(self):
+        # t4-rag: a multi-leg route with every leg available today (opus-4-6
+        # was the example until cc went unavailable, operator 2026-09-27).
         rendered = registry.render_models_doc(real_registry())
-        row = row_for(rendered, "opus-4-6")
+        row = row_for(rendered, "t4-rag")
+        self.assertIn("→", row)
         self.assertNotIn("(unavailable)", row)
 
 

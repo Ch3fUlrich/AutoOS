@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — Claude Code (cc) legs unavailable (operator 2026-09-27: never connected to OmniRoute)
+
+- **`catalog/ai-registry.json`** `providers.cc.available: false` (sourced); `opus-4-6` and `t2-orchestrator` keep their antigravity opus-4-6-thinking leg, the cc leg leaves combos.json.
+
 ### Changed — cheaperinference disabled (operator 2026-09-27T10:12Z: no top-up, no free tier) (OR1h)
 
 - **`catalog/ai-registry.json`** `providers.cheapinference.available: false` (sourced); every gateway declaration drops its legs (t2-worker, t3-driver) and the two single-leg combos (`cheaperinference/kimi-k3`, `cheaperinference/glm-5.2`) move to combos.json `omitted`, so `apply.sh` prunes them live.

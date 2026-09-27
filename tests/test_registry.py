@@ -1120,5 +1120,21 @@ class CheaperinferenceDisabledTests(unittest.TestCase):
                              "route %s still serves a cheaperinference leg" % rid)
 
 
+class ClaudeCodeLegsUnavailableTests(unittest.TestCase):
+    """Operator 2026-09-27T11:1xZ (via L0): Claude Code (cc/*) will not be
+    connected to OmniRoute, so provider cc is unavailable and no gateway
+    declaration carries a cc leg."""
+
+    def test_provider_is_unavailable(self):
+        self.assertIs(load_registry()["providers"]["cc"].get("available"), False)
+
+    def test_gateway_legs_drop_every_cc_leg(self):
+        reg = load_registry()
+        for rid, route in reg["routes"].items():
+            kept = registry.gateway_legs(route, reg)
+            self.assertFalse([leg for leg in kept if leg.startswith("cc/")],
+                             "route %s still serves a cc leg" % rid)
+
+
 if __name__ == "__main__":
     unittest.main()
