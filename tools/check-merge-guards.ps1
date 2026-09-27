@@ -37,7 +37,11 @@ try {
     }
 } finally { $ErrorActionPreference = $prevAction }
 Step 'Linux suite' {
-    bash tests/run-tests.sh 2>&1 | Select-Object -Last 3
+    # run-tests.sh refuses an unfiltered run without the explicit opt-in (R-host-08).
+    $env:AUTOOS_FULL_SUITE = '1'
+    try { bash tests/run-tests.sh 2>&1 | Select-Object -Last 3 }
+    finally { Remove-Item Env:AUTOOS_FULL_SUITE -ErrorAction SilentlyContinue }
+    if ($LASTEXITCODE -ne 0) { throw 'run-tests.sh exited non-zero' }
 }
 
 Step 'shellcheck' {
