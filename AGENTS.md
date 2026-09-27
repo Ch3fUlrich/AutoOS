@@ -100,6 +100,7 @@ what makes `--dry-run` meaningful and what lets a headless run be fully non-inte
   expansion. `shellcheck` clean, no exceptions without an inline justification comment.
 - No `sudo` inside a function — check `AUTOOS_SUDO` (set once at startup, empty when already
   root) so the scripts work identically as root, under `sudo`, and in a container.
+  Exception (operator 2026-09-27): `antigravity_sandbox_setup` alone may call `sudo` for `chrome-sandbox`.
 
 ### Output
 

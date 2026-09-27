@@ -1229,18 +1229,65 @@ antigravity_sandbox_needed() {
     return 1
 }
 
-# antigravity_sandbox_note <dir>: the sandbox helper. NO sudo here and NEVER
-# --no-sandbox (it switches off the protection a browser engine renders web
-# content behind): when the kernel needs the SUID helper the two commands are
-# printed once for the operator; otherwise nothing is required.
-antigravity_sandbox_note() {
-    local box="$1/chrome-sandbox" sq="'" bs='\' esc
+# antigravity_is_tty: true when stdin is a TTY. AUTOOS_ASSUME_TTY=1 forces
+# true; it exists only so the sandbox-setup tests can simulate the interactive
+# path (sudo may prompt) without a terminal.
+antigravity_is_tty() {
+    [[ "${AUTOOS_ASSUME_TTY:-0}" == 1 ]] && return 0
+    [[ -t 0 ]]
+}
+
+# antigravity_sandbox_setup <dir>: the sandbox helper. NEVER --no-sandbox (it
+# switches off the protection a browser engine renders web content behind).
+# Operator decision 2026-09-27: this ONE step may run sudo - the tarball was
+# already verified before the swap, so the helper is known-good. When the
+# kernel needs the SUID helper it is set up here: with setup.sh --yes (or
+# whenever stdin is not a TTY, where a prompt could never be answered)
+# `sudo -n` is used so a password can never hang the run; on an interactive
+# TTY without --yes plain `sudo` runs so it may prompt. Both sudo calls take
+# argument arrays, never a string through sh -c. Anything sudo cannot do
+# (missing, failed) falls back to printing the two commands for the operator -
+# and never fails the install.
+antigravity_sandbox_setup() {
+    local box="$1/chrome-sandbox" sq="'" bs='\' esc owner nlink
+    local -a sudo_argv
     if ! antigravity_sandbox_needed; then
         ui_muted "chrome-sandbox: nothing is required (this kernel allows unprivileged user namespaces, so Electron needs no SUID helper)"
         return 0
     fi
+    if [[ -L "$box" ]] || [[ ! -f "$box" ]]; then
+        ui_warn "chrome-sandbox: ${box} is not a regular file (it comes from the tarball) - left as it is"
+        return 0
+    fi
+    nlink="$(stat -c %h -- "$box" 2>/dev/null || echo 0)"
+    if [[ "$nlink" != 1 ]]; then
+        ui_warn "chrome-sandbox: ${box} has ${nlink} hard links - left as it is"
+        return 0
+    fi
+    owner="$(stat -c '%u %g %a' -- "$box" 2>/dev/null || echo '')"
+    if [[ "$owner" == "0 0 4755" ]]; then
+        ui_muted "chrome-sandbox: already root-owned 4755 (skipped)"
+        return 0
+    fi
     esc="${box//$sq/$sq$bs$sq$sq}"
-    ui_warn "chrome-sandbox: this kernel restricts unprivileged user namespaces (or AutoOS could not tell), so Electron needs its SUID sandbox helper, which must be root-owned. AutoOS never runs sudo itself; check the file first (it comes from the tarball), then run this once:"
+    if (( ${AUTOOS_DRY_RUN:-0} )); then
+        ui_muted "would run: sudo chown root:root '${esc}' && sudo chmod 4755 '${esc}'"
+        return 0
+    fi
+    if ! has_cmd sudo; then
+        ui_warn "chrome-sandbox: this kernel restricts unprivileged user namespaces (or AutoOS could not tell), so Electron needs its SUID sandbox helper, which must be root-owned. AutoOS could not set it up (sudo is not installed); check the file first (it comes from the tarball), then run this once:"
+        ui_warn "    sudo chown root:root '${esc}' && sudo chmod 4755 '${esc}'"
+        return 0
+    fi
+    sudo_argv=(sudo)
+    if (( ${ASSUME_YES:-0} )) || ! antigravity_is_tty; then
+        sudo_argv=(sudo -n)
+    fi
+    if "${sudo_argv[@]}" chown root:root "$box" && "${sudo_argv[@]}" chmod 4755 "$box"; then
+        ui_ok "chrome-sandbox: set root-owned 4755"
+        return 0
+    fi
+    ui_warn "chrome-sandbox: this kernel restricts unprivileged user namespaces (or AutoOS could not tell), so Electron needs its SUID sandbox helper, which must be root-owned. AutoOS could not set it up (sudo failed); check the file first (it comes from the tarball), then run this once:"
     ui_warn "    sudo chown root:root '${esc}' && sudo chmod 4755 '${esc}'"
     return 0
 }
@@ -1328,7 +1375,7 @@ antigravity_install_staged() {
     antigravity_swap "$dir" "$tree" "$suffix" "$existing" || return 1
     antigravity_link "$dir"
     antigravity_desktop_entry "$dir"
-    antigravity_sandbox_note "$dir"
+    antigravity_sandbox_setup "$dir"
     ui_ok "Antigravity Hub ${ANTIGRAVITY_VERSION} (${ANTIGRAVITY_ID}) installed in ${dir} (command: antigravity; recorded sha256 ${sha} was computed here, not published)"
     antigravity_path_check "$dir"
     antigravity_warn_old_apt
