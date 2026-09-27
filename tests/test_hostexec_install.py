@@ -104,6 +104,26 @@ class _DriverCase(unittest.TestCase):
             return []
         return self.syslog.read_text(encoding="utf-8").splitlines()
 
+    def install_mktemp_logger(self) -> Path:
+        """Put an `mktemp` stub first on PATH that records its arguments and
+        delegates to the real mktemp. Returns the log path. The stub lets a
+        test assert *where* and *how* the driver stages files (the stage name
+        must be mktemp's own in the destination directory, never a guessable
+        `$$` name)."""
+        log = Path(self.tmp.name) / "mktemp.log"
+        real = "/usr/bin/mktemp"
+        if not os.path.exists(real):
+            real = "/bin/mktemp"
+        stub = self.bindir / "mktemp"
+        stub.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> "{log}"\n'
+            f'exec "{real}" "$@"\n',
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        return log
+
     def assert_no_enable_or_start(self):
         for line in self.systemctl_argv():
             words = line.split()
@@ -253,6 +273,22 @@ class UnitInstallTests(_DriverCase):
         proc = self.run_driver("--unit")
         self.assertNotEqual(proc.returncode, 0, "failed backup must fail the install")
         self.assertEqual(unit.read_text(encoding="utf-8"), "# keep me\n")
+
+    def test_unit_stages_through_mktemp_in_the_destination_dir(self):
+        # install.sh stage: the temp file that is renamed into place must be
+        # mktemp's own (an unpredictable, exclusively created name in the
+        # destination directory), never a guessable `.<unit>.tmp.$$` that a
+        # pre-existing file could occupy.
+        log = self.install_mktemp_logger()
+        self.run_driver_ok("--unit")
+        lines = log.read_text(encoding="utf-8").splitlines()
+        destdir = str(self.home / ".config" / "systemd" / "user")
+        staged = [ln for ln in lines if ln.startswith(destdir + "/")]
+        self.assertTrue(staged, f"no mktemp stage under {destdir}: {lines!r}")
+        self.assertTrue(
+            all("XXXXXX" in ln for ln in staged),
+            f"mktemp stage is not a template: {staged!r}",
+        )
 
 
 @unittest.skipIf(os.name == "nt", "bash scripts and systemd; POSIX only")
@@ -454,6 +490,19 @@ class ClientWriterTests(_DriverCase):
             f"http://127.0.0.1:{_default_port()}/mcp",
         )
         self.assert_token_nowhere(proc)
+
+    def test_client_config_stages_through_mktemp_in_the_target_dir(self):
+        # install.sh publish_candidate: when a client config is replaced it
+        # must be staged through mktemp's own file in the target directory,
+        # not a guessable `.hostexec.tmp.$$`.
+        log = self.install_mktemp_logger()
+        self.write_token("claude")
+        self.run_driver_ok("--clients", "claude")
+        lines = log.read_text(encoding="utf-8").splitlines()
+        homedir = str(self.home)
+        staged = [ln for ln in lines if ln.startswith(homedir + "/.hostexec.")]
+        self.assertTrue(staged, f"no mktemp stage under {homedir}: {lines!r}")
+        self.assertTrue(all("XXXXXX" in ln for ln in staged), staged)
 
 
 @unittest.skipIf(os.name == "nt", "bash scripts and systemd; POSIX only")

@@ -194,7 +194,14 @@ install_unit() {
         else
             backup_file "$dest" || return 1
             mkdir -p "$(dirname "$dest")"
-            stage="$(dirname "$dest")/.${UNIT_NAME}.tmp.$$"
+            # Stage through mktemp's own file in the destination directory: an
+            # unpredictable name created exclusively (0600), which a
+            # pre-existing file or symlink cannot occupy -- unlike a guessable
+            # `.${UNIT_NAME}.tmp.$$`. On failure only mktemp's file is removed.
+            if ! stage="$(mktemp "$(dirname "$dest")/.${UNIT_NAME}.XXXXXX")"; then
+                err "install: refusing: could not stage unit, leaving untouched: ${dest}"
+                return 1
+            fi
             TMP_FILES+=("$stage")
             if ! cp "$rendered" "$stage"; then
                 rm -f "$stage"
@@ -278,7 +285,14 @@ publish_candidate() {
         mode="$(file_mode "$file")"
     fi
     mkdir -p "$(dirname "$file")"
-    stage="$(dirname "$file")/.hostexec.tmp.$$"
+    # Stage through mktemp's own file in the target directory (see
+    # install_unit): exclusive creation defeats a file or symlink pre-placed
+    # at a guessable `.hostexec.tmp.$$` name. Remove only mktemp's file on
+    # failure.
+    if ! stage="$(mktemp "$(dirname "$file")/.hostexec.XXXXXX")"; then
+        err "install: refusing: could not stage, leaving untouched: ${file}"
+        return 1
+    fi
     TMP_FILES+=("$stage")
     if ! cp "$cand" "$stage"; then
         rm -f "$stage"
