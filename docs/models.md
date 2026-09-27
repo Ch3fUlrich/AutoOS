@@ -182,39 +182,24 @@ resolves through the others.
 
 ### Effort levels (A6a — per-model variants rendered from registry)
 
-Effort is a **caller-side suffix**, not a model id. **How opencode resolves
-it:** since A6a, `tools/sync-ide-models.py` emits a `variants` block on each
-gateway model entry whose route's first-leg model carries an `effort_ladder` in
-`catalog/ai-registry.json` (the "none" entry is omitted). This lets opencode V2
-show per-model effort sliders for gateway combos without needing
-`supportedThinkingEfforts` in the provider catalog.
+Effort is a **caller-side suffix**, not a model id. Since A6a,
+`tools/sync-ide-models.py` emits a `variants` block (an array of
+`{label, reasoningEffort}` objects) on each gateway model entry whose route's
+first-leg model carries an `effort_ladder` in `catalog/ai-registry.json`
+(source: `tools/registry.py`, `render_ide()` at line 1189). The `"none"` entry
+is always omitted from the ladder — only meaningful levels are emitted.
 
-Before A6a (2026-09-22 measurement) a hand-written `"variants"` block made the
-whole provider unresolvable — that is no longer the case.
+**The rendered variants are the source of truth** — `opencode.jsonc`
+`AUTOOS-MANAGED` blocks between the `START` / `END` markers (lines 192–372
+as of 2026-09-27) carry the live ladder per route. Rerun
+`python3 tools/sync-ide-models.py` after registry changes; see
+`opencode.jsonc` for authoritative per-route levels.
 
-| Suffix ladder | openrouter direct | gateway combo |
-|---|---|---|
-| `#minimal`, `low`, `medium`, `high`, `xhigh` | all resolve; `#minimal`/`#low`/`#xhigh` ack-proven 2026-09-22 | all resolve (per-model variants emitted from `effort_ladder`) |
-| `#max` | not offered (Zen-native only) | not offered |
-| `#max` | not offered (Zen-native only) | not offered |
-
-**Rule: the gateway combo is for fallback routing; the direct provider
-model is for effort control.** `#max` stays Zen-native only — nothing routed
-through OmniRoute exposes it. Agents that need max reasoning on a combo pin
-`#high` (`t1-orchestrator-orchestrator` does). The per-model `variants` blocks
-now give gateway combos the same effort ladder as the direct provider (minus
-`#max` and any model-native `#none`).
-
-**Where the direct surface lives** (so nobody has to re-derive it):
-
-- repo `opencode.jsonc` → `providers.openrouter` with
-  `muse-spark-1.3-contributor` (`modelID: meta/muse-spark-1.3-contributor`,
-  key via `OPENROUTER_API_KEY`);
-- OpenHands → the `openrouter-muse-spark-1.3-contributor` tier profile. It is
-  the one profile with `"gateway": "openrouter"`: it names its own endpoint and
-  takes the OpenRouter key, not the gateway client key. Both installers and
-  `tools/sync-openhands-profiles.py` resolve keys per `gateway`, and the
-  suites assert the direct profile gets the right key.
+**Gateway-combo caveat:** the gateway combo is for fallback routing. For the
+full effort ladder (including `max`) use the direct provider model
+(`openrouter/meta/muse-spark-1.3-contributor` with suffix, keyed via
+`OPENROUTER_API_KEY`). `max` is Zen/OpenRouter-native only; gateway combos
+expose the filtered ladder minus `none`.
 
 ## Role labels (display names — the `t*-*` ids are the contract)
 

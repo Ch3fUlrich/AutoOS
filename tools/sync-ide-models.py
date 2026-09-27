@@ -267,13 +267,13 @@ def render_entries(models, indent, trailing_comma):
     for n, m in enumerate(models):
         limit = '{ "context": %d, "output": %d }' % (m["context"], m["output"])
         last = n == len(models) - 1
+        ladder = m.get("effort_ladder")
         entry = [
             f"{indent}{json.dumps(m['id'], ensure_ascii=False)}: {{",
             f'{indent}  "modelID": {json.dumps(m["id"], ensure_ascii=False)},',
             f'{indent}  "name": {json.dumps(m["name"], ensure_ascii=False)},',
-            f'{indent}  "limit": {limit}',
+            f'{indent}  "limit": {limit}' + ("," if ladder else ""),
         ]
-        ladder = m.get("effort_ladder")
         if ladder:
             entry.extend(_variants_block(ladder, indent))
         entry.append(f"{indent}}}" + ("," if (not last or trailing_comma) else ""))

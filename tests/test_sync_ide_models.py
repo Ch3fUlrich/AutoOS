@@ -339,6 +339,25 @@ class UnusableInputTests(SandboxCase):
         self.box.save_catalog(doc)
         self.assert_refused("litellm-t4-rag")
 
+    def test_non_list_effort_ladder_is_refused(self):
+        doc = self.box.catalog()
+        model(doc, "t2-worker")["effort_ladder"] = "low"
+        self.box.save_catalog(doc)
+        self.assert_refused("effort_ladder")
+
+    def test_non_string_in_effort_ladder_list_is_refused(self):
+        doc = self.box.catalog()
+        model(doc, "t2-worker")["effort_ladder"] = ["low", 42, "high"]
+        self.box.save_catalog(doc)
+        self.assert_refused("effort_ladder")
+
+    def test_empty_effort_ladder_list_is_refused(self):
+        doc = self.box.catalog()
+        model(doc, "t2-worker")["effort_ladder"] = []
+        self.box.save_catalog(doc)
+        self.assert_refused("effort_ladder", "empty")
+
+
 class TomlUnknownModelTests(SandboxCase):
     """A dev-path table naming a model the catalog does not know is the
     user's own: it is reported and left alone, and the rest still syncs."""
