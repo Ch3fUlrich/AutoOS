@@ -967,6 +967,31 @@ if it "svc: run-opencode-serve generates the password once, private, and reuses 
     if (( ok )); then pass; else fail "password handling is wrong"; fi
 fi
 
+# api-keys.yml's opencode_password is the single source (ai-stack.sh init
+# writes it); the pinned file is only the fallback. The value must reach
+# opencode through the environment and never appear on stdout.
+if it "svc: run-opencode-serve takes the password from api-keys.yml opencode_password"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/home"
+    printf '#!/bin/sh\n[ "$OPENCODE_PASSWORD" = "new-pass" ] && echo "pw-match $*" || echo "pw-other $*"\n' >"$d/bin/opencode"
+    chmod +x "$d/bin/opencode"
+    printf "omniroute: sk-test-key\nopencode_password: 'new-pass'\n" >"$d/keys.yml"
+    _run() { env -u OPENCODE_PASSWORD HOME="$d/home" PATH="$d/bin:$PATH" \
+        AUTOOS_LITELLM_DIR="$d/none" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/cfg/pw" \
+        bash "$ROOT/configuration/autostart/run-opencode-serve.sh" "$@" 2>&1; }
+    out="$(_run)"
+    plan="$(_run --dry-run)"
+    ok=1
+    [[ "$out" == *"pw-match serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "password not from the keys file: $out" >&2; }
+    [[ "$out" == *"new-pass"* ]] && { ok=0; echo "the password was printed" >&2; }
+    [[ -e "$d/cfg/pw" ]] && { ok=0; echo "the fallback file was written despite a keys password" >&2; }
+    [[ "$plan" == *"$d/keys.yml"* ]] || { ok=0; echo "the dry run did not name the source: $plan" >&2; }
+    [[ "$plan" == *"new-pass"* ]] && { ok=0; echo "the dry run printed the password" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "run-opencode-serve does not read opencode_password"; fi
+fi
+
 if it "svc: the opencode unit runs the wrapper from this checkout"; then
     d="$(_svc_reg_sandbox)"
     out="$(_svc_reg "$d" --render autoos-opencode)"
@@ -1699,6 +1724,10 @@ fi
 if it "backup residual: aistack up fails before docker when init cannot back up an env file"; then
     d="$(_aistack_sandbox)"
     mkdir -p "$d/cfg"
+    # Pre-seed the single source so the first write needing a backup in init is
+    # opencode.env (the ensure_env_file call site this test guards), not the
+    # api-keys.yml opencode_password migration that now runs before it.
+    printf "omniroute: sk-test-client-key\nopencode_password: 'pinned-pass'\n" >"$d/repo/api-keys.yml"
     printf '# operator\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
     cp "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig"
     : >"$d/active-coding-agents-fw"; : >"$d/image-exists"
@@ -1719,6 +1748,9 @@ fi
 if it "backup residual: aistack init leaves the env file in place when its backup copy fails"; then
     d="$(_aistack_sandbox)"
     mkdir -p "$d/cfg"
+    # See the test above: skip the api-keys.yml migration so opencode.env's
+    # backup is the first one attempted.
+    printf "omniroute: sk-test-client-key\nopencode_password: 'pinned-pass'\n" >"$d/repo/api-keys.yml"
     printf '# operator\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
     cp "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig"
     bin="$(backup_fail_bin)"
@@ -1806,6 +1838,148 @@ if it "aistack: init reuses the pinned opencode-serve password so phone logins s
     _aistack "$d" init >/dev/null
     if grep -q "^OPENCODE_PASSWORD='phone-pass'$" "$d/cfg/opencode.env"; then pass; else fail "password not carried over"; fi
     rm -rf "$d"
+fi
+
+# ─── api-keys.yml opencode_password is the single source (OPENCODE-CFG) ─────
+# The derived copies are ~/.config/autoos/ai-stack/opencode.env's
+# OPENCODE_PASSWORD and ~/.config/autoos/opencode-serve.password. No case may
+# print a password value; each checks the value in the file, never in stdout.
+if it "aistack: init migrates opencode_password into api-keys.yml and skips a second run"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    mkdir -p "$d/home/.config/autoos"
+    printf 'phone-pass\n' >"$d/home/.config/autoos/opencode-serve.password"
+    first="$(_aistack "$d" init)"
+    sha_keys_first="$(sha256sum "$keys" | cut -d' ' -f1)"
+    sha_env_first="$(sha256sum "$d/cfg/opencode.env" | cut -d' ' -f1)"
+    second="$(_aistack "$d" init)"
+    sha_keys_second="$(sha256sum "$keys" | cut -d' ' -f1)"
+    sha_env_second="$(sha256sum "$d/cfg/opencode.env" | cut -d' ' -f1)"
+    ok=1
+    grep -qF "opencode_password: 'phone-pass'" "$keys" || { ok=0; echo "api-keys.yml did not gain the password" >&2; }
+    compgen -G "$keys.autoos-backup-*" >/dev/null || { ok=0; echo "no api-keys.yml backup" >&2; }
+    grep -q "^OPENCODE_PASSWORD='phone-pass'$" "$d/cfg/opencode.env" || { ok=0; echo "opencode.env missing the password" >&2; }
+    [[ "$second" == *"(skipped)"* ]] || { ok=0; echo "second run did not skip: $second" >&2; }
+    [[ "$sha_keys_first" == "$sha_keys_second" && "$sha_env_first" == "$sha_env_second" ]] \
+        || { ok=0; echo "a second run rewrote a file" >&2; }
+    [[ "$first$second" == *"phone-pass"* ]] && { ok=0; echo "a password was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "api-keys.yml is not the opencode_password source"; fi
+fi
+
+if it "aistack: a changed opencode_password flows into opencode.env and the serve file"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf "omniroute: sk-test-client-key\nopencode_password: 'new-pass'\n" >"$keys"
+    mkdir -p "$d/cfg"
+    printf '# keep me\nOPENCODE_PASSWORD=old-pass\nEXTRA=keep\n' >"$d/cfg/opencode.env"
+    touch -d '2 hours ago' "$d/cfg/opencode.env"
+    _aistack "$d" init >/dev/null
+    ok=1
+    grep -q "^OPENCODE_PASSWORD='new-pass'$" "$d/cfg/opencode.env" || { ok=0; echo "opencode.env not updated" >&2; }
+    grep -q '^EXTRA=keep$' "$d/cfg/opencode.env" || { ok=0; echo "an unrelated line was lost" >&2; }
+    grep -q '^# keep me$' "$d/cfg/opencode.env" || { ok=0; echo "a comment was lost" >&2; }
+    compgen -G "$d/cfg/opencode.env.autoos-backup-*" >/dev/null || { ok=0; echo "no opencode.env backup" >&2; }
+    [[ "$(cat "$d/home/.config/autoos/opencode-serve.password" 2>/dev/null)" == new-pass ]] \
+        || { ok=0; echo "serve password file not written" >&2; }
+    [[ "$(stat -c %a "$d/home/.config/autoos/opencode-serve.password" 2>/dev/null)" == 600 ]] \
+        || { ok=0; echo "serve password file is not 0600" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "changed opencode_password not propagated"; fi
+fi
+
+if it "aistack: a newer derived opencode password is left as is with a warning"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf "omniroute: sk-test-client-key\nopencode_password: 'new-pass'\n" >"$keys"
+    touch -d '2 hours ago' "$keys"
+    mkdir -p "$d/cfg"
+    printf "# keep\nOPENCODE_PASSWORD='old-pass'\nAUTOOS_OMNIROUTE_KEY='sk-test-client-key'\n" >"$d/cfg/opencode.env"
+    before="$(sha256sum "$d/cfg/opencode.env" | cut -d' ' -f1)"
+    out="$(_aistack "$d" init)"; rc=$?
+    after="$(sha256sum "$d/cfg/opencode.env" | cut -d' ' -f1)"
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "init failed: rc=$rc" >&2; }
+    [[ "$before" == "$after" ]] || { ok=0; echo "a newer opencode.env was rewritten" >&2; }
+    [[ "$out" == *"newer opencode password than"* ]] || { ok=0; echo "no warning: $out" >&2; }
+    [[ "$out" == *"old-pass"* || "$out" == *"new-pass"* ]] && { ok=0; echo "a password was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a newer derived password was not preserved"; fi
+fi
+
+if it "aistack: a REPLACE_WITH_ placeholder counts as an unset opencode_password"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf "omniroute: sk-test-client-key\nopencode_password: REPLACE_WITH_X\n" >"$keys"
+    mkdir -p "$d/home/.config/autoos"
+    printf 'phone-pass\n' >"$d/home/.config/autoos/opencode-serve.password"
+    _aistack "$d" init >/dev/null
+    _aistack "$d" init >/dev/null
+    ok=1
+    grep -qF "opencode_password: 'phone-pass'" "$keys" || { ok=0; echo "placeholder not migrated" >&2; }
+    grep -q "^OPENCODE_PASSWORD='phone-pass'$" "$d/cfg/opencode.env" || { ok=0; echo "opencode.env not set" >&2; }
+    [[ "$(grep -c '^opencode_password:' "$keys")" -le 2 ]] || { ok=0; echo "migration appended repeatedly" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "REPLACE_WITH_ was not treated as empty"; fi
+fi
+
+if it "aistack: --dry-run init announces the migration and writes no password"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    mkdir -p "$d/home/.config/autoos"
+    printf 'phone-pass\n' >"$d/home/.config/autoos/opencode-serve.password"
+    before="$(sha256sum "$keys" | cut -d' ' -f1)"
+    out="$(_aistack "$d" --dry-run init)"
+    after="$(sha256sum "$keys" | cut -d' ' -f1)"
+    ok=1
+    [[ "$before" == "$after" ]] || { ok=0; echo "dry run rewrote api-keys.yml" >&2; }
+    [[ -e "$d/cfg/opencode.env" ]] && { ok=0; echo "dry run wrote opencode.env" >&2; }
+    [[ "$out" == *"would add opencode_password to"* ]] || { ok=0; echo "migration not announced" >&2; }
+    [[ "$out" == *"phone-pass"* ]] && { ok=0; echo "a password was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dry run wrote the opencode password"; fi
+fi
+
+if it "aistack: init reads an api-keys.yml value with a trailing comment"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf 'opencode_password: "pw-with-comment"   # rotated by L0\nomniroute: '\''sk-x'\''  # client\n' >"$keys"
+    _aistack "$d" init >/dev/null
+    ok=1
+    grep -q "^OPENCODE_PASSWORD='pw-with-comment'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "OPENCODE_PASSWORD not exact: $(grep '^OPENCODE_PASSWORD=' "$d/cfg/opencode.env")" >&2; }
+    grep -q "^AUTOOS_OMNIROUTE_KEY='sk-x'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "AUTOOS_OMNIROUTE_KEY not exact: $(grep '^AUTOOS_OMNIROUTE_KEY=' "$d/cfg/opencode.env")" >&2; }
+    rm -rf "$d"
+
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf 'opencode_password: plain-pw # c\nomniroute: sk-plain # note\n' >"$keys"
+    _aistack "$d" init >/dev/null
+    grep -q "^OPENCODE_PASSWORD='plain-pw'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "unquoted OPENCODE_PASSWORD not exact: $(grep '^OPENCODE_PASSWORD=' "$d/cfg/opencode.env")" >&2; }
+    grep -q "^AUTOOS_OMNIROUTE_KEY='sk-plain'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "unquoted AUTOOS_OMNIROUTE_KEY not exact: $(grep '^AUTOOS_OMNIROUTE_KEY=' "$d/cfg/opencode.env")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a trailing # comment leaked into the value"; fi
+fi
+
+if it "svc: run-opencode-serve reads a quoted opencode_password with a trailing comment"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/home"
+    printf '#!/bin/sh\n[ "$OPENCODE_PASSWORD" = "pw-with-comment" ] && echo "pw-match $*" || echo "pw-other $*"\n' >"$d/bin/opencode"
+    chmod +x "$d/bin/opencode"
+    printf 'opencode_password: "pw-with-comment"   # rotated by L0\nomniroute: sk-test\n' >"$d/keys.yml"
+    out="$(env -u OPENCODE_PASSWORD HOME="$d/home" PATH="$d/bin:$PATH" \
+        AUTOOS_LITELLM_DIR="$d/none" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/cfg/pw" \
+        bash "$ROOT/configuration/autostart/run-opencode-serve.sh" 2>&1)"
+    ok=1
+    [[ "$out" == *"pw-match serve --hostname 0.0.0.0 --port 4096"* ]] \
+        || { ok=0; echo "password not from the keys file (with trailing comment): $out" >&2; }
+    [[ "$out" == *"pw-with-comment"* ]] && { ok=0; echo "the password was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "run-opencode-serve does not drop a trailing comment"; fi
 fi
 
 if it "aistack: the container opencode config reaches the gateway by name"; then
@@ -2312,6 +2486,43 @@ if it "aistack: the omniroute layer adds qodercli at an exact version on a diges
     [[ "$(grep -E '^USER ' "$f" 2>/dev/null | tail -n1)" == "USER node" ]] || { ok=0; echo "the image must end as USER node" >&2; }
     grep -qiE '^(COPY|ADD)[[:space:]]' "$f" 2>/dev/null && { ok=0; echo "COPY/ADD: a vendor binary would be committed; npm fetches at build" >&2; }
     if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned qodercli"; fi
+fi
+
+if it "aistack: the omniroute layer adds bcryptjs for the reset-password CLI at an exact version, outside /app's npm tree"; then
+    # The base's standalone build prunes bcryptjs from /app/node_modules although
+    # package-lock pins it, so `node bin/reset-password.mjs` dies with
+    # ERR_MODULE_NOT_FOUND. Running npm with cwd /app would reconcile the whole
+    # package.json, so the package is fetched into a throw-away prefix and moved.
+    ok=1
+    f="$AISTACK/omniroute.Dockerfile"
+    [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
+    grep -qE '^RUN npm install --prefix /tmp/[a-z-]+ --ignore-scripts .* bcryptjs@[0-9]+\.[0-9]+\.[0-9]+ && (rm -rf .* && )?mv .* /app/node_modules/bcryptjs && rm -rf .* && npm cache clean --force$' "$f" 2>/dev/null \
+        || { ok=0; echo "bcryptjs is not pinned and added, moved into /app/node_modules and cleaned up in one layer" >&2; }
+    layer="$(grep -nE '^RUN npm install --prefix /tmp/[a-z-]+ .*bcryptjs@' "$f" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
+    last="$(grep -nE '^USER node' "$f" 2>/dev/null | tail -n1 | cut -d: -f1 || true)"
+    [[ -n "$layer" && -n "$last" ]] || { ok=0; echo "no bcryptjs layer or no trailing USER node line" >&2; }
+    (( ${layer:-0} < ${last:-0} )) \
+        || { ok=0; echo "the bcryptjs layer (line ${layer:-0}) comes after the last USER node (line ${last:-0})" >&2; }
+    grep -qE 'cd /app' "$f" 2>/dev/null \
+        && { ok=0; echo "npm runs with cwd /app: it would reconcile the whole package.json" >&2; }
+    if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned bcryptjs outside /app's npm tree"; fi
+fi
+
+if it "aistack: keys_add_opencode_password backs up a 644 keys file at mode 600"; then
+    d="$(_aistack_sandbox)"
+    # A keys file the operator relaxed to 644 (a common mistake on shared
+    # checkouts): the migration backup must NOT inherit that mode.
+    printf 'omniroute: sk-test-client-key\n' >"$d/repo/api-keys.yml"
+    chmod 644 "$d/repo/api-keys.yml"
+    _aistack "$d" init >/dev/null
+    backup="$(ls "$d/repo/api-keys.yml.autoos-backup-"* 2>/dev/null | head -n1)"
+    ok=1
+    [[ -n "$backup" ]] || { ok=0; echo "no migration backup was made" >&2; }
+    if [[ -n "$backup" ]]; then
+        got="$(stat -c '%a' "$backup" 2>&1)"
+        [[ "$got" == "600" ]] || { ok=0; echo "backup mode is $got, expected 600" >&2; }
+    fi
+    if (( ok )); then pass; else fail "keys_add_opencode_password backup inherits source mode instead of 600"; fi
 fi
 
 if it "aistack: init creates the qoder home, private and the operator's, and leaves the gateway data alone"; then

@@ -389,10 +389,24 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
 .chip-missing{background:var(--warn-soft);color:var(--warn)}
 .providers{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
 .provider{
-  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;
   padding:8px 11px;border:1px solid var(--rule);border-radius:9px;background:var(--surface-2);
 }
 .provider .pname{font-weight:600;font-size:.84rem}
+.provider .pgroup{font-weight:400;font-size:.7rem;color:var(--ink-muted);margin-left:6px}
+.provider input[type=password]{
+  flex:1 1 9rem;min-width:7rem;font-family:var(--mono);font-size:.76rem;
+  padding:4px 6px;border:1px solid var(--rule);border-radius:6px;
+  background:var(--surface);color:var(--ink);
+}
+.provider .save-secret{
+  font-size:.74rem;padding:4px 10px;border:1px solid var(--rule);
+  border-radius:6px;background:var(--surface);color:var(--ink);cursor:pointer;
+}
+.provider .secret-apply{
+  flex-basis:100%;font-size:.7rem;color:var(--ink-muted);
+  font-family:var(--mono);word-break:break-all;
+}
 .provider.off{opacity:.62}
 .services{display:grid;gap:8px;margin-bottom:12px}
 .svc{
@@ -795,7 +809,7 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
         <button type="button" class="card-pill" data-target-card="cardProfile" aria-pressed="true">Profile</button>
         <button type="button" class="card-pill" data-target-card="cardCatalog" aria-pressed="true">Components</button>
         <button type="button" class="card-pill" data-target-card="cardOrder" aria-pressed="true">Install order</button>
-        <button type="button" class="card-pill" data-target-card="cardProviders" aria-pressed="true">AI providers</button>
+        <button type="button" class="card-pill" data-target-card="cardProviders" aria-pressed="true">Logins and keys</button>
         <button type="button" class="card-pill" data-target-card="cardTiers" aria-pressed="true">Router tiers</button>
       </div>
       <div class="card-presets">
@@ -817,14 +831,14 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
 
     <details class="card" id="cardProviders" open>
       <summary>
-        <span class="card-title">AI providers</span>
+        <span class="card-title">Logins and keys</span>
         <span class="card-sub" id="providersSub">from configuration/api-keys.yml</span>
       </summary>
       <div class="card-body">
         <div class="legend">
-          <span><span class="chip chip-ok">configured</span> a key is present</span>
+          <span><span class="chip chip-ok">configured</span> a value is set</span>
           <span><span class="chip chip-missing">missing</span> add one, or routing skips it</span>
-          <span>Values are never shown or sent to this page.</span>
+          <span>Write-only: values are never shown, logged or read back.</span>
         </div>
         <div class="providers" id="providers"></div>
       </div>
@@ -1924,18 +1938,85 @@ function serverGone() {
     'URL; the token changes every run, so this one is now dead too.</div></div>';
 }
 
-/* ── providers, from configuration/api-keys.yml (values never sent) ────── */
-function renderProviders() {
-  const list = STATE.providers || [];
-  const done = list.filter(p => p.configured).length;
-  el("providersSub").textContent = done + " of " + list.length +
-    " configured · from configuration/api-keys.yml";
-  el("providers").innerHTML = list.map(p =>
-    '<div class="provider' + (p.configured ? "" : " off") + '">' +
-      '<span class="pname">' + esc(p.name) + "</span>" +
-      '<span class="chip ' + (p.configured ? "chip-ok" : "chip-missing") + '">' +
-        (p.configured ? "configured" : "missing") + "</span>" +
-    "</div>").join("");
+/* ── logins and keys, write-only (GET/POST /api/secrets) ──────────────── */
+/* The server sends set/missing per key and an apply hint - never a value. A
+   save POSTs {id,value}, then clears the box and flips the chip. Nothing here
+   puts a value back into the DOM, the log or localStorage. */
+async function renderProviders() {
+  let rows = null, writable = true;
+  try {
+    const r = await fetch(api("/api/secrets"), { cache: "no-store" });
+    if (r.ok) {
+      const d = await r.json();
+      rows = d.secrets || [];
+      writable = d.writable !== false;
+    }
+  } catch (e) {
+    /* older server or a hiccup: fall back to the status the state carries */
+  }
+  if (!rows) rows = (STATE.providers || []).map(p => ({
+    id: p.id, name: p.name, group: "", apply: "", configured: p.configured
+  }));
+  const done = rows.filter(p => p.configured).length;
+  el("providersSub").textContent = done + " of " + rows.length +
+    " set · configuration/api-keys.yml · write-only";
+  el("providers").innerHTML = rows.map(p => providerRow(p, writable)).join("");
+  rows.forEach(p => {
+    const btn = el("save-" + p.id);
+    if (btn) btn.addEventListener("click", () => saveSecret(p));
+  });
+}
+
+function providerRow(p, writable) {
+  return '<div class="provider' + (p.configured ? "" : " off") +
+      '" data-secret="' + esc(p.id) + '">' +
+    '<span class="pname">' + esc(p.name) +
+      (p.group ? '<span class="pgroup">' + esc(p.group) + "</span>" : "") + "</span>" +
+    '<span class="chip ' + (p.configured ? "chip-ok" : "chip-missing") +
+      '" id="state-' + esc(p.id) + '">' +
+      (p.configured ? "configured" : "missing") + "</span>" +
+    '<input type="password" id="input-' + esc(p.id) +
+      '" autocomplete="new-password" spellcheck="false" aria-label="' +
+      esc(p.name) + '" placeholder="' +
+      (p.configured ? "replace value" : "paste value") + '">' +
+    '<button type="button" class="save-secret" id="save-' + esc(p.id) + '"' +
+      (writable ? "" : " disabled") + ">Save</button>" +
+    '<span class="secret-apply" id="apply-' + esc(p.id) + '"></span>' +
+  "</div>";
+}
+
+async function saveSecret(p) {
+  const input = el("input-" + p.id);
+  const note = el("apply-" + p.id);
+  const value = input ? input.value : "";
+  if (!value) { if (note) note.innerHTML = esc("enter a value first"); return; }
+  let r;
+  try {
+    r = await fetch(api("/api/secrets"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: p.id, value: value })
+    });
+  } catch (e) {
+    if (note) note.innerHTML = esc("could not reach the server");
+    return;
+  }
+  let d = {};
+  try { d = await r.json(); } catch (e) { d = {}; }
+  if (!r.ok) {
+    if (note) note.innerHTML = esc(d.error || ("save failed (HTTP " + r.status + ")"));
+    return;
+  }
+  if (input) input.value = "";
+  p.configured = true;
+  const chip = el("state-" + p.id);
+  if (chip) { chip.textContent = "configured"; chip.className = "chip chip-ok"; }
+  const row = document.querySelector('[data-secret="' + p.id + '"]');
+  if (row) row.classList.remove("off");
+  if (note) {
+    note.innerHTML = esc(d.apply ? ("apply: " + d.apply)
+                                 : (d.unchanged ? "unchanged" : "saved"));
+  }
 }
 
 /* ── AI services: live status + the existing setup actions ─────────────── */
