@@ -251,6 +251,17 @@ Docker sandbox runs with `HOME=/home/openhands` and gets no host `~/.openhands`
 `.agents/skills` inside the mounted code tree. A skill that loads nowhere is a
 defect — the suites assert the wiring, not just the files.
 
+| client | user-scope skills dir it reads | linked by the installers |
+|---|---|---|
+| Claude Code | `~/.claude/skills` (+ project `.claude/skills`) | yes |
+| Antigravity (agy) | `~/.gemini/config/skills` | yes |
+| gemini, qoder, qwen | `~/.agents/skills` (qwen also `~/.qwen/skills`) | yes, `~/.agents/skills` |
+| codex | `~/.codex/skills` | yes, only when `~/.codex` exists or `codex` is on PATH |
+| OpenHands | `~/.agents/skills`, `~/.openhands/skills` | yes |
+| opencode | project `.agents/skills` | not needed |
+
+Measured 2026-09-27 (`logs/handoff-sessions/20260925/status/L1-backlog.spike-c5-skills-dirs.md`).
+
 Provenance: subtree from `agent-skills` (`git log -- .agents/skills`);
 `qa-swarm`, `review-triage`, `babysit-prs` are native rewrites (unlicensed
 upstreams — see `agent-skills/THIRD_PARTY.md`); sync ledger at

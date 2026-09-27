@@ -1308,6 +1308,14 @@ function Install-AutoOSAgentSkills {
         }
     }
 
+    # Link repo skills into user-scope directories for clients that read from
+    # ~/.agents/skills (gemini, qoder, qwen) and ~/.codex/skills (codex).
+    # Sync-AutoOSSkillDirs handles dry-run, idempotency and never-overwrite rules.
+    $skillsSource = Get-AutoOSSkillsSource
+    if ($skillsSource) {
+        $null = Sync-AutoOSAgentSkillTargets -Source $skillsSource
+    }
+
     if ($script:DryRun) {
         Write-AutoOSLine 'would check the omnigraph image, network and token' -Level muted
         return
@@ -2588,6 +2596,33 @@ function Sync-AutoOSSkillDirs {
     }
     if ($skipped -gt 0) {
         Write-AutoOSLine "skipped $skipped skill link(s) that are already in place in $Destination" -Level muted
+    }
+    return $ok
+}
+
+function Sync-AutoOSAgentSkillTargets {
+    <#
+      .SYNOPSIS
+        Mirror the repo's skills into the user-scope dirs the other agents read.
+
+      .DESCRIPTION
+        Clients that follow the Agent Skills convention read a user-scope
+        directory: gemini, qoder and qwen read ~/.agents/skills; codex reads
+        ~/.codex/skills. Each skill is linked individually by
+        Sync-AutoOSSkillDirs, so the user's own entries sit beside ours and are
+        never touched, and a second run is a no-op.
+
+        ~/.codex/skills is only written when codex is actually there (its
+        command is on PATH or its ~/.codex directory exists): creating the
+        directory for a tool the machine does not have is worse than doing
+        nothing. ~/.agents/skills has no such guard - it is the shared
+        convention directory, not one vendor's.
+    #>
+    param([Parameter(Mandatory)][string]$Source)
+    $ok = Sync-AutoOSSkillDirs -Source $Source -Destination (Join-Path $HOME '.agents\skills')
+    $codexHome = Join-Path $HOME '.codex'
+    if ((Test-Path -LiteralPath $codexHome) -or (Get-Command codex -ErrorAction SilentlyContinue)) {
+        $ok = (Sync-AutoOSSkillDirs -Source $Source -Destination (Join-Path $codexHome 'skills')) -and $ok
     }
     return $ok
 }
@@ -3913,7 +3948,7 @@ Export-ModuleMember -Function `
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
-    Set-AutoOSOpenCodeConfig, Get-AutoOSLegacyModels, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig, Sync-AutoOSSkillDirs,
+    Set-AutoOSOpenCodeConfig, Get-AutoOSLegacyModels, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig, Sync-AutoOSSkillDirs, Sync-AutoOSAgentSkillTargets,
     Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
     Set-AutoOSQoderMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,

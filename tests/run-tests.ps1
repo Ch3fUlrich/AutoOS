@@ -4638,6 +4638,37 @@ function Invoke-LoggedSkillSync {
     }
 }
 
+$script:HomeNotRedirected = '::home-not-redirected::'
+
+function Invoke-LoggedSkillTargetSync {
+    # Calls Sync-AutoOSAgentSkillTargets under a redirected $HOME and returns
+    # what it logged. The caller supplies a scratch home whose .agents/skills
+    # dir may or may not exist yet; the function creates nothing it does not
+    # have to (including the scratch home itself when DryRun says no).
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$ScratchHome
+    )
+    $savedHome = & (Get-Module AutoOS.Install) { $HOME }
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        Set-Variable -Name HOME -Value $ScratchHome -Force -Scope Global
+        $env:HOME = $ScratchHome
+        # Never run the writer against the real home: if the module does not
+        # see the scratch home (PS 5.1 may refuse the redirect), sync nothing
+        # and tell the caller, which skips (same guard as the other sites).
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $ScratchHome) { return $script:HomeNotRedirected }
+        Initialize-AutoOSLog -Path $log
+        $null = Sync-AutoOSAgentSkillTargets -Source $Source
+        Get-Content -LiteralPath $log -Raw -Encoding utf8
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        $env:HOME = $savedHome
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-TestLinkTarget {
     # The full path a link points at ('' when the item is not a link). Target is
     # a string[] in Windows PowerShell 5.1 and may be relative for a symlink.
@@ -4982,6 +5013,183 @@ Test-Case 'openhands skills: a dry run links nothing' {
 
 Test-Case 'openhands skills: the writer no longer runs an unconditional mklink /J' {
     if ($installSource -match 'mklink') { throw 'lib\windows\AutoOS.Install.psm1 still shells out to mklink (a false "Linked" line on failure)' }
+    Pass
+}
+
+Describe-Group 'agent-skills targets'
+
+Test-Case 'agent-skills targets: links repo skills into ~/.agents\skills' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'home\.agents\skills'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $destItem = Get-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+        if (-not $destItem) { throw "$dest was not created" }
+        if ($destItem.LinkType) { throw "$dest is a $($destItem.LinkType), not a real directory" }
+        foreach ($n in @('alpha', 'beta')) {
+            $link = Join-Path $dest $n
+            $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+            if (-not $item) { throw "skill '$n' was not linked" }
+            if (@('Junction', 'SymbolicLink') -notcontains [string]$item.LinkType) { throw "skill '$n' is not a junction (LinkType: [$($item.LinkType)])" }
+            $wantTarget = [IO.Path]::GetFullPath((Join-Path $repo ".agents\skills\$n")).TrimEnd('\', '/')
+            if ((Get-TestLinkTarget -Path $link) -ne $wantTarget) { throw "skill '$n' points at [$((Get-TestLinkTarget -Path $link))], expected [$wantTarget]" }
+            if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$n'/SKILL.md is unreadable through the link" }
+        }
+        if (Test-Path -LiteralPath (Join-Path $dest 'nofile')) { throw "nofile (no SKILL.md) was linked" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: links into ~/.codex\skills when codex dir exists' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $homeDir = Join-Path $scratch 'home'
+    $dest = Join-Path $homeDir '.agents\skills'
+    $codexDir = Join-Path $homeDir '.codex'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $codexDir -Force
+        $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
+        # Verify .agents\skills
+        foreach ($n in @('alpha', 'beta')) {
+            $link = Join-Path $dest $n
+            if (-not (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) { throw "skill '$n' not linked into .agents\skills" }
+        }
+        # Verify .codex\skills was created alongside
+        $codexSkills = Join-Path $codexDir 'skills'
+        $codexItem = Get-Item -LiteralPath $codexSkills -Force -ErrorAction SilentlyContinue
+        if (-not $codexItem) { throw ".codex\skills was not created" }
+        if ($codexItem.LinkType) { throw ".codex\skills is a $($codexItem.LinkType), not a real directory" }
+        foreach ($n in @('alpha', 'beta')) {
+            $link = Join-Path $codexSkills $n
+            $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+            if (-not $item) { throw "skill '$n' not linked into .codex\skills" }
+            if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$n'/SKILL.md unreadable through .codex\skills link" }
+        }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-TestDirLinks -Directory (Join-Path $codexDir 'skills')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: creates no ~/.codex when codex is absent' {
+    # No ~/.codex and no codex on PATH: the codex target is skipped entirely
+    # (a directory for a tool the machine lacks is worse than nothing).
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $homeDir = Join-Path $scratch 'home'
+    $dest = Join-Path $homeDir '.agents\skills'
+    $emptyBin = Join-Path $scratch 'bin'
+    $savedPath = $env:PATH
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $emptyBin -Force
+        $env:PATH = $emptyBin
+        $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        if ($log -eq $script:HomeNotRedirected) { $env:PATH = $savedPath; Skip 'HOME cannot be redirected for the installer module'; return }
+        $env:PATH = $savedPath
+        if (Test-Path -LiteralPath (Join-Path $homeDir '.codex')) { throw '.codex was created without codex' }
+        if (-not (Get-Item -LiteralPath (Join-Path $dest 'alpha') -Force -ErrorAction SilentlyContinue)) { throw '.agents\skills not linked, so the sync did not run' }
+    } finally {
+        $env:PATH = $savedPath
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: second run reports skipped for ~/.agents\skills' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'home\.agents\skills'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        # Snapshot before second run
+        $before = @{}
+        foreach ($n in @('alpha', 'beta')) {
+            $link = Join-Path $dest $n
+            $before["$n-target"] = Get-TestLinkTarget -Path $link
+            $before["$n-mtime"] = (Get-Item -LiteralPath $link -Force).LastWriteTimeUtc
+        }
+        $out = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        # Verify nothing changed
+        foreach ($n in @('alpha', 'beta')) {
+            $link = Join-Path $dest $n
+            $afterTarget = Get-TestLinkTarget -Path $link
+            $afterMtime = (Get-Item -LiteralPath $link -Force).LastWriteTimeUtc
+            if ($afterTarget -ne $before["$n-target"]) { throw "skill '$n' target changed from [$($before["$n-target"])] to [$afterTarget]" }
+            if ($afterMtime -ne $before["$n-mtime"]) { throw "skill '$n' was touched (mtime changed)" }
+        }
+        if ($out -notmatch 'skipped') { throw "second run never says skipped: [$out]" }
+        if ($out -match '(?i)\b(linked|repointed) (alpha|beta)\b') { throw "second run printed a linked/repointed line: [$out]" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: keeps a user''s own skill in ~/.agents\skills' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'home\.agents\skills'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path (Join-Path $dest 'alpha'), (Join-Path $dest 'mine') -Force
+        [IO.File]::WriteAllText((Join-Path $dest 'alpha\SKILL.md'), 'my own alpha')
+        [IO.File]::WriteAllText((Join-Path $dest 'mine\SKILL.md'), 'my own skill')
+        $alphaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $alphaDir = Test-Path -LiteralPath (Join-Path $dest 'alpha') -PathType Container
+        $mineBefore = Get-TestLinkTarget -Path (Join-Path $dest 'mine')
+        $mineContent = [IO.File]::ReadAllText((Join-Path $dest 'mine\SKILL.md'))
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        # alpha (repo has it) was a user dir: not replaced
+        $alphaNow = Get-Item -LiteralPath (Join-Path $dest 'alpha') -Force
+        if ($alphaNow.LinkType) { throw "the user's own alpha was replaced with a link (LinkType: $($alphaNow.LinkType))" }
+        if ([IO.File]::ReadAllText((Join-Path $dest 'alpha\SKILL.md')) -ne 'my own alpha') { throw "the user's alpha content changed" }
+        if ($log -notmatch ('kept .*[\\/]alpha')) { throw "no 'kept ...alpha' line: [$log]" }
+        # beta (repo has it) was absent: linked
+        $wantBeta = [IO.Path]::GetFullPath((Join-Path $repo '.agents\skills\beta')).TrimEnd('\', '/')
+        if ((Get-TestLinkTarget -Path (Join-Path $dest 'beta')) -ne $wantBeta) { throw "beta was not linked next to the user's skills" }
+        # mine (repo does not have) was a user dir: left alone
+        $mineNow = Get-Item -LiteralPath (Join-Path $dest 'mine') -Force
+        if ($mineNow.LinkType) { throw "the user's mine was replaced with a link" }
+        if ([IO.File]::ReadAllText((Join-Path $dest 'mine\SKILL.md')) -ne $mineContent) { throw "the user's mine content changed" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: a dry run links nothing' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'home\.agents\skills'
+    try {
+        New-TestSkillRepo -Repo $repo
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        if (Test-Path -LiteralPath (Join-Path $scratch 'home')) { throw 'a dry run created the home directory' }
+        if ($log -notmatch 'would link') { throw "no 'would link' line: [$log]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Pass
 }
 

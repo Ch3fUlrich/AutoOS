@@ -3933,6 +3933,18 @@ print(json.dumps({
         fi
     fi
 
+    # Link repo skills into user-scope directories for clients that read from
+    # ~/.agents/skills (gemini, qoder, qwen) and ~/.codex/skills (codex).
+    # link_skill_dirs handles dry-run, idempotency and never-overwrite rules.
+    local skills_source
+    skills_source="$(autoos_skills_source)"
+    if [[ -n "$skills_source" ]]; then
+        link_skill_dirs "$skills_source" "$SYS_HOME/.agents/skills" || true
+        if [[ -d "$SYS_HOME/.codex" ]] || has_cmd codex; then
+            link_skill_dirs "$skills_source" "$SYS_HOME/.codex/skills" || true
+        fi
+    fi
+
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would check the omnigraph image, network and token"
         return 0
