@@ -6582,7 +6582,9 @@ Test-Case 'openhands template routes tiers with no secrets' {
 Test-Case 'litellm fallback config is internally consistent' {
     $yaml = Get-Content (Join-Path $Root 'configuration\litellm\config.yaml') -Raw -Encoding utf8
     $groups = @([regex]::Matches($yaml, '(?m)^\s*-\s*model_name:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
-    foreach ($g in @('t1-orchestrator', 't1-orchestrator-paid', 't2-worker', 't2-worker-paid', 't2-worker-free-only', 't3-driver', 't3-driver-paid', 't4-rag')) {
+    # Every group the registry can serve through LiteLLM (managed) plus the
+    # hand-curated *-paid escalations, mirroring the Linux consistency test.
+    foreach ($g in @('t1-orchestrator', 't1-orchestrator-clean', 'spark-1.3-contributor', 't1-orchestrator-paid', 't2-orchestrator', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-worker-paid', 't3-driver', 't3-driver-clean', 't3-driver-paid', 't4-rag', 'deepseek-v4.1-flash', 'gemini-3.8-flash')) {
         Assert-Contains $groups $g
     }
     $fb = [regex]::Match($yaml, '(?s)fallbacks:(.*?)(?:\r?\n\S|\z)').Groups[1].Value
@@ -7967,6 +7969,23 @@ Test-Case 'autostart resumes the LiteLLM fallback proxy too' {
     $starter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.ps1') -Raw
     Assert-True ($starter -match '\.env') 'starter does not read the litellm .env'
     Assert-True ($starter -notmatch 'REPLACE_WITH_YOUR') 'starter embeds a placeholder key name list, not values'
+}
+
+Test-Case 'litellm starter takes host, state dir and master-key file from the environment' {
+    # The starter is the one place the proxy's bind, log location and master
+    # key are chosen; all three must be overridable without editing the file.
+    $starter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.ps1') -Raw
+    $shStarter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.sh') -Raw
+    foreach ($v in @('AUTOOS_LITELLM_HOST', 'AUTOOS_LITELLM_STATE_DIR', 'AUTOOS_LITELLM_MASTER_KEY_FILE')) {
+        Assert-True ($starter -match $v) "ps1 starter ignores $v"
+        Assert-True ($shStarter -match $v) "sh starter ignores $v"
+    }
+    Assert-True ($starter -match '--host' -and $shStarter -match '--host \$HOST') 'bind host not passed to litellm'
+    Assert-True ($starter -match 'litellm\.log' -and $shStarter -match 'litellm\.log') 'state-dir log name missing'
+    # Never echo the key value: the starter reports key NAMES only.
+    Assert-True ($starter -notmatch 'Write-Host \$master') 'ps1 starter prints the master key'
+    Assert-True ($shStarter -notmatch 'echo "\$MASTER_KEY"') 'sh starter prints the master key'
+    Pass
 }
 
 Test-Case 'healthcheck probes four ports and resumes only with -Fix' {

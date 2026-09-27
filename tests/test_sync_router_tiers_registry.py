@@ -108,6 +108,75 @@ class RegistryRefsTests(unittest.TestCase):
             sync.registry_refs(self.registry_path, tiers=("t2-worker", "no-such-tier"))
 
 
+class ManagedTierSelectionTests(unittest.TestCase):
+    """The default tier set is derived from the registry instead of a
+    hand-kept pair: registry_refs() (and so both consumers) manage every route
+    that declares legs and keeps at least one LiteLLM-servable leg. A legless
+    route (the *-paid fallbacks) and a route whose every leg is gateway-only
+    (cc/antigravity: no LiteLLM transport or key) get no managed entry."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.registry_path = self.dir / "ai-registry.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_registry(self, routes):
+        doc = {
+            "providers": {
+                "groq": {"omniroute_id": "groq", "litellm_env": "GROQ_API_KEY"},
+                "cc": {"omniroute_id": "cc"},
+                "antigravity": {"omniroute_id": "antigravity"},
+            },
+            "routes": routes,
+        }
+        self.registry_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    def test_default_covers_a_servable_route_outside_the_old_synced_pair(self):
+        self._write_registry({
+            "t2-worker": {"legs": ["groq/openai/gpt-oss-120b"]},
+            "t3-driver": {"legs": ["groq/qwen/qwen3.8-27b"]},
+            "t4-rag": {"legs": ["groq/command-a-03-2025"]},
+        })
+        sync = _load_module()
+        self.assertEqual(set(sync.registry_refs(self.registry_path)),
+                         {"t2-worker", "t3-driver", "t4-rag"})
+
+    def test_a_legless_route_gets_no_managed_entry(self):
+        self._write_registry({
+            "t2-worker": {"legs": ["groq/openai/gpt-oss-120b"]},
+            "t3-driver": {"legs": ["groq/qwen/qwen3.8-27b"]},
+            "t2-worker-paid": {"legs": []},
+        })
+        sync = _load_module()
+        self.assertEqual(set(sync.registry_refs(self.registry_path)),
+                         {"t2-worker", "t3-driver"})
+
+    def test_a_gateway_only_route_gets_no_managed_entry(self):
+        self._write_registry({
+            "t2-worker": {"legs": ["groq/openai/gpt-oss-120b"]},
+            "t3-driver": {"legs": ["groq/qwen/qwen3.8-27b"]},
+            "opus-4-6": {"legs": ["cc/claude-opus-4-6",
+                                  "antigravity/claude-opus-4-6-thinking"]},
+        })
+        sync = _load_module()
+        self.assertEqual(set(sync.registry_refs(self.registry_path)),
+                         {"t2-worker", "t3-driver"})
+
+    def test_combos_override_defaults_to_every_servable_combo(self):
+        combos_path = self.dir / "combos.json"
+        combos_path.write_text(json.dumps({"combos": [
+            {"name": "t2-worker", "models": ["groq/openai/gpt-oss-120b"]},
+            {"name": "t3-driver", "models": []},
+            {"name": "opus-4-6", "models": ["antigravity/claude-opus-4-6-thinking"]},
+        ]}), encoding="utf-8")
+        sync = _load_module()
+        refs = sync.combos_refs(combos_path)
+        self.assertEqual(set(refs), {"t2-worker"})
+
+
 class RegistrySandbox:
     """Temp copies of ai-registry.json, combos.json and config.yaml, plus a
     runner pointed at them - proves the tool's default (unflagged --combos)

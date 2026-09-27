@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
+
+- **`configuration/litellm/config.yaml`**, **`tools/sync-router-tiers.py`**, **`tools/registry.py`**: every registry route `gateway_legs` can serve through LiteLLM is now an `AUTOOS-MANAGED` block (12 groups) regenerated from the registry, replacing the hardcoded `SYNCED_TIERS` (`t2-worker`, `t3-driver`) pair. A route whose final servable set is empty gets no group (instead of the render raising); the legless `*-paid` chains stay hand-curated. New `managed_tiers` / `litellm_servable_refs`; `registry_refs`/`combos_refs` default to every servable tier. Tests: `tests/test_registry_render.py`, `tests/test_sync_router_tiers_registry.py`, `tests/linux/17-ai-routing.sh`.
+- **`configuration/litellm/start-litellm.sh`**, **`configuration/litellm/start-litellm.ps1`**: `AUTOOS_LITELLM_HOST` (bind address), `AUTOOS_LITELLM_STATE_DIR` (where `litellm.log` lives) and `AUTOOS_LITELLM_MASTER_KEY_FILE` (a private file whose single line overrides `.env`; unreadable or empty is a hard error). Values are never printed. Tests: `tests/linux/34-ai-services.sh`.
+
 ### Changed — Claude Code (cc) legs unavailable (operator 2026-09-27: never connected to OmniRoute)
 
 - **`catalog/ai-registry.json`** `providers.cc.available: false` (sourced); `opus-4-6` and `t2-orchestrator` keep their antigravity opus-4-6-thinking leg, the cc leg leaves combos.json.
