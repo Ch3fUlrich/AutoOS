@@ -937,6 +937,27 @@ def parent_snapshot(root=None):
     return head, branch, reflog_count, refs, _filtered_parent_status(root)
 
 
+def _sibling_worktree_branches(root):
+    """Branch refs checked out in OTHER worktrees of root's repository.
+
+    Every lane is a worktree of one .git, so a parallel lane's worker commit
+    on its own checked-out branch moves an existing ref without touching this
+    run's parent checkout. Those refs are not scanned as side branches.
+    """
+    r = subprocess.run(["git", "-C", root, "worktree", "list", "--porcelain"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return set()
+    here = os.path.realpath(root)
+    out, path = set(), None
+    for line in r.stdout.splitlines():
+        if line.startswith("worktree "):
+            path = os.path.realpath(line[len("worktree "):])
+        elif line.startswith("branch ") and path and path != here:
+            out.add(line[len("branch "):])
+    return out
+
+
 def parent_leak(snapshot, root=None):
     """(leak lines) since a parent_snapshot; empty list = no leak.
 
@@ -948,7 +969,9 @@ def parent_leak(snapshot, root=None):
     - the same scan on every branch ref that EXISTED at the snapshot and
       moved (a worker committing on a side branch). NEW refs are never
       scanned: the orchestrator fetches or merges worker lanes into new refs
-      during a run - never a leak. The --first-parent exemption assumes
+      during a run - never a leak. A ref checked out in ANOTHER worktree of
+      the same repository is skipped too: that is a parallel lane's own
+      branch, not this parent; The --first-parent exemption assumes
       lanes merge with --no-ff (repo convention); a fast-forward would land
       worker commits on the first-parent chain and false-flag;
     - any tracked path outside logs/ whose porcelain state is DIRTY after
@@ -985,8 +1008,11 @@ def parent_leak(snapshot, root=None):
             name, _, sha = line.partition("\x00")
             if name and sha and name in before_refs and before_refs[name] != sha:
                 moved[name] = (before_refs[name], sha)
+    siblings = _sibling_worktree_branches(root)
     side = []
     for name, (old, new) in sorted(moved.items()):
+        if name in siblings:
+            continue  # another lane's own worktree branch: not this run's parent
         # New refs are skipped: only refs that existed at the snapshot count.
         for sha in _scan_first_parent_range(root, old, new):
             side.append("%s %s" % (name, sha))
