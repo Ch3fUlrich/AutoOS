@@ -250,6 +250,7 @@
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b",
+        "openrouter/openai/gpt-oss-120b",
         "cheaperinference/deepseek-v4-flash",
         "cheaperinference/glm-4.5-air",
         "cheaperinference/kimi-k3",

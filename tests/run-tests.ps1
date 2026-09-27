@@ -78,8 +78,13 @@ function Pass { $script:Pass++; Write-Host ("  " + (C '+' '38;5;71') + " $script
 function Skip { param($why) $script:Skip++; Write-Host ("  " + (C '-' '38;5;179') + " $script:Current " + (C "($why)" '2;38;5;245')) }
 
 function Assert-Equal {
-    param($Actual, $Expected)
-    if ($Actual -eq $Expected) { Pass } else { throw "expected [$Expected] but got [$Actual]" }
+    # $Message is the caller's diagnostic (e.g. a failing unittest's output); it
+    # was once a silently ignored extra argument, so a red CI named nothing.
+    param($Actual, $Expected, [string]$Message = '')
+    if ($Actual -eq $Expected) { Pass; return }
+    $text = "expected [$Expected] but got [$Actual]"
+    if ($Message) { $text += ": $Message" }
+    throw $text
 }
 function Assert-True {
     param($Condition, $Message = 'expected true')
@@ -101,6 +106,13 @@ $winCatalog = Get-AutoOSCatalog (Join-Path $Root 'catalog\windows.json')
 
 # ─── Catalog schema ─────────────────────────────────────────────────────────
 Describe-Group 'catalog schema'
+
+Test-Case 'Assert-Equal carries its caller message into the failure' {
+    $got = $null
+    try { Assert-Equal 1 0 'the unittest output' } catch { $got = $_.Exception.Message }
+    if ($got -ne 'expected [0] but got [1]: the unittest output') { throw "message lost: [$got]" }
+    Pass
+}
 
 Test-Case 'windows catalog validates' {
     $p = @(Test-AutoOSCatalogSchema -Catalog $winCatalog)
@@ -124,19 +136,21 @@ Test-Case 'a malformed catalog is rejected' {
         "expected provider/kebab/ghost problems, got: $joined"
 }
 
-# ─── Shared LLM model catalogue (single source of truth) ────────────────
-Describe-Group 'llm models'
+# ─── Registry models (single source of truth) ─────────────────────────
+Describe-Group 'registry models'
 
-Test-Case 'llm-models.json is valid and has unique ids' {
-    $doc = Get-Content (Join-Path $Root 'catalog\llm-models.json') -Raw | ConvertFrom-Json
-    $ids = @($doc.models | ForEach-Object { $_.id })
-    Assert-True ($ids.Count -ge 18) "expected >= 18 models, got $($ids.Count)"
-    $dupes = @($ids | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
-    @(Assert-True ($dupes.Count -eq 0) ("duplicate model ids: " + ($dupes -join ', ')))
-    foreach ($m in $doc.models) {
-        $hasOr = $m.PSObject.Properties.Name.Contains('openrouter_id') -and $m.openrouter_id
-        $hasDirect = $m.PSObject.Properties.Name.Contains('direct') -and $m.direct
-        if (-not $hasOr -and -not $hasDirect) { throw "model '$($m.id)' has neither openrouter_id nor direct" }
+Test-Case 'registry models are valid' {
+    # catalog/ai-registry.json `models` is a map keyed by model id, so ids are
+    # unique by construction; assert the map is non-empty and that every entry
+    # carrying a `direct` block is keyed by its own id.
+    $models = (Get-Content (Join-Path $Root 'catalog\ai-registry.json') -Raw | ConvertFrom-Json).models
+    $names = @($models.PSObject.Properties.Name)
+    Assert-True ($names.Count -ge 18) "expected >= 18 registry models, got $($names.Count)"
+    foreach ($name in $names) {
+        $m = $models.$name
+        if ($m.PSObject.Properties.Name.Contains('direct') -and $m.direct) {
+            Assert-True ($m.id -eq $name) "model key '$name' does not match its id '$($m.id)'"
+        }
     }
 }
 
@@ -288,6 +302,33 @@ Test-Case 'registry model reads match python legacy_models on the real catalog' 
             Assert-True ($psOptVal -eq $pyOptVal) "$id $opt"
         }
     }
+}
+
+Test-Case 'registry: no generated file drifts' {
+    # Routing v2 spec 3.2 D11 (task A5f): every generated file must match a
+    # fresh `python3 tools/registry.py render <t> --check` (omniroute, litellm,
+    # ide, openhands, models-doc); catalog/ide-models.json is byte-exact, not
+    # only semantically (regenerate: python3 tools/registry.py render ide
+    # --out catalog/ide-models.json).
+    if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { Skip 'python3 absent'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        foreach ($t in @('omniroute', 'litellm', 'ide', 'openhands', 'models-doc')) {
+            $out = & python3 (Join-Path $Root 'tools\registry.py') render $t --check 2>&1 | Out-String; $rc = $LASTEXITCODE
+            Assert-True ($rc -eq 0) "render $t drift: $out"
+        }
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
+        try {
+            $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE
+            Assert-True ($rc -eq 0) "render ide --out failed: $out"
+            $a = [IO.File]::ReadAllBytes($tmp)
+            $b = [IO.File]::ReadAllBytes((Join-Path $Root 'catalog\ide-models.json'))
+            $same = ($a.Length -eq $b.Length) -and (@(Compare-Object $a $b -SyncWindow 0).Length -eq 0)
+            Assert-True $same 'catalog/ide-models.json differs byte-exact from render ide (run: python3 tools/registry.py render ide --out catalog/ide-models.json)'
+        } finally {
+            Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+        }
+    } finally { $ErrorActionPreference = $prev }
 }
 
 Test-Case 'every winget component has a non-empty package id' {
@@ -6932,14 +6973,16 @@ Test-Case "audit-router's unit tests pass (registry-sourced, task A5c)" {
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { $out = & $py.Source (Join-Path $Root 'tests\test_audit_router_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
     finally { $ErrorActionPreference = $prev }
-    Assert-Equal $rc 0 "audit-router registry unit tests failed: $out"
+    Assert-True ($rc -eq 0) "audit-router registry unit tests failed: $out"
 }
 
 Test-Case 'the IDE model lists match catalog/ide-models.json (sync-ide-models --check)' {
-    # catalog/ide-models.json is the single source for the gateway model list
-    # (ids, names, windows, membership). opencode.jsonc and the OpenHands
-    # tier spec + config.toml carry generated copies; --check exits 1 with a
-    # diff when one drifted (fix: python tools/sync-ide-models.py).
+    # catalog/ide-models.json is rendered from catalog/ai-registry.json
+    # (python3 tools/registry.py render ide --out catalog/ide-models.json),
+    # not the single source. opencode.jsonc and the OpenHands tier spec +
+    # config.toml carry generated copies; --check exits 1 with a diff when
+    # one drifted (fix: edit ai-registry.json, re-render, then python3
+    # tools/sync-ide-models.py).
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     # A drift report goes to stderr; keep Windows PowerShell 5.1 from turning
@@ -6947,7 +6990,7 @@ Test-Case 'the IDE model lists match catalog/ide-models.json (sync-ide-models --
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { $out = & $py.Source (Join-Path $Root 'tools\sync-ide-models.py') --check 2>&1 | Out-String; $rc = $LASTEXITCODE }
     finally { $ErrorActionPreference = $prev }
-    Assert-Equal $rc 0 "sync-ide-models drift: $out"
+    Assert-True ($rc -eq 0) "sync-ide-models drift: $out"
 }
 
 Test-Case "the IDE model sync tool's unit tests pass (sync-ide-models)" {
@@ -7264,8 +7307,9 @@ Test-Case 'apply scripts carry the Cloudflare User-Agent fix and stay openrouter
     $ps1 = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
     $sh = Get-Content (Join-Path $Root 'configuration\omniroute\apply.sh') -Raw
     foreach ($text in @($ps1, $sh)) {
-        # Task A5a (routing v2 spec 3.2, D11) moved the provider source from
-        # catalog/providers.json to catalog/ai-registry.json's `providers`.
+        # The UA quirk now lives once, in the registry; apply.sh only passes
+        # provider_data through. Task A5e deleted catalog/providers.json;
+        # catalog/ai-registry.json is the only provider source.
         Assert-True ($text -match 'ai-registry\.json') 'does not read catalog/ai-registry.json'
         Assert-True ($text -match 'provider-specific-data') 'provider-specific-data flag missing'
         Assert-True ($text -notmatch "'meta'|`"meta:|meta:muse-code") 'muse-code mapping must stay removed (openrouter-first)'
@@ -7294,8 +7338,9 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
     Assert-True ($null -ne $jsonDef) 'Get-AutoOSProviderDataJson missing from apply.ps1'
     . ([scriptblock]::Create($mapDef.Extent.Text + "`n" + $jsonDef.Extent.Text))
-    # Task A5a: the real call site now points at catalog/ai-registry.json, so
-    # this test does too - it exercises the exact call apply.ps1 itself makes.
+    # Task A5e: catalog/providers.json is deleted; the real call site now
+    # points at catalog/ai-registry.json, so this test does too - it exercises
+    # the exact call apply.ps1 itself makes.
     $registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\ai-registry.json')
     $ProviderData = $registry.Data
     Assert-Equal $registry.Map['groq'] 'groq'
@@ -7306,7 +7351,8 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     Assert-True (-not $registry.Map.Contains('meta')) 'meta must not be registered (2026-09-23)'
     Assert-True (-not $registry.Map.Contains('omniroute')) 'omniroute is the client key, not a provider'
     # antigravity and cc exist only in the registry (no catalog/providers.json
-    # entry) - switching the source picks them up for the first time.
+    # entry - it was deleted in task A5e) - switching the source picks them up
+    # for the first time.
     Assert-Equal $registry.Map['antigravity'] 'antigravity'
     Assert-Equal $registry.Map['cc'] 'cc'
     # Regression lock for today's registry (2026-09-26): cerebras (402/401
@@ -7383,7 +7429,7 @@ Test-Case 'Get-AutoOSProviderMap skips a provider whose every route leg is unava
         # mixed: one leg down (r1), one leg live (r2) - not EVERY leg.
         Assert-True ($registry.Map.Contains('mixed')) 'mixed (one live leg) was wrongly all-unavailable-skipped'
         # noomni has no omniroute_id - the pre-existing skip rule, never
-        # even considered (matches today's providers.json behaviour).
+        # even considered (matches today's ai-registry.json behaviour).
         Assert-True (-not $registry.Map.Contains('noomni')) 'noomni (no omniroute_id) must never appear in Map'
     } finally {
         Remove-Item -LiteralPath $fixture -ErrorAction SilentlyContinue
@@ -7391,9 +7437,9 @@ Test-Case 'Get-AutoOSProviderMap skips a provider whose every route leg is unava
 }
 
 Test-Case 'provider registry is the single source for apply, mirror and tier maps' {
-    # catalog/providers.json is the one map; the helper asserts every consumer's
-    # in-memory map equals it, so a hand-edited copy or a half-done registry
-    # edit fails loudly instead of routing a provider to the wrong name.
+    # catalog/ai-registry.json is the one map; the helper asserts every
+    # consumer's in-memory map equals it, so a hand-edited copy or a half-done
+    # registry edit fails here instead of routing a provider to a wrong name.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $out = & $py.Source (Join-Path $Root 'tests\helpers\check-provider-registry.py') 2>&1 | Out-String

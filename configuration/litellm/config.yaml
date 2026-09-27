@@ -92,6 +92,10 @@ model_list:
       api_key: os.environ/SAMBANOVA_API_KEY
   - model_name: t2-worker
     litellm_params:
+      model: openrouter/openai/gpt-oss-120b
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker
+    litellm_params:
       model: openai/deepseek-v4-flash
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY

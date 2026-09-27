@@ -161,8 +161,8 @@ the rest. Keep private-repo lanes on private-safe models, whatever the gate woul
 
 ## 5. What to add to OpenCode and OpenHands (AutoOS, one catalogue)
 
-`catalog/llm-models.json` is the single source (Phase 7). Today it has 16 OpenRouter entries
-(all `:free`) and one local Ollama model (M: `catalog/llm-models.json:38-220`). Proposed additions:
+`catalog/ai-registry.json` is the single source. Its `models` map holds the OpenRouter entries
+(all `:free`) and the local Ollama model (M: `catalog/ai-registry.json`). Proposed additions:
 
 - **OpenRouter:**
   - `google/gemma-4-31b-it:free` and `google/gemma-4-26b-a4b-it:free`;

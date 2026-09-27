@@ -424,7 +424,7 @@ that module by path (`importlib.util.spec_from_file_location`, the same techniqu
 logic that genuinely needed factoring — the (prefix, api_base, env_key) map keyed by
 OmniRoute provider id, previously inlined in `sync-router-tiers.py`'s own
 `provider_maps()` — is now `provider_maps_from_dict(providers)`, and `provider_maps
-(path=None)` is a thin wrapper that loads `catalog/providers.json` and calls it.
+(path=None)` is a thin wrapper that loads `catalog/ai-registry.json` and calls it.
 `tools/registry.py` calls `provider_maps_from_dict()` with the registry's own
 `providers` section instead. This is safe because the two sections share the exact
 same field names for every fact this needs — `omniroute_id`, `litellm_prefix`,
