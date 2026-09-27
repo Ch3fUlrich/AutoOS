@@ -30,7 +30,7 @@ services:
     build:
       context: .
       dockerfile: omniroute.Dockerfile
-    image: autoos/omniroute:3.8.50-autoos1
+    image: autoos/omniroute:3.8.50-autoos2
     container_name: autoos-omniroute
     restart: unless-stopped
     # The image's own user is node (1000); the host user's ids keep the
