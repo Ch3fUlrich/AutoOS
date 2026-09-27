@@ -221,7 +221,7 @@ if it "apply sets the resilience deadline and the fast-skip breaker"; then
     # Zen client-bound, OpenRouter off; deepseek-v4.1-flash omitted 2026-09-27T16:4xZ
     # on the deepseek 402), so there is no tier-1/spark head leg in any combo to
     # compare - assert the omission instead of a shared head (OR1e).
-    omitted="$(python3 - <<'PY'
+    omitted="$(python3 - 2>&1 <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 by = {c["name"]: c["models"] for c in d["combos"]}

@@ -4128,7 +4128,10 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     # Pinned on purpose: the order is the OpenHands push priority (the app
     # keeps 10 profiles), so a reorder must be a deliberate, reviewed edit.
-    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-t3-driver-free-only,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only'
+    # Re-pinned 2026-09-27 (PROVPIN, PROV bab8d70): the -clean, spark and
+    # deepseek tiers are omitted with their providers' credits off; the two
+    # t1-orchestrator-free-only tiers are the free gemini leg that serves t1 now.
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-t3-driver-free-only,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only,litellm-t1-orchestrator-free-only,omniroute-t1-orchestrator-free-only'
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
     Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
     foreach ($t in $spec.tiers) {
@@ -4136,7 +4139,7 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
         # provider profiles (openrouter spark, deepseek-v4.1-flash) are gone:
         # their routes fail closed (DSMAX 2026-09-27, deepseek 402
         # 2026-09-27T16:4xZ), so every tier is a gateway tier now.
-        Assert-True ($t.model -match '^(openai/(t2-worker(-clean|-free-only)?|t2-orchestrator|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|opus-4-6))$') "$($t.id) model is not a servable gateway tier"
+        Assert-True ($t.model -match '^(openai/(t1-orchestrator(-free-only)?|t2-worker(-clean|-free-only)?|t2-orchestrator|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|opus-4-6))$') "$($t.id) model is not a servable gateway tier"
     }
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
@@ -4159,7 +4162,10 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
         'LITELLM_MASTER_KEY=test-lit-key' | Out-File $litEnv -Encoding utf8
         & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys --litellm-env $litEnv *> $null
         Assert-Equal $LASTEXITCODE 0 'generator failed'
-        foreach ($t in @('omniroute-t1-orchestrator', 'omniroute-t3-driver-clean', 'litellm-t2-worker', 'openrouter-muse-spark-1.3-contributor')) {
+        # Every spec tier has a key in the fixture, so exactly one profile per
+        # tier must come out - derived from the spec, never a pinned count.
+        Assert-Equal (@(Get-ChildItem (Join-Path $tmpA 'profiles') -Filter '*.json').Count) @($spec.tiers).Count 'generator wrote a different number of profiles than the spec lists'
+        foreach ($t in @('omniroute-t1-orchestrator', 'omniroute-t3-driver-clean', 'litellm-t2-worker')) {
             Assert-True (Test-Path (Join-Path $tmpA "profiles\$t.json")) "$t.json missing"
         }
         $t1 = Get-Content (Join-Path $tmpA 'profiles\omniroute-t1-orchestrator.json') -Raw | ConvertFrom-Json
@@ -4169,11 +4175,28 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
         Assert-Equal $lt.model 'openai/t1-orchestrator'
         Assert-Equal $lt.base_url 'http://host.docker.internal:4000/v1'
         Assert-Equal $lt.api_key 'test-lit-key'
-        # A direct-provider tier takes its OWN key and endpoint, not the gateway's.
-        $direct = Get-Content (Join-Path $tmpA 'profiles\openrouter-muse-spark-1.3-contributor.json') -Raw | ConvertFrom-Json
-        Assert-Equal $direct.api_key 'test-or-key'
-        Assert-Equal $direct.base_url 'https://openrouter.ai/api/v1'
-        Assert-Equal $direct.model 'openrouter/meta/muse-spark-1.3-contributor'
+        # A direct-provider tier (gateway: openrouter) takes its OWN key and
+        # endpoint, not the gateway's - that is the effort-ladder surface. The
+        # committed spec has none today (PROV 2026-09-27: openrouter credit
+        # off), so the renderer's behaviour is exercised on a synthetic one-tier
+        # spec instead of a pinned profile name that goes stale with the
+        # provider state (PROVPIN re-pin).
+        $realOrKey = $env:OPENROUTER_API_KEY
+        try {
+            $syn = Join-Path $tmpB 'synthetic'
+            $null = New-Item -ItemType Directory -Force -Path $syn
+            [IO.File]::WriteAllText((Join-Path $syn 'spec.json'), '{"gateway_base_url": "http://gateway.invalid:20128/v1", "litellm_base_url": "http://litellm.invalid:4000/v1", "tiers": [{"id": "openrouter-muse-spark-1.3-contributor", "gateway": "openrouter", "base_url": "https://openrouter.ai/api/v1", "model": "openrouter/meta/muse-spark-1.3-contributor", "max_input_tokens": 131072, "max_output_tokens": 32768, "reasoning": true}]}')
+            Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+            & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --spec (Join-Path $syn 'spec.json') --openhands-dir (Join-Path $syn 'oh') --keys-file $keys --litellm-env $litEnv *> $null
+            Assert-Equal $LASTEXITCODE 0 'synthetic generator failed'
+            $direct = Get-Content (Join-Path $syn 'oh\profiles\openrouter-muse-spark-1.3-contributor.json') -Raw | ConvertFrom-Json
+            Assert-Equal $direct.api_key 'test-or-key'
+            Assert-Equal $direct.base_url 'https://openrouter.ai/api/v1'
+            Assert-Equal $direct.model 'openrouter/meta/muse-spark-1.3-contributor'
+        } finally {
+            if ($null -eq $realOrKey) { Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue }
+            else { $env:OPENROUTER_API_KEY = $realOrKey }
+        }
     } finally {
         if ($null -eq $realOmniKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
         else { $env:AUTOOS_OMNIROUTE_KEY = $realOmniKey }
