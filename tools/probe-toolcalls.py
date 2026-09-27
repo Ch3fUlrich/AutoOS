@@ -34,17 +34,17 @@ Exit codes: 0 the probe ran (verdicts, including "broken"/"unproven", are
 data, not failure); 2 bad arguments or an unreadable registry; 3 no OmniRoute
 client key or the gateway is unreachable.
 
-Never prints or logs the gateway key.
+Never prints or logs the gateway key, nor a provider's error body: an error
+is the status, plus the one fact read out of a 400's body (see
+`TOOLS_UNSUPPORTED` below).
 """
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import re
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -54,21 +54,38 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 from registry import resolve_leg, unavailable_now  # noqa: E402 - tools/ is on sys.path above
-
-DEFAULT_REGISTRY = os.path.join(ROOT, "catalog", "ai-registry.json")
-DEFAULT_OVERLAY = os.path.join(ROOT, "logs", "routing", "measured.json")
-DEFAULT_GATEWAY = "http://127.0.0.1:20128/v1/chat/completions"
-
-# 429/503 are transient (rate limit / load shedding); retried before either
-# call is called an error. Same shape as tools/audit-router.py's _chat retry.
-RETRY_DELAYS_S = (5, 15, 45)
-RETRY_STATUSES = (429, 503)
+from probe_common import (  # noqa: E402 - tools/ is on sys.path above
+    DEFAULT_GATEWAY,
+    DEFAULT_OVERLAY,
+    DEFAULT_REGISTRY,
+    RETRY_DELAYS_S,  # re-exported: tests read it on this module
+    gateway_up,
+    load_agent_module as _load_agent_module,
+    load_overlay,
+    now_iso as _now_iso,
+    post_with_retry,
+    save_overlay,
+)
 
 # Statuses that mean "we learned nothing about this leg's tool-calling
 # ability", never a verdict: keep whatever the overlay already said.
 # 401/403: the gateway has no credentials for the provider (a sign-in gap,
 # measured 2026-09-26 on antigravity/cc/cerebras) - no fact about tool calling.
+# This is NOT probe_common.is_no_verdict_status(): there every non-200 is a
+# no-verdict, and here an HTTP 400 that says the leg has no tools is a verdict.
 NO_VERDICT_STATUSES = (401, 402, 403, 429, "ERR", "timeout")
+
+# The one deliberate use of a provider error body. An HTTP 400 that says the
+# leg has no tool/function support is a "broken" verdict here, so the body is
+# read - but only inside make_post, only to choose between this fixed token
+# and a bare "HTTP <code>". classify() matches this token and never reads a
+# body: the body is the provider's text (org/project ids, internal hosts) and
+# the error reaches stdout and the overlay detail (AGENTS.md rule 1).
+TOOLS_UNSUPPORTED = "HTTP 400 (mentions tool/function support)"
+
+# Providers write it both ways ("tool use is not supported", "tools are not
+# supported"), so the plural counts.
+TOOLS_MENTION = re.compile(r"(?i)\b(tool|function)s?\b")
 
 # Assignable, so tests need no real network wait.
 _sleep = time.sleep
@@ -76,6 +93,12 @@ _sleep = time.sleep
 
 # ---------------------------------------------------------------------------
 # legs_to_probe: which legs exist, and which of them to skip.
+#
+# Not tools/probe_common.py's: that one also refuses every leg whose provider
+# tier is not "free" (spec section 10, D18) and reads a plain `available:
+# false`, while this probe lists any route leg and lets a passed
+# `unavailable_until` back in (registry.unavailable_now). Changing which legs
+# this probe walks is a routing decision, not this file's to make on its own.
 # ---------------------------------------------------------------------------
 
 def _skip_reason(leg, routes, registry):
@@ -213,24 +236,16 @@ def _check_round_trip(parsed):
     return True, "ok"
 
 
-def _post_with_retry(post, body):
-    """Call `post(body)`, retrying 429/503 with RETRY_DELAYS_S backoff."""
-    delays = list(RETRY_DELAYS_S)
-    while True:
-        status, parsed, error = post(body)
-        if status not in RETRY_STATUSES or not delays:
-            return status, parsed, error
-        _sleep(delays.pop(0))
-
-
 def run_trial(leg, post, max_tokens=2048):
     """One trial: the single call, then (if it passed) the round trip.
 
     Returns {single: pass|fail|error, round: pass|fail|error|skipped,
     status, note}. `status` is always the single call's HTTP status: that is
-    the call classify() judges "answered" or "broken" on.
+    the call classify() judges "answered" or "broken" on. `note` is a check's
+    own text or the fixed error token — never a provider body.
     """
-    status, parsed, error = _post_with_retry(post, single_call_body(leg, max_tokens))
+    status, parsed, error = post_with_retry(
+        post, single_call_body(leg, max_tokens), _sleep)
     if status != 200 or parsed is None:
         return {"single": "error", "round": "skipped", "status": status,
                 "note": error or "malformed or missing response body"}
@@ -240,8 +255,9 @@ def run_trial(leg, post, max_tokens=2048):
         return {"single": "fail", "round": "skipped", "status": status, "note": note}
 
     assistant_message = parsed["choices"][0]["message"]
-    rt_status, rt_parsed, rt_error = _post_with_retry(
-        post, round_trip_body(leg, assistant_message, call.get("id"), max_tokens))
+    rt_status, rt_parsed, rt_error = post_with_retry(
+        post, round_trip_body(leg, assistant_message, call.get("id"), max_tokens),
+        _sleep)
     if rt_status != 200 or rt_parsed is None:
         return {"single": "pass", "round": "error", "status": status,
                 "note": "round trip: %s" % (rt_error or "HTTP %s" % (rt_status,))}
@@ -275,8 +291,9 @@ def classify(trials):
         return "broken", "every trial answered (HTTP 200) but produced no valid tool_call"
 
     for t in trials:
-        if t["status"] == 400 and re.search(r"(?i)\b(tool|function)\b", t.get("note") or ""):
-            return "broken", "HTTP 400 mentions tool/function support: %s" % t["note"]
+        # The fixed token make_post read out of the body, never the body here.
+        if t["status"] == 400 and (t.get("note") or "") == TOOLS_UNSUPPORTED:
+            return "broken", "HTTP 400 mentions tool/function support"
 
     if all(_is_no_verdict_status(t["status"]) for t in trials):
         return None, "only credential/transport errors (%s): keeping the previous value" % (
@@ -286,33 +303,9 @@ def classify(trials):
 
 
 # ---------------------------------------------------------------------------
-# Overlay: read-modify-write, atomic, never a None verdict.
+# Overlay: read-modify-write, never a None verdict.
+# (load_overlay / save_overlay are tools/probe_common.py's.)
 # ---------------------------------------------------------------------------
-
-def load_overlay(path):
-    if not os.path.isfile(path):
-        return {}
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def save_overlay(path, overlay):
-    """Atomic write: a temp file in the same directory, then os.replace."""
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".measured-", suffix=".json", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(overlay, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
-
 
 def record_verdict(overlay, leg, value, detail, trials, passes, at):
     """Merge one leg's verdict into `overlay` (read-modify-write), in place.
@@ -334,11 +327,28 @@ def record_verdict(overlay, leg, value, detail, trials, passes, at):
 
 
 # ---------------------------------------------------------------------------
-# The real (network) post(), and the gateway/key plumbing around it.
+# The real (network) post(). The gateway probe, the agent-module load that
+# reads the key and the timestamp are tools/probe_common.py's.
 # ---------------------------------------------------------------------------
 
+def _error_token(status, body):
+    """The fixed error text for a failed call: the status, plus the one fact a
+    400's body is allowed to carry on into it."""
+    if status == 400 and TOOLS_MENTION.search(body):
+        return TOOLS_UNSUPPORTED
+    return "HTTP %d" % status
+
+
 def make_post(gateway_url, key, timeout=180):
-    """A real `post(body) -> (status, parsed_json_or_None, error_text)`."""
+    """A real `post(body) -> (status, parsed_json_or_None, error_text)`.
+
+    Not tools/probe_common.py's `make_post`: here an HTTP 400 that says the leg
+    has no tool/function support is a verdict, so this is the one post that
+    reads the error body at all. It reads it only to pick `_error_token` and
+    returns that token — never the body, never an exception's text. A provider
+    body carries org/project ids and internal hosts, and the error text is
+    printed and stored in the overlay detail.
+    """
     def post(body):
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
@@ -350,37 +360,19 @@ def make_post(gateway_url, key, timeout=180):
                 status = resp.status
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
-            return exc.code, None, exc.read(500).decode("utf-8", "replace")
+            # Only a 400's body can say anything about tool support; no other
+            # status is worth reading the provider's text for.
+            text = (exc.read(500).decode("utf-8", "replace")
+                    if exc.code == 400 else "")
+            return exc.code, None, _error_token(exc.code, text)
         except Exception as exc:  # noqa: BLE001 - any transport failure is a finding
-            return "ERR", None, str(exc)[:500]
+            return "ERR", None, "transport error: %s" % type(exc).__name__
         try:
             parsed = json.loads(raw.decode("utf-8", "replace"))
         except ValueError as exc:
             return status, None, "invalid JSON body: %s" % exc
         return status, parsed, None
     return post
-
-
-def gateway_up(gateway_url, timeout=3):
-    base = gateway_url.rsplit("/v1/", 1)[0] if "/v1/" in gateway_url else gateway_url
-    try:
-        with urllib.request.urlopen(base + "/api/health", timeout=timeout) as resp:
-            return resp.status == 200
-    except Exception:  # noqa: BLE001 - unreachable is unreachable
-        return False
-
-
-def _load_agent_module():
-    """tools/autoos-agent.py, loaded by path (a hyphen is not importable)."""
-    agent_path = os.path.join(HERE, "autoos-agent.py")
-    spec = importlib.util.spec_from_file_location("autoos_agent_for_probe", agent_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _now_iso():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def main(argv=None) -> int:

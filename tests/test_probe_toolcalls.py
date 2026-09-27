@@ -6,7 +6,9 @@ call, reads the OmniRoute key, or runs the live probe. Only the CLI's
 ``--dry-run`` path and its argument-error paths are exercised through
 subprocess (both make no request); the full non-dry-run flow is exercised by
 calling `main()` directly with `_load_agent_module`, `gateway_up` and
-`make_post` monkeypatched to fakes.
+`make_post` monkeypatched to fakes — except `MakePostScrubTests` and the
+error-body case in `CliMainTests`, which call the real `make_post` with
+`urllib.request.urlopen` patched to raise.
 
 Run from the repo root:
 
@@ -16,16 +18,24 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
 PROBE = TOOLS / "probe-toolcalls.py"
+
+# What a gateway error body says that must never be printed or stored: an org
+# id and an internal host.
+ORG = "org-SECRET123"
+HOST = "10.0.0.9"
+GATEWAY_URL = "http://gateway.invalid/v1/chat/completions"
 
 
 def _load_module():
@@ -34,6 +44,12 @@ def _load_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def http_error(code, body):
+    """The HTTPError urlopen raises for a failed call whose body is `body`."""
+    return urllib.error.HTTPError(GATEWAY_URL, code, "Bad Request", {},
+                                  io.BytesIO(body.encode("utf-8")))
 
 
 def ok_response(city="Paris", call_id="call_1"):
@@ -219,11 +235,13 @@ class RunTrialTests(unittest.TestCase):
         self.assertEqual(len(post.calls), 1)  # round trip never sent
 
     def test_400_tools_not_supported_is_an_error(self):
-        post = FakePost([(400, None, "this model does not support tools")])
+        # post() gives back the fixed token, never the body (MakePostScrubTests);
+        # run_trial passes it through as the trial's note.
+        post = FakePost([(400, None, self.mod.TOOLS_UNSUPPORTED)])
         trial = self.mod.run_trial("p/m", post)
         self.assertEqual(trial["single"], "error")
         self.assertEqual(trial["status"], 400)
-        self.assertIn("tools", trial["note"])
+        self.assertEqual(trial["note"], self.mod.TOOLS_UNSUPPORTED)
 
     def test_429_then_200_retries_with_backoff_and_passes(self):
         post = FakePost([
@@ -258,8 +276,10 @@ class ClassifyTests(unittest.TestCase):
         return {"single": "fail", "round": "skipped", "status": 200, "note": "no tool_calls"}
 
     def _tools_400_trial(self):
+        # The fixed token make_post returns for a 400 whose body mentioned
+        # tool/function support — never the body itself.
         return {"single": "error", "round": "skipped", "status": 400,
-                "note": "this model does not support tool use"}
+                "note": self.mod.TOOLS_UNSUPPORTED}
 
     def _rate_limited_trial(self):
         return {"single": "error", "round": "skipped", "status": 429, "note": "rate limited"}
@@ -280,6 +300,28 @@ class ClassifyTests(unittest.TestCase):
         value, _ = self.mod.classify([self._pass_trial(), self._tools_400_trial()])
         self.assertEqual(value, "broken")
 
+    def test_a_400_without_the_tool_token_is_not_broken(self):
+        # A 400 that said nothing about tools is an unknown, not a verdict
+        # about tool calling: 400 is not a no-verdict status here.
+        trial = {"single": "error", "round": "skipped", "status": 400,
+                 "note": "HTTP 400"}
+        value, _ = self.mod.classify([trial])
+        self.assertEqual(value, "unproven")
+
+    def test_a_raw_error_body_is_never_matched_as_tool_support(self):
+        # classify() reads only the fixed token. Body text reaching it means
+        # something classified outside make_post, and a body is not evidence.
+        trial = {"single": "error", "round": "skipped", "status": 400,
+                 "note": "this model does not support tool use: org-SECRET123"}
+        value, _ = self.mod.classify([trial])
+        self.assertNotEqual(value, "broken")
+
+    def test_the_broken_detail_of_a_400_carries_no_body(self):
+        _value, detail = self.mod.classify([self._tools_400_trial()])
+        self.assertIn("400", detail)
+        self.assertNotIn(ORG, detail)
+        self.assertNotIn(HOST, detail)
+
     def test_mixed_pass_and_fail_is_unproven(self):
         value, _ = self.mod.classify([self._pass_trial(), self._text_only_trial()])
         self.assertEqual(value, "unproven")
@@ -290,11 +332,12 @@ class ClassifyTests(unittest.TestCase):
         self.assertIn("429", detail)
 
     def test_missing_credentials_is_no_verdict(self):
-        # Live run 2026-09-26: antigravity/cc/cerebras answered 401 "No active
-        # credentials for provider" - a sign-in gap, not a tool-calling fact.
+        # Live run 2026-09-26: antigravity/cc/cerebras answered 401 with a body
+        # saying "No active credentials for provider" - a sign-in gap, not a
+        # tool-calling fact. Only the status survives make_post now.
         for status in (401, 403):
             trial = {"single": "error", "round": "skipped", "status": status,
-                     "note": '{"error":{"message":"No active credentials for provider: cerebras."}}'}
+                     "note": "HTTP %d" % status}
             value, detail = self.mod.classify([trial] * 3)
             self.assertIsNone(value, status)
             self.assertIn(str(status), detail)
@@ -307,6 +350,62 @@ class ClassifyTests(unittest.TestCase):
     def test_empty_trials_is_no_verdict(self):
         value, _ = self.mod.classify([])
         self.assertIsNone(value)
+
+
+class MakePostScrubTests(unittest.TestCase):
+    """The real `make_post` with `urlopen` patched: what may come back as an error.
+
+    A provider error body carries org/project ids and internal hosts, and the
+    error text is printed and stored in the overlay, so the body is read only
+    to pick a fixed token and then dropped. `urlopen` raises, so nothing here
+    reaches the network.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.post = self.mod.make_post(GATEWAY_URL, "sk-fake-key")
+
+    def _urlopen(self, exc):
+        return mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=exc)
+
+    def test_a_400_body_mentioning_tools_becomes_the_fixed_token(self):
+        body = '{"error":{"message":"tools are not supported for org %s on %s"}}' % (ORG, HOST)
+        with self._urlopen(http_error(400, body)):
+            status, parsed, error = self.post({"model": "m"})
+        self.assertEqual((status, parsed), (400, None))
+        self.assertEqual(error, self.mod.TOOLS_UNSUPPORTED)
+        self.assertNotIn(ORG, error)
+        self.assertNotIn(HOST, error)
+
+    def test_a_400_body_about_anything_else_is_only_the_status(self):
+        body = '{"error":{"message":"rate limit reached for org %s on %s"}}' % (ORG, HOST)
+        with self._urlopen(http_error(400, body)):
+            status, _parsed, error = self.post({"model": "m"})
+        self.assertEqual((status, error), (400, "HTTP 400"))
+
+    def test_a_non_400_body_mentioning_tools_is_still_only_the_status(self):
+        # Only a 400's body is read at all: a 401 credential gap is no
+        # tool-calling fact however it is worded (live 2026-09-26).
+        body = '{"error":{"message":"no credentials for the tools API at %s"}}' % HOST
+        with self._urlopen(http_error(401, body)):
+            status, _parsed, error = self.post({"model": "m"})
+        self.assertEqual((status, error), (401, "HTTP 401"))
+
+    def test_a_transport_error_names_only_the_exception_type(self):
+        with self._urlopen(OSError("connect to %s port 8080 refused" % HOST)):
+            status, parsed, error = self.post({"model": "m"})
+        self.assertEqual((status, parsed, error),
+                         ("ERR", None, "transport error: OSError"))
+
+    def test_the_token_is_a_word_classify_actually_matches(self):
+        # The token and classify() have to agree, and both are written here
+        # independently of the module: an inline pattern in make_post that no
+        # longer matched the token would have left every error a no-verdict.
+        token = self.mod.TOOLS_UNSUPPORTED
+        self.assertRegex(token, re.compile(r"(?i)\b(tool|function)s?\b"))
+        self.assertEqual(
+            self.mod.classify([{"single": "error", "round": "skipped",
+                                "status": 400, "note": token}])[0], "broken")
 
 
 class OverlayTests(unittest.TestCase):
@@ -460,6 +559,25 @@ class CliMainTests(unittest.TestCase):
         with io.open(self.overlay_path, encoding="utf-8") as fh:
             overlay_text = fh.read()
         self.assertNotIn("sk-SECRET-not-printed", overlay_text)
+
+    def test_a_provider_error_body_reaches_neither_stdout_nor_the_overlay(self):
+        # The whole flow with the real make_post and urlopen failing: a 400
+        # whose body names an org and an internal host. The verdict is still
+        # "broken", and only the fixed token may be printed or stored.
+        fake_agent = mock.Mock(client_key=mock.Mock(return_value="sk-fake"), ROOT="/nowhere")
+        err = http_error(400, '{"error":{"message":"tools are not supported '
+                              'for org %s on %s"}}' % (ORG, HOST))
+        with mock.patch.object(self.mod, "_load_agent_module", return_value=fake_agent), \
+             mock.patch.object(self.mod, "gateway_up", return_value=True), \
+             mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=err), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = self.mod.main(self._argv(**{"--trials": "1"}))
+        self.assertEqual(rc, 0)
+        with io.open(self.overlay_path, encoding="utf-8") as fh:
+            text = out.getvalue() + fh.read()
+        self.assertIn("broken", text)
+        for leak in (ORG, HOST, "tools are not supported"):
+            self.assertNotIn(leak, text)
 
 
 if __name__ == "__main__":
