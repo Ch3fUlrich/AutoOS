@@ -93,15 +93,6 @@ _sleep = time.sleep
 
 
 # ---------------------------------------------------------------------------
-# legs_to_probe / _skip_reason: the shared leg selection of
-# tools/probe_common.py (policy.leg_rules deny, free legs only per D18,
-# unavailable_now self-heal). This probe keeps its own make_post / 400 body
-# classification below: probe_common.make_post returns a bare 'HTTP 400' and
-# would lose the 'tools unsupported' verdict.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # The two trial checks and the request bodies they need.
 # ---------------------------------------------------------------------------
 
