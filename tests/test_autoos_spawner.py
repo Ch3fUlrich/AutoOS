@@ -943,6 +943,21 @@ class McpToolTests(unittest.TestCase):
         for name in ("job.json", "output.log", "exit.json"):
             self.assertTrue(os.path.isfile(os.path.join(out["dir"], name)), name)
 
+    def test_spawn_run_dir_is_0700_under_a_shared_umask(self):
+        """The run dir carries the task brief, the worker's output and the
+        question.json / answer.json pair autoos-ask.py uses for ask-back: a
+        local user who can enter the dir can read the brief and answer the
+        worker's question. So the dir is private like the spawner's workers
+        dir (0700), whatever the spawning process's umask says."""
+        old = os.umask(0o022)
+        try:
+            out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+            self.assertNotIn("error", out)
+            self.wait_done(out["id"])
+            self.assertEqual(os.stat(out["dir"]).st_mode & 0o777, 0o700)
+        finally:
+            os.umask(old)
+
     def test_refusals_come_back_synchronously(self):
         self.assertIn("error", mcp_server.spawn({"task": "t", "card": {"privacy": "sensitive", "ctx": "1m"}}))
         self.assertIn("error", mcp_server.spawn({"task": "t", "card": {"bogus": "x"}}))
