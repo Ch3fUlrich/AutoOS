@@ -323,15 +323,15 @@ fi
 # current combo.
 if it "apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t1-orchestrator-free-only t2-worker my-own-combo
+    _prune_list "$d" deepseek-v4.1-flash t2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     deletes="$(grep '^combo delete' "$d/calls.log")"
-    [[ "$deletes" == "combo delete t1-orchestrator-free-only --yes" ]] \
+    [[ "$deletes" == "combo delete deepseek-v4.1-flash --yes" ]] \
         || { ok=0; echo "deleted: [$deletes]" >&2; }
     grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-free-only: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "prune did not delete exactly the omitted combo"; fi
@@ -339,12 +339,12 @@ fi
 
 if it "apply prune: --dry-run names the omitted combo and deletes nothing"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t1-orchestrator-free-only my-own-combo
+    _prune_list "$d" deepseek-v4.1-flash my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
     grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-free-only: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"omitted, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
@@ -356,13 +356,13 @@ fi
 # "t2-worker-paid") is never deleted - and a dry run never even names it.
 if it "apply prune: a live legless combo (auto, t2-worker-paid) is never deleted or named"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" auto t2-worker-paid t1-orchestrator-free-only my-own-combo
+    _prune_list "$d" auto t2-worker-paid deepseek-v4.1-flash my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     grep -q 'auto' "$d/calls.log" && { ok=0; echo "a legless combo was touched: $(cat "$d/calls.log")" >&2; }
     [[ "$out" == *"  - auto:"* ]] && { ok=0; echo "a live auto combo was named: $out" >&2; }
     [[ "$out" == *"  - t2-worker-paid:"* ]] && { ok=0; echo "a live t2-worker-paid combo was named: $out" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-free-only: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the legless combos were not left alone"; fi
 fi
@@ -1344,10 +1344,14 @@ fi
 # holds lower-ranked AutoOS profiles from an older order (measured 2026-09-25:
 # the live app held 10 in-spec profiles, 0 retired, so deleting retired ids
 # alone freed nothing and t3-driver/t4-rag still never fit).
+# Re-pinned 2026-09-27 (PROVPIN): the held AutoOS profiles must be ids the
+# spec still ranks. omniroute-spark-1.3-contributor is omitted now, so it went
+# through the retired-delete pass instead of the cap eviction this test is
+# about; the two free-only litellm tiers are the spec's last two ranks.
 if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}, "omniroute-spark-1.3-contributor": {"model": "openai/spark-1.3-contributor"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
-    _seed_pushed "$d" litellm-t2-worker-free-only omniroute-spark-1.3-contributor
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}, "litellm-t3-driver-free-only": {"model": "openai/t3-driver-free-only"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-t2-worker-free-only litellm-t3-driver-free-only
     _fake_app "$d" "$d/seed.json"
     first="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
@@ -1359,7 +1363,8 @@ if it "svc: profile push makes room for a higher-ranked tier by removing the low
     ok=1
     # One slot is the user's; the two AutoOS slots go to the spec's top two.
     [[ "$after" == "my-own-profile omniroute-t1-orchestrator omniroute-t2-worker " ]] || { ok=0; echo "app holds: $after" >&2; }
-    [[ "$first" == *"litellm-t2-worker-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "eviction not announced: $first" >&2; }
+    [[ "$first" == *"litellm-t3-driver-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "first eviction not announced: $first" >&2; }
+    [[ "$first" == *"litellm-t2-worker-free-only removed to make room for omniroute-t2-worker"* ]] || { ok=0; echo "second eviction not announced: $first" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run evicted again ($second_deletes)" >&2; }
     if (( ok )); then pass; else fail "the cap is not filled in spec order"; fi

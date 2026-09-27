@@ -21,13 +21,14 @@ markers in config.yaml:
     ...
     # AUTOOS-MANAGED-END <tier>
 
-Everything outside the markers -- the header prose, t1-orchestrator,
-t1-orchestrator-paid, t2-worker-paid, t3-driver-paid, router_settings,
-litellm_settings, every comment and
-the exact whitespace between them -- is left byte-for-byte untouched. Inside a
-managed block the legs are machine-owned, so they are regenerated in full:
-reordering, adding or dropping a leg is exactly the drift this tool exists to
-remove.
+Everything outside the markers -- the header prose, the true hand groups
+(t2-worker-paid, t3-driver-paid; t1-orchestrator-paid has none while
+OpenRouter is off), router_settings,
+litellm_settings, every comment and the exact whitespace between them -- is
+left byte-for-byte untouched. Inside a managed block the legs are
+machine-owned, so they are regenerated in full: reordering, adding or
+dropping a leg is exactly the drift this tool exists to remove. A managed
+block for a tier the registry no longer renders is stale and is pruned.
 
 Usage:
     python3 tools/sync-router-tiers.py [--check]
@@ -98,11 +99,23 @@ def provider_maps_from_dict(providers: dict):
     instead of the legacy catalog, without copying this logic or
     diverging from it.
 
-    The OmniRoute provider id is the key because it is the first segment of a
-    combos.json / registry `routes.<id>.legs` model ref; an entry with no
-    omniroute_id (meta, the client key) has no refs and is skipped, as is any
-    non-dict entry (defensive - the caller's source is otherwise trusted to
-    already be well-formed).
+    A leg's prefix is the first segment of a registry `routes.<id>.legs` model
+    ref, and tools/registry.py's resolve_leg() accepts EITHER the providers key
+    OR any provider's omniroute_id there. The two coincide for most providers
+    (groq, samba) but differ where the live gateway spells one differently
+    (zen -> opencode-zen, google_ai_studio -> gemini, free_ai -> free-ai), so
+    BOTH spellings key the same transport here: a leg must resolve to the same
+    litellm_prefix/api_base/env whether it is written with the providers key or
+    the omniroute_id. Without that, a leg spelled with the providers key
+    (free_ai/qwen7b) falls through to LiteLLM's own <provider> handling and
+    silently loses its litellm_prefix/api_base (D 2026-09-27 renamed
+    free_ai's omniroute_id to free-ai, exposing exactly this). An entry with
+    no omniroute_id (meta, the client key) has no refs and is skipped, as is
+    any non-dict entry (defensive - the caller's source is otherwise trusted
+    to already be well-formed). A provider NAME always outranks another
+    provider's omniroute_id for the same key (name keys are written first, an
+    omniroute_id key only when no name claims it), matching resolve_leg()'s
+    name-first precedence (PROV finding 4).
 
     Only ids whose LiteLLM transport differs from the OmniRoute id appear in
     the prefix map: OmniRoute's <provider>/<model> is already LiteLLM's shape,
@@ -111,18 +124,24 @@ def provider_maps_from_dict(providers: dict):
     names the conventional env vars; Leg falls back to <PROVIDER>_API_KEY.
     """
     prefix, api_base, env_key = {}, {}, {}
-    for entry in providers.values():
-        if not isinstance(entry, dict):
-            continue
-        omni = entry.get("omniroute_id")
-        if not omni:
-            continue
-        if entry.get("litellm_prefix"):
-            prefix[omni] = entry["litellm_prefix"]
-        if entry.get("api_base"):
-            api_base[omni] = entry["api_base"]
-        if entry.get("litellm_env"):
-            env_key[omni] = entry["litellm_env"]
+    rows = [(name, entry) for name, entry in providers.items()
+            if isinstance(entry, dict) and entry.get("omniroute_id")]
+    # Names first (PROV finding 4): provider_maps mirrors resolve_leg()'s
+    # name-first precedence, so a provider name always owns its own key.
+    for name, entry in rows:
+        for dest, field in ((prefix, "litellm_prefix"), (api_base, "api_base"),
+                            (env_key, "litellm_env")):
+            if entry.get(field):
+                dest[name] = entry[field]
+    # Then each omniroute_id, but only where no provider name already claimed
+    # the key - otherwise a provider whose name equals ANOTHER provider's
+    # omniroute_id would silently steal that transport (last writer wins).
+    for name, entry in rows:
+        omni = entry["omniroute_id"]
+        for dest, field in ((prefix, "litellm_prefix"), (api_base, "api_base"),
+                            (env_key, "litellm_env")):
+            if entry.get(field) and omni not in dest:
+                dest[omni] = entry[field]
     return prefix, api_base, env_key
 
 
@@ -396,7 +415,17 @@ def leading_indent(line):
 
 
 def rewrite(text, combos):
-    """Return (synced_text, [tiers changed]); keeps the file's newline style."""
+    """Return (synced_text, [tiers changed]); keeps the file's newline style.
+
+    Every managed block is machine-owned, so `combos` (the complete renderable
+    set, derived from the registry) decides which exist. A managed block whose
+    tier is NOT in `combos` is stale - every leg died or the route was removed -
+    and is pruned, not left behind: without that the file kept serving a dead
+    group while both directions the tool checked ("a rendered tier is missing"
+    and "a block differs") stayed green (PROV review). Only the marker-delimited
+    block goes; the hand-written comment above it is prose this tool never
+    owned and is left for a human to clean.
+    """
     lines = text.splitlines()
     blocks = locate_blocks(lines)
     missing = [t for t in combos if t not in blocks]
@@ -408,10 +437,14 @@ def rewrite(text, combos):
         )
 
     changed = []
-    # Replace bottom-up: each splice changes the indices of every block below
-    # it, so a top-down loop would corrupt the second block.
-    for tier in sorted(combos, key=lambda t: blocks[t][0], reverse=True):
+    # Bottom-up: each splice changes the indices of every block below it, so a
+    # top-down loop would corrupt the second block.
+    for tier in sorted(blocks, key=lambda t: blocks[t][0], reverse=True):
         start, end = blocks[tier]
+        if tier not in combos:
+            changed.append(tier)
+            del lines[start : end + 1]
+            continue
         indent = leading_indent(lines[start])
         extras = parse_block(lines, start, end)
         new_block = render_block(tier, combos[tier], indent, extras)
