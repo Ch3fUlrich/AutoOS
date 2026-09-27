@@ -10,7 +10,7 @@ and every new id target exists in `SKILL.md`.
 | `R-spawn-02` | code: MCP `spawn` uses `start_new_session=True` + `_reap()` | process-group isolation |
 | `R-spawn-03` | code: `autoos_clients.py build_command` argv-order check | --mcp-config variadic before prompt |
 | `R-spawn-04` | code: `trust_worktree.py --lane-mcp` strict per-worktree config | lane MCP isolation |
-| `R-spawn-05` | code: `autoos-agent.py run` preflight trust check | untrusted worktree → exit 2 |
+| `R-spawn-05` | R-orch-12 | not enforced in code (cao/worktree.py only prints the trust_worktree.py line) |
 | `R-spawn-06` | code: `l1_handoff.py` brief validator refuses raw worktree paths | require isolation:worktree |
 | `R-spawn-07` | code: `run`/`spawn` refuses shell tasks under isolation:worktree | isolation enforcement |
 | `R-spawn-08` | code: `client_key`/`key_files` fall back to main checkout | api-keys.yml fallback |
@@ -54,7 +54,7 @@ and every new id target exists in `SKILL.md`.
 | `R-tests-11` | dropped: process gap (unwired suite), not a repeatable rule | one-off |
 | `R-tests-12` | `R-worker-03` | absorbed: real --no-cache builds |
 | `R-tests-13` | `R-worker-02` | absorbed: seed bug state, assert reason |
-| `R-tests-14` | dropped: one-off mutation procedure | covered by R-worker-03 spirit |
+| `R-tests-14` | R-worker-08 | |
 | `R-tests-15` | `R-worker-02` | absorbed: guard platform (SUDO_USER) |
 | `R-tests-16` | `R-coord-02` | absorbed: verify yourself before merge |
 | `R-tests-17` | `R-coord-05` | absorbed: include helpers in touched area |
@@ -128,9 +128,9 @@ and every new id target exists in `SKILL.md`.
 | `R-host-05` | `R-coord-04` | absorbed: <=3 lanes + 3 readers |
 | `R-host-06` | code: lint flags `path` vars and bare multi-step shell | zsh safety |
 | `R-host-07` | code: liveness via sessions-json procStart vs /proc | heartbeat measure |
-| `R-host-08` | dropped: one-off incident procedure (CI owns that file) | not repeatable |
+| `R-host-08` | R-worker-07 | unfiltered run-tests.sh is refused in code (AUTOOS_FULL_SUITE, FULLGUARD) |
 | `R-host-09` | `R-coord-04` | absorbed: cap heavy runs |
-| `R-host-10` | code: MCP guard refuses Serena `activate_project` from worktree | MCP safety |
+| `R-host-10` | R-worker-09 | no code guard yet |
 | `R-safety-01` | code: preflight refuses secrets in committed handoff configs | secret guard |
 | `R-safety-02` | `R-orch-08` | absorbed: record refusals verbatim |
 | `R-safety-03` | `R-worker-06` | absorbed: leaf never spawns |

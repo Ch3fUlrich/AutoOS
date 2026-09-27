@@ -5,9 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Changed — orchestration skill cut to 25 level rules (S1, 2026-09-27)
+### Changed — orchestration skill cut to 29 level rules (S1, 2026-09-27)
 
-- **`.agents/skills/unattended-orchestration/SKILL.md`**: ~130 topic rules become 25 rules grouped by level (`router` L0, `coord` L1, `orch` L2, `worker` L3); mechanical rules point to `autoos-agent.py heartbeat`, the resolver and `registry.py` instead of restating them. New rules from 2026-09-27 lessons: sudo/root changes always get the Sonnet final, test fakes follow the real tool's contract, data lanes grep all of `tests/` for changed ids. **`references/rule-map.md`** maps every old id; **`tests/test_skill_rules.py`** fails when a cited `R-` id resolves nowhere.
+- **`.agents/skills/unattended-orchestration/SKILL.md`**: ~130 topic rules become 29 rules grouped by level (`router` L0, `coord` L1, `orch` L2, `worker` L3); mechanical rules point to `autoos-agent.py heartbeat`, the resolver and `registry.py` instead of restating them. New rules from 2026-09-27 lessons: sudo/root changes always get the Sonnet final, test fakes follow the real tool's contract, data lanes grep all of `tests/` for changed ids. **`references/rule-map.md`** maps every old id; **`tests/test_skill_rules.py`** fails when a cited `R-` id resolves nowhere.
 
 ### Added — Free.ai free provider restores `t3-driver-free-only` (FREEAI, 2026-09-27)
 

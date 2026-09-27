@@ -102,6 +102,7 @@ merges (L1, and an L2 for its own lanes); `orch` rules bind whoever briefs or re
 - R-orch-09: Re-read your inbox before every launch, not only while waiting. (why: stale orders launched three workers post-stop; source: inbox/L1-routing.md 21:44Z)
 - R-orch-10: Any change that runs sudo/root gets the Sonnet final review regardless of cheap verdict. (why: privileged ops need highest-trust gate; source: L1-backlog agysb 8b36913)
 - R-orch-11: A data lane that changes a route/provider set greps ALL of tests/ for changed ids. (why: stale test ids break CI silently; source: CI 36320592493, ee35dd3)
+- R-orch-12: Approve each fresh worktree with `trust_worktree.py` before its first session. (why: background sessions cannot answer a trust dialog; source: three lanes blocked in 3s)
 
 ### worker (L3)
 
@@ -111,6 +112,9 @@ merges (L1, and an L2 for its own lanes); `orch` rules bind whoever briefs or re
 - R-worker-04: Test fakes reproduce the real tool's observable contract; read the real tool first, cite its lines. (why: fake drift hides real bugs; source: L1-backlog lstby 99742a1)
 - R-worker-05: Gate on `set -o pipefail` and the 'N passed' line, never `tail -1 && push`. (why: 'no tests ran' exited 0 and was pushed; source: work/L1-routing/B3a.out)
 - R-worker-06: A leaf role never spawns; only a spawning role lists the autoos-agent MCP. (why: supervisor wanting to code mis-decomposed; source: tests/test_agent_harness.py)
+- R-worker-07: Never shellcheck tests/run-tests.sh locally; run jobs over ~2 GB under systemd-run MemoryMax=2G. (why: its OOM killed every session twice; source: herdr-server.log 2026-09-26T15:25Z)
+- R-worker-08: Mutation-test a scratch copy (`tar --exclude=.git`), never the worktree. (why: a mutation must not touch the lane's tree; source: status/L1-backlog.lane-omni.report.md)
+- R-worker-09: Never call Serena `activate_project` from a worktree. (why: the one shared server re-points every session; source: briefs/common.md MCP, 2026-09-26)
 
 ## CAO quickstart
 
