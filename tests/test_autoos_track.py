@@ -166,6 +166,32 @@ class SuccessEstimateTests(unittest.TestCase):
 
 
 class SpawnerRecordTests(unittest.TestCase):
+    def _spawner_plan(self):
+        """A plan track_entry() accepts: a gateway client on a known route."""
+        return {"client": "opencode", "free": False,
+                "route": {"combo": "t2-worker-clean", "class": "cheap", "card": {}}}
+
+    def test_record_run_accepts_every_failure_class_track_entry_emits(self):
+        # autoos-agent.track_entry() maps rc 5/6/7/8 to capability/logic/
+        # containment/provider. Before FAILURES named containment and provider,
+        # validate() raised and record_run()'s except swallowed it - the record
+        # was silently dropped (REVFIX). Pipe the real track_entry() output
+        # through record_run(), not just assert on the returned dict.
+        cli = load_agent()
+        fields = {0: None, 5: "capability", 6: "logic", 7: "containment",
+                  8: "provider"}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "track-record.jsonl")
+            for rc, failure in fields.items():
+                with self.subTest(rc=rc):
+                    tracked = cli.track_entry(self._spawner_plan(), rc, 1.0)
+                    self.assertIsNotNone(tracked)
+                    self.assertEqual(tracked["failure_class"], failure)
+                    self.assertEqual(tracked["gate"], "pass" if rc == 0 else "fail")
+                    self.assertTrue(cli.record_run(path, tracked),
+                                    "rc %d must be recorded, not dropped" % rc)
+            self.assertEqual(len(track.load(path)), len(fields))
+
     @unittest.skipIf(os.name == "nt", "chmod mode bits; POSIX only")
     def test_the_record_step_never_raises_when_the_log_dir_is_unwritable(self):
         cli = load_agent()

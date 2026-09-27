@@ -23,7 +23,10 @@ CLASSES = ("free", "cheap", "mid", "frontier")
 BUCKETS = ("unknown", "S0", "S1", "S2", "S3", "S4")
 EFFORTS = ("unknown", "none", "low", "medium", "high", "xhigh", "max")
 GATES = ("pass", "fail")
-FAILURES = (None, "logic", "capability")
+# Every failure_class autoos-agent.py's track_entry() emits: rc 5 -> capability,
+# rc 6 -> logic, rc 7 -> containment, rc 8 -> provider. Omitting one made
+# validate() reject the record and record_run() silently drop it (REVFIX).
+FAILURES = (None, "logic", "capability", "containment", "provider")
 
 
 def _text(name, value):
