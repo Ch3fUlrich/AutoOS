@@ -102,8 +102,12 @@ cp configuration/hostexec/policy.example.toml ~/.config/autoos/exec/policy.toml 
     `--unregister` removes only entries this driver wrote: JSON/TOML
     entries carry an `"x-autoos": "hostexec"` fingerprint (OpenHands
     forbids extra keys, so there the url+header shape is compared
-    instead), and the unit is removed only when it matches the rendered
-    template -- anything else is left untouched with a message.
+    instead). The unit is removed only when it byte-matches what this
+    driver renders for the port and checkout path recorded in the
+    installed unit itself (its `Environment=AUTOOS_EXEC_PORT=` line and
+    `ExecStart` script path) -- so a unit installed under a different port,
+    or from a checkout that has since moved or been renamed, is still
+    recognised, while anything else is left untouched with a message.
 
     The driver renders `autoos-hostexec.service` with your checkout's
     path into `~/.config/systemd/user/` (backed up before any replace; a
@@ -197,6 +201,13 @@ comes up (empty `AUTOOS_EXEC_BIND`, bind failure).
 The child never inherits the broker's stdin (`stdin=DEVNULL`), so an
 allowed bare `sh`/`cat` cannot siphon the operator's keystrokes.
 
+On an `ssh`-kind host the runner builds
+`ssh -o BatchMode=yes -T <alias> -- "cd <cwd> && <argv>"`: `cwd` is the
+REMOTE working directory and the leading `cd` (shlex-quoted) makes the
+command run exactly where the audit line says it did. A remote `cd` that
+fails stops the wrapped command rather than running it in some other
+directory (the local `ssh` process runs outside `cwd`).
+
 Retention is 90 days (operator decision, 2026-09-26), pruned by filename
 date only, never by file mtime (so a touched or copied file cannot dodge
 it):
@@ -221,9 +232,11 @@ separate or `=`, `Bearer <token>` separate or inside one token
 (`Authorization: Bearer x`), `x-api-key: <v>`, `user:pass@` in URLs,
 `-p<secret>`/`-u<user:pass>` attached, `-u`/`-p` separate values, and known
 secret prefixes `sk-`, `ghp_`, `gho_`, `glpat-`, `xox` -> `***`); a
-separate `argv_sha256`, over the RAW unredacted argv, lets you still
-correlate two identical calls without the secret ever touching disk in
-clear. `reason`/`session`/`cwd` are capped at 4096 chars (excess marks the
+separate `argv_sha256` is over the REDACTED argv, so you can still
+correlate two identical calls while a secret's value never influences the
+stored digest (the raw form is never hashed -- a digest of a raw secret is
+offline-guessable). `reason`/`session`/`cwd` are capped at 4096 chars
+(excess marks the
 line `truncated`). `seq` resumes by scanning backwards for the last
 complete JSON line (any length); each line is written with an `os.write`
 loop that errors on short write.

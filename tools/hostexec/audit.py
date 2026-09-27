@@ -59,6 +59,20 @@ def sanitize_text(s: str) -> str:
 # only 0x09 (tab) is kept.
 
 
+def _argv_text(tok: object) -> str:
+    """One argv element as text. Elements are usually str; MCP JSON can also
+    carry a number/bool/null, which policy refuses as argv-caps but which
+    the audit must still render -- a refused call is always recorded, so
+    redaction may never raise on one. json.dumps gives a stable,
+    JSON-faithful spelling (`123`, `true`, `null`)."""
+    if isinstance(tok, str):
+        return tok
+    try:
+        return json.dumps(tok, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return repr(tok)
+
+
 def redact_argv(argv: Sequence[str]) -> list[str]:
     """Best-effort credential redaction for the STORED/rendered argv:
     `KEY=value`-shaped names that look secret (*TOKEN*|*SECRET*|*PASSWORD*|
@@ -66,13 +80,13 @@ def redact_argv(argv: Sequence[str]) -> list[str]:
     (`Authorization: Bearer x`), common `--token`/`--password`/... flags
     with a separate value, mysql-style `-pSECRET` and `-uUSER:PASS`
     attached, `x-api-key: <v>`, `user:pass@` in URLs, and known secret
-    prefixes (sk-, ghp_, gho_, glpat-, xox). argv_sha256 (below) hashes the
-    RAW, unredacted form separately, so two identical raw calls can still
-    be correlated without the secret ever being stored in clear."""
+    prefixes (sk-, ghp_, gho_, glpat-, xox). argv_sha256 (below) hashes
+    THIS redacted form, so a secret's value never reaches (or influences)
+    the stored record."""
     out: list[str] = []
     mask_next = False
-    for tok in argv:
-        tok = sanitize_text(tok)
+    for tok_raw in argv:
+        tok = sanitize_text(_argv_text(tok_raw))
         if mask_next:
             out.append("***")
             mask_next = False
@@ -119,10 +133,12 @@ def redact_argv(argv: Sequence[str]) -> list[str]:
 
 
 def hash_argv(argv: Sequence[str]) -> str:
-    """sha256 of the RAW (unredacted) argv, joined with a byte that cannot
-    appear in a single argv element (unit separator), so distinct argv
-    arrays never collide via naive concatenation."""
-    canonical = "\x1f".join(argv).encode("utf-8", "surrogateescape")
+    """sha256 of the REDACTED argv (item 5), joined with a byte that cannot
+    appear in a single redacted element (unit separator -- redaction strips
+    it), so distinct argv arrays never collide via naive concatenation. The
+    raw form is deliberately NOT hashed: a digest of a raw secret is
+    offline-guessable, so a secret's value must not influence the digest."""
+    canonical = "\x1f".join(redact_argv(argv)).encode("utf-8", "surrogateescape")
     return hashlib.sha256(canonical).hexdigest()
 
 
