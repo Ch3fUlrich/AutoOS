@@ -3905,11 +3905,20 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
         cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
 
-        calls = {"n": 0, "cwds": []}
+        calls = {"n": 0, "cwds": [], "route_marks": []}
+        real_build_plan = agent.build_plan
+
+        def marking_build_plan(*a, **k):
+            # Tag each plan's env with its route, so a re-run that kept the
+            # first plan's env shows up as a stale mark.
+            plan = real_build_plan(*a, **k)
+            plan["env"]["AUTOOS_TEST_ROUTE_MARK"] = plan["route"]["combo"]
+            return plan
 
         def fake_run_client(cmd, cwd, env, reap=True, capture=False):
             calls["n"] += 1
             calls["cwds"].append(cwd)
+            calls["route_marks"].append(env.get("AUTOOS_TEST_ROUTE_MARK"))
             with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
                       encoding="utf-8") as fh:
                 fh.write("work\n")
@@ -3929,7 +3938,8 @@ class ProviderStopFallthroughTests(unittest.TestCase):
             with mock.patch.dict(os.environ, env, clear=True):
                 with mock.patch.object(agent, "load_registry",
                                        lambda path: _fallthrough_registry(route_ids)):
-                    with mock.patch.object(agent, "route_plan_for", _fallthrough_plan):
+                    with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
+                            mock.patch.object(agent, "build_plan", marking_build_plan):
                         with mock.patch.object(agent, "run_client", fake_run_client):
                             with mock.patch.object(agent.measure_mod, "client_state",
                                                    lambda *a, **k: {}):
@@ -3957,6 +3967,12 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         self.assertIn("provider stop on r-free: Error: Rate limit exceeded "
                       "-> falling through to r-cheap", out + err)
         self.assertIn("WIP-COMMITTED", out + err)
+
+    def test_a_fallthrough_re_run_gets_the_next_plans_env(self):
+        # qoder review 2026-09-27: env was built once from the first plan, so a
+        # re-run kept the stopped route's OPENCODE_CONFIG_CONTENT/session tag.
+        _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1)
+        self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"], out + err)
 
     def test_fallthrough_stops_after_the_cap_and_exits_8(self):
         rc, out, err, calls, _ = self._run(

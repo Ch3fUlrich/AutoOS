@@ -1872,6 +1872,12 @@ def cmd_run(args, cfg: dict) -> int:
         excluded_routes.add(plan["route"]["combo"])
         print(fallthrough_line(plan["route"]["combo"], stop, next_combo), file=sys.stderr)
         plan = next_plan
+        # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
+        # and session tag), not the stopped route's (qoder review 2026-09-27).
+        env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
+        env.pop("AUTOOS_OMNIROUTE_KEY", None)
+        if uses_key:
+            env["AUTOOS_OMNIROUTE_KEY"] = key
     if plan["sandbox"] and not args.joinable:
         sb = plan["sandbox"]
         branch = sb["branch"]
