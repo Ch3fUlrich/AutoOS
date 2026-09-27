@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  // Repo default: OmniRoute on :20128 (docs/models.md). t2-worker/t3-driver and their
+  // Repo default: OmniRoute on :20128 (docs/models.md). t1-orchestrator/2/3 and their
   // -clean variants are combos created by configuration/omniroute/apply.*
   // (priority chains: free legs first, allowed paid legs after). The paid
   // overflow legs already cover every provider with money on it: cerebras
@@ -10,24 +10,27 @@
   // only through the direct opencode `meta` provider, never the gateway.
   // No funded provider is missing a leg —
   // verify with `omniroute simulate --combo tierN --explain`.
-  // DSMAX (operator 2026-09-27T15:05:54Z): OpenRouter is off entirely (no
-  // credit), so no route has a live 1M leg. The t1-orchestrator and
-  // t1-orchestrator-clean combos plus the standalone spark-1.3-contributor
-  // combo were removed; a 1M card fails closed (split the work to 128k). The
-  // t1-orchestrator *agent* stays as the orchestrator identity but runs on the
-  // 128k t2-worker route. Role labels (display only — the t2-worker/t3-driver
-  // ids are a contract and never change): t1-orchestrator = orchestrator,
-  // t2-worker = smart-reasoning-128k, t3-driver = cheap-driver-128k. "-clean"
-  // excludes every model/plan that trains on prompts — pick it for sensitive
-  // data. auto/* stays as a zero-setup bootstrap that always resolves.
+  // DSMAX (operator 2026-09-27T15:05:54Z) took OpenRouter/DeepSeek off entirely
+  // (no credit); T1FREE (L0 2026-09-27T16:00:38Z, every tier keeps a free leg)
+  // re-added gemini/gemini-3.8-flash as the free fallback leg of
+  // t1-orchestrator and t1-orchestrator-free-only, so t1 is servable again
+  // and back as the default. t1-orchestrator-clean and the standalone
+  // spark-1.3-contributor combo stay omitted (contributor-only, paid,
+  // trains); a sensitive 1M card still fails closed. Role labels (display
+  // only — the t1-orchestrator/2/3 ids are a contract and never change):
+  // t1-orchestrator = orchestrator, t2-worker = smart-reasoning-128k,
+  // t3-driver = cheap-driver-128k. "-clean" excludes every model/plan that
+  // trains on prompts — pick it for sensitive data. auto/* stays as a
+  // zero-setup bootstrap that always resolves.
   // Effort: `variants` arrays below are rendered from each route's first-leg
   // effort_ladder in catalog/ai-registry.json by tools/sync-ide-models.py
   // (opencode v2.0.16 array form; see docs/models.md "Effort levels").
-  // Limits below must match the combo curations: there is no live 1M route;
-  // anything that fits belongs in t2-worker. Override per user in
+  // Limits below must match the combo curations: t1-orchestrator serves
+  // 1M-declared cards through its gemini fallback while the contributor legs
+  // are off. Override per user in
   // ~/.config/opencode/opencode.jsonc. Client key via env
   // AUTOOS_OMNIROUTE_KEY (or configuration/api-keys.yml).
-  "model": "omniroute/t2-worker",
+  "model": "omniroute/t1-orchestrator",
   // Serena memory tools are always off: project memory belongs to
   // omnigraph+graphify, never serena memory. MCP tools register as
   // <server>_<tool>, so these six keys disable them globally (an agent-level
@@ -71,7 +74,7 @@
     "t1-orchestrator": {
       "description": "Long-horizon orchestrator: plans, slices, verifies, never codes directly. May launch t2-worker only.",
       "mode": "all",
-      "model": "omniroute/t2-worker#high",
+      "model": "omniroute/t1-orchestrator#high",
       "permissions": [
         { "action": "subagent", "resource": "*", "effect": "deny" },
         { "action": "subagent", "resource": "t2-worker", "effect": "allow" }

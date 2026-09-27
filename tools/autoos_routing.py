@@ -14,14 +14,16 @@ Card v1 (unknown fields and values are an error):
     spend       free-ok | credit                     default free-ok
 
 Resolution is filters, then preference: privacy, ctx, spend, then
-role/complexity. ctx=1m has no route since 2026-09-27: the only 1M leg
-(muse-spark-1.3-contributor) was switched off at the provider level
-(OpenRouter off; the Zen leg is client-bound), so a 1M card fails closed -
-split the work to 128k. The allow_training parameter is retained for
-compatibility but is inert: there is no trainable gateway leg left to unlock.
-spend=credit stays a valid value but has no combo of its own: the -credit
-chains were dropped 2026-09-23, and t2-worker / t3-driver already overflow to
-their paid legs.
+role/complexity. ctx=1m routes to t1-orchestrator again since 2026-09-27
+(T1FREE): the route keeps a free gemini/gemini-3.8-flash fallback leg while
+OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps
+a free leg). Sensitive 1m still has no route: t1-orchestrator-clean's only
+leg is a contributor model that trains on prompts and stays off, so it is
+reachable only through an explicit allow_training, which the caller logs -
+but that leg is provider-off too, so allow_training is retained for
+compatibility and is inert. spend=credit stays a valid value but has no
+combo of its own: the -credit chains were dropped 2026-09-23, and t2-worker /
+t3-driver already overflow to their paid legs.
 """
 from __future__ import annotations
 
@@ -40,7 +42,8 @@ CARD_VALUES = {
 }
 CARD_DEFAULTS = {"role": "implement", "complexity": "standard", "ctx": "128k",
                  "privacy": "public", "spend": "free-ok"}
-ALL_COMBOS = ("t2-worker", "t3-driver", "t2-worker-clean", "t3-driver-clean")
+ALL_COMBOS = ("t1-orchestrator", "t2-worker", "t3-driver",
+              "t2-worker-clean", "t3-driver-clean", "t1-orchestrator-clean")
 
 # Card v2 (spec docs/plans/2026-09-25-routing-v2-spec.md §4). v1 stays valid:
 # role/complexity/ctx/spend map onto kind/bucket_hint/min_context, and privacy
@@ -264,9 +267,10 @@ def select_combo(card: dict, allow_training: bool = False) -> tuple:
     """Return (combo, reason). Raises CardError or NoRoute.
 
     ``allow_training`` is accepted for backward compatibility and is inert:
-    since 2026-09-27 the only 1M leg was switched off at the provider level,
-    so there is no trainable gateway leg for it to unlock. It never changes
-    the result.
+    sensitive ctx=1m's only candidate leg (t1-orchestrator-clean's
+    contributor leg) is off at the provider level since 2026-09-27, so there
+    is no trainable gateway leg for it to unlock. It never changes the
+    result.
     """
     c = normalize(card)
     strong = c["role"] == "orchestrate" or c["complexity"] == "hard"
@@ -288,17 +292,13 @@ def select_combo(card: dict, allow_training: bool = False) -> tuple:
         return ("t3-driver-clean", "sensitive-light") if light else ("t2-worker-clean", "sensitive")
 
     # public
-    # ctx=1m has no route since 2026-09-27 (see the module docstring); a
-    # caller that cannot split the work has nowhere to go, so fail loudly
-    # rather than silently truncating to 128k.
+    # ctx=1m routes to t1-orchestrator again (T1FREE, 2026-09-27): the route
+    # now carries a free gemini/gemini-3.8-flash fallback leg, so it stays
+    # servable while OpenRouter/DeepSeek credit is out.
     if c["ctx"] == "1m":
-        raise NoRoute(
-            "ctx=1m has no route: the only 1M leg (muse-spark-1.3-contributor) "
-            "was switched off 2026-09-27 (OpenRouter off; the Zen leg is "
-            "client-bound). Split the work so each part fits 128k and run it on "
-            "t2-worker (card ctx=128k).")
+        return "t1-orchestrator", "public-1m"
     if strong:
-        return "t2-worker", "public-strong"
+        return "t1-orchestrator", "public-strong"
     # 3. spend - no -credit chains since 2026-09-23; the reason still says credit.
     if c["spend"] == "credit":
         return ("t3-driver", "public-light-credit") if light else ("t2-worker", "public-credit")

@@ -7,7 +7,7 @@ Driving them by hand has
 four traps, all measured 2026-09-24 against opencode 2.0.16:
 
   1. `opencode run --agent t2-worker` runs on the TOP-LEVEL default model
-     (omniroute/t2-worker), not the agent's own - the agent/model pairing only
+     (omniroute/t1-orchestrator), not the agent's own - the agent/model pairing only
      holds for children spawned through the subagent tool. This tool always
      passes the agent's model explicitly.
   2. Without --standalone, `opencode run` talks to a background service that
@@ -28,8 +28,8 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
 Routing: without --tier the model comes from a task card. A v1 card
 (role/complexity/ctx/spend, or empty) goes through autoos_routing.select_combo
 (ADR 0006) - the one decision point, shared with the MCP server. An empty card
-is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed (since
-2026-09-27 the only 1M leg is off, so --allow-training is accepted for
+is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed (the only
+sensitive 1M leg is off, so --allow-training is accepted for
 compatibility but inert). A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
 paths/override, spec 6.1 "run takes card v2") instead goes through the
 resolver (route_plan_for/autoos_resolver.plan, the same core the `route`
