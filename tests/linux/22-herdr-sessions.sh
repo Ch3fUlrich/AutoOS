@@ -194,6 +194,70 @@ if it "herdr-sessions: the system herdr-server template keeps WorkingDirectory u
     fi
 fi
 
+# rv2 item 3: the herdr binary path was hard-coded into both herdr-server
+# templates -- the user unit's /bin/sh guard and exec both said
+# %h/.local/bin/herdr, the system unit's ExecCondition/ExecStart both said
+# /root/.local/bin/herdr -- even though the profile already carries HERDR_BIN
+# (example.conf sets it, and the driver reads it via lib/herdr-lib.sh). A host
+# that keeps herdr anywhere else installed a unit that could never start, with
+# nothing at install time saying so. install.sh now renders @HERDR_BIN@ from the
+# profile's HERDR_BIN, defaulting per scope to the previous literal when unset.
+if it "herdr-sessions: the rendered user herdr-server unit takes its herdr path from HERDR_BIN"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+HERDR_BIN=/opt/x/herdr
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-server.service"
+    got="$(grep -h '^ExecStart=' "$unit" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [[ "$got" == *"'if /opt/x/herdr status"* && "$got" == *"exec /opt/x/herdr server'"* ]] \
+       && [[ "$got" != *"%h/.local/bin/herdr"* ]]; then
+        pass
+    else
+        fail "rendered ExecStart does not carry HERDR_BIN: [$got]"
+    fi
+fi
+
+# Default unchanged when the profile does not set HERDR_BIN: the user unit keeps
+# the %h specifier the manager expands per user, so an existing profile that
+# never mentioned HERDR_BIN renders byte-identically to before.
+if it "herdr-sessions: an unset HERDR_BIN leaves the user herdr-server path at %h/.local/bin/herdr"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-server.service"
+    got="$(grep -h '^ExecStart=' "$unit" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [[ "$got" == *"%h/.local/bin/herdr server"* ]]; then
+        pass
+    else
+        fail "an unset HERDR_BIN changed the user unit's herdr path: [$got]"
+    fi
+fi
+
+# Both templates must carry the token, not a hard-coded path: the system scope
+# (default /root/.local/bin/herdr) cannot be rendered here -- a real system
+# install needs root and writes a real /etc -- so pin the template shape.
+if it "herdr-sessions: both herdr-server templates carry @HERDR_BIN@, not a hard-coded herdr path"; then
+    ok=1
+    for f in configuration/herdr-sessions/systemd/user/herdr-server.service \
+             configuration/herdr-sessions/systemd/system/herdr-server.service; do
+        grep -q '@HERDR_BIN@' "$f" || { ok=0; echo "no @HERDR_BIN@ token in $f" >&2; }
+        # Comments may name the default; only the directives must not hard-code it.
+        bad="$(grep -v '^[[:space:]]*#' "$f" | grep 'local/bin/herdr' | grep -v '@HERDR_BIN@' || true)"
+        [ -z "$bad" ] || { ok=0; echo "hard-coded herdr path in $f:"; echo "$bad" >&2; }
+    done
+    if (( ok )); then pass; else fail "a herdr-server template still hard-codes the herdr path"; fi
+fi
+
 if it "herdr-sessions: re-run reports already current; a drifted unit is backed up before replacing"; then
     tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
     cat > "$tmp/site.conf" <<EOF

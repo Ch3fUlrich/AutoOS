@@ -109,6 +109,19 @@ WORKDIR="$(prof_key HS_WORKDIR)"
 [ -n "$WORKDIR" ] || WORKDIR="$APPDIR"
 [ -x "$HERE/herdr-sessions.sh" ] || { echo "FATAL: driver missing at $HERE/herdr-sessions.sh" >&2; exit 1; }
 
+# Herdr binary path spliced into both herdr-server templates (ExecCondition and
+# ExecStart), and into the system-scope precondition below. The profile's
+# HERDR_BIN wins -- the driver reads the same key, so the unit and the driver
+# cannot disagree about which herdr is installed. An unset key keeps each
+# scope's historical literal: %h/.local/bin/herdr for user units (the user
+# manager expands %h per user) and /root/.local/bin/herdr for system units.
+# NOT systemd_escape'd: the user default IS the %h specifier, so doubling it
+# would render a literal "%h" directory that does not exist.
+HERDR_BIN="$(prof_key HERDR_BIN)"
+if [ -z "$HERDR_BIN" ]; then
+    if [ "$SCOPE" = user ]; then HERDR_BIN='%h/.local/bin/herdr'; else HERDR_BIN=/root/.local/bin/herdr; fi
+fi
+
 say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 run() { if [ "$DRY" = 1 ]; then echo "  would: $*"; else "$@"; fi; }
 
@@ -163,10 +176,11 @@ systemd_escape() {
 }
 
 # Render a unit template into a real unit file. The checked-in units carry
-# four literal tokens -- @PROFILE@ (the --profile argument as given, informational
+# five literal tokens -- @PROFILE@ (the --profile argument as given, informational
 # only), @APPDIR@ (where this checkout lives), @WORKDIR@ (the cwd panes
-# inherit) and @PROFILE_PATH@ (the resolved absolute profile path, what
-# HERDR_PROFILE is actually set to). Every replacement is an
+# inherit), @PROFILE_PATH@ (the resolved absolute profile path, what
+# HERDR_PROFILE is actually set to) and @HERDR_BIN@ (the herdr binary the unit
+# execs, from the profile's HERDR_BIN). Every replacement is an
 # arbitrary filesystem path, so this does NOT use sed (its replacement text
 # treats `&` as "the matched text" and `\` as an escape, both unescaped here) --
 # and, less obviously, does NOT use bash's own `${var/pattern/value}` either: on
@@ -178,6 +192,8 @@ systemd_escape() {
 # double quotes (WorkingDirectory is the one exception -- systemd does not
 # strip quotes there), so a path with a space stays one token, and a literal
 # `%`/`"`/`\` survives specifier expansion and quote parsing.
+# @HERDR_BIN@ is the one token spliced RAW: its default for user units is the
+# `%h` specifier itself, which escaping would turn into a literal `%h` path.
 render_unit() {
     local line
     local appdir_esc workdir_esc profile_path_esc
@@ -190,6 +206,7 @@ render_unit() {
         line="$(_replace_token "$line" "@APPDIR@" "$appdir_esc")"
         line="$(_replace_token "$line" "@WORKDIR@" "$workdir_esc")"
         line="$(_replace_token "$line" "@PROFILE_PATH@" "$profile_path_esc")"
+        line="$(_replace_token "$line" "@HERDR_BIN@" "$HERDR_BIN")"
         printf '%s\n' "$line"
     done < "$1"
 }
@@ -346,15 +363,13 @@ else
     # usable as a CI smoke test (see tests/test_smoke.sh) instead of only ever
     # runnable on the live host.
     # The units are rendered with @APPDIR@ = this checkout, so any location works.
-    HERDR_BIN_CHECK="$(prof_key HERDR_BIN)"
-    [ -n "$HERDR_BIN_CHECK" ] || HERDR_BIN_CHECK=/root/.local/bin/herdr
     if [ "$DRY" = 1 ]; then
         say "dry-run: skipping root/herdr-binary preconditions"
-        echo "    (a real install requires: root, and herdr at $HERDR_BIN_CHECK)"
+        echo "    (a real install requires: root, and herdr at $HERDR_BIN)"
     else
         [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
-        [ -x "$HERDR_BIN_CHECK" ] || {
-            echo "FATAL: herdr is not installed at $HERDR_BIN_CHECK" >&2; exit 1; }
+        [ -x "$HERDR_BIN" ] || {
+            echo "FATAL: herdr is not installed at $HERDR_BIN" >&2; exit 1; }
     fi
 
     say "systemd system units -> $DEST"
