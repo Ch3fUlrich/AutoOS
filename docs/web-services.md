@@ -50,6 +50,12 @@ The table below describes the native (workstation) layout.
 - **Start**: `configuration/autostart/register-autostart.sh` installs the
   `autoos-omniroute` unit (Type=notify, watchdog). By hand:
   `omniroute --no-open --port 20128` from `$HOME`.
+- **Dashboard password reset from the host** (docker stack):
+  `printf '%s' "$NEW" | docker exec -i autoos-omniroute node bin/reset-password.mjs --password-stdin`,
+  then log in to the dashboard with the new password. The CLI imports
+  `bcryptjs`, which the upstream image's standalone build prunes from
+  `/app/node_modules`, so the derived layer adds it: needs
+  `autoos/omniroute:…-autoos2` or later (rebuilt by `ai-stack.sh up`).
 
 #### OAuth logins and the public URL
 
@@ -220,7 +226,7 @@ pre-ticked in `server`, requires `docker`.
 
 | Service | Image | Container | Runs as | Published | State |
 |---|---|---|---|---|---|
-| `omniroute` | local `autoos/omniroute:3.8.50-autoos1` (FROM `diegosouzapw/omniroute:3.8.50@sha256:085c…`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> `/home/qoder` (`HOME`) |
+| `omniroute` | local `autoos/omniroute:3.8.50-autoos2` (FROM `diegosouzapw/omniroute:3.8.50@sha256:085c…`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> `/home/qoder` (`HOME`) |
 | `opencode` | local `autoos/opencode:2.0.16-autoos1` (FROM `ghcr.io/anomalyco/opencode:2.0.16@sha256:1644…`) | `autoos-opencode` | host uid:gid | `${AUTOOS_STACK_BIND}:4096` | `…/ai-stack/opencode-home` -> `/home/opencode`; the code tree at the same path |
 | `openhands` | `docker.openhands.dev/openhands/openhands@sha256:17d0…` | `openhands-app` | root entrypoint -> `enduser` (host uid) | `${AUTOOS_STACK_BIND}:3000` | `~/.openhands` -> `/.openhands` |
 
