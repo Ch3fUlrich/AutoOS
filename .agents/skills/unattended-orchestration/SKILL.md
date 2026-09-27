@@ -45,13 +45,15 @@ asks before loading that level's rules.
 
 | Level | Job | Relaunches | Asks the operator |
 |---|---|---|---|
-| **L0** router | the operator's own session: routes intent, tracks PAUSE/resume, is the *only* path to the operator | L1 | R-router-01 (its own rule: it researches the obvious ones, forwards the rest verbatim) |
-| **L1** coordinator | one per run: launches L2s, merges lanes into main, pushes, cleans up | L2, past its context cap, from its handoff (R-coord-06) | never directly — R-router-01 |
+| **L0** router | the operator's own session: routes intent, tracks PAUSE/resume, is the *only* path to the operator | L1, when L1's status timestamp stays quiet >25 min from its handoff (R-coord-08; source: common.md "Heartbeats never stop") | R-router-01 (its own rule: it researches the obvious ones, forwards the rest verbatim) |
+| **L1** coordinator | one per run: launches L2s, merges lanes into main, pushes, cleans up | L2, past its context cap (R-coord-06); or a busy L2 whose status timestamp it watches stays quiet >25 min from its handoff (R-coord-08) | never directly — R-router-01 |
 | **L2** orchestrator | one per track/plan: owns a worktree + branch, spawns and reviews L3 | L3, never resuming a no-change stop (R-orch-06) | never directly — same channel, via L1 |
 | **L3** worker / reviewer | one closed task, an explicit return contract (`docs/agent-protocol.md`) | nothing — R-worker-06 | never |
 
 This is depth, not the model tier `unattended-orchestration.md`'s `t1`/`t2`/`t3` picks for a task
-— the two axes are independent. `references/main-orchestrator.md` names a single top session
+— the two axes are independent. *Relaunches* is a watch: each level reads the status timestamp the
+level below rewrites and relaunches — never resumes (R-orch-06) — a busy child quiet >25 min from
+its handoff (R-coord-08, the beat). `references/main-orchestrator.md` names a single top session
 "L1" in an older 3-level scheme (its L1 ≈ this table's L2) — read whichever your brief names.
 
 ## Rules
@@ -93,7 +95,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-coord-04: Hold host headroom: run `autoos-agent.py heartbeat`; <=3 lanes + 3 readers, MemAvailable >= 3 GB. (why: headroom keeps tests and builds alive; source: briefs/common.md "Host limits")
 - R-coord-06: At cap (`autoos-agent.py context`, registry `handoff_caps`): rewrite state, brief successor, append handoff, stop. (why: successor resumes from state alone; source: common.md Context cap)
 - R-coord-07: Heartbeat: L1/L2 run a 10-min CronCreate beat from launch to stop, recreated after relaunch or clear. (why: an idle session is retired after 8 h; source: common.md Heartbeats never stop)
-- R-coord-08: Each beat pushes, rewrites status (timestamp first), checks children; read inbox before each launch. (why: stale orders launched three workers post-stop; source: common.md 15:3xZ)
+- R-coord-08: Beat pushes, rewrites status timestamp-first, relaunches a child quiet >25 min; read inbox before launch. (why: stale orders launched three workers post-stop; source: common.md 15:3xZ)
 
 ### orch (L2)
 

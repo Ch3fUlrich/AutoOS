@@ -21,7 +21,8 @@ One recurring `CronCreate` job (cron `7-59/10 * * * *`) from launch until you st
 every relaunch or context clear. Its prompt names the round trip — read your inbox, the status and
 DONE files you wait for and your CI runs; act; continue your plan. It is your primary wake-up — a
 background loop dies under memory pressure. Each beat pushes your branches, rewrites your status
-file (timestamp on the first line), reads your inbox, and checks your children. The rules that bind
+file (timestamp on the first line), reads your inbox, and relaunches a child whose status has gone
+quiet past 25 min. The rules that bind
 it are R-coord-07 and R-coord-08; `autoos-agent.py heartbeat` is the read-only report of the same
 state, and an idle session is retired after 8 h.
 
