@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-from registry import resolve_leg  # noqa: E402 - tools/ is on sys.path above
+from registry import resolve_leg, unavailable_now  # noqa: E402 - tools/ is on sys.path above
 
 DEFAULT_REGISTRY = os.path.join(ROOT, "catalog", "ai-registry.json")
 DEFAULT_OVERLAY = os.path.join(ROOT, "logs", "routing", "measured.json")
@@ -87,7 +87,11 @@ def _skip_reason(leg, routes, registry):
         provider_id, model_id = resolve_leg(leg, registry)
     except ValueError as exc:
         return "unresolvable: %s" % exc
-    if (registry.get("providers", {}).get(provider_id) or {}).get("available") is False:
+    provider = registry.get("providers", {}).get(provider_id) or {}
+    if unavailable_now(provider, datetime.now(timezone.utc)):
+        until = provider.get("unavailable_until")
+        if until is not None:
+            return "provider %s: unavailable until %s" % (provider_id, until)
         return "provider %s: available false" % provider_id
     bound = (registry.get("models", {}).get(model_id) or {}).get("client_bound")
     if bound:

@@ -122,7 +122,7 @@ import autoos_measure as measure_mod  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_track as track  # noqa: E402
-from registry import private_safe, resolve_leg  # noqa: E402
+from registry import private_safe, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
@@ -1085,19 +1085,21 @@ def record_run(path: str, entry: dict) -> bool:
 def _available_legs(route: dict, registry: dict) -> list:
     """Leg strings of `route` that are actually available.
 
-    Drops a leg named in `unavailable_legs` and a leg whose provider is
-    `available: false` -- the same rule autoos_resolver.serving_legs applies,
-    kept local so this module carries no dependency on the resolver. Order is
+    Drops a leg whose own `unavailable_legs` entry or whose provider is
+    unavailable now, read through ``registry.unavailable_now`` -- the one
+    availability rule autoos_resolver.serving_legs applies, so this can never
+    disagree with the resolver about an ``unavailable_until`` window. Order is
     the route's own leg order (the priority strategy needs the first one).
     """
     unavailable = route.get("unavailable_legs") or {}
     providers = registry.get("providers") or {}
+    now = datetime.datetime.now(datetime.timezone.utc)
     out = []
     for leg in route.get("legs") or []:
-        if leg in unavailable:
-            continue
         provider_id, _ = resolve_leg(leg, registry)
-        if providers.get(provider_id, {}).get("available") is False:
+        if unavailable_now(unavailable.get(leg), now):
+            continue
+        if unavailable_now(providers.get(provider_id), now):
             continue
         out.append(leg)
     return out

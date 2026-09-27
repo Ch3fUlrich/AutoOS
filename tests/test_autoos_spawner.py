@@ -763,8 +763,11 @@ class ProbeProposalTests(unittest.TestCase):
             "r-proven": {"legs": ["clean/big"]},
             "r-mixed": {"legs": ["clean/big", "clean/small"]},
             "r-with-unavailable-provider": {"legs": ["clean/big", "flaky/small"]},
-            "r-with-unavailable-leg": {"legs": ["clean/big", "clean/small"],
-                                       "unavailable_legs": {"clean/small": {}}},
+            "r-with-unavailable-leg": {
+                "legs": ["clean/big", "clean/small"],
+                # The schema requires `available` on an unavailable_legs entry;
+                # unavailable_now drops it on available: false.
+                "unavailable_legs": {"clean/small": {"available": False}}},
         },
     }
 
@@ -820,6 +823,31 @@ class ProbeProposalTests(unittest.TestCase):
         # Only clean/big remains (proven) once clean/small is excluded: no proposal.
         out = self.cli.probe_proposal("r-with-unavailable-leg", "pass", None, self.REGISTRY, {})
         self.assertIsNone(out)
+
+    def test_a_provider_with_a_future_until_drops_its_leg(self):
+        # UNTILfix: _available_legs must read unavailable_until through
+        # registry.unavailable_now, never a local `available` snapshot, so it
+        # agrees with the resolver. A provider whose until is still ahead
+        # drops its leg even with no available: false.
+        registry = json.loads(json.dumps(self.REGISTRY))
+        registry["providers"]["flaky"]["available"] = True
+        registry["providers"]["flaky"]["unavailable_until"] = (
+            "2999-01-01T00:00:00Z")
+        self.assertEqual(
+            self.cli._available_legs(
+                registry["routes"]["r-with-unavailable-provider"], registry),
+            ["clean/big"])
+
+    def test_a_provider_whose_until_passed_is_available_again(self):
+        # ...and the same provider with a passed until is usable again, even
+        # though it still carries available: false (the self-heal rule).
+        registry = json.loads(json.dumps(self.REGISTRY))
+        registry["providers"]["flaky"]["unavailable_until"] = (
+            "2000-01-01T00:00:00Z")
+        self.assertEqual(
+            self.cli._available_legs(
+                registry["routes"]["r-with-unavailable-provider"], registry),
+            ["clean/big", "flaky/small"])
 
     def test_unknown_route_is_none(self):
         self.assertIsNone(self.cli.probe_proposal("no-such-route", "pass", None, self.REGISTRY, {}))
@@ -2001,6 +2029,33 @@ class McpRouteTests(unittest.TestCase):
             self.assertEqual(set(row), {"id", "class", "legs", "retired"})
             for leg in row["legs"]:
                 self.assertEqual(set(leg), {"leg", "available"})
+
+    def test_list_agents_reads_unavailable_until_at_the_current_clock(self):
+        # UNTILfix: the per-leg `available` flag must come from
+        # registry.unavailable_now, the one availability rule, so an operator
+        # sees exactly what the resolver's hard filter applies.
+        registry = {
+            "clients": {},
+            "providers": {
+                "ahead": {"id": "ahead", "available": True,
+                          "unavailable_until": "2999-01-01T00:00:00Z"},
+                "healed": {"id": "healed", "available": False,
+                           "unavailable_until": "2000-01-01T00:00:00Z"},
+            },
+            "models": {"big": {"id": "big"}},
+            "routes": {"r": {"id": "r",
+                             "legs": ["ahead/big", "healed/big"]}},
+        }
+        with mock.patch.object(mcp_server.agent, "load_registry",
+                               return_value=registry), \
+                mock.patch.object(mcp_server.agent.measure_mod,
+                                  "client_state", return_value={}):
+            out = mcp_server.list_agents()
+        self.assertNotIn("error", out)
+        legs = {row["leg"]: row["available"]
+                for row in out["routes"][0]["legs"]}
+        self.assertFalse(legs["ahead/big"])
+        self.assertTrue(legs["healed/big"])
 
     def test_context_returns_a_dict(self):
         with tempfile.TemporaryDirectory() as tmp:

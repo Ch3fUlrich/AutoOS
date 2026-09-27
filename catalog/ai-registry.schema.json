@@ -48,6 +48,11 @@
       "description": "D20: default (unmeasured), probe (overlay-measured), or the ISO date a measurement/decision was made.",
       "pattern": "^(default|probe|\\d{4}-\\d{2}-\\d{2})$"
     },
+    "until_tag": {
+      "type": "string",
+      "description": "ISO-8601 UTC instant, e.g. \"2026-10-01T09:05:00Z\" (pattern-checked here; parseability is enforced by tools/registry.py check rule 7).",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
     "sourced_number": {
       "type": "object",
       "description": "The one consistent shape (D20) for a policy number that is not itself a data table: the value plus where it came from.",
@@ -94,6 +99,10 @@
         "available": {
           "type": "boolean",
           "description": "Additive field, not in spec 3.1: operator decision 2026-09-25 (OpenRouter not topped up) needs a way to mark a provider unusable without deleting or reordering its data - see routes.<id>.unavailable_legs for the matching per-leg flag. Omitted (not false) means available."
+        },
+        "unavailable_until": {
+          "$ref": "#/$defs/until_tag",
+          "description": "Additive field, not in spec 3.1 (brief UNTIL 2026-09-26, skill rule R-gateway-12): time-bounded unavailability - the entry is unavailable until this UTC instant, then counts as available again on its own (the resolver's reason says 're-probe'; a multi-day quota reset never needs a hand edit to undo). Resolver-only: the renders and their CI drift gates never read it."
         },
         "trains_on_prompts": {
           "type": "boolean",
@@ -230,6 +239,10 @@
             "additionalProperties": false,
             "properties": {
               "available": { "const": false },
+              "unavailable_until": {
+                "$ref": "#/$defs/until_tag",
+                "description": "Time-bounded form of the flag (brief UNTIL 2026-09-26, R-gateway-12): the leg is unavailable until this UTC instant, then available again without a hand edit. Resolver-only; renders ignore it."
+              },
               "$comment": { "$ref": "#/$defs/comment" }
             }
           }
@@ -253,6 +266,14 @@
         "signin_check": {
           "type": ["string", "null"],
           "description": "'env:<NAME>' for a gateway client (presence check), the literal probe command for a client tools/autoos_clients.py already probes (agy), or null where no probe exists yet."
+        },
+        "available": {
+          "type": "boolean",
+          "description": "Additive field, not in spec 3.1 (brief UNTIL 2026-09-26): a client marked false is filtered out of routing; pair it with unavailable_until for a time-bounded outage so it comes back on its own."
+        },
+        "unavailable_until": {
+          "$ref": "#/$defs/until_tag",
+          "description": "Additive field, not in spec 3.1 (brief UNTIL 2026-09-26, skill rule R-gateway-12): the client is unavailable until this UTC instant (e.g. a 429 quota reset), then counts as available again - the resolver's reason says 're-probe'. Resolver-only: renders and CI drift gates never read it."
         },
         "$comment": { "$ref": "#/$defs/comment" }
       }
