@@ -110,17 +110,24 @@ WORKDIR="$(prof_key HS_WORKDIR)"
 [ -x "$HERE/herdr-sessions.sh" ] || { echo "FATAL: driver missing at $HERE/herdr-sessions.sh" >&2; exit 1; }
 
 # Herdr binary path spliced into both herdr-server templates (ExecCondition and
-# ExecStart), and into the system-scope precondition below. The profile's
-# HERDR_BIN wins -- the driver reads the same key, so the unit and the driver
-# cannot disagree about which herdr is installed. An unset key keeps each
-# scope's historical literal: %h/.local/bin/herdr for user units (the user
+# ExecStart), and into the precondition both scopes are checked against below.
+# The profile's HERDR_BIN wins -- the driver reads the same key, so the unit and
+# the driver cannot disagree about which herdr is installed. An unset key keeps
+# each scope's historical literal: %h/.local/bin/herdr for user units (the user
 # manager expands %h per user) and /root/.local/bin/herdr for system units.
-# NOT systemd_escape'd: the user default IS the %h specifier, so doubling it
-# would render a literal "%h" directory that does not exist.
+# `%h/` is the one specifier allowed at the front of a profile's HERDR_BIN, and
+# it means the same thing to both consumers: install.sh leaves it intact for the
+# manager, hs_resolve_h_specifier turns it into $HOME for everything that has to
+# touch the filesystem here (and the driver does the same before it execs).
 HERDR_BIN="$(prof_key HERDR_BIN)"
 if [ -z "$HERDR_BIN" ]; then
     if [ "$SCOPE" = user ]; then HERDR_BIN='%h/.local/bin/herdr'; else HERDR_BIN=/root/.local/bin/herdr; fi
 fi
+
+# The driver's own library, for the one rule both consumers must agree on
+# (what a leading `%h/` means). It defines functions only.
+# shellcheck source=lib/herdr-lib.sh
+. "$HERE/lib/herdr-lib.sh"
 
 say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 run() { if [ "$DRY" = 1 ]; then echo "  would: $*"; else "$@"; fi; }
@@ -175,29 +182,23 @@ systemd_escape() {
     printf '%s' "$out"
 }
 
-# systemd_escape_path <value>: like systemd_escape but also wraps the result
-# in double quotes if it contains spaces or tabs, so systemd's ExecStart
-# parser sees it as a single argument. Specifiers (%h, %u, etc.) are passed
-# through unquoted because they are not literal paths.
+# systemd_escape_path <value>: the form of a path for a systemd *command line*
+# (ExecStart=, ExecCondition=) -- always double-quoted, so the parser reads it
+# back as exactly one argument whatever it contains, with systemd's own
+# escapes inside the quotes (`\`, `"`) and every `%` doubled so a literal `%`
+# survives specifier expansion. The one exception is a leading `%h/`, which is
+# not a literal path but the specifier the user-scope default is written with,
+# and is kept intact -- inside the quotes, where systemd expands it just the
+# same. Never an early "looks like a specifier, return it raw" pass-through:
+# `%h/My Bin/herdr` rendered that way put an unquoted space in front of the
+# parser, which split the argument.
 systemd_escape_path() {
-    local s="$1"
-    # If it looks like a systemd specifier (starts with %), don't quote.
+    local s="$1" pre="" esc
     case "$s" in
-        %*) printf '%s' "$s"; return ;;
+        %h/*) pre='%h'; s="${s#%h}" ;;
     esac
-    local esc; esc="$(systemd_escape "$s")"
-    # Quote if it contains whitespace or is empty (empty would be invalid anyway)
-    case "$esc" in
-        *[[:space:]]*) printf '"%s"' "$esc" ;;
-        *) printf '%s' "$esc" ;;
-    esac
-}
-
-# shell_quote <value>: quote <value> for safe use inside a shell command
-# string (e.g. inside sh -c '...'). Uses printf %q which produces a
-# POSIX-compatible quoted form.
-shell_quote() {
-    printf '%q' "$1"
+    esc="$(systemd_escape "$s")"
+    printf '"%s%s"' "$pre" "$esc"
 }
 
 # systemd_escape_workdir <value>: escape <value> for use in WorkingDirectory.
@@ -220,12 +221,12 @@ systemd_escape_workdir() {
 }
 
 # Render a unit template into a real unit file. The checked-in units carry
-# five literal tokens -- @PROFILE@ (the --profile argument as given, informational
+# four literal tokens -- @PROFILE@ (the --profile argument as given, informational
 # only), @APPDIR@ (where this checkout lives), @WORKDIR@ (the cwd panes
 # inherit), @PROFILE_PATH@ (the resolved absolute profile path, what
-# HERDR_PROFILE is actually set to) and @HERDR_BIN@/@HERDR_BIN_SH@ (the herdr
-# binary the unit execs, from the profile's HERDR_BIN). Every replacement is an
-# arbitrary filesystem path, so this does NOT use sed (its replacement text
+# HERDR_PROFILE is actually set to) and @HERDR_BIN@ (the herdr binary the unit
+# execs, from the profile's HERDR_BIN). Every replacement is an arbitrary
+# filesystem path, so this does NOT use sed (its replacement text
 # treats `&` as "the matched text" and `\` as an escape, both unescaped here) --
 # and, less obviously, does NOT use bash's own `${var/pattern/value}` either: on
 # bash >= 5.2 (patsub_replacement, on by default) that construct has the exact
@@ -236,26 +237,28 @@ systemd_escape_workdir() {
 # double quotes (WorkingDirectory is the one exception -- systemd does not
 # strip quotes there), so a path with a space stays one token, and a literal
 # `%`/`"`/`\` survives specifier expansion and quote parsing.
-# @HERDR_BIN@ is rendered with systemd_escape_path (quoted if needed for ExecStart).
-# @HERDR_BIN_SH@ is rendered with shell_quote (for use inside sh -c).
+# @HERDR_BIN@ goes through systemd_escape_path, which always quotes: the unit
+# hands the binary to the shell as a positional parameter
+# (`sh -c 'script' _ @HERDR_BIN@`, referenced as "$1"), so the path is escaped
+# for systemd ONLY. Quoting it a second time for the shell as well -- which is
+# what the `sh -c '... <path> ...'` form this replaces needed -- is how a `%`
+# ended up a fatal specifier and a `\` an escape systemd ignores.
 # @WORKDIR@ is rendered with systemd_escape_workdir (spaces as \x20, no quotes).
 render_unit() {
     local line
     local appdir_esc workdir_esc profile_path_esc
-    local herdr_bin_sys herdr_bin_sh
+    local herdr_bin_sys
     # Escape once, not once per line.
     appdir_esc="$(systemd_escape "$APPDIR")"
     workdir_esc="$(systemd_escape_workdir "$WORKDIR")"
     profile_path_esc="$(systemd_escape "$PROFILE_CONF")"
     herdr_bin_sys="$(systemd_escape_path "$HERDR_BIN")"
-    herdr_bin_sh="$(shell_quote "$HERDR_BIN")"
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="$(_replace_token "$line" "@PROFILE@" "$PROFILE")"
         line="$(_replace_token "$line" "@APPDIR@" "$appdir_esc")"
         line="$(_replace_token "$line" "@WORKDIR@" "$workdir_esc")"
         line="$(_replace_token "$line" "@PROFILE_PATH@" "$profile_path_esc")"
         line="$(_replace_token "$line" "@HERDR_BIN@" "$herdr_bin_sys")"
-        line="$(_replace_token "$line" "@HERDR_BIN_SH@" "$herdr_bin_sh")"
         printf '%s\n' "$line"
     done < "$1"
 }
@@ -354,6 +357,41 @@ remove_unit() {  # $1=dest path
 UNITS=(herdr-sessions-update.service herdr-server.service herdr-sessions-restore.service
        herdr-sessions-snapshot.service herdr-sessions-snapshot.timer)
 
+# ── preconditions ────────────────────────────────────────────────────────────
+# Both scopes exec $HERDR_BIN from the units they write (herdr-server's
+# ExecStart, and the restore driver it runs first), so a unit installed against
+# a path with nothing executable there is a unit that can never start -- and
+# nothing else at install time says so. Checking only the system branch left the
+# user branch able to ship exactly that.
+#
+# These gate a REAL install only. --dry-run must work from any checkout, as any
+# user, with no herdr installed -- that is what makes it usable as a CI smoke
+# test (see tests/test_smoke.sh) instead of only ever runnable on the live host.
+# The units are rendered with @APPDIR@ = this checkout, so any location works.
+# --unregister is exempt too: removing units never needs the binary.
+if [ "$UNREGISTER" != 1 ]; then
+    HERDR_BIN_HERE="$(hs_resolve_h_specifier "$HERDR_BIN")"
+    if [ "$DRY" = 1 ]; then
+        say "dry-run: skipping preconditions"
+        if [ "$SCOPE" = system ]; then
+            echo "    (a real install requires: root, and herdr at $HERDR_BIN)"
+        else
+            echo "    (a real install requires: herdr at $HERDR_BIN)"
+        fi
+    else
+        if [ "$SCOPE" = system ] && [ "$(id -u)" -ne 0 ]; then
+            echo "must run as root" >&2; exit 1
+        fi
+        [ -x "$HERDR_BIN_HERE" ] || {
+            echo "FATAL: herdr is not installed at $HERDR_BIN" >&2
+            [ "$HERDR_BIN_HERE" = "$HERDR_BIN" ] ||
+                echo "       (%h resolved to $HERDR_BIN_HERE)" >&2
+            echo "       set HERDR_BIN in $PROFILE_CONF to the herdr you run" >&2
+            exit 1
+        }
+    fi
+fi
+
 if [ "$UNREGISTER" = 1 ]; then
     if [ "$SCOPE" = system ] && [ "$DRY" != 1 ] && [ "$(id -u)" -ne 0 ]; then
         echo "must run as root" >&2; exit 1
@@ -407,19 +445,7 @@ if [ "$SCOPE" = user ]; then
     echo "Undo: ./install.sh --profile $PROFILE --unregister"
 else
     # ── system scope: root required ──────────────────────────────────────────
-    # These preconditions only gate a REAL install. --dry-run must work from any
-    # checkout, as any user, with no herdr installed -- that is what makes it
-    # usable as a CI smoke test (see tests/test_smoke.sh) instead of only ever
-    # runnable on the live host.
-    # The units are rendered with @APPDIR@ = this checkout, so any location works.
-    if [ "$DRY" = 1 ]; then
-        say "dry-run: skipping root/herdr-binary preconditions"
-        echo "    (a real install requires: root, and herdr at $HERDR_BIN)"
-    else
-        [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
-        [ -x "$HERDR_BIN" ] || {
-            echo "FATAL: herdr is not installed at $HERDR_BIN" >&2; exit 1; }
-    fi
+    # (root and the herdr binary were checked under "preconditions" above.)
 
     say "systemd system units -> $DEST"
     for u in "${UNITS[@]}"; do

@@ -44,9 +44,12 @@ Environment=SHELL=/bin/zsh
 # panes inherit this manager environment rather than an interactive .zshrc.
 Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # @HERDR_BIN@ is rendered by install.sh from the profile's HERDR_BIN
-# (default %h/.local/bin/herdr): the same binary the driver runs.
-# @HERDR_BIN_SH@ is the shell-quoted form for use inside sh -c.
-ExecStart=/bin/sh -c 'if @HERDR_BIN_SH@ status 2>/dev/null | grep -q "status: running"; then echo "herdr server already running — nothing to do"; exit 0; fi; exec @HERDR_BIN_SH@ server'
+# (default %h/.local/bin/herdr): the same binary the driver runs. It arrives as
+# ONE quoted argument placed AFTER the script (so the shell never has to parse
+# it, and `sh -c` binds it to $1), because a path escaped twice -- once for
+# systemd, once for the shell -- is a path whose `%` systemd reads as a
+# specifier and whose `\` it reads as noise.
+ExecStart=/bin/sh -c 'if "$1" status 2>/dev/null | grep -q "status: running"; then echo "herdr server already running — nothing to do"; exit 0; fi; exec "$1" server' _ @HERDR_BIN@
 Restart=on-failure
 RestartSec=10
 # The guard above exits 0 when a server is already up; RemainAfterExit keeps the

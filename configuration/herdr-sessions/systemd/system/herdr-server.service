@@ -52,10 +52,18 @@ WorkingDirectory=@WORKDIR@
 # Restart=on-failure retries forever. StartLimitBurst does NOT stop it — it only
 # pauses the burst until the interval rolls over, then systemd tries again.
 # @HERDR_BIN@ is rendered by install.sh from the profile's HERDR_BIN
-# (default /root/.local/bin/herdr): the same binary the driver runs.
-# @HERDR_BIN_SH@ is the shell-quoted form for use inside sh -c.
-ExecCondition=/bin/sh -c 'if @HERDR_BIN_SH@ pane list >/dev/null 2>&1; then exit 1; fi; exit 0'
-ExecStart=@HERDR_BIN@ server
+# (default /root/.local/bin/herdr): the same binary the driver runs. It arrives
+# as ONE quoted argument -- never as the unit's executable. Both lines below
+# hand it to the shell as $1 rather than interpolating it into the script text:
+# the path is then escaped for systemd only, never twice.
+#
+# ExecStart goes through `exec` for the same reason: systemd validates the
+# executable's own path and refuses one containing a quote or a backslash
+# ("Executable name contains special characters" -> the unit will not load),
+# while an argument may be any path. The `exec` keeps herdr as the unit's own
+# process, so Restart= and the cgroup are unchanged.
+ExecCondition=/bin/sh -c 'if "$1" pane list >/dev/null 2>&1; then exit 1; fi; exit 0' _ @HERDR_BIN@
+ExecStart=/bin/sh -c 'exec "$1" server' _ @HERDR_BIN@
 
 Restart=on-failure
 RestartSec=10
