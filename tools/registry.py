@@ -47,7 +47,10 @@ Three subcommands:
        false`` -- the resolver reads ``available`` to decide whether to
        emit a re-probe note after the until passes (FUP 2026-09-27,
        measured on ``clients.agy`` which had ``unavailable_until`` without
-       ``available: false`` and silently lost the re-probe on expiry).
+       ``available: false`` and silently lost the re-probe on expiry);
+    9. every serving route leg is allowed by policy.leg_rules (ordered fnmatch
+       rules, first match wins, no match = allowed; leg_rule_for()); a denied
+       leg must be gated (available false) - L0 ONE-ROUTER 2026-09-27.
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -133,6 +136,7 @@ derived from this file's own location.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import importlib.util
 import ipaddress
 import json
@@ -1830,6 +1834,56 @@ def models_doc_diff(rendered_block: str, current_block: str) -> list:
 
 
 # ===========================================================================
+# rule 9 - leg_rules policy gates (briefs/common.md Claude budget)
+# ===========================================================================
+
+
+def leg_rule_for(leg: str, registry: dict):
+    """The first policy.leg_rules entry whose fnmatch `match` pattern matches
+    `leg`, or None when no rule matches (no match = allowed). The single
+    matcher: _check_leg_rules() and the renders (OR1) both call it."""
+    rules = _section(registry, "policy").get("leg_rules")
+    for rule in rules if isinstance(rules, list) else []:
+        if (isinstance(rule, dict) and isinstance(rule.get("match"), str)
+                and fnmatch.fnmatchcase(leg, rule["match"])):
+            return rule
+    return None
+
+
+def leg_denied(leg: str, registry: dict) -> bool:
+    """Whether policy.leg_rules denies `leg` (first matching rule has allow false)."""
+    rule = leg_rule_for(leg, registry)
+    return rule is not None and rule.get("allow") is not True
+
+
+def _check_leg_rules(registry) -> list:
+    """rule 9 - every serving route leg is allowed by policy.leg_rules.
+
+    The rules encode the operator's budget and gateway-fitness decisions
+    (briefs/common.md 'Claude budget'; L0 ONE-ROUTER 2026-09-27 measured the
+    live gateway serving legs they forbid). A denied leg passes only while it
+    is gated the same way the renders read gating - _leg_is_unavailable():
+    routes.<id>.unavailable_legs[leg].available false, or its provider's
+    available false. An entry with available true (or only a past
+    unavailable_until) does not gate it: the check stays clock-free."""
+    problems = []
+    for route_id, route in sorted(_section(registry, "routes").items()):
+        if not isinstance(route, dict):
+            continue
+        for leg in dict.fromkeys(route.get("legs") or []):
+            rule = leg_rule_for(leg, registry)
+            if rule is None or rule.get("allow") is True:
+                continue
+            if _leg_is_unavailable(leg, route, registry):
+                continue
+            problems.append("leg_rules: routes.%s leg %s denied by %s (%s) - gate it in "
+                            "routes.%s.unavailable_legs or change the rule"
+                            % (route_id, leg, rule.get("id", "(unnamed)"),
+                               rule.get("reason", ""), route_id))
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -1845,6 +1899,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_required_keys(registry))
     problems.extend(_check_until_values(registry))
     problems.extend(_check_unavailable_until_pairs_available(registry))
+    problems.extend(_check_leg_rules(registry))
     return problems
 
 

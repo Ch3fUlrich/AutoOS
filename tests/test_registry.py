@@ -167,11 +167,12 @@ class RuleThreePrivacyTests(unittest.TestCase):
         # behaviour): the gateway does not consult unavailable_legs/
         # available:false, so rule 3 must not either. Use t2-worker-clean
         # (not exempt, unlike t1-orchestrator-clean) and its
-        # unavailable_legs-flagged openrouter leg.
+        # openrouter leg, flagged here (OR2 2026-09-27 un-gated it in the real
+        # data - the BYOK allowlist - so the test sets its own precondition).
         reg = mutated()
         reg["providers"]["openrouter"]["trains_on_prompts"] = True
-        self.assertIn("openrouter/deepseek/deepseek-v4.1-flash",
-                      reg["routes"]["t2-worker-clean"]["unavailable_legs"])
+        reg["routes"]["t2-worker-clean"].setdefault("unavailable_legs", {})[
+            "openrouter/deepseek/deepseek-v4.1-flash"] = {"available": False}
         problems = registry.check_registry(reg)
         self.assertTrue(
             any("privacy: t2-worker-clean" in p
@@ -885,6 +886,110 @@ class OpenRouterByokLegTests(unittest.TestCase):
         entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
         self.assertIn("$comment", entry)
         self.assertIn("L0 2026-09-27T03:39Z", entry["$comment"])
+
+
+class LegRulesTests(unittest.TestCase):
+    """leg_rules policy gates (briefs/common.md Claude budget rules, encoded as
+    policy.leg_rules: ordered list of {"id", "match" (fnmatch), "allow" (bool),
+    "reason", "source"}; first match wins; no match = allowed.
+
+    A denied leg that routes.<id>.unavailable_legs already gates (available:false)
+    passes the check — the operator has already acknowledged it. A denied leg
+    that is still serving (not flagged in unavailable_legs) is an error naming
+    the rule that denied it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_denied_serving_leg_fails_check_naming_the_rule(self):
+        """A leg matching a deny rule with no unavailable_legs gate is flagged."""
+        reg = mutated()
+        # groq/qwen/qwen3.8-27b resolves (provider groq, model qwen/qwen3.8-27b)
+        # and would be denied by groq/* rule
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p for p in problems),
+            problems)
+
+    def test_denied_leg_gated_via_unavailable_legs_passes(self):
+        """A leg matching a deny rule that is already in unavailable_legs is not
+        flagged — the operator has already acknowledged it."""
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        reg["routes"]["t2-worker"].setdefault("unavailable_legs", {})[
+            "groq/qwen/qwen3.8-27b"] = {"available": False}
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p for p in problems),
+            problems)
+
+    def test_allowed_leg_passes_after_deny_rule(self):
+        """First-match-wins: an allow rule placed before a deny rule exempts."""
+        reg = mutated()
+        # deepseek/deepseek-flash resolves and should be allowed by an early
+        # allow rule before the *deepseek* deny
+        reg["routes"]["t2-worker"]["legs"].append("deepseek/deepseek-flash")
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "deepseek/deepseek-flash" in p for p in problems),
+            problems)
+
+    def test_leg_with_no_matching_rule_is_allowed(self):
+        """No match in any leg_rule = allowed (not flagged)."""
+        reg = mutated()
+        # mistral/leg exists and is not matched by any leg_rule
+        reg["routes"]["t2-worker"]["legs"].append("mistral/mistral-small-latest")
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "mistral/mistral-small-latest" in p for p in problems),
+            problems)
+
+    def test_rule_order_pins_the_budget_decisions(self):
+        """The committed rules decide each measured case (first match wins)."""
+        cases = {
+            "groq/openai/gpt-oss-120b": False,          # deny-groq before allow-gpt-oss
+            "samba/gpt-oss-120b": True,
+            "opencode-zen/deepseek-v4.1-flash": False,  # zen before the deepseek allows
+            "openrouter/deepseek/deepseek-v4.1-flash": True,
+            "openrouter/meta/muse-spark-1.3-contributor-xhigh": True,
+            "openrouter/openai/gpt-oss-120b": True,
+            "openrouter/google/gemini-3.8-flash": False,
+            "deepseek/deepseek-flash": True,
+            "cheaperinference/deepseek-v4-flash": False,
+            "cc/claude-opus-4-6": True,                  # subscription seat
+            "antigravity/claude-opus-4-6-thinking": True,  # agy sign-in
+            "cheaperinference/claude-sonnet-5": False,
+            "cheaperinference/gpt-5.5": False,
+            "mistral/mistral-small-latest": True,        # no rule matches
+        }
+        got = {leg: not registry.leg_denied(leg, self.reg) for leg in cases}
+        self.assertEqual(got, cases)
+
+    def test_available_true_entry_does_not_gate_a_denied_leg(self):
+        """Only available:false gates (the renders' _leg_is_unavailable)."""
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        reg["routes"]["t2-worker"].setdefault("unavailable_legs", {})[
+            "groq/qwen/qwen3.8-27b"] = {"available": True}
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("groq/qwen/qwen3.8-27b" in p for p in problems), problems)
+
+    def test_problem_names_rule_id_and_reason(self):
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        rule = registry.leg_rule_for("groq/qwen/qwen3.8-27b", reg)
+        hits = [p for p in registry.check_registry(reg) if "groq/qwen/qwen3.8-27b" in p]
+        self.assertEqual(len(hits), 1, hits)
+        self.assertIn(rule["id"], hits[0])
+        self.assertIn(rule["reason"], hits[0])
+
+    def test_real_registry_passes_leg_rules_check(self):
+        """The committed registry must itself pass check (any denied serving
+        leg must be gated via unavailable_legs)."""
+        self.assertEqual(registry.check_registry(self.reg), [])
 
 
 if __name__ == "__main__":
