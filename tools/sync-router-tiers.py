@@ -111,7 +111,10 @@ def provider_maps_from_dict(providers: dict):
     free_ai's omniroute_id to free-ai, exposing exactly this). An entry with
     no omniroute_id (meta, the client key) has no refs and is skipped, as is
     any non-dict entry (defensive - the caller's source is otherwise trusted
-    to already be well-formed).
+    to already be well-formed). A provider NAME always outranks another
+    provider's omniroute_id for the same key (name keys are written first, an
+    omniroute_id key only when no name claims it), matching resolve_leg()'s
+    name-first precedence (PROV finding 4).
 
     Only ids whose LiteLLM transport differs from the OmniRoute id appear in
     the prefix map: OmniRoute's <provider>/<model> is already LiteLLM's shape,
@@ -120,22 +123,24 @@ def provider_maps_from_dict(providers: dict):
     names the conventional env vars; Leg falls back to <PROVIDER>_API_KEY.
     """
     prefix, api_base, env_key = {}, {}, {}
-    for name, entry in providers.items():
-        if not isinstance(entry, dict):
-            continue
-        omni = entry.get("omniroute_id")
-        if not omni:
-            continue
-        # Both valid leg spellings key the same transport (see the docstring);
-        # dict.fromkeys dedupes when the providers key already equals the
-        # omniroute_id, keeping the two-map shape unchanged for those.
-        for key in dict.fromkeys((name, omni)):
-            if entry.get("litellm_prefix"):
-                prefix[key] = entry["litellm_prefix"]
-            if entry.get("api_base"):
-                api_base[key] = entry["api_base"]
-            if entry.get("litellm_env"):
-                env_key[key] = entry["litellm_env"]
+    rows = [(name, entry) for name, entry in providers.items()
+            if isinstance(entry, dict) and entry.get("omniroute_id")]
+    # Names first (PROV finding 4): provider_maps mirrors resolve_leg()'s
+    # name-first precedence, so a provider name always owns its own key.
+    for name, entry in rows:
+        for dest, field in ((prefix, "litellm_prefix"), (api_base, "api_base"),
+                            (env_key, "litellm_env")):
+            if entry.get(field):
+                dest[name] = entry[field]
+    # Then each omniroute_id, but only where no provider name already claimed
+    # the key - otherwise a provider whose name equals ANOTHER provider's
+    # omniroute_id would silently steal that transport (last writer wins).
+    for name, entry in rows:
+        omni = entry["omniroute_id"]
+        for dest, field in ((prefix, "litellm_prefix"), (api_base, "api_base"),
+                            (env_key, "litellm_env")):
+            if entry.get(field) and omni not in dest:
+                dest[omni] = entry[field]
     return prefix, api_base, env_key
 
 

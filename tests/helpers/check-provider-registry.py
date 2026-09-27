@@ -46,18 +46,22 @@ def expected_by_omni(providers: dict):
     Both are valid leg prefixes (tools/registry.py's resolve_leg accepts
     either), so provider_maps_from_dict() keys both; this mirrors it."""
     prefix, api_base, env_key, seen = {}, {}, {}, {}
-    for name, entry in providers.items():
-        omni = entry.get("omniroute_id")
-        if not omni:
-            continue
-        seen[omni] = name
-        for key in dict.fromkeys((name, omni)):
-            if entry.get("litellm_prefix"):
-                prefix[key] = entry["litellm_prefix"]
-            if entry.get("api_base"):
-                api_base[key] = entry["api_base"]
-            if entry.get("litellm_env"):
-                env_key[key] = entry["litellm_env"]
+    rows = [(name, entry) for name, entry in providers.items()
+            if isinstance(entry, dict) and entry.get("omniroute_id")]
+    # Name keys first, then omniroute_id keys only when no name claims them -
+    # the same name-first precedence as provider_maps_from_dict() (PROV finding 4).
+    for name, entry in rows:
+        seen[entry["omniroute_id"]] = name
+        for dest, field in ((prefix, "litellm_prefix"), (api_base, "api_base"),
+                            (env_key, "litellm_env")):
+            if entry.get(field):
+                dest[name] = entry[field]
+    for name, entry in rows:
+        omni = entry["omniroute_id"]
+        for dest, field in ((prefix, "litellm_prefix"), (api_base, "api_base"),
+                            (env_key, "litellm_env")):
+            if entry.get(field) and omni not in dest:
+                dest[omni] = entry[field]
     return prefix, api_base, env_key, seen
 
 
@@ -83,6 +87,16 @@ def main() -> int:
             if env in seen_envs:
                 problems.append(f"duplicate litellm_env {env}: {seen_envs[env]}, {name}")
             seen_envs[env] = name
+
+    # 1b. a provider name must never equal ANOTHER provider's omniroute_id:
+    # provider_maps_from_dict()/expected_by_omni() key both spellings onto one
+    # string, so the collision would let one provider's transport overwrite
+    # another's (PROV finding 4).
+    for name, entry in providers.items():
+        omni = entry.get("omniroute_id")
+        if omni and omni != name and omni in providers:
+            problems.append(
+                f"provider name {omni!r} is also provider {name!r}'s omniroute_id")
 
     # 2. the case quirk and the two null rows are contracts, not trivia.
     if "SambaNova" not in providers:

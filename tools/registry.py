@@ -1981,15 +1981,43 @@ def models_doc_diff(rendered_block: str, current_block: str) -> list:
 # ===========================================================================
 
 
+def _canonical_leg_spelling(leg: str, registry: dict) -> str:
+    """The leg re-spelled with its provider's canonical `omniroute_id` prefix
+    (the gateway's spelling), or the raw string when it does not resolve.
+    resolve_leg() accepts EITHER the providers key or any provider's
+    omniroute_id, so policy.leg_rules written against one spelling must still
+    gate a leg written with the other (PROV finding 3: a leg written
+    `cheapinference/glm-4.5-air` previously slipped past `cheaperinference/*`)."""
+    if not isinstance(leg, str):
+        return leg
+    try:
+        provider_id, model_id = resolve_leg(leg, registry)
+    except ValueError:
+        return leg
+    provider = _section(registry, "providers").get(provider_id)
+    omni = provider.get("omniroute_id") if isinstance(provider, dict) else None
+    return "%s/%s" % (omni or provider_id, model_id)
+
+
 def leg_rule_for(leg: str, registry: dict):
     """The first policy.leg_rules entry whose fnmatch `match` pattern matches
     `leg`, or None when no rule matches (no match = allowed). The single
-    matcher: _check_leg_rules() and the renders (OR1) both call it."""
+    matcher: _check_leg_rules() and the renders (OR1) both call it.
+
+    Both valid spellings of a leg are tested - the raw string and its canonical
+    `omniroute_id` re-spelling (PROV finding 3) - so a rule matches whichever
+    spelling the leg was written with. Rule order still decides first match."""
     rules = _section(registry, "policy").get("leg_rules")
+    candidates = [leg]
+    canonical = _canonical_leg_spelling(leg, registry)
+    if canonical not in candidates:
+        candidates.append(canonical)
     for rule in rules if isinstance(rules, list) else []:
-        if (isinstance(rule, dict) and isinstance(rule.get("match"), str)
-                and fnmatch.fnmatchcase(leg, rule["match"])):
-            return rule
+        if not (isinstance(rule, dict) and isinstance(rule.get("match"), str)):
+            continue
+        for candidate in candidates:
+            if fnmatch.fnmatchcase(candidate, rule["match"]):
+                return rule
     return None
 
 

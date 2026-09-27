@@ -927,6 +927,19 @@ class OpenRouterByokLegTests(unittest.TestCase):
         self.assertIsNotNone(entry, "t2-worker no longer gates the BYOK leg")
         self.assertFalse(entry["available"])
 
+    def test_unavailable_entry_has_the_l0_comment(self):
+        """PROV finding 12: the route-level gate must carry its provenance
+        ($comment), not only the boolean flag - the removed gate-comment test's
+        contract (D20: an unmeasured lesson is not a rule)."""
+        entry = (self.reg["routes"]["t2-worker"].get("unavailable_legs") or {}).get(
+            "openrouter/openai/gpt-oss-120b")
+        self.assertIsNotNone(entry, "t2-worker no longer gates the BYOK leg")
+        comment = entry.get("$comment")
+        self.assertIsInstance(comment, str, "$comment provenance is missing")
+        self.assertTrue(comment.strip())
+        self.assertIn("2026-09-27T03:39Z", comment)
+        self.assertIn("probe-toolcalls.py", comment)
+
     def test_gated_leg_is_not_servable_in_any_route_listing_it(self):
         listing = 0
         for rid, route in self.reg["routes"].items():
@@ -1037,6 +1050,33 @@ class LegRulesTests(unittest.TestCase):
         }
         got = {leg: not registry.leg_denied(leg, self.reg) for leg in cases}
         self.assertEqual(got, cases)
+
+    def test_providers_key_spelling_matches_the_omniroute_id_rule(self):
+        """PROV finding 3: resolve_leg() accepts either the providers key or a
+        provider's omniroute_id, so leg_rules must gate BOTH spellings. A leg
+        written with the providers key (cheapinference/…) must hit the rule
+        written against the canonical id (cheaperinference/*)."""
+        # both spellings of the denied leg are denied
+        self.assertTrue(registry.leg_denied("cheapinference/glm-4.5-air", self.reg))
+        self.assertTrue(registry.leg_denied("cheaperinference/glm-4.5-air", self.reg))
+        # and both spellings of an allowed leg stay allowed (allow wins, first
+        # match, before the trailing deny-cheaperinference)
+        self.assertFalse(registry.leg_denied("cheapinference/kimi-k3", self.reg))
+        self.assertFalse(registry.leg_denied("cheaperinference/kimi-k3", self.reg))
+        # the providers key spelling is what the canonical resolution yields
+        self.assertEqual(
+            registry._canonical_leg_spelling("cheapinference/glm-4.5-air", self.reg),
+            "cheaperinference/glm-4.5-air")
+
+    def test_providers_key_spelling_is_flagged_when_serving(self):
+        """A denied leg is only tolerated while the route gates it by the same
+        exact string; a providers-key spelling with no gate is still a problem."""
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append("cheapinference/glm-4.5-air")
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("leg_rules" in p and "cheapinference/glm-4.5-air" in p
+                for p in problems), problems)
 
     def test_available_true_entry_does_not_gate_a_denied_leg(self):
         """Only available:false gates (the renders' _leg_is_unavailable)."""
@@ -1309,12 +1349,15 @@ class FreeAiProviderTests(unittest.TestCase):
             self.assertEqual(legs[-1], "free_ai/qwen7b", route_id)
 
     def test_no_clean_route_carries_free_ai(self):
+        # PROV finding 11: assert BOTH spellings - the registry leg (free_ai/)
+        # and its rendered omniroute_id (free-ai/) - so a regression that emits
+        # either into a -clean route is caught.
         for route_id, route in self.reg["routes"].items():
             if not route_id.endswith("-clean"):
                 continue
             self.assertFalse(
                 [leg for leg in route.get("legs") or []
-                 if leg.startswith("free_ai/")],
+                 if leg.startswith(("free_ai/", "free-ai/"))],
                 "clean route %s carries free_ai" % route_id)
 
     def test_gateway_legs_keep_free_ai_on_the_free_only_routes(self):

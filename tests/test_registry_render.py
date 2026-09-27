@@ -1402,11 +1402,14 @@ class FreeAiRenderTests(unittest.TestCase):
                              "free-ai/qwen7b", route_id)
 
     def test_free_ai_never_enters_a_clean_combo(self):
+        # PROV finding 11: neither spelling may appear - the rendered omniroute_id
+        # (free-ai/) nor the registry leg (free_ai/).
         for combo in registry.render_omniroute(real_registry())["combos"]:
             if not combo["name"].endswith("-clean"):
                 continue
             self.assertFalse(
-                [m for m in combo["models"] if m.startswith("free-ai/")],
+                [m for m in combo["models"]
+                 if m.startswith(("free-ai/", "free_ai/"))],
                 combo["name"])
 
     def test_litellm_blocks_carry_free_ai_on_both_free_only_routes(self):

@@ -85,6 +85,41 @@ class ProviderMapsReadTheRegistryTests(unittest.TestCase):
         self.assertEqual(sync.REGISTRY_FILE, REGISTRY_PATH)
         self.assertEqual(sync.provider_maps(), sync.provider_maps(REGISTRY_PATH))
 
+    def test_a_name_key_beats_another_providers_omniroute_id(self):
+        """PROV finding 4: name keys are written first and an omniroute_id key
+        is added only when no provider name already owns it, mirroring
+        resolve_leg()'s name-first precedence. Here provider "alpha" declares
+        omniroute_id "beta", which is also provider "beta"'s own name - beta's
+        name key must keep beta's transport, not be stolen by alpha (last
+        writer would otherwise win)."""
+        sync = _load_module()
+        providers = {
+            "beta": {"omniroute_id": "beta-live", "litellm_prefix": "beta-prefix",
+                     "litellm_env": "BETA_KEY"},
+            "alpha": {"omniroute_id": "beta", "litellm_prefix": "alpha-prefix",
+                      "litellm_env": "ALPHA_KEY"},
+        }
+        prefix, _, env_key = sync.provider_maps_from_dict(providers)
+        self.assertEqual(prefix["alpha"], "alpha-prefix")
+        self.assertEqual(prefix["beta"], "beta-prefix")
+        self.assertEqual(prefix["beta-live"], "beta-prefix")
+        self.assertEqual(env_key["beta"], "BETA_KEY")
+
+    def test_real_registry_has_no_name_colliding_with_another_omniroute_id(self):
+        """The dual-keying hazard cannot fire on today's data: no provider name
+        equals another provider's omniroute_id (the invariant the helper also
+        enforces)."""
+        doc = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+        providers = doc["providers"]
+        problems = [
+            "%r is %r's omniroute_id" % (entry.get("omniroute_id"), name)
+            for name, entry in providers.items()
+            if entry.get("omniroute_id")
+            and entry["omniroute_id"] != name
+            and entry["omniroute_id"] in providers
+        ]
+        self.assertEqual(problems, [])
+
 
 class RegistryRefsTests(unittest.TestCase):
     """registry_refs() is the new default leg source (task A5c), reading
