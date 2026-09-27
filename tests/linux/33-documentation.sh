@@ -882,3 +882,13 @@ if it "phone URLs are documented without secrets"; then
     if (( ok )); then pass; else fail "phone docs missing or leaking"; fi
 fi
 
+
+if it "secret key-file backups are git-ignored (api-keys.yml.autoos-backup-*, .bak-*), the example is not"; then
+    ok=1
+    for f in configuration/api-keys.yml configuration/api-keys.yml.autoos-backup-20260101-000000 \
+             configuration/api-keys.yml.autoos-backup-20260101-000000-2 configuration/api-keys.yml.bak-20260927134910; do
+        git -C "$ROOT" check-ignore -q --no-index "$f" || { ok=0; echo "not ignored: $f" >&2; }
+    done
+    git -C "$ROOT" check-ignore -q --no-index configuration/api-keys.example.yml && { ok=0; echo "the example file is ignored" >&2; }
+    if (( ok )); then pass; else fail "a key-file backup could be committed"; fi
+fi
