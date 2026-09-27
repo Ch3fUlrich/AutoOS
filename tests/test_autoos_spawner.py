@@ -4129,6 +4129,11 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     old_root, old_track, old_overlay = (agent.ROOT, agent.TRACK_RECORD,
                                         agent.MEASURED_OVERLAY_PATH)
     agent.ROOT = root
+    # A run without --isolate works in the caller's own directory (plan["cwd"] is
+    # os.getcwd()), and the fake client writes there — so the whole run happens
+    # inside the throwaway root, never in the checkout running the suite.
+    old_cwd = os.getcwd()
+    os.chdir(root)
     agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
     agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
     cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
@@ -4195,6 +4200,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
                                             contextlib.redirect_stderr(err):
                                         rc = agent.cmd_run(args, cfg)
     finally:
+        os.chdir(old_cwd)  # before any cleanup tries to remove the temp root
         agent.time.time = old_time
         calls["track"] = agent.track.load(agent.TRACK_RECORD)
         (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
