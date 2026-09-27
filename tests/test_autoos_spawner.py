@@ -3914,6 +3914,36 @@ class WorkerRecordTests(_WorkerRecordBase):
         self.assertEqual(after["rc"], 4)
 
 
+    def test_a_failed_end_record_keeps_the_client_rc(self):
+        # L1-routing review note (1): the finally-block record write must never
+        # replace the client's rc (disk full, permissions).
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title="t", model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+
+        def boom(*_a, **_k):
+            raise OSError(28, "No space left on device")
+
+        err = io.StringIO()
+        with mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "run_client", return_value=self.agent.ClientExit(4)), \
+                mock.patch.object(self.agent, "_worker_record_end", side_effect=boom), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 4)
+        self.assertIn("could not update worker record", err.getvalue())
+
+
 class PsTests(_WorkerRecordBase):
     """The `ps` subcommand and the MCP `ps` tool read the same rows."""
 

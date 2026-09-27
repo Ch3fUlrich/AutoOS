@@ -1892,7 +1892,12 @@ def cmd_run(args, cfg: dict) -> int:
         run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
                             capture=capture)
     finally:
-        _worker_record_end(workers, worker_id, worker_rec, run_rc)
+        # A failed record write (disk full, permissions) must never replace the
+        # client's own rc or exception: ps then shows the worker as died.
+        try:
+            _worker_record_end(workers, worker_id, worker_rec, run_rc)
+        except OSError as exc:
+            print("autoos-agent: could not update worker record %s: %s" % (worker_id, exc), file=sys.stderr)
     client_tail = getattr(run_rc, "tail", "") or ""
     rc, refusal = refusal_exit(int(run_rc), getattr(run_rc, "refusal", None) or "")
     child_rc = rc  # the WIP message names the client's own rc, not a verdict override
@@ -1978,7 +1983,8 @@ def main(argv=None) -> int:
                                  "`usage --since 1h --by provider,lane`")
     sub.add_parser("list", help="show the tiers, their models and who may spawn whom")
     ps = sub.add_parser("ps", help="live table of every spawned worker on this host (all "
-                                   "worktrees and clones)")
+                                   "worktrees and clones); deletes records that ended "
+                                   "(or died) more than 7 days ago")
     ps.add_argument("--all", action="store_true",
                     help="also show exited workers from the last 24 h")
     ps.add_argument("--json", action="store_true", help="print the rows as JSON")
