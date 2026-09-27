@@ -192,6 +192,12 @@ if it "the IDE model sync tool's unit tests pass (sync-ide-models)"; then
     out="$(python3 tests/test_sync_ide_models.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/registry_loader.py: the one importlib-by-path loader for tools/
+# registry.py that the registry-consuming tools share (REVFIX).
+if it "registry loader: the shared by-path loader and its consumers (unit tests)"; then
+    out="$(python3 tests/test_registry_loader.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "every leg of a combo carries a provider prefix"; then
     bad="$(python3 - 2>&1 <<'PY'
 import json
@@ -546,6 +552,19 @@ fi
 
 if it "resolver v2: track record and Beta success estimate (unit tests)"; then
     out="$(python3 tests/test_autoos_track.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# tools/autoos_usage.py: the `usage` subcommand of autoos-agent.py reads the
+# gateway call-logs (OR4). Every test injects a fake fetch, so this never
+# calls the gateway.
+if it "autoos_usage: gateway call-logs report, paging and aggregation (unit tests)"; then
+    out="$(python3 tests/test_autoos_usage.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# REVFIX: no unit test file may be invisible to every harness. This guard
+# fails when a tests/test_*.py is not named by any suite entry point.
+if it "suite wiring: every tests/test_*.py is wired into a harness"; then
+    out="$(python3 tests/test_suite_wiring.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "autoos-agent context: fill from the session transcript (unit tests)"; then

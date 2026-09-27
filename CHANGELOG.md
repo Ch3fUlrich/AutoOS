@@ -24,10 +24,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed — `provider_maps_from_dict` keys transport by providers-key or `omniroute_id` (PROV, 2026-09-27)
 
 - **`tools/sync-router-tiers.py`**: each provider's LiteLLM transport is now keyed by both its providers key and its `omniroute_id` (deduplicated), because `resolve_leg()` accepts either as a leg prefix. This lets `free_ai/qwen7b` keep `litellm_prefix: openai` + `api_base: https://api.free.ai/v1` + `FREE_AI_API_KEY` even though the gateway catalog names the model `free-ai/qwen7b`; the config is unchanged and the registry comment now matches it. Mirrored in **`tests/helpers/check-provider-registry.py::expected_by_omni`** and asserted in **`tests/test_sync_router_tiers_registry.py`**.
+### Fixed — review batch: dropped track records, per-attempt fallthrough records, shared registry loader (REVFIX, S1-S2, 2026-09-27)
+
+- **`tools/autoos_track.py`**: `FAILURES` now names `containment` and `provider`, so a `record_run()` for a LEAK (rc 7) or a provider stop (rc 8) is no longer rejected by `validate()` and silently dropped — every `failure_class` `tools/autoos-agent.py`'s `track_entry()` emits is accepted.
+- **`tools/autoos-agent.py`**: each provider-stopped attempt in the `--isolate` fallthrough loop writes its own `track_entry`/`record_run` (gate fail, failure_class `provider`, its own route), not only the final plan; `tests/test_autoos_spawner.py::ProviderStopFallthroughTests` asserts one track line per attempt.
+- **`tools/autoos_measure.py`**: coverage matches on whole tokens, so a test name covering any token of a multi-token stem counts as covered.
+- **`tools/registry_loader.py`** (new): the one importlib-by-path loader for `tools/registry.py`; `tools/sync-ide-models.py`, `tools/audit-router.py`, `tools/mirror-litellm-env.py` and `tools/sync-openhands-profiles.py` import it instead of each carrying an identical copy. `tools/sync-router-tiers.py` guards its `sys.path.insert` against duplicates. `tools/probe_common.py:make_post()` gains a `classify_error` hook and `tools/probe-toolcalls.py`'s forked post is deleted.
+- **Tests**: `tests/test_registry_loader.py` (new, wired into both suites), the suite-wiring guard `tests/test_suite_wiring.py` (every `tests/test_*.py` must be named by a harness), and the `sk-test-dummy` fixture in `tests/linux/34-ai-services.sh` is renamed `TEST-ONLY-fake-litellm-key` (secret-scanner false positive); its three duplicated loopback HTTP servers become one `_svc_loopback_server` helper.
+
+### Added — route by client shell/write capability, fall through on a provider stop (SPAWNCAP, S2, 2026-09-27)
+
+- **`catalog/ai-registry.json`**, **`catalog/ai-registry.schema.json`**: every client now declares `capabilities` (`shell`, `write`); new `$defs.capabilities` requires both and forbids extras, and `$defs.client` requires it. opencode/claude/codex/gemini/qwen declare `true/true`; agy and qoder declare `false/false` (source: the `HEADLESS_REFUSAL_MARKERS` refusals and qoder's `--permission-mode dont_ask, no shell`, `docs/agent-protocol.md:160`).
+- **`tools/autoos-agent.py`**: `run` now refuses *before* anything is planned or started when the task needs `shell`/`write` and the named `--client` lacks one (exit 2, naming the missing capability and the clients that have it); with no `--client` it picks the first capable client (`choose_client`, `opencode` when nothing is required). A run needs shell or write when `--isolate` is set or the card is *explicit* editing (`kind` implement/debug/bulk; v1 `role=implement`); an absent, read-only (`review`/`research`/`plan`) or defaults-only card is never gated, so the existing qoder/privacy tests keep their behaviour.
+- **`tools/autoos-agent.py`**: a provider-stopped resolver-routed `--isolate` run now WIP-commits the stopped attempt and re-runs the same task in the **same sandbox** on the next route (at most 2 fallthroughs), instead of stranding the work on a dead route. Each fallthrough is logged exactly as `provider stop on <route>: <marker> -> falling through to <next>`; the gateway's `ALL_TARGETS_SKIPPED` ("all targets were skipped by pre-dispatch filters") and `credits exhausted` join the provider-stop markers. A `--tier`/v1-card/`--joinable` run keeps today's immediate exit 8.
+- Tests: `tests/test_autoos_spawner.py::ClientCapabilityTests` and `::ProviderStopFallthroughTests`.
+
+### Changed — `tests/run-tests.sh` refuses an unfiltered local run (FULLGUARD, 2026-09-27)
+
+- **`tests/run-tests.sh`**, **`.github/workflows/ci.yml`**, **`tests/linux/01-test-harness.sh`**, **`AGENTS.md`**, **`docs/`**: an unfiltered local run now exits 2 and names `--filter` / `AUTOOS_FULL_SUITE=1`; CI sets the opt-in so its one full run is unchanged (the full suite's shellcheck once OOM-killed a 16 GB host, R-host-08).
+### Changed — orchestration skill cut to 30 level rules (S1, 2026-09-27)
+
+- **`.agents/skills/unattended-orchestration/SKILL.md`**: ~130 topic rules become 30 rules (R-orch-13 different-family review before every ready, operator 2026-09-27T14:3xZ) grouped by level (`router` L0, `coord` L1, `orch` L2, `worker` L3); mechanical rules point to `autoos-agent.py heartbeat`, the resolver and `registry.py` instead of restating them. New rules from 2026-09-27 lessons: sudo/root changes always get the Sonnet final, test fakes follow the real tool's contract, data lanes grep all of `tests/` for changed ids. **`references/rule-map.md`** maps every old id; **`tests/test_skill_rules.py`** fails when a cited `R-` id resolves nowhere.
 
 ### Added — Free.ai free provider restores `t3-driver-free-only` (FREEAI, 2026-09-27)
 
 - **`catalog/ai-registry.json`**, **`configuration/omniroute/combos.json`**, **`configuration/litellm/config.yaml`**, **`catalog/ide-models.json`**, **`configuration/openhands/tier-profiles.json`**, **`opencode.jsonc`**, **`docs/models.md`**, **`configuration/omniroute/apply.sh`**, **`configuration/api-keys.example.yml`**, **`docs/api-keys.md`**: Free.ai (`free_ai`, model `qwen7b`, OpenAI-compatible at `https://api.free.ai/v1`; 30k tokens/day, 10 rpm, public/may train) joins as the last leg of `t2-worker-free-only` and the only leg of `t3-driver-free-only`, restoring the latter as a servable combo; never private-safe and never in a `*-clean` route. `apply.sh`'s existing-id regex widens to `[a-z0-9_-]+` so the underscored `omniroute_id` stays idempotent.
+### Changed — Antigravity Hub sets up chrome-sandbox itself via sudo (agysb)
+
+- **`lib/linux/install.sh`**: `antigravity_sandbox_note` is now
+  `antigravity_sandbox_setup` (operator decision 2026-09-27: this one step may
+  run sudo). When the kernel needs the SUID helper it re-checks
+  `chrome-sandbox` (regular file, no symlink, 1 hard link), skips an already
+  root-owned 4755 helper, prints the would-run line under `--dry-run`, and
+  otherwise runs `sudo -n chown root:root` + `sudo -n chmod 4755` with
+  `setup.sh --yes` (plain `sudo`, so it may prompt, on an interactive TTY
+  without `--yes`); a missing/failed sudo prints the two commands for the
+  operator and never fails the install. NEVER `--no-sandbox`.
+- **TOCTOU fix**: each privileged step re-checks inside the one root process
+  (`find -P` on a still-regular single-link file, chmod only on a file root
+  owns), so a symlink swapped in after the check can no longer escalate;
+  anything else falls back to the printed commands.
+
 
 ### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
 ### Added — one-command standby router: `ai-stack.sh failover` (lstby)

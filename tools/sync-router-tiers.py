@@ -242,7 +242,9 @@ def _gateway_legs(route, registry):
     so a module-level import would be circular. The drop rules
     (unavailable/denied/client_bound) have one home - registry.py - and this
     tool reuses them rather than copying them."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    tools_dir = str(Path(__file__).resolve().parent)
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
     from registry import gateway_legs  # noqa: E402
     return gateway_legs(route, registry)
 

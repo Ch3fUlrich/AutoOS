@@ -1,5 +1,8 @@
 # API keys — how to get each one
 
+Where each key and password lives, what it guards, and how to rotate it:
+[Logins and secrets](web-services.md#logins-and-secrets).
+
 **One file, one command.** Every key goes into
 `configuration/api-keys.yml` (git-ignored; copy from
 `configuration/api-keys.example.yml`), then:

@@ -349,5 +349,33 @@ class StaleManagedBlockTests(unittest.TestCase):
         self.assertEqual(self._run("--check", "--quiet").returncode, 0)
 
 
+class GatewayLegsNoPathGrowthTests(unittest.TestCase):
+    """_gateway_legs() imports tools/registry.py lazily (registry.py loads
+    THIS module by path, so a module-level import would be circular). It must
+    add tools/ to sys.path once, not on every leg lookup: a long-lived caller
+    (a test process, a tool called in a loop) otherwise accumulates one
+    duplicate sys.path entry per route - the same unbounded-growth bug the
+    review flagged in _gateway_legs()."""
+
+    def test_repeated_leg_lookups_do_not_grow_sys_path(self):
+        sync = _load_module()
+        tools_dir = str(TOOL.resolve().parent)
+        before = list(sys.path)
+        try:
+            # Start from a clean slate: the first call is the one allowed to
+            # add tools/, any later call must not add another copy.
+            sys.path[:] = [p for p in sys.path if p != tools_dir]
+            route = MINIMAL_REGISTRY["routes"]["t2-worker"]
+            sync._gateway_legs(route, MINIMAL_REGISTRY)
+            after_first = sys.path.count(tools_dir)
+            sync._gateway_legs(route, MINIMAL_REGISTRY)
+            sync._gateway_legs(MINIMAL_REGISTRY["routes"]["t3-driver"], MINIMAL_REGISTRY)
+            after_many = sys.path.count(tools_dir)
+        finally:
+            sys.path[:] = before
+        self.assertEqual(after_first, 1, "tools/ was not added exactly once")
+        self.assertEqual(after_many, 1, "sys.path grew once per leg lookup")
+
+
 if __name__ == "__main__":
     unittest.main()
