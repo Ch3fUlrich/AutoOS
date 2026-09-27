@@ -227,9 +227,13 @@ class WriteTests(SandboxCase):
                                  f"{gateway} {entry.get('modelID')} has unexpected keys: {unexpected}")
                 if "variants" in entry:
                     self.assertIsInstance(entry["variants"], list)
+                    # opencode v2.0.16 config schema (packages/schema/src/config/
+                    # provider.ts:76-79): each item is {id, ...ModelOverlays};
+                    # the effort rides in settings.reasoningEffort
+                    # (packages/ai/src/protocols/openai-chat.ts:776-792).
                     for v in entry["variants"]:
-                        self.assertIn("label", v)
-                        self.assertIn("reasoningEffort", v)
+                        self.assertEqual(set(v), {"id", "settings"}, v)
+                        self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
 
 
 class CommaDisciplineTests(SandboxCase):

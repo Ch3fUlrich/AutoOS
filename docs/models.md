@@ -180,26 +180,38 @@ good-vs-bad ranking — the gateway tries them top-down and hops on
 key is missing, `apply` skips its legs with a warning and the chain still
 resolves through the others.
 
-### Effort levels (A6a — per-model variants rendered from registry)
+### Effort levels (measured 2026-09-27, gateway 3.8.51, opencode v2.0.16)
 
-Effort is a **caller-side suffix**, not a model id. Since A6a,
-`tools/sync-ide-models.py` emits a `variants` block (an array of
-`{label, reasoningEffort}` objects) on each gateway model entry whose route's
-first-leg model carries an `effort_ladder` in `catalog/ai-registry.json`
-(source: `tools/registry.py`, `render_ide()` at line 1189). The `"none"` entry
-is always omitted from the ladder — only meaningful levels are emitted.
+Effort is a **caller-side suffix** (`omniroute/<route>#<rung>`), not a model id.
+opencode v2.0.16 builds a custom provider's variant list from config: a
+`variants` **array** of `{id, settings: {reasoningEffort}}`
+(`packages/schema/src/config/provider.ts:76-79`); without one it offers only
+`low/medium/high` (`packages/core/src/variant.ts:27`), and a declared array
+replaces that default, so it lists every rung. The rung is sent as body
+`reasoning_effort` (`packages/ai/src/protocols/openai-chat.ts:776-792`). The
+2026-09-22 failure (v2.0.12) was the *object* form, which broke the provider.
 
-**The rendered variants are the source of truth** — `opencode.jsonc`
-`AUTOOS-MANAGED` blocks between the `START` / `END` markers (lines 192–372
-as of 2026-09-27) carry the live ladder per route. Rerun
-`python3 tools/sync-ide-models.py` after registry changes; see
-`opencode.jsonc` for authoritative per-route levels.
+`tools/sync-ide-models.py` renders the array into the repo `opencode.jsonc`
+`providers` blocks from `catalog/ide-models.json`'s `effort_ladder`, which
+`tools/registry.py render_ide()` takes from the route's **first leg's** model
+`effort_ladder` minus `none`. Later legs may lack a rung; the gateway passes
+the effort through and the upstream clamps or ignores it.
 
-**Gateway-combo caveat:** the gateway combo is for fallback routing. For the
-full effort ladder (including `max`) use the direct provider model
-(`openrouter/meta/muse-spark-1.3-contributor` with suffix, keyed via
-`OPENROUTER_API_KEY`). `max` is Zen/OpenRouter-native only; gateway combos
-expose the filtered ladder minus `none`.
+Measured 2026-09-27 via `tools/autoos-agent.py run --model
+omniroute/t1-orchestrator#xhigh`: before the render `Variant unavailable for
+omniroute/t1-orchestrator: xhigh`; after it the call answered, and
+`#bogus` is still refused.
+
+**Where the direct surface lives** (full vendor ladder, no gateway):
+
+- repo `opencode.jsonc` → `providers.openrouter` with
+  `muse-spark-1.3-contributor` (`modelID: meta/muse-spark-1.3-contributor`,
+  key via `OPENROUTER_API_KEY`);
+- OpenHands → the `openrouter-muse-spark-1.3-contributor` tier profile. It is
+  the one profile with `"gateway": "openrouter"`: it names its own endpoint and
+  takes the OpenRouter key, not the gateway client key. Both installers and
+  `tools/sync-openhands-profiles.py` resolve keys per `gateway`, and the
+  suites assert the direct profile gets the right key.
 
 ## Role labels (display names — the `t*-*` ids are the contract)
 

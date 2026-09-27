@@ -245,16 +245,18 @@ def _significant(lines, index, step):
 
 def _variants_block(effort_ladder, indent):
     """JSON lines for a model-level ``variants`` array from an effort ladder,
-    omitting "none" (already filtered upstream in render_ide). Each variant
-    maps ``label`` -> ``reasoningEffort`` for opencode V2."""
+    omitting "none" (already filtered upstream in render_ide). Each item is
+    opencode V2's {id, settings: {reasoningEffort}} (v2.0.16
+    packages/schema/src/config/provider.ts:76-79); a declared list replaces
+    opencode's own low/medium/high, so it carries every rung."""
     if not effort_ladder:
         return []
     inner = indent + "  " * 2
     items = []
     for n, level in enumerate(effort_ladder):
         comma = "," if n < len(effort_ladder) - 1 else ""
-        items.append(f'{inner}{{ "label": {json.dumps(level, ensure_ascii=False)}, '
-                     f'"reasoningEffort": {json.dumps(level, ensure_ascii=False)} }}{comma}')
+        rung = json.dumps(level, ensure_ascii=False)
+        items.append(f'{inner}{{ "id": {rung}, "settings": {{ "reasoningEffort": {rung} }} }}{comma}')
     return [
         f'{indent}  "variants": [',
         *items,
