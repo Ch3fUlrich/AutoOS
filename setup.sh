@@ -656,8 +656,11 @@ fi
 
 # ─── 7. Execute ─────────────────────────────────────────────────────────────
 ui_section "Installing"
-installed=0; skipped=0; failed=0; failed_names=""
-installed_names=""; skipped_names=""; unverified=0
+# The result buckets are the ones lib/linux/install.sh declares: one component id
+# per bucket, and the counts the report prints are their lengths, so a number can
+# never disagree with the list it summarises. Ids, not the names printed for a
+# component: a name with a space splits into several "results" in the state file.
+unverified=0
 step=0; manual=0; manual_names=""
 for id in $PLAN_IDS; do
     step=$((step + 1))
@@ -669,18 +672,24 @@ for id in $PLAN_IDS; do
     case "$INSTALL_STATE" in
         manual) manual=$((manual+1)); manual_names+="$id "; ui_warn "Action required: ${CAT_HOMEPAGE[i]}" ;;
         installed)
-            run_post_install "${CAT_POST[i]}"
-            installed=$((installed + 1)); installed_names+="${CAT_ID[i]} "
-            verify_component "${CAT_VERIFY[i]}" "${CAT_NAME[i]}"
-            if [[ "$VERIFY_STATE" == "unverified" ]]; then unverified=$((unverified + 1)); fi
-            ui_ok "${CAT_NAME[i]} done"
+            run_post_install "${CAT_POST[i]}" "$id"
+            # A post-install refusal makes the component a failure, so it is not
+            # also reported as installed — see autoos_fold_extra_failures.
+            if autoos_is_recorded_failure "$id"; then
+                ui_err "${CAT_NAME[i]}: post-install refused to change a file"
+            else
+                AUTOOS_RESULT_INSTALLED+=("$id")
+                verify_component "${CAT_VERIFY[i]}" "${CAT_NAME[i]}"
+                if [[ "$VERIFY_STATE" == "unverified" ]]; then unverified=$((unverified + 1)); fi
+                ui_ok "${CAT_NAME[i]} done"
+            fi
             ;;
         skipped)
-            run_post_install "${CAT_POST[i]}"
-            skipped=$((skipped + 1)); skipped_names+="${CAT_ID[i]} "
+            run_post_install "${CAT_POST[i]}" "$id"
+            autoos_is_recorded_failure "$id" || AUTOOS_RESULT_SKIPPED+=("$id")
             ;;
         failed)
-            failed=$((failed + 1)); failed_names+="${CAT_NAME[i]} "
+            AUTOOS_RESULT_FAILED+=("$id")
             ui_err "${CAT_NAME[i]} failed"
             ;;
     esac
@@ -690,11 +699,14 @@ done
 
 # Post-install steps can record a failure of their own - a user file they could
 # not back up, so a change they refused to make - without the package install
-# failing. Fold those in, so neither the summary nor the exit code claims
-# success over something that never happened.
-for extra in "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}"; do
-    failed=$((failed + 1)); failed_names+="$extra "
-done
+# failing, including one recorded while a *different* component was installing.
+# Fold those in last, so neither the summary nor the exit code claims success over
+# something that never happened: the refusal moves the id into the failed bucket
+# and out of the success ones, so it is counted and written exactly once.
+autoos_fold_extra_failures
+installed=${#AUTOOS_RESULT_INSTALLED[@]}
+skipped=${#AUTOOS_RESULT_SKIPPED[@]}
+failed=${#AUTOOS_RESULT_FAILED[@]}
 
 # ─── 8. Report ──────────────────────────────────────────────────────────────
 ui_section "Summary"
@@ -705,20 +717,21 @@ if (( unverified )); then ui_kv "Installed but unverified" "$unverified" warn; f
 if (( failed )); then ui_kv "Failed" "$failed" err; else ui_kv "Failed" "0" muted; fi
 if (( failed )); then
     printf '\n'
-    for f in $failed_names; do ui_err "$f"; done
+    for f in "${AUTOOS_RESULT_FAILED[@]}"; do ui_err "$(autoos_result_label "$f")"; done
     ui_muted "Re-run to retry only the failures; everything else reports as already present."
 fi
 printf '\n'
 # ─── Where it landed ────────────────────────────────────────────────────────
 # The counts above say how many, not where or how to start them. Resolved from
 # the live machine, so a blank means genuinely not found rather than a guess.
-landed="${installed_names}${skipped_names}"
-if [[ -n "${landed// /}" ]]; then
+landed=("${AUTOOS_RESULT_INSTALLED[@]+"${AUTOOS_RESULT_INSTALLED[@]}"}" \
+        "${AUTOOS_RESULT_SKIPPED[@]+"${AUTOOS_RESULT_SKIPPED[@]}"}")
+if (( ${#landed[@]} )); then
     ui_section "Where to find them"
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "Dry run installed nothing — these are the locations as they stand now."
     fi
-    for id in $landed; do
+    for id in "${landed[@]}"; do
         i="$(catalog_index_of "$id")"
         if launch_hint "${CAT_NAME[i]}" "${CAT_ID[i]}" "${CAT_VERIFY[i]}"; then
             ui_kv "${CAT_NAME[i]}" "$LAUNCH_HOW"
@@ -730,10 +743,13 @@ if [[ -n "${landed// /}" ]]; then
     done
 fi
 
-# Saved last, so a replay reflects what actually happened rather than what was planned.
+# Saved last, so a replay reflects what actually happened rather than what was
+# planned. All three buckets are id lists, and a component appears in one of them:
+# a post-install refusal moved it out of installed/skipped above.
 if [[ -n "$STATE_PATH" ]]; then
     autoos_state_save "$STATE_PATH" "$PROFILE" "$SELECTED" \
-        "$installed_names" "$skipped_names" "$failed_names" "$manual_names"
+        "${AUTOOS_RESULT_INSTALLED[*]}" "${AUTOOS_RESULT_SKIPPED[*]}" \
+        "${AUTOOS_RESULT_FAILED[*]}" "$manual_names"
 fi
 
 ui_info "Some changes (PATH, shell, docker group) need a new login to take effect."

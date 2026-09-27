@@ -68,6 +68,56 @@ if it "a dry run saves no state"; then
     if [[ -f "$tmp" ]]; then rm -f "$tmp"; fail "dry run wrote a state file"; else pass; fi
 fi
 
+# A post-install step that refuses to change a user's file records its id with
+# autoos_record_failure; setup.sh folds those ids into the summary. The fold lives
+# in lib/linux/install.sh next to the recorder, so both halves of one rule have
+# one home (and the buckets are ids, not printed names: "OpenClaw Desktop CLI"
+# shatters into three tokens when a list is joined for the state file).
+if it "summary: a recorded post-install refusal is not also counted as installed"; then
+    out="$(
+        AUTOOS_EXTRA_FAILURES=(agent-skills)
+        AUTOOS_RESULT_INSTALLED=(git agent-skills tmux)
+        AUTOOS_RESULT_SKIPPED=(opencode-cli)
+        AUTOOS_RESULT_FAILED=()
+        autoos_fold_extra_failures
+        printf 'installed=%s skipped=%s failed=%s list=[%s]\n' \
+            "${#AUTOOS_RESULT_INSTALLED[@]}" "${#AUTOOS_RESULT_SKIPPED[@]}" \
+            "${#AUTOOS_RESULT_FAILED[@]}" "${AUTOOS_RESULT_INSTALLED[*]}"
+        printf 'failed=[%s]\n' "${AUTOOS_RESULT_FAILED[*]}"
+    )"
+    assert_eq "$out" "installed=2 skipped=1 failed=1 list=[git tmux]
+failed=[agent-skills]"
+fi
+
+if it "summary: a recorded refusal that also failed its install is listed once"; then
+    out="$(
+        AUTOOS_EXTRA_FAILURES=(agent-skills)
+        AUTOOS_RESULT_INSTALLED=()
+        AUTOOS_RESULT_SKIPPED=()
+        AUTOOS_RESULT_FAILED=(agent-skills)
+        autoos_fold_extra_failures
+        printf '%s' "${#AUTOOS_RESULT_FAILED[@]}"
+    )"
+    assert_eq "$out" "1"
+fi
+
+if it "summary: a recorded refusal is labelled failed (post-install)"; then
+    catalog_load catalog/linux.json x64 0
+    git_name="${CAT_NAME[$(catalog_index_of git)]}"
+    skill_name="${CAT_NAME[$(catalog_index_of agent-skills)]}"
+    out="$(
+        AUTOOS_EXTRA_FAILURES=(agent-skills)
+        AUTOOS_RESULT_FAILED=(agent-skills git not-a-real-id)
+        for f in "${AUTOOS_RESULT_FAILED[@]}"; do printf '%s\n' "$(autoos_result_label "$f")"; done
+    )"
+    # One line per component: the old `for f in $failed_names` printed the words
+    # of a multi-word display name as separate failures.
+    assert_eq "$(printf '%s\n' "$out" | grep -c '')" "3"
+    assert_eq "$(printf '%s\n' "$out" | sed -n 1p)" "$skill_name (post-install)"
+    assert_eq "$(printf '%s\n' "$out" | sed -n 2p)" "$git_name"
+    assert_eq "$(printf '%s\n' "$out" | sed -n 3p)" "not-a-real-id"
+fi
+
 if it "undo restores a backed-up file"; then
     scratch="$(mktemp -d)"
     target="$scratch/.zshrc"

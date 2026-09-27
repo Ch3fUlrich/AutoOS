@@ -536,12 +536,12 @@ if it "install_agent_skills records a refused project-server approval for the su
 fi
 
 # ─── OpenHands: repo skills mirrored per skill, idempotent settings writer ──
-# oh_setup_run <home> <repo>: setup_openhands_config in a hermetic subshell -
-# scratch HOME and AUTOOS_ROOT, no gateway or provider key, no network - with
-# stdout and stderr merged. AUTOOS_KEYS_FILE points at a file that does not
+# oh_setup_run <home> <repo> [fn]: setup_openhands_config (or `fn`) in a hermetic
+# subshell - scratch HOME and AUTOOS_ROOT, no gateway or provider key, no network
+# - with stdout and stderr merged. AUTOOS_KEYS_FILE points at a file that does not
 # exist so the repo's own keys file is never consulted.
 oh_setup_run() {
-    local home="$1" repo="$2"
+    local home="$1" repo="$2" fn="${3:-setup_openhands_config}"
     mkdir -p "$home"
     (
         SYS_HOME="$home"; AUTOOS_DRY_RUN=0
@@ -550,7 +550,7 @@ oh_setup_run() {
         unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY
         export AUTOOS_KEYS_FILE="$home/no-keys.yml"
         curl() { return 6; }
-        setup_openhands_config
+        "$fn"
     ) 2>&1
 }
 
@@ -816,6 +816,66 @@ if it "openhands: a failing agent harness is reported, not called written"; then
     [[ -f "$tmp/home/.openhands/settings.json" ]] || problems+="[the settings writer itself no longer ran] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# A warning alone is not a result: setup.sh folds autoos_record_failure ids into
+# the summary, and an unwarned refusal leaves nothing to fold, so the component
+# still reads "installed" while its harness was never applied. Both writers take
+# their id from run_post_install (AUTOOS_POST_COMPONENT), because one function
+# serves two catalog ids for OpenCode.
+if it "a refused agent harness records OpenHands as failed"; then
+    tmp="$(mktemp -d)"
+    oh_report_recorded() {
+        run_post_install setup_openhands_config openhands
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    }
+    out="$(
+        python3() {
+            if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+                echo "stub: the harness failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" "" oh_report_recorded
+    )"
+    if [[ "$out" == *"recorded: openhands"* ]]; then
+        pass
+    else
+        fail "the refused harness was not recorded: [$(tail -n 3 <<<"$out")]"
+    fi
+    rm -rf "$tmp"
+fi
+
+if it "a refused agent harness records OpenCode under the id being installed, once"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    oc="$tmp/.config/opencode"; mkdir -p "$oc"
+    printf '{"model": "anthropic/mine"}\n' >"$oc/opencode.json"
+    oc_report_recorded() {
+        # Two config files, so the recorder runs twice for one component: the id
+        # must still be listed once, or the fold counts one component twice.
+        run_post_install setup_opencode_config opencode-cli
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    }
+    out="$(
+        python3() {
+            if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+                echo "agent-harness opencode: left alone, $* is a symlink" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 AUTOOS_ROOT="$ROOT"
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          opencode_is_v2() { return 1; }
+          oc_report_recorded ) 2>&1
+    )"
+    problems=""
+    [[ "$out" == *"recorded: opencode-cli"* ]] || problems+="[the refused harness was not recorded: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"opencode-cli opencode-cli"* ]] || problems+="[the id was recorded twice] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
 fi
 
 if it "custom_is_installed detects agent-skills under Documents/code or Documents/Code"; then
