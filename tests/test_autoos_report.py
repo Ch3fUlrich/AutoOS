@@ -223,6 +223,26 @@ That's all folks."""
         self.assertEqual(result["missing"], [])
 
 
+class TestDictShape(unittest.TestCase):
+    """A one-part block has the same keys as a full one (C3 final review)."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_one_part_report_has_every_key(self):
+        mod = self.mod
+        full = mod.parse_report("REPORT a · completed · f.py · t -> r · b · l\n")
+        bare = mod.parse_report("REPORT a\n")
+        self.assertEqual(sorted(bare), sorted(full))
+        self.assertEqual(bare["files"], [])
+
+    def test_one_part_brief_has_every_key(self):
+        mod = self.mod
+        full = mod.parse_brief("BRIEF a · g · src/ · exact · tests pass · skills: x · medium · 10")
+        bare = mod.parse_brief("BRIEF a\n")
+        self.assertEqual(sorted(bare), sorted(full))
+
+
 class TestParseBrief(unittest.TestCase):
     """parse_brief(text) -> dict or None."""
 
@@ -446,7 +466,9 @@ class TestCLI(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            Path(f.name).unlink()
+        # Unlink after the with block: Windows cannot delete a file whose
+        # handle is still open (C3 final review).
+        Path(f.name).unlink()
         self.assertEqual(result.returncode, 0)
         data = json.loads(result.stdout)
         self.assertEqual(data["id"], "task-cli")
@@ -527,6 +549,27 @@ class TestCLI(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("b.py", result.stdout)
+
+    def test_check_changed_with_no_files_is_an_empty_diff(self):
+        """check <r> --changed with nothing after it = nothing changed, not a usage error."""
+        result = subprocess.run(
+            [sys.executable, str(REPORT_TOOL), "check", "-", "--changed"],
+            input="REPORT task-empty · no-op · · · · \n",
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 2, result.stderr)
+
+    def test_check_changed_claims_against_an_empty_diff(self):
+        """A claimed file with an empty diff is still reported."""
+        result = subprocess.run(
+            [sys.executable, str(REPORT_TOOL), "check", "-", "--changed"],
+            input="REPORT task-empty2 · completed · a.py · pytest -> pass · · \n",
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("a.py", result.stdout)
 
     # --- end defect 2 tests ---
 

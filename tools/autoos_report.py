@@ -149,12 +149,9 @@ def _find_block(text: str, prefix: str) -> Optional[str]:
 
 def _parse_single_line_report(line: str) -> dict:
     """Parse a single-line REPORT in '·'-joined form."""
+    # A one-part line falls through: every field is missing and gets its
+    # default, so the dict has the same keys as a full one.
     parts = [p.strip() for p in line.split("·")]
-    if len(parts) < 2:
-        first = parts[0] if parts else ""
-        first = re.sub(r"^REPORT\s+", "", first, flags=re.IGNORECASE)
-        return {"id": first, "missing": REPORT_FIELDS[1:]}
-
     first = parts[0]
     first = re.sub(r"^REPORT\s+", "", first, flags=re.IGNORECASE)
     result = {"id": first, "missing": []}
@@ -196,7 +193,9 @@ def _set_report_field(result: dict, field: str, value: str) -> None:
 
 def _set_report_field_default(result: dict, field: str) -> None:
     """Set a default (empty) value for *field* in *result*."""
-    if field == "files":
+    if field == "status":
+        result["status"] = ""
+    elif field == "files":
         result["files"] = []
     elif field == "tests":
         result["tests"] = []
@@ -248,12 +247,9 @@ def parse_report(text) -> Optional[dict]:
 
 def _parse_single_line_brief(line: str) -> dict:
     """Parse a single-line BRIEF in '·'-joined form."""
+    # A one-part line falls through: every field is missing and gets its
+    # default, so the dict has the same keys as a full one.
     parts = [p.strip() for p in line.split("·")]
-    if len(parts) < 2:
-        first = parts[0] if parts else ""
-        first = re.sub(r"^BRIEF\s+", "", first, flags=re.IGNORECASE)
-        return {"id": first, "missing": BRIEF_FIELDS[1:]}
-
     first = parts[0]
     first = re.sub(r"^BRIEF\s+", "", first, flags=re.IGNORECASE)
     result = {"id": first, "missing": []}
@@ -428,7 +424,8 @@ def main():
         sys.exit(0)
 
     elif cmd == "check":
-        if len(sys.argv) < 5 or sys.argv[3] != "--changed":
+        # `--changed` with nothing after it is an empty diff, not a usage error.
+        if len(sys.argv) < 4 or sys.argv[3] != "--changed":
             print("check requires <report-file|-> --changed <changed-file...>", file=sys.stderr)
             sys.exit(2)
 

@@ -94,8 +94,11 @@ python3 tools/autoos_report.py parse report.txt
 python3 tools/autoos_report.py parse -
 
 # Check a report against the actual diff (§5.7 gate)
-python3 tools/autoos_report.py check report.txt --changed changed-files.txt
+python3 tools/autoos_report.py check report.txt --changed $(git diff --name-only base..HEAD)
 ```
+
+The arguments after `--changed` are the changed file names themselves, not a file that lists
+them; `--changed` with nothing after it means nothing changed.
 
 The `check` subcommand verifies:
 - Files claimed in the report match the diff (no extra, no missing)
