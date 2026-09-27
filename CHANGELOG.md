@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — OmniRoute gateway stops refusing every chat call on page-cache pressure
+
+- **`configuration/docker/ai-stack/compose.yml`**: the omniroute service caps the
+  per-call log artifacts that fed page cache (`CHAT_LOG_MAX_BODY_KB=64`,
+  `CHAT_LOG_TEXT_LIMIT=16384`, `CALL_LOG_RETENTION_DAYS=3`; image defaults
+  1024/65536/7). Measured 2026-09-27: 831 MB in 3905 files under
+  `/app/data/call_logs` in one day left `memory.current` at 2.62G of 2.68G max
+  with only 0.83G `anon` (1.65G reclaimable `inactive_file`), and the gateway's
+  pressure guard (503 at >= 92%, not configurable in 3.8.50) tripped 48x/h.
+  Documented as commented defaults in **`stack.env.example`**.
+- **`configuration/docker/ai-stack/ai-stack.sh`**: `verify` prints the real
+  cgroup memory split (`omniroute memory: current … of … (…%), anon …,
+  reclaimable cache …`; "no limit" with no ratio when `memory.max` is `max`),
+  informational like the admission gate, and warns with the one-line
+  `memory.reclaim` relief when page cache - not anon - holds the guard at 503.
+  Docs: `docs/web-services.md` "Page-cache pressure guard".
+
 ### Added — Linux catches Windows-only test failures first (K1)
 
 - **`tests/test_windows_portability.py`** (in `tests/linux/36-static-analysis.sh`): an AST lint fails when a Python test writes a `#!/bin/sh` stub or uses `os.chmod`/`os.killpg`/`os.setsid`/`signal.SIGKILL`/`fcntl`/`pwd`/`grp` without an `os.name`/`sys.platform` skip guard, and every tracked `.ps1`/`.psm1` must start with a UTF-8 BOM. Both classes had failed the Windows CI job repeatedly (measured over 300 runs) while Linux stayed green; the 26 unguarded functions it found now carry the guard (a skip counts only in the branch taken on Windows).

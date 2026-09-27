@@ -370,6 +370,19 @@ sub-requests with retryable 503, killing worker runs (4 of 5; measured
 appends `--max-old-space-size=$OMNIROUTE_MEMORY_MB` to `NODE_OPTIONS`; the
 last flag wins, so `NODE_OPTIONS` is not set in compose.
 
+**Page-cache pressure guard** (omniroute only): the gateway refuses every chat
+call with 503 while its cgroup use sits at or above 92% of its ceiling, and
+page cache counts toward that ratio even though it is reclaimable (measured
+2026-09-27: `memory.current` 2.62G of `memory.max` 2.68G, but `anon` only 0.83G
+with 1.65G `inactive_file` from per-call log artifacts - 831 MB in 3905 files
+under `/app/data/call_logs` in one day). The compose defaults therefore cap
+what each call may log (`CHAT_LOG_MAX_BODY_KB=64`, `CHAT_LOG_TEXT_LIMIT=16384`)
+and how long call logs are kept (`CALL_LOG_RETENTION_DAYS=3`); the upstream
+image defaults (1024 / 65536 / 7) let the cache alone hold the guard at 503.
+`ai-stack.sh verify` prints the real split (`omniroute memory: current …,
+anon …, reclaimable cache …`) and, when the cache is what holds the guard,
+the one-line `memory.reclaim` relief for the container's cgroup scope.
+
 ### Migration (an existing native host)
 
 Opt-in and announced; `ai-stack.sh migrate` without `--yes` only prints the

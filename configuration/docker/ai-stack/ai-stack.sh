@@ -1328,6 +1328,47 @@ verify_omniroute_admission() {
     echo "  = $name: max_heavy=$heavy, queue_ms=$queue, heap MB=$heap"
 }
 
+# 10. The cgroup memory split behind the gateway's pressure guard: the guard
+# (upstream thresholds, not configurable in 3.8.50) answers 503 to every chat
+# call at >= 92% current/max and only recovers below 75%, and page cache counts
+# toward it - while anon (real use) can sit far lower (measured 2026-09-27:
+# current 2.62G of max 2.68G, anon 0.83G, inactive_file 1.65G from per-call log
+# artifacts). Informational - not a pass/fail check; one exec read, like the
+# admission gate above.
+verify_omniroute_memory() {
+    local c name="omniroute memory" out cur max anon cache
+    local cur_mb max_mb anon_mb cache_mb pct cid
+    c="$(verify_container omniroute)"
+    if [[ -z "$c" ]]; then echo "  skip  $name - the omniroute service is not enabled"; return 0; fi
+    if ! container_running "$c"; then echo "  skip  $name - $c is not running"; return 0; fi
+    out="$("$DOCKER" exec "$c" sh -c 'cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max; grep -E "^(anon|inactive_file) " /sys/fs/cgroup/memory.stat' 2>/dev/null || true)"
+    cur="$(printf '%s\n' "$out" | sed -n '1p')"
+    max="$(printf '%s\n' "$out" | sed -n '2p')"
+    anon="$(printf '%s\n' "$out" | sed -n 's/^anon //p' | tail -n1)"
+    cache="$(printf '%s\n' "$out" | sed -n 's/^inactive_file //p' | tail -n1)"
+    if [[ ! "$cur" =~ ^[0-9]+$ || -z "$max" || ! "$anon" =~ ^[0-9]+$ || ! "$cache" =~ ^[0-9]+$ ]]; then
+        echo "  = $name: could not read the cgroup counters"; return 0
+    fi
+    cur_mb=$(( (cur + 524288) / 1048576 ))
+    anon_mb=$(( (anon + 524288) / 1048576 ))
+    cache_mb=$(( (cache + 524288) / 1048576 ))
+    if [[ "$max" == max ]]; then
+        echo "  = $name: current $cur_mb MB, no limit, anon $anon_mb MB, reclaimable cache $cache_mb MB"
+        return 0
+    fi
+    if [[ ! "$max" =~ ^[0-9]+$ || "$max" -eq 0 ]]; then
+        echo "  = $name: could not read the cgroup counters"; return 0
+    fi
+    max_mb=$(( (max + 524288) / 1048576 ))
+    pct=$(( cur * 100 / max ))
+    echo "  = $name: current $cur_mb MB of $max_mb MB (${pct}%), anon $anon_mb MB, reclaimable cache $cache_mb MB"
+    if (( cur * 100 >= max * 92 )) && (( anon * 100 < max * 75 )); then
+        cid="$("$DOCKER" inspect -f '{{.Id}}' "$c" 2>/dev/null || true)"
+        cid="${cid%%$'\n'*}"
+        echo "  ! $name: page cache holds the pressure guard at ${pct}% (it answers 503 above 92%); relief: sudo sh -c 'echo ${cache_mb}M > /sys/fs/cgroup/system.slice/docker-${cid}.scope/memory.reclaim'"
+    fi
+}
+
 cmd_verify() {
     V_OK=0; V_FAIL=0; V_SKIP=0
     verify_load_services
@@ -1341,6 +1382,7 @@ cmd_verify() {
     verify_omniroute_public_url
     verify_healthcheck
     verify_omniroute_admission
+    verify_omniroute_memory
     printf 'verify: %d ok, %d failed, %d skipped\n' "$V_OK" "$V_FAIL" "$V_SKIP"
     [[ $V_FAIL -eq 0 ]]
 }

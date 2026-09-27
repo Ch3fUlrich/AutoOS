@@ -2737,6 +2737,88 @@ if it "aistack: verify prints unset wording when admission gate vars are absent 
     if (( ok )); then pass; else fail "verify admission gate unset wording"; fi
 fi
 
+if it "aistack: compose.yml caps the per-call log artifacts that feed page cache"; then
+    f="$AISTACK/compose.yml"
+    # The omniroute block: from its service header to the next service.
+    omni="$(sed -n '/^  omniroute:/,/^  [a-z]/p' "$f" | sed '$d')"
+    ok=1
+    grep -q 'CHAT_LOG_MAX_BODY_KB: ${CHAT_LOG_MAX_BODY_KB:-64}' <<<"$omni" \
+        || { ok=0; echo "CHAT_LOG_MAX_BODY_KB not capped at default 64" >&2; }
+    grep -q 'CHAT_LOG_TEXT_LIMIT: ${CHAT_LOG_TEXT_LIMIT:-16384}' <<<"$omni" \
+        || { ok=0; echo "CHAT_LOG_TEXT_LIMIT not capped at default 16384" >&2; }
+    grep -q 'CALL_LOG_RETENTION_DAYS: ${CALL_LOG_RETENTION_DAYS:-3}' <<<"$omni" \
+        || { ok=0; echo "CALL_LOG_RETENTION_DAYS not capped at default 3" >&2; }
+    if (( ok )); then pass; else fail "compose.yml per-call log caps"; fi
+fi
+
+if it "aistack: stack.env.example documents the per-call log caps as commented defaults"; then
+    f="$AISTACK/stack.env.example"
+    ok=1
+    grep -q '^# CHAT_LOG_MAX_BODY_KB=64' "$f" \
+        || { ok=0; echo "CHAT_LOG_MAX_BODY_KB default not documented" >&2; }
+    grep -q '^# CHAT_LOG_TEXT_LIMIT=16384' "$f" \
+        || { ok=0; echo "CHAT_LOG_TEXT_LIMIT default not documented" >&2; }
+    grep -q '^# CALL_LOG_RETENTION_DAYS=3' "$f" \
+        || { ok=0; echo "CALL_LOG_RETENTION_DAYS default not documented" >&2; }
+    if (( ok )); then pass; else fail "stack.env.example per-call log caps"; fi
+fi
+
+if it "aistack: verify prints the omniroute memory split with no warning under no pressure"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '1048576000\n2684354560\nanon 838860800\ninactive_file 104857600\n' \
+        >"$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    grep -q 'omniroute memory: current 1000 MB of 2560 MB (39%), anon 800 MB, reclaimable cache 100 MB' <<<"$out" \
+        || { ok=0; echo "memory split not printed: $(grep -i 'omniroute memory' <<<"$out")" >&2; }
+    grep -q 'page cache holds the pressure guard' <<<"$out" \
+        && { ok=0; echo "a pressure warning on a healthy split" >&2; }
+    # Informational, not a pass/fail check: no v_ok/v_fail line for it.
+    grep -qE '^  (ok|FAIL)  .*omniroute memory' <<<"$out" && { ok=0; echo "memory should be informational, not ok/FAIL" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify omniroute memory split"; fi
+fi
+
+if it "aistack: verify warns when page cache holds the pressure guard at 503"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    # Measured 2026-09-27: current 2.62G of max 2.68G, anon 0.83G,
+    # inactive_file 1.65G - the guard answers 503 above 92%.
+    printf '2616913920\n2684354560\nanon 827203584\ninactive_file 1650200576\n' \
+        >"$d/cgroup-autoos-omniroute"
+    printf 'cafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00d' \
+        >"$d/id-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    grep -q 'omniroute memory: current 2496 MB of 2560 MB (97%), anon 789 MB, reclaimable cache 1574 MB' <<<"$out" \
+        || { ok=0; echo "memory split not printed: $(grep -i 'omniroute memory' <<<"$out")" >&2; }
+    grep -q "page cache holds the pressure guard at 97% (it answers 503 above 92%)" <<<"$out" \
+        || { ok=0; echo "no pressure warning: $(grep -i 'pressure guard' <<<"$out")" >&2; }
+    grep -q "sudo sh -c 'echo 1574M > /sys/fs/cgroup/system.slice/docker-cafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00d.scope/memory.reclaim'" <<<"$out" \
+        || { ok=0; echo "no reclaim command: $(grep -i 'reclaim' <<<"$out")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify page-cache pressure warning"; fi
+fi
+
+if it "aistack: verify prints no ratio when the omniroute cgroup has no limit"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '1048576000\nmax\nanon 838860800\ninactive_file 104857600\n' \
+        >"$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    memline="$(grep -i 'omniroute memory' <<<"$out")"
+    grep -q 'no limit' <<<"$memline" \
+        || { ok=0; echo "unlimited max not reported: [$memline]" >&2; }
+    grep -q '%' <<<"$memline" \
+        && { ok=0; echo "a ratio on an unlimited cgroup: [$memline]" >&2; }
+    grep -q 'page cache holds the pressure guard' <<<"$out" \
+        && { ok=0; echo "a pressure warning with no limit to press against" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify omniroute memory without a limit"; fi
+fi
+
 if it "aistack: verify is read-only: only inspect and exec reach docker, nothing on disk changes"; then
     d="$(_aistack_sandbox)"
     _aistack_verify_sandbox "$d"
@@ -2751,7 +2833,7 @@ if it "aistack: verify is read-only: only inspect and exec reach docker, nothing
     [[ "$(grep -cE '^(start|stop|restart|rm|up|down|run|create|compose|build|pull|network|kill|pause|unpause|cp|update)( |$)' "$d/docker.log" || true)" == 0 ]] \
         || { ok=0; echo "a mutating docker verb: $(grep -E '^(start|stop|restart|rm|up|down|run|create|compose)' "$d/docker.log" | head -3)" >&2; }
     grep -vE '^(inspect|exec) ' "$d/docker.log" | grep -q . && { ok=0; echo "docker verbs beyond inspect/exec: $(grep -vE '^(inspect|exec) ' "$d/docker.log" | head -3)" >&2; }
-    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |qodercli --version$|sh -c tr "\\0" "\\n" </proc/1/environ$)' | grep -q . && { ok=0; echo "an exec that is neither test -d, qodercli --version nor the /proc/1/environ read" >&2; }
+    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |qodercli --version$|sh -c .*memory\.current|sh -c tr "\\0" "\\n" </proc/1/environ$)' | grep -q . && { ok=0; echo "an exec that is neither test -d, qodercli --version nor a cgroup//proc/1/environ read" >&2; }
     # Nothing but docker inspect/exec: not systemctl, not ss, not the plain curl on PATH.
     grep -vE '^docker: (inspect|exec) ' "$d/events.log" | grep -q . && { ok=0; echo "another tool was called: $(grep -vE '^docker: (inspect|exec) ' "$d/events.log" | head -3)" >&2; }
     rm -rf "$d"
