@@ -287,5 +287,67 @@ class CliDefaultsToRegistryTests(unittest.TestCase):
             box.close()
 
 
+class StaleManagedBlockTests(unittest.TestCase):
+    """PROV review: the tool only ever checked "a rendered tier is missing or
+    differs". A managed block for a tier the registry no longer produces (every
+    leg died, or the route was removed) stayed in config.yaml - still served by
+    LiteLLM - with every gate green. rewrite() must prune it and --check must
+    name it as drift."""
+
+    STALE = (
+        "  # AUTOOS-MANAGED-START dead-tier\n"
+        "  - model_name: dead-tier\n"
+        "    litellm_params:\n"
+        "      model: groq/ghost\n"
+        "      api_key: os.environ/GROQ_API_KEY\n"
+        "  # AUTOOS-MANAGED-END dead-tier\n"
+    )
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.registry_path = self.dir / "ai-registry.json"
+        self.registry_path.write_text(json.dumps({
+            "providers": {"groq": {"omniroute_id": "groq",
+                                   "litellm_env": "GROQ_API_KEY"}},
+            "routes": {"t2-worker": {"legs": ["groq/openai/gpt-oss-120b"]}},
+        }), encoding="utf-8")
+        self.config_path = self.dir / "config.yaml"
+        self.config_path.write_text(
+            "model_list:\n"
+            "  # AUTOOS-MANAGED-START t2-worker\n"
+            "  - model_name: t2-worker\n"
+            "    litellm_params:\n"
+            "      model: groq/openai/gpt-oss-120b\n"
+            "      api_key: os.environ/GROQ_API_KEY\n"
+            "  # AUTOOS-MANAGED-END t2-worker\n"
+            "\n" + self.STALE,
+            encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, *extra):
+        return subprocess.run(
+            [sys.executable, str(TOOL), "--registry", str(self.registry_path),
+             "--config", str(self.config_path)] + list(extra),
+            capture_output=True, text=True, cwd=str(self.dir))
+
+    def test_check_flags_a_stale_managed_block(self):
+        result = self._run("--check", "--quiet")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("dead-tier", result.stderr)
+
+    def test_rewrite_prunes_a_stale_managed_block_and_keeps_the_rest(self):
+        result = self._run("--quiet")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        text = self.config_path.read_text(encoding="utf-8")
+        self.assertNotIn("AUTOOS-MANAGED-START dead-tier", text)
+        self.assertNotIn("model_name: dead-tier", text)
+        self.assertIn("AUTOOS-MANAGED-START t2-worker", text)
+        # The pruned file is clean on the next check: prune is idempotent.
+        self.assertEqual(self._run("--check", "--quiet").returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

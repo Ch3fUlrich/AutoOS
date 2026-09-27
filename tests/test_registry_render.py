@@ -378,6 +378,31 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         self.assertIn("gemini-3.8-flash", rendered["t2-worker"])
 
 
+class StaleLitellmBlockIsDriftTests(unittest.TestCase):
+    """PROV review: litellm_diff() only walked the rendered tiers, so a managed
+    block the registry no longer produces stayed in config.yaml with the
+    `render litellm --check` gate green. A stale block is drift and must be
+    named, matching tools/sync-router-tiers.py's own --check."""
+
+    STALE = (
+        "\n  # AUTOOS-MANAGED-START dead-tier\n"
+        "  - model_name: dead-tier\n"
+        "    litellm_params:\n"
+        "      model: groq/ghost\n"
+        "      api_key: os.environ/GROQ_API_KEY\n"
+        "  # AUTOOS-MANAGED-END dead-tier\n"
+    )
+
+    def test_a_stale_managed_block_is_reported(self):
+        config = real_litellm_config() + self.STALE
+        rendered = registry.render_litellm_blocks(real_registry(), config)
+        self.assertIn("dead-tier", registry.litellm_diff(rendered, config))
+
+    def test_the_committed_config_has_no_stale_block(self):
+        rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        self.assertEqual(registry.litellm_diff(rendered, real_litellm_config()), [])
+
+
 class LitellmRenderDeterminismTests(unittest.TestCase):
     """A second render changes nothing (spec 11: idempotence)."""
 

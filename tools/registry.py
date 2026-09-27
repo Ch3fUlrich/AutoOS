@@ -1145,9 +1145,14 @@ def litellm_block_text(config_text: str, tier: str) -> str:
 
 def litellm_diff(rendered: dict, config_text: str) -> list:
     """Return the tiers (sorted) where a fresh render_litellm_blocks() output
-    differs, byte for byte, from `config_text`'s own current managed block.
-    Empty means every rendered tier matches exactly - the spec 3.2 phase-1
-    gate for configuration/litellm/config.yaml (task A4b)."""
+    differs, byte for byte, from `config_text`'s own current managed block, plus
+    any managed block `config_text` carries that the render no longer produces
+    (a stale tier: every leg died or the route was removed). Empty means every
+    rendered tier matches exactly AND no dead group is left behind - the spec
+    3.2 phase-1 gate for configuration/litellm/config.yaml (task A4b). Walking
+    only `rendered` was one-directional: a stale block stayed in the file, still
+    served by LiteLLM, with this gate green (PROV review), which is exactly the
+    drift tools/sync-router-tiers.py now prunes on rewrite."""
     problems = []
     for tier in sorted(rendered):
         try:
@@ -1157,7 +1162,15 @@ def litellm_diff(rendered: dict, config_text: str) -> list:
             continue
         if rendered[tier] != current:
             problems.append(tier)
-    return problems
+    sync = _load_sync_router_tiers()
+    try:
+        blocks = sync.locate_blocks(config_text.splitlines())
+    except sync.ConfigError as exc:
+        raise ValueError(str(exc)) from exc
+    for tier in blocks:
+        if tier not in rendered and tier not in problems:
+            problems.append(tier)
+    return sorted(set(problems))
 
 
 # ===========================================================================

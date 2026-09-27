@@ -21,13 +21,13 @@ markers in config.yaml:
     ...
     # AUTOOS-MANAGED-END <tier>
 
-Everything outside the markers -- the header prose, t1-orchestrator,
-t1-orchestrator-paid, t2-worker-paid, t3-driver-paid, router_settings,
-litellm_settings, every comment and
-the exact whitespace between them -- is left byte-for-byte untouched. Inside a
-managed block the legs are machine-owned, so they are regenerated in full:
-reordering, adding or dropping a leg is exactly the drift this tool exists to
-remove.
+Everything outside the markers -- the header prose, the true hand groups
+(t1-orchestrator-paid, t2-worker-paid, t3-driver-paid), router_settings,
+litellm_settings, every comment and the exact whitespace between them -- is
+left byte-for-byte untouched. Inside a managed block the legs are
+machine-owned, so they are regenerated in full: reordering, adding or
+dropping a leg is exactly the drift this tool exists to remove. A managed
+block for a tier the registry no longer renders is stale and is pruned.
 
 Usage:
     python3 tools/sync-router-tiers.py [--check]
@@ -412,7 +412,17 @@ def leading_indent(line):
 
 
 def rewrite(text, combos):
-    """Return (synced_text, [tiers changed]); keeps the file's newline style."""
+    """Return (synced_text, [tiers changed]); keeps the file's newline style.
+
+    Every managed block is machine-owned, so `combos` (the complete renderable
+    set, derived from the registry) decides which exist. A managed block whose
+    tier is NOT in `combos` is stale - every leg died or the route was removed -
+    and is pruned, not left behind: without that the file kept serving a dead
+    group while both directions the tool checked ("a rendered tier is missing"
+    and "a block differs") stayed green (PROV review). Only the marker-delimited
+    block goes; the hand-written comment above it is prose this tool never
+    owned and is left for a human to clean.
+    """
     lines = text.splitlines()
     blocks = locate_blocks(lines)
     missing = [t for t in combos if t not in blocks]
@@ -424,10 +434,14 @@ def rewrite(text, combos):
         )
 
     changed = []
-    # Replace bottom-up: each splice changes the indices of every block below
-    # it, so a top-down loop would corrupt the second block.
-    for tier in sorted(combos, key=lambda t: blocks[t][0], reverse=True):
+    # Bottom-up: each splice changes the indices of every block below it, so a
+    # top-down loop would corrupt the second block.
+    for tier in sorted(blocks, key=lambda t: blocks[t][0], reverse=True):
         start, end = blocks[tier]
+        if tier not in combos:
+            changed.append(tier)
+            del lines[start : end + 1]
+            continue
         indent = leading_indent(lines[start])
         extras = parse_block(lines, start, end)
         new_block = render_block(tier, combos[tier], indent, extras)
