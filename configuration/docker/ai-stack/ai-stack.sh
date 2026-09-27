@@ -5,6 +5,7 @@
 #   ai-stack.sh init              env files + opencode config (idempotent)
 #   ai-stack.sh up [service...]   build/pull what is missing, start, wait healthy
 #   ai-stack.sh down [service...] stop the containers (kept; `up` resumes)
+#   ai-stack.sh restart <service> restart one service (page-cache relief: verify says when)
 #   ai-stack.sh status            containers + a probe per port
 #   ai-stack.sh is-active         exit 0 when the stack owns the services (marker below)
 #   ai-stack.sh migrate [--yes]   native units -> containers (plan without --yes)
@@ -64,7 +65,7 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY=1 ;;
         --yes)     YES=1 ;;
-        -h|--help) sed -n '2,27p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}"; exit 0 ;;
         -*) echo "Unknown option: $arg"; exit 2 ;;
         *) if [[ -z "$CMD" ]]; then CMD="$arg"; else SERVICES+=("$arg"); fi ;;
     esac
@@ -659,6 +660,23 @@ is_compose_container() {
 cmd_down() {
     if [[ $DRY -eq 1 ]]; then echo "  - would run: docker compose -p autoos-ai stop ${SERVICES[*]}"; return 0; fi
     dc stop "${SERVICES[@]}"
+}
+
+# restart one service through the same compose wrapper as up/down (same
+# project and env file via dc): no backup, no rebuild, no guard. verify names
+# this as the relief when page cache holds the gateway's pressure guard.
+cmd_restart() {
+    local svc c
+    if (( ${#SERVICES[@]} == 0 )); then
+        echo "  ! restart needs a service (omniroute, opencode, openhands)"; return 2
+    fi
+    for svc in "${SERVICES[@]}"; do
+        c="$(service_container "$svc")"
+        [[ -n "$c" ]] || { echo "  ! unknown service $svc (omniroute, opencode, openhands)"; return 2; }
+        if [[ $DRY -eq 1 ]]; then echo "  - would run: docker compose -p autoos-ai restart $svc"; continue; fi
+        dc restart "$svc" || { echo "  ! docker compose restart $svc failed - see: $0 status"; return 1; }
+        echo "  + $svc restarted ($c)"
+    done
 }
 
 cmd_status() {
@@ -1332,20 +1350,20 @@ verify_omniroute_admission() {
 # (upstream thresholds, not configurable in 3.8.50) answers 503 to every chat
 # call at >= 92% current/max and only recovers below 75%, and page cache counts
 # toward it - while anon (real use) can sit far lower (measured 2026-09-27:
-# current 2.62G of max 2.68G, anon 0.83G, inactive_file 1.65G from per-call log
+# current 2.62G of max 2.68G, anon 0.83G, file 1.65G from per-call log
 # artifacts). Informational - not a pass/fail check; one exec read, like the
-# admission gate above.
+# admission gate above. The image needs only cat and sed for it.
 verify_omniroute_memory() {
     local c name="omniroute memory" out cur max anon cache
-    local cur_mb max_mb anon_mb cache_mb pct cid
+    local cur_mb max_mb anon_mb cache_mb pct
     c="$(verify_container omniroute)"
     if [[ -z "$c" ]]; then echo "  skip  $name - the omniroute service is not enabled"; return 0; fi
     if ! container_running "$c"; then echo "  skip  $name - $c is not running"; return 0; fi
-    out="$("$DOCKER" exec "$c" sh -c 'cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max; grep -E "^(anon|inactive_file) " /sys/fs/cgroup/memory.stat' 2>/dev/null || true)"
+    out="$("$DOCKER" exec "$c" sh -c 'cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max; sed -n "s/^\(anon\|file\) /&/p" /sys/fs/cgroup/memory.stat' 2>/dev/null || true)"
     cur="$(printf '%s\n' "$out" | sed -n '1p')"
     max="$(printf '%s\n' "$out" | sed -n '2p')"
     anon="$(printf '%s\n' "$out" | sed -n 's/^anon //p' | tail -n1)"
-    cache="$(printf '%s\n' "$out" | sed -n 's/^inactive_file //p' | tail -n1)"
+    cache="$(printf '%s\n' "$out" | sed -n 's/^file //p' | tail -n1)"
     if [[ ! "$cur" =~ ^[0-9]+$ || -z "$max" || ! "$anon" =~ ^[0-9]+$ || ! "$cache" =~ ^[0-9]+$ ]]; then
         echo "  = $name: could not read the cgroup counters"; return 0
     fi
@@ -1363,9 +1381,7 @@ verify_omniroute_memory() {
     pct=$(( cur * 100 / max ))
     echo "  = $name: current $cur_mb MB of $max_mb MB (${pct}%), anon $anon_mb MB, reclaimable cache $cache_mb MB"
     if (( cur * 100 >= max * 92 )) && (( anon * 100 < max * 75 )); then
-        cid="$("$DOCKER" inspect -f '{{.Id}}' "$c" 2>/dev/null || true)"
-        cid="${cid%%$'\n'*}"
-        echo "  ! $name: page cache holds the pressure guard at ${pct}% (it answers 503 above 92%); relief: sudo sh -c 'echo ${cache_mb}M > /sys/fs/cgroup/system.slice/docker-${cid}.scope/memory.reclaim'"
+        echo "  ! $name: page cache holds the pressure guard at ${pct}% (it answers 503 above 92%); relief: ai-stack.sh restart omniroute"
     fi
 }
 
@@ -1391,10 +1407,11 @@ case "$CMD" in
     init)      cmd_init ;;
     up)        cmd_up ;;
     down)      cmd_down ;;
+    restart)   cmd_restart ;;
     status)    cmd_status ;;
     is-active) cmd_is_active ;;
     migrate)   cmd_migrate ;;
     rollback)  cmd_rollback ;;
     verify)    cmd_verify ;;
-    *) echo "Unknown command: $CMD (init, up, down, status, is-active, migrate, rollback, verify)"; exit 2 ;;
+    *) echo "Unknown command: $CMD (init, up, down, restart, status, is-active, migrate, rollback, verify)"; exit 2 ;;
 esac

@@ -34,7 +34,7 @@
 #                              OMNIROUTE_CHAT_ADMISSION_QUEUE_MS and NODE_OPTIONS)
 #   cgroup-<container>         what `docker exec <container> sh -c '...memory.current...'`
 #                              prints: memory.current, memory.max ("max" when
-#                              unlimited), then the anon + inactive_file lines
+#                              unlimited), then the anon + file lines
 #                              of memory.stat, one per line (the memory-split
 #                              verify reads the cgroup pressure numbers)
 #   id-<container>             what `docker inspect -f '{{.Id}}' <container>`
@@ -187,6 +187,12 @@ fake_docker() {
                     local svcs=("$@")
                     (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands)
                     for svc in "${svcs[@]}"; do rm -f "$S/run-$(container_of "$svc")"; done ;;
+                restart)
+                    for a in "$@"; do
+                        [[ "$a" == -* ]] && continue
+                        c="$(container_of "$a")"
+                        : >"$S/run-$c"; : >"$S/compose-$c"
+                    done ;;
                 rm)
                     for a in "$@"; do
                         [[ "$a" == -* ]] && continue
