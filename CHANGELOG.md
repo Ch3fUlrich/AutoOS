@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — ask-back: a blocked worker asks its orchestrator (spec routing-v2 §9)
+
+- **`tools/autoos-ask.py`** (Python stdlib only): the worker-side helper — writes `question.json` into the run dir
+  (the spawner now exports it to the child as `AUTOOS_TASK_DIR`; the CLI forwards its environment to the client),
+  polls for the orchestrator's `answer.json`, prints the answer and archives the exchange as `qa-<n>.json`
+  (history kept). Exit 0 answered, 3 timeout (question withdrawn, run back to `working`), 2 misuse
+  (no `AUTOOS_TASK_DIR`, a question already pending, an empty question).
+- `tools/autoos_agent_mcp.py`: a live run with a pending `question.json` and no `answer.json` reports
+  `state: "input_required"` (plus the question text, `detail` still `running`); the new `respond(run_id, text)`
+  MCP tool answers it atomically and the run returns to `working`; `cancel` now also stops a run parked in
+  `input_required`. Ask-back files are documented in the module docstring.
+
+### Fixed — ask-back: stale answer.json after timeout no longer blocks the next ask
+
+- **`tools/autoos-ask.py`**: "pending" now means `question.json` exists (only). An `answer.json`
+  with no `question.json` is stale (left by a timeout the previous run hit, or an answer landing
+  at/after the deadline); it is archived as `qa-<n>.json` with `"stale": true` and a null question,
+  never silently deleted. On timeout the helper also archives a late `answer.json` that appeared
+  between the last poll and the deadline. A second ask after a timeout now writes its question and
+  works instead of refusing "already pending" (exit 2) forever.
+- **`tools/autoos-ask.py`**: every file operation into `AUTOOS_TASK_DIR` is wrapped; an `OSError`
+  (a read-only mount, a full disk, an `--isolate` outside-path fence) exits 5 with a message that
+  names the reason and suggests `--isolate`, not a raw traceback. Exit code 5 is documented in the
+  module docstring with the other exit codes.
+
+### Changed — the autoos-agent MCP server reports A2A task states (spec routing-v2 §9)
+
+- `tools/autoos_agent_mcp.py`: `status`/`result` states are now `submitted`/`working`/`completed`/`failed`/`canceled` (A2A spelling, one `l`) with the old value kept in a new `detail` field (`lost` stays visible as `failed` + `detail: "lost"`), a refused `spawn` returns `state: "rejected"`, and the full set is the module constant `TASK_STATES`.
+
 ### Changed — the Linux test suite is split into one file per describe block
 
 - `tests/run-tests.sh` keeps the harness and summary and sources `tests/linux/NN-<describe>.sh` in order; test names
