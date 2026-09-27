@@ -119,6 +119,38 @@ def write_registry(reg) -> str:
     return tmp.name
 
 
+def synthetic_gateway_registry() -> dict:
+    """A tiny registry exercising every gateway_legs() drop rule at once: a
+    route-level unavailable_legs gate, a policy.leg_rules deny, a provider whose
+    available is false, and a model carrying client_bound, plus two live legs
+    either side so the surviving order is observable."""
+    return {
+        "providers": {
+            "clean": {"id": "clean"},
+            "dead": {"id": "dead", "available": False},
+        },
+        "models": {
+            "first": {"id": "first"},
+            "second": {"id": "second"},
+            "bound": {"id": "bound", "client_bound": "opencode"},
+            "deadmodel": {"id": "deadmodel"},
+        },
+        "policy": {"leg_rules": [
+            {"id": "deny-locked", "match": "locked/*", "allow": False},
+        ]},
+        "routes": {
+            "mix": {
+                "id": "mix",
+                "class": "cheap",
+                "strategy": "priority",
+                "legs": ["clean/first", "locked/one", "dead/deadmodel",
+                         "clean/bound", "clean/second"],
+                "surfaces": {"omniroute": {"context_declared": "8k"}},
+            },
+        },
+    }
+
+
 class RenderMatchesTodayTests(unittest.TestCase):
     """Render of the real registry equals today's combos.json semantically."""
 
@@ -142,15 +174,15 @@ class RenderMatchesTodayTests(unittest.TestCase):
         rendered = registry.render_omniroute(real_registry())
         self.assertEqual(sorted(rendered["retired"]), sorted(real_combos()["retired"]))
 
-    def test_every_leg_is_preserved_including_operator_flagged_dead_ones(self):
-        # 2026-09-25/26 operator decisions mark some legs unavailable in the
-        # registry (routes.<id>.unavailable_legs / providers.openrouter.available)
-        # without removing them from `legs` - today's combos.json already lists
-        # these same dead legs, so the render must too (mapping doc section 10).
+    def test_operator_flagged_dead_leg_is_not_mirrored_into_combos(self):
+        # OR1a: a leg the registry marks unavailable/denied/client-bound must
+        # not reach a gateway render, or the live gateway serves a dead leg.
         rendered = registry.render_omniroute(real_registry())
         combos_by_name = {c["name"]: c for c in rendered["combos"]}
-        self.assertIn("opencode-zen/deepseek-v4.1-flash",
-                      combos_by_name["t2-worker-clean"]["models"])
+        self.assertNotIn("opencode-zen/deepseek-v4.1-flash",
+                         combos_by_name["t2-worker-clean"]["models"])
+        self.assertNotIn("groq/openai/gpt-oss-120b",
+                         combos_by_name["t2-worker"]["models"])
         self.assertIn("openrouter/deepseek/deepseek-v4.1-flash",
                       combos_by_name["t2-worker"]["models"])
 
@@ -314,12 +346,19 @@ class ChangedLegFailsLitellmCheckTests(unittest.TestCase):
 
 
 class ExistingSyncRouterTiersStillWorkTests(unittest.TestCase):
-    """A4b must not disturb tools/sync-router-tiers.py - the brief's own 'it stays
-    a working tool, its tests must pass' rule. Both are the *actual* existing
-    tests/checks for that tool (grepped from tests/), not new ones invented here."""
+    """tools/sync-router-tiers.py must stay a working tool - the brief's own 'it
+    stays a working tool, its tests must pass' rule. OR1a changed what
+    config.yaml's managed blocks mirror: only gateway-servable legs, the same
+    set render_omniroute() writes into combos.json. The tool's default leg
+    source is the registry's raw routes.<tier>.legs, which still carry the
+    operator-flagged dead legs, so its default --check now wants to re-add them
+    - a tool defect outside this brief's paths and tracked in open:. Against the
+    filtered source it exists to mirror, combos.json, it still exits 0. The
+    provider-consistency helper below is unaffected by the leg filter."""
 
-    def test_sync_router_tiers_check_still_exits_zero(self):
-        proc = run_helper(SYNC_ROUTER_TIERS_TOOL, "--check")
+    def test_sync_router_tiers_check_against_the_filtered_source_exits_zero(self):
+        proc = run_helper(SYNC_ROUTER_TIERS_TOOL, "--check",
+                          "--combos", str(COMBOS_PATH))
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_provider_registry_consistency_helper_still_passes(self):
@@ -908,6 +947,101 @@ class UnknownModelsDocDocsFlagStillGoesThroughRenderTargetsTests(unittest.TestCa
         for target in ("omniroute", "litellm", "ide", "openhands"):
             proc = run_cli("render", target, "--check")
             self.assertEqual(proc.returncode, 0, "%s: %s" % (target, proc.stdout + proc.stderr))
+
+
+class GatewayLegsFilterTests(unittest.TestCase):
+    """OR1a (ONE-ROUTER step 1a): the gateway renders mirror only legs a live
+    gateway can actually serve - never a leg the registry marks unavailable
+    (route-level or provider-level), a leg policy.leg_rules denies, or a
+    client_bound leg the gateway 403s. models-doc is deliberately not in this
+    set: it still shows a gated leg struck through for the human reader."""
+
+    def setUp(self):
+        self.reg = synthetic_gateway_registry()
+
+    def test_drops_denied_provider_dead_and_client_bound_keeps_order(self):
+        # clean/first and clean/second survive; locked/one (denied),
+        # dead/deadmodel (provider available: false) and clean/bound
+        # (client_bound) do not; the two survivors keep their declared order.
+        self.assertEqual(
+            registry.gateway_legs(self.reg["routes"]["mix"], self.reg),
+            ["clean/first", "clean/second"])
+
+    def test_drops_a_leg_gated_in_its_own_route(self):
+        reg = copy.deepcopy(self.reg)
+        reg["routes"]["mix"]["unavailable_legs"] = {
+            "clean/first": {"available": False}}
+        self.assertEqual(
+            registry.gateway_legs(reg["routes"]["mix"], reg), ["clean/second"])
+
+    def test_provider_available_false_drops_its_legs(self):
+        reg = copy.deepcopy(self.reg)
+        reg["routes"]["mix"]["legs"] = ["dead/deadmodel"]
+        self.assertEqual(registry.gateway_legs(reg["routes"]["mix"], reg), [])
+
+    def test_client_bound_leg_dropped(self):
+        reg = copy.deepcopy(self.reg)
+        reg["routes"]["mix"]["legs"] = ["clean/bound"]
+        self.assertEqual(registry.gateway_legs(reg["routes"]["mix"], reg), [])
+
+    def test_omniroute_mirrors_only_the_servable_legs(self):
+        combo = {c["name"]: c for c in
+                 registry.render_omniroute(self.reg)["combos"]}["mix"]
+        self.assertEqual(combo["models"], ["clean/first", "clean/second"])
+
+    def test_omniroute_omits_a_route_with_no_servable_leg(self):
+        # A combo whose every leg is dead would serve nothing - and a caller
+        # must not be handed a dead combo - so the route gets no entry at all,
+        # exactly like a route whose `legs` is already [].
+        reg = copy.deepcopy(self.reg)
+        reg["routes"]["mix"]["legs"] = ["dead/deadmodel"]
+        rendered = registry.render_omniroute(reg)
+        self.assertEqual([c["name"] for c in rendered["combos"]], [])
+
+    def test_all_gateway_legs_dropped_raises_naming_the_route(self):
+        # A synced litellm tier with no servable leg would render an empty
+        # model list into config.yaml - a hard error, not a silent empty block.
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t2-worker"]["legs"] = ["groq/anything"]
+        with self.assertRaises(ValueError) as ctx:
+            registry.render_litellm_blocks(
+                reg, real_litellm_config(), tiers=("t2-worker",))
+        self.assertIn("t2-worker", str(ctx.exception))
+
+    def test_real_omniroute_drops_gated_legs_and_keeps_live_order(self):
+        combos = {c["name"]: c for c in
+                  registry.render_omniroute(real_registry())["combos"]}
+        self.assertEqual(
+            combos["t2-worker-clean"]["models"],
+            ["deepseek/deepseek-flash",
+             "openrouter/deepseek/deepseek-v4.1-flash",
+             "mistral/mistral-small-latest"])
+        # samba/SambaNova is available: false, so every one of its legs goes -
+        # including the pinned one-leg routes and the zero-spend t1 route.
+        for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3",
+                     "t1-orchestrator-free-only", "t3-driver-free-only"):
+            self.assertNotIn(gone, combos)
+
+    def test_real_litellm_drops_gated_legs(self):
+        rendered = registry.render_litellm_blocks(
+            real_registry(), real_litellm_config())
+        self.assertNotIn("gpt-oss-120b", rendered["t2-worker"])
+        self.assertNotIn("model: openai/deepseek-v4-flash", rendered["t2-worker"])
+        # the client-bound opencode-zen leg (litellm transport openai/…) is
+        # dropped; the live openrouter leg of the same model stays.
+        self.assertNotIn("model: openai/deepseek-v4.1-flash", rendered["t2-worker"])
+        self.assertIn("model: openrouter/deepseek/deepseek-v4.1-flash", rendered["t2-worker"])
+        self.assertIn("gemini-3.8-flash", rendered["t2-worker"])
+        # t3-driver: groq denied; samba/sambanova/cerebras provider-dead;
+        # opencode-zen client-bound.
+        self.assertNotIn("qwen3.8-27b", rendered["t3-driver"])
+        self.assertNotIn("MiniMax-M3", rendered["t3-driver"])
+        self.assertIn("mistral-code-latest", rendered["t3-driver"])
+
+    def test_models_doc_still_strikes_through_a_gated_leg(self):
+        row = row_for(registry.render_models_doc(real_registry()), "t2-worker-clean")
+        self.assertIn(
+            "~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable)", row)
 
 
 class UnavailableUntilRenderIndependenceTests(unittest.TestCase):
