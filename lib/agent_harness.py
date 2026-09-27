@@ -309,10 +309,14 @@ def desired_opencode(user, harness, repo_root, skills_source):
     )
 
     instructions = list(doc.get("instructions") or [])
-    for skill in harness["rules"]["skills"]:
-        entry = _join(skills_source, skill, "SKILL.md")
-        if entry not in instructions:
-            instructions.append(entry)
+    # No source means no paths: joining "" would append "some-skill/SKILL.md",
+    # a relative path that resolves nowhere but reads, in the merged config,
+    # exactly like a skills install that worked.
+    if skills_source:
+        for skill in harness["rules"]["skills"]:
+            entry = _join(skills_source, skill, "SKILL.md")
+            if entry not in instructions:
+                instructions.append(entry)
     leaf_contract = _join(repo_root, harness["rules"]["leaf_contract"])
     if leaf_contract not in instructions:
         instructions.append(leaf_contract)

@@ -111,6 +111,7 @@ Tiers, fallback trees, per-app start commands and provider quirks:
 | [Troubleshooting](docs/troubleshooting.md) | It broke. Now what? |
 | [WSL native agent home](docs/wsl-agent-home.md) | Why do agent tools need native ext4 state on WSL? |
 | [Architecture](docs/architecture.md) | How is it built, and why that way? |
+| [`infra/`](infra/README.md) | Imported infrastructure (mcp-servers, local-ai, remote-access) — has its own repo rules |
 | [Testing](docs/testing.md) | How do I check a change before shipping it? |
 | [Security](docs/security.md) | What must never be committed? |
 | [Verification](docs/verification.md) | What was tested and proven, and what is known broken? |

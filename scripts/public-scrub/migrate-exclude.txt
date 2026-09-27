@@ -1,0 +1,13 @@
+# Paths never migrated to AutoOS (one git pathspec prefix per line; read by scan.py --exclude-file).
+#
+# Operator decision D2 (amended 2026-09-18): nothing else is excluded. Every other document,
+# including EVIDENCE.md, CHANGELOG.md, webpage/, handoff.config.json, infra/local-ai/ and
+# docs/REMOTE-SYNC-TEST-PLAN.md, is scrubbed in place and then migrated. No information is lost.
+
+# The scanner's own rules: patterns.txt holds the private values themselves.
+scripts/public-scrub/
+
+# No upstream licence (THIRD_PARTY.md); excluded until the clean-room rewrite.
+skills/qa-swarm/
+skills/review-triage/
+skills/babysit-prs/

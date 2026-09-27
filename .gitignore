@@ -9,6 +9,11 @@ vault.yml
 !*.example.yml
 !*.example.json
 configuration/api-keys.yml
+# Private scrubber patterns (contains real usernames, emails, domains, IPs, paths)
+scripts/public-scrub/patterns.private.txt
+# infra/ env templates (.env.shared/.server/.client.example) are re-included by
+# infra/.gitignore — the broad `.env.*` above is a basename match and would
+# otherwise reach into infra/mcp-servers/.
 # backups of the key file (installers, web UI, ai-stack.sh: .autoos-backup-*, .bak-*) hold the same secrets
 configuration/api-keys.yml.*
 
