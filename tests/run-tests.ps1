@@ -7258,6 +7258,22 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         Assert-True (($r -is [string]) -and $r) "bad retired id: [$r]"
         Assert-True ($names -notcontains $r) "retired combo id back: $r"
     }
+    # OR1e: "omitted" is the other managed-orphan list - every route the render
+    # produced no combo for (no gateway-servable leg). apply.sh prunes it as well,
+    # so it must be non-empty, disjoint from the current combos and from retired.
+    Assert-True ($null -ne $doc.PSObject.Properties['omitted']) 'combos.json has no "omitted" list'
+    $omitted = @($doc.omitted)
+    Assert-True ($omitted.Count -gt 0) 'combos.json "omitted" is empty'
+    foreach ($o in $omitted) {
+        Assert-True (($o -is [string]) -and $o) "bad omitted id: [$o]"
+        Assert-True ($names -notcontains $o) "omitted id is also a current combo: $o"
+        Assert-True ($retired -notcontains $o) "omitted id is also retired: $o"
+    }
+    # The deliberately legless routes (*-paid, auto*) have no combo by design;
+    # OR1e names them here so apply can prune a live orphan the registry stopped serving.
+    foreach ($legless in @('auto', 'auto/cheap', 'auto/smart', 't1-orchestrator-paid', 't2-worker-paid', 't3-driver-paid')) {
+        Assert-True ($omitted -contains $legless) "legless route $legless is not omitted"
+    }
     $contexts = @{
         't1-orchestrator' = '1M'; 'spark-1.3-contributor' = '1M'; 't1-orchestrator-clean' = '1M'; 't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't4-rag' = '128k'
@@ -7551,11 +7567,7 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     # the exact call apply.ps1 itself makes.
     $registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\ai-registry.json')
     $ProviderData = $registry.Data
-    Assert-Equal $registry.Map['groq'] 'groq'
     Assert-Equal $registry.Map['google_ai_studio'] 'gemini'
-    Assert-Equal $registry.Map['zen'] 'opencode-zen'
-    # api-keys.yml spells SambaNova with capitals; apply reads lower-cased keys.
-    Assert-Equal $registry.Map['sambanova'] 'sambanova'
     Assert-True (-not $registry.Map.Contains('meta')) 'meta must not be registered (2026-09-23)'
     Assert-True (-not $registry.Map.Contains('omniroute')) 'omniroute is the client key, not a provider'
     # antigravity and cc exist only in the registry (no catalog/providers.json
@@ -7563,22 +7575,44 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     # for the first time.
     Assert-Equal $registry.Map['antigravity'] 'antigravity'
     Assert-Equal $registry.Map['cc'] 'cc'
-    # Regression lock for today's registry (2026-09-26): cerebras (402/401
-    # credit exhaustion, L0 2026-09-26T11:44Z) and openrouter (every leg
-    # individually flagged, docs/plans/2026-09-25-routing-v2-plan.md's
-    # "OpenRouter is not to be trusted" decision) are all-unavailable across
-    # every route that lists them, so neither is offered for registration.
-    Assert-True ($registry.Skipped -contains 'cerebras') 'cerebras (all legs dead today) was not skipped'
-    Assert-True ($registry.Skipped -contains 'openrouter') 'openrouter (all legs dead today) was not skipped'
-    Assert-True (-not $registry.Map.Contains('cerebras')) 'cerebras must not also be in Map'
-    Assert-True (-not $registry.Map.Contains('openrouter')) 'openrouter must not also be in Map'
-    $v7 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 7
-    $v5 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 5
-    Assert-Equal ($v7 | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
-    # What node parses after 5.1 legacy unescaping (measured: backslash
-    # quotes arrive as plain quotes) must equal the 7.x literal.
-    Assert-Equal (($v5 -replace '\\"','"') | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
-    Assert-True ($null -eq (Get-AutoOSProviderDataJson 'nope' -ShellMajor 7)) 'unknown provider must yield null'
+    # Regression lock for today's registry (2026-09-27, OR1e): cerebras (402/401
+    # credit exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27) and the zen
+    # free pool are all-unavailable across every route that lists them; openrouter
+    # and antigravity still each carry a live leg, so they are offered. A dead
+    # provider must land in Skipped and never in Map.
+    foreach ($dead in @('cerebras', 'groq', 'opencode-zen', 'sambanova', 'samba')) {
+        Assert-True ($registry.Skipped -contains $dead) "$dead (all legs dead today) was not skipped"
+        Assert-True (-not $registry.Map.Contains($dead)) "$dead must not also be in Map"
+    }
+    Assert-True ($registry.Map.Contains('openrouter')) 'openrouter (has a live leg today) must be offered'
+    # The UA escaping branch is a pure function of the registry's provider_data;
+    # both real carriers (groq, cerebras) are skipped today, so a fixture keeps
+    # both PowerShell generations under test. It is the exact call apply.ps1 makes.
+    $fixturePath = Join-Path ([IO.Path]::GetTempPath()) ('aos_or1e_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "providers": {
+    "groq": {"omniroute_id": "groq", "provider_data": {"customUserAgent": "curl/8.7.1"}}
+  },
+  "routes": {
+    "r": {"legs": ["groq/openai/gpt-oss-120b"]}
+  }
+}
+'@ | Set-Content -LiteralPath $fixturePath -Encoding utf8
+    try {
+        $fixtureRegistry = Get-AutoOSProviderMap $fixturePath
+        Assert-Equal $fixtureRegistry.Map['groq'] 'groq'
+        $ProviderData = $fixtureRegistry.Data
+        $v7 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 7
+        $v5 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 5
+        Assert-Equal ($v7 | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
+        # What node parses after 5.1 legacy unescaping (measured: backslash
+        # quotes arrive as plain quotes) must equal the 7.x literal.
+        Assert-Equal (($v5 -replace '\\"','"') | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
+        Assert-True ($null -eq (Get-AutoOSProviderDataJson 'nope' -ShellMajor 7)) 'unknown provider must yield null'
+    } finally {
+        Remove-Item -LiteralPath $fixturePath -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Case 'Get-AutoOSProviderMap skips a provider whose every route leg is unavailable' {

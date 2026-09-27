@@ -205,6 +205,18 @@
     "tier2-credit",
     "tier3-credit"
   ],
+  "omitted": [
+    "auto",
+    "auto/cheap",
+    "auto/smart",
+    "samba/MiniMax-M3",
+    "samba/gpt-oss-120b",
+    "t1-orchestrator-free-only",
+    "t1-orchestrator-paid",
+    "t2-worker-paid",
+    "t3-driver-free-only",
+    "t3-driver-paid"
+  ],
   "combos": [
     {
       "name": "t1-orchestrator",

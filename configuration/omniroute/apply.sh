@@ -213,7 +213,9 @@ gateway_up() { curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1; }
 #  "active":...,"error":...} — a leg ref reconstructs as providerId/model, the
 # spelling combos.json already uses (the CLI splits the leading provider/
 # segment off a plain "provider/model" token when a combo is created).
-# A combo listed in the file's "retired" ids is ignored on the live side; any
+# A combo listed in the file's "retired" ids is ignored on the live side; an
+# "omitted" id (a route the registry renders no combo for) is an extra, but the
+# reason is named so the operator sees it is an orphan apply will prune. Any
 # other live combo absent from the file is reported, never touched.
 if [[ $DRIFT -eq 1 ]]; then
     if ! command -v omniroute >/dev/null; then
@@ -249,14 +251,22 @@ except (OSError, ValueError):
     else:
         print("drift: live store unreadable - combo list output was not JSON")
     sys.exit(3)
-if not isinstance(live_doc, dict) or live_doc.get("error"):
+if not isinstance(live_doc, dict):
+    # A bare JSON list is not a combo document. The old single `not isinstance
+    # (...) or live_doc.get("error")` guard short-circuited the condition but
+    # then called .get() on the list in the body, so --drift exited 1 with a
+    # traceback instead of this reason (OR1e).
+    print("drift: live store unreadable - unexpected output")
+    sys.exit(3)
+if live_doc.get("error"):
     # The CLI answers a refused management call as {"error": "HTTP 401"}.
     # The status is a reason, never a key, so it is safe to show.
-    print("drift: live store unreadable - %s" % live_doc.get("error", "unexpected output"))
+    print("drift: live store unreadable - %s" % live_doc["error"])
     sys.exit(3)
 
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 retired = set(data.get("retired", []))
+omitted = set(data.get("omitted", []))
 file_combos = {c["name"]: list(c["models"]) for c in data.get("combos", [])}
 
 live_combos = {}
@@ -289,7 +299,10 @@ for name, file_refs in file_combos.items():
         rc = 1
 for name in live_combos:
     if name not in file_combos:
-        print("extra %s" % name)
+        if name in omitted:
+            print("extra %s (omitted: no servable leg)" % name)
+        else:
+            print("extra %s" % name)
         rc = 1
 if rc == 0:
     # No "drift:" here: that prefix marks a difference line, and an in-sync
@@ -471,12 +484,15 @@ for c in data.get("combos", []):
 PY
 )
 
-# ─── Prune: delete the retired combos, and only those ───────────────────────
-# combos.json "retired" lists the ids a rename or removal left behind. The loop
-# above only creates and replaces by name, so they used to stay in the store
-# forever (9 orphans deleted by hand on 2026-09-25). A name is deleted only when
-# it is retired AND live (and not a current combo): a store combo that is not
-# in "retired" may be one the user made and is never touched.
+# ─── Prune: delete the retired and omitted combos, and only those ───────────
+# combos.json carries two lists of ids the live store should not hold:
+# "retired" (a rename or removal left them behind; 9 orphans were deleted by
+# hand on 2026-09-25) and "omitted" (OR1e: every route the render produced no
+# combo for, because it has no gateway-servable leg). The loop above only
+# creates and replaces by name, so such an id would otherwise stay in the store
+# forever. A name is deleted only when it is in one of those lists AND live (and
+# not a current combo): a store combo in neither list may be one the user made
+# and is never touched.
 # A down gateway is not listed at all: the CLI would fall back to reading the
 # store file directly, and a dry run must not depend on that.
 echo "Prune:"
@@ -498,22 +514,29 @@ for line in sys.stdin.read().splitlines():
     m = re.match(r"\s*\S+\s+(\S+)\s+\[[^\]]*\]", re.sub(r"\x1b\[[0-9;]*m", "", line))
     if m:
         live.add(m.group(1))
-for name in data.get("retired", []):
-    if name in live and name not in current:
-        print(name)
+# Each managed orphan is printed as "<kind>\t<name>" so the message names why
+# it is pruned. The two lists are disjoint by construction, but the store is
+# external: a name in both is printed once, "retired" first (the older fact).
+seen = set()
+for kind, ids in (("retired", data.get("retired", [])),
+                  ("omitted", data.get("omitted", []))):
+    for name in ids:
+        if name in live and name not in current and name not in seen:
+            seen.add(name)
+            print("%s\t%s" % (kind, name))
 ' "$COMBOS_FILE")"; then
-    echo "  ! cannot read the retired list from $COMBOS_FILE - nothing pruned"
+    echo "  ! cannot read the retired/omitted lists from $COMBOS_FILE - nothing pruned"
 elif [[ -z "$prune_names" ]]; then
-    echo "  = no retired combos in the store"
+    echo "  = no retired or omitted combos in the store"
 else
-    while IFS= read -r retired_name; do
-        [[ -z "$retired_name" ]] && continue
+    while IFS=$'\t' read -r prune_kind prune_name; do
+        [[ -z "$prune_name" ]] && continue
         if [[ $DRY -eq 1 ]]; then
-            echo "  - $retired_name: retired, would delete"
-        elif omni combo delete "$retired_name" --yes </dev/null >/dev/null 2>&1; then
-            echo "  - $retired_name: retired, deleted"
+            echo "  - $prune_name: $prune_kind, would delete"
+        elif omni combo delete "$prune_name" --yes </dev/null >/dev/null 2>&1; then
+            echo "  - $prune_name: $prune_kind, deleted"
         else
-            echo "  ! $retired_name: retired, delete failed - run: omniroute combo delete $retired_name --yes"
+            echo "  ! $prune_name: $prune_kind, delete failed - run: omniroute combo delete $prune_name --yes"
         fi
     done <<<"$prune_names"
 fi

@@ -248,15 +248,48 @@ if it "apply prune: --dry-run names the retired combo and deletes nothing"; then
     if (( ok )); then pass; else fail "the prune dry run is not a dry run"; fi
 fi
 
-if it "apply prune: a second run finds no retired combos and deletes nothing"; then
+if it "apply prune: a second run finds no retired or omitted combos and deletes nothing"; then
     d="$(_prune_sandbox)"
     _prune_list "$d" t2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     grep -q '^combo delete' "$d/calls.log" && { ok=0; echo "deleted: $(grep '^combo delete' "$d/calls.log")" >&2; }
-    [[ "$out" == *"  = no retired combos in the store"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  = no retired or omitted combos in the store"* ]] || { ok=0; echo "out: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "a clean store is not reported as clean"; fi
+fi
+
+# OR1e: combos.json "omitted" lists every route the registry renders no combo
+# for (no servable leg). A live combo with such an id is a managed orphan, so
+# apply prunes it - but never a user-made combo, and never a current combo.
+if it "apply prune: deletes an omitted (unservable) combo the store holds, never a user-made one"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" t1-orchestrator-paid t2-worker my-own-combo
+    out="$(_prune_apply "$d")"
+    ok=1
+    deletes="$(grep '^combo delete' "$d/calls.log")"
+    [[ "$deletes" == "combo delete t1-orchestrator-paid --yes" ]] \
+        || { ok=0; echo "deleted: [$deletes]" >&2; }
+    grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    [[ "$out" == *"  - t1-orchestrator-paid: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "prune did not delete exactly the omitted combo"; fi
+fi
+
+if it "apply prune: --dry-run names the omitted combo and deletes nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" t1-orchestrator-paid my-own-combo
+    out="$(_prune_apply "$d" --dry-run)"
+    ok=1
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"  - t1-orchestrator-paid: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"omitted, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the omitted prune dry run is not a dry run"; fi
 fi
 
 # A down gateway must not be listed: the real CLI then falls back to reading
@@ -435,6 +468,48 @@ PY
     [[ "$out" == *"$retired"* ]] && { ok=0; echo "named the retired live combo: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "--drift missed missing/extra or touched a retired id"; fi
+fi
+
+# OR1e: a live combo whose id the registry lists in "omitted" is a managed
+# orphan the render dropped (no servable leg). It is still an "extra" (the file
+# does not carry it as a combo), but the reason is named so the operator knows
+# a prune will remove it rather than thinking it is a user-made combo.
+if it "apply drift: an omitted live combo is reported as extra with the omitted reason"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    doc="$ROOT/configuration/omniroute/combos.json"
+    omitted="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["omitted"][0])' "$doc")"
+    python3 - "$doc" "$d/drift.json" "$omitted" >"$d/drift.json.new" <<'PY'
+import json, sys
+live = json.load(open(sys.argv[2], encoding="utf-8"))
+live["combos"].append({"name": sys.argv[3], "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "x"}]})
+print(json.dumps(live))
+PY
+    mv "$d/drift.json.new" "$d/drift.json"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"extra $omitted (omitted: no servable leg)"* ]] || { ok=0; echo "no labeled extra line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift did not label the omitted live combo"; fi
+fi
+
+# OR1e: the CLI can answer a management call with a bare JSON list. The old
+# isinstance(...) or live_doc.get(...) form short-circuited the guard but then
+# called .get() on the list, so --drift died with a traceback and exit 1
+# instead of the one-line "unreadable" reason and exit 3.
+if it "apply drift: a bare JSON list is an unreadable store, not a crash"; then
+    d="$(_drift_sandbox)"
+    printf '[]' >"$d/drift.json"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 3 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    grep -qi 'traceback' <<<"$out" && { ok=0; echo "crashed: $out" >&2; }
+    [[ "$(grep -c . <<<"$out")" -eq 1 ]] || { ok=0; echo "not one line: $out" >&2; }
+    [[ "$out" == *unreadable* ]] || { ok=0; echo "no reason line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift crashed on a JSON list instead of exiting 3"; fi
 fi
 
 # A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp
