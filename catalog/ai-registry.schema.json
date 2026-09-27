@@ -538,6 +538,24 @@
               "source": { "$ref": "#/$defs/source_tag" }
             }
           }
+        },
+        "reviewers": {
+          "type": "array",
+          "minItems": 1,
+          "description": "REVROUTE (S2) item 1, operator 2026-09-27T20:3xZ: the ordered preference list a review card walks -- WHO may review, as data rather than as a constant in the resolver. First usable entry wins: an entry is skipped when its `family` equals the author's (a review must come from a different model family), when the gateway/provider says it is unavailable, or when the card is privacy=sensitive and the model trains on prompts. `model` is the client's own model spelling (a gateway combo like 'omniroute/spark-1.3-contributor', or Haiku's client-side alias) -- like policy.free_client_models it is deliberately NOT checked against providers/models, because a reviewer is picked per client, not per route leg. `paid` is the operator's cost preference made visible: the paid Meta Muse contributor leads. `first_pass_only` true marks a reviewer that may take a normal-risk first pass but never closes (Claude Haiku); the high-risk Sonnet close is the resolver's own closer and is not on this list.",
+          "items": {
+            "type": "object",
+            "required": ["client", "model", "family", "paid", "source"],
+            "additionalProperties": false,
+            "properties": {
+              "client": { "type": "string" },
+              "model": { "type": "string" },
+              "family": { "type": "string" },
+              "paid": { "type": "boolean" },
+              "first_pass_only": { "type": "boolean" },
+              "source": { "$ref": "#/$defs/source_tag" }
+            }
+          }
         }
       }
     },
