@@ -3891,7 +3891,10 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         sandbox is a real temp clone so WIP commits and re-runs are real.
 
         Returns (rc, out, err, calls, sandbox_names): `calls` is
-        {"n": int, "cwds": [str]}.
+        {"n": int, "cwds": [str], "track": [record]}. The run is a gateway
+        (opencode) run so `track_entry` emits a record per attempt - an
+        own-account client's run is tracked as None (SPAWNCAP fallthrough
+        records every provider-stopped attempt, not just the final plan).
         """
         root = _init_git_root()
         self.addCleanup(shutil.rmtree, root, True)
@@ -3905,7 +3908,7 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
         cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
 
-        calls = {"n": 0, "cwds": [], "route_marks": []}
+        calls = {"n": 0, "cwds": [], "route_marks": [], "track": []}
         real_build_plan = agent.build_plan
 
         def marking_build_plan(*a, **k):
@@ -3927,19 +3930,26 @@ class ProviderStopFallthroughTests(unittest.TestCase):
             return agent.ClientExit(0, tail="done\n")
 
         args = argparse.Namespace(
-            client="claude", tier=None, card="kind=implement", task="edit README.md",
+            client="opencode", tier=None, card="kind=implement", task="edit README.md",
             free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
             joinable=False, model=None, clean=False, allow_training=False,
             max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
         env = dict(os.environ)
         env["AUTOOS_STATE_DIR"] = statedir
+        # A gateway run needs a client key and a live gateway; both are faked
+        # here. The key is what makes the run track-recorded at all.
+        env["AUTOOS_OMNIROUTE_KEY"] = "test-only-key"
         out, err = io.StringIO(), io.StringIO()
         try:
             with mock.patch.dict(os.environ, env, clear=True):
                 with mock.patch.object(agent, "load_registry",
                                        lambda path: _fallthrough_registry(route_ids)):
                     with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
-                            mock.patch.object(agent, "build_plan", marking_build_plan):
+                            mock.patch.object(agent, "build_plan", marking_build_plan), \
+                            mock.patch.object(agent, "gateway_up", lambda: True), \
+                            mock.patch.object(agent, "resolve_model",
+                                              lambda cfg, tier, clean, override:
+                                                  override or "omniroute/r-t2"):
                         with mock.patch.object(agent, "run_client", fake_run_client):
                             with mock.patch.object(agent.measure_mod, "client_state",
                                                    lambda *a, **k: {}):
@@ -3947,11 +3957,12 @@ class ProviderStopFallthroughTests(unittest.TestCase):
                                         agent.clients, "signin_state",
                                         lambda client, env=None: (None, "")):
                                     with mock.patch("shutil.which",
-                                                    return_value="/usr/bin/claude"):
+                                                    return_value="/usr/bin/opencode"):
                                         with contextlib.redirect_stdout(out), \
                                                 contextlib.redirect_stderr(err):
                                             rc = agent.cmd_run(args, cfg)
         finally:
+            calls["track"] = agent.track.load(agent.TRACK_RECORD)
             (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
                 old_root, old_track, old_overlay)
         base = os.path.join(statedir, "sandboxes")
@@ -3987,6 +3998,35 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         self.assertEqual(rc, 8, out + err)
         self.assertEqual(calls["n"], 1, "nowhere to fall through to")
         self.assertNotIn("falling through to", out + err)
+
+    @staticmethod
+    def _records(calls):
+        """The track record as (route, gate, failure_class) triples."""
+        return [(r["route"], r["gate"], r["failure_class"]) for r in calls["track"]]
+
+    def test_every_provider_stopped_attempt_is_track_recorded(self):
+        # REVFIX: a provider-stopped attempt that falls through was never its
+        # own observation - only the final plan's record survived, so the dead
+        # route looked healthy and `route` kept picking it.
+        _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1)
+        self.assertEqual(
+            self._records(calls),
+            [("r-free", "fail", "provider"), ("r-cheap", "pass", None)], out + err)
+
+    def test_a_run_with_no_fallthrough_is_track_recorded_once(self):
+        # The per-attempt record must not double-count the final plan's own
+        # record when the loop never falls through.
+        _, out, err, calls, _ = self._run(["r-free"], stops=0)
+        self.assertEqual(self._records(calls), [("r-free", "pass", None)], out + err)
+
+    def test_the_cap_records_every_fallthrough_attempt(self):
+        _, out, err, calls, _ = self._run(
+            ["r-free", "r-cheap", "r-cheap2", "r-cheap3"], stops=5)
+        self.assertEqual(
+            self._records(calls),
+            [("r-free", "fail", "provider"),
+             ("r-cheap", "fail", "provider"),
+             ("r-cheap2", "fail", "provider")], out + err)
 
 
 class OutsideFenceTaskDirTests(unittest.TestCase):

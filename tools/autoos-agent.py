@@ -1814,6 +1814,7 @@ def cmd_run(args, cfg: dict) -> int:
     # WIP-committed - exactly as before WIPfix. CAPTURE_CLIENTS keeps its own.
     capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
     while True:
+        attempt_start = time.time()
         run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
                             capture=capture)
         client_tail = getattr(run_rc, "tail", "") or ""
@@ -1870,6 +1871,12 @@ def cmd_run(args, cfg: dict) -> int:
             if wip_sha:
                 print("WIP-COMMITTED: %s" % wip_sha)
         excluded_routes.add(plan["route"]["combo"])
+        # REVFIX: each provider-stopped attempt is its own observation, not
+        # just the final plan's. Without this the dead route looked healthy
+        # (no fail record), so the resolver kept handing it the work.
+        stopped = track_entry(plan, rc, time.time() - attempt_start)
+        if stopped is not None:
+            record_run(TRACK_RECORD, stopped)
         print(fallthrough_line(plan["route"]["combo"], stop, next_combo), file=sys.stderr)
         plan = next_plan
         # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
