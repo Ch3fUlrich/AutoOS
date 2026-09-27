@@ -1301,6 +1301,7 @@ failover_require_port_free() {
 # Then gateway health plus a published-port check; on failure the manual fix,
 # rc 1. Optional <health_tries> bounds the wait: the interrupt trap passes a
 # short one, so a handed-back Ctrl-C never sits on the full 180 s.
+# shellcheck disable=SC2120  # the INT/TERM trap string passes <health_tries>; shellcheck cannot see into it
 failover_bring_back_omniroute() {
     local tries="${1:-36}"
     local port

@@ -22,6 +22,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (no pid file, fake `ss` listener, real `litellm`-renamed sleep) plus
   busy-port and foreign-listener cases in `tests/linux/34-ai-services.sh`.
   Docs: `docs/web-services.md` "Standby router (LiteLLM)".
+  Review round (DeepSeek v4.1-flash): a pid counts as the standby only when it
+  is litellm AND holds (or was started with `--port`) the gateway port, so the
+  always-on `:4000` proxy is never signalled; the published-port check rejects
+  `{}` and `{"20128/tcp":null}`; the gateway comes back through `dc_up`
+  (preflight guards); a failed state write leaves no state file; `off` without
+  a state file still stops a standby on the port; the Ctrl-C path waits a
+  short health window; TERM->KILL is tested.
 
 ### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
 ### Added — one-command standby router: `ai-stack.sh failover` (lstby)
