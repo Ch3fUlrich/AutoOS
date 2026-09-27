@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — RTK A/B probe: the measurement behind decision D19
+
+- **`tools/probe-rtk.py`** (Python stdlib only): collects real tool output locally (`git log --stat`, `git diff`, a `grep` over `tools/`, this repo's own probe test runs) plus synthetic failing outputs buried in 300 lines of passing noise, sends each sample through the host CLI's management-scoped RTK endpoint (`omniroute --output json -q ctx rtk test --file …`), and checks that every failure line of the original survives verbatim in the compressed text. TSV per sample plus a summary on stdout; `--report PATH` adds a markdown table and the verdict line — `D19: enable RTK on tool output` only when the corpus saves >= 10% **and** no sample lost a line or failed to measure, else `D19: keep RTK off (<reason>)`. The manage key is read from `~/.config/autoos/ai-stack/manage.key` (or `$AUTOOS_AI_STACK_CONFIG`) and passed only in the child's environment — never argv, never printed; without it the probe exits 3 and says it is an operator step. Exit 0 on a completed run whatever the verdict, 2 usage, 3 CLI/auth unavailable. `--dry-run` lists the corpus and calls nothing. Tests: `tests/test_probe_rtk.py` (offline, `subprocess.run` monkeypatched).
+
 ### Added — ask-back: a blocked worker asks its orchestrator (spec routing-v2 §9)
 
 - **`tools/autoos-ask.py`** (Python stdlib only): the worker-side helper — writes `question.json` into the run dir

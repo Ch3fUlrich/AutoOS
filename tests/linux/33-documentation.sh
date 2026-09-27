@@ -568,6 +568,13 @@ if it "probe-effort: effort-ladder probe writes the overlay (unit tests)"; then
     out="$(python3 tests/test_probe_effort.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/probe-rtk.py: the RTK A/B behind decision D19 (routing v2 spec section 10).
+# Offline: subprocess.run is monkeypatched, so this never calls the omniroute CLI
+# and never reads a manage key - the live A/B stays an operator run.
+if it "probe-rtk: RTK A/B and the D19 gate (unit tests)"; then
+    out="$(python3 tests/test_probe_rtk.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/skill-rules.py: the linter for one-line skill rules (routing v2 spec 8.1).
 if it "skill-rules check: ids, length, source, near-duplicates (unit tests)"; then
     out="$(python3 tests/test_skill_rules.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
