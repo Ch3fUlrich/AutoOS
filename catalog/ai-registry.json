@@ -2267,6 +2267,7 @@
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b",
+        "openrouter/openai/gpt-oss-120b",
         "cheaperinference/deepseek-v4-flash",
         "cheaperinference/glm-4.5-air",
         "cheaperinference/kimi-k3",
@@ -2325,6 +2326,10 @@
         },
         "openrouter/deepseek/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
+          "available": false
+        },
+        "openrouter/openai/gpt-oss-120b": {
+          "$comment": "L0 2026-09-27T03:39Z: unpinned OpenRouter BYOK leg; OmniRoute 3.8.51 has no per-leg provider pin. Serves only after the operator sets BYOK keys Prioritized + shared capacity off (operator list 2b); then re-probe with tools/probe-toolcalls.py and drop this entry.",
           "available": false
         }
       }
