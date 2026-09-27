@@ -44,6 +44,23 @@ def load_agent():
     return module
 
 
+# Every cmd_run writes a worker record (ps). No test may write into the host's
+# real registry (<main checkout>/logs/workers): pin it to a throwaway dir for the
+# whole module; a test that needs its own dir still passes AUTOOS_WORKERS_DIR.
+_WORKERS_TMP = None
+
+
+def setUpModule():
+    global _WORKERS_TMP
+    _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-workers-test-")
+    os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
+
+
+def tearDownModule():
+    os.environ.pop("AUTOOS_WORKERS_DIR", None)
+    shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
+
+
 def clean_env(**extra):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k != "AUTOOS_OMNIROUTE_KEY"}
@@ -54,6 +71,88 @@ def clean_env(**extra):
 def run_agent(*args, env=None):
     return subprocess.run([sys.executable, str(AGENT), *args], capture_output=True,
                           text=True, env=env or clean_env(), stdin=subprocess.DEVNULL)
+
+
+class _FakeFn:
+    """A callable standing in for a ctypes function. ctypes functions carry
+    ``restype``/``argtypes``; the production helper assigns them, so the fake
+    must expose writable attributes on a per-instance callable (bound methods
+    do not)."""
+
+    def __init__(self, fn):
+        self._fn = fn
+        self.restype = None
+        self.argtypes = None
+
+    def __call__(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+
+class _FakeKernel32:
+    """A fake ctypes kernel32 for the Windows liveness/start-time paths (V1/V2).
+
+    Runs on Linux: the production code imports ctypes inside its
+    ``os.name == "nt"`` branch, so injecting this module into ``sys.modules``
+    is exactly what it sees. ``byref`` returns the ctypes-like value object
+    itself, so the fake Get* calls can write ``.value`` on it.
+    """
+
+    def __init__(self, handle=1234, exit_code=259, created=987654321,
+                 last_error=0, times_ok=True):
+        self.handle = handle
+        self.exit_code = exit_code
+        self.created = created
+        self.last_error = last_error
+        self.times_ok = times_ok
+        self.opened = []
+        self.closed = []
+        self.OpenProcess = _FakeFn(self._open_process)
+        self.GetExitCodeProcess = _FakeFn(self._get_exit_code_process)
+        self.GetProcessTimes = _FakeFn(self._get_process_times)
+        self.CloseHandle = _FakeFn(self._close_handle)
+
+    def _open_process(self, access, inherit, pid):
+        self.opened.append((access, inherit, pid))
+        return self.handle
+
+    def _get_exit_code_process(self, handle, code):
+        code.value = self.exit_code
+        return 1
+
+    def _get_process_times(self, handle, created, exited, kernel, user):
+        if not self.times_ok:
+            return 0
+        created.value = self.created
+        return 1
+
+    def _close_handle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+class _FakeCtypesValue:
+    def __init__(self, value=0):
+        self.value = value
+
+
+def fake_windows_ctypes(k32):
+    """A ctypes stand-in whose kernel32 is `k32` (V1/V2 tests).
+
+    ``WinDLL`` is what the production helper now asks for (typed signatures);
+    ``wintypes`` carries the sentinels the tests assert the helper assigned.
+    """
+    fake = types.ModuleType("ctypes")
+    fake.k32 = k32
+    fake.windll = types.SimpleNamespace(kernel32=k32)
+    fake.WinDLL = lambda *args, **kwargs: k32
+    fake.wintypes = types.SimpleNamespace(HANDLE=object(), DWORD=_FakeCtypesValue,
+                                          BOOL=object(), FILETIME=object())
+    fake.POINTER = lambda typ: typ
+    fake.get_last_error = lambda: k32.last_error
+    fake.byref = lambda obj: obj
+    fake.c_ulong = _FakeCtypesValue
+    fake.c_ulonglong = _FakeCtypesValue
+    return fake
 
 
 class RoutingTableTests(unittest.TestCase):
@@ -1402,7 +1501,8 @@ class McpStdioTests(unittest.TestCase):
             self.assertEqual(replies[1]["result"]["serverInfo"]["name"], "autoos-agent")
             names = {t["name"] for t in replies[2]["result"]["tools"]}
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
-                                     "respond", "route", "list_agents", "context", "heartbeat"})
+                                     "respond", "route", "list_agents", "context", "heartbeat",
+                                     "ps"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "t3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])
@@ -4058,6 +4158,384 @@ class OutsideFenceTaskDirTests(unittest.TestCase):
         rules, err = self.fence(link)
         self.assertEqual(rules, self.todays_rules())
         self.assertIn("AUTOOS_TASK_DIR", err)
+
+
+class _WorkerRecordBase(unittest.TestCase):
+    """Shared fixtures for the host-wide worker registry (`ps`)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.workers = os.path.join(self.tmp, "workers")
+        self.old = os.environ.get("AUTOOS_WORKERS_DIR")
+        os.environ["AUTOOS_WORKERS_DIR"] = self.workers
+        self.addCleanup(self._restore)
+        # cmd_run refuses (rc 3) when no gateway answers; CI has none, a dev host
+        # usually does - pin it so these tests never depend on the host's stack.
+        # CI also has no configuration/api-keys.yml, so no client key (rc 3 before
+        # the gateway check); a dev host reads the main checkout's. Pin both.
+        for name, value in (("gateway_up", True), ("client_key", "sk-test-key")):
+            patcher = mock.patch.object(self.agent, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _restore(self):
+        if self.old is None:
+            os.environ.pop("AUTOOS_WORKERS_DIR", None)
+        else:
+            os.environ["AUTOOS_WORKERS_DIR"] = self.old
+
+    def write(self, wid="w1", **over):
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        rec = {"id": wid, "pid": os.getpid(), "pid_start": self.agent._proc_starttime(os.getpid()),
+               "started": self.agent.utc_now_iso(), "session_tag": "lane-a", "client": "opencode",
+               "model": "m", "route": "t2-worker", "title": "", "cwd": "/x", "sandbox": "",
+               "task_head": "do a thing", "depth": 1}
+        rec.update(over)
+        path = os.path.join(self.workers, wid + ".json")
+        with io.open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        return path
+
+
+class WorkerRecordTests(_WorkerRecordBase):
+    """list_workers / workers_dir: state, the pid-reuse guard and pruning."""
+
+    def test_workers_dir_honours_the_env_override_and_is_0700(self):
+        self.assertEqual(self.agent.workers_dir(), self.workers)
+        self.assertTrue(os.path.isdir(self.workers))
+        self.assertEqual(os.stat(self.workers).st_mode & 0o777, 0o700)
+
+    def test_a_dry_run_writes_no_record(self):
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=True,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title=None, model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+        with mock.patch.object(self.agent, "build_plan", return_value=plan):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 0)
+        self.assertEqual([f for f in (os.listdir(self.workers)
+                                      if os.path.isdir(self.workers) else [])], [])
+
+    def test_current_pid_and_start_time_is_running(self):
+        if self.agent._proc_starttime(os.getpid()) is None:
+            self.skipTest("no /proc start time on this host")
+        self.write()
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["running"])
+
+    def test_worker_record_file_is_0600_and_leaves_no_tmp(self):
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        path = os.path.join(self.workers, "w9.json")
+        self.agent._write_worker_record(path, {"id": "w9", "pid": os.getpid()})
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertEqual(os.listdir(self.workers), ["w9.json"])
+
+    def test_a_pid_that_does_not_exist_is_died(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        self.write(pid=proc.pid, pid_start=None)
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["died"])
+
+    def test_a_start_time_mismatch_is_died(self):
+        start = self.agent._proc_starttime(os.getpid())
+        if start is None:
+            self.skipTest("no /proc start time on this host")
+        self.write(pid_start=start + 1)
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["died"])
+
+    def test_a_start_time_mismatch_is_died_with_mocked_start(self):
+        # The guard fires on a genuinely different start time, host-independently.
+        self.write(pid_start=12345)
+        with mock.patch.object(self.agent, "_proc_starttime", return_value=54321):
+            rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["died"])
+
+    def test_a_live_pid_with_unreadable_start_time_is_running(self):
+        # Q1: a live pid whose start time cannot be read now (permissions,
+        # GetProcessTimes failure) must NOT be reported as died - the reuse
+        # guard is skipped, matching list_workers' docstring.
+        self.write(pid_start=12345)
+        with mock.patch.object(self.agent, "_proc_starttime", return_value=None):
+            rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["running"])
+
+    def test_ended_is_exited_rc_and_hidden_without_include_ended(self):
+        self.write(ended=self.agent.utc_now_iso(), rc=7)
+        self.assertEqual(self.agent.list_workers(self.workers), [])
+        rows = self.agent.list_workers(self.workers, include_ended=True)
+        self.assertEqual([r["state"] for r in rows], ["exited rc=7"])
+
+    def test_an_eight_day_old_ended_record_is_deleted(self):
+        old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=8)
+        path = self.write(ended=old.isoformat(timespec="seconds").replace("+00:00", "Z"), rc=0)
+        rows = self.agent.list_workers(self.workers, include_ended=True)
+        self.assertEqual(rows, [])
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_corrupt_record_is_skipped_never_raises(self):
+        self.write()
+        bad = os.path.join(self.workers, "bad.json")
+        with io.open(bad, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["id"] for r in rows], ["w1"])
+
+    def test_cmd_run_records_during_the_run_and_ended_with_rc_after(self):
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title="t", model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+        seen = {}
+
+        def fake_run(*a, **k):
+            files = [f for f in os.listdir(self.workers) if f.endswith(".json")]
+            self.assertEqual(len(files), 1)
+            with io.open(os.path.join(self.workers, files[0]), encoding="utf-8") as fh:
+                seen["rec"] = json.load(fh)
+            self.assertIsNone(seen["rec"].get("ended"))
+            self.assertEqual(seen["rec"]["pid"], os.getpid())
+            self.assertEqual(a[2]["AUTOOS_WORKERS_DIR"], self.workers)
+            return self.agent.ClientExit(4)
+
+        with mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "run_client", side_effect=fake_run), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 4)
+        self.assertEqual(seen["rec"]["client"], "opencode")
+        self.assertEqual(seen["rec"]["route"], "t2-worker")
+        self.assertEqual(seen["rec"]["task_head"], "do it")
+        with io.open(os.path.join(self.workers, seen["rec"]["id"] + ".json"), encoding="utf-8") as fh:
+            after = json.load(fh)
+        self.assertTrue(after["ended"])
+        self.assertEqual(after["rc"], 4)
+
+
+    def test_a_failed_end_record_keeps_the_client_rc(self):
+        # L1-routing review note (1): the finally-block record write must never
+        # replace the client's rc (disk full, permissions).
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title="t", model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+
+        def boom(*_a, **_k):
+            raise OSError(28, "No space left on device")
+
+        err = io.StringIO()
+        with mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "run_client", return_value=self.agent.ClientExit(4)), \
+                mock.patch.object(self.agent, "_worker_record_end", side_effect=boom), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 4)
+        self.assertIn("could not update worker record", err.getvalue())
+
+
+    def test_a_record_start_failure_still_runs_the_client(self):
+        # V4 ps final review: workers_dir()/_worker_record_start() run before
+        # run_client; an OSError there must not stop the client from launching.
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title="t", model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+        called = {}
+
+        def boom(*_a, **_k):
+            raise OSError(28, "No space left on device")
+
+        def fake_run(*_a, **_k):
+            called["ran"] = True
+            return self.agent.ClientExit(4)
+
+        err = io.StringIO()
+        with mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "_worker_record_start", side_effect=boom), \
+                mock.patch.object(self.agent, "run_client", side_effect=fake_run), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertTrue(called.get("ran"), "run_client must run without a worker record")
+        self.assertEqual(rc, 4)
+        self.assertIn("could not write worker record", err.getvalue())
+
+
+class WindowsLivenessTests(_WorkerRecordBase):
+    """V1/V2 ps final review: on Windows liveness and the pid-reuse start time
+    go through ctypes (OpenProcess/GetExitCodeProcess/GetProcessTimes/
+    CloseHandle), never os.kill - signal 0 there Ctrl+C's a live worker. The
+    fake kernel32 lets these run on Linux."""
+
+    def call(self, k32, fn, *args):
+        fake = fake_windows_ctypes(k32)
+        with mock.patch.dict(sys.modules, {"ctypes": fake}), \
+                mock.patch.object(self.agent, "_WIN_KERNEL32", None), \
+                mock.patch.object(self.agent.os, "name", "nt"), \
+                mock.patch.object(self.agent.os, "kill",
+                                  side_effect=AssertionError("os.kill must not run on Windows")):
+            return fn(*args)
+
+    def test_the_helper_sets_typed_ctypes_signatures_once(self):
+        # Q2/Q3: without restype, ctypes truncates a 64-bit HANDLE to a C int.
+        # The helper declares the signatures (cached, not per call); assert the
+        # restype landed on the fake function objects.
+        k32 = _FakeKernel32()
+        fake = fake_windows_ctypes(k32)
+        with mock.patch.dict(sys.modules, {"ctypes": fake}), \
+                mock.patch.object(self.agent, "_WIN_KERNEL32", None):
+            first = self.agent._win_kernel32()
+            second = self.agent._win_kernel32()
+        self.assertIs(first, k32)
+        self.assertIs(second, k32, "the helper must cache, not rebuild per call")
+        self.assertIs(k32.OpenProcess.restype, fake.wintypes.HANDLE)
+        self.assertIs(k32.GetExitCodeProcess.restype, fake.wintypes.BOOL)
+        self.assertIs(k32.GetProcessTimes.restype, fake.wintypes.BOOL)
+        self.assertIs(k32.CloseHandle.restype, fake.wintypes.BOOL)
+        self.assertIsNotNone(k32.OpenProcess.argtypes)
+        self.assertEqual(len(k32.OpenProcess.argtypes), 3)
+        self.assertEqual(len(k32.GetProcessTimes.argtypes), 5)
+
+    def test_a_live_windows_pid_is_alive_and_never_os_kill(self):
+        k32 = _FakeKernel32(handle=7, exit_code=259)
+        self.assertTrue(self.call(k32, self.agent._pid_alive, 4242))
+        self.assertEqual(k32.opened, [(0x1000, False, 4242)])
+        self.assertEqual(k32.closed, [7])
+
+    def test_a_null_handle_with_no_error_is_not_alive(self):
+        self.assertFalse(self.call(_FakeKernel32(handle=None), self.agent._pid_alive, 4242))
+
+    def test_access_denied_means_a_live_process(self):
+        # ERROR_ACCESS_DENIED (5): the process exists, owned by someone else.
+        k32 = _FakeKernel32(handle=None, last_error=5)
+        self.assertTrue(self.call(k32, self.agent._pid_alive, 4242))
+
+    def test_a_non_still_active_exit_code_is_not_alive(self):
+        self.assertFalse(self.call(_FakeKernel32(exit_code=0), self.agent._pid_alive, 1))
+
+    def test_windows_start_time_comes_from_get_process_times(self):
+        self.assertEqual(self.call(_FakeKernel32(created=987654321),
+                                   self.agent._proc_starttime, 1), 987654321)
+
+    def test_windows_start_time_is_none_when_the_process_is_denied(self):
+        k32 = _FakeKernel32(handle=None, last_error=5)
+        self.assertIsNone(self.call(k32, self.agent._proc_starttime, 1))
+
+    def test_windows_start_time_is_none_when_get_process_times_fails(self):
+        k32 = _FakeKernel32(times_ok=False)
+        self.assertIsNone(self.call(k32, self.agent._proc_starttime, 1))
+
+
+class WindowsPrototypeTests(unittest.TestCase):
+    """Real ctypes type-checking (no fake module): every by-reference argument
+    _win_liveness passes must be accepted by the prototype _win_kernel32 declares.
+    A POINTER(FILETIME) prototype rejected byref(c_ulonglong) with ArgumentError."""
+
+    def test_declared_pointer_types_accept_the_values_passed(self):
+        import ctypes
+        agent = load_agent()
+        exit_code_t, stamp_t = agent._win_value_types()
+        ctypes.POINTER(exit_code_t).from_param(ctypes.byref(exit_code_t()))
+        ctypes.POINTER(stamp_t).from_param(ctypes.byref(stamp_t()))
+        self.assertEqual(ctypes.sizeof(stamp_t), 8)  # one FILETIME
+        src = AGENT.read_text(encoding="utf-8")
+        self.assertNotIn("POINTER(wintypes.FILETIME)", src)
+        self.assertNotIn("ctypes.c_ulonglong() for", src)
+
+
+class PsTests(_WorkerRecordBase):
+    """The `ps` subcommand and the MCP `ps` tool read the same rows."""
+
+    def test_ps_json_parses_and_has_the_columns(self):
+        self.write()
+        r = run_agent("ps", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertEqual(data["dir"], self.workers)
+        row = data["workers"][0]
+        for key in ("id", "state", "elapsed", "client", "model", "lane", "pid", "title", "task"):
+            self.assertIn(key, row)
+        self.assertEqual(row["state"], "running")
+
+    def test_ps_says_no_workers_running_when_empty(self):
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        r = run_agent("ps", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no workers running", r.stdout)
+
+    def test_ps_all_window_is_by_end_time_not_run_length(self):
+        # --all adds workers that EXITED in the last 24 h: a 1-minute run that
+        # ended 3 days ago is out, a 30-hour run that ended an hour ago is in.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        iso = lambda d: d.isoformat(timespec="seconds").replace("+00:00", "Z")
+        self.write("old", started=iso(now - datetime.timedelta(days=3, minutes=1)),
+                   ended=iso(now - datetime.timedelta(days=3)), rc=0)
+        self.write("long", started=iso(now - datetime.timedelta(hours=31)),
+                   ended=iso(now - datetime.timedelta(hours=1)), rc=0)
+        r = run_agent("ps", "--all", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([w["id"] for w in json.loads(r.stdout)["workers"]], ["long"])
+
+    def test_mcp_ps_returns_the_same_rows(self):
+        self.write()
+        rows = self.agent.list_workers(self.workers)
+        out = mcp_server.ps()
+        self.assertEqual(out["dir"], self.workers)
+        self.assertEqual([(w["id"], w["state"], w["client"]) for w in out["workers"]],
+                         [(w["id"], w["state"], w["client"]) for w in rows])
+
+    def test_an_exited_record_ended_three_days_ago_is_hidden_by_both_callers(self):
+        # V3 ps final review: the CLI's --all 24 h end-time window and the MCP
+        # ps(include_ended=True) must agree; the 7-day prune must not leak an
+        # old exited record into the MCP tool.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        iso = lambda d: d.isoformat(timespec="seconds").replace("+00:00", "Z")
+        self.write("old", started=iso(now - datetime.timedelta(days=3, minutes=1)),
+                   ended=iso(now - datetime.timedelta(days=3)), rc=0)
+        self.write("recent", started=iso(now - datetime.timedelta(hours=2)),
+                   ended=iso(now - datetime.timedelta(hours=1)), rc=0)
+        r = run_agent("ps", "--all", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([w["id"] for w in json.loads(r.stdout)["workers"]], ["recent"])
+        out = mcp_server.ps(include_ended=True)
+        self.assertEqual([w["id"] for w in out["workers"]], ["recent"])
 
 
 if __name__ == "__main__":
