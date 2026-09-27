@@ -5,6 +5,78 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the redactor's matching cost, the classification tail, the prefix scope (REDACTFIX, 2026-09-27)
+
+S2 fix round on SPAWNREDACT (findings S1/S2/S3 of
+`logs/handoff-sessions/20260925/work/L1-routing/review-spawnredact.md`).
+
+- **`tools/autoos_redact.py`** (S1, HIGH — matching cost): the
+  `key|token|secret… = value` carrier is no longer one regex. Its two unbounded
+  quantifiers overlapped the keyword literals, so a line of 200 KB of
+  `keytokensecretpasswordcredential` with no `:`/`=` backtracked for **104 s** —
+  in `run_client`'s output pump, one call per line of a stream whose line length
+  *the worker* chooses, so the run hung rather than finished. One charset scan
+  now finds the separators, the name run in front of each is walked back over
+  characters that cannot themselves be a separator (the walks of one line never
+  overlap, so they sum to its length) and Python decides keyword membership:
+  the same line costs **3.7 ms**, a 1 MB line streams in ~20 ms.
+  `ASSIGNMENT_SCAN_CAP` (4 MiB) bounds what one line can cost at all; above it
+  only that line's assignment carriers are skipped — the bearer/URL/prefix/PEM
+  and injected-literal patterns still run over the whole line.
+- **`tools/autoos-agent.py`** (S2, MEDIUM — classification was blind):
+  `run_client` keeps the last `TAIL_LIMIT` bytes *twice*. `ClientExit.tail`
+  stays redacted (the caller's stream, the record, the commit message); the new
+  `ClientExit.raw_tail` holds the child's own text and is read by nothing but
+  the headless-refusal and provider-stop checks — never printed, never recorded,
+  never committed. Redaction can mask the very marker a check looks for
+  (`error: retry_key = 429` is a stop line and a secret carrier at once), and
+  while the docstring and the entry below promised classification on raw text,
+  the code passed the redacted tail. The announced `PROVIDER-STOP` line and the
+  WIP commit message redact it as before.
+- **prefix scope** (S3/H1, LOW — behaviour change, previously unpinned):
+  `_SECRET_PREFIX_RE`, shared with hostexec's stored argv since SPAWNREDACT,
+  masks an argv token that *starts* with a known prefix, **case-insensitively**,
+  and the set is `sk-`/`ghp_`/`gho_`/`github_pat_`/`aiza`/`xox`/`glpat-` — so a
+  `gcloud AIzaSy…` line is now masked whole where hostexec used to store it
+  verbatim. Pinned by
+  `test_hostexec_log.py::RedactionTests::test_the_shared_prefix_set_masks_any_case_and_starts_a_token`.
+  Its deliberate asymmetry with the text stream (`AIza` stays case-exact there —
+  Google's own keys always are, review H1) is pinned by
+  `test_autoos_spawner.py::SharedRedactPatternTests::test_the_text_prefix_rule_stays_case_exact_on_aiza`.
+
+### Fixed — the spawner redacts its worker's output (SPAWNREDACT, 2026-09-27)
+
+- **`tools/autoos_redact.py`** (new): one home for the secret patterns. hostexec's
+  set (bearer, `api_key:`/`KEY=value` carriers, `user:pass@` URLs, key prefixes,
+  the control-character strip) plus what a worker's report actually contains —
+  vendor prefixes (`sk-`, `sk-or-`, `sk-ant-`, `ghp_`/`gho_`/`github_pat_`,
+  `AIza`, `xox[bp]-`, `glpat-`), `key|token|secret|password = value`
+  assignments, PEM private-key blocks (masked across streamed lines), and the
+  exact values of secret-named variables the spawner injects into the child env
+  (`AUTOOS_OMNIROUTE_KEY` and friends, ≥ 12 chars). `Redactor` is line-oriented
+  so a stream can be masked as it arrives; `redact_argv` keeps hostexec's `***`.
+- **`tools/hostexec/audit.py`**: deletes its private copy of the patterns and
+  aliases `sanitize_text`/`redact_argv` to the shared module — stored-argv
+  behaviour and its tests unchanged, now with `github_pat_`/`AIza`/`sk-or-`
+  prefixes recognised too.
+- **`tools/autoos-agent.py`**: every stream the spawner writes of a worker's
+  output goes through it — the live pass-through and the captured tail in
+  `run_client` (a line is classified for refusal while still the child's own
+  text, so redaction can never blind the check), the `HEADLESS-REFUSAL`,
+  `PROVIDER-STOP` and fall-through lines, the sandbox `changed`/`commits`/`LEAK`
+  summary, the worker registry record, every track entry (`record_run`, the one
+  choke point) and the WIP commit message. Prints
+  `autoos-agent: redacted N secret(s) from worker output` once when N > 0, so a
+  masked report does not read as the worker's own words.
+- **`tests/test_autoos_spawner.py`**: 14 tests — each pattern class masked in
+  text and in argv, PEM across lines, ordinary output untouched, injected env
+  values by exact match, and through `run_client` that the caller's stream and
+  tail carry none of the samples while `provider_stop` still reads
+  "Rate limit exceeded" next to a redacted line and the refusal still exits 6.
+
+Evidence: lesson inbox 2026-09-27T18:58:28Z — a worker's REPORT printed a secret
+it had found, verbatim, despite its brief naming the file it came from.
+
 ### Changed — run rules folded into the orchestration skill, one home per fact (FOLD2, 2026-09-27)
 
 - **`.agents/skills/unattended-orchestration/SKILL.md`**: 30 rules → 28. New from this run's lessons: `R-coord-07`/`R-coord-08` keep a 10-minute `CronCreate` heartbeat from launch to stop (each beat pushes, rewrites the timestamped status file, reads the inbox, checks children — common.md "Heartbeats never stop", 15:3xZ). Extended: `R-orch-13` (a plan, spec, decision or bigger change gets a pinned cross-family review before it is executed or merged — common.md "Second opinion on everything bigger"), `R-orch-14` (new: a slow free reviewer is queued, never skipped; Haiku stays an extra first pass only; the lane record names writer, reviewer, verdict — HAIKU-EVAL.md, inbox 17:52:55Z), `R-coord-02` (findings are judged by the author's orchestrator, Opus decides critical), `R-coord-03` (writers by complexity come from `route --explain`, not a prose model list), `R-coord-06` (the cap is `autoos-agent.py context` against registry `policy.handoff_caps`), `R-orch-06` (relaunch a child that went quiet >25 min), `R-orch-11` (a retired route is grepped as a DEFAULT in `configuration/`, `lib/`, `start-stack.*` too — inbox 17:09:02Z), `R-orch-01` (agent-to-agent text is terse: one line per fact, evidence by pointer). Five rules restated another rule's fact and were folded instead: `R-orch-03`→`R-router-01`, `R-orch-05`→`R-coord-01`, `R-orch-07`→`R-orch-13`, `R-orch-09`→`R-coord-08`, `R-coord-05`→`R-worker-03`; **`references/rule-map.md`** resolves each retired id.

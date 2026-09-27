@@ -139,6 +139,7 @@ import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
+import autoos_redact as redact  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_track as track  # noqa: E402
@@ -657,6 +658,48 @@ def gateway_up() -> bool:
 def slugify(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40].strip("-")
     return slug or "task"
+
+
+# --- redacting the worker's output (SPAWNREDACT item 2) --------------------
+# Lesson inbox 2026-09-27T18:58:28Z: a worker's REPORT printed a secret it had
+# found, and the spawner passed it straight through to the caller's terminal,
+# its log and its WIP commit. Everything the spawner writes *of* or *from* a
+# worker's output goes through this one redactor, so no stream has to remember
+# to be careful. The patterns live in tools/autoos_redact.py, shared with
+# hostexec's argv redaction (item 1).
+_OUTPUT_REDACTOR = redact.Redactor()
+
+
+def register_secret_env(env) -> None:
+    """Remember the literal values of the secret-named variables this run hands
+    the child (AUTOOS_OMNIROUTE_KEY and anything the plan injects), so a worker
+    echoing back the key it was given is masked whatever its shape looks like."""
+    _OUTPUT_REDACTOR.add_env(env)
+
+
+def redact_output(text: str) -> str:
+    """Mask secrets in a chunk of worker output (line-oriented, so a stream can
+    be redacted as it arrives; already-masked text comes back unchanged)."""
+    if not text:
+        return text
+    return _OUTPUT_REDACTOR.text(text)
+
+
+def redact_record(record: dict) -> dict:
+    """Redact the string fields of a worker record / track entry. Keys and
+    non-text values (rc, cost, latency) pass through: the file stays readable."""
+    return {k: (redact_output(v) if isinstance(v, str) else v) for k, v in record.items()}
+
+
+def report_redactions() -> None:
+    """Tell the caller its worker's output was altered, once, with a count --
+    silence would read as 'the report you saw was the worker's own words'. The
+    count resets, so a second cmd_run in this process reports its own secrets,
+    not the two runs' total."""
+    n = _OUTPUT_REDACTOR.count
+    if n:
+        print("autoos-agent: redacted %d secret(s) from worker output" % n)
+        _OUTPUT_REDACTOR.reset_count()
 
 
 SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._/-]{1,120}$")
@@ -1438,9 +1481,11 @@ MAX_FALLTHROUGH = 2
 def fallthrough_line(combo: str, stop: str, next_combo: str) -> str:
     """The one line printed when a provider-stopped attempt falls through.
 
-    Pure, so the exact wording is pinned by a test rather than by the caller.
+    Wording is pinned by a test rather than by the caller; `stop` is a quote of
+    the worker's own text, so it goes through the redactor (SPAWNREDACT item 2).
     """
-    return "provider stop on %s: %s -> falling through to %s" % (combo, stop, next_combo)
+    return "provider stop on %s: %s -> falling through to %s" % (
+        combo, redact_output(stop), next_combo)
 
 # WIPfix2 (measured 2026-09-26 20:2xZ): a worker that merely READS or prints
 # text containing a marker mid-run - a brief or lesson quoting a past 429 -
@@ -1722,7 +1767,11 @@ def wip_commit(sandbox: str, rc: int, stop: str | None, branch: str | None = Non
     """
     msg = "WIP(autoos-agent): uncommitted at exit rc=%d" % rc
     if stop:
-        msg += "; provider stop: %s" % stop
+        # SPAWNREDACT item 2: the stop line is a quote of the worker's output,
+        # and a commit message outlives every log rotation. Redact it again --
+        # since REDACTFIX item 2 the stop cmd_run hands us is the child's own
+        # (raw) text, so this is the copy's only masking pass.
+        msg += "; provider stop: %s" % redact_output(stop)
     # The clone carries this repo's .gitignore (which already names both of
     # these), but the WIP commit must hold even if that file is edited -
     # belt and braces via the sandbox's own excludes, never the user's.
@@ -1825,9 +1874,11 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
 
 
 def record_run(path: str, entry: dict) -> bool:
-    """Append one track record; failing to record never changes the run's exit code."""
+    """Append one track record; failing to record never changes the run's exit
+    code. SPAWNREDACT item 2: the entry is redacted at the one choke point every
+    record passes, so no field of a new entry type can be written raw."""
     try:
-        track.record(path, entry)
+        track.record(path, redact_record(entry))
         return True
     except (OSError, ValueError) as exc:  # a bad entry must not fail a finished run either
         print("autoos-agent: track record not written (%s): %s"
@@ -1981,20 +2032,38 @@ def _terminate_group(proc, pgid) -> None:
         pass
 
 
+def _trim_tail(buf: bytearray, chunk: bytes) -> None:
+    """Append one chunk of the child's output, keeping only the last TAIL_LIMIT
+    bytes. The cut is bytewise, so it can split a multi-byte character; the
+    decode at the other end uses `replace` and accepts one mojibake character at
+    the front of the window."""
+    buf.extend(chunk)
+    if len(buf) > TAIL_LIMIT:
+        del buf[:len(buf) - TAIL_LIMIT]
+
+
 class ClientExit(int):
     """A client's exit code, carrying the tail run_client captured.
 
     An int subclass, so every existing caller still compares it to a plain exit
     code; `.tail` is the last TAIL_LIMIT bytes of the client's merged
-    stdout+stderr, decoded (bug 2 needs it to spot a headless refusal).
+    stdout+stderr, decoded (bug 2 needs it to spot a headless refusal) and
+    redacted of any secret it carried (SPAWNREDACT item 2). `.raw_tail` is the
+    same window of the child's OWN text: redaction can mask the very marker the
+    refusal and provider-stop checks look for, so they classify on this copy and
+    nothing else ever reads it - it is never printed, never recorded, never
+    committed (REDACTFIX item 2).
     """
     tail = ""
     refusal = None
+    raw_tail = ""
 
-    def __new__(cls, rc: int, tail: str = "", refusal: str | None = None):
+    def __new__(cls, rc: int, tail: str = "", refusal: str | None = None,
+                raw_tail: str = ""):
         obj = super().__new__(cls, rc)
         obj.tail = tail
         obj.refusal = refusal
+        obj.raw_tail = raw_tail
         return obj
 
 
@@ -2009,11 +2078,21 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     re-raised after cleanup. reap=False (a --joinable `claude --bg` session)
     leaves the group alone after exit code 0: that session is meant to outlive
     this spawner. A failed start is reaped.
+
+    SPAWNREDACT item 2: every byte of that stream is redacted before it reaches
+    the caller's terminal, our log or ClientExit.tail -- but redaction is not
+    free for the checks: a provider-stop marker can BE the secret (an
+    ``error: retry_key = 429`` line), and then the redacted copy can no longer
+    be classified. So the pump keeps the same window twice: ClientExit.raw_tail
+    holds the child's own text and is read by nothing but the refusal and
+    provider-stop checks (REDACTFIX item 2); it is never printed, recorded or
+    committed.
     """
     # stdin closed: when it is an open pipe (cron, CI, an agent's shell)
     # `opencode run` waits to read it as extra prompt text and never starts
     # (measured 2026-09-24: 150 s hang vs 6 s with /dev/null).
     # leftovers (private Serena, language servers) survived a cancelled worker, measured 2026-09-25.
+    register_secret_env(env)
     pipe, merge = (subprocess.PIPE, subprocess.STDOUT) if capture else (None, None)
     if os.name == "nt":
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
@@ -2026,23 +2105,28 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
                                 start_new_session=True)
         pgid = proc.pid  # start_new_session makes the client its own group leader
     tail = bytearray()
+    raw_tail = bytearray()
     found = []
 
     def pump():
         try:
             for raw in proc.stdout:
+                text = raw.decode("utf-8", "replace")
+                if not found:
+                    hit = headless_refusal(text)  # classified on the child's own text
+                    if hit:
+                        found.append(redact_output(hit))
+                # REDACTFIX item 2: the classification windows are kept twice,
+                # the raw one for the checks below and the redacted one for
+                # every copy that leaves this process.
+                _trim_tail(raw_tail, text.encode("utf-8", "surrogateescape"))
+                text = redact_output(text)
                 try:
-                    sys.stdout.write(raw.decode("utf-8", "replace"))
+                    sys.stdout.write(text)
                     sys.stdout.flush()
                 except (OSError, ValueError):  # a closed/odd stdout must not kill the run
                     pass
-                if not found:
-                    hit = headless_refusal(raw.decode("utf-8", "replace"))
-                    if hit:
-                        found.append(hit)
-                tail.extend(raw)
-                if len(tail) > TAIL_LIMIT:
-                    del tail[:len(tail) - TAIL_LIMIT]
+                _trim_tail(tail, text.encode("utf-8", "surrogateescape"))
         except (OSError, ValueError):
             pass
 
@@ -2069,7 +2153,9 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
             proc.stdout.close()
         except (OSError, ValueError):
             pass
-    return ClientExit(rc, tail.decode("utf-8", "replace"), found[0] if found else None)
+    return ClientExit(rc, tail.decode("utf-8", "replace"),
+                      found[0] if found else None,
+                      raw_tail.decode("utf-8", "replace"))
 
 
 # --- the host-wide worker registry (`ps`) ---------------------------------
@@ -2233,13 +2319,14 @@ def _worker_record_start(plan: dict, args, directory: str):
     wid = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex()
     pid = os.getpid()
     task = (args.task or "").splitlines()
-    record = {"id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
-              "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
-              "client": plan.get("client"), "model": plan.get("model"),
-              "route": (plan.get("route") or {}).get("combo") or "",
-              "title": args.title or "", "cwd": plan.get("cwd"),
-              "sandbox": (plan.get("sandbox") or {}).get("path", ""),
-              "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0]}
+    record = redact_record({
+        "id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
+        "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
+        "client": plan.get("client"), "model": plan.get("model"),
+        "route": (plan.get("route") or {}).get("combo") or "",
+        "title": args.title or "", "cwd": plan.get("cwd"),
+        "sandbox": (plan.get("sandbox") or {}).get("path", ""),
+        "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0]})
     _write_worker_record(os.path.join(directory, wid + ".json"), record)
     return wid, record
 
@@ -2531,6 +2618,11 @@ def cmd_run(args, cfg: dict) -> int:
                   "(or use --free)." % GATEWAY, file=sys.stderr)
             return 3
         env["AUTOOS_OMNIROUTE_KEY"] = key
+    # SPAWNREDACT item 2: the key is in the child's env from here on, so a
+    # worker echoing it back must be masked before anything of this run is
+    # written -- the record, the log line and the caller's terminal all read
+    # this same dict.
+    register_secret_env(env)
     # SPAWNCAP (S2): the route ids a provider-stopped attempt has already
     # burned, so a fallthrough re-run never picks one of them again.
     excluded_routes = set()
@@ -2635,10 +2727,21 @@ def cmd_run(args, cfg: dict) -> int:
                     print("autoos-agent: could not update worker record %s: %s"
                           % (worker_id, exc), file=sys.stderr)
         client_tail = getattr(run_rc, "tail", "") or ""
-        rc, refusal = refusal_exit(int(run_rc), getattr(run_rc, "refusal", None) or "")
+        # REDACTFIX item 2 (review-spfix S2): both checks classify on the
+        # child's OWN text, because redaction can mask the very marker they look
+        # for (`error: retry_key = 429` is a stop line and a secret carrier at
+        # once). Only the copies that leave this process are redacted. A client
+        # exit with no raw window falls back to the redacted tail, which is what
+        # this checked before.
+        check_tail = getattr(run_rc, "raw_tail", "") or client_tail
+        rc, refusal = refusal_exit(int(run_rc), check_tail)
+        if refusal is None and getattr(run_rc, "refusal", None):
+            # the refusal line has since scrolled out of the window: the pump
+            # caught it while streaming and kept a copy for exactly this.
+            rc, refusal = refusal_exit(int(run_rc), run_rc.refusal)
         child_rc = rc  # the WIP message names the client's own rc, not a verdict override
         if refusal is not None:
-            print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
+            print("autoos-agent: HEADLESS-REFUSAL: %s" % redact_output(refusal), file=sys.stderr)
         # A provider stop is a failure even though the client often exited 0: it
         # was cut off mid-task (WIPfix, 2026-09-26). rc 0 and 6 upgrade to 8; a
         # LEAK (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
@@ -2652,9 +2755,9 @@ def cmd_run(args, cfg: dict) -> int:
         # jetski refusal + AGY_ERROR 429, R-gateway-12).
         # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
         # a promo client whose tail is a provider stop does not get a false probe.
-        stop = provider_stop(client_tail)
+        stop = provider_stop(check_tail)
         if stop is not None and rc in (0, 3, 6):
-            print("autoos-agent: PROVIDER-STOP: %s" % stop, file=sys.stderr)
+            print("autoos-agent: PROVIDER-STOP: %s" % redact_output(stop), file=sys.stderr)
             rc = 8
         if rc == 0 and client.promo:
             clients.record_probe(client.name)
@@ -2749,9 +2852,10 @@ def cmd_run(args, cfg: dict) -> int:
         ahead = subprocess.run(["git", "-C", sb["path"], "log", "--oneline",
                                 sb["base"] + ".." + branch],
                                capture_output=True, text=True).stdout.strip()
-        print("\nsandbox changes (uncommitted):\n" + (changed or "  (none)"))
+        # SPAWNREDACT item 2: a filename or a commit subject is worker text too.
+        print("\nsandbox changes (uncommitted):\n" + redact_output(changed or "  (none)"))
         if ahead:
-            print("sandbox commits:\n" + ahead)
+            print("sandbox commits:\n" + redact_output(ahead))
         q = shlex.quote(sb["path"])
         print("review:  git -C %s diff" % q)
         print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
@@ -2764,7 +2868,8 @@ def cmd_run(args, cfg: dict) -> int:
             # did change something, just in the wrong checkout. Never reverts
             # anything.
             print("LEAK: the --isolate run wrote outside its sandbox "
-                  "(containment failure, exit 7): %s" % "; ".join(leak), file=sys.stderr)
+                  "(containment failure, exit 7): %s" % redact_output("; ".join(leak)),
+                  file=sys.stderr)
             rc = 7
         elif override is not None and rc == 0:
             print(message)
@@ -2775,9 +2880,15 @@ def cmd_run(args, cfg: dict) -> int:
         # already recorded its own sample above).
         tracked = track_entry(plan, rc, time.time() - attempt_start)
         if tracked is not None:
+            # Redact once, here: `record_run` writes it and `propose_reprobe`
+            # derives a logged proposal and a printed line from the same dict.
+            tracked = redact_record(tracked)
             record_run(TRACK_RECORD, tracked)
             propose_reprobe(tracked, REGISTRY_PATH, MEASURED_OVERLAY_PATH,
                             PROBE_PROPOSALS_LOG, sb["path"])
+    # SPAWNREDACT item 2: tell the caller its worker's output was altered,
+    # once, after every stream of this run has been written.
+    report_redactions()
     # Log the FINAL rc: the LEAK override happens above and the log, the
     # orch-*.log watchdog and the track record must not disagree.
     log_run(plan, rc, time.time() - start, args.free)
