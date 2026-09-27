@@ -14,6 +14,7 @@ Only the standard library is used, and nothing here touches the network.
 """
 import argparse
 import copy
+import errno
 import json
 import os
 import shutil
@@ -449,13 +450,30 @@ def _backup_and_write(path, text, stamp=None):
     which the user did not ask AutoOS to touch (compare
     antigravity_desktop_entry, which refuses a symlinked .desktop). Nothing -
     not the link, not its target, not a backup - is changed on refusal.
+
+    Uses os.open with O_NOFOLLOW to avoid TOCTOU between the symlink check
+    and the write (CVE class: symlink swap between check and open).
     """
+    # Check for symlink first (before any filesystem operation that could be
+    # raced). This is a best-effort check; the real protection is O_NOFOLLOW.
     if os.path.islink(path):
         return False
     if os.path.exists(path):
         shutil.copy2(path, _backup_path(path, stamp))
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+    # Open with O_NOFOLLOW so the write fails with ELOOP if path becomes a
+    # symlink between the check above and this open. This makes the check
+    # and the write atomic from the filesystem's perspective.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o644)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return False
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
     return True
 
