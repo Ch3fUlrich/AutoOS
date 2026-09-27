@@ -40,6 +40,9 @@ Type=simple
 # did exactly that, twice.
 OOMPolicy=continue
 Environment=SHELL=/bin/zsh
+# claude, herdr and uv/uvx (serena, graphify) all live in %h/.local/bin, and
+# panes inherit this manager environment rather than an interactive .zshrc.
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/bin/sh -c 'if %h/.local/bin/herdr status 2>/dev/null | grep -q "status: running"; then echo "herdr server already running — nothing to do"; exit 0; fi; exec %h/.local/bin/herdr server'
 Restart=on-failure
 RestartSec=10

@@ -109,6 +109,29 @@ EOF
     fi
 fi
 
+# rv2 item 1: the user units set no PATH, so every pane inherited the user
+# manager's minimal environment -- claude, herdr and uv/uvx in ~/.local/bin were
+# not on it (the system units already set PATH=/root/.local/bin:...). Every
+# rendered user service must lead with %h/.local/bin, the user-scope twin of the
+# system line, so a pane finds the same tools an interactive shell would.
+if it "herdr-sessions: every rendered user unit puts %h/.local/bin first on PATH"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    want='Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    ok=1
+    for u in herdr-server herdr-sessions-restore herdr-sessions-snapshot herdr-sessions-update; do
+        f="$tmp/home/.config/systemd/user/$u.service"
+        grep -qxF "$want" "$f" || { ok=0; echo "missing PATH in $u.service: [$(grep -n '^Environment=PATH' "$f" 2>/dev/null)]" >&2; }
+    done
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "one or more user units do not set %h/.local/bin on PATH"; fi
+fi
+
 if it "herdr-sessions: re-run reports already current; a drifted unit is backed up before replacing"; then
     tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
     cat > "$tmp/site.conf" <<EOF

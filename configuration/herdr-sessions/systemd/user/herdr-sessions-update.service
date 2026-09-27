@@ -19,6 +19,9 @@ RequiresMountsFor=@APPDIR@
 Type=oneshot
 RemainAfterExit=yes
 
+# claude, herdr and uv/uvx live in %h/.local/bin and the driver shells out to
+# them; panes inherit this manager environment, not an interactive .zshrc.
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HERDR_PROFILE=@PROFILE_PATH@
 ExecStart=@APPDIR@/herdr-sessions.sh update
 # Two downloads at UPDATE_TIMEOUT_SEC (180 s) each, plus slack.
