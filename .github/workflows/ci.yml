@@ -67,9 +67,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # PSScriptAnalyzer 1.25.0 (pinned: the cache key) used to be
+      # Install-Moduled on every run (~95 s); the module directory is
+      # cached instead and the install runs only on a cache miss. The
+      # gate itself is unchanged: the suite's 'PSScriptAnalyzer is clean'
+      # test runs whatever this provides.
+      - name: Cache PSScriptAnalyzer
+        id: psscriptanalyzer-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/Documents/WindowsPowerShell/Modules/PSScriptAnalyzer
+          key: psscriptanalyzer-1.25.0
+
       - name: Install PSScriptAnalyzer
+        if: steps.psscriptanalyzer-cache.outputs.cache-hit != 'true'
         shell: powershell
-        run: Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
+        run: Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck -RequiredVersion 1.25.0
 
       # Windows has no network namespaces, so this is the practical guard:
       # every download path in the suite goes through curl.exe, which honours
