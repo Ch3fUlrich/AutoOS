@@ -39,6 +39,9 @@ to your provider key, not to OpenRouter credit — credit-chain economics in
 registering by hand in the dashboard. Source: `catalog/ai-registry.json` — the
 registry that `apply`, `tools/mirror-litellm-env.py` and
 `tools/sync-router-tiers.py` all read; this table is its human-readable view.
+The first column is normally the `api-keys.yml` name; a provider that shares
+another's key is listed under its own registry id instead, and its Notes say
+which entry to fill in (`meta_api` is that case today).
 
 | `api-keys.yml` name | OmniRoute provider id | Notes |
 |---|---|---|
@@ -52,7 +55,8 @@ registry that `apply`, `tools/mirror-litellm-env.py` and
 | `cerebras` | `cerebras` | Cloudflare-fronted: `customUserAgent` (as groq) |
 | `SambaNova` | `sambanova` | |
 | `deepseek` | `deepseek` | |
-| `meta` | — (unregistered since 2026-09-23) | Meta Model API (`api.meta.ai`); openrouter-first — direct access via the opencode `meta` provider only; see [models.md](models.md) |
+| `meta` | — (unregistered since 2026-09-23) | Meta Model API (`api.meta.ai`); the opencode `meta` provider answers the plain `muse-spark` model directly, no gateway connection; the same value is read by `meta_api` below; see [models.md](models.md) |
+| `meta_api` | `meta-api` | MUSEAPI 2026-09-27: the **same `meta` key** (`providers.meta_api.key_name: meta`) — no second entry to create. OpenAI-compatible custom registration, so the dashboard needs base URL `https://api.meta.ai/v1`. Serves `muse-spark-1.3-contributor` ($0.10/$0.20 per 1M, 100 rpm, 3M tpm), which **trains on prompts**: never a `*-clean` leg, and a `privacy: sensitive` card is refused by the spawner. `meta-api` is not a built-in OmniRoute connection — the first live `apply` creates it |
 | `openrouter` | `openrouter` | |
 | `zen` | `opencode-zen` | free promo models + paid; paid legs need Zen balance |
 | `cheapinference` | `cheaperinference` | paid partner gateway (`ci_live_…` key); legs sit between free and paid in tier2/tier3, never in `*-clean` |
