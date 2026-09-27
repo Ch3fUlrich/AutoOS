@@ -2495,6 +2495,68 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertIn("r-quota", after)
 
 
+class MetaApiResolverTests(unittest.TestCase):
+    """BRIEF MUSEAPI (2026-09-27): meta_api/muse-spark-1.3-contributor is the
+    main writer for normal work, but the contributor contract trains on prompts
+    (evidence: dev.meta.ai/docs/pricing-rate-limits), so a privacy=sensitive
+    card must never reach it. filter_routes() is where that is enforced: one
+    non-private-safe serving leg disqualifies the whole route (spec: privacy is
+    a hard filter, only -clean routes serve sensitive work)."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        cls.registry = json.loads(path.read_text(encoding="utf-8"))
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True,
+                             "reason": ""}}
+
+    def test_the_contributor_leg_is_never_private_safe(self):
+        safe, reason = registry_tool.private_safe(
+            "meta_api", "muse-spark-1.3-contributor", self.registry)
+        self.assertFalse(safe)
+        self.assertIn("train", reason.lower())
+
+    def test_a_sensitive_card_removes_every_route_the_leg_heads(self):
+        card = {"kind": "review", "privacy": "sensitive"}
+        survivors, removed = r.filter_routes(
+            card, {"need_tokens": 1000}, self.state(), self.registry, {})
+        for route_id in ("t1-orchestrator", "t1-orchestrator-paid",
+                         "spark-1.3-contributor"):
+            self.assertNotIn(route_id, survivors, route_id)
+            self.assertIn(route_id, removed, route_id)
+            joined = " ".join(removed[route_id])
+            self.assertIn("privacy: meta_api/muse-spark-1.3-contributor",
+                          joined, route_id)
+
+    def test_a_public_card_routes_through_the_contributor_leg(self):
+        card = {"kind": "review", "privacy": "public"}
+        survivors, _ = r.filter_routes(
+            card, {"need_tokens": 1000}, self.state(), self.registry, {})
+        for route_id in ("t1-orchestrator", "t1-orchestrator-paid",
+                         "spark-1.3-contributor"):
+            self.assertIn(route_id, survivors, route_id)
+        legs, _skipped, _notes = r.usable_legs(
+            self.registry["routes"]["t1-orchestrator"], card,
+            {"need_tokens": 1000}, self.state(), self.registry, {})
+        self.assertEqual(legs[0], ("meta_api", "muse-spark-1.3-contributor"))
+
+    def test_no_clean_route_serves_the_contributor_leg(self):
+        card = {"kind": "review", "privacy": "sensitive"}
+        survivors, _ = r.filter_routes(
+            card, {"need_tokens": 1000}, self.state(), self.registry, {})
+        for route_id in survivors:
+            if not route_id.endswith("-clean"):
+                continue
+            legs, _skipped, _notes = r.usable_legs(
+                self.registry["routes"][route_id], card,
+                {"need_tokens": 1000}, self.state(), self.registry, {})
+            self.assertFalse([leg for leg in legs
+                              if leg[0] == "meta_api"], route_id)
+
+
 class FreeAiResolverTests(unittest.TestCase):
     """BRIEF FREEAI (2026-09-27): free_ai declares only rpm/tpd (no tpm), so
     the resolver's request-size filter never skips its qwen7b leg - a

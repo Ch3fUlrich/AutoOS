@@ -3635,10 +3635,21 @@ class IsolateContainmentTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         return d
 
+    def make_scratch(self):
+        """A working directory for the run itself. cmd_run may start the client
+        before a sandbox exists (a `--version`/`--help` mode probe), and such a
+        probe inherits this process's cwd — without it an argv-naive fake writes
+        its "sandbox" files into the checkout running the suite."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        return d
+
     def run_isolated(self, root, stubdir, statedir, mode, card=None):
         agent = self.agent
         old_root, old_track = agent.ROOT, agent.TRACK_RECORD
         agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
+        old_cwd = os.getcwd()
+        os.chdir(self.make_scratch())
         try:
             args = argparse.Namespace(
                 client="agy", tier=None if card else 2, card=card, task="do the thing",
@@ -3666,6 +3677,7 @@ class IsolateContainmentTests(unittest.TestCase):
                     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                         rc = agent.cmd_run(args, cfg)
         finally:
+            os.chdir(old_cwd)  # before the cleanup removes the scratch dir
             agent.ROOT, agent.TRACK_RECORD = old_root, old_track
         return rc, out.getvalue(), err.getvalue()
 
@@ -4156,6 +4168,8 @@ class IsolateContainmentTests(unittest.TestCase):
         agent = self.agent
         old_root, old_track = agent.ROOT, agent.TRACK_RECORD
         agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
+        old_cwd = os.getcwd()
+        os.chdir(self.make_scratch())
         try:
             args = argparse.Namespace(
                 client="claude", tier=2, card=None, task="do the thing",
@@ -4174,8 +4188,36 @@ class IsolateContainmentTests(unittest.TestCase):
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     rc = agent.cmd_run(args, cfg)
         finally:
+            os.chdir(old_cwd)  # before the cleanup removes the scratch dir
             agent.ROOT, agent.TRACK_RECORD = old_root, old_track
         return rc, out.getvalue(), err.getvalue()
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_the_callers_own_directory_stays_clean(self):
+        # SPAWNFIX2 (S1 test hygiene): cmd_run probes the client binary before
+        # a sandbox exists (`--version`/`--help` through check_client_modes), and
+        # that probe inherits this process's cwd. The claude fake is argv-naive,
+        # so the probe ran the whole worker script and dropped worker-new.txt
+        # into the checkout running the suite. Pinned for the agy fake too: it
+        # writes its "sandbox" files into the cwd as well, and only `agy`
+        # declaring no modes keeps it out of the probe path today.
+        cases = [
+            ("agy sandbox-write", lambda: self.run_isolated(
+                self.make_root(), self.make_fake_agy(), self.make_state(),
+                "sandbox-write")),
+            ("claude joinable", lambda: self.run_isolated_joinable(
+                self.make_root(), self.make_fake_claude(), self.make_state())),
+        ]
+        for name, run in cases:
+            with self.subTest(case=name):
+                cwd = os.getcwd()
+                before = set(os.listdir(cwd))
+                rc, out, err = run()
+                self.assertEqual(rc, 0, out + err)
+                self.assertEqual(os.getcwd(), cwd, "the helper restored the cwd")
+                self.assertEqual(set(os.listdir(cwd)) - before, set(),
+                                 "the run wrote into the directory the suite "
+                                 "was started in")
 
     def test_provider_stop_matches_a_redrawn_line(self):
         # WIPfix4 review: a stop line redrawn in place ("\r" then erase-line)

@@ -30,6 +30,99 @@ REGISTRY = ROOT / "catalog" / "ai-registry.json"
 REQUIRED_FIELDS = ("omniroute_id", "litellm_env", "litellm_prefix", "api_base", "provider_data")
 
 
+def key_name_of(providers: dict, name: str) -> str:
+    """The api-keys.yml entry whose value a provider's key is read from: its own
+    name, unless the registry says otherwise with key_name (MUSEAPI step 4 -
+    meta_api reuses the 'meta' key)."""
+    entry = providers.get(name)
+    if not isinstance(entry, dict):
+        return name
+    return entry.get("key_name") or name
+
+
+def litellm_env_problems(providers: dict) -> list:
+    """Contracts on providers.<id>.litellm_env, as data rather than a
+    provider-name allowlist (an allowlist would let the second share through
+    without anyone restating the rule):
+
+    - One env var may be written by several providers only when they all read
+      the SAME api-keys.yml name. Two different names feeding one variable is
+      how the .env ended up with a real key on one line and a REPLACE_WITH_
+      placeholder on the next (last line wins) - so the rule is the reason the
+      duplicate is safe, and it keeps being the rule for any future share.
+    - A key_name must name another provider's api-keys name, and must not
+      change what that provider itself reads.
+    """
+    problems = []
+    seen_envs: dict = {}
+    for name, entry in providers.items():
+        if not isinstance(entry, dict):
+            continue
+        env = entry.get("litellm_env")
+        if not env:
+            continue
+        src = key_name_of(providers, name)
+        if env in seen_envs and seen_envs[env][0] != src:
+            first = seen_envs[env]
+            problems.append(
+                f"duplicate litellm_env {env}: {first[1]} and {name} read "
+                f"different api-keys.yml names ({first[0]!r} vs {src!r}) - "
+                f"share it with key_name or give one entry its own key")
+        seen_envs.setdefault(env, (src, name))
+    for name, entry in providers.items():
+        if not isinstance(entry, dict):
+            continue
+        claimed = entry.get("key_name")
+        if not claimed:
+            continue
+        if claimed == name:
+            problems.append(f"{name}: key_name repeats its own provider id")
+        elif claimed not in providers:
+            problems.append(f"{name}: key_name {claimed!r} is no provider's name")
+    return problems
+
+
+def model_prefix_problems(providers: dict) -> list:
+    """Contracts on providers.<id>.model_prefix - the spelling gateway_ref()
+    puts into combos.json (MUSEAPI: the 'meta' prefix a second Meta record
+    already owned, which made tools/sync-router-tiers.py --combos render the
+    contributor leg with no api_base).
+
+    - A prefix must never be ANOTHER provider's registry key. Both
+      tools/registry.py's resolve_leg() and sync-router-tiers' transport maps
+      key legs by provider name first, so a borrowed name silently hands the
+      leg that other provider's LiteLLM transport (finding 4 says the same of
+      omniroute_id; model_prefix is the third spelling of the same namespace).
+    - A provider that LiteLLM can address (it has a litellm_env or
+      litellm_prefix) must spell its gateway prefix with one of its OWN two
+      keys, name or omniroute_id, because those are the only keys
+      provider_maps_from_dict() emits. A gateway-only bridge (no transport at
+      all - antigravity/agy) is exempt: its legs never enter a managed block
+      and sync-router-tiers carries both of its spellings in GATEWAY_ONLY by
+      hand.
+    """
+    problems = []
+    names = {name for name, entry in providers.items() if isinstance(entry, dict)}
+    for name, entry in providers.items():
+        if not isinstance(entry, dict):
+            continue
+        prefix = entry.get("model_prefix")
+        if not prefix:
+            continue
+        if prefix in names and prefix != name:
+            problems.append(
+                f"{name}: model_prefix {prefix!r} is another provider's registry "
+                f"key - a combos leg with that prefix resolves that provider's transport")
+        if entry.get("litellm_env") or entry.get("litellm_prefix"):
+            own = {name, entry.get("omniroute_id")}
+            if prefix not in own:
+                problems.append(
+                    f"{name}: model_prefix {prefix!r} is neither its own key nor its "
+                    f"omniroute_id, so tools/sync-router-tiers.py --combos cannot "
+                    f"resolve the rendered leg back to this provider's transport")
+    return problems
+
+
 def load_registry_providers() -> dict:
     return json.loads(REGISTRY.read_text(encoding="utf-8"))["providers"]
 
@@ -70,9 +163,9 @@ def main() -> int:
     problems: list[str] = []
     providers = load_registry_providers()
 
-    # 1. schema completeness, no duplicate OmniRoute ids, unique env names.
+    # 1. schema completeness, no duplicate OmniRoute ids, env names shared only
+    # through the rule in 1c.
     seen_ids: dict = {}
-    seen_envs: dict = {}
     for name, entry in providers.items():
         missing = [f for f in REQUIRED_FIELDS if f not in entry]
         if missing:
@@ -83,11 +176,6 @@ def main() -> int:
             if omni in seen_ids:
                 problems.append(f"duplicate omniroute_id {omni}: {seen_ids[omni]}, {name}")
             seen_ids[omni] = name
-        env = entry.get("litellm_env")
-        if env:
-            if env in seen_envs:
-                problems.append(f"duplicate litellm_env {env}: {seen_envs[env]}, {name}")
-            seen_envs[env] = name
 
     # 1b. a provider name must never equal ANOTHER provider's omniroute_id:
     # provider_maps_from_dict()/expected_by_omni() key both spellings onto one
@@ -98,6 +186,13 @@ def main() -> int:
         if omni and omni != name and omni in providers:
             problems.append(
                 f"provider name {omni!r} is also provider {name!r}'s omniroute_id")
+
+    # 1c. the litellm_env sharing rule and what a key_name may claim.
+    problems.extend(litellm_env_problems(providers))
+
+    # 1d. the combos/gateway spelling (model_prefix) must resolve back to the
+    # provider that declared it - same namespace as 1b.
+    problems.extend(model_prefix_problems(providers))
 
     # 2. the case quirk and the two null rows are contracts, not trivia.
     if "SambaNova" not in providers:
@@ -113,11 +208,17 @@ def main() -> int:
         if ua != "curl/8.7.1":
             problems.append(f"{name} provider_data must carry the Cloudflare UA fix")
 
-    # 3. mirror tool: name -> env, in registry order (the .env line order).
+    # 3. mirror tool: api-keys.yml name -> env, in registry order (the .env
+    #    line order). Keyed by the NAME THE VALUE IS READ FROM, so a provider
+    #    that shares another's key (key_name) collapses into that one line
+    #    instead of asking for an api-keys.yml entry nobody has.
     registry_providers = load_registry_providers()
     mirror = load_module("tools/mirror-litellm-env.py", "mirror_litellm_env")
-    want_env = {name: entry["litellm_env"] for name, entry in registry_providers.items()
-                if entry.get("litellm_env")}
+    want_env = {}
+    for name, entry in registry_providers.items():
+        if not (isinstance(entry, dict) and entry.get("litellm_env")):
+            continue
+        want_env[key_name_of(registry_providers, name)] = entry["litellm_env"]
     if mirror.KEY_MAP != want_env:
         problems.append(f"mirror KEY_MAP != registry: {mirror.KEY_MAP}")
     elif list(mirror.KEY_MAP) != list(want_env):

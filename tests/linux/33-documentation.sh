@@ -217,18 +217,16 @@ if it "apply sets the resilience deadline and the fast-skip breaker"; then
         grep -qE 'failureThreshold.?[:=].?2|BREAKER_THRESHOLD=2' "$f" \
             || { ok=0; echo "$f does not use the 2-failure threshold" >&2; }
     done
-    # t1-orchestrator and spark-1.3-contributor fail closed (omitted 2026-09-27:
-    # Zen client-bound, OpenRouter off; deepseek-v4.1-flash omitted 2026-09-27T16:4xZ
-    # on the deepseek 402), so there is no tier-1/spark head leg in any combo to
-    # compare - assert the omission instead of a shared head (OR1e).
+    # A route that fails closed is named in combos.json's "omitted" and must
+    # never appear as a combo (t1-orchestrator-clean since DSMAX 2026-09-27,
+    # deepseek-v4.1-flash since the deepseek 402 of 2026-09-27T16:4xZ). The set
+    # is read from the rendered file, never re-pinned here (lesson PROVPIN).
     omitted="$(python3 - 2>&1 <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
-by = {c["name"]: c["models"] for c in d["combos"]}
+by = {c["name"] for c in d["combos"]}
 omitted = set(d.get("omitted", []))
-# t1-orchestrator(-free-only) are served again by the free gemini leg (T1FREE).
-gone = {"spark-1.3-contributor", "t1-orchestrator-clean", "deepseek-v4.1-flash"}
-print(",".join(sorted(g for g in gone if g in by or g not in omitted)))
+print(",".join(sorted(g for g in omitted if g in by)))
 PY
 )"
     assert_eq "$omitted" ""
@@ -260,12 +258,25 @@ fi
 
 if it "combos.json parses and carries the servable tiers"; then
     report="$(python3 - 2>&1 <<'PY'
-import json
+import json, sys
+sys.path.insert(0, "tools")
+import registry
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["gemini-3.8-flash", "opus-4-6", "t1-orchestrator", "t1-orchestrator-free-only", "t2-orchestrator", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag"]:
+# Which tiers are servable / fail closed is provider state, derived from the
+# registry render instead of re-pinned as a literal list here (lesson PROVPIN
+# 2026-09-27: the MUSEAPI meta_api flip went servable and this pin went stale).
+reg = json.load(open("catalog/ai-registry.json", encoding="utf-8"))
+rendered = registry.render_omniroute(reg)
+expected_names = [c["name"] for c in rendered["combos"]]
+expected_omitted = [o for o in rendered.get("omitted", [])]
+if not expected_names:
+    problems.append("render-empty")
+if names != expected_names:
     problems.append("names")
+if sorted(d.get("omitted", [])) != sorted(expected_omitted):
+    problems.append("omitted-set")
 # "retired" is the one home of the ids a rename left behind: apply prunes
 # them from the store, so a retired id must never also be a current combo.
 retired = d.get("retired")
@@ -285,45 +296,42 @@ for c in d["combos"]:
             problems.append(c["name"] + ":" + m)
 by = {c["name"]: c["models"] for c in d["combos"]}
 omitted = set(d.get("omitted", []))
-# T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only now carry
-# a free gemini/gemini-3.8-flash fallback leg, so they are servable again.
-# t1-orchestrator-clean, spark-1.3-contributor and deepseek-v4.1-flash still
-# fail closed (omitted, never a combo): t1/spark since DSMAX 2026-09-27 (Zen
-# client-bound, OpenRouter off), deepseek-v4.1-flash since the deepseek 402
-# of 2026-09-27T16:4xZ. No 1M context promise survives them, and no combo
-# may carry their legs.
-for gone in ("t1-orchestrator-clean", "spark-1.3-contributor",
-             "deepseek-v4.1-flash"):
+# A route that declares legs but has none the gateway can serve fails closed:
+# never a combo, always named in "omitted" (t1-orchestrator-clean since DSMAX
+# 2026-09-27, deepseek-v4.1-flash since the deepseek 402 of 2026-09-27T16:4xZ,
+# and every future flip — derived, so no per-route list to keep current).
+for gone in expected_omitted:
     if gone in by:
         problems.append(gone + "-should-be-omitted")
     if gone not in omitted:
         problems.append(gone + "-not-in-omitted")
-# t1-orchestrator and t1-orchestrator-free-only MUST be in combos now.
-for kept in ("t1-orchestrator", "t1-orchestrator-free-only"):
+# Every servable route is offered (t1-orchestrator and t1-orchestrator-free-only
+# since T1FREE, spark-1.3-contributor and t1-orchestrator-paid since MUSEAPI).
+for kept in expected_names:
     if kept not in by:
         problems.append(kept + "-should-be-in-combos")
-# Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no combo may carry
-# a spark leg at all now that t1/spark fail closed.
+# Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no combo may carry a
+# plain spark leg. The contributor variant is a different model id and is what
+# the meta_api legs serve (MUSEAPI 2026-09-27).
 import re as _re2
 if _re2.search(r"muse-spark-1\.3(?!-contributor)", " ".join(m for c in d["combos"] for m in c["models"])):
     problems.append("plain-spark-blocked")
-if _re2.search(r"spark", " ".join(m for c in d["combos"] for m in c["models"])):
-    problems.append("spark-in-combos")
 # *-clean = paid legs only: no free pool may train on private prompts.
 # Free = contributor-free, groq / cerebras / sambanova / gemini hosts,
 # mistral-code + qwen free pools. -contributor (trains by contract) is
-# banned in t2-worker-clean/t3-driver-clean (t1-orchestrator-clean is gone:
-# omitted, see above).
+# banned in every clean combo (a route that fails closed is not a combo at
+# all, so it needs no name listed here).
 # Direct-key legs (mistral-small, deepseek, openrouter paid, zen paid)
 # bill past the pool on the same key, so they stay.
 import re
 free = re.compile(r"contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen")
 trains = re.compile(r"-contributor$")
-for n in ("t2-worker-clean", "t3-driver-clean"):
+clean = [n for n in names if n.endswith("-clean")]
+for n in clean:
     bad = [m for m in by[n] if free.search(m)]
     if bad:
         problems.append(n + "-free:" + ",".join(bad))
-for n in ("t2-worker-clean", "t3-driver-clean"):
+for n in clean:
     bad = [m for m in by[n] if trains.search(m)]
     if bad:
         problems.append(n + "-trains:" + ",".join(bad))
@@ -745,25 +753,31 @@ import json, re, io
 text = re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read())
 oc = json.loads(text)
 m = oc["providers"]["omniroute"]["models"]
+# Expected models and their context limits are derived from
+# catalog/ide-models.json (rendered from catalog/ai-registry.json) and the
+# omitted set from configuration/omniroute/combos.json - so a provider flip
+# that makes a route servable, or fails it closed, needs no re-pin here
+# (lesson PROVPIN 2026-09-27).
+ide = json.load(io.open("catalog/ide-models.json", encoding="utf-8"))["models"]
+expected = {x["id"]: x["context"] for x in ide
+            if "opencode" in ((x.get("surfaces") or {}).get("omniroute") or [])}
+combos = json.load(io.open("configuration/omniroute/combos.json", encoding="utf-8"))
 problems = []
-for name, ctx in (("t2-worker", 131072), ("t3-driver", 131072),
-                  ("t2-worker-clean", 131072), ("t3-driver-clean", 131072),
-                  ("t2-worker-free-only", 131072), ("t3-driver-free-only", 131072),
-                  ("t2-orchestrator", 200000), ("opus-4-6", 200000),
-                  ("gemini-3.8-flash", 131072)):
+for name in sorted(expected):
+    ctx = expected[name]
     if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:
         problems.append(name)
-# t1-orchestrator-clean, spark-1.3-contributor and
-# deepseek-v4.1-flash fail closed (omitted) - they must NOT be client models.
-# T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only are back.
-for gone in ("t1-orchestrator-clean", "spark-1.3-contributor",
-             "deepseek-v4.1-flash"):
+if not expected:
+    problems.append("ide-models-empty")
+# A route that fails closed is omitted from the gateway, so it must not be a
+# client model either; a route that is servable must be offered to the client.
+for gone in combos.get("omitted", []):
     if gone in m:
         problems.append(gone + "-should-be-omitted")
-# t1-orchestrator and t1-orchestrator-free-only MUST be available.
-for kept in ("t1-orchestrator", "t1-orchestrator-free-only"):
-    if kept not in m:
-        problems.append(kept + "-should-be-in-client-models")
+for combo in combos["combos"]:
+    name = combo["name"]
+    if name in expected and name not in m:
+        problems.append(name + "-should-be-in-client-models")
 print(" ".join(problems))
 PY
 )"
