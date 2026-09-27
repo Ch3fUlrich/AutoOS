@@ -3208,6 +3208,29 @@ print("Error: Rate limit exceeded. Please try again later.")
 '''
 
 
+def _init_git_root():
+    """A temp git checkout with two commits and an extra `side` branch: the
+    fixture the --isolate containment tests clone from, shared with the
+    provider-stop fallthrough tests. The caller owns the tempdir
+    (addCleanup(shutil.rmtree, ...))."""
+    tmp = tempfile.mkdtemp()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+           "-c", "init.defaultBranch=master"]
+    subprocess.run(git + ["init", "-q", tmp], check=True)
+    with open(os.path.join(tmp, "tracked.txt"), "w", encoding="utf-8") as fh:
+        fh.write("base\n")
+    subprocess.run(git + ["-C", tmp, "add", "tracked.txt"], check=True)
+    subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "init"], check=True)
+    with open(os.path.join(tmp, "conflict.txt"), "w", encoding="utf-8") as fh:
+        fh.write("base\n")
+    subprocess.run(git + ["-C", tmp, "add", "conflict.txt"], check=True)
+    subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "conflict base"], check=True)
+    # A second EXISTING branch (not checked out) for the side-ref cases;
+    # refs created mid-run are new and never scanned.
+    subprocess.run(git + ["-C", tmp, "branch", "side"], check=True)
+    return tmp
+
+
 class IsolateContainmentTests(unittest.TestCase):
     """ISOfix (rule->code: --isolate containment leak). Measured 2026-09-26:
     an --isolate worker given absolute parent paths edited and committed in
@@ -3221,22 +3244,8 @@ class IsolateContainmentTests(unittest.TestCase):
         self.agent = load_agent()
 
     def make_root(self):
-        tmp = tempfile.mkdtemp()
+        tmp = _init_git_root()
         self.addCleanup(shutil.rmtree, tmp, True)
-        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
-               "-c", "init.defaultBranch=master"]
-        subprocess.run(git + ["init", "-q", tmp], check=True)
-        with open(os.path.join(tmp, "tracked.txt"), "w", encoding="utf-8") as fh:
-            fh.write("base\n")
-        subprocess.run(git + ["-C", tmp, "add", "tracked.txt"], check=True)
-        subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "init"], check=True)
-        with open(os.path.join(tmp, "conflict.txt"), "w", encoding="utf-8") as fh:
-            fh.write("base\n")
-        subprocess.run(git + ["-C", tmp, "add", "conflict.txt"], check=True)
-        subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "conflict base"], check=True)
-        # A second EXISTING branch (not checked out) for the side-ref cases;
-        # refs created mid-run are new and never scanned.
-        subprocess.run(git + ["-C", tmp, "branch", "side"], check=True)
         return tmp
 
     def make_fake_agy(self):
@@ -3823,6 +3832,145 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertNotIn("logs/x", files)
                 self.assertNotIn("logs", files.split())
                 self.assertIn("worker-new.txt", files)
+
+
+def _fallthrough_registry(route_ids):
+    """A registry whose routes are exactly `route_ids`, plus the clients the
+    capability gate reads. The resolver itself is replaced by
+    `_fallthrough_plan`, so providers/models/policy are not consulted."""
+    return {
+        "clients": {
+            "opencode": {"capabilities": {"shell": True, "write": True}},
+            "claude": {"capabilities": {"shell": True, "write": True}},
+        },
+        "routes": {rid: {"id": rid, "class": "cheap", "legs": []} for rid in route_ids},
+    }
+
+
+def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, overlay,
+                      track_record, client_state):
+    """route_plan_for stand-in: the first route id still in `registry`.
+
+    `_resolve_route_v2` drops the excluded ids before calling, so the second
+    attempt sees only the routes that have not been tried yet. No routes left
+    is the resolver's own input_required."""
+    routes = list((registry.get("routes") or {}).keys())
+    if not routes:
+        return {"route": None, "state": "input_required",
+                "reason": "no route survives the filters", "bucket": "S0",
+                "defer_until": None}
+    return {"route": routes[0], "state": "ready", "reason": "stub", "bucket": "S1",
+            "defer_until": None}
+
+
+class ProviderStopFallthroughTests(unittest.TestCase):
+    """SPAWNCAP (S2) part B: a provider-stopped resolver-routed --isolate run
+    re-runs the same task in the same sandbox on the next route, after
+    WIP-committing the stopped attempt, at most MAX_FALLTHROUGH times; then it
+    exits 8 exactly as WIPfix did."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def test_fallthrough_line_names_both_routes(self):
+        self.assertEqual(
+            self.agent.fallthrough_line("r-free", "Error: Rate limit exceeded", "r-cheap"),
+            "provider stop on r-free: Error: Rate limit exceeded -> falling through to r-cheap")
+
+    def test_provider_stop_matches_all_targets_skipped(self):
+        # gateway 503 ALL_TARGETS_SKIPPED, printed as an error line.
+        line = "Error: all targets were skipped by pre-dispatch filters"
+        self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
+
+    def test_provider_stop_matches_credits_exhausted(self):
+        line = "Error: credits exhausted"
+        self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
+
+    def _run(self, route_ids, stops):
+        """Run cmd_run with the resolver and the client replaced by fakes; the
+        sandbox is a real temp clone so WIP commits and re-runs are real.
+
+        Returns (rc, out, err, calls, sandbox_names): `calls` is
+        {"n": int, "cwds": [str]}.
+        """
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        statedir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, statedir, True)
+        agent = self.agent
+        old_root, old_track, old_overlay = (agent.ROOT, agent.TRACK_RECORD,
+                                            agent.MEASURED_OVERLAY_PATH)
+        agent.ROOT = root
+        agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
+        agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
+        cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
+
+        calls = {"n": 0, "cwds": []}
+
+        def fake_run_client(cmd, cwd, env, reap=True, capture=False):
+            calls["n"] += 1
+            calls["cwds"].append(cwd)
+            with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
+                      encoding="utf-8") as fh:
+                fh.write("work\n")
+            if calls["n"] <= stops:
+                return agent.ClientExit(0, tail="Error: Rate limit exceeded\n")
+            return agent.ClientExit(0, tail="done\n")
+
+        args = argparse.Namespace(
+            client="claude", tier=None, card="kind=implement", task="edit README.md",
+            free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
+            joinable=False, model=None, clean=False, allow_training=False,
+            max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+        env = dict(os.environ)
+        env["AUTOOS_STATE_DIR"] = statedir
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(agent, "load_registry",
+                                       lambda path: _fallthrough_registry(route_ids)):
+                    with mock.patch.object(agent, "route_plan_for", _fallthrough_plan):
+                        with mock.patch.object(agent, "run_client", fake_run_client):
+                            with mock.patch.object(agent.measure_mod, "client_state",
+                                                   lambda *a, **k: {}):
+                                with mock.patch.object(
+                                        agent.clients, "signin_state",
+                                        lambda client, env=None: (None, "")):
+                                    with mock.patch("shutil.which",
+                                                    return_value="/usr/bin/claude"):
+                                        with contextlib.redirect_stdout(out), \
+                                                contextlib.redirect_stderr(err):
+                                            rc = agent.cmd_run(args, cfg)
+        finally:
+            (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
+                old_root, old_track, old_overlay)
+        base = os.path.join(statedir, "sandboxes")
+        names = os.listdir(base) if os.path.isdir(base) else []
+        return rc, out.getvalue(), err.getvalue(), calls, names
+
+    def test_a_provider_stop_falls_through_to_the_next_route_and_succeeds(self):
+        rc, out, err, calls, sandboxes = self._run(["r-free", "r-cheap"], stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 2, "one stopped attempt plus one re-run")
+        self.assertEqual(calls["cwds"][0], calls["cwds"][1], "same sandbox, same cwd")
+        self.assertEqual(len(sandboxes), 1, sandboxes)
+        self.assertIn("provider stop on r-free: Error: Rate limit exceeded "
+                      "-> falling through to r-cheap", out + err)
+        self.assertIn("WIP-COMMITTED", out + err)
+
+    def test_fallthrough_stops_after_the_cap_and_exits_8(self):
+        rc, out, err, calls, _ = self._run(
+            ["r-free", "r-cheap", "r-cheap2", "r-cheap3"], stops=5)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 3, "the first attempt plus MAX_FALLTHROUGH re-runs")
+        lines = [ln for ln in (out + err).splitlines() if ln.startswith("provider stop on ")]
+        self.assertEqual(len(lines), 2, lines)
+
+    def test_no_next_route_exits_8_without_a_fallthrough(self):
+        rc, out, err, calls, _ = self._run(["r-free"], stops=5)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1, "nowhere to fall through to")
+        self.assertNotIn("falling through to", out + err)
 
 
 class OutsideFenceTaskDirTests(unittest.TestCase):
