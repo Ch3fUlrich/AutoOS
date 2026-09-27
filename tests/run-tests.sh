@@ -149,7 +149,7 @@ fake_usb() {
 # done - this function never cleans up after itself.
 _start_test_http_server() {
     local dir="$1" portfile pid port i
-    portfile="$(mktemp -u)"
+    portfile="$(mktemp)"
     python3 -c '
 import http.server, socketserver, sys, os
 os.chdir(sys.argv[1])

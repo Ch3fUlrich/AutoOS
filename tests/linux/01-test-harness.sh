@@ -66,6 +66,37 @@ if it "the harness runs the tests a --filter selects, not merely exits 0"; then
     fi
 fi
 
+if it "the test HTTP server creates a real port file, never mktemp -u"; then
+    # `mktemp -u` only PRINTS a name and creates nothing: two callers -- or a
+    # same-user process that races the same path -- can be handed the same
+    # name and the second writer clobbers the first. A test that then reads
+    # the port file can observe another server's port. Pin that the helper
+    # asks mktemp for a real file. A PATH stub logs mktemp's arguments and
+    # still returns a usable path, so the helper runs to completion either way.
+    fakebin="$(mktemp -d)"
+    log="$fakebin/mktemp.args"
+    real_mktemp="$(command -v mktemp)"
+    cat >"$fakebin/mktemp" <<EOS
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"\$MKTEMP_LOG"
+case "\${1:-}" in -u) shift ;; esac
+exec "$real_mktemp" "\$@"
+EOS
+    chmod +x "$fakebin/mktemp"
+    out="$(MKTEMP_LOG="$log" PATH="$fakebin:$PATH" _start_test_http_server "$ROOT/tests/helpers/image_index_fixtures" 2>/dev/null)"
+    read -r srv_pid srv_port <<<"$out"
+    [[ -n "$srv_pid" ]] && kill "$srv_pid" 2>/dev/null
+    mktemp_args="$(tr '\n' ' ' <"$log" 2>/dev/null)"
+    rm -rf "$fakebin"
+    if [[ "$mktemp_args" == *"-u"* ]]; then
+        fail "mktemp was called with -u, which reserves a name and creates no file: [$mktemp_args]"
+    elif [[ -z "$srv_port" ]]; then
+        fail "the helper served no port (pid=[$srv_pid], port=[$srv_port], mktemp args=[$mktemp_args])"
+    else
+        pass
+    fi
+fi
+
 if it "the harness does not refuse when AUTOOS_FULL_SUITE=1"; then
     tmp="$(mktemp -d)"
     cp "$ROOT/tests/run-tests.sh" "$tmp/run-tests.sh"
