@@ -18,16 +18,49 @@ param([ValidateSet('opencode', 'zed', 'nvim', 'openhands', 'opencode-serve', 'no
 
 $ErrorActionPreference = 'Stop'
 $Gateway = 'http://127.0.0.1:20128'
-$Key = $env:AUTOOS_OMNIROUTE_KEY
-if ([string]::IsNullOrWhiteSpace($Key)) {
-    # Fall back to the single source of truth for keys.
-    $keysFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'configuration\api-keys.yml'
-    if (Test-Path $keysFile) {
-        foreach ($line in (Get-Content $keysFile -Encoding utf8)) {
-            $t = $line.Trim()
-            if ($t -match '^omniroute\s*:\s*(.+)$') { $Key = $matches[1].Trim().Trim('"').Trim("'") ; break }
+$keysFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'configuration\api-keys.yml'
+
+function Get-AutoOSKeyValue {
+    # First uncommented `<Name>: <value>` line in a YAML-ish key file.
+    # YAML plain/quoted scalar parse (enough for this file):
+    #   - starts with " : up to the next " (no escapes)
+    #   - starts with ' : up to the next '
+    #   - otherwise    : up to the first # preceded by space or tab, then trim
+    # CR is stripped. Returns '' when the file or key is missing, or when the
+    # value starts with REPLACE_WITH_ (the placeholder for "not filled in").
+    param([string]$Path, [string]$Name)
+    if (-not $Path -or -not $Name -or -not (Test-Path -LiteralPath $Path)) { return '' }
+    $escaped = [regex]::Escape($Name)
+    foreach ($raw in (Get-Content -LiteralPath $Path -Encoding utf8)) {
+        $line = $raw -replace '\r$',''
+        if ($line -match "^\s*$escaped\s*:\s*(.+)$") {
+            $v = $Matches[1]
+            if ($v -match '^\s*#') { continue }
+            if ($v.Length -gt 0 -and $v[0] -eq '"') {
+                $rest = $v.Substring(1)
+                $q = $rest.IndexOf('"')
+                if ($q -lt 0) { $v = $rest } else { $v = $rest.Substring(0, $q) }
+            }
+            elseif ($v.Length -gt 0 -and $v[0] -eq "'") {
+                $rest = $v.Substring(1)
+                $q = $rest.IndexOf("'")
+                if ($q -lt 0) { $v = $rest } else { $v = $rest.Substring(0, $q) }
+            }
+            else {
+                $m = [regex]::Match($v, '([ \t])#')
+                if ($m.Success) { $v = $v.Substring(0, $m.Index + 1) }
+                $v = $v.TrimEnd()
+            }
+            if ($v -like 'REPLACE_WITH_*') { return '' }
+            return $v
         }
     }
+    ''
+}
+
+$Key = $env:AUTOOS_OMNIROUTE_KEY
+if ([string]::IsNullOrWhiteSpace($Key)) {
+    $Key = Get-AutoOSKeyValue -Path $keysFile -Name 'omniroute'
 }
 if ([string]::IsNullOrWhiteSpace($Key)) {
     Write-Host 'No OmniRoute client key. Add `omniroute: sk-...` to configuration\api-keys.yml,'
@@ -194,6 +227,13 @@ switch ($App) {
         elseif (-not (Get-Command opencode -ErrorAction SilentlyContinue)) {
             Write-Host 'opencode is not installed. Run: .\setup.ps1 -Only opencode-cli -Yes'; exit 1
         } else {
+            $pw = Get-AutoOSKeyValue -Path $keysFile -Name 'opencode_password'
+            if ($pw) {
+                $env:OPENCODE_PASSWORD = $pw
+                Write-Host "Serve password: from $keysFile (user: opencode)."
+            } else {
+                Write-Host "No opencode_password in $keysFile - opencode serve picks a new random password every start; add one (see docs/web-services.md#logins-and-secrets)."
+            }
             Write-Host 'Starting opencode serve in the background...'
             Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', '0.0.0.0', '--port', '4096' -WindowStyle Hidden
             Write-Host 'opencode serve should answer on http://localhost:4096 (401 = alive, pair via: opencode pair).'

@@ -44,6 +44,27 @@ done
 # shellcheck source=../env-file.sh
 . "$REPO/configuration/env-file.sh"
 
+# keys_value <file> <name>: last uncommented `^<name>[[:space:]]*:` line,
+# YAML plain/quoted scalar parse (enough for this file). See ai-stack.sh
+# keys_value for the rule.
+keys_value() {
+    local file="$1" name="$2" raw val
+    [[ -f "$file" ]] || return 0
+    raw="$(sed -n "s/^${name}[[:space:]]*:[[:space:]]*//p" "$file" \
+        | grep -v '^[[:space:]]*#' | tail -n1 | tr -d '\r')"
+    [[ -n "$raw" ]] || return 0
+    case "$raw" in
+        \"*) val="${raw#\"}"; val="${val%%\"*}" ;;
+        \'*) val="${raw#\'}"; val="${val%%\'*}" ;;
+        *)   val="$raw"
+             val="$(printf '%s' "$val" | sed -E 's/([[:space:]])#.*$/\1/')"
+             val="${val%"${val##*[![:space:]]}"}"
+             ;;
+    esac
+    [[ "$val" == REPLACE_WITH_* ]] && return 0
+    printf '%s' "$val"
+}
+
 LOADED=()
 if autoos_read_env_file "$LIT_ENV"; then
     for i in "${!ENV_NAMES[@]}"; do
@@ -54,8 +75,8 @@ if autoos_read_env_file "$LIT_ENV"; then
     done
 fi
 if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" && -f "$KEYS_FILE" ]]; then
-    key="$(sed -n 's/^omniroute[[:space:]]*:[[:space:]]*//p' "$KEYS_FILE" | head -n1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
-    if [[ -n "$key" && "$key" != REPLACE_WITH_* ]]; then
+    key="$(keys_value "$KEYS_FILE" omniroute)"
+    if [[ -n "$key" ]]; then
         export AUTOOS_OMNIROUTE_KEY="$key"
         LOADED+=(AUTOOS_OMNIROUTE_KEY)
     fi
@@ -66,7 +87,20 @@ else
     echo "No keys found in $LIT_ENV or $KEYS_FILE - the omniroute/litellm providers will be refused."
 fi
 
-if [[ ! -s "$PW_FILE" ]]; then
+# configuration/api-keys.yml's opencode_password is the single source
+# (ai-stack.sh init writes it). Fall back to the pinned file, generated once,
+# when it is absent. The value is never printed - only the source is named.
+KEYS_PW=""
+if [[ -f "$KEYS_FILE" ]]; then
+    KEYS_PW="$(keys_value "$KEYS_FILE" opencode_password)"
+fi
+if [[ -n "$KEYS_PW" ]]; then
+    if [[ $DRY -eq 1 ]]; then
+        echo "  - would use the opencode_password from $KEYS_FILE (user: opencode)."
+    else
+        echo "Serve password: from $KEYS_FILE (user: opencode)."
+    fi
+elif [[ ! -s "$PW_FILE" ]]; then
     if [[ $DRY -eq 1 ]]; then
         echo "  - would generate the serve password into $PW_FILE (mode 600)"
     else
@@ -92,7 +126,11 @@ if [[ $DRY -eq 1 ]]; then
 fi
 
 command -v opencode >/dev/null || { echo "opencode is not installed. Run: ./setup.sh --only opencode-cli --yes"; exit 1; }
-OPENCODE_PASSWORD="$(cat "$PW_FILE")"
+if [[ -n "$KEYS_PW" ]]; then
+    OPENCODE_PASSWORD="$KEYS_PW"
+else
+    OPENCODE_PASSWORD="$(cat "$PW_FILE")"
+fi
 export OPENCODE_PASSWORD
 
 # From $HOME, as the unit does: the serve process's cwd becomes its default

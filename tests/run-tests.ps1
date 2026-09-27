@@ -6680,6 +6680,63 @@ Test-Case 'start-stack.ps1: a settings backup never overwrites an earlier one ta
     Pass
 }
 
+Test-Case 'start-stack.ps1: opencode serve takes its password from api-keys.yml opencode_password' {
+    # The opencode-serve branch must read opencode_password from the same
+    # api-keys.yml the OmniRoute key comes from, export it as OPENCODE_PASSWORD
+    # so the child inherits it, and never print the value. AST-extract
+    # Get-AutoOSKeyValue and exercise it in a scratch dir.
+    $script = Join-Path $Root 'configuration\start-stack.ps1'
+    $tokens = $null; $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
+    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-AutoOSKeyValue' }, $true))
+    if ($fn.Count -ne 1) { throw "want exactly one function Get-AutoOSKeyValue in start-stack.ps1, found $($fn.Count)" }
+    . ([scriptblock]::Create($fn[0].Extent.Text))
+
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ockey-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $keys = Join-Path $scratch 'api-keys.yml'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: hunter2" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'hunter2'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: 'x'" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'x'
+
+        Set-Content -LiteralPath $keys -Value 'opencode_password: "x"' -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'x'
+
+        Set-Content -LiteralPath $keys -Value "# opencode_password: y" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: REPLACE_WITH_A" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+
+        Set-Content -LiteralPath $keys -Value 'opencode_password: "pw-with-comment"   # rotated by L0' -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'pw-with-comment'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: 'single-q'  # note" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'single-q'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: plain-pw # c" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'plain-pw'
+
+        Assert-Equal (Get-AutoOSKeyValue -Path (Join-Path $scratch 'nope.yml') -Name 'opencode_password') ''
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $text = Get-Content -LiteralPath $script -Raw
+    $ocBranch = $text -split "`n" | Where-Object { $_ -match 'opencode-serve' -or $_ -match 'opencode serve' -or $_ -match 'OPENCODE_PASSWORD' -or ($_ -match 'Get-AutoOSKeyValue' -and $_ -match 'opencode_password') }
+    $ocText = $ocBranch -join "`n"
+    if ($ocText -notmatch 'Get-AutoOSKeyValue') { throw 'opencode-serve branch must read opencode_password via Get-AutoOSKeyValue' }
+    if ($ocText -notmatch 'opencode_password') { throw 'opencode-serve branch must reference opencode_password' }
+    if ($text -notmatch '\$env:OPENCODE_PASSWORD') { throw 'opencode-serve branch must set $env:OPENCODE_PASSWORD' }
+    $whLines = @($text -split "`n" | Where-Object { $_ -match 'Write-Host' -and $_ -match '\$pw' })
+    if ($whLines.Count -gt 0) { throw "a Write-Host line references `$pw (would print the password): $($whLines -join ' | ')" }
+    Pass
+}
+
 Test-Case 'openhands launch is detached, probed and stale-settings safe' {
     # -it fails without a TTY and foreground never returns (the old script
     # printed the URL even when nothing started); schema_version 6 settings
