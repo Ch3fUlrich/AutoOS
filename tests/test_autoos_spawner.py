@@ -44,6 +44,23 @@ def load_agent():
     return module
 
 
+# Every cmd_run writes a worker record (ps). No test may write into the host's
+# real registry (<main checkout>/logs/workers): pin it to a throwaway dir for the
+# whole module; a test that needs its own dir still passes AUTOOS_WORKERS_DIR.
+_WORKERS_TMP = None
+
+
+def setUpModule():
+    global _WORKERS_TMP
+    _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-workers-test-")
+    os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
+
+
+def tearDownModule():
+    os.environ.pop("AUTOOS_WORKERS_DIR", None)
+    shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
+
+
 def clean_env(**extra):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k != "AUTOOS_OMNIROUTE_KEY"}
