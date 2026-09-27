@@ -376,6 +376,36 @@ def resolve_leg(leg, registry) -> tuple:
     return provider_id, model_id
 
 
+def gateway_ref(leg, registry) -> str:
+    """The id the OmniRoute gateway catalog actually serves for a registry leg.
+
+    A provider may spell its models differently in the live gateway than in this
+    registry: the antigravity OAuth bridge (agy CLI) serves ``agy/*`` ids
+    (measured against the live catalog's /v1/models, 2026-09-27), while the
+    registry keeps ``antigravity/*`` because resolve_leg()/usable_legs() and
+    every saved route/selection already use that spelling. This is the ONE
+    translation point between the two: a provider declaring ``model_prefix``
+    has each leg rewritten to ``<model_prefix>/<model>``; every other leg - and
+    any leg that does not resolve, or is not a string - is returned unchanged
+    (rule 1 already reports a malformed leg loudly, and a render must not hide
+    one behind a silent rewrite).
+
+    The registry's own leg spelling never moves, so the resolver and
+    apply.sh/apply.ps1 (which look a provider connection up by ``omniroute_id``)
+    are untouched."""
+    if not isinstance(leg, str):
+        return leg
+    try:
+        provider_id, model_id = resolve_leg(leg, registry)
+    except ValueError:
+        return leg
+    provider = _section(registry, "providers").get(provider_id)
+    prefix = provider.get("model_prefix") if isinstance(provider, dict) else None
+    if not prefix:
+        return leg
+    return "%s/%s" % (prefix, model_id)
+
+
 def _check_legs(registry) -> list:
     problems = []
     for route_id, route in _section(registry, "routes").items():
@@ -893,7 +923,7 @@ def render_omniroute(registry: dict) -> dict:
             "name": route_id,
             "strategy": route.get("strategy"),
             "context": omniroute_surface["context_declared"],
-            "models": list(legs),
+            "models": [gateway_ref(leg, registry) for leg in legs],
         })
 
     return {
@@ -985,7 +1015,8 @@ def _load_sync_router_tiers():
     module identifier) - the same importlib-by-path technique this repo uses
     for every other dash-named tool.
     Reused, not copied, so Leg/render_block/locate_blocks/parse_block/
-    leading_indent/GATEWAY_ONLY/SYNCED_TIERS/provider_maps_from_dict can never
+    leading_indent/GATEWAY_ONLY/managed_tiers/litellm_servable_refs/
+    provider_maps_from_dict can never
     drift from the tool that still owns configuration/litellm/config.yaml's
     actual managed blocks (task A4b's brief: "reuse ... rather than copying
     it"). A fresh module object every call, deliberately: render_litellm_
@@ -1032,21 +1063,29 @@ def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
     exactly like render_omniroute(registry) leaves combos.json's own read to
     its caller).
 
-    Returns {tier: block_text}, one entry per synced tier (tools/sync-router-
-    tiers.py's own SYNCED_TIERS by default - currently t2-worker/t3-driver;
-    t1-orchestrator and every *-paid/*-free-only group are hand-curated, not
-    sync-managed, same as today), each block running from its "# AUTOOS-
-    MANAGED-START <tier>" line to its "# AUTOOS-MANAGED-END <tier>" line
-    inclusive, newline-joined with no leading or trailing blank line - the
-    exact slice tools/sync-router-tiers.py's own rewrite() replaces.
+    Returns {tier: block_text}, one entry per renderable tier. By default the
+    set is tools/sync-router-tiers.py's own managed_tiers(registry) - every
+    route that declares `legs` and still has at least one LiteLLM-servable leg
+    after GATEWAY_ONLY is dropped, in registry order. That replaces the old
+    hand-maintained SYNCED_TIERS pair (t2-worker/t3-driver), so a tier becomes
+    managed purely by existing in the registry. A tier whose final servable
+    ref set is empty (all legs unavailable, policy-denied or client-bound, or
+    all gateway-only) gets NO entry and NO block: an empty model list is not a
+    valid config, but the registry itself decides which groups exist. Legless
+    hand groups (every *-paid group; they declare no `legs`) are never managed
+    and never rendered. Each block runs from its "# AUTOOS-MANAGED-START
+    <tier>" line to its "# AUTOOS-MANAGED-END <tier>" line inclusive,
+    newline-joined with no leading or trailing blank line - the exact slice
+    tools/sync-router-tiers.py's own rewrite() replaces.
 
-    Raises ValueError, naming every offending tier at once, when the registry
-    has no `routes.<tier>` for a tier being rendered, or when `config_text` has
-    no managed block for one (a missing/duplicate/mismatched marker - the same
-    cases tools/sync-router-tiers.py itself refuses via its own ConfigError,
-    surfaced here as ValueError so a caller needs only one exception type)."""
+    Raises ValueError, naming every offending tier at once, when an explicitly
+    passed tier has no `routes.<tier>`, or when `config_text` has no managed
+    block for a tier that is actually rendered (a missing/duplicate/mismatched
+    marker - the same cases tools/sync-router-tiers.py itself refuses via its
+    own ConfigError, surfaced here as ValueError so a caller needs only one
+    exception type)."""
     sync = _load_sync_router_tiers()
-    tiers = tuple(tiers) if tiers is not None else sync.SYNCED_TIERS
+    tiers = tuple(tiers) if tiers is not None else sync.managed_tiers(registry)
 
     providers = _section(registry, "providers")
     sync.PROVIDER_PREFIX, sync.API_BASE, sync.ENV_KEY = sync.provider_maps_from_dict(providers)
@@ -1056,36 +1095,26 @@ def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
     if missing_routes:
         raise ValueError("registry has no routes.<id> for tier(s): %s" % ", ".join(missing_routes))
 
+    # Only tiers with a non-empty final servable ref set get a block; a route
+    # that drops to nothing is silently omitted (the registry decides which
+    # groups exist), not an error.
     refs_by_tier = {}
-    servable = servable_route_ids(registry)
     for tier in tiers:
-        declared_legs = routes[tier].get("legs") or []
-        legs = gateway_legs(routes[tier], registry)
-        if declared_legs and tier not in servable:
-            # An empty model list in a managed block is not a valid config: a
-            # synced tier with no gateway-servable leg (unavailable, denied or
-            # client-bound) is a hard error naming the tier/route, unlike
-            # render_omniroute's all-dead route, which simply gets no combo.
-            raise ValueError(
-                "routes.%s has legs but no gateway-servable leg "
-                "(unavailable, policy-denied, or client-bound): %s"
-                % (tier, ", ".join(str(leg) for leg in declared_legs)))
-        refs_by_tier[tier] = [
-            leg for leg in legs
-            if isinstance(leg, str) and leg.split("/", 1)[0] not in sync.GATEWAY_ONLY
-        ]
+        refs = sync.litellm_servable_refs(routes[tier], registry)
+        if refs:
+            refs_by_tier[tier] = refs
 
     lines = config_text.splitlines()
     try:
         blocks = sync.locate_blocks(lines)
     except sync.ConfigError as exc:
         raise ValueError(str(exc)) from exc
-    missing_blocks = [t for t in tiers if t not in blocks]
+    missing_blocks = [t for t in refs_by_tier if t not in blocks]
     if missing_blocks:
         raise ValueError("config.yaml has no managed block for: %s" % ", ".join(missing_blocks))
 
     rendered = {}
-    for tier in tiers:
+    for tier in refs_by_tier:
         start, end = blocks[tier]
         indent = sync.leading_indent(lines[start])
         extras = sync.parse_block(lines, start, end)

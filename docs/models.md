@@ -47,7 +47,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `cheaperinference/kimi-k3` | cheap | 128k | ~~cheaperinference `kimi-k3`~~ (unavailable) |
 | `deepseek-v4.1-flash` | cheap | 128k | openrouter `deepseek/deepseek-v4.1-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `gemini-3.8-flash` | cheap | 128k | gemini `gemini-3.8-flash` → ~~openrouter `google/gemini-3.8-flash`~~ (unavailable) |
-| `opus-4-6` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → cc `claude-opus-4-6` |
+| `opus-4-6` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) |
 | `samba/MiniMax-M3` | cheap | 128k | ~~samba `MiniMax-M3`~~ (unavailable) |
 | `samba/gpt-oss-120b` | cheap | 128k | ~~samba `gpt-oss-120b`~~ (unavailable) |
 | `spark-1.3-contributor` | cheap | 1M | ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → openrouter `meta/muse-spark-1.3-contributor` |
@@ -55,7 +55,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `t1-orchestrator-clean` | cheap | 1M | openrouter `meta/muse-spark-1.3-contributor` |
 | `t1-orchestrator-free-only` | free | 1M | ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) |
 | `t1-orchestrator-paid` | cheap | 1,000,000 | (none) |
-| `t2-orchestrator` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → cc `claude-opus-4-6` → openrouter `deepseek/deepseek-v4.1-flash` |
+| `t2-orchestrator` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) → openrouter `deepseek/deepseek-v4.1-flash` |
 | `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → openrouter `deepseek/deepseek-v4.1-flash` → deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `t2-worker-clean` | mid | 128k | deepseek `deepseek-flash` → openrouter `deepseek/deepseek-v4.1-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → mistral `mistral-small-latest` |
 | `t2-worker-free-only` | free | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-medium` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) |
