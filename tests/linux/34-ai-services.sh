@@ -310,11 +310,14 @@ SH
     : >"$d/calls.log"
     printf '%s\n' "$d"
 }
-# _drift_json <dir> [swap] - render the live list from combos.json itself;
-# "swap" reverses one combo's legs so the orders differ.
+# _drift_json <dir> [swap] [split] - render the live list from combos.json
+# itself; "swap" reverses one combo's legs so the orders differ. The default
+# step shape is the live one (measured 2026-09-27T08:4xZ, omniroute 3.8.51 in
+# docker): "model" carries the full ref, providerId repeats its first segment.
+# "split" is the upstream-source shape (model without the provider segment).
 _drift_json() {
-    local d="$1" swap="${2:-}"
-    python3 - "$ROOT/configuration/omniroute/combos.json" "$swap" >"$d/drift.json" <<'PY'
+    local d="$1" swap="${2:-}" split="${3:-}"
+    python3 - "$ROOT/configuration/omniroute/combos.json" "$swap" "$split" >"$d/drift.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 combos = []
@@ -322,7 +325,8 @@ for c in data.get("combos", []):
     models = []
     for ref in c["models"]:
         provider, _, model = ref.partition("/")
-        models.append({"kind": "model", "providerId": provider, "model": model})
+        models.append({"kind": "model", "providerId": provider,
+                       "model": model if sys.argv[3] else ref})
     combos.append({"name": c["name"], "strategy": c.get("strategy", "priority"),
                    "models": models})
 if sys.argv[2] and combos:
@@ -361,6 +365,14 @@ if it "apply drift: live combos equal combos.json -> exit 0, no difference lines
     [[ -s "$d/calls.log" ]] && { ok=0; echo "wrote through the CLI: $(cat "$d/calls.log")" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "--drift reported drift on an in-sync store"; fi
+fi
+
+if it "apply drift: the upstream split step shape (model without provider) is in sync too"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d" "" split
+    out="$(_drift_apply "$d")"; rc=$?
+    rm -rf "$d"
+    if [[ $rc -eq 0 && "$out" == *"in sync"* ]]; then pass; else fail "rc=$rc: $out"; fi
 fi
 
 if it "apply drift: one combo's leg order differs -> exit 1 and names it"; then

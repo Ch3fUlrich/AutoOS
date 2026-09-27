@@ -150,7 +150,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-gateway-14: qoder as a non-review worker denies every Bash call; use it to write or review, never to run tests. (why: 6 denials incl. tests; source: inbox/L1-routing.md 2026-09-26T16:49:00Z)
 - R-gateway-15: Never mix Groq and DeepSeek legs in a multi-turn combo. (why: Groq 400s reasoning_details, DeepSeek needs reasoning_text; source: L1-backlog-k1 logs/lane-k1.out)
 - R-gateway-16: Prove a provider's credit with a worker-sized request or its balance, not 'reply PONG'. (why: PONG passed, worker turns failed 2 min later; source: work/L1-routing/OR1a.r2.out)
-- R-gateway-17: Read live OmniRoute state over its HTTP API; host `omniroute` CLI management calls 401. (why: stack moved into docker; source: inbox/L1-routing.md 2026-09-27T03:53:13Z)
+- R-gateway-17: Manage the docker OmniRoute via apply.sh's omni wrapper (manage key); a bare host CLI call 401s. (why: the wrapper read every live combo; source: apply.sh --drift 2026-09-27T08:4xZ)
 
 ### cost
 

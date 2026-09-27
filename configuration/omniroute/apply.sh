@@ -271,7 +271,11 @@ for c in live_doc.get("combos") or []:
         elif isinstance(step, dict) and step.get("kind", "model") == "model":
             provider = step.get("providerId") or step.get("provider") or ""
             model = step.get("model") or ""
-            refs.append("%s/%s" % (provider, model) if provider else model)
+            # Live 3.8.51 (measured 2026-09-27) keeps the full ref in "model"
+            # ("opencode-zen/muse-..."); the upstream source splits it off.
+            if provider and not model.startswith(provider + "/"):
+                model = "%s/%s" % (provider, model)
+            refs.append(model)
     live_combos[name] = refs
 
 rc = 0
