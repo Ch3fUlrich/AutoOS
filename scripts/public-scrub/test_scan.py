@@ -146,7 +146,7 @@ def test_patterns_comments_and_blanks_ignored(tmp_path):
 def test_git_tree_non_ascii_name_is_scanned(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "patterns.txt").write_text("host\tsecret\.example\.lan\n", encoding="utf-8")
+    (repo / "patterns.txt").write_text(PATTERN_LINE, encoding="utf-8")
     (repo / "sécret.md").write_text("see secret.example.lan\n", encoding="utf-8")
     git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=t"]
     subprocess.run(git + ["init", "-q"], cwd=repo, check=True)
@@ -268,3 +268,63 @@ def test_clean_document_exits_0(tmp_path):
     (tmp_path / "ok.md").write_text("\n".join(CLEAN) + "\n", encoding="utf-8")
     proc = run_scan(["--patterns", str(REPO_PATTERNS), "ok.md"], cwd=tmp_path)
     assert proc.returncode == 0, proc.stdout
+
+
+# ─── the scanner never reads its own rules and fixtures ──────────────────────
+# patterns.txt holds the shapes, patterns.private.txt the real literals and this
+# file planted specimens of both. Without that exemption a plain `scan.py .`
+# reports the gate's own rules as hits, so CI would have to pass --exclude-file
+# everywhere and a developer's run would read as broken.
+
+def test_the_scrubbers_own_home_is_skipped_by_default():
+    # cwd must be the repository root: exclusions are repo-relative prefixes.
+    proc = run_scan(["--patterns", str(REPO_PATTERNS), "scripts/public-scrub/"],
+                    cwd=REPO_PATTERNS.parent.parent.parent)
+    assert proc.returncode == 0, proc.stdout
+
+
+def test_that_skipping_is_the_default_and_not_an_accident(tmp_path):
+    # Same tree, an empty exclusion list: the planted fixtures must be caught.
+    empty = tmp_path / "empty-excludes.txt"
+    empty.write_text("# nothing excluded\n", encoding="utf-8")
+    proc = run_scan(["--patterns", str(REPO_PATTERNS),
+                     "--exclude-file", str(empty),
+                     str(REPO_PATTERNS.parent / "test_scan.py")],
+                    cwd=REPO_PATTERNS.parent.parent.parent)
+    assert proc.returncode == 1, proc.stdout
+    assert "test_scan.py" in proc.stdout
+
+
+if __name__ == "__main__":
+    # Runnable without pytest on purpose: CI's scrub job and the Linux suite both
+    # execute this file, and neither installs anything (AGENTS.md: the suites have
+    # no dependencies). pytest is still welcome — it collects the same functions.
+    import inspect
+    import tempfile
+    import traceback
+
+    passed = failed = 0
+    for name, fn in sorted(globals().items()):
+        if not name.startswith("test_") or not callable(fn):
+            continue
+        params = inspect.signature(fn).parameters
+        unknown = set(params) - {"tmp_path"}
+        if unknown:
+            print("%s: unsupported fixture(s) %s for the no-pytest runner"
+                  % (name, ", ".join(sorted(unknown))), file=sys.stderr)
+            failed += 1
+            continue
+        try:
+            if "tmp_path" in params:
+                with tempfile.TemporaryDirectory() as tmp:
+                    fn(Path(tmp))
+            else:
+                fn()
+        except Exception:
+            failed += 1
+            print("FAIL %s" % name)
+            traceback.print_exc()
+        else:
+            passed += 1
+    print("%d passed, %d failed" % (passed, failed))
+    sys.exit(1 if failed else 0)

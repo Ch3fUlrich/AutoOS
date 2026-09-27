@@ -5,6 +5,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the publication scanner learns four more shapes and gates the docs (SPEC-OMNI A2, 2026-09-27)
+
+The public-scrub gate covered `infra/` and `scripts/` with four shapes, and its
+own test file was run by nobody — a rule could stop matching, or a hostname could
+land in `docs/`, without any check noticing. Both are fixed here.
+
+- **`scripts/public-scrub/patterns.txt`**: five generic shapes added — `cgnat`
+  (RFC 6598's 100.64.0.0/10, where Tailscale and Docker's pooled addresses live),
+  `link-local` (RFC 3927's 169.254.0.0/16), `ipv6-ula` (RFC 4193's fd00::/8),
+  `private-host` (a single-label name ending in `.lan`, `.local`, `home.arpa` or
+  `.internal`) and `email`. Names describe the kind, never the value.
+  Documentation and look-alike values are deliberately unmatched so the gate stays
+  green on honest prose: the RFC 5737 / RFC 3849 documentation ranges, loopback,
+  RFC 2606 reserved example domains, Anthropic's and GitHub's published no-reply
+  addresses, Docker's `host.docker.internal` alias, a dotenv `.env.local` filename
+  and a `settings.local.json` filename. Known limit: a private host one label
+  deeper than the last (`vm01.dc.internal`) is out of reach of a rule that must
+  ignore `coding.example.internal` — that is what `patterns.private.txt`
+  (gitignored) is for. (`CHANGELOG.md` is not in the gate's scope; it names the
+  shapes it describes, like this entry does.)
+- **`scripts/public-scrub/scan.py`** now loads **`scan-exclude.txt`** (new) by
+  default, so the scrubber's own rules, private literals and planted fixtures are
+  never reported as hits — previously only the `--patterns` file was skipped, and
+  a developer holding a real `patterns.private.txt` saw it listed as a leak.
+  `--exclude-file` still overrides it; one reason per entry in the file.
+- **`.github/workflows/ci.yml`** ("Public scrub scan") scans `docs/`, `catalog/`,
+  `README.md` and `AGENTS.md` beside `infra/` and `scripts/`, and runs
+  `scripts/public-scrub/test_scan.py` directly (no pytest is installed anywhere —
+  the file grew a dependency-free `__main__` runner, and pytest still collects
+  the same functions). **`tests/linux/36-static-analysis.sh`** runs the same
+  command, checks the rules and fixtures, and greps the CI step for each scope
+  token so narrowing the gate back fails the suite instead of un-gating the docs.
+- Documentation placeholders for hits the widened scope found: `docs/web-services.md`
+  named container homes that `configuration/docker/ai-stack/compose.yml` owns
+  (now `/home/<service-user>` — one home per fact), `AGENTS.md` the OpenHands
+  image's own `HOME`, `catalog/ai-registry.schema.json`'s `$id` (`.internal` is a
+  private-host shape; `autoos.example` is reserved documentation space, and no
+  code resolves the id), and `infra/mcp-servers/docs/OBSERVABILITY-MCP-SETUP.md`
+  used `sentry.local` as its example hostname.
+
 ### Changed — run rules folded into the orchestration skill, one home per fact (FOLD2, 2026-09-27)
 
 - **`.agents/skills/unattended-orchestration/SKILL.md`**: 30 rules → 28. New from this run's lessons: `R-coord-07`/`R-coord-08` keep a 10-minute `CronCreate` heartbeat from launch to stop (each beat pushes, rewrites the timestamped status file, reads the inbox, checks children — common.md "Heartbeats never stop", 15:3xZ). Extended: `R-orch-13` (a plan, spec, decision or bigger change gets a pinned cross-family review before it is executed or merged — common.md "Second opinion on everything bigger"), `R-orch-14` (new: a slow free reviewer is queued, never skipped; Haiku stays an extra first pass only; the lane record names writer, reviewer, verdict — HAIKU-EVAL.md, inbox 17:52:55Z), `R-coord-02` (findings are judged by the author's orchestrator, Opus decides critical), `R-coord-03` (writers by complexity come from `route --explain`, not a prose model list), `R-coord-06` (the cap is `autoos-agent.py context` against registry `policy.handoff_caps`), `R-orch-06` (relaunch a child that went quiet >25 min), `R-orch-11` (a retired route is grepped as a DEFAULT in `configuration/`, `lib/`, `start-stack.*` too — inbox 17:09:02Z), `R-orch-01` (agent-to-agent text is terse: one line per fact, evidence by pointer). Five rules restated another rule's fact and were folded instead: `R-orch-03`→`R-router-01`, `R-orch-05`→`R-coord-01`, `R-orch-07`→`R-orch-13`, `R-orch-09`→`R-coord-08`, `R-coord-05`→`R-worker-03`; **`references/rule-map.md`** resolves each retired id.
