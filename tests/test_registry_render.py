@@ -772,8 +772,13 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         self.assertIn("(none)", row_for(rendered, "auto"))
 
     def test_leg_flagged_unavailable_in_its_own_route_is_marked(self):
-        # routes.deepseek-v4.1-flash.unavailable_legs flags both its legs today.
-        rendered = registry.render_models_doc(real_registry())
+        # Both legs of routes.deepseek-v4.1-flash flagged in a copy (the real
+        # data flags only its zen leg since OR2 2026-09-27 un-gated the BYOK one).
+        reg = copy.deepcopy(real_registry())
+        route = reg["routes"]["deepseek-v4.1-flash"]
+        for leg in route["legs"]:
+            route.setdefault("unavailable_legs", {})[leg] = {"available": False}
+        rendered = registry.render_models_doc(reg)
         row = row_for(rendered, "deepseek-v4.1-flash")
         self.assertEqual(row.count("(unavailable)"), 2)
 

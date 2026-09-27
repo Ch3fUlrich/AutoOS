@@ -43,6 +43,9 @@ Three subcommands:
        brief UNTIL 2026-09-26) parses as an ISO-8601 UTC timestamp -- the
        resolver reads it via unavailable_now(), the renders never do (they
        stay time-independent so the CI drift gates do not move with the date).
+    9. every serving route leg is allowed by policy.leg_rules (ordered fnmatch
+       rules, first match wins, no match = allowed; leg_rule_for()); a denied
+       leg must be gated (available false) - L0 ONE-ROUTER 2026-09-27.
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -128,6 +131,7 @@ derived from this file's own location.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import importlib.util
 import ipaddress
 import json
@@ -1787,42 +1791,52 @@ def models_doc_diff(rendered_block: str, current_block: str) -> list:
 
 
 # ===========================================================================
-# leg_rules policy gates (briefs/common.md Claude budget)
+# rule 9 - leg_rules policy gates (briefs/common.md Claude budget)
 # ===========================================================================
 
 
-def _check_leg_rules(registry) -> list:
-    """Check every route leg against policy.leg_rules (briefs/common.md Claude
-    budget rules). First match wins; no match = allowed. A leg that is denied
-    but already gated via the route's unavailable_legs passes -- the operator
-    has already acknowledged it. A denied leg that is still serving is an error
-    naming the rule that denied it."""
-    import fnmatch
-
-    problems = []
+def leg_rule_for(leg: str, registry: dict):
+    """The first policy.leg_rules entry whose fnmatch `match` pattern matches
+    `leg`, or None when no rule matches (no match = allowed). The single
+    matcher: _check_leg_rules() and the renders (OR1) both call it."""
     rules = _section(registry, "policy").get("leg_rules")
-    if not isinstance(rules, list):
-        return problems
+    for rule in rules if isinstance(rules, list) else []:
+        if (isinstance(rule, dict) and isinstance(rule.get("match"), str)
+                and fnmatch.fnmatchcase(leg, rule["match"])):
+            return rule
+    return None
 
-    for route_id, route in _section(registry, "routes").items():
+
+def leg_denied(leg: str, registry: dict) -> bool:
+    """Whether policy.leg_rules denies `leg` (first matching rule has allow false)."""
+    rule = leg_rule_for(leg, registry)
+    return rule is not None and rule.get("allow") is not True
+
+
+def _check_leg_rules(registry) -> list:
+    """rule 9 - every serving route leg is allowed by policy.leg_rules.
+
+    The rules encode the operator's budget and gateway-fitness decisions
+    (briefs/common.md 'Claude budget'; L0 ONE-ROUTER 2026-09-27 measured the
+    live gateway serving legs they forbid). A denied leg passes only while it
+    is gated the same way the renders read gating - _leg_is_unavailable():
+    routes.<id>.unavailable_legs[leg].available false, or its provider's
+    available false. An entry with available true (or only a past
+    unavailable_until) does not gate it: the check stays clock-free."""
+    problems = []
+    for route_id, route in sorted(_section(registry, "routes").items()):
         if not isinstance(route, dict):
             continue
-        unavailable = set(route.get("unavailable_legs") or {})
         for leg in dict.fromkeys(route.get("legs") or []):
-            if leg in unavailable:
-                continue  # operator already acknowledged it
-            for rule in rules:
-                if not isinstance(rule, dict):
-                    continue
-                match = rule.get("match")
-                if not isinstance(match, str):
-                    continue
-                if fnmatch.fnmatch(leg, match):
-                    if rule.get("allow") is not True:
-                        problems.append(
-                            "leg_rules: routes.%s leg %s denied by rule %s"
-                            % (route_id, leg, rule.get("id", "(unnamed)")))
-                    break  # first match wins
+            rule = leg_rule_for(leg, registry)
+            if rule is None or rule.get("allow") is True:
+                continue
+            if _leg_is_unavailable(leg, route, registry):
+                continue
+            problems.append("leg_rules: routes.%s leg %s denied by %s (%s) - gate it in "
+                            "routes.%s.unavailable_legs or change the rule"
+                            % (route_id, leg, rule.get("id", "(unnamed)"),
+                               rule.get("reason", ""), route_id))
     return problems
 
 
