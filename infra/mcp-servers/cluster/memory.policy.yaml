@@ -1,0 +1,11 @@
+version: 1
+
+# Per-graph bundle for the `memory` graph (applies_to: [memory]).
+groups:
+  operators: [default]
+
+rules:
+  - id: operators-memory-access
+    allow:
+      actors: { group: operators }
+      actions: [read, export, change, schema_apply, branch_create, branch_delete, branch_merge, invoke_query]

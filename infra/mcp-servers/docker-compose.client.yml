@@ -1,0 +1,172 @@
+# Client role — the MCP tools a developer machine runs for its coding agent.
+#
+#   serena          — LSP semantic code navigation over your local repos (SSE :9121)
+#   graphify        — code-structure graph MCP (stdio; build-only image, run per session)
+#   omnigraph       — connect the agent's MCP bridge to the memory SERVER (not a
+#                     service here; see below). Optional local server for OFFLINE use.
+#
+# Usage:
+#   cp .env.shared.example .env.shared ; cp .env.client.example .env.client   # fill in
+#   docker compose --env-file .env.shared --env-file .env.client -f docker-compose.client.yml up -d
+#   # build the graphify image (stdio, used per session by the agent):
+#   docker compose --env-file .env.shared --env-file .env.client -f docker-compose.client.yml --profile build build graphify
+#   # OFFLINE: also run a local memory server the sync timer reconciles later:
+#   docker compose --env-file .env.shared --env-file .env.client -f docker-compose.client.yml --profile offline up -d
+#
+# The `omnigraph` MCP itself is stdio (`npx -y @modernrelay/omnigraph-mcp`) and is
+# wired into your AGENT's MCP config (config/*.json) with OMNIGRAPH_URL +
+# OMNIGRAPH_TOKEN — online it points at the central server, offline at localhost:8080.
+
+name: mcp-client
+
+services:
+  # ─── Serena — LSP semantic code navigation (SSE) ──────────────────────────
+  serena:
+    image: ghcr.io/oraios/serena:latest
+    container_name: serena-mcp
+    command: >
+      serena start-mcp-server
+      --transport sse --port 9121 --host 0.0.0.0 --context ide-assistant
+    environment:
+      - SERENA_DOCKER=1
+    volumes:
+      # SAME path in and out so the project paths the agent sends resolve.
+      - ${CODE_ROOT:?set CODE_ROOT in .env.client}:${CODE_ROOT}
+      - serena_data:/root/.serena
+    ports:
+      - "127.0.0.1:9121:9121"     # SSE MCP endpoint: /sse
+      - "127.0.0.1:24282:24282"   # web dashboard (optional)
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  # ─── Graphify — code-structure graph MCP (stdio; build-only) ──────────────
+  # graphify.serve is stdio-only: the agent runs `docker run -i --rm -v <repo>:/repo
+  # graphify-mcp:latest` per session (see config/mcp-claude-code.json). This entry
+  # only builds/tags the image; the "build" profile keeps it out of `up`.
+  graphify:
+    image: graphify-mcp:latest
+    build: ./servers/graphify-mcp
+    profiles: ["build"]
+
+  # ─── Sentry MCP Server (Observability) ────────────────────────────────────
+  # Sentry is the default observability MCP for runtime debugging.
+  # Usage: docker compose --profile observability up -d sentry-mcp
+  sentry-mcp:
+    image: node:20-alpine
+    container_name: sentry-mcp
+    profiles: ["observability"]
+    command: npx -y @modelcontextprotocol/server-sentry
+    environment:
+      - SENTRY_AUTH_TOKEN=${SENTRY_ACCESS_TOKEN}
+      - SENTRY_ORG=${SENTRY_ORG}
+      - SENTRY_PROJECT=${SENTRY_PROJECT}
+    restart: "no"
+
+  # ─── Datadog MCP Server (Observability) ───────────────────────────────────
+  # Datadog is conditional, for cross-service observability in distributed setups.
+  datadog-mcp:
+    image: node:20-alpine
+    container_name: datadog-mcp
+    profiles: ["observability"]
+    command: npx -y @modelcontextprotocol/server-datadog
+    environment:
+      - DD_API_KEY=${DD_API_KEY}
+      - DD_APP_KEY=${DD_APP_KEY}
+      - DD_SITE=${DD_SITE:-datadoghq.com}
+    restart: "no"
+
+  # ═══ OFFLINE ONLY (profile "offline") — local Omnigraph memory ═════════════
+  #   Lets the agent keep working with no connection to the central server.
+  #   omnigraph-setup/omnigraph-sync.sh reconciles this into central `main` when online.
+  omnigraph-local-minio:
+    image: minio/minio:latest
+    container_name: omnigraph-local-minio
+    profiles: ["offline"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${LOCAL_MINIO_USER:-omnigraph}
+      MINIO_ROOT_PASSWORD: ${LOCAL_MINIO_PASSWORD:?set LOCAL_MINIO_PASSWORD in .env.client}
+    volumes:
+      - omnigraph_local_minio:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [client-net]
+
+  omnigraph-local-mc:
+    image: minio/mc:latest
+    container_name: omnigraph-local-mc
+    profiles: ["offline"]
+    depends_on:
+      omnigraph-local-minio: { condition: service_healthy }
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set l http://omnigraph-local-minio:9000 $${LOCAL_MINIO_USER} $${LOCAL_MINIO_PASSWORD} &&
+      mc mb --ignore-existing l/$${S3_BUCKET} && echo 'bucket ready'"
+    environment:
+      LOCAL_MINIO_USER: ${LOCAL_MINIO_USER:-omnigraph}
+      LOCAL_MINIO_PASSWORD: ${LOCAL_MINIO_PASSWORD}
+      S3_BUCKET: ${S3_BUCKET:-omnigraph}
+    networks: [client-net]
+    restart: "no"
+
+  omnigraph-local-init:
+    image: modernrelay/omnigraph-server:v0.8.1
+    container_name: omnigraph-local-init
+    profiles: ["offline"]
+    depends_on:
+      omnigraph-local-mc: { condition: service_completed_successfully }
+    entrypoint: ["sh", "-c", "omnigraph cluster import --config /cluster --yes 2>/dev/null || true; omnigraph cluster apply --config /cluster --yes --as default"]
+    environment:
+      - AWS_ACCESS_KEY_ID=${LOCAL_MINIO_USER:-omnigraph}
+      - AWS_SECRET_ACCESS_KEY=${LOCAL_MINIO_PASSWORD}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ENDPOINT_URL_S3=http://omnigraph-local-minio:9000
+      - AWS_ALLOW_HTTP=true
+      - AWS_S3_FORCE_PATH_STYLE=true
+    volumes:
+      - ./cluster:/cluster:ro
+    networks: [client-net]
+    restart: "no"
+
+  omnigraph-local:
+    image: modernrelay/omnigraph-server:v0.8.1
+    container_name: omnigraph-local
+    profiles: ["offline"]
+    depends_on:
+      omnigraph-local-minio: { condition: service_healthy }
+      omnigraph-local-init: { condition: service_completed_successfully }
+    environment:
+      - OMNIGRAPH_BIND=0.0.0.0:8080
+      - OMNIGRAPH_CLUSTER=s3://${S3_BUCKET:-omnigraph}/cluster
+      - OMNIGRAPH_SERVER_BEARER_TOKEN=${OMNIGRAPH_TOKEN:?set OMNIGRAPH_TOKEN in .env.shared}
+      - AWS_ACCESS_KEY_ID=${LOCAL_MINIO_USER:-omnigraph}
+      - AWS_SECRET_ACCESS_KEY=${LOCAL_MINIO_PASSWORD}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ENDPOINT_URL_S3=http://omnigraph-local-minio:9000
+      - AWS_ALLOW_HTTP=true
+      - AWS_S3_FORCE_PATH_STYLE=true
+      - OLLAMA_DUMMY_KEY=${OLLAMA_DUMMY_KEY:-ollama}
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [client-net]
+    restart: unless-stopped
+
+volumes:
+  serena_data:
+  omnigraph_local_minio:
+
+networks:
+  client-net:
+    driver: bridge

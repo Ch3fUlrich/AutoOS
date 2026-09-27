@@ -72,3 +72,28 @@ if it "tests: POSIX-only Python tests are guarded for Windows; every .ps1/.psm1 
     out="$(python3 tests/test_windows_portability.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# The public-scrub gate existed with no caller before asm-a2, so a private
+# literal could reach a tracked file unscanned. Assert CI actually invokes the
+# scanner, and that the scanner is clean over the imported infra/ tree plus the
+# scrubber's own rules. A whole-tree scan is deliberately NOT asserted: the
+# generic unix-home/rfc1918 shapes legitimately match test fixtures,
+# example.conf and autoinstall placeholders elsewhere in the repo, so the gate
+# is scoped to the area under review (the same command ci.yml runs).
+if it "public-scrub: ci.yml invokes scan.py and it is clean over infra/ + scripts/"; then
+    ci_yml="$ROOT/.github/workflows/ci.yml"
+    if ! grep -qE 'public-scrub/scan\.py' "$ci_yml"; then
+        fail "ci.yml does not invoke scripts/public-scrub/scan.py — the no-secrets gate is wired to nothing"
+    elif ! has_cmd python3; then
+        skip "no python3 to run the scanner"
+    else
+        out="$(python3 "$ROOT/scripts/public-scrub/scan.py" \
+                 --patterns "$ROOT/scripts/public-scrub/patterns.txt" \
+                 "$ROOT/infra/" "$ROOT/scripts/" 2>&1)"; rc=$?
+        if [[ $rc -eq 0 ]]; then
+            pass
+        else
+            fail "scan.py reported hits (exit $rc):"$'\n'"$(printf '%s\n' "$out" | head -20)"
+        fi
+    fi
+fi
+
