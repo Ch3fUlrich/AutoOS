@@ -118,6 +118,100 @@ if it "summary: a recorded refusal is labelled failed (post-install)"; then
     assert_eq "$(printf '%s\n' "$out" | sed -n 3p)" "not-a-real-id"
 fi
 
+# The fold above only matters if the run lives long enough to reach it. A
+# postInstall is called bare from setup.sh's execute loop, which runs under
+# `set -euo pipefail`, so one step returning non-zero killed the whole run
+# mid-plan: no summary, no state file, and every component after it silently
+# never installed. The real entry point is what is exercised here because the
+# defect is in the call, not in the step.
+if it "post-install: a failing postInstall is recorded and the run still finishes"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tree="$(mktemp -d)"
+    mkdir -p "$tree/home"
+    # A scratch tree: the code under test is linked, never copied-and-edited;
+    # only the catalog gets two test-only components. `custom` installs nothing
+    # (its work is entirely the postInstall), so the run touches nothing but $tree.
+    ln -s "$ROOT/setup.sh" "$tree/setup.sh"
+    ln -s "$ROOT/lib" "$tree/lib"
+    cp -a catalog "$tree/catalog"
+    python3 - "$tree/catalog/linux.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding="utf-8"))
+doc["categories"][0]["components"] += [
+    {"id": "postinstall-fail-demo", "name": "Demo failing step",
+     "description": "test double", "provider": "custom", "package": "demo-fail",
+     "profiles": [], "postInstall": "autoos_test_failing_post_install"},
+    {"id": "postinstall-second-demo", "name": "Demo second component",
+     "description": "test double", "provider": "custom", "package": "demo-second",
+     "profiles": []},
+]
+json.dump(doc, open(path, "w", encoding="utf-8"), indent=2)
+PY
+    out="$(
+        # The step is an exported shell function because a postInstall is, by
+        # contract, just a named function run with no arguments (see
+        # run_post_install); the fake keeps that shape.
+        autoos_test_failing_post_install() { echo "DEMO post-install step ran"; return 1; }
+        export -f autoos_test_failing_post_install
+        HOME="$tree/home" bash "$tree/setup.sh" \
+            --only postinstall-fail-demo,postinstall-second-demo \
+            --yes --no-color --save-state "$tree/state.json" 2>&1
+    )"; rc=$?
+    saved="$(python3 -c '
+import json, sys
+r = json.load(open(sys.argv[1], encoding="utf-8"))["results"]
+print("installed=[%s] failed=[%s]" % (",".join(r["installed"]), ",".join(r["failed"])))
+' "$tree/state.json" 2>/dev/null || echo "no state file")"
+    rm -rf "$tree"
+    problems=""
+    [[ "$out" == *"DEMO post-install step ran"* ]] \
+        || problems+="[the fake postInstall never ran: $(printf '%s\n' "$out" | tail -3)] "
+    [[ "$out" == *"[2/2] Demo second component"* ]] \
+        || problems+="[the run stopped at the failing step, step 2/2 never ran] "
+    [[ "$out" == *"Demo failing step (post-install)"* ]] \
+        || problems+="[the summary does not name the component a post-install failure] "
+    # Listed once, as a failure — not also as installed.
+    listed="$(printf '%s\n' "$out" | grep -c '(post-install)')"
+    [[ "$listed" == "1" ]] || problems+="[the post-install failure line count is $listed, expected 1] "
+    [[ "$saved" == "installed=[postinstall-second-demo] failed=[postinstall-fail-demo]" ]] \
+        || problems+="[state file says: $saved] "
+    (( rc == 1 )) || problems+="[exit code $rc, expected 1 (the run must not read as success)] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+# run_post_install owns the containment, so every step gets it without each one
+# re-implementing it: it returns 0 whatever the step returned, warns with the
+# step's own exit code, and records the component. With no component id (a step
+# called from elsewhere) it records the step name, which the fold prints as-is.
+if it "post-install: run_post_install contains the step's exit code and records it"; then
+    out="$(
+        demo_step_fails() { echo "STEP RAN"; return 3; }
+        AUTOOS_EXTRA_FAILURES=()
+        run_post_install demo_step_fails demo-component
+        rc_own=$?
+        printf 'rc=%s recorded=[%s]\n' "$rc_own" "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    )"
+    problems=""
+    [[ "$out" == *"STEP RAN"* ]] || problems+="[the step never ran: $out] "
+    [[ "$out" == *"rc=0"* ]] || problems+="[run_post_install propagated a non-zero exit code] "
+    [[ "$out" == *"recorded=[demo-component]"* ]] || problems+="[the component id was not recorded: $out] "
+    [[ "$out" == *"demo_step_fails"* && "$out" == *"3"* ]] \
+        || problems+="[no warning naming the step and its exit code: $out] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "post-install: a step with no component id records the step name"; then
+    out="$(
+        demo_step_bare_fails() { return 1; }
+        AUTOOS_EXTRA_FAILURES=()
+        run_post_install demo_step_bare_fails
+        printf 'recorded=[%s]\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    )"
+    assert_eq "$(printf '%s\n' "$out" | grep '^recorded=')" "recorded=[demo_step_bare_fails]"
+fi
+
 if it "undo restores a backed-up file"; then
     scratch="$(mktemp -d)"
     target="$scratch/.zshrc"

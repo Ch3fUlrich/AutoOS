@@ -673,10 +673,12 @@ for id in $PLAN_IDS; do
         manual) manual=$((manual+1)); manual_names+="$id "; ui_warn "Action required: ${CAT_HOMEPAGE[i]}" ;;
         installed)
             run_post_install "${CAT_POST[i]}" "$id"
-            # A post-install refusal makes the component a failure, so it is not
-            # also reported as installed — see autoos_fold_extra_failures.
+            # A post-install that recorded a failure — it refused to change a
+            # file, or the step itself exited non-zero — makes the component a
+            # failure, so it is not also reported as installed: see
+            # autoos_fold_extra_failures.
             if autoos_is_recorded_failure "$id"; then
-                ui_err "${CAT_NAME[i]}: post-install refused to change a file"
+                ui_err "${CAT_NAME[i]}: post-install step failed"
             else
                 AUTOOS_RESULT_INSTALLED+=("$id")
                 verify_component "${CAT_VERIFY[i]}" "${CAT_NAME[i]}"

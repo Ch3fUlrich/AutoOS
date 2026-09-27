@@ -2629,7 +2629,10 @@ PY
         unset _file_key
     fi
     if has_cmd claude; then
-        route_claude_to_gateway
+        # route_claude_to_gateway is `claude-code`'s own postInstall, called
+        # directly from `omniroute`'s step: bare here it would abort the run under
+        # setup.sh's `set -euo pipefail`, so it records the component instead.
+        route_claude_to_gateway || autoos_record_failure claude-code
     else
         ui_muted "Claude Code not installed - skipping gateway routing"
     fi
@@ -3575,10 +3578,11 @@ install_mcp_playwright() {
     # Linux behaviour (mcp-servers-setup says so); macOS keeps its npx entry until
     # that is measured there.
     if [[ "${SYS_OS:-linux}" != macos ]] && has_cmd docker; then
-        # A postInstall runs bare under setup.sh's `set -euo pipefail`
-        # (run_post_install, and install_agent_skills calls this directly), so a
-        # non-zero return would abort the whole run. Record the failure for the
-        # summary and exit code instead, and return 0.
+        # run_post_install contains the step's exit code; this record is here
+        # because the step carries on to the Antigravity entry either way, so its
+        # own return says nothing about the proxy. The id is the one the fold
+        # looks for, and it matches the id install_agent_skills' guarded call
+        # records — `autoos_record_failure` keeps it to one entry.
         register_playwright_lazy_proxy "$playwright_pkg" \
             || autoos_record_failure mcp-playwright
     else
@@ -3997,11 +4001,16 @@ install_agent_skills() {
 
     write_omnigraph_env "$base"
 
-    # Wire user-scope MCP servers across Claude Code and Antigravity
-    install_mcp_graphify
-    install_mcp_serena
-    install_mcp_playwright
-    install_mcp_context7
+    # Wire user-scope MCP servers across Claude Code and Antigravity. These are
+    # catalog postInstalls in their own right, called directly here — so they get
+    # the same containment run_post_install gives them (a bare call under
+    # setup.sh's `set -euo pipefail` would abort the whole run). Each records its
+    # own component id, the id install_mcp_playwright already records internally,
+    # so one broken wiring is counted once.
+    install_mcp_graphify   || autoos_record_failure mcp-graphify
+    install_mcp_serena     || autoos_record_failure mcp-serena
+    install_mcp_playwright || autoos_record_failure mcp-playwright
+    install_mcp_context7   || autoos_record_failure mcp-context7
 
     # omnigraph is the opposite: project scope only, pinned per repo by
     # OMNIGRAPH_GRAPH_ID. A user-scope entry silently WINS over the project one
@@ -5289,16 +5298,27 @@ setup_wsl_agent_home() {
 # `opencode-cli`), so the step cannot pick one out of its own head.
 AUTOOS_POST_COMPONENT=""
 run_post_install() {
-    local fn="$1"
-    AUTOOS_POST_COMPONENT="${2:-}"
+    local fn="$1" id="${2:-}" rc=0
+    AUTOOS_POST_COMPONENT="$id"
     [[ -z "$fn" ]] && return 0
     if ! declare -F "$fn" >/dev/null; then
         ui_warn "post-install '${fn}' not found"
         return 0
     fi
     ui_step "post-install: ${fn}"
-    "$fn"
+    # Contained here, in the one place that runs a step, not in every step:
+    # setup.sh calls this bare under `set -euo pipefail`, so a step returning
+    # non-zero used to abort the whole run — no summary, no state file, and
+    # every later component silently never installed. A failed step is still a
+    # result, so it is recorded for the fold instead: the component reads as
+    # failed (post-install) and setup.sh still exits non-zero.
+    "$fn" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "post-install '${fn}' failed (exit ${rc}) - the run continues"
+        autoos_record_failure "${id:-$fn}"
+    fi
     AUTOOS_POST_COMPONENT=""
+    return 0
 }
 
 # ─── Post-install verification ──────────────────────────────────────────────

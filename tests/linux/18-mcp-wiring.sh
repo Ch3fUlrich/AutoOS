@@ -535,6 +535,70 @@ if it "install_agent_skills records a refused project-server approval for the su
     if (( ok )); then pass; else fail "install_agent_skills did not record a refused project-server approval"; fi
 fi
 
+# install_agent_skills calls four catalog postInstalls directly, and
+# route_detected_clis_to_gateway calls Claude Code's — bare, those non-zero
+# returns reached setup.sh's `set -euo pipefail` and ended the run. Each now
+# records its own component id instead, so the summary and the exit code see it
+# while the step finishes its remaining work. The Playwright double below records
+# its id itself the way the real function does, so this also proves the recorder
+# keeps one line for one broken wiring.
+if it "install_agent_skills: a failing mcp sub-step is recorded for the summary and the step carries on"; then
+    tmp="$(mktemp -d)"; ok=1
+    mkdir -p "$tmp/Documents/code/agent-skills" "$tmp/root"
+    out="$( (
+        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp/root"; AUTOOS_DRY_RUN=0
+        AUTOOS_EXTRA_FAILURES=()
+        clone_or_update() { :; }
+        write_omnigraph_env() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        mcp_has_server() { : >"$tmp/mark_later"; return 1; }
+        install_mcp_graphify() { : >"$tmp/mark_graphify"; return 0; }
+        install_mcp_serena() { : >"$tmp/mark_serena"; return 1; }
+        install_mcp_playwright() { : >"$tmp/mark_playwright"; autoos_record_failure mcp-playwright; return 1; }
+        install_mcp_context7() { : >"$tmp/mark_context7"; return 1; }
+        install_agent_skills >/dev/null 2>&1
+        step_rc=$?
+        printf 'agent_skills_rc=%s\n' "$step_rc"
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    ) 2>&1 )"
+    for mark in serena playwright context7 later; do
+        [[ -e "$tmp/mark_$mark" ]] \
+            || { ok=0; echo "the step never reached mark_$mark (a failing sub-step stopped the run)" >&2; }
+    done
+    [[ "$out" == *"recorded:"*"mcp-serena"* && "$out" == *"recorded:"*"mcp-playwright"* && "$out" == *"recorded:"*"mcp-context7"* ]] \
+        || { ok=0; echo "a failing sub-step was not recorded: $(printf '%s\n' "$out" | grep '^recorded')" >&2; }
+    [[ "$(printf '%s\n' "$out" | grep '^recorded:' | grep -o 'mcp-playwright' | wc -l | tr -d ' ')" == "1" ]] \
+        || { ok=0; echo "mcp-playwright was counted twice: $(printf '%s\n' "$out" | grep '^recorded')" >&2; }
+    [[ "$out" == *"agent_skills_rc=0"* ]] \
+        || { ok=0; echo "install_agent_skills propagated a non-zero code (it must not: the fold reports it)" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "a failing mcp sub-step did not become a recorded failure"; fi
+fi
+
+if it "route_detected_clis_to_gateway: a failing Claude routing step is recorded for the summary"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; ok=1
+    out="$( (
+        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp"; AUTOOS_DRY_RUN=0; AUTOOS_EXTRA_FAILURES=()
+        # A keys file of its own: the real configuration/api-keys.yml is never read.
+        AUTOOS_KEYS_FILE="$tmp/keys.yml"
+        unset OMNIROUTE_API_KEY AUTOOS_OMNIROUTE_KEY
+        claude() { return 0; }
+        has_cmd() { [[ "$1" == claude ]]; }
+        route_claude_to_gateway() { : >"$tmp/mark_route"; return 1; }
+        route_detected_clis_to_gateway >/dev/null 2>&1
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    ) 2>&1 )"
+    [[ -e "$tmp/mark_route" ]] || { ok=0; echo "the routing step never ran: [${out:0:300}]" >&2; }
+    [[ "$out" == *"recorded: claude-code"* ]] \
+        || { ok=0; echo "a failing Claude routing was not recorded: $(printf '%s\n' "$out" | grep '^recorded')" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "route_claude_to_gateway's failure was not recorded"; fi
+    fi
+fi
+
 # ─── OpenHands: repo skills mirrored per skill, idempotent settings writer ──
 # oh_setup_run <home> <repo> [fn]: setup_openhands_config (or `fn`) in a hermetic
 # subshell - scratch HOME and AUTOOS_ROOT, no gateway or provider key, no network
