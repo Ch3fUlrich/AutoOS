@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `failover off` really hands the gateway port back (lstby2)
+
+- **`configuration/docker/ai-stack/ai-stack.sh`**: the standby pid is the
+  process listening on the gateway port, found with `ss` exactly like
+  `start-litellm.sh` does and accepted only when `/proc/<pid>/cmdline` is
+  litellm (`start-litellm.sh` writes no pid file — the old pid-file lookup
+  left the standby running with "litellm pid unknown", live 2026-09-27).
+  `off` and every `on` rollback stop the standby (TERM, KILL after 10 s),
+  then refuse when the port stays busy (names the holder from `ss`, starts
+  nothing, rc 1), otherwise recreate the gateway
+  (`compose up -d --no-deps omniroute` — a bare `start` of a port-less
+  container never republishes the port), wait for `/api/health`, check the
+  port is published, and only then remove the state file (on failure: the
+  manual fix `ai-stack.sh up omniroute`, rc 1). Tests: the realistic fakes
+  (no pid file, fake `ss` listener, real `litellm`-renamed sleep) plus
+  busy-port and foreign-listener cases in `tests/linux/34-ai-services.sh`.
+  Docs: `docs/web-services.md` "Standby router (LiteLLM)".
+  Review round (DeepSeek v4.1-flash): a pid counts as the standby only when it
+  is litellm AND holds (or was started with `--port`) the gateway port, so the
+  always-on `:4000` proxy is never signalled; the published-port check rejects
+  `{}` and `{"20128/tcp":null}`; the gateway comes back through `dc_up`
+  (preflight guards); a failed state write leaves no state file; `off` without
+  a state file still stops a standby on the port; the Ctrl-C path waits a
+  short health window; TERM->KILL is tested.
+- Review round (lstby2d): `failover off` accepts a gateway that already serves
+  the port and clears the stale state instead of refusing forever; it finds a
+  standby holding the port even with no state dir (the dir is a hint, never a
+  gate); and a stale state-file pid that is simply gone is reported as
+  "already gone", not signalled as if it belonged to a foreign program.
 ### Changed — t1-orchestrator keeps a free gemini leg (T1FREE, 2026-09-27)
 
 - **`catalog/ai-registry.json`** + renders: `gemini/gemini-3.8-flash` appended to `t1-orchestrator` and `t1-orchestrator-free-only`, so the default model of start-stack, the installer and OpenHands stays servable while OpenRouter, DeepSeek and cheapinference credit is out; `t1-orchestrator-clean`, `spark-1.3-contributor`, `deepseek-v4.1-flash` and the cheaperinference pins stay omitted. Open: `t1-orchestrator-paid` (LiteLLM picker) has no leg until MUSEAPI.

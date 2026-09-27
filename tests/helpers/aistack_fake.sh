@@ -40,6 +40,11 @@
 #   id-<container>             what `docker inspect -f '{{.Id}}' <container>`
 #                              prints (the memory-split verify names the
 #                              cgroup scope in its reclaim hint)
+#   noports-<container>  `docker inspect -f '{{json .NetworkSettings.Ports}}'`
+#                              prints {} - the container publishes nothing
+#   nullports-<container>      the same prints {"20128/tcp":null}: the key is
+#                              there with NO host binding (docker's own "not
+#                              published" shape, as broken as {} for a client)
 #   omni-key-fails       the omniroute CLI cannot create the manage key
 #   fail-register        register-autostart.sh fails (register.log also
 #                        records marker=yes|no: ai-stack.sh's marker at the call)
@@ -48,21 +53,40 @@
 #                        (the sandbox's data dir) existed at each `compose up`
 #   slow-sleep           the fake `sleep` really sleeps 0.5 s (a test that must
 #                        signal the script mid-wait gets a window); default: no-op
-#   failover-liveliness-fail  `start-litellm` writes no pid file: the
+#   failover-liveliness-fail  `start-litellm` spawns no standby: the
 #                        /health/liveliness probe never answers (a standby
 #                        that starts but never turns live)
-# The sandbox keeps its ai-stack config in <state-dir>/cfg, so the failover
-# pid file the fake start-litellm writes is
-# <state-dir>/cfg/failover/litellm.pid while AUTOOS_LITELLM_STATE_DIR points
-# there. fake_curl answers http://127.0.0.1:20128/health/liveliness with 200
-# only while that pid file exists (and the fail marker above is absent).
+#   fail-start-litellm   `start-litellm` exits 1 without spawning anything
+#                        (a starter that fails outright)
+#   ss-hold-<port>       extra `ss` output for that port, printed verbatim
+#                        after the container/standby lines: a test-planted
+#                        holder (a named foreign program), or a port that stays
+#                        busy after the standby dies
+#   standby-ignore-term  the spawned standby traps SIGTERM and ignores it, so
+#                        only the KILL after the caller's grace period stops it
+# The sandbox keeps its ai-stack config in <state-dir>/cfg. Like the real
+# configuration/litellm/start-litellm.sh, the fake starter writes NO pid file:
+# it spawns a real process whose argv is the proxy's own
+# (`litellm --config config.yaml --host <h> --port <p>`, see
+# fake_start_litellm) and records "<pid> <port>" per spawn in
+# <state-dir>/standbys (plus the newest pid in <state-dir>/standby-pid) - never
+# under cfg/, because the script under test must find the standby the live way,
+# with `ss -ltnpH "sport = :20128"` plus a /proc/<pid>/cmdline check, exactly
+# like the real starter's listener_pid. The port is recorded so a standby
+# started on :4000 (the always-on fallback unit) is visible on :4000 only and
+# can never be mistaken for the gateway-port listener.
+# fake_ss reports a standby - with a users:(("litellm",pid=N,fd=3)) suffix, so
+# the holder is nameable - only on its own port and only while it is alive;
+# fake_curl answers http://127.0.0.1:20128/health/liveliness with 200 only while
+# a 20128 standby is alive (and the fail marker above is absent). Tests kill the
+# leftovers through <state-dir>/standbys (see _aistack_kill_standby in
+# tests/linux/34-ai-services.sh).
 # `start-litellm` (AUTOOS_START_LITELLM) records the env NAMES
 # (AUTOOS_LITELLM_HOST/PORT/MASTER_KEY_FILE/STATE_DIR) in
 # start-litellm-env.log, plus master-key-file=ok|missing (a readability check
 # on the pointed-to file, never its content); argv lands in
-# start-litellm.log through the generic logger below. Nothing real is
-# started: the pid file holds 424242, which never exists, so callers must
-# tolerate a failed kill. `compose start <svc>` marks the service running.
+# start-litellm.log through the generic logger below. `compose start <svc>`
+# marks the service running.
 # Every call is appended to <tool>.log and, as "<tool>: <args>", to events.log
 # (the cross-tool order). Arguments only - the environment is never logged;
 # saw-manage-key only records WHICH tool had OMNIROUTE_API_KEY set.
@@ -175,6 +199,14 @@ fake_docker() {
                     elif [[ -e "$S/unhealthy-$(service_of "$c")" ]]; then echo 'running (unhealthy)'
                     else echo 'running (healthy)'; fi ;;
                 *Config.Env*) [[ -s "$S/env-$c" ]] && cat "$S/env-$c" ;;
+                *Ports*)
+                    if [[ -e "$S/nullports-$c" ]]; then
+                        echo '{"20128/tcp":null}'
+                    elif [[ -e "$S/run-$c" && ! -e "$S/noports-$c" ]]; then
+                        echo '{"20128/tcp":[{"HostIp":"0.0.0.0","HostPort":"20128"}]}'
+                    else
+                        echo '{}'
+                    fi ;;
                 *'{{.Id}}'*) [[ -s "$S/id-$c" ]] && cat "$S/id-$c" || printf 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789' ;;
                 *Networks*) echo '{}' ;;
             esac
@@ -246,7 +278,10 @@ fake_systemctl() {
     esac
 }
 
-# ss -ltnH "sport = :PORT": a native unit or a running container holds it.
+# ss -ltn[H] "sport = :PORT": a native unit, a running container, a fake
+# standby started on THAT port, or a test-planted holder owns it. The standby
+# line carries its pid (users:(...pid=N...), like the real ss -p) so the script
+# under test can discover it; it is printed only while that process is alive.
 fake_ss() {
     local port="${*: -1}"; port="${port##*:}"
     local unit c
@@ -254,10 +289,14 @@ fake_ss() {
         20128) unit=autoos-omniroute; c=autoos-omniroute ;;
         4096)  unit=autoos-opencode;  c=autoos-opencode ;;
         3000)  unit=none;             c=openhands-app ;;
-        *) return 0 ;;
+        *)     unit=none;             c=none ;;
     esac
-    if [[ -e "$S/active-$unit" || -e "$S/run-$c" ]]; then
+    if [[ "$unit" != none && -e "$S/active-$unit" ]] || [[ "$c" != none && -e "$S/run-$c" ]]; then
         echo "LISTEN 0 511 0.0.0.0:$port 0.0.0.0:*"
+    fi
+    standby_ss_lines "$port"
+    if [[ -s "$S/ss-hold-$port" ]]; then
+        cat "$S/ss-hold-$port"
     fi
     return 0
 }
@@ -275,7 +314,7 @@ fake_curl() {
     up() { [[ -e "$S/active-$1" ]] || { [[ -e "$S/run-$2" ]] && [[ ! -e "$S/unhealthy-$3" ]]; }; }
     case "$url" in
         *:20128/health/liveliness*)
-            if [[ ! -e "$S/failover-liveliness-fail" && -s "$S/cfg/failover/litellm.pid" ]]; then code=200; fi ;;
+            if [[ ! -e "$S/failover-liveliness-fail" ]] && standby_alive 20128; then code=200; fi ;;
         *:20128/api/health*) up autoos-omniroute autoos-omniroute omniroute && code=200 ;;
         *:20128/v1/*)        up autoos-omniroute autoos-omniroute omniroute && code=401 ;;
         *:4096/api/*)        up autoos-opencode autoos-opencode opencode && code=401 ;;
@@ -337,8 +376,27 @@ fake_start_stack() {
 # Records the interface, never the secrets: the env NAMES (one of them points
 # at a key file) plus master-key-file=ok|missing, argv through the generic
 # logger above. Values - the key itself above all - are never logged.
+# Like the real starter it writes NO pid file: it spawns a real listener and
+# records it in <state-dir>/standbys as "<pid> <port>" (plus <state-dir>/
+# standby-pid for the newest), which is what fake_ss and fake_curl read.
+# With failover-liveliness-fail nothing is spawned (a standby that never turns
+# live); with fail-start-litellm the starter itself fails (rc 1); with
+# standby-ignore-term the standby shrugs off SIGTERM, so only the KILL after
+# the 10 s grace stops it.
+#
+# The argv mirrors the real proxy's exactly:
+#   litellm --config config.yaml --host <h> --port <p>
+# `sleep` renamed with `exec -a` cannot take those arguments (it exits on an
+# unknown option), and a shebang script always lands the *script path* in
+# argv[1] - which is the documented venv-python shape the caller accepts by
+# name. So the standby is one executable file named `litellm`, generated on
+# first use. It reads nothing but its own timeout: it blocks on fd 9, a fifo
+# opened read-write by its own parent, so it never sees EOF from a dead writer.
+# stdout/stderr stay redirected and stdin is /dev/null - without that, every
+# $(...) capture in ai-stack.sh would block for the standby's whole lifetime.
 fake_start_litellm() {
-    local v
+    local v pid ignore_term=""
+    local host="${AUTOOS_LITELLM_HOST:-127.0.0.1}" port="${AUTOOS_LITELLM_PORT:-4000}"
     for v in AUTOOS_LITELLM_HOST AUTOOS_LITELLM_PORT AUTOOS_LITELLM_MASTER_KEY_FILE AUTOOS_LITELLM_STATE_DIR; do
         if [[ -n "${!v:-}" ]]; then printf 'env:%s\n' "$v" >>"$S/start-litellm-env.log"; fi
     done
@@ -347,13 +405,69 @@ fake_start_litellm() {
     else
         printf 'master-key-file=missing\n' >>"$S/start-litellm-env.log"
     fi
-    # A standby that never turns live: no pid file, so the liveliness probe
-    # (fake_curl) never answers and the caller must hand the port back.
+    # A standby that never turns live: nothing is spawned, so the liveliness
+    # probe (fake_curl) never answers and the caller must hand the port back.
     if [[ -e "$S/failover-liveliness-fail" ]]; then return 0; fi
-    if [[ -n "${AUTOOS_LITELLM_STATE_DIR:-}" ]]; then
-        mkdir -p "$AUTOOS_LITELLM_STATE_DIR"
-        printf '424242\n' >"$AUTOOS_LITELLM_STATE_DIR/litellm.pid"
+    if [[ -e "$S/fail-start-litellm" ]]; then return 1; fi
+    [[ -e "$S/standby-ignore-term" ]] && ignore_term=1
+    if [[ ! -x "$S/standby-bin/litellm" ]]; then
+        mkdir -p "$S/standby-bin" || return 1
+        cat >"$S/standby-bin/litellm" <<'FAKE_STANDBY'
+#!/usr/bin/env bash
+[[ -n "${AISTACK_STANDBY_IGNORE_TERM:-}" ]] && trap '' TERM
+read -r -u 9 -t 300 _hold
+FAKE_STANDBY
+        chmod +x "$S/standby-bin/litellm" || return 1
     fi
+    [[ -p "$S/standby-hold" ]] || mkfifo "$S/standby-hold" 2>/dev/null || true
+    AISTACK_STANDBY_IGNORE_TERM="$ignore_term" \
+        "$S/standby-bin/litellm" --config config.yaml --host "$host" --port "$port" \
+        9<>"$S/standby-hold" </dev/null >/dev/null 2>&1 &
+    pid="$!"
+    printf '%s\n' "$pid" >"$S/standby-pid"
+    printf '%s %s\n' "$pid" "$port" >>"$S/standbys"
+    return 0
+}
+
+# Is <pid> a process that is still RUNNING? A zombie answers `kill -0` but has
+# released every socket it held, so it must not count as the holder of a port:
+# without the state check an exited-but-unreaped standby would keep showing up
+# in fake_ss and fake_curl for as long as its reaper takes. Without /proc
+# (macOS) kill -0 is all there is.
+proc_running() {
+    local p="$1" st
+    [[ "$p" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$p" 2>/dev/null || return 1
+    [[ -r "/proc/$p/stat" ]] || return 0
+    st="$(sed -n 's/^.*) \([A-Za-z]\).*/\1/p' "/proc/$p/stat" 2>/dev/null)" || return 0
+    [[ "$st" != Z ]]
+}
+
+# Is a fake standby of $1 alive? Reads <state-dir>/standbys ("<pid> <port>"
+# per spawn); false when the file is absent or every listed process is gone.
+standby_alive() {
+    local want="$1" pid port
+    [[ -s "$S/standbys" ]] || return 1
+    while read -r pid port; do
+        [[ "$port" == "$want" ]] || continue
+        if proc_running "$pid"; then return 0; fi
+    done <"$S/standbys"
+    return 1
+}
+
+# The `ss` line for every live fake standby holding port $1, in ss -p's shape
+# (users:(("litellm",pid=N,fd=3))) so the holder is nameable. A standby is
+# reported only on the port it was started with: the always-on :4000 proxy
+# never shows up as a listener on the gateway port.
+standby_ss_lines() {
+    local want="$1" pid port
+    [[ -s "$S/standbys" ]] || return 0
+    while read -r pid port; do
+        [[ "$port" == "$want" ]] || continue
+        if proc_running "$pid"; then
+            echo "LISTEN 0 511 0.0.0.0:$want 0.0.0.0:* users:((\"litellm\",pid=$pid,fd=3))"
+        fi
+    done <"$S/standbys"
     return 0
 }
 
