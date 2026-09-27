@@ -624,9 +624,24 @@ antigravity_run() {
             # run() executes through python3 in real life, which no function stub can
             # see; here it logs and runs the stub function by name.
             run() { printf 'run %s\n' "$*" >>"$log"; "$@"; }
-            sudo() { printf 'sudo %s\n' "$*" >>"$log"; }
+            sudo() { printf 'sudo %s\n' "$*" >>"$log"; [[ "${AG_SUDO_FAIL:-0}" != 1 ]]; }
             sudo_rec() { printf 'sudo %s\n' "$*" >>"$log"; }
             chown() { printf 'chown %s\n' "$*" >>"$log"; }
+            # A stub sudo cannot really chown to root, so once both privileged
+            # find steps logged their sudo call, stat reports what a real sudo
+            # would have left behind; before that it answers truly, so the
+            # pre-checks still run against the real file.
+            stat() {
+                local a n
+                for a in "$@"; do
+                    if [[ "$a" == "%u %g %a" ]]; then
+                        n="$(grep -c '^sudo ' "$log" 2>/dev/null || true)"
+                        if [[ "$n" -ge 2 ]]; then printf '0 0 4755\n'; return 0; fi
+                        break
+                    fi
+                done
+                command stat "$@"
+            }
             # AG_MV_FAIL_DESKTOP=1: the final rename of the desktop entry's temp file fails
             mv() { if [[ "${AG_MV_FAIL_DESKTOP:-0}" == 1 && "$*" == *.antigravity.desktop.* ]]; then return 1; fi; command mv "$@"; }
             update-desktop-database() { printf 'update-desktop-database %s\n' "$*" >>"$log"; }
@@ -798,26 +813,320 @@ if it "antigravity icon: an unpacked icon is read from app.asar.unpacked, but an
     if (( ok )); then pass; else fail "an asar key can steer the icon lookup out of app.asar.unpacked"; fi
 fi
 
-if it "antigravity sandbox: the SUID commands are printed once, verbatim, only when this kernel restricts user namespaces; the installer never runs them"; then
+if it "antigravity sandbox: when the kernel restricts user namespaces the installer sets the SUID helper up itself via sudo; otherwise it says nothing is required"; then
     ok=1
     for mode in restricted clone0 unreadable allowed; do
         sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
         antigravity_run "$sb" "AG_SYSCTL=$mode"
         dir="$sb/home/.local/opt/antigravity"
-        want="sudo chown root:root '$dir/chrome-sandbox' && sudo chmod 4755 '$dir/chrome-sandbox'"
         [[ "$AG_STATE" == installed ]] || { ok=0; echo "$mode: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:500}" >&2; }
-        n="$(grep -cF -- "$want" <<<"$AG_OUT")"
         if [[ "$mode" == allowed ]]; then
-            [[ "$n" == 0 && "$AG_OUT" != *"sudo chown"* ]] || { ok=0; echo "$mode: the SUID commands were printed although nothing is needed" >&2; }
             [[ "$AG_OUT" == *"nothing is required"* ]] || { ok=0; echo "$mode: it does not say that nothing is required: ${AG_OUT:0:500}" >&2; }
+            [[ "$AG_OUT" != *"sudo chown"* ]] || { ok=0; echo "$mode: the SUID commands were printed although nothing is needed" >&2; }
+            [[ "$(antigravity_count "$sb" '^sudo ')" == 0 ]] || { ok=0; echo "$mode: sudo was called although nothing is needed" >&2; }
         else
-            [[ "$n" == 1 ]] || { ok=0; echo "$mode: the verbatim command line appeared $n times, not once: ${AG_OUT:0:900}" >&2; }
+            [[ "$AG_OUT" == *"chrome-sandbox: set root-owned 4755"* ]] || { ok=0; echo "$mode: no setup success line: ${AG_OUT:0:900}" >&2; }
+            chown_line="sudo -n find -P $dir/chrome-sandbox -maxdepth 0 -type f -links 1 -exec chown root:root {} +"
+            chmod_line="sudo -n find -P $dir/chrome-sandbox -maxdepth 0 -type f -links 1 -user 0 -exec chmod 4755 {} +"
+            [[ "$(grep -cF -- "$chown_line" "$sb/calls.log" 2>/dev/null || true)" == 1 ]] \
+                || { ok=0; echo "$mode: sudo -n find/chown was not run once: $(grep '^sudo' "$sb/calls.log" 2>&1)" >&2; }
+            [[ "$(grep -cF -- "$chmod_line" "$sb/calls.log" 2>/dev/null || true)" == 1 ]] \
+                || { ok=0; echo "$mode: sudo -n find/chmod was not run once: $(grep '^sudo' "$sb/calls.log" 2>&1)" >&2; }
         fi
-        [[ "$(antigravity_count "$sb" '(^|run )(sudo|chown|chmod)')" == 0 ]] || { ok=0; echo "$mode: a privileged call was made" >&2; }
         [[ "$AG_OUT" != *"--no-sandbox"* ]] || { ok=0; echo "$mode: suggests --no-sandbox" >&2; }
         rm -rf "$sb"
     done
-    if (( ok )); then pass; else fail "the sandbox step is printed when it is not needed, missing when it is, or run by the installer"; fi
+    # a failing sudo never fails the install: the two commands are printed for the operator instead
+    sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
+    antigravity_run "$sb" AG_SYSCTL=restricted AG_SUDO_FAIL=1
+    dir="$sb/home/.local/opt/antigravity"
+    want="sudo chown root:root '$dir/chrome-sandbox' && sudo chmod 4755 '$dir/chrome-sandbox'"
+    [[ "$AG_STATE" == installed && "$AG_RC" == 0 ]] || { ok=0; echo "sudo-fail: state=[$AG_STATE] rc=[$AG_RC]: ${AG_OUT:0:500}" >&2; }
+    [[ "$AG_OUT" == *"$want"* ]] || { ok=0; echo "sudo-fail: no fallback command line: ${AG_OUT:0:900}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the sandbox step is missing when it is needed, runs when it is not, or fails the install when sudo fails"; fi
+fi
+
+# antigravity_sandbox_shim <scratch>: a sudo stand-in first on PATH that appends
+# its argv (one line per call) to <scratch>/sudo.log and exits with the code in
+# <scratch>/sudo.code (0 when the file is absent). The real sudo is never
+# reached: the shim shadows it on PATH and every test unsets any sudo function.
+antigravity_sandbox_shim() {
+    local sb="$1" shim="$1/shim"
+    mkdir -p "$shim"
+    cat >"$shim/sudo" <<'SHIM'
+#!/bin/bash
+printf '%s\n' "$*" >>"$SUDO_LOG"
+code="$(cat "$SUDO_MARKER" 2>/dev/null || printf '0')"
+exit "$code"
+SHIM
+    chmod +x "$shim/sudo"
+    printf '%s\n' "$shim"
+}
+
+if it "antigravity sandbox setup: when the kernel allows user namespaces nothing runs and no sudo is called"; then
+    sb="$(mktemp -d)"; dir="$sb/opt/antigravity"; mkdir -p "$dir"
+    printf 'sandbox\n' >"$dir/chrome-sandbox"; chmod 755 "$dir/chrome-sandbox"
+    shim="$(antigravity_sandbox_shim "$sb")"
+    out="$( (
+        unset -f sudo 2>/dev/null || true
+        antigravity_sandbox_needed() { return 1; }
+        export PATH="$shim:$PATH" SUDO_LOG="$sb/sudo.log" SUDO_MARKER="$sb/sudo.code"
+        ASSUME_YES=0 AUTOOS_DRY_RUN=0
+        unset AUTOOS_ASSUME_TTY 2>/dev/null || true
+        antigravity_sandbox_setup "$dir" 2>&1; printf 'RC %s' "$?"
+    ) )"
+    ok=1
+    [[ "$out" == *"nothing is required"* ]] || { ok=0; echo "no 'nothing is required': [$out]" >&2; }
+    [[ "$out" == *"RC 0"* ]] || { ok=0; echo "rc: [$out]" >&2; }
+    [[ ! -s "$sb/sudo.log" ]] || { ok=0; echo "sudo was called: [$(cat "$sb/sudo.log")]" >&2; }
+    [[ "$out" != *"--no-sandbox"* ]] || { ok=0; echo "suggests --no-sandbox" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the sandbox setup runs sudo although nothing is needed"; fi
+fi
+
+if it "antigravity sandbox setup: with --yes it runs sudo -n find/chown then sudo -n find/chmod as argv arrays"; then
+    sb="$(mktemp -d)"; dir="$sb/opt/antigravity"; mkdir -p "$dir"
+    printf 'sandbox\n' >"$dir/chrome-sandbox"; chmod 755 "$dir/chrome-sandbox"
+    box="$dir/chrome-sandbox"
+    shim="$(antigravity_sandbox_shim "$sb")"
+    # The logging shim sudo cannot really chown to root, so stat reports
+    # root-owned 4755 once both sudo calls are logged (what a real sudo would
+    # have left behind); before that it answers truly.
+    cat >"$shim/stat" <<EOF
+#!/bin/bash
+for a in "\$@"; do
+    if [[ "\$a" == "%u %g %a" ]]; then
+        n="\$(grep -c . "$sb/sudo.log" 2>/dev/null || true)"
+        if (( n >= 2 )); then printf '0 0 4755\n'; exit 0; fi
+        break
+    fi
+done
+if [[ -x /usr/bin/stat ]]; then exec /usr/bin/stat "\$@"; else exec /bin/stat "\$@"; fi
+EOF
+    chmod +x "$shim/stat"
+    out="$( (
+        unset -f sudo 2>/dev/null || true
+        antigravity_sandbox_needed() { return 0; }
+        export PATH="$shim:$PATH" SUDO_LOG="$sb/sudo.log" SUDO_MARKER="$sb/sudo.code"
+        ASSUME_YES=1 AUTOOS_DRY_RUN=0
+        unset AUTOOS_ASSUME_TTY 2>/dev/null || true
+        antigravity_sandbox_setup "$dir" 2>&1; printf 'RC %s' "$?"
+    ) )"
+    ok=1
+    [[ "$out" == *"set root-owned 4755"* ]] || { ok=0; echo "no success line: [$out]" >&2; }
+    [[ "$out" == *"RC 0"* ]] || { ok=0; echo "rc: [$out]" >&2; }
+    want1="-n find -P $box -maxdepth 0 -type f -links 1 -exec chown root:root {} +"; want2="-n find -P $box -maxdepth 0 -type f -links 1 -user 0 -exec chmod 4755 {} +"
+    [[ "$(sed -n 1p "$sb/sudo.log" 2>/dev/null)" == "$want1" ]] || { ok=0; echo "line 1 is [$(sed -n 1p "$sb/sudo.log" 2>&1)], want [$want1]" >&2; }
+    [[ "$(sed -n 2p "$sb/sudo.log" 2>/dev/null)" == "$want2" ]] || { ok=0; echo "line 2 is [$(sed -n 2p "$sb/sudo.log" 2>&1)], want [$want2]" >&2; }
+    [[ "$(wc -l <"$sb/sudo.log" 2>/dev/null | tr -d ' ')" == 2 ]] || { ok=0; echo "expected exactly 2 sudo calls: [$(cat "$sb/sudo.log" 2>&1)]" >&2; }
+    [[ "$out" != *"--no-sandbox"* ]] || { ok=0; echo "suggests --no-sandbox" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the --yes sandbox setup does not run exactly sudo -n find/chown then sudo -n find/chmod"; fi
+fi
+
+if it "antigravity sandbox setup: interactive (a TTY on stdin, not --yes) runs sudo without -n so it may prompt"; then
+    sb="$(mktemp -d)"; dir="$sb/opt/antigravity"; mkdir -p "$dir"
+    printf 'sandbox\n' >"$dir/chrome-sandbox"; chmod 755 "$dir/chrome-sandbox"
+    box="$dir/chrome-sandbox"
+    shim="$(antigravity_sandbox_shim "$sb")"
+    # As above: the shim sudo cannot really chown to root, so stat reports
+    # root-owned 4755 only once both sudo calls are logged.
+    cat >"$shim/stat" <<EOF
+#!/bin/bash
+for a in "\$@"; do
+    if [[ "\$a" == "%u %g %a" ]]; then
+        n="\$(grep -c . "$sb/sudo.log" 2>/dev/null || true)"
+        if (( n >= 2 )); then printf '0 0 4755\n'; exit 0; fi
+        break
+    fi
+done
+if [[ -x /usr/bin/stat ]]; then exec /usr/bin/stat "\$@"; else exec /bin/stat "\$@"; fi
+EOF
+    chmod +x "$shim/stat"
+    out="$( (
+        unset -f sudo 2>/dev/null || true
+        antigravity_sandbox_needed() { return 0; }
+        export PATH="$shim:$PATH" SUDO_LOG="$sb/sudo.log" SUDO_MARKER="$sb/sudo.code"
+        ASSUME_YES=0 AUTOOS_DRY_RUN=0 AUTOOS_ASSUME_TTY=1
+        antigravity_sandbox_setup "$dir" 2>&1; printf 'RC %s' "$?"
+    ) )"
+    ok=1
+    [[ "$out" == *"set root-owned 4755"* ]] || { ok=0; echo "no success line: [$out]" >&2; }
+    want1="find -P $box -maxdepth 0 -type f -links 1 -exec chown root:root {} +"; want2="find -P $box -maxdepth 0 -type f -links 1 -user 0 -exec chmod 4755 {} +"
+    [[ "$(sed -n 1p "$sb/sudo.log" 2>/dev/null)" == "$want1" ]] || { ok=0; echo "line 1 is [$(sed -n 1p "$sb/sudo.log" 2>&1)], want [$want1] (no -n)" >&2; }
+    [[ "$(sed -n 2p "$sb/sudo.log" 2>/dev/null)" == "$want2" ]] || { ok=0; echo "line 2 is [$(sed -n 2p "$sb/sudo.log" 2>&1)], want [$want2] (no -n)" >&2; }
+    ! grep -q -- '-n' "$sb/sudo.log" 2>/dev/null || { ok=0; echo "-n was passed on an interactive run: [$(cat "$sb/sudo.log")]" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the interactive sandbox setup does not run sudo without -n"; fi
+fi
+
+if it "antigravity sandbox setup: already root-owned 4755 is skipped with no sudo"; then
+    sb="$(mktemp -d)"; dir="$sb/opt/antigravity"; mkdir -p "$dir"
+    printf 'sandbox\n' >"$dir/chrome-sandbox"; chmod 755 "$dir/chrome-sandbox"
+    shim="$(antigravity_sandbox_shim "$sb")"
+    cat >"$shim/stat" <<'SHIM'
+#!/bin/bash
+for a in "$@"; do
+    if [[ "$a" == "%u %g %a" ]]; then printf '0 0 4755\n'; exit 0; fi
+done
+if [[ -x /usr/bin/stat ]]; then exec /usr/bin/stat "$@"; else exec /bin/stat "$@"; fi
+SHIM
+    chmod +x "$shim/stat"
+    out="$( (
+        unset -f sudo 2>/dev/null || true
+        antigravity_sandbox_needed() { return 0; }
+        export PATH="$shim:$PATH" SUDO_LOG="$sb/sudo.log" SUDO_MARKER="$sb/sudo.code"
+        ASSUME_YES=1 AUTOOS_DRY_RUN=0
+        unset AUTOOS_ASSUME_TTY 2>/dev/null || true
+        antigravity_sandbox_setup "$dir" 2>&1; printf 'RC %s' "$?"
+    ) )"
+    ok=1
+    [[ "$out" == *"already root-owned 4755 (skipped)"* ]] || { ok=0; echo "no skipped line: [$out]" >&2; }
+    [[ "$out" == *"RC 0"* ]] || { ok=0; echo "rc: [$out]" >&2; }
+    [[ ! -s "$sb/sudo.log" ]] || { ok=0; echo "sudo was called: [$(cat "$sb/sudo.log")]" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "an already root-owned helper is not skipped"; fi
+fi
+
+if it "antigravity sandbox setup: a failing sudo prints the fallback warning and the step still succeeds"; then
+    sb="$(mktemp -d)"; dir="$sb/opt/antigravity"; mkdir -p "$dir"
+    printf 'sandbox\n' >"$dir/chrome-sandbox"; chmod 755 "$dir/chrome-sandbox"
+    box="$dir/chrome-sandbox"
+    shim="$(antigravity_sandbox_shim "$sb")"
+    printf '1' >"$sb/sudo.code"
+    out="$( (
+        unset -f sudo 2>/dev/null || true
+        antigravity_sandbox_needed() { return 0; }
+        export PATH="$shim:$PATH" SUDO_LOG="$sb/sudo.log" SUDO_MARKER="$sb/sudo.code"
+        ASSUME_YES=1 AUTOOS_DRY_RUN=0
+        unset AUTOOS_ASSUME_TTY 2>/dev/null || true
+        antigravity_sandbox_setup "$dir" 2>&1; printf 'RC %s' "$?"
+    ) )"
+    ok=1
+    [[ "$out" == *"RC 0"* ]] || { ok=0; echo "the step failed: [$out]" >&2; }
+    [[ "$out" == *"sudo chown root:root '$box'"* ]] || { ok=0; echo "no fallback chown line: [$out]" >&2; }
+    [[ "$out" == *"sudo chmod 4755 '$box'"* ]] || { ok=0; echo "no fallback chmod line: [$out]" >&2; }
+    [[ "$out" != *"--no-sandbox"* ]] || { ok=0; echo "suggests --no-sandbox" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a failing sudo does not fall back to the printed warning with rc 0"; fi
+fi
+
+if it "antigravity sandbox setup: a symlinked helper is left alone with no sudo"; then
+    sb="$(mktemp -d)"; dir="$sb/opt/antigravity"; mkdir -p "$dir"
+    printf 'sandbox\n' >"$sb/real-sandbox"
+    ln -s "$sb/real-sandbox" "$dir/chrome-sandbox"
+    shim="$(antigravity_sandbox_shim "$sb")"
+    out="$( (
+        unset -f sudo 2>/dev/null || true
+        antigravity_sandbox_needed() { return 0; }
+        export PATH="$shim:$PATH" SUDO_LOG="$sb/sudo.log" SUDO_MARKER="$sb/sudo.code"
+        ASSUME_YES=1 AUTOOS_DRY_RUN=0
+        unset AUTOOS_ASSUME_TTY 2>/dev/null || true
+        antigravity_sandbox_setup "$dir" 2>&1; printf 'RC %s' "$?"
+    ) )"
+    ok=1
+    [[ "$out" == *"RC 0"* ]] || { ok=0; echo "the step failed: [$out]" >&2; }
+    [[ ! -s "$sb/sudo.log" ]] || { ok=0; echo "sudo was called for a symlink: [$(cat "$sb/sudo.log")]" >&2; }
+    [[ "$out" != *"set root-owned"* ]] || { ok=0; echo "a symlink was reported as set up: [$out]" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a symlinked chrome-sandbox is not left alone"; fi
+fi
+
+if it "antigravity sandbox setup: a symlink swapped in between check and sudo cannot escalate (TOCTOU)"; then
+    sb="$(mktemp -d)"; dir="$sb/opt/antigravity"; mkdir -p "$dir"
+    box="$dir/chrome-sandbox"
+    target="$sb/victim"
+    printf 'sandbox\n' >"$box"; chmod 755 "$box"
+    printf 'victim\n' >"$target"; chmod 755 "$target"
+    shim="$sb/shim"; mkdir -p "$shim"
+    # Executing sudo stand-in: runs the command without privilege. On the FIRST
+    # call it swaps <box> for a symlink to the victim file first (the TOCTOU
+    # attacker winning the race while a human types the sudo password).
+    cat >"$shim/sudo" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >>"$sb/sudo.log"
+if [[ ! -e "$sb/swapped" ]]; then
+    : >"$sb/swapped"
+    rm -f "$box"
+    ln -s "$target" "$box"
+fi
+if [[ "\$1" == "-n" ]]; then shift; fi
+"\$@"
+EOF
+    chmod +x "$shim/sudo"
+    # A non-root test cannot chown to root: log the call and do nothing. chmod
+    # stays the real binary so a symlink-following chmod visibly escalates.
+    cat >"$shim/chown" <<'SHIM'
+#!/bin/bash
+printf 'chown %s\n' "$*" >>"$SUDO_LOG"
+exit 0
+SHIM
+    chmod +x "$shim/chown"
+    out="$( (
+        unset -f sudo 2>/dev/null || true
+        antigravity_sandbox_needed() { return 0; }
+        export PATH="$shim:$PATH" SUDO_LOG="$sb/sudo.log"
+        ASSUME_YES=1 AUTOOS_DRY_RUN=0
+        unset AUTOOS_ASSUME_TTY 2>/dev/null || true
+        antigravity_sandbox_setup "$dir" 2>&1; printf 'RC %s' "$?"
+    ) )"
+    ok=1
+    [[ "$out" == *"RC 0"* ]] || { ok=0; echo "the step failed: [$out]" >&2; }
+    [[ "$(stat -c %a -- "$target" 2>/dev/null)" == "755" ]] || { ok=0; echo "TOCTOU: the victim is now [$(stat -c %a -- "$target" 2>&1)] (chmod followed the swapped symlink)" >&2; }
+    [[ "$out" == *"sudo chown root:root '$box'"* ]] || { ok=0; echo "no fallback chown line: [$out]" >&2; }
+    [[ "$out" != *"set root-owned"* ]] || { ok=0; echo "a swapped symlink was reported as set up: [$out]" >&2; }
+    [[ "$out" != *"--no-sandbox"* ]] || { ok=0; echo "suggests --no-sandbox" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a symlink swapped in after the check escalates through sudo chmod"; fi
+fi
+
+if it "antigravity sandbox setup: a dry run prints the would-run line and calls no sudo"; then
+    sb="$(mktemp -d)"; dir="$sb/opt/antigravity"; mkdir -p "$dir"
+    printf 'sandbox\n' >"$dir/chrome-sandbox"; chmod 755 "$dir/chrome-sandbox"
+    box="$dir/chrome-sandbox"
+    shim="$(antigravity_sandbox_shim "$sb")"
+    out="$( (
+        unset -f sudo 2>/dev/null || true
+        antigravity_sandbox_needed() { return 0; }
+        export PATH="$shim:$PATH" SUDO_LOG="$sb/sudo.log" SUDO_MARKER="$sb/sudo.code"
+        ASSUME_YES=1 AUTOOS_DRY_RUN=1
+        unset AUTOOS_ASSUME_TTY 2>/dev/null || true
+        antigravity_sandbox_setup "$dir" 2>&1; printf 'RC %s' "$?"
+    ) )"
+    ok=1
+    [[ "$out" == *"RC 0"* ]] || { ok=0; echo "the step failed: [$out]" >&2; }
+    [[ "$out" == *"sudo chown root:root '$box'"* ]] || { ok=0; echo "no would-run chown line: [$out]" >&2; }
+    [[ ! -s "$sb/sudo.log" ]] || { ok=0; echo "sudo was called during a dry run: [$(cat "$sb/sudo.log")]" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a dry run calls sudo or does not print the would-run line"; fi
+fi
+
+if it "antigravity sandbox setup: the second run after success (root-owned 4755) is skipped"; then
+    sb="$(mktemp -d)"; dir="$sb/opt/antigravity"; mkdir -p "$dir"
+    printf 'sandbox\n' >"$dir/chrome-sandbox"; chmod 755 "$dir/chrome-sandbox"
+    shim="$(antigravity_sandbox_shim "$sb")"
+    cat >"$shim/stat" <<'SHIM'
+#!/bin/bash
+for a in "$@"; do
+    if [[ "$a" == "%u %g %a" ]]; then printf '0 0 4755\n'; exit 0; fi
+done
+if [[ -x /usr/bin/stat ]]; then exec /usr/bin/stat "$@"; else exec /bin/stat "$@"; fi
+SHIM
+    chmod +x "$shim/stat"
+    out="$( (
+        unset -f sudo 2>/dev/null || true
+        antigravity_sandbox_needed() { return 0; }
+        export PATH="$shim:$PATH" SUDO_LOG="$sb/sudo.log" SUDO_MARKER="$sb/sudo.code"
+        ASSUME_YES=1 AUTOOS_DRY_RUN=0
+        unset AUTOOS_ASSUME_TTY 2>/dev/null || true
+        antigravity_sandbox_setup "$dir" 2>&1; printf 'RC %s' "$?"
+    ) )"
+    ok=1
+    [[ "$out" == *"already root-owned 4755 (skipped)"* ]] || { ok=0; echo "no skipped line: [$out]" >&2; }
+    [[ ! -s "$sb/sudo.log" ]] || { ok=0; echo "sudo was called on the second run: [$(cat "$sb/sudo.log")]" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "the second run after success is not skipped"; fi
 fi
 
 if it "antigravity discovery: the newest version is the numeric maximum (2.17.0 beats 2.9.1 and 2.4.3) and the Linux URL is built only from the constant and the build id"; then
@@ -1300,7 +1609,7 @@ fi
 if it "antigravity desktop entry: the install path is quoted for the Desktop Entry spec (space, quote, dollar, percent, backslash) and the sandbox command is single-quoted"; then
     ok=1; sb="$(antigravity_scratch)"; antigravity_serve "$sb" "$AG_VA" "$AG_IDA"
     odd="$sb"'/h m"e$x%u\b`t'"'"'s'; mkdir -p "$odd"
-    antigravity_run "$sb" "AG_HOME=$odd" AG_SYSCTL=restricted
+    antigravity_run "$sb" "AG_HOME=$odd" AG_SYSCTL=restricted AG_SUDO_FAIL=1
     dir="$odd/.local/opt/antigravity"; dt="$odd/.local/share/applications/antigravity.desktop"
     [[ "$AG_STATE" == installed ]] || { ok=0; echo "state=[$AG_STATE]: ${AG_OUT:0:600}" >&2; }
     # expected by hand: " ` $ escaped with one backslash, \ written as four (string escape, then quote escape), % doubled
