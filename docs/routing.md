@@ -26,6 +26,10 @@ flowchart LR
 Drift gates (run after any combo/client edit): `audit-router.py` (live) /
 `--offline` (CI), `sync-router-tiers.py --check`, `check-links.py`.
 
+Usage report: `autoos-agent.py usage --since 1h --by provider,combo,lane` (`--json` for machine-readable).
+It reads the OmniRoute gateway's `/api/usage/call-logs` with the manage-scoped key from the ai-stack
+config dir. Heartbeats print `usage --since 1h --by provider,lane`.
+
 A live probe that gets HTTP 503 is retried with a backoff (5 s, 15 s, 45 s) before it is
 reported: OmniRoute answers 503 "resource pressure" when the host is short of memory, which
 is load shedding, not a dead leg. 400, 404 and transport errors are drift and are never
