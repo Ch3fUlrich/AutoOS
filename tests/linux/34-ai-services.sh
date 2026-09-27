@@ -1218,7 +1218,7 @@ _aistack() {
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
         -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
-        -u OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT -u OMNIROUTE_CHAT_ADMISSION_QUEUE_MS \
+        -u OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT -u OMNIROUTE_CHAT_ADMISSION_QUEUE_MS -u AUTOOS_VERIFY_RETRY_SLEEP \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
         AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
         AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
@@ -2298,7 +2298,9 @@ _aistack_verify_sandbox() {
 # curl stand-in for `ai-stack.sh verify` (AUTOOS_CURL). Answers from
 # <state>/curl-table, one "URL AUTH BODY CODE" line per route: AUTH is none |
 # key | bad | any, BODY is - or a substring of the -d payload, the first match
-# wins and no match means nothing answered. Logs its argv to curl-argv.log.
+# wins and no match means nothing answered. CODE may be a comma list
+# ("503,200"): one code per call to that route, the last one repeats (a
+# gateway warming up). Logs its argv to curl-argv.log.
 # The Authorization header is read from `-H @-` (stdin) or an inline -H and
 # compared with <state>/curl-key; it is never logged, only the verdict is.
 S="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -2327,7 +2329,15 @@ while read -r t_url t_auth t_body t_code; do
     [[ "$t_url" == "$url" ]] || continue
     [[ "$t_auth" == any || "$t_auth" == "$auth" ]] || continue
     [[ "$t_body" == - || "$body" == *"$t_body"* ]] || continue
-    code="$t_code"; break
+    code="$t_code"
+    if [[ "$code" == *,* ]]; then
+        n_file="$S/curl-count-$(printf '%s' "$t_url $t_auth $t_body" | cksum | cut -d' ' -f1)"
+        n="$(cat "$n_file" 2>/dev/null || echo 0)"; echo $((n + 1)) >"$n_file"
+        IFS=, read -ra seq <<<"$code"
+        (( n < ${#seq[@]} )) || n=$(( ${#seq[@]} - 1 ))
+        code="${seq[n]}"
+    fi
+    break
 done <"$S/curl-table"
 printf 'url=%s auth=%s code=%s\n' "$url" "$auth" "$code" >>"$S/curl-seen.log"
 if (( want_code )); then printf '%s' "$code"; fi
@@ -2451,6 +2461,46 @@ if it "aistack: verify skips the keyed combos without a key, and the key never r
     if (( ok )); then pass; else fail "the gateway key leaks, or the keyless run is not a skip"; fi
 fi
 
+if it "aistack: verify retries a combo that answers 502/503 while the gateway warms up, never a 404"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key warm-combo 503,200
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key cold-combo 503,502
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key gone-combo 404,200
+    ok=1
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_RETRY_SLEEP=0 \
+        AUTOOS_VERIFY_COMBOS="warm-combo cold-combo gone-combo" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1" >&2; }
+    grep -qx '  ok    combo warm-combo' <<<"$out" || { ok=0; echo "warm-combo not ok after a 503: $(grep warm <<<"$out")" >&2; }
+    grep -qE '^  FAIL  combo cold-combo - HTTP 502' <<<"$out" || { ok=0; echo "cold-combo: not FAIL with the last code" >&2; }
+    grep -qE '^  FAIL  combo gone-combo - HTTP 404' <<<"$out" || { ok=0; echo "gone-combo: a 404 was retried" >&2; }
+    [[ "$(grep -c 'warm-combo' "$d/curl-argv.log")" == 2 ]] || { ok=0; echo "warm-combo: not 2 requests" >&2; }
+    [[ "$(grep -c 'cold-combo' "$d/curl-argv.log")" == 3 ]] || { ok=0; echo "cold-combo: not 3 attempts" >&2; }
+    [[ "$(grep -c 'gone-combo' "$d/curl-argv.log")" == 1 ]] || { ok=0; echo "gone-combo: not 1 request" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "combo warm-up retry"; fi
+fi
+
+# Final review 2026-09-27: "008" passed a digits-only guard and then
+# $(( wait_s * 2 )) died on "value too great for base", killing verify.
+if it "aistack: verify reads AUTOOS_VERIFY_RETRY_SLEEP as decimal, junk falls back to 10"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '#!/usr/bin/env bash\necho "$*" >>"%s/sleep.log"\n' "$d" >"$d/bin/sleep"; chmod +x "$d/bin/sleep"
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key cold-combo 503
+    ok=1
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_RETRY_SLEEP=008 \
+        AUTOOS_VERIFY_COMBOS="cold-combo" verify)" && rc=0 || rc=$?
+    grep -q '^verify: ' <<<"$out" || { ok=0; echo "008: verify died before its summary (rc=$rc)" >&2; }
+    [[ "$(tr '\n' ' ' <"$d/sleep.log" 2>/dev/null)" == "8 16 " ]] || { ok=0; echo "008: sleeps were '$(tr '\n' ' ' <"$d/sleep.log" 2>/dev/null)', not '8 16'" >&2; }
+    rm -f "$d/sleep.log" "$d"/curl-count-*
+    _aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_RETRY_SLEEP=abc \
+        AUTOOS_VERIFY_COMBOS="cold-combo" verify >/dev/null || true
+    [[ "$(tr '\n' ' ' <"$d/sleep.log" 2>/dev/null)" == "10 20 " ]] || { ok=0; echo "abc: sleeps not '10 20'" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "AUTOOS_VERIFY_RETRY_SLEEP parsing"; fi
+fi
+
 if it "aistack: verify AUTOOS_VERIFY_COMBOS replaces the combo list"; then
     d="$(_aistack_sandbox)"
     _aistack_verify_sandbox "$d"
@@ -2463,7 +2513,9 @@ if it "aistack: verify AUTOOS_VERIFY_COMBOS replaces the combo list"; then
     grep -qE '^  FAIL  combo beta-combo - HTTP 404' <<<"$out" || { ok=0; echo "beta-combo not FAIL" >&2; }
     [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "not exactly one FAIL" >&2; }
     grep -q 't2-worker-free-only' "$d/curl-argv.log" && { ok=0; echo "a default combo was still requested" >&2; }
-    grep -q '"max_tokens":16' "$d/curl-argv.log" || { ok=0; echo "max_tokens 16 not sent" >&2; }
+    # 256, not 16: a reasoning leg spent 18 of 20 tokens thinking and the
+    # gateway's quality check answered 502 (L0, live 2026-09-27).
+    grep -q '"max_tokens":256' "$d/curl-argv.log" || { ok=0; echo "max_tokens 256 not sent" >&2; }
     # A name that could break out of the JSON body is refused, not sent.
     rm -f "$d/curl-argv.log"
     out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_COMBOS='bad"name' verify)" && rc=0 || rc=$?

@@ -36,6 +36,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added — usage report (OR4)
 
 - `autoos-agent.py usage --since <ISO-8601 UTC | 30m | 6h | 2d> [--by provider,combo,lane,model] [--json]`: pages the OmniRoute gateway's `/api/usage/call-logs` with the manage-scoped key and prints calls, ok/errors and tokens per group.
+### Fixed — `ai-stack.sh verify` combo probes survive gateway warm-up and reasoning legs
+
+- The keyed combo probe sends `max_tokens` 256 (at 16 a reasoning leg spent its budget thinking and the gateway's
+  quality check answered 502) and retries a 502/503 twice, 10 s then 20 s (`AUTOOS_VERIFY_RETRY_SLEEP`), because a
+  freshly recreated gateway answered 503 for its free-only combos and then 200 on re-probe (L0, live 2026-09-27).
+  Any other status is still a FAIL on the first answer.
+
+### Fixed — `probe-toolcalls` no longer prints or stores a provider error body
+
+- **`tools/probe-toolcalls.py`**: its `make_post` returned `exc.read(500)` for an HTTP error and `str(exc)` for a transport failure, and that text is what the probe prints and writes into the `detail`/`trials` of `logs/routing/measured.json` — so a gateway error's org/project id or internal host landed in a public repository's log tree (AGENTS.md rule 1). The body is now read only for an HTTP 400, and only to choose between two fixed tokens: `HTTP 400 (mentions tool/function support)` and `HTTP <code>`; a transport failure is `transport error: <ExceptionType>`. `classify()` matches the token, never a body, so the 400-about-tools verdict stays `broken` — the plural counts now too ("tools are not supported", which the old whole-word `tool|function` missed), and every other verdict (proven/broken/unproven/no-verdict, and `400` not being a no-verdict status) is unchanged. Its 429/503 retry, overlay read-modify-write, gateway probe, key-reading module load and timestamp now come from **`tools/probe_common.py`** instead of a second copy; its leg list and no-verdict statuses stay its own, because `probe_common`'s free-legs-only rule and "any non-200 measured nothing" would both change what this probe reports. Tests: `tests/test_probe_toolcalls.py` (offline — `urlopen` faked, no live probe).
 
 ### Added — RTK A/B probe: the measurement behind decision D19
 
