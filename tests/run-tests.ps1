@@ -4638,6 +4638,8 @@ function Invoke-LoggedSkillSync {
     }
 }
 
+$script:HomeNotRedirected = '::home-not-redirected::'
+
 function Invoke-LoggedSkillTargetSync {
     # Calls Sync-AutoOSAgentSkillTargets under a redirected $HOME and returns
     # what it logged. The caller supplies a scratch home whose .agents/skills
@@ -4652,6 +4654,10 @@ function Invoke-LoggedSkillTargetSync {
     try {
         Set-Variable -Name HOME -Value $ScratchHome -Force -Scope Global
         $env:HOME = $ScratchHome
+        # Never run the writer against the real home: if the module does not
+        # see the scratch home (PS 5.1 may refuse the redirect), sync nothing
+        # and tell the caller, which skips (same guard as the other sites).
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $ScratchHome) { return $script:HomeNotRedirected }
         Initialize-AutoOSLog -Path $log
         $null = Sync-AutoOSAgentSkillTargets -Source $Source
         Get-Content -LiteralPath $log -Raw -Encoding utf8
@@ -5033,8 +5039,6 @@ Test-Case 'agent-skills targets: links repo skills into ~/.agents\skills' {
             if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$n'/SKILL.md is unreadable through the link" }
         }
         if (Test-Path -LiteralPath (Join-Path $dest 'nofile')) { throw "nofile (no SKILL.md) was linked" }
-        $codexSkills = Join-Path $scratch 'home\.codex\skills'
-        if (Test-Path -LiteralPath $codexSkills) { throw ".codex\skills was created even though codex is not present" }
     } finally {
         Remove-TestDirLinks -Directory $dest
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
@@ -5053,6 +5057,7 @@ Test-Case 'agent-skills targets: links into ~/.codex\skills when codex dir exist
         New-TestSkillRepo -Repo $repo
         $null = New-Item -ItemType Directory -Path $codexDir -Force
         $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
         # Verify .agents\skills
         foreach ($n in @('alpha', 'beta')) {
             $link = Join-Path $dest $n
@@ -5091,7 +5096,8 @@ Test-Case 'agent-skills targets: creates no ~/.codex when codex is absent' {
         New-TestSkillRepo -Repo $repo
         $null = New-Item -ItemType Directory -Path $emptyBin -Force
         $env:PATH = $emptyBin
-        $null = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        if ($log -eq $script:HomeNotRedirected) { $env:PATH = $savedPath; Skip 'HOME cannot be redirected for the installer module'; return }
         $env:PATH = $savedPath
         if (Test-Path -LiteralPath (Join-Path $homeDir '.codex')) { throw '.codex was created without codex' }
         if (-not (Get-Item -LiteralPath (Join-Path $dest 'alpha') -Force -ErrorAction SilentlyContinue)) { throw '.agents\skills not linked, so the sync did not run' }
