@@ -78,8 +78,13 @@ function Pass { $script:Pass++; Write-Host ("  " + (C '+' '38;5;71') + " $script
 function Skip { param($why) $script:Skip++; Write-Host ("  " + (C '-' '38;5;179') + " $script:Current " + (C "($why)" '2;38;5;245')) }
 
 function Assert-Equal {
-    param($Actual, $Expected)
-    if ($Actual -eq $Expected) { Pass } else { throw "expected [$Expected] but got [$Actual]" }
+    # $Message is the caller's diagnostic (e.g. a failing unittest's output); it
+    # was once a silently ignored extra argument, so a red CI named nothing.
+    param($Actual, $Expected, [string]$Message = '')
+    if ($Actual -eq $Expected) { Pass; return }
+    $text = "expected [$Expected] but got [$Actual]"
+    if ($Message) { $text += ": $Message" }
+    throw $text
 }
 function Assert-True {
     param($Condition, $Message = 'expected true')
@@ -101,6 +106,13 @@ $winCatalog = Get-AutoOSCatalog (Join-Path $Root 'catalog\windows.json')
 
 # ─── Catalog schema ─────────────────────────────────────────────────────────
 Describe-Group 'catalog schema'
+
+Test-Case 'Assert-Equal carries its caller message into the failure' {
+    $got = $null
+    try { Assert-Equal 1 0 'the unittest output' } catch { $got = $_.Exception.Message }
+    if ($got -ne 'expected [0] but got [1]: the unittest output') { throw "message lost: [$got]" }
+    Pass
+}
 
 Test-Case 'windows catalog validates' {
     $p = @(Test-AutoOSCatalogSchema -Catalog $winCatalog)
