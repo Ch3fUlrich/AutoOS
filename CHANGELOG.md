@@ -10,6 +10,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`catalog/ai-registry.json`**, **`configuration/omniroute/combos.json`**, **`configuration/litellm/config.yaml`**, **`catalog/ide-models.json`**, **`configuration/openhands/tier-profiles.json`**, **`opencode.jsonc`**, **`docs/models.md`**, **`configuration/omniroute/apply.sh`**, **`configuration/api-keys.example.yml`**, **`docs/api-keys.md`**: Free.ai (`free_ai`, model `qwen7b`, OpenAI-compatible at `https://api.free.ai/v1`; 30k tokens/day, 10 rpm, public/may train) joins as the last leg of `t2-worker-free-only` and the only leg of `t3-driver-free-only`, restoring the latter as a servable combo; never private-safe and never in a `*-clean` route. `apply.sh`'s existing-id regex widens to `[a-z0-9_-]+` so the underscored `omniroute_id` stays idempotent.
 
 ### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
+### Added — one-command standby router: `ai-stack.sh failover` (lstby)
+
+- **`configuration/docker/ai-stack/ai-stack.sh`**: new `failover on|off|status`
+  (in `--help` and the unknown-command list). `on` refuses (rc 2) when already
+  on, else stops the omniroute container and starts LiteLLM through
+  `configuration/litellm/start-litellm.sh` with `AUTOOS_LITELLM_HOST` (the
+  gateway's bind), `AUTOOS_LITELLM_PORT` (the gateway's port),
+  `AUTOOS_LITELLM_MASTER_KEY_FILE` (`client.key`, 0600 — the value is
+  redirected, never argv/printed) and `AUTOOS_LITELLM_STATE_DIR` (its own dir,
+  so the always-on `:4000` unit is untouched); waits for `/health/liveliness`
+  (60 s), and on failure stops the standby, restarts the gateway (rc 1 — the
+  port is never left empty). `off` stops only the standby pid, restarts the
+  gateway, waits for `/api/health`, removes the state file (already off is a
+  no-op, rc 0). `verify` prints `failover ON: LiteLLM serves the gateway port`
+  while the standby holds the port (informational, never FAIL). Clients keep
+  base URL, key and combo ids. Tests: nine `aistack: failover …` cases plus a
+  `start-litellm` stand-in in `tests/helpers/aistack_fake.sh` (env names, never
+  values; liveliness ok/fail via marker). Docs: `docs/web-services.md`
+  "Standby router (LiteLLM)".
+
 ### Fixed — probe-toolcalls uses the shared leg selection (ptc)
 
 - **`tools/probe-toolcalls.py`**: deleted its local `_skip_reason`/`legs_to_probe` copies and imports both from **`tools/probe_common.py`**, so a `policy.leg_rules`-denied leg is skipped with `policy: denied by <id>` and only free legs are probed (D18); its own `make_post`/400 body classification is unchanged. Tests: new `DenyRuleTests` in `tests/test_probe_toolcalls.py`; existing leg fixtures now declare `tier: free` (no skip-reason assertion needed rewording — the shared wording matches).
