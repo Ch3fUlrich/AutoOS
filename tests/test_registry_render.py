@@ -1038,6 +1038,80 @@ class GatewayLegsFilterTests(unittest.TestCase):
             "~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable)", row)
 
 
+class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
+    """OR1d (ONE-ROUTER step 1d): a route that declares legs but has no
+    gateway-servable leg is offered by no declaration - render_ide and
+    render_openhands drop it exactly as render_omniroute/render_litellm_blocks
+    already do. A deliberately legless route (the LiteLLM-only *-paid and the
+    dynamic auto* routes) keeps its declaration: it never promised a gateway
+    leg, so the rule does not reach it. docs/models.md is deliberately out of
+    scope and still lists every route for the human reader."""
+
+    def test_servable_route_ids_is_nonempty_only_with_a_servable_leg(self):
+        reg = copy.deepcopy(synthetic_gateway_registry())
+        self.assertIn("mix", registry.servable_route_ids(reg))
+        reg["routes"]["mix"]["legs"] = ["dead/deadmodel"]
+        self.assertNotIn("mix", registry.servable_route_ids(reg))
+
+    def test_servable_route_ids_treats_a_legless_route_as_unsatisfied(self):
+        # A route with no declared legs serves nothing, so it is not in the
+        # set - the renders below are what deliberately keep it.
+        reg = copy.deepcopy(synthetic_gateway_registry())
+        reg["routes"]["mix"]["legs"] = []
+        self.assertNotIn("mix", registry.servable_route_ids(reg))
+
+    def test_ide_drops_a_route_that_declares_legs_but_serves_none(self):
+        ids = [m["id"] for m in registry.render_ide(real_registry())["models"]]
+        for gone in ("t1-orchestrator-free-only", "t3-driver-free-only",
+                     "samba/gpt-oss-120b", "samba/MiniMax-M3"):
+            self.assertNotIn(gone, ids)
+
+    def test_ide_keeps_a_deliberately_legless_route(self):
+        ids = [m["id"] for m in registry.render_ide(real_registry())["models"]]
+        for kept in ("t1-orchestrator-paid", "t2-worker-paid", "t3-driver-paid",
+                     "auto", "auto/smart", "auto/cheap"):
+            self.assertIn(kept, ids)
+
+    def test_ide_route_returns_when_its_leg_becomes_servable(self):
+        reg = copy.deepcopy(real_registry())
+        reg["providers"]["samba"]["available"] = True
+        ids = [m["id"] for m in registry.render_ide(reg)["models"]]
+        self.assertIn("samba/gpt-oss-120b", ids)
+        self.assertIn("samba/MiniMax-M3", ids)
+
+    def test_openhands_drops_a_tier_that_declares_legs_but_serves_none(self):
+        ids = {t["id"] for t in registry.render_openhands(real_registry())["tiers"]}
+        for gone in ("omniroute-t1-orchestrator-free-only",
+                     "litellm-t1-orchestrator-free-only",
+                     "omniroute-t3-driver-free-only",
+                     "litellm-t3-driver-free-only"):
+            self.assertNotIn(gone, ids)
+
+    def test_openhands_keeps_a_tier_whose_route_now_declares_no_legs(self):
+        # The rule reaches a route that DECLARED legs and cannot serve them -
+        # never one that declares none at all.
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t1-orchestrator"]["legs"] = []
+        ids = {t["id"] for t in registry.render_openhands(reg)["tiers"]}
+        self.assertIn("omniroute-t1-orchestrator", ids)
+        self.assertIn("litellm-t1-orchestrator", ids)
+
+    def test_openhands_tier_returns_when_its_leg_becomes_servable(self):
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t3-driver-free-only"]["unavailable_legs"] = {}
+        ids = {t["id"] for t in registry.render_openhands(reg)["tiers"]}
+        self.assertIn("omniroute-t3-driver-free-only", ids)
+        self.assertIn("litellm-t3-driver-free-only", ids)
+
+    def test_models_doc_is_not_filtered(self):
+        # Out of scope by OR1d's own decision: models-doc still shows every
+        # route, gated legs struck through, for the human reader.
+        doc = registry.render_models_doc(real_registry())
+        for kept in ("t1-orchestrator-free-only", "t3-driver-free-only",
+                     "samba/gpt-oss-120b", "samba/MiniMax-M3"):
+            self.assertIn("| `%s`" % kept, doc)
+
+
 class UnavailableUntilRenderIndependenceTests(unittest.TestCase):
     """``unavailable_until`` (brief UNTIL, 2026-09-26) is resolver-only: the
     OmniRoute gateway handles a quota 429 itself, so every render -- and the
