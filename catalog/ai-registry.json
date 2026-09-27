@@ -1681,6 +1681,7 @@
       ]
     },
     "cerebras": {
+      "$comment": "Operator 2026-09-27T12:55Z: no free tier, no credits; OmniRoute disables the connection. The route legs stay in the data (routes.*.unavailable_legs) so the intent is visible; the whole provider is off until the operator restores it.",
       "api_base": null,
       "id": "cerebras",
       "litellm_env": "CEREBRAS_API_KEY",
@@ -1690,7 +1691,8 @@
         "customUserAgent": "curl/8.7.1"
       },
       "tier": "free",
-      "trains_on_prompts": false
+      "trains_on_prompts": false,
+      "available": false
     },
     "cheapinference": {
       "$comment": [
