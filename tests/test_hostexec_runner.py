@@ -229,7 +229,28 @@ class RemoteSshTests(unittest.TestCase):
             argv = ["echo", "a b", "$(evil)", "; rm -rf /", 'quote"in', "back`tick`", "a|b>c<d"]
             result = runner.run_remote(argv, alias="myhost", cwd=tmp, path_dirs=[bindir], timeout=5)
             self.assertEqual(result.exit_code, 0, result.output)
-            self.assertEqual(result.output.splitlines(), argv)
+            # item 3: the remote command is prefixed with `cd <cwd> &&` so it
+            # runs where the audit line says it did; the argv elements
+            # themselves still round-trip as exactly one literal arg each.
+            self.assertEqual(result.output.splitlines(), ["cd", tmp, "&&"] + argv)
+
+    def test_remote_command_is_cd_prefixed_to_the_audited_cwd(self):
+        # item 3: without the prefix the audit line says cwd=/ but the
+        # command actually runs in the remote login shell's $HOME. The cwd
+        # is shlex.quoted, so a space stays one argument to the remote `cd`.
+        # The local ssh process must not chdir into this (remote-only) path.
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            marker = os.path.join(tmp, "remote.txt")
+            _write_script(os.path.join(bindir, "ssh"), f"#!{sys.executable}\n"
+                          "import sys\n"
+                          f"open({marker!r}, 'w').write(sys.argv[-1])\n")
+            runner.run_remote(["id"], alias="myhost",
+                              cwd="/srv/remote work", path_dirs=[bindir], timeout=5)
+            with open(marker, encoding="utf-8") as fh:
+                seen = fh.read()
+            self.assertEqual(seen, "cd '/srv/remote work' && id")
 
     def test_ssh_invoked_with_batchmode_and_dash_capital_t(self):
         with tempfile.TemporaryDirectory() as tmp:

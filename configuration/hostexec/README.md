@@ -197,6 +197,13 @@ comes up (empty `AUTOOS_EXEC_BIND`, bind failure).
 The child never inherits the broker's stdin (`stdin=DEVNULL`), so an
 allowed bare `sh`/`cat` cannot siphon the operator's keystrokes.
 
+On an `ssh`-kind host the runner builds
+`ssh -o BatchMode=yes -T <alias> -- "cd <cwd> && <argv>"`: `cwd` is the
+REMOTE working directory and the leading `cd` (shlex-quoted) makes the
+command run exactly where the audit line says it did. A remote `cd` that
+fails stops the wrapped command rather than running it in some other
+directory (the local `ssh` process runs outside `cwd`).
+
 Retention is 90 days (operator decision, 2026-09-26), pruned by filename
 date only, never by file mtime (so a touched or copied file cannot dodge
 it):
