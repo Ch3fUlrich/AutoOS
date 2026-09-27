@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 import autoos_track as track  # tools/ is on sys.path for every caller
 from registry import (resolve_leg, private_safe, unavailable_now,  # tools/ is on sys.path
-                      _parse_until)
+                      _parse_until, leg_denied, leg_rule_for)
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
@@ -318,6 +318,31 @@ def usable_context(model_id, registry, overlay):
     return int(registry["models"][model_id]["context_usable"]["tokens"])
 
 
+def provider_tpm(provider_id, model_id, registry):
+    """The per-minute token cap for ``provider_id``'s ``model_id`` leg, or None
+    when the provider carries no ``limits`` for that model.
+
+    Brief R4 (2026-09-27): providers.<id>.limits is keyed by the provider's own
+    model spelling (the part of a leg after its ``<provider>/`` prefix), which
+    is exactly ``model_id`` as resolve_leg returns it. Only ``tpm`` is read
+    today -- a request-size filter in usable_legs; rpm/rpd/tpd are data only
+    for now (no clock, no counters). A missing limits table or a missing model
+    key means the leg is not size-filtered.
+
+    The estimate compared against tpm is *input only* (review R4FIX,
+    2026-09-27): ``need_tokens`` is the brief plus the files, with no output
+    reserve. TPM counts input+output, so a leg close to its cap can still 413
+    on a long generation even though it passes here.
+    """
+    provider = (registry.get("providers") or {}).get(provider_id) or {}
+    limits = provider.get("limits") or {}
+    entry = limits.get(model_id) or {}
+    tpm = entry.get("tpm")
+    if tpm is None:
+        return None
+    return int(tpm)
+
+
 def _client_reason(client_state, client, registry=None, now=None):
     """The client filter's reason for `client`, or None when it passes.
 
@@ -426,25 +451,40 @@ def _leg_availability(leg, provider_id, unavailable, registry, now):
 
 def usable_legs(route, card, features, client_state, registry, overlay,
                client="opencode", now=None):
-    """``(legs, skipped)`` -- FT (fall-through, spec 2026-09-26 operator
-    decision): the serving legs of `route` that also pass every *per-leg*
-    filter, and why each rejected leg did not.
+    """``(legs, skipped, re_probe_notes)`` -- FT (fall-through, spec 2026-09-26
+    operator decision): the serving legs of `route` that also pass every
+    *per-leg* filter, and why each rejected leg did not.
 
     ``legs`` is ``(provider_id, model_id)`` tuples, same shape as
     ``serving_legs``, in route order. ``skipped`` maps the leg string exactly
     as written in the route (an omniroute_id alias included) to every reason
     that leg did not qualify -- collecting all of them for that leg, never
-    stopping at the first, in route order.
+    stopping at the first, in route order. ``re_probe_notes`` is a parallel
+    dict for legs that ARE usable but carry informational re-probe notes
+    (a past ``unavailable_until`` that self-healed -- such notes must not
+    count as a "skipped leg" in plan()).
 
     Per-leg filters (replacing the old route-level context/tool_calls/
     client_bound checks, which blocked the whole route on one bad leg):
 
     - context: ``need_tokens * 1.3 <= usable_context``.
+    - tpm (brief R4, 2026-09-27): a leg whose provider limits for that model
+      carry ``tpm`` is skipped when ``need_tokens * 1.3 > tpm`` -- a
+      request-size cap Groq's free tier enforces (a request above ~8K tokens
+      413s there). rpm/rpd/tpd are data only for now (no clock, no counters).
+      Keep-on-equal (review R4FIX): ``need_tokens * 1.3 == tpm`` keeps the leg;
+      only a strictly greater need skips it. The estimate is input only --
+      ``need_tokens`` is the brief plus the files, no output reserve -- so a
+      leg near its cap may still 413 on long outputs even though it passes.
     - tool_calls (agentic kinds only): a value other than ``"proven"``
       (unproven, broken, or no verdict at all) skips the leg.
     - client_bound: a bound leg is always skipped - a route is served through
       the gateway (omniroute/<route>), never from inside the bound client, so
       even `client` == bound gets 403 (run 20260926-142228, R-gateway-03).
+    - leg_rules (brief OR1f, 2026-09-27): a leg ``policy.leg_rules`` denies
+      (``registry.leg_denied``) is skipped with reason ``leg_rules: <leg>
+      denied by <rule id>`` - the same legs ``registry.gateway_legs`` drops,
+      since a gateway combo never carries a denied leg.
     - an overlay rate limit (agentic kinds only, and only when the leg is
       not already proven): every trial of the leg's last tool_calls probe
       error was HTTP 429. A leg already proven is kept even if currently
@@ -479,6 +519,7 @@ def usable_legs(route, card, features, client_state, registry, overlay,
 
     legs = []
     skipped = {}
+    re_probe_notes = {}
     for leg in route.get("legs") or []:
         # One leg-resolution rule for the validator and the resolver. Every
         # leg is resolved, unavailable or not, so a broken registry fails
@@ -498,6 +539,16 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             reasons.append("context: need %sx1.3 > usable %s on %s/%s"
                            % (need, usable, provider_id, model_id))
 
+        # Brief R4 (2026-09-27): a request-size cap from the provider's own
+        # limits table -- need * 1.3 > tpm skips the leg, same shape as the
+        # context filter. tpm is a per-minute token cap Groq's free tier
+        # enforces (a request above ~8K tokens 413s there); rpm/rpd/tpd stay
+        # data-only for now (no clock, no counters).
+        tpm = provider_tpm(provider_id, model_id, registry)
+        if tpm is not None and need * 1.3 > tpm:
+            reasons.append("limit: %s/%s tpm %s < need %s"
+                           % (provider_id, model_id, tpm, need))
+
         value = _tool_calls_value(leg, model_id, registry, overlay)
         proven = value == "proven"
         if agentic and not proven:
@@ -509,6 +560,16 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             reasons.append("client_bound: %s/%s needs %s"
                            % (provider_id, model_id, bound))
 
+        # Brief OR1f (2026-09-27): the gateway renders only legs
+        # policy.leg_rules allows (registry.gateway_legs drops every denied
+        # leg), so the resolver must not plan a leg no combo serves. One
+        # predicate -- leg_denied, the same one gateway_legs calls; leg_rule_for
+        # only names the rule in the reason.
+        if leg_denied(leg, registry):
+            rule = leg_rule_for(leg, registry) or {}
+            reasons.append("leg_rules: %s denied by %s"
+                           % (leg, rule.get("id", "(unnamed)")))
+
         if agentic and not proven and _rate_limited(leg, overlay):
             reasons.append("rate_limited: %s/%s (429)" % (provider_id, model_id))
 
@@ -517,9 +578,9 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         else:
             legs.append((provider_id, model_id))
             if notes:
-                skipped[leg] = notes
+                re_probe_notes[leg] = notes
 
-    return legs, skipped
+    return legs, skipped, re_probe_notes
 
 
 def filter_routes(card, features, client_state, registry, overlay,
@@ -548,8 +609,9 @@ def filter_routes(card, features, client_state, registry, overlay,
     false`` in ``registry["clients"]`` is folded into that same reason by
     ``_client_reason``).
 
-    Every other filter (context, tool_calls, client_bound, the rate-limit
-    overlay, an unavailable leg/provider) is now per-leg (``usable_legs``): it
+    Every other filter (context, tool_calls, client_bound, policy.leg_rules,
+    the rate-limit overlay, an unavailable leg/provider) is now per-leg
+    (``usable_legs``): it
     no longer removes the route by itself. The route is removed only when
     ``usable_legs`` comes
     back with no usable leg at all, with reason ``"no usable leg: " +
@@ -585,8 +647,8 @@ def filter_routes(card, features, client_state, registry, overlay,
         if client_reason:
             reasons.append(client_reason)
 
-        usable, skipped = usable_legs(route, card, features, client_state,
-                                      registry, overlay, client, now)
+        usable, skipped, _ = usable_legs(route, card, features, client_state,
+                                        registry, overlay, client, now)
         if not usable:
             reasons.append("no usable leg: " + "; ".join(
                 "%s: %s" % (leg, "; ".join(leg_reasons))
@@ -1097,8 +1159,8 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
     out = []
     for route_id in route_ids:
         route = registry["routes"][route_id]
-        legs, _ = usable_legs(route, card, features, client_state, registry,
-                              overlay, client, now)
+        legs, _, _ = usable_legs(route, card, features, client_state, registry,
+                                overlay, client, now)
         if not legs:
             raise ValueError("route %r has no usable leg to score" % route_id)
         leg = legs[0]
@@ -1256,12 +1318,19 @@ def plan(card, features, client_state, registry, overlay, track_record,
 
     # FT (spec 2026-09-26 operator decision): the chosen route's own skipped
     # legs, so a caller can see which legs it fell through past.
-    _, skipped_legs = usable_legs(registry["routes"][chosen["route"]], card,
-                                  features, client_state, registry, overlay,
-                                  client, now)
+    # FUP (2026-09-27): re-probe notes tracked separately so they do not
+    # inflate the "falls through" count.
+    _, skipped_legs, re_probe_notes = usable_legs(
+        registry["routes"][chosen["route"]], card,
+        features, client_state, registry, overlay,
+        client, now)
     if skipped_legs:
         reason_parts.append(
             "falls through %d skipped leg(s)" % len(skipped_legs))
+    if re_probe_notes:
+        for leg, notes in re_probe_notes.items():
+            for note in notes:
+                reason_parts.append(note)
 
     defer_time, defer_reason = defer_until(card, chosen, registry, now)
     reason_parts.append(defer_reason)
@@ -1296,4 +1365,5 @@ def plan(card, features, client_state, registry, overlay, track_record,
         "reason": "; ".join(reason_parts),
         "explain": [s["reason"] for s in scores],
         "skipped_legs": skipped_legs,
+        "re_probe_notes": re_probe_notes,
     }

@@ -37,7 +37,7 @@ cache; adopting A2A before a real cross-vendor boundary exists.
 | D16 | Handoff | Per-model caps (§8.3), checkpoint every wave, replaced by probe results. |
 | D17 | Messaging | MCP Tasks lifecycle with A2A-compatible names; A2A adapter later. |
 | D18 | Probe spend | Free legs only. Paid-only models keep the D8 default until measured another way. |
-| D19 | RTK | OmniRoute RTK on tool output only after an A/B shows savings with no lost failure line. Off until then. |
+| D19 | RTK | OmniRoute RTK on tool output only after an A/B shows savings with no lost failure line. **Measured 2026-09-27: off** - 81.4 % tokens saved but 7 of 10 samples lost a failure line (`FAIL:`, `✗`, `SC2086`, pytest `FAILURES`; commit e13cb50, `docs/plans/2026-09-27-d19-rtk-ab.md`). Re-run `tools/probe-rtk.py` after an RTK filter change or OmniRoute release; enable only at 0 lost and >= 10 % saved. |
 | D20 | Evidence first | Nothing enters the skill rules, the MCP tools, the registry `policy` or the resolver without evidence: a test that pins it or a recorded measurement. A value still at `source: default` is shown as unmeasured in every `--explain` line; a rule without a `source` fails `skill-rules.py check`. |
 
 ## 3. The registry — `catalog/ai-registry.json`
@@ -275,7 +275,7 @@ half price, verified 2026-09-24 in ADR 0006). Time never overrides a hard filter
 - OmniRoute's native Gemini translator maps `high`/`xhigh`/`max` to one budget: routes that need more
   than `high` on Gemini put the openrouter leg first.
 - Forward a stable session id so OpenRouter's sticky routing keeps prompt-cache hits across turns.
-- Response cache stays off. Prompt-cache passthrough stays on. Compression off until D19's A/B.
+- Response cache stays off. Prompt-cache passthrough stays on. Compression (RTK) off: D19's A/B lost failure lines.
 - Qoder and Antigravity accounts added as OAuth providers (operator sign-in), then referenced as legs.
 - OmniRoute 3.8.51 cannot pin an OpenRouter provider per combo leg (PINspike): BYOK legs are unpinned and serve through the operator's Prioritized BYOK keys; gate each with an unavailable_legs entry until that is set.
 

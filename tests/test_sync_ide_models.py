@@ -213,14 +213,37 @@ class WriteTests(SandboxCase):
                 self.assertEqual(entry["modelID"], mid)
                 self.assertEqual(entry["name"], model(doc, mid)["name"])
 
-    def test_no_variants_or_effort_block_is_ever_generated(self):
-        # A static variants block makes the whole provider unresolvable in
-        # opencode (measured 2026-09-22); effort stays a Zed-only field.
+    def test_variants_blocks_are_generated_from_effort_ladder(self):
+        # A6a: models whose route's first leg carries an effort_ladder in the
+        # registry get a "variants" block with reasoningEffort labels (none
+        # omitted). Models without a ladder get no variants.
         self.assertEqual(self.box.run().returncode, 0)
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
         for gateway in ("omniroute", "litellm"):
             for entry in oc["providers"][gateway]["models"].values():
-                self.assertEqual(set(entry), {"modelID", "name", "limit"})
+                allowed = {"modelID", "name", "limit", "variants"}
+                unexpected = set(entry) - allowed
+                self.assertEqual(unexpected, set(),
+                                 f"{gateway} {entry.get('modelID')} has unexpected keys: {unexpected}")
+                if "variants" in entry:
+                    self.assertIsInstance(entry["variants"], list)
+                    # opencode v2.0.16 config schema (packages/schema/src/config/
+                    # provider.ts:76-79): each item is {id, ...ModelOverlays};
+                    # the effort rides in settings.reasoningEffort
+                    # (packages/ai/src/protocols/openai-chat.ts:776-792).
+                    for v in entry["variants"]:
+                        self.assertEqual(set(v), {"id", "settings"}, v)
+                        self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
+        # A6a review: t1-orchestrator (first leg muse-spark-1.3-contributor-free
+        # with ladder minimal/low/medium/high/xhigh/max) gets variants for each
+        # rung in that order; t3-driver (first leg mistral-code-latest with
+        # empty ladder) has no variants key.
+        t1 = oc["providers"]["omniroute"]["models"]["t1-orchestrator"]
+        expected_rungs = ["minimal", "low", "medium", "high", "xhigh", "max"]
+        self.assertEqual([v["id"] for v in t1["variants"]], expected_rungs)
+        for v in t1["variants"]:
+            self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
+        self.assertNotIn("variants", oc["providers"]["omniroute"]["models"]["t3-driver"])
 
 
 class CommaDisciplineTests(SandboxCase):
@@ -329,6 +352,37 @@ class UnusableInputTests(SandboxCase):
         model(doc, "t4-rag")["surfaces"]["litellm"].append("openhands")
         self.box.save_catalog(doc)
         self.assert_refused("litellm-t4-rag")
+
+    def test_non_list_effort_ladder_is_refused(self):
+        doc = self.box.catalog()
+        model(doc, "t2-worker")["effort_ladder"] = "low"
+        self.box.save_catalog(doc)
+        self.assert_refused("effort_ladder")
+
+    def test_non_string_in_effort_ladder_list_is_refused(self):
+        doc = self.box.catalog()
+        model(doc, "t2-worker")["effort_ladder"] = ["low", 42, "high"]
+        self.box.save_catalog(doc)
+        self.assert_refused("effort_ladder")
+
+    def test_empty_effort_ladder_list_is_refused(self):
+        doc = self.box.catalog()
+        model(doc, "t2-worker")["effort_ladder"] = []
+        self.box.save_catalog(doc)
+        self.assert_refused("effort_ladder", "empty")
+
+    def test_none_in_effort_ladder_is_refused(self):
+        doc = self.box.catalog()
+        model(doc, "t2-worker")["effort_ladder"] = ["none", "low", "medium"]
+        self.box.save_catalog(doc)
+        self.assert_refused("effort_ladder", "none")
+
+    def test_duplicate_rungs_in_effort_ladder_is_refused(self):
+        doc = self.box.catalog()
+        model(doc, "t2-worker")["effort_ladder"] = ["low", "medium", "low"]
+        self.box.save_catalog(doc)
+        self.assert_refused("effort_ladder", "duplicate")
+
 
 class TomlUnknownModelTests(SandboxCase):
     """A dev-path table naming a model the catalog does not know is the
@@ -475,6 +529,26 @@ class RegistrySourcedTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
         self.assertEqual(oc["providers"]["omniroute"]["models"]["t3-driver"]["limit"]["context"], 77777)
+
+    def test_unresolvable_head_leg_raises_error(self):
+        # A6a review: a route whose first leg resolve_leg rejects raises
+        # ValueError (load_from_registry wraps it as ConfigError).
+        doc = self.box.registry()
+        doc["routes"]["t2-worker"]["legs"][0] = "nonesuch/bogus"
+        self.box.save_registry(doc)
+        result = self.box.run()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("t2-worker", result.stderr)
+
+    def test_non_string_rung_in_registry_effort_ladder_raises_error(self):
+        # A6a review: a non-string rung in the head model's effort_ladder
+        # raises ValueError (load_from_registry wraps it as ConfigError).
+        doc = self.box.registry()
+        doc["models"]["gemini-3.8-flash"]["effort_ladder"] = ["low", 99, "high"]
+        self.box.save_registry(doc)
+        result = self.box.run()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("t2-worker", result.stderr)
 
 
 if __name__ == "__main__":

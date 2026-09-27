@@ -454,21 +454,21 @@ class FilterTests(unittest.TestCase):
         # FT: a too-small-context leg no longer removes the whole route (see
         # test_survivors_are_route_ids_in_registry_order) -- it is only
         # skipped, in usable_legs()'s own per-leg reasons.
-        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-mixed"],
                                    self.card(), self.feats(), self.state(),
                                    self.registry, {})
         self.assertIn("context: need 1000x1.3 > usable 100 on clean/tiny",
                       skipped["clean/tiny"])
 
     def test_tool_calls_reason(self):
-        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-mixed"],
                                    self.card(kind="implement"), self.feats(),
                                    self.state(), self.registry, self.overlay)
         self.assertIn("tool_calls: clean/bound is unproven",
                       skipped["clean/bound"])
 
     def test_tool_calls_filter_is_skipped_for_a_non_agentic_kind(self):
-        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-mixed"],
                                    self.card(kind="research"),
                                    self.feats(need_tokens=10), self.state(),
                                    self.registry, {})
@@ -476,7 +476,7 @@ class FilterTests(unittest.TestCase):
                          ["client_bound: clean/bound needs claude"])
 
     def test_client_bound_reason(self):
-        _, skipped = r.usable_legs(self.registry["routes"]["r-mixed"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-mixed"],
                                    self.card(kind="review"),
                                    self.feats(need_tokens=10), self.state(),
                                    self.registry, {})
@@ -788,7 +788,7 @@ class FallThroughTests(unittest.TestCase):
         # inside the bound client: run 20260926-142228 got 403 "OpenCode's free
         # tier can only be used from within OpenCode" on client=opencode.
         registry = self.two_leg_registry(leg_a={"client_bound": "opencode"})
-        legs, skipped = r.usable_legs(registry["routes"]["r-ft"], self.card(),
+        legs, skipped, _ = r.usable_legs(registry["routes"]["r-ft"], self.card(),
                                       self.features(), self.state(), registry, {},
                                       client="opencode")
         self.assertEqual(legs, [("p", "model-b")])
@@ -802,7 +802,7 @@ class FallThroughTests(unittest.TestCase):
         survivors, _ = r.filter_routes(card, features, client_state, registry, {})
         self.assertEqual(survivors, ["r-ft"])
 
-        legs, skipped = r.usable_legs(registry["routes"]["r-ft"], card,
+        legs, skipped, _ = r.usable_legs(registry["routes"]["r-ft"], card,
                                       features, client_state, registry, {})
         self.assertEqual(legs, [("p", "model-b")])
         self.assertEqual(skipped,
@@ -851,7 +851,7 @@ class FallThroughTests(unittest.TestCase):
             "p/model-b": {"tool_calls_last_error": {"trials": trials_429}},
         }}
 
-        legs, skipped = r.usable_legs(registry["routes"]["r-ft"], card,
+        legs, skipped, _ = r.usable_legs(registry["routes"]["r-ft"], card,
                                       features, client_state, registry, overlay)
         # model-a: unproven AND rate-limited -- skipped, both reasons kept.
         self.assertEqual(legs, [("p", "model-b")])
@@ -882,6 +882,232 @@ class FallThroughTests(unittest.TestCase):
                                              registry, overlay)
         self.assertIn("t2-worker-clean", survivors)
         self.assertNotIn("t2-worker-clean", removed)
+
+
+class ProviderLimitsFilterTests(unittest.TestCase):
+    """The per-leg tpm filter (brief R4, 2026-09-27): a leg whose provider
+    limits for that model carry `tpm` is skipped when need_tokens * 1.3 > tpm,
+    counted as a skipped leg exactly like the context filter. No clock, no
+    counters: rpm/rpd/tpd are data only for now.
+
+    A small inline registry with a groq leg carrying tpm 8000 (the operator's
+    measured Groq free-tier cap); no policy.leg_rules here, so the deny-groq
+    rule never gates it -- the test isolates the tpm filter.
+    """
+
+    def setUp(self):
+        self.registry = {
+            "providers": {
+                "groq": {"id": "groq", "tier": "free", "trains_on_prompts": False,
+                         "limits": {
+                             "openai/gpt-oss-120b": {
+                                 "rpm": 30, "rpd": 1000, "tpm": 8000,
+                                 "tpd": 200000,
+                                 "source": "operator Groq console screenshot 2026-09-27"}}},
+                "clean": {"id": "clean", "tier": "paid", "trains_on_prompts": False},
+            },
+            "models": {
+                "openai/gpt-oss-120b": {
+                    "id": "openai/gpt-oss-120b", "tool_calls": "proven",
+                    "context_usable": {"tokens": 131072, "source": "default"}},
+                "big": {"id": "big", "tool_calls": "proven",
+                        "context_usable": {"tokens": 100000, "source": "default"}},
+            },
+            "routes": {
+                "r-groq": {"id": "r-groq",
+                           "legs": ["groq/openai/gpt-oss-120b", "clean/big"]},
+            },
+        }
+
+    def card(self, kind="review", privacy="public"):
+        return {"kind": kind, "privacy": privacy}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def test_a_2k_token_need_keeps_a_groq_leg(self):
+        # 2000 * 1.3 = 2600 <= tpm 8000: the groq leg survives.
+        legs, skipped, _ = r.usable_legs(
+            self.registry["routes"]["r-groq"], self.card(),
+            {"need_tokens": 2000}, self.state(), self.registry, {})
+        self.assertIn(("groq", "openai/gpt-oss-120b"), legs)
+        self.assertNotIn("groq/openai/gpt-oss-120b", skipped)
+
+    def test_a_9k_need_skips_the_groq_leg_with_the_reason(self):
+        # 9000 * 1.3 = 11700 > tpm 8000: the groq leg is skipped, named as a
+        # limit reason, and the clean/big fallback leg still serves.
+        legs, skipped, _ = r.usable_legs(
+            self.registry["routes"]["r-groq"], self.card(),
+            {"need_tokens": 9000}, self.state(), self.registry, {})
+        self.assertNotIn(("groq", "openai/gpt-oss-120b"), legs)
+        self.assertIn("groq/openai/gpt-oss-120b", skipped)
+        self.assertTrue(
+            any("limit: groq/openai/gpt-oss-120b tpm 8000 < need 9000" in rsn
+                for rsn in skipped["groq/openai/gpt-oss-120b"]),
+            skipped["groq/openai/gpt-oss-120b"])
+
+    def test_a_leg_without_limits_is_unaffected(self):
+        # clean/big has no limits entry: a 9k need skips the groq leg but keeps
+        # clean/big (context 100000 * 1.3 covers it).
+        legs, skipped, _ = r.usable_legs(
+            self.registry["routes"]["r-groq"], self.card(),
+            {"need_tokens": 9000}, self.state(), self.registry, {})
+        self.assertIn(("clean", "big"), legs)
+        self.assertNotIn("clean/big", skipped)
+
+    def test_tpm_boundary_equal_keeps_the_leg(self):
+        """need * 1.3 == tpm keeps the leg (review R4FIX): the filter skips only
+        on strictly greater, so the boundary leg survives and one token over
+        drops it."""
+        reg = self.registry
+        reg["providers"]["groq"]["limits"]["openai/gpt-oss-120b"]["tpm"] = 1300
+        legs, skipped, _ = r.usable_legs(
+            reg["routes"]["r-groq"], self.card(),
+            {"need_tokens": 1000}, self.state(), reg, {})
+        self.assertIn(("groq", "openai/gpt-oss-120b"), legs)
+        self.assertNotIn("groq/openai/gpt-oss-120b", skipped)
+
+        legs, skipped, _ = r.usable_legs(
+            reg["routes"]["r-groq"], self.card(),
+            {"need_tokens": 1001}, self.state(), reg, {})
+        self.assertNotIn(("groq", "openai/gpt-oss-120b"), legs)
+        self.assertIn("groq/openai/gpt-oss-120b", skipped)
+
+    def test_a_route_dropped_by_tpm_is_input_required_naming_tpm(self):
+        """Review R4FIX: when the tpm filter drops every leg of a route, the
+        route comes back with a 'no usable leg' reason naming the tpm limit and
+        no_route reports input_required."""
+        reg = self.registry
+        reg["routes"]["r-groq"]["legs"] = ["groq/openai/gpt-oss-120b"]
+        survivors, removed = r.filter_routes(
+            self.card(), {"need_tokens": 9000}, self.state(), reg, {})
+        self.assertNotIn("r-groq", survivors)
+        self.assertIn("r-groq", removed)
+        joined = " ".join(removed["r-groq"])
+        self.assertIn("no usable leg", joined)
+        self.assertIn("tpm", joined)
+        self.assertEqual(r.no_route(removed)["state"], "input_required")
+
+
+class LegRulesFilterTests(unittest.TestCase):
+    """The per-leg policy.leg_rules filter (brief OR1f, 2026-09-27).
+
+    The gateway renders only ``registry.gateway_legs``, which drops every leg
+    ``policy.leg_rules`` denies; the resolver's ``usable_legs`` must drop the
+    same legs, or it plans a combo (e.g. ``groq/openai/gpt-oss-120b``) the
+    gateway never serves. A denied leg is skipped with a reason naming the
+    rule, and a route whose only leg is denied comes back as the resolver's
+    existing no-usable-leg outcome. No clock, no availability here: the inline
+    registry isolates the deny rule from the other per-leg filters.
+    """
+
+    def registry(self):
+        return {
+            "providers": {
+                "groq": {"id": "groq", "tier": "free",
+                         "trains_on_prompts": False},
+                "clean": {"id": "clean", "tier": "paid",
+                          "trains_on_prompts": False},
+            },
+            "models": {
+                "openai/gpt-oss-120b": {
+                    "id": "openai/gpt-oss-120b", "tool_calls": "proven",
+                    "context_usable": {"tokens": 131072, "source": "default"}},
+                "big": {"id": "big", "tool_calls": "proven",
+                        "context_usable": {"tokens": 100000,
+                                           "source": "default"}},
+                "small": {"id": "small", "tool_calls": "proven",
+                          "context_usable": {"tokens": 100000,
+                                             "source": "default"}},
+            },
+            "routes": {
+                "r-rules": {"id": "r-rules",
+                            "legs": ["groq/openai/gpt-oss-120b", "clean/big"]},
+                "r-only-denied": {"id": "r-only-denied",
+                                  "legs": ["groq/openai/gpt-oss-120b"]},
+                "r-order": {"id": "r-order",
+                            "legs": ["clean/big", "groq/openai/gpt-oss-120b",
+                                     "clean/small"]},
+            },
+            "policy": {
+                "leg_rules": [
+                    {"id": "deny-groq", "match": "groq/*", "allow": False,
+                     "reason": "test: groq denied"},
+                    {"id": "allow-clean", "match": "clean/*", "allow": True,
+                     "reason": "test: clean allowed"},
+                ],
+            },
+        }
+
+    def card(self):
+        return {"kind": "review", "privacy": "public"}
+
+    def features(self):
+        return {"need_tokens": 1000}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def test_denied_leg_skipped_with_reason_naming_the_rule(self):
+        registry = self.registry()
+        legs, skipped, _ = r.usable_legs(registry["routes"]["r-rules"],
+                                       self.card(), self.features(),
+                                       self.state(), registry, {})
+        self.assertEqual(legs, [("clean", "big")])
+        self.assertEqual(
+            skipped["groq/openai/gpt-oss-120b"],
+            ["leg_rules: groq/openai/gpt-oss-120b denied by deny-groq"])
+
+    def test_route_whose_only_leg_is_denied_is_input_required(self):
+        registry = self.registry()
+        survivors, removed = r.filter_routes(self.card(), self.features(),
+                                             self.state(), registry, {})
+        self.assertNotIn("r-only-denied", survivors)
+        joined = " ".join(removed["r-only-denied"])
+        self.assertIn("no usable leg", joined)
+        self.assertIn("leg_rules: groq/openai/gpt-oss-120b denied by deny-groq",
+                      joined)
+        self.assertEqual(r.no_route(removed)["state"], "input_required")
+
+    def test_an_allowed_leg_next_to_a_denied_one_is_kept_in_order(self):
+        registry = self.registry()
+        legs, skipped, _ = r.usable_legs(registry["routes"]["r-order"],
+                                       self.card(), self.features(),
+                                       self.state(), registry, {})
+        # Allowed legs keep route order; the denied leg in the middle is the
+        # only one skipped.
+        self.assertEqual(legs, [("clean", "big"), ("clean", "small")])
+        self.assertEqual(sorted(skipped), ["groq/openai/gpt-oss-120b"])
+
+    def test_real_registry_usable_legs_are_gateway_servable(self):
+        """Every leg ``usable_legs`` keeps is also served by
+        ``registry.gateway_legs`` for the same route: the resolver must plan
+        only legs a gateway combo serves. Client-bound legs are dropped by both
+        (the gateway 403s them; the resolver's client_bound filter skips them).
+        Legs are compared in resolved ``(provider_id, model_id)`` form because
+        gateway_legs returns the raw leg strings, whose provider half can be an
+        alias (``cheapinference/...`` resolves to provider
+        ``cheaperinference``)."""
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        card = {"kind": "review", "privacy": "public"}
+        features = {"need_tokens": 1000}
+        client_state = {"opencode": {"installed": True, "signed_in": True,
+                                     "reason": ""}}
+        for route_id, route in registry["routes"].items():
+            if not (route.get("legs") or []):
+                continue  # a legless route renders no combo at all
+            gateway = set()
+            for leg in registry_tool.gateway_legs(route, registry):
+                if isinstance(leg, str):
+                    gateway.add(registry_tool.resolve_leg(leg, registry))
+            kept, _, _ = r.usable_legs(route, card, features, client_state,
+                                       registry, {})
+            for leg in kept:
+                self.assertIn(leg, gateway,
+                              "%s: usable leg %s is not in gateway_legs"
+                              % (route_id, leg))
 
 
 class ScoreTests(unittest.TestCase):
@@ -1542,7 +1768,7 @@ class PlanTests(unittest.TestCase):
             "route", "class", "client", "leg", "effort", "max_tokens",
             "context_budget", "bucket", "decompose", "p", "expected_cost",
             "reviewers", "escalation", "state", "defer_until", "reason",
-            "explain", "skipped_legs",
+            "explain", "skipped_legs", "re_probe_notes",
         })
         # Every model in this fixture is tool_calls "proven" with plenty of
         # context: nothing is skipped, so FT's skipped_legs is empty here.
@@ -1600,6 +1826,27 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(result["bucket"], "S0")
         self.assertIn("hints", result)
         self.assertIn("no route survives the filters", result["reason"])
+
+    # FUP (2026-09-27): re-probe notes must not inflate "falls through"
+    # count -- a leg whose provider's unavailable_until just passed is
+    # usable again, and the informational note is separate from skipped.
+
+    def test_re_probe_note_does_not_say_falls_through(self):
+        reg = self.registry()
+        reg["providers"]["free-p"]["available"] = False
+        reg["providers"]["free-p"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        now = self.dt(2026, 10, 1, 9, 5)
+        result = r.plan(self.card(), self.features(),
+                        self.state(), reg, {}, [],
+                        "orch", now=now)
+        self.assertIsNotNone(result["route"], "a self-healed route must be picked")
+        self.assertEqual(result["skipped_legs"], {},
+                         "a leg whose only note is re-probe must not be in skipped")
+        notes = result.get("re_probe_notes", {}).get("free-p/free-model", [])
+        self.assertTrue(notes and "re-probe" in notes[0],
+                        "%s: %s" % (result.get("route", "?"), notes))
+        self.assertNotIn("falls through", result["reason"],
+                         "re-probe notes must not inflate the falls-through count")
 
     # --- override ------------------------------------------------------
 
@@ -2146,10 +2393,14 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         now = self.dt(2026, 10, 1, 9, 5, 0)
         survivors, removed = self.filter(now=now)
         self.assertIn("r-quota", survivors)
-        _, skipped = r.usable_legs(self.registry["routes"]["r-quota"],
-                                   self.card, self.features, self.state,
-                                   self.registry, {}, now=now)
-        self.assertEqual(skipped["quota/slow"],
+        _, skipped, re_probe_notes = r.usable_legs(
+            self.registry["routes"]["r-quota"],
+            self.card, self.features, self.state,
+            self.registry, {}, now=now)
+        # The re-probe note is no longer in skipped for a usable leg; it
+        # lives in re_probe_notes instead (FUP 2026-09-27).
+        self.assertNotIn("quota/slow", skipped)
+        self.assertEqual(re_probe_notes["quota/slow"],
                          ["re-probe: quota unavailable_until passed"])
 
     def test_an_unavailable_leg_with_a_future_until_names_the_date(self):
@@ -2168,7 +2419,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # reason line must not claim it did (rule 7 reports the value).
         self.registry["providers"]["quota"]["unavailable_until"] = (
             "next tuesday")
-        _, skipped = r.usable_legs(self.registry["routes"]["r-quota"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-quota"],
                                    self.card, self.features, self.state,
                                    self.registry, {}, now=self.dt(2026, 9, 26))
         self.assertNotIn("quota/slow", skipped)
@@ -2177,7 +2428,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # Same on the leg's own unavailable_legs entry.
         self.registry["routes"]["r-plain"]["unavailable_legs"] = {
             "cheap/fast": {"unavailable_until": "next tuesday"}}
-        _, skipped = r.usable_legs(self.registry["routes"]["r-plain"],
+        _, skipped, _ = r.usable_legs(self.registry["routes"]["r-plain"],
                                    self.card, self.features, self.state,
                                    self.registry, {}, now=self.dt(2026, 9, 26))
         self.assertNotIn("cheap/fast", skipped)
@@ -2190,7 +2441,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
             self.assertNotIn("r-plain", survivors)
             self.assertEqual(removed["r-plain"],
                              ["no usable leg: cheap/fast: unavailable"])
-            _, skipped = r.usable_legs(self.registry["routes"]["r-plain"],
+            _, skipped, _ = r.usable_legs(self.registry["routes"]["r-plain"],
                                        self.card, self.features, self.state,
                                        self.registry, {}, now=now)
             self.assertEqual(skipped["cheap/fast"], ["unavailable"])

@@ -296,6 +296,55 @@ class ShapeTests(RepoTestCase):
                                              "tests", "need_tokens"})
 
 
+class ConflictDedupTests(unittest.TestCase):
+    """Item 4 (TOOLFIX): during an unresolved merge git ls-files lists a
+    conflicted path once per index stage (1/2/3); tracked_files dedups it so
+    one file is not counted as three (measured: files=3 -> bucket S0 became S2).
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "commit.gpgsign=false"]
+        subprocess.run(git + ["init", "-q", str(self.repo)], check=True)
+        f = self.repo / "conflict.txt"
+        f.write_text("base\n", encoding="utf-8")
+        subprocess.run(git + ["-C", str(self.repo), "add", "conflict.txt"], check=True)
+        subprocess.run(git + ["-C", str(self.repo), "commit", "-q", "-m", "base"],
+                       check=True)
+        # a divergent branch changing the same line
+        subprocess.run(git + ["-C", str(self.repo), "checkout", "-q", "-b", "topic"],
+                       check=True)
+        f.write_text("topic\n", encoding="utf-8")
+        subprocess.run(git + ["-C", str(self.repo), "add", "conflict.txt"], check=True)
+        subprocess.run(git + ["-C", str(self.repo), "commit", "-q", "-m", "topic"],
+                       check=True)
+        # back on master, change the same line, then merge topic -> conflict
+        subprocess.run(git + ["-C", str(self.repo), "checkout", "-q", "master"],
+                       check=True)
+        f.write_text("master\n", encoding="utf-8")
+        subprocess.run(git + ["-C", str(self.repo), "add", "conflict.txt"], check=True)
+        subprocess.run(git + ["-C", str(self.repo), "commit", "-q", "-m", "master"],
+                       check=True)
+        proc = subprocess.run(git + ["-C", str(self.repo), "merge", "-q", "topic"],
+                              capture_output=True)
+        self.assertNotEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_a_conflicted_path_is_counted_once(self):
+        # git ls-files lists the one conflicted path three times (stages
+        # 1/2/3); tracked_files dedups order-preserving so files == 1, not 3.
+        files = m.tracked_files(str(self.repo))
+        self.assertEqual(files, ["conflict.txt"])
+        self.assertEqual(len(files), 1)
+
+    def test_measure_reports_the_deduped_count(self):
+        f = m.measure({"paths": ["."]}, str(self.repo), "brief")
+        self.assertEqual(f["files"], 1)
+        self.assertEqual(f["sources"]["files"], "git ls-files")
+
+
 class _FakeClient:
     def __init__(self, name, binary, signin_probe=()):
         self.name = name

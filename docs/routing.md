@@ -25,6 +25,21 @@ flowchart LR
 
 Drift gates (run after any combo/client edit): `audit-router.py` (live) /
 `--offline` (CI), `sync-router-tiers.py --check`, `check-links.py`.
+`apply.sh --drift` compares the live combos against `combos.json` (`omniroute --output json combo list`: name + ordered legs, `retired` ids ignored) and writes nothing.
+Exit 0 in sync, 1 on any `drift`/`missing`/`extra` line, 3 when the store cannot be read (CLI absent or gateway refuses — one reason line, never a key).
+`apply.sh` and `apply.ps1` also prune the two managed-orphan lists in `combos.json` from the live store: `retired` (dead ids a rename left) and `omitted` (OR1g: only the orphaned routes — a route that declared legs but the render serves none for) — never a combo in `combos.json`, and never one the user made. A deliberately legless route (`legs: []`: the LiteLLM-only `*-paid` and the dynamic `auto*`) is in neither list, so a live combo with one of its ids is never pruned.
+`--drift` reports an omitted live combo as `extra <id> (omitted: no servable leg)`, and a non-object `combo list` answer as an unreadable store (exit 3), not a crash.
+
+Usage report: `autoos-agent.py usage --since 1h --by provider,combo,lane` (`--json` for machine-readable).
+It reads the OmniRoute gateway's `/api/usage/call-logs` with the manage-scoped key from the ai-stack
+config dir. Heartbeats print `usage --since 1h --by provider,lane`.
+
+Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
+header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;
+tag = env `AUTOOS_SESSION_TAG` when valid, else `<lane worktree basename>/<slugified title>`).
+OmniRoute copies that header into the `session_tag` field of each `call_logs` row, so a lane's calls
+are the rows of `/api/usage/call-logs` whose `session_tag` equals the tag (the route has no
+`session_tag` filter param yet — page and match client-side).
 
 A live probe that gets HTTP 503 is retried with a backoff (5 s, 15 s, 45 s) before it is
 reported: OmniRoute answers 503 "resource pressure" when the host is short of memory, which

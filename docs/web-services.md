@@ -482,7 +482,7 @@ when M is 0**, 1 otherwise.
 The variables `verify` reads besides the ones above:
 
 - `AUTOOS_VERIFY_COMBOS` - space separated combo names for check 3
-  (default `t2-worker-free-only t3-driver-free-only t2-worker-clean`).
+  (default `t2-worker-free-only t2-worker-clean`).
 - `AUTOOS_VERIFY_RETRY_SLEEP` - seconds before check 3's first retry (default
   10, doubled for the second; decimal, anything else means 10).
 - `AUTOOS_VERIFY_PUBLIC_URLS` - space separated public URLs for check 6. Keep

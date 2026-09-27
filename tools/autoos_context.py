@@ -26,11 +26,11 @@ import os
 from pathlib import Path
 
 # Spec 8.3, exactly: (lowercased substring, window, hand off at).
-# Opus 400k/1M, Fable 400k/1M, Muse Spark 300k/1M, Gemini 200k/1M,
+# Opus 600k/1M, Fable 600k/1M (operator 2026-09-27, was 400k), Muse Spark 300k/1M, Gemini 200k/1M,
 # 200k-class default 150k.
 DEFAULT_CAPS = [
-    ("opus", 1000000, 400000),
-    ("fable", 1000000, 400000),
+    ("opus", 1000000, 600000),
+    ("fable", 1000000, 600000),
     ("spark", 1000000, 300000),
     ("gemini", 1000000, 200000),
     ("*", 200000, 150000),
@@ -50,6 +50,13 @@ def caps_from_registry(registry_dict: dict) -> list[tuple[str, int, int]]:
     Non-"*" rows come first in file order, "*" last (the default). Each row's
     `match` list may carry multiple substrings (e.g. opus+ fable); each becomes
     its own row so cap_for's first-match-wins logic stays unchanged.
+
+    A row is usable only when every key the schema requires is present:
+    `match`, `window`, `cap_tokens` and `cap_fraction` (the schema's
+    provider-independent cap formula is window * cap_fraction). A partial row
+    (measured: one missing cap_fraction) is skipped, so a registry carrying
+    only partial rows falls through to DEFAULT_CAPS and load_caps reports
+    source 'default', never 'policy' (review R4FIX, 2026-09-27).
     """
     handoff_caps = registry_dict.get("policy", {}).get("handoff_caps", {})
     if not isinstance(handoff_caps, dict):
@@ -62,7 +69,11 @@ def caps_from_registry(registry_dict: dict) -> list[tuple[str, int, int]]:
         match = entry.get("match")
         window = entry.get("window")
         cap = entry.get("cap_tokens")
-        if not isinstance(match, list) or not isinstance(window, int) or not isinstance(cap, int):
+        fraction = entry.get("cap_fraction")
+        if not isinstance(match, list) or not isinstance(window, int) \
+                or not isinstance(cap, int) \
+                or not isinstance(fraction, (int, float)) \
+                or isinstance(fraction, bool):
             continue
         for substring in match:
             if not isinstance(substring, str):
@@ -81,7 +92,10 @@ def _has_usable_rows(registry_dict) -> bool:
     if not isinstance(handoff_caps, dict):
         return False
     return any(isinstance(e, dict) and isinstance(e.get("match"), list)
-               and isinstance(e.get("window"), int) and isinstance(e.get("cap_tokens"), int)
+               and isinstance(e.get("window"), int)
+               and isinstance(e.get("cap_tokens"), int)
+               and isinstance(e.get("cap_fraction"), (int, float))
+               and not isinstance(e.get("cap_fraction"), bool)
                for e in handoff_caps.values())
 
 

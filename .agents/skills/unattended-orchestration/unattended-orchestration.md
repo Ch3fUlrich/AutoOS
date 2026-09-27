@@ -151,7 +151,7 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   repo. Take results with `git fetch <clone> <branch>`; nothing is merged or
   deleted for you. The clone starts from `HEAD`, so commit first.
 - **`--free`** maps every tier to opencode's own free model (default
-  `opencode/big-pickle`) through `OPENCODE_CONFIG_CONTENT`. Use it to
+  `opencode/muse-spark-1.3-contributor-free`) through `OPENCODE_CONFIG_CONTENT`. Use it to
   exercise the chain and the fences before any provider key exists. Free
   promo models may train on prompts, so `--free --clean` is refused.
 
@@ -159,15 +159,14 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
 
 `tools/autoos_agent_mcp.py` is a stdio MCP server
 (`uv --quiet run --no-project --with 'mcp<2' python tools/autoos_agent_mcp.py`).
-It has five tools:
-
-- `list_clients`
-- `spawn(task, client, card | tier, isolate, lean, …)`: returns a run id at
-  once. Refusals come back synchronously from the CLI's own dry run.
-  `lean` defaults on for `role=review`.
-- `status(run_id?)`
-- `result(run_id)`: the output tail.
-- `cancel(run_id)`
+Its tools, their arguments and the run states are listed once, in the module
+docstring of `tools/autoos_agent_mcp.py` (read it there). The ones an orchestrator
+uses: `spawn` returns a run id at once (refusals come back synchronously from the
+CLI's own dry run; `lean` defaults on for `role=review`); `status` reports the A2A
+states in `TASK_STATES` (`submitted`, `working`, `input_required`, `completed`,
+`failed`, `canceled`, `rejected`; the old value stays in `detail`); a worker blocked
+on a question (`tools/autoos-ask.py`) shows `input_required` until
+`respond(run_id, text)` answers it; `result`, `cancel`, `route`.
 
 Each run keeps `job.json`, `output.log` and `exit.json` under
 `<repo>/logs/agents/<id>/` (git-ignored; `AUTOOS_STATE_DIR` overrides `<repo>/logs`, isolated clones go to `logs/sandboxes/`). The installers register the server,

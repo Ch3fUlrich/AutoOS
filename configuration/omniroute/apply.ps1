@@ -5,10 +5,12 @@
 .DESCRIPTION
   1. Registers every provider key found in configuration/api-keys.yml.
   2. (Re)creates the tier combos from configuration/omniroute/combos.json.
-  3. Prunes the combos listed there as "retired" from the store (only those).
+  3. Prunes the combos listed there as "retired" or "omitted" from the store
+     (only those).
 
   Safe to re-run: providers are add-or-update, combos are replaced in place,
-  and a retired combo that is already gone is simply not found again.
+  and a managed orphan (retired/omitted) that is already gone is simply not
+  found again.
   Model refs the live catalog does not know are skipped with a warning, so a
   renamed upstream model degrades one tier leg instead of breaking the run.
 
@@ -374,20 +376,21 @@ foreach ($combo in $combos) {
     }
 }
 
-# --- Prune: delete the retired combos, and only those ---
-# combos.json "retired" lists the ids a rename or removal left behind. The loop
-# above only creates and replaces by name, so they used to stay in the store
-# forever (9 orphans deleted by hand on 2026-09-25). A name is deleted only when
-# it is retired AND live (and not a current combo): a store combo that is not
-# in "retired" may be one the user made and is never touched.
+# --- Prune: delete the retired and omitted combos, and only those ---
+# combos.json carries two lists of ids the live store should not hold:
+# "retired" (a rename or removal left them behind; 9 orphans were deleted by
+# hand on 2026-09-25) and "omitted" (OR1g: a route that declared legs but the
+# registry renders no combo for, because it has no gateway-servable leg). The
+# loop above only creates and replaces by name, so such an id would otherwise
+# stay in the store forever. A name is deleted only when it is in one of those
+# lists AND live (and not a current combo): a store combo in neither list may
+# be one the user made and is never touched. A deliberately legless route
+# (legs: [] - the LiteLLM-only *-paid and auto* routes) is in neither list by
+# construction, so a live combo with one of its ids is never pruned.
 # A down gateway is not listed at all: the CLI would fall back to reading the
 # store file directly, and a dry run must not depend on that.
 Write-Host 'Prune:'
 $currentNames = @($combos | ForEach-Object { $_.name })
-$retiredNames = @()
-if ($comboDoc.PSObject.Properties['retired']) {
-    $retiredNames = @($comboDoc.retired | Where-Object { $currentNames -cnotcontains $_ })
-}
 if (-not (Get-Command omniroute -ErrorAction SilentlyContinue)) {
     Write-Host '  - omniroute CLI missing - the store is not read, nothing pruned'
 } elseif (-not (Test-Gateway)) {
@@ -409,16 +412,33 @@ if (-not (Get-Command omniroute -ErrorAction SilentlyContinue)) {
     if (-not $listed) {
         Write-Host "  ! could not list the store's combos - nothing pruned"
     } else {
-        $pruneNames = @($retiredNames | Where-Object { $liveNames -ccontains $_ })
-        if ($pruneNames.Count -eq 0) { Write-Host '  = no retired combos in the store' }
-        foreach ($retiredName in $pruneNames) {
+        # Every managed orphan, labelled with the list it came from. The two
+        # lists are disjoint by construction, but the store is external: a name
+        # in both is printed once, "retired" first (the older fact) - the same
+        # order apply.sh uses.
+        $pruneNames = @()
+        $seen = @()
+        foreach ($kind in @('retired', 'omitted')) {
+            if ($comboDoc.PSObject.Properties[$kind]) {
+                foreach ($name in @($comboDoc.$kind)) {
+                    if ($liveNames -ccontains $name -and $currentNames -cnotcontains $name -and $seen -cnotcontains $name) {
+                        $seen += $name
+                        $pruneNames += [pscustomobject]@{ Kind = $kind; Name = $name }
+                    }
+                }
+            }
+        }
+        if ($pruneNames.Count -eq 0) {
+            Write-Host '  = no retired or omitted combos in the store'
+        }
+        foreach ($prune in $pruneNames) {
             if ($DryRun) {
-                Write-Host "  - ${retiredName}: retired, would delete"
+                Write-Host "  - $($prune.Name): $($prune.Kind), would delete"
                 continue
             }
-            & omniroute combo delete $retiredName --yes *> $null
-            if ($LASTEXITCODE -eq 0) { Write-Host "  - ${retiredName}: retired, deleted" }
-            else { Write-Host "  ! ${retiredName}: retired, delete failed - run: omniroute combo delete $retiredName --yes" }
+            & omniroute combo delete $prune.Name --yes *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Host "  - $($prune.Name): $($prune.Kind), deleted" }
+            else { Write-Host "  ! $($prune.Name): $($prune.Kind), delete failed - run: omniroute combo delete $($prune.Name) --yes" }
         }
     }
 }

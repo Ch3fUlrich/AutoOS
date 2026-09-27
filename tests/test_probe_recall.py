@@ -794,5 +794,29 @@ class CliMainTests(unittest.TestCase):
         self.assertEqual(len(post.calls), 8)
 
 
+class DenyRuleTests(unittest.TestCase):
+    """Item 1 (TOOLFIX): probe_common's shared skip logic also skips a
+    policy-denied free leg (probe-recall uses probe_common.legs_to_probe)."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.registry = {
+            "providers": {
+                "free": {"id": "free", "tier": "free", "available": True},
+                "groq": {"id": "groq", "tier": "free", "available": True},
+            },
+            "models": {"big": {"id": "big",
+                               "context_advertised": {"tokens": 1000000}}},
+            "routes": {"r1": {"id": "r1", "legs": ["free/big", "groq/big"]}},
+            "policy": {"leg_rules": [
+                {"id": "deny-groq", "match": "groq/*", "allow": False, "reason": "x"},
+            ]},
+        }
+
+    def test_a_denied_free_leg_is_skipped_with_the_rule_id(self):
+        reasons = dict(self.mod.legs_to_probe(self.registry))
+        self.assertEqual(reasons["groq/big"], "policy: denied by deny-groq")
+
+
 if __name__ == "__main__":
     unittest.main()

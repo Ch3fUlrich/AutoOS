@@ -68,9 +68,9 @@ Usage:
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
 
 --free maps every tier agent to one of opencode's own free models (default
-opencode/big-pickle) through OPENCODE_CONFIG_CONTENT: no gateway, no key, no
-spend - for exercising the tier chain and the permission fences. Free promo
-models may train on prompts, so --free refuses --clean.
+opencode/muse-spark-1.3-contributor-free) through OPENCODE_CONFIG_CONTENT: no
+gateway, no key, no spend - for exercising the tier chain and the permission
+fences. Free promo models may train on prompts, so --free refuses --clean.
 
 Never prints a key. The OmniRoute client key comes from AUTOOS_OMNIROUTE_KEY
 or the `omniroute:` line of configuration/api-keys.yml and is handed to the
@@ -84,7 +84,8 @@ branch reflog (commit-then-reset) or moved side refs - or a tracked file outside
 before - the shas and paths are printed, nothing is reverted, the track record carries
 failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6 and 8); 8 = a provider stop
 (rate limit, 429, capacity, quota or billing) appeared in the last lines of the captured client
-output while the client exited 0 (PROVIDER-STOP; the track record carries failure class
+output while the client exited 0, 3 or 6 (PROVIDER-STOP; rc 3 is agy's own quota exit - AGYFIX
+item 3, measured 2026-09-27; the track record carries failure class
 "provider"; an --isolate run WIP-commits its uncommitted work first (a review run exempted - its
 deliverable is its diff), so nothing is lost); the child's
 exit code; 2 bad arguments, card or route refused;
@@ -127,12 +128,13 @@ import autoos_measure as measure_mod  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_track as track  # noqa: E402
+import autoos_usage as usage_mod  # noqa: E402
 from registry import private_safe, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
 GATEWAY = "http://127.0.0.1:20128"
-DEFAULT_FREE_MODEL = "opencode/big-pickle"
+DEFAULT_FREE_MODEL = "opencode/muse-spark-1.3-contributor-free"
 # run_client re-emits a child's output as it arrives and keeps this much of it
 # so cmd_run can spot a headless refusal that still exited 0 (bug 2).
 TAIL_LIMIT = 64 * 1024
@@ -217,7 +219,7 @@ def lean_overlay(cfg: dict) -> dict:
                                 for n in LEAN_DROP if n in servers}}}
 
 
-def outside_fence(data_dir: str) -> list:
+def outside_fence(data_dir: str, task_dir: str | None = None) -> list:
     # opencode's default for paths outside the project is "ask", and --auto
     # approves every ask - live 2026-09-24 an isolated worker wrote to the
     # main checkout by absolute path. Deny outside paths, then re-allow the
@@ -227,6 +229,26 @@ def outside_fence(data_dir: str) -> list:
              os.path.join(home, ".local", "share", "opencode", "shell", "*", "*"),
              "/tmp/opencode/*"]
     allow.append(os.path.join(data_dir, "opencode", "*"))
+    if task_dir is not None:
+        # FENCE (L1-backlog 2026-09-27): the MCP run_job sets AUTOOS_TASK_DIR
+        # to <ROOT>/logs/agents/<run id>, and a blocked worker's
+        # tools/autoos-ask.py writes question.json there. Under --isolate the
+        # run dir is outside the sandbox clone, so the deny above refused the
+        # write (autoos-ask exit 5). Re-allow exactly that dir - only when
+        # its realpath stays under logs/agents; anything else (an escape via
+        # .. or a symlink, a relative path, a missing dir) adds no rule and
+        # warns once, it never refuses the run. The allow entries above set
+        # the form: "<dir>/*" matches the files written inside the dir, so
+        # the bare dir itself needs no entry.
+        task_real = os.path.realpath(task_dir)
+        agents = os.path.realpath(os.path.join(ROOT, "logs", "agents"))
+        if (os.path.isabs(task_dir) and os.path.isdir(task_real)
+                and task_real.startswith(agents + os.sep)):
+            allow.append(os.path.join(task_real, "*"))
+        else:
+            print("AUTOOS_TASK_DIR %s is not an existing run dir under %s - "
+                  "the --isolate fence keeps it denied (autoos-ask exits 5)"
+                  % (task_dir, agents), file=sys.stderr)
     return ([{"action": "external_directory", "resource": "*", "effect": "deny"}] +
             [{"action": "external_directory", "resource": p, "effect": "allow"} for p in allow])
 
@@ -273,6 +295,32 @@ def gateway_up() -> bool:
 def slugify(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40].strip("-")
     return slug or "task"
+
+
+SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._/-]{1,120}$")
+SESSION_TAG_HEADER = "x-omniroute-session-id"
+
+
+def session_tag(title: str, env=None) -> str:
+    """The lane tag stamped on every spawned gateway request (OR3).
+
+    OmniRoute fills call_logs.session_tag from the request header
+    `x-omniroute-session-id` (chatCore.ts explicitSessionIdHeader wins over
+    the conversation id). Env AUTOOS_SESSION_TAG wins when it is a valid tag
+    ([A-Za-z0-9._/-]{1,120}); anything else warns once and falls back to
+    "<lane worktree basename>/<slugified title>".
+    """
+    env = os.environ if env is None else env
+    raw = env.get("AUTOOS_SESSION_TAG")
+    if raw:
+        if SESSION_TAG_RE.match(raw):
+            return raw
+        print("autoos-agent: AUTOOS_SESSION_TAG %r is not [A-Za-z0-9._/-]{1,120} - "
+              "falling back to <lane>/<title>" % raw, file=sys.stderr)
+    # The worktree name is not ours to trust: keep the header charset and
+    # leave room for "/<slug>" (slugify caps it at 40) inside 120 chars.
+    lane = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(ROOT)).strip("-")[:79] or "lane"
+    return "%s/%s" % (lane, slugify(title))
 
 
 def unique_suffix() -> str:
@@ -447,6 +495,7 @@ def build_plan(args, cfg: dict) -> dict:
     env = {"AUTOOS_AGENT_DEPTH": str(depth), "AUTOOS_AGENT_MAX_DEPTH": str(max_depth)}
     overlay = {}
     title = args.title or ("t%d %s" % (route["tier"], args.task[:50]))
+    tag = None
     if client.name == "opencode":
         agent = TIERS[route["tier"]]
         if args.free:
@@ -456,6 +505,18 @@ def build_plan(args, cfg: dict) -> dict:
             model = route["model"]
         if args.lean:
             overlay.update(lean_overlay(cfg))
+        # OR3: a spawned opencode run whose model sits on the omniroute
+        # provider stamps every gateway request with the lane tag, so
+        # call_logs.session_tag attributes the call (1881 live calls carried
+        # none). Provider-level `headers` (opencode v2 config schema
+        # packages/schema/src/config/provider.ts:32, spread into the provider
+        # at :90 and merged onto each model's requests in
+        # packages/core/src/model.ts:198) - merged into any existing provider
+        # block, never replacing it.
+        if (model or "").startswith("omniroute/"):
+            tag = session_tag(title)
+            prov = overlay.setdefault("providers", {}).setdefault("omniroute", {})
+            prov.setdefault("headers", {})[SESSION_TAG_HEADER] = tag
         cmd = ["opencode", "run", "--standalone", "--agent", agent, "--model", model,
                "--title", title]
         if args.auto:
@@ -487,7 +548,8 @@ def build_plan(args, cfg: dict) -> dict:
             # saw first; a private data dir keeps the clone from inheriting the
             # main checkout's recorded root.
             env["XDG_DATA_HOME"] = sandbox["path"] + ".opencode-data"
-            overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"])
+            overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"],
+                                                   os.environ.get("AUTOOS_TASK_DIR"))
     if sandbox is not None:
         # The fence denies opencode's file tools outside the clone, but a
         # worker told (or shown) an absolute parent path can still cd, git -C
@@ -500,7 +562,8 @@ def build_plan(args, cfg: dict) -> dict:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
             "route": route, "depth": (depth, max_depth), "free": bool(args.free),
-            "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd()}
+            "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd(),
+            "session_tag": tag}
 
 
 def cmd_list(cfg: dict) -> int:
@@ -569,11 +632,12 @@ def context_state(transcript_path: str | None, model_override: str | None) -> tu
         return {"context": "unknown", "reason": "no usage"}, 0
 
     model = model_override or fill.get("model") or "unknown"
-    cap = ctx.cap_for(model)
+    caps, source = ctx.load_caps()
+    cap = ctx.cap_for(model, caps)
     tokens = fill["tokens"]
     pct = int(round(100 * tokens / cap)) if cap else 0
     return ({"tokens": tokens, "cap": cap, "pct": pct, "model": model,
-             "transcript": path, "source": "default"}, 0)
+             "transcript": path, "source": source}, 0)
 
 
 def cmd_context(args) -> int:
@@ -582,8 +646,8 @@ def cmd_context(args) -> int:
     The fill comes from the Claude Code transcript's latest assistant usage
     record. `--model` overrides only the model the cap is looked up for; the
     tokens still come from the transcript. `--json` prints the same numbers as
-    an object (its `source` is the cap's provenance, `default` until a probe
-    measures one).
+    an object (its `source` is the cap's provenance: `policy` when read from
+    the registry's policy.handoff_caps, `default` when that is unreadable).
     """
     data, rc = context_state(args.transcript, args.model)
     if data.get("context") == "unknown":
@@ -854,6 +918,13 @@ PROVIDER_STOP_MARKERS = (
     "quota reached",
     "payment required",
     " 402",
+    # FUP (2026-09-27, measured as the whole last line of a qoder run):
+    # qodercli stops when no credits remain.
+    "your personal credits have been exhausted",
+    # TOOLFIX item 3 (measured 2026-09-27): an opencode run that printed
+    # "Error: No active credentials for provider: sambanova." as its error line
+    # then exited 1 instead of 8 -- a provider stop, not a normal exit.
+    "no active credentials for provider",
 )
 
 # WIPfix2 (measured 2026-09-26 20:2xZ): a worker that merely READS or prints
@@ -1485,6 +1556,11 @@ def cmd_run(args, cfg: dict) -> int:
             os.environ.get("AUTOOS_AGENT_TRANSCRIPT")))
         if pause["active"]:
             return refuse("PAUSE active (%s): %s" % (pause["at"], pause["text"]), 3)
+    # FUP (2026-09-27): refuse an empty or whitespace-only task before any
+    # clone or client start (measured: $(cat missing-file) produced '' and
+    # a worker chatted twice before the route planner caught it).
+    if not args.task or not args.task.strip():
+        return refuse("task is empty or whitespace-only", 2)
     client = clients.CLIENTS[args.client]
     if args.free and args.clean:
         return refuse("--free uses promo models that may train on prompts; it cannot be --clean.")
@@ -1518,6 +1594,8 @@ def cmd_run(args, cfg: dict) -> int:
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
     print("depth: %d/%d" % plan["depth"])
+    if plan.get("session_tag"):
+        print("session-tag: %s" % plan["session_tag"])
     if args.lean:
         print("lean: no %s" % (", ".join(LEAN_DROP) if client.name == "opencode" else "MCP servers"))
     if plan["sandbox"] and client.name != "opencode":
@@ -1585,18 +1663,25 @@ def cmd_run(args, cfg: dict) -> int:
     child_rc = rc  # the WIP message names the client's own rc, not a verdict override
     if refusal is not None:
         print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
-    if rc == 0 and client.promo:
-        clients.record_probe(client.name)
-    # A provider stop is a failure even though the client exited 0: it was cut
-    # off mid-task (WIPfix, 2026-09-26). Only rc 0 and 6 upgrade to 8; a LEAK
-    # (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
+    # A provider stop is a failure even though the client often exited 0: it
+    # was cut off mid-task (WIPfix, 2026-09-26). rc 0 and 6 upgrade to 8; a
+    # LEAK (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
+    # AGYFIX item 3 (measured 2026-09-27, K3 audit addendum 08:1xZ): agy with
+    # no --model exits 3 after its default Gemini quota runs out, so rc 3 joins
+    # them - the provider_stop() tail check still gates the upgrade, and other
+    # rc-3 runs (missing binary is the spawner's own 3, set earlier) never
+    # reach here with a provider-stop line.
     # Exit precedence 7 > 8 > 5 > 6: a HEADLESS-REFUSAL (6) run that is then
     # provider-stopped exits 8 with failure_class "provider" (agy measured:
     # jetski refusal + AGY_ERROR 429, R-gateway-12).
+    # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
+    # a promo client whose tail is a provider stop does not get a false probe.
     stop = provider_stop(client_tail)
-    if stop is not None and rc in (0, 6):
+    if stop is not None and rc in (0, 3, 6):
         print("autoos-agent: PROVIDER-STOP: %s" % stop, file=sys.stderr)
         rc = 8
+    if rc == 0 and client.promo:
+        clients.record_probe(client.name)
     if plan["sandbox"] and not args.joinable:
         sb = plan["sandbox"]
         branch = sb["branch"]
@@ -1648,8 +1733,14 @@ def cmd_run(args, cfg: dict) -> int:
 
 
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["usage"]:  # everything after `usage` belongs to autoos_usage
+        return usage_mod.main(list(argv[1:]))
     ap = argparse.ArgumentParser(description="Spawn one AutoOS tier agent (see module docstring).")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("usage", help="usage report by provider/combo/lane from the OmniRoute "
+                                 "gateway (OR4); its own flags follow `usage`, e.g. "
+                                 "`usage --since 1h --by provider,lane`")
     sub.add_parser("list", help="show the tiers, their models and who may spawn whom")
     run = sub.add_parser("run", help="run one task on one tier")
     run.add_argument("--tier", type=int, choices=sorted(TIERS),
