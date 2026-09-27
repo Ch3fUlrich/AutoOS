@@ -788,5 +788,48 @@ class RuleSevenUnavailableUntilTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(load_registry()), [])
 
 
+class OpenRouterByokLegTests(unittest.TestCase):
+    """L0 2026-09-27: openrouter/openai/gpt-oss-120b BYOK leg on t2-worker."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+        cls.t2_worker_legs = cls.reg["routes"]["t2-worker"]["legs"]
+        cls.unavailable_legs = cls.reg["routes"]["t2-worker"].get("unavailable_legs", {})
+
+    def test_leg_is_present_after_sambanova_gpt_oss_120b(self):
+        idx = self.t2_worker_legs.index("openrouter/openai/gpt-oss-120b")
+        # Must be right after sambanova/gpt-oss-120b
+        self.assertGreaterEqual(idx, 1)
+        self.assertEqual(self.t2_worker_legs[idx - 1], "sambanova/gpt-oss-120b")
+
+    def test_leg_resolves_to_a_model(self):
+        # resolve_leg ignores route membership, so this pins the spelling only;
+        # the membership/order pin is the test above.
+        provider, model = registry.resolve_leg("openrouter/openai/gpt-oss-120b", self.reg)
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(model, "openai/gpt-oss-120b")
+
+    def test_a_sibling_spelling_with_no_model_entry_is_refused(self):
+        with self.assertRaises(ValueError):
+            registry.resolve_leg("openrouter/openai/gpt-oss-120b-nope", self.reg)
+
+    def test_leg_is_unavailable_via_unavailable_legs_entry(self):
+        entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
+        self.assertIsNotNone(entry)
+        self.assertIs(entry.get("available"), False)
+
+    def test_leg_is_unavailable_now(self):
+        entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
+        self.assertIsNotNone(entry)
+        self.assertTrue(registry.unavailable_now(
+            entry, datetime.now(timezone.utc)))
+
+    def test_unavailable_entry_has_the_l0_comment(self):
+        entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
+        self.assertIn("$comment", entry)
+        self.assertIn("L0 2026-09-27T03:39Z", entry["$comment"])
+
+
 if __name__ == "__main__":
     unittest.main()
