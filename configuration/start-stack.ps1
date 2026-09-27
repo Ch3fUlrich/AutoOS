@@ -21,7 +21,7 @@ $Gateway = 'http://127.0.0.1:20128'
 $keysFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'configuration\api-keys.yml'
 
 function Get-AutoOSKeyValue {
-    # First uncommented `<Name>: <value>` line in a YAML-ish key file.
+    # Last uncommented (as bash keys_value, tail -n1) `<Name>: <value>` line in a YAML-ish key file.
     # YAML plain/quoted scalar parse (enough for this file):
     #   - starts with " : up to the next " (no escapes)
     #   - starts with ' : up to the next '

@@ -129,10 +129,11 @@ def configured_ids() -> set:
         return set()
     have = set()
     for line in path.read_text(encoding="utf-8-sig").splitlines():
-        t = line.strip()
-        if not t or t.startswith("#") or ":" not in t:
+        if not line or line[0] in " \t":
             continue
-        key, _, val = t.partition(":")
+        if line.startswith("#") or ":" not in line:
+            continue
+        key, _, val = line.partition(":")
         scalar = _yaml_scalar(val)
         if scalar and not scalar.upper().startswith(_PLACEHOLDER_PREFIX):
             have.add(key.strip())
@@ -251,60 +252,62 @@ def write_secret(key_id: str, value: str) -> tuple:
     returned, logged or echoed. An identical value is a no-op with no backup.
     """
     path = keys_file()
-    raw = path.read_bytes() if path.exists() else None
-    original = raw.decode("utf-8-sig") if raw is not None else None
-    lines = original.splitlines(keepends=True) if original is not None else []
-
     new_text = None
-    for i, line in enumerate(lines):
-        core = line.rstrip("\r\n")
-        stripped = core.strip()
-        if not stripped or stripped.startswith("#") or ":" not in core:
-            continue
-        head, _, after = core.partition(":")
-        if head.strip() != key_id:
-            continue
-        value_part, comment = _split_trailing_comment(after)
-        if _yaml_scalar(value_part) == value:
-            return 200, {"ok": True, "id": key_id, "unchanged": True}
-        new_line = head.rstrip() + ": " + _quote_yaml(value)
-        if comment:
-            new_line += " " + comment
-        lines[i] = new_line + ("\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else "")
-        new_text = "".join(lines)
-        break
+    with LOCK:
+        raw = path.read_bytes() if path.exists() else None
+        original = raw.decode("utf-8-sig") if raw is not None else None
+        lines = original.splitlines(keepends=True) if original is not None else []
 
-    if new_text is None:
-        text = original or ""
-        if text and not text.endswith("\n"):
-            text += "\n"
-        new_text = text + key_id + ": " + _quote_yaml(value) + "\n"
+        for i, line in enumerate(lines):
+            core = line.rstrip("\r\n")
+            if not core or core[0] in " \t":
+                continue
+            if core.startswith("#") or ":" not in core:
+                continue
+            head, _, after = core.partition(":")
+            if head.strip() != key_id:
+                continue
+            value_part, comment = _split_trailing_comment(after)
+            if _yaml_scalar(value_part) == value:
+                return 200, {"ok": True, "id": key_id, "unchanged": True}
+            new_line = head.rstrip() + ": " + _quote_yaml(value)
+            if comment:
+                new_line += " " + comment
+            lines[i] = new_line + ("\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else "")
+            new_text = "".join(lines)
+            break
 
-    if raw is not None:
-        # Same stamp/collision scheme as _post_config: the undo listing only
-        # ranks \d{8}-?\d{6} names, and a name taken inside one second gets -1.
-        base = path.with_name(path.name + time.strftime(".autoos-backup-%Y%m%d-%H%M%S"))
-        backup = base
-        n = 0
-        while backup.exists() or backup.is_symlink():
-            n += 1
-            backup = base.with_name(f"{base.name}-{n}")
-        fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(raw)
+        if new_text is None:
+            text = original or ""
+            if text and not text.endswith("\n"):
+                text += "\n"
+            new_text = text + key_id + ": " + _quote_yaml(value) + "\n"
 
-    tmp = path.with_name(f"{path.name}.autoos-tmp-{os.getpid()}-{secrets.token_hex(4)}")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(new_text)
-        os.replace(tmp, path)
-    except BaseException:
+        if raw is not None:
+            # Same stamp/collision scheme as _post_config: the undo listing only
+            # ranks \d{8}-?\d{6} names, and a name taken inside one second gets -1.
+            base = path.with_name(path.name + time.strftime(".autoos-backup-%Y%m%d-%H%M%S"))
+            backup = base
+            n = 0
+            while backup.exists() or backup.is_symlink():
+                n += 1
+                backup = base.with_name(f"{base.name}-{n}")
+            fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+
+        tmp = path.with_name(f"{path.name}.autoos-tmp-{os.getpid()}-{secrets.token_hex(4)}")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                fh.write(new_text)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     return 200, {"ok": True, "id": key_id, "configured": True,
                  "apply": SECRET_KEYS[key_id]["apply"]}
