@@ -304,6 +304,9 @@ def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str)
         if base in _ALWAYS_DENY_WRAPPERS:
             return Decision(False, "no-inline-shell",
                              (f"{base} is an exec wrapper; run the command directly",))
+        split_problem = _env_split_string_problem(head)
+        if split_problem:
+            return Decision(False, "no-inline-shell", (split_problem,))
         # flock -c/--command runs its argument via a shell (sh -c).
         if base == "flock" and any(
                 t == "-c" or t == "--command" or t.startswith("--command=")
@@ -412,19 +415,58 @@ def _idx_after_env(s: Sequence[str]) -> int | None:
             i += 2 if tok in longs_with_val else 1
             continue
         if tok.startswith("-") and len(tok) > 1 and tok != "-":
-            if tok in ("-u", "-C", "-S", "-a"):
-                i += 2
-                continue
-            if len(tok) > 2 and tok[1] in "uCSa":
+            # Parse the short-option cluster left to right. -S splits its
+            # string into argv, so the wrapped command cannot be derived
+            # statically -- give up (decide() denies env -S separately).
+            # u/C/a take a value: the rest of the token, else the next token.
+            value_at = None
+            for k, ch in enumerate(tok[1:]):
+                if ch == "S":
+                    return None
+                if ch in "uCa":
+                    value_at = k
+                    break
+                if ch in "i0":
+                    continue
+                break
+            if value_at is not None and value_at == len(tok) - 2:
+                i += 2  # value is the next token
+            else:
                 i += 1
-                continue
-            i += 1
             continue
         if _looks_like_assignment(tok):
             i += 1
             continue
         break
     return i if i < n else None
+
+
+def _env_split_string_problem(argv: Sequence[str]) -> str | None:
+    """env -S/--split-string (coreutils) splits a single argument into argv
+    and execs the result, e.g. ["env","-S","sudo id"] runs sudo. decide()
+    only sees one opaque token, so no wrapper-transparency head exists and
+    the real command is invisible to every other rule. Deny it outright
+    (same fail-closed posture as _ALWAYS_DENY_WRAPPERS)."""
+    if not argv or _basename(argv[0]) != "env":
+        return None
+    for tok in argv[1:]:
+        if not isinstance(tok, str):
+            continue
+        if tok == "--":
+            break
+        if tok == "--split-string" or tok.startswith("--split-string="):
+            return ("env --split-string splits a string into argv and hides the "
+                    "real command; run the command directly")
+        if tok.startswith("-") and not tok.startswith("--") and len(tok) > 1:
+            for k, ch in enumerate(tok[1:]):
+                if ch == "S":
+                    return ("env -S splits a string into argv and hides the "
+                            "real command; run the command directly")
+                if ch in "uCa":
+                    break  # the rest of the token is this option's value
+                if ch not in "i0":
+                    break
+    return None
 
 
 def _idx_after_nice(s: Sequence[str]) -> int | None:
