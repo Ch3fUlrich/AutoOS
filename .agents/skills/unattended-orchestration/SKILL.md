@@ -92,6 +92,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-spawn-22: Pass brief inputs to an --isolate worker inline or by absolute read-only path; its clone has no git-ignored logs/. (why: relative logs/ paths were empty; source: work/L1-routing/Q1doc.out)
 - R-spawn-23: Route a fix that must turn red tests green to opencode, never qoder. (why: headless qoder cannot run tests; came back worse; source: L1-backlog-c3 lane-c3-fix.out)
 - R-spawn-24: Use Muse (t1-orchestrator) for research and review only, never to implement. (why: 1h45m reading git history, zero edits; source: work/L1-routing/OR1-muse-noop.out)
+- R-spawn-25: A relaunched session never stops, deletes or moves its predecessor's leftovers; list or re-dispatch them. (why: classifier blocks stalled a session; source: inbox/L1-routing.md 09:23:33Z)
 
 ### review
 
