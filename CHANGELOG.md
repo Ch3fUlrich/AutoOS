@@ -8,6 +8,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed — OR1f resolver honours policy.leg_rules (2026-09-27)
 
 - **`tools/autoos_resolver.py`**: `usable_legs` now skips every leg `policy.leg_rules` denies, with a reason naming the rule, so the resolver plans only the legs `registry.gateway_legs` serves (a gateway combo never carries a denied leg).
+### Fixed — a route with no servable leg is offered by no declaration (OR1d)
+
+- **`tools/registry.py`**: new `servable_route_ids(registry)` names every route with at least one `gateway_legs`; `render_ide` and `render_openhands` now drop any route that *declares legs* but has none servable, matching the leg filter `render_litellm_blocks` already applied. The four all-legs-dead routes (`t1-orchestrator-free-only`, `t3-driver-free-only`, `samba/gpt-oss-120b`, `samba/MiniMax-M3`) disappear from `catalog/ide-models.json`, `configuration/openhands/tier-profiles.json`, the litellm gateway blocks and `opencode.jsonc`; deliberately legless routes (`*--paid`, `auto*`) stay. Tests: `tests/test_registry_render.py::NoServableLegOffersNoDeclarationTests`.
 
 ### Fixed — R4 review fixes (R4FIX, 2026-09-27)
 

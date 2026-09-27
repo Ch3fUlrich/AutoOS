@@ -156,12 +156,12 @@ fi
 # above became machine-dependent.
 if it "svc: apply --dry-run against a down gateway plans from the key file alone"; then
     keys="$(mktemp)"
-    printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    printf 'google_ai_studio: REPLACE_WITH_GOOGLE_AI_STUDIO_KEY\nmistral: not-a-real-key-123\n' >"$keys"
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
     ok=1
-    [[ "$out" == *"groq: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "groq: $out" >&2; }
+    [[ "$out" == *"gemini: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "gemini: $out" >&2; }
     [[ "$out" == *"mistral: would register"* ]] || { ok=0; echo "mistral: $out" >&2; }
     [[ "$out" == *"already registered"* ]] && { ok=0; echo "read the live gateway" >&2; }
     if (( ok )); then pass; else fail "apply dry run depends on the live gateway"; fi
@@ -1013,12 +1013,13 @@ if it "svc: profile sync pushes the tiers into a running app, idempotently and c
     [[ "$first" == *"app settings seeded with omniroute-t1-orchestrator"* ]] || { ok=0; echo "not seeded: $first" >&2; }
     # Spec order = configuration/openhands/tier-profiles.json: the three
     # hierarchy tiers (t1 -> t2 -> t3) fill the fake's cap of 3; the red-by-
-    # design t1-orchestrator-free-only is last and never takes a slot.
+    # design the last tier (litellm-t2-worker-free-only) is last and never
+    # takes a slot.
     for _t in omniroute-t1-orchestrator omniroute-t2-worker omniroute-t3-driver; do
         [[ "$first" == *"app profile $_t saved"* ]] || { ok=0; echo "spec order ($_t): $first" >&2; }
     done
     [[ "$first" == *"app profile omniroute-t2-orchestrator saved"* ]] && { ok=0; echo "cap 3 should stop before t2-orchestrator" >&2; }
-    [[ "$first" == *"app profile omniroute-t1-orchestrator-free-only saved"* ]] && { ok=0; echo "free-only took a slot" >&2; }
+    [[ "$first" == *"app profile litellm-t2-worker-free-only saved"* ]] && { ok=0; echo "free-only took a slot" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$first" == *"FAILED"* ]] && { ok=0; echo "a push failed (StrictLLM?): $first" >&2; }
     grep -q '^POST' "$d/req.log" && grep -q '^POST /api/v1/settings/profiles/omniroute-t1-orchestrator$' "$d/req.log" \
@@ -1170,8 +1171,8 @@ fi
 # alone freed nothing and t3-driver/t4-rag still never fit).
 if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-t1-orchestrator-free-only": {"model": "openai/t1-orchestrator-free-only"}, "omniroute-spark-1.3-contributor": {"model": "openai/spark-1.3-contributor"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
-    _seed_pushed "$d" omniroute-t1-orchestrator-free-only omniroute-spark-1.3-contributor
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}, "omniroute-spark-1.3-contributor": {"model": "openai/spark-1.3-contributor"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-t2-worker-free-only omniroute-spark-1.3-contributor
     _fake_app "$d" "$d/seed.json"
     first="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
@@ -1183,7 +1184,7 @@ if it "svc: profile push makes room for a higher-ranked tier by removing the low
     ok=1
     # One slot is the user's; the two AutoOS slots go to the spec's top two.
     [[ "$after" == "my-own-profile omniroute-t1-orchestrator omniroute-t2-worker " ]] || { ok=0; echo "app holds: $after" >&2; }
-    [[ "$first" == *"omniroute-t1-orchestrator-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "eviction not announced: $first" >&2; }
+    [[ "$first" == *"litellm-t2-worker-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "eviction not announced: $first" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run evicted again ($second_deletes)" >&2; }
     if (( ok )); then pass; else fail "the cap is not filled in spec order"; fi
@@ -1194,8 +1195,8 @@ fi
 # room for a higher tier. A prefix-named profile nobody recorded never does.
 if it "svc: profile push evicts an unbuilt AutoOS tier below the refused one, never a foreign profile"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-personal": {"model": "openai/mine"}, "litellm-t2-worker": {"model": "openai/t2-worker"}, "omniroute-t1-orchestrator-free-only": {"model": "openai/t1-orchestrator-free-only"}}}' >"$d/seed.json"
-    _seed_pushed "$d" litellm-t2-worker omniroute-t1-orchestrator-free-only
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-personal": {"model": "openai/mine"}, "litellm-t2-worker": {"model": "openai/t2-worker"}, "litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-t2-worker litellm-t2-worker-free-only
     _fake_app "$d" "$d/seed.json"
     out="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
@@ -2513,7 +2514,6 @@ STUB
         'http://127.0.0.1:20128/v1/models key - 200' \
         'http://127.0.0.1:20128/v1/chat/completions bad - 401' \
         'http://127.0.0.1:20128/v1/chat/completions key t2-worker-free-only 200' \
-        'http://127.0.0.1:20128/v1/chat/completions key t3-driver-free-only 200' \
         'http://127.0.0.1:20128/v1/chat/completions key t2-worker-clean 200' \
         'http://127.0.0.1:4096/api/session none - 401' >"$d/curl-table"
 }
@@ -2543,11 +2543,11 @@ if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
         AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "exit $rc, not 0" >&2; }
-    grep -qx 'verify: 13 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
+    grep -qx 'verify: 12 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
     grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
     for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
                 'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
-                'combo t2-worker-free-only' 'combo t3-driver-free-only' 'combo t2-worker-clean' 'omniroute has qodercli' \
+                'combo t2-worker-free-only' 'combo t2-worker-clean' 'omniroute has qodercli' \
                 'public URL http://127.0.0.1:18081/' 'public URL http://127.0.0.1:18082/'; do
         grep -qx "  ok    $name" <<<"$out" || { ok=0; echo "no ok line for: $name" >&2; }
     done
@@ -2606,9 +2606,9 @@ if it "aistack: verify skips the keyed combos without a key, and the key never r
     rm -f "$d/curl-argv.log" "$d/curl-seen.log"
     out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" verify)" && rc=0 || rc=$?
     (( rc == 0 )) || { ok=0; echo "key set: exit $rc, not 0" >&2; }
-    [[ "$(grep -c 'chat/completions' "$d/curl-argv.log")" == 3 ]] || { ok=0; echo "key set: not three chat requests" >&2; }
+    [[ "$(grep -c 'chat/completions' "$d/curl-argv.log")" == 2 ]] || { ok=0; echo "key set: not two chat requests" >&2; }
     # The stub compared the header it read from stdin: the key did arrive.
-    [[ "$(grep -c 'chat/completions auth=key code=200' "$d/curl-seen.log")" == 3 ]] || { ok=0; echo "key set: the key did not reach curl" >&2; }
+    [[ "$(grep -c 'chat/completions auth=key code=200' "$d/curl-seen.log")" == 2 ]] || { ok=0; echo "key set: the key did not reach curl" >&2; }
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "the key is on curl's command line" >&2; }
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/docker.log" || true)" == 0 ]] || { ok=0; echo "the key reached docker" >&2; }
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" <<<"$out" || true)" == 0 ]] || { ok=0; echo "the key is in the output" >&2; }
@@ -2617,7 +2617,7 @@ if it "aistack: verify skips the keyed combos without a key, and the key never r
     rm -f "$d/curl-argv.log" "$d/curl-seen.log"
     out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY=sk-verify-wrong-key-987654321 verify)" && rc=0 || rc=$?
     (( rc == 1 )) || { ok=0; echo "wrong key: exit $rc, not 1" >&2; }
-    [[ "$(grep -c '^  FAIL  combo .* - HTTP 401' <<<"$out")" == 3 ]] || { ok=0; echo "wrong key: not three FAIL lines" >&2; }
+    [[ "$(grep -c '^  FAIL  combo .* - HTTP 401' <<<"$out")" == 2 ]] || { ok=0; echo "wrong key: not two FAIL lines" >&2; }
     [[ "$(grep -c -F -e 'sk-verify-wrong-key-987654321' "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "the wrong key is on curl's command line" >&2; }
     [[ "$(grep -c -F -e 'sk-verify-wrong-key-987654321' <<<"$out" || true)" == 0 ]] || { ok=0; echo "the wrong key is in the output" >&2; }
     rm -rf "$d"

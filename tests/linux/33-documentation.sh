@@ -253,7 +253,7 @@ import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "cheaperinference/kimi-k3", "cheaperinference/glm-5.2", "samba/gpt-oss-120b", "samba/MiniMax-M3", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
+if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t2-worker", "cheaperinference/kimi-k3", "cheaperinference/glm-5.2", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
     problems.append("names")
 # "retired" is the one home of the ids a rename left behind: apply prunes
 # them from the store, so a retired id must never also be a current combo.
@@ -308,7 +308,7 @@ for n in ("t2-worker-clean", "t3-driver-clean"):
         problems.append(n + "-trains:" + ",".join(bad))
 # *-free-only = zero paid/keyed legs (zen contributor-free counts as free).
 paid = re.compile(r"cheaperinference|openrouter|^(deepseek|mistral)/|opencode-zen/(?!.*-free)")
-for n in ("t1-orchestrator-free-only", "t2-worker-free-only", "t3-driver-free-only"):
+for n in (n for n in names if n.endswith("-free-only")):
     bad = [m for m in by[n] if paid.search(m)]
     if bad:
         problems.append(n + "-paid:" + ",".join(bad))
@@ -364,11 +364,11 @@ fi
 # registered, "already registered" would also shadow the real key forever.
 if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
     keys="$(mktemp)"
-    printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    printf 'google_ai_studio: REPLACE_WITH_GOOGLE_AI_STUDIO_KEY\nmistral: not-a-real-key-123\n' >"$keys"
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
-    assert_contains "$out" "groq: no key in api-keys.yml, skipped"
+    assert_contains "$out" "gemini: no key in api-keys.yml, skipped"
     if grep -q "mistral: would register\|mistral already registered" <<<"$out"; then pass
     else fail "the real mistral key was not planned"; fi
 fi
@@ -710,10 +710,9 @@ oc = json.loads(text)
 m = oc["providers"]["omniroute"]["models"]
 problems = []
 for name, ctx in (("t1-orchestrator", 1000000), ("t1-orchestrator-clean", 1000000),
-                  ("t1-orchestrator-free-only", 1000000),
                   ("t2-worker", 131072), ("t3-driver", 131072),
                   ("t2-worker-clean", 131072), ("t3-driver-clean", 131072),
-                  ("t2-worker-free-only", 131072), ("t3-driver-free-only", 131072),
+                  ("t2-worker-free-only", 131072),
                   ("gemini-3.8-flash", 131072), ("deepseek-v4.1-flash", 131072),
                   ("spark-1.3-contributor", 1000000)):
     if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:

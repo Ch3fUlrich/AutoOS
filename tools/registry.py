@@ -1042,10 +1042,11 @@ def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
         raise ValueError("registry has no routes.<id> for tier(s): %s" % ", ".join(missing_routes))
 
     refs_by_tier = {}
+    servable = servable_route_ids(registry)
     for tier in tiers:
         declared_legs = routes[tier].get("legs") or []
         legs = gateway_legs(routes[tier], registry)
-        if declared_legs and not legs:
+        if declared_legs and tier not in servable:
             # An empty model list in a managed block is not a valid config: a
             # synced tier with no gateway-servable leg (unavailable, denied or
             # client-bound) is a hard error naming the tier/route, unlike
@@ -1220,10 +1221,18 @@ def render_ide(registry: dict) -> dict:
             "unexpected: %s" % (", ".join(missing) or "none", ", ".join(extra) or "none"))
 
     models = []
+    servable = servable_route_ids(registry)
     for route_id in IDE_MODEL_ORDER:
         route = routes[route_id]
         if not isinstance(route, dict):
             raise ValueError("routes.%s is not an object" % route_id)
+        if (route.get("legs") or []) and route_id not in servable:
+            # OR1d: a route that declares legs but can serve none through
+            # either gateway is offered by no declaration - the same rule
+            # render_omniroute() applies to combos.json. A deliberately
+            # legless route (legs: []) is NOT dropped: it never promised a
+            # gateway leg.
+            continue
         surfaces = route.get("surfaces")
         surfaces = surfaces if isinstance(surfaces, dict) else {}
         gateways = {
@@ -1471,10 +1480,15 @@ def render_openhands(registry: dict) -> dict:
             "missing: %s; unexpected: %s" % (", ".join(missing) or "none", ", ".join(extra) or "none"))
 
     tiers = []
+    servable = servable_route_ids(registry)
     for tier_id in OPENHANDS_TIER_ORDER:
         target = wanted[tier_id]
         if target is None:
             route_id = OPENHANDS_DIRECT_PROFILE_IDS[tier_id]
+            if (routes[route_id].get("legs") or []) and route_id not in servable:
+                # OR1d: same "declared legs, none servable -> no declaration"
+                # rule as render_ide(); a legs: [] route is kept.
+                continue
             profile = routes[route_id]["surfaces"]["openhands"]["direct_profile"]
             tier = {"id": tier_id, "gateway": profile.get("gateway")}
             if "model" in profile:
@@ -1488,6 +1502,10 @@ def render_openhands(registry: dict) -> dict:
             continue
 
         gw, route_id = target
+        if (routes[route_id].get("legs") or []) and route_id not in servable:
+            # OR1d: a route that declares legs but has no gateway-servable leg
+            # gets no tier here either.
+            continue
         profile = routes[route_id]["surfaces"][gw]["openhands_profile"]
         tier = {"id": tier_id}
         if gw == "litellm":
@@ -1703,6 +1721,32 @@ def gateway_legs(route: dict, registry: dict) -> list:
             continue
         out.append(leg)
     return out
+
+
+def servable_route_ids(registry: dict) -> set:
+    """The route ids with at least one gateway-servable leg: exactly
+    `routes.<id>` where gateway_legs() is non-empty.
+
+    OR1d (ONE-ROUTER step 1d): "a route whose gateway_legs is empty is offered
+    by no declaration". render_omniroute() and render_litellm_blocks() already
+    enforce this from gateway_legs() directly; render_ide() and
+    render_openhands() use this set to apply the SAME rule to their own
+    declarations (catalog/ide-models.json, configuration/openhands/
+    tier-profiles.json).
+
+    Membership is deliberately gateway-servability, not "has any legs": a
+    route that declares no legs at all (the LiteLLM-only *-paid and the
+    dynamic auto* routes) is NOT a member either. The renders keep such a
+    route's declaration on purpose - it never promised a gateway leg - so the
+    filter they apply is "declared legs AND not servable", never this alone.
+
+    Pure and time-independent, like gateway_legs(): see its own contract."""
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+    return {
+        route_id for route_id, route in routes.items()
+        if isinstance(route, dict) and gateway_legs(route, registry)
+    }
 
 
 def _leg_cell_text(leg: str, route: dict, registry: dict) -> str:
