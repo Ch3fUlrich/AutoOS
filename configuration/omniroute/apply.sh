@@ -48,18 +48,21 @@ command -v python3 >/dev/null || {
     exit 1
 }
 
-if [[ ! -f "$KEYS_FILE" ]]; then
+# --drift reads no provider keys and never registers, so neither a missing
+# key file nor a missing CLI stops it here: its own block below reports an
+# unreadable store and exits 3.
+if [[ ! -f "$KEYS_FILE" && $DRIFT -ne 1 ]]; then
     echo "Missing $KEYS_FILE — copy configuration/api-keys.example.yml and fill it in."
     [[ $DRY -eq 1 ]] || exit 1
 fi
-command -v omniroute >/dev/null || {
+if ! command -v omniroute >/dev/null && [[ $DRIFT -ne 1 ]]; then
     if [[ $DRY -eq 1 ]]; then
         echo "OmniRoute CLI not installed - dry run continues with the static plan (nothing started, registered or created)."
     else
         echo "OmniRoute CLI not installed. Run: ./setup.sh --only omniroute --yes"
         exit 1
     fi
-}
+fi
 
 # ─── Parse the flat key: value map without needing PyYAML ───────────────────
 declare -A KEYS=()
@@ -222,21 +225,29 @@ if [[ $DRIFT -eq 1 ]]; then
         exit 3
     fi
     # Same banner strip as omni_json below (the CLI prints "Loaded env" lines
-    # before the JSON document). A non-zero exit means a transport or auth
-    # failure - the body may then hold an error page, not JSON.
+    # before the JSON document). Keep the captured stdout even on a non-zero
+    # exit: the CLI answers a refused management call with the document
+    # {"combos":[],...,"error":"HTTP 401"} AND exit 1, so the reason must come
+    # from the body, not the exit code. The body reaches python on fd 3: a
+    # herestring and the program heredoc cannot share stdin (the heredoc wins,
+    # and python would then parse its own text as JSON).
+    drift_failed=0
     if ! drift_raw="$(cd "$HOME" && omni --output json --no-color combo list 2>/dev/null \
             | sed -n '/^[[:space:]]*[{[]/,$p')"; then
-        echo "drift: live store unreadable - omniroute combo list failed (gateway down or refused)"
-        exit 3
+        drift_failed=1
     fi
     drift_rc=0
-    python3 - "$COMBOS_FILE" <<<"$drift_raw" <<'PY' || drift_rc=$?
+    python3 - "$COMBOS_FILE" "$drift_failed" 3<<<"$drift_raw" <<'PY' || drift_rc=$?
 import json, sys
 
 try:
-    live_doc = json.load(sys.stdin)
-except Exception:
-    print("drift: live store unreadable - combo list output was not JSON")
+    with open("/dev/fd/3", encoding="utf-8") as fh:
+        live_doc = json.load(fh)
+except (OSError, ValueError):
+    if sys.argv[2] == "1":
+        print("drift: live store unreadable - the omniroute CLI could not reach the gateway")
+    else:
+        print("drift: live store unreadable - combo list output was not JSON")
     sys.exit(3)
 if not isinstance(live_doc, dict) or live_doc.get("error"):
     # The CLI answers a refused management call as {"error": "HTTP 401"}.
@@ -277,7 +288,9 @@ for name in live_combos:
         print("extra %s" % name)
         rc = 1
 if rc == 0:
-    print("drift: live combos match %s (%d combos)" % (sys.argv[1], len(file_combos)))
+    # No "drift:" here: that prefix marks a difference line, and an in-sync
+    # store must print none.
+    print("in sync: live combos match %s (%d combos)" % (sys.argv[1], len(file_combos)))
 sys.exit(rc)
 PY
     exit "$drift_rc"

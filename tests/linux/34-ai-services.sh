@@ -293,7 +293,8 @@ _drift_sandbox() {
 d="$(cd "$(dirname "$0")/.." && pwd)"
 for a in "$@"; do
     if [[ "$a" == list ]]; then
-        if [[ -s "$d/drift.fail" ]]; then
+        # -e, not -s: the unreadable-store case writes the marker with `: >`.
+        if [[ -e "$d/drift.fail" ]]; then
             echo "Error: connect ECONNREFUSED" >&2
             exit 1
         fi
@@ -391,6 +392,37 @@ if it "apply drift: an unreadable live store -> exit 3 with a one-line reason"; 
         || { ok=0; echo "no reason line: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "--drift did not exit 3 on an unreadable store"; fi
+fi
+
+# The other half of the comparison: a file combo the store lacks is "missing",
+# a store combo the file does not know is "extra", and a store combo whose name
+# is a retired id is ignored (it is not a combo the file forgot; the file
+# itself consigned it). A user-made combo is never a difference.
+if it "apply drift: reports missing and extra, and ignores a retired live combo"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    doc="$ROOT/configuration/omniroute/combos.json"
+    missing="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["combos"][0]["name"])' "$doc")"
+    retired="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["retired"][0])' "$doc")"
+    python3 - "$doc" "$d/drift.json" "$missing" "$retired" >"$d/drift.json.new" <<'PY'
+import json, sys
+live = json.load(open(sys.argv[2], encoding="utf-8"))
+live["combos"] = [c for c in live["combos"] if c["name"] != sys.argv[3]]
+live["combos"].append({"name": "user-made-combo", "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "x"}]})
+live["combos"].append({"name": sys.argv[4], "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "y"}]})
+print(json.dumps(live))
+PY
+    mv "$d/drift.json.new" "$d/drift.json"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"missing $missing"* ]] || { ok=0; echo "no missing line: $out" >&2; }
+    [[ "$out" == *"extra user-made-combo"* ]] || { ok=0; echo "no extra line: $out" >&2; }
+    [[ "$out" == *"$retired"* ]] && { ok=0; echo "named the retired live combo: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift missed missing/extra or touched a retired id"; fi
 fi
 
 # A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp

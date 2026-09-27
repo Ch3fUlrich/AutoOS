@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **`configuration/omniroute/apply.sh --drift`** (OR1b): compares the live combos against `combos.json` (name + ordered legs, `retired` ids ignored) without writing; exit 0 in sync, 1 on any `drift`/`missing`/`extra` line, 3 when the store cannot be read.
+
 ### Added — provider rate limits as registry data + resolver request-size filter (R4)
 
 - **`catalog/ai-registry.schema.json`**: new `providers.<id>.limits` field (object keyed by the provider's own model spelling) and a `provider_limits` def (`rpm`/`rpd`/`tpm`/`tpd` non-negative ints, each optional; `source` required). The renders never read it; resolver-only.
