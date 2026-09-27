@@ -1189,27 +1189,34 @@ cmd_failover_on() {
     fi
     ensure_client_key_file || return 1
     dc stop omniroute || { echo "  ! could not stop the omniroute container"; return 1; }
+    # From here the gateway is down: an interrupt (ctrl-C, TERM) must hand the
+    # port back instead of leaving a stateless standby on it. Cleared on every
+    # return below.
+    trap 'echo "  ! interrupted - handing the port back to the gateway"; failover_stop_litellm; dc start omniroute || true; trap - INT TERM; exit 130' INT TERM
     if ! AUTOOS_LITELLM_HOST="$host" AUTOOS_LITELLM_PORT="$port" \
         AUTOOS_LITELLM_MASTER_KEY_FILE="$CLIENT_KEY_FILE" AUTOOS_LITELLM_STATE_DIR="$FAILOVER_DIR" \
         "$START_LITELLM"; then
         echo "  ! the standby router did not start - starting the gateway again (the port is never left empty)"
         dc start omniroute || true
         wait_for gateway_ok && echo "  = omniroute answers on :$port again" || echo "  ! omniroute did not answer - docker logs autoos-omniroute"
+        trap - INT TERM
         return 1
     fi
     if wait_for failover_litellm_ok 12; then
         since="$(date +%Y-%m-%dT%H:%M:%S%z)"
         pid="$(failover_pids | head -n1)" || true
         [[ -n "$pid" ]] || pid="unknown"
-        mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" || return 1
-        printf 'since=%s\npid=%s\n' "$since" "$pid" >"$FAILOVER_STATE" || return 1
+        mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" || { trap - INT TERM; return 1; }
+        printf 'since=%s\npid=%s\n' "$since" "$pid" >"$FAILOVER_STATE" || { trap - INT TERM; return 1; }
         echo "  + failover on: LiteLLM serves :$port (since $since, litellm pid $pid)"
+        trap - INT TERM
         return 0
     fi
     echo "  ! the standby router did not answer /health/liveliness on :$port - starting the gateway again (the port is never left empty)"
     failover_stop_litellm
     dc start omniroute || true
     wait_for gateway_ok && echo "  = omniroute answers on :$port again" || echo "  ! omniroute did not answer - docker logs autoos-omniroute"
+    trap - INT TERM
     return 1
 }
 

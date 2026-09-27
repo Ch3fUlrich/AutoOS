@@ -3343,6 +3343,31 @@ if it "aistack: verify prints the failover line when on and never FAILs it"; the
     if (( ok )); then pass; else fail "verify does not report the standby"; fi
 fi
 
+if it "aistack: failover on interrupted after the gateway stop hands the port back"; then
+    # A TERM (or ctrl-C) during the liveliness wait must not leave the gateway
+    # stopped with a stateless standby on its port (qoder review lstby).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    touch "$d/failover-liveliness-fail" "$d/slow-sleep"   # the wait window is real (12 x 0.5 s)
+    ( _aistack "$d" failover on >"$d/out.txt" 2>&1 ) &
+    bg=$!
+    p=""
+    for _ in $(seq 1 50); do
+        grep -q 'stop omniroute' "$d/docker.log" 2>/dev/null && p="$(pgrep -n -f "ai-stack.sh failover on" || true)" && [[ -n "$p" ]] && break
+        sleep 0.1
+    done
+    ok=1
+    if [[ -z "$p" ]]; then ok=0; echo "failover on never reached the gateway stop" >&2; else
+        sleep 1; kill -TERM "$p" 2>/dev/null || true
+    fi
+    wait "$bg" 2>/dev/null || true
+    _aistack_seq "$d/events.log" "stop omniroute" "start omniroute" || { ok=0; echo "the gateway was not started again: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was left behind" >&2; }
+    [[ -s "$d/cfg/failover/litellm.pid" ]] && { ok=0; echo "the standby pid file was left behind" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an interrupted failover on left the gateway down"; fi
+fi
+
 if it "aistack: failover on refreshes a stale client.key from the current gateway key"; then
     # A rotated client key must not leave the standby router serving the old
     # one: every failover on rewrites client.key when it differs (0600 kept).

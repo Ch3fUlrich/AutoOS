@@ -46,6 +46,8 @@
 #   compose-bind.log     AUTOOS_STACK_BIND as every `docker compose` call saw it
 #   qoder-home-at-up.log "present"/"absent": whether <state-dir>/data/qoder-home
 #                        (the sandbox's data dir) existed at each `compose up`
+#   slow-sleep           the fake `sleep` really sleeps 0.5 s (a test that must
+#                        signal the script mid-wait gets a window); default: no-op
 #   failover-liveliness-fail  `start-litellm` writes no pid file: the
 #                        /health/liveliness probe never answers (a standby
 #                        that starts but never turns live)
@@ -364,6 +366,6 @@ case "$TOOL" in
     omniroute)   fake_omniroute "$@" ;;
     register)    fake_register "$@" ;;
     start-stack) fake_start_stack "$@" ;;
-    sleep)       exit 0 ;;
+    sleep)       if [[ -e "$S/slow-sleep" ]]; then exec /bin/sleep 0.5; fi; exit 0 ;;
     *) echo "aistack_fake.sh: unknown tool $TOOL" >&2; exit 2 ;;
 esac
