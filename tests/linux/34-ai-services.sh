@@ -2737,6 +2737,104 @@ if it "aistack: verify prints unset wording when admission gate vars are absent 
     if (( ok )); then pass; else fail "verify admission gate unset wording"; fi
 fi
 
+if it "aistack: compose.yml caps the per-call log artifacts that feed page cache"; then
+    f="$AISTACK/compose.yml"
+    # The omniroute block: from its service header to the next service.
+    omni="$(sed -n '/^  omniroute:/,/^  [a-z]/p' "$f" | sed '$d')"
+    ok=1
+    grep -q 'CHAT_LOG_MAX_BODY_KB: ${CHAT_LOG_MAX_BODY_KB:-64}' <<<"$omni" \
+        || { ok=0; echo "CHAT_LOG_MAX_BODY_KB not capped at default 64" >&2; }
+    grep -q 'CHAT_LOG_TEXT_LIMIT: ${CHAT_LOG_TEXT_LIMIT:-16384}' <<<"$omni" \
+        || { ok=0; echo "CHAT_LOG_TEXT_LIMIT not capped at default 16384" >&2; }
+    grep -q 'CALL_LOG_RETENTION_DAYS: ${CALL_LOG_RETENTION_DAYS:-3}' <<<"$omni" \
+        || { ok=0; echo "CALL_LOG_RETENTION_DAYS not capped at default 3" >&2; }
+    if (( ok )); then pass; else fail "compose.yml per-call log caps"; fi
+fi
+
+if it "aistack: stack.env.example documents the per-call log caps as commented defaults"; then
+    f="$AISTACK/stack.env.example"
+    ok=1
+    grep -q '^# CHAT_LOG_MAX_BODY_KB=64' "$f" \
+        || { ok=0; echo "CHAT_LOG_MAX_BODY_KB default not documented" >&2; }
+    grep -q '^# CHAT_LOG_TEXT_LIMIT=16384' "$f" \
+        || { ok=0; echo "CHAT_LOG_TEXT_LIMIT default not documented" >&2; }
+    grep -q '^# CALL_LOG_RETENTION_DAYS=3' "$f" \
+        || { ok=0; echo "CALL_LOG_RETENTION_DAYS default not documented" >&2; }
+    if (( ok )); then pass; else fail "stack.env.example per-call log caps"; fi
+fi
+
+if it "aistack: verify prints the omniroute memory split with no warning under no pressure"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '1048576000\n2684354560\nanon 838860800\nfile 104857600\n' \
+        >"$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    grep -q 'omniroute memory: current 1000 MB of 2560 MB (39%), anon 800 MB, reclaimable cache 100 MB' <<<"$out" \
+        || { ok=0; echo "memory split not printed: $(grep -i 'omniroute memory' <<<"$out")" >&2; }
+    grep -q 'page cache holds the pressure guard' <<<"$out" \
+        && { ok=0; echo "a pressure warning on a healthy split" >&2; }
+    # Informational, not a pass/fail check: no v_ok/v_fail line for it.
+    grep -qE '^  (ok|FAIL)  .*omniroute memory' <<<"$out" && { ok=0; echo "memory should be informational, not ok/FAIL" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify omniroute memory split"; fi
+fi
+
+if it "aistack: verify warns when page cache holds the pressure guard at 503"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    # Measured 2026-09-27: current 2.62G of max 2.68G, anon 0.83G,
+    # file 1.65G - the guard answers 503 above 92%.
+    printf '2616913920\n2684354560\nanon 827203584\nfile 1650200576\n' \
+        >"$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    grep -q 'omniroute memory: current 2496 MB of 2560 MB (97%), anon 789 MB, reclaimable cache 1574 MB' <<<"$out" \
+        || { ok=0; echo "memory split not printed: $(grep -i 'omniroute memory' <<<"$out")" >&2; }
+    grep -q "page cache holds the pressure guard at 97% (it answers 503 above 92%); relief: ai-stack.sh restart omniroute" <<<"$out" \
+        || { ok=0; echo "no restart relief: $(grep -i 'pressure guard' <<<"$out")" >&2; }
+    grep -q 'memory.reclaim' <<<"$out" && { ok=0; echo "the sudo cgroup relief is still there" >&2; }
+    grep -q 'sudo' <<<"$(grep -i 'omniroute memory' <<<"$out")" && { ok=0; echo "the relief needs root" >&2; }
+    grep -q '{{.Id}}' "$d/docker.log" 2>/dev/null && { ok=0; echo "verify still inspects the container id: $(grep '{{.Id}}' "$d/docker.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify page-cache pressure warning"; fi
+fi
+
+if it "aistack: verify prints no ratio when the omniroute cgroup has no limit"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '1048576000\nmax\nanon 838860800\nfile 104857600\n' \
+        >"$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    memline="$(grep -i 'omniroute memory' <<<"$out")"
+    grep -q 'no limit' <<<"$memline" \
+        || { ok=0; echo "unlimited max not reported: [$memline]" >&2; }
+    grep -q '%' <<<"$memline" \
+        && { ok=0; echo "a ratio on an unlimited cgroup: [$memline]" >&2; }
+    grep -q 'page cache holds the pressure guard' <<<"$out" \
+        && { ok=0; echo "a pressure warning with no limit to press against" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify omniroute memory without a limit"; fi
+fi
+
+if it "aistack: verify without cgroup counters says so and keeps its exit status"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '1048576000\n2684354560\nanon 838860800\nfile 104857600\n' \
+        >"$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)" && rc_with=0 || rc_with=$?
+    rm -f "$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)" && rc_without=0 || rc_without=$?
+    ok=1
+    grep -q 'could not read the cgroup counters' <<<"$out" \
+        || { ok=0; echo "no unreadable-counters line: $(grep -i 'omniroute memory' <<<"$out")" >&2; }
+    [[ "$rc_without" == "$rc_with" ]] \
+        || { ok=0; echo "exit $rc_without without counters, $rc_with with them" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify without cgroup counters"; fi
+fi
+
 if it "aistack: verify is read-only: only inspect and exec reach docker, nothing on disk changes"; then
     d="$(_aistack_sandbox)"
     _aistack_verify_sandbox "$d"
@@ -2751,7 +2849,7 @@ if it "aistack: verify is read-only: only inspect and exec reach docker, nothing
     [[ "$(grep -cE '^(start|stop|restart|rm|up|down|run|create|compose|build|pull|network|kill|pause|unpause|cp|update)( |$)' "$d/docker.log" || true)" == 0 ]] \
         || { ok=0; echo "a mutating docker verb: $(grep -E '^(start|stop|restart|rm|up|down|run|create|compose)' "$d/docker.log" | head -3)" >&2; }
     grep -vE '^(inspect|exec) ' "$d/docker.log" | grep -q . && { ok=0; echo "docker verbs beyond inspect/exec: $(grep -vE '^(inspect|exec) ' "$d/docker.log" | head -3)" >&2; }
-    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |qodercli --version$|sh -c tr "\\0" "\\n" </proc/1/environ$)' | grep -q . && { ok=0; echo "an exec that is neither test -d, qodercli --version nor the /proc/1/environ read" >&2; }
+    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |qodercli --version$|sh -c cat /sys/fs/cgroup/memory\.current /sys/fs/cgroup/memory\.max; sed -n "s/\^\\\(anon\\\|file\\\) /&/p" /sys/fs/cgroup/memory\.stat$|sh -c tr "\\0" "\\n" </proc/1/environ$)' | grep -q . && { ok=0; echo "an exec that is neither test -d, qodercli --version nor a cgroup//proc/1/environ read" >&2; }
     # Nothing but docker inspect/exec: not systemctl, not ss, not the plain curl on PATH.
     grep -vE '^docker: (inspect|exec) ' "$d/events.log" | grep -q . && { ok=0; echo "another tool was called: $(grep -vE '^docker: (inspect|exec) ' "$d/events.log" | head -3)" >&2; }
     rm -rf "$d"
@@ -2768,5 +2866,72 @@ if it "aistack: verify is listed in the unknown-command message and in --help"; 
     grep -q 'ai-stack.sh verify' <<<"$out" || { ok=0; echo "not in --help" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "verify is not advertised"; fi
+fi
+
+if it "aistack: restart omniroute issues exactly one compose restart and no backup"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" restart omniroute)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ "$(grep -c 'compose.*restart' "$d/docker.log" 2>/dev/null || true)" == 1 ]] \
+        || { ok=0; echo "not exactly one compose restart: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    grep -q 'restart omniroute' "$d/docker.log" \
+        || { ok=0; echo "no restart of omniroute: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    grep -qE '(^| )up( |$)' "$d/docker.log" && { ok=0; echo "restart ran up: $(cat "$d/docker.log")" >&2; }
+    compgen -G "$d/cfg/*.autoos-backup-*" >/dev/null && { ok=0; echo "restart took a backup" >&2; }
+    [[ "$out" == *"omniroute"* ]] || { ok=0; echo "no one-line report: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "restart omniroute is not one compose restart with no backup"; fi
+fi
+
+if it "aistack: restart with one unknown name restarts nothing (validate all first)"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" restart omniroute bogus)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2: $out" >&2; }
+    grep -q 'restart' "$d/docker.log" 2>/dev/null && { ok=0; echo "restarted before the usage error: $(cat "$d/docker.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "restart omniroute bogus mutated before failing"; fi
+fi
+
+if it "aistack: --dry-run restart calls no compose"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" --dry-run restart omniroute)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc: $out" >&2; }
+    grep -q 'restart' "$d/docker.log" 2>/dev/null && { ok=0; echo "dry run restarted: $(cat "$d/docker.log")" >&2; }
+    [[ "$out" == *"would run"*"restart omniroute"* ]] || { ok=0; echo "no would-run line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--dry-run restart is not side-effect free"; fi
+fi
+
+if it "aistack: restart with an unknown service exits 2 without calling compose"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" restart bogus)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2: $out" >&2; }
+    [[ -s "$d/docker.log" ]] && { ok=0; echo "compose was called: $(cat "$d/docker.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "restart of an unknown service is not a usage error"; fi
+fi
+
+if it "aistack: restart is listed in the unknown-command message and in --help"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    out="$(_aistack "$d" bogus)" && rc=0 || rc=$?
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2" >&2; }
+    grep -qE '^Unknown command: bogus \(.*\brestart\b.*\)' <<<"$out" || { ok=0; echo "not in the message: $out" >&2; }
+    out="$(_aistack "$d" --help)"
+    grep -q 'ai-stack.sh restart' <<<"$out" || { ok=0; echo "not in --help" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "restart is not advertised"; fi
 fi
 

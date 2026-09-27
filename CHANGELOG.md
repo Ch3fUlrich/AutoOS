@@ -9,6 +9,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`docs/api-keys.md`**: where to get a Free.ai key (`free_ai`), its free terms (30k tokens/day on self-hosted models, 10 requests/min) and that only public work goes there.
 
+### Fixed — OmniRoute gateway stops refusing every chat call on page-cache pressure
+
+- **`configuration/docker/ai-stack/compose.yml`**: the omniroute service caps the
+  per-call log artifacts that fed page cache (`CHAT_LOG_MAX_BODY_KB=64`,
+  `CHAT_LOG_TEXT_LIMIT=16384`, `CALL_LOG_RETENTION_DAYS=3`; image defaults
+  1024/65536/7). Measured 2026-09-27: 831 MB in 3905 files under
+  `/app/data/call_logs` in one day left `memory.current` at 2.62G of 2.68G max
+  with only 0.83G `anon` (1.65G reclaimable `file`), and the gateway's
+  pressure guard (503 at >= 92%, not configurable in 3.8.50) tripped 48x/h.
+  The caps reach the gateway only when its container is recreated with the new
+  env (`ai-stack.sh up omniroute` recreates it because the compose config
+  changed). Documented as commented defaults in **`stack.env.example`**.
+- **`configuration/docker/ai-stack/ai-stack.sh`**: new `restart <service>`
+  subcommand (one compose restart through the same wrapper as the other
+  subcommands, no backup; unknown name is a usage error, rc 2), and `verify`
+  prints the real cgroup memory split (`omniroute memory: current … of …
+  (…%), anon …, reclaimable cache …` from the `file` line of `memory.stat`,
+  read with cat+sed only; "no limit" with no ratio when `memory.max` is `max`),
+  informational like the admission gate, and warns with the root-free relief
+  (`ai-stack.sh restart omniroute`; measured 11:04Z, `memory.current`
+  2215M -> 786M) when page cache - not anon - holds the guard at 503.
+  Docs: `docs/web-services.md` "Page-cache pressure guard".
+
 ### Added — tool-calling probe feeds the resolver; spawner proposes a re-probe (d86711d)
 
 - **New `tools/probe-toolcalls.py`**: probes each leg's tool-calling support and writes the verdicts into the `logs/routing/measured.json` overlay, which **`tools/autoos_resolver.py`** now reads; **`tools/autoos-agent.py`** proposes a re-probe when a run contradicts the record (an own-account client run is not counted as a gateway-route observation).
