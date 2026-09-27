@@ -358,6 +358,130 @@ class ClientCommandTests(unittest.TestCase):
             self.assertNotIn("never-print-this-key", r.stdout + r.stderr, client)
 
 
+def _cap_args(**over):
+    """A cmd_run-ish Namespace for required_capabilities (only the two fields it reads)."""
+    ns = argparse.Namespace(isolate=False, card=None)
+    ns.__dict__.update(over)
+    return ns
+
+
+class ClientCapabilityTests(unittest.TestCase):
+    """SPAWNCAP (S2) part A: a client's shell/write abilities are registry data,
+    and a task that needs one is refused before dispatch (exit 2) instead of
+    being started on a client that cannot do it. Auto-choice (no --client)
+    never picks such a client."""
+
+    CAPABLE = {"opencode", "claude", "codex", "gemini", "qwen"}
+    INCAPABLE = {"agy", "qoder"}
+
+    def setUp(self):
+        self.agent = load_agent()
+        with io.open(ROOT / "catalog" / "ai-registry.json", encoding="utf-8") as fh:
+            self.registry = json.load(fh)
+
+    def test_every_client_declares_shell_and_write(self):
+        for name, client in self.registry["clients"].items():
+            with self.subTest(client=name):
+                caps = client.get("capabilities")
+                self.assertIsInstance(caps, dict, name)
+                self.assertIn("shell", caps, name)
+                self.assertIn("write", caps, name)
+                self.assertIsInstance(caps["shell"], bool, name)
+                self.assertIsInstance(caps["write"], bool, name)
+
+    def test_the_capable_client_set_is_the_five_measured_ones(self):
+        capable = {name for name, client in self.registry["clients"].items()
+                   if client["capabilities"]["shell"] and client["capabilities"]["write"]}
+        self.assertEqual(capable, self.CAPABLE)
+        for name in self.INCAPABLE:
+            self.assertFalse(self.registry["clients"][name]["capabilities"]["write"], name)
+
+    def test_client_capabilities_reads_the_registry(self):
+        self.assertEqual(self.agent.client_capabilities("opencode", self.registry),
+                         {"shell": True, "write": True})
+        self.assertEqual(self.agent.client_capabilities("qoder", self.registry),
+                         {"shell": False, "write": False})
+
+    def test_isolate_needs_shell_and_write(self):
+        self.assertEqual(self.agent.required_capabilities(_cap_args(isolate=True)),
+                         ("shell", "write"))
+
+    def test_explicit_editing_cards_need_shell_and_write(self):
+        for card in ("kind=implement", "kind=debug", "kind=bulk", "role=implement"):
+            with self.subTest(card=card):
+                self.assertEqual(self.agent.required_capabilities(_cap_args(card=card)),
+                                 ("shell", "write"), card)
+
+    def test_read_only_cards_need_nothing(self):
+        for card in ("kind=review", "kind=research", "kind=plan",
+                     "role=review", "role=orchestrate"):
+            with self.subTest(card=card):
+                self.assertEqual(self.agent.required_capabilities(_cap_args(card=card)), (), card)
+
+    def test_absent_empty_and_defaults_only_cards_need_nothing(self):
+        # v1's defaults make every absent card role=implement, but only an
+        # explicitly named editing kind/role is a write request: privacy=sensitive
+        # alone (or an empty card) must not be gated, or qoder's own promo
+        # refusal (test_qoder_is_refused_for_sensitive_work) would be shadowed
+        # by the capability message instead of printing "public".
+        for card in (None, "", "   ", "privacy=sensitive", "complexity=hard", "ctx=1m"):
+            with self.subTest(card=card):
+                self.assertEqual(self.agent.required_capabilities(_cap_args(card=card)), (), card)
+
+    def test_a_malformed_card_is_left_for_build_plan_to_report(self):
+        # A bad card is not a capability question: build_plan raises the CardError.
+        self.assertEqual(self.agent.required_capabilities(_cap_args(card="bogus=1")), ())
+
+    def test_choose_client_picks_the_first_capable_in_registry_order(self):
+        self.assertEqual(self.agent.choose_client(("shell", "write"), self.registry), "opencode")
+        self.assertEqual(self.agent.choose_client((), None), "opencode")
+
+    def test_choose_client_skips_an_incapable_first_client(self):
+        registry = {"clients": {
+            "opencode": {"capabilities": {"shell": False, "write": False}},
+            "claude": {"capabilities": {"shell": True, "write": True}},
+        }}
+        self.assertEqual(self.agent.choose_client(("shell", "write"), registry), "claude")
+
+    def test_capability_refusal_names_the_missing_capability_and_the_capable_clients(self):
+        msg = self.agent.capability_refusal("qoder", ("shell", "write"), self.registry)
+        self.assertIsNotNone(msg)
+        self.assertIn("qoder", msg)
+        self.assertIn("shell", msg)
+        self.assertIn("write", msg)
+        for name in self.CAPABLE:
+            self.assertIn(name, msg)
+        self.assertIsNone(
+            self.agent.capability_refusal("opencode", ("shell", "write"), self.registry))
+
+    def test_qoder_is_refused_for_an_isolated_write_before_it_starts(self):
+        r = plan_of("--client", "qoder", "--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("qoder", r.stderr)
+        self.assertIn("opencode", r.stderr)
+        self.assertNotIn("would run:", r.stdout)
+
+    def test_qoder_is_refused_for_an_explicit_editing_card(self):
+        r = plan_of("--client", "qoder", "--card", "kind=implement", "edit README.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("opencode", r.stderr)
+
+    def test_qoder_can_still_take_a_read_only_card(self):
+        r = plan_of("--client", "qoder", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("qodercli", r.stdout)
+
+    def test_an_isolated_run_without_a_client_auto_picks_a_capable_one(self):
+        r = plan_of("--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run: opencode", r.stdout)
+
+    def test_the_no_client_default_is_still_opencode(self):
+        r = plan_of("t")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run: opencode", r.stdout)
+
+
 class ReviewFindingTests(unittest.TestCase):
     """Cross-family review (t1-orchestrator, 2026-09-24) findings, pinned."""
 
