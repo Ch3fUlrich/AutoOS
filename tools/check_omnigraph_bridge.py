@@ -443,7 +443,6 @@ def summarise(records: list[dict], parallel: int, mode: str, graph_id: str,
                                    "lock/cache error(s) on stderr"}
                         for r in records if r["lock_errors"]["total"])
 
-    verdict = "PASS" if not failures else "FAIL"
     if not failures:
         verdict_text = (f"PASS — {parallel} bridges answered health in under "
                         f"{limit_ms} ms with 0 lock errors; npx satisfies D9")
