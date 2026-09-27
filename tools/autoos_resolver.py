@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 import autoos_track as track  # tools/ is on sys.path for every caller
 from registry import (resolve_leg, private_safe, unavailable_now,  # tools/ is on sys.path
-                      _parse_until)
+                      _parse_until, leg_denied, leg_rule_for)
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
@@ -481,6 +481,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
     - client_bound: a bound leg is always skipped - a route is served through
       the gateway (omniroute/<route>), never from inside the bound client, so
       even `client` == bound gets 403 (run 20260926-142228, R-gateway-03).
+    - leg_rules (brief OR1f, 2026-09-27): a leg ``policy.leg_rules`` denies
+      (``registry.leg_denied``) is skipped with reason ``leg_rules: <leg>
+      denied by <rule id>`` - the same legs ``registry.gateway_legs`` drops,
+      since a gateway combo never carries a denied leg.
     - an overlay rate limit (agentic kinds only, and only when the leg is
       not already proven): every trial of the leg's last tool_calls probe
       error was HTTP 429. A leg already proven is kept even if currently
@@ -556,6 +560,16 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             reasons.append("client_bound: %s/%s needs %s"
                            % (provider_id, model_id, bound))
 
+        # Brief OR1f (2026-09-27): the gateway renders only legs
+        # policy.leg_rules allows (registry.gateway_legs drops every denied
+        # leg), so the resolver must not plan a leg no combo serves. One
+        # predicate -- leg_denied, the same one gateway_legs calls; leg_rule_for
+        # only names the rule in the reason.
+        if leg_denied(leg, registry):
+            rule = leg_rule_for(leg, registry) or {}
+            reasons.append("leg_rules: %s denied by %s"
+                           % (leg, rule.get("id", "(unnamed)")))
+
         if agentic and not proven and _rate_limited(leg, overlay):
             reasons.append("rate_limited: %s/%s (429)" % (provider_id, model_id))
 
@@ -595,8 +609,9 @@ def filter_routes(card, features, client_state, registry, overlay,
     false`` in ``registry["clients"]`` is folded into that same reason by
     ``_client_reason``).
 
-    Every other filter (context, tool_calls, client_bound, the rate-limit
-    overlay, an unavailable leg/provider) is now per-leg (``usable_legs``): it
+    Every other filter (context, tool_calls, client_bound, policy.leg_rules,
+    the rate-limit overlay, an unavailable leg/provider) is now per-leg
+    (``usable_legs``): it
     no longer removes the route by itself. The route is removed only when
     ``usable_legs`` comes
     back with no usable leg at all, with reason ``"no usable leg: " +

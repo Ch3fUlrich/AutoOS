@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — OR1f resolver honours policy.leg_rules (2026-09-27)
+
+- **`tools/autoos_resolver.py`**: `usable_legs` now skips every leg `policy.leg_rules` denies, with a reason naming the rule, so the resolver plans only the legs `registry.gateway_legs` serves (a gateway combo never carries a denied leg).
+
 ### Fixed — R4 review fixes (R4FIX, 2026-09-27)
 
 - **limits/resolver/context**: `_check_provider_limits` now rejects an unknown key in a `providers.<id>.limits.<model>` entry (naming provider, model and key; the allowed set mirrors the schema's `provider_limits`); the tpm filter's keep-on-equal boundary and input-only estimate are pinned/documented; `load_caps` treats a `handoff_caps` row missing `cap_fraction` as unusable (`source: default`); the live groq limits test asserts shape only, its exact console numbers moved to an inline-registry test.
