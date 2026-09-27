@@ -293,6 +293,7 @@ fi
 #   current             - prints "already current", touches no marker (the
 #                         driver's OWN idempotency, as on a second call)
 #   fail                - exits 1
+#   dry-fail            - exits 1 only under --dry-run
 herdr_stub_driver() {
     local dir="$1" mode="${2:-installed}"
     mkdir -p "$dir"
@@ -308,6 +309,10 @@ while [[ \$# -gt 0 ]]; do
     esac
 done
 if (( dry )); then
+    if [[ "$mode" == dry-fail ]]; then
+        printf 'driver: dry boom\n' >&2
+        exit 1
+    fi
     printf 'would restore panes from %s\n' "\$profile"
     exit 0
 fi
@@ -356,6 +361,24 @@ if it "herdr-sessions: a dry run calls the driver with --dry-run and changes not
     [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "a dry run touched the driver's marker file" >&2; }
     rm -rf "$sb"
     if (( ok )); then pass; else fail "install_herdr_sessions dry run is not side-effect free"; fi
+fi
+
+# A dry run must not silently pass when the driver's own dry run fails: the
+# driver is called in a command substitution whose non-zero status used to be
+# discarded (install_script runs under install_component's `|| rc=$?`, which
+# suppresses errexit), so a failure printed nothing and reported success.
+if it "herdr-sessions: a dry run reports a driver that fails its own dry run"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" dry-fail
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$drv" "$profile" 1)"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "a failing dry run reported success (rc=$rc): ${out:0:300}" >&2; }
+    [[ "$out" == *"dry run failed"* && "$out" == *"driver: dry boom"* ]] \
+        || { ok=0; echo "the failure was not reported: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "a dry run touched the driver's marker file" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions swallows a failing dry run"; fi
 fi
 
 # Finding 4 (qoder review, L1-backlog.review-herdr-qoder.md, low): the dry-run

@@ -1844,8 +1844,16 @@ install_herdr_sessions() {
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would run: bash $driver --profile $profile --dry-run"
-        local dry_out; dry_out="$(bash "$driver" --profile "$profile" --dry-run 2>&1)"
+        # The driver's own dry run can fail; discarding that status (as a plain
+        # `$(...)` did) reported success over a plan the driver refused to
+        # produce. Capture and report it like the real path below.
+        local dry_out dry_rc=0
+        dry_out="$(bash "$driver" --profile "$profile" --dry-run 2>&1)" || dry_rc=$?
         [[ -n "$dry_out" ]] && ui_muted "$dry_out"
+        if (( dry_rc != 0 )); then
+            ui_err "herdr-sessions: driver dry run failed (rc=$dry_rc) for profile $profile"
+            return 1
+        fi
         return 0
     fi
 
