@@ -433,7 +433,7 @@ class OpencodeMergeTests(unittest.TestCase):
                 "--repo-root", REPO_ROOT,
                 "--skills-source", SKILLS_SOURCE,
             )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("left alone", result.stdout)
             self.assertEqual(real.read_bytes(), before)
             self.assertEqual(list(Path(tmp).glob("*.autoos-backup-*")), [])

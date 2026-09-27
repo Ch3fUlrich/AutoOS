@@ -523,7 +523,7 @@ def cmd_opencode(args):
         config_path, json.dumps(desired, indent=2, ensure_ascii=False) + "\n"
     ):
         print("agent-harness opencode: left alone, %s is a symlink" % config_path)
-        return 0
+        return 1
     if link_needs_change:
         if os.path.islink(link_path) or _is_junction(link_path):
             _remove_link(link_path)
@@ -599,6 +599,10 @@ def _apply_file(path, text, dry_run):
     difference alone must not cost a write and a backup on every run.
     """
     existed = os.path.exists(path)
+    # Check for symlink before dry_run: a symlinked config must report
+    # "left alone (symlink)" even in dry-run, not "would update".
+    if os.path.islink(path):
+        return "left alone (symlink)"
     if existed:
         try:
             with open(path, encoding="utf-8-sig") as handle:
