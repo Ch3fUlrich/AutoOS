@@ -2488,6 +2488,26 @@ if it "aistack: the omniroute layer adds qodercli at an exact version on a diges
     if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned qodercli"; fi
 fi
 
+if it "aistack: the omniroute layer adds bcryptjs for the reset-password CLI at an exact version, outside /app's npm tree"; then
+    # The base's standalone build prunes bcryptjs from /app/node_modules although
+    # package-lock pins it, so `node bin/reset-password.mjs` dies with
+    # ERR_MODULE_NOT_FOUND. Running npm with cwd /app would reconcile the whole
+    # package.json, so the package is fetched into a throw-away prefix and moved.
+    ok=1
+    f="$AISTACK/omniroute.Dockerfile"
+    [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
+    grep -qE '^RUN npm install --prefix /tmp/[a-z-]+ --ignore-scripts .* bcryptjs@[0-9]+\.[0-9]+\.[0-9]+ && mv .* /app/node_modules/bcryptjs && rm -rf .* && npm cache clean --force$' "$f" 2>/dev/null \
+        || { ok=0; echo "bcryptjs is not pinned and added, moved into /app/node_modules and cleaned up in one layer" >&2; }
+    layer="$(grep -nE '^RUN npm install --prefix /tmp/[a-z-]+ .*bcryptjs@' "$f" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
+    last="$(grep -nE '^USER node' "$f" 2>/dev/null | tail -n1 | cut -d: -f1 || true)"
+    [[ -n "$layer" && -n "$last" ]] || { ok=0; echo "no bcryptjs layer or no trailing USER node line" >&2; }
+    (( ${layer:-0} < ${last:-0} )) \
+        || { ok=0; echo "the bcryptjs layer (line ${layer:-0}) comes after the last USER node (line ${last:-0})" >&2; }
+    grep -qE 'cd /app' "$f" 2>/dev/null \
+        && { ok=0; echo "npm runs with cwd /app: it would reconcile the whole package.json" >&2; }
+    if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned bcryptjs outside /app's npm tree"; fi
+fi
+
 if it "aistack: init creates the qoder home, private and the operator's, and leaves the gateway data alone"; then
     d="$(_aistack_sandbox)"
     ok=1
