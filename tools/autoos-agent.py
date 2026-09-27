@@ -316,7 +316,10 @@ def session_tag(title: str, env=None) -> str:
             return raw
         print("autoos-agent: AUTOOS_SESSION_TAG %r is not [A-Za-z0-9._/-]{1,120} - "
               "falling back to <lane>/<title>" % raw, file=sys.stderr)
-    return "%s/%s" % (os.path.basename(ROOT), slugify(title))
+    # The worktree name is not ours to trust: keep the header charset and
+    # leave room for "/<slug>" (slugify caps it at 40) inside 120 chars.
+    lane = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(ROOT)).strip("-")[:79] or "lane"
+    return "%s/%s" % (lane, slugify(title))
 
 
 def unique_suffix() -> str:
@@ -509,7 +512,7 @@ def build_plan(args, cfg: dict) -> dict:
         # at :90 and merged onto each model's requests in
         # packages/core/src/model.ts:198) - merged into any existing provider
         # block, never replacing it.
-        if model.startswith("omniroute/"):
+        if (model or "").startswith("omniroute/"):
             tag = session_tag(title)
             prov = overlay.setdefault("providers", {}).setdefault("omniroute", {})
             prov.setdefault("headers", {})[SESSION_TAG_HEADER] = tag

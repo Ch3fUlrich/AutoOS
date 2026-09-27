@@ -1552,6 +1552,17 @@ class SessionTagTests(unittest.TestCase):
     def setUpClass(cls):
         cls.cli = load_agent()
 
+    def test_fallback_tag_is_a_valid_header_value_for_any_worktree_name(self):
+        # review-or3: the ROOT basename was used verbatim - a worktree name with
+        # spaces or 120+ chars would emit an illegal header / an over-long tag.
+        with mock.patch.object(self.cli, "ROOT", "/x/My Lane \u00e9 " + "w" * 150):
+            tag = self.cli.session_tag("Some Title!", env={})
+        self.assertRegex(tag, self.cli.SESSION_TAG_RE)
+
+    def test_fallback_tag_keeps_a_plain_worktree_name(self):
+        with mock.patch.object(self.cli, "ROOT", "/x/L1-routing-OR3"):
+            self.assertEqual(self.cli.session_tag("OR3", env={}), "L1-routing-OR3/or3")
+
     def _args(self, **overrides):
         ns = argparse.Namespace(
             client="opencode", tier=2, card=None, task="do the thing",
