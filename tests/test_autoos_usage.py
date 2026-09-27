@@ -321,10 +321,13 @@ class CliTests(UsageCliTests):
         rep = self.json_report(["--since", "1h", "--by", "provider,lane"], fetch)
         self.assertEqual(set(rep), {"since", "pages", "truncated", "totals", "by"})
         self.assertEqual(set(rep["by"]), {"provider", "lane"})
+        # The default shape is the token report it always was: cost columns
+        # appear only when --cost asks for them (MUSEAPI step 5), so nothing
+        # that reads `usage --json` today has to change.
         self.assertEqual(set(rep["totals"]),
-                         {"calls", "ok", "errors", "tokens_in", "tokens_out", "cost_in", "cost_out"})
+                         {"calls", "ok", "errors", "tokens_in", "tokens_out"})
         entry = rep["by"]["provider"][0]
-        self.assertEqual(set(entry), {"key", "calls", "ok", "errors", "tokens_in", "tokens_out", "cost_in", "cost_out"})
+        self.assertEqual(set(entry), {"key", "calls", "ok", "errors", "tokens_in", "tokens_out"})
 
     def test_text_tables_one_per_dimension_sorted_by_calls_desc(self):
         rows = (fresh_rows(3, NOW - datetime.timedelta(minutes=1), provider="groq", tag=None)
@@ -351,6 +354,143 @@ class CliTests(UsageCliTests):
         self.assertIn("bogus", err)
 
 
+class CostTests(UsageCliTests):
+    """MUSEAPI step 5: the same report, priced from catalog/ai-registry.json's
+    price_in/price_out. Two things the tests exist to pin:
+
+    - the UNIT. The registry stores USD PER TOKEN (spec 3.1: the contributor's
+      $0.10/1M is 1e-07), so a cost is tokens * price. Dividing the token count
+      by 1M as well would report a millionth of the spend and still look
+      plausible on a free tier, which is the worst kind of wrong on a spend
+      guard.
+    - the flag. Cost is opt-in: `usage --json` readers (the heartbeat, the
+      serve payload) get exactly the shape they get today.
+    """
+
+    PRICED = "muse-spark-1.3-contributor"
+
+    def setUp(self):
+        super().setUp()
+        self.registry = Path(self.tmp.name) / "ai-registry.json"
+        self.registry.write_text(json.dumps({"models": {
+            self.PRICED: {"id": self.PRICED, "price_in": 1e-07, "price_out": 2e-07},
+            "openai/gpt-oss-120b": {"id": "openai/gpt-oss-120b",
+                                    "price_in": 1e-08, "price_out": 1e-08},
+        }}), encoding="utf-8")
+
+    def rows(self, model, tin=1000, tout=500, provider="meta-api", n=1, age_min=1):
+        # age_min separates two batches' row ids: the fetcher dedupes by `id`,
+        # which is derived from the start timestamp, so two batches built at the
+        # same minute collapse into one row.
+        return fresh_rows(n, NOW - datetime.timedelta(minutes=age_min),
+                          model=model, provider=provider, tin=tin, tout=tout)
+
+    def cost_report(self, rows, extra=()):
+        fetch = FakeFetch({0: (200, rows)})
+        argv = ["--since", "1h", "--by", "provider", "--registry", str(self.registry),
+                "--cost"] + list(extra)
+        return self.json_report(argv, fetch)
+
+    def test_cost_columns_appear_only_when_asked_for(self):
+        fetch = FakeFetch({0: (200, self.rows(self.PRICED))})
+        plain = self.json_report(["--since", "1h", "--by", "provider"], fetch)
+        self.assertNotIn("cost_in", plain["totals"])
+        self.assertNotIn("cost_in", plain["by"]["provider"][0])
+        priced = self.cost_report(self.rows(self.PRICED))
+        self.assertIn("cost_in", priced["totals"])
+        self.assertIn("cost_in", priced["by"]["provider"][0])
+
+    def test_a_meta_api_row_gets_a_cost(self):
+        rep = self.cost_report(self.rows(self.PRICED, tin=1000, tout=500))
+        entry = rep["by"]["provider"][0]
+        self.assertAlmostEqual(entry["cost_in"], 1000 * 1e-07, places=12)
+        self.assertAlmostEqual(entry["cost_out"], 500 * 2e-07, places=12)
+        self.assertAlmostEqual(rep["totals"]["cost_in"] + rep["totals"]["cost_out"],
+                               0.0002, places=12)
+
+    def test_one_million_tokens_at_ten_cents_per_million_costs_ten_cents(self):
+        rep = self.cost_report(self.rows(self.PRICED, tin=1_000_000, tout=0))
+        self.assertAlmostEqual(rep["totals"]["cost_in"], 0.10, places=12)
+
+    def test_the_gateway_spelling_of_a_model_is_priced_too(self):
+        # call_logs carry the gateway's own model id, which is prefixed with the
+        # connection (meta-api/muse-spark-1.3-contributor). The registry keys the
+        # bare model id, so a price lookup that only tries the exact string
+        # would report every real call as free.
+        exact = self.cost_report(self.rows(self.PRICED))
+        prefixed = self.cost_report(self.rows("meta-api/" + self.PRICED))
+        self.assertEqual(prefixed["totals"]["cost_in"], exact["totals"]["cost_in"])
+        self.assertEqual(prefixed["totals"]["cost_out"], exact["totals"]["cost_out"])
+
+    def test_a_model_id_that_contains_a_slash_is_matched_exactly_first(self):
+        # groq's spelling IS "openai/gpt-oss-120b" in the registry: stripping a
+        # leading provider from everything would price it as a different model.
+        rep = self.cost_report(self.rows("openai/gpt-oss-120b", tin=1000, tout=0,
+                                         provider="groq"))
+        self.assertAlmostEqual(rep["totals"]["cost_in"], 1000 * 1e-08, places=12)
+
+    def test_an_unpriced_model_costs_nothing_but_still_counts_tokens(self):
+        rep = self.cost_report(self.rows("some-model-the-registry-does-not-know"))
+        self.assertEqual(rep["totals"]["tokens_in"], 1000)
+        self.assertEqual(rep["totals"]["cost_in"], 0.0)
+        self.assertEqual(rep["totals"]["cost_out"], 0.0)
+
+    def test_rows_sum_across_calls(self):
+        rep = self.cost_report(self.rows(self.PRICED, tin=1000, tout=500, n=4))
+        self.assertEqual(rep["totals"]["calls"], 4)
+        self.assertAlmostEqual(rep["totals"]["cost_in"], 4 * 1000 * 1e-07, places=12)
+
+    def test_the_text_table_shows_cost_only_with_the_flag(self):
+        fetch = FakeFetch({0: (200, self.rows(self.PRICED))})
+        rc, plain, _err = self.run_cli(["--since", "1h", "--by", "provider"], fetch)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("cost", plain)
+        rc, priced, _err = self.run_cli(
+            ["--since", "1h", "--by", "provider", "--cost", "--registry", str(self.registry)],
+            FakeFetch({0: (200, self.rows(self.PRICED))}))
+        self.assertEqual(rc, 0)
+        self.assertIn("cost_in", priced)
+        self.assertIn("estimated cost", priced)
+
+    def test_the_shipped_registry_prices_the_contributor_leg(self):
+        # The fixture above proves the math; this proves the fact: the number a
+        # reader of the spend guard sees for the Meta contributor is the docs'
+        # $0.10 in / $0.20 out per 1M, not a stale or missing price.
+        prices = usage.load_registry_prices(ROOT / "catalog" / "ai-registry.json")
+        self.assertEqual(prices["muse-spark-1.3-contributor"], (1e-07, 2e-07))
+
+    def test_an_unreadable_registry_prices_nothing_and_still_reports(self):
+        fetch = FakeFetch({0: (200, self.rows(self.PRICED))})
+        rep = self.json_report(["--since", "1h", "--by", "provider", "--cost",
+                                "--registry", str(Path(self.tmp.name) / "nope.json")], fetch)
+        self.assertEqual(rep["totals"]["cost_in"], 0.0)
+        self.assertEqual(rep["totals"]["tokens_in"], 1000)
+        # The source says null: the report must not claim the registry priced
+        # these calls when nothing was read.
+        self.assertIsNone(rep["cost"]["source"])
+
+    def test_the_cost_block_names_its_source_and_what_it_could_not_price(self):
+        # A spend guard whose numbers cannot be traced is not a guard: every
+        # --cost report carries which file priced it and how many models it had
+        # no price for, so a 0 row is readable as "free" or "unknown".
+        rows = (self.rows(self.PRICED) + self.rows("a-model-nobody-priced", age_min=2))
+        rep = self.cost_report(rows)
+        self.assertEqual(rep["cost"]["source"], str(self.registry))
+        self.assertEqual(rep["cost"]["models_unpriced"], 1)
+
+    def test_no_cost_block_without_the_flag(self):
+        fetch = FakeFetch({0: (200, self.rows(self.PRICED))})
+        rep = self.json_report(["--since", "1h", "--by", "provider"], fetch)
+        self.assertNotIn("cost", rep)
+
+    def test_the_default_price_source_is_the_repo_registry(self):
+        fetch = FakeFetch({0: (200, self.rows("muse-spark-1.3-contributor"))})
+        rep = self.json_report(["--since", "1h", "--by", "provider", "--cost"], fetch)
+        self.assertEqual(rep["cost"]["source"], "catalog/ai-registry.json")
+        # $0.10 in / $0.20 out per 1M, 1000 tokens in: 1e-4.
+        self.assertAlmostEqual(rep["totals"]["cost_in"], 0.0001, places=12)
+
+
 class DelegationTests(unittest.TestCase):
     """tools/autoos-agent.py `usage` delegates the remaining argv to autoos_usage.main."""
 
@@ -364,6 +504,15 @@ class DelegationTests(unittest.TestCase):
         with mock.patch.object(self.agent.usage_mod, "main", return_value=0) as m:
             rc = self.agent.main(["usage", "--since", "1h", "--by", "provider,lane", "--json"])
         m.assert_called_once_with(["--since", "1h", "--by", "provider,lane", "--json"])
+        self.assertEqual(rc, 0)
+
+    def test_usage_delegates_the_cost_flag(self):
+        # MUSEAPI step 5's documented call: `autoos-agent.py usage --since 24h
+        # --by provider --cost`. Delegation is what makes the flag reachable
+        # from the agent CLI at all.
+        with mock.patch.object(self.agent.usage_mod, "main", return_value=0) as m:
+            rc = self.agent.main(["usage", "--since", "24h", "--by", "provider", "--cost"])
+        m.assert_called_once_with(["--since", "24h", "--by", "provider", "--cost"])
         self.assertEqual(rc, 0)
 
 

@@ -3,6 +3,7 @@
 provider, combo, lane and model. The operator-facing name is the subcommand:
 
     autoos-agent.py usage --since 1h [--by provider,combo,lane,model] [--json]
+    autoos-agent.py usage --since 24h --by provider --cost   # the spend guard
 
 It pages GET /api/usage/call-logs with the manage-scoped key the ai-stack
 installer left on the host, aggregates the rows client-side and prints one
@@ -48,6 +49,17 @@ comboName, "(none)" when empty; provider/model "(unknown)" when empty. Rows
 with a timestamp older than --since are dropped; rows without a parseable
 timestamp are kept (they are almost always in-flight rows).
 
+Cost (--cost, MUSEAPI step 5): every group and the totals also carry cost_in /
+cost_out in USD, priced from catalog/ai-registry.json's price_in/price_out.
+Those registry fields are USD PER TOKEN (spec 3.1: the Meta contributor's
+$0.10 per 1M is 1e-07), so a cost is tokens * price. --registry points the
+lookup at another file (a test fixture). A model the registry does not know
+costs 0 and says so by being 0 - the tokens are still counted. Cost is
+strictly opt-in: without the flag the JSON has exactly the keys it always had.
+An estimate, not an invoice - it prices what the gateway reported it served,
+and free tiers are priced 0 in the registry, so a $0 line can mean "free" or
+"no price on file".
+
 Exit codes: 0 ok; 2 bad input (--since/--by); 3 gateway unreachable, HTTP
 error (401/403 named as auth failures), a non-array response, or the key file
 missing/empty. The failure line names the cause and never the key.
@@ -82,21 +94,63 @@ class UsageError(Exception):
     """A one-line, key-free failure cause (exit 3)."""
 
 
-def load_registry_prices():
-    """Load model prices from the registry. Returns dict model_id -> (price_in, price_out)."""
+def load_prices(path=None):
+    """(--cost) the price table and the name of the file it was read from.
+
+    The name travels with the report: numbers a reader cannot trace are not a
+    spend guard. A missing file yields no prices and a null source, so the
+    report never claims the registry priced what it could not read."""
+    resolved = Path(path) if path else REGISTRY_PATH
+    if not resolved.is_file():
+        return {}, None
     try:
-        with REGISTRY_PATH.open(encoding="utf-8") as fh:
+        name = str(resolved.relative_to(ROOT))
+    except ValueError:
+        name = str(resolved)
+    return load_registry_prices(resolved), name
+
+
+def load_registry_prices(path=None):
+    """{model id: (price_in, price_out)} in USD PER TOKEN, from the registry's
+    `models` section. The prices are already per token - the contributor's
+    $0.10 per 1M is 1e-07 here - so multiply by the token count and nothing
+    else. An unreadable or absent file prices nothing ({}), which the report
+    shows as a 0 cost rather than a failure: the token counts stay true.
+    """
+    try:
+        with (Path(path) if path else REGISTRY_PATH).open(encoding="utf-8") as fh:
             registry = json.load(fh)
     except (OSError, ValueError):
         return {}
     prices = {}
-    for model_id, model in registry.get("models", {}).items():
-        if isinstance(model, dict):
-            price_in = model.get("price_in")
-            price_out = model.get("price_out")
-            if price_in is not None and price_out is not None:
-                prices[model_id] = (float(price_in), float(price_out))
+    for model_id, model in (registry.get("models") or {}).items():
+        if isinstance(model, dict) and model.get("price_in") is not None \
+                and model.get("price_out") is not None:
+            try:
+                prices[model_id] = (float(model["price_in"]), float(model["price_out"]))
+            except (TypeError, ValueError):
+                pass
     return prices
+
+
+def price_for(model, prices):
+    """The (price_in, price_out) row for a call-log model, or None.
+
+    The gateway reports its own spelling - prefixed with the connection, e.g.
+    meta-api/muse-spark-1.3-contributor - while the registry keys the bare model
+    id, so an exact-only lookup would price every real call as free. The exact
+    string is tried first because a registry id may legitimately contain a slash
+    (groq spells gpt-oss-120b as openai/gpt-oss-120b, cerebras does not).
+    """
+    if not model or not prices:
+        return None
+    if model in prices:
+        return prices[model]
+    if "/" in model:
+        tail = model.rsplit("/", 1)[1]
+        if tail in prices:
+            return prices[tail]
+    return None
 
 
 def parse_since(text, now):
@@ -239,8 +293,13 @@ def _as_int(value):
         return 0
 
 
-def _new_group(key):
-    return {"key": key, "calls": 0, "ok": 0, "errors": 0, "tokens_in": 0, "tokens_out": 0, "cost_in": 0.0, "cost_out": 0.0}
+def _new_group(key, priced=False):
+    group = {"key": key, "calls": 0, "ok": 0, "errors": 0,
+             "tokens_in": 0, "tokens_out": 0}
+    if priced:
+        group["cost_in"] = 0.0
+        group["cost_out"] = 0.0
+    return group
 
 
 def _add_row(group, row, prices=None):
@@ -261,59 +320,75 @@ def _add_row(group, row, prices=None):
     tout = _as_int(tokens.get("out"))
     group["tokens_in"] += tin
     group["tokens_out"] += tout
-    # Calculate cost if prices are available
-    if prices:
-        model = row.get("model") if isinstance(row, dict) else None
-        if model and model in prices:
-            price_in, price_out = prices[model]
-            # price is per 1M tokens
-            group["cost_in"] += (tin / 1_000_000.0) * price_in
-            group["cost_out"] += (tout / 1_000_000.0) * price_out
+    if prices is not None:
+        # Registry prices are per token, so tokens * price is the USD cost of
+        # the row. A model with no price on file adds 0.
+        pair = price_for(row.get("model") if isinstance(row, dict) else None, prices)
+        if pair:
+            group["cost_in"] += tin * pair[0]
+            group["cost_out"] += tout * pair[1]
 
 
 def aggregate(rows, dims, prices=None):
     """{dim: [group, ...]} sorted by calls desc, ties by key asc."""
+    priced = prices is not None
     by = {}
     for dim in dims:
         groups = {}
         for r in rows:
             key = _group_key(dim, r)
-            groups.setdefault(key, _new_group(key))
+            groups.setdefault(key, _new_group(key, priced))
             _add_row(groups[key], r, prices)
         by[dim] = sorted(groups.values(), key=lambda g: (-g["calls"], g["key"]))
     return by
 
 
 def totals(rows, prices=None):
-    t = _new_group("(all)")
+    t = _new_group("(all)", prices is not None)
     for r in rows:
         _add_row(t, r, prices)
     del t["key"]
     return t
 
 
-def build_report(rows, dims, cutoff, pages, truncated):
+def build_report(rows, dims, cutoff, pages, truncated, prices=None, price_source=None):
     kept = [r for r in rows
             if not (row_timestamp(r) is not None and row_timestamp(r) < cutoff)]
-    prices = load_registry_prices()
-    return {
+    report = {
         "since": cutoff.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "pages": pages,
         "truncated": truncated,
         "totals": totals(kept, prices),
         "by": aggregate(kept, dims, prices),
     }
+    if prices is not None:
+        unpriced = {r.get("model") for r in kept if isinstance(r, dict)
+                    and r.get("model") and price_for(r.get("model"), prices) is None}
+        report["cost"] = {"source": price_source, "models_unpriced": len(unpriced)}
+    return report
 
 
-def render_text(report, dims, show_cost=False):
+def render_text(report, dims):
+    """One table per --by dimension. Whether the cost columns appear is a
+    property of the report (build_report adds them under --cost), not a second
+    flag that could disagree with it."""
     t = report["totals"]
-    cost_line = ""
-    if show_cost:
-        total_cost = t.get("cost_in", 0.0) + t.get("cost_out", 0.0)
-        cost_line = ", estimated cost: $%.4f" % total_cost
+    cost = report.get("cost")
+    # (header, width, formatter) - the cost pair rides along only when priced.
+    columns = [("calls", 6, "%d"), ("ok", 6, "%d"), ("errors", 6, "%d"),
+               ("tokens_in", 10, "%d"), ("tokens_out", 10, "%d")]
+    if cost is not None:
+        columns += [("cost_in", 10, "%.4f"), ("cost_out", 10, "%.4f")]
     lines = ["usage since %s - %d calls, %d ok, %d errors, %d tokens in, %d tokens out (%d page%s)%s"
              % (report["since"], t["calls"], t["ok"], t["errors"],
-                t["tokens_in"], t["tokens_out"], report["pages"], "s" if report["pages"] != 1 else "", cost_line)]
+                t["tokens_in"], t["tokens_out"], report["pages"],
+                "s" if report["pages"] != 1 else "",
+                "" if cost is None else
+                " - estimated cost: $%.4f" % (t["cost_in"] + t["cost_out"]))]
+    if cost is not None:
+        lines.append("estimated cost priced from %s; %d model(s) had no price on file "
+                     "and count as 0" % (cost["source"] or "no readable registry",
+                                         cost["models_unpriced"]))
     if report["truncated"]:
         lines.append("note: stopped at the %d-page cap; older rows may be missing - narrow --since"
                      % MAX_PAGES)
@@ -325,22 +400,13 @@ def render_text(report, dims, show_cost=False):
             lines.append("  (no rows)")
             continue
         width = min(40, max([len(dim)] + [len(str(e["key"])) for e in entries]))
-        if show_cost:
-            lines.append("%-*s  %6s %6s %6s %10s %10s %10s %10s"
-                         % (width, "", "calls", "ok", "errors", "tokens_in", "tokens_out", "cost_in", "cost_out"))
-            for e in entries:
-                cost_in = e.get("cost_in", 0.0)
-                cost_out = e.get("cost_out", 0.0)
-                lines.append("%-*s  %6d %6d %6d %10d %10d %10.4f %10.4f"
-                             % (width, str(e["key"])[:width], e["calls"], e["ok"],
-                                e["errors"], e["tokens_in"], e["tokens_out"], cost_in, cost_out))
-        else:
-            lines.append("%-*s  %6s %6s %6s %10s %10s"
-                         % (width, "", "calls", "ok", "errors", "tokens_in", "tokens_out"))
-            for e in entries:
-                lines.append("%-*s  %6d %6d %6d %10d %10d"
-                             % (width, str(e["key"])[:width], e["calls"], e["ok"],
-                                e["errors"], e["tokens_in"], e["tokens_out"]))
+        lines.append("%-*s  %s" % (width, "",
+                                     "  ".join(h.rjust(w) for h, w, _f in columns)))
+        for e in entries:
+            cells = [f % e[h] for h, w, f in columns]
+            lines.append("%-*s  %s" % (width, str(e["key"])[:width],
+                                         "  ".join(c.rjust(w) for c, (_h, w, _f)
+                                                   in zip(cells, columns))))
     return "\n".join(lines)
 
 
@@ -357,7 +423,10 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     ap.add_argument("--json", action="store_true",
                     help="machine-readable JSON instead of tables")
     ap.add_argument("--cost", action="store_true",
-                    help="show estimated cost per provider/model using registry prices")
+                    help="add estimated cost_in/cost_out (USD) per group, priced from "
+                         "the registry's price_in/price_out")
+    ap.add_argument("--registry", default=None,
+                    help="price source for --cost (default: catalog/ai-registry.json)")
     args = ap.parse_args(argv)
 
     dims = [d.strip() for d in args.by.split(",") if d.strip()]
@@ -392,11 +461,13 @@ def main(argv=None, *, fetch=None, env=None, now=None):
         print("autoos-usage: %s" % e, file=sys.stderr)
         return 3
 
-    report = build_report(rows, dims, cutoff, pages, truncated)
+    prices, price_source = load_prices(args.registry) if args.cost else (None, None)
+    report = build_report(rows, dims, cutoff, pages, truncated,
+                          prices=prices, price_source=price_source)
     if args.json:
         print(json.dumps(report, indent=2))
     else:
-        print(render_text(report, dims, show_cost=args.cost))
+        print(render_text(report, dims))
     return 0
 
 
