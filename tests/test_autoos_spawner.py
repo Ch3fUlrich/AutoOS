@@ -1665,7 +1665,12 @@ class AskRaceTests(unittest.TestCase):
         """qa-<n> is a history slot. Scanning for the next free number and then
         writing lets two archivers pick the same n, and the second silently
         overwrites the first - an exchange vanishes from the record. Each
-        archive has to claim its own number."""
+        archive has to claim its own number.
+
+        The race is driven through _archive_stale_answer, the entry point
+        main() uses when it files an answer, so the test covers the path a real
+        run takes (and keeps working if the private write helper is renamed).
+        """
         mod = load_ask()
         sentinel = os.path.join(self.tmp, "qa-1.json")
         with io.open(sentinel, "w", encoding="utf-8") as fh:
@@ -1676,10 +1681,14 @@ class AskRaceTests(unittest.TestCase):
         errors = []
 
         def archive(i):
+            # Every archiver holds one orphan answer of its own — the shape
+            # main() hands the helper — and files it into the shared history.
+            apath = os.path.join(self.tmp, "orphan-%d.json" % i)
+            with io.open(apath, "w", encoding="utf-8") as fh:
+                json.dump({"text": "a%d" % i, "answered": "2026-09-27T00:00:0%dZ" % i}, fh)
             barrier.wait()
             try:
-                mod._write_qa(self.tmp, {"question": {"text": "q%d?" % i},
-                                         "answer": {"text": "a%d" % i}})
+                mod._archive_stale_answer(self.tmp, apath)
             except Exception as exc:  # noqa: BLE001 - surfaced as a failure below
                 errors.append("q%d: %r" % (i, exc))
 
@@ -1700,6 +1709,69 @@ class AskRaceTests(unittest.TestCase):
             with io.open(os.path.join(self.tmp, name), encoding="utf-8") as fh:
                 answers.add(json.load(fh)["answer"]["text"])
         self.assertEqual(answers, {"a%d" % i for i in range(writers)}, "an exchange was lost")
+        for i in range(writers):
+            orphan = os.path.join(self.tmp, "orphan-%d.json" % i)
+            self.assertFalse(os.path.exists(orphan), "%s was filed but left behind" % orphan)
+
+    def test_a_qa_slot_is_never_observed_empty_or_partial(self):
+        """Reserving the slot first (create qa-<n> empty, fill it in a second
+        step) leaves a window in which the history file exists with no bytes in
+        it. A reader polling the run dir sees an entry that is neither valid
+        JSON nor any exchange, and a run killed inside the window loses the slot
+        forever — the next archive steps over an empty qa-<n>. The slot must
+        appear on the filesystem already complete."""
+        mod = load_ask()
+        apath = os.path.join(self.tmp, "answer.json")
+        with io.open(apath, "w", encoding="utf-8") as fh:
+            json.dump({"text": "ship it", "answered": "2026-09-27T00:00:00Z"}, fh)
+
+        problems = []
+        stop = threading.Event()
+
+        def watch():
+            while not stop.is_set():
+                for name in sorted(os.listdir(self.tmp)):
+                    if not (name.startswith("qa-") and name.endswith(".json")):
+                        continue
+                    with io.open(os.path.join(self.tmp, name), "rb") as fh:
+                        raw = fh.read()
+                    if not raw.strip():
+                        problems.append("%s existed with no bytes in it" % name)
+                        continue
+                    try:
+                        json.loads(raw.decode("utf-8"))
+                    except (ValueError, UnicodeDecodeError):
+                        problems.append("%s existed half-written" % name)
+                time.sleep(0.005)
+
+        real_dump = json.dump
+
+        def slow_dump(obj, fh, *args, **kwargs):
+            # Widen the window between "the slot exists" and "the slot holds
+            # its bytes" — the gap the two-step reserve used to leave open.
+            time.sleep(0.2)
+            return real_dump(obj, fh, *args, **kwargs)
+
+        observer = threading.Thread(target=watch)
+        observer.start()
+        try:
+            with mock.patch.object(mod.json, "dump", slow_dump):
+                mod._archive_stale_answer(self.tmp, apath)
+        finally:
+            stop.set()
+            observer.join()
+
+        self.assertEqual(problems, [])
+        filed = sorted(n for n in os.listdir(self.tmp)
+                       if n.startswith("qa-") and n.endswith(".json"))
+        self.assertEqual(filed, ["qa-1.json"], filed)
+        with io.open(os.path.join(self.tmp, "qa-1.json"), encoding="utf-8") as fh:
+            qa = json.load(fh)
+        self.assertTrue(qa.get("stale"))
+        self.assertEqual(qa["answer"]["text"], "ship it")
+        self.assertFalse(os.path.exists(apath))
+        leftovers = [n for n in os.listdir(self.tmp) if n.endswith(".tmp")]
+        self.assertEqual(leftovers, [], "the archive left a temp file behind")
 
 
 def uv_mcp_cmd():

@@ -1050,15 +1050,16 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 return self._json(400, {"error": "payload must be a JSON object"})
             cfg_file = ROOT / "autoos.config.json"
-            original = cfg_file.read_text(encoding="utf-8-sig") if cfg_file.exists() else None
             try:
+                original = cfg_file.read_text(encoding="utf-8-sig") if cfg_file.exists() else None
                 merged = json.loads(original) if original is not None else {}
-            except json.JSONDecodeError as exc:
-                # The config already on disk is the user's and is not JSON. That
-                # is the caller's problem to fix, not a server fault: answer 400,
-                # write nothing, and let the parser's position text stand - it
-                # names an offset, never a value, so nothing of the file echoes
-                # back to the page.
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                # The config already on disk is the user's and is not JSON - or
+                # not text at all, which fails in the read, before the parser
+                # ever runs. Either way that is the caller's problem to fix, not
+                # a server fault: answer 400, write nothing, and let the
+                # decoder's position text stand - it names a byte and an offset,
+                # never a value, so nothing of the file echoes back to the page.
                 return self._json(400, {
                     "error": f"existing autoos.config.json is corrupt: {exc}"})
             if not isinstance(merged, dict):
