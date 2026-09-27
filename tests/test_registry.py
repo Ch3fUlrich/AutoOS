@@ -890,10 +890,11 @@ class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
 
 
 class OpenRouterByokLegTests(unittest.TestCase):
-    """Operator 2026-09-27T13:5xZ: the openrouter/openai/gpt-oss-120b BYOK leg
-    was measured 200 on 3/3 trials incl. tool calls after the operator set BYOK
-    Prioritized + never shared capacity, so the t2-worker un-gate is lifted and
-    the leg serves in every route that lists it."""
+    """Operator 2026-09-27T13:5xZ measured the openrouter/openai/gpt-oss-120b
+    BYOK leg 200 on 3/3 trials and briefly un-gated it, but the L0 C change was
+    reverted the same day (a re-probe hit 401 credits exhausted), so t2-worker
+    keeps its `available: false` gate until the operator sets BYOK Prioritized
+    and a fresh probe passes. The per-leg allow rule is kept in place."""
 
     @classmethod
     def setUpClass(cls):
@@ -917,20 +918,23 @@ class OpenRouterByokLegTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             registry.resolve_leg("openrouter/openai/gpt-oss-120b-nope", self.reg)
 
-    def test_no_route_gates_the_leg_any_more(self):
-        for rid, route in self.reg["routes"].items():
-            entry = (route.get("unavailable_legs") or {}).get(
-                "openrouter/openai/gpt-oss-120b")
-            self.assertIsNone(entry, "route %s still gates the BYOK leg" % rid)
+    def test_t2_worker_gates_the_leg_until_byok_is_prioritized(self):
+        # C was reverted: the leg stays `available: false` until the operator
+        # sets BYOK Prioritized and a fresh probe passes (probe-toolcalls.py
+        # skips legs listed here).
+        entry = (self.reg["routes"]["t2-worker"].get("unavailable_legs") or {}).get(
+            "openrouter/openai/gpt-oss-120b")
+        self.assertIsNotNone(entry, "t2-worker no longer gates the BYOK leg")
+        self.assertFalse(entry["available"])
 
-    def test_leg_is_servable_in_every_route_listing_it(self):
+    def test_gated_leg_is_not_servable_in_any_route_listing_it(self):
         listing = 0
         for rid, route in self.reg["routes"].items():
             if "openrouter/openai/gpt-oss-120b" not in (route.get("legs") or []):
                 continue
             listing += 1
             kept = registry.gateway_legs(route, self.reg)
-            self.assertIn("openrouter/openai/gpt-oss-120b", kept, rid)
+            self.assertNotIn("openrouter/openai/gpt-oss-120b", kept, rid)
         self.assertGreater(listing, 0)
 
     def test_other_openrouter_legs_stay_denied(self):
@@ -940,12 +944,15 @@ class OpenRouterByokLegTests(unittest.TestCase):
                     "openrouter/qwen/qwen3.8-235b"):
             self.assertTrue(registry.leg_denied(leg, self.reg), leg)
 
-    def test_allow_rule_reason_records_the_measurement(self):
+    def test_leg_rule_records_the_reverted_byok_answer(self):
+        # The allow rule survives the revert (a per-leg allow before the blanket
+        # deny-openrouter), but it carries the operator's 03:39Z answer note,
+        # not the reverted C measurement.
         rules = self.reg["policy"]["leg_rules"]
         rule = next(r for r in rules if r["id"] == "allow-openrouter-gpt-oss-byok")
-        self.assertIn("3/3", rule["reason"])
         self.assertIn("BYOK", rule["reason"])
-        self.assertIn("2026-09-27T13:5", rule["reason"])
+        self.assertNotIn("3/3", rule["reason"])
+        self.assertIn("2026-09-27T03:39Z", rule["source"])
 
 
 class LegRulesTests(unittest.TestCase):
