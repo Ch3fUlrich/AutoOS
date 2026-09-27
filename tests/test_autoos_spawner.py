@@ -1864,6 +1864,12 @@ class SessionTagTests(unittest.TestCase):
     def setUpClass(cls):
         cls.cli = load_agent()
 
+    def _lane(self):
+        # The lane part as session_tag() derives it (sanitised, capped): a
+        # checkout with a long basename (every lane sandbox) is truncated, so
+        # the raw os.path.basename(ROOT) is not the expected value.
+        return self.cli.session_tag("t", env={}).rsplit("/", 1)[0]
+
     def test_fallback_tag_is_a_valid_header_value_for_any_worktree_name(self):
         # review-or3: the ROOT basename was used verbatim - a worktree name with
         # spaces or 120+ chars would emit an illegal header / an over-long tag.
@@ -1901,7 +1907,7 @@ class SessionTagTests(unittest.TestCase):
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(
             prov["headers"]["x-omniroute-session-id"],
-            "%s/fix-the-router" % os.path.basename(self.cli.ROOT))
+            "%s/fix-the-router" % self._lane())
 
     def test_autoos_session_tag_overrides_the_default(self):
         with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one.two_3-x"}):
@@ -1916,7 +1922,7 @@ class SessionTagTests(unittest.TestCase):
                 plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(prov["headers"]["x-omniroute-session-id"],
-                         "%s/t" % os.path.basename(self.cli.ROOT))
+                         "%s/t" % self._lane())
         warns = [l for l in err.getvalue().splitlines()
                  if "AUTOOS_SESSION_TAG" in l]
         self.assertEqual(len(warns), 1, err.getvalue())
@@ -1938,13 +1944,13 @@ class SessionTagTests(unittest.TestCase):
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(prov["settings"], {"baseURL": "http://x/v1"})
         self.assertEqual(prov["headers"]["x-omniroute-session-id"],
-                         "%s/t" % os.path.basename(self.cli.ROOT))
+                         "%s/t" % self._lane())
 
     def test_the_plan_output_prints_the_session_tag(self):
         r = run_agent("run", "--dry-run", "--tier", "2", "--title", "My Tag",
                       "t", env=clean_env())
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("session-tag: %s/my-tag" % os.path.basename(self.cli.ROOT),
+        self.assertIn("session-tag: %s/my-tag" % self._lane(),
                       r.stdout)
 
     def test_a_non_opencode_client_prints_no_session_tag(self):
