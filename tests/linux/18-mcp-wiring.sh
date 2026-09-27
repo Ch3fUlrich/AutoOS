@@ -450,8 +450,9 @@ fi
 
 if it "agent-skills links skills to Antigravity and Claude Code"; then
     tmp="$(mktemp -d)"
-    mkdir -p "$tmp/Documents/code/agent-skills/skills/test-skill"
-    printf -- '---\nname: test-skill\ndescription: test\n---\n' >"$tmp/Documents/code/agent-skills/skills/test-skill/SKILL.md"
+    # Create skill in repo's .agents/skills (new location)
+    mkdir -p "$tmp/.agents/skills/test-skill"
+    printf -- '---\nname: test-skill\ndescription: test\n---\n' >"$tmp/.agents/skills/test-skill/SKILL.md"
     (
         SYS_HOME="$tmp"
         AUTOOS_DRY_RUN=0
@@ -786,24 +787,48 @@ if it "openhands: a failing agent harness is reported, not called written"; then
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "custom_is_installed detects agent-skills under Documents/code or Documents/Code"; then
+if it "custom_is_installed detects agent-skills via .agents/skills + .mcp.json (new location)"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.agents/skills/test-skill"
+    printf -- '---\nname: test-skill\ndescription: test\n---\n' >"$tmp/.agents/skills/test-skill/SKILL.md"
+    cp "$tmp/../../.mcp.json" "$tmp/.mcp.json" 2>/dev/null || printf '{"mcpServers":{}}\n' >"$tmp/.mcp.json"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_ROOT="$tmp"
+        custom_is_installed agent-skills
+    )
+    rc_new=$?
+    rm -rf "$tmp"
+    if [[ $rc_new -eq 0 ]]; then pass
+    else fail "rc_new=$rc_new (new location not detected)"; fi
+fi
+
+if it "custom_is_installed falls back to old clone path for agent-skills"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Documents/code/agent-skills/skills/test-skill"
+    printf -- '---\nname: test-skill\ndescription: test\n---\n' >"$tmp/Documents/code/agent-skills/skills/test-skill/SKILL.md"
+    (
+        SYS_HOME="$tmp"
+        # No AUTOOS_ROOT set, no .agents/skills in home
+        custom_is_installed agent-skills
+    )
+    rc_old=$?
+    rm -rf "$tmp"
+    if [[ $rc_old -eq 0 ]]; then pass
+    else fail "rc_old=$rc_old (old clone fallback not detected)"; fi
+fi
+
+if it "custom_is_installed does not detect agent-skills when neither location exists"; then
     tmp="$(mktemp -d)"
     (
         SYS_HOME="$tmp"
-        mkdir -p "$tmp/Documents/code/agent-skills"
+        AUTOOS_ROOT="$tmp"  # Point to temp dir without .agents/skills
         custom_is_installed agent-skills
     )
-    rc_code=$?
-    (
-        SYS_HOME="$tmp"
-        rm -rf "$tmp/Documents/code"
-        mkdir -p "$tmp/Documents/Code/agent-skills"
-        custom_is_installed agent-skills
-    )
-    rc_Code=$?
+    rc_none=$?
     rm -rf "$tmp"
-    if [[ $rc_code -eq 0 && $rc_Code -eq 0 ]]; then pass
-    else fail "rc_code=$rc_code rc_Code=$rc_Code"; fi
+    if [[ $rc_none -ne 0 ]]; then pass
+    else fail "rc_none=$rc_none (should not detect when neither location exists)"; fi
 fi
 
 if it "custom_is_installed detects a populated native CAO home"; then
@@ -904,6 +929,69 @@ fi
 
 # oh_skill_repo creates a scratch AUTOOS_ROOT with two skills.
 # Reused from the openhands tests above.
+
+if it "install_agent_skills does NOT clone agent-skills repo (no clone_or_update)"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    # Create old clone to verify it's left alone
+    mkdir -p "$tmp/Documents/code/agent-skills/skills/old-skill"
+    printf 'old clone\n' >"$tmp/Documents/code/agent-skills/skills/old-skill/README.md"
+    clone_flag="$tmp/clone_flag"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        AUTOOS_ROOT="$tmp/repo"
+        clone_or_update() { echo called >"$clone_flag"; }
+        install_mcp_graphify() { :; }
+        install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }
+        install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        enable_project_mcp_server() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        has_cmd() { return 1; }
+        install_agent_skills >/dev/null 2>&1
+    )
+    problems=""
+    [[ ! -f "$clone_flag" ]] || problems+="[clone_or_update was called (should not clone)] "
+    # Old clone should be left alone
+    [[ -f "$tmp/Documents/code/agent-skills/skills/old-skill/README.md" ]] || problems+="[old clone was modified] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "install_agent_skills uses repo's .agents/skills and .mcp.json (not clone)"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    # Ensure repo has .mcp.json
+    cp "$tmp/../../.mcp.json" "$tmp/repo/.mcp.json" 2>/dev/null || printf '{"mcpServers":{"omnigraph":{},"autoos-agent":{}}}\n' >"$tmp/repo/.mcp.json"
+    enabled_flag="$tmp/enabled_servers"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        AUTOOS_ROOT="$tmp/repo"
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }
+        install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }
+        install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        enable_project_mcp_server() { printf '%s\n' "$2" >>"$enabled_flag"; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        has_cmd() { return 1; }
+        install_agent_skills >/dev/null 2>&1
+    )
+    problems=""
+    # Should enable omnigraph and autoos-agent from repo's .mcp.json
+    grep -q '^omnigraph$' "$enabled_flag" 2>/dev/null || problems+="[omnigraph not enabled from repo .mcp.json] "
+    grep -q '^autoos-agent$' "$enabled_flag" 2>/dev/null || problems+="[autoos-agent not enabled from repo .mcp.json] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
 
 if it "install_agent_skills links repo skills into ~/.agents/skills"; then
     tmp="$(mktemp -d)"
@@ -1103,5 +1191,167 @@ if it "install_agent_skills: dry-run links nothing into ~/.agents/skills"; then
     [[ ! -e "$tmp/.codex/skills" ]] || problems+="[dry run created $tmp/.codex/skills] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# ─── autoos_api_keys_conf helper ───
+
+if it "autoos_api_keys_conf prefers ~/.config/autoos/api_keys.conf"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.config/autoos"
+    printf 'test=key\n' >"$tmp/.config/autoos/api_keys.conf"
+    mkdir -p "$tmp/configuration"
+    printf 'omniroute: other\n' >"$tmp/configuration/api-keys.yml"
+    mkdir -p "$tmp/Documents/code/agent-skills/secrets"
+    printf 'legacy=key\n' >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_ROOT="$tmp"
+        source lib/linux/install.sh
+        autoos_api_keys_conf
+    )
+    rc=$?
+    out="$(cat "$tmp/.config/autoos/api_keys.conf")"
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$out" == "test=key" ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+fi
+
+if it "autoos_api_keys_conf falls back to repo's configuration/api-keys.yml"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/configuration"
+    printf 'omniroute: from_yml\n' >"$tmp/configuration/api-keys.yml"
+    mkdir -p "$tmp/Documents/code/agent-skills/secrets"
+    printf 'legacy=key\n' >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_ROOT="$tmp"
+        source lib/linux/install.sh
+        autoos_api_keys_conf
+    )
+    rc=$?
+    out="$(cat "$tmp/configuration/api-keys.yml")"
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$out" == "omniroute: from_yml" ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+fi
+
+if it "autoos_api_keys_conf falls back to legacy agent-skills/secrets/api_keys.conf"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Documents/code/agent-skills/secrets"
+    printf 'legacy=key\n' >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_ROOT="$tmp"
+        source lib/linux/install.sh
+        autoos_api_keys_conf
+    )
+    rc=$?
+    out="$(cat "$tmp/Documents/code/agent-skills/secrets/api_keys.conf")"
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$out" == "legacy=key" ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+fi
+
+if it "autoos_api_keys_conf returns non-zero when no file exists"; then
+    tmp="$(mktemp -d)"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_ROOT="$tmp"
+        source lib/linux/install.sh
+        autoos_api_keys_conf
+    )
+    rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -ne 0 ]]; then pass
+    else fail "rc=$rc (should be non-zero when no file exists)"; fi
+fi
+
+# ─── graphify-mcp symlink handling ───
+
+if it "graphify_mcp_symlink creates symlink when missing"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.local/bin"
+    mkdir -p "$tmp/infra/mcp-servers/bin"
+    printf '#!/bin/sh\necho "graphify-mcp from repo"\n' >"$tmp/infra/mcp-servers/bin/graphify-mcp"
+    chmod +x "$tmp/infra/mcp-servers/bin/graphify-mcp"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_ROOT="$tmp"
+        source lib/linux/install.sh
+        graphify_mcp_symlink
+    )
+    rc=$?
+    link_target="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo "none")"
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$link_target" == "$tmp/infra/mcp-servers/bin/graphify-mcp" ]]; then pass
+    else fail "rc=$rc link_target=$link_target"; fi
+fi
+
+if it "graphify_mcp_symlink repoints symlink from agent-skills path"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.local/bin"
+    mkdir -p "$tmp/Documents/code/agent-skills/infra/mcp-servers/bin"
+    printf '#!/bin/sh\necho "old graphify-mcp"\n' >"$tmp/Documents/code/agent-skills/infra/mcp-servers/bin/graphify-mcp"
+    chmod +x "$tmp/Documents/code/agent-skills/infra/mcp-servers/bin/graphify-mcp"
+    ln -sf "$tmp/Documents/code/agent-skills/infra/mcp-servers/bin/graphify-mcp" "$tmp/.local/bin/graphify-mcp"
+    mkdir -p "$tmp/infra/mcp-servers/bin"
+    printf '#!/bin/sh\necho "graphify-mcp from repo"\n' >"$tmp/infra/mcp-servers/bin/graphify-mcp"
+    chmod +x "$tmp/infra/mcp-servers/bin/graphify-mcp"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_ROOT="$tmp"
+        source lib/linux/install.sh
+        graphify_mcp_symlink
+    )
+    rc=$?
+    link_target="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo "none")"
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$link_target" == "$tmp/infra/mcp-servers/bin/graphify-mcp" ]]; then pass
+    else fail "rc=$rc link_target=$link_target (expected repo path)"; fi
+fi
+
+if it "graphify_mcp_symlink leaves user-made regular file alone"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.local/bin"
+    printf '#!/bin/sh\necho "user graphify-mcp"\n' >"$tmp/.local/bin/graphify-mcp"
+    chmod +x "$tmp/.local/bin/graphify-mcp"
+    mkdir -p "$tmp/infra/mcp-servers/bin"
+    printf '#!/bin/sh\necho "graphify-mcp from repo"\n' >"$tmp/infra/mcp-servers/bin/graphify-mcp"
+    chmod +x "$tmp/infra/mcp-servers/bin/graphify-mcp"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_ROOT="$tmp"
+        source lib/linux/install.sh
+        graphify_mcp_symlink 2>&1
+    )
+    rc=$?
+    content="$(cat "$tmp/.local/bin/graphify-mcp")"
+    rm -rf "$tmp"
+    # Check that the file content is unchanged (includes shebang)
+    if [[ $rc -eq 0 && "$content" == $'#!/bin/sh\necho "user graphify-mcp"' ]]; then pass
+    else fail "rc=$rc content=$content (user file should be left alone)"; fi
+fi
+
+if it "graphify_mcp_symlink leaves user-made symlink to different target alone"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.local/bin"
+    mkdir -p "$tmp/other/path"
+    printf '#!/bin/sh\necho "other graphify-mcp"\n' >"$tmp/other/path/graphify-mcp"
+    chmod +x "$tmp/other/path/graphify-mcp"
+    ln -sf "$tmp/other/path/graphify-mcp" "$tmp/.local/bin/graphify-mcp"
+    mkdir -p "$tmp/infra/mcp-servers/bin"
+    printf '#!/bin/sh\necho "graphify-mcp from repo"\n' >"$tmp/infra/mcp-servers/bin/graphify-mcp"
+    chmod +x "$tmp/infra/mcp-servers/bin/graphify-mcp"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_ROOT="$tmp"
+        source lib/linux/install.sh
+        graphify_mcp_symlink 2>&1
+    )
+    rc=$?
+    link_target="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo "none")"
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$link_target" == "$tmp/other/path/graphify-mcp" ]]; then pass
+    else fail "rc=$rc link_target=$link_target (user symlink should be left alone)"; fi
 fi
 

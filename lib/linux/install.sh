@@ -192,7 +192,15 @@ custom_is_installed() {
             [[ -d "$SYS_HOME/.cao" && -n "$(ls -A "$SYS_HOME/.cao" 2>/dev/null || true)" ]]
             ;;
         agent-skills)
-            [[ -d "$SYS_HOME/Documents/Code/agent-skills" || -d "$SYS_HOME/Documents/code/agent-skills" ]]
+            # New location: this checkout's .agents/skills + .mcp.json wiring
+            local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+            if [[ -d "$repo_root/.agents/skills" && -f "$repo_root/.mcp.json" ]]; then
+                return 0
+            fi
+            # Fallback: old external clone (for machines mid-migration)
+            local code_root="$SYS_HOME/Documents/Code"
+            [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
+            [[ -d "$code_root/agent-skills/skills" ]]
             ;;
         mcp-serena)
             mcp_has_server serena || antigravity_has_server serena
@@ -3889,13 +3897,7 @@ PY
 }
 
 install_agent_skills() {
-    local code_root="$SYS_HOME/Documents/Code"
-    if [[ -d "$SYS_HOME/Documents/code" ]]; then
-        code_root="$SYS_HOME/Documents/code"
-    fi
-    local dest="$code_root/agent-skills"
-    (( AUTOOS_DRY_RUN )) || mkdir -p "$code_root"
-    clone_or_update https://github.com/Ch3fUlrich/agent-skills.git "$dest"
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
     local base
     base="$(omnigraph_base_url)"
@@ -3917,15 +3919,12 @@ install_agent_skills() {
         ui_warn "per-repo one and answers from the wrong graph. Remove it with:"
         ui_muted "    claude mcp remove omnigraph --scope user"
     fi
-    if [[ -f "$dest/.mcp.json" ]]; then
-        ui_muted "omnigraph is declared per-repo in ${dest}/.mcp.json"
-        enable_project_mcp_server "$dest" omnigraph
+    # Enable project MCP servers from this repo's .mcp.json (omnigraph + autoos-agent)
+    if [[ -f "$repo_root/.mcp.json" ]]; then
+        enable_project_mcp_server "$repo_root" omnigraph
+        enable_project_mcp_server "$repo_root" autoos-agent
     else
-        ui_warn "no .mcp.json in ${dest} — nothing to pin omnigraph to."
-    fi
-    # The agent spawner is declared in this repo's own .mcp.json.
-    if [[ -n "${AUTOOS_ROOT:-}" && -f "$AUTOOS_ROOT/.mcp.json" ]]; then
-        enable_project_mcp_server "$AUTOOS_ROOT" autoos-agent
+        ui_warn "no .mcp.json in ${repo_root} — nothing to pin omnigraph/autoos-agent to."
     fi
 
     local omni_pkg omni_spec
@@ -3951,13 +3950,14 @@ print(json.dumps({
     # Wire skills into Antigravity and Claude Code global skills directories
     local agy_skills="$SYS_HOME/.gemini/config/skills"
     local claude_skills="$SYS_HOME/.claude/skills"
-    if [[ -d "$dest/skills" ]]; then
+    local repo_skills="$repo_root/.agents/skills"
+    if [[ -d "$repo_skills" ]]; then
         if (( AUTOOS_DRY_RUN )); then
-            ui_muted "would link skills from $dest/skills to $agy_skills and $claude_skills"
+            ui_muted "would link skills from $repo_skills to $agy_skills and $claude_skills"
         else
             mkdir -p "$agy_skills" "$claude_skills"
             local s_dir s_name
-            for s_dir in "$dest/skills"/*; do
+            for s_dir in "$repo_skills"/*; do
                 [[ -d "$s_dir" ]] || continue
                 s_name="$(basename "$s_dir")"
                 if [[ ! -e "$agy_skills/$s_name" ]]; then
@@ -3974,9 +3974,7 @@ print(json.dumps({
     # Repo skills into project .claude/skills (Claude Code reads only that
     # dir). Symlinks, created at install time (never committed - see
     # .gitignore). Guarded: existing entries win.
-    repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-    repo_skills="$repo_root/.agents/skills"
-    repo_claude="$repo_root/.claude/skills"
+    local repo_claude="$repo_root/.claude/skills"
     if [[ -d "$repo_skills" ]]; then
         if (( AUTOOS_DRY_RUN )); then
             ui_muted "would link repo skills into $repo_claude"
@@ -4004,11 +4002,23 @@ print(json.dumps({
         fi
     fi
 
+    # Check for retired external agent-skills clone and hint it's no longer used
+    local code_root="$SYS_HOME/Documents/Code"
+    [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
+    local old_clone="$code_root/agent-skills"
+    if [[ -d "$old_clone" && ! -L "$old_clone" ]]; then
+        ui_muted "Note: external agent-skills clone at $old_clone is retired; AutoOS now uses the vendored .agents/skills in this checkout."
+    fi
+
+    # Ensure graphify-mcp symlink points to this repo's infra
+    graphify_mcp_symlink
+
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would check the omnigraph image, network and token"
         return 0
     fi
-    if omnigraph_readiness "$dest"; then
+    # Check omnigraph readiness using this repo's infra path
+    if omnigraph_readiness "$repo_root"; then
         ui_ok "omnigraph prerequisites are all present."
     fi
     ui_info "Restart Claude Code and Antigravity — MCP servers are only read at session start."
@@ -4057,6 +4067,102 @@ autoos_skills_source() {
     local skills_source="$code_root/agent-skills/skills"
     if [[ -d "$skills_source" ]]; then
         printf '%s\n' "$skills_source"
+    fi
+    return 0
+}
+
+# autoos_api_keys_conf: prints the path to the API keys file, in priority order:
+# 1. ~/.config/autoos/api_keys.conf (user config, create nothing - just check)
+# 2. $AUTOOS_ROOT/configuration/api-keys.yml (repo's git-ignored key file)
+# 3. Legacy ~/Documents/Code/agent-skills/secrets/api_keys.conf (fallback)
+# Returns 0 and prints path if found, 1 if none exist.
+autoos_api_keys_conf() {
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    # 1. User config (~/.config/autoos/api_keys.conf) - create nothing
+    if [[ -f "$SYS_HOME/.config/autoos/api_keys.conf" ]]; then
+        printf '%s\n' "$SYS_HOME/.config/autoos/api_keys.conf"
+        return 0
+    fi
+    # 2. Repo's configuration/api-keys.yml (git-ignored, single source of truth)
+    if [[ -f "$repo_root/configuration/api-keys.yml" ]]; then
+        printf '%s\n' "$repo_root/configuration/api-keys.yml"
+        return 0
+    fi
+    # 3. Legacy agent-skills clone
+    local code_root="$SYS_HOME/Documents/Code"
+    [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
+    if [[ -f "$code_root/agent-skills/secrets/api_keys.conf" ]]; then
+        printf '%s\n' "$code_root/agent-skills/secrets/api_keys.conf"
+        return 0
+    fi
+    return 1
+}
+
+# graphify_mcp_symlink: ensures ~/.local/bin/graphify-mcp points to this repo's
+# infra/mcp-servers/bin/graphify-mcp. Only acts when:
+# - link is missing: creates it
+# - link points into an agent-skills path (old clone): repoints to repo
+# - link is a user-made regular file or symlink to different target: leaves alone with hint
+graphify_mcp_symlink() {
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    local target="$repo_root/infra/mcp-servers/bin/graphify-mcp"
+    local link="$SYS_HOME/.local/bin/graphify-mcp"
+
+    # Ensure target exists
+    if [[ ! -f "$target" || ! -x "$target" ]]; then
+        ui_muted "graphify-mcp target not found at $target - skipping symlink"
+        return 0
+    fi
+
+    if (( AUTOOS_DRY_RUN )); then
+        if [[ -L "$link" ]]; then
+            local current="$(readlink "$link")"
+            if [[ "$current" == "$target" ]]; then
+                ui_muted "graphify-mcp already linked correctly"
+            elif [[ "$current" == */agent-skills/* ]]; then
+                ui_muted "would repoint graphify-mcp from agent-skills clone to $target"
+            else
+                ui_muted "would leave graphify-mcp alone (user-managed: $current)"
+            fi
+        elif [[ -e "$link" ]]; then
+            ui_muted "would leave graphify-mcp alone (user-managed regular file)"
+        else
+            ui_muted "would create graphify-mcp symlink: $link -> $target"
+        fi
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$link")"
+
+    if [[ -L "$link" ]]; then
+        local current="$(readlink "$link")"
+        # Resolve relative paths
+        [[ "$current" == /* ]] || current="$(dirname "$link")/$current"
+        # Normalize path
+        current="$(cd "$(dirname "$current")" 2>/dev/null && pwd -P)/$(basename "$current")" 2>/dev/null || current="$current"
+
+        if [[ "$current" == "$target" ]]; then
+            ui_muted "graphify-mcp already linked correctly"
+        elif [[ "$current" == */agent-skills/* ]]; then
+            # Repoint from agent-skills clone to repo
+            if ln -sfn "$target" "$link"; then
+                ui_ok "repointed graphify-mcp from agent-skills clone to $target"
+            else
+                ui_warn "could not repoint graphify-mcp"
+            fi
+        else
+            ui_muted "left graphify-mcp alone (user-managed symlink to $current)"
+        fi
+    elif [[ -e "$link" ]]; then
+        # Regular file (user-managed)
+        ui_muted "left graphify-mcp alone (user-managed regular file at $link)"
+    else
+        # Missing - create it
+        if ln -s "$target" "$link"; then
+            ui_ok "linked graphify-mcp: $link -> $target"
+        else
+            ui_warn "could not create graphify-mcp symlink"
+        fi
     fi
     return 0
 }
@@ -4165,8 +4271,8 @@ opencode_is_v2() {
 _opencode_merge_config() {
     local config_file="$1"
 
-    local secrets_file="$SYS_HOME/Documents/Code/agent-skills/secrets/api_keys.conf"
-    [[ -f "$secrets_file" ]] || secrets_file="$SYS_HOME/Documents/code/agent-skills/secrets/api_keys.conf"
+    local secrets_file
+    secrets_file="$(autoos_api_keys_conf)" || secrets_file=""
 
     # catalog/ai-registry.json models is the single source of truth for model data.
     # The repo root is anchored off this script, never off the caller's cwd.
@@ -4597,7 +4703,8 @@ setup_openhands_config() {
         link_skill_dirs "$skills_source" "$openhands_dir/skills" || true
     fi
 
-    local secrets_file="$code_root/agent-skills/secrets/api_keys.conf"
+    local secrets_file
+    secrets_file="$(autoos_api_keys_conf)" || secrets_file=""
 
     catalog_require_python || return 0
 
