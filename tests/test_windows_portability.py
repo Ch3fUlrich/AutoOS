@@ -122,14 +122,14 @@ def _decorator_is_skip_with_platform_guard(d: ast.expr) -> bool:
     if d.func.value.id != "unittest":
         return False
 
-    # Walk the arguments for os.name or sys.platform
-    for arg_node in ast.walk(d):
-        if isinstance(arg_node, ast.Attribute) and isinstance(arg_node.value, ast.Name):
-            if arg_node.value.id == "os" and arg_node.attr == "name":
-                return True
-            if arg_node.value.id == "sys" and arg_node.attr == "platform":
-                return True
-    return False
+    # skipIf skips when its condition holds, so it must hold on Windows;
+    # skipUnless runs only when it holds, so it must fail on Windows.
+    if not d.args:
+        return False
+    polarity = _true_on_windows(d.args[0])
+    if polarity is None:
+        return False
+    return polarity if d.func.attr == "skipIf" else not polarity
 
 
 def _is_skip_test_call(node: ast.AST) -> bool:
@@ -153,61 +153,57 @@ class _NotGuarded(Exception):
     """Raised when we determine a skipTest call is NOT inside a platform guard."""
 
 
+def _true_on_windows(test: ast.expr) -> bool | None:
+    """True when *test* holds on Windows (os.name == "nt",
+    sys.platform.startswith("win"), sys.platform == "win32"), False when it
+    holds everywhere else (the != / not forms), None when it is no platform
+    check at all."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _true_on_windows(test.operand)
+        return None if inner is None else not inner
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+        # `os.name == "nt" or <anything>` is true on Windows.
+        return True if any(_true_on_windows(v) is True for v in test.values) else None
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and \
+            isinstance(test.left, ast.Attribute) and isinstance(test.left.value, ast.Name) and \
+            isinstance(test.comparators[0], ast.Constant):
+        owner, attr = test.left.value.id, test.left.attr
+        value = test.comparators[0].value
+        windows = ((owner, attr) == ("os", "name") and value == "nt") or \
+                  ((owner, attr) == ("sys", "platform") and isinstance(value, str) and value.startswith("win"))
+        if not windows:
+            return None
+        if isinstance(test.ops[0], ast.Eq):
+            return True
+        if isinstance(test.ops[0], ast.NotEq):
+            return False
+        return None
+    if isinstance(test, ast.Call) and isinstance(test.func, ast.Attribute) and \
+            test.func.attr == "startswith" and isinstance(test.func.value, ast.Attribute) and \
+            isinstance(test.func.value.value, ast.Name) and \
+            (test.func.value.value.id, test.func.value.attr) == ("sys", "platform") and \
+            test.args and isinstance(test.args[0], ast.Constant) and \
+            str(test.args[0].value).startswith("win"):
+        return True
+    return None
+
+
 def _find_containing_platform_check(skip_stmt: ast.AST, func_node: ast.AST) -> bool:
-    """Walk up from skip_stmt to find if it's inside an os.name/sys.platform check.
-
-    Since AST nodes don't have parent links, we walk the function body tree
-    looking for If statements with a platform check that contain the skip_stmt.
-    We check by source position.
-    """
-    # Get source positions
-    skip_lineno = getattr(skip_stmt, "lineno", None)
-    if skip_lineno is None:
-        raise _NotGuarded()
-
+    """Raise _NotGuarded unless *skip_stmt* sits in the branch of an `if`
+    that is taken on Windows: the body of `if os.name == "nt"` or the else of
+    `if os.name != "nt"`. A skip merely inside some platform `if` is not
+    enough - in the other branch it skips on POSIX and the call still runs
+    on Windows."""
     for node in ast.walk(func_node):
-        if isinstance(node, ast.If):
-            cond = node.test
-            if _mentions_platform(cond):
-                # Check if skip_stmt is within this if's body
-                for child in ast.walk(node):
-                    if child is skip_stmt:
-                        return True
-            # Check elif/else
-            if hasattr(node, "orelse") and node.orelse:
-                for elif_node in node.orelse:
-                    if isinstance(elif_node, ast.If) and _mentions_platform(elif_node.test):
-                        for child in ast.walk(elif_node):
-                            if child is skip_stmt:
-                                return True
-
-    # Also check top-level body statements
-    body = getattr(func_node, "body", [])
-    for stmt in body:
-        if stmt is skip_stmt:
+        if not isinstance(node, ast.If):
             continue
-        for child in ast.walk(stmt):
-            if child is skip_stmt:
-                # Check if this is inside an If that mentions platform
-                for parent in ast.walk(func_node):
-                    if isinstance(parent, ast.If) and parent is not stmt:
-                        for c2 in ast.walk(parent):
-                            if c2 is skip_stmt:
-                                if _mentions_platform(parent.test):
-                                    return True
-
+        polarity = _true_on_windows(node.test)
+        if polarity is None:
+            continue
+        branch = node.body if polarity else node.orelse
+        if any(child is skip_stmt for stmt in branch for child in ast.walk(stmt)):
+            return True
     raise _NotGuarded()
-
-
-def _mentions_platform(node: ast.AST) -> bool:
-    """Return True if the expression mentions os.name or sys.platform."""
-    for child in ast.walk(node):
-        if isinstance(child, ast.Attribute) and isinstance(child.value, ast.Name):
-            if child.value.id == "os" and child.attr == "name":
-                return True
-            if child.value.id == "sys" and child.attr == "platform":
-                return True
-    return False
 
 
 def lint_posix_guards(repo: Path | None = None) -> list[str]:
@@ -399,6 +395,73 @@ class PosixGuardLintTests(unittest.TestCase):
             any("test_creates_sh_stub" in r for r in results),
             f"Expected no findings for inline-guarded function, got: {results}",
         )
+
+    def test_a_skip_that_fires_off_windows_is_no_guard(self):
+        # Sonnet final review: the skip must sit in the branch that is true on
+        # Windows; one that skips on POSIX leaves the call running on Windows.
+        wrong_direction = textwrap.dedent("""\
+            import os
+            import unittest
+
+            class T(unittest.TestCase):
+                def test_ne(self):
+                    if os.name != "nt":
+                        self.skipTest("backwards")
+                    os.chmod("x", 0o755)
+
+                def test_else(self):
+                    if os.name == "nt":
+                        pass
+                    else:
+                        self.skipTest("backwards")
+                    os.chmod("x", 0o755)
+        """)
+        results = self._lint_source(wrong_direction)
+        self.assertTrue(any("test_ne" in r for r in results), results)
+        self.assertTrue(any("test_else" in r for r in results), results)
+
+    def test_decorator_direction_matters(self):
+        src = textwrap.dedent("""\
+            import os
+            import unittest
+
+            class T(unittest.TestCase):
+                @unittest.skipIf(os.name != "nt", "backwards")
+                def test_wrong(self):
+                    os.chmod("x", 0o755)
+
+                @unittest.skipUnless(os.name != "nt", "posix only")
+                def test_unless(self):
+                    os.chmod("x", 0o755)
+
+                @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "posix, not root")
+                def test_or(self):
+                    os.chmod("x", 0o755)
+        """)
+        results = self._lint_source(src)
+        self.assertTrue(any("test_wrong" in r for r in results), results)
+        self.assertFalse(any("test_unless" in r or "test_or" in r for r in results), results)
+
+    def test_a_skip_in_the_windows_branch_is_a_guard(self):
+        right = textwrap.dedent("""\
+            import os
+            import sys
+            import unittest
+
+            class T(unittest.TestCase):
+                def test_else(self):
+                    if os.name != "nt":
+                        pass
+                    else:
+                        self.skipTest("posix only")
+                    os.chmod("x", 0o755)
+
+                def test_platform(self):
+                    if sys.platform.startswith("win"):
+                        raise unittest.SkipTest("posix only")
+                    os.chmod("x", 0o755)
+        """)
+        self.assertEqual(self._lint_source(right), [])
 
 
 class BomLintTests(unittest.TestCase):
