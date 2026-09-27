@@ -3425,7 +3425,7 @@ install_mcp_graphify() {
     return $rc
 }
 
-# graphify_user_entry <config file> <package> <bin path>: classifies the user-scope
+# graphify_user_entry <config file> <package> <resolves|missing>: classifies the user-scope
 # 'graphify' entry of a Claude Code user config - none | tool | stale-tool | uv-run |
 # wrapper | other. tool is the entry this installer writes now and the tool resolves;
 # stale-tool is that same bare `graphify-mcp` command with nothing behind it (the
@@ -3436,15 +3436,17 @@ install_mcp_graphify() {
 # matched as components the way every other AutoOS-leftover recognition matches, so a
 # sibling directory with that name in it is not mistaken for it. Anything else - a
 # different shape, an env block, another argument list - is `other`: the user's own
-# server, never touched. The file is read, never written, and nothing from it is
-# echoed: an entry's args can carry a token.
+# server, never touched. The third argument is graphify_mcp_resolves' verdict, passed
+# in rather than re-derived here, so one rule decides what "the tool is there" means.
+# The file is read, never written, and nothing from it is echoed: an entry's args can
+# carry a token.
 graphify_user_entry() {
     python3 - "$1" "$2" "$3" <<'PY'
-import json, os, posixpath, sys
+import json, posixpath, sys
 
 GRAPH = "graphify-out/graph.json"
 UV_RUN = ["--quiet", "run", "--with", None, "python", "-m", "graphify.serve", GRAPH]
-path, package, binpath = sys.argv[1], sys.argv[2], sys.argv[3]
+path, package, resolves = sys.argv[1], sys.argv[2], sys.argv[3]
 name = package.split("[", 1)[0].split("=", 1)[0]
 
 try:
@@ -3463,8 +3465,7 @@ elif (isinstance(entry, dict) and set(entry) <= {"type", "command", "args", "env
         and all(isinstance(a, str) for a in entry.get("args", []))):
     command, args = entry["command"], entry["args"]
     if command == "graphify-mcp" and args == [GRAPH]:
-        import os
-        kind = "tool" if (os.access(binpath, os.X_OK) and not os.path.isdir(binpath)) else "stale-tool"
+        kind = "tool" if resolves == "resolves" else "stale-tool"
     elif (command == "uv" and len(args) == len(UV_RUN)
             and args[:3] == UV_RUN[:3] and args[4:] == UV_RUN[4:]
             and args[3].split("[", 1)[0].split("=", 1)[0] == name):
@@ -3488,9 +3489,9 @@ PY
 # register_mcp_server's own job right after this, which is what makes the repair
 # idempotent: the name is free, the add lands, and a second run finds `tool`.
 replace_stale_graphify_mcp_entry() {
-    local package="$1" cfg entry kind backup bin
+    local package="$1" cfg kind backup resolved
     cfg="$(claude_user_config_file)"
-    bin="$(graphify_mcp_bin_path)"
+    if graphify_mcp_resolves; then resolved=resolves; else resolved=missing; fi
 
     # The claude CLI reads $HOME; the home this run configures is $SYS_HOME. When the
     # resolver names a file outside it, the run is not pointed at that config — the
@@ -3502,8 +3503,10 @@ replace_stale_graphify_mcp_entry() {
         return 0
     fi
 
-    kind="$(graphify_user_entry "$cfg" "$package" "$bin" 2>/dev/null)" || kind="none"
+    kind="$(graphify_user_entry "$cfg" "$package" "$resolved" 2>/dev/null)" || kind="none"
 
+    # Fail closed on any verdict the classifier did not name: only the three shapes
+    # below are AutoOS's own, and an unreadable config is no licence to rewrite it.
     case "$kind" in
         none)
             return 0
@@ -3512,7 +3515,8 @@ replace_stale_graphify_mcp_entry() {
             ui_muted "MCP server 'graphify' already points at the pinned tool - skipped."
             return 0
             ;;
-        other)
+        stale-tool | uv-run | wrapper) ;;
+        *)
             ui_warn "MCP server 'graphify' has a custom user-scope entry - left alone. To let AutoOS wire the pinned tool, remove it first: claude mcp remove graphify --scope user"
             return 0
             ;;

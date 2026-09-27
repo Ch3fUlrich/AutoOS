@@ -2604,7 +2604,7 @@ if it "graphify repairs once: the second run registers nothing new"; then
     calls_first="$(grep -cE 'claude mcp (add|remove)' "$log" || true)"
     second="$(gfy_wire_run "$tmp" ok)"
     calls="$(grep -cE 'claude mcp (add|remove)' "$log" || true)"
-    backups="$(ls "$tmp"/.claude.json.autoos-backup-* 2>/dev/null | wc -l | tr -d ' ')"
+    n_backups="$(ls "$tmp"/.claude.json.autoos-backup-* 2>/dev/null | wc -l | tr -d ' ')"
     problems=""
     [[ "$first" == *RC=0* && "$second" == *RC=0* ]] \
         || problems+="[a run reported failure: ${first##*RC=} | ${second##*RC=}] "
@@ -2612,7 +2612,7 @@ if it "graphify repairs once: the second run registers nothing new"; then
     [[ "$second" != *"installed"* ]] || problems+="[the second run said installed: $second] "
     [[ "$calls" == "$calls_first" ]] \
         || problems+="[the second run wrote a client config again: $(tr '\n' '|' <"$log")] "
-    [[ "$backups" == "0" ]] || problems+="[$backups backups on a config AutoOS itself wrote] "
+    [[ "$n_backups" == "0" ]] || problems+="[$n_backups backups on a config AutoOS itself wrote] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
     fi
