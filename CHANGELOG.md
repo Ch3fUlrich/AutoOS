@@ -16,6 +16,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `setup.sh --yes` (plain `sudo`, so it may prompt, on an interactive TTY
   without `--yes`); a missing/failed sudo prints the two commands for the
   operator and never fails the install. NEVER `--no-sandbox`.
+- **TOCTOU fix**: each privileged step re-checks inside the one root process
+  (`find -P` on a still-regular single-link file, chmod only on a file root
+  owns), so a symlink swapped in after the check can no longer escalate;
+  anything else falls back to the printed commands.
 
 
 ### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
