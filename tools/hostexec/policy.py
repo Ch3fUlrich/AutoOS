@@ -83,6 +83,17 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
 A deny-list can never be complete: every new exec-capable tool is a
 bypass until listed here. hostexec is an audit + guard boundary.
 
+Long options are matched abbreviation-aware on the deny side (hx4): GNU
+getopt_long and git parse-options select an option from any unambiguous
+prefix, so `rm --recurs /`, `tar --to-com id`, `git push --mir origin`,
+`iptables --flu`, `man --page evil` and `git --git-di=/tmp status` all do the
+thing the rule names even though the full spelling is what the table lists.
+_long_opt_hits() is one matcher for every such gate and fails closed -- any
+prefix of a flagged option counts, even one the real program would call
+ambiguous. It is used where the match DENIES only: an allow gate
+(crontab --list, git config --get, `env bash --version`) stays an exact
+comparison, because over-matching there over-allows.
+
 Command heads (brief A): argv[0], then recursively the command after any
 transparent launcher (env, nice, nohup, timeout, xargs, ionice, stdbuf,
 setsid, chrt, flock, taskset, time, watch, unbuffer, parallel,

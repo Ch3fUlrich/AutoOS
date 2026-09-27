@@ -455,6 +455,222 @@ class WrapperOptionBypassMatrixTests(unittest.TestCase):
             [["ls"]])
 
 
+# ─── round 4 (hx4): generated long-option abbreviation matrix ────────────
+#
+# Every deny gate in the policy names its long options in full (the
+# policy._FlaggedLongs instances), and GNU getopt_long / git parse-options
+# select an option from any unambiguous abbreviation -- so `rm --recurs /`,
+# `tar --to-com id` and `git push --mir origin` executed while the full
+# spelling was denied. The matrix below is generated from the policy's own
+# tables: it walks each flagged option from a 3-character prefix up to the
+# full name, in both the bare and the `--abbrev=value` form, placed where the
+# rule expects it. A new flagged option in the policy is covered by this test
+# without writing a new case; a gate with no template here fails the test.
+
+# Dangerous value per full option name -- what the `--abbrev=value` form
+# carries and what a detached-value option reads from the next token, so the
+# generated argv is one the rule must deny for its own reason, not merely one
+# that trips a neighbouring rule.
+_OPTION_VALUES = {
+    "--pager": "evil-pager",
+    "--git-dir": "/tmp/repo", "--work-tree": "/tmp", "--exec-path": "/tmp",
+    "--output": "/tmp/out", "--upload-pack": "evil", "--receive-pack": "evil",
+    "--config-env": "GIT_CONFIG", "--exec": "evil",
+    "--checkpoint-action": "exec=id", "--to-command": "id",
+    "--use-compress-program": "id",
+    "--pid": "host", "--userns": "host", "--cap-add": "all",
+    "--device": "/dev/mem", "--privileged": "true", "--volume": "/:/host",
+    "--mount": "type=bind,src=/,dst=/host", "--user": "0",
+    "--sshlogin": "other", "--sshloginfile": "/tmp/hosts", "--transfer": "f",
+    "--return": "f", "--ssh": "other",
+    "--force-with-lease": "refs/heads/main", "--force-if-includes": "true",
+}
+
+# Gate name in tools/hostexec/policy.py -> (rule id, argv shape). The shape
+# places the option token where the rule reads it, followed by the detached
+# value a value-taking option reads from the next token ("" for a
+# presence-only flag, or when the generated form already carries `=value`).
+def _opt(prefix, tok, val, suffix=()):
+    return [*prefix, tok, *([val] if val else []), *suffix]
+
+
+_LONG_PREFIX_GATES = {
+    "_RM_DESTRUCTIVE_LONGS": ("destructive",
+                              lambda tok, val: _opt(["rm"], tok, val, ["/"])),
+    "_CHMOD_DESTRUCTIVE_LONGS": ("destructive",
+                                 lambda tok, val: _opt(["chmod"], tok, val, ["/"])),
+    "_GIT_PUSH_DESTRUCTIVE_LONGS": ("destructive",
+                                    lambda tok, val: _opt(["git", "push"], tok, val, ["origin"])),
+    "_IPTABLES_DESTRUCTIVE_LONGS": ("destructive",
+                                    lambda tok, val: _opt(["iptables"], tok, val)),
+    "_GIT_INJECT_LONGS": ("git-option-injection",
+                          lambda tok, val: _opt(["git"], tok, val, ["status"])),
+    "_GIT_REBASE_LONGS": ("git-option-injection",
+                          lambda tok, val: _opt(["git", "rebase"], tok, val, ["origin/main"])),
+    "_MAN_INLINE_LONGS": ("no-inline-shell",
+                          lambda tok, val: _opt(["man"], tok, val, ["ls"])),
+    "_TAR_INLINE_LONGS": ("no-inline-shell",
+                          lambda tok, val: _opt(["tar", "-cf", "/tmp/x.tar"], tok, val)),
+    "_DOCKER_RUN_ROOT_LONGS": ("docker-root",
+                               lambda tok, val: _opt(["docker", "run"], tok, val, ["alpine"])),
+    "_DOCKER_EXEC_ROOT_LONGS": ("docker-root",
+                                lambda tok, val: _opt(["docker", "exec"], tok, val, ["web", "ls"])),
+    # parallel's flag region is walked by _idx_after_parallel, which knows only
+    # the exact long spellings; an abbreviation there mis-locates the wrapped
+    # command, and the bogus head denies as path-hijack before the host-alias
+    # gate is reached. Either way the call is refused -- both are accepted here
+    # so the matrix says what actually stops it.
+    "_PARALLEL_HOST_LONGS": (("use-host-alias", "path-hijack"),
+                             lambda tok, val: _opt(["parallel"], tok, val, ["id", ":::", "x"])),
+}
+
+
+def _flagged_gates():
+    """Every _FlaggedLongs the policy declares, by module attribute name."""
+    return {name: value for name, value in vars(policy).items()
+            if isinstance(value, policy._FlaggedLongs)}
+
+
+def _prefixes(full: str):
+    """Every abbreviation of `full` from 3 option characters up to itself."""
+    body = full[2:]
+    for size in range(3, len(body) + 1):
+        yield "--" + body[:size]
+
+
+def _generated_long_prefix_cases():
+    cases = []
+    for attr, (rule, shape) in _LONG_PREFIX_GATES.items():
+        gate = _flagged_gates()[attr]
+        for full in gate.names:
+            value = _OPTION_VALUES.get(full, "x")
+            for tok in _prefixes(full):
+                if full in gate.takes_value:
+                    # inline `--abbrev=value` and the detached form getopt_long
+                    # reads the same value from the next token.
+                    cases.append((shape(f"{tok}={value}", ""), rule))
+                    cases.append((shape(tok, value), rule))
+                else:
+                    cases.append((shape(tok, ""), rule))
+    return cases
+
+
+@unittest.skipIf(os.name == "nt", "sh stubs and chmod; POSIX only")
+class LongOptionPrefixMatrixTests(unittest.TestCase):
+    """Round 4: one abbreviation-aware matcher (_long_opt_hits) behind every
+    deny gate, generated over the policy's own option tables."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.bindir = _make_fixed_path(cls._tmp.name)
+        cls.policy = _test_policy(cls.bindir)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _decide(self, argv):
+        return policy.decide(self.policy, "claude", "coding-host", argv, cwd="/tmp")
+
+    def test_every_flagged_gate_has_a_template(self):
+        # A new _FlaggedLongs in the policy must be covered here, or this fails.
+        gates = set(_flagged_gates())
+        covered = set(_LONG_PREFIX_GATES)
+        self.assertEqual(gates - covered, set(),
+                         f"gates with no prefix template: {sorted(gates - covered)}")
+        missing = {name for name in covered if not hasattr(policy, name)}
+        self.assertEqual(missing, set(), f"templates naming a deleted gate: {sorted(missing)}")
+
+    def test_generated_matrix_denies_every_abbreviation(self):
+        cases = _generated_long_prefix_cases()
+        # proves the matrix was generated from the tables, not hand-trimmed
+        self.assertGreater(len(cases), 400)
+        for argv, rules in cases:
+            with self.subTest(argv=argv, rules=rules):
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow,
+                                 f"{argv!r} was allowed (rule={decision.rule!r})")
+                self.assertIn(decision.rule, rules, f"{argv!r}")
+
+    def test_shortest_abbreviation_is_denied_too(self):
+        # 1-2 option characters: over-deny is the documented fail-closed side
+        # of the rule -- a token the real program would reject as ambiguous
+        # still names the dangerous option.
+        for argv, rule in (
+                (["rm", "--r", "/"], "destructive"),
+                (["chmod", "--re", "/"], "destructive"),
+                (["git", "push", "--m", "origin"], "destructive"),
+                (["git", "--g", "/tmp", "status"], "git-option-injection"),
+                (["iptables", "--f"], "destructive"),
+                (["man", "--p", "evil"], "no-inline-shell"),
+                (["tar", "--u", "id", "-f", "x"], "no-inline-shell"),
+                (["docker", "run", "--p", "alpine"], "docker-root"),
+                (["parallel", "--s=other", "id", ":::", "x"], "use-host-alias")):
+            with self.subTest(argv=argv, rule=rule):
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow, f"{argv!r} was allowed")
+                self.assertEqual(decision.rule, rule, f"{argv!r}")
+
+    def test_harmless_spellings_stay_allowed(self):
+        # The matching is prefix-aware on the DENY side only; an ordinary
+        # option that merely shares a letter with a flagged one is untouched.
+        for argv in (
+                ["rm", "-i", "f"],
+                ["rm", "--interactive=never", "f"],
+                ["rm", "--preserve-root", "f"],
+                ["chmod", "--verbose", "644", "f"],
+                ["chmod", "644", "/tmp/file"],
+                ["git", "push", "origin", "main"],
+                ["git", "log", "--oneline"],
+                ["git", "status", "--ignored"],
+                ["git", "diff", "--unified=3"],
+                ["git", "commit", "--only", "-m", "msg"],
+                ["tar", "-tf", "x.tar"],
+                ["tar", "--checkpoint=1", "-cf", "/tmp/x.tar", "/tmp/f"],
+                ["tar", "--to-stdout", "-xf", "/tmp/x.tar"],
+                ["man", "ls"],
+                ["man", "--local-file", "ls"],
+                ["docker", "run", "--rm", "alpine"],
+                ["docker", "run", "--detach", "alpine"],
+                ["docker", "exec", "--workdir", "/tmp", "web", "ls"],
+                ["iptables", "-L"],
+                ["parallel", "--tag", "echo", "hi", ":::", "a"],
+                ["parallel", "-I", "foo", "echo", "foo", ":::", "a"],
+                ["parallel", "--replace", "foo", "echo", "foo", ":::", "a"],
+                ["flock", "--", "-evil", "ls"]):
+            with self.subTest(argv=argv):
+                decision = self._decide(argv)
+                self.assertTrue(decision.allow,
+                                f"{argv!r} denied as {decision.rule!r}: {decision.problems}")
+
+    def test_flock_dashdash_lockfile_may_start_with_a_dash(self):
+        # Documented intent (hx4 item 4): after `--` the *next* token is the
+        # lockfile even when it looks like an option, so `-evil` is a file
+        # name and `ls` is the child -- the child is what the rules see.
+        decision = self._decide(["flock", "--", "-evil", "ls"])
+        self.assertTrue(decision.allow, decision.reason)
+        self.assertEqual(policy._direct_child_heads(["flock", "--", "-evil", "ls"]),
+                         [["ls"]])
+        # and the same shape with a forbidden child still denies
+        self.assertEqual(self._decide(["flock", "--", "-evil", "rm", "-rf", "/"]).rule,
+                         "destructive")
+
+    def test_docker_global_option_abbreviation_cannot_hide_the_subcommand(self):
+        # The subcommand scan is prefix-aware too: `docker --log-l info run`
+        # must not read "info" as the subcommand and skip the run checks.
+        for argv in (
+                ["docker", "--log-l", "info", "run", "-v", "/:/h", "alpine"],
+                ["docker", "--ho", "tcp://127.0.0.1:2376", "run", "--priv", "alpine"],
+                ["docker", "--con", "ctx", "exec", "--us", "root", "web", "ls"],
+                ["docker", "--conf", "/tmp/c", "run", "--vol", "/:/h", "alpine"],
+                ["podman", "--log-l", "debug", "create", "--device", "/dev/mem", "alpine"]):
+            with self.subTest(argv=argv):
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow, f"{argv!r} was allowed")
+                self.assertEqual(decision.rule, "docker-root", f"{argv!r}")
+
+
 class CliCheckTests(unittest.TestCase):
     """`hostexec.py check` is a dry decision printer: never runs anything."""
 

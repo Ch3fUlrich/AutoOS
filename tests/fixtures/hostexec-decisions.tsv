@@ -275,3 +275,11 @@ claude	default	coding-host	["man","--pag=evil","ls"]	deny	no-inline-shell	hx4: a
 claude	default	coding-host	["parallel","-I","foo","echo","foo",":::","a"]	allow		hx4 low: -I takes a value; the command is echo, not foo
 claude	default	coding-host	["parallel","--replace","foo","echo","foo",":::","a"]	allow		hx4 low: --replace takes a value
 claude	default	coding-host	["flock","--","-evil","ls"]	allow		hx4: after -- the lockfile may start with '-' (named -evil); child is ls
+claude	default	coding-host	["docker","--log-l","info","run","-v","/:/h","alpine"]	deny	docker-root	hx4: abbreviated --log-level must not shift the subcommand scan
+claude	default	coding-host	["docker","--ho","tcp://127.0.0.1:2376","run","--priv","alpine"]	deny	docker-root	hx4: --priv is --privileged
+claude	default	coding-host	["podman","--log-l","debug","create","--device","/dev/mem","alpine"]	deny	docker-root	hx4: abbreviated --device on create
+claude	default	coding-host	["rm","--r","/"]	deny	destructive	hx4: a 1-char prefix still names --recursive (fail closed)
+claude	default	coding-host	["git","push","--m","origin"]	deny	destructive	hx4: --m selects --mirror
+claude	default	coding-host	["chmod","--verbose","644","/tmp/file"]	allow		hx4: --verbose is not an abbreviation of --recursive
+claude	default	coding-host	["tar","--to-stdout","-xf","/tmp/x.tar"]	allow		hx4: --to-stdout is not --to-command
+claude	default	coding-host	["parallel","--tag","echo","hi",":::","a"]	allow		hx4: --tag is a boolean, not --tagstring
