@@ -52,7 +52,9 @@ The table below describes the native (workstation) layout.
   `omniroute --no-open --port 20128` from `$HOME`.
 - **Dashboard password reset from the host** (docker stack):
   `printf '%s' "$NEW" | docker exec -i autoos-omniroute node bin/reset-password.mjs --password-stdin`,
-  then log in to the dashboard with the new password. The CLI imports
+  then `bash configuration/docker/ai-stack/ai-stack.sh restart omniroute` (the
+  CLI writes the database; the running gateway reads it at start) and log in
+  with the new password. The CLI imports
   `bcryptjs`, which the upstream image's standalone build prunes from
   `/app/node_modules`, so the derived layer adds it: needs
   `autoos/omniroute:…-autoos2` or later (rebuilt by `ai-stack.sh up`).
