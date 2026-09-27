@@ -199,6 +199,29 @@ class RegistryCapsTests(unittest.TestCase):
                 self.assertEqual(source, "default", policy)
                 self.assertEqual(caps, ctx.DEFAULT_CAPS)
 
+    def test_a_partial_caps_row_missing_cap_fraction_reports_default(self):
+        """Review R4FIX: a row that has match/window/cap_tokens but lacks a key
+        the schema requires (cap_fraction) is not usable, so the fallback is
+        reported with source 'default', never 'policy'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "ai-registry.json"
+            registry = {
+                "policy": {
+                    "handoff_caps": {
+                        "partial": {
+                            "cap_tokens": 123,
+                            "match": ["opus"],
+                            "source": "test",
+                            "window": 1000000
+                        }
+                    }
+                }
+            }
+            registry_path.write_text(json.dumps(registry), encoding="utf-8")
+            caps, source = ctx.load_caps(registry_path)
+            self.assertEqual(source, "default")
+            self.assertEqual(caps, ctx.DEFAULT_CAPS)
+
     def test_bracket_1m_rule_unchanged_with_registry(self):
         """The [1m] rule works the same whether caps come from registry or default."""
         self.assertEqual(ctx.cap_for("fable[1m]"), 400000)

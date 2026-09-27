@@ -328,6 +328,11 @@ def provider_tpm(provider_id, model_id, registry):
     today -- a request-size filter in usable_legs; rpm/rpd/tpd are data only
     for now (no clock, no counters). A missing limits table or a missing model
     key means the leg is not size-filtered.
+
+    The estimate compared against tpm is *input only* (review R4FIX,
+    2026-09-27): ``need_tokens`` is the brief plus the files, with no output
+    reserve. TPM counts input+output, so a leg close to its cap can still 413
+    on a long generation even though it passes here.
     """
     provider = (registry.get("providers") or {}).get(provider_id) or {}
     limits = provider.get("limits") or {}
@@ -467,6 +472,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
       carry ``tpm`` is skipped when ``need_tokens * 1.3 > tpm`` -- a
       request-size cap Groq's free tier enforces (a request above ~8K tokens
       413s there). rpm/rpd/tpd are data only for now (no clock, no counters).
+      Keep-on-equal (review R4FIX): ``need_tokens * 1.3 == tpm`` keeps the leg;
+      only a strictly greater need skips it. The estimate is input only --
+      ``need_tokens`` is the brief plus the files, no output reserve -- so a
+      leg near its cap may still 413 on long outputs even though it passes.
     - tool_calls (agentic kinds only): a value other than ``"proven"``
       (unproven, broken, or no verdict at all) skips the leg.
     - client_bound: a bound leg is always skipped - a route is served through
