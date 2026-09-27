@@ -4128,18 +4128,21 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     # Pinned on purpose: the order is the OpenHands push priority (the app
     # keeps 10 profiles), so a reorder must be a deliberate, reviewed edit.
-    # Re-pinned 2026-09-27 (PROVPIN, PROV bab8d70): the -clean, spark and
-    # deepseek tiers are omitted with their providers' credits off; the two
+    # Re-pinned 2026-09-27 (PROVPIN, PROV bab8d70): the -clean and deepseek
+    # tiers are omitted with their providers' credits off; the two
     # t1-orchestrator-free-only tiers are the free gemini leg that serves t1 now.
-    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-t3-driver-free-only,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only,litellm-t1-orchestrator-free-only,omniroute-t1-orchestrator-free-only'
+    # Re-pinned again 2026-09-27 (PROVFIX3 verify): MUSEAPI gave meta_api a paid
+    # contributor key, so both spark tiers are servable and back in the spec.
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-t3-driver-free-only,omniroute-spark-1.3-contributor,openrouter-muse-spark-1.3-contributor,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only,litellm-t1-orchestrator-free-only,omniroute-t1-orchestrator-free-only'
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
     Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
     foreach ($t in $spec.tiers) {
-        # Gateway tiers carry the openai/ transport prefix. The DIRECT
-        # provider profiles (openrouter spark, deepseek-v4.1-flash) are gone:
-        # their routes fail closed (DSMAX 2026-09-27, deepseek 402
-        # 2026-09-27T16:4xZ), so every tier is a gateway tier now.
-        Assert-True ($t.model -match '^(openai/(t1-orchestrator(-free-only)?|t2-worker(-clean|-free-only)?|t2-orchestrator|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|opus-4-6))$') "$($t.id) model is not a servable gateway tier"
+        # Gateway tiers carry the openai/ transport prefix; the direct
+        # openrouter tier names the provider's own model id and takes its own
+        # key and endpoint (asserted below on a synthetic spec). The
+        # deepseek-v4.1-flash tier stays gone: its route fails closed (DSMAX
+        # 2026-09-27, deepseek 402 2026-09-27T16:4xZ).
+        Assert-True ($t.model -match '^(openai/(t1-orchestrator(-free-only)?|t2-worker(-clean|-free-only)?|t2-orchestrator|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|opus-4-6|spark-1\.3-contributor)|openrouter/meta/muse-spark-1\.3-contributor)$') "$($t.id) model is not a servable tier"
     }
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
@@ -4177,10 +4180,10 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
         Assert-Equal $lt.api_key 'test-lit-key'
         # A direct-provider tier (gateway: openrouter) takes its OWN key and
         # endpoint, not the gateway's - that is the effort-ladder surface. The
-        # committed spec has none today (PROV 2026-09-27: openrouter credit
-        # off), so the renderer's behaviour is exercised on a synthetic one-tier
-        # spec instead of a pinned profile name that goes stale with the
-        # provider state (PROVPIN re-pin).
+        # committed spec has one again since MUSEAPI
+        # (openrouter-muse-spark-1.3-contributor), but the rule is still
+        # exercised on a synthetic one-tier spec: a pinned profile name goes
+        # stale the moment the provider's credit state changes.
         $realOrKey = $env:OPENROUTER_API_KEY
         try {
             $syn = Join-Path $tmpB 'synthetic'
@@ -5912,10 +5915,13 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
             Assert-Equal (($got | ForEach-Object { $_.name }) -join ',') (($want | ForEach-Object { $_.id }) -join ',')
             Assert-Equal (($got | ForEach-Object { "$($_.display_name)|$($_.max_tokens)" }) -join ',') (($want | ForEach-Object { "$($_.name)|$($_.context)" }) -join ',')
         }
-        # The 1M tier is 1000000 on every surface (operator ruling 2026-09-25).
+        # PROVFIX3 finding 1 re-pins the window: t1 falls through to its gemini
+        # leg (131,072), so that is what every surface may promise — and the
+        # effort still rides along, because the leg that answers FIRST is the
+        # 1M/xhigh contributor (finding 8: the ladder follows the served head).
         $t1 = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | Where-Object { $_.name -eq 't1-orchestrator' })
         Assert-Equal $t1.Count 1
-        Assert-Equal $t1[0].max_tokens 1000000
+        Assert-Equal $t1[0].max_tokens 131072
         Assert-Equal $t1[0].reasoning_effort 'xhigh'
         $bypass = $s.agent.profiles.bypass
         Assert-Equal $bypass.name 'bypass'
@@ -6595,11 +6601,16 @@ Test-Case 'subagent depth config' {
 
 Test-Case 'openhands template routes tiers with no secrets' {
     $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
-    foreach ($section in @('[llm]', '[llm.t1-orchestrator]', '[llm.t2-worker]', '[llm.t3-driver]', '[llm.t1-orchestrator-clean]', '[llm.t2-worker-clean]', '[llm.t3-driver-clean]', '[llm.t4-rag]', '[llm.litellm-t1-orchestrator]', '[llm.litellm-t2-worker]', '[llm.litellm-t3-driver]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
+    # t1-orchestrator-clean is NOT in this list (PROVFIX3 finding 6): its combo
+    # is omitted — a route with no servable leg — so apply prunes it and the
+    # profile would point at a 404. The next assertion pins it staying gone.
+    foreach ($section in @('[llm]', '[llm.t1-orchestrator]', '[llm.t2-worker]', '[llm.t3-driver]', '[llm.t2-worker-clean]', '[llm.t3-driver-clean]', '[llm.t4-rag]', '[llm.litellm-t1-orchestrator]', '[llm.litellm-t2-worker]', '[llm.litellm-t3-driver]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
         Assert-True ($toml -match [regex]::Escape($section)) "missing $section"
     }
+    Assert-True ($toml -notmatch '\[llm\.t1-orchestrator-clean\]') 'a pruned combo still has an OpenHands profile'
     Assert-True ($toml -match 'host\.docker\.internal:20128') 'not pointed at the gateway'
     Assert-True ($toml -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
+    Assert-True ($toml -match 'api_key = ""') 'api_key not left empty'
     Pass
 }
 
@@ -7677,8 +7688,11 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         Assert-True ($omitted -notcontains $legless) "legless route $legless is omitted"
     }
     $contexts = @{
-        't1-orchestrator' = '1M'
-        't1-orchestrator-free-only' = '1M'
+        # PROVFIX3 finding 1: a combo may only promise what its smallest
+        # servable leg takes. Both t1 free-bearing tiers fall through to gemini
+        # (131,072), so they render 128k; the two 1M-only tiers keep 1M.
+        't1-orchestrator' = '128k'
+        't1-orchestrator-free-only' = '128k'
         't1-orchestrator-paid' = '1M'
         'spark-1.3-contributor' = '1M'
         't2-worker' = '128k'
@@ -7815,6 +7829,38 @@ if [ "$1 $2" = "providers list" ]; then
     cat "$d/providers.txt"
     exit 0
 fi
+# `omniroute models <provider>` is what makes the gateway enumerate a freshly
+# registered provider's models into /v1/models. The stand-in catalog is
+# gw/v1/models (served by the static gateway): its baseline is catalog.base
+# plus provider_models.tsv's rows for every provider enumerated so far. Nothing
+# is served until a test writes catalog.base, so every other test here keeps the
+# old "no catalog to validate against" behaviour.
+if [ "$1" = "models" ]; then
+    echo "$*" >>"$d/calls.log"
+    [ -n "$2" ] && echo "$2" >>"$d/enumerated"
+    [ -f "$d/gw/v1/models" ] || exit 0
+    python3 - "$d" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+ids = []
+base = os.path.join(d, "catalog.base")
+if os.path.exists(base):
+    ids += [l.strip() for l in open(base, encoding="utf-8") if l.strip()]
+enum = set()
+seen = os.path.join(d, "enumerated")
+if os.path.exists(seen):
+    enum = {l.strip() for l in open(seen, encoding="utf-8") if l.strip()}
+table = os.path.join(d, "provider_models.tsv")
+if os.path.exists(table):
+    for line in open(table, encoding="utf-8"):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) == 2 and parts[0] in enum:
+            ids.append(parts[1])
+with open(os.path.join(d, "gw", "v1", "models"), "w", encoding="utf-8") as fh:
+    json.dump({"data": [{"id": i} for i in dict.fromkeys(ids)]}, fh)
+PY
+    exit 0
+fi
 echo "$*" >>"$d/calls.log"
 exit 0
 '@
@@ -7945,13 +7991,16 @@ Test-Case 'apply prune: deletes an omitted (orphaned) combo the store holds, nev
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
-        Set-AutoOSPruneList $d @('t1-orchestrator-free-only', 't2-worker', 'my-own-combo')
+        # PROVFIX3 verify: the example id follows the registry — T1FREE/MUSEAPI
+        # re-serviced t1-orchestrator-free-only, so the orphan on show today is
+        # deepseek-v4.1-flash (deepseek 402, 2026-09-27T16:4xZ). Same rule, real id.
+        Set-AutoOSPruneList $d @('deepseek-v4.1-flash', 't2-worker', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
-        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete t1-orchestrator-free-only --yes'
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete deepseek-v4.1-flash --yes'
         Assert-True (@($calls | Where-Object { $_ -like '*my-own-combo*' }).Count -eq 0) 'the user-made combo was touched'
-        Assert-True ($out -like '*  - t1-orchestrator-free-only: omitted, deleted*') "no omitted-deletion line in: $out"
+        Assert-True ($out -like '*  - deepseek-v4.1-flash: omitted, deleted*') "no omitted-deletion line in: $out"
         Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
     } finally {
         Stop-AutoOSTestHttpServer $srv
@@ -7964,12 +8013,12 @@ Test-Case 'apply prune: --dry-run names the omitted combo and never names a live
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
-        Set-AutoOSPruneList $d @('t1-orchestrator-free-only', 'auto', 't2-worker-paid', 'my-own-combo')
+        Set-AutoOSPruneList $d @('deepseek-v4.1-flash', 'auto', 't2-worker-paid', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
         Assert-Equal (@($calls | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
-        Assert-True ($out -like '*  - t1-orchestrator-free-only: omitted, would delete*') "no omitted would-delete line in: $out"
+        Assert-True ($out -like '*  - deepseek-v4.1-flash: omitted, would delete*') "no omitted would-delete line in: $out"
         Assert-True ($out -notlike '*omitted, deleted*') 'the dry run claims a deletion'
         Assert-True ($out -notlike '*- auto:*') 'a live "auto" combo was named'
         Assert-True ($out -notlike '*- t2-worker-paid:*') 'a live "t2-worker-paid" combo was named'
@@ -8029,6 +8078,89 @@ Test-Case 'apply registers meta_api from the shared meta key and stays idempoten
     } finally {
         Stop-AutoOSTestHttpServer $srv
         Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# L0 2026-09-27T19:07:39Z, free-ai/qwen7b on a fresh machine: the leg appeared
+# in t3-driver-free-only only on the SECOND apply run, because the first read
+# /v1/models before the gateway had enumerated the connection it had just added
+# and dropped the ref as "catalog does not know". The order that fixes it is
+# register -> refresh (omniroute models <provider>) -> read -> combos.
+# Behavioral twin of the bash suite's "apply: one run registers a provider,
+# refreshes the catalog…": the stand-in CLI's `models` branch is POSIX (a cmd
+# file cannot rebuild JSON without a python dependency), so Windows skips it and
+# the next case pins the order in the script text instead — on every platform.
+Test-Case 'apply.ps1: one run registers a provider, refreshes the catalog, and writes its leg into the combos' {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Skip 'the stand-in CLI models branch is POSIX; the order is asserted in the script text'
+        return
+    }
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        # apply.ps1 reads /v1/models only when an omniroute client key exists —
+        # without it every combo is written unvalidated and this proves nothing.
+        [IO.File]::WriteAllText((Join-Path $d 'keys.yml'),
+            "free_ai: not-a-real-key-123`nomniroute: not-a-real-client-key`n")
+        $refs = @((Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw |
+            ConvertFrom-Json).combos.models) | Sort-Object -Unique
+        $fresh = @($refs | Where-Object { $_ -like 'free-ai/*' })
+        $base = @($refs | Where-Object { $fresh -notcontains $_ })
+        $null = New-Item -ItemType Directory -Path (Join-Path $d 'gw\v1')
+        [IO.File]::WriteAllLines((Join-Path $d 'catalog.base'), $base)
+        [IO.File]::WriteAllLines((Join-Path $d 'provider_models.tsv'),
+            @($fresh | ForEach-Object { "free-ai`t$_" }))
+        [IO.File]::WriteAllText((Join-Path $d 'gw\v1\models'),
+            (@{ data = @($base | ForEach-Object { @{ id = $_ } }) } | ConvertTo-Json -Depth 5 -Compress))
+        Set-AutoOSPruneList $d @()
+        $srv = Start-AutoOSPruneGateway $d
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-True ($out -like '*  + free-ai registered*') "register step: $out"
+        Assert-True ($out -like '*  + free-ai enumerated*') "refresh step: $out"
+        Assert-True ($out -notlike '*catalog does not know free-ai*') "leg dropped: $out"
+        Assert-True ($out -notlike '*could not read /v1/models*') "catalog never read: $out"
+        Assert-Equal (@($calls | Where-Object {
+            $_ -eq 'combo create t3-driver-free-only --strategy priority --models free-ai/qwen7b' }).Count) 1 `
+            "first-run combos: $($calls -join ' | ')"
+        $enumAt = -1; $comboAt = -1
+        for ($i = 0; $i -lt $calls.Count; $i++) {
+            if ($enumAt -lt 0 -and $calls[$i] -eq 'models free-ai') { $enumAt = $i }
+            if ($comboAt -lt 0 -and $calls[$i] -like 'combo create *') { $comboAt = $i }
+        }
+        Assert-True ($enumAt -ge 0 -and $comboAt -gt $enumAt) "order: refresh=$enumAt first-combo=$comboAt"
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply scripts refresh the catalog between registering and reading /v1/models' {
+    # The platform-independent half of the L0 fix: whatever the stand-in can or
+    # cannot emulate, neither script may read the catalog before it refreshed it,
+    # nor write a combo before it read it. Each step is one straight block, so a
+    # call site's position in the text is the position in the run. Anchored on the
+    # call sites themselves, not on prose that mentions them.
+    $steps = @(
+        @{ File = 'configuration\omniroute\apply.ps1'
+           Add = "`$addArgs = @('providers', 'add'"; Enum = '& omniroute models $providerId'
+           Read = '$resp = Invoke-RestMethod -Uri "$Gateway/v1/models'
+           Write = '& omniroute combo create $combo.name' },
+        @{ File = 'configuration/omniroute/apply.sh'
+           Add = 'omni providers add "$provider_id"'; Enum = 'omni models "$provider_id"'
+           Read = '"$GATEWAY/v1/models"'; Write = 'omni combo create "$name"' }
+    )
+    foreach ($s in $steps) {
+        $text = Get-Content (Join-Path $Root $s.File) -Raw
+        $add = $text.IndexOf($s.Add, [System.StringComparison]::Ordinal)
+        $enum = $text.IndexOf($s.Enum, [System.StringComparison]::Ordinal)
+        $read = $text.IndexOf($s.Read, [System.StringComparison]::Ordinal)
+        $write = $text.IndexOf($s.Write, [System.StringComparison]::Ordinal)
+        Assert-True ($add -ge 0 -and $enum -ge 0 -and $read -ge 0 -and $write -ge 0) `
+            "a step is missing from $($s.File) (add=$add enum=$enum read=$read write=$write)"
+        Assert-True ($add -lt $enum) "$($s.File) refreshes the catalog before it registers"
+        Assert-True ($enum -lt $read) "$($s.File) reads /v1/models before it refreshes the catalog"
+        Assert-True ($read -lt $write) "$($s.File) writes combos before it reads /v1/models"
     }
 }
 
@@ -8191,6 +8323,61 @@ Test-Case 'Get-AutoOSProviderMap skips a provider whose every route leg is unava
     }
 }
 
+Test-Case 'Get-AutoOSProviderMap rejects two connections on one api-keys.yml name' {
+    # MUSEAPI review F1, both sides: apply.sh exits 1 on it (tests/linux
+    # 'apply refuses a registry where two providers claim one api-keys.yml
+    # name'), apply.ps1 throws here. The ordered map keys the api-keys.yml name
+    # once, so without the guard the second connection is dropped silently and
+    # the operator gets a half-configured gateway. A fixture, so neither the
+    # real registry nor a live key file is touched - and the guard must NOT fire
+    # for the real MUSEAPI shape, where only one of the two is registered at
+    # all (the direct `meta` provider carries no omniroute_id).
+    $tokens = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Root 'configuration\omniroute\apply.ps1'), [ref]$tokens, [ref]$errs)
+    Assert-Equal $errs.Count 0 'apply.ps1 does not parse'
+    $mapDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $n.Name -eq 'Get-AutoOSProviderMap' }, $false)
+    Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
+    . ([scriptblock]::Create($mapDef.Extent.Text))
+    $dir = [IO.Path]::GetTempPath()
+
+    $clash = Join-Path $dir ('aos_dupkey_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "providers": {
+    "muse":     {"omniroute_id": "muse-id",     "key_name": "meta"},
+    "meta_api": {"omniroute_id": "meta-api-id", "key_name": "meta"}
+  },
+  "routes": {}
+}
+'@ | Set-Content -LiteralPath $clash -Encoding utf8
+    $shared = Join-Path $dir ('aos_sharedkey_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "providers": {
+    "meta":     {"omniroute_id": null},
+    "meta_api": {"omniroute_id": "meta-api-id", "key_name": "meta"}
+  },
+  "routes": {}
+}
+'@ | Set-Content -LiteralPath $shared -Encoding utf8
+    try {
+        $threw = $null
+        try { $null = Get-AutoOSProviderMap $clash } catch { $threw = $_.Exception.Message }
+        Assert-True ($null -ne $threw) 'two connections claiming one api-keys.yml name were accepted'
+        Assert-True ($threw -match 'claimed by both muse-id and meta-api-id') "guard said: $threw"
+
+        # The shape the real registry actually has: the unregistered provider
+        # never reaches the guard, so the live run keeps working.
+        $registry = Get-AutoOSProviderMap $shared
+        Assert-Equal $registry.Map['meta'] 'meta-api-id'
+        Assert-True (-not $registry.Map.Contains('meta_api')) 'a phantom meta_api key must not be offered'
+    } finally {
+        Remove-Item -LiteralPath $clash, $shared -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'provider registry is the single source for apply, mirror and tier maps' {
     # catalog/ai-registry.json is the one map; the helper asserts every
     # consumer's in-memory map equals it, so a hand-edited copy or a half-done
@@ -8217,14 +8404,31 @@ Test-Case 'opencode tiers declare matching context limits' {
     Assert-Equal $models.'gemini-3.8-flash'.limit.context 131072
     Assert-Equal $models.'opus-4-6'.limit.context 200000
     Assert-Equal $models.'t4-rag'.limit.context 131072
-    foreach ($name in @('t2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-orchestrator', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't4-rag', 'opus-4-6', 'gemini-3.8-flash', 'auto', 'auto/cheap', 'auto/smart')) {
+    # T1FREE 2026-09-27 brought t1-orchestrator back; PROVFIX3 finding 1 pins
+    # what "back" means for the window. t1 falls to gemini-3.8-flash (131072
+    # advertised), so its promise clamps to the 128k rung, while the routes
+    # whose only servable leg is the meta_api contributor model keep the 1M
+    # floor. A 1M on t1-orchestrator here is the bug, not the pin.
+    Assert-Equal $models.'t1-orchestrator'.limit.context 131072
+    Assert-Equal $models.'t1-orchestrator-free-only'.limit.context 131072
+    Assert-Equal $models.'t1-orchestrator-paid'.limit.context 1000000
+    Assert-Equal $models.'spark-1.3-contributor'.limit.context 1000000
+    foreach ($name in @('t1-orchestrator', 't1-orchestrator-free-only', 't1-orchestrator-paid',
+                        'spark-1.3-contributor', 't2-worker', 't2-worker-clean',
+                        't2-worker-free-only', 't2-orchestrator', 't3-driver',
+                        't3-driver-clean', 't3-driver-free-only', 't4-rag', 'opus-4-6',
+                        'gemini-3.8-flash', 'auto', 'auto/cheap', 'auto/smart')) {
         Assert-True ($null -ne $models.$name) "missing model $name"
         Assert-Equal $models.$name.modelID $name
     }
-    # t1-orchestrator, t1-orchestrator-clean, spark-1.3-contributor and
-    # deepseek-v4.1-flash fail closed (omitted) - they must NOT be client models.
-    foreach ($gone in @('t1-orchestrator', 't1-orchestrator-clean', 'spark-1.3-contributor', 'deepseek-v4.1-flash')) {
-        Assert-True ($null -eq $models.$gone) "$gone should be omitted, not a client model"
+    # t1-orchestrator-clean and deepseek-v4.1-flash fail closed (omitted) - they
+    # must NOT be client models. spark-1.3-contributor joined the served set when
+    # MUSEAPI gave meta_api a paid contributor key, so it left this list.
+    # PSObject membership, not $null -eq $models.$gone: strict mode makes an
+    # absent property an error instead of $null, so the naive check throws.
+    $modelIds = @($models.PSObject.Properties.Name)
+    foreach ($gone in @('t1-orchestrator-clean', 'deepseek-v4.1-flash')) {
+        Assert-True (-not ($modelIds -contains $gone)) "$gone should be omitted, not a client model"
     }
     Pass
 }

@@ -240,12 +240,15 @@ PY
 )"
     # Pinned on purpose: the order is the OpenHands push priority (the app
     # keeps 10 profiles), so a reorder must be a deliberate, reviewed edit.
-    # Re-pinned 2026-09-27 (PROVPIN, PROV bab8d70): omniroute-t1-orchestrator-clean,
-    # omniroute-spark-1.3-contributor, openrouter-muse-spark-1.3-contributor and
-    # omniroute-deepseek-v4.1-flash are omitted (their providers' credits are off,
-    # so no leg is servable); t1-orchestrator is servable again through the free
-    # gemini leg, which is what the two t1-orchestrator-free-only tiers carry.
-    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-t3-driver-free-only,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only,litellm-t1-orchestrator-free-only,omniroute-t1-orchestrator-free-only|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-orchestrator,openai/t2-worker-clean,openai/t3-driver-clean,openai/t4-rag,openai/opus-4-6,openai/gemini-3.8-flash,openai/t2-worker-free-only,openai/t3-driver-free-only,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-worker-free-only,openai/t3-driver-free-only,openai/t1-orchestrator-free-only,openai/t1-orchestrator-free-only"
+    # Re-pinned 2026-09-27 (PROVPIN, PROV bab8d70): omniroute-t1-orchestrator-clean
+    # and omniroute-deepseek-v4.1-flash are omitted (their providers' credits are
+    # off, so no leg is servable); t1-orchestrator is servable again through the
+    # free gemini leg, which is what the two t1-orchestrator-free-only tiers carry.
+    # Re-pinned again 2026-09-27 (PROVFIX3 verify): MUSEAPI gave meta_api a paid
+    # contributor key, so spark-1.3-contributor is servable and both spark tiers
+    # are back - the gateway one at the combos.json "1M" floor (1000000) and the
+    # direct openrouter one at the model's advertised 1048576.
+    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-t3-driver-free-only,omniroute-spark-1.3-contributor,openrouter-muse-spark-1.3-contributor,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only,litellm-t1-orchestrator-free-only,omniroute-t1-orchestrator-free-only|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-orchestrator,openai/t2-worker-clean,openai/t3-driver-clean,openai/t4-rag,openai/opus-4-6,openai/gemini-3.8-flash,openai/t2-worker-free-only,openai/t3-driver-free-only,openai/spark-1.3-contributor,openrouter/meta/muse-spark-1.3-contributor,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-worker-free-only,openai/t3-driver-free-only,openai/t1-orchestrator-free-only,openai/t1-orchestrator-free-only"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
     # Generator round-trip with fixture keys (env hidden: the suite never
@@ -268,9 +271,10 @@ PY
 
     # A direct-provider tier (gateway: openrouter) must take its OWN key and
     # endpoint, not the gateway's - that is the effort-ladder surface. The
-    # committed spec has none today (PROV 2026-09-27: openrouter credit off),
-    # so the behaviour is exercised on a synthetic one-tier spec rather than a
-    # pinned profile name that goes stale with the provider state.
+    # committed spec has one again since MUSEAPI (openrouter-muse-spark-1.3-
+    # contributor), but the behaviour is still exercised on a synthetic one-tier
+    # spec: a pinned profile name goes stale the moment the provider's credit
+    # state changes, and this assertion is about the rule, not the current route.
     synth="$(mktemp -d)"
     cat >"$synth/spec.json" <<JSON
 {"gateway_base_url": "http://gateway.invalid:20128/v1",

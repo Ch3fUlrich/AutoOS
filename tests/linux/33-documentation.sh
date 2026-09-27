@@ -751,20 +751,26 @@ for name, ctx in (("t2-worker", 131072), ("t3-driver", 131072),
                   ("t2-worker-clean", 131072), ("t3-driver-clean", 131072),
                   ("t2-worker-free-only", 131072), ("t3-driver-free-only", 131072),
                   ("t2-orchestrator", 200000), ("opus-4-6", 200000),
-                  ("gemini-3.8-flash", 131072)):
+                  ("gemini-3.8-flash", 131072),
+                  # T1FREE 2026-09-27: t1-orchestrator and
+                  # t1-orchestrator-free-only are back, and PROVFIX3 finding 1
+                  # pins what "back" means for the window: t1 falls to
+                  # gemini-3.8-flash (131072 advertised), so its promise is
+                  # clamped to the 128k rung, while the routes whose only
+                  # servable leg is the meta_api contributor model keep the 1M
+                  # floor. A 1M here on t1-orchestrator is the bug, not the pin.
+                  ("t1-orchestrator", 131072),
+                  ("t1-orchestrator-free-only", 131072),
+                  ("t1-orchestrator-paid", 1000000),
+                  ("spark-1.3-contributor", 1000000)):
     if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:
         problems.append(name)
-# t1-orchestrator-clean, spark-1.3-contributor and
-# deepseek-v4.1-flash fail closed (omitted) - they must NOT be client models.
-# T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only are back.
-for gone in ("t1-orchestrator-clean", "spark-1.3-contributor",
-             "deepseek-v4.1-flash"):
+# t1-orchestrator-clean and deepseek-v4.1-flash fail closed (omitted) - they
+# must NOT be client models. spark-1.3-contributor joined the served set when
+# MUSEAPI gave meta_api a paid contributor key, so it left this list.
+for gone in ("t1-orchestrator-clean", "deepseek-v4.1-flash"):
     if gone in m:
         problems.append(gone + "-should-be-omitted")
-# t1-orchestrator and t1-orchestrator-free-only MUST be available.
-for kept in ("t1-orchestrator", "t1-orchestrator-free-only"):
-    if kept not in m:
-        problems.append(kept + "-should-be-in-client-models")
 print(" ".join(problems))
 PY
 )"

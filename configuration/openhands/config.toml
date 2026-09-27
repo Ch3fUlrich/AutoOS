@@ -37,7 +37,7 @@ temperature = 0.0
 num_retries = 3
 # Token windows in every [llm*] table come from catalog/ide-models.json
 # (python3 tools/sync-ide-models.py rewrites them; edit the catalog).
-max_input_tokens = 1000000
+max_input_tokens = 131072
 max_output_tokens = 32768
 
 # ── Named tiers (dev path: pick per agent below) ────────────────────
@@ -45,7 +45,7 @@ max_output_tokens = 32768
 model = "openai/t1-orchestrator"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.0
-max_input_tokens = 1000000
+max_input_tokens = 131072
 max_output_tokens = 32768
 
 [llm.t2-worker]
@@ -63,11 +63,11 @@ max_input_tokens = 131072
 max_output_tokens = 16384
 
 # Sensitive data: swap tier ids for the -clean combos (no prompt training).
-[llm.t1-orchestrator-clean]
-model = "openai/t1-orchestrator-clean"
-base_url = "http://127.0.0.1:20128/v1"
-temperature = 0.0
-
+# t1-orchestrator-clean is NOT here (PROVFIX3 finding 6): the combo has been
+# omitted since DSMAX 2026-09-27 (its only legs were OpenRouter and the
+# client-bound Zen deployment), apply.sh prunes an omitted combo from the
+# gateway store, and the OpenHands tier spec dropped the profile — so this table
+# would 404 on activation. The two clean tiers that do serve are below.
 [llm.t2-worker-clean]
 model = "openai/t2-worker-clean"
 base_url = "http://127.0.0.1:20128/v1"

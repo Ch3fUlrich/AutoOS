@@ -678,7 +678,9 @@ def serve() -> None:
         take their defaults, an empty card is t2-worker. Or pass tier 1-3 instead of a card.
         isolate: private git clone on its own branch. lean: no serena/playwright
         (default on for role=review). Refused past the depth budget, and for
-        privacy=sensitive + ctx=1m unless allow_training."""
+        privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
+        does not unlock it — routing.select_combo is explicit that the flag is
+        inert there; it only waives the privacy check on an explicit --model)."""
         return spawn({"task": task, "client": client, "card": card, "tier": tier, "model": model,
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,

@@ -43,7 +43,9 @@ if it "the OpenHands template carries the LiteLLM provider prefix"; then    # Ev
     ok=1
     grep -q 'model = "openai/t1-orchestrator"' configuration/openhands/config.toml || ok=0
     grep -q 'model = "openai/t3-driver"' configuration/openhands/config.toml || ok=0
-    grep -q 'openai/t1-orchestrator-clean' configuration/openhands/config.toml || ok=0
+    # PROVFIX3 finding 6: t1-orchestrator-clean must NOT come back — the combo is
+    # omitted (DSMAX 2026-09-27) and apply.sh prunes it, so the profile 404s.
+    if grep -q 'openai/t1-orchestrator-clean' configuration/openhands/config.toml; then ok=0; fi
     if [[ -n "$bad" ]]; then fail "model lines without the openai/ prefix: $bad"
     elif (( ok )); then pass
     else fail "template is missing the expected tier models"; fi
@@ -2226,7 +2228,9 @@ oc = cfg.get("language_models", {}).get("openai_compatible", {})
 omni = oc.get("autoos-omniroute", {})
 lit = oc.get("autoos-litellm", {})
 # The model lists are catalog/ide-models.json projected at run time (ids,
-# display names, windows, membership, order); the 1M tier is 1000000.
+# display names, windows, membership, order). PROVFIX3 finding 1 re-pins the
+# t1 window: a route may only promise what its smallest servable leg takes, and
+# t1 falls through to gemini (131,072).
 cat = json.load(open("catalog/ide-models.json", encoding="utf-8"))["models"]
 def want(gateway):
     out = []
@@ -2240,7 +2244,7 @@ def want(gateway):
 got_models = {g: oc.get("autoos-" + g, {}).get("available_models") for g in ("omniroute", "litellm")}
 bad = [g for g in got_models if got_models[g] != want(g)]
 t1 = [m.get("max_tokens") for m in (got_models["omniroute"] or []) if m.get("name") == "t1-orchestrator"]
-models = "catalog-ok" if not bad and t1 == [1000000] else "MISMATCH:%s t1=%s" % (",".join(bad), t1)
+models = "catalog-ok" if not bad and t1 == [131072] else "MISMATCH:%s t1=%s" % (",".join(bad), t1)
 # Keys never land in settings.json (Zed docs: keychain/UI or env).
 # Pins come from the harness at runtime, never as literals in lib/.
 h = json.load(open("catalog/agent-harness.json", encoding="utf-8"))
@@ -2430,6 +2434,9 @@ PY
     assert_eq "$report" ""
 fi
 
+# The list is what the registry renders today: spark-1.3-contributor and
+# t1-orchestrator-paid joined it with MUSEAPI (2026-09-27) and this Linux pin was
+# left behind — the ids are registry output, verified by sync-ide-models --check.
 if it "opencode repo config pins omniroute with litellm fallback"; then
     report="$(python3 - <<'PY'
 import json, re, io
@@ -2452,12 +2459,14 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,gemini-3.8-flash,opus-4-6,t1-orchestrator,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-free-only,t1-orchestrator-paid,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
     ok=1
-    for s in '\[llm\]' '\[llm.t1-orchestrator\]' '\[llm.t2-worker\]' '\[llm.t3-driver\]' '\[llm.t1-orchestrator-clean\]' '\[llm.t2-worker-clean\]' '\[llm.t3-driver-clean\]' '\[llm.t4-rag\]' '\[llm.litellm-t1-orchestrator\]' '\[llm.litellm-t2-worker\]' '\[llm.litellm-t3-driver\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
+    # t1-orchestrator-clean deliberately absent (PROVFIX3 finding 6 — its combo is
+    # pruned, so the table would 404); the previous test asserts it stays gone.
+    for s in '\[llm\]' '\[llm.t1-orchestrator\]' '\[llm.t2-worker\]' '\[llm.t3-driver\]' '\[llm.t2-worker-clean\]' '\[llm.t3-driver-clean\]' '\[llm.t4-rag\]' '\[llm.litellm-t1-orchestrator\]' '\[llm.litellm-t2-worker\]' '\[llm.litellm-t3-driver\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
         grep -q "$s" configuration/openhands/config.toml || { ok=0; echo "missing: $s" >&2; }
     done
     grep -q 'host.docker.internal:20128' configuration/openhands/config.toml || ok=0
