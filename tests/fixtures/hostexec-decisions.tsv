@@ -20,6 +20,8 @@ claude	default	coding-host	[""]	deny	empty-argv	one blank element
 claude	default	coding-host	["","",""]	deny	empty-argv	all blank elements
 claude	default	coding-host	["echo","a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z","a1","b1","c1","d1","e1","f1","g1","h1","i1","j1","k1","l1","m1","n1","o1","p1","q1","r1","s1","t1","u1","v1","w1","x1","y1","z1","a2","b2","c2","d2","e2","f2","g2","h2","i2","j2","k2","l2","m2","n2","o2","p2","q2"]	deny	argv-caps	over max_args (64) for the test policy
 claude	default	coding-host	["echo","AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]	deny	argv-caps	one argument over max_arg_length (64) for the test policy
+claude	default	coding-host	["echo",123]	deny	argv-caps	a non-string argv element is refused, not a crash (MCP JSON)
+claude	default	coding-host	[null]	deny	argv-caps	a null argv element is refused, not a crash (MCP JSON)
 claude	default	storage	["echo","hi"]	deny	forbid-host	host declared forbid=true
 claude	default	firewall	["echo","hi"]	deny	forbid-host	host declared forbid=true
 claude	default	not-a-declared-host	["echo","hi"]	deny	forbid-host	host missing from policy entirely
@@ -231,3 +233,53 @@ claude	default	lab-ssh	["ssh","other","id"]	deny	use-host-alias	ssh to an undecl
 claude	default	lab-ssh	["scp","a","other:b"]	deny	use-host-alias	scp second hop from an ssh-kind host must use host_run host= alias (hop)
 claude	default	lab-ssh	["id"]	allow		plain command on an ssh-kind host still works (hop allow)
 claude	default	lab-ssh	["ls","-la"]	allow		plain ls on an ssh-kind host still works (hop allow)
+claude	default	coding-host	["env","-S","sudo id"]	deny	no-inline-shell	env -S splits its string into argv, hiding the real command (L1 high)
+claude	default	coding-host	["env","-S","rm -rf /"]	deny	no-inline-shell	env -S hides a destructive command (L1 high)
+claude	default	coding-host	["env","--split-string=sudo id"]	deny	no-inline-shell	env --split-string= attached form (L1 high)
+claude	default	coding-host	["env","--split-string","sudo id"]	deny	no-inline-shell	env --split-string separate form (L1 high)
+claude	default	coding-host	["env","-Ssudo id"]	deny	no-inline-shell	env -S attached value form (L1 high)
+claude	default	coding-host	["env","-iS","sudo id"]	deny	no-inline-shell	env short-option cluster ending in -S (L1 high)
+claude	default	coding-host	["env","-uS","id"]	allow		env -u takes S as its value, not split-string (no false positive)
+claude	default	coding-host	["env","-i","id"]	allow		env -i (no split-string) still allows (L1 allow)
+claude	default	coding-host	["env","-vS","sudo id"]	deny	no-inline-shell	env -vS: an unknown flag before S must not stop the scan (L1 high)
+claude	default	coding-host	["env","-0vS","sudo id"]	deny	no-inline-shell	env -0vS: scan continues past -0/-v to the S (L1 high)
+claude	default	coding-host	["env","--s","sudo id"]	deny	no-inline-shell	env --s is a unique prefix of --split-string (L1 high)
+claude	default	coding-host	["env","--sp=sudo id"]	deny	no-inline-shell	env --sp= abbreviated split-string, attached form (L1 high)
+claude	default	coding-host	["env","--split","sudo id"]	deny	no-inline-shell	env --split abbreviated split-string, separate form (L1 high)
+claude	default	coding-host	["env","--split-str=sudo id"]	deny	no-inline-shell	env --split-str= abbreviated split-string (L1 high)
+claude	default	coding-host	["env","--ch","/tmp","sudo","id"]	deny	no-sudo	env --ch resolves to --chdir so /tmp is its value, sudo is the head (L1 high)
+claude	default	coding-host	["env","--un","X","sudo","id"]	deny	no-sudo	env --un resolves to --unset so X is its value, sudo is the head (L1 high)
+claude	default	coding-host	["env","--i","sudo","id"]	deny	no-inline-shell	env --i is ambiguous (ignore-environment/ignore-signal): deny, do not guess (L1 high)
+claude	default	coding-host	["env","--nope","sudo","id"]	deny	no-inline-shell	env --nope is an unknown option: deny, do not guess (L1 high)
+claude	default	coding-host	["nice","--ad","5","sudo","id"]	deny	no-sudo	nice --ad resolves to --adjustment, sudo is the head (L1 high)
+claude	default	coding-host	["nice","--nope","5","sudo","id"]	deny	no-inline-shell	nice unknown long option fails closed (L1 high)
+claude	default	coding-host	["timeout","--si","5","1","sudo","id"]	deny	no-sudo	timeout --si resolves to --signal, sudo is the head (L1 high)
+claude	default	coding-host	["stdbuf","--in","L","sudo","id"]	deny	no-sudo	stdbuf --in resolves to --input, sudo is the head (L1 high)
+claude	default	coding-host	["ionice","--classd","2","sudo","id"]	deny	no-sudo	ionice --classd resolves to --classdata, sudo is the head (L1 high)
+claude	default	coding-host	["xargs","--max-a","1","sudo","id"]	deny	no-sudo	xargs --max-a resolves to --max-args, sudo is the head (L1 high)
+claude	default	coding-host	["flock","--time","5","/tmp/lock","sudo","id"]	deny	no-sudo	flock --time resolves to --timeout, sudo is the head (L1 high)
+claude	default	coding-host	["rm","--recurs","/"]	deny	destructive	hx4: rm --recurs is a unique prefix of --recursive
+claude	default	coding-host	["rm","--forc","/"]	deny	destructive	hx4: rm --forc is a unique prefix of --force
+claude	default	coding-host	["rm","--recur=/","/"]	deny	destructive	hx4: abbreviated --recursive= with an attached value
+claude	default	coding-host	["chmod","--recurs","/"]	deny	destructive	hx4: chmod --recurs is a unique prefix of --recursive
+claude	default	coding-host	["chown","--recurs","/"]	deny	destructive	hx4: chown --recurs is a unique prefix of --recursive
+claude	default	coding-host	["tar","--checkpoint-ac=exec=id","-f","x"]	deny	no-inline-shell	hx4: abbreviated --checkpoint-action=exec
+claude	default	coding-host	["tar","--to-com","id","-f","x"]	deny	no-inline-shell	hx4: abbreviated --to-command
+claude	default	coding-host	["tar","--use-compress-prog=id","-f","x"]	deny	no-inline-shell	hx4: abbreviated --use-compress-program
+claude	default	coding-host	["git","push","--mir","origin"]	deny	destructive	hx4: git push --mir executes a mirror push
+claude	default	coding-host	["git","rebase","--exe","evil"]	deny	git-option-injection	hx4: git rebase --exe is a unique prefix of --exec
+claude	default	coding-host	["git","--git-di=/tmp","status"]	deny	git-option-injection	hx4: git parse-options abbreviates --git-dir=
+claude	default	coding-host	["iptables","--flu"]	deny	destructive	hx4: iptables --flu flushes the firewall
+claude	default	coding-host	["man","--page","evil"]	deny	no-inline-shell	hx4: man --page is a shorter unique prefix of --pager
+claude	default	coding-host	["man","--pag=evil","ls"]	deny	no-inline-shell	hx4: abbreviated --pager= attached form
+claude	default	coding-host	["parallel","-I","foo","echo","foo",":::","a"]	allow		hx4 low: -I takes a value; the command is echo, not foo
+claude	default	coding-host	["parallel","--replace","foo","echo","foo",":::","a"]	allow		hx4 low: --replace takes a value
+claude	default	coding-host	["flock","--","-evil","ls"]	allow		hx4: after -- the lockfile may start with '-' (named -evil); child is ls
+claude	default	coding-host	["docker","--log-l","info","run","-v","/:/h","alpine"]	deny	docker-root	hx4: abbreviated --log-level must not shift the subcommand scan
+claude	default	coding-host	["docker","--ho","tcp://127.0.0.1:2376","run","--priv","alpine"]	deny	docker-root	hx4: --priv is --privileged
+claude	default	coding-host	["podman","--log-l","debug","create","--device","/dev/mem","alpine"]	deny	docker-root	hx4: abbreviated --device on create
+claude	default	coding-host	["rm","--r","/"]	deny	destructive	hx4: a 1-char prefix still names --recursive (fail closed)
+claude	default	coding-host	["git","push","--m","origin"]	deny	destructive	hx4: --m selects --mirror
+claude	default	coding-host	["chmod","--verbose","644","/tmp/file"]	allow		hx4: --verbose is not an abbreviation of --recursive
+claude	default	coding-host	["tar","--to-stdout","-xf","/tmp/x.tar"]	allow		hx4: --to-stdout is not --to-command
+claude	default	coding-host	["parallel","--tag","echo","hi",":::","a"]	allow		hx4: --tag is a boolean, not --tagstring
