@@ -102,8 +102,12 @@ cp configuration/hostexec/policy.example.toml ~/.config/autoos/exec/policy.toml 
     `--unregister` removes only entries this driver wrote: JSON/TOML
     entries carry an `"x-autoos": "hostexec"` fingerprint (OpenHands
     forbids extra keys, so there the url+header shape is compared
-    instead), and the unit is removed only when it matches the rendered
-    template -- anything else is left untouched with a message.
+    instead). The unit is removed only when it byte-matches what this
+    driver renders for the port and checkout path recorded in the
+    installed unit itself (its `Environment=AUTOOS_EXEC_PORT=` line and
+    `ExecStart` script path) -- so a unit installed under a different port,
+    or from a checkout that has since moved or been renamed, is still
+    recognised, while anything else is left untouched with a message.
 
     The driver renders `autoos-hostexec.service` with your checkout's
     path into `~/.config/systemd/user/` (backed up before any replace; a

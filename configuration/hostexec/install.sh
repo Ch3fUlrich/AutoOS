@@ -138,15 +138,18 @@ backup_file() {
     say "backup: ${path} -> ${dest}"
 }
 
-# render_unit_template <out>: render the unit template with the repo path
-# and the chosen port. Shared by install and remove so --unregister can
-# compare to what the driver would write (foreign units are left
-# untouched). The checkout path in ExecStart is systemd-quoted: wrapped in
+# render_unit_template <out> [port] [repo]: render the unit template with
+# the checkout path and the chosen port (defaults: the live $PORT/$REPO).
+# Shared by install and remove so --unregister can compare to what the
+# driver would write (foreign units are left untouched). Removal passes
+# the port/repo read back from the *installed* unit, so a unit written
+# under a different port or from a moved checkout is still recognised as
+# ours. The checkout path in ExecStart is systemd-quoted: wrapped in
 # double quotes, with `"` and `\` escaped and `%` as `%%` (%h specifiers
 # elsewhere stay untouched). The port is rendered as
 # Environment=AUTOOS_EXEC_PORT=<port> so clients and service agree.
 render_unit_template() {
-    local out="$1"
+    local out="$1" port="${2:-${PORT:-}}" repo="${3:-$REPO}"
     if [[ "${AUTOOS_HOSTEXEC_BREAK:-}" == "no-template" ]]; then
         err "install: refusing: unit template is unavailable (test hook)"
         return 1
@@ -155,7 +158,7 @@ render_unit_template() {
         err "install: refusing: unit template not found: ${TEMPLATE}"
         return 1
     fi
-    REPO_PATH="$REPO" TEMPLATE_PATH="$TEMPLATE" OUT_PATH="$out" UNIT_PORT="${PORT:-}" python3 <<'PYEOF' || return 1
+    REPO_PATH="$repo" TEMPLATE_PATH="$TEMPLATE" OUT_PATH="$out" UNIT_PORT="$port" python3 <<'PYEOF' || return 1
 import os
 repo = os.environ["REPO_PATH"]
 template_path = os.environ["TEMPLATE_PATH"]
@@ -176,6 +179,46 @@ with open(out_path, "w", encoding="utf-8") as fh:
     fh.write(text)
 PYEOF
     return 0
+}
+
+# unit_param <unitfile> <port|repo>: read back a value this driver can
+# derive from an *installed* unit, so ownership does not depend on the
+# live environment. `port` comes from the Environment=AUTOOS_EXEC_PORT=
+# line; `repo` is the unescaped checkout path from the systemd-quoted
+# ExecStart "<repo>/tools/hostexec.py" argument. Prints the value and
+# exits 0, or prints nothing and exits 1 when the unit does not carry it.
+unit_param() {
+    local unit="$1" key="$2"
+    UNIT_PATH="$unit" UNIT_KEY="$key" python3 <<'PYEOF'
+import os, re, sys
+
+path = os.environ["UNIT_PATH"]
+key = os.environ["UNIT_KEY"]
+try:
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+except OSError:
+    sys.exit(1)
+
+if key == "port":
+    m = re.search(r"(?m)^Environment=AUTOOS_EXEC_PORT=([0-9]+)[ \t]*$", text)
+    if not m:
+        sys.exit(1)
+    sys.stdout.write(m.group(1))
+    sys.exit(0)
+
+if key == "repo":
+    m = re.search(r'(?m)^ExecStart=.*?"((?:[^"\\]|\\.)*)/tools/hostexec\.py"', text)
+    if not m:
+        sys.exit(1)
+    # Undo render_unit_template's escaping in reverse order.
+    esc = m.group(1)
+    esc = esc.replace("%%", "%").replace('\\"', '"').replace("\\\\", "\\")
+    sys.stdout.write(esc)
+    sys.exit(0)
+
+sys.exit(2)
+PYEOF
 }
 
 # install_unit: render the template with the repo path and install it to
@@ -817,15 +860,29 @@ remove_qoder() {
     return 0
 }
 
+# remove_unit: delete the unit only when it is byte-identical to what this
+# driver renders. Ownership is decided from the *installed* unit's own
+# AUTOOS_EXEC_PORT and recorded script path, not the live environment, so a
+# unit written under another port or from a moved/renamed checkout is still
+# removed; any other unit is foreign and left untouched.
 remove_unit() {
-    local dest rendered
+    local dest rendered port repo
     dest="$HOME/.config/systemd/user/${UNIT_NAME}"
     if [[ ! -e "$dest" && ! -L "$dest" ]]; then
         say "unit: nothing to remove: ${dest}"
         return 0
     fi
+    port="$(unit_param "$dest" port || true)"
+    repo="$(unit_param "$dest" repo || true)"
+    if [[ -z "$port" && -z "$repo" ]]; then
+        say "unit: foreign unit, leaving untouched: ${dest}"
+        return 0
+    fi
     rendered="$(new_tmp)"
-    if ! render_unit_template "$rendered"; then
+    # Re-render from the installed unit's own port/repo. A unit that does
+    # not carry both (or does not match byte-for-byte) was not written by
+    # this driver: leave it untouched.
+    if ! render_unit_template "$rendered" "$port" "$repo"; then
         return 1
     fi
     if ! cmp -s "$rendered" "$dest"; then

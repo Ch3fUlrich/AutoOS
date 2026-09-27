@@ -675,6 +675,67 @@ class UnregisterTests(_DriverCase):
         self.assertEqual(unit.read_text(encoding="utf-8"), "# operator-edited unit\n")
         self.assertIn("leaving untouched", (proc.stdout + proc.stderr).lower())
 
+    def test_unregister_removes_own_unit_under_a_different_port(self):
+        # install.sh:remove_unit -- ownership is decided from the installed
+        # unit's own AUTOOS_EXEC_PORT, never from the live PORT, so a unit
+        # installed under one port is still removed when the operator later
+        # unregisters with another.
+        self.run_driver_ok("--unit")
+        unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
+        self.assertIn(
+            f"Environment=AUTOOS_EXEC_PORT={TEST_PORT}",
+            unit.read_text(encoding="utf-8"),
+        )
+        proc = self.run_driver_ok("--unregister", env_extra={"AUTOOS_EXEC_PORT": "29999"})
+        self.assertFalse(unit.exists(), "own unit must be removed regardless of live PORT")
+        self.assertIn("removed", proc.stdout + proc.stderr)
+
+    def test_unregister_removes_own_unit_from_a_moved_checkout(self):
+        # install.sh:remove_unit -- ownership is decided from the script
+        # path recorded in the installed unit (unescaped), not from the live
+        # checkout, so moving/renaming the checkout still lets the driver
+        # remove the unit it wrote. Uses a path with a space and `%` so the
+        # quote/percent escaping is exercised in reverse too.
+        import shutil
+
+        old_repo = Path(self.tmp.name) / "old repo%name"
+        (old_repo / "configuration" / "hostexec").mkdir(parents=True)
+        (old_repo / "tools" / "hostexec").mkdir(parents=True)
+        shutil.copy(str(DRIVER), str(old_repo / "configuration" / "hostexec" / "install.sh"))
+        shutil.copy(
+            str(TEMPLATE),
+            str(old_repo / "configuration" / "hostexec" / "autoos-hostexec.service"),
+        )
+        (old_repo / "tools" / "hostexec" / "server.py").write_text(
+            "DEFAULT_PORT = 8765\n", encoding="utf-8"
+        )
+        env = dict(self.env)
+        env["AUTOOS_EXEC_PORT"] = ""  # take the default from the fake server.py
+        proc = subprocess.run(
+            ["bash", str(old_repo / "configuration" / "hostexec" / "install.sh"), "--unit"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(old_repo),
+        )
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
+        self.assertTrue(unit.is_file(), "unit was not installed from the fake checkout")
+
+        new_repo = Path(self.tmp.name) / "moved repo%name2"
+        old_repo.rename(new_repo)
+        proc2 = subprocess.run(
+            ["bash", str(new_repo / "configuration" / "hostexec" / "install.sh"), "--unregister"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(new_repo),
+        )
+        self.assertEqual(proc2.returncode, 0, f"{proc2.stdout}\n{proc2.stderr}")
+        self.assertFalse(unit.exists(), "own unit must be removed after the checkout moved")
+        self.assertIn("removed", proc2.stdout + proc2.stderr)
+        self.assertNotIn("leaving untouched", proc2.stdout + proc2.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
