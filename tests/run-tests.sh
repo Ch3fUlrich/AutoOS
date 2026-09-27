@@ -4,12 +4,14 @@
 # Zero dependencies on purpose: the whole point of this repo is to run on a
 # machine where nothing is installed yet, so the tests must not need bats.
 #
-#   bash tests/run-tests.sh            run here
-#   bash tests/run-tests.sh --wsl      re-run inside WSL2 (from Windows)
-#   bash tests/run-tests.sh --filter catalog
-#   bash tests/run-tests.sh --filter usb,catalog   comma = OR (shard union)
+#   AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh   full local run (opt in)
+#   bash tests/run-tests.sh --wsl                 re-run inside WSL2 (from Windows)
+#   bash tests/run-tests.sh --filter catalog      run matching tests only
+#   bash tests/run-tests.sh --filter usb,catalog  comma = OR (shard union)
 #
 # Environment:
+#   AUTOOS_FULL_SUITE=1           allow an unfiltered run (default: refuse it,
+#                                 because the full suite can OOM the host)
 #   AUTOOS_SHELLCHECK_REQUIRED=1  a shellcheck that runs out of memory FAILS the
 #                                 "shellcheck is clean" cases (default: a loud skip)
 #   AUTOOS_MEMINFO=<file>         meminfo that sizes shellcheck's memory limit
@@ -42,6 +44,15 @@ for arg in "$@"; do
         --filter=*) FILTER="${arg#--filter=}" ;;
     esac
 done
+
+# An unfiltered run executes every test, including the shellcheck of this file,
+# whose memory use has OOM-killed a 16 GB host and every session on it
+# (R-host-08). Refuse it unless the caller explicitly opts in. CI sets
+# AUTOOS_FULL_SUITE=1 for its one true full run.
+if [[ -z "$FILTER" && "${AUTOOS_FULL_SUITE:-}" != 1 ]]; then
+    printf 'run-tests.sh: refusing an unfiltered run (host OOM risk, R-host-08); use --filter <terms> or set AUTOOS_FULL_SUITE=1 (CI does)\n' >&2
+    exit 2
+fi
 
 PASS=0; FAIL=0; SKIP=0
 SUMMARY_PRINTED=0
