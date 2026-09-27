@@ -133,6 +133,80 @@ class CapTests(unittest.TestCase):
         self.assertEqual(ctx.cap_for("other", caps), 1500)
 
 
+class RegistryCapsTests(unittest.TestCase):
+    """load_caps and caps_from_registry: the registry is the single source."""
+
+    def test_policy_caps_match_default_caps(self):
+        """Drift test: the fallback must match the policy."""
+        caps, source = ctx.load_caps()
+        self.assertEqual(source, "policy")
+        self.assertEqual(caps, ctx.DEFAULT_CAPS)
+
+    def test_edited_registry_changes_cap_for(self):
+        """An edited registry (opus cap 123) changes cap_for through load_caps."""
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "ai-registry.json"
+            registry = {
+                "policy": {
+                    "handoff_caps": {
+                        "claude-opus-1m": {
+                            "cap_tokens": 123,
+                            "cap_fraction": 0.4,
+                            "match": ["opus", "fable"],
+                            "source": "test",
+                            "window": 1000000
+                        },
+                        "200k-class": {
+                            "cap_tokens": 150000,
+                            "cap_fraction": 0.75,
+                            "match": ["*"],
+                            "source": "test",
+                            "window": 200000
+                        }
+                    }
+                }
+            }
+            registry_path.write_text(json.dumps(registry), encoding="utf-8")
+            caps, source = ctx.load_caps(registry_path)
+            self.assertEqual(source, "policy")
+            self.assertEqual(ctx.cap_for("claude-opus-4-6", caps), 123)
+            self.assertEqual(ctx.cap_for("fable-1", caps), 123)
+            self.assertEqual(ctx.cap_for("claude-sonnet-4-5", caps), 150000)
+
+    def test_missing_registry_falls_back_to_default(self):
+        """Missing registry file -> DEFAULT_CAPS with source 'default'."""
+        caps, source = ctx.load_caps("/nonexistent/path/ai-registry.json")
+        self.assertEqual(source, "default")
+        self.assertEqual(caps, ctx.DEFAULT_CAPS)
+
+    def test_malformed_registry_falls_back_to_default(self):
+        """Malformed registry JSON -> DEFAULT_CAPS with source 'default'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "ai-registry.json"
+            registry_path.write_text("{not valid json", encoding="utf-8")
+            caps, source = ctx.load_caps(registry_path)
+            self.assertEqual(source, "default")
+            self.assertEqual(caps, ctx.DEFAULT_CAPS)
+
+    def test_a_registry_without_usable_caps_rows_reports_default(self):
+        """Valid JSON but no usable handoff_caps rows -> the fallback, and the
+        source says so (never "policy" for numbers that are not the policy's)."""
+        for policy in ({}, {"handoff_caps": []}, {"handoff_caps": {"x": {"cap_tokens": 1}}}):
+            with tempfile.TemporaryDirectory() as tmp:
+                registry_path = Path(tmp) / "ai-registry.json"
+                registry_path.write_text(json.dumps({"policy": policy}), encoding="utf-8")
+                caps, source = ctx.load_caps(registry_path)
+                self.assertEqual(source, "default", policy)
+                self.assertEqual(caps, ctx.DEFAULT_CAPS)
+
+    def test_bracket_1m_rule_unchanged_with_registry(self):
+        """The [1m] rule works the same whether caps come from registry or default."""
+        self.assertEqual(ctx.cap_for("fable[1m]"), 400000)
+        self.assertEqual(ctx.cap_for("muse-spark-1.3[1m]"), 300000)
+        self.assertEqual(ctx.cap_for("gemini-3.1-pro[1m]"), 200000)
+        self.assertEqual(ctx.cap_for("claude-opus-4-6[1m]"), 400000)
+
+
 class CliTests(unittest.TestCase):
     """The CLI over a fixture transcript: text line and --json."""
 
