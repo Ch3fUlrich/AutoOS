@@ -131,6 +131,8 @@ import sys
 import threading
 import time
 import urllib.request
+if os.name != "nt":
+    import fcntl  # the free-leg provider lock (SPAWNFIX item 2); msvcrt on Windows
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
@@ -297,6 +299,153 @@ FREE_QUEUE_POLL_SECONDS = 15
 FREE_QUEUE_TIMEOUT_SECONDS = 20 * 60
 EXIT_FREE_QUEUE_TIMEOUT = 9
 
+# SPAWNFIX (S2 fix of SPAWNFREE) item 2: counting the live workers and starting
+# are two steps, and the worker record — the thing the count reads — used to be
+# written only after the clone. N spawners started together each counted the
+# others as absent and all N started, which is the 429 storm the cap exists to
+# prevent. So the count and the taking of a slot are now one critical section:
+# an exclusive lock over FREE_SLOT_LOCK_NAME in the spawner state dir, held while
+# a `.free-reservation` placeholder is written for this run. The placeholder is
+# what the next lock holder counts, so it cannot be shown a slot that another
+# spawner already claimed. It is not `.json`, so `ps` — which reads every `.json`
+# in that dir as a worker — never lists it.
+FREE_SLOT_LOCK_NAME = "free-slot.lock"
+FREE_RESERVATION_SUFFIX = ".free-reservation"
+FREE_LOCK_RETRY_SECONDS = 0.05
+FREE_LOCK_GIVEUP_SECONDS = 60
+
+
+def _free_lock_lock(fh) -> None:
+    """Try once to take `fh`'s exclusive lock; raise OSError when it is held."""
+    if os.name == "nt":
+        import msvcrt
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def free_slot_lock_take(directory: str):
+    """Take the free-leg provider lock, retrying up to FREE_LOCK_GIVEUP_SECONDS.
+
+    Returns the handle to hand back to free_slot_lock_give(), or None when the
+    lock could not be taken at all. A lock that is unavailable (an unwritable
+    state dir, a spawner wedged for a minute) degrades to today's best-effort
+    count — it never refuses a run and never hangs one.
+    """
+    try:
+        fd = os.open(os.path.join(directory, FREE_SLOT_LOCK_NAME),
+                     os.O_RDWR | os.O_CREAT, 0o600)
+        fh = os.fdopen(fd, "r+b")
+    except OSError:
+        return None
+    deadline = time.time() + FREE_LOCK_GIVEUP_SECONDS
+    while True:
+        try:
+            _free_lock_lock(fh)
+            return fh
+        except OSError:
+            if time.time() >= deadline:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+                return None
+            time.sleep(FREE_LOCK_RETRY_SECONDS)
+
+
+def free_slot_lock_give(fh) -> None:
+    """Release a handle from free_slot_lock_take(); None (no lock taken) is fine."""
+    if fh is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        fh.close()
+    except OSError:
+        pass
+
+
+def _reservation_rows(directory: str, provider: str) -> tuple:
+    """(live paths, stale paths) of the reservations in `directory` naming `provider`.
+
+    A reservation is claimed by a live process or by none at all: the pid in it
+    is gone (a killed spawner, a reboot) or its file cannot be read, so it is
+    stale and reaped. A stale placeholder must never queue a run — the cost of
+    dropping one is a 429, the cost of trusting it is a leg nothing can leave.
+    """
+    live, stale = [], []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return live, stale
+    for name in names:
+        if not name.endswith(FREE_RESERVATION_SUFFIX):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                record = json.load(fh)
+        except (OSError, ValueError):
+            stale.append(path)
+            continue
+        if not isinstance(record, dict) or record.get("provider") != provider:
+            continue
+        try:
+            alive = _worker_state(record) == "running"
+        except Exception:  # noqa: BLE001 - an unjudgeable placeholder is a stale one
+            alive = False
+        (live if alive else stale).append(path)
+    return live, stale
+
+
+def live_free_reservations(directory: str, provider: str) -> int:
+    """Reservations in `directory` for `provider` whose spawner is still alive.
+
+    Reaps the stale ones on the way, so a run that died holding a slot leaves it
+    rather than blocking the leg forever.
+    """
+    live, stale = _reservation_rows(directory, provider)
+    for path in stale:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return len(live)
+
+
+def _reserve_free_slot(directory: str, provider: str, model: str):
+    """Write this run's placeholder and return its path (None when it cannot be
+    written — the run then proceeds unreserved, exactly as it used to)."""
+    wid = "free-%d-%s" % (os.getpid(), os.urandom(3).hex())
+    record = {"id": wid, "pid": os.getpid(), "pid_start": _proc_starttime(os.getpid()),
+              "started": utc_now_iso(), "provider": provider, "model": model}
+    path = os.path.join(directory, wid + FREE_RESERVATION_SUFFIX)
+    try:
+        _write_worker_record(path, record)
+    except OSError:
+        return None
+    return path
+
+
+def free_reservation_release(token) -> None:
+    """Give up a slot taken by _reserve_free_slot(); None and an vanished file are
+    both fine — a killed holder's placeholder is stale and reaped by the next
+    count anyway."""
+    if not token:
+        return
+    try:
+        os.remove(token)
+    except OSError:
+        pass
+
 
 def free_provider(model) -> str:
     """The provider prefix of a model id ('opencode/muse-...-free' -> 'opencode')."""
@@ -331,8 +480,15 @@ def live_free_workers(directory: str, provider: str) -> int:
 
 def wait_for_free_slot(provider: str, cap: int, directory: str, printer=None,
                        sleep=None, now=None, poll_seconds: int = FREE_QUEUE_POLL_SECONDS,
-                       deadline_seconds: int = FREE_QUEUE_TIMEOUT_SECONDS) -> tuple:
+                       deadline_seconds: int = FREE_QUEUE_TIMEOUT_SECONDS,
+                       on_free=None) -> tuple:
     """Poll until fewer than `cap` workers of `provider` are live.
+
+    Counts the live worker records *and* the live reservations (a spawner that
+    claimed a slot but has not got its record down yet occupies it). Every
+    count happens under the free-leg lock, and `on_free` — the caller's
+    reservation — runs in the same critical section, so no two spawners are ever
+    shown the same slot.
 
     Returns (live_count, timed_out). Each poll with the slot still taken prints
     the one line 'queued behind <n> <provider> workers', so a log says why a
@@ -344,8 +500,16 @@ def wait_for_free_slot(provider: str, cap: int, directory: str, printer=None,
     now = now or time.time
     limit = now() + deadline_seconds
     while True:
-        live = live_free_workers(directory, provider)
-        if live < cap:
+        lock = free_slot_lock_take(directory)
+        try:
+            live = (live_free_workers(directory, provider)
+                    + live_free_reservations(directory, provider))
+            slot = live < cap
+            if slot and on_free is not None:
+                on_free()
+        finally:
+            free_slot_lock_give(lock)
+        if slot:
             return live, False
         printer("queued behind %d %s workers" % (live, provider))
         if now() + poll_seconds > limit:
@@ -353,19 +517,37 @@ def wait_for_free_slot(provider: str, cap: int, directory: str, printer=None,
         sleep(poll_seconds)
 
 
-def free_slot_refusal(plan: dict, policy: dict | None) -> str | None:
-    """Wait for a free slot for `plan`'s model; None when it is (or becomes)
-    free, the refusal message when the bounded wait ran out."""
+def free_slot_refusal(plan: dict, policy: dict | None, directory: str | None = None,
+                      printer=None, sleep=None, now=None,
+                      poll_seconds: int = FREE_QUEUE_POLL_SECONDS,
+                      deadline_seconds: int = FREE_QUEUE_TIMEOUT_SECONDS) -> tuple:
+    """Wait for a free slot for `plan`'s model and claim it.
+
+    Returns (None, reservation-token) when the run may start, and
+    (refusal-message, None) when the bounded wait ran out. The token keeps the
+    slot claimed from this count until the run's own worker record exists;
+    release it with free_reservation_release() once that record is down (or the
+    run is over)."""
     provider = free_provider(plan["model"])
     cap = free_concurrency_cap(policy, provider)
-    live, timed_out = wait_for_free_slot(provider, cap, workers_dir())
+    directory = directory or workers_dir()
+    claimed = []
+
+    def reserve():
+        claimed.append(_reserve_free_slot(directory, provider, plan["model"]))
+
+    live, timed_out = wait_for_free_slot(provider, cap, directory, printer=printer,
+                                         sleep=sleep, now=now,
+                                         poll_seconds=poll_seconds,
+                                         deadline_seconds=deadline_seconds,
+                                         on_free=reserve)
     if not timed_out:
-        return None
+        return None, (claimed[0] if claimed else None)
     return ("the %s free leg is saturated: %d worker(s) of the same provider were "
             "live for %d min (cap %d per provider, policy.free_concurrency). Nothing "
             "started - retry later, run without --free, or raise the cap if the "
             "provider says it serves more at once."
-            % (provider, live, FREE_QUEUE_TIMEOUT_SECONDS // 60, cap))
+            % (provider, live, FREE_QUEUE_TIMEOUT_SECONDS // 60, cap), None)
 
 
 def lean_decision(client_name: str, route: dict) -> tuple:
@@ -2374,10 +2556,14 @@ def cmd_run(args, cfg: dict) -> int:
     # worker on it does not add capacity, it adds a 429. Wait for a slot before
     # anything is cloned or started (a queue that outlasts the bound costs
     # nothing but time and exits 9).
+    # SPAWNFIX (S2) item 2: and claim it while holding the free-leg lock, so a
+    # second spawner that starts at the same moment counts this one instead of
+    # the empty leg. The claim lives until this run's worker record exists.
+    free_reservation = None
     if args.free:
-        queued = free_slot_refusal(plan, free_policy)
-        if queued is not None:
-            return refuse(queued, EXIT_FREE_QUEUE_TIMEOUT)
+        queue_msg, free_reservation = free_slot_refusal(plan, free_policy)
+        if queue_msg is not None:
+            return refuse(queue_msg, EXIT_FREE_QUEUE_TIMEOUT)
     parent_snap = None
     if plan["sandbox"]:
         sb = plan["sandbox"]
@@ -2411,9 +2597,9 @@ def cmd_run(args, cfg: dict) -> int:
         # record (track_entry returns None for it), so a queue timeout costs
         # the route nothing.
         if args.free and fallthroughs:
-            queued = free_slot_refusal(plan, free_policy)
-            if queued is not None:
-                print("autoos-agent: %s" % queued, file=sys.stderr)
+            queue_msg, free_reservation = free_slot_refusal(plan, free_policy)
+            if queue_msg is not None:
+                print("autoos-agent: %s" % queue_msg, file=sys.stderr)
                 rc = EXIT_FREE_QUEUE_TIMEOUT
                 break
         # Worker registry (ps): one record per attempt (a SPAWNCAP fallthrough
@@ -2429,6 +2615,13 @@ def cmd_run(args, cfg: dict) -> int:
             worker_id, worker_rec = _worker_record_start(plan, args, workers)
         except Exception as exc:  # noqa: BLE001
             print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
+        if worker_id is not None:
+            # The record is the thing every count reads, so the placeholder this
+            # run claimed the slot with has done its job (SPAWNFIX item 2). It is
+            # kept when there is no record, so a run nobody can see still cannot
+            # share the leg with one.
+            free_reservation_release(free_reservation)
+            free_reservation = None
         attempt_start = time.time()
         run_rc = None
         try:
@@ -2533,6 +2726,11 @@ def cmd_run(args, cfg: dict) -> int:
                     env["AUTOOS_OMNIROUTE_KEY"] = key
         if not fell_through:
             break
+    # Nothing that runs after here occupies the free leg: whatever is left of the
+    # summary is bookkeeping, and a placeholder with no run behind it would make
+    # the next spawner wait for nothing.
+    free_reservation_release(free_reservation)
+    free_reservation = None
     if plan["sandbox"] and not args.joinable:
         sb = plan["sandbox"]
         branch = sb["branch"]

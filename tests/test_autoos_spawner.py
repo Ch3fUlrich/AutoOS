@@ -4795,6 +4795,142 @@ class FreeConcurrencyCapTests(unittest.TestCase):
     def test_the_bound_defaults_to_twenty_minutes(self):
         self.assertEqual(self.agent.FREE_QUEUE_TIMEOUT_SECONDS, 20 * 60)
 
+    # SPAWNFIX (S2 fix of SPAWNFREE) item 2: the cap was check-then-act — the
+    # gate counted the worker records, and the record only lands after the
+    # clone — so N spawners started together each counted 0 live and all N
+    # started into the same 429 the cap exists to prevent. The count and the
+    # reservation are now one critical section under a provider lock in the
+    # spawner state dir.
+    plan = {"model": "opencode/muse-spark-1.3-contributor-free"}
+
+    def reservations(self):
+        return sorted(n for n in os.listdir(self.workers)
+                      if n.endswith(self.agent.FREE_RESERVATION_SUFFIX))
+
+    def test_two_simultaneous_gates_reserve_only_one_slot(self):
+        agent = self.agent
+        real_count = agent.live_free_workers
+        delay = 0.3  # the window the clone used to sit in, between count and record
+
+        def slow_count(directory, provider):
+            live = real_count(directory, provider)
+            time.sleep(delay)
+            return live
+
+        results = []
+        with mock.patch.object(agent, "live_free_workers", slow_count):
+            with contextlib.redirect_stderr(io.StringIO()):
+                threads = [
+                    threading.Thread(
+                        target=lambda: results.append(
+                            agent.free_slot_refusal(dict(self.plan), None,
+                                                    directory=self.workers,
+                                                    poll_seconds=0.05,
+                                                    deadline_seconds=1.0)))
+                    for _ in range(2)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(20)
+        self.assertEqual(len(results), 2, results)
+        proceeds = [r for r in results if r[0] is None]
+        refusals = [r for r in results if r[0] is not None]
+        self.assertEqual(len(proceeds), 1, "exactly one spawner got the one slot")
+        self.assertEqual(len(refusals), 1, refusals)
+        self.assertIn("saturated", refusals[0][0])
+        self.assertEqual(len(self.reservations()), 1, self.reservations())
+        with contextlib.redirect_stderr(io.StringIO()):
+            agent.free_reservation_release(proceeds[0][1])
+
+    def test_a_held_reservation_blocks_the_gate_until_it_is_released(self):
+        agent = self.agent
+        with contextlib.redirect_stderr(io.StringIO()):
+            refusal, token = agent.free_slot_refusal(
+                dict(self.plan), None, directory=self.workers,
+                poll_seconds=0.05, deadline_seconds=0)
+            self.assertIsNone(refusal, "an empty leg takes the slot at once")
+            self.assertEqual(len(self.reservations()), 1, self.reservations())
+            self.assertEqual(agent.live_free_reservations(self.workers, "opencode"), 1)
+            self.assertEqual(agent.live_free_reservations(self.workers, "other"), 0)
+            second, token2 = agent.free_slot_refusal(
+                dict(self.plan), None, directory=self.workers,
+                poll_seconds=0.05, deadline_seconds=0)
+            self.assertIsNotNone(second, "the live reservation is the one occupant")
+            self.assertIsNone(token2)
+            agent.free_reservation_release(token)
+            self.assertEqual(self.reservations(), [])
+            third, token3 = agent.free_slot_refusal(
+                dict(self.plan), None, directory=self.workers,
+                poll_seconds=0.05, deadline_seconds=0)
+            self.assertIsNone(third, "releasing the reservation frees the slot")
+        agent.free_reservation_release(token3)
+
+    def test_a_reservation_from_a_dead_pid_does_not_block(self):
+        agent = self.agent
+        path = os.path.join(self.workers, "dead-pid" + agent.FREE_RESERVATION_SUFFIX)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            json.dump({"id": "dead-pid", "pid": 999999999, "pid_start": 1,
+                       "started": agent.utc_now_iso(), "provider": "opencode",
+                       "model": self.plan["model"]}, fh)
+        junk = os.path.join(self.workers, "corrupt" + agent.FREE_RESERVATION_SUFFIX)
+        with io.open(junk, "w", encoding="utf-8") as fh:
+            fh.write("{ not json")
+        self.assertEqual(agent.live_free_reservations(self.workers, "opencode"), 0,
+                         "a stale or unreadable reservation never counts")
+        with contextlib.redirect_stderr(io.StringIO()):
+            refusal, token = agent.free_slot_refusal(
+                dict(self.plan), None, directory=self.workers,
+                poll_seconds=0.05, deadline_seconds=0)
+        self.assertIsNone(refusal, "a run killed long ago cannot queue a live one")
+        agent.free_reservation_release(token)
+
+    def test_a_reservation_is_never_a_ps_row(self):
+        # ps reads every *.json in the workers dir; a reservation is a lock-held
+        # placeholder, not a worker, so it must not show up there.
+        agent = self.agent
+        with contextlib.redirect_stderr(io.StringIO()):
+            _, token = agent.free_slot_refusal(dict(self.plan), None,
+                                                directory=self.workers,
+                                                poll_seconds=0.05, deadline_seconds=0)
+        self.assertEqual([r["model"] for r in agent.list_workers(self.workers)], [])
+        agent.free_reservation_release(token)
+
+    def test_a_started_free_run_releases_its_reservation(self):
+        # The worker record replaces the reservation as the thing that occupies
+        # the slot; nothing of either kind is left live after the run.
+        agent = self.agent
+        rc, out, err, calls = self._cmd_run_free_real()
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls, [1])
+        self.assertEqual(self.reservations(), [], "the reservation was released")
+        rows = agent.list_workers(self.workers, include_ended=True)
+        self.assertEqual(len(rows), 1, rows)
+        self.assertTrue(rows[0]["state"].startswith("exited"), rows)
+
+    def _cmd_run_free_real(self):
+        """cmd_run for a --free run with the real gate (nothing patched out but
+        the client itself)."""
+        agent = self.agent
+        args = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do it", free=True,
+            free_model="opencode/muse-spark-1.3-contributor-free", isolate=False,
+            auto=True, joinable=False, model=None, clean=False, allow_training=False,
+            max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+        cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
+               "agents": {"t2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
+        out, err = io.StringIO(), io.StringIO()
+        calls = []
+        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
+                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+            with mock.patch.object(agent, "run_client",
+                                   lambda *a, **k: calls.append(1) or agent.ClientExit(0)):
+                with mock.patch.object(agent.clients, "signin_state",
+                                       lambda client, env=None: (None, "")):
+                    with mock.patch("shutil.which", return_value="/usr/bin/opencode"):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            rc = agent.cmd_run(args, cfg)
+        return rc, out.getvalue(), err.getvalue(), calls
+
 
 class OutsideFenceTaskDirTests(unittest.TestCase):
     """FENCE (L1-backlog 2026-09-27T04:49Z): the MCP run_job exports
