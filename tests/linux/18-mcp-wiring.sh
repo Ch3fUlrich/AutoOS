@@ -900,3 +900,208 @@ if it "backup collision: a failed CAO backup copy leaves no partial backup and d
     if (( ok )); then pass; else fail "failed CAO backup left a partial copy or aborted"; fi
 fi
 
+# ─── User-scope skill targets: ~/.agents/skills and ~/.codex/skills ──
+
+# oh_skill_repo creates a scratch AUTOOS_ROOT with two skills.
+# Reused from the openhands tests above.
+
+if it "install_agent_skills links repo skills into ~/.agents/skills"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/Documents/code/agent-skills/skills"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        AUTOOS_ROOT="$tmp/repo"
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }
+        install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }
+        install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        enable_project_mcp_server() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        has_cmd() { return 1; }  # no codex installed
+        install_agent_skills >/dev/null 2>&1
+    )
+    problems=""
+    dest="$tmp/.agents/skills"
+    [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is missing or a symlink] "
+    for n in alpha beta; do
+        [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
+            || problems+="[$n not linked into $dest] "
+        [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
+    done
+    [[ ! -e "$dest/nofile" ]] || problems+="[nofile (no SKILL.md) was linked] "
+    [[ ! -d "$tmp/.codex/skills" ]] || problems+="[.codex/skills was created even though codex is not present] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "install_agent_skills links into ~/.codex/skills when codex is installed"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/Documents/code/agent-skills/skills"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        AUTOOS_ROOT="$tmp/repo"
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }
+        install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }
+        install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        enable_project_mcp_server() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        has_cmd() { [[ "$1" == "codex" ]] && return 0; return 1; }
+        install_agent_skills >/dev/null 2>&1
+    )
+    problems=""
+    dest="$tmp/.codex/skills"
+    [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is missing or a symlink] "
+    for n in alpha beta; do
+        [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
+            || problems+="[$n not linked into $dest] "
+        [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
+    done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "install_agent_skills creates no ~/.codex when codex is absent"; then
+    # Creating a directory for a tool the machine does not have is worse
+    # than doing nothing: without ~/.codex and without codex on PATH the
+    # installer must leave ~/.codex alone (only ~/.agents/skills is shared).
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/Documents/code/agent-skills/skills"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        AUTOOS_ROOT="$tmp/repo"
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }
+        install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }
+        install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        enable_project_mcp_server() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        has_cmd() { return 1; }
+        install_agent_skills >/dev/null 2>&1
+    )
+    problems=""
+    [[ -e "$tmp/.codex" ]] && problems+="[~/.codex was created without codex] "
+    [[ -L "$tmp/.agents/skills/alpha" ]] || problems+="[~/.agents/skills not linked, so the run did not reach the step] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "install_agent_skills: second run reports skipped for ~/.agents/skills"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/Documents/code/agent-skills/skills"
+    run_install() {
+        (
+            SYS_HOME="$tmp"
+            AUTOOS_DRY_RUN=0
+            AUTOOS_ROOT="$tmp/repo"
+            clone_or_update() { :; }
+            install_mcp_graphify() { :; }
+            install_mcp_serena() { :; }
+            install_mcp_playwright() { :; }
+            install_mcp_context7() { :; }
+            mcp_has_server() { return 1; }
+            enable_project_mcp_server() { :; }
+            register_antigravity_mcp_server() { :; }
+            omnigraph_readiness() { return 0; }
+            answer() { echo ""; }
+            has_cmd() { return 1; }
+            install_agent_skills 2>&1
+        )
+    }
+    run_install >/dev/null
+    dest="$tmp/.agents/skills"
+    before="$(stat -c '%Y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
+    out="$(run_install)"
+    after="$(stat -c '%Y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
+    problems=""
+    [[ "$before" == "$after" ]] || problems+="[the skills directory or a link changed] "
+    # Match skill-name-specific lines, not the "Agent skills linked to Antigravity" line
+    grep -Eq '(^|[^[:alnum:]])(linked|repointed) (alpha|beta)\b' <<<"$out" && problems+="[second run printed a linked/repointed line] "
+    [[ "$out" == *skipped* ]] || problems+="[second run never says skipped] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "install_agent_skills: keeps a user's own skill in ~/.agents/skills"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/Documents/code/agent-skills/skills" "$tmp/.agents/skills/alpha" "$tmp/.agents/skills/mine"
+    printf 'my own alpha\n' >"$tmp/.agents/skills/alpha/SKILL.md"
+    printf 'my own skill\n'  >"$tmp/.agents/skills/mine/SKILL.md"
+    snap() { ( cd "$tmp/.agents/skills" && find alpha mine -type f -exec sha256sum {} + | sort; ls -A ) ; }
+    before="$(snap)"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        AUTOOS_ROOT="$tmp/repo"
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }
+        install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }
+        install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        enable_project_mcp_server() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        has_cmd() { return 1; }
+        install_agent_skills >/dev/null 2>&1
+    )
+    after="$(snap)"
+    problems=""
+    [[ -d "$tmp/.agents/skills/alpha" && ! -L "$tmp/.agents/skills/alpha" ]] \
+        || problems+="[the user's own alpha is no longer a real directory] "
+    [[ "$(readlink "$tmp/.agents/skills/beta" 2>/dev/null)" == "$tmp/repo/.agents/skills/beta" ]] \
+        || problems+="[beta was not linked next to the user's skills] "
+    [[ "$(grep -v '^beta$' <<<"$after")" == "$before" ]] || problems+="[the user's skills changed] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "install_agent_skills: dry-run links nothing into ~/.agents/skills"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/Documents/code/agent-skills/skills"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=1
+        AUTOOS_ROOT="$tmp/repo"
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }
+        install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }
+        install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        enable_project_mcp_server() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        has_cmd() { return 1; }
+        install_agent_skills 2>&1
+    ) >/dev/null
+    problems=""
+    [[ ! -e "$tmp/.agents/skills" ]] || problems+="[dry run created $tmp/.agents/skills] "
+    [[ ! -e "$tmp/.codex/skills" ]] || problems+="[dry run created $tmp/.codex/skills] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
