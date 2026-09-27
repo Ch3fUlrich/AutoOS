@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the Linux test suite is split into one file per describe block
+
+- `tests/run-tests.sh` keeps the harness and summary and sources `tests/linux/NN-<describe>.sh` in order; test names
+  and `--filter` are unchanged (all 719 names in the same order). CI and the suite shellcheck each part in its own
+  process: one shellcheck over the 14k-line file needed more than 2.5 GB and OOM-killed a 16 GB host twice; a part
+  peaks near 1.2 GB. `docs/testing.md` says how to lint and where a new block goes.
+
 ### Added — hostexec: one logged, policy-checked path for agents to run host commands (nothing enabled)
 
 - **`tools/hostexec.py` + `tools/hostexec/`**: an MCP server over HTTP (`host_run`, `host_policy`, `host_log_tail`) that runs argv
@@ -20,12 +27,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and the printed `systemctl --user enable --now autoos-hostexec.service`. OpenHands needs `AUTOOS_EXEC_BIND` set to the docker
   bridge address.
 
+### Fixed — the web UI config save no longer churns backups
+
+- `POST /api/config` (`lib/linux/serve.py`, `lib/windows/AutoOS.Serve.psm1`) backed up and rewrote
+  `autoos.config.json` on every save, even when the merged result equalled the file, and the Linux
+  `<time_ns>` / Windows `-fffffff` backup names were not rankable by the undo listing. "Equal" is
+  now a data compare, key order aside (`Add-Member -Force` reorders keys on a no-op merge) and type
+  strict on Linux (`1` is not `true`), via the shared `ConvertTo-AutoOSCanonicalJson` /
+  `Save-AutoOSWebConfig` helpers. An unchanged save — identical or reorder-only — returns
+  `unchanged` with no backup and no write; a changed save backs up under the standard
+  `<file>.autoos-backup-YYYYmmdd-HHMMSS` name (`-1`, `-2`, ... on a clash, never overwrite).
+- `Set-AutoOSManagedFile` now uses `Copy-AutoOSBackup`, making shell-file backups rankable and preserving each same-second version with `-1`, `-2`, ... suffixes.
+
 ### Fixed — backups outside the installer never overwrite a same-second backup
 
 - `configuration/autostart/register-autostart.sh`, `configuration/docker/ai-stack/ai-stack.sh` (config backups and the
   migrate `aside` directory) and `templates/rescue-bootstrap.sh` named backups `<file>.autoos-backup-<second>` and
   overwrote an earlier backup taken in the same second. They now pick a name that did not exist yet (`-1`, `-2`, ...,
   the rule of `lib/linux/install.sh` `backup_path`), and a failed copy leaves the file untouched.
+- `ai-stack.sh` now gives migration and rollback archives an unused `-N.tar.gz` name, while WSL CAO relocation uses a free `-N` directory and leaves native state untouched if it cannot be backed up.
 - `ai-stack.sh init` (also run by `up` and `migrate`) now stops when a config backup fails instead of continuing with
   a stack.env it could not update. `configuration/start-stack.sh` moves an unparseable OpenHands `settings.json` aside
   under a unique name and deletes it only after the copy succeeded.

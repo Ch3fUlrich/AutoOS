@@ -804,8 +804,21 @@ class Handler(BaseHTTPRequestHandler):
                     merged[key].update(value)
                 else:
                     merged[key] = value
+            # Compare serialized JSON, not dicts: True == 1 in Python, so an
+            # unchanged save must not churn the file or pile up backups of
+            # identical bytes - and {"flag": true} over {"flag": 1} IS a change.
+            if original is not None and json.dumps(merged, sort_keys=True) == json.dumps(json.loads(original), sort_keys=True):
+                return self._json(200, {"ok": True, "saved": str(cfg_file), "unchanged": True})
             if original is not None:
-                cfg_file.with_name(cfg_file.name + f".autoos-backup-{time.time_ns()}").write_text(original, encoding="utf-8")
+                # The undo listing only ranks \d{8}-?\d{6} stamps; a name that
+                # is taken - even inside one second - gets -1, -2, ... .
+                base = cfg_file.with_name(cfg_file.name + time.strftime(".autoos-backup-%Y%m%d-%H%M%S"))
+                backup = base
+                n = 0
+                while backup.exists() or backup.is_symlink():
+                    n += 1
+                    backup = base.with_name(f"{base.name}-{n}")
+                backup.write_text(original, encoding="utf-8")
             tmp_file.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
             tmp_file.replace(cfg_file)
             return self._json(200, {"ok": True, "saved": str(cfg_file)})
