@@ -197,6 +197,16 @@ class SuccessEstimateTests(unittest.TestCase):
         self.assertEqual(source, "route")
         self.assertEqual(p, (1 + 0) / (1 + 1 + 0 + 1))  # 1/3
 
+    def test_an_unstamped_legacy_failure_still_lowers_p(self):
+        # Fail closed: a record from before classes were stamped carries
+        # failure_class None; it must count, or every historical failure
+        # silently stops moving the estimate.
+        records = [rec(route="r1", gate="fail")]
+        records[0]["failure_class"] = None
+        p, source = track.p_success(records, "r1", "free", "S0", "low", PRIORS)
+        self.assertEqual(source, "route")
+        self.assertEqual(p, (1 + 0) / (1 + 1 + 0 + 1))  # 1/3
+
     def test_an_unknown_effort_record_matches_any_effort(self):
         # REVFIX review 1: a record stamped "unknown" (no rung known at write
         # time) must still be matched by a real query rung, or it never moves p.

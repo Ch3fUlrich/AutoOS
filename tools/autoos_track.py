@@ -31,14 +31,16 @@ GATES = ("pass", "fail")
 # record_run() silently drop it (REVFIX).
 FAILURES = (None, "logic", "capability", "containment", "provider", "refusal")
 
-# The failure classes that are the route's OWN answer quality, per spec §5.7:
-# `logic` (wrong result, failing test) and `capability` (fabricated report, no
-# edit, broken tool calls, context overflow). Only these lower p_success.
-# `containment` (rc 7: wrote outside its sandbox), `provider` (rc 8: quota or
-# gateway stop) and `refusal` (rc 6: the client could not prompt headlessly)
-# are not the model's answer quality - they stay in the file for availability
-# and escalation, but the Beta estimate must ignore them (REVFIX review 3).
-QUALITY_FAILURES = ("logic", "capability")
+# Failure classes that are NOT the route's own answer quality, per spec
+# §5.7: `containment` (rc 7: wrote outside its sandbox), `provider` (rc 8:
+# quota or gateway stop) and `refusal` (rc 6: the client could not prompt
+# headlessly). These stay in the file for availability and escalation, but the
+# Beta estimate must ignore them (REVFIX review 3). Every other fail class -
+# `logic` (wrong result, failing test), `capability` (fabricated report, no
+# edit, broken tool calls, context overflow), and None (a legacy record from
+# before classes were stamped) - counts against p: fail closed, an unstamped
+# failure still moves the estimate.
+NON_QUALITY_FAILURES = ("containment", "provider", "refusal")
 
 
 def _text(name, value):
@@ -140,10 +142,10 @@ def p_success(records: list, route: str, route_class: str, bucket: str,
     A record whose effort was not known when it was written is stamped
     ``"unknown"`` and matches any queried rung, so a legacy record still moves
     p (REVFIX review 1). Per spec 5.7 only the route's OWN answer quality
-    counts: ``logic`` and ``capability`` failures enter the Beta denominator;
-    ``containment``, ``provider`` and ``refusal`` records are availability
-    observations, kept for escalation but not charged against p
-    (REVFIX review 3).
+    counts: ``containment``, ``provider`` and ``refusal`` records are
+    availability observations, kept for escalation but not charged against p;
+    any other fail (``logic``, ``capability``, or an unstamped legacy None)
+    enters the Beta denominator (REVFIX review 3).
     """
     alpha, beta = _prior(priors, route_class, bucket)
 
@@ -161,5 +163,5 @@ def p_success(records: list, route: str, route_class: str, bucket: str,
     passes = sum(1 for r in observed if r.get("gate") == "pass")
     failures = sum(1 for r in observed
                    if r.get("gate") == "fail"
-                   and r.get("failure_class") in QUALITY_FAILURES)
+                   and r.get("failure_class") not in NON_QUALITY_FAILURES)
     return (alpha + passes) / (alpha + beta + passes + failures), source
