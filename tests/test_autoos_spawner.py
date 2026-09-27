@@ -457,6 +457,130 @@ class ClientCommandTests(unittest.TestCase):
             self.assertNotIn("never-print-this-key", r.stdout + r.stderr, client)
 
 
+def _cap_args(**over):
+    """A cmd_run-ish Namespace for required_capabilities (only the two fields it reads)."""
+    ns = argparse.Namespace(isolate=False, card=None)
+    ns.__dict__.update(over)
+    return ns
+
+
+class ClientCapabilityTests(unittest.TestCase):
+    """SPAWNCAP (S2) part A: a client's shell/write abilities are registry data,
+    and a task that needs one is refused before dispatch (exit 2) instead of
+    being started on a client that cannot do it. Auto-choice (no --client)
+    never picks such a client."""
+
+    CAPABLE = {"opencode", "claude", "codex", "gemini", "qwen"}
+    INCAPABLE = {"agy", "qoder"}
+
+    def setUp(self):
+        self.agent = load_agent()
+        with io.open(ROOT / "catalog" / "ai-registry.json", encoding="utf-8") as fh:
+            self.registry = json.load(fh)
+
+    def test_every_client_declares_shell_and_write(self):
+        for name, client in self.registry["clients"].items():
+            with self.subTest(client=name):
+                caps = client.get("capabilities")
+                self.assertIsInstance(caps, dict, name)
+                self.assertIn("shell", caps, name)
+                self.assertIn("write", caps, name)
+                self.assertIsInstance(caps["shell"], bool, name)
+                self.assertIsInstance(caps["write"], bool, name)
+
+    def test_the_capable_client_set_is_the_five_measured_ones(self):
+        capable = {name for name, client in self.registry["clients"].items()
+                   if client["capabilities"]["shell"] and client["capabilities"]["write"]}
+        self.assertEqual(capable, self.CAPABLE)
+        for name in self.INCAPABLE:
+            self.assertFalse(self.registry["clients"][name]["capabilities"]["write"], name)
+
+    def test_client_capabilities_reads_the_registry(self):
+        self.assertEqual(self.agent.client_capabilities("opencode", self.registry),
+                         {"shell": True, "write": True})
+        self.assertEqual(self.agent.client_capabilities("qoder", self.registry),
+                         {"shell": False, "write": False})
+
+    def test_isolate_needs_shell_and_write(self):
+        self.assertEqual(self.agent.required_capabilities(_cap_args(isolate=True)),
+                         ("shell", "write"))
+
+    def test_explicit_editing_cards_need_shell_and_write(self):
+        for card in ("kind=implement", "kind=debug", "kind=bulk", "role=implement"):
+            with self.subTest(card=card):
+                self.assertEqual(self.agent.required_capabilities(_cap_args(card=card)),
+                                 ("shell", "write"), card)
+
+    def test_read_only_cards_need_nothing(self):
+        for card in ("kind=review", "kind=research", "kind=plan",
+                     "role=review", "role=orchestrate"):
+            with self.subTest(card=card):
+                self.assertEqual(self.agent.required_capabilities(_cap_args(card=card)), (), card)
+
+    def test_absent_empty_and_defaults_only_cards_need_nothing(self):
+        # v1's defaults make every absent card role=implement, but only an
+        # explicitly named editing kind/role is a write request: privacy=sensitive
+        # alone (or an empty card) must not be gated, or qoder's own promo
+        # refusal (test_qoder_is_refused_for_sensitive_work) would be shadowed
+        # by the capability message instead of printing "public".
+        for card in (None, "", "   ", "privacy=sensitive", "complexity=hard", "ctx=1m"):
+            with self.subTest(card=card):
+                self.assertEqual(self.agent.required_capabilities(_cap_args(card=card)), (), card)
+
+    def test_a_malformed_card_is_left_for_build_plan_to_report(self):
+        # A bad card is not a capability question: build_plan raises the CardError.
+        self.assertEqual(self.agent.required_capabilities(_cap_args(card="bogus=1")), ())
+
+    def test_choose_client_picks_the_first_capable_in_registry_order(self):
+        self.assertEqual(self.agent.choose_client(("shell", "write"), self.registry), "opencode")
+        self.assertEqual(self.agent.choose_client((), None), "opencode")
+
+    def test_choose_client_skips_an_incapable_first_client(self):
+        registry = {"clients": {
+            "opencode": {"capabilities": {"shell": False, "write": False}},
+            "claude": {"capabilities": {"shell": True, "write": True}},
+        }}
+        self.assertEqual(self.agent.choose_client(("shell", "write"), registry), "claude")
+
+    def test_capability_refusal_names_the_missing_capability_and_the_capable_clients(self):
+        msg = self.agent.capability_refusal("qoder", ("shell", "write"), self.registry)
+        self.assertIsNotNone(msg)
+        self.assertIn("qoder", msg)
+        self.assertIn("shell", msg)
+        self.assertIn("write", msg)
+        for name in self.CAPABLE:
+            self.assertIn(name, msg)
+        self.assertIsNone(
+            self.agent.capability_refusal("opencode", ("shell", "write"), self.registry))
+
+    def test_qoder_is_refused_for_an_isolated_write_before_it_starts(self):
+        r = plan_of("--client", "qoder", "--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("qoder", r.stderr)
+        self.assertIn("opencode", r.stderr)
+        self.assertNotIn("would run:", r.stdout)
+
+    def test_qoder_is_refused_for_an_explicit_editing_card(self):
+        r = plan_of("--client", "qoder", "--card", "kind=implement", "edit README.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("opencode", r.stderr)
+
+    def test_qoder_can_still_take_a_read_only_card(self):
+        r = plan_of("--client", "qoder", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("qodercli", r.stdout)
+
+    def test_an_isolated_run_without_a_client_auto_picks_a_capable_one(self):
+        r = plan_of("--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run: opencode", r.stdout)
+
+    def test_the_no_client_default_is_still_opencode(self):
+        r = plan_of("t")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run: opencode", r.stdout)
+
+
 class ReviewFindingTests(unittest.TestCase):
     """Cross-family review (t1-orchestrator, 2026-09-24) findings, pinned."""
 
@@ -3184,6 +3308,29 @@ print("Error: Rate limit exceeded. Please try again later.")
 '''
 
 
+def _init_git_root():
+    """A temp git checkout with two commits and an extra `side` branch: the
+    fixture the --isolate containment tests clone from, shared with the
+    provider-stop fallthrough tests. The caller owns the tempdir
+    (addCleanup(shutil.rmtree, ...))."""
+    tmp = tempfile.mkdtemp()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+           "-c", "init.defaultBranch=master"]
+    subprocess.run(git + ["init", "-q", tmp], check=True)
+    with open(os.path.join(tmp, "tracked.txt"), "w", encoding="utf-8") as fh:
+        fh.write("base\n")
+    subprocess.run(git + ["-C", tmp, "add", "tracked.txt"], check=True)
+    subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "init"], check=True)
+    with open(os.path.join(tmp, "conflict.txt"), "w", encoding="utf-8") as fh:
+        fh.write("base\n")
+    subprocess.run(git + ["-C", tmp, "add", "conflict.txt"], check=True)
+    subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "conflict base"], check=True)
+    # A second EXISTING branch (not checked out) for the side-ref cases;
+    # refs created mid-run are new and never scanned.
+    subprocess.run(git + ["-C", tmp, "branch", "side"], check=True)
+    return tmp
+
+
 class IsolateContainmentTests(unittest.TestCase):
     """ISOfix (rule->code: --isolate containment leak). Measured 2026-09-26:
     an --isolate worker given absolute parent paths edited and committed in
@@ -3197,22 +3344,8 @@ class IsolateContainmentTests(unittest.TestCase):
         self.agent = load_agent()
 
     def make_root(self):
-        tmp = tempfile.mkdtemp()
+        tmp = _init_git_root()
         self.addCleanup(shutil.rmtree, tmp, True)
-        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
-               "-c", "init.defaultBranch=master"]
-        subprocess.run(git + ["init", "-q", tmp], check=True)
-        with open(os.path.join(tmp, "tracked.txt"), "w", encoding="utf-8") as fh:
-            fh.write("base\n")
-        subprocess.run(git + ["-C", tmp, "add", "tracked.txt"], check=True)
-        subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "init"], check=True)
-        with open(os.path.join(tmp, "conflict.txt"), "w", encoding="utf-8") as fh:
-            fh.write("base\n")
-        subprocess.run(git + ["-C", tmp, "add", "conflict.txt"], check=True)
-        subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "conflict base"], check=True)
-        # A second EXISTING branch (not checked out) for the side-ref cases;
-        # refs created mid-run are new and never scanned.
-        subprocess.run(git + ["-C", tmp, "branch", "side"], check=True)
         return tmp
 
     def make_fake_agy(self):
@@ -3256,8 +3389,15 @@ class IsolateContainmentTests(unittest.TestCase):
             env["AUTOOS_FAKE_MODE"] = mode
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.dict(os.environ, env, clear=True):
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    rc = agent.cmd_run(args, cfg)
+                # SPAWNCAP (S2): the real registry declares headless agy with
+                # shell=false/write=false (its headless refusal evidence), but
+                # these tests exercise containment/leak/provider-stop with a fake
+                # worker, not the capability gate. Neutralise the gate here so
+                # the containment behaviour is still what is measured.
+                with mock.patch.object(agent, "client_capabilities",
+                                       lambda name, registry=None: {"shell": True, "write": True}):
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        rc = agent.cmd_run(args, cfg)
         finally:
             agent.ROOT, agent.TRACK_RECORD = old_root, old_track
         return rc, out.getvalue(), err.getvalue()
@@ -3792,6 +3932,161 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertNotIn("logs/x", files)
                 self.assertNotIn("logs", files.split())
                 self.assertIn("worker-new.txt", files)
+
+
+def _fallthrough_registry(route_ids):
+    """A registry whose routes are exactly `route_ids`, plus the clients the
+    capability gate reads. The resolver itself is replaced by
+    `_fallthrough_plan`, so providers/models/policy are not consulted."""
+    return {
+        "clients": {
+            "opencode": {"capabilities": {"shell": True, "write": True}},
+            "claude": {"capabilities": {"shell": True, "write": True}},
+        },
+        "routes": {rid: {"id": rid, "class": "cheap", "legs": []} for rid in route_ids},
+    }
+
+
+def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, overlay,
+                      track_record, client_state):
+    """route_plan_for stand-in: the first route id still in `registry`.
+
+    `_resolve_route_v2` drops the excluded ids before calling, so the second
+    attempt sees only the routes that have not been tried yet. No routes left
+    is the resolver's own input_required."""
+    routes = list((registry.get("routes") or {}).keys())
+    if not routes:
+        return {"route": None, "state": "input_required",
+                "reason": "no route survives the filters", "bucket": "S0",
+                "defer_until": None}
+    return {"route": routes[0], "state": "ready", "reason": "stub", "bucket": "S1",
+            "defer_until": None}
+
+
+class ProviderStopFallthroughTests(unittest.TestCase):
+    """SPAWNCAP (S2) part B: a provider-stopped resolver-routed --isolate run
+    re-runs the same task in the same sandbox on the next route, after
+    WIP-committing the stopped attempt, at most MAX_FALLTHROUGH times; then it
+    exits 8 exactly as WIPfix did."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def test_fallthrough_line_names_both_routes(self):
+        self.assertEqual(
+            self.agent.fallthrough_line("r-free", "Error: Rate limit exceeded", "r-cheap"),
+            "provider stop on r-free: Error: Rate limit exceeded -> falling through to r-cheap")
+
+    def test_provider_stop_matches_all_targets_skipped(self):
+        # gateway 503 ALL_TARGETS_SKIPPED, printed as an error line.
+        line = "Error: all targets were skipped by pre-dispatch filters"
+        self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
+
+    def test_provider_stop_matches_credits_exhausted(self):
+        line = "Error: credits exhausted"
+        self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
+
+    def _run(self, route_ids, stops):
+        """Run cmd_run with the resolver and the client replaced by fakes; the
+        sandbox is a real temp clone so WIP commits and re-runs are real.
+
+        Returns (rc, out, err, calls, sandbox_names): `calls` is
+        {"n": int, "cwds": [str]}.
+        """
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        statedir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, statedir, True)
+        agent = self.agent
+        old_root, old_track, old_overlay = (agent.ROOT, agent.TRACK_RECORD,
+                                            agent.MEASURED_OVERLAY_PATH)
+        agent.ROOT = root
+        agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
+        agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
+        cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
+
+        calls = {"n": 0, "cwds": [], "route_marks": []}
+        real_build_plan = agent.build_plan
+
+        def marking_build_plan(*a, **k):
+            # Tag each plan's env with its route, so a re-run that kept the
+            # first plan's env shows up as a stale mark.
+            plan = real_build_plan(*a, **k)
+            plan["env"]["AUTOOS_TEST_ROUTE_MARK"] = plan["route"]["combo"]
+            return plan
+
+        def fake_run_client(cmd, cwd, env, reap=True, capture=False):
+            calls["n"] += 1
+            calls["cwds"].append(cwd)
+            calls["route_marks"].append(env.get("AUTOOS_TEST_ROUTE_MARK"))
+            with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
+                      encoding="utf-8") as fh:
+                fh.write("work\n")
+            if calls["n"] <= stops:
+                return agent.ClientExit(0, tail="Error: Rate limit exceeded\n")
+            return agent.ClientExit(0, tail="done\n")
+
+        args = argparse.Namespace(
+            client="claude", tier=None, card="kind=implement", task="edit README.md",
+            free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
+            joinable=False, model=None, clean=False, allow_training=False,
+            max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+        env = dict(os.environ)
+        env["AUTOOS_STATE_DIR"] = statedir
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(agent, "load_registry",
+                                       lambda path: _fallthrough_registry(route_ids)):
+                    with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
+                            mock.patch.object(agent, "build_plan", marking_build_plan):
+                        with mock.patch.object(agent, "run_client", fake_run_client):
+                            with mock.patch.object(agent.measure_mod, "client_state",
+                                                   lambda *a, **k: {}):
+                                with mock.patch.object(
+                                        agent.clients, "signin_state",
+                                        lambda client, env=None: (None, "")):
+                                    with mock.patch("shutil.which",
+                                                    return_value="/usr/bin/claude"):
+                                        with contextlib.redirect_stdout(out), \
+                                                contextlib.redirect_stderr(err):
+                                            rc = agent.cmd_run(args, cfg)
+        finally:
+            (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
+                old_root, old_track, old_overlay)
+        base = os.path.join(statedir, "sandboxes")
+        names = os.listdir(base) if os.path.isdir(base) else []
+        return rc, out.getvalue(), err.getvalue(), calls, names
+
+    def test_a_provider_stop_falls_through_to_the_next_route_and_succeeds(self):
+        rc, out, err, calls, sandboxes = self._run(["r-free", "r-cheap"], stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 2, "one stopped attempt plus one re-run")
+        self.assertEqual(calls["cwds"][0], calls["cwds"][1], "same sandbox, same cwd")
+        self.assertEqual(len(sandboxes), 1, sandboxes)
+        self.assertIn("provider stop on r-free: Error: Rate limit exceeded "
+                      "-> falling through to r-cheap", out + err)
+        self.assertIn("WIP-COMMITTED", out + err)
+
+    def test_a_fallthrough_re_run_gets_the_next_plans_env(self):
+        # qoder review 2026-09-27: env was built once from the first plan, so a
+        # re-run kept the stopped route's OPENCODE_CONFIG_CONTENT/session tag.
+        _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1)
+        self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"], out + err)
+
+    def test_fallthrough_stops_after_the_cap_and_exits_8(self):
+        rc, out, err, calls, _ = self._run(
+            ["r-free", "r-cheap", "r-cheap2", "r-cheap3"], stops=5)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 3, "the first attempt plus MAX_FALLTHROUGH re-runs")
+        lines = [ln for ln in (out + err).splitlines() if ln.startswith("provider stop on ")]
+        self.assertEqual(len(lines), 2, lines)
+
+    def test_no_next_route_exits_8_without_a_fallthrough(self):
+        rc, out, err, calls, _ = self._run(["r-free"], stops=5)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1, "nowhere to fall through to")
+        self.assertNotIn("falling through to", out + err)
 
 
 class OutsideFenceTaskDirTests(unittest.TestCase):
