@@ -523,6 +523,8 @@ cases = [
     {"id": "groq", "value": "has\x00nul"},
     {"id": "groq", "value": "  padded"},
     {"id": "groq", "value": "REPLACE_WITH_your_key"},
+    {"id": "groq", "value": "has'quote"},
+    {"id": "groq", "value": 'has"double'},
     {"id": "groq", "value": 123},
     {"id": "groq", "value": "x" * 4097},
     {},

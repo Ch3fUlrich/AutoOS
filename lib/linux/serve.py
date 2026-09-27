@@ -212,6 +212,8 @@ def _secret_value_error(value) -> str | None:
         return "value must not contain a newline or NUL"
     if value != value.strip():
         return "value must not start or end with whitespace"
+    if "'" in value or '"' in value:
+        return "value must not contain quote characters (' or \"): the shell and PowerShell readers of api-keys.yml take the value literally"
     if value.startswith(_PLACEHOLDER_PREFIX):
         return "value still looks like the placeholder it replaces"
     return None
