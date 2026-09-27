@@ -75,6 +75,8 @@ FAILOVER_PORT=""
 MOVED=()
 UNITS_BEFORE=()
 OH_REPLACED=0
+# Filled by opencode_password_sync; read by cmd_init.
+OC_PW=""
 
 DRY=0
 YES=0
@@ -212,6 +214,147 @@ omniroute_client_key() {
     key="$(sed -n 's/^omniroute[[:space:]]*:[[:space:]]*//p' "$KEYS_FILE" | head -n1 | tr -d '\r' \
         | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
     [[ "$key" == REPLACE_WITH_* ]] || printf '%s' "$key"
+}
+
+# keys_add_opencode_password <value>: append `opencode_password: '<v>'` to
+# KEYS_FILE (read-modify-write). A backup is made first when it exists and its
+# mode is kept; a new file is 0600. A missing trailing newline is added first,
+# so the new key never joins the last line. Never prints the value.
+keys_add_opencode_password() {
+    local val="$1" backup="" existed=0
+    if [[ -f "$KEYS_FILE" ]]; then
+        existed=1
+        backup="$(autoos_backup_path "$KEYS_FILE")"
+        if ! cp -p -- "$KEYS_FILE" "$backup"; then
+            rm -f -- "$backup"
+            echo "  ! could not back up $KEYS_FILE - the key was not added" >&2
+            return 1
+        fi
+    fi
+    (
+        umask 077
+        [[ $existed -eq 1 && -s "$KEYS_FILE" && -n "$(tail -c1 "$KEYS_FILE")" ]] && printf '\n' >>"$KEYS_FILE"
+        printf 'opencode_password: %s\n' "$(quote_value "$val")" >>"$KEYS_FILE"
+    )
+    [[ $existed -eq 1 ]] || chmod 600 "$KEYS_FILE"
+}
+
+# env_replace_value <file> <KEY> <value>: replace the one KEY= line in place,
+# keeping every other line and comment, backing the file up first exactly as
+# ensure_env_file does. Only used to move today's OPENCODE_PASSWORD line to the
+# api-keys.yml value; never prints the value.
+env_replace_value() {
+    local file="$1" key="$2" val="$3" backup tmp line
+    backup="$(autoos_backup_path "$file")"
+    if ! cp -p -- "$file" "$backup"; then
+        rm -f -- "$backup"
+        echo "  ! could not back up $file - leaving it untouched" >&2
+        return 1
+    fi
+    chmod 600 "$backup"
+    tmp="$(mktemp "$(dirname "$file")/.autoos-env-XXXXXX")"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*= ]]; then
+            printf '%s=%s\n' "$key" "$(quote_value "$val")"
+        else
+            printf '%s\n' "$line"
+        fi
+    done <"$file" >"$tmp"
+    chmod 600 "$tmp"
+    mv -- "$tmp" "$file"
+}
+
+# opencode_password_sync: make configuration/api-keys.yml's `opencode_password`
+# the single source of the opencode serve Basic-auth password. Y is read from
+# the yml (quotes and CR stripped; a REPLACE_WITH_* placeholder counts as
+# empty). When empty it migrates the value once - from the native serve file,
+# then the docker opencode.env OPENCODE_PASSWORD, then a fresh 32-char value -
+# appending it to the yml. It then makes the two derived copies agree, never
+# overwriting a copy newer than the yml. Sets OC_PW. Only file names, never a
+# value, are printed.
+opencode_password_sync() {
+    local keys_env="$CONFIG_DIR/opencode.env"
+    local y="" src="" val backup cur
+    if [[ -f "$KEYS_FILE" ]]; then
+        y="$(sed -n 's/^opencode_password[[:space:]]*:[[:space:]]*//p' "$KEYS_FILE" | tail -n1 \
+            | tr -d '\r' | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
+    fi
+    [[ "$y" == REPLACE_WITH_* ]] && y=""
+    if [[ "$y" == *$'\n'* || "$y" == *$'\r'* ]]; then
+        echo "  ! opencode_password: the value holds a line break (\\n or \\r) - an env file cannot carry it; not used"
+        return 1
+    fi
+    if [[ -z "$y" ]]; then
+        if [[ -s "$PW_FILE" ]]; then
+            val="$(tr -d '\r\n' <"$PW_FILE")"; src="$PW_FILE"
+        else
+            val="$(env_value "$keys_env" OPENCODE_PASSWORD)"
+            [[ -n "$val" ]] && src="$keys_env OPENCODE_PASSWORD"
+        fi
+        if [[ -z "$val" ]]; then
+            if [[ $DRY -eq 1 ]]; then val="generated"
+            else val="$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 32)"; fi
+            src="a fresh random value"
+        fi
+        if [[ $DRY -eq 1 ]]; then
+            echo "  - would add opencode_password to $KEYS_FILE"
+        else
+            keys_add_opencode_password "$val" || return 1
+            echo "  + opencode_password added to $KEYS_FILE (from $src)"
+        fi
+        y="$val"
+    fi
+    OC_PW="$y"
+
+    # Derived copy 1: the docker opencode.env OPENCODE_PASSWORD.
+    if ! file_has_key "$keys_env" OPENCODE_PASSWORD; then
+        ensure_env_file "$keys_env" OPENCODE_PASSWORD "$y" || return 1
+    else
+        cur="$(env_value "$keys_env" OPENCODE_PASSWORD)"
+        if [[ "$cur" == "$y" ]]; then
+            echo "  = $keys_env opencode password up to date (skipped)"
+        elif [[ -f "$KEYS_FILE" && "$keys_env" -nt "$KEYS_FILE" ]]; then
+            echo "  ! $keys_env holds a newer opencode password than $KEYS_FILE - left as is; put it into opencode_password there and re-run init"
+        elif [[ $DRY -eq 1 ]]; then
+            echo "  - would update the opencode password in $keys_env from $KEYS_FILE"
+        else
+            env_replace_value "$keys_env" OPENCODE_PASSWORD "$y" || return 1
+            echo "  + $keys_env opencode password updated from $KEYS_FILE"
+        fi
+    fi
+
+    # Derived copy 2: the native serve password file (0600 under a 0700 dir).
+    if [[ ! -s "$PW_FILE" ]]; then
+        if [[ $DRY -eq 1 ]]; then
+            echo "  - would write the opencode password to $PW_FILE (mode 600)"
+        else
+            mkdir -p "$(dirname "$PW_FILE")" || return 1
+            chmod 700 "$(dirname "$PW_FILE")"
+            ( umask 077; printf '%s\n' "$y" >"$PW_FILE" ) || return 1
+            chmod 600 "$PW_FILE"
+            echo "  + wrote the opencode password to $PW_FILE (mode 600)"
+        fi
+    else
+        cur="$(tr -d '\r\n' <"$PW_FILE")"
+        if [[ "$cur" == "$y" ]]; then
+            echo "  = $PW_FILE opencode password up to date (skipped)"
+        elif [[ -f "$KEYS_FILE" && "$PW_FILE" -nt "$KEYS_FILE" ]]; then
+            echo "  ! $PW_FILE holds a newer opencode password than $KEYS_FILE - left as is; put it into opencode_password there and re-run init"
+        elif [[ $DRY -eq 1 ]]; then
+            echo "  - would update $PW_FILE opencode password from $KEYS_FILE"
+        else
+            backup="$(autoos_backup_path "$PW_FILE")"
+            if ! cp -p -- "$PW_FILE" "$backup"; then
+                rm -f -- "$backup"
+                echo "  ! could not back up $PW_FILE - leaving it untouched" >&2
+                return 1
+            fi
+            chmod 600 "$backup"
+            ( umask 077; printf '%s\n' "$y" >"$PW_FILE" ) || return 1
+            chmod 600 "$PW_FILE"
+            echo "  + $PW_FILE opencode password updated from $KEYS_FILE"
+        fi
+    fi
 }
 
 # The value a name should get: this environment, then the litellm .env (the
@@ -484,11 +627,10 @@ cmd_init() {
 
     local password="" client_key pairs=() n
     client_key="$(omniroute_client_key)"
-    [[ -s "$PW_FILE" ]] && password="$(tr -d '\r\n' <"$PW_FILE")"
-    if [[ -z "$password" ]] && ! file_has_key "$CONFIG_DIR/opencode.env" OPENCODE_PASSWORD; then
-        if [[ $DRY -eq 1 ]]; then password="generated"
-        else password="$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 32)"; fi
-    fi
+    # configuration/api-keys.yml's opencode_password is the single source;
+    # opencode_password_sync writes both derived copies and sets OC_PW.
+    opencode_password_sync || return 1
+    password="$OC_PW"
     pairs=(OPENCODE_PASSWORD "$password" AUTOOS_OMNIROUTE_KEY "$client_key")
     pairs+=(OMNIGRAPH_TOKEN "${OMNIGRAPH_TOKEN:-$(env_value "$OMNIGRAPH_ENV" OMNIGRAPH_TOKEN)}")
     for n in "${names[@]}"; do

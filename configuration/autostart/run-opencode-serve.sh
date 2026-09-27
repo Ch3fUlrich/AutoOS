@@ -66,7 +66,22 @@ else
     echo "No keys found in $LIT_ENV or $KEYS_FILE - the omniroute/litellm providers will be refused."
 fi
 
-if [[ ! -s "$PW_FILE" ]]; then
+# configuration/api-keys.yml's opencode_password is the single source
+# (ai-stack.sh init writes it). Fall back to the pinned file, generated once,
+# when it is absent. The value is never printed - only the source is named.
+KEYS_PW=""
+if [[ -f "$KEYS_FILE" ]]; then
+    KEYS_PW="$(sed -n 's/^opencode_password[[:space:]]*:[[:space:]]*//p' "$KEYS_FILE" | tail -n1 | tr -d '\r' \
+        | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
+    [[ "$KEYS_PW" == REPLACE_WITH_* ]] && KEYS_PW=""
+fi
+if [[ -n "$KEYS_PW" ]]; then
+    if [[ $DRY -eq 1 ]]; then
+        echo "  - would use the opencode_password from $KEYS_FILE (user: opencode)."
+    else
+        echo "Serve password: from $KEYS_FILE (user: opencode)."
+    fi
+elif [[ ! -s "$PW_FILE" ]]; then
     if [[ $DRY -eq 1 ]]; then
         echo "  - would generate the serve password into $PW_FILE (mode 600)"
     else
@@ -92,7 +107,11 @@ if [[ $DRY -eq 1 ]]; then
 fi
 
 command -v opencode >/dev/null || { echo "opencode is not installed. Run: ./setup.sh --only opencode-cli --yes"; exit 1; }
-OPENCODE_PASSWORD="$(cat "$PW_FILE")"
+if [[ -n "$KEYS_PW" ]]; then
+    OPENCODE_PASSWORD="$KEYS_PW"
+else
+    OPENCODE_PASSWORD="$(cat "$PW_FILE")"
+fi
 export OPENCODE_PASSWORD
 
 # From $HOME, as the unit does: the serve process's cwd becomes its default
