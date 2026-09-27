@@ -6499,7 +6499,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $oc = $stripped | ConvertFrom-Json
     Assert-Equal $oc.model 'omniroute/t1-orchestrator'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,gemini-3.8-flash,opus-4-6,t1-orchestrator,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-free-only,t1-orchestrator-paid,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -7625,7 +7625,7 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
-    Assert-Equal ($names -join ',') 'gemini-3.8-flash,opus-4-6,t1-orchestrator,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
+    Assert-Equal ($names -join ',') 'gemini-3.8-flash,opus-4-6,t1-orchestrator,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,spark-1.3-contributor'
     # "retired" is the one home of the ids a rename left behind: apply prunes
     # them from the store, so a retired id must never also be a current combo.
     $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -7656,6 +7656,7 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $contexts = @{
         't1-orchestrator' = '1M'
         't1-orchestrator-free-only' = '1M'
+        'spark-1.3-contributor' = '1M'
         't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
         'gemini-3.8-flash' = '128k'; 'opus-4-6' = '200k'
@@ -7669,11 +7670,11 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     }
     # T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only carry
     # a free gemini/gemini-3.8-flash fallback leg, so they are servable again.
-    # t1-orchestrator-clean, spark-1.3-contributor and deepseek-v4.1-flash still
-    # fail closed (omitted, never a combo): t1/spark since DSMAX 2026-09-27 (Zen
-    # client-bound, OpenRouter off), deepseek-v4.1-flash since the deepseek 402
-    # of 2026-09-27T16:4xZ. No 1M context promise survives them.
-    foreach ($gone in @('t1-orchestrator-clean', 'spark-1.3-contributor', 'deepseek-v4.1-flash')) {
+    # t1-orchestrator-clean and deepseek-v4.1-flash still
+    # fail closed (omitted, never a combo): t1-orchestrator-clean since DSMAX 2026-09-27 (OpenRouter off),
+    # deepseek-v4.1-flash since the deepseek 402 of 2026-09-27T16:4xZ.
+    # spark-1.3-contributor is NOW SERVABLE via meta_api (MUSEAPI 2026-09-27).
+    foreach ($gone in @('t1-orchestrator-clean', 'deepseek-v4.1-flash')) {
         Assert-True ($names -notcontains $gone) "$gone should be omitted, not a combo"
         Assert-True ($omitted -contains $gone) "$gone missing from omitted"
     }
@@ -7704,11 +7705,13 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         $paid = @($c.models | Where-Object { $_ -match $paidRe })
         Assert-Equal ($paid -join ',') '' "$($c.name) carries paid legs: $($paid -join ',')"
     }
-    # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no spark leg may
-    # appear in any combo now that t1/spark fail closed.
+    # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no plain spark leg may
+    # appear in any combo. muse-spark-1.3-contributor is NOW SERVABLE via
+    # meta_api (MUSEAPI 2026-09-27).
     $allLegs = @($combos | ForEach-Object { $_.models }) -join ' '
     Assert-True ($allLegs -notmatch 'muse-spark-1\.3(?!-contributor)') 'plain muse-spark-1.3 leg present'
-    Assert-True ($allLegs -notmatch 'spark') 'spark leg present in a combo'
+    # Allow spark-1.3-contributor but block plain spark
+    Assert-True ($allLegs -notmatch 'muse-spark-1\.3(?!-contributor)') 'spark leg present in a combo'
 }
 
 Test-Case 'apply --dry-run registers nothing and starts nothing' {

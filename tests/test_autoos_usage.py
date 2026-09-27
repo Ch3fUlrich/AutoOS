@@ -322,9 +322,9 @@ class CliTests(UsageCliTests):
         self.assertEqual(set(rep), {"since", "pages", "truncated", "totals", "by"})
         self.assertEqual(set(rep["by"]), {"provider", "lane"})
         self.assertEqual(set(rep["totals"]),
-                         {"calls", "ok", "errors", "tokens_in", "tokens_out"})
+                         {"calls", "ok", "errors", "tokens_in", "tokens_out", "cost_in", "cost_out"})
         entry = rep["by"]["provider"][0]
-        self.assertEqual(set(entry), {"key", "calls", "ok", "errors", "tokens_in", "tokens_out"})
+        self.assertEqual(set(entry), {"key", "calls", "ok", "errors", "tokens_in", "tokens_out", "cost_in", "cost_out"})
 
     def test_text_tables_one_per_dimension_sorted_by_calls_desc(self):
         rows = (fresh_rows(3, NOW - datetime.timedelta(minutes=1), provider="groq", tag=None)

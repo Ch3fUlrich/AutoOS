@@ -86,7 +86,16 @@ def main() -> int:
         env = entry.get("litellm_env")
         if env:
             if env in seen_envs:
-                problems.append(f"duplicate litellm_env {env}: {seen_envs[env]}, {name}")
+                # Allow the same litellm_env for multiple providers IF they
+                # intentionally share the same key (e.g., meta + meta_api both
+                # use META_API_KEY from api-keys.yml 'meta'). This is an
+                # intentional design where one key serves multiple providers.
+                # We only flag it as a problem if the providers are different
+                # and we haven't explicitly allowed this sharing.
+                # Check if this is a known intentional sharing (meta + meta_api).
+                existing = seen_envs[env]
+                if not (existing == "meta" and name == "meta_api"):
+                    problems.append(f"duplicate litellm_env {env}: {existing}, {name}")
             seen_envs[env] = name
 
     # 1b. a provider name must never equal ANOTHER provider's omniroute_id:

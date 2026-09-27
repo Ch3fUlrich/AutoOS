@@ -64,6 +64,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 DEFAULT_GATEWAY = "http://127.0.0.1:20128"
 PAGE_LIMIT = 500
@@ -72,9 +73,30 @@ TIMEOUT_S = 15
 DIMENSIONS = ("provider", "combo", "lane", "model")
 UNTAGGED_LANE = "(untagged)"
 
+# Registry path for cost lookup
+ROOT = Path(__file__).resolve().parent.parent
+REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
+
 
 class UsageError(Exception):
     """A one-line, key-free failure cause (exit 3)."""
+
+
+def load_registry_prices():
+    """Load model prices from the registry. Returns dict model_id -> (price_in, price_out)."""
+    try:
+        with REGISTRY_PATH.open(encoding="utf-8") as fh:
+            registry = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    prices = {}
+    for model_id, model in registry.get("models", {}).items():
+        if isinstance(model, dict):
+            price_in = model.get("price_in")
+            price_out = model.get("price_out")
+            if price_in is not None and price_out is not None:
+                prices[model_id] = (float(price_in), float(price_out))
+    return prices
 
 
 def parse_since(text, now):
@@ -217,7 +239,11 @@ def _as_int(value):
         return 0
 
 
-def _add_row(group, row):
+def _new_group(key):
+    return {"key": key, "calls": 0, "ok": 0, "errors": 0, "tokens_in": 0, "tokens_out": 0, "cost_in": 0.0, "cost_out": 0.0}
+
+
+def _add_row(group, row, prices=None):
     group["calls"] += 1
     status = row.get("status") if isinstance(row, dict) else None
     try:
@@ -231,15 +257,21 @@ def _add_row(group, row):
         group["ok"] += 1
     tokens = row.get("tokens") if isinstance(row, dict) else None
     tokens = tokens if isinstance(tokens, dict) else {}
-    group["tokens_in"] += _as_int(tokens.get("in"))
-    group["tokens_out"] += _as_int(tokens.get("out"))
+    tin = _as_int(tokens.get("in"))
+    tout = _as_int(tokens.get("out"))
+    group["tokens_in"] += tin
+    group["tokens_out"] += tout
+    # Calculate cost if prices are available
+    if prices:
+        model = row.get("model") if isinstance(row, dict) else None
+        if model and model in prices:
+            price_in, price_out = prices[model]
+            # price is per 1M tokens
+            group["cost_in"] += (tin / 1_000_000.0) * price_in
+            group["cost_out"] += (tout / 1_000_000.0) * price_out
 
 
-def _new_group(key):
-    return {"key": key, "calls": 0, "ok": 0, "errors": 0, "tokens_in": 0, "tokens_out": 0}
-
-
-def aggregate(rows, dims):
+def aggregate(rows, dims, prices=None):
     """{dim: [group, ...]} sorted by calls desc, ties by key asc."""
     by = {}
     for dim in dims:
@@ -247,15 +279,15 @@ def aggregate(rows, dims):
         for r in rows:
             key = _group_key(dim, r)
             groups.setdefault(key, _new_group(key))
-            _add_row(groups[key], r)
+            _add_row(groups[key], r, prices)
         by[dim] = sorted(groups.values(), key=lambda g: (-g["calls"], g["key"]))
     return by
 
 
-def totals(rows):
+def totals(rows, prices=None):
     t = _new_group("(all)")
     for r in rows:
-        _add_row(t, r)
+        _add_row(t, r, prices)
     del t["key"]
     return t
 
@@ -263,20 +295,25 @@ def totals(rows):
 def build_report(rows, dims, cutoff, pages, truncated):
     kept = [r for r in rows
             if not (row_timestamp(r) is not None and row_timestamp(r) < cutoff)]
+    prices = load_registry_prices()
     return {
         "since": cutoff.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "pages": pages,
         "truncated": truncated,
-        "totals": totals(kept),
-        "by": aggregate(kept, dims),
+        "totals": totals(kept, prices),
+        "by": aggregate(kept, dims, prices),
     }
 
 
-def render_text(report, dims):
+def render_text(report, dims, show_cost=False):
     t = report["totals"]
-    lines = ["usage since %s - %d calls, %d ok, %d errors, %d tokens in, %d tokens out (%d page%s)"
+    cost_line = ""
+    if show_cost:
+        total_cost = t.get("cost_in", 0.0) + t.get("cost_out", 0.0)
+        cost_line = ", estimated cost: $%.4f" % total_cost
+    lines = ["usage since %s - %d calls, %d ok, %d errors, %d tokens in, %d tokens out (%d page%s)%s"
              % (report["since"], t["calls"], t["ok"], t["errors"],
-                t["tokens_in"], t["tokens_out"], report["pages"], "s" if report["pages"] != 1 else "")]
+                t["tokens_in"], t["tokens_out"], report["pages"], "s" if report["pages"] != 1 else "", cost_line)]
     if report["truncated"]:
         lines.append("note: stopped at the %d-page cap; older rows may be missing - narrow --since"
                      % MAX_PAGES)
@@ -288,12 +325,22 @@ def render_text(report, dims):
             lines.append("  (no rows)")
             continue
         width = min(40, max([len(dim)] + [len(str(e["key"])) for e in entries]))
-        lines.append("%-*s  %6s %6s %6s %10s %10s"
-                     % (width, "", "calls", "ok", "errors", "tokens_in", "tokens_out"))
-        for e in entries:
-            lines.append("%-*s  %6d %6d %6d %10d %10d"
-                         % (width, str(e["key"])[:width], e["calls"], e["ok"],
-                            e["errors"], e["tokens_in"], e["tokens_out"]))
+        if show_cost:
+            lines.append("%-*s  %6s %6s %6s %10s %10s %10s %10s"
+                         % (width, "", "calls", "ok", "errors", "tokens_in", "tokens_out", "cost_in", "cost_out"))
+            for e in entries:
+                cost_in = e.get("cost_in", 0.0)
+                cost_out = e.get("cost_out", 0.0)
+                lines.append("%-*s  %6d %6d %6d %10d %10d %10.4f %10.4f"
+                             % (width, str(e["key"])[:width], e["calls"], e["ok"],
+                                e["errors"], e["tokens_in"], e["tokens_out"], cost_in, cost_out))
+        else:
+            lines.append("%-*s  %6s %6s %6s %10s %10s"
+                         % (width, "", "calls", "ok", "errors", "tokens_in", "tokens_out"))
+            for e in entries:
+                lines.append("%-*s  %6d %6d %6d %10d %10d"
+                             % (width, str(e["key"])[:width], e["calls"], e["ok"],
+                                e["errors"], e["tokens_in"], e["tokens_out"]))
     return "\n".join(lines)
 
 
@@ -309,6 +356,8 @@ def main(argv=None, *, fetch=None, env=None, now=None):
                          % ",".join(DIMENSIONS))
     ap.add_argument("--json", action="store_true",
                     help="machine-readable JSON instead of tables")
+    ap.add_argument("--cost", action="store_true",
+                    help="show estimated cost per provider/model using registry prices")
     args = ap.parse_args(argv)
 
     dims = [d.strip() for d in args.by.split(",") if d.strip()]
@@ -347,7 +396,7 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     if args.json:
         print(json.dumps(report, indent=2))
     else:
-        print(render_text(report, dims))
+        print(render_text(report, dims, show_cost=args.cost))
     return 0
 
 
