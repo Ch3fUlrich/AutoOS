@@ -3729,7 +3729,12 @@ if it "aistack: failover off waits its TERM grace only on pids it accepted"; the
     (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
     _aistack_wait_gone "$standby" || { ok=0; echo "the standby (pid $standby) survived" >&2; }
     _aistack_process_alive "$other" || { ok=0; echo "the stale pid (pid $other) was killed" >&2; }
-    n="$(wc -l <"$d/sleep.log" 2>/dev/null)" || n=0
+    n=0
+    # Read only when the fake `sleep` actually ran: a bare `<` on a missing path
+    # fails the redirection before any `2>/dev/null` applies and writes to the
+    # suite's stderr (assertion still passes, but a red line per run - review
+    # lstby2d).
+    [[ -e "$d/sleep.log" ]] && n="$(wc -l <"$d/sleep.log")" || n=0
     (( n <= 5 )) || { ok=0; echo "the grace waited on the refused pid: $n sleep calls" >&2; }
     kill "$other" 2>/dev/null || true; wait "$other" 2>/dev/null || true
     _aistack_kill_standby "$d"
