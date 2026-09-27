@@ -161,13 +161,19 @@ combo id).
 - `ai-stack.sh failover on` - stop the gateway container, start LiteLLM on
   the gateway's bind and port with the gateway client key
   (`~/.config/autoos/ai-stack/client.key`, mode 600, never printed), wait for
-  `/health/liveliness`, then record `failover.state`. Already on refuses
-  (rc 2); a standby that never turns live hands the port back to the gateway
-  and exits 1 - the port is never left empty.
-- `ai-stack.sh failover off` - stop only the standby (its own state dir, only
-  its pid - the `:4000` unit below is never touched), start the gateway
-  again, wait for `/api/health`, remove the state file. Already off is a
-  no-op (rc 0).
+  `/health/liveliness`, then record `failover.state` with the standby pid -
+  the process listening on `:20128`, found with `ss` exactly like
+  `start-litellm.sh` does (it writes no pid file) and accepted only when its
+  `/proc/<pid>/cmdline` is litellm. Already on refuses (rc 2); a standby
+  that never turns live hands the port back to the gateway and exits 1 -
+  the port is never left empty.
+- `ai-stack.sh failover off` - stop only the standby (TERM, KILL after 10 s;
+  a foreign listener on the port is never signalled - the `:4000` unit below
+  is never touched), then refuse when the port stays busy (names the holder
+  from `ss`, starts nothing, rc 1), otherwise recreate the gateway
+  (`compose up -d --no-deps omniroute` - a bare `start` of a port-less
+  container never republishes the port), wait for `/api/health`, check the
+  port is published, remove the state file. Already off is a no-op (rc 0).
 - `ai-stack.sh failover status` - `failover on since <time> (litellm pid N)`
   or `failover off`. `--dry-run` prints every step and changes nothing;
   `verify` names the standby (`failover ON: LiteLLM serves the gateway port`)

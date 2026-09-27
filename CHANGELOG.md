@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `failover off` really hands the gateway port back (lstby2)
+
+- **`configuration/docker/ai-stack/ai-stack.sh`**: the standby pid is the
+  process listening on the gateway port, found with `ss` exactly like
+  `start-litellm.sh` does and accepted only when `/proc/<pid>/cmdline` is
+  litellm (`start-litellm.sh` writes no pid file — the old pid-file lookup
+  left the standby running with "litellm pid unknown", live 2026-09-27).
+  `off` and every `on` rollback stop the standby (TERM, KILL after 10 s),
+  then refuse when the port stays busy (names the holder from `ss`, starts
+  nothing, rc 1), otherwise recreate the gateway
+  (`compose up -d --no-deps omniroute` — a bare `start` of a port-less
+  container never republishes the port), wait for `/api/health`, check the
+  port is published, and only then remove the state file (on failure: the
+  manual fix `ai-stack.sh up omniroute`, rc 1). Tests: the realistic fakes
+  (no pid file, fake `ss` listener, real `litellm`-renamed sleep) plus
+  busy-port and foreign-listener cases in `tests/linux/34-ai-services.sh`.
+  Docs: `docs/web-services.md` "Standby router (LiteLLM)".
+
 ### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
 ### Added — one-command standby router: `ai-stack.sh failover` (lstby)
 
