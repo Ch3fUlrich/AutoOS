@@ -1206,8 +1206,13 @@ cmd_failover_on() {
         since="$(date +%Y-%m-%dT%H:%M:%S%z)"
         pid="$(failover_pids | head -n1)" || true
         [[ -n "$pid" ]] || pid="unknown"
-        mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" || { trap - INT TERM; return 1; }
-        printf 'since=%s\npid=%s\n' "$since" "$pid" >"$FAILOVER_STATE" || { trap - INT TERM; return 1; }
+        # No state file = a later `off` could not find the standby: roll back.
+        if ! { mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" && printf 'since=%s\npid=%s\n' "$since" "$pid" >"$FAILOVER_STATE"; }; then
+            echo "  ! could not record the failover state - handing the port back to the gateway"
+            failover_stop_litellm; dc start omniroute || true
+            trap - INT TERM
+            return 1
+        fi
         echo "  + failover on: LiteLLM serves :$port (since $since, litellm pid $pid)"
         trap - INT TERM
         return 0

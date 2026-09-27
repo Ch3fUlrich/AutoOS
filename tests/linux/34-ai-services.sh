@@ -3343,6 +3343,24 @@ if it "aistack: verify prints the failover line when on and never FAILs it"; the
     if (( ok )); then pass; else fail "verify does not report the standby"; fi
 fi
 
+if it "aistack: failover off never kills a reused pid that is not the standby"; then
+    # The recorded pid may since belong to another program: off must check
+    # /proc/<pid>/cmdline and leave anything that is not litellm alive.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    sleep 300 &
+    other=$!
+    mkdir -p "$d/cfg/failover"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$other" >"$d/cfg/failover.state"
+    printf '%s\n' "$other" >"$d/cfg/failover/litellm.pid"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    kill -0 "$other" 2>/dev/null || { ok=0; echo "failover off killed an unrelated process (pid $other)" >&2; }
+    kill "$other" 2>/dev/null || true; wait "$other" 2>/dev/null || true
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover off killed a pid that is not the standby"; fi
+fi
+
 if it "aistack: failover on interrupted after the gateway stop hands the port back"; then
     # A TERM (or ctrl-C) during the liveliness wait must not leave the gateway
     # stopped with a stateless standby on its port (qoder review lstby).
