@@ -4338,6 +4338,197 @@ class FreeModelFallthroughTests(unittest.TestCase):
         self.assertEqual(calls["n"], 1, "the refused re-plan never starts a client")
 
 
+QODERCLI_1_1_63_HELP = """Usage: qodercli [options] [command] [query...]
+
+Qoder CLI - Defaults to interactive mode. Use -p/--print for non-interactive
+output.
+
+Arguments:
+  query                                Initial prompt.
+
+Options:
+  -d, --debug                          Run in debug mode (default: false)
+  -m, --model <model>                  Model for the current session
+  --list-models                        List available models for the current
+                                       user
+  --permission-mode <mode>             Set the permission mode (choices:
+                                       default, accept_edits,
+                                       bypass_permissions, dont_ask, auto)
+  --dangerously-skip-permissions       Bypass all permission checks
+  --output-format <format>             Output format (choices: text, json,
+                                       stream-json)
+"""
+
+
+def _fake_cli(dirpath, name, version, help_text):
+    """A POSIX shell stand-in for an agent CLI: answers --version and --help,
+    counts every --help it is asked for (the cache test), and records its own
+    path so the checker's PATH lookup is the temp dir, never the host."""
+    path = os.path.join(dirpath, name)
+    script = ("#!/bin/sh\n"
+              "case \"$1\" in\n"
+              "  --version) printf '%%s\\n' '%s' ;;\n"
+              "  --help) printf x >> '%s.help-calls'\n"
+              "cat <<'FAKEHELP'\n%s\nFAKEHELP\n"
+              "    ;;\n"
+              "esac\n" % (version, path, help_text.strip()))
+    with io.open(path, "w", encoding="utf-8") as fh:
+        fh.write(script)
+    os.chmod(path, 0o755)
+    return path
+
+
+class ClientModeHelpTests(unittest.TestCase):
+    """SPAWNFREE (S2) item 3: '--permission-mode accept_edits' is not a mode
+    qodercli 1.1.63 offers, and 62 runs refused every write before anyone
+    noticed (L1-backlog qoder lanes, 2026-09-27). Each client's declared modes
+    are now validated against the client's own --help, once per binary version.
+    """
+
+    def setUp(self):
+        self.clients = clients
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.old_state = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+        self.addCleanup(self._restore_state)
+
+    def _restore_state(self):
+        if self.old_state is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self.old_state
+
+    def _env(self, *names):
+        return {"PATH": os.pathsep.join([self.tmp, os.environ.get("PATH", "")]),
+                "HOME": os.environ.get("HOME", "/tmp"),
+                "AUTOOS_STATE_DIR": self.tmp}
+
+    def test_the_choices_list_parses_across_wrapped_lines(self):
+        parsed = self.clients.parse_mode_choices(QODERCLI_1_1_63_HELP)
+        self.assertEqual(parsed["--permission-mode"],
+                         ["default", "accept_edits", "bypass_permissions", "dont_ask", "auto"])
+        self.assertEqual(parsed["--output-format"], ["text", "json", "stream-json"])
+        self.assertNotIn("--list-models", parsed)
+
+    def test_quoted_choices_are_read_as_the_values_they_name(self):
+        # `claude --help` quotes its list (choices: "acceptEdits", "plan"); a
+        # quoted choice that does not match its own unquoted spelling makes the
+        # checker refuse a client that is configured correctly.
+        parsed = self.clients.parse_mode_choices(
+            'Options:\n'
+            '  --permission-mode <mode>   Permission mode (choices: "acceptEdits",\n'
+            '                             "bypassPermissions", "plan".)\n')
+        self.assertEqual(parsed["--permission-mode"],
+                         ["acceptEdits", "bypassPermissions", "plan"])
+
+    def test_a_client_whose_modes_the_help_offers_passes(self):
+        _fake_cli(self.tmp, "qodercli", "1.1.63", QODERCLI_1_1_63_HELP)
+        ok, reason = self.clients.check_client_modes(
+            self.clients.CLIENTS["qoder"], env=self._env())
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "")
+
+    def test_a_mode_the_client_does_not_offer_is_refused_with_the_accepted_list(self):
+        _fake_cli(self.tmp, "qodercli", "1.1.63", QODERCLI_1_1_63_HELP)
+        bogus = self.clients.Client("qoder", "qodercli", True, False, True, "login",
+                                    modes={"read": ["--permission-mode", "plan"],
+                                           "edit": ["--permission-mode", "acceptEdits"]})
+        ok, reason = self.clients.check_client_modes(bogus, env=self._env())
+        self.assertFalse(ok)
+        self.assertIn("acceptEdits", reason)
+        self.assertIn("plan", reason)
+        self.assertIn("bypass_permissions", reason)  # the accepted list, verbatim
+        self.assertIn("qodercli --help", reason)
+
+    def test_the_help_is_read_once_per_client_binary_version(self):
+        exe = _fake_cli(self.tmp, "qodercli", "1.1.63", QODERCLI_1_1_63_HELP)
+        client = self.clients.CLIENTS["qoder"]
+        env = self._env()
+        for _ in range(3):
+            ok, reason = self.clients.check_client_modes(client, env=env)
+            self.assertTrue(ok, reason)
+        self.assertEqual(self._help_calls(exe), 1, "cached by version")
+        with io.open(exe, encoding="utf-8") as fh:
+            script = fh.read()
+        with io.open(exe, "w", encoding="utf-8") as fh:
+            fh.write(script.replace("1.1.63", "1.1.64"))
+        ok, reason = self.clients.check_client_modes(client, env=env)
+        self.assertTrue(ok, reason)
+        self.assertEqual(self._help_calls(exe), 2, "a new version re-reads the help")
+
+    def test_an_entry_from_an_older_parser_is_re_read(self):
+        # A cached reading the checker no longer trusts must not keep deciding
+        # runs: the parser version is part of the cache key.
+        exe = _fake_cli(self.tmp, "qodercli", "1.1.63", QODERCLI_1_1_63_HELP)
+        client = self.clients.CLIENTS["qoder"]
+        env = self._env()
+        self.assertTrue(self.clients.check_client_modes(client, env=env)[0])
+        path = self.clients._mode_cache_file(env)
+        with io.open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["qodercli"]["parser"] = self.clients.MODE_PARSER_VERSION - 1
+        with io.open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        self.assertTrue(self.clients.check_client_modes(client, env=env)[0])
+        self.assertEqual(self._help_calls(exe), 2)
+
+    def _help_calls(self, exe):
+        try:
+            return len(io.open(exe + ".help-calls", encoding="utf-8").read())
+        except OSError:
+            return 0
+            return len(io.open(exe + ".help-calls", encoding="utf-8").read())
+        except OSError:
+            return 0
+
+    def test_an_absent_binary_is_not_a_refusal(self):
+        ok, reason = self.clients.check_client_modes(
+            self.clients.CLIENTS["agy"], env={"PATH": self.tmp, "HOME": "/tmp"})
+        self.assertIsNone(ok, reason)
+
+    def test_a_client_with_no_declared_modes_never_asks_for_help(self):
+        exe = _fake_cli(self.tmp, "agy", "1.2.12", "Usage: agy\n")
+        ok, reason = self.clients.check_client_modes(self.clients.CLIENTS["agy"],
+                                                     env=self._env())
+        self.assertIsNone(ok, reason)
+        self.assertEqual(self._help_calls(exe), 0)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_the_spawner_refuses_a_bad_mode_before_starting_anything(self):
+        agent = load_agent()
+        _fake_cli(self.tmp, "qodercli", "1.1.63", QODERCLI_1_1_63_HELP)
+        bogus = self.clients.Client("qoder", "qodercli", True, False, True, "login",
+                                    promo=True,
+                                    modes={"read": ["--permission-mode", "plan"],
+                                           "edit": ["--permission-mode", "acceptEdits"]})
+        started = []
+        args = argparse.Namespace(
+            client="qoder", tier=2, card=None, task="do it", free=False,
+            free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True, joinable=False,
+            model=None, clean=False, allow_training=False, max_depth=None, lean=False,
+            title=None, dry_run=False, no_defer=False)
+        cfg = {"agents": {a: {"model": "qoder/x"} for a in
+                          ("t1-orchestrator", "t2-worker", "t3-reviewer")},
+               "providers": {"qoder": {"models": {"x": {}}}}}
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp,
+                                          "AUTOOS_WORKERS_DIR": self.tmp,
+                                          "PATH": self.tmp + os.pathsep + os.environ.get("PATH", "")},
+                             clear=True):
+            with mock.patch.dict(self.clients.CLIENTS, {"qoder": bogus}):
+                with mock.patch.object(agent, "run_client",
+                                       lambda *a, **k: started.append(1)):
+                    with mock.patch.object(self.clients, "signin_state",
+                                           lambda client, env=None: (None, "")):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            rc = agent.cmd_run(args, cfg)
+        self.assertEqual(rc, 2, out.getvalue() + err.getvalue())
+        self.assertEqual(started, [], "refused before the client started")
+        self.assertIn("acceptEdits", err.getvalue())
+        self.assertIn("qodercli --help", err.getvalue())
+
+
 class FreeConcurrencyCapTests(unittest.TestCase):
     """SPAWNFREE (S2) item 2: three Muse free workers started together on one
     account and all died on 'Rate limit exceeded' (L1-backlog lanes lstby2e,

@@ -2230,6 +2230,14 @@ def cmd_run(args, cfg: dict) -> int:
         if refusal is not None:
             return refuse(refusal)
     client = clients.CLIENTS[args.client]
+    # SPAWNFREE (S2) item 3: a mode the CLI does not offer is not rejected by
+    # the CLI - qodercli 1.1.63 took `--permission-mode accept_edits`, ignored
+    # it, and refused every write (62 runs). Check the adapter's modes against
+    # the client's own --help (cached per binary version) before anything is
+    # cloned, planned or started.
+    modes_ok, modes_why = clients.check_client_modes(client)
+    if modes_ok is False:
+        return refuse(modes_why)
     if args.free and args.clean:
         return refuse("--free uses promo models that may train on prompts; it cannot be --clean.")
     if args.tier is not None and args.card is not None:
