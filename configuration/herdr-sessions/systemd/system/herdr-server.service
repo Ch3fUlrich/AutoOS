@@ -14,7 +14,7 @@
 # from inside Claude passes CLAUDE_CODE_* down and transcript saving is silently
 # disabled — after which nothing can be resumed at all.
 Description=Herdr agent multiplexer (headless server)
-Documentation=file://@APPDIR@/README.md
+Documentation="file://@APPDIR@/README.md"
 # The update unit runs first so a fresh herdr/claude binary is what this server
 # and every pane it spawns pick up. Wants= (not Requires=): a failed or skipped
 # update must never keep the session from coming back.
@@ -22,7 +22,7 @@ After=network-online.target herdr-sessions-update.service
 Wants=network-online.target herdr-sessions-update.service
 # The driver lives in this checkout; keep the dependency explicit so a future
 # split-out dataset does not turn into a silent empty-directory start.
-RequiresMountsFor=@APPDIR@
+RequiresMountsFor="@APPDIR@"
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -51,8 +51,19 @@ WorkingDirectory=@WORKDIR@
 # Without this, `herdr server` exits 1 ("herdr server is already running") and
 # Restart=on-failure retries forever. StartLimitBurst does NOT stop it — it only
 # pauses the burst until the interval rolls over, then systemd tries again.
-ExecCondition=/bin/sh -c 'if /root/.local/bin/herdr pane list >/dev/null 2>&1; then exit 1; fi; exit 0'
-ExecStart=/root/.local/bin/herdr server
+# @HERDR_BIN@ is rendered by install.sh from the profile's HERDR_BIN
+# (default /root/.local/bin/herdr): the same binary the driver runs. It arrives
+# as ONE quoted argument -- never as the unit's executable. Both lines below
+# hand it to the shell as $1 rather than interpolating it into the script text:
+# the path is then escaped for systemd only, never twice.
+#
+# ExecStart goes through `exec` for the same reason: systemd validates the
+# executable's own path and refuses one containing a quote or a backslash
+# ("Executable name contains special characters" -> the unit will not load),
+# while an argument may be any path. The `exec` keeps herdr as the unit's own
+# process, so Restart= and the cgroup are unchanged.
+ExecCondition=/bin/sh -c 'if "$1" pane list >/dev/null 2>&1; then exit 1; fi; exit 0' _ @HERDR_BIN@
+ExecStart=/bin/sh -c 'exec "$1" server' _ @HERDR_BIN@
 
 Restart=on-failure
 RestartSec=10

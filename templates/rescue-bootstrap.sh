@@ -119,7 +119,7 @@ require_root() {
 # so it gets its own copy. <stamp> defaults to now; a test can pin it.
 backup_path() {
     local path="$1" stamp="${2:-}" base candidate n=0
-    [[ -n "$stamp" ]] || stamp="$(date -u +%Y%m%d%H%M%S)"
+    [[ -n "$stamp" ]] || stamp="$(date -u +%Y%m%d-%H%M%S)"
     base="$path.autoos-backup-$stamp"
     candidate="$base"
     while [[ -e "$candidate" || -L "$candidate" ]]; do

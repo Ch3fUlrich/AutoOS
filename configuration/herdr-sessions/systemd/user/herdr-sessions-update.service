@@ -9,18 +9,21 @@
 # download, a failed update -- the driver logs it and exits 0, and the session
 # is restored on whatever version is on disk.
 Description=Update herdr and claude before the sessions are restored (user session)
-Documentation=file://@APPDIR@/README.md
+Documentation="file://@APPDIR@/README.md"
 After=network-online.target
 Wants=network-online.target
 Before=herdr-server.service
-RequiresMountsFor=@APPDIR@
+RequiresMountsFor="@APPDIR@"
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 
-Environment=HERDR_PROFILE=@PROFILE_PATH@
-ExecStart=@APPDIR@/herdr-sessions.sh update
+# claude, herdr and uv/uvx live in %h/.local/bin and the driver shells out to
+# them; panes inherit this manager environment, not an interactive .zshrc.
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HERDR_PROFILE="@PROFILE_PATH@"
+ExecStart="@APPDIR@/herdr-sessions.sh" update
 # Two downloads at UPDATE_TIMEOUT_SEC (180 s) each, plus slack.
 TimeoutStartSec=420
 StandardOutput=journal

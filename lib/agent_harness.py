@@ -14,6 +14,7 @@ Only the standard library is used, and nothing here touches the network.
 """
 import argparse
 import copy
+import errno
 import json
 import os
 import shutil
@@ -447,12 +448,49 @@ def _backup_and_write(path, text, stamp=None):
     copy2, not copyfile: the backup keeps the source's mode (and times), like
     the bash helper's `cp -p`. A 0600 config that may hold a key must not get a
     0644 copy of itself.
+
+    Returns True when `path` was written and False when it was refused. A
+    symlink is refused: writing through it would edit whatever it points at,
+    which the user did not ask AutoOS to touch (compare
+    antigravity_desktop_entry, which refuses a symlinked .desktop). Nothing -
+    not the link, not its target, not a backup - is changed on refusal.
+
+    Uses os.open with O_NOFOLLOW to avoid TOCTOU between the symlink check
+    and the write (CVE class: symlink swap between check and open).
     """
+    # Check for symlink first (before any filesystem operation that could be
+    # raced). This is a best-effort check; the real protection is O_NOFOLLOW.
+    if os.path.islink(path):
+        return False
+    backup = None
     if os.path.exists(path):
-        shutil.copy2(path, _backup_path(path, stamp))
+        backup = _backup_path(path, stamp)
+        shutil.copy2(path, backup)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+    # Open with O_NOFOLLOW so the write fails with ELOOP if path becomes a
+    # symlink between the check above and this open. This makes the check
+    # and the write atomic from the filesystem's perspective.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o644)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            # The pre-check passed and copy2 already ran, so the refusal below
+            # has to take its own backup back -- the promise above is that a
+            # refused write changes nothing, and a stray copy of the target's
+            # bytes is a change the user never asked for.
+            if backup is not None:
+                try:
+                    os.unlink(backup)
+                except OSError:
+                    pass
+            return False
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
+    return True
 
 
 def cmd_opencode(args):
@@ -496,7 +534,11 @@ def cmd_opencode(args):
         _print_notes(notes)
         return 0
 
-    _backup_and_write(config_path, json.dumps(desired, indent=2, ensure_ascii=False) + "\n")
+    if not _backup_and_write(
+        config_path, json.dumps(desired, indent=2, ensure_ascii=False) + "\n"
+    ):
+        print("agent-harness opencode: left alone, %s is a symlink" % config_path)
+        return 1
     if link_needs_change:
         if os.path.islink(link_path) or _is_junction(link_path):
             _remove_link(link_path)
@@ -572,6 +614,10 @@ def _apply_file(path, text, dry_run):
     difference alone must not cost a write and a backup on every run.
     """
     existed = os.path.exists(path)
+    # Check for symlink before dry_run: a symlinked config must report
+    # "left alone (symlink)" even in dry-run, not "would update".
+    if os.path.islink(path):
+        return "left alone (symlink)"
     if existed:
         try:
             with open(path, encoding="utf-8-sig") as handle:
@@ -582,7 +628,8 @@ def _apply_file(path, text, dry_run):
             pass
     if dry_run:
         return "would update" if existed else "would install"
-    _backup_and_write(path, text)
+    if not _backup_and_write(path, text):
+        return "left alone (symlink)"
     return "updated" if existed else "installed"
 
 
@@ -663,12 +710,19 @@ def cmd_openhands(args):
     roles = harness.get("roles") or {}
     contract_ref = _join(args.repo_root, harness["rules"]["leaf_contract"])
     enable = bool((roles.get("orchestrator") or {}).get("spawn"))
+    # Every refusal to write must reach the caller: "left alone (symlink)"
+    # printed on stdout and exit 0 told the installer a config was applied when
+    # nothing was touched, so the component reported installed and the user's
+    # file stayed as it was. Same contract as cmd_opencode, whose caller folds
+    # a non-zero exit into autoos_record_failure.
+    refused = False
 
     settings_path = os.path.join(args.openhands_dir, "settings.json")
     status = _settings_status(settings_path, enable, args.dry_run)
     if status is None:
         print("agent-harness openhands: left alone %s" % settings_path)
     else:
+        refused = refused or status == "left alone (symlink)"
         print("agent-harness openhands: %s %s" % (status, settings_path))
 
     for role_name, role in roles.items():
@@ -679,8 +733,9 @@ def cmd_openhands(args):
             base = vendored_base(args.repo_root, profile)
         rendered = render_profile(role_name, role, base, contract_ref)
         status = _apply_file(path, _serialize_profile(rendered), args.dry_run)
+        refused = refused or status == "left alone (symlink)"
         print("agent-harness openhands: %s %s" % (status, path))
-    return 0
+    return 1 if refused else 0
 
 
 # --------------------------------------------------------------------------- cli

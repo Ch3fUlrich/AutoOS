@@ -305,6 +305,84 @@ INSTALL_STATE=""
 # current) sets this to "skipped": install_component then reports skipped, not
 # installed. Reset on every call.
 INSTALL_SCRIPT_STATE=""
+# A post-install step can refuse to touch a user's file (a backup that could not
+# be made means no write) without the package install failing. Such a step calls
+# `autoos_record_failure <id>`, and setup.sh folds the ids into the result
+# buckets with autoos_fold_extra_failures, so neither the summary nor the exit
+# code can read "done" over a change that never happened. The id is a catalog
+# component id — that is what lets the fold find the component it belongs to —
+# and it is recorded once, so two call paths in one run cannot double-count.
+AUTOOS_EXTRA_FAILURES=()
+# autoos_list_has <value> <value>...: whether the first argument is one of the
+# rest. Every membership test in this section is the same loop, and "recorded
+# once" / "failed once" / "is this component a refusal" must not drift apart.
+autoos_list_has() {
+    local want="$1" seen
+    shift
+    for seen in "$@"; do
+        [[ "$seen" == "$want" ]] && return 0
+    done
+    return 1
+}
+autoos_record_failure() {
+    local id="$1"
+    autoos_list_has "$id" "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}" && return 0
+    AUTOOS_EXTRA_FAILURES+=("$id")
+    return 0
+}
+
+# The three result buckets setup.sh fills while it executes, one component id per
+# element. Ids and not display names: a name with spaces shatters when the list is
+# joined for the state file, and "counted as installed *and* failed" is only
+# detectable by id. The counts are their lengths (autoos_fold_extra_failures).
+AUTOOS_RESULT_INSTALLED=()
+AUTOOS_RESULT_SKIPPED=()
+AUTOOS_RESULT_FAILED=()
+
+# autoos_is_recorded_failure <id>: whether a post-install step refused a change
+# to <id>'s own file. The recorder's list is the one place that knows.
+autoos_is_recorded_failure() {
+    autoos_list_has "$1" "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}"
+}
+
+# autoos_fold_extra_failures: merge AUTOOS_EXTRA_FAILURES into the buckets.
+# A refusal is a component's ONLY result: leaving the id in the installed (or
+# skipped) bucket as well counted one component in two numbers and wrote it into
+# both buckets of the state file, so "3 installed, 1 failed" described 4 things
+# that happened to 3 components. Called after the execute loop, when the list of
+# refusals is complete — including a refusal recorded under another component.
+autoos_fold_extra_failures() {
+    local extra entry keep
+    for extra in "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}"; do
+        keep=()
+        for entry in "${AUTOOS_RESULT_INSTALLED[@]+"${AUTOOS_RESULT_INSTALLED[@]}"}"; do
+            [[ "$entry" == "$extra" ]] || keep+=("$entry")
+        done
+        AUTOOS_RESULT_INSTALLED=("${keep[@]+"${keep[@]}"}")
+        keep=()
+        for entry in "${AUTOOS_RESULT_SKIPPED[@]+"${AUTOOS_RESULT_SKIPPED[@]}"}"; do
+            [[ "$entry" == "$extra" ]] || keep+=("$entry")
+        done
+        AUTOOS_RESULT_SKIPPED=("${keep[@]+"${keep[@]}"}")
+        # Failed once, even when the install itself failed too.
+        autoos_list_has "$extra" "${AUTOOS_RESULT_FAILED[@]+"${AUTOOS_RESULT_FAILED[@]}"}" \
+            || AUTOOS_RESULT_FAILED+=("$extra")
+    done
+}
+
+# autoos_result_label <id>: one line of the failure report. The catalog name
+# where there is one, the token itself otherwise (a step may record an id of its
+# own); a post-install refusal says so, because "<name> failed" alone reads like
+# a broken package run rather than a step that refused to touch a user's file.
+autoos_result_label() {
+    local id="$1" i name
+    if i="$(catalog_index_of "$id")"; then name="${CAT_NAME[i]}"; else name="$id"; fi
+    if autoos_is_recorded_failure "$id"; then
+        printf '%s (post-install)' "$name"
+    else
+        printf '%s' "$name"
+    fi
+}
 install_component() {
     local provider="$1" package="$2" CASK_FLAG="${3:-0}"
     INSTALL_STATE="failed"; INSTALL_SCRIPT_STATE=""
@@ -1837,8 +1915,16 @@ install_herdr_sessions() {
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would run: bash $driver --profile $profile --dry-run"
-        local dry_out; dry_out="$(bash "$driver" --profile "$profile" --dry-run 2>&1)"
+        # The driver's own dry run can fail; discarding that status (as a plain
+        # `$(...)` did) reported success over a plan the driver refused to
+        # produce. Capture and report it like the real path below.
+        local dry_out dry_rc=0
+        dry_out="$(bash "$driver" --profile "$profile" --dry-run 2>&1)" || dry_rc=$?
         [[ -n "$dry_out" ]] && ui_muted "$dry_out"
+        if (( dry_rc != 0 )); then
+            ui_err "herdr-sessions: driver dry run failed (rc=$dry_rc) for profile $profile"
+            return 1
+        fi
         return 0
     fi
 
@@ -2543,7 +2629,10 @@ route_detected_clis_to_gateway() {
         unset _file_key
     fi
     if has_cmd claude; then
-        route_claude_to_gateway
+        # route_claude_to_gateway is `claude-code`'s own postInstall, called
+        # directly from `omniroute`'s step: bare here it would abort the run under
+        # setup.sh's `set -euo pipefail`, so it records the component instead.
+        route_claude_to_gateway || autoos_record_failure claude-code
     else
         ui_muted "Claude Code not installed - skipping gateway routing"
     fi
@@ -3446,7 +3535,7 @@ register_playwright_lazy_proxy() {
         else
             ui_warn "could not back up ${cfg} - the ${kind/-/ } 'playwright' entry was left unchanged"
         fi
-        return 0
+        return 1
     fi
 
     if [[ "$kind" != none ]]; then
@@ -3469,11 +3558,14 @@ register_playwright_lazy_proxy() {
         fi
     elif [[ "$kind" == none ]]; then
         ui_warn "could not register 'playwright'"
+        return 1
     elif ( cd "$SYS_HOME" 2>/dev/null; claude mcp add --scope user playwright -- "${old[@]}" ); then
         ui_warn "could not add the lazy proxy - put back the previous ${kind/-/ } entry (config backup: ${backup})"
+        return 1
     else
         printf -v restore '%q ' "${old[@]}"      # quoted: a checkout path may hold a space
         ui_err "could not add the lazy proxy and could not put back the previous ${kind/-/ } entry - restore it with: claude mcp add --scope user playwright -- ${restore}(config backup: ${backup})"
+        return 1
     fi
     return 0
 }
@@ -3486,7 +3578,13 @@ install_mcp_playwright() {
     # Linux behaviour (mcp-servers-setup says so); macOS keeps its npx entry until
     # that is measured there.
     if [[ "${SYS_OS:-linux}" != macos ]] && has_cmd docker; then
-        register_playwright_lazy_proxy "$playwright_pkg"
+        # run_post_install contains the step's exit code; this record is here
+        # because the step carries on to the Antigravity entry either way, so its
+        # own return says nothing about the proxy. The id is the one the fold
+        # looks for, and it matches the id install_agent_skills' guarded call
+        # records — `autoos_record_failure` keeps it to one entry.
+        register_playwright_lazy_proxy "$playwright_pkg" \
+            || autoos_record_failure mcp-playwright
     else
         # No docker (or macOS), so no backend for the proxy: today's npx entry.
         register_mcp_server playwright user "$SYS_HOME" \
@@ -3653,7 +3751,7 @@ enable_project_mcp_server() {
     mkdir -p "$repo/.claude"
     if [[ -f "$path" ]] && ! backup_file "$path" >/dev/null; then
         ui_warn "could not back up ${path} - left unchanged"
-        return 0
+        return 1
     fi
     if ! python3 - "$path" "$name" <<'PY'; then
 import json, pathlib, sys
@@ -3897,11 +3995,16 @@ install_agent_skills() {
 
     write_omnigraph_env "$base"
 
-    # Wire user-scope MCP servers across Claude Code and Antigravity
-    install_mcp_graphify
-    install_mcp_serena
-    install_mcp_playwright
-    install_mcp_context7
+    # Wire user-scope MCP servers across Claude Code and Antigravity. These are
+    # catalog postInstalls in their own right, called directly here — so they get
+    # the same containment run_post_install gives them (a bare call under
+    # setup.sh's `set -euo pipefail` would abort the whole run). Each records its
+    # own component id, the id install_mcp_playwright already records internally,
+    # so one broken wiring is counted once.
+    install_mcp_graphify   || autoos_record_failure mcp-graphify
+    install_mcp_serena     || autoos_record_failure mcp-serena
+    install_mcp_playwright || autoos_record_failure mcp-playwright
+    install_mcp_context7   || autoos_record_failure mcp-context7
 
     # omnigraph is the opposite: project scope only, pinned per repo by
     # OMNIGRAPH_GRAPH_ID. A user-scope entry silently WINS over the project one
@@ -3913,8 +4016,8 @@ install_agent_skills() {
     fi
     # Enable project MCP servers from this repo's .mcp.json (omnigraph + autoos-agent)
     if [[ -f "$repo_root/.mcp.json" ]]; then
-        enable_project_mcp_server "$repo_root" omnigraph
-        enable_project_mcp_server "$repo_root" autoos-agent
+        enable_project_mcp_server "$repo_root" omnigraph || autoos_record_failure agent-skills
+        enable_project_mcp_server "$repo_root" autoos-agent || autoos_record_failure agent-skills
     else
         ui_warn "no .mcp.json in ${repo_root} — nothing to pin omnigraph/autoos-agent to."
     fi
@@ -4251,6 +4354,9 @@ setup_opencode_config() {
             harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
             if (( harness_rc != 0 )); then
                 ui_warn "agent harness not applied to OpenCode (exit $harness_rc)"
+                # Warned is not reported: the component's own harness never
+                # landed, so it is not installed either (setup.sh folds this id).
+                autoos_record_failure "${AUTOOS_POST_COMPONENT:-opencode}"
             else
                 while IFS= read -r _harness_line; do
                     [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
@@ -4258,6 +4364,7 @@ setup_opencode_config() {
             fi
         else
             ui_warn "agent harness not applied: python3 not found"
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-opencode}"
         fi
 
         [[ "$config_file" == */config.json ]] && merged_first=1
@@ -5203,6 +5310,7 @@ PY
         # the OpenCode writer; setup runs postInstall under set -e.
         ui_warn "OpenHands configuration not written to $openhands_dir/settings.json (settings script exit $oh_rc)"
         ui_muted "    The profiles under $openhands_dir may be incomplete and the agent harness was skipped; fix the error above and re-run."
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-openhands}"
         return 0
     fi
 
@@ -5216,6 +5324,9 @@ PY
     harness_out="$(python3 "$harness_root/lib/agent_harness.py" openhands --openhands-dir "$openhands_dir" --repo-root "$harness_root" 2>&1)" || harness_rc=$?
     if (( harness_rc != 0 )); then
         ui_warn "agent harness not applied to OpenHands (exit $harness_rc)"
+        # Warned is not reported: the role profiles never landed, so the
+        # component is not applied either (setup.sh folds this id).
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-openhands}"
     else
         while IFS= read -r _harness_line; do
             [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
@@ -5257,7 +5368,11 @@ setup_wsl_agent_home() {
     # locks) onto ext4, keep a timestamped backup, leave an empty dir behind
     # so the legacy path never dangles.
     if [[ -d "$cao_legacy" && ! -L "$cao_legacy" ]]; then
-        if ! python3 -c "import os; os.mkfifo('$cao_legacy/.autoos-fifo-probe')" 2>/dev/null; then
+        # The path goes in as argv, never spliced into the Python source: a CAO
+        # home containing a single quote would otherwise turn the probe itself
+        # into a SyntaxError, read as "no FIFO support", and falsely relocate a
+        # working ext4 home.
+        if ! python3 -c 'import os,sys; os.mkfifo(sys.argv[1])' "$cao_legacy/.autoos-fifo-probe" 2>/dev/null; then
             local ts backup backup_base n=0
             ts="$(date +%Y%m%d-%H%M%S)"
             backup_base="${cao_legacy}.backup-${ts}"
@@ -5290,15 +5405,34 @@ setup_wsl_agent_home() {
     ui_ok "CAO home on native ext4: $cao_home (CAO_HOME_DIR exported)"
 }
 
+# AUTOOS_POST_COMPONENT: the id of the component being installed, published to the
+# step running under it. A recorded failure has to name the plan's id for
+# autoos_fold_extra_failures to find the right bucket, and one step serves several
+# ids (setup_opencode_config is the postInstall of both `opencode` and
+# `opencode-cli`), so the step cannot pick one out of its own head.
+AUTOOS_POST_COMPONENT=""
 run_post_install() {
-    local fn="$1"
+    local fn="$1" id="${2:-}" rc=0
+    AUTOOS_POST_COMPONENT="$id"
     [[ -z "$fn" ]] && return 0
     if ! declare -F "$fn" >/dev/null; then
         ui_warn "post-install '${fn}' not found"
         return 0
     fi
     ui_step "post-install: ${fn}"
-    "$fn"
+    # Contained here, in the one place that runs a step, not in every step:
+    # setup.sh calls this bare under `set -euo pipefail`, so a step returning
+    # non-zero used to abort the whole run — no summary, no state file, and
+    # every later component silently never installed. A failed step is still a
+    # result, so it is recorded for the fold instead: the component reads as
+    # failed (post-install) and setup.sh still exits non-zero.
+    "$fn" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "post-install '${fn}' failed (exit ${rc}) - the run continues"
+        autoos_record_failure "${id:-$fn}"
+    fi
+    AUTOOS_POST_COMPONENT=""
+    return 0
 }
 
 # ─── Post-install verification ──────────────────────────────────────────────
