@@ -264,14 +264,44 @@ fake_ss() {
 
 # curl: the HTTP code a probe would see, from the unit/container state.
 fake_curl() {
-    local url="" a want_code=0 fail_flag=0 code=000
-    for a in "$@"; do
+    local url="" a want_code=0 fail_flag=0 code=000 is_post=0 header_file="" header_value="" data=""
+    # Use while loop for proper argument parsing with shifts
+    while (( $# )); do
+        a="$1"; shift
         case "$a" in
-            http://*) url="$a" ;;
+            http://*|https://*) url="$a" ;;
             -w) want_code=1 ;;
             -sf|-f|-fsS) fail_flag=1 ;;
+            -X) [[ "${1:-}" == POST ]] && is_post=1; shift ;;
+            -H) header_file="${1:-}"; shift ;;
+            -d) data="${1:-}"; shift ;;
+            --max-redirs) shift ;;
+            --noproxy) shift ;;
+            -m) shift ;;
+            -q) ;;
+            -s) ;;
+            -o) shift ;;
         esac
     done
+    # Debug: log what we received
+    printf 'DEBUG: curl url=%s is_post=%s AISTACK_EDGE_WEBHOOK_URL=%s\n' "$url" "$is_post" "${AISTACK_EDGE_WEBHOOK_URL:-<unset>}" >>"$S/curl-debug.log"
+    # If this is a POST to the edge webhook URL (from AISTACK_EDGE_WEBHOOK_URL),
+    # record the args and return the code from AISTACK_FAKE_WEBHOOK_CODE.
+    if (( is_post )) && [[ -n "${AISTACK_EDGE_WEBHOOK_URL:-}" && "$url" == "${AISTACK_EDGE_WEBHOOK_URL}" ]]; then
+        # Record the call for test inspection
+        printf 'url=%s\n' "$url" >>"$S/edge-webhook-call.log"
+        printf 'header_file=%s\n' "$header_file" >>"$S/edge-webhook-call.log"
+        if [[ -n "$header_file" && -f "$header_file" ]]; then
+            cat "$header_file" >>"$S/edge-webhook-call.log"
+        fi
+        printf 'data=%s\n' "$data" >>"$S/edge-webhook-call.log"
+        # Return the code from the env var, or 200 if not set
+        code="${AISTACK_FAKE_WEBHOOK_CODE:-200}"
+        (( want_code )) && printf '%s' "$code"
+        if [[ "$code" == 000 ]]; then return 7; fi
+        if (( fail_flag )) && [[ "$code" != 2* ]]; then return 22; fi
+        return 0
+    fi
     up() { [[ -e "$S/active-$1" ]] || { [[ -e "$S/run-$2" ]] && [[ ! -e "$S/unhealthy-$3" ]]; }; }
     case "$url" in
         *:20128/health/liveliness*)

@@ -75,8 +75,7 @@ def component_platforms() -> dict:
 #    carry only presence, and POST /api/secrets cannot read one back out.
 APPLY_OMNIROUTE = "bash configuration/omniroute/apply.sh"
 APPLY_OPENCODE_PASSWORD = (
-    "bash configuration/docker/ai-stack/ai-stack.sh init && "
-    "bash configuration/docker/ai-stack/ai-stack.sh up opencode"
+    "bash configuration/docker/ai-stack/ai-stack.sh opencode-rotate"
 )
 
 SECRET_KEYS = {

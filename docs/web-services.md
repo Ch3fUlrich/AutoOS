@@ -41,7 +41,7 @@ Nothing secret is in a tracked file; the real values are git-ignored.
 | Login / secret | Protects | File | Key | How to change | Restart / apply after |
 |---|---|---|---|---|---|
 | Authelia browser login (admins group + 2FA) for `omniroute`/`opencode`/`openhands` `<domain>`s | SSO gate at the reverse proxy | `secrets-generated/auth_users_database.yml` (server repo, not this one); rules in `server/manage/auth/authelia/configuration.yml` | argon2id hashes via `server/manage/auth/authelia/gen-user-hashes.sh` | edit the users file with a new hash (server repo) | Authelia Semaphore template |
-| opencode serve Basic auth (user `opencode`) | `/api/*` on :4096 | source: `configuration/api-keys.yml` → `opencode_password`; derived copies written by `ai-stack.sh init`: `~/.config/autoos/ai-stack/opencode.env` `OPENCODE_PASSWORD` (docker) and `~/.config/autoos/opencode-serve.password` (0600, native). `init` updates a copy older than `api-keys.yml` (backup first), leaves a newer copy and warns about it; a missing yml key is migrated once from the password file, else from `opencode.env`, else a new random value | `opencode_password` (yml) → `OPENCODE_PASSWORD` (env) | edit `configuration/api-keys.yml` → `opencode_password`, or the **Logins and keys** card in the browser UI (`./setup.sh --serve`) | docker: `ai-stack.sh init && ai-stack.sh up opencode`; native: `systemctl --user restart autoos-opencode`; Windows: `.\configuration\start-stack.ps1 -App opencode-serve` |
+| opencode serve Basic auth (user `opencode`) | `/api/*` on :4096 | source: `configuration/api-keys.yml` → `opencode_password`; derived copies written by `ai-stack.sh init`: `~/.config/autoos/ai-stack/opencode.env` `OPENCODE_PASSWORD` (docker) and `~/.config/autoos/opencode-serve.password` (0600, native). `init` updates a copy older than `api-keys.yml` (backup first), leaves a newer copy and warns about it; a missing yml key is migrated once from the password file, else from `opencode.env`, else a new random value | `opencode_password` (yml) → `OPENCODE_PASSWORD` (env) | edit `configuration/api-keys.yml` → `opencode_password`, or the **Logins and keys** card in the browser UI (`./setup.sh --serve`) | docker: `ai-stack.sh opencode-rotate` (init, recreate opencode, POST the edge webhook so the edge pulls the new password); native: `systemctl --user restart autoos-opencode`; Windows: `.\configuration\start-stack.ps1 -App opencode-serve` |
 | OmniRoute dashboard password | dashboard + `/api/*` on :20128 | dashboard DB in `~/.local/share/autoos/ai-stack/omniroute/` (docker) or `~/.omniroute/` (native); `INITIAL_PASSWORD` in the `.env` there seeds only the first start | dashboard session cookie | dashboard → Settings → change password | immediate |
 | OmniRoute client API key (`REQUIRE_API_KEY=true`) | `/v1/*` on :20128 (every model/chat call) | source: `configuration/api-keys.yml` → `omniroute` (dashboard → API keys → Create API Key); consumers: `~/.config/autoos/ai-stack/opencode.env` `AUTOOS_OMNIROUTE_KEY`, `~/.config/autoos/ai-stack/openhands.env` `LLM_API_KEY`, `~/.config/autoos/ai-stack/client.key` (standby router, 0600) | bearer `sk-…` | dashboard → API keys; re-read by `ai-stack.sh init` (opencode.env, openhands.env) and `ensure_client_key_file` (client.key, on every `failover on`) | `configuration/omniroute/apply.sh` (registers the new key) |
 | OmniRoute management token | management routes (`/api/providers`, `/api/combos`, `/api/resilience`) | `~/.config/autoos/ai-stack/manage.key` (0600, `ai-stack.sh ensure_manage_key`) - what **`apply.sh` reads**, after `$OMNIROUTE_API_KEY` (`apply.sh` :189-201). `configuration/api-keys.yml` → `omniroute_management` is *not* read by `apply.sh`; it is optional and remote-only, per its comment in `configuration/api-keys.example.yml` | `oma_live_…` with scope `manage` | dashboard → API keys → new key with scope `manage`; save it to `manage.key` (or export `OMNIROUTE_API_KEY`) | immediate - `apply.sh` re-reads `manage.key` / the env var on each run; a `omniroute_management` yml value has no effect on `apply.sh` |
@@ -355,6 +355,36 @@ is one `KEY=value` per line and docker's format has no escape for it, so the
 rest of the value would become a key of its own. Such a key is skipped with a
 warning that names the key, never the value. The data directory, its
 `omniroute/`, `opencode-home/` and `qoder-home/` are mode `700`.
+
+#### Rotating the opencode password
+
+When the opencode serve password needs to be rotated (e.g. a scheduled
+rotation, or a suspected leak), run:
+
+```bash
+bash configuration/docker/ai-stack/ai-stack.sh opencode-rotate
+```
+
+This single command performs three steps atomically:
+
+1. **Regenerate `opencode.env`** — runs `ai-stack.sh init` logic to refresh the
+   derived `OPENCODE_PASSWORD` in `~/.config/autoos/ai-stack/opencode.env` from
+   the single source of truth in `configuration/api-keys.yml` → `opencode_password`.
+
+2. **Recreate the opencode container** — runs `ai-stack.sh up opencode` to
+   restart the opencode service with the new password, using all the same
+   guards (bind address, public URL, native unit conflicts) as a normal `up`.
+
+3. **POST the edge webhook** — if `semaphore_edge_webhook_url` and
+   `semaphore_edge_webhook_header` are configured in `api-keys.yml`, POSTs a
+   webhook to the edge's Semaphore template. The template then PULLS the new
+   password from the coding VM's `opencode.env`. AutoOS holds **no Semaphore
+   API token** and sends **no secret** — it only triggers the template refresh.
+
+The command is idempotent: a second run with the same password skips the webhook
+(unless `--force` is given). The webhook is sent with the header via a 0600 temp
+file (`-H @file`), never on the command line, and the password never appears in
+output or logs. Use `--dry-run` to preview without making changes.
 
 ### opencode in the container
 

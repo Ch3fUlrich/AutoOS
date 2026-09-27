@@ -49,3 +49,11 @@ omniroute: REPLACE_WITH_OMNIROUTE_CLIENT_KEY
 # Optional: oma_live_… management token, only needed for remote management
 # calls. Local CLI management works without it.
 # omniroute_management: REPLACE_WITH_OMNIROUTE_ACCESS_TOKEN
+
+# ── Edge secret refresh (Semaphore template) ────────────────────────────────
+# The edge's copy of the opencode credential is refreshed by a Semaphore
+# template that PULLS the password from the coding VM's opencode.env.
+# ai-stack.sh opencode-rotate POSTs this webhook (AutoOS holds no Semaphore
+# token and sends no secret).
+# semaphore_edge_webhook_url: REPLACE_WITH_EDGE_WEBHOOK_URL   # from the edge admin; ai-stack.sh opencode-rotate POSTs it
+# semaphore_edge_webhook_header: REPLACE_WITH_EDGE_WEBHOOK_HEADER  # one full line "Name: value", secret; from the edge admin
