@@ -7573,6 +7573,16 @@ Test-Case "the IDE model sync tool's unit tests pass (sync-ide-models)" {
     Assert-Equal $rc 0 "sync-ide-models unit tests failed: $out"
 }
 
+Test-Case "registry_loader's unit tests pass (shared by-path loader, REVFIX)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr (PS 5.1 + Stop would throw on it).
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_registry_loader.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "registry_loader unit tests failed: $out"
+}
+
 Test-Case 'apply sets the resilience deadline and the fast-skip breaker' {
     # A 15s requestQueue.maxWaitMs kills every spark request mid-think and the
     # chain then reports a different leg's error (see docs/verification.md).
