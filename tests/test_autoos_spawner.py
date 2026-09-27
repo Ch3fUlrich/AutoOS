@@ -44,6 +44,23 @@ def load_agent():
     return module
 
 
+# Every cmd_run writes a worker record (ps). No test may write into the host's
+# real registry (<main checkout>/logs/workers): pin it to a throwaway dir for the
+# whole module; a test that needs its own dir still passes AUTOOS_WORKERS_DIR.
+_WORKERS_TMP = None
+
+
+def setUpModule():
+    global _WORKERS_TMP
+    _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-workers-test-")
+    os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
+
+
+def tearDownModule():
+    os.environ.pop("AUTOOS_WORKERS_DIR", None)
+    shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
+
+
 def clean_env(**extra):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k != "AUTOOS_OMNIROUTE_KEY"}
@@ -54,6 +71,88 @@ def clean_env(**extra):
 def run_agent(*args, env=None):
     return subprocess.run([sys.executable, str(AGENT), *args], capture_output=True,
                           text=True, env=env or clean_env(), stdin=subprocess.DEVNULL)
+
+
+class _FakeFn:
+    """A callable standing in for a ctypes function. ctypes functions carry
+    ``restype``/``argtypes``; the production helper assigns them, so the fake
+    must expose writable attributes on a per-instance callable (bound methods
+    do not)."""
+
+    def __init__(self, fn):
+        self._fn = fn
+        self.restype = None
+        self.argtypes = None
+
+    def __call__(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+
+class _FakeKernel32:
+    """A fake ctypes kernel32 for the Windows liveness/start-time paths (V1/V2).
+
+    Runs on Linux: the production code imports ctypes inside its
+    ``os.name == "nt"`` branch, so injecting this module into ``sys.modules``
+    is exactly what it sees. ``byref`` returns the ctypes-like value object
+    itself, so the fake Get* calls can write ``.value`` on it.
+    """
+
+    def __init__(self, handle=1234, exit_code=259, created=987654321,
+                 last_error=0, times_ok=True):
+        self.handle = handle
+        self.exit_code = exit_code
+        self.created = created
+        self.last_error = last_error
+        self.times_ok = times_ok
+        self.opened = []
+        self.closed = []
+        self.OpenProcess = _FakeFn(self._open_process)
+        self.GetExitCodeProcess = _FakeFn(self._get_exit_code_process)
+        self.GetProcessTimes = _FakeFn(self._get_process_times)
+        self.CloseHandle = _FakeFn(self._close_handle)
+
+    def _open_process(self, access, inherit, pid):
+        self.opened.append((access, inherit, pid))
+        return self.handle
+
+    def _get_exit_code_process(self, handle, code):
+        code.value = self.exit_code
+        return 1
+
+    def _get_process_times(self, handle, created, exited, kernel, user):
+        if not self.times_ok:
+            return 0
+        created.value = self.created
+        return 1
+
+    def _close_handle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+class _FakeCtypesValue:
+    def __init__(self, value=0):
+        self.value = value
+
+
+def fake_windows_ctypes(k32):
+    """A ctypes stand-in whose kernel32 is `k32` (V1/V2 tests).
+
+    ``WinDLL`` is what the production helper now asks for (typed signatures);
+    ``wintypes`` carries the sentinels the tests assert the helper assigned.
+    """
+    fake = types.ModuleType("ctypes")
+    fake.k32 = k32
+    fake.windll = types.SimpleNamespace(kernel32=k32)
+    fake.WinDLL = lambda *args, **kwargs: k32
+    fake.wintypes = types.SimpleNamespace(HANDLE=object(), DWORD=_FakeCtypesValue,
+                                          BOOL=object(), FILETIME=object())
+    fake.POINTER = lambda typ: typ
+    fake.get_last_error = lambda: k32.last_error
+    fake.byref = lambda obj: obj
+    fake.c_ulong = _FakeCtypesValue
+    fake.c_ulonglong = _FakeCtypesValue
+    return fake
 
 
 class RoutingTableTests(unittest.TestCase):
@@ -67,14 +166,15 @@ class RoutingTableTests(unittest.TestCase):
         self.assertEqual(combo, "t2-worker")
         self.assertTrue(reason)
 
-    def test_public_1m_orchestrate_is_t1_orchestrator(self):
-        self.assertEqual(self.pick(ctx="1m", role="orchestrate"), "t1-orchestrator")
-
-    def test_public_1m_hard_is_t1_orchestrator(self):
-        self.assertEqual(self.pick(ctx="1m", complexity="hard"), "t1-orchestrator")
-
-    def test_public_1m_any_role_is_t1_orchestrator(self):
-        self.assertEqual(self.pick(ctx="1m", role="review", spend="credit"), "t1-orchestrator")
+    def test_public_1m_routes_to_t1_orchestrator(self):
+        # T1FREE 2026-09-27: t1-orchestrator now carries a free gemini/gemini-3.8-flash
+        # fallback leg, so ctx=1m public cards route there again.
+        for card in ({"ctx": "1m", "role": "orchestrate"},
+                     {"ctx": "1m", "complexity": "hard"},
+                     {"ctx": "1m", "role": "review", "spend": "credit"}):
+            combo, reason = routing.select_combo(card)
+            self.assertEqual(combo, "t1-orchestrator")
+            self.assertEqual(reason, "public-1m")
 
     def test_public_implement_standard_free_is_t2_worker(self):
         self.assertEqual(self.pick(role="implement", complexity="standard", spend="free-ok"), "t2-worker")
@@ -128,7 +228,8 @@ class RoutingTableTests(unittest.TestCase):
             routing.select_combo({"privacy": "sensitive", "ctx": "1m"})
         msg = str(ctx.exception)
         self.assertIn("t2-worker-clean", msg)
-        self.assertIn("--allow-training", msg)
+        self.assertIn("128k", msg)
+        self.assertNotIn("--allow-training", msg)
 
 
 class RoutingBoundaryTests(unittest.TestCase):
@@ -164,20 +265,24 @@ class RoutingBoundaryTests(unittest.TestCase):
         self.assertEqual(routing.CARD_VALUES["spend"], ("free-ok", "credit"))
 
     def test_public_128k_orchestrate_goes_to_t1_orchestrator(self):
-        # t1-orchestrator carries 1m, a superset of 128k; the orchestrator is never demoted.
+        # T1FREE 2026-09-27: t1-orchestrator serves public-strong again (ctx=128k +
+        # orchestrate/hard) through its gemini fallback leg.
         self.assertEqual(routing.select_combo({"role": "orchestrate"})[0], "t1-orchestrator")
+        self.assertEqual(routing.select_combo({"role": "orchestrate"})[1], "public-strong")
 
     def test_hard_review_is_t1_orchestrator_not_t3_driver(self):
         # orchestrate/hard wins over review/trivial: a hard review needs the strong model.
+        # T1FREE 2026-09-27: t1-orchestrator serves public-strong again.
         self.assertEqual(routing.select_combo({"role": "review", "complexity": "hard"})[0], "t1-orchestrator")
 
     def test_sensitive_orchestrate_128k_is_t2_worker_clean(self):
         self.assertEqual(routing.select_combo({"privacy": "sensitive", "role": "orchestrate"})[0], "t2-worker-clean")
 
-    def test_allow_training_opens_sensitive_1m_and_says_so(self):
-        combo, reason = routing.select_combo({"privacy": "sensitive", "ctx": "1m"}, allow_training=True)
-        self.assertEqual(combo, "t1-orchestrator-clean")
-        self.assertIn("allow-training", reason)
+    def test_allow_training_no_longer_opens_sensitive_1m(self):
+        # Compatibility flag, inert since DSMAX 2026-09-27: there is no
+        # trainable 1M gateway leg left for it to unlock.
+        with self.assertRaises(routing.NoRoute):
+            routing.select_combo({"privacy": "sensitive", "ctx": "1m"}, allow_training=True)
 
     def test_allow_training_changes_nothing_else(self):
         self.assertEqual(routing.select_combo({"privacy": "sensitive"}, allow_training=True)[0], "t2-worker-clean")
@@ -328,8 +433,39 @@ class ClientCommandTests(unittest.TestCase):
         self.assertIn("public", r.stderr)
 
     def test_qoder_public_runs_print_mode(self):
+        # qodercli 1.1.63 knows only bypass_permissions|dont_ask|auto; the old
+        # 'accept_edits' does not exist and every write was refused (62 runs,
+        # measured 2026-09-27). Writers run with bypass_permissions and the
+        # free Qwen3.8-Flash by default.
         r = plan_of("--client", "qoder", "t")
-        self.assertIn("would run: qodercli -p --permission-mode accept_edits t", r.stdout)
+        self.assertIn("qodercli -p --permission-mode bypass_permissions --model Qwen3.8-Flash", r.stdout)
+
+    def test_qoder_writer_is_always_isolated(self):
+        # bypass_permissions is only acceptable inside the private sandbox
+        # clone, where the leak check still applies: the spawner forces it.
+        r = plan_of("--client", "qoder", "t")
+        self.assertIn("git clone --local", r.stdout)
+        self.assertIn("is your only writable checkout", r.stdout)
+
+    def test_qoder_without_auto_is_isolated_too(self):
+        # review of 6622d29 (qoder Qwen3.8-Flash): --no-auto gave level "ask",
+        # no permission flag and NO sandbox. Every non-read qoder run is isolated.
+        r = plan_of("--client", "qoder", "--no-auto", "t")
+        self.assertIn("git clone --local", r.stdout)
+
+    def test_qoder_plan_names_the_model_it_runs(self):
+        r = plan_of("--client", "qoder", "t")
+        self.assertNotIn("(client default)", r.stdout)
+
+    def test_qoder_reviewer_stays_dont_ask(self):
+        r = plan_of("--client", "qoder", "--card", "role=review", "t")
+        self.assertIn("qodercli -p --permission-mode dont_ask", r.stdout)
+        self.assertNotIn("bypass_permissions", r.stdout)
+
+    def test_qoder_explicit_model_is_kept(self):
+        r = plan_of("--client", "qoder", "--model", "Efficient", "t")
+        self.assertIn("--model Efficient", r.stdout)
+        self.assertNotIn("Qwen3.8-Flash", r.stdout)
 
     def test_opencode_card_maps_combo_to_its_tier_agent(self):
         r = plan_of("--card", "role=review,privacy=sensitive", "t")
@@ -343,7 +479,8 @@ class ClientCommandTests(unittest.TestCase):
     def test_sensitive_1m_fails_closed_with_next_steps(self):
         r = plan_of("--card", "privacy=sensitive,ctx=1m", "t")
         self.assertEqual(r.returncode, 2)
-        self.assertIn("--allow-training", r.stderr)
+        self.assertIn("128k", r.stderr)
+        self.assertNotIn("--allow-training", r.stderr)
 
     def test_tier_and_card_together_are_refused(self):
         self.assertEqual(plan_of("--tier", "2", "--card", "role=review", "t").returncode, 2)
@@ -358,6 +495,139 @@ class ClientCommandTests(unittest.TestCase):
             self.assertNotIn("never-print-this-key", r.stdout + r.stderr, client)
 
 
+def _cap_args(**over):
+    """A cmd_run-ish Namespace for required_capabilities (only the two fields it reads)."""
+    ns = argparse.Namespace(isolate=False, card=None)
+    ns.__dict__.update(over)
+    return ns
+
+
+class ClientCapabilityTests(unittest.TestCase):
+    """SPAWNCAP (S2) part A: a client's shell/write abilities are registry data,
+    and a task that needs one is refused before dispatch (exit 2) instead of
+    being started on a client that cannot do it. Auto-choice (no --client)
+    never picks such a client."""
+
+    # QOFIX 2026-09-27: qoder writes + runs shell headless with bypass_permissions
+    # (measured; the old false came from the invalid mode accept_edits).
+    CAPABLE = {"opencode", "claude", "codex", "gemini", "qwen", "qoder"}
+    INCAPABLE = {"agy"}
+
+    def setUp(self):
+        self.agent = load_agent()
+        with io.open(ROOT / "catalog" / "ai-registry.json", encoding="utf-8") as fh:
+            self.registry = json.load(fh)
+
+    def test_every_client_declares_shell_and_write(self):
+        for name, client in self.registry["clients"].items():
+            with self.subTest(client=name):
+                caps = client.get("capabilities")
+                self.assertIsInstance(caps, dict, name)
+                self.assertIn("shell", caps, name)
+                self.assertIn("write", caps, name)
+                self.assertIsInstance(caps["shell"], bool, name)
+                self.assertIsInstance(caps["write"], bool, name)
+
+    def test_the_capable_client_set_is_the_six_measured_ones(self):
+        capable = {name for name, client in self.registry["clients"].items()
+                   if client["capabilities"]["shell"] and client["capabilities"]["write"]}
+        self.assertEqual(capable, self.CAPABLE)
+        for name in self.INCAPABLE:
+            self.assertFalse(self.registry["clients"][name]["capabilities"]["write"], name)
+
+    def test_client_capabilities_reads_the_registry(self):
+        self.assertEqual(self.agent.client_capabilities("opencode", self.registry),
+                         {"shell": True, "write": True})
+        self.assertEqual(self.agent.client_capabilities("qoder", self.registry),
+                         {"shell": True, "write": True})
+        self.assertEqual(self.agent.client_capabilities("agy", self.registry),
+                         {"shell": False, "write": False})
+
+    def test_isolate_needs_shell_and_write(self):
+        self.assertEqual(self.agent.required_capabilities(_cap_args(isolate=True)),
+                         ("shell", "write"))
+
+    def test_explicit_editing_cards_need_shell_and_write(self):
+        for card in ("kind=implement", "kind=debug", "kind=bulk", "role=implement"):
+            with self.subTest(card=card):
+                self.assertEqual(self.agent.required_capabilities(_cap_args(card=card)),
+                                 ("shell", "write"), card)
+
+    def test_read_only_cards_need_nothing(self):
+        for card in ("kind=review", "kind=research", "kind=plan",
+                     "role=review", "role=orchestrate"):
+            with self.subTest(card=card):
+                self.assertEqual(self.agent.required_capabilities(_cap_args(card=card)), (), card)
+
+    def test_absent_empty_and_defaults_only_cards_need_nothing(self):
+        # v1's defaults make every absent card role=implement, but only an
+        # explicitly named editing kind/role is a write request: privacy=sensitive
+        # alone (or an empty card) must not be gated, or qoder's own promo
+        # refusal (test_qoder_is_refused_for_sensitive_work) would be shadowed
+        # by the capability message instead of printing "public".
+        for card in (None, "", "   ", "privacy=sensitive", "complexity=hard", "ctx=1m"):
+            with self.subTest(card=card):
+                self.assertEqual(self.agent.required_capabilities(_cap_args(card=card)), (), card)
+
+    def test_a_malformed_card_is_left_for_build_plan_to_report(self):
+        # A bad card is not a capability question: build_plan raises the CardError.
+        self.assertEqual(self.agent.required_capabilities(_cap_args(card="bogus=1")), ())
+
+    def test_choose_client_picks_the_first_capable_in_registry_order(self):
+        self.assertEqual(self.agent.choose_client(("shell", "write"), self.registry), "opencode")
+        self.assertEqual(self.agent.choose_client((), None), "opencode")
+
+    def test_choose_client_skips_an_incapable_first_client(self):
+        registry = {"clients": {
+            "opencode": {"capabilities": {"shell": False, "write": False}},
+            "claude": {"capabilities": {"shell": True, "write": True}},
+        }}
+        self.assertEqual(self.agent.choose_client(("shell", "write"), registry), "claude")
+
+    def test_capability_refusal_names_the_missing_capability_and_the_capable_clients(self):
+        msg = self.agent.capability_refusal("agy", ("shell", "write"), self.registry)
+        self.assertIsNotNone(msg)
+        self.assertIn("agy", msg)
+        self.assertIn("shell", msg)
+        self.assertIn("write", msg)
+        for name in self.CAPABLE:
+            self.assertIn(name, msg)
+        self.assertIsNone(
+            self.agent.capability_refusal("opencode", ("shell", "write"), self.registry))
+
+    def test_agy_is_refused_for_an_isolated_write_before_it_starts(self):
+        r = plan_of("--client", "agy", "--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("agy", r.stderr)
+        self.assertIn("opencode", r.stderr)
+        self.assertNotIn("would run:", r.stdout)
+
+    def test_qoder_takes_an_isolated_write(self):
+        r = plan_of("--client", "qoder", "--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--permission-mode bypass_permissions", r.stdout)
+
+    def test_qoder_takes_an_explicit_editing_card(self):
+        r = plan_of("--client", "qoder", "--card", "role=implement", "edit README.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("git clone --local", r.stdout)
+
+    def test_qoder_can_still_take_a_read_only_card(self):
+        r = plan_of("--client", "qoder", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("qodercli", r.stdout)
+
+    def test_an_isolated_run_without_a_client_auto_picks_a_capable_one(self):
+        r = plan_of("--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run: opencode", r.stdout)
+
+    def test_the_no_client_default_is_still_opencode(self):
+        r = plan_of("t")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run: opencode", r.stdout)
+
+
 class ReviewFindingTests(unittest.TestCase):
     """Cross-family review (t1-orchestrator, 2026-09-24) findings, pinned."""
 
@@ -366,8 +636,8 @@ class ReviewFindingTests(unittest.TestCase):
         self.assertIn("--model opus", r.stdout)
 
     def test_gateway_client_model_override_wins_over_the_card(self):
-        r = plan_of("--client", "qwen", "--card", "complexity=trivial", "--model", "omniroute/t1-orchestrator", "t")
-        self.assertIn("omniroute run qwen --model t1-orchestrator ", r.stdout)
+        r = plan_of("--client", "qwen", "--card", "complexity=trivial", "--model", "omniroute/t2-worker", "t")
+        self.assertIn("omniroute run qwen --model t2-worker ", r.stdout)
 
     def test_mcp_max_depth_as_a_string_is_coerced_not_a_crash(self):
         argv, _ = mcp_server.build_argv({"task": "t", "max_depth": "2"})
@@ -1278,7 +1548,8 @@ class McpStdioTests(unittest.TestCase):
             self.assertEqual(replies[1]["result"]["serverInfo"]["name"], "autoos-agent")
             names = {t["name"] for t in replies[2]["result"]["tools"]}
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
-                                     "respond", "route", "list_agents", "context", "heartbeat"})
+                                     "respond", "route", "list_agents", "context", "heartbeat",
+                                     "ps"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "t3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])
@@ -1740,6 +2011,12 @@ class SessionTagTests(unittest.TestCase):
     def setUpClass(cls):
         cls.cli = load_agent()
 
+    def _lane(self):
+        # The lane part as session_tag() derives it (sanitised, capped): a
+        # checkout with a long basename (every lane sandbox) is truncated, so
+        # the raw os.path.basename(ROOT) is not the expected value.
+        return self.cli.session_tag("t", env={}).rsplit("/", 1)[0]
+
     def test_fallback_tag_is_a_valid_header_value_for_any_worktree_name(self):
         # review-or3: the ROOT basename was used verbatim - a worktree name with
         # spaces or 120+ chars would emit an illegal header / an over-long tag.
@@ -1777,7 +2054,7 @@ class SessionTagTests(unittest.TestCase):
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(
             prov["headers"]["x-omniroute-session-id"],
-            "%s/fix-the-router" % os.path.basename(self.cli.ROOT))
+            "%s/fix-the-router" % self._lane())
 
     def test_autoos_session_tag_overrides_the_default(self):
         with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one.two_3-x"}):
@@ -1792,7 +2069,7 @@ class SessionTagTests(unittest.TestCase):
                 plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(prov["headers"]["x-omniroute-session-id"],
-                         "%s/t" % os.path.basename(self.cli.ROOT))
+                         "%s/t" % self._lane())
         warns = [l for l in err.getvalue().splitlines()
                  if "AUTOOS_SESSION_TAG" in l]
         self.assertEqual(len(warns), 1, err.getvalue())
@@ -1814,13 +2091,13 @@ class SessionTagTests(unittest.TestCase):
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(prov["settings"], {"baseURL": "http://x/v1"})
         self.assertEqual(prov["headers"]["x-omniroute-session-id"],
-                         "%s/t" % os.path.basename(self.cli.ROOT))
+                         "%s/t" % self._lane())
 
     def test_the_plan_output_prints_the_session_tag(self):
         r = run_agent("run", "--dry-run", "--tier", "2", "--title", "My Tag",
                       "t", env=clean_env())
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("session-tag: %s/my-tag" % os.path.basename(self.cli.ROOT),
+        self.assertIn("session-tag: %s/my-tag" % self._lane(),
                       r.stdout)
 
     def test_a_non_opencode_client_prints_no_session_tag(self):
@@ -2710,10 +2987,13 @@ class ModelOverridePrivacyTests(unittest.TestCase):
         rc, out, err = self.run_cmd(card="privacy=public", model="omniroute/t3-driver")
         self.assertEqual(rc, 0, err)
 
-    def test_allow_training_keeps_the_documented_escape(self):
+    def test_allow_training_no_longer_opens_the_sensitive_1m_route(self):
+        # Compatibility flag, inert since DSMAX 2026-09-27: the card fails
+        # closed before the explicit --model is even considered.
         rc, out, err = self.run_cmd(card="privacy=sensitive,ctx=1m", allow_training=True,
-                                    model="omniroute/t1-orchestrator-clean")
-        self.assertEqual(rc, 0, err)
+                                    model="omniroute/t2-worker-clean")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("128k", err)
 
 
 class RunCardV2AcceptanceTests(unittest.TestCase):
@@ -2972,6 +3252,12 @@ elif mode == "commit-sibling-worktree":
                     "-c", "user.email=autoos-worker@users.noreply.github.com",
                     "commit", "-q", "-m", "sibling lane worker change"], check=True)
     print("fake: a sibling lane's worker committed in its own worktree")
+elif mode == "untracked-in-parent":
+    # A worker with full write rights drops a NEW untracked file into the parent
+    # checkout (review of 6622d29: git status ran with --untracked-files=no).
+    with open(os.path.join(root, "stray.txt"), "w") as fh:
+        fh.write("leak\\n")
+    print("fake: wrote an untracked file into the parent")
 elif mode == "orchestrator-commits-wip":
     # The orchestrator commits its own pre-existing WIP mid-run: the path was
     # dirty before, is clean after - the orchestrator's own cleanup, not a
@@ -3084,6 +3370,29 @@ print("Error: Rate limit exceeded. Please try again later.")
 '''
 
 
+def _init_git_root():
+    """A temp git checkout with two commits and an extra `side` branch: the
+    fixture the --isolate containment tests clone from, shared with the
+    provider-stop fallthrough tests. The caller owns the tempdir
+    (addCleanup(shutil.rmtree, ...))."""
+    tmp = tempfile.mkdtemp()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+           "-c", "init.defaultBranch=master"]
+    subprocess.run(git + ["init", "-q", tmp], check=True)
+    with open(os.path.join(tmp, "tracked.txt"), "w", encoding="utf-8") as fh:
+        fh.write("base\n")
+    subprocess.run(git + ["-C", tmp, "add", "tracked.txt"], check=True)
+    subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "init"], check=True)
+    with open(os.path.join(tmp, "conflict.txt"), "w", encoding="utf-8") as fh:
+        fh.write("base\n")
+    subprocess.run(git + ["-C", tmp, "add", "conflict.txt"], check=True)
+    subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "conflict base"], check=True)
+    # A second EXISTING branch (not checked out) for the side-ref cases;
+    # refs created mid-run are new and never scanned.
+    subprocess.run(git + ["-C", tmp, "branch", "side"], check=True)
+    return tmp
+
+
 class IsolateContainmentTests(unittest.TestCase):
     """ISOfix (rule->code: --isolate containment leak). Measured 2026-09-26:
     an --isolate worker given absolute parent paths edited and committed in
@@ -3097,22 +3406,8 @@ class IsolateContainmentTests(unittest.TestCase):
         self.agent = load_agent()
 
     def make_root(self):
-        tmp = tempfile.mkdtemp()
+        tmp = _init_git_root()
         self.addCleanup(shutil.rmtree, tmp, True)
-        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
-               "-c", "init.defaultBranch=master"]
-        subprocess.run(git + ["init", "-q", tmp], check=True)
-        with open(os.path.join(tmp, "tracked.txt"), "w", encoding="utf-8") as fh:
-            fh.write("base\n")
-        subprocess.run(git + ["-C", tmp, "add", "tracked.txt"], check=True)
-        subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "init"], check=True)
-        with open(os.path.join(tmp, "conflict.txt"), "w", encoding="utf-8") as fh:
-            fh.write("base\n")
-        subprocess.run(git + ["-C", tmp, "add", "conflict.txt"], check=True)
-        subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "conflict base"], check=True)
-        # A second EXISTING branch (not checked out) for the side-ref cases;
-        # refs created mid-run are new and never scanned.
-        subprocess.run(git + ["-C", tmp, "branch", "side"], check=True)
         return tmp
 
     def make_fake_agy(self):
@@ -3156,8 +3451,15 @@ class IsolateContainmentTests(unittest.TestCase):
             env["AUTOOS_FAKE_MODE"] = mode
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.dict(os.environ, env, clear=True):
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    rc = agent.cmd_run(args, cfg)
+                # SPAWNCAP (S2): the real registry declares headless agy with
+                # shell=false/write=false (its headless refusal evidence), but
+                # these tests exercise containment/leak/provider-stop with a fake
+                # worker, not the capability gate. Neutralise the gate here so
+                # the containment behaviour is still what is measured.
+                with mock.patch.object(agent, "client_capabilities",
+                                       lambda name, registry=None: {"shell": True, "write": True}):
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        rc = agent.cmd_run(args, cfg)
         finally:
             agent.ROOT, agent.TRACK_RECORD = old_root, old_track
         return rc, out.getvalue(), err.getvalue()
@@ -3254,6 +3556,13 @@ class IsolateContainmentTests(unittest.TestCase):
         rc, out, err = self.run_isolated(root, stub, state, "commit-sibling-worktree")
         self.assertNotIn("LEAK", out + err)
         self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_new_untracked_file_in_the_parent_is_a_leak(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "untracked-in-parent")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("stray.txt", out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_lane_fetched_into_a_new_ref_is_not_a_leak(self):
@@ -3694,6 +4003,217 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertIn("worker-new.txt", files)
 
 
+def _fallthrough_registry(route_ids):
+    """A registry whose routes are exactly `route_ids`, plus the clients the
+    capability gate reads. The resolver itself is replaced by
+    `_fallthrough_plan`, so providers/models/policy are not consulted."""
+    return {
+        "clients": {
+            "opencode": {"capabilities": {"shell": True, "write": True}},
+            "claude": {"capabilities": {"shell": True, "write": True}},
+        },
+        "routes": {rid: {"id": rid, "class": "cheap", "legs": []} for rid in route_ids},
+    }
+
+
+def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, overlay,
+                      track_record, client_state):
+    """route_plan_for stand-in: the first route id still in `registry`.
+
+    `_resolve_route_v2` drops the excluded ids before calling, so the second
+    attempt sees only the routes that have not been tried yet. No routes left
+    is the resolver's own input_required."""
+    routes = list((registry.get("routes") or {}).keys())
+    if not routes:
+        return {"route": None, "state": "input_required",
+                "reason": "no route survives the filters", "bucket": "S0",
+                "defer_until": None}
+    return {"route": routes[0], "state": "ready", "reason": "stub", "bucket": "S1",
+            "defer_until": None}
+
+
+class ProviderStopFallthroughTests(unittest.TestCase):
+    """SPAWNCAP (S2) part B: a provider-stopped resolver-routed --isolate run
+    re-runs the same task in the same sandbox on the next route, after
+    WIP-committing the stopped attempt, at most MAX_FALLTHROUGH times; then it
+    exits 8 exactly as WIPfix did."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def test_fallthrough_line_names_both_routes(self):
+        self.assertEqual(
+            self.agent.fallthrough_line("r-free", "Error: Rate limit exceeded", "r-cheap"),
+            "provider stop on r-free: Error: Rate limit exceeded -> falling through to r-cheap")
+
+    def test_provider_stop_matches_all_targets_skipped(self):
+        # gateway 503 ALL_TARGETS_SKIPPED, printed as an error line.
+        line = "Error: all targets were skipped by pre-dispatch filters"
+        self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
+
+    def test_provider_stop_matches_credits_exhausted(self):
+        line = "Error: credits exhausted"
+        self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
+
+    def _run(self, route_ids, stops, clock=None):
+        """Run cmd_run with the resolver and the client replaced by fakes; the
+        sandbox is a real temp clone so WIP commits and re-runs are real.
+
+        Returns (rc, out, err, calls, sandbox_names): `calls` is
+        {"n": int, "cwds": [str], "track": [record]}. The run is a gateway
+        (opencode) run so `track_entry` emits a record per attempt - an
+        own-account client's run is tracked as None (SPAWNCAP fallthrough
+        records every provider-stopped attempt, not just the final plan).
+        """
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        statedir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, statedir, True)
+        agent = self.agent
+        old_root, old_track, old_overlay = (agent.ROOT, agent.TRACK_RECORD,
+                                            agent.MEASURED_OVERLAY_PATH)
+        agent.ROOT = root
+        agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
+        agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
+        cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
+
+        calls = {"n": 0, "cwds": [], "route_marks": [], "track": []}
+        real_build_plan = agent.build_plan
+
+        def marking_build_plan(*a, **k):
+            # Tag each plan's env with its route, so a re-run that kept the
+            # first plan's env shows up as a stale mark.
+            plan = real_build_plan(*a, **k)
+            plan["env"]["AUTOOS_TEST_ROUTE_MARK"] = plan["route"]["combo"]
+            return plan
+
+        def fake_run_client(cmd, cwd, env, reap=True, capture=False):
+            calls["n"] += 1
+            calls["cwds"].append(cwd)
+            calls["route_marks"].append(env.get("AUTOOS_TEST_ROUTE_MARK"))
+            with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
+                      encoding="utf-8") as fh:
+                fh.write("work\n")
+            if calls["n"] <= stops:
+                return agent.ClientExit(0, tail="Error: Rate limit exceeded\n")
+            return agent.ClientExit(0, tail="done\n")
+
+        args = argparse.Namespace(
+            client="opencode", tier=None, card="kind=implement", task="edit README.md",
+            free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
+            joinable=False, model=None, clean=False, allow_training=False,
+            max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+        env = dict(os.environ)
+        env["AUTOOS_STATE_DIR"] = statedir
+        # A gateway run needs a client key and a live gateway; both are faked
+        # here. The key is what makes the run track-recorded at all.
+        env["AUTOOS_OMNIROUTE_KEY"] = "test-only-key"
+        out, err = io.StringIO(), io.StringIO()
+        old_time = agent.time.time
+        if clock is not None:
+            agent.time.time = clock
+        try:
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(agent, "load_registry",
+                                       lambda path: _fallthrough_registry(route_ids)):
+                    with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
+                            mock.patch.object(agent, "build_plan", marking_build_plan), \
+                            mock.patch.object(agent, "gateway_up", lambda: True), \
+                            mock.patch.object(agent, "resolve_model",
+                                              lambda cfg, tier, clean, override:
+                                                  override or "omniroute/r-t2"):
+                        with mock.patch.object(agent, "run_client", fake_run_client):
+                            with mock.patch.object(agent.measure_mod, "client_state",
+                                                   lambda *a, **k: {}):
+                                with mock.patch.object(
+                                        agent.clients, "signin_state",
+                                        lambda client, env=None: (None, "")):
+                                    with mock.patch("shutil.which",
+                                                    return_value="/usr/bin/opencode"):
+                                        with contextlib.redirect_stdout(out), \
+                                                contextlib.redirect_stderr(err):
+                                            rc = agent.cmd_run(args, cfg)
+        finally:
+            agent.time.time = old_time
+            calls["track"] = agent.track.load(agent.TRACK_RECORD)
+            (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
+                old_root, old_track, old_overlay)
+        base = os.path.join(statedir, "sandboxes")
+        names = os.listdir(base) if os.path.isdir(base) else []
+        return rc, out.getvalue(), err.getvalue(), calls, names
+
+    def test_a_provider_stop_falls_through_to_the_next_route_and_succeeds(self):
+        rc, out, err, calls, sandboxes = self._run(["r-free", "r-cheap"], stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 2, "one stopped attempt plus one re-run")
+        self.assertEqual(calls["cwds"][0], calls["cwds"][1], "same sandbox, same cwd")
+        self.assertEqual(len(sandboxes), 1, sandboxes)
+        self.assertIn("provider stop on r-free: Error: Rate limit exceeded "
+                      "-> falling through to r-cheap", out + err)
+        self.assertIn("WIP-COMMITTED", out + err)
+
+    def test_a_fallthrough_re_run_gets_the_next_plans_env(self):
+        # qoder review 2026-09-27: env was built once from the first plan, so a
+        # re-run kept the stopped route's OPENCODE_CONFIG_CONTENT/session tag.
+        _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1)
+        self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"], out + err)
+
+    def test_fallthrough_stops_after_the_cap_and_exits_8(self):
+        rc, out, err, calls, _ = self._run(
+            ["r-free", "r-cheap", "r-cheap2", "r-cheap3"], stops=5)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 3, "the first attempt plus MAX_FALLTHROUGH re-runs")
+        lines = [ln for ln in (out + err).splitlines() if ln.startswith("provider stop on ")]
+        self.assertEqual(len(lines), 2, lines)
+
+    def test_no_next_route_exits_8_without_a_fallthrough(self):
+        rc, out, err, calls, _ = self._run(["r-free"], stops=5)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1, "nowhere to fall through to")
+        self.assertNotIn("falling through to", out + err)
+
+    @staticmethod
+    def _records(calls):
+        """The track record as (route, gate, failure_class) triples."""
+        return [(r["route"], r["gate"], r["failure_class"]) for r in calls["track"]]
+
+    def test_every_provider_stopped_attempt_is_track_recorded(self):
+        # REVFIX: a provider-stopped attempt that falls through was never its
+        # own observation - only the final plan's record survived, so the dead
+        # route looked healthy and `route` kept picking it.
+        _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1)
+        self.assertEqual(
+            self._records(calls),
+            [("r-free", "fail", "provider"), ("r-cheap", "pass", None)], out + err)
+
+    def test_a_run_with_no_fallthrough_is_track_recorded_once(self):
+        # The per-attempt record must not double-count the final plan's own
+        # record when the loop never falls through.
+        _, out, err, calls, _ = self._run(["r-free"], stops=0)
+        self.assertEqual(self._records(calls), [("r-free", "pass", None)], out + err)
+
+    def test_the_surviving_routes_latency_excludes_the_dead_attempts(self):
+        # REVFIX review 2: the final record used the cumulative `start`, so the
+        # surviving route's latency sample included the dead attempt's seconds
+        # (which are already their own sample). One tick per time.time() call:
+        # each attempt spans exactly one tick, so the survivor's latency is 1s.
+        ticks = iter(range(1000))
+        _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                          clock=lambda: float(next(ticks)))
+        by_route = {r["route"]: r["latency_s"] for r in calls["track"]}
+        self.assertEqual(by_route["r-free"], 1.0, out + err)  # its own attempt
+        self.assertEqual(by_route["r-cheap"], 1.0, out + err)  # not 2+ (cumulative)
+
+    def test_the_cap_records_every_fallthrough_attempt(self):
+        _, out, err, calls, _ = self._run(
+            ["r-free", "r-cheap", "r-cheap2", "r-cheap3"], stops=5)
+        self.assertEqual(
+            self._records(calls),
+            [("r-free", "fail", "provider"),
+             ("r-cheap", "fail", "provider"),
+             ("r-cheap2", "fail", "provider")], out + err)
+
+
 class OutsideFenceTaskDirTests(unittest.TestCase):
     """FENCE (L1-backlog 2026-09-27T04:49Z): the MCP run_job exports
     AUTOOS_TASK_DIR=<root>/logs/agents/<run id>, and a blocked worker's
@@ -3763,6 +4283,384 @@ class OutsideFenceTaskDirTests(unittest.TestCase):
         rules, err = self.fence(link)
         self.assertEqual(rules, self.todays_rules())
         self.assertIn("AUTOOS_TASK_DIR", err)
+
+
+class _WorkerRecordBase(unittest.TestCase):
+    """Shared fixtures for the host-wide worker registry (`ps`)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.workers = os.path.join(self.tmp, "workers")
+        self.old = os.environ.get("AUTOOS_WORKERS_DIR")
+        os.environ["AUTOOS_WORKERS_DIR"] = self.workers
+        self.addCleanup(self._restore)
+        # cmd_run refuses (rc 3) when no gateway answers; CI has none, a dev host
+        # usually does - pin it so these tests never depend on the host's stack.
+        # CI also has no configuration/api-keys.yml, so no client key (rc 3 before
+        # the gateway check); a dev host reads the main checkout's. Pin both.
+        for name, value in (("gateway_up", True), ("client_key", "sk-test-key")):
+            patcher = mock.patch.object(self.agent, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _restore(self):
+        if self.old is None:
+            os.environ.pop("AUTOOS_WORKERS_DIR", None)
+        else:
+            os.environ["AUTOOS_WORKERS_DIR"] = self.old
+
+    def write(self, wid="w1", **over):
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        rec = {"id": wid, "pid": os.getpid(), "pid_start": self.agent._proc_starttime(os.getpid()),
+               "started": self.agent.utc_now_iso(), "session_tag": "lane-a", "client": "opencode",
+               "model": "m", "route": "t2-worker", "title": "", "cwd": "/x", "sandbox": "",
+               "task_head": "do a thing", "depth": 1}
+        rec.update(over)
+        path = os.path.join(self.workers, wid + ".json")
+        with io.open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        return path
+
+
+class WorkerRecordTests(_WorkerRecordBase):
+    """list_workers / workers_dir: state, the pid-reuse guard and pruning."""
+
+    def test_workers_dir_honours_the_env_override_and_is_0700(self):
+        self.assertEqual(self.agent.workers_dir(), self.workers)
+        self.assertTrue(os.path.isdir(self.workers))
+        self.assertEqual(os.stat(self.workers).st_mode & 0o777, 0o700)
+
+    def test_a_dry_run_writes_no_record(self):
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=True,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title=None, model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+        with mock.patch.object(self.agent, "build_plan", return_value=plan):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 0)
+        self.assertEqual([f for f in (os.listdir(self.workers)
+                                      if os.path.isdir(self.workers) else [])], [])
+
+    def test_current_pid_and_start_time_is_running(self):
+        if self.agent._proc_starttime(os.getpid()) is None:
+            self.skipTest("no /proc start time on this host")
+        self.write()
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["running"])
+
+    def test_worker_record_file_is_0600_and_leaves_no_tmp(self):
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        path = os.path.join(self.workers, "w9.json")
+        self.agent._write_worker_record(path, {"id": "w9", "pid": os.getpid()})
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertEqual(os.listdir(self.workers), ["w9.json"])
+
+    def test_a_pid_that_does_not_exist_is_died(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        self.write(pid=proc.pid, pid_start=None)
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["died"])
+
+    def test_a_start_time_mismatch_is_died(self):
+        start = self.agent._proc_starttime(os.getpid())
+        if start is None:
+            self.skipTest("no /proc start time on this host")
+        self.write(pid_start=start + 1)
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["died"])
+
+    def test_a_start_time_mismatch_is_died_with_mocked_start(self):
+        # The guard fires on a genuinely different start time, host-independently.
+        self.write(pid_start=12345)
+        with mock.patch.object(self.agent, "_proc_starttime", return_value=54321):
+            rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["died"])
+
+    def test_a_live_pid_with_unreadable_start_time_is_running(self):
+        # Q1: a live pid whose start time cannot be read now (permissions,
+        # GetProcessTimes failure) must NOT be reported as died - the reuse
+        # guard is skipped, matching list_workers' docstring.
+        self.write(pid_start=12345)
+        with mock.patch.object(self.agent, "_proc_starttime", return_value=None):
+            rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["running"])
+
+    def test_ended_is_exited_rc_and_hidden_without_include_ended(self):
+        self.write(ended=self.agent.utc_now_iso(), rc=7)
+        self.assertEqual(self.agent.list_workers(self.workers), [])
+        rows = self.agent.list_workers(self.workers, include_ended=True)
+        self.assertEqual([r["state"] for r in rows], ["exited rc=7"])
+
+    def test_an_eight_day_old_ended_record_is_deleted(self):
+        old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=8)
+        path = self.write(ended=old.isoformat(timespec="seconds").replace("+00:00", "Z"), rc=0)
+        rows = self.agent.list_workers(self.workers, include_ended=True)
+        self.assertEqual(rows, [])
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_corrupt_record_is_skipped_never_raises(self):
+        self.write()
+        bad = os.path.join(self.workers, "bad.json")
+        with io.open(bad, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["id"] for r in rows], ["w1"])
+
+    def test_cmd_run_records_during_the_run_and_ended_with_rc_after(self):
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title="t", model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+        seen = {}
+
+        def fake_run(*a, **k):
+            files = [f for f in os.listdir(self.workers) if f.endswith(".json")]
+            self.assertEqual(len(files), 1)
+            with io.open(os.path.join(self.workers, files[0]), encoding="utf-8") as fh:
+                seen["rec"] = json.load(fh)
+            self.assertIsNone(seen["rec"].get("ended"))
+            self.assertEqual(seen["rec"]["pid"], os.getpid())
+            self.assertEqual(a[2]["AUTOOS_WORKERS_DIR"], self.workers)
+            return self.agent.ClientExit(4)
+
+        with mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "run_client", side_effect=fake_run), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 4)
+        self.assertEqual(seen["rec"]["client"], "opencode")
+        self.assertEqual(seen["rec"]["route"], "t2-worker")
+        self.assertEqual(seen["rec"]["task_head"], "do it")
+        with io.open(os.path.join(self.workers, seen["rec"]["id"] + ".json"), encoding="utf-8") as fh:
+            after = json.load(fh)
+        self.assertTrue(after["ended"])
+        self.assertEqual(after["rc"], 4)
+
+
+    def test_a_failed_end_record_keeps_the_client_rc(self):
+        # L1-routing review note (1): the finally-block record write must never
+        # replace the client's rc (disk full, permissions).
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title="t", model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+
+        def boom(*_a, **_k):
+            raise OSError(28, "No space left on device")
+
+        err = io.StringIO()
+        with mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "run_client", return_value=self.agent.ClientExit(4)), \
+                mock.patch.object(self.agent, "_worker_record_end", side_effect=boom), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 4)
+        self.assertIn("could not update worker record", err.getvalue())
+
+
+    def test_a_record_start_failure_still_runs_the_client(self):
+        # V4 ps final review: workers_dir()/_worker_record_start() run before
+        # run_client; an OSError there must not stop the client from launching.
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title="t", model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+        called = {}
+
+        def boom(*_a, **_k):
+            raise OSError(28, "No space left on device")
+
+        def fake_run(*_a, **_k):
+            called["ran"] = True
+            return self.agent.ClientExit(4)
+
+        err = io.StringIO()
+        with mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "_worker_record_start", side_effect=boom), \
+                mock.patch.object(self.agent, "run_client", side_effect=fake_run), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertTrue(called.get("ran"), "run_client must run without a worker record")
+        self.assertEqual(rc, 4)
+        self.assertIn("could not write worker record", err.getvalue())
+
+
+class WindowsLivenessTests(_WorkerRecordBase):
+    """V1/V2 ps final review: on Windows liveness and the pid-reuse start time
+    go through ctypes (OpenProcess/GetExitCodeProcess/GetProcessTimes/
+    CloseHandle), never os.kill - signal 0 there Ctrl+C's a live worker. The
+    fake kernel32 lets these run on Linux."""
+
+    def call(self, k32, fn, *args):
+        fake = fake_windows_ctypes(k32)
+        with mock.patch.dict(sys.modules, {"ctypes": fake}), \
+                mock.patch.object(self.agent, "_WIN_KERNEL32", None), \
+                mock.patch.object(self.agent.os, "name", "nt"), \
+                mock.patch.object(self.agent.os, "kill",
+                                  side_effect=AssertionError("os.kill must not run on Windows")):
+            return fn(*args)
+
+    def test_the_helper_sets_typed_ctypes_signatures_once(self):
+        # Q2/Q3: without restype, ctypes truncates a 64-bit HANDLE to a C int.
+        # The helper declares the signatures (cached, not per call); assert the
+        # restype landed on the fake function objects.
+        k32 = _FakeKernel32()
+        fake = fake_windows_ctypes(k32)
+        with mock.patch.dict(sys.modules, {"ctypes": fake}), \
+                mock.patch.object(self.agent, "_WIN_KERNEL32", None):
+            first = self.agent._win_kernel32()
+            second = self.agent._win_kernel32()
+        self.assertIs(first, k32)
+        self.assertIs(second, k32, "the helper must cache, not rebuild per call")
+        self.assertIs(k32.OpenProcess.restype, fake.wintypes.HANDLE)
+        self.assertIs(k32.GetExitCodeProcess.restype, fake.wintypes.BOOL)
+        self.assertIs(k32.GetProcessTimes.restype, fake.wintypes.BOOL)
+        self.assertIs(k32.CloseHandle.restype, fake.wintypes.BOOL)
+        self.assertIsNotNone(k32.OpenProcess.argtypes)
+        self.assertEqual(len(k32.OpenProcess.argtypes), 3)
+        self.assertEqual(len(k32.GetProcessTimes.argtypes), 5)
+
+    def test_a_live_windows_pid_is_alive_and_never_os_kill(self):
+        k32 = _FakeKernel32(handle=7, exit_code=259)
+        self.assertTrue(self.call(k32, self.agent._pid_alive, 4242))
+        self.assertEqual(k32.opened, [(0x1000, False, 4242)])
+        self.assertEqual(k32.closed, [7])
+
+    def test_a_null_handle_with_no_error_is_not_alive(self):
+        self.assertFalse(self.call(_FakeKernel32(handle=None), self.agent._pid_alive, 4242))
+
+    def test_access_denied_means_a_live_process(self):
+        # ERROR_ACCESS_DENIED (5): the process exists, owned by someone else.
+        k32 = _FakeKernel32(handle=None, last_error=5)
+        self.assertTrue(self.call(k32, self.agent._pid_alive, 4242))
+
+    def test_a_non_still_active_exit_code_is_not_alive(self):
+        self.assertFalse(self.call(_FakeKernel32(exit_code=0), self.agent._pid_alive, 1))
+
+    def test_windows_start_time_comes_from_get_process_times(self):
+        self.assertEqual(self.call(_FakeKernel32(created=987654321),
+                                   self.agent._proc_starttime, 1), 987654321)
+
+    def test_windows_start_time_is_none_when_the_process_is_denied(self):
+        k32 = _FakeKernel32(handle=None, last_error=5)
+        self.assertIsNone(self.call(k32, self.agent._proc_starttime, 1))
+
+    def test_windows_start_time_is_none_when_get_process_times_fails(self):
+        k32 = _FakeKernel32(times_ok=False)
+        self.assertIsNone(self.call(k32, self.agent._proc_starttime, 1))
+
+
+class WindowsPrototypeTests(unittest.TestCase):
+    """Real ctypes type-checking (no fake module): every by-reference argument
+    _win_liveness passes must be accepted by the prototype _win_kernel32 declares.
+    A POINTER(FILETIME) prototype rejected byref(c_ulonglong) with ArgumentError."""
+
+    def test_declared_pointer_types_accept_the_values_passed(self):
+        import ctypes
+        agent = load_agent()
+        exit_code_t, stamp_t = agent._win_value_types()
+        ctypes.POINTER(exit_code_t).from_param(ctypes.byref(exit_code_t()))
+        ctypes.POINTER(stamp_t).from_param(ctypes.byref(stamp_t()))
+        self.assertEqual(ctypes.sizeof(stamp_t), 8)  # one FILETIME
+        src = AGENT.read_text(encoding="utf-8")
+        self.assertNotIn("POINTER(wintypes.FILETIME)", src)
+        self.assertNotIn("ctypes.c_ulonglong() for", src)
+
+
+class PsTests(_WorkerRecordBase):
+    """The `ps` subcommand and the MCP `ps` tool read the same rows."""
+
+    def test_ps_json_parses_and_has_the_columns(self):
+        self.write()
+        r = run_agent("ps", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertEqual(data["dir"], self.workers)
+        row = data["workers"][0]
+        for key in ("id", "state", "elapsed", "client", "model", "lane", "pid", "title", "task"):
+            self.assertIn(key, row)
+        self.assertEqual(row["state"], "running")
+
+    def test_ps_says_no_workers_running_when_empty(self):
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        r = run_agent("ps", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no workers running", r.stdout)
+
+    def test_ps_all_window_is_by_end_time_not_run_length(self):
+        # --all adds workers that EXITED in the last 24 h: a 1-minute run that
+        # ended 3 days ago is out, a 30-hour run that ended an hour ago is in.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        iso = lambda d: d.isoformat(timespec="seconds").replace("+00:00", "Z")
+        self.write("old", started=iso(now - datetime.timedelta(days=3, minutes=1)),
+                   ended=iso(now - datetime.timedelta(days=3)), rc=0)
+        self.write("long", started=iso(now - datetime.timedelta(hours=31)),
+                   ended=iso(now - datetime.timedelta(hours=1)), rc=0)
+        r = run_agent("ps", "--all", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([w["id"] for w in json.loads(r.stdout)["workers"]], ["long"])
+
+    def test_mcp_ps_returns_the_same_rows(self):
+        self.write()
+        rows = self.agent.list_workers(self.workers)
+        out = mcp_server.ps()
+        self.assertEqual(out["dir"], self.workers)
+        self.assertEqual([(w["id"], w["state"], w["client"]) for w in out["workers"]],
+                         [(w["id"], w["state"], w["client"]) for w in rows])
+
+    def test_an_exited_record_ended_three_days_ago_is_hidden_by_both_callers(self):
+        # V3 ps final review: the CLI's --all 24 h end-time window and the MCP
+        # ps(include_ended=True) must agree; the 7-day prune must not leak an
+        # old exited record into the MCP tool.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        iso = lambda d: d.isoformat(timespec="seconds").replace("+00:00", "Z")
+        self.write("old", started=iso(now - datetime.timedelta(days=3, minutes=1)),
+                   ended=iso(now - datetime.timedelta(days=3)), rc=0)
+        self.write("recent", started=iso(now - datetime.timedelta(hours=2)),
+                   ended=iso(now - datetime.timedelta(hours=1)), rc=0)
+        r = run_agent("ps", "--all", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([w["id"] for w in json.loads(r.stdout)["workers"]], ["recent"])
+        out = mcp_server.ps(include_ended=True)
+        self.assertEqual([w["id"] for w in out["workers"]], ["recent"])
 
 
 if __name__ == "__main__":

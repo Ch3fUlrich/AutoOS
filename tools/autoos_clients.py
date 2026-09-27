@@ -66,7 +66,11 @@ CLIENTS = {c.name: c for c in (
            signin_probe=("models",)),
     Client("qoder", "qodercli", True, False, True, "qodercli login (own account)",
            "own auth, not the gateway; promo - privacy=public only", promo=True,
-           modes={"read": ["--permission-mode", "dont_ask"], "edit": ["--permission-mode", "accept_edits"]}),
+           # qodercli 1.1.63 modes are bypass_permissions|dont_ask|auto only; the
+           # former "accept_edits" does not exist and refused every write (62 runs,
+           # 2026-09-27). bypass_permissions is safe only because the spawner
+           # forces an --isolate sandbox for every qoder writer (autoos-agent.py).
+           modes={"read": ["--permission-mode", "dont_ask"], "edit": ["--permission-mode", "bypass_permissions"]}),
 )}
 
 # AGYFIX item 2 (K3 CLI audit addendum 2026-09-27 08:1xZ): agy with no --model
@@ -77,6 +81,11 @@ CLIENTS = {c.name: c for c in (
 # .schema.json $defs.client, additionalProperties false) has no such slot; a
 # constant is the brief's documented fallback rather than widening the schema.
 AGY_DEFAULT_MODEL = "claude-opus-4-6-thinking"
+
+# Qoder's free model on the operator's account (qodercli --list-models: Efficient,
+# Qwen3.8-Max, Qwen3.8-Flash; Max needs credit). Measured 2026-09-27: writes a file
+# and runs a shell command unattended in 25 s with bypass_permissions.
+QODER_DEFAULT_MODEL = "Qwen3.8-Flash"
 
 
 def build_command(client: Client, task: str, combo: str | None, level: str,
@@ -95,7 +104,7 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
     if client.name == "codex":
         inner = ["exec"] + mode + ["--skip-git-repo-check", task]
     elif client.name == "qoder":
-        return ["qodercli", "-p"] + mode + ([] if not model else ["--model", model]) + [task]
+        return ["qodercli", "-p"] + mode + ["--model", model or QODER_DEFAULT_MODEL] + [task]
     elif client.name == "agy":
         # AGYFIX item 1 (measured 2026-09-27, K3 CLI audit): agy 1.2.12 reads
         # "--model" as the -p prompt when -p comes first, so the model goes

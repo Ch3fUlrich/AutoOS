@@ -151,6 +151,19 @@ as greyed placeholders rather than as values, so a field you have not answered
 looks unanswered, and an empty field is saved as *unanswered* rather than as an
 empty string that would shadow the default.
 
+### Logins and keys
+
+The Configure tab has a **Logins and keys** card for
+`configuration/api-keys.yml`: every value there can be set from the browser, not
+only edited in the file. The fields are write-only — a stored secret is never
+sent back to the page — and are accepted from loopback clients only unless you
+set `AUTOOS_SERVE_REMOTE_SECRETS=1`, so on a remote machine tunnel first with
+`ssh -L 8777:127.0.0.1:8777 <host>` and open the printed `http://127.0.0.1:8777`
+URL. After a save the card shows the apply command that makes the new value take
+effect (`configuration/omniroute/apply.sh`, `ai-stack.sh init`, …). Which file
+each key actually comes from, and what to restart, is in
+[Logins and secrets](web-services.md#logins-and-secrets).
+
 ### Dry run
 
 **Dry run** is off by default and the confirmation lists every package before

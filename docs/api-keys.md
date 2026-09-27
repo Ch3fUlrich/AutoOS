@@ -1,5 +1,8 @@
 # API keys — how to get each one
 
+Where each key and password lives, what it guards, and how to rotate it:
+[Logins and secrets](web-services.md#logins-and-secrets).
+
 **One file, one command.** Every key goes into
 `configuration/api-keys.yml` (git-ignored; copy from
 `configuration/api-keys.example.yml`), then:
@@ -53,7 +56,7 @@ registry that `apply`, `tools/mirror-litellm-env.py` and
 | `openrouter` | `openrouter` | |
 | `zen` | `opencode-zen` | free promo models + paid; paid legs need Zen balance |
 | `cheapinference` | `cheaperinference` | paid partner gateway (`ci_live_…` key); legs sit between free and paid in tier2/tier3, never in `*-clean` |
-| `free_ai` | `free_ai` | Free.ai self-hosted pool; 10 rpm, 30k tokens/day, may train on prompts — **never** in a `*-clean` route |
+| `free_ai` | `free-ai` | Free.ai self-hosted pool; 10 rpm, 30k tokens/day, may train on prompts — **never** in a `*-clean` route |
 | `omniroute` | — | the **client** key apps use; not a provider |
 
 ## Where to get them

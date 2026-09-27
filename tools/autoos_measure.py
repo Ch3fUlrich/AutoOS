@@ -101,23 +101,34 @@ def _module_of(path):
     return path.split("/", 1)[0]
 
 
+# Tokens too generic to prove coverage: a touched docs/test_plan.md must not
+# read as covered by whichever test file a shared "test" token reaches first
+# (REVFIX review 10). "install"/"common" can still over-match; sources["tests"]
+# names the covering file, so that residue stays inspectable.
+_GENERIC_TOKENS = frozenset(("test", "tests", "py", "ps1", "sh"))
+
+
 def _covered(repo, touched, tracked):
     """The first tracked test file that covers a touched file, else None.
 
-    A test file covers a touched path when the touched file's stem equals a
-    whole token of the test file's name (split on "_", "." and "-"), or its
-    text contains the touched file's repo path (a suite reference). The
-    whole-token rule keeps lib/i.py from reading as covered by
-    tests/test_maintenance.py. Text is read with errors="replace" so one odd
-    byte cannot hide a reference.
+    A test file covers a touched path when the touched file's stem shares a
+    whole token with the test file's name (both split on "_", "." and "-"), or
+    its text contains the touched file's repo path (a suite reference). Both
+    sides are tokenised, so a multi-token stem - decision_engine.py matched by
+    test_decision_engine.py - is covered by name alone; comparing the stem
+    whole missed it (REVFIX). The whole-token rule still keeps lib/i.py from
+    reading as covered by tests/test_maintenance.py, and _GENERIC_TOKENS keeps
+    a stem's "test"/"py"/"sh" from standing in for a real match. Text is read
+    with errors="replace" so one odd byte cannot hide a reference.
     """
-    stems = {Path(p).stem for p in touched}
+    stem_tokens = {tok for path in touched
+                   for tok in re.split(r"[_.\-]", Path(path).stem)
+                   if tok and tok not in _GENERIC_TOKENS}
     for candidate in tracked:
         if not _is_test_file(candidate):
             continue
         name = candidate.rsplit("/", 1)[-1]
-        tokens = set(re.split(r"[_.\-]", name))
-        if any(stem and stem in tokens for stem in stems):
+        if set(re.split(r"[_.\-]", name)) & stem_tokens:
             return candidate
         try:
             text = (Path(repo) / candidate).read_text(encoding="utf-8",

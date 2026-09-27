@@ -30,6 +30,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
 PROBE = TOOLS / "probe-toolcalls.py"
+COMMON = TOOLS / "probe_common.py"
 
 # What a gateway error body says that must never be printed or stored: an org
 # id and an internal host.
@@ -41,6 +42,14 @@ GATEWAY_URL = "http://gateway.invalid/v1/chat/completions"
 def _load_module():
     """Load tools/probe-toolcalls.py via an absolute path (a hyphen is not importable)."""
     spec = importlib.util.spec_from_file_location("probe_toolcalls", str(PROBE))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_common():
+    """Load tools/probe_common.py by path - the shared post/retry plumbing."""
+    spec = importlib.util.spec_from_file_location("probe_common_for_toolcalls", str(COMMON))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -600,6 +609,85 @@ class CliMainTests(unittest.TestCase):
         self.assertIn("broken", text)
         for leak in (ORG, HOST, "tools are not supported"):
             self.assertNotIn(leak, text)
+
+
+class CommonMakePostHookTests(unittest.TestCase):
+    """tools/probe_common.py's make_post() now owns the whole urlopen loop;
+    a caller that needs to look at an error body passes `classify_error`, a
+    callable handed the HTTPError that may return the fixed token to report.
+
+    The default (no hook) must stay byte-for-byte the old behaviour: the bare
+    status, and the body never read. Only probe-toolcalls supplies a hook.
+    """
+
+    def setUp(self):
+        self.common = _load_common()
+
+    def _urlopen(self, exc):
+        return mock.patch.object(self.common.urllib.request, "urlopen", side_effect=exc)
+
+    def test_a_classifier_token_replaces_the_bare_status(self):
+        seen = []
+
+        def classify(exc):
+            seen.append(exc.code)
+            return "TOOLS-UNSUPPORTED"
+
+        post = self.common.make_post(GATEWAY_URL, "sk-fake-key",
+                                     classify_error=classify)
+        with self._urlopen(http_error(400, '{"error":"anything"}')):
+            status, parsed, error = post({"model": "m"})
+        self.assertEqual((status, parsed, error), (400, None, "TOOLS-UNSUPPORTED"))
+        self.assertEqual(seen, [400])
+
+    def test_a_classifier_that_declines_falls_back_to_the_status(self):
+        post = self.common.make_post(GATEWAY_URL, "sk-fake-key",
+                                     classify_error=lambda exc: None)
+        with self._urlopen(http_error(400, '{"error":"rate limit"}')):
+            status, parsed, error = post({"model": "m"})
+        self.assertEqual((status, parsed, error), (400, None, "HTTP 400"))
+
+    def test_without_a_classifier_the_error_body_is_never_read(self):
+        # The default hook is None: the body object must not be consumed, so
+        # even a body naming an org/host cannot leak into the token.
+        fp = mock.Mock()
+        fp.read.return_value = b'{"error":{"message":"org %s on %s"}}' % (ORG.encode(), HOST.encode())
+        exc = urllib.error.HTTPError(GATEWAY_URL, 400, "Bad Request", {}, fp)
+        post = self.common.make_post(GATEWAY_URL, "sk-fake-key")
+        with self._urlopen(exc):
+            status, parsed, error = post({"model": "m"})
+        self.assertEqual((status, parsed, error), (400, None, "HTTP 400"))
+        fp.read.assert_not_called()
+
+
+class ProbeToolcallsMakePostDelegationTests(unittest.TestCase):
+    """tools/probe-toolcalls.py no longer carries a second urlopen loop:
+    its make_post() is a thin wrapper that hands probe_common.make_post()
+    the 400 tool-support classifier."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_make_post_delegates_to_the_common_post_with_its_classifier(self):
+        seen = {}
+
+        def fake(gateway_url, key, timeout=180, classify_error=None):
+            seen["args"] = (gateway_url, key, timeout, classify_error)
+            return "POST"
+
+        with mock.patch.object(self.mod, "_common_make_post", fake):
+            got = self.mod.make_post("http://x/v1", "k")
+        self.assertEqual(got, "POST")
+        self.assertEqual(seen["args"][:3], ("http://x/v1", "k", 180))
+        self.assertIs(seen["args"][3], self.mod._classify_error)
+
+    def test_the_classifier_reads_only_a_400_and_only_for_tools(self):
+        # A non-400 is never read; a 400 is read for the one allowed fact.
+        self.assertIsNone(self.mod._classify_error(http_error(401, "tools")))
+        self.assertIsNone(self.mod._classify_error(http_error(400, '{"error":"rate limit"}')))
+        self.assertEqual(
+            self.mod._classify_error(http_error(400, '{"error":"no tool support"}')),
+            self.mod.TOOLS_UNSUPPORTED)
 
 
 if __name__ == "__main__":

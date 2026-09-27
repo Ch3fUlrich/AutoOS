@@ -3,6 +3,11 @@
     "agy": {
       "$comment": "skills_dir unmeasured - see clients.qwen's comment. signin_check is filled from tools/autoos_clients.py's own signin_probe below, not this table. unavailable_until 'agy 429 Individual quota reached, resets 110h47m at 2026-09-26T19:17Z (work/L1-routing/review-isofix.out)'.",
       "binary": "agy",
+      "capabilities": {
+        "$comment": "SPAWNCAP (S2): both false - headless agy auto-denies the tool that needs them and still exits 0, printing 'no output produced - a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied' (HEADLESS_REFUSAL_MARKERS; measured 2026-09-25, run 20260925-215048-85ba11). That rc-6 evidence does not measure a shell-vs-write split, so both are false rather than guessed.",
+        "shell": false,
+        "write": false
+      },
       "gateway_mode": "none",
       "id": "agy",
       "signin_check": "agy models",
@@ -14,6 +19,7 @@
     "claude": {
       "$comment": "No signin probe exists in tools/autoos_clients.py yet (auth is interactive 'claude login'); signin_check stays null until one does. supports_effort=false: no effort/reasoning flag in CLIENTS['claude'].modes.",
       "binary": "claude",
+      "capabilities": { "shell": true, "write": true },
       "gateway_mode": "none",
       "id": "claude",
       "signin_check": null,
@@ -23,6 +29,7 @@
     "codex": {
       "$comment": "skills_dir unmeasured - see clients.qwen's comment.",
       "binary": "codex",
+      "capabilities": { "shell": true, "write": true },
       "gateway_mode": "omniroute-run",
       "id": "codex",
       "signin_check": "env:AUTOOS_OMNIROUTE_KEY",
@@ -32,6 +39,7 @@
     "gemini": {
       "$comment": "skills_dir unmeasured - see clients.qwen's comment.",
       "binary": "gemini",
+      "capabilities": { "shell": true, "write": true },
       "gateway_mode": "omniroute-run",
       "id": "gemini",
       "signin_check": "env:AUTOOS_OMNIROUTE_KEY",
@@ -40,6 +48,7 @@
     },
     "opencode": {
       "binary": "opencode",
+      "capabilities": { "shell": true, "write": true },
       "gateway_mode": "native",
       "id": "opencode",
       "signin_check": "env:AUTOOS_OMNIROUTE_KEY",
@@ -49,6 +58,11 @@
     "qoder": {
       "$comment": "Own-account auth (qodercli login) but tools/autoos_clients.py defines no signin_probe for it (only agy has one) - a real gap, not fixed by this migration. skills_dir unmeasured - see clients.qwen's comment.",
       "binary": "qodercli",
+      "capabilities": {
+        "$comment": "QOFIX 2026-09-27 (L0, operator-approved): headless shell + write work with --permission-mode bypass_permissions (measured: file written + ls run in a scratch repo, Qwen3.8-Flash, 25 s). The earlier false/false came from the spawner passing the non-existent mode accept_edits. The spawner forces an --isolate sandbox for every non-read qoder run; qodercli has no path fence of its own, so the containment prompt and the post-run leak check (tracked + untracked parent changes, refs) are the controls - writes outside the parent checkout (e.g. $HOME) are not detected.",
+        "shell": true,
+        "write": true
+      },
       "gateway_mode": "none",
       "id": "qoder",
       "signin_check": null,
@@ -58,6 +72,7 @@
     "qwen": {
       "$comment": "skills_dir unmeasured: plan.md Phase C5 spikes each client's native skills directory; not done as of this migration.",
       "binary": "qwen",
+      "capabilities": { "shell": true, "write": true },
       "gateway_mode": "omniroute-run",
       "id": "qwen",
       "signin_check": "env:AUTOOS_OMNIROUTE_KEY",
@@ -155,20 +170,25 @@
       "tool_calls": "unproven"
     },
     "deepseek-flash": {
-      "$comment": "deepseek-direct leg. docs/models.md is explicit that this is a *different snapshot* from deepseek-v4.1-flash ('no v4-flash or deepseek-flash legs' in the v4.1-flash pinned route) - reasoning/ladder are not assumed from that sibling. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration.",
+      "$comment": "deepseek-direct leg. A *different snapshot* from deepseek-v4.1-flash (the providers' own snapshot names, not a good-vs-bad ranking). Re-verified 2026-09-27: the native deepseek/deepseek-flash leg measured 200 through the gateway (2026-09-27T14:5xZ), so the earlier '400 / not available in the live catalog' note is withdrawn (L0 2026-09-27T12:55:16Z, operator). DSMAX (operator 2026-09-27T15:05:54Z) moved the reasoning ladder here from the retired OpenRouter twin, so routes.deepseek-v4.1-flash kept its #low/#high/#max aliases while this was legs[0]. Since 2026-09-27T16:4xZ providers.deepseek is 402 (available: false): the route fails closed and the aliases are out of the renders until the balance is topped up - the ladder stays here so they re-render unchanged. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
         "tokens": 65536
       },
-      "effort_ladder": [],
+      "effort_ladder": [
+        "none",
+        "low",
+        "high",
+        "max"
+      ],
       "family": "deepseek",
       "id": "deepseek-flash",
       "output_max": 32768,
       "price_cache_read": 6e-09,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
-      "reasoning": false,
+      "reasoning": true,
       "tool_calls": "unproven"
     },
     "deepseek-v4-flash": {
@@ -1585,6 +1605,34 @@
         "allow": false,
         "reason": "no GPT models through a paid API (too expensive)",
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
+      },
+      {
+        "id": "allow-cheaperinference-kimi-k3",
+        "match": "cheaperinference/kimi-k3",
+        "allow": true,
+        "reason": "cheaperinference re-enabled with a small balance, cheap efficient models only: kimi-k3 is one of the three allowed legs",
+        "source": "L0 2026-09-27T12:55:16Z (operator)"
+      },
+      {
+        "id": "allow-cheaperinference-glm-5.2",
+        "match": "cheaperinference/glm-5.2",
+        "allow": true,
+        "reason": "cheaperinference re-enabled with a small balance, cheap efficient models only: glm-5.2 is one of the three allowed legs",
+        "source": "L0 2026-09-27T12:55:16Z (operator)"
+      },
+      {
+        "id": "allow-cheaperinference-minimax-m2.7",
+        "match": "cheaperinference/minimax-m2.7",
+        "allow": true,
+        "reason": "cheaperinference re-enabled with a small balance, cheap efficient models only: minimax-m2.7 is one of the three allowed legs",
+        "source": "L0 2026-09-27T12:55:16Z (operator)"
+      },
+      {
+        "id": "deny-cheaperinference",
+        "match": "cheaperinference/*",
+        "allow": false,
+        "reason": "cheaperinference balance is small: only kimi-k3, glm-5.2 and minimax-m2.7 may serve; every other cheaperinference leg spends the remaining balance and stays off until the operator allows it",
+        "source": "L0 2026-09-27T12:55:16Z (operator)"
       }
     ]
   },
@@ -1653,6 +1701,7 @@
       ]
     },
     "cerebras": {
+      "$comment": "Operator 2026-09-27T12:55Z: no free tier, no credits; OmniRoute disables the connection. The route legs stay in the data (routes.*.unavailable_legs) so the intent is visible; the whole provider is off until the operator restores it.",
       "api_base": null,
       "id": "cerebras",
       "litellm_env": "CEREBRAS_API_KEY",
@@ -1662,12 +1711,14 @@
         "customUserAgent": "curl/8.7.1"
       },
       "tier": "free",
-      "trains_on_prompts": false
+      "trains_on_prompts": false,
+      "available": false
     },
     "cheapinference": {
       "$comment": [
         "Privacy research 2026-09-26 (Q1 lane): https://www.cheaperinference.com/legal/privacy states 'We do not use customer prompt or response bodies to train Keak models' and 'Cheaper Inference does not store prompt or response bodies in its application database' - only operational/billing metadata (model, endpoint, timestamps, token usage, latency) is retained, generally 12 months. CheaperInference is itself a marketplace proxy to upstream providers (OpenAI/Anthropic/Google/Meta/etc, owned by Keak) - this citation covers CheaperInference's own handling only, not each upstream provider's separate policy. trains_on_prompts: false confirmed (was unsourced before this migration).",
-        "Operator 2026-09-27T10:12Z (via L0, inbox/L1-routing.md): no top-up - treated like SambaNova under R1. CheaperInference has no free model (all its legs are credit-pool models), and every worker turn failed '[cheaperinference] All 1 connection(s) credits exhausted' 08:12Z-08:25Z (work/L1-routing/OR1a.r2.out), so the whole provider is unavailable until credits return."
+        "Operator 2026-09-27T12:55Z re-enabled with a small balance, cheap efficient models only. The 10:12Z 'no top-up / all credits exhausted' note above is withdrawn: only cheaperinference/kimi-k3, cheaperinference/glm-5.2 and cheaperinference/minimax-m2.7 are allowed to serve (policy.leg_rules allow entries, then a deny cheaperinference/*); every other cheaperinference leg stays off - cheaperinference/glm-4.5-air is route-gated in t2-worker/t3-driver, cheaperinference/deepseek-v4-flash keeps its t2-worker entry. Source: L0 2026-09-27T12:55:16Z (operator).",
+        "Operator 2026-09-27T17:2xZ: wallet balance exhausted (402), operator rule: credits out -> off until topped up. Provider marked available:false. Its pinned combos cheaperinference/{glm-5.2,kimi-k3} then go to omitted like deepseek - re-pin tests accordingly."
       ],
       "api_base": "https://api.cheaperinference.com/v1",
       "id": "cheapinference",
@@ -1714,8 +1765,9 @@
       "trains_on_prompts": true
     },
     "deepseek": {
-      "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either.",
+      "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either. DeepSeek credit exhausted (402 Insufficient Balance, measured 2026-09-27T16:4xZ): providers.deepseek is off entirely (available: false, below) until topped up. Routes whose only served leg was deepseek/* (deepseek-v4.1-flash) fail closed like t1/spark; t2-worker-clean/t3-driver-clean still serve via mistral.",
       "api_base": null,
+      "available": false,
       "id": "deepseek",
       "litellm_env": "DEEPSEEK_API_KEY",
       "litellm_prefix": null,
@@ -1825,7 +1877,7 @@
       "trains_on_prompts": false
     },
     "free_ai": {
-      "$comment": "BRIEF FREEAI 2026-09-27: Free.ai's free tier, an OpenAI-compatible endpoint at https://api.free.ai/v1 (measured L0 2026-09-27T11:23:04Z: POST /v1/chat/completions with model 'qwen7b' -> 200; that id answers with Qwen/Qwen3-30B-A3B-Instruct). Terms: free self-hosted only, 30k tokens/day, 10 requests/min, prompts are public and may be used for training - so trains_on_prompts true and tier free, which makes private_safe() reject it (a free effective tier is never private-safe) and keeps it out of every -clean route. Referral: https://free.ai/?ref=46pK6GCwBJs. litellm_prefix 'openai' plus its own api_base, so LiteLLM never falls back to api.openai.com; omniroute_id 'free_ai' equals the registry id and the leg prefix, so apply.sh registers one connection and the 'free_ai/qwen7b' leg resolves through provider_maps_from_dict() (cf. zen -> opencode-zen).",
+      "$comment": "BRIEF FREEAI 2026-09-27: Free.ai's free tier, an OpenAI-compatible endpoint at https://api.free.ai/v1 (measured L0 2026-09-27T11:23:04Z: POST /v1/chat/completions with model 'qwen7b' -> 200; that id answers with Qwen/Qwen3-30B-A3B-Instruct). Terms: free self-hosted only, 30k tokens/day, 10 requests/min, prompts are public and may be used for training - so trains_on_prompts true and tier free, which makes private_safe() reject it (a free effective tier is never private-safe) and keeps it out of every -clean route. Referral: https://free.ai/?ref=46pK6GCwBJs. litellm_prefix 'openai' plus its own api_base, so LiteLLM never falls back to api.openai.com; omniroute_id is the built-in OmniRoute connection id 'free-ai', NOT the registry id: the live catalog names this provider's model free-ai/qwen7b, so model_prefix 'free-ai' (same shape as antigravity -> agy) makes gateway_ref() emit free-ai/qwen7b in OmniRoute combos while the registry leg stays free_ai/qwen7b and apply.sh addresses the built-in 'free-ai' connection (api-keys.yml keeps the free_ai key name; that connection already exists, so apply reports it registered and never adds a duplicate).",
       "api_base": "https://api.free.ai/v1",
       "id": "free_ai",
       "litellm_env": "FREE_AI_API_KEY",
@@ -1837,7 +1889,8 @@
           "tpd": 30000
         }
       },
-      "omniroute_id": "free_ai",
+      "model_prefix": "free-ai",
+      "omniroute_id": "free-ai",
       "provider_data": null,
       "tier": "free",
       "trains_on_prompts": true
@@ -1955,7 +2008,8 @@
       "$comment": [
         "KNOWN EXCEPTION (provider-level trains_on_prompts cannot express this): the meta/muse-spark-1.3-contributor leg reached through this provider trains by contract; combos.json's own $comment documents the 2026-09-21 operator downgrade this caused - 't1-orchestrator-clean ... no longer means trains-nothing - it means paid-only'. Every other leg reached through openrouter (deepseek, mistral, google twins) does not train.",
         "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
-        "SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 15:44Z/15:49Z recovery rationale above is withdrawn - OpenRouter is BYOK with no shared credit, so no funded-credit leg exists; Qwen-via-OpenRouter legs are superseded and referenced by no route, no deepseek-v4-pro entry exists, and cheaperinference/deepseek-v4-flash carries route-level unavailable_legs entries (DeepSeek is V4.1-Flash-only). Every OpenRouter leg (openrouter/deepseek/deepseek-v4.1-flash, openrouter/meta/muse-spark-1.3-contributor, and since 2026-09-27 the BYOK openrouter/openai/gpt-oss-120b) is gated by its own routes.*.unavailable_legs entry - see tools/registry.py _leg_is_unavailable, which flags a leg down when either its route-level unavailable_legs entry or its provider-level available:false says so, so both gates are independently enforced. Re-probe before trusting any flagged leg again."
+        "SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 15:44Z/15:49Z recovery rationale above is withdrawn - OpenRouter is BYOK with no shared credit, so no funded-credit leg exists; Qwen-via-OpenRouter legs are superseded and referenced by no route, no deepseek-v4-pro entry exists, and cheaperinference/deepseek-v4-flash carries route-level unavailable_legs entries (DeepSeek is V4.1-Flash-only). Every OpenRouter leg (openrouter/deepseek/deepseek-v4.1-flash, openrouter/meta/muse-spark-1.3-contributor, and since 2026-09-27 the BYOK openrouter/openai/gpt-oss-120b) is gated by its own routes.*.unavailable_legs entry - see tools/registry.py _leg_is_unavailable, which flags a leg down when either its route-level unavailable_legs entry or its provider-level available:false says so, so both gates are independently enforced. Re-probe before trusting any flagged leg again.",
+        "DSMAX (operator 2026-09-27T15:05:54Z via L0): no OpenRouter credit - a re-probe hit 401 'insufficient credits' even for BYOK, so this provider is off entirely (available: false, below, not only per-leg). This also covers openrouter/meta/muse-spark-1.3-contributor: Muse is available as the free Zen leg through the opencode client (client_bound opencode) only, never by spending OpenRouter credit. The three allow-openrouter-* leg_rules stay in place so the intent is visible; this provider-level gate is the guard that actually keeps every openrouter leg out of the renders."
       ],
       "api_base": null,
       "id": "openrouter",
@@ -1964,7 +2018,8 @@
       "omniroute_id": "openrouter",
       "provider_data": null,
       "tier": "paid",
-      "trains_on_prompts": false
+      "trains_on_prompts": false,
+      "available": false
     },
     "samba": {
       "$comment": [
@@ -2095,7 +2150,7 @@
       "class": "cheap",
       "id": "deepseek-v4.1-flash",
       "legs": [
-        "openrouter/deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-flash",
         "opencode-zen/deepseek-v4.1-flash"
       ],
       "strategy": "priority",
@@ -2112,7 +2167,7 @@
           "openhands_profile": {
             "max_input_tokens": 131072,
             "max_output_tokens": 32768,
-            "reasoning": false
+            "reasoning": true
           },
           "output": 32768
         }
@@ -2271,11 +2326,13 @@
       }
     },
     "t1-orchestrator": {
+      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry",
       "class": "cheap",
       "id": "t1-orchestrator",
       "legs": [
         "opencode-zen/muse-spark-1.3-contributor-free",
-        "openrouter/meta/muse-spark-1.3-contributor"
+        "openrouter/meta/muse-spark-1.3-contributor",
+        "gemini/gemini-3.8-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -2350,10 +2407,12 @@
       "unavailable_legs": {}
     },
     "t1-orchestrator-free-only": {
+      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry",
       "class": "free",
       "id": "t1-orchestrator-free-only",
       "legs": [
-        "opencode-zen/muse-spark-1.3-contributor-free"
+        "opencode-zen/muse-spark-1.3-contributor-free",
+        "gemini/gemini-3.8-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -2504,7 +2563,11 @@
           "available": false
         },
         "cheaperinference/deepseek-v4-flash": {
-          "$comment": "Operator decision 2026-09-26 16:4xZ ('Claude budget' revision, briefs/common.md): 'DeepSeek = ONLY V4.1 Flash: native deepseek/deepseek-flash or openrouter/deepseek/deepseek-v4.1-flash ... incl. samba/cheaperinference DeepSeek rows' - this leg is DeepSeek v4 (not v4.1), so it is out. Kept in place (operator flags, never deletes or reorders) so combos.json still mirrors today's committed data.",
+          "$comment": "Operator decision 2026-09-26 16:4xZ ('Claude budget' revision, briefs/common.md): 'DeepSeek = ONLY V4.1 Flash: native deepseek/deepseek-flash or openrouter/deepseek/deepseek-v4.1-flash ... incl. samba/cheaperinference DeepSeek rows' - this leg is DeepSeek v4 (not v4.1), so it is out. Kept in place (operator flags, never deletes or reorders) so combos.json still mirrors today's committed data. Still denied after the 2026-09-27T12:55Z re-enable by the earlier deny-deepseek (*deepseek*) rule.",
+          "available": false
+        },
+        "cheaperinference/glm-4.5-air": {
+          "$comment": "Operator 2026-09-27T12:55Z: cheaperinference came back with a small balance for cheap efficient models only - kimi-k3, glm-5.2 and minimax-m2.7 are allowed (policy.leg_rules), the trailing deny-cheaperinference gates this leg. Route-gated here so rule 9 passes.",
           "available": false
         },
         "opencode-zen/deepseek-v4.1-flash": {
@@ -2692,6 +2755,10 @@
         },
         "groq/qwen/qwen3.8-27b": {
           "$comment": "deny-groq (OR2 2026-09-27): 400 'messages.N role:assistant' x335 + 413 x78 on agent calls (L0 ONE-ROUTER call_logs)",
+          "available": false
+        },
+        "cheaperinference/glm-4.5-air": {
+          "$comment": "Operator 2026-09-27T12:55Z: cheaperinference came back with a small balance for cheap efficient models only - kimi-k3, glm-5.2 and minimax-m2.7 are allowed (policy.leg_rules), the trailing deny-cheaperinference gates this leg. Route-gated here so rule 9 passes.",
           "available": false
         },
         "opencode-zen/deepseek-v4.1-flash": {
