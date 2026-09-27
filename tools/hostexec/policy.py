@@ -1341,17 +1341,17 @@ def _docker_root_problem(head: Sequence[str]) -> str | None:
                 if _long_opt_value(tok, rest, j) == "host":
                     return f"{base} {sub} {hit}=host"
             elif hit in ("--volume", "--mount"):
-                bind_problem = _dockerbind_problem(base, sub, _long_opt_value(tok, rest, j),
+                bind_problem = _docker_bind_problem(base, sub, _long_opt_value(tok, rest, j),
                                                     is_mount=hit == "--mount")
                 if bind_problem:
                     return bind_problem
             elif tok == "-v" and j + 1 < m:
-                bind_problem = _dockerbind_problem(base, sub, rest[j + 1])
+                bind_problem = _docker_bind_problem(base, sub, rest[j + 1])
                 if bind_problem:
                     return bind_problem
             elif tok.startswith("-v") and len(tok) > 2 and not tok.startswith("--"):
                 # Attached short form: -v/src:dst, -vX (r2 high).
-                bind_problem = _dockerbind_problem(base, sub, tok[2:].lstrip("="))
+                bind_problem = _docker_bind_problem(base, sub, tok[2:].lstrip("="))
                 if bind_problem:
                     return bind_problem
             j += 1
@@ -1378,7 +1378,7 @@ def _docker_root_problem(head: Sequence[str]) -> str | None:
     return None
 
 
-def _dockerbind_problem(base: str, sub: str, vol_val: str, *,
+def _docker_bind_problem(base: str, sub: str, vol_val: str, *,
                         is_mount: bool = False) -> str | None:
     """The bind-source test shared by --volume/-v and --mount: a mount spec is
     comma-separated key=value, a volume spec is src:dst[:mode]."""
