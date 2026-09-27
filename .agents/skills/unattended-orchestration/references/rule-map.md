@@ -6,12 +6,12 @@ and every new id target exists in `SKILL.md`.
 
 | old | new / code | notes |
 |---|---|---|
-| `R-spawn-01` | code: `l1_handoff.py` lane-cleanup | stop id, remove worktree, delete sandbox |
+| `R-spawn-01` | partial: `l1_handoff.py` stale() lists the stop/remove commands | listing only, the orchestrator runs them (not enforced) |
 | `R-spawn-02` | code: MCP `spawn` uses `start_new_session=True` + `_reap()` | process-group isolation |
 | `R-spawn-03` | code: `autoos_clients.py build_command` argv-order check | --mcp-config variadic before prompt |
 | `R-spawn-04` | code: `trust_worktree.py --lane-mcp` strict per-worktree config | lane MCP isolation |
 | `R-spawn-05` | R-orch-12 | not enforced in code (cao/worktree.py only prints the trust_worktree.py line) |
-| `R-spawn-06` | code: `l1_handoff.py` brief validator refuses raw worktree paths | require isolation:worktree |
+| `R-spawn-06` | R-orch-04 | not enforced in code (no brief validator exists) |
 | `R-spawn-07` | code: `run`/`spawn` refuses shell tasks under isolation:worktree | isolation enforcement |
 | `R-spawn-08` | code: `client_key`/`key_files` fall back to main checkout | api-keys.yml fallback |
 | `R-spawn-09` | `R-orch-07` | absorbed: cross-family routing |
@@ -67,7 +67,7 @@ and every new id target exists in `SKILL.md`.
 | `R-gateway-01` | code: `autoos_resolver.py` enforces bucket leg order | already enforced |
 | `R-gateway-02` | code: resolver `effort`/`max_tokens` sizes reviewer output budget | already enforced |
 | `R-gateway-03` | code: `--free` is opencode-only (refuses other clients) | already enforced |
-| `R-gateway-04` | code: `route` refuses when live gateway combos mismatch code | drift check |
+| `R-gateway-04` | docs: `configuration/omniroute/apply.sh --drift` (run after every apply) | `route` does not check live drift |
 | `R-gateway-05` | code: preflight checks tool-allowlist prefix matches MCP wiring | prefix validation |
 | `R-gateway-06` | code: resolver caps Qwen free-only requests (~7000 input tokens) | TPM guard |
 | `R-gateway-07` | code: `heartbeat` surfaces probe-proposals.jsonl lines | heartbeat report |

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -41,19 +42,27 @@ def load_module(relative_path: str, name: str):
 
 
 def expected_by_omni(providers: dict):
-    """(prefix, api_base, env_key, seen) keyed by OmniRoute provider id."""
+    """(prefix, api_base, env_key, seen) keyed by provider name and OmniRoute id.
+
+    Both are valid leg prefixes (tools/registry.py's resolve_leg accepts
+    either), so provider_maps_from_dict() keys both; this mirrors it."""
     prefix, api_base, env_key, seen = {}, {}, {}, {}
-    for name, entry in providers.items():
-        omni = entry.get("omniroute_id")
-        if not omni:
-            continue
-        seen[omni] = name
-        if entry.get("litellm_prefix"):
-            prefix[omni] = entry["litellm_prefix"]
-        if entry.get("api_base"):
-            api_base[omni] = entry["api_base"]
-        if entry.get("litellm_env"):
-            env_key[omni] = entry["litellm_env"]
+    rows = [(name, entry) for name, entry in providers.items()
+            if isinstance(entry, dict) and entry.get("omniroute_id")]
+    # Name keys first, then omniroute_id keys only when no name claims them -
+    # the same name-first precedence as provider_maps_from_dict() (PROV finding 4).
+    for name, entry in rows:
+        seen[entry["omniroute_id"]] = name
+        for dest, field in ((prefix, "litellm_prefix"), (api_base, "api_base"),
+                            (env_key, "litellm_env")):
+            if entry.get(field):
+                dest[name] = entry[field]
+    for name, entry in rows:
+        omni = entry["omniroute_id"]
+        for dest, field in ((prefix, "litellm_prefix"), (api_base, "api_base"),
+                            (env_key, "litellm_env")):
+            if entry.get(field) and omni not in dest:
+                dest[omni] = entry[field]
     return prefix, api_base, env_key, seen
 
 
@@ -79,6 +88,16 @@ def main() -> int:
             if env in seen_envs:
                 problems.append(f"duplicate litellm_env {env}: {seen_envs[env]}, {name}")
             seen_envs[env] = name
+
+    # 1b. a provider name must never equal ANOTHER provider's omniroute_id:
+    # provider_maps_from_dict()/expected_by_omni() key both spellings onto one
+    # string, so the collision would let one provider's transport overwrite
+    # another's (PROV finding 4).
+    for name, entry in providers.items():
+        omni = entry.get("omniroute_id")
+        if omni and omni != name and omni in providers:
+            problems.append(
+                f"provider name {omni!r} is also provider {name!r}'s omniroute_id")
 
     # 2. the case quirk and the two null rows are contracts, not trivia.
     if "SambaNova" not in providers:
@@ -122,10 +141,33 @@ def main() -> int:
         if "ai-registry.json" not in text:
             problems.append(f"{rel} does not read catalog/ai-registry.json")
 
-    # 6. the docs table names the registry as its source.
+    # 6. the docs table names the registry as its source AND its provider-id
+    #    column matches every omniroute_id (PROV finding 5: the human view of
+    #    exactly what apply reads had drifted - free_ai vs free-ai - and
+    #    nothing compared it). A provider with a null omniroute_id must show a
+    #    dash, never a bare id.
     docs = (ROOT / "docs" / "api-keys.md").read_text(encoding="utf-8")
     if "catalog/ai-registry.json" not in docs:
         problems.append("docs/api-keys.md does not name catalog/ai-registry.json")
+    table_ids = {}
+    for line in docs.splitlines():
+        m = re.match(r"^\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|", line)
+        if m:
+            table_ids[m.group(1)] = m.group(2).strip()
+    for name, entry in registry_providers.items():
+        if name not in table_ids:
+            continue
+        cell = table_ids[name]
+        omni = entry.get("omniroute_id")
+        if omni is None:
+            if not cell.startswith("—"):
+                problems.append(
+                    f"docs/api-keys.md row {name}: expected — for a null "
+                    f"omniroute_id, got {cell!r}")
+        elif cell != f"`{omni}`":
+            problems.append(
+                f"docs/api-keys.md row {name}: provider id {cell!r} != "
+                f"omniroute_id {omni!r}")
 
     if problems:
         for problem in problems:
