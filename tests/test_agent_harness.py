@@ -184,6 +184,28 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "new")
             self.assertEqual(list(target.parent.glob("*.autoos-backup-*")), [])
 
+    def test_a_symlink_is_refused_not_written_through(self):
+        # Writing through a link edits whatever it points at, which the user did
+        # not ask AutoOS to touch. antigravity_desktop_entry refuses a symlinked
+        # .desktop for the same reason; this helper must refuse too, and say so.
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            link = Path(tmp) / "linked.json"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest("cannot create symlinks here: %s" % exc)
+            wrote = module._backup_and_write(str(link), "changed", stamp=self.STAMP)
+            self.assertFalse(wrote, "a symlink must be refused, not written through")
+            self.assertEqual(target.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(
+                os.path.lexists("%s.autoos-backup-%s" % (link, self.STAMP)),
+                "a refused write must not leave a backup either",
+            )
+
     @unittest.skipIf(os.name == "nt", "POSIX mode bits do not exist on Windows")
     def test_the_backup_keeps_the_mode_of_the_file_it_copies(self):
         # A 0600 config may hold a key: shutil.copyfile makes the backup with
@@ -395,6 +417,26 @@ class OpencodeMergeTests(unittest.TestCase):
         user = {"permission": {"bash": "allow"}}
         doc = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
         self.assertEqual(doc["permission"]["bash"]["*"], "allow")
+
+    @unittest.skipUnless(os.name == "posix", "creating symlinks needs POSIX")
+    def test_a_symlinked_config_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real.json"
+            real.write_text("{}", encoding="utf-8")
+            link = Path(tmp) / "opencode.json"
+            link.symlink_to(real)
+            before = real.read_bytes()
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(link),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", SKILLS_SOURCE,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("left alone", result.stdout)
+            self.assertEqual(real.read_bytes(), before)
+            self.assertEqual(list(Path(tmp).glob("*.autoos-backup-*")), [])
 
     def test_an_unexpected_instructions_type_is_left_alone(self):
         with tempfile.TemporaryDirectory() as tmp:

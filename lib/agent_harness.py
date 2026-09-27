@@ -443,12 +443,21 @@ def _backup_and_write(path, text, stamp=None):
     copy2, not copyfile: the backup keeps the source's mode (and times), like
     the bash helper's `cp -p`. A 0600 config that may hold a key must not get a
     0644 copy of itself.
+
+    Returns True when `path` was written and False when it was refused. A
+    symlink is refused: writing through it would edit whatever it points at,
+    which the user did not ask AutoOS to touch (compare
+    antigravity_desktop_entry, which refuses a symlinked .desktop). Nothing -
+    not the link, not its target, not a backup - is changed on refusal.
     """
+    if os.path.islink(path):
+        return False
     if os.path.exists(path):
         shutil.copy2(path, _backup_path(path, stamp))
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
+    return True
 
 
 def cmd_opencode(args):
@@ -492,7 +501,11 @@ def cmd_opencode(args):
         _print_notes(notes)
         return 0
 
-    _backup_and_write(config_path, json.dumps(desired, indent=2, ensure_ascii=False) + "\n")
+    if not _backup_and_write(
+        config_path, json.dumps(desired, indent=2, ensure_ascii=False) + "\n"
+    ):
+        print("agent-harness opencode: left alone, %s is a symlink" % config_path)
+        return 0
     if link_needs_change:
         if os.path.islink(link_path) or _is_junction(link_path):
             _remove_link(link_path)
@@ -578,7 +591,8 @@ def _apply_file(path, text, dry_run):
             pass
     if dry_run:
         return "would update" if existed else "would install"
-    _backup_and_write(path, text)
+    if not _backup_and_write(path, text):
+        return "left alone (symlink)"
     return "updated" if existed else "installed"
 
 
