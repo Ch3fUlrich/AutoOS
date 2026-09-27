@@ -53,7 +53,8 @@ WorkingDirectory=@WORKDIR@
 # pauses the burst until the interval rolls over, then systemd tries again.
 # @HERDR_BIN@ is rendered by install.sh from the profile's HERDR_BIN
 # (default /root/.local/bin/herdr): the same binary the driver runs.
-ExecCondition=/bin/sh -c 'if @HERDR_BIN@ pane list >/dev/null 2>&1; then exit 1; fi; exit 0'
+# @HERDR_BIN_SH@ is the shell-quoted form for use inside sh -c.
+ExecCondition=/bin/sh -c 'if @HERDR_BIN_SH@ pane list >/dev/null 2>&1; then exit 1; fi; exit 0'
 ExecStart=@HERDR_BIN@ server
 
 Restart=on-failure

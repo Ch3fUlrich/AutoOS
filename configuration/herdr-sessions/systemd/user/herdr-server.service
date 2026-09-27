@@ -45,7 +45,8 @@ Environment=SHELL=/bin/zsh
 Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # @HERDR_BIN@ is rendered by install.sh from the profile's HERDR_BIN
 # (default %h/.local/bin/herdr): the same binary the driver runs.
-ExecStart=/bin/sh -c 'if @HERDR_BIN@ status 2>/dev/null | grep -q "status: running"; then echo "herdr server already running — nothing to do"; exit 0; fi; exec @HERDR_BIN@ server'
+# @HERDR_BIN_SH@ is the shell-quoted form for use inside sh -c.
+ExecStart=/bin/sh -c 'if @HERDR_BIN_SH@ status 2>/dev/null | grep -q "status: running"; then echo "herdr server already running — nothing to do"; exit 0; fi; exec @HERDR_BIN_SH@ server'
 Restart=on-failure
 RestartSec=10
 # The guard above exits 0 when a server is already up; RemainAfterExit keeps the

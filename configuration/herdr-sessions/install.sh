@@ -175,12 +175,56 @@ systemd_escape() {
     printf '%s' "$out"
 }
 
+# systemd_escape_path <value>: like systemd_escape but also wraps the result
+# in double quotes if it contains spaces or tabs, so systemd's ExecStart
+# parser sees it as a single argument. Specifiers (%h, %u, etc.) are passed
+# through unquoted because they are not literal paths.
+systemd_escape_path() {
+    local s="$1"
+    # If it looks like a systemd specifier (starts with %), don't quote.
+    case "$s" in
+        %*) printf '%s' "$s"; return ;;
+    esac
+    local esc; esc="$(systemd_escape "$s")"
+    # Quote if it contains whitespace or is empty (empty would be invalid anyway)
+    case "$esc" in
+        *[[:space:]]*) printf '"%s"' "$esc" ;;
+        *) printf '%s' "$esc" ;;
+    esac
+}
+
+# shell_quote <value>: quote <value> for safe use inside a shell command
+# string (e.g. inside sh -c '...'). Uses printf %q which produces a
+# POSIX-compatible quoted form.
+shell_quote() {
+    printf '%q' "$1"
+}
+
+# systemd_escape_workdir <value>: escape <value> for use in WorkingDirectory.
+# WorkingDirectory does not support quoting (a quoted value fails to load),
+# so spaces must be escaped as \x20. Also doubles % for specifier expansion,
+# and escapes \ and " like systemd_escape.
+systemd_escape_workdir() {
+    local s="$1" out="" c i
+    for (( i = 0; i < ${#s}; i++ )); do
+        c="${s:i:1}"
+        case "$c" in
+            '\') out+='\\' ;;
+            '"') out+='\"' ;;
+            '%') out+='%%' ;;
+            ' ') out+='\x20' ;;
+            *)   out+="$c" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 # Render a unit template into a real unit file. The checked-in units carry
 # five literal tokens -- @PROFILE@ (the --profile argument as given, informational
 # only), @APPDIR@ (where this checkout lives), @WORKDIR@ (the cwd panes
 # inherit), @PROFILE_PATH@ (the resolved absolute profile path, what
-# HERDR_PROFILE is actually set to) and @HERDR_BIN@ (the herdr binary the unit
-# execs, from the profile's HERDR_BIN). Every replacement is an
+# HERDR_PROFILE is actually set to) and @HERDR_BIN@/@HERDR_BIN_SH@ (the herdr
+# binary the unit execs, from the profile's HERDR_BIN). Every replacement is an
 # arbitrary filesystem path, so this does NOT use sed (its replacement text
 # treats `&` as "the matched text" and `\` as an escape, both unescaped here) --
 # and, less obviously, does NOT use bash's own `${var/pattern/value}` either: on
@@ -192,21 +236,26 @@ systemd_escape() {
 # double quotes (WorkingDirectory is the one exception -- systemd does not
 # strip quotes there), so a path with a space stays one token, and a literal
 # `%`/`"`/`\` survives specifier expansion and quote parsing.
-# @HERDR_BIN@ is the one token spliced RAW: its default for user units is the
-# `%h` specifier itself, which escaping would turn into a literal `%h` path.
+# @HERDR_BIN@ is rendered with systemd_escape_path (quoted if needed for ExecStart).
+# @HERDR_BIN_SH@ is rendered with shell_quote (for use inside sh -c).
+# @WORKDIR@ is rendered with systemd_escape_workdir (spaces as \x20, no quotes).
 render_unit() {
     local line
     local appdir_esc workdir_esc profile_path_esc
+    local herdr_bin_sys herdr_bin_sh
     # Escape once, not once per line.
     appdir_esc="$(systemd_escape "$APPDIR")"
-    workdir_esc="$(systemd_escape "$WORKDIR")"
+    workdir_esc="$(systemd_escape_workdir "$WORKDIR")"
     profile_path_esc="$(systemd_escape "$PROFILE_CONF")"
+    herdr_bin_sys="$(systemd_escape_path "$HERDR_BIN")"
+    herdr_bin_sh="$(shell_quote "$HERDR_BIN")"
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="$(_replace_token "$line" "@PROFILE@" "$PROFILE")"
         line="$(_replace_token "$line" "@APPDIR@" "$appdir_esc")"
         line="$(_replace_token "$line" "@WORKDIR@" "$workdir_esc")"
         line="$(_replace_token "$line" "@PROFILE_PATH@" "$profile_path_esc")"
-        line="$(_replace_token "$line" "@HERDR_BIN@" "$HERDR_BIN")"
+        line="$(_replace_token "$line" "@HERDR_BIN@" "$herdr_bin_sys")"
+        line="$(_replace_token "$line" "@HERDR_BIN_SH@" "$herdr_bin_sh")"
         printf '%s\n' "$line"
     done < "$1"
 }
