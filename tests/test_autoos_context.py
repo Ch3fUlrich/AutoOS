@@ -106,26 +106,26 @@ class CapTests(unittest.TestCase):
         ])
 
     def test_named_rows(self):
-        self.assertEqual(ctx.cap_for("claude-opus-4-6"), 400000)
-        self.assertEqual(ctx.cap_for("fable-1"), 400000)
-        self.assertEqual(ctx.cap_for("muse-spark-1.3"), 300000)
-        self.assertEqual(ctx.cap_for("gemini-3.1-pro"), 200000)
+        self.assertEqual(ctx.cap_for("claude-opus-4-6", ctx.DEFAULT_CAPS), 400000)
+        self.assertEqual(ctx.cap_for("fable-1", ctx.DEFAULT_CAPS), 400000)
+        self.assertEqual(ctx.cap_for("muse-spark-1.3", ctx.DEFAULT_CAPS), 300000)
+        self.assertEqual(ctx.cap_for("gemini-3.1-pro", ctx.DEFAULT_CAPS), 200000)
 
     def test_sonnet_falls_through_to_the_200k_default(self):
-        self.assertEqual(ctx.cap_for("claude-sonnet-4-5"), 150000)
-        self.assertEqual(ctx.cap_for("some-unknown-model"), 150000)
+        self.assertEqual(ctx.cap_for("claude-sonnet-4-5", ctx.DEFAULT_CAPS), 150000)
+        self.assertEqual(ctx.cap_for("some-unknown-model", ctx.DEFAULT_CAPS), 150000)
 
     def test_match_is_case_insensitive_substring(self):
-        self.assertEqual(ctx.cap_for("Claude-OPUS-4-6"), 400000)
+        self.assertEqual(ctx.cap_for("Claude-OPUS-4-6", ctx.DEFAULT_CAPS), 400000)
 
     def test_first_matching_row_wins(self):
-        self.assertEqual(ctx.cap_for("gemini-opus-hybrid"), 400000)
+        self.assertEqual(ctx.cap_for("gemini-opus-hybrid", ctx.DEFAULT_CAPS), 400000)
 
     def test_bracket_1m_takes_the_family_row(self):
-        self.assertEqual(ctx.cap_for("fable[1m]"), 400000)
-        self.assertEqual(ctx.cap_for("muse-spark-1.3[1m]"), 300000)
-        self.assertEqual(ctx.cap_for("gemini-3.1-pro[1m]"), 200000)
-        self.assertEqual(ctx.cap_for("claude-opus-4-6[1m]"), 400000)
+        self.assertEqual(ctx.cap_for("fable[1m]", ctx.DEFAULT_CAPS), 400000)
+        self.assertEqual(ctx.cap_for("muse-spark-1.3[1m]", ctx.DEFAULT_CAPS), 300000)
+        self.assertEqual(ctx.cap_for("gemini-3.1-pro[1m]", ctx.DEFAULT_CAPS), 200000)
+        self.assertEqual(ctx.cap_for("claude-opus-4-6[1m]", ctx.DEFAULT_CAPS), 400000)
 
     def test_the_caller_supplies_the_table(self):
         caps = [("small", 1000, 500), ("*", 2000, 1500)]
