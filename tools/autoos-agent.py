@@ -916,6 +916,10 @@ PROVIDER_STOP_MARKERS = (
     # FUP (2026-09-27, measured as the whole last line of a qoder run):
     # qodercli stops when no credits remain.
     "your personal credits have been exhausted",
+    # TOOLFIX item 3 (measured 2026-09-27): an opencode run that printed
+    # "Error: No active credentials for provider: sambanova." as its error line
+    # then exited 1 instead of 8 -- a provider stop, not a normal exit.
+    "no active credentials for provider",
 )
 
 # WIPfix2 (measured 2026-09-26 20:2xZ): a worker that merely READS or prints

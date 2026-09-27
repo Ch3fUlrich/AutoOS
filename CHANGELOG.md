@@ -9,6 +9,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Spawned opencode runs on the omniroute provider send `x-omniroute-session-id: <lane>/<title>` (env `AUTOOS_SESSION_TAG` overrides) via the `OPENCODE_CONFIG_CONTENT` overlay's provider `headers`, so OmniRoute `call_logs.session_tag` attributes every spawned call.
 
+### Fixed — TOOLFIX: four small rule→code fixes (probes, audit-router, spawner, measure)
+
+- **`tools/probe_common.py`**: `_skip_reason` gained a policy-deny rule (checked first): a leg that
+  `registry.leg_denied` denies is skipped with `policy: denied by <rule id>`, and the provider check
+  uses `registry.unavailable_now` (UNTILfix self-heal). With the free-tier rule (spec D18) paid and
+  policy-denied legs are never probed. `tools/probe-toolcalls.py` keeps its own copy until it moves
+  onto probe_common (L1-backlog). Test: `tests/test_probe_recall.py` (`DenyRuleTests`).
+- **`tools/audit-router.py`**: `_chat_once` no longer forwards provider error bodies or exception text
+  into its result. The `HTTPError` branch returns `"HTTP %d"` and the transport branch returns
+  `"transport error: %s" % type(exc).__name__`; the provider's JSON `detail`/`error` body and the raw
+  exception message never reach the audit verdict. Tests: `tests/test_audit_router_probe_retry.py` —
+  `test_always_503` and `test_non_http_exception` now assert the neutral detail strings (the old
+  `assertIn` on the provider's error text is the one named assertion change), and a new test asserts an
+  org secret planted in a provider 503 body never appears in the result.
+- **`tools/autoos-agent.py`**: `PROVIDER_STOP_MARKERS` now includes `"no active credentials for
+  provider"`, so a run that dies with `Error: No active credentials for provider: <name>.` is classified
+  as a provider stop (retryable, not a containment failure) instead of leaking through as a crash.
+  Only the marker list is touched. Test: `tests/test_autoos_spawner.py`
+  (`test_provider_stop_matches_no_active_credentials`).
+- **`tools/autoos_measure.py`**: `tracked_files` dedups `git ls-files -z` output order-preserving. During
+  an unresolved merge `git ls-files` lists a conflicted path three times (stages 1/2/3), which inflated
+  the measured file count and double-counted diffs. Tests: `tests/test_autoos_measure.py`
+  (`ConflictDedupTests`) build a real conflicted-merge repo and assert the path is counted once.
+
 ### Added — usage report (OR4)
 
 - `autoos-agent.py usage --since <ISO-8601 UTC | 30m | 6h | 2d> [--by provider,combo,lane,model] [--json]`: pages the OmniRoute gateway's `/api/usage/call-logs` with the manage-scoped key and prints calls, ok/errors and tokens per group.

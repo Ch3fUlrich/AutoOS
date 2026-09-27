@@ -3254,6 +3254,14 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertEqual(agent.provider_stop("working\n" + line + "\n"),
                                  line)
 
+    def test_provider_stop_matches_no_active_credentials(self):
+        # TOOLFIX item 3 (measured 2026-09-27): an opencode run that printed
+        # "Error: No active credentials for provider: sambanova." as its error
+        # line then exited 1 instead of 8 -- it is a provider stop.
+        agent = self.agent
+        line = "Error: No active credentials for provider: sambanova."
+        self.assertEqual(agent.provider_stop("working\n" + line + "\n"), line)
+
     def test_provider_stop_ignores_a_marker_in_code_or_prose(self):
         # WIPfix3: the WIPfix2 false positive and its neighbours - a marker
         # quoted in a code line, a list entry, or a grep command must NOT
