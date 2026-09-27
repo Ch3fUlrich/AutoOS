@@ -21,6 +21,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`tools/autoos_report.py`** (Python stdlib only): `format_brief(dict)->str` and `format_report(dict)->str` produce the terse fixed-field protocol; `parse_report(text)->dict` and `parse_brief(text)->dict` find the LAST block in free text (workers print prose around it), accepting both the "·"-joined single-line form and the multi-line "field: value" form (case-insensitive field names). Status must be one of `completed|failed|input_required` else `missing` includes "status". Tests entries split on `->` or `→`. `check_report(report, changed_files)->list` implements the §5.7 gate: files claimed but not in the diff, diff files not claimed, status completed with no tests. CLI: `parse <file|->` prints JSON; `check <report-file> --changed <file...>` prints problems, exit 1 if any. Tests: `tests/test_autoos_report.py` (offline — no network, no subprocess to live tools). Docs: `docs/agent-protocol.md` with templates and examples.
 
+### Added — installers link agent skills into ~/.agents/skills and ~/.codex/skills
+
+- **`lib/linux/install.sh`**: `install_agent_skills` now calls `link_skill_dirs` for
+  `~/.agents/skills` (unconditional — gemini, qoder, qwen) and guarded against codex presence
+  for `~/.codex/skills` (codex). Each skill is one symlink; a user's own files are left
+  untouched with a warning; a second run is a no-op; `--dry-run` prints "would link".
+- **`lib/windows/AutoOS.Install.psm1`**: new `Sync-AutoOSAgentSkillTargets` function reads
+  `$HOME/.agents/skills` (unconditional) and `$HOME/.codex/skills` (guarded by directory
+  existence or `Get-Command codex`). Called from `Install-AutoOSAgentSkills`. Exported for
+  tests. Uses the same one-link-per-skill, never-overwrite, second-run-no-op pattern as the
+  existing OpenHands skill writer.
+- **Tests** (`tests/run-tests.ps1`, `tests/linux/18-mcp-wiring.sh`): fresh install, codex linked
+  when present and `~/.codex` never created when absent, second run skipped, a user's own skill
+  untouched, dry run creates nothing. **`AGENTS.md`** §8: client -> skills dir -> linked table.
+
 ### Fixed — `ai-stack.sh verify` combo probes survive gateway warm-up and reasoning legs
 
 - The keyed combo probe sends `max_tokens` 256 (at 16 a reasoning leg spent its budget thinking and the gateway's
