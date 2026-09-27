@@ -32,6 +32,14 @@
 #                              prints: one NAME=value per line (the admission
 #                              gate verify reads OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT,
 #                              OMNIROUTE_CHAT_ADMISSION_QUEUE_MS and NODE_OPTIONS)
+#   cgroup-<container>         what `docker exec <container> sh -c '...memory.current...'`
+#                              prints: memory.current, memory.max ("max" when
+#                              unlimited), then the anon + file lines
+#                              of memory.stat, one per line (the memory-split
+#                              verify reads the cgroup pressure numbers)
+#   id-<container>             what `docker inspect -f '{{.Id}}' <container>`
+#                              prints (the memory-split verify names the
+#                              cgroup scope in its reclaim hint)
 #   omni-key-fails       the omniroute CLI cannot create the manage key
 #   fail-register        register-autostart.sh fails (register.log also
 #                        records marker=yes|no: ai-stack.sh's marker at the call)
@@ -88,6 +96,14 @@ fake_docker() {
                 if [[ -s "$S/proc1-environ-$2" ]]; then cat "$S/proc1-environ-$2"; fi
                 return 0
             fi
+            # exec <container> sh -c '...memory.current...': the memory-split
+            # check reads the cgroup counters. Content from a state file so a
+            # test can stub any split of anon vs reclaimable cache.
+            if [[ "${3:-}" == sh && "${4:-}" == -c && "${5:-}" == *"memory.current"* ]]; then
+                [[ -e "$S/run-$2" ]] || return 1
+                if [[ -s "$S/cgroup-$2" ]]; then cat "$S/cgroup-$2"; fi
+                return 0
+            fi
             # exec <container> qodercli --version: the gateway's CLI check.
             if [[ "${3:-}" == qodercli ]]; then
                 [[ -e "$S/run-$2" ]] || return 1
@@ -142,6 +158,7 @@ fake_docker() {
                     elif [[ -e "$S/unhealthy-$(service_of "$c")" ]]; then echo 'running (unhealthy)'
                     else echo 'running (healthy)'; fi ;;
                 *Config.Env*) [[ -s "$S/env-$c" ]] && cat "$S/env-$c" ;;
+                *'{{.Id}}'*) [[ -s "$S/id-$c" ]] && cat "$S/id-$c" || printf 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789' ;;
                 *Networks*) echo '{}' ;;
             esac
             return 0 ;;
@@ -170,6 +187,12 @@ fake_docker() {
                     local svcs=("$@")
                     (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands)
                     for svc in "${svcs[@]}"; do rm -f "$S/run-$(container_of "$svc")"; done ;;
+                restart)
+                    for a in "$@"; do
+                        [[ "$a" == -* ]] && continue
+                        c="$(container_of "$a")"
+                        : >"$S/run-$c"; : >"$S/compose-$c"
+                    done ;;
                 rm)
                     for a in "$@"; do
                         [[ "$a" == -* ]] && continue
