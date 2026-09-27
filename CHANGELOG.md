@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — Windows CI suite stops paying 120 s per test HTTP server (WCI)
+
+- **`tests/run-tests.ps1`**: the loopback fixture server (`Start-AutoOSTestHttpServer`) parked its job thread in the blocking `TcpListener.AcceptTcpClient()`, so `Remove-Job -Force` in `Stop-AutoOSTestHttpServer` took exactly 120 s per server (measured locally with `Measure-Command`: 120.0 s). The Windows CI suite owns 10 such server lifetimes, i.e. ~1200 s of its 1425 s step (run 36320271121); the remaining listed ~120 s tests (down-gateway prune, unreachable-mirror fetch, uncached read-back, custom-local setup plan, uncached hash) own no server and only absorb the preceding server test's teardown gap. The job loop now polls `Pending()` with a 50 ms sleep and exits on a stop file; `Stop` signals, waits bounded (10 s), then reaps. No assertion changed. Measured locally (Linux pwsh): new `server stop` regression test 121.78 s (failing) before, 1.96 s (passing) after; the full `apply prune` block (6 tests, 27 assertions) runs in 10.6 s after (one prune test alone took ~2 min before). Windows-only download/usb cases are measured by CI.
+- **`lib/windows/AutoOS.Download.psm1`** (new exported `Get-AutoOSHttpTimeoutSec`, the one home for every Windows HTTP wait), **`lib/windows/AutoOS.Usb.psm1`**, **`configuration/omniroute/apply.ps1`**: every HTTP wait is now explicit and overridable via `AUTOOS_HTTP_TIMEOUT_SEC` (production default 30 s, clamped 1..600; the gateway probe keeps its 5 s default). curl takes it as `--connect-timeout` only, so multi-gigabyte ISO totals are never capped mid-transfer; the curl-less fallback and the Ventoy release fetch were previously on the 100 s+ default. Tests set 2 s where they deliberately hit a dead endpoint (down-gateway prune, unreachable-mirror fetch).
+- **`.github/workflows/ci.yml`**: `PSScriptAnalyzer` 1.25.0 (pinned; ~95 s to install every run) is cached on the PowerShell modules path keyed by its version and installed only on a cache miss. The gate is unchanged: the suite's `PSScriptAnalyzer is clean` test runs whatever this provides.
+
 ### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
 ### Added — one-command standby router: `ai-stack.sh failover` (lstby)
 
