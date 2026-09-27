@@ -360,6 +360,97 @@ def _is_v2_card(parsed: dict) -> bool:
     return False
 
 
+# SPAWNCAP (S2). A client advertises shell/write in the registry
+# (clients.<id>.capabilities); a task that needs one is refused before dispatch
+# rather than started on a client that cannot do it, and auto-choice skips such
+# a client. The only explicit card kinds/roles that ask for shell+write: a v2
+# kind of implement/debug/bulk, or a v1 role=implement.
+CAPABILITY_EDITING_KINDS = frozenset({"implement", "debug", "bulk"})
+
+
+def client_capabilities(name: str, registry: dict | None = None) -> dict:
+    """One client's declared {shell, write}; a missing entry reads as both False."""
+    if registry is None:
+        registry = load_registry(REGISTRY_PATH)
+    declared = ((registry.get("clients") or {}).get(name) or {}).get("capabilities") or {}
+    return {"shell": bool(declared.get("shell")), "write": bool(declared.get("write"))}
+
+
+def _parsed_card_fields(text) -> dict | None:
+    """routing.parse_card's output for `text`, or None for an empty/malformed one.
+
+    A malformed card is build_plan's to report (its own CardError message, with
+    the existing "(see: ... list)" suffix); the capability gate must not shadow it.
+    """
+    try:
+        parsed = routing.parse_card(text or "")
+    except routing.CardError:
+        return None
+    return parsed or None
+
+
+def required_capabilities(args) -> tuple:
+    """The shell/write capabilities this run's task needs, in a fixed order.
+
+    `--isolate` means the worker writes to its clone and uses git, so both are
+    needed. Otherwise only an EXPLICIT editing card is a write request: a v2
+    `kind` of implement/debug/bulk, or a v1 `role=implement`. An absent, empty,
+    malformed, read-only (review/research/plan) or defaults-only card (e.g.
+    `privacy=sensitive` alone) asks for nothing - being explicit is what makes a
+    run a write run.
+    """
+    if getattr(args, "isolate", False):
+        return ("shell", "write")
+    parsed = _parsed_card_fields(getattr(args, "card", None))
+    if not parsed:
+        return ()
+    if _is_v2_card(parsed):
+        if parsed.get("kind") in CAPABILITY_EDITING_KINDS:
+            return ("shell", "write")
+        return ()
+    if parsed.get("role") == "implement":
+        return ("shell", "write")
+    return ()
+
+
+def _client_order() -> list:
+    """The preference order auto-choice walks: opencode first, then
+    autoos_clients.CLIENTS' own order."""
+    return ["opencode"] + [name for name in clients.CLIENTS if name != "opencode"]
+
+
+def choose_client(required: tuple, registry: dict | None = None) -> str | None:
+    """The first client declaring every capability in `required`, or None.
+
+    With no requirement this is `opencode` - exactly today's default.
+    """
+    if not required:
+        return "opencode"
+    for name in _client_order():
+        caps = client_capabilities(name, registry)
+        if all(caps.get(cap) for cap in required):
+            return name
+    return None
+
+
+def capability_refusal(name: str, required: tuple, registry: dict | None = None) -> str | None:
+    """Why `name` cannot take this run, or None when it declares every capability.
+
+    Names the missing capability and the clients that do have it, so the
+    operator can reroute without guessing.
+    """
+    caps = client_capabilities(name, registry)
+    missing = [cap for cap in required if not caps.get(cap)]
+    if not missing:
+        return None
+    capable = [other for other in _client_order()
+               if all(client_capabilities(other, registry).get(cap) for cap in missing)]
+    return ("client %s cannot run this task: it lacks %s (declares shell=%s, write=%s). "
+            "Clients with %s: %s" % (
+                name, " and ".join(missing), str(caps["shell"]).lower(), str(caps["write"]).lower(),
+                " and ".join(missing), ", ".join(capable) or "none"))
+
+
 class RouteInputRequired(ValueError):
     """A v2 card's resolver plan is input_required: no route survives the filters."""
 
@@ -1561,6 +1652,25 @@ def cmd_run(args, cfg: dict) -> int:
     # a worker chatted twice before the route planner caught it).
     if not args.task or not args.task.strip():
         return refuse("task is empty or whitespace-only", 2)
+    # SPAWNCAP (S2): decide the client from the task's shell/write needs before
+    # anything is planned or started. An explicit --client that lacks one is
+    # refused with the capable clients named; with no --client the first capable
+    # one is chosen (opencode, today's default when nothing is required).
+    required = required_capabilities(args)
+    registry = None
+    if required:
+        try:
+            registry = load_registry(REGISTRY_PATH)
+        except (OSError, ValueError) as exc:
+            return refuse("cannot load client capabilities: %s" % exc)
+    if args.client is None:
+        args.client = choose_client(required, registry)
+        if args.client is None:
+            return refuse("no client declares %s, which this task needs" % " and ".join(required))
+    else:
+        refusal = capability_refusal(args.client, required, registry)
+        if refusal is not None:
+            return refuse(refusal)
     client = clients.CLIENTS[args.client]
     if args.free and args.clean:
         return refuse("--free uses promo models that may train on prompts; it cannot be --clean.")
@@ -1751,7 +1861,9 @@ def main(argv=None) -> int:
                           "and run now instead of refusing with exit 2")
     run.add_argument("--allow-training", action="store_true",
                      help="let privacy=sensitive,ctx=1m use t1-orchestrator-clean, whose leg trains on prompts (logged)")
-    run.add_argument("--client", choices=sorted(clients.CLIENTS), default="opencode")
+    run.add_argument("--client", choices=sorted(clients.CLIENTS), default=None,
+                     help="agent CLI to spawn (default: the first client that declares the "
+                          "capabilities the task needs, opencode when it needs none)")
     run.add_argument("--joinable", action="store_true",
                      help="claude only: a background session you can join through Remote Control")
     run.add_argument("--max-depth", type=int, help="lower the depth budget for this child's subtree")

@@ -272,13 +272,25 @@
         "$comment": { "$ref": "#/$defs/comment" }
       }
     },
+    "capabilities": {
+      "type": "object",
+      "description": "SPAWNCAP (S2): what this client's headless mode can actually do. `run` refuses (exit 2) before dispatch when a task needs a capability the chosen client lacks; auto-choice skips clients that lack one. A split that is not measurable is recorded as both false, never guessed.",
+      "required": ["shell", "write"],
+      "additionalProperties": false,
+      "properties": {
+        "shell": { "type": "boolean" },
+        "write": { "type": "boolean" },
+        "$comment": { "$ref": "#/$defs/comment" }
+      }
+    },
     "client": {
       "type": "object",
-      "required": ["id", "binary", "gateway_mode", "skills_dir", "supports_effort", "signin_check"],
+      "required": ["id", "binary", "gateway_mode", "skills_dir", "supports_effort", "signin_check", "capabilities"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string" },
         "binary": { "type": "string" },
+        "capabilities": { "$ref": "#/$defs/capabilities" },
         "gateway_mode": { "enum": ["omniroute-run", "native", "none"] },
         "skills_dir": {
           "type": ["string", "null"],

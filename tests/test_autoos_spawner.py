@@ -3280,8 +3280,15 @@ class IsolateContainmentTests(unittest.TestCase):
             env["AUTOOS_FAKE_MODE"] = mode
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.dict(os.environ, env, clear=True):
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    rc = agent.cmd_run(args, cfg)
+                # SPAWNCAP (S2): the real registry declares headless agy with
+                # shell=false/write=false (its headless refusal evidence), but
+                # these tests exercise containment/leak/provider-stop with a fake
+                # worker, not the capability gate. Neutralise the gate here so
+                # the containment behaviour is still what is measured.
+                with mock.patch.object(agent, "client_capabilities",
+                                       lambda name, registry=None: {"shell": True, "write": True}):
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        rc = agent.cmd_run(args, cfg)
         finally:
             agent.ROOT, agent.TRACK_RECORD = old_root, old_track
         return rc, out.getvalue(), err.getvalue()
