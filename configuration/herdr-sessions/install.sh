@@ -137,24 +137,59 @@ _replace_token() {
     printf '%s' "$out"
 }
 
+# systemd_escape <value>: the bytes systemd must see to read <value> back
+# literally once <value> has been placed inside a double-quoted unit setting.
+# Doubles `\` first (else the escapes this adds would be doubled again), then
+# `"`, then `%` -- `%` because systemd runs specifier expansion (`%h`, `%%`)
+# on every ExecStart/Environment/WorkingDirectory value, so a literal `%` must
+# be written `%%` or the assignment is dropped (and, for some keys, the unit
+# fails to load). Plain character walk, never `${var//pat/repl}`: under
+# bash >= 5.2 (patsub_replacement on by default) that replacement field reads
+# `&` and `\` specially, the very trap _replace_token exists to avoid. Exact
+# twin of configuration/hostexec/install.sh's
+#   esc = repo.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").
+systemd_escape() {
+    local s="$1" out="" c i
+    for (( i = 0; i < ${#s}; i++ )); do
+        c="${s:i:1}"
+        case "$c" in
+            '\') out+='\\' ;;
+            '"') out+='\"' ;;
+            '%') out+='%%' ;;
+            *)   out+="$c" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 # Render a unit template into a real unit file. The checked-in units carry
 # four literal tokens -- @PROFILE@ (the --profile argument as given, informational
 # only), @APPDIR@ (where this checkout lives), @WORKDIR@ (the cwd panes
 # inherit) and @PROFILE_PATH@ (the resolved absolute profile path, what
-# HERDR_PROFILE is actually set to). Every replacement is an arbitrary
-# filesystem path, so this does NOT use sed (its replacement text treats `&`
-# as "the matched text" and `\` as an escape, both unescaped here) -- and,
-# less obviously, does NOT use bash's own `${var/pattern/value}` either: on
+# HERDR_PROFILE is actually set to). Every replacement is an
+# arbitrary filesystem path, so this does NOT use sed (its replacement text
+# treats `&` as "the matched text" and `\` as an escape, both unescaped here) --
+# and, less obviously, does NOT use bash's own `${var/pattern/value}` either: on
 # bash >= 5.2 (patsub_replacement, on by default) that construct has the exact
 # same `&`-as-backreference behaviour as sed's replacement field. Plain
 # split-and-concatenate (_replace_token) is immune to both.
+#
+# Each path is also systemd_escape'd: the templates wrap the path values in
+# double quotes (WorkingDirectory is the one exception -- systemd does not
+# strip quotes there), so a path with a space stays one token, and a literal
+# `%`/`"`/`\` survives specifier expansion and quote parsing.
 render_unit() {
     local line
+    local appdir_esc workdir_esc profile_path_esc
+    # Escape once, not once per line.
+    appdir_esc="$(systemd_escape "$APPDIR")"
+    workdir_esc="$(systemd_escape "$WORKDIR")"
+    profile_path_esc="$(systemd_escape "$PROFILE_CONF")"
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="$(_replace_token "$line" "@PROFILE@" "$PROFILE")"
-        line="$(_replace_token "$line" "@APPDIR@" "$APPDIR")"
-        line="$(_replace_token "$line" "@WORKDIR@" "$WORKDIR")"
-        line="$(_replace_token "$line" "@PROFILE_PATH@" "$PROFILE_CONF")"
+        line="$(_replace_token "$line" "@APPDIR@" "$appdir_esc")"
+        line="$(_replace_token "$line" "@WORKDIR@" "$workdir_esc")"
+        line="$(_replace_token "$line" "@PROFILE_PATH@" "$profile_path_esc")"
         printf '%s\n' "$line"
     done < "$1"
 }

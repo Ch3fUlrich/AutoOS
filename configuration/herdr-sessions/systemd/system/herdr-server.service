@@ -14,7 +14,7 @@
 # from inside Claude passes CLAUDE_CODE_* down and transcript saving is silently
 # disabled — after which nothing can be resumed at all.
 Description=Herdr agent multiplexer (headless server)
-Documentation=file://@APPDIR@/README.md
+Documentation="file://@APPDIR@/README.md"
 # The update unit runs first so a fresh herdr/claude binary is what this server
 # and every pane it spawns pick up. Wants= (not Requires=): a failed or skipped
 # update must never keep the session from coming back.
@@ -22,7 +22,7 @@ After=network-online.target herdr-sessions-update.service
 Wants=network-online.target herdr-sessions-update.service
 # The driver lives in this checkout; keep the dependency explicit so a future
 # split-out dataset does not turn into a silent empty-directory start.
-RequiresMountsFor=@APPDIR@
+RequiresMountsFor="@APPDIR@"
 StartLimitIntervalSec=300
 StartLimitBurst=5
 

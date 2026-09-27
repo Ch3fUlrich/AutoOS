@@ -7,7 +7,7 @@
 # Install: see ../../install.sh --profile <yours>
 [Unit]
 Description=Snapshot live Claude Code sessions for reboot restore
-Documentation=file://@APPDIR@/README.md
+Documentation="file://@APPDIR@/README.md"
 After=herdr-server.service
 
 [Service]
@@ -15,8 +15,8 @@ Type=oneshot
 # claude, herdr and uv/uvx live in %h/.local/bin and the driver shells out to
 # them; panes inherit this manager environment, not an interactive .zshrc.
 Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=HERDR_PROFILE=@PROFILE_PATH@
-ExecStart=@APPDIR@/herdr-sessions.sh snapshot
+Environment=HERDR_PROFILE="@PROFILE_PATH@"
+ExecStart="@APPDIR@/herdr-sessions.sh" snapshot
 Nice=15
 # Without these the script output does not reach the journal, and the
 # troubleshooting commands in the README show nothing.

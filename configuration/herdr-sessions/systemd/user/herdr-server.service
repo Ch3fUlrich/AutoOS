@@ -24,7 +24,7 @@
 # Install: see ../../install.sh --profile <yours>
 [Unit]
 Description=Herdr agent multiplexer (headless, user session)
-Documentation=file://@APPDIR@/README.md
+Documentation="file://@APPDIR@/README.md"
 # The update unit runs first so a fresh herdr/claude binary is what this server
 # and every pane it spawns pick up. Wants= (not Requires=): a failed or skipped
 # update must never keep the session from coming back.

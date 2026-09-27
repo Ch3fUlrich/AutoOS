@@ -78,7 +78,7 @@ EOF
     out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"; rc=$?
     got="$(grep -h HERDR_PROFILE "$tmp/home/.config/systemd/user/herdr-sessions-restore.service" 2>/dev/null || true)"
     rm -rf "$tmp"
-    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=$tmp/site.conf" ]; then
+    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=\"$tmp/site.conf\"" ]; then
         pass
     else
         fail "rc=$rc got=[$got] out=$out"
@@ -102,7 +102,7 @@ EOF
     out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$conf" 2>&1)"; rc=$?
     got="$(grep -h HERDR_PROFILE "$tmp/home/.config/systemd/user/herdr-sessions-restore.service" 2>/dev/null || true)"
     rm -rf "$tmp"
-    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=$conf" ]; then
+    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=\"$conf\"" ]; then
         pass
     else
         fail "rc=$rc got=[$got] out=${out:0:300}"
@@ -130,6 +130,68 @@ EOF
     done
     rm -rf "$tmp"
     if (( ok )); then pass; else fail "one or more user units do not set %h/.local/bin on PATH"; fi
+fi
+
+# rv2 item 2: render_unit spliced arbitrary paths into the units with no
+# systemd quoting or escaping at all. A profile whose directory contains a
+# space rendered an unquoted Environment=/ExecStart= that systemd split at the
+# space ("Invalid environment assignment, ignoring: ..."), and a literal `%`
+# was read as a specifier ("Failed to resolve specifiers in %Qdir/..., ...
+# Invalid slot, ignoring") -- the unit loaded with its profile silently
+# dropped, so the restore ran against the wrong (or no) profile. The fix is
+# hostexec's (configuration/hostexec/install.sh): double `\`, `"` and `%`,
+# and wrap each substituted path in double quotes. WorkingDirectory stays
+# UNQUOTED -- systemd does not strip quotes there and fails the unit. Proven
+# on the exact rendered bytes and again through systemd's own parser.
+if it "herdr-sessions: render_unit systemd-quotes and escapes a profile path with a space and a %"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    site_dir="$tmp/sp ace %Qdir"; mkdir -p "$site_dir"
+    conf="$site_dir/hs.conf"
+    cat > "$conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    apdir="$ROOT/configuration/herdr-sessions"
+    esc_conf="$(printf '%s' "$conf" | sed 's/%/%%/g')"
+    got_profile="$(grep -h '^Environment=HERDR_PROFILE=' "$unit" 2>/dev/null || true)"
+    got_exec="$(grep -h '^ExecStart=' "$unit" 2>/dev/null || true)"
+    got_doc="$(grep -h '^Documentation=' "$unit" 2>/dev/null || true)"
+    # systemd-analyze verify reads every unit in the directory. Capture its
+    # verdict before the scratch HOME goes away; only the two messages this
+    # bug itself produces are fatal here (an absent dependency unit is not).
+    verify=""
+    command -v systemd-analyze >/dev/null 2>&1 && verify="$(systemd-analyze verify "$unit" 2>&1 || true)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$got_profile" == "Environment=HERDR_PROFILE=\"$esc_conf\"" ]] \
+        || { ok=0; echo "HERDR_PROFILE line: [$got_profile] want [Environment=HERDR_PROFILE=\"$esc_conf\"]" >&2; }
+    [[ "$got_exec" == "ExecStart=\"$apdir/herdr-sessions.sh\" restore" ]] \
+        || { ok=0; echo "ExecStart line: [$got_exec]" >&2; }
+    [[ "$got_doc" == "Documentation=\"file://$apdir/README.md\"" ]] \
+        || { ok=0; echo "Documentation line: [$got_doc]" >&2; }
+    [[ "$verify" != *"Failed to resolve specifiers"* ]] \
+        || { ok=0; echo "systemd-analyze verify still rejects the unit: $verify" >&2; }
+    [[ "$verify" != *"Invalid environment assignment"* ]] \
+        || { ok=0; echo "systemd-analyze verify still rejects the unit: $verify" >&2; }
+    if (( ok )); then pass; else fail "render_unit did not systemd-quote/escape the substituted paths"; fi
+fi
+
+# The system herdr-server unit is the one place @WORKDIR@ is spliced, into a
+# WorkingDirectory= line. WorkingDirectory is NOT quote-aware: a quoted value
+# fails to load ("Failed to resolve specifiers"/"path is not absolute"), so it
+# must stay bare (the value still gets `%`-doubling, since WorkingDirectory
+# also runs specifier expansion). Not renderable in this suite -- a real
+# system install needs root and writes /etc -- so pin the template shape.
+if it "herdr-sessions: the system herdr-server template keeps WorkingDirectory unquoted"; then
+    line="$(grep -h '^WorkingDirectory=' configuration/herdr-sessions/systemd/system/herdr-server.service || true)"
+    if [ "$line" = "WorkingDirectory=@WORKDIR@" ]; then
+        pass
+    else
+        fail "WorkingDirectory line is [$line], want the bare WorkingDirectory=@WORKDIR@ (systemd does not strip quotes here)"
+    fi
 fi
 
 if it "herdr-sessions: re-run reports already current; a drifted unit is backed up before replacing"; then
