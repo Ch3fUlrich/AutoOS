@@ -390,11 +390,14 @@ class RunTrialTests(unittest.TestCase):
         self.assertIsNone(result["recall"])
         self.assertEqual(len(post.calls), 1)
 
-    def test_a_400_trial_is_a_failure_not_a_non_measurement(self):
-        post = StatusPost(400, "context length exceeded")
-        result = self.mod.run_trial("free/m", 4000, post, seed="4000:0")
-        self.assertEqual(result["recall"], 0.0)
-        self.assertIn("context length", result["note"])
+    def test_any_non_200_trial_measures_nothing(self):
+        # Live 2026-09-27: groq answered 413 (free-tier TPM 8000 < a 25k
+        # prompt) and the old rule scored it recall 0.0 and wrote it. A
+        # non-200 says nothing about the model's recall: never a verdict.
+        for status in (400, 404, 413, 422):
+            post = StatusPost(status, "HTTP %d" % status)
+            result = self.mod.run_trial("free/m", 4000, post, seed="4000:0")
+            self.assertIsNone(result["recall"], status)
 
 
 class ClassifyLadderTests(unittest.TestCase):

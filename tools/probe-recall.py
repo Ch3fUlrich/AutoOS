@@ -20,8 +20,8 @@ access code with its name as a JSON object, and scores recall as the
 fraction of needles returned exactly. context_usable.tokens becomes the
 largest size where every trial scored >= 0.9; when the smallest probed size
 already fails, nothing is written for tokens (the registry default stays in
-force) and only a detail is recorded. Statuses 401/402/403/429/timeout mean
-no verdict: whatever the overlay already said is kept.
+force) and only a detail is recorded. Every non-200 status (or a transport
+error) means no verdict: whatever the overlay already said is kept.
 
 The verdict lands in the git-ignored overlay logs/routing/measured.json as
 overlay["models"][<model_id>]["context_usable"] (read-modify-write: every
@@ -29,6 +29,10 @@ other key is kept), the shape tools/autoos_resolver.py's usable_context()
 already reads. Every request logs leg, size, prompt_tokens and
 completion_tokens (from the response usage) to stdout, with a total at the
 end.
+
+The free-leg rule, the gateway post with its retry and no-verdict statuses,
+the key/gateway plumbing and the overlay read-modify-write are shared with
+tools/probe-effort.py in tools/probe_common.py.
 
 Usage:
     python3 tools/probe-recall.py --dry-run
@@ -48,113 +52,42 @@ Never prints or logs the gateway key.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import random
 import sys
-import tempfile
 import time
-import urllib.error
-import urllib.request
-from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 from registry import resolve_leg  # noqa: E402 - tools/ is on sys.path above
+from probe_common import (  # noqa: E402 - tools/ is on sys.path above
+    DEFAULT_GATEWAY,
+    DEFAULT_OVERLAY,
+    DEFAULT_REGISTRY,
+    RETRY_DELAYS_S,  # re-exported: tests read it on this module
+    gateway_up,
+    is_no_verdict_status,
+    legs_to_probe,
+    load_agent_module as _load_agent_module,
+    load_overlay,
+    make_post,
+    now_iso as _now_iso,
+    post_with_retry,
+    print_request,
+    print_total,
+    refused_leg,
+    save_overlay,
+)
 
-DEFAULT_REGISTRY = os.path.join(ROOT, "catalog", "ai-registry.json")
-DEFAULT_OVERLAY = os.path.join(ROOT, "logs", "routing", "measured.json")
-DEFAULT_GATEWAY = "http://127.0.0.1:20128/v1/chat/completions"
 DEFAULT_SIZES = "32000,128000,256000,500000"
-
-# 429/503 are transient (rate limit / load shedding); retried before a call
-# is scored. Same shape as tools/probe-toolcalls.py's retry.
-RETRY_DELAYS_S = (5, 15, 45)
-RETRY_STATUSES = (429, 503)
-
-# Statuses that mean "we learned nothing about this leg's recall", never a
-# verdict: keep whatever the overlay already said. 401/402/403 are a
-# sign-in or credit gap, 429 a rate limit, "ERR"/timeout transport.
-NO_VERDICT_STATUSES = (401, 402, 403, 429, "ERR", "timeout")
 
 # A size is usable only when every trial recalled at least this fraction.
 RECALL_PASS = 0.9
 
 # Assignable, so tests need no real network wait.
 _sleep = time.sleep
-
-
-# ---------------------------------------------------------------------------
-# legs_to_probe / refused_leg: which legs exist, which to skip, which to
-# refuse outright.
-# ---------------------------------------------------------------------------
-
-def _skip_reason(leg, routes, registry):
-    """None when `leg` should be probed; else the reason it is skipped."""
-    for route in routes.values():
-        if leg in (route.get("unavailable_legs") or {}):
-            return "unavailable_legs: %s" % leg
-    try:
-        provider_id, model_id = resolve_leg(leg, registry)
-    except ValueError as exc:
-        return "unresolvable: %s" % exc
-    provider = registry.get("providers", {}).get(provider_id) or {}
-    if provider.get("tier") != "free":
-        # Free legs only (spec section 10, D18): a probe never spends paid or
-        # subscription quota. A named such leg is a refusal, not a skip.
-        return "tier: %s" % provider.get("tier")
-    if provider.get("available") is False:
-        return "provider %s: available false" % provider_id
-    bound = (registry.get("models", {}).get(model_id) or {}).get("client_bound")
-    if bound:
-        # The gateway 403s a client-bound leg (e.g. a Zen free leg): it can
-        # only be probed through that client, never through the gateway.
-        return "client_bound: probe through %s" % bound
-    return None
-
-
-def legs_to_probe(registry, only_legs=(), only_routes=()):
-    """``[(leg, skip_reason_or_None), ...]``: every distinct leg, registry order.
-
-    Every leg named in any ``routes.*.legs``, in the order routes and then
-    legs appear in the registry, deduplicated to first sight. ``only_legs`` /
-    ``only_routes`` (non-empty) narrow which legs/routes are considered at
-    all; a leg outside both stays unlisted rather than skipped.
-    """
-    routes = registry.get("routes") or {}
-    only_legs = set(only_legs)
-    only_routes = set(only_routes)
-    order = []
-    seen = set()
-    for route_id, route in routes.items():
-        if only_routes and route_id not in only_routes:
-            continue
-        for leg in route.get("legs") or []:
-            if only_legs and leg not in only_legs:
-                continue
-            if leg not in seen:
-                seen.add(leg)
-                order.append(leg)
-    return [(leg, _skip_reason(leg, routes, registry)) for leg in order]
-
-
-def refused_leg(registry, only_legs):
-    """The first leg in `only_legs` on a non-free provider, as (leg, tier).
-
-    None when every named leg is free (or unresolvable - those surface as a
-    skip reason in legs_to_probe, not a refusal: their tier is unknown).
-    """
-    for leg in only_legs:
-        try:
-            provider_id, _model_id = resolve_leg(leg, registry)
-        except ValueError:
-            continue
-        provider = registry.get("providers", {}).get(provider_id) or {}
-        if provider.get("tier") != "free":
-            return leg, provider.get("tier")
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -299,22 +232,6 @@ def score_recall(content, needles):
 # Trials, the size ladder, the verdict.
 # ---------------------------------------------------------------------------
 
-def _is_no_verdict_status(status):
-    if status in NO_VERDICT_STATUSES:
-        return True
-    return isinstance(status, int) and 500 <= status < 600
-
-
-def _post_with_retry(post, body):
-    """Call `post(body)`, retrying 429/503 with RETRY_DELAYS_S backoff."""
-    delays = list(RETRY_DELAYS_S)
-    while True:
-        status, parsed, error = post(body)
-        if status not in RETRY_STATUSES or not delays:
-            return status, parsed, error
-        _sleep(delays.pop(0))
-
-
 def run_trial(leg, size, post, seed="0", max_tokens=2048):
     """One trial at `size` tokens: haystack, request, score.
 
@@ -323,7 +240,8 @@ def run_trial(leg, size, post, seed="0", max_tokens=2048):
     credential or transport status): never a failure, never a pass.
     """
     haystack, needles = build_haystack(size, seed=seed)
-    status, parsed, error = _post_with_retry(post, recall_body(leg, haystack, max_tokens))
+    status, parsed, error = post_with_retry(
+        post, recall_body(leg, haystack, max_tokens), _sleep)
     if isinstance(parsed, dict):
         usage = parsed.get("usage") or {}
     else:
@@ -331,7 +249,7 @@ def run_trial(leg, size, post, seed="0", max_tokens=2048):
     result = {"status": status, "prompt_tokens": usage.get("prompt_tokens"),
               "completion_tokens": usage.get("completion_tokens")}
     if status != 200 or parsed is None:
-        result["recall"] = None if _is_no_verdict_status(status) else 0.0
+        result["recall"] = None if is_no_verdict_status(status) else 0.0
         result["note"] = error or "malformed or missing response body"
         return result
     try:
@@ -402,33 +320,8 @@ def probe_model(leg, sizes, post, trials, max_tokens=2048):
 
 
 # ---------------------------------------------------------------------------
-# Overlay: read-modify-write, atomic, keyed by model id.
+# Overlay: read-modify-write, keyed by model id (load/save in probe_common).
 # ---------------------------------------------------------------------------
-
-def load_overlay(path):
-    if not os.path.isfile(path):
-        return {}
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def save_overlay(path, overlay):
-    """Atomic write: a temp file in the same directory, then os.replace."""
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".measured-", suffix=".json", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(overlay, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
-
 
 def record_verdict(overlay, model_id, tokens, detail, at):
     """Merge one model's verdict into `overlay` (read-modify-write), in place.
@@ -452,56 +345,6 @@ def record_no_verdict(overlay, model_id, detail, at):
     entry = overlay.setdefault("models", {}).setdefault(model_id, {})
     entry["context_usable_last_error"] = {"detail": detail, "at": at}
     return overlay
-
-
-# ---------------------------------------------------------------------------
-# The real (network) post(), and the gateway/key plumbing around it.
-# ---------------------------------------------------------------------------
-
-def make_post(gateway_url, key, timeout=180):
-    """A real `post(body) -> (status, parsed_json_or_None, error_text)`."""
-    def post(body):
-        data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(
-            gateway_url, data=data,
-            headers={"Content-Type": "application/json",
-                     "Authorization": "Bearer " + key})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status = resp.status
-                raw = resp.read()
-        except urllib.error.HTTPError as exc:
-            return exc.code, None, exc.read(500).decode("utf-8", "replace")
-        except Exception as exc:  # noqa: BLE001 - any transport failure is a finding
-            return "ERR", None, str(exc)[:500]
-        try:
-            parsed = json.loads(raw.decode("utf-8", "replace"))
-        except ValueError as exc:
-            return status, None, "invalid JSON body: %s" % exc
-        return status, parsed, None
-    return post
-
-
-def gateway_up(gateway_url, timeout=3):
-    base = gateway_url.rsplit("/v1/", 1)[0] if "/v1/" in gateway_url else gateway_url
-    try:
-        with urllib.request.urlopen(base + "/api/health", timeout=timeout) as resp:
-            return resp.status == 200
-    except Exception:  # noqa: BLE001 - unreachable is unreachable
-        return False
-
-
-def _load_agent_module():
-    """tools/autoos-agent.py, loaded by path (a hyphen is not importable)."""
-    agent_path = os.path.join(HERE, "autoos-agent.py")
-    spec = importlib.util.spec_from_file_location("autoos_agent_for_probe", agent_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _now_iso():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------
@@ -649,11 +492,8 @@ def main(argv=None) -> int:
             continue
         outcomes, requests = probe_model(leg, model_sizes, post, args.trials)
         for request in requests:
-            print("%s\trequest\t%d\t%s\t%s" % (
-                leg, request["size"],
-                "-" if request["prompt_tokens"] is None else request["prompt_tokens"],
-                "-" if request["completion_tokens"] is None
-                else request["completion_tokens"]))
+            print_request(leg, request["size"], request["prompt_tokens"],
+                          request["completion_tokens"])
             if request["prompt_tokens"] is not None:
                 total_prompt += request["prompt_tokens"]
             if request["completion_tokens"] is not None:
@@ -662,7 +502,7 @@ def main(argv=None) -> int:
         at = _now_iso()
         if verdict["no_verdict"]:
             statuses = sorted({str(status) for o in outcomes for status in o["statuses"]})
-            detail = ("only credential/transport errors (%s): keeping the previous value"
+            detail = ("no verdict: only non-200 statuses (%s): keeping the previous value"
                       % ", ".join(statuses))
             record_no_verdict(overlay, model_id, detail, at)
             print("%s\tno-verdict\t-\t%s" % (leg, detail))
@@ -674,7 +514,7 @@ def main(argv=None) -> int:
                 print("%s\tverdict\t%d\t%s" % (leg, verdict["tokens"],
                                                _format_detail(verdict["detail"])))
     save_overlay(args.overlay, overlay)
-    print("total\t%d\t%d" % (total_prompt, total_completion))
+    print_total(total_prompt, total_completion)
     return 0
 
 
