@@ -445,7 +445,7 @@ if it "backup residual: rescue-bootstrap backs up the operator's profile twice i
     cat > "$BS_BIN/date" <<'EOS'
 #!/usr/bin/env bash
 case "$2" in
-    '+%Y%m%d%H%M%S') echo '20260101000000' ;;
+    '+%Y%m%d-%H%M%S') echo '20260101-000000' ;;
     *) echo '2026-01-01T00:00:00Z' ;;
 esac
 EOS
@@ -460,7 +460,7 @@ EOS
     out3="$(bootstrap_sandbox_run)"    # third run, same pinned second -> must not clobber the first backup
 
     ok=1
-    base="$BS_PROFILE.autoos-backup-20260101000000"
+    base="$BS_PROFILE.autoos-backup-20260101-000000"
     [[ "$out3" == *"kept your edits"* ]] || { ok=0; echo "third run: $out3" >&2; }
     [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
     [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
