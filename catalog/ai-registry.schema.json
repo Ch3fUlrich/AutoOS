@@ -104,6 +104,10 @@
         "omniroute_id": { "type": ["string", "null"] },
         "litellm_env": { "type": ["string", "null"] },
         "litellm_prefix": { "type": ["string", "null"] },
+        "model_prefix": {
+          "type": ["string", "null"],
+          "description": "Additive field, not in spec 3.1 (brief AGYID, 2026-09-27): the prefix the live OmniRoute catalog serves this provider's models under when it differs from the provider's registry id. The antigravity OAuth bridge serves agy/* while registry legs keep antigravity/* (measured /v1/models 2026-09-27, source: inbox/L1-routing.md L0 live apply 11:44:31Z). Read only by tools/registry.py's gateway_ref() at render time; omniroute_id still names the provider connection apply.sh registers. Absent/null means the leg is emitted unchanged."
+        },
         "api_base": {
           "type": ["string", "null"],
           "description": "Public vendor endpoint only (registry.py check rejects private hosts/IPs/usernames, spec 3.1)."

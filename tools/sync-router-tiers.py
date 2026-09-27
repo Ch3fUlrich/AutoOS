@@ -68,7 +68,13 @@ SYNCED_TIERS = ("t2-worker", "t3-driver")
 
 # Providers LiteLLM has no transport or key for (OAuth/subscription bridges).
 # Their legs never enter a managed mirror block — see combos_refs().
-GATEWAY_ONLY = frozenset({"antigravity", "cc"})
+# Both spellings of a provider appear here: registry_refs() drops the registry
+# leg ("antigravity/<m>"), while combos_refs() reads an already-rendered
+# combos.json, where render_omniroute() has translated the leg through the
+# provider's model_prefix ("agy/<m>", AGYID 2026-09-27). Missing either one
+# lets a gateway-only leg leak into a managed LiteLLM block; the test that
+# proves the --combos override still matches the registry default catches it.
+GATEWAY_ONLY = frozenset({"antigravity", "agy", "cc"})
 
 # Filled from the registry providers by main(); Leg reads them at call time.
 # They are module state because Leg is constructed in several code paths and

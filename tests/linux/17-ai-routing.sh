@@ -2073,8 +2073,8 @@ transport = {"opencode-zen": "openai", "cheaperinference": "openai"}
 def litellm_model(ref):
     prov, model = ref.split("/", 1)
     return "%s/%s" % (transport.get(prov, prov), model)
-known_drops = {"antigravity/gemini-3.7-flash-medium",
-               "antigravity/claude-opus-4-6-thinking"}
+known_drops = {"agy/gemini-3.7-flash-medium",
+               "agy/claude-opus-4-6-thinking"}
 text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
 problems = []
 free_only = sorted(n for n in combos if n.endswith("-free-only"))

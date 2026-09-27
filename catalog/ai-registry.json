@@ -1589,11 +1589,12 @@
       "available": false
     },
     "antigravity": {
-      "$comment": "Google Antigravity OAuth bridge (agy CLI): hosts both Gemini and Claude legs (gemini-3.7-flash-high/medium, claude-opus-4-6-thinking). No published data-training policy found for this consumer surface (checked docs/ and .agents/skills/unattended-orchestration/, 2026-09-25); trains_on_prompts defaults conservatively to true (unmeasured, D8's 'assume the less private option' pattern). Never referenced by a -clean route today, so this default changes no filter outcome.",
+      "$comment": "Google Antigravity OAuth bridge (agy CLI): hosts both Gemini and Claude legs (gemini-3.7-flash-high/medium, claude-opus-4-6-thinking). No published data-training policy found for this consumer surface (checked docs/ and .agents/skills/unattended-orchestration/, 2026-09-25); trains_on_prompts defaults conservatively to true (unmeasured, D8's 'assume the less private option' pattern). Never referenced by a -clean route today, so this default changes no filter outcome. model_prefix 'agy' with source: the live OmniRoute catalog names this provider's models agy/*, never antigravity/* (measured /v1/models 2026-09-27 11:5xZ; L0 live apply 2026-09-27T11:44:31Z skipped the antigravity/* legs for exactly this reason). Registry legs keep the antigravity/* spelling; gateway_ref() translates only where an OmniRoute id is emitted, and omniroute_id stays 'antigravity' so apply.sh still finds the provider connection.",
       "api_base": null,
       "id": "antigravity",
       "litellm_env": null,
       "litellm_prefix": null,
+      "model_prefix": "agy",
       "omniroute_id": "antigravity",
       "provider_data": null,
       "tier": "free",

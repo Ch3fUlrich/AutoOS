@@ -244,7 +244,7 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
-        "antigravity/gemini-3.7-flash-high",
+        "agy/gemini-3.7-flash-high",
         "openrouter/deepseek/deepseek-v4.1-flash",
         "deepseek/deepseek-flash"
       ]
@@ -265,7 +265,7 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
-        "antigravity/gemini-3.7-flash-medium"
+        "agy/gemini-3.7-flash-medium"
       ]
     },
     {
@@ -273,7 +273,7 @@
       "strategy": "priority",
       "context": "200k",
       "models": [
-        "antigravity/claude-opus-4-6-thinking",
+        "agy/claude-opus-4-6-thinking",
         "openrouter/deepseek/deepseek-v4.1-flash"
       ]
     },
@@ -326,7 +326,7 @@
       "strategy": "priority",
       "context": "200k",
       "models": [
-        "antigravity/claude-opus-4-6-thinking"
+        "agy/claude-opus-4-6-thinking"
       ]
     }
   ]

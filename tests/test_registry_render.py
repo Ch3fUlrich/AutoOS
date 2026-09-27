@@ -197,6 +197,49 @@ class RenderMatchesTodayTests(unittest.TestCase):
             self.assertNotIn(absent, names)
 
 
+class GatewayRefTests(unittest.TestCase):
+    """AGYID: the live OmniRoute catalog names the antigravity provider's models
+    agy/* (measured /v1/models 2026-09-27, never antigravity/*), so an omniroute
+    render must translate a registry leg through the provider's model_prefix.
+    The registry itself keeps its own antigravity/* spelling - resolve_leg and
+    every consumer of it are untouched."""
+
+    def test_render_omniroute_uses_the_provider_model_prefix(self):
+        rendered = registry.render_omniroute(real_registry())
+        by_name = {c["name"]: c for c in rendered["combos"]}
+        self.assertIn("agy/gemini-3.7-flash-high",
+                      by_name["t2-worker"]["models"])
+        self.assertNotIn("antigravity/gemini-3.7-flash-high",
+                         by_name["t2-worker"]["models"])
+        self.assertIn("agy/claude-opus-4-6-thinking",
+                      by_name["opus-4-6"]["models"])
+
+    def test_render_omniroute_leaves_other_providers_unchanged(self):
+        rendered = registry.render_omniroute(real_registry())
+        by_name = {c["name"]: c for c in rendered["combos"]}
+        self.assertIn("openrouter/deepseek/deepseek-v4.1-flash",
+                      by_name["t2-worker"]["models"])
+        self.assertIn("gemini/gemini-3.8-flash", by_name["t2-worker"]["models"])
+
+    def test_registry_legs_keep_their_own_spelling(self):
+        self.assertIn("antigravity/gemini-3.7-flash-high",
+                      real_registry()["routes"]["t2-worker"]["legs"])
+        # resolve_leg still splits the registry spelling at the first '/'.
+        self.assertEqual(
+            registry.resolve_leg("antigravity/gemini-3.7-flash-high", real_registry()),
+            ("antigravity", "gemini-3.7-flash-high"))
+
+    def test_gateway_ref_returns_the_leg_when_there_is_no_model_prefix(self):
+        self.assertEqual(
+            registry.gateway_ref("openrouter/deepseek/deepseek-v4.1-flash",
+                                 real_registry()),
+            "openrouter/deepseek/deepseek-v4.1-flash")
+
+    def test_gateway_ref_leaves_an_unresolvable_leg_alone(self):
+        self.assertEqual(registry.gateway_ref("ghost/provider", real_registry()),
+                         "ghost/provider")
+
+
 class RenderDeterminismTests(unittest.TestCase):
     """A second render changes nothing (spec 11: idempotence)."""
 

@@ -376,6 +376,36 @@ def resolve_leg(leg, registry) -> tuple:
     return provider_id, model_id
 
 
+def gateway_ref(leg, registry) -> str:
+    """The id the OmniRoute gateway catalog actually serves for a registry leg.
+
+    A provider may spell its models differently in the live gateway than in this
+    registry: the antigravity OAuth bridge (agy CLI) serves ``agy/*`` ids
+    (measured against the live catalog's /v1/models, 2026-09-27), while the
+    registry keeps ``antigravity/*`` because resolve_leg()/usable_legs() and
+    every saved route/selection already use that spelling. This is the ONE
+    translation point between the two: a provider declaring ``model_prefix``
+    has each leg rewritten to ``<model_prefix>/<model>``; every other leg - and
+    any leg that does not resolve, or is not a string - is returned unchanged
+    (rule 1 already reports a malformed leg loudly, and a render must not hide
+    one behind a silent rewrite).
+
+    The registry's own leg spelling never moves, so the resolver and
+    apply.sh/apply.ps1 (which look a provider connection up by ``omniroute_id``)
+    are untouched."""
+    if not isinstance(leg, str):
+        return leg
+    try:
+        provider_id, model_id = resolve_leg(leg, registry)
+    except ValueError:
+        return leg
+    provider = _section(registry, "providers").get(provider_id)
+    prefix = provider.get("model_prefix") if isinstance(provider, dict) else None
+    if not prefix:
+        return leg
+    return "%s/%s" % (prefix, model_id)
+
+
 def _check_legs(registry) -> list:
     problems = []
     for route_id, route in _section(registry, "routes").items():
@@ -893,7 +923,7 @@ def render_omniroute(registry: dict) -> dict:
             "name": route_id,
             "strategy": route.get("strategy"),
             "context": omniroute_surface["context_declared"],
-            "models": list(legs),
+            "models": [gateway_ref(leg, registry) for leg in legs],
         })
 
     return {
