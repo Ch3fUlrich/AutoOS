@@ -250,7 +250,8 @@ everything else is kept as it is — a directory or file of yours, a live link
 of yours (even one into this repo's `.agents`), a dangling link of any other
 shape — and a whole-dir symlink from the old layout is left with one warning.
 That reaches native OpenHands (host CLI, Windows) only: a
-Docker sandbox runs with `HOME=/home/openhands` and gets no host `~/.openhands`
+Docker sandbox runs with the image's own `HOME`
+(`/home/<container-user>`) and gets no host `~/.openhands`
 (only the app container mounts it), so its agent sees just the workspace
 `.agents/skills` inside the mounted code tree. A skill that loads nowhere is a
 defect — the suites assert the wiring, not just the files.

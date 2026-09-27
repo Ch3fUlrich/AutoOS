@@ -1,8 +1,18 @@
 # Generic shapes for the AutoOS publication scanner. TRACKED: safe to commit.
 # One name<TAB>regex per line. Names describe the kind of hit and never echo the value.
 # Private literals (usernames, emails, domains, IPs, paths) are in patterns.private.txt (gitignored).
+# Deliberately not matched, so the gate stays green on honest documentation: the RFC 5737
+# and RFC 3849 documentation ranges, loopback, RFC 2606 reserved domains (example.com/.org/.net),
+# published no-reply addresses, and the look-alikes `host.docker.internal`, `.env.local` and
+# `foo.local.json`. A private hostname one label deeper than the last (`vm01.dc.internal`) is
+# out of this rule's reach — that is what patterns.private.txt is for.
 
 rfc1918	\b(10\.\d{1,3}|192\.168|172\.(1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b
 win-home	(?i)[a-z]:[\/]+Users[\/]+(?!(you|x|me|someone|user|username|<|\.\.\.|%|\$))[^\/\s\"'`<>|]+
 unix-home	/home/(?!(you|someone|user|username)\b)[a-z][a-z0-9_-]+
 key-shape	(sk-or-v1-[0-9a-f]{16,}|sk-ant-[A-Za-z0-9-]{16,}|LLM_[A-Za-z0-9]{12,})
+cgnat	\b100\.(6[4-9]|7[0-9]|8[0-9]|9[0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}\b
+link-local	\b169\.254\.\d{1,3}\.\d{1,3}\b
+ipv6-ula	(?i)\bfd[0-9a-f]{0,3}(:[0-9a-f]{0,4}){2,}
+private-host	(?<![A-Za-z0-9._-])[A-Za-z0-9-]+\.(?:lan|local|home\.arpa|internal)\b(?!\.?[A-Za-z])
+email	(?<![A-Za-z0-9._%+-])(?!noreply@anthropic\.com\b)[A-Za-z0-9._%+-]+@(?!(?:[A-Za-z0-9-]+\.)*example\.(?:com|org|net|edu)\b|users\.noreply\.github\.com\b)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b

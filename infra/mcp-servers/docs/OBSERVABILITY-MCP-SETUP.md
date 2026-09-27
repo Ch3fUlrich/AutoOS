@@ -24,8 +24,8 @@ Sentry MCP requires an authentication token. Generate an Internal Integration To
 Provide the following variables in your environment or `.env` equivalent:
 
 - `SENTRY_ACCESS_TOKEN`: The authentication token.
-- `SENTRY_HOST`: (Self-Hosted) The hostname of your self-hosted instance (e.g., `sentry.local`).
-- `SENTRY_URL`: (Self-Hosted) The full URL of your instance (e.g., `https://sentry.local`).
+- `SENTRY_HOST`: (Self-Hosted) The hostname of your self-hosted instance (your own private DNS name for it).
+- `SENTRY_URL`: (Self-Hosted) The full URL of your instance (`https://<your-sentry-host>`).
 - `SENTRY_ORG`: Your Sentry organization slug.
 - `SENTRY_PROJECT`: Your Sentry project slug.
 - `EMBEDDED_AGENT_PROVIDER`: If the MCP requires an embedded model provider, specify the provider name here.

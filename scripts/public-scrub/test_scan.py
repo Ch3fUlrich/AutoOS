@@ -1,8 +1,10 @@
 from pathlib import Path
+import importlib.util
 import subprocess
 import sys
 
 SCAN = Path(__file__).parent / "scan.py"
+REPO_PATTERNS = Path(__file__).parent / "patterns.txt"
 PATTERN_LINE = "host\tsecret\\.example\\.lan\n"
 
 
@@ -175,3 +177,94 @@ def test_missing_path_is_not_clean(tmp_path):
                         str(tmp_path / "nope.md")], capture_output=True, text=True)
     assert r.returncode == 2
     assert "unreadable" in r.stderr
+
+
+# ─── the tracked generic shapes (patterns.txt) ───────────────────────────────
+# Everything above feeds the scanner a pattern of its own invention. These test
+# the shipped file: a shape that stops matching fails here instead of quietly
+# un-guarding the public repo (SPEC-OMNI A2). Fixture values are invented and
+# live in a temp dir, never in a tracked document.
+
+def _scan_module():
+    spec = importlib.util.spec_from_file_location("public_scrub_scan", SCAN)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _rule_names(text, rules):
+    return {name for name, rx in rules if rx.search(text)}
+
+
+# Each kind of site value the gate must catch, with an obviously fake specimen.
+SHAPES = {
+    "cgnat": ["bind = 100.64.5.6", "peer 100.127.255.255 down"],
+    "link-local": ["169.254.1.1", "route via 169.254.0.1"],
+    "ipv6-ula": ["fd00::1", "fd12:3456:7890::1", "fdab::42"],
+    "email": ["ops@widget-factory.dev", "a.b+c@mail.acme-corp.io"],
+    "private-host": [
+        "http://nas.lan:8080/",
+        "printer.home.arpa",
+        "srv01.internal",
+        "http://hub.local/api",
+    ],
+}
+
+# Documentation and loopback values: the shapes every public document uses
+# legitimately. None of them may hit any rule at all.
+CLEAN = [
+    # RFC 5737 documentation ranges and loopback.
+    "192.0.2.1", "198.51.100.7", "203.0.113.42", "127.0.0.1", "0.0.0.0",
+    "http://localhost:8080/ui",
+    # IPv6 documentation and loopback.
+    "2001:db8::1", "::1", "fe80::1",
+    # Adjacent-but-public addresses (just outside CGNAT and link-local).
+    "100.63.9.9", "100.128.0.1", "169.253.1.1", "169.255.0.1",
+    # RFC 2606 reserved and published no-reply addresses.
+    "user@example.com", "you@sub.example.org", "nobody@example.net",
+    "autoos-worker@users.noreply.github.com", "noreply@anthropic.com",
+    "root@localhost", "not-an-email",
+    # Paths and hostnames that look like the shapes but are not site values:
+    # a dotfile directory, a settings file, a dotenv filename, a glob, Docker's
+    # host alias, and the scrubbed `<name>.example.internal` placeholder this
+    # repo's infra/ docs already use.
+    "~/.local/bin/tool", "settings.local.json", "*.local/share/app",
+    "are gitignored (`.env.local`, `.env.client`)",
+    "Runs on `coding.example.internal` from the single-source",
+    "http://host.docker.internal:8080", "/home/you/project",
+    "C:\\Users\\you\\project",
+]
+
+
+def test_every_documented_shape_is_matched_by_its_own_rule():
+    rules = _scan_module().load_patterns(REPO_PATTERNS)
+    for name, specimens in SHAPES.items():
+        for text in specimens:
+            assert name in _rule_names(text, rules), "%r is not caught by %s" % (
+                text, name)
+
+
+def test_clean_values_hit_no_rule_at_all():
+    rules = _scan_module().load_patterns(REPO_PATTERNS)
+    for text in CLEAN:
+        assert not _rule_names(text, rules), "%r trips %s" % (
+            text, ", ".join(sorted(_rule_names(text, rules))))
+
+
+def test_planted_tree_is_caught_end_to_end(tmp_path):
+    # The path CI takes: real patterns file, real subprocess, a planted file.
+    (tmp_path / "leak.md").write_text(
+        "\n".join(specimens for s in SHAPES.values() for specimens in s) + "\n",
+        encoding="utf-8")
+    proc = run_scan(["--patterns", str(REPO_PATTERNS), "leak.md"], cwd=tmp_path)
+    assert proc.returncode == 1
+    names = {ln.rsplit(": ", 1)[1] for ln in proc.stdout.splitlines()}
+    assert names >= set(SHAPES), names
+    for line in proc.stdout.splitlines():
+        assert "100.64" not in line and "@" not in line
+
+
+def test_clean_document_exits_0(tmp_path):
+    (tmp_path / "ok.md").write_text("\n".join(CLEAN) + "\n", encoding="utf-8")
+    proc = run_scan(["--patterns", str(REPO_PATTERNS), "ok.md"], cwd=tmp_path)
+    assert proc.returncode == 0, proc.stdout
