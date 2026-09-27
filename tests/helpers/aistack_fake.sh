@@ -407,7 +407,7 @@ fake_start_litellm() {
     # A real listener, discoverable only through ss + cmdline like the live
     # one. The fake bin dir is first on PATH, so the binary is named by its
     # absolute path; exec -a makes argv[0] (hence /proc/<pid>/cmdline) litellm.
-    bash -c 'exec -a litellm "$0" 300' "$sleep_bin" &
+    bash -c 'exec -a litellm "$0" 300' "$sleep_bin" </dev/null >/dev/null 2>&1 &
     printf '%s\n' "$!" >"$S/standby-pid"
     return 0
 }
