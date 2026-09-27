@@ -23,6 +23,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`tools/hostexec/policy.py`** (hx3): the per-wrapper option scan is now a single `_walk_wrapper_options` that returns the wrapped command's index *and* every option it saw, so the `env -S`/`--split-string` and `flock -c`/`--command` predicates read that list instead of re-walking the options with their own rules -- one option walker per wrapper, so a spelling the walker understands cannot be missed by a second, weaker scan. The walker learns env's bare `-` (means `-i`, not a command) and flock's leading lockfile positional (a wrapper that takes an argument before its command), and sees options the C library's getopt permutes after that positional (`flock /tmp/l -c cmd`). After `--`, flock's next token is always the lockfile, so `flock -- -c rm -rf /` locks on the file `-c` and runs `rm` (previously the head was taken from the lockfile). The bypass matrix is now generated, flat *and* nested one level (2185 cases).
 - **`tools/hostexec/policy.py`** (hx4): the same prefix-aware matching hx3 gave the wrappers now covers the command rules, which compared long options with `==`/`startswith` and so let the abbreviation of a forbidden flag execute it -- `rm --recurs /`, `rm --forc /`, `chmod --recurs /`, `tar --checkpoint-ac=exec=id`, `tar --to-com prog`, `tar --use-compress-prog=evil`, `git push --mir origin`, `git rebase --exe evil`, `git --git-di=/tmp status`, `iptables --flu`, `man --page evil`. One matcher, `_long_opt_hits(token, flagged)`, sits behind every deny gate (rm/chmod/chown, git push, git's global and rebase options, tar's exec hooks, man's pager, docker run/exec, parallel's ssh options, iptables), and it fails closed: any prefix of a flagged option counts, even one the real program would reject as ambiguous, because over-deny is safe and under-deny is the bug. Allow gates (`crontab --list`, `git config --get`, a bare `env bash --version`) deliberately stay exact -- over-matching there would over-*allow*. Each gate's flagged options moved into module-level `_FlaggedLongs` tables, and `tests/test_hostexec_policy.py` generates the matrix from them (409 cases: every prefix from 3 characters up, bare and `=value`, in the position each rule reads), so a new flagged option is covered by a table edit, not a new test. `_DOCKER_GLOBAL_VALUE_LONGS` also fixes the subcommand scan, where `docker --log-l info run -v /:/h alpine` read `info` as the subcommand. `parallel -I`/`--replace` now consume their replacement string, so the harmless `parallel -I foo echo foo ::: a` is no longer denied as a path-hijack, and `flock -- -evil ls` (lock file named `-evil`, child `ls`) is pinned as allowed.
 - **`tools/hostexec/runner.py`** (hx3): the remote command is prefixed `cd -- <cwd> && ...`. `shlex.quote` leaves a leading `-` unquoted, so a cwd like `-evil` was parsed by `cd` as options and never changed directory; `--` makes the path literal.
+### Added — the publication scanner learns four more shapes and gates the docs (SPEC-OMNI A2, 2026-09-27)
+
+The public-scrub gate covered `infra/` and `scripts/` with four shapes, and its
+own test file was run by nobody — a rule could stop matching, or a hostname could
+land in `docs/`, without any check noticing. Both are fixed here.
+
+- **`scripts/public-scrub/patterns.txt`**: five generic shapes added — `cgnat`
+  (RFC 6598's 100.64.0.0/10, where Tailscale and Docker's pooled addresses live),
+  `link-local` (RFC 3927's 169.254.0.0/16), `ipv6-ula` (RFC 4193's fd00::/8),
+  `private-host` (a single-label name ending in `.lan`, `.local`, `home.arpa` or
+  `.internal`) and `email`. Names describe the kind, never the value.
+  Documentation and look-alike values are deliberately unmatched so the gate stays
+  green on honest prose: the RFC 5737 / RFC 3849 documentation ranges, loopback,
+  RFC 2606 reserved example domains, Anthropic's and GitHub's published no-reply
+  addresses, Docker's `host.docker.internal` alias, a dotenv `.env.local` filename
+  and a `settings.local.json` filename. Known limit: a private host one label
+  deeper than the last (`vm01.dc.internal`) is out of reach of a rule that must
+  ignore `coding.example.internal` — that is what `patterns.private.txt`
+  (gitignored) is for. (`CHANGELOG.md` is not in the gate's scope; it names the
+  shapes it describes, like this entry does.)
+- **`scripts/public-scrub/scan.py`** now loads **`scan-exclude.txt`** (new) by
+  default, so the scrubber's own rules, private literals and planted fixtures are
+  never reported as hits — previously only the `--patterns` file was skipped, and
+  a developer holding a real `patterns.private.txt` saw it listed as a leak.
+  `--exclude-file` still overrides it; one reason per entry in the file.
+- **`.github/workflows/ci.yml`** ("Public scrub scan") scans `docs/`, `catalog/`,
+  `README.md` and `AGENTS.md` beside `infra/` and `scripts/`, and runs
+  `scripts/public-scrub/test_scan.py` directly (no pytest is installed anywhere —
+  the file grew a dependency-free `__main__` runner, and pytest still collects
+  the same functions). **`tests/linux/36-static-analysis.sh`** runs the same
+  command, checks the rules and fixtures, and greps the CI step for each scope
+  token so narrowing the gate back fails the suite instead of un-gating the docs.
+- Documentation placeholders for hits the widened scope found: `docs/web-services.md`
+  named container homes that `configuration/docker/ai-stack/compose.yml` owns
+  (now `/home/<service-user>` — one home per fact), `AGENTS.md` the OpenHands
+  image's own `HOME`, `catalog/ai-registry.schema.json`'s `$id` (`.internal` is a
+  private-host shape; `autoos.example` is reserved documentation space, and no
+  code resolves the id), and `infra/mcp-servers/docs/OBSERVABILITY-MCP-SETUP.md`
+  used `sentry.local` as its example hostname.
+
 ### Changed — run rules folded into the orchestration skill, one home per fact (FOLD2, 2026-09-27)
 
 - **`.agents/skills/unattended-orchestration/SKILL.md`**: 30 rules → 28. New from this run's lessons: `R-coord-07`/`R-coord-08` keep a 10-minute `CronCreate` heartbeat from launch to stop (each beat pushes, rewrites the timestamped status file, reads the inbox, checks children — common.md "Heartbeats never stop", 15:3xZ). Extended: `R-orch-13` (a plan, spec, decision or bigger change gets a pinned cross-family review before it is executed or merged — common.md "Second opinion on everything bigger"), `R-orch-14` (new: a slow free reviewer is queued, never skipped; Haiku stays an extra first pass only; the lane record names writer, reviewer, verdict — HAIKU-EVAL.md, inbox 17:52:55Z), `R-coord-02` (findings are judged by the author's orchestrator, Opus decides critical), `R-coord-03` (writers by complexity come from `route --explain`, not a prose model list), `R-coord-06` (the cap is `autoos-agent.py context` against registry `policy.handoff_caps`), `R-orch-06` (relaunch a child that went quiet >25 min), `R-orch-11` (a retired route is grepped as a DEFAULT in `configuration/`, `lib/`, `start-stack.*` too — inbox 17:09:02Z), `R-orch-01` (agent-to-agent text is terse: one line per fact, evidence by pointer). Five rules restated another rule's fact and were folded instead: `R-orch-03`→`R-router-01`, `R-orch-05`→`R-coord-01`, `R-orch-07`→`R-orch-13`, `R-orch-09`→`R-coord-08`, `R-coord-05`→`R-worker-03`; **`references/rule-map.md`** resolves each retired id.
