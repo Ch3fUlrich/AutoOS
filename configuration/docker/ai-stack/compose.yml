@@ -192,6 +192,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # The official caddy binary carries the file capability cap_net_bind_service;
+    # with it outside the bounding set exec fails ("exec /usr/bin/caddy:
+    # operation not permitted", measured). Only this one cap comes back.
+    cap_add:
+      - NET_BIND_SERVICE
     # Only OPENCODE_BASIC_B64 (base64 of "opencode:<password>") - the single
     # key this forwarder needs. Never printed, never tracked.
     env_file:

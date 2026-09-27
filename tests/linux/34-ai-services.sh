@@ -1986,6 +1986,10 @@ if it "aistack: forwarder compose service is digest-pinned, publishes :4097 and 
     grep -q '^    read_only: true$' <<<"$block" || { ok=0; echo "not read-only" >&2; }
     grep -q 'no-new-privileges:true' <<<"$block" || { ok=0; echo "no-new-privileges missing" >&2; }
     grep -q '^      - ALL$' <<<"$block" || { ok=0; echo "cap_drop ALL missing" >&2; }
+    # cap_add exactly NET_BIND_SERVICE: the caddy binary's file capability needs it
+    # in the bounding set, or exec fails (measured); nothing else comes back.
+    [[ "$(sed -n '/^    cap_add:/,/^    [a-z_]*:/p' <<<"$block" | grep -c '^      - ')" == 1 ]] \
+        && grep -q '^      - NET_BIND_SERVICE$' <<<"$block" || { ok=0; echo "cap_add must be exactly NET_BIND_SERVICE" >&2; }
     grep -q '^    depends_on:$' <<<"$block" && grep -q '^      - opencode$' <<<"$block" \
         || { ok=0; echo "depends_on opencode missing" >&2; }
     out="$(python3 "$ROOT/tests/helpers/check_compose.py" "$f" 2>&1)" && rc=0 || rc=$?
