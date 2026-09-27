@@ -952,7 +952,10 @@ class LegRulesTests(unittest.TestCase):
         cases = {
             "groq/openai/gpt-oss-120b": False,          # deny-groq before allow-gpt-oss
             "samba/gpt-oss-120b": True,
-            "opencode-zen/deepseek-v4.1-flash": False,  # zen before the deepseek allows
+            # operator 2026-09-27T07:3xZ: zen allowed as opencode-client-bound (was denied);
+            # the zen rule still sits before the deepseek deny, so zen deepseek is allowed
+            "opencode-zen/deepseek-v4.1-flash": True,
+            "opencode-zen/muse-spark-1.3-contributor-free": True,
             "openrouter/deepseek/deepseek-v4.1-flash": True,
             "openrouter/meta/muse-spark-1.3-contributor-xhigh": True,
             "openrouter/openai/gpt-oss-120b": True,

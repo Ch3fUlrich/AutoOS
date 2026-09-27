@@ -1459,11 +1459,11 @@
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
-        "id": "deny-opencode-zen",
+        "id": "allow-opencode-zen-client-bound",
         "match": "opencode-zen/*",
-        "allow": false,
-        "reason": "Zen answers only the opencode client; through the gateway it returned 403 x49",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
+        "allow": true,
+        "reason": "Zen models are free and allowed when they run through the opencode client (client_bound opencode); through the gateway they 403 'only from within OpenCode', so gateway renders never carry them",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); operator direction 2026-09-27T07:3xZ (corrects the 04:5xZ 'never in gateway combos')"
       },
       {
         "id": "allow-openrouter-deepseek-v4.1-flash",
@@ -2173,7 +2173,7 @@
       },
       "unavailable_legs": {
         "opencode-zen/muse-spark-1.3-contributor-free": {
-          "$comment": "deny-opencode-zen (OR2 2026-09-27): Zen answers only the opencode client; 403 x49 through the gateway (L0 ONE-ROUTER call_logs)",
+          "$comment": "client-bound (operator 2026-09-27): Zen answers only the opencode client - 403 x49 through the gateway (L0 ONE-ROUTER call_logs); the leg serves via the opencode client, never a gateway combo",
           "available": false
         }
       }
@@ -2225,7 +2225,7 @@
       },
       "unavailable_legs": {
         "opencode-zen/muse-spark-1.3-contributor-free": {
-          "$comment": "deny-opencode-zen (OR2 2026-09-27): Zen answers only the opencode client; 403 x49 through the gateway (L0 ONE-ROUTER call_logs)",
+          "$comment": "client-bound (operator 2026-09-27): Zen answers only the opencode client - 403 x49 through the gateway (L0 ONE-ROUTER call_logs); the leg serves via the opencode client, never a gateway combo",
           "available": false
         }
       }
@@ -2301,7 +2301,7 @@
       },
       "unavailable_legs": {
         "opencode-zen/muse-spark-1.3-contributor-free": {
-          "$comment": "deny-opencode-zen (OR2 2026-09-27): Zen answers only the opencode client; 403 x49 through the gateway (L0 ONE-ROUTER call_logs)",
+          "$comment": "client-bound (operator 2026-09-27): Zen answers only the opencode client - 403 x49 through the gateway (L0 ONE-ROUTER call_logs); the leg serves via the opencode client, never a gateway combo",
           "available": false
         }
       }
