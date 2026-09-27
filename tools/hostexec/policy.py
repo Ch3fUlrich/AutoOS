@@ -918,6 +918,15 @@ def _parent_chain(directory: str) -> list[str]:
 
 
 def _path_hijack_problem(argv0: str, policy: Policy) -> str | None:
+    # Residual check-then-exec race (item 6, accepted): every probe below is
+    # a separate os.* call on the path, while the actual exec happens later
+    # in runner._exec. A writer to argv[0]'s own file or an immediate parent
+    # can swap the file (or repoint a symlink) in between, so this is a
+    # best-effort guard against a statically-hijacked PATH, not a
+    # TOCTOU-proof one -- the same posture as the rest of the deny-list
+    # (README: an audit boundary, not containment). Closing it would need
+    # execveat()/O_PATH on a pinned fd, which Python's subprocess does not
+    # expose.
     if not argv0:
         return None  # empty-argv already covers this
     if "/" in argv0:
