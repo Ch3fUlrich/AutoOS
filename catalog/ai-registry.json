@@ -1854,7 +1854,7 @@
       "trains_on_prompts": false
     },
     "free_ai": {
-      "$comment": "BRIEF FREEAI 2026-09-27: Free.ai's free tier, an OpenAI-compatible endpoint at https://api.free.ai/v1 (measured L0 2026-09-27T11:23:04Z: POST /v1/chat/completions with model 'qwen7b' -> 200; that id answers with Qwen/Qwen3-30B-A3B-Instruct). Terms: free self-hosted only, 30k tokens/day, 10 requests/min, prompts are public and may be used for training - so trains_on_prompts true and tier free, which makes private_safe() reject it (a free effective tier is never private-safe) and keeps it out of every -clean route. Referral: https://free.ai/?ref=46pK6GCwBJs. litellm_prefix 'openai' plus its own api_base, so LiteLLM never falls back to api.openai.com; omniroute_id 'free_ai' equals the registry id and the leg prefix, so apply.sh registers one connection and the 'free_ai/qwen7b' leg resolves through provider_maps_from_dict() (cf. zen -> opencode-zen).",
+      "$comment": "BRIEF FREEAI 2026-09-27: Free.ai's free tier, an OpenAI-compatible endpoint at https://api.free.ai/v1 (measured L0 2026-09-27T11:23:04Z: POST /v1/chat/completions with model 'qwen7b' -> 200; that id answers with Qwen/Qwen3-30B-A3B-Instruct). Terms: free self-hosted only, 30k tokens/day, 10 requests/min, prompts are public and may be used for training - so trains_on_prompts true and tier free, which makes private_safe() reject it (a free effective tier is never private-safe) and keeps it out of every -clean route. Referral: https://free.ai/?ref=46pK6GCwBJs. litellm_prefix 'openai' plus its own api_base, so LiteLLM never falls back to api.openai.com; omniroute_id is the built-in OmniRoute connection id 'free-ai', NOT the registry id: the live catalog names this provider's model free-ai/qwen7b, so model_prefix 'free-ai' (same shape as antigravity -> agy) makes gateway_ref() emit free-ai/qwen7b in OmniRoute combos while the registry leg stays free_ai/qwen7b and apply.sh addresses the built-in 'free-ai' connection (api-keys.yml keeps the free_ai key name; that connection already exists, so apply reports it registered and never adds a duplicate).",
       "api_base": "https://api.free.ai/v1",
       "id": "free_ai",
       "litellm_env": "FREE_AI_API_KEY",
@@ -1866,7 +1866,8 @@
           "tpd": 30000
         }
       },
-      "omniroute_id": "free_ai",
+      "model_prefix": "free-ai",
+      "omniroute_id": "free-ai",
       "provider_data": null,
       "tier": "free",
       "trains_on_prompts": true
