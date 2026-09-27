@@ -1546,7 +1546,10 @@
   },
   "providers": {
     "SambaNova": {
-      "$comment": "Privacy research 2026-09-26 (Q1 lane): SambaNova's general Privacy Policy (https://sambanova.ai/privacy-policy) and Terms & Conditions (https://sambanova.ai/terms-and-conditions) were fetched and read; neither makes any statement about whether SambaNova Cloud API inference/prompts are used to train models, nor about opting out. Inconclusive research defaults conservative (trains_on_prompts: true, was unsourced 'false' before this migration) per operator policy 2026-09-26 ('default true / not private-safe unless the policy clearly says no training'). Distinct from the new 'samba' provider (a separately-funded paid credit tier) - see that entry's own $comment.",
+      "$comment": [
+        "Privacy research 2026-09-26 (Q1 lane): SambaNova's general Privacy Policy (https://sambanova.ai/privacy-policy) and Terms & Conditions (https://sambanova.ai/terms-and-conditions) were fetched and read; neither makes any statement about whether SambaNova Cloud API inference/prompts are used to train models, nor about opting out. Inconclusive research defaults conservative (trains_on_prompts: true, was unsourced 'false' before this migration) per operator policy 2026-09-26 ('default true / not private-safe unless the policy clearly says no training'). Distinct from the new 'samba' provider (a separately-funded paid credit tier) - see that entry's own $comment.",
+        "Operator 2026-09-27T07:3xZ (common.md 'Operator direction'): disabled entirely - SambaNova has no free tier (signup credits only) and answered 402 'You have run out of credits' 2026-09-27T04:12Z (L0, OmniRoute DB); never tried until the operator tops up. Re-enable via OpenRouter BYOK, not direct."
+      ],
       "api_base": null,
       "id": "SambaNova",
       "litellm_env": "SAMBANOVA_API_KEY",
@@ -1554,7 +1557,8 @@
       "omniroute_id": "sambanova",
       "provider_data": null,
       "tier": "free",
-      "trains_on_prompts": true
+      "trains_on_prompts": true,
+      "available": false
     },
     "antigravity": {
       "$comment": "Google Antigravity OAuth bridge (agy CLI): hosts both Gemini and Claude legs (gemini-3.7-flash-high/medium, claude-opus-4-6-thinking). No published data-training policy found for this consumer surface (checked docs/ and .agents/skills/unattended-orchestration/, 2026-09-25); trains_on_prompts defaults conservatively to true (unmeasured, D8's 'assume the less private option' pattern). Never referenced by a -clean route today, so this default changes no filter outcome.",
@@ -1871,7 +1875,10 @@
       "trains_on_prompts": false
     },
     "samba": {
-      "$comment": "New paid-credit access tier funded 2026-09-26 (orchestrator extension, operator priority 2026-09-26T15:54Z), distinct from the pre-existing free 'SambaNova' provider (omniroute_id 'sambanova') used by t2-worker/t2-worker-free-only today - 'samba' is its own leg prefix (measured leg strings: samba/DeepSeek-V3.2, samba/MiniMax-M3, samba/gpt-oss-120b), not resolvable via the 'SambaNova' key or its 'sambanova' omniroute_id (tools/registry.py resolve_leg matches on exact spelling). trains_on_prompts: true is the conservative default (see SambaNova's own $comment for the research checked, which was inconclusive for the whole SambaNova surface) - not private-safe until a policy is found that clearly says otherwise. litellm_env/omniroute_id are unsourced placeholders (D20): this migration only declares and probes the leg via the OmniRoute gateway, real wiring is a follow-up.",
+      "$comment": [
+        "New paid-credit access tier funded 2026-09-26 (orchestrator extension, operator priority 2026-09-26T15:54Z), distinct from the pre-existing free 'SambaNova' provider (omniroute_id 'sambanova') used by t2-worker/t2-worker-free-only today - 'samba' is its own leg prefix (measured leg strings: samba/DeepSeek-V3.2, samba/MiniMax-M3, samba/gpt-oss-120b), not resolvable via the 'SambaNova' key or its 'sambanova' omniroute_id (tools/registry.py resolve_leg matches on exact spelling). trains_on_prompts: true is the conservative default (see SambaNova's own $comment for the research checked, which was inconclusive for the whole SambaNova surface) - not private-safe until a policy is found that clearly says otherwise. litellm_env/omniroute_id are unsourced placeholders (D20): this migration only declares and probes the leg via the OmniRoute gateway, real wiring is a follow-up.",
+        "Operator 2026-09-27T07:3xZ (common.md 'Operator direction'): disabled entirely - SambaNova has no free tier (signup credits only) and answered 402 'You have run out of credits' 2026-09-27T04:12Z (L0, OmniRoute DB); never tried until the operator tops up. Re-enable via OpenRouter BYOK, not direct."
+      ],
       "api_base": null,
       "id": "samba",
       "litellm_env": null,
@@ -1879,7 +1886,8 @@
       "omniroute_id": "samba",
       "provider_data": null,
       "tier": "paid",
-      "trains_on_prompts": true
+      "trains_on_prompts": true,
+      "available": false
     },
     "zen": {
       "$comment": "KNOWN EXCEPTION: the free 'muse-spark-1.3-contributor-free' promo leg trains by contract like its contributor siblings, but no -clean combo ever references it - only the paid opencode-zen/deepseek-v4.1-flash leg does, which does not train (see models.'muse-spark-1.3-contributor-free').",
