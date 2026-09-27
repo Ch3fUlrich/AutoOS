@@ -22,7 +22,8 @@ markers in config.yaml:
     # AUTOOS-MANAGED-END <tier>
 
 Everything outside the markers -- the header prose, the true hand groups
-(t1-orchestrator-paid, t2-worker-paid, t3-driver-paid), router_settings,
+(t2-worker-paid, t3-driver-paid; t1-orchestrator-paid has none while
+OpenRouter is off), router_settings,
 litellm_settings, every comment and the exact whitespace between them -- is
 left byte-for-byte untouched. Inside a managed block the legs are
 machine-owned, so they are regenerated in full: reordering, adding or
