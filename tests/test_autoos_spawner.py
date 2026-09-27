@@ -4338,6 +4338,173 @@ class FreeModelFallthroughTests(unittest.TestCase):
         self.assertEqual(calls["n"], 1, "the refused re-plan never starts a client")
 
 
+class FreeConcurrencyCapTests(unittest.TestCase):
+    """SPAWNFREE (S2) item 2: three Muse free workers started together on one
+    account and all died on 'Rate limit exceeded' (L1-backlog lanes lstby2e,
+    hx4m, rv3). A --free run now counts the host's live worker records that use
+    the same free provider and waits for a slot (bounded) before starting."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.workers = os.path.join(self.tmp, "workers")
+        os.makedirs(self.workers)
+
+    def record(self, wid, model, state="live", **over):
+        rec = {"id": wid, "pid": os.getpid(),
+               "pid_start": self.agent._proc_starttime(os.getpid()),
+               "started": self.agent.utc_now_iso(), "session_tag": "", "client": "opencode",
+               "model": model, "route": "r", "title": "", "cwd": "/x", "sandbox": "",
+               "task_head": "t", "depth": 1}
+        if state == "ended":
+            rec["ended"] = self.agent.utc_now_iso()
+            rec["rc"] = 0
+        if state == "dead":
+            rec["pid"] = 999999999
+            rec["pid_start"] = 1
+        rec.update(over)
+        with io.open(os.path.join(self.workers, wid + ".json"), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def test_the_free_provider_is_the_model_prefix(self):
+        self.assertEqual(self.agent.free_provider("opencode/muse-spark-1.3-contributor-free"),
+                         "opencode")
+        self.assertEqual(self.agent.free_provider("muse"), "muse")
+        self.assertEqual(self.agent.free_provider(""), "")
+
+    def test_the_cap_is_one_for_an_unlisted_provider(self):
+        agent = self.agent
+        self.assertEqual(agent.free_concurrency_cap({}, "opencode"),
+                         agent.DEFAULT_FREE_CONCURRENCY)
+        self.assertEqual(agent.DEFAULT_FREE_CONCURRENCY, 1,
+                         "zen free is one shared account (3 workers, 3 rate limits)")
+        policy = {"free_concurrency": {"$comment": ["prose"], "opencode": 3, "other": 2}}
+        self.assertEqual(agent.free_concurrency_cap(policy, "opencode"), 3)
+        self.assertEqual(agent.free_concurrency_cap(policy, "other"), 2)
+        self.assertEqual(agent.free_concurrency_cap(policy, "third"), 1)
+
+    def test_only_live_workers_of_the_same_free_provider_count(self):
+        self.record("a", "opencode/muse-spark-1.3-contributor-free")
+        self.record("b", "opencode/nemotron-3-ultra-free")
+        self.record("c", "other/free-model")
+        self.record("d", "opencode/mimo-v2.6-flash-free", state="ended")
+        self.record("e", "opencode/mimo-v2.6-flash-free", state="dead")
+        self.assertEqual(self.agent.live_free_workers(self.workers, "opencode"), 2)
+        self.assertEqual(self.agent.live_free_workers(self.workers, "other"), 1)
+        self.assertEqual(self.agent.live_free_workers(self.workers, "none"), 0)
+        self.assertEqual(self.agent.live_free_workers(os.path.join(self.tmp, "nope"), "opencode"), 0)
+
+    def _clock(self):
+        """A fake (now, sleep) pair: sleep advances the clock, so a bounded
+        wait is measured in the polls it really made."""
+        state = {"t": 0.0}
+
+        def now():
+            return state["t"]
+
+        def sleep(secs):
+            state["t"] += secs
+            sleep.calls.append(secs)
+        sleep.calls = []
+        return now, sleep
+
+    def test_a_queued_run_waits_for_a_slot_and_says_so(self):
+        agent = self.agent
+        self.record("a", "opencode/muse-spark-1.3-contributor-free")
+        lines = []
+        now, sleep = self._clock()
+
+        def sleep_and_free(secs):
+            sleep(secs)
+            if len(sleep.calls) == 2:  # the other worker ends on poll 2
+                os.remove(os.path.join(self.workers, "a.json"))
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            live, timed_out = agent.wait_for_free_slot("opencode", 1, self.workers,
+                                                       printer=lines.append,
+                                                       sleep=sleep_and_free, now=now,
+                                                       poll_seconds=1,
+                                                       deadline_seconds=60)
+        self.assertEqual((live, timed_out), (0, False), lines)
+        self.assertEqual(lines, ["queued behind 1 opencode workers",
+                                 "queued behind 1 opencode workers"], lines)
+
+    def test_a_queue_outlasting_the_bound_reports_timed_out(self):
+        agent = self.agent
+        self.record("a", "opencode/muse-spark-1.3-contributor-free")
+        now, sleep = self._clock()
+        lines = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            live, timed_out = agent.wait_for_free_slot(
+                "opencode", 1, self.workers, printer=lines.append, sleep=sleep,
+                now=now, poll_seconds=30, deadline_seconds=120)
+        self.assertTrue(timed_out, lines)
+        self.assertEqual(live, 1)
+        # bounded: polls at 0/30/60/90/120 s, and the fifth refuses to sleep
+        # past the deadline rather than starting a 21st minute.
+        self.assertEqual(lines, ["queued behind 1 opencode workers"] * 5, lines)
+        self.assertEqual(sleep.calls, [30, 30, 30, 30], sleep.calls)
+
+    def _cmd_run_free(self, wait_result, policy=None):
+        agent = self.agent
+        args = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do it", free=True,
+            free_model="opencode/muse-spark-1.3-contributor-free", isolate=False,
+            auto=True, joinable=False, model=None, clean=False, allow_training=False,
+            max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+        cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
+               "agents": {"t2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
+        out, err = io.StringIO(), io.StringIO()
+        calls = []
+        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
+                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+            with mock.patch.object(agent, "wait_for_free_slot",
+                                   lambda *a, **k: wait_result):
+                with mock.patch.object(agent, "run_client",
+                                       lambda *a, **k: calls.append(1) or agent.ClientExit(0)):
+                    with mock.patch.object(agent.clients, "signin_state",
+                                           lambda client, env=None: (None, "")):
+                        with mock.patch("shutil.which", return_value="/usr/bin/opencode"):
+                            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                                rc = agent.cmd_run(args, cfg)
+        return rc, out.getvalue(), err.getvalue(), calls
+
+    def test_a_free_run_that_cannot_get_a_slot_exits_9_without_starting(self):
+        rc, out, err, calls = self._cmd_run_free((2, True))
+        self.assertEqual(rc, self.agent.EXIT_FREE_QUEUE_TIMEOUT, out + err)
+        self.assertEqual(self.agent.EXIT_FREE_QUEUE_TIMEOUT, 9)
+        self.assertEqual(calls, [], "the client never started (no 429, no work lost)")
+        self.assertIn("opencode", err)
+        self.assertIn("2", err)
+
+    def test_a_free_run_that_gets_a_slot_starts(self):
+        rc, out, err, calls = self._cmd_run_free((0, False))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls, [1])
+
+    def test_a_dry_run_never_waits_for_a_slot(self):
+        agent = self.agent
+        args = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do it", free=True,
+            free_model="opencode/muse-spark-1.3-contributor-free", isolate=False,
+            auto=True, joinable=False, model=None, clean=False, allow_training=False,
+            max_depth=None, lean=False, title=None, dry_run=True, no_defer=False)
+        cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
+               "agents": {"t2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
+        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
+                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+            with mock.patch.object(agent, "wait_for_free_slot",
+                                   side_effect=AssertionError("a dry run waited for a slot")):
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    rc = agent.cmd_run(args, cfg)
+        self.assertEqual(rc, 0)
+
+    def test_the_bound_defaults_to_twenty_minutes(self):
+        self.assertEqual(self.agent.FREE_QUEUE_TIMEOUT_SECONDS, 20 * 60)
+
+
 class OutsideFenceTaskDirTests(unittest.TestCase):
     """FENCE (L1-backlog 2026-09-27T04:49Z): the MCP run_job exports
     AUTOOS_TASK_DIR=<root>/logs/agents/<run id>, and a blocked worker's

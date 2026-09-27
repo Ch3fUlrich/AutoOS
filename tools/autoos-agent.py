@@ -93,9 +93,12 @@ output while the client exited 0, 3 or 6 (PROVIDER-STOP; rc 3 is agy's own quota
 item 3, measured 2026-09-27; the track record carries failure class
 "provider"; an --isolate run WIP-commits its uncommitted work first (a review run exempted - its
 deliverable is its diff), so nothing is lost); the child's
-exit code; 2 bad arguments, card or route refused;
+exit code; 2 bad arguments, card or route refused, or a --permission-mode/--approval-mode/--sandbox
+value the client's own --help does not offer (CLIENT-MODE, SPAWNFREE item 3 - the message names the
+mode and the client's accepted list);
 3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
-PAUSE (R-pause-01); 4 depth budget exhausted.
+PAUSE (R-pause-01); 4 depth budget exhausted; 9 a --free run waited the whole bounded queue
+(FREE_QUEUE_TIMEOUT_SECONDS) for a slot on its free provider and nothing started (SPAWNFREE item 2).
 
 `heartbeat` (R-heartbeat-02/03, R-pause-01, R-handoff-07) is read-only - it never pushes,
 commits or writes anything. Exit codes of its own: 3 an inbox PAUSE is active (takes
@@ -264,6 +267,90 @@ def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
         tried.add(model)
         return next_plan, current, model
     return None, None, None
+
+
+# SPAWNFREE (S2) item 2: one free provider is one shared account, so N workers
+# on it is N times the same rate limit (measured 2026-09-27: 3 Muse free workers
+# started together on the L1-backlog lanes lstby2e, hx4m and rv3, and all three
+# printed 'Rate limit exceeded'). A --free run therefore counts the host's live
+# worker records that use the same free provider before it starts, and waits
+# for a slot rather than starting into a 429. The cap is
+# policy.free_concurrency in catalog/ai-registry.json; the wait is bounded, and
+# a queue that outlasts the bound exits 9 having started nothing.
+DEFAULT_FREE_CONCURRENCY = 1
+FREE_QUEUE_POLL_SECONDS = 15
+FREE_QUEUE_TIMEOUT_SECONDS = 20 * 60
+EXIT_FREE_QUEUE_TIMEOUT = 9
+
+
+def free_provider(model) -> str:
+    """The provider prefix of a model id ('opencode/muse-...-free' -> 'opencode')."""
+    return (model or "").partition("/")[0]
+
+
+def free_concurrency_cap(policy: dict | None, provider: str) -> int:
+    """policy.free_concurrency for `provider`; DEFAULT_FREE_CONCURRENCY (1) for
+    an unlisted provider, a junk value or a cap below 1 (a 0 cap is a queue
+    nothing can ever leave)."""
+    cap = ((policy or {}).get("free_concurrency") or {}).get(provider)
+    if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+        return DEFAULT_FREE_CONCURRENCY
+    return cap
+
+
+def live_free_workers(directory: str, provider: str) -> int:
+    """Worker records in `directory` that are live and run a model of `provider`.
+
+    `died` (gone, or a recycled pid) and `exited` records are not live; an
+    unjudgeable record counts, because the cost of a false queue is a wait and
+    the cost of missing one is a 429.
+    """
+    try:
+        rows = list_workers(directory)
+    except OSError:
+        return 0
+    return sum(1 for row in rows
+               if not row["state"].startswith("exited") and row["state"] != "died"
+               and free_provider(row["model"]) == provider)
+
+
+def wait_for_free_slot(provider: str, cap: int, directory: str, printer=None,
+                       sleep=None, now=None, poll_seconds: int = FREE_QUEUE_POLL_SECONDS,
+                       deadline_seconds: int = FREE_QUEUE_TIMEOUT_SECONDS) -> tuple:
+    """Poll until fewer than `cap` workers of `provider` are live.
+
+    Returns (live_count, timed_out). Each poll with the slot still taken prints
+    the one line 'queued behind <n> <provider> workers', so a log says why a
+    spawn took 20 minutes. Never raises on a registry problem: an unreadable
+    directory reads as 0 live workers (start, and let the client fail loudly).
+    """
+    printer = printer or (lambda line: print(line, file=sys.stderr))
+    sleep = sleep or time.sleep
+    now = now or time.time
+    limit = now() + deadline_seconds
+    while True:
+        live = live_free_workers(directory, provider)
+        if live < cap:
+            return live, False
+        printer("queued behind %d %s workers" % (live, provider))
+        if now() + poll_seconds > limit:
+            return live, True
+        sleep(poll_seconds)
+
+
+def free_slot_refusal(plan: dict, policy: dict | None) -> str | None:
+    """Wait for a free slot for `plan`'s model; None when it is (or becomes)
+    free, the refusal message when the bounded wait ran out."""
+    provider = free_provider(plan["model"])
+    cap = free_concurrency_cap(policy, provider)
+    live, timed_out = wait_for_free_slot(provider, cap, workers_dir())
+    if not timed_out:
+        return None
+    return ("the %s free leg is saturated: %d worker(s) of the same provider were "
+            "live for %d min (cap %d per provider, policy.free_concurrency). Nothing "
+            "started - retry later, run without --free, or raise the cap if the "
+            "provider says it serves more at once."
+            % (provider, live, FREE_QUEUE_TIMEOUT_SECONDS // 60, cap))
 
 
 def lean_overlay(cfg: dict) -> dict:
@@ -2210,6 +2297,35 @@ def cmd_run(args, cfg: dict) -> int:
                   "(or use --free)." % GATEWAY, file=sys.stderr)
             return 3
         env["AUTOOS_OMNIROUTE_KEY"] = key
+    # SPAWNCAP (S2): the route ids a provider-stopped attempt has already
+    # burned, so a fallthrough re-run never picks one of them again.
+    excluded_routes = set()
+    # SPAWNFREE (S2) item 1: and the free models it burned. A --free run's
+    # model is not a route, so the resolver's fallthrough never reached it -
+    # the first 'Rate limit exceeded' ended the run (inbox 2026-09-27T17:08:22Z
+    # and 17:19:45Z, work/L1-routing/T1FREE.r2.out).
+    excluded_free_models = set()
+    # How many re-runs this run has already started (route or free model): the
+    # one bound MAX_FALLTHROUGH is about.
+    fallthroughs = 0
+    free_chain = None
+    free_policy = None
+    if args.free:
+        if registry is None:
+            try:
+                registry = load_registry(REGISTRY_PATH)
+            except (OSError, ValueError):
+                registry = None  # an unreadable registry leaves one free model
+        free_policy = (registry or {}).get("policy") or {}
+        free_chain = free_model_chain(free_policy, client.name, args.free_model)
+    # SPAWNFREE (S2) item 2: a free provider is one shared account, so a second
+    # worker on it does not add capacity, it adds a 429. Wait for a slot before
+    # anything is cloned or started (a queue that outlasts the bound costs
+    # nothing but time and exits 9).
+    if args.free:
+        queued = free_slot_refusal(plan, free_policy)
+        if queued is not None:
+            return refuse(queued, EXIT_FREE_QUEUE_TIMEOUT)
     parent_snap = None
     if plan["sandbox"]:
         sb = plan["sandbox"]
@@ -2227,26 +2343,6 @@ def cmd_run(args, cfg: dict) -> int:
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
-    # SPAWNCAP (S2): the route ids a provider-stopped attempt has already
-    # burned, so a fallthrough re-run never picks one of them again.
-    excluded_routes = set()
-    # SPAWNFREE (S2) item 1: and the free models it burned. A --free run's
-    # model is not a route, so the resolver's fallthrough never reached it -
-    # the first 'Rate limit exceeded' ended the run (inbox 2026-09-27T17:08:22Z
-    # and 17:19:45Z, work/L1-routing/T1FREE.r2.out).
-    excluded_free_models = set()
-    # How many re-runs this run has already started (route or free model): the
-    # one bound MAX_FALLTHROUGH is about.
-    fallthroughs = 0
-    free_chain = None
-    if args.free:
-        if registry is None:
-            try:
-                registry = load_registry(REGISTRY_PATH)
-            except (OSError, ValueError):
-                registry = None  # an unreadable registry leaves one free model
-        free_chain = free_model_chain((registry or {}).get("policy"), client.name,
-                                      args.free_model)
     start = time.time()
     # Every finished --isolate run is captured (tee'd to our stdout), so the
     # WIPfix provider-stop check has the child's tail. A --joinable launcher
@@ -2255,6 +2351,19 @@ def cmd_run(args, cfg: dict) -> int:
     # WIP-committed - exactly as before WIPfix. CAPTURE_CLIENTS keeps its own.
     capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
     while True:
+        # SPAWNFREE (S2) item 2: a fallthrough re-run is a fresh start on the
+        # same shared free account, so it passes the same gate (the first
+        # attempt passed it before the clone was made). Breaking here still
+        # runs the sandbox summary below, so the WIP commit the stopped
+        # attempt left is announced. A --free run never reaches the track
+        # record (track_entry returns None for it), so a queue timeout costs
+        # the route nothing.
+        if args.free and fallthroughs:
+            queued = free_slot_refusal(plan, free_policy)
+            if queued is not None:
+                print("autoos-agent: %s" % queued, file=sys.stderr)
+                rc = EXIT_FREE_QUEUE_TIMEOUT
+                break
         # Worker registry (ps): one record per attempt (a SPAWNCAP fallthrough
         # is its own record), live for the whole run, so `ps` shows this spawn
         # from any checkout. The child inherits the dir so a nested spawn in an
