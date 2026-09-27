@@ -236,10 +236,12 @@ def ps(include_ended: bool = False) -> dict:
 
     The same host-wide registry the CLI writes (AUTOOS_WORKERS_DIR, else the
     main checkout's logs/workers): running and died workers by default,
-    exited ones too with include_ended. Returns {"workers": rows, "dir": dir}.
+    exited ones too with include_ended (the same 24 h end-time window as
+    ``autoos-agent.py ps --all``, V3 ps final review).
+    Returns {"workers": rows, "dir": dir}.
     """
     directory = agent.workers_dir()
-    return {"workers": agent.list_workers(directory, include_ended=include_ended),
+    return {"workers": agent.visible_workers(directory, include_ended=include_ended),
             "dir": directory}
 
 
@@ -730,7 +732,8 @@ def serve() -> None:
         """Every spawned worker on this host (all worktrees and clones): id,
         state (running / died / exited rc=N), elapsed, client, model, lane,
         pid and title/task - the same rows `autoos-agent.py ps --json` prints.
-        include_ended adds workers that exited (last 7 days)."""
+        include_ended adds workers that exited in the last 24 h (the same
+        window as `autoos-agent.py ps --all`)."""
         return ps(include_ended)
 
     @app.tool(name="context")

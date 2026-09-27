@@ -1564,12 +1564,56 @@ def _parse_iso(text):
         return None
 
 
+# Windows process queries (V1/V2, ps final review): os.kill(pid, 0) is signal
+# 0, which on Windows is CTRL_C_EVENT - GenerateConsoleCtrlEvent - so it would
+# Ctrl+C a live worker and read it as dead. Query the process instead. One
+# OpenProcess handle answers both _pid_alive and _proc_starttime.
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+ERROR_ACCESS_DENIED = 5
+STILL_ACTIVE = 259
+
+
+def _win_liveness(pid):
+    """(alive, creation_time) of a Windows pid, or (False, None) when gone.
+
+    OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) with a NULL handle and
+    ERROR_ACCESS_DENIED means the process exists but belongs to someone else:
+    alive, start time unknown. GetExitCodeProcess == STILL_ACTIVE keeps it
+    alive; GetProcessTimes' creation FILETIME (as an int) is the pid-reuse
+    guard's start time, None when the process exists but its times are
+    unreadable. Never touches a signal.
+    """
+    import ctypes
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False, None
+    k32 = ctypes.windll.kernel32
+    handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return (ctypes.get_last_error() == ERROR_ACCESS_DENIED), None
+    try:
+        code = ctypes.c_ulong()
+        if not k32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != STILL_ACTIVE:
+            return False, None
+        stamps = [ctypes.c_ulonglong() for _ in range(4)]
+        if k32.GetProcessTimes(handle, *(ctypes.byref(s) for s in stamps)):
+            return True, stamps[0].value
+        return True, None
+    finally:
+        k32.CloseHandle(handle)
+
+
 def _proc_starttime(pid):
-    """Field 22 (starttime, in clock ticks) of /proc/<pid>/stat, or None.
+    """The process's start time: field 22 (clock ticks) of /proc/<pid>/stat on
+    POSIX, or the GetProcessTimes creation FILETIME (as an int) on Windows;
+    None when it cannot be read.
 
     The reuse guard: a recycled pid is a different process, so its start time
     no longer matches the one a record stored when it was alive.
     """
+    if os.name == "nt":
+        return _win_liveness(pid)[1]
     try:
         with io.open("/proc/%d/stat" % int(pid), encoding="utf-8") as fh:
             data = fh.read()
@@ -1638,6 +1682,9 @@ def _worker_record_end(directory: str, wid: str, record: dict, rc) -> None:
 
 
 def _pid_alive(pid) -> bool:
+    if os.name == "nt":
+        # os.kill(pid, 0) here is CTRL_C_EVENT, not a probe (V1).
+        return _win_liveness(pid)[0]
     try:
         os.kill(int(pid), 0)
     except (ProcessLookupError, ValueError, TypeError):
@@ -1684,7 +1731,9 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
 
     state is "running" (alive, start time matches - the pid-reuse guard),
     "died" (gone or a recycled pid) or "exited rc=N". Records with no ``ended``
-    whose process cannot be checked are not judged here. A record whose ended
+    whose process cannot be checked are not judged here; the pid-reuse guard is
+    skipped only when a live pid's start time is unreadable (a Windows process
+    owned by another user), which still counts as running. A record whose ended
     time (or, for a died worker, whose started time) is older than 7 days is
     deleted. A corrupt record is skipped, never raised on.
     """
@@ -1735,6 +1784,31 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
     return rows
 
 
+ENDED_VISIBLE_WINDOW = datetime.timedelta(hours=24)
+
+
+def visible_workers(directory: str, include_ended: bool = False, now=None) -> list:
+    """The rows both ps surfaces show (V3 ps final review).
+
+    `list_workers` with the one ``--all`` window the CLI and the MCP tool
+    share: with include_ended, an ended row is shown only when it *ended*
+    within the last 24 h - a long run that ended an hour ago is in, a short
+    one that ended three days ago is out. Running and died rows always pass;
+    without include_ended exited rows are already gone from `list_workers`.
+    ``now`` is a datetime, an ISO string or None (as in `list_workers`).
+    """
+    rows = list_workers(directory, now=now, include_ended=include_ended)
+    if not include_ended:
+        return rows
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    elif not isinstance(now, datetime.datetime):
+        now = _parse_iso(now) or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - ENDED_VISIBLE_WINDOW
+    return [r for r in rows if not r["state"].startswith("exited")
+            or (_parse_iso(r["ended"]) or cutoff) > cutoff]
+
+
 def _print_worker_table(rows: list) -> None:
     head = ["ID", "STATE", "ELAPSED", "CLIENT", "MODEL", "LANE", "PID", "TITLE/TASK"]
     cells = [[r["id"], r["state"], r["elapsed"] or "-", r["client"], r["model"],
@@ -1753,11 +1827,7 @@ def _print_worker_table(rows: list) -> None:
 
 def cmd_ps(args) -> int:
     directory = workers_dir()
-    rows = list_workers(directory, include_ended=args.all)
-    if args.all:  # --all: exited from the last 24 h (running/died always shown)
-        day_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
-        rows = [r for r in rows if not r["state"].startswith("exited")
-                or (_parse_iso(r["ended"]) or day_ago) > day_ago]
+    rows = visible_workers(directory, include_ended=args.all)
     if args.json:
         print(json.dumps({"workers": rows, "dir": directory}, indent=1))
         return 0
@@ -1884,9 +1954,17 @@ def cmd_run(args, cfg: dict) -> int:
     # this spawn even from another checkout. Hand the dir to the child so a
     # nested spawn (inside an --isolate clone, which has its own .git) records
     # in the same host-wide place.
-    workers = workers_dir()
-    env["AUTOOS_WORKERS_DIR"] = workers
-    worker_id, worker_rec = _worker_record_start(plan, args, workers)
+    # V4 ps final review: a record write (disk full, read-only workers dir)
+    # must never stop the client from launching - the run just shows as died.
+    workers = None
+    worker_id = None
+    worker_rec = None
+    try:
+        workers = workers_dir()
+        env["AUTOOS_WORKERS_DIR"] = workers
+        worker_id, worker_rec = _worker_record_start(plan, args, workers)
+    except OSError as exc:
+        print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
     run_rc = None
     try:
         run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
@@ -1894,10 +1972,11 @@ def cmd_run(args, cfg: dict) -> int:
     finally:
         # A failed record write (disk full, permissions) must never replace the
         # client's own rc or exception: ps then shows the worker as died.
-        try:
-            _worker_record_end(workers, worker_id, worker_rec, run_rc)
-        except OSError as exc:
-            print("autoos-agent: could not update worker record %s: %s" % (worker_id, exc), file=sys.stderr)
+        if worker_id is not None:
+            try:
+                _worker_record_end(workers, worker_id, worker_rec, run_rc)
+            except OSError as exc:
+                print("autoos-agent: could not update worker record %s: %s" % (worker_id, exc), file=sys.stderr)
     client_tail = getattr(run_rc, "tail", "") or ""
     rc, refusal = refusal_exit(int(run_rc), getattr(run_rc, "refusal", None) or "")
     child_rc = rc  # the WIP message names the client's own rc, not a verdict override

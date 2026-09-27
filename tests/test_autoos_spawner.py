@@ -56,6 +56,60 @@ def run_agent(*args, env=None):
                           text=True, env=env or clean_env(), stdin=subprocess.DEVNULL)
 
 
+class _FakeKernel32:
+    """A fake ctypes kernel32 for the Windows liveness/start-time paths (V1/V2).
+
+    Runs on Linux: the production code imports ctypes inside its
+    ``os.name == "nt"`` branch, so injecting this module into ``sys.modules``
+    is exactly what it sees. ``byref`` returns the ctypes-like value object
+    itself, so the fake Get* calls can write ``.value`` on it.
+    """
+
+    def __init__(self, handle=1234, exit_code=259, created=987654321,
+                 last_error=0, times_ok=True):
+        self.handle = handle
+        self.exit_code = exit_code
+        self.created = created
+        self.last_error = last_error
+        self.times_ok = times_ok
+        self.opened = []
+        self.closed = []
+
+    def OpenProcess(self, access, inherit, pid):
+        self.opened.append((access, inherit, pid))
+        return self.handle
+
+    def GetExitCodeProcess(self, handle, code):
+        code.value = self.exit_code
+        return 1
+
+    def GetProcessTimes(self, handle, created, exited, kernel, user):
+        if not self.times_ok:
+            return 0
+        created.value = self.created
+        return 1
+
+    def CloseHandle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+class _FakeCtypesValue:
+    def __init__(self, value=0):
+        self.value = value
+
+
+def fake_windows_ctypes(k32):
+    """A ctypes stand-in whose ``windll.kernel32`` is `k32` (V1/V2 tests)."""
+    fake = types.ModuleType("ctypes")
+    fake.windll = types.SimpleNamespace(kernel32=k32)
+    fake.get_last_error = lambda: k32.last_error
+    fake.byref = lambda obj: obj
+    fake.c_ulong = _FakeCtypesValue
+    fake.c_ulonglong = _FakeCtypesValue
+    return fake
+
+
 class RoutingTableTests(unittest.TestCase):
     """ADR 0006 decision 3: one test per row of the resolution table."""
 
@@ -3944,6 +3998,86 @@ class WorkerRecordTests(_WorkerRecordBase):
         self.assertIn("could not update worker record", err.getvalue())
 
 
+    def test_a_record_start_failure_still_runs_the_client(self):
+        # V4 ps final review: workers_dir()/_worker_record_start() run before
+        # run_client; an OSError there must not stop the client from launching.
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title="t", model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+        called = {}
+
+        def boom(*_a, **_k):
+            raise OSError(28, "No space left on device")
+
+        def fake_run(*_a, **_k):
+            called["ran"] = True
+            return self.agent.ClientExit(4)
+
+        err = io.StringIO()
+        with mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "_worker_record_start", side_effect=boom), \
+                mock.patch.object(self.agent, "run_client", side_effect=fake_run), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertTrue(called.get("ran"), "run_client must run without a worker record")
+        self.assertEqual(rc, 4)
+        self.assertIn("could not write worker record", err.getvalue())
+
+
+class WindowsLivenessTests(_WorkerRecordBase):
+    """V1/V2 ps final review: on Windows liveness and the pid-reuse start time
+    go through ctypes (OpenProcess/GetExitCodeProcess/GetProcessTimes/
+    CloseHandle), never os.kill - signal 0 there Ctrl+C's a live worker. The
+    fake kernel32 lets these run on Linux."""
+
+    def call(self, k32, fn, *args):
+        fake = fake_windows_ctypes(k32)
+        with mock.patch.dict(sys.modules, {"ctypes": fake}), \
+                mock.patch.object(self.agent.os, "name", "nt"), \
+                mock.patch.object(self.agent.os, "kill",
+                                  side_effect=AssertionError("os.kill must not run on Windows")):
+            return fn(*args)
+
+    def test_a_live_windows_pid_is_alive_and_never_os_kill(self):
+        k32 = _FakeKernel32(handle=7, exit_code=259)
+        self.assertTrue(self.call(k32, self.agent._pid_alive, 4242))
+        self.assertEqual(k32.opened, [(0x1000, False, 4242)])
+        self.assertEqual(k32.closed, [7])
+
+    def test_a_null_handle_with_no_error_is_not_alive(self):
+        self.assertFalse(self.call(_FakeKernel32(handle=None), self.agent._pid_alive, 4242))
+
+    def test_access_denied_means_a_live_process(self):
+        # ERROR_ACCESS_DENIED (5): the process exists, owned by someone else.
+        k32 = _FakeKernel32(handle=None, last_error=5)
+        self.assertTrue(self.call(k32, self.agent._pid_alive, 4242))
+
+    def test_a_non_still_active_exit_code_is_not_alive(self):
+        self.assertFalse(self.call(_FakeKernel32(exit_code=0), self.agent._pid_alive, 1))
+
+    def test_windows_start_time_comes_from_get_process_times(self):
+        self.assertEqual(self.call(_FakeKernel32(created=987654321),
+                                   self.agent._proc_starttime, 1), 987654321)
+
+    def test_windows_start_time_is_none_when_the_process_is_denied(self):
+        k32 = _FakeKernel32(handle=None, last_error=5)
+        self.assertIsNone(self.call(k32, self.agent._proc_starttime, 1))
+
+    def test_windows_start_time_is_none_when_get_process_times_fails(self):
+        k32 = _FakeKernel32(times_ok=False)
+        self.assertIsNone(self.call(k32, self.agent._proc_starttime, 1))
+
+
 class PsTests(_WorkerRecordBase):
     """The `ps` subcommand and the MCP `ps` tool read the same rows."""
 
@@ -3984,6 +4118,22 @@ class PsTests(_WorkerRecordBase):
         self.assertEqual(out["dir"], self.workers)
         self.assertEqual([(w["id"], w["state"], w["client"]) for w in out["workers"]],
                          [(w["id"], w["state"], w["client"]) for w in rows])
+
+    def test_an_exited_record_ended_three_days_ago_is_hidden_by_both_callers(self):
+        # V3 ps final review: the CLI's --all 24 h end-time window and the MCP
+        # ps(include_ended=True) must agree; the 7-day prune must not leak an
+        # old exited record into the MCP tool.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        iso = lambda d: d.isoformat(timespec="seconds").replace("+00:00", "Z")
+        self.write("old", started=iso(now - datetime.timedelta(days=3, minutes=1)),
+                   ended=iso(now - datetime.timedelta(days=3)), rc=0)
+        self.write("recent", started=iso(now - datetime.timedelta(hours=2)),
+                   ended=iso(now - datetime.timedelta(hours=1)), rc=0)
+        r = run_agent("ps", "--all", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([w["id"] for w in json.loads(r.stdout)["workers"]], ["recent"])
+        out = mcp_server.ps(include_ended=True)
+        self.assertEqual([w["id"] for w in out["workers"]], ["recent"])
 
 
 if __name__ == "__main__":
