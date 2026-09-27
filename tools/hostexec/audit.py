@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
@@ -38,84 +39,17 @@ def default_state_dir() -> str:
 
 # ─── redaction (spec section 5; review F12 broadens the patterns, F13 strips
 # control characters so a log line can never forge terminal output) ────────
+# SPAWNREDACT item 1: the pattern set itself lives in tools/autoos_redact.py,
+# shared with the spawner's worker-output streams (one home per fact). The
+# mask stays "***" here, which is what the audit log's own tests pin.
 
-_SECRET_NAME_RE = re.compile(r"(?i)(token|secret|password|passwd|bearer|api[_-]?key|credential|key)")
-_SECRET_VALUE_FLAGS = ("--token", "--password", "--passwd", "--secret", "--key",
-                        "--api-key", "--bearer", "-u", "-p")
-_SECRET_PREFIX_RE = re.compile(r"^(sk-|ghp_|gho_|glpat-|xox)")
-_BEARER_IN_TOKEN_RE = re.compile(r"(?i)bearer\s+\S+")
-_API_KEY_IN_TOKEN_RE = re.compile(r"(?i)(api[_-]?key\s*[:=]\s*)\S+")
-_URL_USERPASS_RE = re.compile(r"(https?://)[^/\s:@]+:[^/\s:@]+@")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
+_TOOLS_DIR = str(Path(__file__).resolve().parent.parent)
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+import autoos_redact as _redact  # noqa: E402
 
-
-def sanitize_text(s: str) -> str:
-    """Strip C0/C1 control characters (tab kept) so a stored/rendered field
-    can never inject a terminal escape or a fake extra log line."""
-    return _CONTROL_RE.sub("", s)
-
-
-# note: 0x0a (LF) and 0x0d (CR) are C0 controls too and MUST be stripped --
-# only 0x09 (tab) is kept.
-
-
-def redact_argv(argv: Sequence[str]) -> list[str]:
-    """Best-effort credential redaction for the STORED/rendered argv:
-    `KEY=value`-shaped names that look secret (*TOKEN*|*SECRET*|*PASSWORD*|
-    *KEY*), `Bearer <token>` separate or inside one token
-    (`Authorization: Bearer x`), common `--token`/`--password`/... flags
-    with a separate value, mysql-style `-pSECRET` and `-uUSER:PASS`
-    attached, `x-api-key: <v>`, `user:pass@` in URLs, and known secret
-    prefixes (sk-, ghp_, gho_, glpat-, xox). argv_sha256 (below) hashes the
-    RAW, unredacted form separately, so two identical raw calls can still
-    be correlated without the secret ever being stored in clear."""
-    out: list[str] = []
-    mask_next = False
-    for tok in argv:
-        tok = sanitize_text(tok)
-        if mask_next:
-            out.append("***")
-            mask_next = False
-            continue
-        if tok == "Bearer":
-            out.append(tok)
-            mask_next = True
-            continue
-        if _SECRET_PREFIX_RE.match(tok):
-            out.append("***")
-            continue
-        # Single-token carriers inside a larger token.
-        redacted = _BEARER_IN_TOKEN_RE.sub("Bearer ***", tok)
-        redacted = _API_KEY_IN_TOKEN_RE.sub(r"\1***", redacted)
-        redacted = _URL_USERPASS_RE.sub(r"\1***:***@", redacted)
-        if redacted != tok:
-            out.append(redacted)
-            continue
-        if "=" in tok:
-            name, _, _value = tok.partition("=")
-            bare = name.lstrip("-")
-            if _SECRET_NAME_RE.search(bare):
-                out.append(f"{name}=***")
-                continue
-            out.append(tok)
-            continue
-        if tok.startswith("-p") and len(tok) > 2 and not tok.startswith("--"):
-            out.append("-p***")
-            continue
-        if tok.startswith("-u") and len(tok) > 2 and not tok.startswith("--"):
-            # Attached -uUSER is just a username (keep, e.g. -uroot);
-            # -uUSER:PASS carries a secret (mask).
-            if ":" in tok[2:]:
-                out.append("-u***")
-            else:
-                out.append(tok)
-            continue
-        if tok in _SECRET_VALUE_FLAGS:
-            out.append(tok)
-            mask_next = True
-            continue
-        out.append(tok)
-    return out
+sanitize_text = _redact.sanitize_text
+redact_argv = _redact.redact_argv
 
 
 def hash_argv(argv: Sequence[str]) -> str:
