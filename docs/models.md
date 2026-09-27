@@ -180,35 +180,29 @@ good-vs-bad ranking — the gateway tries them top-down and hops on
 key is missing, `apply` skips its legs with a warning and the chain still
 resolves through the others.
 
-### Effort levels (measured 2026-09-22, gateway 3.8.50, opencode v2.0.12)
+### Effort levels (measured 2026-09-27, gateway 3.8.51, opencode v2.0.16)
 
-Effort is a **caller-side suffix**, not a model id. **How opencode resolves
-it:** it builds a model's variant list from the **provider catalog's**
-`supportedThinkingEfforts` metadata — *not* from config. A hand-written
-`"variants"` block does not register, and is worse than useless: on this
-build any `variants` object on an openai-compatible provider model (docs
-shape `{"low": {"reasoningEffort": "low"}}` included, verified in isolation)
-makes the **whole provider unresolvable** (`Model unavailable`, even bare).
-Tried and reverted 2026-09-22.
+Effort is a **caller-side suffix** (`omniroute/<route>#<rung>`), not a model id.
+opencode v2.0.16 builds a custom provider's variant list from config: a
+`variants` **array** of `{id, settings: {reasoningEffort}}`
+(`packages/schema/src/config/provider.ts:76-79`); without one it offers only
+`low/medium/high` (`packages/core/src/variant.ts:27`), and a declared array
+replaces that default, so it lists every rung. The rung is sent as body
+`reasoning_effort` (`packages/ai/src/protocols/openai-chat.ts:776-792`). The
+2026-09-22 failure (v2.0.12) was the *object* form, which broke the provider.
 
-That is the whole answer to "why does the gateway combo lack minimal/xhigh
-while Zen has max?": the gateway combo carries no catalog effort metadata,
-so opencode's built-in fallback list (`low/medium/high`) is all that
-resolves; openrouter's own catalog *does* advertise the ladder.
+`tools/sync-ide-models.py` renders the array into the repo `opencode.jsonc`
+`providers` blocks from `catalog/ide-models.json`'s `effort_ladder`, which
+`tools/registry.py render_ide()` takes from the route's **first leg's** model
+`effort_ladder` minus `none`. Later legs may lack a rung; what a fallback
+leg does with it is unmeasured (spec 5.5: clamp to the leg's ladder).
 
-| Suffix ladder | openrouter direct | gateway combo |
-|---|---|---|
-| `#minimal`, `low`, `medium`, `high`, `xhigh` | all resolve; `#minimal`/`#low`/`#xhigh` ack-proven 2026-09-22 | only `#low`/`#medium`/`#high` |
-| `#max` | not offered (Zen-native only) | not offered |
+Measured 2026-09-27 via `tools/autoos-agent.py run --model
+omniroute/t1-orchestrator#xhigh`: before the render `Variant unavailable for
+omniroute/t1-orchestrator: xhigh`; after it the call answered, and
+`#bogus` is still refused. `#minimal` and `#max` answered too.
 
-**Rule: the gateway combo is for fallback routing; the direct provider
-model is for effort control.** `#max` stays Zen-native only — nothing routed
-through OmniRoute exposes it. Agents that need max reasoning on a combo pin
-`#high` (`t1-orchestrator-orchestrator` does). Re-probe after any gateway or opencode
-upgrade: if gateway combos start forwarding effort metadata, the two rows
-collapse.
-
-**Where the direct surface lives** (so nobody has to re-derive it):
+**Where the direct surface lives** (full vendor ladder, no gateway):
 
 - repo `opencode.jsonc` → `providers.openrouter` with
   `muse-spark-1.3-contributor` (`modelID: meta/muse-spark-1.3-contributor`,
@@ -238,10 +232,10 @@ label is display only and appears identically in `combos.json` (`$comment`),
 
 ## Proven effort ladders & costs (measured 2026-09-23 via provider catalogs)
 
-Gateway combos expose only `low/medium/high` (the gateway strips
-`supportedThinkingEfforts`). The full ladder needs the direct OpenRouter ref.
-Ladders are **non-contiguous** — never assume `medium` exists. Never forward
-an unsupported effort (see the clamp rule in `combos.json`).
+Gateway combos now carry per-model `variants` blocks derived from the
+registry's `effort_ladder` (A6a). Ladders are **non-contiguous** — never assume
+`medium` exists. Never forward an unsupported effort (see the clamp rule in
+`combos.json`).
 
 | Model | Direct ref | Proven efforts | Marginal cost | Privacy |
 |---|---|---|---|---|

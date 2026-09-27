@@ -122,6 +122,16 @@ def _validate_models(models, label):
         effort = m.get("reasoning_effort")
         if effort is not None and not isinstance(effort, str):
             raise ConfigError(f"{label}: {model_label}: reasoning_effort must be a string")
+        ladder = m.get("effort_ladder")
+        if ladder is not None:
+            if not isinstance(ladder, list) or not all(isinstance(e, str) for e in ladder):
+                raise ConfigError(f"{label}: {model_label}: effort_ladder must be a list of strings")
+            if not ladder:
+                raise ConfigError(f"{label}: {model_label}: effort_ladder must not be empty")
+            if any(e == "none" for e in ladder):
+                raise ConfigError(f"{label}: {model_label}: effort_ladder must not contain 'none'")
+            if len(ladder) != len(set(ladder)):
+                raise ConfigError(f"{label}: {model_label}: effort_ladder contains duplicate rungs")
         if not m["surfaces"]:
             raise ConfigError(f"{label}: {model_label}: surfaces is empty")
         for gateway, surfaces in m["surfaces"].items():
@@ -237,18 +247,43 @@ def _significant(lines, index, step):
     return ""
 
 
+def _variants_block(effort_ladder, indent):
+    """JSON lines for a model-level ``variants`` array from an effort ladder,
+    omitting "none" (already filtered upstream in render_ide). Each item is
+    opencode V2's {id, settings: {reasoningEffort}} (v2.0.16
+    packages/schema/src/config/provider.ts:76-79); a declared list replaces
+    opencode's own low/medium/high, so it carries every rung."""
+    if not effort_ladder:
+        return []
+    inner = indent + "  " * 2
+    items = []
+    for n, level in enumerate(effort_ladder):
+        comma = "," if n < len(effort_ladder) - 1 else ""
+        rung = json.dumps(level, ensure_ascii=False)
+        items.append(f'{inner}{{ "id": {rung}, "settings": {{ "reasoningEffort": {rung} }} }}{comma}')
+    return [
+        f'{indent}  "variants": [',
+        *items,
+        f'{indent}  ]',
+    ]
+
+
 def render_entries(models, indent, trailing_comma):
     lines = []
     for n, m in enumerate(models):
         limit = '{ "context": %d, "output": %d }' % (m["context"], m["output"])
         last = n == len(models) - 1
-        lines += [
+        ladder = m.get("effort_ladder")
+        entry = [
             f"{indent}{json.dumps(m['id'], ensure_ascii=False)}: {{",
             f'{indent}  "modelID": {json.dumps(m["id"], ensure_ascii=False)},',
             f'{indent}  "name": {json.dumps(m["name"], ensure_ascii=False)},',
-            f'{indent}  "limit": {limit}',
-            f"{indent}}}" + ("," if (not last or trailing_comma) else ""),
+            f'{indent}  "limit": {limit}' + ("," if ladder else ""),
         ]
+        if ladder:
+            entry.extend(_variants_block(ladder, indent))
+        entry.append(f"{indent}}}" + ("," if (not last or trailing_comma) else ""))
+        lines.extend(entry)
     return lines
 
 

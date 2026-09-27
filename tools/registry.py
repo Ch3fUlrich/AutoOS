@@ -75,7 +75,10 @@ opencode.jsonc's AUTOOS-MANAGED blocks and Zed's own model lists (both via
 tools/sync-ide-models.py) - from a loaded catalog/ai-registry.json (spec 3.2
 phase 1, task A4c; docs/plans/2026-09-25-registry-mapping.md section 12
 documents the mapping; task A5f made the committed file byte-exact, so the old
-$comment exception no longer applies to it). To update the committed file after
+$comment exception no longer applies to it). Each entry now carries an
+optional `effort_ladder` list (derived from the first leg's model-registry
+entry, with "none" omitted) that tools/sync-ide-models.py uses to emit
+opencode V2 variants. To update the committed file after
 a registry change: `python3 tools/registry.py render ide
 --out catalog/ide-models.json`; with no flag the render goes to stdout; --out PATH
 writes it elsewhere; --check compares a fresh render against --ide-models
@@ -1137,6 +1140,10 @@ def render_ide(registry: dict) -> dict:
     standalone surfaces.openhands entry, which is not this render's concern);
     `surfaces` is rebuilt as {gateway: clients} for every such gateway present.
 
+    Each entry's `effort_ladder` is derived from the first leg's model-registry
+    entry (via resolve_leg), filtered to omit "none". Routes with empty legs or a
+    leg whose model has no effort_ladder get no effort_ladder field.
+
     Raises ValueError, naming every offending id at once, when `registry["routes"]`
     and IDE_MODEL_ORDER disagree on which ids exist (a route added/removed without
     updating that constant - see its own comment above), or when a listed route has
@@ -1179,6 +1186,29 @@ def render_ide(registry: dict) -> dict:
         effort = canonical.get("effort_default")
         if effort is not None:
             model["reasoning_effort"] = effort
+        # effort_ladder from the first leg's model definition:
+        legs = route.get("legs") or []
+        if legs:
+            try:
+                _pid, mid = resolve_leg(legs[0], registry)
+            except ValueError:
+                raise ValueError(
+                    "routes.%s: first leg %r cannot be resolved"
+                    % (route_id, legs[0]))
+            model_entry = _section(registry, "models").get(mid)
+            if isinstance(model_entry, dict):
+                ladder = model_entry.get("effort_ladder")
+                if isinstance(ladder, list):
+                    # A non-string rung is a data error - raise immediately.
+                    for rung in ladder:
+                        if not isinstance(rung, str):
+                            raise ValueError(
+                                "routes.%s: non-string rung %r in model %s effort_ladder"
+                                % (route_id, rung, mid))
+                    # Omit "none" so opencode gets only meaningful levels
+                    filtered = [e for e in ladder if e != "none"]
+                    if filtered:
+                        model["effort_ladder"] = filtered
         model["surfaces"] = {gw: list(gateways[gw].get("clients") or []) for gw in IDE_GATEWAYS if gw in gateways}
         models.append(model)
 

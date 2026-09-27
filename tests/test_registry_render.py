@@ -466,6 +466,62 @@ class MissingRouteFailsIdeRenderTests(unittest.TestCase):
         self.assertIn("brand-new-route", str(ctx.exception))
 
 
+class EffortLadderInRenderIdeTests(unittest.TestCase):
+    """render_ide() derives effort_ladder from the first leg's model definition
+    in the registry, filtering out "none" and omitting for legless routes or
+    models without a ladder (A6a)."""
+
+    def test_effort_ladder_derived_from_head_leg(self):
+        reg = copy.deepcopy(real_registry())
+        # Pick a route whose first leg's model actually carries an effort_ladder
+        route = reg["routes"]["t1-orchestrator"]
+        _pid, mid = registry.resolve_leg(route["legs"][0], reg)
+        model_entry = reg["models"][mid]
+        self.assertIn("effort_ladder", model_entry)
+        rendered = registry.render_ide(reg)
+        by_id = {m["id"]: m for m in rendered["models"]}
+        self.assertEqual(by_id["t1-orchestrator"]["effort_ladder"],
+                         [e for e in model_entry["effort_ladder"] if e != "none"])
+
+    def test_none_is_dropped_from_effort_ladder(self):
+        reg = copy.deepcopy(real_registry())
+        route = reg["routes"]["t2-worker"]
+        _pid, mid = registry.resolve_leg(route["legs"][0], reg)
+        reg["models"][mid]["effort_ladder"] = ["none", "low", "medium", "high"]
+        rendered = registry.render_ide(reg)
+        by_id = {m["id"]: m for m in rendered["models"]}
+        self.assertEqual(by_id["t2-worker"]["effort_ladder"], ["low", "medium", "high"])
+
+    def test_no_effort_ladder_when_model_has_no_ladder(self):
+        reg = copy.deepcopy(real_registry())
+        route = reg["routes"]["t3-driver-clean"]
+        _pid, mid = registry.resolve_leg(route["legs"][0], reg)
+        # Ensure the model has no effort_ladder
+        reg["models"][mid].pop("effort_ladder", None)
+        # t1-orchestrator still has a ladder via the first leg's model
+        t1_route = reg["routes"]["t1-orchestrator"]
+        _t1_pid, t1_mid = registry.resolve_leg(t1_route["legs"][0], reg)
+        t1_ladder = reg["models"][t1_mid].get("effort_ladder", [])
+        expected = [e for e in t1_ladder if isinstance(e, str) and e != "none"]
+        rendered = registry.render_ide(reg)
+        by_id = {m["id"]: m for m in rendered["models"]}
+        self.assertNotIn("effort_ladder", by_id["t3-driver-clean"])
+        self.assertEqual(by_id["t1-orchestrator"]["effort_ladder"], expected)
+
+    def test_no_effort_ladder_when_route_has_no_legs(self):
+        reg = copy.deepcopy(real_registry())
+        # t1-orchestrator-paid is a legless route
+        # t2-worker has legs whose first model carries a ladder
+        t2_route = reg["routes"]["t2-worker"]
+        _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
+        t2_ladder = reg["models"][t2_mid].get("effort_ladder", [])
+        expected = [e for e in t2_ladder if isinstance(e, str) and e != "none"]
+        rendered = registry.render_ide(reg)
+        by_id = {m["id"]: m for m in rendered["models"]}
+        self.assertNotIn("effort_ladder", by_id["t1-orchestrator-paid"])
+        self.assertEqual(by_id["t2-worker"]["effort_ladder"], expected)
+
+
 class OpenhandsRenderMatchesTodayTests(unittest.TestCase):
     """Render of the real registry equals today's configuration/openhands/
     tier-profiles.json semantically (task A4d; docs/plans/2026-09-25-registry-
