@@ -427,8 +427,29 @@ class ClientCommandTests(unittest.TestCase):
         self.assertIn("public", r.stderr)
 
     def test_qoder_public_runs_print_mode(self):
+        # qodercli 1.1.63 knows only bypass_permissions|dont_ask|auto; the old
+        # 'accept_edits' does not exist and every write was refused (62 runs,
+        # measured 2026-09-27). Writers run with bypass_permissions and the
+        # free Qwen3.8-Flash by default.
         r = plan_of("--client", "qoder", "t")
-        self.assertIn("would run: qodercli -p --permission-mode accept_edits t", r.stdout)
+        self.assertIn("qodercli -p --permission-mode bypass_permissions --model Qwen3.8-Flash", r.stdout)
+        self.assertNotIn("accept_edits", r.stdout)
+
+    def test_qoder_writer_is_always_isolated(self):
+        # bypass_permissions is only acceptable inside the private sandbox
+        # clone, where the leak check still applies: the spawner forces it.
+        r = plan_of("--client", "qoder", "t")
+        self.assertIn("git clone --local", r.stdout)
+        self.assertIn("is your only writable checkout", r.stdout)
+
+    def test_qoder_reviewer_stays_dont_ask(self):
+        r = plan_of("--client", "qoder", "--card", "role=review", "t")
+        self.assertIn("qodercli -p --permission-mode dont_ask", r.stdout)
+        self.assertNotIn("bypass_permissions", r.stdout)
+
+    def test_qoder_explicit_model_is_kept(self):
+        r = plan_of("--client", "qoder", "--model", "Efficient", "t")
+        self.assertIn("--model Efficient", r.stdout)
 
     def test_opencode_card_maps_combo_to_its_tier_agent(self):
         r = plan_of("--card", "role=review,privacy=sensitive", "t")
@@ -470,8 +491,10 @@ class ClientCapabilityTests(unittest.TestCase):
     being started on a client that cannot do it. Auto-choice (no --client)
     never picks such a client."""
 
-    CAPABLE = {"opencode", "claude", "codex", "gemini", "qwen"}
-    INCAPABLE = {"agy", "qoder"}
+    # QOFIX 2026-09-27: qoder writes + runs shell headless with bypass_permissions
+    # (measured; the old false came from the invalid mode accept_edits).
+    CAPABLE = {"opencode", "claude", "codex", "gemini", "qwen", "qoder"}
+    INCAPABLE = {"agy"}
 
     def setUp(self):
         self.agent = load_agent()
@@ -488,7 +511,7 @@ class ClientCapabilityTests(unittest.TestCase):
                 self.assertIsInstance(caps["shell"], bool, name)
                 self.assertIsInstance(caps["write"], bool, name)
 
-    def test_the_capable_client_set_is_the_five_measured_ones(self):
+    def test_the_capable_client_set_is_the_six_measured_ones(self):
         capable = {name for name, client in self.registry["clients"].items()
                    if client["capabilities"]["shell"] and client["capabilities"]["write"]}
         self.assertEqual(capable, self.CAPABLE)
@@ -499,6 +522,8 @@ class ClientCapabilityTests(unittest.TestCase):
         self.assertEqual(self.agent.client_capabilities("opencode", self.registry),
                          {"shell": True, "write": True})
         self.assertEqual(self.agent.client_capabilities("qoder", self.registry),
+                         {"shell": True, "write": True})
+        self.assertEqual(self.agent.client_capabilities("agy", self.registry),
                          {"shell": False, "write": False})
 
     def test_isolate_needs_shell_and_write(self):
@@ -543,9 +568,9 @@ class ClientCapabilityTests(unittest.TestCase):
         self.assertEqual(self.agent.choose_client(("shell", "write"), registry), "claude")
 
     def test_capability_refusal_names_the_missing_capability_and_the_capable_clients(self):
-        msg = self.agent.capability_refusal("qoder", ("shell", "write"), self.registry)
+        msg = self.agent.capability_refusal("agy", ("shell", "write"), self.registry)
         self.assertIsNotNone(msg)
-        self.assertIn("qoder", msg)
+        self.assertIn("agy", msg)
         self.assertIn("shell", msg)
         self.assertIn("write", msg)
         for name in self.CAPABLE:
@@ -553,17 +578,22 @@ class ClientCapabilityTests(unittest.TestCase):
         self.assertIsNone(
             self.agent.capability_refusal("opencode", ("shell", "write"), self.registry))
 
-    def test_qoder_is_refused_for_an_isolated_write_before_it_starts(self):
-        r = plan_of("--client", "qoder", "--isolate", "edit README.md")
+    def test_agy_is_refused_for_an_isolated_write_before_it_starts(self):
+        r = plan_of("--client", "agy", "--isolate", "edit README.md")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("qoder", r.stderr)
+        self.assertIn("agy", r.stderr)
         self.assertIn("opencode", r.stderr)
         self.assertNotIn("would run:", r.stdout)
 
-    def test_qoder_is_refused_for_an_explicit_editing_card(self):
-        r = plan_of("--client", "qoder", "--card", "kind=implement", "edit README.md")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("opencode", r.stderr)
+    def test_qoder_takes_an_isolated_write(self):
+        r = plan_of("--client", "qoder", "--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--permission-mode bypass_permissions", r.stdout)
+
+    def test_qoder_takes_an_explicit_editing_card(self):
+        r = plan_of("--client", "qoder", "--card", "role=implement", "edit README.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("git clone --local", r.stdout)
 
     def test_qoder_can_still_take_a_read_only_card(self):
         r = plan_of("--client", "qoder", "--card", "role=review", "t")

@@ -646,6 +646,10 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     else:
         agent = client.name
         level = "ask" if not args.auto else ("read" if route["review"] else "edit")
+        if client.name == "qoder" and level == "edit":
+            # qoder writes with bypass_permissions (no other headless write mode
+            # exists) - only inside a private clone, where the leak check applies.
+            args.isolate = True
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
