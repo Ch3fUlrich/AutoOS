@@ -1,6 +1,6 @@
 [Unit]
 Description=Periodic snapshot of the live Claude Code session
-Documentation=file://@APPDIR@/README.md
+Documentation="file://@APPDIR@/README.md"
 
 [Timer]
 # Wall-clock OnCalendar, NOT monotonic OnUnitActiveSec: a monotonic-only timer

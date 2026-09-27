@@ -12,6 +12,21 @@ hs_log() { printf '%s %s: %s\n' "$(date '+%F %T')" "${HS_TAG:-herdr-sessions}" "
 hs_die() { hs_log "ERROR: $*"; exit 1; }
 
 # ── profile ──────────────────────────────────────────────────────────────────
+# hs_resolve_h_specifier <path>: the filesystem form of a path written with the
+# `%h` systemd specifier at the front ("%h/.local/bin/herdr" ->
+# "$HOME/.local/bin/herdr"). ONE rule, shared by both consumers of HERDR_BIN:
+# the units carry the specifier form so the manager expands it per user, and a
+# site that copies that default into its profile must not get a working unit and
+# a driver that dies with "herdr not found at %h/.local/bin/herdr". Nothing
+# else in a path is special -- a `%` anywhere but at the front stays literal,
+# which is also what install.sh renders for systemd (`%%`).
+hs_resolve_h_specifier() {
+    case "$1" in
+        %h/*) printf '%s' "$HOME/${1#%h/}" ;;
+        *)    printf '%s' "$1" ;;
+    esac
+}
+
 # A profile is plain shell: only assignments, sourced into this process. Every
 # knob has a default here so a profile stays as short as the host is unusual.
 hs_load_profile() {
@@ -21,6 +36,7 @@ hs_load_profile() {
     [ -n "$p" ] && [ -f "$p" ] && . "$p"
 
     HERDR_BIN="${HERDR_BIN:-$HOME/.local/bin/herdr}"
+    HERDR_BIN="$(hs_resolve_h_specifier "$HERDR_BIN")"
     HERDR_SOCKET="${HERDR_SOCKET:-$HOME/.config/herdr/herdr.sock}"
     STATE_DIR="${STATE_DIR:-$HOME/.local/state/herdr-sessions}"
     STATE_FILE="${STATE_FILE:-$STATE_DIR/sessions.json}"
