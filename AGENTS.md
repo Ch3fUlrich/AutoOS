@@ -46,6 +46,8 @@ web/index.html         Browser UI, served by `--serve` for headless machines
 tests/                 Both suites — written in-house, no framework
 Windows/ansible/       Remote fleet provisioning ONLY — not used by setup.ps1
 third_party/           Vendored code with its own licence. Never edit.
+infra/                 Imported infrastructure (mcp-servers, local-ai, remote-access)
+                       — has its own repo rules (see infra/README.md)
 ```
 
 **The catalog is data, the libraries are code.** Adding software must never require touching

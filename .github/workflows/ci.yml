@@ -151,3 +151,23 @@ jobs:
             exit 1
           fi
           echo "no committed installers found"
+
+  public-scrub:
+    name: Public scrub scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan the imported infra/ tree and the scrubber's own rules
+        run: |
+          # Generic shapes only (private literals live in gitignored
+          # patterns.private.txt, unavailable to CI). Scoped to infra/ (the
+          # imported area under review) and scripts/ (so a literal can't be
+          # reintroduced into the scanner's own rules). A whole-tree run is not
+          # used: the heuristic unix-home/rfc1918 shapes legitimately match
+          # test fixtures, example.conf and autoinstall placeholders elsewhere
+          # in the repo, and this gate must stay green to be worth keeping.
+          python3 scripts/public-scrub/scan.py \
+            --patterns scripts/public-scrub/patterns.txt infra/ scripts/
