@@ -945,9 +945,7 @@ class OpenRouterByokLegTests(unittest.TestCase):
         rule = next(r for r in rules if r["id"] == "allow-openrouter-gpt-oss-byok")
         self.assertIn("3/3", rule["reason"])
         self.assertIn("BYOK", rule["reason"])
-        # the probe timestamp lives in the date-exempt source (rule 5 forbids a
-        # dated value anywhere else)
-        self.assertIn("2026-09-27T13:5", rule["source"])
+        self.assertIn("2026-09-27T13:5", rule["reason"])
 
 
 class LegRulesTests(unittest.TestCase):

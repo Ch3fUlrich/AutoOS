@@ -1527,8 +1527,8 @@
         "id": "allow-openrouter-gpt-oss-byok",
         "match": "openrouter/openai/gpt-oss-120b",
         "allow": true,
-        "reason": "OpenRouter BYOK gpt-oss-120b measured 200 on 3/3 trials incl. tool calls after the operator set BYOK Prioritized + never shared capacity, so it serves",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); L0 BYOK answer 2026-09-27T03:39Z; measured 200 3/3 incl. tool calls 2026-09-27T13:5xZ (operator)"
+        "reason": "OpenRouter BYOK gpt-oss-120b (L0 BYOK answer option 2; serves once the operator sets BYOK keys Prioritized)",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); L0 BYOK answer 2026-09-27T03:39Z"
       },
       {
         "id": "deny-openrouter",
@@ -1985,7 +1985,7 @@
       "$comment": [
         "KNOWN EXCEPTION (provider-level trains_on_prompts cannot express this): the meta/muse-spark-1.3-contributor leg reached through this provider trains by contract; combos.json's own $comment documents the 2026-09-21 operator downgrade this caused - 't1-orchestrator-clean ... no longer means trains-nothing - it means paid-only'. Every other leg reached through openrouter (deepseek, mistral, google twins) does not train.",
         "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
-        "SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 15:44Z/15:49Z recovery rationale above is withdrawn - OpenRouter is BYOK with no shared credit, so no funded-credit leg exists; Qwen-via-OpenRouter legs are superseded and referenced by no route, no deepseek-v4-pro entry exists, and cheaperinference/deepseek-v4-flash carries route-level unavailable_legs entries (DeepSeek is V4.1-Flash-only). Until 2026-09-27T13:5xZ the OpenRouter BYOK openrouter/openai/gpt-oss-120b leg was gated by a routes.t2-worker.unavailable_legs entry; the operator then set BYOK Prioritized with shared capacity off and the leg measured 200 on 3/3 trials incl. tool calls, so that gate was dropped and the leg serves in every route listing it. The other OpenRouter legs (openrouter/deepseek/deepseek-v4.1-flash, openrouter/meta/muse-spark-1.3-contributor) keep their own routes.*.unavailable_legs entries - see tools/registry.py _leg_is_unavailable, which flags a leg down when either its route-level unavailable_legs entry or its provider-level available:false says so, so both gates are independently enforced. Re-probe before trusting any flagged leg again."
+        "SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 15:44Z/15:49Z recovery rationale above is withdrawn - OpenRouter is BYOK with no shared credit, so no funded-credit leg exists; Qwen-via-OpenRouter legs are superseded and referenced by no route, no deepseek-v4-pro entry exists, and cheaperinference/deepseek-v4-flash carries route-level unavailable_legs entries (DeepSeek is V4.1-Flash-only). Every OpenRouter leg (openrouter/deepseek/deepseek-v4.1-flash, openrouter/meta/muse-spark-1.3-contributor, and since 2026-09-27 the BYOK openrouter/openai/gpt-oss-120b) is gated by its own routes.*.unavailable_legs entry - see tools/registry.py _leg_is_unavailable, which flags a leg down when either its route-level unavailable_legs entry or its provider-level available:false says so, so both gates are independently enforced. Re-probe before trusting any flagged leg again."
       ],
       "api_base": null,
       "id": "openrouter",
@@ -2543,6 +2543,10 @@
         },
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
+          "available": false
+        },
+        "openrouter/openai/gpt-oss-120b": {
+          "$comment": "L0 2026-09-27T03:39Z: unpinned OpenRouter BYOK leg; OmniRoute 3.8.51 has no per-leg provider pin. Serves only after the operator sets BYOK keys Prioritized + shared capacity off (operator list 2b); then drop this entry and re-probe with tools/probe-toolcalls.py (it skips legs listed here); put it back if the probe fails.",
           "available": false
         },
         "groq/openai/gpt-oss-120b": {
