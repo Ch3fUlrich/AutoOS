@@ -7355,8 +7355,8 @@ Test-Case 'secrets: key match is exact-case and leaves differently-cased lines a
         $prev = $env:AUTOOS_KEYS_FILE
         $env:AUTOOS_KEYS_FILE = $keysFile
         try {
-            $haveBefore = Get-AutoOSConfiguredIds -RepoRoot $scratch
-            Assert-True (-not $haveBefore.Contains('groq')) 'configured_ids returned groq for uppercase GROQ line'
+            $groqBefore = @(Get-AutoOSProviderStatus -RepoRoot $scratch) | Where-Object { $_.id -eq 'groq' }
+            Assert-True (-not $groqBefore.configured) 'provider status reported groq configured for an uppercase GROQ line'
             $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_CASETEST' }
             $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
             Assert-Equal $result.Code 200
