@@ -103,6 +103,7 @@ merges (L1, and an L2 for its own lanes); `orch` rules bind whoever briefs or re
 - R-orch-10: Any change that runs sudo/root gets the Sonnet final review regardless of cheap verdict. (why: privileged ops need highest-trust gate; source: L1-backlog agysb 8b36913)
 - R-orch-11: A data lane that changes a route/provider set greps ALL of tests/ for changed ids. (why: stale test ids break CI silently; source: CI 36320592493, ee35dd3)
 - R-orch-12: Approve each fresh worktree with `trust_worktree.py` before its first session. (why: background sessions cannot answer a trust dialog; source: three lanes blocked in 3s)
+- R-orch-13: Before every ready: a different-family review, then a Sonnet/Opus final judging it. (why: each final caught what writer and gate missed; source: operator 2026-09-27T14:3xZ, 830376b)
 
 ### worker (L3)
 
