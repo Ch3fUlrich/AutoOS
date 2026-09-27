@@ -2160,6 +2160,21 @@ elif mode == "commit-other-branch":
         "commit", "-q", "-m", "worker side change")
     git("switch", "-q", back)
     print("fake: committed as worker on another existing branch")
+elif mode == "commit-sibling-worktree":
+    # Another lane's worker commits on ITS OWN branch, checked out in a
+    # sibling worktree of the same .git (all lanes share one repository):
+    # that branch moves, but it is not a leak into this run's parent.
+    wt = subprocess.run(["git", "-C", root, "worktree", "list", "--porcelain"],
+                        check=True, capture_output=True, text=True).stdout
+    paths = [ln[len("worktree "):] for ln in wt.splitlines() if ln.startswith("worktree ")]
+    sib = [p for p in paths if os.path.realpath(p) != os.path.realpath(root)][0]
+    with open(os.path.join(sib, "sib.txt"), "w") as fh:
+        fh.write("sibling\\n")
+    subprocess.run(["git", "-C", sib, "add", "sib.txt"], check=True)
+    subprocess.run(["git", "-C", sib, "-c", "user.name=autoos-worker",
+                    "-c", "user.email=autoos-worker@users.noreply.github.com",
+                    "commit", "-q", "-m", "sibling lane worker change"], check=True)
+    print("fake: a sibling lane's worker committed in its own worktree")
 elif mode == "orchestrator-commits-wip":
     # The orchestrator commits its own pre-existing WIP mid-run: the path was
     # dirty before, is clean after - the orchestrator's own cleanup, not a
@@ -2417,6 +2432,22 @@ class IsolateContainmentTests(unittest.TestCase):
         self.assertEqual(rc, 7, out + err)
         self.assertIn("LEAK", out + err)
         self.assertIn("refs/heads/side", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_sibling_worktree_lane_committing_on_its_own_branch_is_not_a_leak(self):
+        # All lanes are worktrees of one .git: a parallel lane's worker commit
+        # on the branch checked out in ITS worktree moves an existing ref but
+        # is not a leak (final Sonnet check of 073b8ae, 2026-09-26). The
+        # side-branch leak test above stays: `side` is checked out nowhere.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        sib = tempfile.mkdtemp()
+        shutil.rmtree(sib)
+        self.addCleanup(shutil.rmtree, sib, True)
+        subprocess.run(["git", "-C", root, "worktree", "add", "-q", "-b", "lane-sib", sib],
+                       check=True)
+        rc, out, err = self.run_isolated(root, stub, state, "commit-sibling-worktree")
+        self.assertNotIn("LEAK", out + err)
+        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_lane_fetched_into_a_new_ref_is_not_a_leak(self):
