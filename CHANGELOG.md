@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — hostexec policy/runner/audit hardening (HX, 2026-09-27)
+
+- **`tools/hostexec/policy.py`**, **`tools/hostexec/server.py`**, **`tools/hostexec/runner.py`**, **`tools/hostexec/audit.py`**, **`configuration/hostexec/install.sh`**, **`configuration/hostexec/README.md`**, **`tests/`**: deny `env -S`/`--split-string` (the shebang split-string form re-splits an argument string into argv; new `no-inline-shell` rule). `policy.decide` now refuses a non-str argv element (`argv-caps`) instead of crashing, and `server.host_run` wraps `decide()` so a raise is audited as a `policy-error` denial rather than escaping as an unhandled error. Remote `ssh` executes in the audited cwd via a `cd` prefix (the local ssh process runs in `/`, so a remote-only path no longer breaks local spawn). `audit.hash_argv` hashes the redacted argv, so a secret no longer changes the fingerprint, and non-str audit tokens are rendered via `json.dumps` instead of crashing `audit.write`. Dead `_strip_wrappers`/`_WRAPPERS` deleted; the residual check-then-exec race in `_path_hijack_problem` is documented. `install.sh` stages the unit and client configs through `mktemp` in the destination directory (unpredictable, exclusively created), not a guessable `.<name>.tmp.$$`.
+
 ### Changed — `tests/run-tests.sh` refuses an unfiltered local run (FULLGUARD, 2026-09-27)
 
 - **`tests/run-tests.sh`**, **`.github/workflows/ci.yml`**, **`tests/linux/01-test-harness.sh`**, **`AGENTS.md`**, **`docs/`**: an unfiltered local run now exits 2 and names `--filter` / `AUTOOS_FULL_SUITE=1`; CI sets the opt-in so its one full run is unchanged (the full suite's shellcheck once OOM-killed a 16 GB host, R-host-08).
