@@ -18,16 +18,32 @@ param([ValidateSet('opencode', 'zed', 'nvim', 'openhands', 'opencode-serve', 'no
 
 $ErrorActionPreference = 'Stop'
 $Gateway = 'http://127.0.0.1:20128'
-$Key = $env:AUTOOS_OMNIROUTE_KEY
-if ([string]::IsNullOrWhiteSpace($Key)) {
-    # Fall back to the single source of truth for keys.
-    $keysFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'configuration\api-keys.yml'
-    if (Test-Path $keysFile) {
-        foreach ($line in (Get-Content $keysFile -Encoding utf8)) {
-            $t = $line.Trim()
-            if ($t -match '^omniroute\s*:\s*(.+)$') { $Key = $matches[1].Trim().Trim('"').Trim("'") ; break }
+$keysFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'configuration\api-keys.yml'
+
+function Get-AutoOSKeyValue {
+    # First uncommented `<Name>: <value>` line in a YAML-ish key file.
+    # Strips one pair of surrounding quotes. Returns '' when the file or
+    # key is missing, or when the value starts with REPLACE_WITH_ (the
+    # placeholder marker for "user has not filled this in yet").
+    param([string]$Path, [string]$Name)
+    if (-not $Path -or -not $Name -or -not (Test-Path -LiteralPath $Path)) { return '' }
+    foreach ($line in (Get-Content -LiteralPath $Path -Encoding utf8)) {
+        $t = $line.Trim()
+        if ($t -match "^$([regex]::Escape($Name))\s*:\s*(.+)$") {
+            $v = $matches[1].Trim()
+            if ($v.Length -ge 2 -and (($v[0] -eq '"' -and $v[-1] -eq '"') -or ($v[0] -eq "'" -and $v[-1] -eq "'"))) {
+                $v = $v.Substring(1, $v.Length - 2)
+            }
+            if ($v -like 'REPLACE_WITH_*') { return '' }
+            return $v
         }
     }
+    ''
+}
+
+$Key = $env:AUTOOS_OMNIROUTE_KEY
+if ([string]::IsNullOrWhiteSpace($Key)) {
+    $Key = Get-AutoOSKeyValue -Path $keysFile -Name 'omniroute'
 }
 if ([string]::IsNullOrWhiteSpace($Key)) {
     Write-Host 'No OmniRoute client key. Add `omniroute: sk-...` to configuration\api-keys.yml,'
@@ -194,6 +210,13 @@ switch ($App) {
         elseif (-not (Get-Command opencode -ErrorAction SilentlyContinue)) {
             Write-Host 'opencode is not installed. Run: .\setup.ps1 -Only opencode-cli -Yes'; exit 1
         } else {
+            $pw = Get-AutoOSKeyValue -Path $keysFile -Name 'opencode_password'
+            if ($pw) {
+                $env:OPENCODE_PASSWORD = $pw
+                Write-Host "Serve password: from $keysFile (user: opencode)."
+            } else {
+                Write-Host "No opencode_password in $keysFile - opencode serve picks a new random password every start; add one (see docs/web-services.md#logins-and-secrets)."
+            }
             Write-Host 'Starting opencode serve in the background...'
             Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', '0.0.0.0', '--port', '4096' -WindowStyle Hidden
             Write-Host 'opencode serve should answer on http://localhost:4096 (401 = alive, pair via: opencode pair).'
