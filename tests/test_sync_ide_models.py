@@ -135,8 +135,11 @@ class CheckTests(SandboxCase):
 
 class WriteTests(SandboxCase):
     def drift(self):
+        # deepseek-v4.1-flash was the drift model until it fail-closed
+        # (deepseek 402, 2026-09-27T16:4xZ) and left ide-models.json;
+        # t2-worker-clean is the servable equivalent with a ladder.
         doc = self.box.catalog()
-        model(doc, "deepseek-v4.1-flash")["output"] = 40000
+        model(doc, "t2-worker-clean")["output"] = 40000
         model(doc, "t3-driver")["context"] = 65536
         self.box.save_catalog(doc)
 
@@ -152,12 +155,12 @@ class WriteTests(SandboxCase):
         self.assertEqual(self.box.run("--check").returncode, 0)
 
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
-        t1 = oc["providers"]["omniroute"]["models"]["deepseek-v4.1-flash"]
+        t1 = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
         self.assertEqual(t1["limit"], {"context": 131072, "output": 40000})
         self.assertEqual(oc["providers"]["litellm"]["models"]["t3-driver"]["limit"]["context"], 65536)
         spec = json.loads(self.box.text("tier_profiles"))
         by_id = {t["id"]: t for t in spec["tiers"]}
-        self.assertEqual(by_id["omniroute-deepseek-v4.1-flash"]["max_output_tokens"], 40000)
+        self.assertEqual(by_id["omniroute-t2-worker-clean"]["max_output_tokens"], 40000)
         self.assertEqual(by_id["litellm-t3-driver"]["max_input_tokens"], 65536)
         toml = self.box.text("openhands_toml")
         section = toml.split("[llm.t3-driver]", 1)[1].split("\n[", 1)[0]
@@ -234,11 +237,12 @@ class WriteTests(SandboxCase):
                     for v in entry["variants"]:
                         self.assertEqual(set(v), {"id", "settings"}, v)
                         self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        # A6a review: deepseek-v4.1-flash (first leg deepseek/deepseek-flash with
+        # A6a review: t2-worker-clean (first leg deepseek/deepseek-flash with
         # ladder none/low/high/max) gets variants for each non-"none" rung in
         # that order; t3-driver (first leg mistral-code-latest with empty ladder)
-        # has no variants key.
-        t1 = oc["providers"]["omniroute"]["models"]["deepseek-v4.1-flash"]
+        # has no variants key. deepseek-v4.1-flash was the example until it
+        # fail-closed 2026-09-27T16:4xZ.
+        t1 = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
         expected_rungs = ["low", "high", "max"]
         self.assertEqual([v["id"] for v in t1["variants"]], expected_rungs)
         for v in t1["variants"]:

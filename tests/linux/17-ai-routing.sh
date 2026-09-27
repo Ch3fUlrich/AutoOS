@@ -2024,11 +2024,14 @@ groups = set(re.findall(r"(?m)^\s*-\s*model_name:\s*(\S+)\s*$", text))
 # Every group the registry can serve through LiteLLM (managed) plus the
 # hand-curated *-paid escalations. An independent second opinion on
 # tools/sync-router-tiers.py --check: it asserts the whole set is present.
-need = {"t1-orchestrator", "t1-orchestrator-clean", "spark-1.3-contributor",
-        "t1-orchestrator-paid", "t2-orchestrator", "t2-worker", "t2-worker-clean",
-        "t2-worker-free-only", "t2-worker-paid", "t3-driver", "t3-driver-clean",
-        "t3-driver-free-only", "t3-driver-paid", "t4-rag", "deepseek-v4.1-flash",
-        "gemini-3.8-flash"}
+# t1-orchestrator, t1-orchestrator-clean, spark-1.3-contributor (DSMAX
+# 2026-09-27, fail closed) and deepseek-v4.1-flash (deepseek 402,
+# 2026-09-27T16:4xZ, fail closed) render no block and are not expected.
+need = {"cheaperinference/glm-5.2", "cheaperinference/kimi-k3",
+        "gemini-3.8-flash",
+        "t2-worker-paid", "t2-worker", "t2-worker-clean",
+        "t2-worker-free-only", "t3-driver", "t3-driver-clean",
+        "t3-driver-free-only", "t3-driver-paid", "t4-rag"}
 fb = text.split("fallbacks:", 1)[1]
 refs = set(re.findall(r"[- ](\S+):\s*\[([^\]]*)\]", fb))
 problems = sorted(list(need - groups))
@@ -2139,7 +2142,7 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,cheaperinference/glm-5.2,cheaperinference/kimi-k3,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/t2-worker|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,cheaperinference/glm-5.2,cheaperinference/kimi-k3,gemini-3.8-flash,opus-4-6,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then

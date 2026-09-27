@@ -211,17 +211,21 @@ if it "apply sets the resilience deadline and the fast-skip breaker"; then
         grep -qE 'failureThreshold.?[:=].?2|BREAKER_THRESHOLD=2' "$f" \
             || { ok=0; echo "$f does not use the 2-failure threshold" >&2; }
     done
-    # The tier-1/spark head must be the same servable leg in both combos: the
-    # registry dropped every dead leg upstream, so the render's first entry is
-    # what apply creates (OR1e; the old free promo leg is no longer servable).
-    head_leg="$(python3 - <<'PY'
+    # t1-orchestrator and spark-1.3-contributor fail closed (omitted 2026-09-27:
+    # Zen client-bound, OpenRouter off; deepseek-v4.1-flash omitted 2026-09-27T16:4xZ
+    # on the deepseek 402), so there is no tier-1/spark head leg in any combo to
+    # compare - assert the omission instead of a shared head (OR1e).
+    omitted="$(python3 - <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 by = {c["name"]: c["models"] for c in d["combos"]}
-print(",".join(by[n][0] for n in ("t1-orchestrator", "spark-1.3-contributor")))
+omitted = set(d.get("omitted", []))
+gone = {"t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean",
+        "t1-orchestrator-free-only", "deepseek-v4.1-flash"}
+print(",".join(sorted(g for g in gone if g in by or g not in omitted)))
 PY
 )"
-    assert_eq "$head_leg" "openrouter/meta/muse-spark-1.3-contributor,openrouter/meta/muse-spark-1.3-contributor"
+    assert_eq "$omitted" ""
     if (( ok )); then pass; else fail "the resilience settings are not applied"; fi
 fi
 
@@ -248,13 +252,13 @@ PY
     assert_eq "$report" ""
 fi
 
-if it "combos.json parses and t1-orchestrator promises 1M"; then
+if it "combos.json parses and carries the servable tiers"; then
     report="$(python3 - 2>&1 <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["cheaperinference/glm-5.2", "cheaperinference/kimi-k3", "t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
+if names != ["cheaperinference/glm-5.2", "cheaperinference/kimi-k3", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "opus-4-6"]:
     problems.append("names")
 # "retired" is the one home of the ids a rename left behind: apply prunes
 # them from the store, so a retired id must never also be a current combo.
@@ -273,33 +277,38 @@ for c in d["combos"]:
     for m in c["models"]:
         if "/" not in m:
             problems.append(c["name"] + ":" + m)
-    if c["name"] == "t1-orchestrator" and c.get("context") != "1M":
-        problems.append("t1-context")
 by = {c["name"]: c["models"] for c in d["combos"]}
-# Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): the only spark in
-# any tier is the contributor.
+omitted = set(d.get("omitted", []))
+# t1-orchestrator, t1-orchestrator-clean, t1-orchestrator-free-only,
+# spark-1.3-contributor and deepseek-v4.1-flash fail closed (omitted, never a
+# combo): t1/spark since DSMAX 2026-09-27 (Zen client-bound, OpenRouter off),
+# deepseek-v4.1-flash since the deepseek 402 of 2026-09-27T16:4xZ. No 1M
+# context promise survives them, and no combo may carry their legs.
+for gone in ("t1-orchestrator", "t1-orchestrator-clean",
+             "t1-orchestrator-free-only", "spark-1.3-contributor",
+             "deepseek-v4.1-flash"):
+    if gone in by:
+        problems.append(gone + "-should-be-omitted")
+    if gone not in omitted:
+        problems.append(gone + "-not-in-omitted")
+# Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no combo may carry
+# a spark leg at all now that t1/spark fail closed.
 import re as _re2
 if _re2.search(r"muse-spark-1\.3(?!-contributor)", " ".join(m for c in d["combos"] for m in c["models"])):
     problems.append("plain-spark-blocked")
-# t1-orchestrator is spark-only: gemini must never occupy a 1M slot again.
-if any("gemini" in m for m in by["t1-orchestrator"]):
-    problems.append("t1-gemini")
-    problems.append("t1-gemini")
+if _re2.search(r"spark", " ".join(m for c in d["combos"] for m in c["models"])):
+    problems.append("spark-in-combos")
 # *-clean = paid legs only: no free pool may train on private prompts.
 # Free = contributor-free, groq / cerebras / sambanova / gemini hosts,
 # mistral-code + qwen free pools. -contributor (trains by contract) is
-# banned in t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries
-# it deliberately since the 2026-09-21 contributor-only block (paid-only,
-# trains).
+# banned in t2-worker-clean/t3-driver-clean (t1-orchestrator-clean is gone:
+# omitted, see above).
 # Direct-key legs (mistral-small, deepseek, openrouter paid, zen paid)
 # bill past the pool on the same key, so they stay.
-# The pinned spark-1.3-contributor single-model combo reuses t1-orchestrator's
-# legs verbatim, so it is exempt from the tier-shape rules below (it is not
-# a tier) but must stay byte-identical to t1.
 import re
 free = re.compile(r"contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen")
 trains = re.compile(r"-contributor$")
-for n in ("t1-orchestrator-clean", "t2-worker-clean", "t3-driver-clean"):
+for n in ("t2-worker-clean", "t3-driver-clean"):
     bad = [m for m in by[n] if free.search(m)]
     if bad:
         problems.append(n + "-free:" + ",".join(bad))
@@ -313,8 +322,6 @@ for n in (n for n in names if n.endswith("-free-only")):
     bad = [m for m in by[n] if paid.search(m)]
     if bad:
         problems.append(n + "-paid:" + ",".join(bad))
-if by.get("spark-1.3-contributor") != by["t1-orchestrator"]:
-    problems.append("spark-combo-drift")
 print(" ".join(problems))
 PY
 )"
@@ -446,12 +453,12 @@ if it "apply.sh reads provider rows from ai-registry.json and skips a provider w
 fi
 
 # Regression lock for today's registry (2026-09-27): cerebras (402/401 credit
-# exhaustion, L0 2026-09-26T11:44Z) and groq (L0 2026-09-27) are, right now,
-# all-unavailable across every route that lists them - proves the real
+# exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27), openrouter (DSMAX
+# 401, 2026-09-27T15:05:54Z) and deepseek (402, 2026-09-27T16:4xZ) are, right
+# now, all-unavailable across every route that lists them - proves the real
 # catalog/ai-registry.json actually reaches apply.sh's live plan, not just the
-# synthetic fixture above. openrouter and antigravity each still carry a live
-# leg (openrouter's own unavailable flags were lifted), so they are offered
-# and only skipped for the missing key.
+# synthetic fixture above. Antigravity still carries a live leg, so it is
+# offered and only skipped for the missing key.
 if it "apply --dry-run against the real registry skips a provider whose every leg is dead today"; then
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
@@ -460,10 +467,12 @@ if it "apply --dry-run against the real registry skips a provider whose every le
         || { ok=0; echo "cerebras was not flagged: $out" >&2; }
     [[ "$out" == *"  - groq: all legs unavailable (skipped)"* ]] \
         || { ok=0; echo "groq was not flagged: $out" >&2; }
+    [[ "$out" == *"  - openrouter: all legs unavailable (skipped)"* ]] \
+        || { ok=0; echo "openrouter was not flagged: $out" >&2; }
+    [[ "$out" == *"  - deepseek: all legs unavailable (skipped)"* ]] \
+        || { ok=0; echo "deepseek was not flagged: $out" >&2; }
     # A provider with a live leg must still be offered normally, even with no
-    # key: openrouter and antigravity satisfy that today.
-    [[ "$out" == *"  - openrouter: no key in api-keys.yml, skipped"* ]] \
-        || { ok=0; echo "openrouter (has a live leg today) was wrongly all-unavailable-skipped: $out" >&2; }
+    # key: antigravity satisfies that today.
     [[ "$out" == *"  - antigravity: no key in api-keys.yml, skipped"* ]] \
         || { ok=0; echo "antigravity (has a live leg today) was wrongly skipped: $out" >&2; }
     if (( ok )); then pass; else fail "the real registry's dead providers do not reach apply.sh's plan"; fi
@@ -713,14 +722,19 @@ text = re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").
 oc = json.loads(text)
 m = oc["providers"]["omniroute"]["models"]
 problems = []
-for name, ctx in (("t1-orchestrator", 1000000), ("t1-orchestrator-clean", 1000000),
-                  ("t2-worker", 131072), ("t3-driver", 131072),
+for name, ctx in (("t2-worker", 131072), ("t3-driver", 131072),
                   ("t2-worker-clean", 131072), ("t3-driver-clean", 131072),
-                  ("t2-worker-free-only", 131072),
-                  ("gemini-3.8-flash", 131072), ("deepseek-v4.1-flash", 131072),
-                  ("spark-1.3-contributor", 1000000)):
+                  ("t2-worker-free-only", 131072), ("t3-driver-free-only", 131072),
+                  ("t2-orchestrator", 200000), ("opus-4-6", 200000),
+                  ("gemini-3.8-flash", 131072)):
     if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:
         problems.append(name)
+# t1-orchestrator, t1-orchestrator-clean, spark-1.3-contributor and
+# deepseek-v4.1-flash fail closed (omitted) - they must NOT be client models.
+for gone in ("t1-orchestrator", "t1-orchestrator-clean", "spark-1.3-contributor",
+             "deepseek-v4.1-flash"):
+    if gone in m:
+        problems.append(gone + "-should-be-omitted")
 print(" ".join(problems))
 PY
 )"

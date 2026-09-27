@@ -222,10 +222,14 @@ class GatewayRefTests(unittest.TestCase):
                       by_name["opus-4-6"]["models"])
 
     def test_render_omniroute_leaves_other_providers_unchanged(self):
+        # Providers without a model_prefix keep their registry spelling in
+        # the render (mistral has none; deepseek was the example until
+        # providers.deepseek went 402/unavailable 2026-09-27T16:4xZ and its
+        # legs stopped rendering).
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
-        self.assertIn("deepseek/deepseek-flash",
-                      by_name["t2-worker"]["models"])
+        self.assertIn("mistral/mistral-code-latest",
+                      by_name["t3-driver"]["models"])
         self.assertIn("gemini/gemini-3.8-flash", by_name["t2-worker"]["models"])
 
     def test_registry_legs_keep_their_own_spelling(self):

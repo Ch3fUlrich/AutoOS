@@ -4128,14 +4128,15 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     # Pinned on purpose: the order is the OpenHands push priority (the app
     # keeps 10 profiles), so a reorder must be a deliberate, reviewed edit.
-    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-deepseek-v4.1-flash,omniroute-t3-driver-free-only,omniroute-t1-orchestrator-clean,omniroute-spark-1.3-contributor,openrouter-muse-spark-1.3-contributor,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only'
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-t3-driver-free-only,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only'
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
     Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
     foreach ($t in $spec.tiers) {
-        # Gateway tiers carry the openai/ transport prefix; a DIRECT provider
-        # profile (the effort-ladder surface for spark) names the provider
-        # itself, e.g. openrouter/<model>.
-        Assert-True ($t.model -match '^(openai/(t1-orchestrator(-clean|-free-only)?|t2-worker(-clean|-free-only)?|t2-orchestrator|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|deepseek-v4\.1-flash|spark-1\.3-contributor|opus-4-6)|openrouter/meta/muse-spark-1\.3-contributor)$') "$($t.id) model is neither a gateway tier nor a known direct route"
+        # Gateway tiers carry the openai/ transport prefix. The DIRECT
+        # provider profiles (openrouter spark, deepseek-v4.1-flash) are gone:
+        # their routes fail closed (DSMAX 2026-09-27, deepseek 402
+        # 2026-09-27T16:4xZ), so every tier is a gateway tier now.
+        Assert-True ($t.model -match '^(openai/(t2-worker(-clean|-free-only)?|t2-orchestrator|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|opus-4-6))$') "$($t.id) model is not a servable gateway tier"
     }
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
@@ -6496,9 +6497,9 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $oc = $stripped | ConvertFrom-Json
-    Assert-Equal $oc.model 'omniroute/t1-orchestrator'
+    Assert-Equal $oc.model 'omniroute/t2-worker'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,cheaperinference/glm-5.2,cheaperinference/kimi-k3,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,cheaperinference/glm-5.2,cheaperinference/kimi-k3,gemini-3.8-flash,opus-4-6,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -6584,7 +6585,9 @@ Test-Case 'litellm fallback config is internally consistent' {
     $groups = @([regex]::Matches($yaml, '(?m)^\s*-\s*model_name:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
     # Every group the registry can serve through LiteLLM (managed) plus the
     # hand-curated *-paid escalations, mirroring the Linux consistency test.
-    foreach ($g in @('t1-orchestrator', 't1-orchestrator-clean', 'spark-1.3-contributor', 't1-orchestrator-paid', 't2-orchestrator', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-worker-paid', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't3-driver-paid', 't4-rag', 'deepseek-v4.1-flash', 'gemini-3.8-flash')) {
+    # t1/spark (DSMAX 2026-09-27) and deepseek-v4.1-flash (deepseek 402,
+    # 2026-09-27T16:4xZ) fail closed and render no block.
+    foreach ($g in @('cheaperinference/glm-5.2', 'cheaperinference/kimi-k3', 'gemini-3.8-flash', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-worker-paid', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't3-driver-paid', 't4-rag')) {
         Assert-Contains $groups $g
     }
     $fb = [regex]::Match($yaml, '(?s)fallbacks:(.*?)(?:\r?\n\S|\z)').Groups[1].Value
@@ -7249,7 +7252,7 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
-    Assert-Equal ($names -join ',') 'cheaperinference/glm-5.2,cheaperinference/kimi-k3,t1-orchestrator,spark-1.3-contributor,t1-orchestrator-clean,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,deepseek-v4.1-flash,opus-4-6'
+    Assert-Equal ($names -join ',') 'cheaperinference/glm-5.2,cheaperinference/kimi-k3,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,opus-4-6'
     # "retired" is the one home of the ids a rename left behind: apply prunes
     # them from the store, so a retired id must never also be a current combo.
     $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -7278,9 +7281,9 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         Assert-True ($omitted -notcontains $legless) "legless route $legless is omitted"
     }
     $contexts = @{
-        't1-orchestrator' = '1M'; 'spark-1.3-contributor' = '1M'; 't1-orchestrator-clean' = '1M'; 't2-worker' = '128k'
+        't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
-        'gemini-3.8-flash' = '128k'; 'deepseek-v4.1-flash' = '128k'; 'opus-4-6' = '200k'
+        'gemini-3.8-flash' = '128k'; 'opus-4-6' = '200k'
         'cheaperinference/glm-5.2' = '128k'; 'cheaperinference/kimi-k3' = '128k'
     }
     foreach ($c in $combos) {
@@ -7290,27 +7293,28 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         }
         Assert-Equal $c.context $contexts[$c.name]
     }
-    # t1-orchestrator is spark-only: gemini-3.1-pro reasons worse than 3.8-flash and
-    # must never occupy a 1M orchestrator slot again.
-    $t1 = @($combos | Where-Object { $_.name -eq 't1-orchestrator' })[0]
-    Assert-True (($t1.models -join ',') -notmatch 'gemini') 'gemini back in t1-orchestrator'
+    # t1-orchestrator, t1-orchestrator-clean, spark-1.3-contributor and
+    # deepseek-v4.1-flash fail closed (omitted, never a combo): t1/spark since
+    # DSMAX 2026-09-27, deepseek-v4.1-flash since the deepseek 402 of
+    # 2026-09-27T16:4xZ. No 1M context promise survives them.
+    foreach ($gone in @('t1-orchestrator', 't1-orchestrator-clean', 't1-orchestrator-free-only', 'spark-1.3-contributor', 'deepseek-v4.1-flash')) {
+        Assert-True ($names -notcontains $gone) "$gone should be omitted, not a combo"
+        Assert-True ($omitted -contains $gone) "$gone missing from omitted"
+    }
     # *-clean = paid legs only: no free pool may train on private prompts.
     # Free legs = contributor-free, groq/cerebras/sambanova hosts, gemini
     # free tier, mistral-code + qwen free pools. -contributor (trains by
-    # contract) is banned in t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries it
-    # deliberately since the 2026-09-21 contributor-only block (paid-only,
-    # trains — see combos.json). Direct-key legs (mistral-small, deepseek,
-    # openrouter paid, zen paid) bill past the pool on the same key, so
-    # they stay.
+    # contract) is banned in t2-worker-clean/t3-driver-clean
+    # (t1-orchestrator-clean is omitted, see above). Direct-key legs
+    # (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
+    # on the same key, so they stay.
     $freeRe = 'contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen'
     $noTrainRe = '-contributor$'
     foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
         $free = @($c.models | Where-Object { $_ -match $freeRe })
         Assert-Equal ($free -join ',') '' "$($c.name) carries free legs: $($free -join ',')"
-        if ($c.name -ne 't1-orchestrator-clean') {
-            $train = @($c.models | Where-Object { $_ -match $noTrainRe })
-            Assert-Equal ($train -join ',') '' "$($c.name) carries training legs: $($train -join ',')"
-        }
+        $train = @($c.models | Where-Object { $_ -match $noTrainRe })
+        Assert-Equal ($train -join ',') '' "$($c.name) carries training legs: $($train -join ',')"
     }
     # *-free-only = zero paid/keyed legs: only free pools may appear (the
     # zen contributor-free promo counts as free; other opencode-zen legs bill).
@@ -7319,16 +7323,11 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         $paid = @($c.models | Where-Object { $_ -match $paidRe })
         Assert-Equal ($paid -join ',') '' "$($c.name) carries paid legs: $($paid -join ',')"
     }
-    # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): the only spark
-    # in any tier is the contributor.
+    # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no spark leg may
+    # appear in any combo now that t1/spark fail closed.
     $allLegs = @($combos | ForEach-Object { $_.models }) -join ' '
     Assert-True ($allLegs -notmatch 'muse-spark-1\.3(?!-contributor)') 'plain muse-spark-1.3 leg present'
-    # spark-1.3-contributor is the pinned single-model route: byte-identical
-    # legs to t1-orchestrator (zen free promo -> openrouter paid), so the spark family
-    # is addressable directly without the t1 id.
-    $t1legs = (@($combos | Where-Object { $_.name -eq 't1-orchestrator' })[0].models) -join ','
-    $splegs = (@($combos | Where-Object { $_.name -eq 'spark-1.3-contributor' })[0].models) -join ','
-    Assert-Equal $splegs $t1legs
+    Assert-True ($allLegs -notmatch 'spark') 'spark leg present in a combo'
 }
 
 Test-Case 'apply --dry-run registers nothing and starts nothing' {
@@ -7624,15 +7623,16 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     # cc: provider available:false since 2026-09-27 (operator: never connected
     # to OmniRoute), so it now lands in Skipped with the dead providers below.
     # Regression lock for today's registry (2026-09-27, OR1e): cerebras (402/401
-    # credit exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27) and the zen
-    # free pool are all-unavailable across every route that lists them; openrouter
-    # and antigravity still each carry a live leg, so they are offered. A dead
+    # credit exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27), openrouter
+    # (DSMAX 401, 2026-09-27T15:05:54Z), deepseek (402, 2026-09-27T16:4xZ) and
+    # the zen free pool are all-unavailable across every route that lists them;
+    # antigravity still carries a live leg, so it is offered. A dead
     # provider must land in Skipped and never in Map.
-    foreach ($dead in @('cerebras', 'groq', 'opencode-zen', 'sambanova', 'samba', 'cc')) {
+    foreach ($dead in @('cerebras', 'groq', 'opencode-zen', 'sambanova', 'samba', 'cc', 'openrouter', 'deepseek')) {
         Assert-True ($registry.Skipped -contains $dead) "$dead (all legs dead today) was not skipped"
         Assert-True (-not $registry.Map.Contains($dead)) "$dead must not also be in Map"
     }
-    Assert-True ($registry.Map.Contains('openrouter')) 'openrouter (has a live leg today) must be offered'
+    Assert-True ($registry.Map.Contains('antigravity')) 'antigravity (has a live leg today) must be offered'
     # The UA escaping branch is a pure function of the registry's provider_data;
     # both real carriers (groq, cerebras) are skipped today, so a fixture keeps
     # both PowerShell generations under test. It is the exact call apply.ps1 makes.
@@ -7742,8 +7742,6 @@ Test-Case 'opencode tiers declare matching context limits' {
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $oc = $stripped | ConvertFrom-Json
     $models = $oc.providers.omniroute.models
-    Assert-Equal $models.'t1-orchestrator'.limit.context 1000000
-    Assert-Equal $models.'t1-orchestrator-clean'.limit.context 1000000
     Assert-Equal $models.'t2-worker'.limit.context 131072
     Assert-Equal $models.'t2-worker-clean'.limit.context 131072
     Assert-Equal $models.'t2-worker-free-only'.limit.context 131072
@@ -7752,13 +7750,16 @@ Test-Case 'opencode tiers declare matching context limits' {
     Assert-Equal $models.'t3-driver-clean'.limit.context 131072
     Assert-Equal $models.'t3-driver-free-only'.limit.context 131072
     Assert-Equal $models.'gemini-3.8-flash'.limit.context 131072
-    Assert-Equal $models.'deepseek-v4.1-flash'.limit.context 131072
     Assert-Equal $models.'opus-4-6'.limit.context 200000
-    Assert-Equal $models.'spark-1.3-contributor'.limit.context 1000000
     Assert-Equal $models.'t4-rag'.limit.context 131072
-    foreach ($name in @('t1-orchestrator', 't1-orchestrator-clean', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-orchestrator', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't4-rag', 'spark-1.3-contributor', 'opus-4-6', 'gemini-3.8-flash', 'deepseek-v4.1-flash', 'auto', 'auto/cheap', 'auto/smart')) {
+    foreach ($name in @('t2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-orchestrator', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't4-rag', 'opus-4-6', 'gemini-3.8-flash', 'auto', 'auto/cheap', 'auto/smart')) {
         Assert-True ($null -ne $models.$name) "missing model $name"
         Assert-Equal $models.$name.modelID $name
+    }
+    # t1-orchestrator, t1-orchestrator-clean, spark-1.3-contributor and
+    # deepseek-v4.1-flash fail closed (omitted) - they must NOT be client models.
+    foreach ($gone in @('t1-orchestrator', 't1-orchestrator-clean', 'spark-1.3-contributor', 'deepseek-v4.1-flash')) {
+        Assert-True ($null -eq $models.$gone) "$gone should be omitted, not a client model"
     }
     Pass
 }
