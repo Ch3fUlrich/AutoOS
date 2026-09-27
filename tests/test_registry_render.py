@@ -183,6 +183,9 @@ class RenderMatchesTodayTests(unittest.TestCase):
                          combos_by_name["t2-worker-clean"]["models"])
         self.assertNotIn("groq/openai/gpt-oss-120b",
                          combos_by_name["t2-worker"]["models"])
+        # the un-gated OpenRouter BYOK leg does reach the combo now.
+        self.assertIn("openrouter/openai/gpt-oss-120b",
+                      combos_by_name["t2-worker"]["models"])
         self.assertIn("openrouter/deepseek/deepseek-v4.1-flash",
                       combos_by_name["t2-worker"]["models"])
 

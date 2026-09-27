@@ -1585,6 +1585,34 @@
         "allow": false,
         "reason": "no GPT models through a paid API (too expensive)",
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
+      },
+      {
+        "id": "allow-cheaperinference-kimi-k3",
+        "match": "cheaperinference/kimi-k3",
+        "allow": true,
+        "reason": "cheaperinference re-enabled with a small balance, cheap efficient models only: kimi-k3 is one of the three allowed legs",
+        "source": "L0 2026-09-27T12:55:16Z (operator)"
+      },
+      {
+        "id": "allow-cheaperinference-glm-5.2",
+        "match": "cheaperinference/glm-5.2",
+        "allow": true,
+        "reason": "cheaperinference re-enabled with a small balance, cheap efficient models only: glm-5.2 is one of the three allowed legs",
+        "source": "L0 2026-09-27T12:55:16Z (operator)"
+      },
+      {
+        "id": "allow-cheaperinference-minimax-m2.7",
+        "match": "cheaperinference/minimax-m2.7",
+        "allow": true,
+        "reason": "cheaperinference re-enabled with a small balance, cheap efficient models only: minimax-m2.7 is one of the three allowed legs",
+        "source": "L0 2026-09-27T12:55:16Z (operator)"
+      },
+      {
+        "id": "deny-cheaperinference",
+        "match": "cheaperinference/*",
+        "allow": false,
+        "reason": "cheaperinference balance is small: only kimi-k3, glm-5.2 and minimax-m2.7 may serve; every other cheaperinference leg spends the remaining balance and stays off until the operator allows it",
+        "source": "L0 2026-09-27T12:55:16Z (operator)"
       }
     ]
   },
@@ -1667,7 +1695,7 @@
     "cheapinference": {
       "$comment": [
         "Privacy research 2026-09-26 (Q1 lane): https://www.cheaperinference.com/legal/privacy states 'We do not use customer prompt or response bodies to train Keak models' and 'Cheaper Inference does not store prompt or response bodies in its application database' - only operational/billing metadata (model, endpoint, timestamps, token usage, latency) is retained, generally 12 months. CheaperInference is itself a marketplace proxy to upstream providers (OpenAI/Anthropic/Google/Meta/etc, owned by Keak) - this citation covers CheaperInference's own handling only, not each upstream provider's separate policy. trains_on_prompts: false confirmed (was unsourced before this migration).",
-        "Operator 2026-09-27T10:12Z (via L0, inbox/L1-routing.md): no top-up - treated like SambaNova under R1. CheaperInference has no free model (all its legs are credit-pool models), and every worker turn failed '[cheaperinference] All 1 connection(s) credits exhausted' 08:12Z-08:25Z (work/L1-routing/OR1a.r2.out), so the whole provider is unavailable until credits return."
+        "Operator 2026-09-27T12:55Z re-enabled with a small balance, cheap efficient models only. The 10:12Z 'no top-up / all credits exhausted' note above is withdrawn: only cheaperinference/kimi-k3, cheaperinference/glm-5.2 and cheaperinference/minimax-m2.7 are allowed to serve (policy.leg_rules allow entries, then a deny cheaperinference/*); every other cheaperinference leg stays off - cheaperinference/glm-4.5-air is route-gated in t2-worker/t3-driver, cheaperinference/deepseek-v4-flash keeps its t2-worker entry. Source: L0 2026-09-27T12:55:16Z (operator)."
       ],
       "api_base": "https://api.cheaperinference.com/v1",
       "id": "cheapinference",
@@ -1676,8 +1704,7 @@
       "omniroute_id": "cheaperinference",
       "provider_data": null,
       "tier": "paid",
-      "trains_on_prompts": false,
-      "available": false
+      "trains_on_prompts": false
     },
     "cloudflare_workers_ai": {
       "$comment": "Unverified default: not registered with any Account ID yet (combos.json $comment) and no combo references this provider.",
@@ -2504,7 +2531,11 @@
           "available": false
         },
         "cheaperinference/deepseek-v4-flash": {
-          "$comment": "Operator decision 2026-09-26 16:4xZ ('Claude budget' revision, briefs/common.md): 'DeepSeek = ONLY V4.1 Flash: native deepseek/deepseek-flash or openrouter/deepseek/deepseek-v4.1-flash ... incl. samba/cheaperinference DeepSeek rows' - this leg is DeepSeek v4 (not v4.1), so it is out. Kept in place (operator flags, never deletes or reorders) so combos.json still mirrors today's committed data.",
+          "$comment": "Operator decision 2026-09-26 16:4xZ ('Claude budget' revision, briefs/common.md): 'DeepSeek = ONLY V4.1 Flash: native deepseek/deepseek-flash or openrouter/deepseek/deepseek-v4.1-flash ... incl. samba/cheaperinference DeepSeek rows' - this leg is DeepSeek v4 (not v4.1), so it is out. Kept in place (operator flags, never deletes or reorders) so combos.json still mirrors today's committed data. Still denied after the 2026-09-27T12:55Z re-enable by the earlier deny-deepseek (*deepseek*) rule.",
+          "available": false
+        },
+        "cheaperinference/glm-4.5-air": {
+          "$comment": "Operator 2026-09-27T12:55Z: cheaperinference came back with a small balance for cheap efficient models only - kimi-k3, glm-5.2 and minimax-m2.7 are allowed (policy.leg_rules), the trailing deny-cheaperinference gates this leg. Route-gated here so rule 9 passes.",
           "available": false
         },
         "opencode-zen/deepseek-v4.1-flash": {
@@ -2692,6 +2723,10 @@
         },
         "groq/qwen/qwen3.8-27b": {
           "$comment": "deny-groq (OR2 2026-09-27): 400 'messages.N role:assistant' x335 + 413 x78 on agent calls (L0 ONE-ROUTER call_logs)",
+          "available": false
+        },
+        "cheaperinference/glm-4.5-air": {
+          "$comment": "Operator 2026-09-27T12:55Z: cheaperinference came back with a small balance for cheap efficient models only - kimi-k3, glm-5.2 and minimax-m2.7 are allowed (policy.leg_rules), the trailing deny-cheaperinference gates this leg. Route-gated here so rule 9 passes.",
           "available": false
         },
         "opencode-zen/deepseek-v4.1-flash": {
