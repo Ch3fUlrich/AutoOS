@@ -49,6 +49,13 @@ services:
       REQUIRE_API_KEY: "true"
       DATA_DIR: /app/data
       OMNIROUTE_MEMORY_MB: ${OMNIROUTE_MEMORY_MB:-1536}
+      # Chat admission gate: the image defaults (1 heavy request in flight,
+      # 2000 ms queue) reject parallel agent sub-requests with retryable 503,
+      # killing worker runs (4 of 5; measured 2026-09-27). OMNIROUTE_MEMORY_MB
+      # above is the heap knob (the entrypoint appends it to NODE_OPTIONS; the
+      # last --max-old-space-size flag wins - do NOT add NODE_OPTIONS here).
+      OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT: ${OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT:-6}
+      OMNIROUTE_CHAT_ADMISSION_QUEUE_MS: ${OMNIROUTE_CHAT_ADMISSION_QUEUE_MS:-60000}
       # The gateway's public origin, from stack.env (AUTOOS_OMNIROUTE_PUBLIC_URL;
       # docs/web-services.md says what it does and does not change). Unset gives
       # empty values, which are the same as absent: the image's launcher drops

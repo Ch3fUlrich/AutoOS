@@ -1218,6 +1218,7 @@ _aistack() {
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
         -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
+        -u OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT -u OMNIROUTE_CHAT_ADMISSION_QUEUE_MS \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
         AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
         AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
@@ -1263,6 +1264,21 @@ PY
 if it "aistack: compose template keeps the hardening contract"; then
     out="$(python3 "$ROOT/tests/helpers/check_compose.py" "$AISTACK/compose.yml" 2>&1)" && rc=0 || rc=$?
     if (( rc == 0 )); then pass; else fail "$out"; fi
+fi
+
+if it "aistack: compose.yml sets the chat admission gate and carries no NODE_OPTIONS"; then
+    f="$AISTACK/compose.yml"
+    # The omniroute block: from its service header to the next service.
+    omni="$(sed -n '/^  omniroute:/,/^  [a-z]/p' "$f" | sed '$d')"
+    ok=1
+    grep -q 'OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT: ${OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT:-6}' <<<"$omni" \
+        || { ok=0; echo "MAX_HEAVY not set to default 6" >&2; }
+    grep -q 'OMNIROUTE_CHAT_ADMISSION_QUEUE_MS: ${OMNIROUTE_CHAT_ADMISSION_QUEUE_MS:-60000}' <<<"$omni" \
+        || { ok=0; echo "QUEUE_MS not set to default 60000" >&2; }
+    # OMNIROUTE_MEMORY_MB is the heap knob (the entrypoint appends it to
+    # NODE_OPTIONS; last flag wins). A NODE_OPTIONS in compose would fight it.
+    grep -qE '^ +NODE_OPTIONS:' <<<"$omni" && { ok=0; echo "NODE_OPTIONS must not be in compose (OMNIROUTE_MEMORY_MB is the heap knob)" >&2; }
+    if (( ok )); then pass; else fail "compose.yml chat admission gate"; fi
 fi
 
 if it "aistack: the opencode layer builds on a digest-pinned V2 image, never V1"; then
@@ -1324,6 +1340,23 @@ if it "aistack: init twice: 0600 env files, the second run skips, user values su
     [[ "$first$second" == *"sk-test-client-key"* ]] && { ok=0; echo "printed a key" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "init is not idempotent read-modify-write"; fi
+fi
+
+if it "aistack: init adds the admission gate keys to stack.env and keeps an operator's value"; then
+    d="$(_aistack_sandbox)"
+    _aistack "$d" init >/dev/null
+    ok=1
+    grep -q "^OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT='6'$" "$d/cfg/stack.env" \
+        || { ok=0; echo "MAX_HEAVY not added: $(grep OMNIROUTE_CHAT "$d/cfg/stack.env")" >&2; }
+    grep -q "^OMNIROUTE_CHAT_ADMISSION_QUEUE_MS='60000'$" "$d/cfg/stack.env" \
+        || { ok=0; echo "QUEUE_MS not added" >&2; }
+    # An operator's own value survives a second run (ensure_env_file only adds missing keys).
+    sed -i "s/^OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=.*/OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=99/" "$d/cfg/stack.env"
+    _aistack "$d" init >/dev/null
+    grep -q "^OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=99$" "$d/cfg/stack.env" \
+        || { ok=0; echo "operator's value was overwritten: $(grep OMNIROUTE_CHAT_MAX "$d/cfg/stack.env")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "init admission gate keys"; fi
 fi
 
 # Same class as lib/linux/install.sh backup_path/backup_file (main fixed
@@ -2614,6 +2647,44 @@ if it "aistack: verify follows the compose profiles: a disabled openhands is ski
     if (( ok )); then pass; else fail "compose profiles are not honoured"; fi
 fi
 
+if it "aistack: verify prints the admission gate values and heap MB from the running gateway process"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    # Stub /proc/1/environ: two --max-old-space-size flags; the last one wins
+    # (the image ENTRYPOINT appends OMNIROUTE_MEMORY_MB to NODE_OPTIONS).
+    printf 'OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=6\nOMNIROUTE_CHAT_ADMISSION_QUEUE_MS=60000\nNODE_OPTIONS=--max-old-space-size=1024 --max-old-space-size=1536\nHOME=/home/qoder\n' \
+        >"$d/proc1-environ-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    grep -q 'max_heavy=6' <<<"$out" || { ok=0; echo "max_heavy not printed: $(grep -i 'admission\|max_heavy' <<<"$out")" >&2; }
+    grep -q 'queue_ms=60000' <<<"$out" || { ok=0; echo "queue_ms not printed" >&2; }
+    grep -q 'heap MB=1536' <<<"$out" || { ok=0; echo "heap MB not the last --max-old-space-size: $(grep -i 'heap' <<<"$out")" >&2; }
+    # Informational, not a pass/fail check: no v_ok/v_fail line for it.
+    grep -qE '^  (ok|FAIL)  .*admission' <<<"$out" && { ok=0; echo "admission should be informational, not ok/FAIL" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify admission gate values"; fi
+fi
+
+if it "aistack: verify prints unset wording when admission gate vars are absent from the process"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    # Stub /proc/1/environ without the admission vars or NODE_OPTIONS.
+    printf 'HOME=/home/qoder\nPATH=/usr/bin\n' >"$d/proc1-environ-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    grep -q 'unset (image default 1 / 2000)' <<<"$out" \
+        || { ok=0; echo "unset wording missing: $(grep -i 'admission\|max_heavy\|queue' <<<"$out")" >&2; }
+    grep -q 'heap MB=unset' <<<"$out" \
+        || { ok=0; echo "heap MB unset missing: $(grep -i 'heap' <<<"$out")" >&2; }
+    # A stopped gateway: skipped, no exec.
+    rm -f "$d/run-autoos-omniroute" "$d/docker.log"
+    out="$(_aistack_verify "$d" verify)"
+    grep -q '^  skip  omniroute admission - ' <<<"$out" || { ok=0; echo "stopped gateway: no admission skip line" >&2; }
+    grep -q '/proc/1/environ' "$d/docker.log" 2>/dev/null && { ok=0; echo "stopped: docker was asked to read /proc/1/environ" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify admission gate unset wording"; fi
+fi
+
 if it "aistack: verify is read-only: only inspect and exec reach docker, nothing on disk changes"; then
     d="$(_aistack_sandbox)"
     _aistack_verify_sandbox "$d"
@@ -2628,7 +2699,7 @@ if it "aistack: verify is read-only: only inspect and exec reach docker, nothing
     [[ "$(grep -cE '^(start|stop|restart|rm|up|down|run|create|compose|build|pull|network|kill|pause|unpause|cp|update)( |$)' "$d/docker.log" || true)" == 0 ]] \
         || { ok=0; echo "a mutating docker verb: $(grep -E '^(start|stop|restart|rm|up|down|run|create|compose)' "$d/docker.log" | head -3)" >&2; }
     grep -vE '^(inspect|exec) ' "$d/docker.log" | grep -q . && { ok=0; echo "docker verbs beyond inspect/exec: $(grep -vE '^(inspect|exec) ' "$d/docker.log" | head -3)" >&2; }
-    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |qodercli --version$)' | grep -q . && { ok=0; echo "an exec that is neither test -d nor qodercli --version" >&2; }
+    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |qodercli --version$|sh -c tr "\\0" "\\n" </proc/1/environ$)' | grep -q . && { ok=0; echo "an exec that is neither test -d, qodercli --version nor the /proc/1/environ read" >&2; }
     # Nothing but docker inspect/exec: not systemctl, not ss, not the plain curl on PATH.
     grep -vE '^docker: (inspect|exec) ' "$d/events.log" | grep -q . && { ok=0; echo "another tool was called: $(grep -vE '^docker: (inspect|exec) ' "$d/events.log" | head -3)" >&2; }
     rm -rf "$d"

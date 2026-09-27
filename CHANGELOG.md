@@ -5,6 +5,64 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — ask-back: a blocked worker asks its orchestrator (spec routing-v2 §9)
+
+- **`tools/autoos-ask.py`** (Python stdlib only): the worker-side helper — writes `question.json` into the run dir
+  (the spawner now exports it to the child as `AUTOOS_TASK_DIR`; the CLI forwards its environment to the client),
+  polls for the orchestrator's `answer.json`, prints the answer and archives the exchange as `qa-<n>.json`
+  (history kept). Exit 0 answered, 3 timeout (question withdrawn, run back to `working`), 2 misuse
+  (no `AUTOOS_TASK_DIR`, a question already pending, an empty question).
+- `tools/autoos_agent_mcp.py`: a live run with a pending `question.json` and no `answer.json` reports
+  `state: "input_required"` (plus the question text, `detail` still `running`); the new `respond(run_id, text)`
+  MCP tool answers it atomically and the run returns to `working`; `cancel` now also stops a run parked in
+  `input_required`. Ask-back files are documented in the module docstring.
+
+### Fixed — ask-back: stale answer.json after timeout no longer blocks the next ask
+
+- **`tools/autoos-ask.py`**: "pending" now means `question.json` exists (only). An `answer.json`
+  with no `question.json` is stale (left by a timeout the previous run hit, or an answer landing
+  at/after the deadline); it is archived as `qa-<n>.json` with `"stale": true` and a null question,
+  never silently deleted. On timeout the helper also archives a late `answer.json` that appeared
+  between the last poll and the deadline. A second ask after a timeout now writes its question and
+  works instead of refusing "already pending" (exit 2) forever.
+- **`tools/autoos-ask.py`**: every file operation into `AUTOOS_TASK_DIR` is wrapped; an `OSError`
+  (a read-only mount, a full disk, an `--isolate` outside-path fence) exits 5 with a message that
+  names the reason and suggests `--isolate`, not a raw traceback. Exit code 5 is documented in the
+  module docstring with the other exit codes.
+
+### Changed — the autoos-agent MCP server reports A2A task states (spec routing-v2 §9)
+
+- `tools/autoos_agent_mcp.py`: `status`/`result` states are now `submitted`/`working`/`completed`/`failed`/`canceled` (A2A spelling, one `l`) with the old value kept in a new `detail` field (`lost` stays visible as `failed` + `detail: "lost"`), a refused `spawn` returns `state: "rejected"`, and the full set is the module constant `TASK_STATES`.
+
+### Fixed — OmniRoute chat admission gate no longer kills parallel agent workers
+
+- **`configuration/docker/ai-stack/compose.yml`**: `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT` (default 6) and
+  `OMNIROUTE_CHAT_ADMISSION_QUEUE_MS` (default 60000) on the omniroute service. The image defaults (1 heavy
+  request in flight, 2000 ms queue) rejected parallel agent sub-requests with retryable 503, killing worker
+  runs (4 of 5; measured 2026-09-27). `NODE_OPTIONS` is not set in compose: `OMNIROUTE_MEMORY_MB` is the
+  heap knob (the entrypoint appends it; last flag wins).
+- **`configuration/docker/ai-stack/ai-stack.sh`**: `init` writes both keys to `stack.env` (only when missing;
+  an operator's own value survives). `verify` prints the effective values the running gateway process sees
+  (read from `/proc/1/environ`): `max_heavy`, `queue_ms`, and `heap MB` (the last `--max-old-space-size` in
+  `NODE_OPTIONS`); "unset (image default 1 / 2000)" when absent. Informational, not a pass/fail check.
+- **`configuration/docker/ai-stack/stack.env.example`**, **`docs/web-services.md`**: documented.
+
+### Added — effort probe: reasoning tokens and pass rate per effort rung on free legs
+
+- **`tools/probe-effort.py` + `tests/test_probe_effort.py`** (spec §5.5/§10; wired into `tests/linux/33-documentation.sh`):
+  n >= 5 trials of a fixed five-puzzle task set per `effort_ladder` rung (rung `none` omits `reasoning_effort`;
+  `max_tokens` 48k, 64k at high and above, capped by `output_max`) -> `overlay.models.<id>.effort`. Shared plumbing
+  moved to `tools/probe_common.py`. Both probes: only a 200 is a measurement - any other status (a live groq 413 was
+  scored recall 0.0) keeps the previous value, and provider error bodies (org ids) are never printed or stored.
+
+### Added — recall probe: usable context measured on free legs only
+
+- **`tools/probe-recall.py` + `tests/test_probe_recall.py`** (spec §3.1/§10, D18; wired into `tests/linux/33-documentation.sh`): builds a deterministic ~N-token
+  haystack (seeded filler, 5 access-code needles at spread depths) per size (default 32000/128000/256000/500000, never above `context_advertised`), asks the model for
+  the codes back as JSON, and writes `context_usable` — the largest size where every trial recalled ≥ 0.9 — to the git-ignored overlay `logs/routing/measured.json`
+  keyed by model (the exact shape `usable_context()` already reads; smallest size failing writes only a detail, 401/402/403/429/timeout keep the old value). Paid or
+  subscription legs are never probed — naming one with `--leg` refuses with exit 4 and makes no request — and every request logs its token use to stdout.
+
 ### Changed — the Linux test suite is split into one file per describe block
 
 - `tests/run-tests.sh` keeps the harness and summary and sources `tests/linux/NN-<describe>.sh` in order; test names
