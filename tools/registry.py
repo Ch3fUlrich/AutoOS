@@ -1192,16 +1192,23 @@ def render_ide(registry: dict) -> dict:
             try:
                 _pid, mid = resolve_leg(legs[0], registry)
             except ValueError:
-                mid = None
-            if mid is not None:
-                model_entry = _section(registry, "models").get(mid)
-                if isinstance(model_entry, dict):
-                    ladder = model_entry.get("effort_ladder")
-                    if isinstance(ladder, list):
-                        # Omit "none" so opencode gets only meaningful levels
-                        filtered = [e for e in ladder if isinstance(e, str) and e != "none"]
-                        if filtered:
-                            model["effort_ladder"] = filtered
+                raise ValueError(
+                    "routes.%s: first leg %r cannot be resolved"
+                    % (route_id, legs[0]))
+            model_entry = _section(registry, "models").get(mid)
+            if isinstance(model_entry, dict):
+                ladder = model_entry.get("effort_ladder")
+                if isinstance(ladder, list):
+                    # A non-string rung is a data error - raise immediately.
+                    for rung in ladder:
+                        if not isinstance(rung, str):
+                            raise ValueError(
+                                "routes.%s: non-string rung %r in model %s effort_ladder"
+                                % (route_id, rung, mid))
+                    # Omit "none" so opencode gets only meaningful levels
+                    filtered = [e for e in ladder if e != "none"]
+                    if filtered:
+                        model["effort_ladder"] = filtered
         model["surfaces"] = {gw: list(gateways[gw].get("clients") or []) for gw in IDE_GATEWAYS if gw in gateways}
         models.append(model)
 

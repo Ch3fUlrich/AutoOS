@@ -128,6 +128,10 @@ def _validate_models(models, label):
                 raise ConfigError(f"{label}: {model_label}: effort_ladder must be a list of strings")
             if not ladder:
                 raise ConfigError(f"{label}: {model_label}: effort_ladder must not be empty")
+            if any(e == "none" for e in ladder):
+                raise ConfigError(f"{label}: {model_label}: effort_ladder must not contain 'none'")
+            if len(ladder) != len(set(ladder)):
+                raise ConfigError(f"{label}: {model_label}: effort_ladder contains duplicate rungs")
         if not m["surfaces"]:
             raise ConfigError(f"{label}: {model_label}: surfaces is empty")
         for gateway, surfaces in m["surfaces"].items():

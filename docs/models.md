@@ -194,13 +194,13 @@ replaces that default, so it lists every rung. The rung is sent as body
 `tools/sync-ide-models.py` renders the array into the repo `opencode.jsonc`
 `providers` blocks from `catalog/ide-models.json`'s `effort_ladder`, which
 `tools/registry.py render_ide()` takes from the route's **first leg's** model
-`effort_ladder` minus `none`. Later legs may lack a rung; the gateway passes
-the effort through and the upstream clamps or ignores it.
+`effort_ladder` minus `none`. Later legs may lack a rung; what a fallback
+leg does with it is unmeasured (spec 5.5: clamp to the leg's ladder).
 
 Measured 2026-09-27 via `tools/autoos-agent.py run --model
 omniroute/t1-orchestrator#xhigh`: before the render `Variant unavailable for
 omniroute/t1-orchestrator: xhigh`; after it the call answered, and
-`#bogus` is still refused.
+`#bogus` is still refused. `#minimal` and `#max` answered too.
 
 **Where the direct surface lives** (full vendor ladder, no gateway):
 
