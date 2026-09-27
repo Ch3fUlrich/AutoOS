@@ -193,8 +193,18 @@ def save_overlay(path, overlay):
 # The real (network) post(), and the gateway/key plumbing around it.
 # ---------------------------------------------------------------------------
 
-def make_post(gateway_url, key, timeout=180):
-    """A real `post(body) -> (status, parsed_json_or_None, error_text)`."""
+def make_post(gateway_url, key, timeout=180, classify_error=None):
+    """A real `post(body) -> (status, parsed_json_or_None, error_text)`.
+
+    `classify_error`, when given, is handed each HTTPError and may return the
+    fixed error token to report instead of the bare status; returning nothing
+    falls back to `HTTP <code>`. It is a hook rather than a body read here so
+    the one probe for which a 400 body is a verdict (probe-toolcalls, tool
+    support) can classify, while every other probe still never reads the
+    body. The body text must never be returned - it carries org/project ids
+    and hosts - only a caller-chosen token may. The default None keeps the
+    old behaviour exactly: the status, and the body untouched.
+    """
     def post(body):
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
@@ -209,6 +219,10 @@ def make_post(gateway_url, key, timeout=180):
         # org/project ids and hosts, and the error reaches stdout and the
         # overlay detail. The status (or exception type) is the finding.
         except urllib.error.HTTPError as exc:
+            if classify_error is not None:
+                token = classify_error(exc)
+                if token:
+                    return exc.code, None, token
             return exc.code, None, "HTTP %d" % exc.code
         except Exception as exc:  # noqa: BLE001 - any transport failure is a finding
             return "ERR", None, "transport error: %s" % type(exc).__name__

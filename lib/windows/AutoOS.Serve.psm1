@@ -34,45 +34,17 @@ $script:ErrTask = $null
 function Get-AutoOSProviderStatus {
     <#
       .SYNOPSIS
-        Which AI providers have a key in configuration/api-keys.yml.
+        Which allowlisted keys have a value in configuration/api-keys.yml.
       .DESCRIPTION
-        Values never leave this function: the payload carries only the
-        provider id, a display label and whether a key is present.
+        Values never leave this function: the payload carries only the key id,
+        a display label and whether a value is present.
     #>
     param([string]$RepoRoot = $script:RepoRoot)
-    $labels = @{
-        'groq'                  = 'Groq'
-        'google_ai_studio'      = 'Google AI Studio (Gemini)'
-        'mistral'               = 'Mistral'
-        'cloudflare_workers_ai' = 'Cloudflare Workers AI'
-        'cohere'                = 'Cohere'
-        'hugging_face'          = 'Hugging Face'
-        'cerebras'              = 'Cerebras'
-        'sambanova'             = 'SambaNova'
-        'deepseek'              = 'DeepSeek'
-        'meta'                  = 'Meta Model API'
-        'openrouter'            = 'OpenRouter'
-        'zen'                   = 'OpenCode Zen'
-        'cheapinference'        = 'Cheaper Inference (paid partner)'
-        'omniroute'             = 'OmniRoute client key'
+    $have = Get-AutoOSConfiguredIds -RepoRoot $RepoRoot
+    $out = foreach ($id in $script:SecretKeys.Keys) {
+        [ordered]@{ id = $id; name = $script:SecretKeys[$id].name; configured = $have.Contains($id) }
     }
-    $out = foreach ($name in $labels.Keys) {
-        [ordered]@{ id = $name; name = $labels[$name]; configured = $false }
-    }
-    $file = Join-Path $RepoRoot 'configuration\api-keys.yml'
-    if (Test-Path $file) {
-        foreach ($line in (Get-Content $file -Encoding utf8)) {
-            $t = $line.Trim()
-            if ($t -eq '' -or $t.StartsWith('#') -or -not $t.Contains(':')) { continue }
-            $key = ($t -split ':', 2)[0].Trim().ToLowerInvariant()
-            $val = ($t -split ':', 2)[1].Trim().Trim('"').Trim("'")
-            foreach ($p in $out) {
-                if ($p.id -eq $key -and $val) { $p.configured = $true }
-            }
-        }
-    }
-    $result = @($out)
-    return $result
+    return @($out)
 }
 
 # -- AI services: live status + the setup actions that already exist ------
@@ -700,6 +672,358 @@ function Save-AutoOSWebConfig {
     @{ ok = $true; saved = $Path }
 }
 
+# -- Logins and keys: one allowlist for the status card AND write-only setting
+#    from the page. `id` is a top-level key in configuration/api-keys.yml (a
+#    git-ignored file); `group` is how the page files the row; `apply` is the
+#    command that re-reads the file after a value changes (empty = nothing to
+#    re-apply from this file). A value never leaves the server: the payloads
+#    carry only presence, and POST /api/secrets cannot read one back out.
+$script:SecretKeys = [ordered]@{
+    'groq'                  = @{ name = 'Groq';                                    group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'google_ai_studio'      = @{ name = 'Google AI Studio (Gemini)';               group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'mistral'               = @{ name = 'Mistral';                                 group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'cloudflare_workers_ai' = @{ name = 'Cloudflare Workers AI';                  group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'cohere'                = @{ name = 'Cohere';                                  group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'hugging_face'          = @{ name = 'Hugging Face';                            group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'cerebras'              = @{ name = 'Cerebras';                                group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'sambanova'             = @{ name = 'SambaNova';                               group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'deepseek'              = @{ name = 'DeepSeek';                                group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'meta'                  = @{ name = 'Meta Model API';                          group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'openrouter'            = @{ name = 'OpenRouter';                              group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'zen'                   = @{ name = 'OpenCode Zen';                            group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'cheapinference'        = @{ name = 'Cheaper Inference (paid partner)';        group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'free_ai'               = @{ name = 'Free.ai';                                 group = 'AI providers';    apply = '.\configuration\omniroute\apply.ps1' }
+    'omniroute'             = @{ name = 'OmniRoute client key';                    group = 'Router';          apply = '.\configuration\omniroute\apply.ps1' }
+    'omniroute_management'  = @{ name = 'OmniRoute management token';              group = 'Router';          apply = '.\configuration\omniroute\apply.ps1' }
+    'opencode_password'     = @{ name = 'opencode serve password (user opencode)'; group = 'Local services';  apply = '.\configuration\start-stack.ps1 -App opencode-serve' }
+    'qoder_pat'             = @{ name = 'Qoder personal access token';             group = 'Coding agents';   apply = '' }
+}
+
+function Get-AutoOSKeysFilePath {
+    <#
+      .SYNOPSIS
+        The api-keys.yml the page reads and writes. Overridable with
+        AUTOOS_KEYS_FILE so tests point at a throwaway file.
+    #>
+    param([string]$RepoRoot)
+    if ($env:AUTOOS_KEYS_FILE) { return $env:AUTOOS_KEYS_FILE }
+    Join-Path $RepoRoot 'configuration\api-keys.yml'
+}
+
+function Get-AutoOSConfiguredIds {
+    <#
+      .SYNOPSIS
+        The allowlisted key ids that hold a real value in the keys file.
+        REPLACE_WITH_* counts as not configured.
+    #>
+    param([string]$RepoRoot)
+    $file = Get-AutoOSKeysFilePath -RepoRoot $RepoRoot
+    if (-not (Test-Path $file)) { return ,([System.Collections.Generic.HashSet[string]]::new()) }
+    $have = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($line in (Get-Content $file -Encoding utf8)) {
+        if ($line.Length -eq 0 -or $line[0] -eq ' ' -or $line[0] -eq "`t") { continue }
+        if ($line.StartsWith('#') -or -not $line.Contains(':')) { continue }
+        $key = ($line -split ':', 2)[0].Trim()
+        $val = ($line -split ':', 2)[1].Trim().Trim(@('"', "'")).Trim()
+        if ($val -and -not $val.ToUpperInvariant().StartsWith('REPLACE_WITH_')) {
+            [void]$have.Add($key)
+        }
+    }
+    return ,$have   # unary comma: PowerShell otherwise unrolls the set (empty -> $null; one element -> a string whose .Contains is a substring test)
+}
+
+function Split-AutoOSTrailingComment {
+    <#
+      .SYNOPSIS
+        Split " 'value' # comment" into @{ Value; Comment }.
+        A value may itself contain " #" inside its quotes, so a naive split
+        would mistake that for the start of a comment.
+    #>
+    param([string]$After)
+    $inQuote = $false
+    $i = 0
+    $n = $After.Length
+    while ($i -lt $n) {
+        $ch = $After[$i]
+        if ($ch -eq "'") {
+            if ($inQuote -and ($i + 1) -lt $n -and $After[$i + 1] -eq "'") {
+                $i += 2
+                continue
+            }
+            $inQuote = -not $inQuote
+        } elseif ($ch -eq "#" -and -not $inQuote -and $i -gt 0 -and ($After[$i - 1] -eq " " -or $After[$i - 1] -eq "`t")) {
+            return @{ Value = $After.Substring(0, $i); Comment = $After.Substring($i) }
+        }
+        $i++
+    }
+    @{ Value = $After; Comment = '' }
+}
+
+function Get-AutoOSYamlScalar {
+    <#
+      .SYNOPSIS
+        The unquoted value of a YAML scalar as this server writes it.
+    #>
+    param([string]$Raw)
+    $Raw.Trim().Trim(@('"', "'")).Trim()
+}
+
+function Get-AutoOSSecretValueError {
+    <#
+      .SYNOPSIS
+        Why a value may not be written, or $null when it is acceptable.
+        The returned messages never include the value itself.
+    #>
+    param($Value)
+    if ($Value -isnot [string]) { return 'value must be a string' }
+    if ($Value.Length -lt 1 -or $Value.Length -gt 4096) { return 'value must be 1..4096 characters' }
+    if ($Value.IndexOfAny([char[]]@("`r", "`n", [char]0)) -ge 0) { return 'value must not contain a newline or NUL' }
+    if ($Value -ne $Value.Trim()) { return 'value must not start or end with whitespace' }
+    if ($Value.ToUpperInvariant().StartsWith('REPLACE_WITH_')) { return 'value still looks like the placeholder it replaces' }
+    if ($Value.IndexOfAny([char[]]@("'", '"')) -ge 0) { return 'value must not contain a quote character' }
+    $null
+}
+
+function Get-AutoOSGitIgnoreRefusal {
+    <#
+      .SYNOPSIS
+        The 409 reason when the file is in a git work tree and not git-ignored.
+        0 = ignored (safe), 1 = in a work tree but NOT ignored (refuse), 128 =
+        not a work tree at all (safe). Run from the file's own directory so git
+        discovers the work tree the file belongs to.
+    #>
+    param([string]$Path)
+    $dir = Split-Path -Parent $Path
+    if (-not $dir -or -not (Test-Path $dir)) { return $null }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $null }
+    $exitCode = 128
+    $prevDir = $null
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $prevDir = Get-Location
+        Set-Location $dir
+        $null = & git check-ignore -q -- $Path 2>$null | Out-Null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        if ($prevDir) { Set-Location $prevDir }
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($exitCode -eq 1) {
+        return "$Path is not git-ignored; refusing to write a secret there"
+    }
+    $null
+}
+
+function Split-AutoOSLinesWithEndings {
+    <#
+      .SYNOPSIS
+        Split text into lines, preserving each line's ending (CRLF, LF, or CR).
+    #>
+    param([string]$Text)
+    if (-not $Text) { return @() }
+    $parts = [regex]::Split($Text, '(\r\n|\r|\n)')
+    $lines = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $parts.Length; $i += 2) {
+        $ending = if ($i + 1 -lt $parts.Length) { $parts[$i + 1] } else { '' }
+        [void]$lines.Add(@{ Text = $parts[$i]; Ending = $ending })
+    }
+    ,$lines
+}
+
+function Set-AutoOSKeyValue {
+    <#
+      .SYNOPSIS
+        Replace or append one key: 'value' line, returning the response payload.
+        Write-only by construction: the value goes into the file and is never
+        returned, logged or echoed. An identical value is a no-op with no backup.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$KeyId,
+        [Parameter(Mandatory)][string]$Value
+    )
+    $file = Get-AutoOSKeysFilePath -RepoRoot $RepoRoot
+    $bytes = $null
+    $text = $null
+    if (Test-Path $file) {
+        $bytes = [System.IO.File]::ReadAllBytes($file)
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+        if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+    }
+
+    $lines = if ($text) { Split-AutoOSLinesWithEndings -Text $text } else { New-Object System.Collections.ArrayList }
+
+    $found = $false
+    $unchanged = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $core = $lines[$i].Text
+        if ($core.Length -eq 0 -or $core[0] -eq ' ' -or $core[0] -eq "`t") { continue }
+        if ($core.StartsWith('#') -or -not $core.Contains(':')) { continue }
+        $colonIdx = $core.IndexOf(':')
+        $head = $core.Substring(0, $colonIdx)
+        $after = $core.Substring($colonIdx + 1)
+        if ($head.Trim() -cne $KeyId) { continue }
+
+        $found = $true
+        $split = Split-AutoOSTrailingComment -After $after
+        $currentValue = Get-AutoOSYamlScalar -Raw $split.Value
+        if ($currentValue -ceq $Value) {
+            $unchanged = $true
+            break
+        }
+
+        $quotedValue = "'" + $Value + "'"
+        $newCore = $head.TrimEnd() + ': ' + $quotedValue
+        if ($split.Comment) { $newCore += ' ' + $split.Comment }
+        $lines[$i] = @{ Text = $newCore; Ending = $lines[$i].Ending }
+        break
+    }
+
+    if ($unchanged) {
+        return @{ ok = $true; id = $KeyId; unchanged = $true }
+    }
+
+    $newText = ''
+    if ($found) {
+        foreach ($line in $lines) { $newText += $line.Text + $line.Ending }
+    } else {
+        $baseText = if ($text) { $text } else { '' }
+        if ($baseText -and -not $baseText.EndsWith("`n")) { $baseText += "`n" }
+        $newText = $baseText + $KeyId + ": '" + $Value + "'`n"
+    }
+
+    $dir = Split-Path -Parent $file
+    $baseName = [System.IO.Path]::GetFileName($file)
+    $newBytes = [System.Text.Encoding]::UTF8.GetBytes($newText)
+    $tmp = $null
+    try {
+        if ($bytes) {
+            $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+            $backupBase = Join-Path $dir "$baseName.autoos-backup-$stamp"
+            $backup = $backupBase
+            $n = 0
+            while (Test-Path $backup) {
+                $n++
+                $backup = "$backupBase-$n"
+            }
+            [System.IO.File]::WriteAllBytes($backup, $bytes)
+            try {
+                $srcAcl = Get-Acl -LiteralPath $file
+                Set-Acl -LiteralPath $backup -AclObject $srcAcl -ErrorAction Stop
+            } catch { }
+        }
+
+        $rand = [Guid]::NewGuid().ToString('N').Substring(0,8)
+        $tmp = Join-Path $dir "$baseName.autoos-tmp-$PID-$rand"
+        $fs = [System.IO.File]::Open($tmp, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $fs.Write($newBytes, 0, $newBytes.Length)
+        } finally {
+            $fs.Dispose()
+        }
+        if ($bytes) {
+            try {
+                $srcAcl = Get-Acl -LiteralPath $file
+                Set-Acl -LiteralPath $tmp -AclObject $srcAcl -ErrorAction Stop
+            } catch { }
+        }
+        Move-Item -LiteralPath $tmp -Destination $file -Force
+        $tmp = $null
+    } finally {
+        if ($tmp -and (Test-Path $tmp)) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    @{ ok = $true; id = $KeyId; configured = $true; apply = $script:SecretKeys[$KeyId].apply }
+}
+
+function Get-AutoOSSecretsPayload {
+    <#
+      .SYNOPSIS
+        GET /api/secrets body: set/missing per key, an apply hint, no values.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [bool]$ClientIsLoopback
+    )
+    $remoteOk = $ClientIsLoopback -or ($env:AUTOOS_SERVE_REMOTE_SECRETS -eq '1')
+    $file = Get-AutoOSKeysFilePath -RepoRoot $RepoRoot
+    $refusal = Get-AutoOSGitIgnoreRefusal -Path $file
+    $writable = (-not $refusal) -and $remoteOk
+    $have = Get-AutoOSConfiguredIds -RepoRoot $RepoRoot
+    $secrets = foreach ($id in $script:SecretKeys.Keys) {
+        [ordered]@{
+            id = $id
+            name = $script:SecretKeys[$id].name
+            group = $script:SecretKeys[$id].group
+            configured = $have.Contains($id)
+            apply = $script:SecretKeys[$id].apply
+        }
+    }
+    [ordered]@{
+        secrets  = @($secrets)
+        file     = 'configuration/api-keys.yml'
+        writable = $writable
+    }
+}
+
+function Get-AutoOSSecretPostResult {
+    <#
+      .SYNOPSIS
+        Validate and apply a POST /api/secrets body. Returns @{ Code; Payload }.
+        The value is never written to host output, the log, or a response.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)]$Body,
+        [bool]$ClientIsLoopback
+    )
+    if (-not $Body -or $Body -isnot [pscustomobject]) {
+        return @{ Code = 400; Payload = @{ error = 'payload must be a JSON object' } }
+    }
+
+    $keyId = $null
+    if ($Body.PSObject.Properties.Name -contains 'id') { $keyId = [string]$Body.id }
+    if (-not $keyId -or -not $script:SecretKeys.Contains($keyId)) {
+        return @{ Code = 400; Payload = @{ error = 'unknown key id'; allowed = @($script:SecretKeys.Keys) } }
+    }
+
+    if (-not ($Body.PSObject.Properties.Name -contains 'value')) {
+        return @{ Code = 400; Payload = @{ error = 'value must be a string' } }
+    }
+    $value = $Body.value
+    if ($value -isnot [string]) {
+        return @{ Code = 400; Payload = @{ error = 'value must be a string' } }
+    }
+
+    $problem = Get-AutoOSSecretValueError -Value $value
+    if ($problem) {
+        return @{ Code = 400; Payload = @{ error = $problem } }
+    }
+
+    $remoteOk = $ClientIsLoopback -or ($env:AUTOOS_SERVE_REMOTE_SECRETS -eq '1')
+    if (-not $remoteOk) {
+        return @{ Code = 403; Payload = @{ error = 'secrets can be set only from this machine (loopback); use an SSH tunnel' } }
+    }
+
+    $file = Get-AutoOSKeysFilePath -RepoRoot $RepoRoot
+    $refusal = Get-AutoOSGitIgnoreRefusal -Path $file
+    if ($refusal) {
+        return @{ Code = 409; Payload = @{ error = $refusal } }
+    }
+
+    try {
+        $result = Set-AutoOSKeyValue -RepoRoot $RepoRoot -KeyId $keyId -Value $value
+        @{ Code = 200; Payload = $result }
+    } catch {
+        $detail = $_.Exception.Message
+        if ($value) { $detail = $detail.Replace($value, '***') }
+        @{ Code = 500; Payload = @{ error = "failed to save secret: $detail" } }
+    }
+}
+
 function Start-AutoOSServer {
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
@@ -972,6 +1296,27 @@ function Start-AutoOSServer {
                     & $json $result.Code $result.Payload
                 }
             }
+            elseif ($path -eq '/api/secrets' -and $req.HttpMethod -eq 'GET') {
+                try {
+                    $isLoopback = [System.Net.IPAddress]::IsLoopback($req.RemoteEndPoint.Address)
+                    & $json 200 (Get-AutoOSSecretsPayload -RepoRoot $RepoRoot -ClientIsLoopback $isLoopback)
+                } catch {
+                    & $json 500 @{ error = $_.Exception.Message }
+                }
+            }
+            elseif ($path -eq '/api/secrets' -and $req.HttpMethod -eq 'POST') {
+                $rawBody = (New-Object IO.StreamReader($req.InputStream, $req.ContentEncoding)).ReadToEnd()
+                $parseFailed = $false
+                $body = $null
+                try { $body = $rawBody | ConvertFrom-Json } catch { $parseFailed = $true }
+                if ($parseFailed) {
+                    & $json 400 @{ error = 'payload must be JSON' }
+                } else {
+                    $isLoopback = [System.Net.IPAddress]::IsLoopback($req.RemoteEndPoint.Address)
+                    $result = Get-AutoOSSecretPostResult -RepoRoot $RepoRoot -Body $body -ClientIsLoopback $isLoopback
+                    & $json $result.Code $result.Payload
+                }
+            }
             elseif ($path -eq '/api/install' -and $req.HttpMethod -eq 'POST') {
                 if ($script:RunInfo.Running) {
                     & $json 409 @{ error = 'a run is already in progress' }
@@ -1021,4 +1366,5 @@ function Start-AutoOSServer {
 
 Export-ModuleMember -Function Start-AutoOSServer, Get-AutoOSServeState, Get-AutoOSLineLevel, Start-AutoOSInstallJob, Update-AutoOSInstallLog, `
     Start-AutoOSUsbCreateJob, Get-AutoOSServeUsbCatalog, Get-AutoOSServeUsbDevices, Get-AutoOSServeUsbCreateResult, Get-AutoOSProviderStatus, `
-    Get-AutoOSServiceStatus, Get-AutoOSServiceActionResult, Start-AutoOSServiceActionJob, Save-AutoOSWebConfig
+    Get-AutoOSServiceStatus, Get-AutoOSServiceActionResult, Start-AutoOSServiceActionJob, Save-AutoOSWebConfig, `
+    Get-AutoOSSecretsPayload, Get-AutoOSSecretPostResult

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the skill-rules utility script.
 """
+import re
 import unittest
 import subprocess
 import sys
@@ -8,6 +9,13 @@ import tempfile
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / 'tools' / 'skill-rules.py'
+
+# Import parse_rule from the skill-rules script for reuse in resolution tests.
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location('skill_rules', str(SCRIPT))
+_sr = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_sr)
+parse_rule = _sr.parse_rule
 
 class SkillRulesTests(unittest.TestCase):
     def run_script(self, args, input_text=None):
@@ -135,6 +143,102 @@ class SkillRulesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn('R-foo-01', result.stdout)
         self.assertNotIn('R-bar-02', result.stdout)
+
+class RuleResolutionTests(unittest.TestCase):
+    """Every R-<topic>-NN cited in git-tracked files (except CHANGELOG.md and
+    references/PROPOSALS-*) must resolve to either:
+      - a rule in SKILL.md, or
+      - a row in references/rule-map.md.
+    Every rule-map target that is a new R-id must exist in SKILL.md."""
+
+    REPO = Path(__file__).resolve().parent.parent
+    SKILL = REPO / '.agents' / 'skills' / 'unattended-orchestration' / 'SKILL.md'
+    RULE_MAP = REPO / '.agents' / 'skills' / 'unattended-orchestration' / 'references' / 'rule-map.md'
+    RULE_ID_RE = re.compile(r'R-[a-z]+-\d{2}')
+
+    def _skill_ids(self):
+        """All R-ids defined as rules in SKILL.md."""
+        text = self.SKILL.read_text(encoding='utf-8')
+        ids = set()
+        for line in text.splitlines():
+            parsed = parse_rule(line)
+            if parsed:
+                ids.add(parsed[0])
+        return ids
+
+    def _rule_map_old_ids(self):
+        """All old R-ids listed in rule-map.md (first column)."""
+        if not self.RULE_MAP.is_file():
+            return set(), {}
+        text = self.RULE_MAP.read_text(encoding='utf-8')
+        old_ids = set()
+        targets = {}  # old_id -> target string
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith('|') or line.startswith('|---') or line.startswith('| old'):
+                continue
+            cols = [c.strip() for c in line.split('|')]
+            if len(cols) < 3:
+                continue
+            old_id = cols[1].strip().strip('`')
+            target = cols[2].strip()
+            m = self.RULE_ID_RE.match(old_id)
+            if m:
+                old_ids.add(old_id)
+                targets[old_id] = target
+        return old_ids, targets
+
+    def _cited_ids(self):
+        """All R-ids cited in git-tracked files, excluding CHANGELOG.md,
+        references/PROPOSALS-*, and SKILL.md itself."""
+        result = subprocess.run(
+            ['git', 'ls-files'],
+            capture_output=True, text=True, cwd=str(self.REPO))
+        cited = set()
+        for f in result.stdout.splitlines():
+            if 'CHANGELOG.md' in f:
+                continue
+            if 'references/PROPOSALS-' in f:
+                continue
+            if f.endswith('SKILL.md') and 'unattended-orchestration' in f:
+                continue
+            if f.endswith('test_skill_rules.py'):
+                continue
+            if f.endswith('rule-map.md'):
+                continue
+            path = self.REPO / f
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding='utf-8', errors='replace')
+            except Exception:
+                continue
+            for m in self.RULE_ID_RE.finditer(text):
+                cited.add(m.group(0))
+        return cited
+
+    def test_every_cited_id_resolves(self):
+        """Every R-id cited anywhere must be a rule in SKILL.md or a row in rule-map.md."""
+        skill_ids = self._skill_ids()
+        map_old_ids, _ = self._rule_map_old_ids()
+        cited = self._cited_ids()
+        unresolved = cited - skill_ids - map_old_ids
+        self.assertEqual(unresolved, set(),
+                         f"cited R-ids that resolve nowhere: {sorted(unresolved)}")
+
+    def test_every_rule_map_target_id_exists_in_skill(self):
+        """Every rule-map target that is a new R-id must exist in SKILL.md."""
+        skill_ids = self._skill_ids()
+        _, targets = self._rule_map_old_ids()
+        missing = []
+        for old_id, target in targets.items():
+            for m in self.RULE_ID_RE.finditer(target):
+                new_id = m.group(0)
+                if new_id not in skill_ids:
+                    missing.append(f"{old_id} -> {new_id}")
+        self.assertEqual(missing, [],
+                         f"rule-map targets not in SKILL.md: {missing}")
+
 
 if __name__ == '__main__':
     unittest.main()
