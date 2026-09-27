@@ -517,9 +517,14 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     # the registry class of the combo that actually runs (an explicit --model may
     # have replaced the resolver's route); the track record keys on it
     route_class = registry.get("routes", {}).get(combo, {}).get("class")
+    # "effort" is the rung the resolver scored (spec 5.2); track_entry stamps it
+    # into the record so p_success can match the resolver's bucket+effort query.
+    # An explicit --model override may have replaced the combo above, but the
+    # resolver's bucket, reason and effort still describe the card's plan.
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["kind"] == "review",
-            "bucket": result["bucket"], "class": route_class, "resolver": True}
+            "bucket": result["bucket"], "class": route_class, "resolver": True,
+            "effort": result.get("effort")}
 
 
 class PrivacyRefused(ValueError):
@@ -1394,10 +1399,12 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     else the v1 tier prefix's class.
 
     Only a card or --tier run carries a combo (--free is keyless); a gateway
-    run's served leg, effort and tokens are unknown to this process, so they
-    are recorded as unknown/0 until the resolver measures them. rc is the same
-    value the run exits with, the NO-OP (5) and LEAK (7, failure class
-    "containment") overrides included.
+    run's served leg and tokens are unknown to this process, so they are
+    recorded as unknown/0 until the resolver measures them. The effort is the
+    rung RUNV2's route carries (``route["effort"]``) when there is one, else
+    "unknown". rc is the same value the run exits with, the NO-OP (5), the
+    headless refusal (6, failure class "refusal") and the LEAK (7, failure
+    class "containment") overrides included.
 
     ``bucket`` is the resolver's own bucket (RUNV2: ``route["bucket"]``, set
     only for a v2-routed run) when there is one, else the v1 compat card's
@@ -1414,20 +1421,29 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     if not klass:
         return None
     card = route.get("card") or {}
+    # RUNV2's plan() carries the rung the resolver scored; a route whose leg is
+    # not a reasoning model carries effort None and the resolver reads that as
+    # "none". A v1/--tier route has no effort key at all: its record is stamped
+    # "unknown", which p_success matches against any queried rung (REVFIX).
+    if "effort" in route:
+        effort = route.get("effort") or "none"
+    else:
+        effort = "unknown"
     return {
         "route": route["combo"],
         "class": klass,
         "served_leg": "unknown",
         "bucket": route.get("bucket") or card.get("bucket_hint") or "unknown",
-        "effort": "unknown",
+        "effort": effort,
         "tokens_in": 0,
         "tokens_out": 0,
         "cost": 0,
         "latency_s": secs,
         "gate": "pass" if rc == 0 else "fail",
         "failure_class": (None if rc == 0 else ("capability" if rc == 5 else
-                          ("containment" if rc == 7 else
-                           ("provider" if rc == 8 else "logic")))),
+                          ("refusal" if rc == 6 else
+                           ("containment" if rc == 7 else
+                            ("provider" if rc == 8 else "logic"))))),
     }
 
 
@@ -2167,6 +2183,7 @@ def cmd_run(args, cfg: dict) -> int:
             worker_id, worker_rec = _worker_record_start(plan, args, workers)
         except Exception as exc:  # noqa: BLE001
             print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
+        attempt_start = time.time()
         run_rc = None
         try:
             run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
@@ -2232,6 +2249,12 @@ def cmd_run(args, cfg: dict) -> int:
             if wip_sha:
                 print("WIP-COMMITTED: %s" % wip_sha)
         excluded_routes.add(plan["route"]["combo"])
+        # REVFIX: each provider-stopped attempt is its own observation, not
+        # just the final plan's. Without this the dead route looked healthy
+        # (no fail record), so the resolver kept handing it the work.
+        stopped = track_entry(plan, rc, time.time() - attempt_start)
+        if stopped is not None:
+            record_run(TRACK_RECORD, stopped)
         print(fallthrough_line(plan["route"]["combo"], stop, next_combo), file=sys.stderr)
         plan = next_plan
         # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
@@ -2279,7 +2302,10 @@ def cmd_run(args, cfg: dict) -> int:
             print(message)
             rc = override
         # Every finished --isolate run is a track-record observation (spec §5.6).
-        tracked = track_entry(plan, rc, time.time() - start)
+        # REVFIX review 2: the survivor's latency is its OWN attempt, not the
+        # cumulative `start` that also spans the dead attempts (each of which
+        # already recorded its own sample above).
+        tracked = track_entry(plan, rc, time.time() - attempt_start)
         if tracked is not None:
             record_run(TRACK_RECORD, tracked)
             propose_reprobe(tracked, REGISTRY_PATH, MEASURED_OVERLAY_PATH,

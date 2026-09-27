@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — review batch: dropped track records, per-attempt fallthrough records, shared registry loader (REVFIX, S1-S2, 2026-09-27)
+
+- **`tools/autoos_track.py`**: `FAILURES` now names `containment` and `provider`, so a `record_run()` for a LEAK (rc 7) or a provider stop (rc 8) is no longer rejected by `validate()` and silently dropped — every `failure_class` `tools/autoos-agent.py`'s `track_entry()` emits is accepted.
+- **`tools/autoos-agent.py`**: each provider-stopped attempt in the `--isolate` fallthrough loop writes its own `track_entry`/`record_run` (gate fail, failure_class `provider`, its own route), not only the final plan; `tests/test_autoos_spawner.py::ProviderStopFallthroughTests` asserts one track line per attempt.
+- **`tools/autoos_measure.py`**: coverage matches on whole tokens, so a test name covering any token of a multi-token stem counts as covered.
+- **`tools/registry_loader.py`** (new): the one importlib-by-path loader for `tools/registry.py`; `tools/sync-ide-models.py`, `tools/audit-router.py`, `tools/mirror-litellm-env.py` and `tools/sync-openhands-profiles.py` import it instead of each carrying an identical copy. `tools/sync-router-tiers.py` guards its `sys.path.insert` against duplicates. `tools/probe_common.py:make_post()` gains a `classify_error` hook and `tools/probe-toolcalls.py`'s forked post is deleted.
+- **Tests**: `tests/test_registry_loader.py` (new, wired into both suites), the suite-wiring guard `tests/test_suite_wiring.py` (every `tests/test_*.py` must be named by a harness), and the `sk-test-dummy` fixture in `tests/linux/34-ai-services.sh` is renamed `TEST-ONLY-fake-litellm-key` (secret-scanner false positive); its three duplicated loopback HTTP servers become one `_svc_loopback_server` helper.
+
 ### Added — route by client shell/write capability, fall through on a provider stop (SPAWNCAP, S2, 2026-09-27)
 
 - **`catalog/ai-registry.json`**, **`catalog/ai-registry.schema.json`**: every client now declares `capabilities` (`shell`, `write`); new `$defs.capabilities` requires both and forbids extras, and `$defs.client` requires it. opencode/claude/codex/gemini/qwen declare `true/true`; agy and qoder declare `false/false` (source: the `HEADLESS_REFUSAL_MARKERS` refusals and qoder's `--permission-mode dont_ask, no shell`, `docs/agent-protocol.md:160`).

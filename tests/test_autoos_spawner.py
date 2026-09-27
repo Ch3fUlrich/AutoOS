@@ -1964,6 +1964,12 @@ class SessionTagTests(unittest.TestCase):
     def setUpClass(cls):
         cls.cli = load_agent()
 
+    def _lane(self):
+        # The lane part as session_tag() derives it (sanitised, capped): a
+        # checkout with a long basename (every lane sandbox) is truncated, so
+        # the raw os.path.basename(ROOT) is not the expected value.
+        return self.cli.session_tag("t", env={}).rsplit("/", 1)[0]
+
     def test_fallback_tag_is_a_valid_header_value_for_any_worktree_name(self):
         # review-or3: the ROOT basename was used verbatim - a worktree name with
         # spaces or 120+ chars would emit an illegal header / an over-long tag.
@@ -2001,7 +2007,7 @@ class SessionTagTests(unittest.TestCase):
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(
             prov["headers"]["x-omniroute-session-id"],
-            "%s/fix-the-router" % os.path.basename(self.cli.ROOT))
+            "%s/fix-the-router" % self._lane())
 
     def test_autoos_session_tag_overrides_the_default(self):
         with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one.two_3-x"}):
@@ -2016,7 +2022,7 @@ class SessionTagTests(unittest.TestCase):
                 plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(prov["headers"]["x-omniroute-session-id"],
-                         "%s/t" % os.path.basename(self.cli.ROOT))
+                         "%s/t" % self._lane())
         warns = [l for l in err.getvalue().splitlines()
                  if "AUTOOS_SESSION_TAG" in l]
         self.assertEqual(len(warns), 1, err.getvalue())
@@ -2038,13 +2044,13 @@ class SessionTagTests(unittest.TestCase):
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(prov["settings"], {"baseURL": "http://x/v1"})
         self.assertEqual(prov["headers"]["x-omniroute-session-id"],
-                         "%s/t" % os.path.basename(self.cli.ROOT))
+                         "%s/t" % self._lane())
 
     def test_the_plan_output_prints_the_session_tag(self):
         r = run_agent("run", "--dry-run", "--tier", "2", "--title", "My Tag",
                       "t", env=clean_env())
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("session-tag: %s/my-tag" % os.path.basename(self.cli.ROOT),
+        self.assertIn("session-tag: %s/my-tag" % self._lane(),
                       r.stdout)
 
     def test_a_non_opencode_client_prints_no_session_tag(self):
@@ -3986,12 +3992,15 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         line = "Error: credits exhausted"
         self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
 
-    def _run(self, route_ids, stops):
+    def _run(self, route_ids, stops, clock=None):
         """Run cmd_run with the resolver and the client replaced by fakes; the
         sandbox is a real temp clone so WIP commits and re-runs are real.
 
         Returns (rc, out, err, calls, sandbox_names): `calls` is
-        {"n": int, "cwds": [str]}.
+        {"n": int, "cwds": [str], "track": [record]}. The run is a gateway
+        (opencode) run so `track_entry` emits a record per attempt - an
+        own-account client's run is tracked as None (SPAWNCAP fallthrough
+        records every provider-stopped attempt, not just the final plan).
         """
         root = _init_git_root()
         self.addCleanup(shutil.rmtree, root, True)
@@ -4005,7 +4014,7 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
         cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
 
-        calls = {"n": 0, "cwds": [], "route_marks": []}
+        calls = {"n": 0, "cwds": [], "route_marks": [], "track": []}
         real_build_plan = agent.build_plan
 
         def marking_build_plan(*a, **k):
@@ -4027,19 +4036,29 @@ class ProviderStopFallthroughTests(unittest.TestCase):
             return agent.ClientExit(0, tail="done\n")
 
         args = argparse.Namespace(
-            client="claude", tier=None, card="kind=implement", task="edit README.md",
+            client="opencode", tier=None, card="kind=implement", task="edit README.md",
             free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
             joinable=False, model=None, clean=False, allow_training=False,
             max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
         env = dict(os.environ)
         env["AUTOOS_STATE_DIR"] = statedir
+        # A gateway run needs a client key and a live gateway; both are faked
+        # here. The key is what makes the run track-recorded at all.
+        env["AUTOOS_OMNIROUTE_KEY"] = "test-only-key"
         out, err = io.StringIO(), io.StringIO()
+        old_time = agent.time.time
+        if clock is not None:
+            agent.time.time = clock
         try:
             with mock.patch.dict(os.environ, env, clear=True):
                 with mock.patch.object(agent, "load_registry",
                                        lambda path: _fallthrough_registry(route_ids)):
                     with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
-                            mock.patch.object(agent, "build_plan", marking_build_plan):
+                            mock.patch.object(agent, "build_plan", marking_build_plan), \
+                            mock.patch.object(agent, "gateway_up", lambda: True), \
+                            mock.patch.object(agent, "resolve_model",
+                                              lambda cfg, tier, clean, override:
+                                                  override or "omniroute/r-t2"):
                         with mock.patch.object(agent, "run_client", fake_run_client):
                             with mock.patch.object(agent.measure_mod, "client_state",
                                                    lambda *a, **k: {}):
@@ -4047,11 +4066,13 @@ class ProviderStopFallthroughTests(unittest.TestCase):
                                         agent.clients, "signin_state",
                                         lambda client, env=None: (None, "")):
                                     with mock.patch("shutil.which",
-                                                    return_value="/usr/bin/claude"):
+                                                    return_value="/usr/bin/opencode"):
                                         with contextlib.redirect_stdout(out), \
                                                 contextlib.redirect_stderr(err):
                                             rc = agent.cmd_run(args, cfg)
         finally:
+            agent.time.time = old_time
+            calls["track"] = agent.track.load(agent.TRACK_RECORD)
             (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
                 old_root, old_track, old_overlay)
         base = os.path.join(statedir, "sandboxes")
@@ -4087,6 +4108,47 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         self.assertEqual(rc, 8, out + err)
         self.assertEqual(calls["n"], 1, "nowhere to fall through to")
         self.assertNotIn("falling through to", out + err)
+
+    @staticmethod
+    def _records(calls):
+        """The track record as (route, gate, failure_class) triples."""
+        return [(r["route"], r["gate"], r["failure_class"]) for r in calls["track"]]
+
+    def test_every_provider_stopped_attempt_is_track_recorded(self):
+        # REVFIX: a provider-stopped attempt that falls through was never its
+        # own observation - only the final plan's record survived, so the dead
+        # route looked healthy and `route` kept picking it.
+        _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1)
+        self.assertEqual(
+            self._records(calls),
+            [("r-free", "fail", "provider"), ("r-cheap", "pass", None)], out + err)
+
+    def test_a_run_with_no_fallthrough_is_track_recorded_once(self):
+        # The per-attempt record must not double-count the final plan's own
+        # record when the loop never falls through.
+        _, out, err, calls, _ = self._run(["r-free"], stops=0)
+        self.assertEqual(self._records(calls), [("r-free", "pass", None)], out + err)
+
+    def test_the_surviving_routes_latency_excludes_the_dead_attempts(self):
+        # REVFIX review 2: the final record used the cumulative `start`, so the
+        # surviving route's latency sample included the dead attempt's seconds
+        # (which are already their own sample). One tick per time.time() call:
+        # each attempt spans exactly one tick, so the survivor's latency is 1s.
+        ticks = iter(range(1000))
+        _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                          clock=lambda: float(next(ticks)))
+        by_route = {r["route"]: r["latency_s"] for r in calls["track"]}
+        self.assertEqual(by_route["r-free"], 1.0, out + err)  # its own attempt
+        self.assertEqual(by_route["r-cheap"], 1.0, out + err)  # not 2+ (cumulative)
+
+    def test_the_cap_records_every_fallthrough_attempt(self):
+        _, out, err, calls, _ = self._run(
+            ["r-free", "r-cheap", "r-cheap2", "r-cheap3"], stops=5)
+        self.assertEqual(
+            self._records(calls),
+            [("r-free", "fail", "provider"),
+             ("r-cheap", "fail", "provider"),
+             ("r-cheap2", "fail", "provider")], out + err)
 
 
 class OutsideFenceTaskDirTests(unittest.TestCase):
