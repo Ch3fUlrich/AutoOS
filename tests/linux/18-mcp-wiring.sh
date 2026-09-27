@@ -528,13 +528,109 @@ if it "repo skills link into project .claude/skills and win as skills source"; t
     if (( ok )); then pass; else fail "vendored skills did not win or were not linked"; fi
 fi
 
+if it "install_agent_skills records a refused project-server approval for the summary"; then
+    # A post-install step that refuses to touch a user's file (no backup, no
+    # write) must still be counted: setup.sh folds autoos_record_failure ids
+    # into its failed count and exit code, so the summary cannot read "done"
+    # over a change that never happened. Both project servers approved here map
+    # to one id, and the recorder is idempotent.
+    tmp="$(mktemp -d)"; ok=1
+    mkdir -p "$tmp/Documents/code/agent-skills/.claude" "$tmp/root/.claude"
+    printf '{}\n' >"$tmp/Documents/code/agent-skills/.mcp.json"
+    printf '{}\n' >"$tmp/root/.mcp.json"
+    printf '{"theme":"mine"}\n' >"$tmp/Documents/code/agent-skills/.claude/settings.local.json"
+    printf '{"theme":"mine"}\n' >"$tmp/root/.claude/settings.local.json"
+    out="$( (
+        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp/root"; AUTOOS_DRY_RUN=0
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }; install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }; install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        write_omnigraph_env() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        backup_file() { return 1; }
+        install_agent_skills >/dev/null 2>&1
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    ) 2>&1 )"
+    [[ "$out" == *"recorded: agent-skills"* ]] || { ok=0; echo "the refusal was not recorded: [${out:0:400}]" >&2; }
+    [[ "$out" != *"agent-skills agent-skills"* ]] || { ok=0; echo "the id was recorded twice" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "install_agent_skills did not record a refused project-server approval"; fi
+fi
+
+# install_agent_skills calls four catalog postInstalls directly, and
+# route_detected_clis_to_gateway calls Claude Code's — bare, those non-zero
+# returns reached setup.sh's `set -euo pipefail` and ended the run. Each now
+# records its own component id instead, so the summary and the exit code see it
+# while the step finishes its remaining work. The Playwright double below records
+# its id itself the way the real function does, so this also proves the recorder
+# keeps one line for one broken wiring.
+if it "install_agent_skills: a failing mcp sub-step is recorded for the summary and the step carries on"; then
+    tmp="$(mktemp -d)"; ok=1
+    mkdir -p "$tmp/Documents/code/agent-skills" "$tmp/root"
+    out="$( (
+        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp/root"; AUTOOS_DRY_RUN=0
+        AUTOOS_EXTRA_FAILURES=()
+        clone_or_update() { :; }
+        write_omnigraph_env() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        mcp_has_server() { : >"$tmp/mark_later"; return 1; }
+        install_mcp_graphify() { : >"$tmp/mark_graphify"; return 0; }
+        install_mcp_serena() { : >"$tmp/mark_serena"; return 1; }
+        install_mcp_playwright() { : >"$tmp/mark_playwright"; autoos_record_failure mcp-playwright; return 1; }
+        install_mcp_context7() { : >"$tmp/mark_context7"; return 1; }
+        install_agent_skills >/dev/null 2>&1
+        step_rc=$?
+        printf 'agent_skills_rc=%s\n' "$step_rc"
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    ) 2>&1 )"
+    for mark in serena playwright context7 later; do
+        [[ -e "$tmp/mark_$mark" ]] \
+            || { ok=0; echo "the step never reached mark_$mark (a failing sub-step stopped the run)" >&2; }
+    done
+    [[ "$out" == *"recorded:"*"mcp-serena"* && "$out" == *"recorded:"*"mcp-playwright"* && "$out" == *"recorded:"*"mcp-context7"* ]] \
+        || { ok=0; echo "a failing sub-step was not recorded: $(printf '%s\n' "$out" | grep '^recorded')" >&2; }
+    [[ "$(printf '%s\n' "$out" | grep '^recorded:' | grep -o 'mcp-playwright' | wc -l | tr -d ' ')" == "1" ]] \
+        || { ok=0; echo "mcp-playwright was counted twice: $(printf '%s\n' "$out" | grep '^recorded')" >&2; }
+    [[ "$out" == *"agent_skills_rc=0"* ]] \
+        || { ok=0; echo "install_agent_skills propagated a non-zero code (it must not: the fold reports it)" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "a failing mcp sub-step did not become a recorded failure"; fi
+fi
+
+if it "route_detected_clis_to_gateway: a failing Claude routing step is recorded for the summary"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; ok=1
+    out="$( (
+        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp"; AUTOOS_DRY_RUN=0; AUTOOS_EXTRA_FAILURES=()
+        # A keys file of its own: the real configuration/api-keys.yml is never read.
+        AUTOOS_KEYS_FILE="$tmp/keys.yml"
+        unset OMNIROUTE_API_KEY AUTOOS_OMNIROUTE_KEY
+        claude() { return 0; }
+        has_cmd() { [[ "$1" == claude ]]; }
+        route_claude_to_gateway() { : >"$tmp/mark_route"; return 1; }
+        route_detected_clis_to_gateway >/dev/null 2>&1
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    ) 2>&1 )"
+    [[ -e "$tmp/mark_route" ]] || { ok=0; echo "the routing step never ran: [${out:0:300}]" >&2; }
+    [[ "$out" == *"recorded: claude-code"* ]] \
+        || { ok=0; echo "a failing Claude routing was not recorded: $(printf '%s\n' "$out" | grep '^recorded')" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "route_claude_to_gateway's failure was not recorded"; fi
+    fi
+fi
+
 # ─── OpenHands: repo skills mirrored per skill, idempotent settings writer ──
-# oh_setup_run <home> <repo>: setup_openhands_config in a hermetic subshell -
-# scratch HOME and AUTOOS_ROOT, no gateway or provider key, no network - with
-# stdout and stderr merged. AUTOOS_KEYS_FILE points at a file that does not
+# oh_setup_run <home> <repo> [fn]: setup_openhands_config (or `fn`) in a hermetic
+# subshell - scratch HOME and AUTOOS_ROOT, no gateway or provider key, no network
+# - with stdout and stderr merged. AUTOOS_KEYS_FILE points at a file that does not
 # exist so the repo's own keys file is never consulted.
 oh_setup_run() {
-    local home="$1" repo="$2"
+    local home="$1" repo="$2" fn="${3:-setup_openhands_config}"
     mkdir -p "$home"
     (
         SYS_HOME="$home"; AUTOOS_DRY_RUN=0
@@ -543,7 +639,7 @@ oh_setup_run() {
         unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY
         export AUTOOS_KEYS_FILE="$home/no-keys.yml"
         curl() { return 6; }
-        setup_openhands_config
+        "$fn"
     ) 2>&1
 }
 
@@ -811,6 +907,66 @@ if it "openhands: a failing agent harness is reported, not called written"; then
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
+# A warning alone is not a result: setup.sh folds autoos_record_failure ids into
+# the summary, and an unwarned refusal leaves nothing to fold, so the component
+# still reads "installed" while its harness was never applied. Both writers take
+# their id from run_post_install (AUTOOS_POST_COMPONENT), because one function
+# serves two catalog ids for OpenCode.
+if it "a refused agent harness records OpenHands as failed"; then
+    tmp="$(mktemp -d)"
+    oh_report_recorded() {
+        run_post_install setup_openhands_config openhands
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    }
+    out="$(
+        python3() {
+            if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+                echo "stub: the harness failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" "" oh_report_recorded
+    )"
+    if [[ "$out" == *"recorded: openhands"* ]]; then
+        pass
+    else
+        fail "the refused harness was not recorded: [$(tail -n 3 <<<"$out")]"
+    fi
+    rm -rf "$tmp"
+fi
+
+if it "a refused agent harness records OpenCode under the id being installed, once"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    oc="$tmp/.config/opencode"; mkdir -p "$oc"
+    printf '{"model": "anthropic/mine"}\n' >"$oc/opencode.json"
+    oc_report_recorded() {
+        # Two config files, so the recorder runs twice for one component: the id
+        # must still be listed once, or the fold counts one component twice.
+        run_post_install setup_opencode_config opencode-cli
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    }
+    out="$(
+        python3() {
+            if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+                echo "agent-harness opencode: left alone, $* is a symlink" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 AUTOOS_ROOT="$ROOT"
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          opencode_is_v2() { return 1; }
+          oc_report_recorded ) 2>&1
+    )"
+    problems=""
+    [[ "$out" == *"recorded: opencode-cli"* ]] || problems+="[the refused harness was not recorded: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"opencode-cli opencode-cli"* ]] || problems+="[the id was recorded twice] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
 if it "custom_is_installed detects agent-skills via .agents/skills + .mcp.json (new location)"; then
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/.agents/skills/test-skill"
@@ -947,6 +1103,36 @@ if it "backup collision: a failed CAO backup copy leaves no partial backup and d
     [[ "$(cat "$legacy/db/state" 2>/dev/null)" == live ]] || { ok=0; echo "legacy state changed" >&2; }
     rm -rf "$tmp"
     if (( ok )); then pass; else fail "failed CAO backup left a partial copy or aborted"; fi
+fi
+
+# Item 4 (rv2): the FIFO probe in setup_wsl_agent_home interpolated the CAO
+# path into Python SOURCE (python3 -c "import os; os.mkfifo('$cao_legacy/...')").
+# A CAO home whose path contained a single quote made that a SyntaxError, the
+# probe "failed", and a perfectly good native ext4 home was falsely relocated:
+# live state moved and a backup taken on a host where FIFOs work fine. The path
+# now goes in as argv, so the shell never parses it and Python never sees it as
+# source.
+if it "setup_wsl_agent_home does not falsely relocate a CAO home whose path contains a single quote"; then
+    tmp="$(mktemp -d)"
+    home="$tmp/it's-here"
+    legacy="$home/.aws/cli-agent-orchestrator"
+    mkdir -p "$legacy/db"
+    printf 'live\n' >"$legacy/db/state"
+    (
+        SYS_HOME="$home"
+        SYS_IS_WSL=1
+        AUTOOS_DRY_RUN=0
+        setup_wsl_agent_home >/dev/null 2>&1
+    )
+    rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$(cat "$legacy/db/state" 2>/dev/null)" == live ]] || { ok=0; echo "legacy state was moved or changed" >&2; }
+    n_bak="$(find "$home/.aws" -maxdepth 1 -name 'cli-agent-orchestrator.backup-*' 2>/dev/null | wc -l | tr -d ' ')"
+    [[ "$n_bak" == 0 ]] || { ok=0; echo "a false relocation took $n_bak backup(s)" >&2; }
+    [[ ! -e "$legacy/.autoos-fifo-probe" ]] || { ok=0; echo "the FIFO probe was left behind" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "a single quote in the CAO path caused a false relocation"; fi
 fi
 
 # ─── User-scope skill targets: ~/.agents/skills and ~/.codex/skills ──
