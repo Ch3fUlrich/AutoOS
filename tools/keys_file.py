@@ -54,7 +54,7 @@ def read_keys(path) -> dict:
 
 
 def main(argv=None) -> int:
-    """`autoos_keys.py <file> <key>` prints one value, or nothing.
+    """`keys_file.py <file> <key>` prints one value, or nothing.
 
     The shell side of the installers needs a single lookup and cannot import
     this module; printing the empty string for a key that is not configured
@@ -63,7 +63,7 @@ def main(argv=None) -> int:
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) != 2:
-        print("usage: autoos_keys.py <file> <key>", file=sys.stderr)
+        print("usage: keys_file.py <file> <key>", file=sys.stderr)
         return 2
     print(read_keys(argv[0]).get(argv[1], ""))
     return 0

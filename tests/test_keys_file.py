@@ -1,4 +1,4 @@
-"""Tests for tools/autoos_keys.py: the one reader for a flat AutoOS keys file.
+"""Tests for tools/keys_file.py: the one reader for a flat AutoOS keys file.
 
 Two shapes exist and both are real: `name=value` (the api_keys.conf the
 installers read) and `name: value` (configuration/api-keys.yml, the file the
@@ -8,7 +8,7 @@ empty dict and a keyless config that looked like a machine with no keys.
 
 Run from the repo root:
 
-    python3 -m pytest -q tests/test_autoos_keys.py
+    python3 -m pytest -q tests/test_keys_file.py
 """
 import importlib.util
 import subprocess
@@ -18,11 +18,11 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MODULE = ROOT / "tools" / "autoos_keys.py"
+MODULE = ROOT / "tools" / "keys_file.py"
 
 
 def load_module():
-    spec = importlib.util.spec_from_file_location("autoos_keys", MODULE)
+    spec = importlib.util.spec_from_file_location("keys_file", MODULE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -98,7 +98,7 @@ class SourceTests(unittest.TestCase):
         # which this helper deliberately does not do. Migrating it is a change
         # with its own consequences, not a deletion — see CHANGELOG.
         text = (ROOT / "lib" / "linux" / "install.sh").read_text(encoding="utf-8")
-        self.assertIn("autoos_keys", text, "install.sh does not use the shared keys reader")
+        self.assertIn("keys_file", text, "install.sh does not use the shared keys reader")
         # The two shapes, spelled out by a caller instead of by this module:
         # precisely how a `.conf` reader came to be handed a `.yml`.
         for pattern in ('"=" in line', "'=' in line", 'startswith("omniroute:")',

@@ -2524,13 +2524,13 @@ route_detected_clis_to_gateway() {
     # Each step skips quietly when its CLI is absent; dry runs announce.
     # Keys bridge from the repo keys file when the env does not carry them
     # (same resolution as the openhands and opencode writers — one chain, one
-    # parser, tools/autoos_keys.py; never printed). Without keys the claude
+    # parser, tools/keys_file.py; never printed). Without keys the claude
     # step warns and the qwen step is skipped.
     if [[ -z "${OMNIROUTE_API_KEY:-}" || -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
         _keys_file="$(autoos_api_keys_conf)" || _keys_file=""
         _file_key=""
         if [[ -n "$_keys_file" ]]; then
-            _file_key="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/autoos_keys.py" \
+            _file_key="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/keys_file.py" \
                 "$_keys_file" omniroute 2>/dev/null)" || _file_key=""
         fi
         unset _keys_file
@@ -4081,7 +4081,7 @@ autoos_skills_source() {
 # Returns 0 and prints the path if one exists, 1 if none does — and nothing is
 # ever invented, so a caller that wants "no keys" gets an empty string rather
 # than a path to a file that does not exist. Whichever file wins, its content is
-# parsed by tools/autoos_keys.py, which reads both the `name=value` and the
+# parsed by tools/keys_file.py, which reads both the `name=value` and the
 # `name: value` shape.
 autoos_api_keys_conf() {
     local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -4322,10 +4322,10 @@ _spec.loader.exec_module(_registry)
 # The keys-file parse is one module too: api_keys.conf writes `name=value`,
 # configuration/api-keys.yml writes `name: value`, and a reader that knows only
 # one of them reports a configured machine as an unconfigured one.
-_KEYS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools', 'autoos_keys.py')
-_key_spec = _ilu.spec_from_file_location('autoos_keys', _KEYS_TOOL)
-_autoos_keys = _ilu.module_from_spec(_key_spec)
-_key_spec.loader.exec_module(_autoos_keys)
+_KEYS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools', 'keys_file.py')
+_key_spec = _ilu.spec_from_file_location('keys_file', _KEYS_TOOL)
+_keys_file = _ilu.module_from_spec(_key_spec)
+_key_spec.loader.exec_module(_keys_file)
 REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
 # MCP package specs live in catalog/agent-harness.json, never inline.
@@ -4393,9 +4393,9 @@ if os.path.isfile(config_path):
 _before = json.dumps(data) if os.path.isfile(config_path) else None
 
 def _read_secrets_into(path, secrets):
-    # Parsing is tools/autoos_keys.py's; only the case-insensitive lookup is
+    # Parsing is tools/keys_file.py's; only the case-insensitive lookup is
     # this writer's own convention.
-    for _k, _v in _autoos_keys.read_keys(path).items():
+    for _k, _v in _keys_file.read_keys(path).items():
         # First occurrence of a key wins.
         secrets.setdefault(_k.lower(), _v)
 
@@ -4791,12 +4791,12 @@ _REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_
 _spec = _ilu.spec_from_file_location("autoos_registry", _REG_TOOL)
 _registry = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_registry)
-# And the keys parse is tools/autoos_keys.py's: the resolved file may be
+# And the keys parse is tools/keys_file.py's: the resolved file may be
 # api_keys.conf (`name=value`) or configuration/api-keys.yml (`name: value`).
-_KEYS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), "tools", "autoos_keys.py")
-_key_spec = _ilu.spec_from_file_location("autoos_keys", _KEYS_TOOL)
-_autoos_keys = _ilu.module_from_spec(_key_spec)
-_key_spec.loader.exec_module(_autoos_keys)
+_KEYS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), "tools", "keys_file.py")
+_key_spec = _ilu.spec_from_file_location("keys_file", _KEYS_TOOL)
+_keys_file = _ilu.module_from_spec(_key_spec)
+_key_spec.loader.exec_module(_keys_file)
 REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
 # resolve_ollama_base_url's answer; empty keeps the catalog default. Applied to
@@ -4813,9 +4813,9 @@ if _ol["base_url"].endswith("/v1"):
     _ol["base_url"] = _ol["base_url"][:-3]
 
 def _read_secrets_file(path, secrets):
-    # Parsing is tools/autoos_keys.py's; only the case-insensitive lookup is
+    # Parsing is tools/keys_file.py's; only the case-insensitive lookup is
     # this writer's own convention.
-    for _k, _v in _autoos_keys.read_keys(path).items():
+    for _k, _v in _keys_file.read_keys(path).items():
         # First occurrence of a key wins.
         secrets.setdefault(_k.lower(), _v)
 

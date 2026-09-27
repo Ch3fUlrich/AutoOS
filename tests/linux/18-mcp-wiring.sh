@@ -1274,11 +1274,11 @@ fi
 
 # The python half of the same fact: one parser, tested on its own. Wired here
 # because tests/test_suite_wiring.py refuses a unit-test file no harness runs.
-if it "keys parser: tools/autoos_keys.py unit tests pass (no agent-skills reader)"; then
+if it "keys parser: tools/keys_file.py unit tests pass (no agent-skills reader)"; then
     if ! has_cmd python3; then
         skip "python3 not found"
     else
-        out="$(python3 tests/test_autoos_keys.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+        out="$(python3 tests/test_keys_file.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
     fi
 fi
 
