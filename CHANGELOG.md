@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
+
+- **`configuration/litellm/config.yaml`**, **`tools/sync-router-tiers.py`**, **`tools/registry.py`**: every registry route `gateway_legs` can serve through LiteLLM is now an `AUTOOS-MANAGED` block (12 groups) regenerated from the registry, replacing the hardcoded `SYNCED_TIERS` (`t2-worker`, `t3-driver`) pair. A route whose final servable set is empty gets no group (instead of the render raising); the legless `*-paid` chains stay hand-curated. New `managed_tiers` / `litellm_servable_refs`; `registry_refs`/`combos_refs` default to every servable tier. Tests: `tests/test_registry_render.py`, `tests/test_sync_router_tiers_registry.py`, `tests/linux/17-ai-routing.sh`.
+- **`configuration/litellm/start-litellm.sh`**, **`configuration/litellm/start-litellm.ps1`**: `AUTOOS_LITELLM_HOST` (bind address), `AUTOOS_LITELLM_STATE_DIR` (where `litellm.log` lives) and `AUTOOS_LITELLM_MASTER_KEY_FILE` (a private file whose single line overrides `.env`; unreadable or empty is a hard error). Values are never printed. Tests: `tests/linux/34-ai-services.sh`.
+### Fixed — gateway renders use the catalog's agy/* ids for antigravity legs (AGYID, 2026-09-27)
+
+- **`tools/registry.py`**: new `gateway_ref(leg, registry)` is the single translation point between a registry leg and the id the live OmniRoute catalog serves: a provider declaring `model_prefix` has each leg rewritten to `<model_prefix>/<model>`, every other leg (or an unresolvable/non-string one) is returned unchanged. `render_omniroute` maps its legs through it, so an antigravity leg renders as `agy/...`; the registry keeps its own `antigravity/...` spelling and `omniroute_id` stays `antigravity`, so `resolve_leg` and `apply.sh`/`apply.ps1` are untouched.
+- **`catalog/ai-registry.json`**, **`catalog/ai-registry.schema.json`**: `providers.antigravity.model_prefix: "agy"` (sourced: the live catalog's `/v1/models` names antigravity models `agy/*`, never `antigravity/*`; L0 live apply 2026-09-27T11:44:31Z skipped the `antigravity/*` legs for exactly this) and the optional `model_prefix` field documented under `$defs.provider`.
+- **`configuration/omniroute/combos.json`**: the four antigravity refs (t2-worker, t2-worker-free-only, t2-orchestrator, opus-4-6) now read `agy/...`, so the gateway stops skipping them.
+- **`tools/sync-router-tiers.py`**: `GATEWAY_ONLY` also carries `agy` (the gateway spelling of antigravity): `combos_refs()` reads an already-rendered combos.json, so the LiteLLM mirror must drop `agy/*` exactly as `registry_refs()` already drops `antigravity/*`. Tests: `tests/test_registry.py::GatewayRefTests`, `tests/test_registry_render.py::GatewayRefTests`, `tests/test_sync_router_tiers_registry.py::CliDefaultsToRegistryTests::test_explicit_combos_override_still_works`, `tests/linux/17-ai-routing.sh` (free-only `known_drops`).
+
+### Changed — Claude Code (cc) legs unavailable (operator 2026-09-27: never connected to OmniRoute)
+
+- **`catalog/ai-registry.json`** `providers.cc.available: false` (sourced); `opus-4-6` and `t2-orchestrator` keep their antigravity opus-4-6-thinking leg, the cc leg leaves combos.json.
+
 ### Changed — cheaperinference disabled (operator 2026-09-27T10:12Z: no top-up, no free tier) (OR1h)
 
 - **`catalog/ai-registry.json`** `providers.cheapinference.available: false` (sourced); every gateway declaration drops its legs (t2-worker, t3-driver) and the two single-leg combos (`cheaperinference/kimi-k3`, `cheaperinference/glm-5.2`) move to combos.json `omitted`, so `apply.sh` prunes them live.
