@@ -30,5 +30,6 @@ Start here. Each page is short and answers one question.
 | [Web services](web-services.md) | Which web UIs and APIs run on the coding host, how is each one guarded, and what does the proxy need? |
 | [OpenHands runbook](openhands-runbook.md) | How do I continue this work from inside OpenHands? |
 | [Handoff](handoff.md) | Done vs open tasks for the next agent |
+| [Agent protocol](agent-protocol.md) | What do BRIEF and REPORT messages look like, and how are they parsed? |
 
 Working on this repo with an AI agent? [AGENTS.md](../AGENTS.md) is the contract.
