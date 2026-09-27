@@ -138,12 +138,17 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   `--max-depth` can only lower the inherited max. This budget is the only
   depth control qwen, gemini, codex, agy and qoder have. Inside one opencode
   process, nesting is still `experimental.subagent_depth`.
-- **`--lean`** (opencode, claude) starts no serena, playwright or context7,
-  which is right for research and review agents. For opencode it overlays
-  each full server entry with `disabled: true`. `enabled: false` is not an
+- **`--lean`** starts no serena, playwright or context7, which is right for
+  research and review agents. Implemented for the clients that can honour it
+  (`LEAN_CLIENTS`): opencode overlays each full server entry with
+  `disabled: true`; claude and qoder get `--strict-mcp-config` (`qodercli`
+  documents it, verified 2026-09-27). Another client cannot drop its servers,
+  so there `--lean` is read-only-vs-writer: a read-only (review) run prints a
+  note and goes ahead — those servers cost memory, not safety — while a writer
+  run still refuses (exit 2), because there removing the write-capable tool
+  surface is the whole point. `enabled: false` is not an
   opencode 2.x field: it is dropped without a warning and the server starts
   anyway. Measured peak process-tree RSS of one run: 1406 MB → 678 MB.
-  claude uses `--strict-mcp-config`.
 - **`--isolate`** runs the agent in a private `git clone --local` on its own
   branch. For opencode it also gets its own data dir and a deny on every path
   outside the clone. **Not a git worktree:** opencode resolves a worktree to

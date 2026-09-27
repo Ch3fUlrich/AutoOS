@@ -17,7 +17,7 @@ and every new id target exists in `SKILL.md`.
 | `R-spawn-09` | `R-orch-13` | absorbed: cross-family routing |
 | `R-spawn-10` | `R-coord-01` | absorbed: cut lanes from main |
 | `R-spawn-11` | `R-coord-08` | absorbed: re-read inbox before launch |
-| `R-spawn-12` | code: `run --lean` with qoder\|agy refuses, exit 2 | already enforced |
+| `R-spawn-12` | code: `run --lean` — honours opencode / claude / qoder (`LEAN_CLIENTS`); another client notes and continues a read-only run, exit 2 on a writer one (`lean_decision`) | enforced in `tools/autoos-agent.py` |
 | `R-spawn-13` | `R-orch-06` | absorbed: relaunch, never resume |
 | `R-spawn-14` | `R-coord-01` | absorbed: cut lanes from main |
 | `R-spawn-15` | `R-orch-06` | absorbed: verify worktree |
