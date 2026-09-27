@@ -115,6 +115,45 @@ class ResolveLegTests(unittest.TestCase):
         self.assertIn("mistral/not-a-model", str(ctx.exception))
 
 
+class GatewayRefTests(unittest.TestCase):
+    """AGYID: gateway_ref() is the one translation point between a registry leg
+    and the id the OmniRoute catalog actually serves. A provider that declares
+    model_prefix (antigravity -> agy) is rewritten; every other leg is returned
+    unchanged, and the registry's own spelling never moves."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_model_prefix_is_applied(self):
+        self.assertEqual(
+            registry.gateway_ref("antigravity/claude-opus-4-6-thinking", self.reg),
+            "agy/claude-opus-4-6-thinking")
+
+    def test_provider_without_model_prefix_is_unchanged(self):
+        self.assertEqual(
+            registry.gateway_ref("mistral/mistral-small-latest", self.reg),
+            "mistral/mistral-small-latest")
+
+    def test_unresolvable_leg_is_unchanged(self):
+        self.assertEqual(registry.gateway_ref("ghost/x", self.reg), "ghost/x")
+
+    def test_non_string_leg_is_unchanged(self):
+        self.assertIsNone(registry.gateway_ref(None, self.reg))
+
+    def test_registry_leg_spelling_is_untouched(self):
+        # The provider still answers to its own id; only the gateway ref moves.
+        self.assertEqual(
+            registry.resolve_leg("antigravity/claude-opus-4-6-thinking", self.reg),
+            ("antigravity", "claude-opus-4-6-thinking"))
+
+    def test_provider_omni_id_is_still_antigravity(self):
+        # apply.sh finds/registers the provider connection by omniroute_id
+        # (apply.sh ~90-144) - the model_prefix rename must not touch it.
+        self.assertEqual(self.reg["providers"]["antigravity"]["omniroute_id"],
+                         "antigravity")
+
+
 class RuleOneLegResolutionTests(unittest.TestCase):
     """Rule 1: every route leg resolves to a providers x models pair."""
 

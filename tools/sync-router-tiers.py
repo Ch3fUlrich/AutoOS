@@ -61,7 +61,11 @@ REGISTRY_FILE = ROOT / "catalog" / "ai-registry.json"
 
 # Providers LiteLLM has no transport or key for (OAuth/subscription bridges).
 # Their legs never enter a managed mirror block — see litellm_servable_refs().
-GATEWAY_ONLY = frozenset({"antigravity", "cc"})
+# Both spellings of a provider appear here: the registry leg ("antigravity/<m>")
+# and the already-rendered combos.json id, which render_omniroute() translates
+# through the provider's model_prefix ("agy/<m>", AGYID 2026-09-27). Missing
+# either lets a gateway-only leg leak into a managed LiteLLM block.
+GATEWAY_ONLY = frozenset({"antigravity", "agy", "cc"})
 
 # Filled from the registry providers by main(); Leg reads them at call time.
 # They are module state because Leg is constructed in several code paths and
