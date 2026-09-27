@@ -1456,7 +1456,7 @@ _aistack_sandbox() {
     # ss, curl, sleep, the omniroute CLI, register-autostart.sh and
     # start-stack.sh answer from files in $d and log their arguments. Nothing
     # reaches the daemon, the user manager or the network.
-    for t in docker systemctl ss curl sleep omniroute register start-stack; do
+    for t in docker systemctl ss curl sleep omniroute register start-stack start-litellm; do
         printf '#!/bin/sh\nexec bash "%s/tests/helpers/aistack_fake.sh" "%s" %s "$@"\n' "$ROOT" "$d" "$t" >"$d/bin/$t"
         chmod +x "$d/bin/$t"
     done
@@ -1475,11 +1475,13 @@ _aistack() {
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
         -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
         -u OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT -u OMNIROUTE_CHAT_ADMISSION_QUEUE_MS -u AUTOOS_VERIFY_RETRY_SLEEP \
+        -u AUTOOS_LITELLM_HOST -u AUTOOS_LITELLM_PORT -u AUTOOS_LITELLM_MASTER_KEY_FILE -u AUTOOS_LITELLM_STATE_DIR \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
         AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
         AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
         AUTOOS_OPENHANDS_DIR="$d/home/.openhands" XDG_CONFIG_HOME="$d/home/.config" \
         AUTOOS_REGISTER_AUTOSTART="$d/bin/fake-register" AUTOOS_START_STACK="$d/bin/fake-start-stack" \
+        AUTOOS_START_LITELLM="$d/bin/start-litellm" \
         "${extra[@]}" bash "${_AISTACK_SH:-$AISTACK/ai-stack.sh}" "$@" 2>&1
 }
 # _aistack_native <sandbox>: a host before the move - both units registered
@@ -3188,5 +3190,172 @@ if it "aistack: restart is listed in the unknown-command message and in --help";
     grep -q 'ai-stack.sh restart' <<<"$out" || { ok=0; echo "not in --help" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "restart is not advertised"; fi
+fi
+
+# ─── ai-stack.sh failover: the LiteLLM standby router ─────────────────────
+# One command moves the gateway PORT between the omniroute container and a
+# LiteLLM standby (same port, same client key, same combo ids), and back.
+# The always-on :4000 unit is never touched: the standby gets its own state
+# dir. start-litellm.sh is the fake above (AUTOOS_START_LITELLM); the gateway
+# port in the sandbox is 20128, the client key sk-test-client-key.
+
+# _aistack_failover_on <sandbox>: migrated host with the standby up.
+_aistack_failover_on() {
+    _aistack_migrated "$1"
+    _aistack "$1" failover on >/dev/null
+}
+
+if it "aistack: failover is listed in the unknown-command message and in --help"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    out="$(_aistack "$d" bogus)" && rc=0 || rc=$?
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2: $out" >&2; }
+    grep -qE '^Unknown command: bogus \(.*\bfailover\b.*\)' <<<"$out" || { ok=0; echo "not in the message: $out" >&2; }
+    out="$(_aistack "$d" --help)"
+    grep -q 'ai-stack.sh failover' <<<"$out" || { ok=0; echo "not in --help" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover is not advertised"; fi
+fi
+
+if it "aistack: failover on stops omniroute then starts litellm with the four env names"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_seq "$d/events.log" "docker: compose" "stop omniroute" "start-litellm: " || ok=0
+    for v in AUTOOS_LITELLM_HOST AUTOOS_LITELLM_PORT AUTOOS_LITELLM_MASTER_KEY_FILE AUTOOS_LITELLM_STATE_DIR; do
+        grep -qx "env:$v" "$d/start-litellm-env.log" 2>/dev/null || { ok=0; echo "$v not passed to start-litellm" >&2; }
+    done
+    grep -qx 'master-key-file=ok' "$d/start-litellm-env.log" 2>/dev/null || { ok=0; echo "the key file was not readable: $(cat "$d/start-litellm-env.log" 2>/dev/null)" >&2; }
+    grep -q 'http://127.0.0.1:20128/health/liveliness' "$d/curl.log" 2>/dev/null || { ok=0; echo "liveliness not probed on :20128" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] && { ok=0; echo "the gateway container still runs" >&2; }
+    grep -qx 'pid=424242' "$d/cfg/failover.state" 2>/dev/null || { ok=0; echo "no state file with the standby pid" >&2; }
+    grep -q '^since=' "$d/cfg/failover.state" 2>/dev/null || { ok=0; echo "no start time in the state file" >&2; }
+    [[ "$(cat "$d/cfg/failover/litellm.pid" 2>/dev/null)" == 424242 ]] || { ok=0; echo "no pid file in the standby state dir" >&2; }
+    if grep -rF -- 'sk-test-client-key' "$d/events.log" "$d/docker.log" "$d/curl.log" "$d/start-litellm.log" "$d/start-litellm-env.log" "$d/systemctl.log" 2>/dev/null; then
+        ok=0; echo "the client key reached a log" >&2
+    fi
+    [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover on does not hand the port to litellm"; fi
+fi
+
+if it "aistack: failover on uses the gateway bind as host and the gateway port, and --dry-run changes nothing"; then
+    ok=1
+    for bind in 127.0.0.1 0.0.0.0; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"
+        printf "AUTOOS_STACK_BIND='%s'\n" "$bind" >"$d/cfg/stack.env"
+        out="$(_aistack "$d" --dry-run failover on)" && rc=0 || rc=$?
+        (( rc == 0 )) || { ok=0; echo "[$bind]: exit $rc, not 0: $out" >&2; }
+        [[ "$out" == *"AUTOOS_LITELLM_HOST=$bind"* ]] || { ok=0; echo "[$bind]: host not in the plan: $out" >&2; }
+        [[ "$out" == *"AUTOOS_LITELLM_PORT=20128"* ]] || { ok=0; echo "[$bind]: port not in the plan" >&2; }
+        [[ "$out" == *"AUTOOS_LITELLM_MASTER_KEY_FILE=$d/cfg/client.key"* ]] || { ok=0; echo "[$bind]: key file not in the plan" >&2; }
+        [[ "$out" == *"AUTOOS_LITELLM_STATE_DIR=$d/cfg/failover"* ]] || { ok=0; echo "[$bind]: state dir not in the plan" >&2; }
+        [[ "$out" == *"stop omniroute"* ]] || { ok=0; echo "[$bind]: no stop step" >&2; }
+        [[ -e "$d/cfg/client.key" || -e "$d/cfg/failover.state" || -e "$d/cfg/failover" ]] && { ok=0; echo "[$bind]: the dry run wrote state" >&2; }
+        [[ -e "$d/docker.log" || -e "$d/start-litellm.log" ]] && { ok=0; echo "[$bind]: the dry run drove something" >&2; }
+        [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "[$bind]: the key is in the dry-run output" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "failover dry run is wrong or has side effects"; fi
+fi
+
+if it "aistack: a second failover on refuses with rc 2 and changes nothing"; then
+    d="$(_aistack_sandbox)"
+    _aistack_failover_on "$d"
+    before="$(cat "$d/cfg/failover.state")"
+    rm -f "$d/docker.log" "$d/events.log" "$d/start-litellm.log" "$d/start-litellm-env.log" "$d/curl.log"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2: $out" >&2; }
+    [[ "$out" == *"already on"* ]] || { ok=0; echo "no refusal: $out" >&2; }
+    [[ -e "$d/docker.log" || -e "$d/start-litellm.log" ]] && { ok=0; echo "the refused run drove something" >&2; }
+    [[ "$(cat "$d/cfg/failover.state")" == "$before" ]] || { ok=0; echo "the state file changed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a second failover on is not a refusal"; fi
+fi
+
+if it "aistack: failover with failed liveliness starts omniroute again, rc 1, no state file"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    : >"$d/failover-liveliness-fail"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    _aistack_seq "$d/docker.log" "stop omniroute" "start omniroute" || ok=0
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was written for a dead standby" >&2; }
+    [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed standby leaves the port empty"; fi
+fi
+
+if it "aistack: failover off restores omniroute and a second off is a no-op"; then
+    d="$(_aistack_sandbox)"
+    _aistack_failover_on "$d"
+    rm -f "$d/docker.log" "$d/events.log" "$d/curl.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null || { ok=0; echo "the gateway was not started: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not running again" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "the state file survived" >&2; }
+    [[ -e "$d/cfg/failover/litellm.pid" ]] && { ok=0; echo "the standby pid file survived" >&2; }
+    [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "second: exit $rc, not 0: $out" >&2; }
+    [[ "$out" == *"failover is off"* ]] || { ok=0; echo "second: no off line: $out" >&2; }
+    [[ -e "$d/docker.log" || -e "$d/events.log" ]] && { ok=0; echo "second: the no-op drove something" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover off does not restore the gateway"; fi
+fi
+
+if it "aistack: failover status says off and on"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    ok=1
+    out="$(_aistack "$d" failover status)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "off: exit $rc: $out" >&2; }
+    [[ "$out" == *"failover off"* ]] || { ok=0; echo "off: [$out]" >&2; }
+    _aistack "$d" failover on >/dev/null || { ok=0; echo "on failed" >&2; }
+    out="$(_aistack "$d" failover status)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "on: exit $rc: $out" >&2; }
+    [[ "$out" == *"failover on since "*"(litellm pid 424242)"* ]] || { ok=0; echo "on: [$out]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover status is wrong"; fi
+fi
+
+if it "aistack: verify prints the failover line when on and never FAILs it"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    ok=1
+    out="$(_aistack "$d" verify)" && rc=0 || rc=$?
+    [[ "$out" != *"failover ON"* ]] || { ok=0; echo "off: a failover line without a failover" >&2; }
+    _aistack "$d" failover on >/dev/null || { ok=0; echo "on failed" >&2; }
+    out="$(_aistack "$d" verify)" && rc=0 || rc=$?
+    grep -q 'failover ON: LiteLLM serves the gateway port' <<<"$out" || { ok=0; echo "on: no failover line" >&2; }
+    grep -q '^  FAIL.*ailover' <<<"$out" && { ok=0; echo "on: failover FAILs: $(grep '^  FAIL.*ailover' <<<"$out")" >&2; }
+    [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify does not report the standby"; fi
+fi
+
+if it "aistack: failover on without a client key refuses before stopping anything"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'mistral: not-a-real-key-123\n' >"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "ran without a key: $out" >&2; }
+    [[ "$out" == *"client key"* ]] || { ok=0; echo "no key hint: $out" >&2; }
+    grep -q 'stop' "$d/docker.log" 2>/dev/null && { ok=0; echo "stopped the gateway without a key" >&2; }
+    [[ -e "$d/start-litellm.log" ]] && { ok=0; echo "started litellm without a key" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is down" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was written without a key" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover on stops the gateway with no key to serve"; fi
 fi
 
