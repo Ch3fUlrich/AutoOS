@@ -102,6 +102,16 @@ class DecisionTableTests(unittest.TestCase):
     def test_fixture_is_not_empty(self):
         self.assertGreater(len(self.rows), 50)
 
+    def test_dead_wrapper_helpers_are_gone(self):
+        # item 4: _strip_wrappers was never called (the command-head walker
+        # _command_heads replaced it) and _WRAPPERS existed only for it.
+        # Keep them deleted rather than letting a future edit re-add dead
+        # code that looks live.
+        self.assertFalse(hasattr(policy, "_strip_wrappers"),
+                         "_strip_wrappers is dead code; do not reintroduce it")
+        self.assertFalse(hasattr(policy, "_WRAPPERS"),
+                         "_WRAPPERS existed only for _strip_wrappers")
+
     def test_every_rule_id_has_at_least_one_row(self):
         rule_ids = {
             "unknown-actor", "empty-argv", "argv-caps", "forbid-host",

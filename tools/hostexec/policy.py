@@ -347,7 +347,6 @@ def _basename(token: str) -> str:
     return token.rsplit("/", 1)[-1]
 
 
-_WRAPPERS = {"env", "nice", "nohup", "timeout", "xargs", "ionice", "stdbuf", "setsid"}
 _SUDO_FAMILY = {"sudo", "su", "doas", "pkexec", "run0", "sudo-rs"}
 # Exec wrappers that are always denied as no-inline-shell (L1 high):
 # script allocates a pty, systemd-run/at/batch create scheduled/transient
@@ -371,34 +370,6 @@ def _looks_like_assignment(token: str) -> bool:
         return False
     name = token.split("=", 1)[0]
     return bool(name) and not name[0].isdigit() and all(c.isalnum() or c == "_" for c in name)
-
-
-def _strip_wrappers(argv: Sequence[str]) -> list[str]:
-    """Peel off leading env/nice/nohup/timeout/xargs/ionice/stdbuf/setsid
-    invocations -- and their own flags/values -- to find the real command.
-    Best-effort: used for the no-sudo check only, never to grant an allow."""
-    rest = list(argv)
-    while rest:
-        base = _basename(rest[0])
-        if base not in _WRAPPERS:
-            break
-        rest.pop(0)
-        while rest and rest[0].startswith("-"):
-            flag = rest.pop(0)
-            # A short flag (nice -n 10, ionice -c 3, stdbuf -o L) often takes
-            # its value as a separate token. Consume it too, UNLESS that
-            # would swallow the real command we are looking for.
-            if (base != "env" and "=" not in flag and not flag.startswith("--")
-                    and rest and not rest[0].startswith("-")
-                    and _basename(rest[0]) not in _WRAPPERS
-                    and _basename(rest[0]) not in _SUDO_FAMILY):
-                rest.pop(0)
-        if base == "env":
-            while rest and not rest[0].startswith("-") and _looks_like_assignment(rest[0]):
-                rest.pop(0)
-        elif base == "timeout" and rest and not rest[0].startswith("-") and _looks_like_duration(rest[0]):
-            rest.pop(0)
-    return rest
 
 
 # ─── command heads: transparent exec launchers (brief A) ─────────────────
