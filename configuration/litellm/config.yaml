@@ -68,16 +68,6 @@ model_list:
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
   - model_name: t2-worker
     litellm_params:
-      model: openai/glm-4.5-air
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: t2-worker
-    litellm_params:
-      model: openai/kimi-k3
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: t2-worker
-    litellm_params:
       model: openrouter/deepseek/deepseek-v4.1-flash
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t2-worker
@@ -127,28 +117,8 @@ model_list:
       api_key: os.environ/MISTRAL_API_KEY
   - model_name: t3-driver
     litellm_params:
-      model: openai/glm-5.2
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: t3-driver
-    litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: openai/kimi-k3
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: openai/glm-4.5-air
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: openai/minimax-m2.7
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: mistral/mistral-small-latest

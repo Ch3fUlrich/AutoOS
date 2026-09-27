@@ -206,6 +206,8 @@
     "tier3-credit"
   ],
   "omitted": [
+    "cheaperinference/glm-5.2",
+    "cheaperinference/kimi-k3",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
     "t1-orchestrator-free-only",
@@ -243,26 +245,8 @@
       "models": [
         "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-high",
-        "cheaperinference/glm-4.5-air",
-        "cheaperinference/kimi-k3",
         "openrouter/deepseek/deepseek-v4.1-flash",
         "deepseek/deepseek-flash"
-      ]
-    },
-    {
-      "name": "cheaperinference/kimi-k3",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "cheaperinference/kimi-k3"
-      ]
-    },
-    {
-      "name": "cheaperinference/glm-5.2",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "cheaperinference/glm-5.2"
       ]
     },
     {
@@ -300,11 +284,7 @@
       "context": "128k",
       "models": [
         "mistral/mistral-code-latest",
-        "cheaperinference/glm-5.2",
         "deepseek/deepseek-flash",
-        "cheaperinference/kimi-k3",
-        "cheaperinference/glm-4.5-air",
-        "cheaperinference/minimax-m2.7",
         "mistral/mistral-small-latest"
       ]
     },

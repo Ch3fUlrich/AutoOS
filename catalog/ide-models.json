@@ -286,30 +286,6 @@
       }
     },
     {
-      "id": "cheaperinference/kimi-k3",
-      "name": "cheaperinference kimi-k3 (S1-S2 credit)",
-      "context": 131072,
-      "output": 32768,
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed"
-        ]
-      }
-    },
-    {
-      "id": "cheaperinference/glm-5.2",
-      "name": "cheaperinference glm-5.2 (S0-S1 credit)",
-      "context": 131072,
-      "output": 16384,
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed"
-        ]
-      }
-    },
-    {
       "id": "auto/smart",
       "name": "bootstrap: auto smart (no combo needed)",
       "context": 131072,

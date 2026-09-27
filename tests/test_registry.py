@@ -1104,5 +1104,21 @@ class ProviderLimitsTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
+class CheaperinferenceDisabledTests(unittest.TestCase):
+    """Operator 2026-09-27T10:12Z (via L0): no cheaperinference top-up - treat
+    it like SambaNova (R2): it has no free model, so the whole provider is
+    unavailable and no gateway declaration carries any of its legs."""
+
+    def test_provider_is_unavailable(self):
+        self.assertIs(load_registry()["providers"]["cheapinference"].get("available"), False)
+
+    def test_gateway_legs_drop_every_cheaperinference_leg(self):
+        reg = load_registry()
+        for rid, route in reg["routes"].items():
+            kept = registry.gateway_legs(route, reg)
+            self.assertFalse([leg for leg in kept if leg.startswith("cheaperinference/")],
+                             "route %s still serves a cheaperinference leg" % rid)
+
+
 if __name__ == "__main__":
     unittest.main()

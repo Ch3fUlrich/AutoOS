@@ -1646,7 +1646,10 @@
       "trains_on_prompts": false
     },
     "cheapinference": {
-      "$comment": "Privacy research 2026-09-26 (Q1 lane): https://www.cheaperinference.com/legal/privacy states 'We do not use customer prompt or response bodies to train Keak models' and 'Cheaper Inference does not store prompt or response bodies in its application database' - only operational/billing metadata (model, endpoint, timestamps, token usage, latency) is retained, generally 12 months. CheaperInference is itself a marketplace proxy to upstream providers (OpenAI/Anthropic/Google/Meta/etc, owned by Keak) - this citation covers CheaperInference's own handling only, not each upstream provider's separate policy. trains_on_prompts: false confirmed (was unsourced before this migration).",
+      "$comment": [
+        "Privacy research 2026-09-26 (Q1 lane): https://www.cheaperinference.com/legal/privacy states 'We do not use customer prompt or response bodies to train Keak models' and 'Cheaper Inference does not store prompt or response bodies in its application database' - only operational/billing metadata (model, endpoint, timestamps, token usage, latency) is retained, generally 12 months. CheaperInference is itself a marketplace proxy to upstream providers (OpenAI/Anthropic/Google/Meta/etc, owned by Keak) - this citation covers CheaperInference's own handling only, not each upstream provider's separate policy. trains_on_prompts: false confirmed (was unsourced before this migration).",
+        "Operator 2026-09-27T10:12Z (via L0, inbox/L1-routing.md): no top-up - treated like SambaNova under R1. CheaperInference has no free model (all its legs are credit-pool models), and every worker turn failed '[cheaperinference] All 1 connection(s) credits exhausted' 08:12Z-08:25Z (work/L1-routing/OR1a.r2.out), so the whole provider is unavailable until credits return."
+      ],
       "api_base": "https://api.cheaperinference.com/v1",
       "id": "cheapinference",
       "litellm_env": "CHEAPINFERENCE_API_KEY",
@@ -1654,7 +1657,8 @@
       "omniroute_id": "cheaperinference",
       "provider_data": null,
       "tier": "paid",
-      "trains_on_prompts": false
+      "trains_on_prompts": false,
+      "available": false
     },
     "cloudflare_workers_ai": {
       "$comment": "Unverified default: not registered with any Account ID yet (combos.json $comment) and no combo references this provider.",
