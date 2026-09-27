@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — OmniRoute chat admission gate no longer kills parallel agent workers
+
+- **`configuration/docker/ai-stack/compose.yml`**: `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT` (default 6) and
+  `OMNIROUTE_CHAT_ADMISSION_QUEUE_MS` (default 60000) on the omniroute service. The image defaults (1 heavy
+  request in flight, 2000 ms queue) rejected parallel agent sub-requests with retryable 503, killing worker
+  runs (4 of 5; measured 2026-09-27). `NODE_OPTIONS` is not set in compose: `OMNIROUTE_MEMORY_MB` is the
+  heap knob (the entrypoint appends it; last flag wins).
+- **`configuration/docker/ai-stack/ai-stack.sh`**: `init` writes both keys to `stack.env` (only when missing;
+  an operator's own value survives). `verify` prints the effective values the running gateway process sees
+  (read from `/proc/1/environ`): `max_heavy`, `queue_ms`, and `heap MB` (the last `--max-old-space-size` in
+  `NODE_OPTIONS`); "unset (image default 1 / 2000)" when absent. Informational, not a pass/fail check.
+- **`configuration/docker/ai-stack/stack.env.example`**, **`docs/web-services.md`**: documented.
+
 ### Changed — the Linux test suite is split into one file per describe block
 
 - `tests/run-tests.sh` keeps the harness and summary and sources `tests/linux/NN-<describe>.sh` in order; test names

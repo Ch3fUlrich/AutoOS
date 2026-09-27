@@ -28,6 +28,10 @@
 #   noqoder-<container>  `docker exec <container> qodercli --version` fails: the
 #                        image has no qodercli layer
 #   qoder-version-<container>  what that command prints instead of 1.1.63
+#   proc1-environ-<container>  what `docker exec <container> sh -c 'tr ... </proc/1/environ'`
+#                              prints: one NAME=value per line (the admission
+#                              gate verify reads OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT,
+#                              OMNIROUTE_CHAT_ADMISSION_QUEUE_MS and NODE_OPTIONS)
 #   omni-key-fails       the omniroute CLI cannot create the manage key
 #   fail-register        register-autostart.sh fails (register.log also
 #                        records marker=yes|no: ai-stack.sh's marker at the call)
@@ -76,6 +80,14 @@ fake_docker() {
     case "$1" in
         info|network|pull) return 0 ;;
         exec)
+            # exec <container> sh -c 'tr ... </proc/1/environ': the admission
+            # gate check reads PID 1's environment. Content from a state file
+            # so a test can stub any combination of vars.
+            if [[ "${3:-}" == sh && "${4:-}" == -c && "${5:-}" == *"/proc/1/environ"* ]]; then
+                [[ -e "$S/run-$2" ]] || return 1
+                if [[ -s "$S/proc1-environ-$2" ]]; then cat "$S/proc1-environ-$2"; fi
+                return 0
+            fi
             # exec <container> qodercli --version: the gateway's CLI check.
             if [[ "${3:-}" == qodercli ]]; then
                 [[ -e "$S/run-$2" ]] || return 1
