@@ -631,11 +631,12 @@ def context_state(transcript_path: str | None, model_override: str | None) -> tu
         return {"context": "unknown", "reason": "no usage"}, 0
 
     model = model_override or fill.get("model") or "unknown"
-    cap = ctx.cap_for(model)
+    caps, source = ctx.load_caps()
+    cap = ctx.cap_for(model, caps)
     tokens = fill["tokens"]
     pct = int(round(100 * tokens / cap)) if cap else 0
     return ({"tokens": tokens, "cap": cap, "pct": pct, "model": model,
-             "transcript": path, "source": "default"}, 0)
+             "transcript": path, "source": source}, 0)
 
 
 def cmd_context(args) -> int:
@@ -644,8 +645,8 @@ def cmd_context(args) -> int:
     The fill comes from the Claude Code transcript's latest assistant usage
     record. `--model` overrides only the model the cap is looked up for; the
     tokens still come from the transcript. `--json` prints the same numbers as
-    an object (its `source` is the cap's provenance, `default` until a probe
-    measures one).
+    an object (its `source` is the cap's provenance: `policy` when read from
+    the registry's policy.handoff_caps, `default` when that is unreadable).
     """
     data, rc = context_state(args.transcript, args.model)
     if data.get("context") == "unknown":

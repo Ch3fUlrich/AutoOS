@@ -248,7 +248,9 @@ class CliTests(unittest.TestCase):
             "pct": 50,
             "model": "claude-opus-4-6",
             "transcript": str(self.transcript),
-            "source": "default",
+            # C4: the cap comes from the registry's policy.handoff_caps now
+            # (autoos_context.load_caps), and `source` says so honestly.
+            "source": "policy",
         })
 
     def test_model_flag_overrides_the_cap(self):
