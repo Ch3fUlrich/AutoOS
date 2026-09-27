@@ -213,14 +213,23 @@ class WriteTests(SandboxCase):
                 self.assertEqual(entry["modelID"], mid)
                 self.assertEqual(entry["name"], model(doc, mid)["name"])
 
-    def test_no_variants_or_effort_block_is_ever_generated(self):
-        # A static variants block makes the whole provider unresolvable in
-        # opencode (measured 2026-09-22); effort stays a Zed-only field.
+    def test_variants_blocks_are_generated_from_effort_ladder(self):
+        # A6a: models whose route's first leg carries an effort_ladder in the
+        # registry get a "variants" block with reasoningEffort labels (none
+        # omitted). Models without a ladder get no variants.
         self.assertEqual(self.box.run().returncode, 0)
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
         for gateway in ("omniroute", "litellm"):
             for entry in oc["providers"][gateway]["models"].values():
-                self.assertEqual(set(entry), {"modelID", "name", "limit"})
+                allowed = {"modelID", "name", "limit", "variants"}
+                unexpected = set(entry) - allowed
+                self.assertEqual(unexpected, set(),
+                                 f"{gateway} {entry.get('modelID')} has unexpected keys: {unexpected}")
+                if "variants" in entry:
+                    self.assertIsInstance(entry["variants"], list)
+                    for v in entry["variants"]:
+                        self.assertIn("label", v)
+                        self.assertIn("reasoningEffort", v)
 
 
 class CommaDisciplineTests(SandboxCase):

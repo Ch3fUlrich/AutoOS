@@ -180,33 +180,30 @@ good-vs-bad ranking — the gateway tries them top-down and hops on
 key is missing, `apply` skips its legs with a warning and the chain still
 resolves through the others.
 
-### Effort levels (measured 2026-09-22, gateway 3.8.50, opencode v2.0.12)
+### Effort levels (A6a — per-model variants rendered from registry)
 
 Effort is a **caller-side suffix**, not a model id. **How opencode resolves
-it:** it builds a model's variant list from the **provider catalog's**
-`supportedThinkingEfforts` metadata — *not* from config. A hand-written
-`"variants"` block does not register, and is worse than useless: on this
-build any `variants` object on an openai-compatible provider model (docs
-shape `{"low": {"reasoningEffort": "low"}}` included, verified in isolation)
-makes the **whole provider unresolvable** (`Model unavailable`, even bare).
-Tried and reverted 2026-09-22.
+it:** since A6a, `tools/sync-ide-models.py` emits a `variants` block on each
+gateway model entry whose route's first-leg model carries an `effort_ladder` in
+`catalog/ai-registry.json` (the "none" entry is omitted). This lets opencode V2
+show per-model effort sliders for gateway combos without needing
+`supportedThinkingEfforts` in the provider catalog.
 
-That is the whole answer to "why does the gateway combo lack minimal/xhigh
-while Zen has max?": the gateway combo carries no catalog effort metadata,
-so opencode's built-in fallback list (`low/medium/high`) is all that
-resolves; openrouter's own catalog *does* advertise the ladder.
+Before A6a (2026-09-22 measurement) a hand-written `"variants"` block made the
+whole provider unresolvable — that is no longer the case.
 
 | Suffix ladder | openrouter direct | gateway combo |
 |---|---|---|
-| `#minimal`, `low`, `medium`, `high`, `xhigh` | all resolve; `#minimal`/`#low`/`#xhigh` ack-proven 2026-09-22 | only `#low`/`#medium`/`#high` |
+| `#minimal`, `low`, `medium`, `high`, `xhigh` | all resolve; `#minimal`/`#low`/`#xhigh` ack-proven 2026-09-22 | all resolve (per-model variants emitted from `effort_ladder`) |
+| `#max` | not offered (Zen-native only) | not offered |
 | `#max` | not offered (Zen-native only) | not offered |
 
 **Rule: the gateway combo is for fallback routing; the direct provider
 model is for effort control.** `#max` stays Zen-native only — nothing routed
 through OmniRoute exposes it. Agents that need max reasoning on a combo pin
-`#high` (`t1-orchestrator-orchestrator` does). Re-probe after any gateway or opencode
-upgrade: if gateway combos start forwarding effort metadata, the two rows
-collapse.
+`#high` (`t1-orchestrator-orchestrator` does). The per-model `variants` blocks
+now give gateway combos the same effort ladder as the direct provider (minus
+`#max` and any model-native `#none`).
 
 **Where the direct surface lives** (so nobody has to re-derive it):
 
@@ -238,10 +235,10 @@ label is display only and appears identically in `combos.json` (`$comment`),
 
 ## Proven effort ladders & costs (measured 2026-09-23 via provider catalogs)
 
-Gateway combos expose only `low/medium/high` (the gateway strips
-`supportedThinkingEfforts`). The full ladder needs the direct OpenRouter ref.
-Ladders are **non-contiguous** — never assume `medium` exists. Never forward
-an unsupported effort (see the clamp rule in `combos.json`).
+Gateway combos now carry per-model `variants` blocks derived from the
+registry's `effort_ladder` (A6a). Ladders are **non-contiguous** — never assume
+`medium` exists. Never forward an unsupported effort (see the clamp rule in
+`combos.json`).
 
 | Model | Direct ref | Proven efforts | Marginal cost | Privacy |
 |---|---|---|---|---|
