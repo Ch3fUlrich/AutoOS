@@ -1017,6 +1017,10 @@ class AskHelperTests(unittest.TestCase):
         self.assertEqual(qa["answer"]["text"], "too late")
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "answer.json")))
 
+    # chmod 0o555 does not stop writes on Windows (only the read-only file
+    # attribute exists there) nor for root: the directory stays writable.
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "chmod cannot make a directory unwritable here")
     def test_an_unwritable_task_dir_exits_5_with_a_message_not_a_traceback(self):
         """Under --isolate the outside-path fence can deny writes into
         AUTOOS_TASK_DIR. The helper must not dump a raw traceback — it must
