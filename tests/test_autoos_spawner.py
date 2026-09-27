@@ -914,6 +914,126 @@ class AskHelperTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, proc.stderr)
         self.assertIn("AUTOOS_TASK_DIR", proc.stderr)
 
+    def test_a_stale_answer_json_at_start_is_archived_not_returned(self):
+        """An answer.json with no question.json is stale (left by a timeout
+        the previous run hit). Archive it as qa-<n>.json with a 'stale' marker
+        and proceed — never silently delete an answer, never treat it as the
+        answer to a question that has not been asked yet."""
+        with io.open(os.path.join(self.tmp, "answer.json"), "w", encoding="utf-8") as fh:
+            json.dump({"text": "late answer", "answered": "2026-09-27T00:00:02Z"}, fh)
+
+        box = {}
+
+        def answer_later():
+            qpath = os.path.join(self.tmp, "question.json")
+            deadline = time.time() + 10
+            while not os.path.exists(qpath) and time.time() < deadline:
+                time.sleep(0.02)
+            with io.open(qpath, encoding="utf-8") as fh:
+                box["question"] = json.load(fh)
+            atmp = os.path.join(self.tmp, "answer.json.tmp")
+            with io.open(atmp, "w", encoding="utf-8") as fh:
+                json.dump({"text": "fresh", "answered": "2026-09-27T00:01:00Z"}, fh)
+            os.replace(atmp, os.path.join(self.tmp, "answer.json"))
+
+        thread = threading.Thread(target=answer_later)
+        thread.start()
+        try:
+            proc = self.run_ask("real question?", "--poll", "0.1", "--timeout", "30")
+        finally:
+            thread.join()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "fresh")  # not the stale "late answer"
+
+        def answer_second():
+            qpath = os.path.join(self.tmp, "question.json")
+            deadline = time.time() + 10
+            while not os.path.exists(qpath) and time.time() < deadline:
+                time.sleep(0.02)
+            with io.open(qpath, encoding="utf-8") as fh:
+                box["question"] = json.load(fh)
+            atmp = os.path.join(self.tmp, "answer.json.tmp")
+            with io.open(atmp, "w", encoding="utf-8") as fh:
+                json.dump({"text": "second answer", "answered": "2026-09-27T00:02:00Z"}, fh)
+            os.replace(atmp, os.path.join(self.tmp, "answer.json"))
+
+        thread2 = threading.Thread(target=answer_second)
+        thread2.start()
+        try:
+            proc2 = self.run_ask("second?", "--poll", "0.1", "--timeout", "30")
+        finally:
+            thread2.join()
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertEqual(proc2.stdout.strip(), "second answer")
+        self.assertEqual(box["question"]["text"], "second?")
+        # the stale answer went to history, never to the second question
+        qa_path = os.path.join(self.tmp, "qa-1.json")
+        self.assertTrue(os.path.exists(qa_path))
+        with io.open(qa_path, encoding="utf-8") as fh:
+            qa = json.load(fh)
+        self.assertTrue(qa.get("stale"))  # the archived stale answer is marked
+        self.assertEqual(qa["answer"]["text"], "late answer")
+        self.assertIsNone(qa.get("question"))  # no question preceded it
+
+    def test_a_late_answer_after_timeout_is_archived_and_the_next_ask_works(self):
+        """The exact bug: timeout removes question.json, but an answer landing
+        at/after the deadline left answer.json behind. The next ask used to
+        see answer.json and refuse 'already pending' (exit 2) forever. Now the
+        orphan answer is archived as stale and the next ask works. Sequential,
+        not a thread race: clean timeout, then the late respond(), then ask."""
+        proc1 = self.run_ask("first?", "--poll", "0.05", "--timeout", "0.2")
+        self.assertEqual(proc1.returncode, 3, proc1.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "question.json")))
+        atmp = os.path.join(self.tmp, "answer.json.tmp")
+        with io.open(atmp, "w", encoding="utf-8") as fh:
+            json.dump({"text": "too late", "answered": "2026-09-27T00:00:05Z"}, fh)
+        os.replace(atmp, os.path.join(self.tmp, "answer.json"))
+
+        box = {}
+
+        def answer_second():
+            qpath = os.path.join(self.tmp, "question.json")
+            deadline = time.time() + 10
+            while not os.path.exists(qpath) and time.time() < deadline:
+                time.sleep(0.02)
+            with io.open(qpath, encoding="utf-8") as fh:
+                box["question"] = json.load(fh)
+            tmp = os.path.join(self.tmp, "answer.json.tmp")
+            with io.open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"text": "second answer", "answered": "2026-09-27T00:02:00Z"}, fh)
+            os.replace(tmp, os.path.join(self.tmp, "answer.json"))
+
+        thread = threading.Thread(target=answer_second)
+        thread.start()
+        proc2 = self.run_ask("second?", "--poll", "0.1", "--timeout", "30")
+        thread.join()
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertEqual(proc2.stdout.strip(), "second answer")
+        self.assertEqual(box["question"]["text"], "second?")
+        # the stale answer went to history (qa-1), never to the second question
+        with io.open(os.path.join(self.tmp, "qa-1.json"), encoding="utf-8") as fh:
+            qa = json.load(fh)
+        self.assertTrue(qa.get("stale"))
+        self.assertEqual(qa["answer"]["text"], "too late")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "answer.json")))
+
+    def test_an_unwritable_task_dir_exits_5_with_a_message_not_a_traceback(self):
+        """Under --isolate the outside-path fence can deny writes into
+        AUTOOS_TASK_DIR. The helper must not dump a raw traceback — it must
+        exit 5 with a message that names the reason and suggests --isolate."""
+        ro = os.path.join(self.tmp, "ro")
+        os.mkdir(ro)
+        os.chmod(ro, 0o555)
+        try:
+            proc = self.run_ask("anything?", "--poll", "0.05", "--timeout", "0.2",
+                                task_dir=ro)
+        finally:
+            os.chmod(ro, 0o755)
+        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertIn("autoos-ask", proc.stderr)
+        self.assertIn("unavailable", proc.stderr)
+
 
 def uv_mcp_cmd():
     """The registered server command, offline only: tests never download."""

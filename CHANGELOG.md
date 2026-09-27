@@ -17,6 +17,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   MCP tool answers it atomically and the run returns to `working`; `cancel` now also stops a run parked in
   `input_required`. Ask-back files are documented in the module docstring.
 
+### Fixed — ask-back: stale answer.json after timeout no longer blocks the next ask
+
+- **`tools/autoos-ask.py`**: "pending" now means `question.json` exists (only). An `answer.json`
+  with no `question.json` is stale (left by a timeout the previous run hit, or an answer landing
+  at/after the deadline); it is archived as `qa-<n>.json` with `"stale": true` and a null question,
+  never silently deleted. On timeout the helper also archives a late `answer.json` that appeared
+  between the last poll and the deadline. A second ask after a timeout now writes its question and
+  works instead of refusing "already pending" (exit 2) forever.
+- **`tools/autoos-ask.py`**: every file operation into `AUTOOS_TASK_DIR` is wrapped; an `OSError`
+  (a read-only mount, a full disk, an `--isolate` outside-path fence) exits 5 with a message that
+  names the reason and suggests `--isolate`, not a raw traceback. Exit code 5 is documented in the
+  module docstring with the other exit codes.
+
 ### Changed — the autoos-agent MCP server reports A2A task states (spec routing-v2 §9)
 
 - `tools/autoos_agent_mcp.py`: `status`/`result` states are now `submitted`/`working`/`completed`/`failed`/`canceled` (A2A spelling, one `l`) with the old value kept in a new `detail` field (`lost` stays visible as `failed` + `detail: "lost"`), a refused `spawn` returns `state: "rejected"`, and the full set is the module constant `TASK_STATES`.

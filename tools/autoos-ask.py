@@ -20,12 +20,22 @@ os.replace, so a reader never sees a half-written file):
                                         helper polls for it
     qa-<n>.json    {"question", "answer"} the archived pair, n the next free
                                         number - the history of every exchange
-                                        is kept
+                                        is kept. A stale entry (an answer that
+                                        arrived after its question timed out,
+                                        or an orphan answer with no question)
+                                        carries "stale": true and a null
+                                        question - never silently deleted.
 
-On an answer the text goes to stdout and the exit code is 0. On timeout the
-question is withdrawn (the run returns to working) and the exit code is 3.
-Misuse - no AUTOOS_TASK_DIR, a question already pending, an empty question -
-exits 2 with the reason on stderr.
+"Pending" means question.json exists. An answer.json with no question.json is
+stale (left by a timeout the previous run hit); it is archived at the start
+of the next ask and the new question proceeds.
+
+Exit codes:
+    0  answered - the answer text went to stdout
+    2  misuse   - no AUTOOS_TASK_DIR, a question already pending, empty question
+    3  timeout  - no answer within --timeout; question withdrawn, run back to working
+    5  io       - cannot write into AUTOOS_TASK_DIR (an --isolate fence, a
+                  read-only mount, a full disk); reason on stderr, no traceback
 """
 from __future__ import annotations
 
@@ -44,6 +54,14 @@ ANSWER_FILE = "answer.json"
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(
         timespec="seconds").replace("+00:00", "Z")
+
+
+def _fail_io(reason: str) -> int:
+    task_dir = os.environ.get("AUTOOS_TASK_DIR", "$AUTOOS_TASK_DIR")
+    print("autoos-ask: cannot write the question into %s (%s) - ask-back is "
+          "unavailable in this run (an --isolate fence?); decide yourself and "
+          "say so in your report" % (task_dir, reason), file=sys.stderr)
+    return 5
 
 
 def _write_json(path: str, data: dict) -> None:
@@ -78,6 +96,20 @@ def _next_qa_path(task_dir: str) -> str:
     return os.path.join(task_dir, "qa-%d.json" % n)
 
 
+def _archive_stale_answer(task_dir: str, apath: str) -> None:
+    """An answer.json with no question.json is stale - archive it as qa-<n>.json
+    with a 'stale' marker. Never silently delete an answer."""
+    answer = _read_json(apath)
+    if not isinstance(answer, dict):
+        return
+    try:
+        _write_json(_next_qa_path(task_dir),
+                    {"question": None, "answer": answer, "stale": True})
+        os.remove(apath)
+    except OSError:
+        pass  # best effort; the main flow will hit the same wall and exit 5
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Ask the orchestrator a question and wait for its answer.")
@@ -102,11 +134,20 @@ def main(argv=None) -> int:
         return 2
     qpath = os.path.join(task_dir, QUESTION_FILE)
     apath = os.path.join(task_dir, ANSWER_FILE)
-    if os.path.exists(qpath) or os.path.exists(apath):
+
+    # "pending" means question.json exists. An orphan answer.json is stale
+    # (left by a timeout the previous run hit); archive it and proceed.
+    if os.path.exists(qpath):
         print("a question is already pending in %s" % task_dir, file=sys.stderr)
         return 2
+    if os.path.exists(apath):
+        _archive_stale_answer(task_dir, apath)
 
-    _write_json(qpath, {"text": question, "asked": _now_iso()})
+    try:
+        _write_json(qpath, {"text": question, "asked": _now_iso()})
+    except OSError as exc:
+        return _fail_io(str(exc))
+
     deadline = time.monotonic() + args.timeout
     while True:
         # a present-but-unreadable answer.json counts as not there yet: keep
@@ -114,22 +155,30 @@ def main(argv=None) -> int:
         answer = _read_json(apath)
         if isinstance(answer, dict):
             print(answer.get("text", ""))
-            _write_json(_next_qa_path(task_dir),
-                        {"question": _read_json(qpath), "answer": answer})
-            for path in (qpath, apath):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            try:
+                _write_json(_next_qa_path(task_dir),
+                            {"question": _read_json(qpath), "answer": answer})
+                for path in (qpath, apath):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            except OSError as exc:
+                return _fail_io(str(exc))
             return 0
         if time.monotonic() >= deadline:
             break
         time.sleep(min(args.poll, max(deadline - time.monotonic(), 0.0)))
 
+    # timeout: withdraw the question; if an answer landed at/after the
+    # deadline, archive it as stale (never leave answer.json behind - the
+    # next ask would see it and refuse "already pending" forever).
     try:
-        os.remove(qpath)  # withdraw the question: the run goes back to working
+        os.remove(qpath)
     except OSError:
         pass
+    if os.path.exists(apath):
+        _archive_stale_answer(task_dir, apath)
     print("no answer within %g s" % args.timeout, file=sys.stderr)
     return 3
 
