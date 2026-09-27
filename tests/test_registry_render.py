@@ -183,9 +183,10 @@ class RenderMatchesTodayTests(unittest.TestCase):
                          combos_by_name["t2-worker-clean"]["models"])
         self.assertNotIn("groq/openai/gpt-oss-120b",
                          combos_by_name["t2-worker"]["models"])
-        # the un-gated OpenRouter BYOK leg does reach the combo now.
-        self.assertIn("openrouter/openai/gpt-oss-120b",
-                      combos_by_name["t2-worker"]["models"])
+        # the OpenRouter BYOK gpt-oss-120b leg is gated again (measured 401,
+        # credits exhausted 2026-09-27), so it does not reach the combo.
+        self.assertNotIn("openrouter/openai/gpt-oss-120b",
+                         combos_by_name["t2-worker"]["models"])
         self.assertIn("openrouter/deepseek/deepseek-v4.1-flash",
                       combos_by_name["t2-worker"]["models"])
 
@@ -877,15 +878,16 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         self.assertIn("(none)", row_for(rendered, "auto"))
 
     def test_leg_flagged_unavailable_in_its_own_route_is_marked(self):
-        # Both legs of routes.deepseek-v4.1-flash flagged in a copy (the real
-        # data flags only its zen leg since OR2 2026-09-27 un-gated the BYOK one).
+        # All legs of routes.deepseek-v4.1-flash flagged in a copy (the real
+        # data flags its zen leg and both OpenRouter BYOK gpt-oss legs stay
+        # gated since the 2026-09-27 credits-exhausted measurement).
         reg = copy.deepcopy(real_registry())
         route = reg["routes"]["deepseek-v4.1-flash"]
         for leg in route["legs"]:
             route.setdefault("unavailable_legs", {})[leg] = {"available": False}
         rendered = registry.render_models_doc(reg)
         row = row_for(rendered, "deepseek-v4.1-flash")
-        self.assertEqual(row.count("(unavailable)"), 2)
+        self.assertEqual(row.count("(unavailable)"), 3)
 
     def test_leg_whose_provider_is_globally_unavailable_is_marked(self):
         # A provider-wide providers.<id>.available: false (independent of any
@@ -1388,22 +1390,23 @@ class FreeAiRenderTests(unittest.TestCase):
         combos = {c["name"]: c for c in rendered["combos"]}
         self.assertIn("t3-driver-free-only", combos)
         # groq and cerebras are unavailable, so free_ai is the only servable leg.
+        # The combo uses the omniroute_id spelling (D: model_prefix free-ai).
         self.assertEqual(combos["t3-driver-free-only"]["models"],
-                         ["free_ai/qwen7b"])
+                         ["free-ai/qwen7b"])
 
     def test_free_ai_is_last_in_the_free_only_combos(self):
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
         for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
             self.assertEqual(combos[route_id]["models"][-1],
-                             "free_ai/qwen7b", route_id)
+                             "free-ai/qwen7b", route_id)
 
     def test_free_ai_never_enters_a_clean_combo(self):
         for combo in registry.render_omniroute(real_registry())["combos"]:
             if not combo["name"].endswith("-clean"):
                 continue
             self.assertFalse(
-                [m for m in combo["models"] if m.startswith("free_ai/")],
+                [m for m in combo["models"] if m.startswith("free-ai/")],
                 combo["name"])
 
     def test_litellm_blocks_carry_free_ai_on_both_free_only_routes(self):
