@@ -46,6 +46,23 @@
 #   compose-bind.log     AUTOOS_STACK_BIND as every `docker compose` call saw it
 #   qoder-home-at-up.log "present"/"absent": whether <state-dir>/data/qoder-home
 #                        (the sandbox's data dir) existed at each `compose up`
+#   slow-sleep           the fake `sleep` really sleeps 0.5 s (a test that must
+#                        signal the script mid-wait gets a window); default: no-op
+#   failover-liveliness-fail  `start-litellm` writes no pid file: the
+#                        /health/liveliness probe never answers (a standby
+#                        that starts but never turns live)
+# The sandbox keeps its ai-stack config in <state-dir>/cfg, so the failover
+# pid file the fake start-litellm writes is
+# <state-dir>/cfg/failover/litellm.pid while AUTOOS_LITELLM_STATE_DIR points
+# there. fake_curl answers http://127.0.0.1:20128/health/liveliness with 200
+# only while that pid file exists (and the fail marker above is absent).
+# `start-litellm` (AUTOOS_START_LITELLM) records the env NAMES
+# (AUTOOS_LITELLM_HOST/PORT/MASTER_KEY_FILE/STATE_DIR) in
+# start-litellm-env.log, plus master-key-file=ok|missing (a readability check
+# on the pointed-to file, never its content); argv lands in
+# start-litellm.log through the generic logger below. Nothing real is
+# started: the pid file holds 424242, which never exists, so callers must
+# tolerate a failed kill. `compose start <svc>` marks the service running.
 # Every call is appended to <tool>.log and, as "<tool>: <args>", to events.log
 # (the cross-tool order). Arguments only - the environment is never logged;
 # saw-manage-key only records WHICH tool had OMNIROUTE_API_KEY set.
@@ -187,6 +204,13 @@ fake_docker() {
                     local svcs=("$@")
                     (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands)
                     for svc in "${svcs[@]}"; do rm -f "$S/run-$(container_of "$svc")"; done ;;
+                start)
+                    local a c
+                    for a in "$@"; do
+                        [[ "$a" == -* ]] && continue
+                        c="$(container_of "$a")"
+                        [[ -n "$c" ]] && : >"$S/run-$c"
+                    done ;;
                 restart)
                     for a in "$@"; do
                         [[ "$a" == -* ]] && continue
@@ -250,6 +274,8 @@ fake_curl() {
     done
     up() { [[ -e "$S/active-$1" ]] || { [[ -e "$S/run-$2" ]] && [[ ! -e "$S/unhealthy-$3" ]]; }; }
     case "$url" in
+        *:20128/health/liveliness*)
+            if [[ ! -e "$S/failover-liveliness-fail" && -s "$S/cfg/failover/litellm.pid" ]]; then code=200; fi ;;
         *:20128/api/health*) up autoos-omniroute autoos-omniroute omniroute && code=200 ;;
         *:20128/v1/*)        up autoos-omniroute autoos-omniroute omniroute && code=401 ;;
         *:4096/api/*)        up autoos-opencode autoos-opencode opencode && code=401 ;;
@@ -307,14 +333,39 @@ fake_start_stack() {
     return 0
 }
 
+# start-litellm.sh stand-in for the failover standby (AUTOOS_START_LITELLM).
+# Records the interface, never the secrets: the env NAMES (one of them points
+# at a key file) plus master-key-file=ok|missing, argv through the generic
+# logger above. Values - the key itself above all - are never logged.
+fake_start_litellm() {
+    local v
+    for v in AUTOOS_LITELLM_HOST AUTOOS_LITELLM_PORT AUTOOS_LITELLM_MASTER_KEY_FILE AUTOOS_LITELLM_STATE_DIR; do
+        if [[ -n "${!v:-}" ]]; then printf 'env:%s\n' "$v" >>"$S/start-litellm-env.log"; fi
+    done
+    if [[ -n "${AUTOOS_LITELLM_MASTER_KEY_FILE:-}" && -s "$AUTOOS_LITELLM_MASTER_KEY_FILE" ]]; then
+        printf 'master-key-file=ok\n' >>"$S/start-litellm-env.log"
+    else
+        printf 'master-key-file=missing\n' >>"$S/start-litellm-env.log"
+    fi
+    # A standby that never turns live: no pid file, so the liveliness probe
+    # (fake_curl) never answers and the caller must hand the port back.
+    if [[ -e "$S/failover-liveliness-fail" ]]; then return 0; fi
+    if [[ -n "${AUTOOS_LITELLM_STATE_DIR:-}" ]]; then
+        mkdir -p "$AUTOOS_LITELLM_STATE_DIR"
+        printf '424242\n' >"$AUTOOS_LITELLM_STATE_DIR/litellm.pid"
+    fi
+    return 0
+}
+
 case "$TOOL" in
     docker)      fake_docker "$@" ;;
+    start-litellm) fake_start_litellm "$@" ;;
     systemctl)   fake_systemctl "$@" ;;
     ss)          fake_ss "$@" ;;
     curl)        fake_curl "$@" ;;
     omniroute)   fake_omniroute "$@" ;;
     register)    fake_register "$@" ;;
     start-stack) fake_start_stack "$@" ;;
-    sleep)       exit 0 ;;
+    sleep)       if [[ -e "$S/slow-sleep" ]]; then exec /bin/sleep 0.5; fi; exit 0 ;;
     *) echo "aistack_fake.sh: unknown tool $TOOL" >&2; exit 2 ;;
 esac
