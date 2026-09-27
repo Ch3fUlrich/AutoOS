@@ -201,6 +201,23 @@ class HostRunPlainFunctionTests(unittest.TestCase):
             lines = list(audit.tail(state_dir, decision="deny"))
             self.assertTrue(any("policy-error" in ln for ln in lines), lines)
 
+    def test_non_string_argv_is_refused_and_audited(self):
+        # A non-str argv element (MCP JSON can carry 123/true/null) must be
+        # refused as argv-caps AND still recorded: the deny write must not
+        # raise on it, or host_run would leak a TypeError and leave the
+        # attempt unaudited (the hole item 2 closes).
+        with tempfile.TemporaryDirectory() as tmp:
+            pol = _policy(_make_bindir(tmp))
+            state_dir = os.path.join(tmp, "state")
+            log = audit.AuditLog(state_dir)
+            with self.assertRaises(server.Refused) as ctx:
+                server.host_run(pol, log, actor="claude", host="coding-host",
+                                argv=["echo", 123], cwd=tmp)
+            log.close()
+            self.assertEqual(ctx.exception.rule, "argv-caps")
+            lines = list(audit.tail(state_dir, decision="deny"))
+            self.assertTrue(any("argv-caps" in ln for ln in lines), lines)
+
     @unittest.skipIf(os.name == "nt", "chmod mode bits; POSIX only")
     def test_fail_closed_when_audit_log_is_unwritable(self):
         with tempfile.TemporaryDirectory() as tmp:
