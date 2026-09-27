@@ -3738,15 +3738,16 @@ fi
 if it "aistack rotate: happy path - init + up opencode happen, POST once, 2xx line, state 0600"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
-    # Set the webhook URL so fake_curl knows to intercept
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=200
-    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\nopencode_password: "rotate-new-pass"\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *"webhook accepted (HTTP 200) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"* ]] || { ok=0; echo "no success message: $out" >&2; }
+    # Step 1 ran: init wrote the new password from api-keys.yml into opencode.env
+    grep -q 'rotate-new-pass' "$d/cfg/opencode.env" 2>/dev/null || { ok=0; echo "init did not write the new password to opencode.env: $(grep -c . "$d/cfg/opencode.env" 2>/dev/null || echo missing)" >&2; }
+    # Step 2 ran: compose up was invoked for the running opencode container
+    # (cmd_up appends it to start; compose recreates it on the changed env_file)
+    grep -q 'up -d --no-deps opencode' "$d/docker.log" 2>/dev/null || { ok=0; echo "opencode was not recreated: $(grep -c . "$d/docker.log" 2>/dev/null || echo no docker calls)" >&2; }
     [[ -e "$d/cfg/edge-webhook.state" ]] || { ok=0; echo "state file not created: $(ls -la "$d/cfg/")" >&2; }
     [[ "$(stat -c %a "$d/cfg/edge-webhook.state")" == 600 ]] || { ok=0; echo "state not 0600: $(stat -c %a "$d/cfg/edge-webhook.state")" >&2; }
     # Verify the call was made
@@ -3755,7 +3756,7 @@ if it "aistack rotate: happy path - init + up opencode happen, POST once, 2xx li
     # curl.log has the argv, edge-webhook-call.log has the header file content
     curl_log="$(cat "$d/curl.log" 2>/dev/null || echo "")"
     [[ "$curl_log" != *"mysecret"* ]] || { ok=0; echo "header value in curl argv: $curl_log" >&2; }
-    [[ "$curl_log" != *"pinned-pass"* ]] || { ok=0; echo "password in curl argv: $curl_log" >&2; }
+    [[ "$curl_log" != *"rotate-new-pass"* ]] || { ok=0; echo "password in curl argv: $curl_log" >&2; }
     [[ "$curl_log" != *"X-AutoOS-Token"* ]] || { ok=0; echo "header name in curl argv: $curl_log" >&2; }
     # Verify the header file content equals "X-AutoOS-Token: mysecret" in edge-webhook-call.log
     call_log="$(cat "$d/edge-webhook-call.log")"
@@ -3764,17 +3765,32 @@ if it "aistack rotate: happy path - init + up opencode happen, POST once, 2xx li
     if (( ok )); then pass; else fail "rotate happy path failed"; fi
 fi
 
+if it "aistack rotate: http URL warns cleartext (rc 0), https URL does not warn"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"! edge: webhook URL is not https - the token crosses the network in cleartext"* ]] || { ok=0; echo "no cleartext warning: $out" >&2; }
+    # The https variant: the URL joins the hash, so the POST fires again, without the warning
+    sed -i 's#http://edge.example#https://edge.example#' "$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=https://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "rc=$rc on https: $out" >&2; }
+    [[ "$out" == *"webhook accepted (HTTP 200)"* ]] || { ok=0; echo "https run did not POST: $out" >&2; }
+    [[ "$out" != *"not https"* ]] || { ok=0; echo "https run warned about cleartext: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate http/https cleartext warning failed"; fi
+fi
+
 if it "aistack rotate: second run -> skipped, no POST"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=200
     # First run
-    _aistack "$d" opencode-rotate >/dev/null
+    _aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate >/dev/null
     # Second run
-    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *"password unchanged since the last webhook - skipped"* ]] || { ok=0; echo "no skip message: $out" >&2; }
@@ -3789,15 +3805,12 @@ if it "aistack rotate: password changed in api-keys.yml -> POST again"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\nopencode_password: "first-pass"\n' >>"$d/repo/api-keys.yml"
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=200
     # First run with first-pass
-    _aistack "$d" opencode-rotate >/dev/null
+    _aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate >/dev/null
     # Change the password
     sed -i 's/opencode_password: "first-pass"/opencode_password: "second-pass"/' "$d/repo/api-keys.yml"
     # Second run
-    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *"webhook accepted (HTTP 200) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"* ]] || { ok=0; echo "no success message on changed password: $out" >&2; }
@@ -3812,13 +3825,10 @@ if it "aistack rotate: --force re-POSTs"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=200
     # First run
-    _aistack "$d" opencode-rotate >/dev/null
+    _aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate >/dev/null
     # Second run with --force
-    out="$(_aistack "$d" --force opencode-rotate)" && rc=0 || rc=$?
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 --force opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *"webhook accepted (HTTP 200) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"* ]] || { ok=0; echo "no success message on --force: $out" >&2; }
@@ -3833,10 +3843,7 @@ if it "aistack rotate: 302 -> rc1 'redirected', state not written"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=302
-    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=302 opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 1 )) || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *"webhook redirected (HTTP 302) - not followed"* ]] || { ok=0; echo "no redirect message: $out" >&2; }
@@ -3849,10 +3856,7 @@ if it "aistack rotate: 500 -> rc1"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=500
-    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=500 opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 1 )) || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *"webhook failed (HTTP 500)"* ]] || { ok=0; echo "no 500 message: $out" >&2; }
@@ -3865,10 +3869,7 @@ if it "aistack rotate: 000 -> 'unreachable'"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=000
-    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=000 opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 1 )) || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *"webhook unreachable"* ]] || { ok=0; echo "no unreachable message: $out" >&2; }
@@ -3881,10 +3882,7 @@ if it "aistack rotate: fake curl's recorded argv contains neither the header val
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\nopencode_password: "pinned-pass"\n' >>"$d/repo/api-keys.yml"
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=200
-    out="$(_aistack "$d" opencode-rotate)"
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)"
     ok=1
     # Check curl.log for the actual argv - header value, password, and header name
     # should NOT be in the argv (header is passed via -H @file)
@@ -3908,10 +3906,7 @@ if it "aistack rotate: --dry-run -> no POST, no state"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=200
-    out="$(_aistack "$d" --dry-run opencode-rotate)" && rc=0 || rc=$?
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 --dry-run opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *"would POST the edge webhook"* ]] || { ok=0; echo "no dry-run message: $out" >&2; }
@@ -3925,10 +3920,7 @@ if it "aistack rotate: header temp file cleaned up after success"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=200
-    out="$(_aistack "$d" opencode-rotate)"
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)"
     ok=1
     # Check that no .edge-webhook-header-* files remain in CONFIG_DIR
     header_files="$(ls "$d/cfg"/.edge-webhook-header-* 2>/dev/null | wc -l)"
@@ -3941,10 +3933,7 @@ if it "aistack rotate: header temp file cleaned up after failure"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
-    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
-    export AISTACK_FAKE_WEBHOOK_CODE=500
-    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
-    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=500 opencode-rotate)" && rc=0 || rc=$?
     ok=1
     # Even on failure, the header temp file should be cleaned up
     header_files="$(ls "$d/cfg"/.edge-webhook-header-* 2>/dev/null | wc -l)"

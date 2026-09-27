@@ -1832,6 +1832,7 @@ cmd_opencode_rotate() {
     # Step 2: Recreate opencode with the new password. Use the same logic as
     # `up opencode` but only for the opencode service. cmd_up already handles
     # all the guards (bind, public URL, native units, etc.) - we reuse it.
+    # No --force-recreate: cmd_up already appends a running service to start (the "= running (skipped)" line is only an echo) and `docker compose up -d` recreates a container when its env_file values changed, while a forced recreate would restart opencode on every idempotent rerun.
     SERVICES=(opencode)
     cmd_up || return 1
 
@@ -1855,6 +1856,9 @@ cmd_opencode_rotate() {
         echo "  ! edge: semaphore_edge_webhook_url is not an http(s) URL"
         return 1
     fi
+    if [[ "$edge_webhook_url" == http://* ]]; then
+        echo "  ! edge: webhook URL is not https - the token crosses the network in cleartext"
+    fi
 
     # Validate header name (must match ^[A-Za-z0-9-]+$)
     if [[ ! "$edge_webhook_header" =~ ^[A-Za-z0-9-]+$ ]]; then
@@ -1877,8 +1881,8 @@ cmd_opencode_rotate() {
     # Idempotence: compute hash of (url + \n + header_name + \n + token + \n + password)
     new_hash="$(printf '%s\n%s\n%s\n%s' "$edge_webhook_url" "$edge_webhook_header" "$edge_webhook_token" "$oc_pw" | sha256sum | cut -d' ' -f1)"
 
-    # State file location (can be overridden for tests)
-    state_file="${AUTOOS_EDGE_STATE:-$CONFIG_DIR/edge-webhook.state}"
+    # State file lives in CONFIG_DIR (already 0700); only the file is 0600.
+    state_file="$CONFIG_DIR/edge-webhook.state"
 
     # Check if password unchanged since last webhook
     if [[ -f "$state_file" && "$FORCE" -eq 0 ]]; then
@@ -1892,6 +1896,7 @@ cmd_opencode_rotate() {
     # POST the webhook
     # Create a temp file for the header (mktemp makes it 0600, never on argv)
     header_file="$(mktemp "${CONFIG_DIR}/.edge-webhook-header-XXXXXX")"
+    trap 'rm -f -- "$header_file"' INT TERM EXIT
     printf '%s: %s\n' "$edge_webhook_header" "$edge_webhook_token" >"$header_file"
 
     # POST via $CURL (tests fake this)
@@ -1903,6 +1908,7 @@ cmd_opencode_rotate() {
 
     # Clean up the temp header file immediately (also on error paths)
     rm -f -- "$header_file"
+    trap - INT TERM EXIT
 
     # Evaluate response: curl exits 0 with || true; unreachable = empty or 000
     if [[ -z "$http_code" || "$http_code" == "000" ]]; then
@@ -1915,8 +1921,7 @@ cmd_opencode_rotate() {
     fi
     if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
         echo "  + edge: webhook accepted (HTTP $http_code) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"
-        # Write state file (0600)
-        mkdir -p "$(dirname "$state_file")" && chmod 700 "$(dirname "$state_file")" || return 1
+        # Write state file (0600). Its parent CONFIG_DIR already exists 0700.
         printf '%s\n' "$new_hash" >"$state_file"
         chmod 600 "$state_file"
         return 0

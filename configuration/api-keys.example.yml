@@ -56,7 +56,7 @@ omniroute: REPLACE_WITH_OMNIROUTE_CLIENT_KEY
 # ai-stack.sh opencode-rotate POSTs this webhook (AutoOS holds no Semaphore
 # token and sends no secret).
 # Three keys are used:
-#   semaphore_edge_webhook_url    - the webhook URL (http(s)://...)
+#   semaphore_edge_webhook_url    - the webhook URL (http(s)://...) — an http:// URL is allowed (LAN) but rotate warns: the token crosses the network in cleartext
 #   semaphore_edge_webhook_header - the header NAME only (e.g. X-AutoOS-Token)
 #   semaphore_edge_webhook_token  - the header VALUE (secret)
 # The header line sent is "<name>: <token>".

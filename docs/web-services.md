@@ -365,7 +365,8 @@ rotation, or a suspected leak), run:
 bash configuration/docker/ai-stack/ai-stack.sh opencode-rotate
 ```
 
-This single command performs three steps atomically:
+This single command runs three steps in order; a failing step stops the ones
+after it (no rollback: rerun after fixing):
 
 1. **Regenerate `opencode.env`** — runs `ai-stack.sh init` logic to refresh the
    derived `OPENCODE_PASSWORD` in `~/.config/autoos/ai-stack/opencode.env` from
