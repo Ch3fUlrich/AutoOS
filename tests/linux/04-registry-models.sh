@@ -2,14 +2,17 @@
 # sourced by tests/run-tests.sh; shares its harness and globals
 # shellcheck disable=SC2034,SC2154
 
-# ─── Shared LLM model catalogue (single source of truth) ──────────────────
-describe "llm models"
+# ─── Registry models (single source of truth) ─────────────────────────────
+describe "registry models"
 
-if it "llm-models.json is valid and every id is unique"; then
+if it "registry models are valid and every id is unique"; then
     if python3 - <<'PY'
-import json, sys
-doc = json.load(open("catalog/llm-models.json", encoding="utf-8"))
-models = doc["models"]
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
+registry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(registry)
+doc = json.load(open("catalog/ai-registry.json", encoding="utf-8"))
+models = registry.legacy_models(doc)
 assert len(models) >= 18, f"expected >= 18 models, got {len(models)}"
 ids = [m["id"] for m in models]
 dupes = {i for i in ids if ids.count(i) > 1}
@@ -18,15 +21,18 @@ for m in models:
     assert m.get("openrouter_id") or m.get("direct"), f"{m['id']}: neither openrouter_id nor direct"
     assert isinstance(m["context"], int) and isinstance(m["output"], int), f"{m['id']}: bad windows"
 PY
-    then pass; else fail "llm-models.json invalid"; fi
+    then pass; else fail "registry models invalid"; fi
 fi
 
 if it "the installers project every shared model instead of hardcoding"; then
     # Single-source/DRY: no model id or price may appear as a literal in the
-    # installers. Everything is projected from llm-models.json.
+    # installers. Everything is projected from the registry models.
     if python3 - <<'PY'
-import json, re, sys
-models = json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]
+import importlib.util, json, re, sys
+spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
+registry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(registry)
+models = registry.legacy_models(json.load(open("catalog/ai-registry.json", encoding="utf-8")))
 bad = []
 for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
     src = open(path, encoding="utf-8").read()
@@ -47,8 +53,11 @@ fi
 
 if it "the openhands projector covers every shared model"; then
     if python3 - <<'PY'
-import json, re, sys
-models = json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]
+import importlib.util, json, re, sys
+spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
+registry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(registry)
+models = registry.legacy_models(json.load(open("catalog/ai-registry.json", encoding="utf-8")))
 for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
     src = open(path, encoding="utf-8").read()
     calls = set()
@@ -68,8 +77,12 @@ if it "the vendored openhands profiles match the catalog snapshot"; then
     # template would ship stale prices to anyone reading the repo, so any
     # mismatch fails here. api_key is injected at install time and absent.
     if python3 - <<'PY'
-import json, glob, os, sys
-models = {m["id"]: m for m in json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]}
+import importlib.util, json, glob, os, sys
+spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
+registry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(registry)
+models = {m["id"]: m for m in registry.legacy_models(
+    json.load(open("catalog/ai-registry.json", encoding="utf-8")))}
 # Legacy alias: muse-spark-1.3-contributor.json is the vendored template for
 # the muse-spark catalog entry (only the contributor variant is kept).
 models["muse-spark-1.3-contributor"] = models["muse-spark"]

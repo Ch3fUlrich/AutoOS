@@ -277,6 +277,7 @@ half price, verified 2026-09-24 in ADR 0006). Time never overrides a hard filter
 - Forward a stable session id so OpenRouter's sticky routing keeps prompt-cache hits across turns.
 - Response cache stays off. Prompt-cache passthrough stays on. Compression off until D19's A/B.
 - Qoder and Antigravity accounts added as OAuth providers (operator sign-in), then referenced as legs.
+- OmniRoute 3.8.51 cannot pin an OpenRouter provider per combo leg (PINspike): BYOK legs are unpinned and serve through the operator's Prioritized BYOK keys; gate each with an unavailable_legs entry until that is set.
 
 ## 8. Orchestration skill v2
 

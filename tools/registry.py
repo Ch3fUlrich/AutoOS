@@ -34,15 +34,19 @@ Three subcommands:
        a model's direct.base_url; private IPv4 ranges, single-label hosts,
        .local/.lan/.internal/.vm hosts and any userinfo@ are always rejected;
     5. no key or value anywhere carries a date, except values under keys named
-       source/verified/version and anything inside a $comment/comment;
+       source/verified/version/unavailable_until and anything inside a
+       $comment/comment;
     6. every key the schema marks required is present (a small hand-rolled
        structural walk of catalog/ai-registry.schema.json - no jsonschema
-       dependency, matching the rest of this repo's suites, AGENTS.md section 5).
+       dependency, matching the rest of this repo's suites, AGENTS.md section 5);
+    7. every ``unavailable_until`` value (clients/providers/unavailable_legs,
+       brief UNTIL 2026-09-26) parses as an ISO-8601 UTC timestamp -- the
+       resolver reads it via unavailable_now(), the renders never do (they
+       stay time-independent so the CI drift gates do not move with the date).
 
-`validate` runs `check`, then re-renders the registry in-process from
-tools/registry-convert.py's build_registry() and compares parsed JSON for
-equality - a committed file that no longer matches its sources is drift
-(spec 3.2 phase-1 gate).
+`validate` runs `check` (kept as a separate subcommand so existing callers
+keep working; the migration drift gate against the one-shot converter
+retired with the old catalogs in task A5e).
 
 `render omniroute` renders configuration/omniroute/combos.json from a loaded
 catalog/ai-registry.json (spec 3.2 phase 1, task A4a; docs/plans/2026-09-25-
@@ -65,13 +69,15 @@ a fresh render against --config's own current managed blocks (default: the
 committed config.yaml) and exits 1, naming each differing tier, when they are not
 byte-for-byte equal.
 
-`render ide` renders catalog/ide-models.json - the single source that feeds
+`render ide` renders catalog/ide-models.json - the generated client list
+(rendered from catalog/ai-registry.json - do not edit) that feeds
 opencode.jsonc's AUTOOS-MANAGED blocks and Zed's own model lists (both via
 tools/sync-ide-models.py) - from a loaded catalog/ai-registry.json (spec 3.2
 phase 1, task A4c; docs/plans/2026-09-25-registry-mapping.md section 12
-documents the mapping and its one intentional equality exception, the same
-$comment exception render omniroute above uses). It never writes catalog/
-ide-models.json itself: with no flag the render goes to stdout; --out PATH
+documents the mapping; task A5f made the committed file byte-exact, so the old
+$comment exception no longer applies to it). To update the committed file after
+a registry change: `python3 tools/registry.py render ide
+--out catalog/ide-models.json`; with no flag the render goes to stdout; --out PATH
 writes it elsewhere; --check compares a fresh render against --ide-models
 (default: the committed ide-models.json) and exits 1, naming each differing
 model, when they are not semantically equal. tools/sync-ide-models.py's
@@ -124,12 +130,12 @@ import ipaddress
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
 SCHEMA_PATH = ROOT / "catalog" / "ai-registry.schema.json"
-CONVERTER_PATH = ROOT / "tools" / "registry-convert.py"
 DEFAULT_OMNIROUTE_COMBOS_PATH = ROOT / "configuration" / "omniroute" / "combos.json"
 SYNC_ROUTER_TIERS_PATH = ROOT / "tools" / "sync-router-tiers.py"
 DEFAULT_LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
@@ -139,7 +145,9 @@ DEFAULT_MODELS_DOC_PATH = ROOT / "docs" / "models.md"
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMMENT_KEYS = ("$comment", "comment")
-DATE_EXEMPT_KEYS = ("source", "verified", "version")
+# unavailable_until's whole job is to hold a date (rule 7 checks the value
+# parses); version is a date by definition. Neither is a rule-5 violation.
+DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until")
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"
@@ -158,10 +166,81 @@ def _section(registry, name) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _parse_until(value):
+    """Parse an ISO-8601 UTC ``unavailable_until`` value to an aware datetime.
+
+    Accepts a trailing ``Z`` or an explicit ``+00:00``; anything else (a
+    non-string, a naive timestamp, another offset, a calendar that does not
+    exist) returns None -- parseability is rule 7's job, the helper never
+    raises into a live resolver. This stays permissive on purpose: rule 7 is
+    the gate that enforces the schema's ``Z``-only shape, while a resolver
+    must degrade gracefully on a hand-edited value rather than crash.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    return moment.astimezone(timezone.utc)
+
+
+def unavailable_now(entry, now) -> bool:
+    """Whether a clients/providers/unavailable_legs `entry` is unavailable at
+    `now` (brief UNTIL, 2026-09-26; skill rule R-gateway-12: a 429 with
+    retryable:true but a multi-day reset is not soon-retryable -- mark the
+    entry unavailable till the reset, and let it come back on its own instead
+    of relying on someone hand-undoing an ``available: false``).
+
+    Semantics: an entry with ``unavailable_until`` strictly in the future is
+    unavailable; once that instant passes the entry counts as available again
+    (the resolver's reason says "re-probe"). An entry with ``available:
+    false`` and no until stays unavailable forever -- today's behaviour,
+    unchanged. An unparsable until reads as available here and is reported by
+    `check` rule 7 instead: a resolver must never crash on a hand-edited
+    timestamp, and a bad one must never silently extend an outage.
+
+    `now` is injectable for tests; a naive `now` is assumed UTC. Pure: no
+    clock of its own, no I/O. The renders deliberately never call this --
+    they stay time-independent so the CI drift gates do not move with the
+    date (the gateway handles a quota 429 itself).
+    """
+    if not isinstance(entry, dict):
+        return False
+    until = entry.get("unavailable_until")
+    if until is not None:
+        moment = _parse_until(until)
+        if moment is not None:
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            return now < moment
+        # unparsable: falls through to the plain `available` flag; rule 7
+        # reports the value itself.
+    return entry.get("available") is False
+
+
 def load(path) -> dict:
     """Load a registry JSON document. Accepts str or Path."""
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def _write_lf(path, text) -> None:
+    """Write `text` to `path` as UTF-8 with LF line endings.
+
+    A Python 3.8-safe equivalent of ``Path(path).write_text(text,
+    encoding="utf-8", newline="\\n")``: ``Path.write_text``'s ``newline``
+    keyword is honored on 3.8+, but routing every render write through one
+    helper keeps the LF guarantee in one place (and avoids the subtle
+    text-mode translation ``open(..., "w")`` would do without an explicit
+    ``newline``). Accepts str or Path."""
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
 
 
 def provider_field_map(providers: dict, field: str) -> dict:
@@ -170,9 +249,9 @@ def provider_field_map(providers: dict, field: str) -> dict:
 
     Small reusable loader (task A5c, spec 3.2 phase 2): the generic form of
     the provider-id -> single-field map a consumer used to build by hand
-    against catalog/providers.json (tools/mirror-litellm-env.py's KEY_MAP was
+    against the legacy provider catalog (tools/mirror-litellm-env.py's KEY_MAP was
     `{name: entry["litellm_env"] for name, entry in doc["providers"].items()}`
-    with no presence filter - harmless against the old catalog, where every
+    with no presence filter - harmless against that catalog, where every
     entry already had a real litellm_env, but wrong against this registry,
     which also carries OAuth/subscription-bridge providers (`cc`,
     `antigravity`) whose litellm_env is null). Falsy values (missing, None,
@@ -188,10 +267,9 @@ def provider_field_map(providers: dict, field: str) -> dict:
 
 
 def _legacy_sort_key(mid: str) -> tuple:
-    """Order key for legacy_models(): the registry is alphabetical
-    (tools/registry-convert.py's build_registry() sorts every key on write)
-    and carries no trace of catalog/llm-models.json's hand-curated order, so
-    that order cannot be derived -- sort instead, with `openrouter-free`
+    """Order key for legacy_models(): the registry is written with every key
+    sorted and carries no trace of the legacy models list's hand-curated
+    order, so that order cannot be derived -- sort instead, with `openrouter-free`
     pinned first among the openrouter entries so the generated openrouter map
     (which filters this list in order) keeps it first."""
     if mid == "openrouter-free":
@@ -202,7 +280,7 @@ def _legacy_sort_key(mid: str) -> tuple:
 
 
 def legacy_models(doc) -> list:
-    """Project registry `models` into the old catalog/llm-models.json entry
+    """Project registry `models` into the legacy llm-models entry
     shape (A5dfix: the one home for the legacy model projection every
     installer read calls instead of carrying its own copy).
 
@@ -580,6 +658,44 @@ def _check_dated_values(registry) -> list:
 
 
 # ===========================================================================
+# rule 7 - every unavailable_until parses as ISO-8601 UTC
+# ===========================================================================
+
+
+def _check_until_values(registry) -> list:
+    """Every ``unavailable_until`` value anywhere in the registry is an
+    ISO-8601 UTC timestamp ending in ``Z``.
+
+    The schema's ``until_tag`` pattern is ``Z``-only, and any offset (even an
+    explicit ``+00:00``) or naive value is ambiguous about which clock it
+    means. A value that does not parse would quietly read as available forever
+    (see unavailable_now), which is exactly the hand-edit-forgot-to-undo
+    failure the field exists to remove -- so it fails check loudly, naming the
+    dotted path."""
+    problems = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in COMMENT_KEYS:
+                    continue
+                child = "%s.%s" % (path, key) if path else key
+                if key == "unavailable_until":
+                    text = value.strip() if isinstance(value, str) else ""
+                    if not text.endswith("Z") or _parse_until(value) is None:
+                        problems.append(
+                            "bad unavailable_until: %s %r" % (path, value))
+                    continue
+                walk(value, child)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, "%s[%d]" % (path, index))
+
+    walk(registry, "")
+    return problems
+
+
+# ===========================================================================
 # rule 6 - schema-required keys
 # ===========================================================================
 
@@ -662,8 +778,8 @@ OMNIROUTE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not 
 # tier1-clean, ...) has no registry entry at all - docs/plans/2026-09-25-registry-
 # mapping.md section 4: "these are ... dead ids with no recoverable leg/class data
 # ... there is nothing to migrate". Reproduced here as a literal, hand-maintained
-# constant, the same convention tools/registry-convert.py uses for facts no source
-# file carries (PROVIDER_EXTRA, MODEL_EXTRA, COMBO_CLASS, ...): apply.sh/apply.ps1
+# constant, the same convention the deleted one-shot converter used for facts no
+# source file carries (PROVIDER_EXTRA, MODEL_EXTRA, COMBO_CLASS, ...): apply.sh/
 # still need this exact list once a later phase switches them onto a rendered file.
 OMNIROUTE_RETIRED_IDS = [
     "tier1", "tier1-clean",
@@ -683,7 +799,7 @@ def render_omniroute(registry: dict) -> dict:
     A route becomes a combo iff it has at least one leg (`legs` non-empty): the
     LiteLLM-only routes (t1-orchestrator-paid, t2-worker-paid, t3-driver-paid) and
     the dynamic `auto`/`auto/smart`/`auto/cheap` routes carry `legs: []`
-    (tools/registry-convert.py's ROUTE_COMMENT / AUTO_IDS) and have no
+    (the migration's ROUTE_COMMENT / AUTO_IDS convention) and have no
     combos.json counterpart at all - mapping doc section 4.
 
     Legs an operator has since flagged unavailable (routes.<id>.unavailable_legs;
@@ -800,8 +916,8 @@ def omniroute_diff(rendered: dict, current: dict) -> list:
 
 def _load_sync_router_tiers():
     """Import tools/sync-router-tiers.py by path (its name is not a valid
-    module identifier) - the same importlib-by-path technique
-    _build_fresh_registry() below already uses for tools/registry-convert.py.
+    module identifier) - the same importlib-by-path technique this repo uses
+    for every other dash-named tool.
     Reused, not copied, so Leg/render_block/locate_blocks/parse_block/
     leading_indent/GATEWAY_ONLY/SYNCED_TIERS/provider_maps_from_dict can never
     drift from the tool that still owns configuration/litellm/config.yaml's
@@ -810,9 +926,7 @@ def _load_sync_router_tiers():
     blocks() below mutates its PROVIDER_PREFIX/API_BASE/ENV_KEY globals (Leg
     reads them at construction time, same as tools/sync-router-tiers.py's own
     main() does), and a fresh import per call keeps that mutation from
-    leaking between two renders in the same process - the same isolation
-    _build_fresh_registry() gets from re-importing tools/registry-convert.py
-    every time it is called."""
+    leaking between two renders in the same process."""
     spec = importlib.util.spec_from_file_location(
         "autoos_sync_router_tiers", SYNC_ROUTER_TIERS_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -823,12 +937,12 @@ def _load_sync_router_tiers():
 def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
     """Render the AUTOOS-MANAGED litellm blocks tools/sync-router-tiers.py owns
     (spec 3.2 phase 1, task A4b), sourcing what that tool takes from
-    configuration/omniroute/combos.json and catalog/providers.json instead from
-    the loaded registry: each tier's ordered leg list from `routes.<tier>.legs`,
+    configuration/omniroute/combos.json and the legacy provider catalog
+    instead from the loaded registry: each tier's ordered leg list from `routes.<tier>.legs`,
     and each leg's LiteLLM transport (prefix/api_base/env var) from
     `providers.<id>.litellm_prefix`/`litellm_env`/`api_base` - registry field
-    names verified identical to catalog/providers.json's own in docs/plans/
-    2026-09-25-registry-mapping.md section 2, so
+    names identical to the legacy provider catalog's own (verified during
+    migration in docs/plans/2026-09-25-registry-mapping.md section 2), so
     tools.sync_router_tiers.provider_maps_from_dict() reads either shape the
     same way (that function was factored out of provider_maps() for exactly
     this reuse).
@@ -979,9 +1093,9 @@ IDE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
 # insignificant, so render_ide() reproduces today's hand-curated order exactly
 # rather than adding an equality exception for it. No registry field carries this
 # order (routes is a dict, and catalog/ai-registry.json's own routes keys are
-# alphabetical - tools/registry-convert.py's build_registry() sorts every key on
-# write); this is therefore a literal, hand-copied constant, the same convention
-# tools/registry.py's own OMNIROUTE_RETIRED_IDS and tools/registry-convert.py's
+# alphabetical - the registry is written with every key sorted); this is
+# therefore a literal, hand-copied constant, the same convention
+# this module's own OMNIROUTE_RETIRED_IDS and the migration's
 # PROVIDER_EXTRA/MODEL_EXTRA/COMBO_CLASS tables use for facts no source field
 # carries. A route added or removed without updating this list is never silently
 # mis-ordered or dropped - render_ide() raises, naming every id the set disagrees
@@ -1656,6 +1770,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_private_hosts(registry))
     problems.extend(_check_dated_values(registry))
     problems.extend(_check_required_keys(registry))
+    problems.extend(_check_until_values(registry))
     return problems
 
 
@@ -1666,28 +1781,6 @@ def _ok_line(registry) -> str:
         len(registry.get("models", {})),
         len(registry.get("providers", {})),
     )
-
-
-def strip_comments(doc):
-    """A copy of `doc` with every "$comment" key removed at any depth.
-
-    Registry prose is hand-edited after migration, so `validate`'s "no drift
-    from a fresh registry-convert.py render" comparison strips it from both
-    sides first; structure, routes, legs, models and providers still match
-    exactly. Never mutates its input."""
-    if isinstance(doc, dict):
-        return {key: strip_comments(value)
-                for key, value in doc.items() if key != "$comment"}
-    if isinstance(doc, list):
-        return [strip_comments(value) for value in doc]
-    return doc
-
-
-def _build_fresh_registry() -> dict:
-    spec = importlib.util.spec_from_file_location("autoos_registry_convert", CONVERTER_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.build_registry()
 
 
 def _cmd_check(args) -> int:
@@ -1711,10 +1804,6 @@ def _cmd_validate(args) -> int:
     if problems:
         for problem in problems:
             print(problem)
-        return 1
-    fresh = _build_fresh_registry()
-    if strip_comments(fresh) != strip_comments(registry):
-        print("drift: %s differs from a fresh registry-convert.py render" % args.registry)
         return 1
     print(_ok_line(registry))
     return 0
@@ -1740,7 +1829,7 @@ def _cmd_render_omniroute(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        _write_lf(args.out, text)
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1773,7 +1862,7 @@ def _cmd_render_litellm(args) -> int:
 
     text = "\n\n".join(rendered[tier] for tier in sorted(rendered)) + "\n"
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        _write_lf(args.out, text)
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1804,7 +1893,7 @@ def _cmd_render_ide(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        _write_lf(args.out, text)
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1835,7 +1924,7 @@ def _cmd_render_openhands(args) -> int:
 
     text = render_json(rendered)
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        _write_lf(args.out, text)
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(text)
@@ -1866,7 +1955,7 @@ def _cmd_render_models_doc(args) -> int:
         return 0
 
     if args.out:
-        Path(args.out).write_text(rendered, encoding="utf-8")
+        _write_lf(args.out, rendered)
         print("wrote %s" % args.out)
     else:
         sys.stdout.write(rendered)
@@ -1882,7 +1971,7 @@ def main(argv=None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (
         ("check", "validate the registry against spec 3.1"),
-        ("validate", "check + confirm no drift from registry-convert.py"),
+        ("validate", "validate the registry (same rules as check)"),
     ):
         sub = subparsers.add_parser(name, help=help_text)
         sub.add_argument("--registry", default=str(DEFAULT_REGISTRY_PATH),
@@ -1930,7 +2019,7 @@ def main(argv=None) -> int:
         help="registry JSON to render from (default: %(default)s)")
     ide_parser.add_argument(
         "--out", default=None,
-        help="write the render here instead of stdout (never the real ide-models.json)")
+        help="write the render here instead of stdout (to update the committed file: --out catalog/ide-models.json)")
     ide_parser.add_argument(
         "--check", action="store_true",
         help="exit 1 if the render differs semantically from --ide-models")

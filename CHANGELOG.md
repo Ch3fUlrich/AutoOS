@@ -51,6 +51,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `NODE_OPTIONS`); "unset (image default 1 / 2000)" when absent. Informational, not a pass/fail check.
 - **`configuration/docker/ai-stack/stack.env.example`**, **`docs/web-services.md`**: documented.
 
+### Added — effort probe: reasoning tokens and pass rate per effort rung on free legs
+
+- **`tools/probe-effort.py` + `tests/test_probe_effort.py`** (spec §5.5/§10; wired into `tests/linux/33-documentation.sh`):
+  n >= 5 trials of a fixed five-puzzle task set per `effort_ladder` rung (rung `none` omits `reasoning_effort`;
+  `max_tokens` 48k, 64k at high and above, capped by `output_max`) -> `overlay.models.<id>.effort`. Shared plumbing
+  moved to `tools/probe_common.py`. Both probes: only a 200 is a measurement - any other status (a live groq 413 was
+  scored recall 0.0) keeps the previous value, and provider error bodies (org ids) are never printed or stored.
+
+### Added — recall probe: usable context measured on free legs only
+
+- **`tools/probe-recall.py` + `tests/test_probe_recall.py`** (spec §3.1/§10, D18; wired into `tests/linux/33-documentation.sh`): builds a deterministic ~N-token
+  haystack (seeded filler, 5 access-code needles at spread depths) per size (default 32000/128000/256000/500000, never above `context_advertised`), asks the model for
+  the codes back as JSON, and writes `context_usable` — the largest size where every trial recalled ≥ 0.9 — to the git-ignored overlay `logs/routing/measured.json`
+  keyed by model (the exact shape `usable_context()` already reads; smallest size failing writes only a detail, 401/402/403/429/timeout keep the old value). Paid or
+  subscription legs are never probed — naming one with `--leg` refuses with exit 4 and makes no request — and every request logs its token use to stdout.
+
 ### Changed — the Linux test suite is split into one file per describe block
 
 - `tests/run-tests.sh` keeps the harness and summary and sources `tests/linux/NN-<describe>.sh` in order; test names
